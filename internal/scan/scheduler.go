@@ -43,6 +43,21 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	if s.Libraries == nil {
 		return fmt.Errorf("scan: scheduler libraries dependency is nil")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	libs, err := s.Libraries.List(ctx)
+	if err != nil {
+		return fmt.Errorf("scan: list libraries: %w", err)
+	}
+	return s.RunOnceFor(ctx, libs)
+}
+
+// RunOnceFor scans the supplied libraries exactly once. Callers that need to
+// restrict a scan to a subset of configured libraries resolve them upstream
+// and pass the slice directly; RunOnce delegates here after listing all
+// configured libraries.
+func (s *Scheduler) RunOnceFor(ctx context.Context, libs []models.Library) error {
 	if s.Results == nil {
 		return fmt.Errorf("scan: scheduler results dependency is nil")
 	}
@@ -51,11 +66,6 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	}
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-
-	libs, err := s.Libraries.List(ctx)
-	if err != nil {
-		return fmt.Errorf("scan: list libraries: %w", err)
 	}
 	for _, v := range libs {
 		if err := ctx.Err(); err != nil {

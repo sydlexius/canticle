@@ -237,6 +237,40 @@ func TestScheduler_RunOnceRequiresDependencies(t *testing.T) {
 	}
 }
 
+func TestScheduler_RunOnceForScansOnlyProvidedLibraries(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeResults{}
+	// fakeLibraries.List would return all three; passing a subset to
+	// RunOnceFor must skip the unselected ones entirely.
+	all := []models.Library{
+		{ID: 7, Path: "/music/a", Name: "A"},
+		{ID: 8, Path: "/music/b", Name: "B"},
+		{ID: 9, Path: "/music/c", Name: "C"},
+	}
+	s := scan.Scheduler{
+		Libraries: fakeLibraries{libs: all},
+		Results:   store,
+		Scanner: fakeScanner{results: []models.ScanResult{{
+			FilePath: "/music/x.mp3",
+			Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+		}}},
+	}
+
+	if err := s.RunOnceFor(ctx, []models.Library{all[0], all[2]}); err != nil {
+		t.Fatalf("RunOnceFor: %v", err)
+	}
+	if len(store.calls) != 2 {
+		t.Fatalf("Upsert calls = %d; want 2 (one per selected library)", len(store.calls))
+	}
+	gotIDs := []int64{store.calls[0].libraryID, store.calls[1].libraryID}
+	wantIDs := []int64{7, 9}
+	for i := range gotIDs {
+		if gotIDs[i] != wantIDs[i] {
+			t.Fatalf("Upsert call %d libraryID = %d; want %d", i, gotIDs[i], wantIDs[i])
+		}
+	}
+}
+
 func TestScheduler_RunOncePropagatesErrors(t *testing.T) {
 	ctx := context.Background()
 	listErr := errors.New("list failed")

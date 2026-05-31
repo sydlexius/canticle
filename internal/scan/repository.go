@@ -234,6 +234,25 @@ func (r *Repo) ClearByLibrary(ctx context.Context, libraryID int64) (int64, erro
 	return n, nil
 }
 
+// ClearByLibraryTx runs the same DELETE as ClearByLibrary inside a caller-
+// supplied transaction so the scan_results delete can be committed atomically
+// with other writes (e.g. work_queue cancellation). The caller owns Begin and
+// Commit.
+func (r *Repo) ClearByLibraryTx(ctx context.Context, tx *sql.Tx, libraryID int64) (int64, error) {
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM scan_results WHERE library_id = ?`,
+		libraryID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("scan: clear by library tx: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("scan: clear by library tx rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // CountByLibrary returns the number of scan_results rows belonging to
 // libraryID. It is useful for reporting what ClearByLibrary would delete
 // without actually deleting anything.

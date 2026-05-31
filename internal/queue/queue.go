@@ -520,6 +520,200 @@ func (q *DBQueue) CountDone(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// CancelByLibrary rebuilds or deletes pending/failed work_queue rows whose
+// output_paths derive from libraryID. Each affected row's output_paths JSON is
+// filtered to retain only entries that appear in scan_results from libraries
+// other than libraryID. Rows whose filtered list is empty are deleted; the
+// rest are updated in place. Processing and done rows are left alone so the
+// worker is not raced and historical writes are preserved.
+//
+// Returns the count of rows deleted and rows updated. Caller is expected to
+// invoke this before scan.ClearByLibrary so the work_queue_scan_results
+// junction is still populated when the operation runs.
+func (q *DBQueue) CancelByLibrary(ctx context.Context, libraryID int64) (deleted int64, updated int64, retErr error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("queue: begin cancel-by-library tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	deleted, updated, err = cancelByLibrary(ctx, tx, libraryID, false)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("queue: commit cancel-by-library tx: %w", err)
+	}
+	return deleted, updated, nil
+}
+
+// CancelByLibraryTx runs the same logic as CancelByLibrary inside a caller-
+// supplied transaction so the queue mutation can be committed atomically with
+// other writes (e.g. scan_results delete). The caller owns Begin and Commit.
+func (q *DBQueue) CancelByLibraryTx(ctx context.Context, tx *sql.Tx, libraryID int64) (deleted int64, updated int64, retErr error) {
+	return cancelByLibrary(ctx, tx, libraryID, false)
+}
+
+// CountCancelByLibrary returns the (deleted, updated) projection that
+// CancelByLibrary would produce, without writing. Intended for dry-run output.
+func (q *DBQueue) CountCancelByLibrary(ctx context.Context, libraryID int64) (deleted int64, updated int64, retErr error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("queue: begin count-cancel tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	return cancelByLibrary(ctx, tx, libraryID, true)
+}
+
+func cancelByLibrary(ctx context.Context, tx *sql.Tx, libraryID int64, dryRun bool) (int64, int64, error) {
+	type candidate struct {
+		id          int64
+		outputPaths string
+	}
+	candidateRows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT wq.id, wq.output_paths
+         FROM work_queue wq
+         JOIN work_queue_scan_results j ON j.work_queue_id = wq.id
+         JOIN scan_results sr ON sr.id = j.scan_result_id
+         WHERE sr.library_id = ?
+           AND wq.status IN ('pending', 'failed')
+         ORDER BY wq.id ASC`,
+		libraryID,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("queue: cancel-by-library candidates: %w", err)
+	}
+	var candidates []candidate
+	for candidateRows.Next() {
+		var c candidate
+		if err := candidateRows.Scan(&c.id, &c.outputPaths); err != nil {
+			_ = candidateRows.Close()
+			return 0, 0, fmt.Errorf("queue: scan cancel candidate: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := candidateRows.Err(); err != nil {
+		_ = candidateRows.Close()
+		return 0, 0, fmt.Errorf("queue: cancel candidates rows: %w", err)
+	}
+	if err := candidateRows.Close(); err != nil {
+		return 0, 0, fmt.Errorf("queue: close cancel candidates: %w", err)
+	}
+
+	var deleted, updated int64
+	for _, c := range candidates {
+		keep, err := keepSetForRow(ctx, tx, c.id, libraryID)
+		if err != nil {
+			return 0, 0, err
+		}
+		var paths []models.OutputPath
+		if c.outputPaths != "" {
+			if err := json.Unmarshal([]byte(c.outputPaths), &paths); err != nil {
+				return 0, 0, fmt.Errorf("queue: unmarshal output_paths for row %d: %w", c.id, err)
+			}
+		}
+		filtered := paths[:0:0]
+		for _, p := range paths {
+			if _, ok := keep[outputPathKey(p)]; ok {
+				filtered = append(filtered, p)
+			}
+		}
+		if len(filtered) == 0 {
+			if dryRun {
+				deleted++
+				continue
+			}
+			// The status guard here is belt-and-suspenders: candidates were
+			// selected with status IN ('pending', 'failed'), but SQLite WAL
+			// admits a small window between candidate selection and this
+			// per-row write during which the worker could move the row to
+			// 'processing'. A 0 affected-rows result means the row moved on
+			// and we skip counting it without raising an error.
+			res, err := tx.ExecContext(ctx,
+				`DELETE FROM work_queue
+                 WHERE id = ?
+                   AND status IN ('pending', 'failed')`,
+				c.id,
+			)
+			if err != nil {
+				return 0, 0, fmt.Errorf("queue: cancel delete row %d: %w", c.id, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return 0, 0, fmt.Errorf("queue: cancel delete rows affected %d: %w", c.id, err)
+			}
+			if n == 1 {
+				deleted++
+			}
+			continue
+		}
+		if len(filtered) == len(paths) {
+			// Defensive: candidate matched but every output_path entry was
+			// also present in a non-X scan_result. Nothing to change.
+			continue
+		}
+		if dryRun {
+			updated++
+			continue
+		}
+		newJSON, err := json.Marshal(filtered)
+		if err != nil {
+			return 0, 0, fmt.Errorf("queue: marshal filtered output_paths for row %d: %w", c.id, err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`UPDATE work_queue
+             SET output_paths = ?
+             WHERE id = ?
+               AND status IN ('pending', 'failed')`,
+			string(newJSON), c.id,
+		)
+		if err != nil {
+			return 0, 0, fmt.Errorf("queue: cancel update row %d: %w", c.id, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, 0, fmt.Errorf("queue: cancel update rows affected %d: %w", c.id, err)
+		}
+		if n == 1 {
+			updated++
+		}
+	}
+	return deleted, updated, nil
+}
+
+func keepSetForRow(ctx context.Context, tx *sql.Tx, workQueueID int64, libraryID int64) (map[string]struct{}, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT sr.outdir, sr.filename
+         FROM scan_results sr
+         JOIN work_queue_scan_results j ON j.scan_result_id = sr.id
+         WHERE j.work_queue_id = ?
+           AND sr.library_id != ?`,
+		workQueueID, libraryID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("queue: keep-set query row %d: %w", workQueueID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	keep := make(map[string]struct{})
+	for rows.Next() {
+		var outdir, filename string
+		if err := rows.Scan(&outdir, &filename); err != nil {
+			return nil, fmt.Errorf("queue: scan keep-set row %d: %w", workQueueID, err)
+		}
+		keep[outputPathKey(models.OutputPath{Outdir: outdir, Filename: filename})] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: keep-set rows %d: %w", workQueueID, err)
+	}
+	return keep, nil
+}
+
+func outputPathKey(p models.OutputPath) string {
+	return p.Outdir + "\x00" + p.Filename
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }

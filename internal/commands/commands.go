@@ -96,11 +96,12 @@ type ServeCmd struct {
 // nested inspection subcommands (results, clear). When neither nested
 // subcommand is set, the legacy run-once scan path is taken.
 type ScanCmd struct {
-	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
-	Depth      int    `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
-	Update     bool   `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files"`
-	Upgrade    bool   `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
-	BFS        bool   `arg:"--bfs" help:"use breadth-first traversal"`
+	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	Depth      int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
+	Update     bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files"`
+	Upgrade    bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
+	BFS        bool     `arg:"--bfs" help:"use breadth-first traversal"`
+	Libraries  []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
 
 	Results *ScanResultsCmd `arg:"subcommand:results" help:"list persisted scan_results rows"`
 	Clear   *ScanClearCmd   `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
@@ -611,11 +612,11 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 		}
 		return runScanClear(ctx, out, sub)
 	default:
-		return runScan(ctx, args)
+		return runScan(ctx, out, args)
 	}
 }
 
-func runScan(ctx context.Context, args ScanCmd) int {
+func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 	cfg, err := config.Load(args.ConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -634,6 +635,27 @@ func runScan(ctx context.Context, args ScanCmd) int {
 		MaxDepth: args.Depth,
 		BFS:      args.BFS,
 	})
+	if len(args.Libraries) > 0 {
+		libRepo := library.New(sqlDB)
+		libs := make([]models.Library, 0, len(args.Libraries))
+		for _, ref := range args.Libraries {
+			lib, err := resolveLibrary(ctx, libRepo, ref)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					_, _ = fmt.Fprintf(out, "library %q not found\n", ref)
+					return 1
+				}
+				_, _ = fmt.Fprintf(out, "library %q: %v\n", ref, err)
+				return 1
+			}
+			libs = append(libs, lib)
+		}
+		if err := s.RunOnceFor(ctx, libs); err != nil {
+			slog.Error("scan failed", "error", err)
+			return 1
+		}
+		return 0
+	}
 	if err := s.RunOnce(ctx); err != nil {
 		slog.Error("scan failed", "error", err)
 		return 1
@@ -1397,20 +1419,45 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 	}
 
 	scanRepo := scan.New(sqlDB)
+	workQueue := queue.NewDBQueue(sqlDB)
 	if !args.Yes {
 		count, err := scanRepo.CountByLibrary(ctx, lib.ID)
 		if err != nil {
 			slog.Error("failed to count scan results", "error", err)
 			return 1
 		}
-		_, _ = fmt.Fprintf(out, "would delete %d scan_results rows for library %q (id=%d); pass --yes to confirm\n", count, lib.Name, lib.ID)
+		qDel, qUpd, err := workQueue.CountCancelByLibrary(ctx, lib.ID)
+		if err != nil {
+			slog.Error("failed to count work_queue cancellations", "error", err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "would delete %d scan_results rows and cancel %d / update %d work_queue rows for library %q (id=%d); pass --yes to confirm\n", count, qDel, qUpd, lib.Name, lib.ID)
 		return 0
 	}
-	deleted, err := scanRepo.ClearByLibrary(ctx, lib.ID)
+	// One transaction wraps both mutations so a failure on the scan_results
+	// delete cannot leave the queue canceled while scan_results survive.
+	// Cancel first: it reads the junction (work_queue_scan_results) which
+	// cascades away when ClearByLibraryTx then deletes the scan_results.
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		slog.Error("failed to begin scan clear tx", "error", err)
+		return 1
+	}
+	defer func() { _ = tx.Rollback() }() //nolint:errcheck // rollback is a no-op after commit
+	qDel, qUpd, err := workQueue.CancelByLibraryTx(ctx, tx, lib.ID)
+	if err != nil {
+		slog.Error("failed to cancel work_queue rows", "error", err)
+		return 1
+	}
+	deleted, err := scanRepo.ClearByLibraryTx(ctx, tx, lib.ID)
 	if err != nil {
 		slog.Error("failed to clear scan results", "error", err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(out, "deleted %d scan_results rows for library %q (id=%d)\n", deleted, lib.Name, lib.ID)
+	if err := tx.Commit(); err != nil {
+		slog.Error("failed to commit scan clear tx", "error", err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "deleted %d scan_results rows and canceled %d / updated %d work_queue rows for library %q (id=%d)\n", deleted, qDel, qUpd, lib.Name, lib.ID)
 	return 0
 }

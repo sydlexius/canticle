@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -1099,5 +1100,455 @@ func TestDBQueue_RetryResetsLinkedScanResults(t *testing.T) {
 		if status != StatusPending {
 			t.Fatalf("scan_results %d status = %q; want %q (Retry must reset every linked processing row)", id, status, StatusPending)
 		}
+	}
+}
+
+func addLibrary(t *testing.T, sqlDB *sql.DB, name, path string) int64 {
+	t.Helper()
+	res, err := sqlDB.ExecContext(context.Background(),
+		`INSERT INTO libraries (path, name) VALUES (?, ?)`, path, name)
+	if err != nil {
+		t.Fatalf("insert library %q: %v", name, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("library %q id: %v", name, err)
+	}
+	return id
+}
+
+func addScanResultIn(t *testing.T, sqlDB *sql.DB, libraryID int64, filePath, outdir, filename string) int64 {
+	t.Helper()
+	res, err := sqlDB.ExecContext(context.Background(),
+		`INSERT INTO scan_results (library_id, file_path, outdir, filename, status) VALUES (?, ?, ?, ?, 'pending')`,
+		libraryID, filePath, outdir, filename)
+	if err != nil {
+		t.Fatalf("insert scan_result %s: %v", filePath, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("scan_result id %s: %v", filePath, err)
+	}
+	return id
+}
+
+func linkScanResult(t *testing.T, sqlDB *sql.DB, workQueueID, scanResultID int64) {
+	t.Helper()
+	if _, err := sqlDB.ExecContext(context.Background(),
+		`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
+		workQueueID, scanResultID); err != nil {
+		t.Fatalf("link work_queue %d -> scan_result %d: %v", workQueueID, scanResultID, err)
+	}
+}
+
+func TestDBQueue_CancelByLibrary_DeletesSingleLibraryRow(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	srA := addScanResultIn(t, sqlDB, libA, "/music/a/1.mp3", "/music/a", "track.lrc")
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "Solo"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/a", Filename: "track.lrc"}},
+		ScanResultID: srA,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	deleted, updated, err := q.CancelByLibrary(ctx, libA)
+	if err != nil {
+		t.Fatalf("CancelByLibrary: %v", err)
+	}
+	if deleted != 1 || updated != 0 {
+		t.Fatalf("CancelByLibrary = (deleted=%d, updated=%d); want (1, 0)", deleted, updated)
+	}
+
+	var count int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count work_queue: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("work_queue row %d still present after CancelByLibrary", item.ID)
+	}
+}
+
+func TestDBQueue_CancelByLibrary_UpdatesSharedRowAndLeavesOtherLibraryUntouched(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	libB := addLibrary(t, sqlDB, "B", "/music/b")
+
+	// Shared row: same artist/title, present in both libraries.
+	srA := addScanResultIn(t, sqlDB, libA, "/music/a/shared.mp3", "/music/a", "shared.lrc")
+	srB := addScanResultIn(t, sqlDB, libB, "/music/b/shared.mp3", "/music/b", "shared.lrc")
+	shared, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Both", TrackName: "Shared"},
+		OutputPaths: []models.OutputPath{
+			{Outdir: "/music/a", Filename: "shared.lrc"},
+			{Outdir: "/music/b", Filename: "shared.lrc"},
+		},
+		ScanResultID: srA,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue shared: %v", err)
+	}
+	linkScanResult(t, sqlDB, shared.ID, srB)
+
+	// Library Y only: must remain untouched.
+	srBOnly := addScanResultIn(t, sqlDB, libB, "/music/b/only.mp3", "/music/b", "only.lrc")
+	bOnly, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Just", TrackName: "B"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/b", Filename: "only.lrc"}},
+		ScanResultID: srBOnly,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue bOnly: %v", err)
+	}
+
+	deleted, updated, err := q.CancelByLibrary(ctx, libA)
+	if err != nil {
+		t.Fatalf("CancelByLibrary: %v", err)
+	}
+	if deleted != 0 || updated != 1 {
+		t.Fatalf("CancelByLibrary = (deleted=%d, updated=%d); want (0, 1)", deleted, updated)
+	}
+
+	// Shared row still present, output_paths shrunk to library B's entry only.
+	var rawPaths string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT output_paths FROM work_queue WHERE id = ?`, shared.ID,
+	).Scan(&rawPaths); err != nil {
+		t.Fatalf("read shared output_paths: %v", err)
+	}
+	var paths []models.OutputPath
+	if err := json.Unmarshal([]byte(rawPaths), &paths); err != nil {
+		t.Fatalf("unmarshal shared output_paths %q: %v", rawPaths, err)
+	}
+	if len(paths) != 1 || paths[0].Outdir != "/music/b" || paths[0].Filename != "shared.lrc" {
+		t.Fatalf("shared output_paths = %+v; want one /music/b entry", paths)
+	}
+
+	// Library B's standalone row is untouched.
+	var bOnlyPaths string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT output_paths FROM work_queue WHERE id = ?`, bOnly.ID,
+	).Scan(&bOnlyPaths); err != nil {
+		t.Fatalf("read bOnly output_paths: %v", err)
+	}
+	if bOnlyPaths == "" {
+		t.Fatalf("bOnly output_paths empty; want preserved")
+	}
+}
+
+func TestDBQueue_CancelByLibrary_LeavesSharedRowWhenAllPathsBelongToOtherLibrary(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	libB := addLibrary(t, sqlDB, "B", "/music/b")
+
+	// The row is a cancel candidate because it links to library A, but every
+	// output_path it carries also belongs to library B's scan_result. The
+	// keep-set therefore retains all paths and the row needs no change: this
+	// exercises the defensive "filtered == paths" branch in cancelByLibrary.
+	srA := addScanResultIn(t, sqlDB, libA, "/music/a/shared.mp3", "/music/a", "shared.lrc")
+	srB := addScanResultIn(t, sqlDB, libB, "/music/b/shared.mp3", "/music/b", "shared.lrc")
+	row, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Both", TrackName: "Shared"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/b", Filename: "shared.lrc"}},
+		ScanResultID: srA,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	linkScanResult(t, sqlDB, row.ID, srB)
+
+	deleted, updated, err := q.CancelByLibrary(ctx, libA)
+	if err != nil {
+		t.Fatalf("CancelByLibrary: %v", err)
+	}
+	if deleted != 0 || updated != 0 {
+		t.Fatalf("CancelByLibrary = (deleted=%d, updated=%d); want (0, 0) when no paths change", deleted, updated)
+	}
+
+	// Row preserved with its single library-B path intact.
+	var rawPaths string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT output_paths FROM work_queue WHERE id = ?`, row.ID,
+	).Scan(&rawPaths); err != nil {
+		t.Fatalf("read output_paths: %v", err)
+	}
+	var paths []models.OutputPath
+	if err := json.Unmarshal([]byte(rawPaths), &paths); err != nil {
+		t.Fatalf("unmarshal output_paths %q: %v", rawPaths, err)
+	}
+	if len(paths) != 1 || paths[0].Outdir != "/music/b" || paths[0].Filename != "shared.lrc" {
+		t.Fatalf("output_paths = %+v; want one /music/b entry unchanged", paths)
+	}
+}
+
+func TestDBQueue_CancelByLibrary_ErrorsOnCorruptOutputPaths(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	srA := addScanResultIn(t, sqlDB, libA, "/music/a/x.mp3", "/music/a", "x.lrc")
+	row, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "X"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/a", Filename: "x.lrc"}},
+		ScanResultID: srA,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	// Corrupt the persisted output_paths so cancelByLibrary's json.Unmarshal of
+	// the candidate row fails and the error is surfaced rather than swallowed.
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET output_paths = ? WHERE id = ?`, "{not-valid-json", row.ID); err != nil {
+		t.Fatalf("corrupt output_paths: %v", err)
+	}
+	if _, _, err := q.CancelByLibrary(ctx, libA); err == nil {
+		t.Fatalf("CancelByLibrary: want error on corrupt output_paths, got nil")
+	}
+}
+
+func TestDBQueue_CancelByLibrary_ErrorsWhenDBClosed(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	if _, _, err := q.CancelByLibrary(ctx, 1); err == nil {
+		t.Fatalf("CancelByLibrary on closed DB: want error, got nil")
+	}
+}
+
+func TestDBQueue_CountCancelByLibrary_ErrorsWhenDBClosed(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	if _, _, err := q.CountCancelByLibrary(ctx, 1); err == nil {
+		t.Fatalf("CountCancelByLibrary on closed DB: want error, got nil")
+	}
+}
+
+func TestDBQueue_CancelByLibrary_ErrorsWhenJunctionMissing(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	// Drop the junction table so the candidate-selection query fails inside
+	// the cancel transaction; the error must propagate to the caller rather
+	// than be swallowed.
+	if _, err := sqlDB.ExecContext(ctx, `DROP TABLE work_queue_scan_results`); err != nil {
+		t.Fatalf("drop junction table: %v", err)
+	}
+	if _, _, err := q.CancelByLibrary(ctx, libA); err == nil {
+		t.Fatalf("CancelByLibrary with missing junction table: want error, got nil")
+	}
+}
+
+func TestDBQueue_CancelByLibrary_LeavesProcessingAndDoneRowsUntouched(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	srProc := addScanResultIn(t, sqlDB, libA, "/music/a/proc.mp3", "/music/a", "proc.lrc")
+	srDone := addScanResultIn(t, sqlDB, libA, "/music/a/done.mp3", "/music/a", "done.lrc")
+
+	proc, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "Processing"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/a", Filename: "proc.lrc"}},
+		ScanResultID: srProc,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue proc: %v", err)
+	}
+	done, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "Done"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/a", Filename: "done.lrc"}},
+		ScanResultID: srDone,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue done: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'processing' WHERE id = ?`, proc.ID); err != nil {
+		t.Fatalf("force processing: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'done' WHERE id = ?`, done.ID); err != nil {
+		t.Fatalf("force done: %v", err)
+	}
+
+	deleted, updated, err := q.CancelByLibrary(ctx, libA)
+	if err != nil {
+		t.Fatalf("CancelByLibrary: %v", err)
+	}
+	if deleted != 0 || updated != 0 {
+		t.Fatalf("CancelByLibrary = (deleted=%d, updated=%d); want (0, 0) for processing+done", deleted, updated)
+	}
+
+	for _, id := range []int64{proc.ID, done.ID} {
+		var count int
+		if err := sqlDB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM work_queue WHERE id = ?`, id,
+		).Scan(&count); err != nil {
+			t.Fatalf("count work_queue %d: %v", id, err)
+		}
+		if count != 1 {
+			t.Fatalf("work_queue %d count = %d; want 1 (processing/done must not be deleted)", id, count)
+		}
+	}
+}
+
+func TestDBQueue_CountCancelByLibrary_ProjectsWithoutWriting(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	libB := addLibrary(t, sqlDB, "B", "/music/b")
+
+	srSolo := addScanResultIn(t, sqlDB, libA, "/music/a/1.mp3", "/music/a", "1.lrc")
+	solo, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Solo", TrackName: "A"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/a", Filename: "1.lrc"}},
+		ScanResultID: srSolo,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue solo: %v", err)
+	}
+
+	srA2 := addScanResultIn(t, sqlDB, libA, "/music/a/2.mp3", "/music/a", "2.lrc")
+	srB2 := addScanResultIn(t, sqlDB, libB, "/music/b/2.mp3", "/music/b", "2.lrc")
+	shared, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Shared", TrackName: "B"},
+		OutputPaths: []models.OutputPath{
+			{Outdir: "/music/a", Filename: "2.lrc"},
+			{Outdir: "/music/b", Filename: "2.lrc"},
+		},
+		ScanResultID: srA2,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue shared: %v", err)
+	}
+	linkScanResult(t, sqlDB, shared.ID, srB2)
+
+	deleted, updated, err := q.CountCancelByLibrary(ctx, libA)
+	if err != nil {
+		t.Fatalf("CountCancelByLibrary: %v", err)
+	}
+	if deleted != 1 || updated != 1 {
+		t.Fatalf("CountCancelByLibrary = (deleted=%d, updated=%d); want (1, 1)", deleted, updated)
+	}
+
+	// Both rows must still exist with original output_paths unchanged.
+	for _, id := range []int64{solo.ID, shared.ID} {
+		var count int
+		if err := sqlDB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM work_queue WHERE id = ?`, id,
+		).Scan(&count); err != nil {
+			t.Fatalf("count work_queue %d: %v", id, err)
+		}
+		if count != 1 {
+			t.Fatalf("work_queue %d count = %d; want 1 (dry-run must not delete)", id, count)
+		}
+	}
+	var sharedPaths string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT output_paths FROM work_queue WHERE id = ?`, shared.ID,
+	).Scan(&sharedPaths); err != nil {
+		t.Fatalf("read shared output_paths: %v", err)
+	}
+	var paths []models.OutputPath
+	if err := json.Unmarshal([]byte(sharedPaths), &paths); err != nil {
+		t.Fatalf("unmarshal shared output_paths: %v", err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("shared output_paths after dry-run = %+v; want 2 (unchanged)", paths)
+	}
+}
+
+func TestDBQueue_CancelByLibraryTx_RunsInExternalTransaction(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA := addLibrary(t, sqlDB, "A", "/music/a")
+	srA := addScanResultIn(t, sqlDB, libA, "/music/a/1.mp3", "/music/a", "track.lrc")
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "Solo"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music/a", Filename: "track.lrc"}},
+		ScanResultID: srA,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	deleted, updated, err := q.CancelByLibraryTx(ctx, tx, libA)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("CancelByLibraryTx: %v", err)
+	}
+	if deleted != 1 || updated != 0 {
+		_ = tx.Rollback()
+		t.Fatalf("CancelByLibraryTx = (deleted=%d, updated=%d); want (1, 0)", deleted, updated)
+	}
+
+	// Before commit, the row must still be visible on a separate read because
+	// the change is uncommitted. Verify rollback restores it.
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	var preCommit int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&preCommit); err != nil {
+		t.Fatalf("post-rollback count: %v", err)
+	}
+	if preCommit != 1 {
+		t.Fatalf("work_queue row %d count after rollback = %d; want 1", item.ID, preCommit)
+	}
+
+	// Now commit a second invocation and verify the row is gone.
+	tx2, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx 2: %v", err)
+	}
+	if _, _, err := q.CancelByLibraryTx(ctx, tx2, libA); err != nil {
+		_ = tx2.Rollback()
+		t.Fatalf("CancelByLibraryTx 2: %v", err)
+	}
+	if err := tx2.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	var postCommit int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&postCommit); err != nil {
+		t.Fatalf("post-commit count: %v", err)
+	}
+	if postCommit != 0 {
+		t.Fatalf("work_queue row %d count after commit = %d; want 0", item.ID, postCommit)
 	}
 }

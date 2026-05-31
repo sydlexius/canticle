@@ -713,6 +713,226 @@ func TestRunScanClear_DryRunAndConfirm(t *testing.T) {
 	}
 }
 
+func TestRunScanClear_CancelsLinkedWorkQueueRow(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	libRepo := library.New(sqlDB)
+	lib, err := libRepo.Add(ctx, "/music", "MusicLib")
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	scanRepo := scan.New(sqlDB)
+	if err := scanRepo.Upsert(ctx, lib.ID, []models.ScanResult{{
+		FilePath: "/music/a.mp3",
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:   "/music",
+		Filename: "a.lrc",
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	pending, err := scanRepo.ListPendingByLibrary(ctx, lib.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("ListPendingByLibrary: %v / %d rows", err, len(pending))
+	}
+	q := queue.NewDBQueue(sqlDB)
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "Title"},
+		OutputPaths:  []models.OutputPath{{Outdir: "/music", Filename: "a.lrc"}},
+		ScanResultID: pending[0].ID,
+	}, 1); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	// Dry run: must report the queue cancellation.
+	var out bytes.Buffer
+	code := Run(ctx, []string{"scan", "clear", "--library", "MusicLib", "--config", cfg}, &out, Deps{})
+	if code != 0 {
+		t.Fatalf("dry-run exit = %d; want 0; out=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "cancel 1") {
+		t.Fatalf("dry-run output missing queue cancel count: %q", out.String())
+	}
+
+	// Confirm: queue row must be gone.
+	out.Reset()
+	code = Run(ctx, []string{"scan", "clear", "--library", "MusicLib", "--yes", "--config", cfg}, &out, Deps{})
+	if code != 0 {
+		t.Fatalf("--yes exit = %d; want 0; out=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "canceled 1") {
+		t.Fatalf("--yes output missing queue cancel count: %q", out.String())
+	}
+
+	sqlDB, err = db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer sqlDB.Close()
+	var qCount int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue`).Scan(&qCount); err != nil {
+		t.Fatalf("count work_queue: %v", err)
+	}
+	if qCount != 0 {
+		t.Fatalf("work_queue rows after scan clear = %d; want 0", qCount)
+	}
+}
+
+func TestRunScan_LibrarySelectorScansOnlyTheNamedLibrary(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	// Two real, empty directories so scanner.ScanLibrary does not error.
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	libRepo := library.New(sqlDB)
+	libA, err := libRepo.Add(ctx, dirA, "Alpha")
+	if err != nil {
+		t.Fatalf("Add Alpha: %v", err)
+	}
+	libB, err := libRepo.Add(ctx, dirB, "Beta")
+	if err != nil {
+		t.Fatalf("Add Beta: %v", err)
+	}
+	// Seed a stale scan_results row in each library; the scan should leave
+	// the unselected library's row alone (the scanner walks the empty dir
+	// and finds nothing, but Upsert is not invoked for unselected libs).
+	scanRepo := scan.New(sqlDB)
+	if err := scanRepo.Upsert(ctx, libA.ID, []models.ScanResult{{
+		FilePath: filepath.Join(dirA, "stale.mp3"),
+		Track:    models.Track{ArtistName: "Stale", TrackName: "A"},
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert A: %v", err)
+	}
+	if err := scanRepo.Upsert(ctx, libB.ID, []models.ScanResult{{
+		FilePath: filepath.Join(dirB, "stale.mp3"),
+		Track:    models.Track{ArtistName: "Stale", TrackName: "B"},
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert B: %v", err)
+	}
+	// Make Beta's directory unscannable. With --only Alpha, Beta is never
+	// walked, so this is harmless; but if the selector were broken and Beta
+	// got scanned, scanner.ScanLibrary would hit the missing directory and
+	// error (scheduler propagates it), forcing a non-zero exit and failing
+	// the test. Without this, both seed rows survive and the test passes even
+	// if nothing was scanned at all.
+	if err := os.RemoveAll(dirB); err != nil {
+		t.Fatalf("remove Beta dir: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := Run(ctx, []string{"scan", "--only", "Alpha", "--config", cfg}, &out, Deps{})
+	if code != 0 {
+		t.Fatalf("scan --library Alpha exit = %d; want 0; out=%s", code, out.String())
+	}
+
+	// Reopen and confirm: Alpha was rescanned (Upsert ran against an empty
+	// directory, so its only seeded row is preserved by default UpsertOptions
+	// status-preserving semantics). Beta must not have been touched at all.
+	// We assert behaviorally by checking both libraries still hold their seed
+	// row; the more meaningful assertion is that the run exited 0 with a
+	// non-existent Beta directory would have errored had it been scanned.
+	sqlDB, err = db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer sqlDB.Close()
+	countA, err := scan.New(sqlDB).CountByLibrary(ctx, libA.ID)
+	if err != nil {
+		t.Fatalf("CountByLibrary A: %v", err)
+	}
+	countB, err := scan.New(sqlDB).CountByLibrary(ctx, libB.ID)
+	if err != nil {
+		t.Fatalf("CountByLibrary B: %v", err)
+	}
+	if countA != 1 || countB != 1 {
+		t.Fatalf("CountByLibrary A=%d B=%d; want 1 each", countA, countB)
+	}
+}
+
+func TestRunScan_LibrarySelectorReportsScanFailure(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	dir := t.TempDir()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, dir, "Alpha"); err != nil {
+		t.Fatalf("Add Alpha: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	// Remove the selected library's directory so scanner.ScanLibrary errors
+	// when the scheduler walks it. The selector path must surface that as a
+	// non-zero exit rather than swallowing it.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove dir: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := Run(ctx, []string{"scan", "--only", "Alpha", "--config", cfg}, &out, Deps{})
+	if code != 1 {
+		t.Fatalf("scan --only Alpha with missing dir: exit = %d; want 1; out=%s", code, out.String())
+	}
+}
+
+func TestRunScan_LibrarySelectorRejectsUnknownName(t *testing.T) {
+	cfg, _ := commandsTestEnv(t)
+	var out bytes.Buffer
+	code := Run(context.Background(), []string{"scan", "--only", "no-such-library", "--config", cfg}, &out, Deps{})
+	if code == 0 {
+		t.Fatalf("unknown library: exit code 0; want non-zero. out=%s", out.String())
+	}
+	if !strings.Contains(out.String(), "no-such-library") {
+		t.Fatalf("output missing offending library reference: %q", out.String())
+	}
+}
+
+func TestRunScan_LibrarySelectorRejectsAmbiguousName(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	libRepo := library.New(sqlDB)
+	// Two libraries where the second one is literally named after the first
+	// one's numeric id. Looking up "1" resolves to both: ID match (lib1) and
+	// name match (lib2). resolveLibrary must reject that as ambiguous.
+	lib1, err := libRepo.Add(ctx, t.TempDir(), "music")
+	if err != nil {
+		t.Fatalf("Add lib1: %v", err)
+	}
+	if _, err := libRepo.Add(ctx, t.TempDir(), strconvFormatInt(lib1.ID)); err != nil {
+		t.Fatalf("Add lib2: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := Run(ctx, []string{"scan", "--only", strconvFormatInt(lib1.ID), "--config", cfg}, &out, Deps{})
+	if code == 0 {
+		t.Fatalf("ambiguous library: exit code 0; want non-zero. out=%s", out.String())
+	}
+	if !strings.Contains(out.String(), "ambiguous") {
+		t.Fatalf("output missing 'ambiguous': %q", out.String())
+	}
+}
+
 func errorsNew(s string) error { return errors.New(s) }
 
 func strconvFormatInt(i int64) string { return strconv.FormatInt(i, 10) }

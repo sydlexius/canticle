@@ -405,3 +405,119 @@ func TestRepo_ListPendingByLibraryAndSetStatus(t *testing.T) {
 		t.Fatalf("pending results after SetStatus = %+v; want none", pending)
 	}
 }
+
+func TestRepo_ClearByLibraryTx_CommitsViaCaller(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	libRepo := library.New(sqlDB)
+	scanRepo := scan.New(sqlDB)
+
+	libA, err := libRepo.Add(ctx, "/music/a", "A")
+	if err != nil {
+		t.Fatalf("Add library A: %v", err)
+	}
+	libB, err := libRepo.Add(ctx, "/music/b", "B")
+	if err != nil {
+		t.Fatalf("Add library B: %v", err)
+	}
+	if err := scanRepo.Upsert(ctx, libA.ID, []models.ScanResult{
+		{FilePath: "/music/a/1.mp3", Track: models.Track{ArtistName: "A", TrackName: "1"}},
+		{FilePath: "/music/a/2.mp3", Track: models.Track{ArtistName: "A", TrackName: "2"}},
+	}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert A: %v", err)
+	}
+	if err := scanRepo.Upsert(ctx, libB.ID, []models.ScanResult{
+		{FilePath: "/music/b/1.mp3", Track: models.Track{ArtistName: "B", TrackName: "1"}},
+	}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert B: %v", err)
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	deleted, err := scanRepo.ClearByLibraryTx(ctx, tx, libA.ID)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("ClearByLibraryTx: %v", err)
+	}
+	if deleted != 2 {
+		_ = tx.Rollback()
+		t.Fatalf("ClearByLibraryTx deleted = %d; want 2", deleted)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	leftA, err := scanRepo.ListByLibrary(ctx, libA.ID)
+	if err != nil {
+		t.Fatalf("ListByLibrary A: %v", err)
+	}
+	if len(leftA) != 0 {
+		t.Fatalf("library A still has %d scan_results after committed tx; want 0", len(leftA))
+	}
+	leftB, err := scanRepo.ListByLibrary(ctx, libB.ID)
+	if err != nil {
+		t.Fatalf("ListByLibrary B: %v", err)
+	}
+	if len(leftB) != 1 {
+		t.Fatalf("library B has %d scan_results; want 1 (ClearByLibraryTx leaked across libraries)", len(leftB))
+	}
+}
+
+func TestRepo_ClearByLibraryTx_ErrorsWhenTableMissing(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	scanRepo := scan.New(sqlDB)
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Drop scan_results inside the same transaction so the DELETE fails; the
+	// error must be surfaced to the caller rather than swallowed.
+	if _, err := tx.ExecContext(ctx, `DROP TABLE scan_results`); err != nil {
+		t.Fatalf("drop scan_results: %v", err)
+	}
+	if _, err := scanRepo.ClearByLibraryTx(ctx, tx, 1); err == nil {
+		t.Fatalf("ClearByLibraryTx with missing table: want error, got nil")
+	}
+}
+
+func TestRepo_ClearByLibraryTx_RollbackPreservesRows(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	libRepo := library.New(sqlDB)
+	scanRepo := scan.New(sqlDB)
+
+	lib, err := libRepo.Add(ctx, "/music", "Music")
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	if err := scanRepo.Upsert(ctx, lib.ID, []models.ScanResult{
+		{FilePath: "/music/1.mp3", Track: models.Track{ArtistName: "A", TrackName: "1"}},
+	}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if _, err := scanRepo.ClearByLibraryTx(ctx, tx, lib.ID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("ClearByLibraryTx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	left, err := scanRepo.ListByLibrary(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("ListByLibrary: %v", err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("library scan_results after rollback = %d; want 1 (delete must roll back with the tx)", len(left))
+	}
+}
