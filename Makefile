@@ -1,4 +1,4 @@
-.PHONY: build run test test-cover smoke lint fmt hooks clean help
+.PHONY: build run test test-cover patch-cover gate smoke lint fmt hooks clean help
 
 # Binary name
 BINARY=mxlrcgo-svc
@@ -19,6 +19,21 @@ test:
 test-cover:
 	go test -count=1 -v -race -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
+
+## patch-cover: Estimate Codecov patch coverage for the current diff (optional; needs claude-kit)
+patch-cover:
+	@helper="$$HOME/.claude/scripts/patch-coverage.sh"; \
+	if [ -x "$$helper" ]; then \
+		go test -count=1 -coverprofile=coverage.out ./...; \
+		COVER_OUT=coverage.out bash "$$helper"; \
+	else \
+		echo "patch-coverage estimator not found at $$helper"; \
+		echo "skipping; Codecov enforces patch coverage in CI. Install claude-kit for the local check."; \
+	fi
+
+## gate: Run the full deterministic pre-push gate (build, test, patch coverage, lint, vuln)
+gate:
+	bash scripts/pre-push-gate.sh
 
 ## smoke: Run CLI smoke tests
 smoke:

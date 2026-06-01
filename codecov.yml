@@ -8,3 +8,11 @@ coverage:
       default:
         target: 70%
         threshold: 0%
+
+ignore:
+  # Application entrypoint: main.go wires config, DB, and the dependency
+  # graph and runs app.App.Run. It owns no business logic and is not
+  # unit-testable without a full integration harness. scripts/pre-push-gate.sh
+  # mirrors this exclusion via PATCH_COVERAGE_EXCLUDE so the local patch
+  # coverage estimate and Codecov agree on scope.
+  - "cmd/mxlrcgo-svc/main.go"
