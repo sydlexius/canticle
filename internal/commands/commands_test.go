@@ -174,6 +174,50 @@ func TestServeWorkerIntervalUsesConfigUnlessFlagProvided(t *testing.T) {
 	}
 }
 
+// TestServeWorkerIntervalPrecedence verifies CLI flag > server.work_interval_seconds
+// > api.cooldown. A zero server.work_interval_seconds means "fall back to cooldown".
+func TestServeWorkerIntervalPrecedence(t *testing.T) {
+	cfg := config.Config{
+		API:    config.APIConfig{Cooldown: 45},
+		Server: config.ServerConfig{WorkIntervalSeconds: 25},
+	}
+
+	if got := serveWorkerInterval(cfg, ServeCmd{}); got != 25*time.Second {
+		t.Fatalf("serveWorkerInterval config = %s; want 25s (server config over cooldown)", got)
+	}
+
+	cfgNoServer := config.Config{API: config.APIConfig{Cooldown: 45}}
+	if got := serveWorkerInterval(cfgNoServer, ServeCmd{}); got != 45*time.Second {
+		t.Fatalf("serveWorkerInterval cooldown fallback = %s; want 45s", got)
+	}
+
+	flag := 30
+	if got := serveWorkerInterval(cfg, ServeCmd{WorkInterval: &flag}); got != 30*time.Second {
+		t.Fatalf("serveWorkerInterval flag = %s; want 30s (flag wins)", got)
+	}
+}
+
+// TestServeScanIntervalPrecedence verifies CLI flag > server.scan_interval_seconds.
+func TestServeScanIntervalPrecedence(t *testing.T) {
+	cfg := config.Config{
+		Server: config.ServerConfig{ScanIntervalSeconds: 600},
+	}
+
+	if got := serveScanInterval(cfg, ServeCmd{}); got != 600*time.Second {
+		t.Fatalf("serveScanInterval config = %s; want 600s", got)
+	}
+
+	flag := 120
+	if got := serveScanInterval(cfg, ServeCmd{ScanInterval: &flag}); got != 120*time.Second {
+		t.Fatalf("serveScanInterval flag = %s; want 120s (flag wins)", got)
+	}
+
+	zero := 0
+	if got := serveScanInterval(cfg, ServeCmd{ScanInterval: &zero}); got != 0 {
+		t.Fatalf("serveScanInterval zero flag = %s; want 0 (disables repeat)", got)
+	}
+}
+
 func TestSchedulerBuildsScanEnqueuer(t *testing.T) {
 	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -396,6 +440,47 @@ func TestCircuitOpenDurationConfigKey(t *testing.T) {
 
 	if !slices.Contains(configKeys(), "api.circuit_open_duration") {
 		t.Fatal("configKeys missing api.circuit_open_duration")
+	}
+}
+
+func TestServerIntervalConfigKeys(t *testing.T) {
+	cfg := config.Config{Server: config.ServerConfig{ScanIntervalSeconds: 900, WorkIntervalSeconds: 20}}
+
+	for key, want := range map[string]string{
+		"server.scan_interval_seconds": "900",
+		"server.work_interval_seconds": "20",
+	} {
+		got, ok := configValue(cfg, key)
+		if !ok {
+			t.Fatalf("configValue(%s) ok = false; want true", key)
+		}
+		if got != want {
+			t.Fatalf("configValue(%s) = %q; want %q", key, got, want)
+		}
+		if !slices.Contains(configKeys(), key) {
+			t.Fatalf("configKeys missing %s", key)
+		}
+	}
+
+	if err := setConfigValue(&cfg, "server.scan_interval_seconds", "0"); err != nil {
+		t.Fatalf("setConfigValue scan 0: %v (zero must be allowed to disable repeat)", err)
+	}
+	if cfg.Server.ScanIntervalSeconds != 0 {
+		t.Fatalf("ScanIntervalSeconds = %d; want 0", cfg.Server.ScanIntervalSeconds)
+	}
+	if err := setConfigValue(&cfg, "server.work_interval_seconds", "30"); err != nil {
+		t.Fatalf("setConfigValue work 30: %v", err)
+	}
+	if cfg.Server.WorkIntervalSeconds != 30 {
+		t.Fatalf("WorkIntervalSeconds = %d; want 30", cfg.Server.WorkIntervalSeconds)
+	}
+	for _, bad := range []string{"", "abc", "-1"} {
+		if err := setConfigValue(&cfg, "server.scan_interval_seconds", bad); err == nil {
+			t.Fatalf("setConfigValue accepted invalid server.scan_interval_seconds %q", bad)
+		}
+		if err := setConfigValue(&cfg, "server.work_interval_seconds", bad); err == nil {
+			t.Fatalf("setConfigValue accepted invalid server.work_interval_seconds %q", bad)
+		}
 	}
 }
 

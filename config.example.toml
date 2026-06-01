@@ -41,6 +41,16 @@ addr = "127.0.0.1:3876"
 # when possible; MXLRC_WEBHOOK_API_KEY can also provide one or more comma-separated keys.
 # webhook_api_keys = ["mxlrc_your-webhook-key"]
 
+# Scheduler scan interval in seconds for `serve` mode (env: MXLRC_SCAN_INTERVAL).
+# Default 900. Set to 0 to scan once and not repeat. The --scan-interval flag
+# overrides this value.
+# scan_interval_seconds = 900
+
+# Worker poll interval in seconds for `serve` mode (env: MXLRC_WORK_INTERVAL).
+# Default 0, which falls back to api.cooldown. Clamped to a 15-second floor.
+# The --work-interval flag overrides this value.
+# work_interval_seconds = 0
+
 [providers]
 # Active lyrics provider. Musixmatch is currently the only supported provider.
 primary = "musixmatch"

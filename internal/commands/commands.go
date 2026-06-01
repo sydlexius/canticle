@@ -37,8 +37,6 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/worker"
 )
 
-const defaultScanInterval = 15 * time.Minute
-
 // Args defines the CLI arguments for the application.
 type Args struct {
 	Fetch   *FetchCmd   `arg:"subcommand:fetch" help:"fetch lyrics once without HTTP server or DB queue"`
@@ -88,8 +86,8 @@ type ServeCmd struct {
 	Update       bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files"`
 	Upgrade      bool    `arg:"--upgrade" help:"scheduler re-fetches .txt lyrics to promote them"`
 	BFS          bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
-	ScanInterval int     `arg:"--scan-interval" help:"scheduler interval in seconds (default: 900; 0 disables repeat)" default:"900"`
-	WorkInterval *int    `arg:"--work-interval" help:"worker cooldown interval in seconds (default: api.cooldown; minimum 15)"`
+	ScanInterval *int    `arg:"--scan-interval" help:"scheduler interval in seconds (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
+	WorkInterval *int    `arg:"--work-interval" help:"worker poll interval in seconds (default: server.work_interval_seconds or api.cooldown; minimum 15)"`
 }
 
 // ScanCmd scans libraries once and enqueues cache misses. It also hosts
@@ -480,7 +478,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	}()
 	go func() {
 		defer wg.Done()
-		runScheduler(runCtx, sqlDB, args)
+		runScheduler(runCtx, sqlDB, cfg, args)
 	}()
 
 	addr := cfg.Server.Addr
@@ -488,8 +486,11 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		addr = *args.Listen
 	}
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           server.NewHandler(authSvc, workQ, outdir),
+		Addr: addr,
+		Handler: server.NewHandler(authSvc, workQ, outdir,
+			server.WithReadiness(sqlDB),
+			server.WithStatusReporter(workQ),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -533,12 +534,29 @@ func runWorkerLoop(ctx context.Context, w *worker.Worker, interval time.Duration
 	}
 }
 
+// serveWorkerInterval resolves the worker poll interval. Precedence:
+// CLI --work-interval > config server.work_interval_seconds > api.cooldown.
+// A zero server.work_interval_seconds means "fall back to api.cooldown".
 func serveWorkerInterval(cfg config.Config, args ServeCmd) time.Duration {
 	interval := cfg.API.Cooldown
+	if cfg.Server.WorkIntervalSeconds > 0 {
+		interval = cfg.Server.WorkIntervalSeconds
+	}
 	if args.WorkInterval != nil {
 		interval = *args.WorkInterval
 	}
 	return time.Duration(interval) * time.Second
+}
+
+// serveScanInterval resolves the scheduler scan interval. Precedence:
+// CLI --scan-interval > config server.scan_interval_seconds (default 900).
+// A zero result disables repeat scanning (scan once).
+func serveScanInterval(cfg config.Config, args ServeCmd) time.Duration {
+	seconds := cfg.Server.ScanIntervalSeconds
+	if args.ScanInterval != nil {
+		seconds = *args.ScanInterval
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func normalizeWorkerInterval(interval time.Duration) time.Duration {
@@ -575,18 +593,14 @@ func configureWorkerVerification(w *worker.Worker, cfg config.Config, verifier v
 	w.EnableVerification(verifier, cfg.Verification.MinConfidence)
 }
 
-func runScheduler(ctx context.Context, sqlDB *sql.DB, args ServeCmd) {
-	interval := defaultScanInterval
-	if args.ScanInterval >= 0 {
-		interval = time.Duration(args.ScanInterval) * time.Second
-	}
+func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd) {
 	s := scheduler(sqlDB, scanner.ScanOptions{
 		Update:   args.Update,
 		Upgrade:  args.Upgrade,
 		MaxDepth: args.Depth,
 		BFS:      args.BFS,
 	})
-	s.Interval = interval
+	s.Interval = serveScanInterval(cfg, args)
 	if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		slog.Warn("scheduler failed", "error", err)
 	}
@@ -960,6 +974,8 @@ func configKeys() []string {
 		"db.path",
 		"server.addr",
 		"server.webhook_api_keys",
+		"server.scan_interval_seconds",
+		"server.work_interval_seconds",
 		"providers.primary",
 		"providers.disabled",
 		"verification.enabled",
@@ -987,6 +1003,10 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return cfg.Server.Addr, true
 	case "server.webhook_api_keys":
 		return strings.Join(cfg.Server.WebhookAPIKeys, ","), true
+	case "server.scan_interval_seconds":
+		return strconv.Itoa(cfg.Server.ScanIntervalSeconds), true
+	case "server.work_interval_seconds":
+		return strconv.Itoa(cfg.Server.WorkIntervalSeconds), true
 	case "providers.primary":
 		return cfg.Providers.Primary, true
 	case "providers.disabled":
@@ -1032,6 +1052,18 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 		cfg.Server.Addr = value
 	case "server.webhook_api_keys":
 		cfg.Server.WebhookAPIKeys = splitCSV(value)
+	case "server.scan_interval_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("server.scan_interval_seconds must be a non-negative integer (seconds; 0 disables repeat)")
+		}
+		cfg.Server.ScanIntervalSeconds = n
+	case "server.work_interval_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("server.work_interval_seconds must be a non-negative integer (seconds; 0 uses api.cooldown)")
+		}
+		cfg.Server.WorkIntervalSeconds = n
 	case "providers.primary":
 		cfg.Providers.Primary = value
 	case "providers.disabled":

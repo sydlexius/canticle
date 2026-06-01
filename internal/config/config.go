@@ -53,7 +53,17 @@ type DBConfig struct {
 type ServerConfig struct {
 	Addr           string   `toml:"addr"`
 	WebhookAPIKeys []string `toml:"webhook_api_keys"`
+	// ScanIntervalSeconds is the scheduler scan interval in seconds for serve
+	// mode. Default 900. A value of 0 disables repeat scanning (scan once).
+	ScanIntervalSeconds int `toml:"scan_interval_seconds"`
+	// WorkIntervalSeconds is the worker poll interval in seconds for serve mode.
+	// Default 0, which means "fall back to api.cooldown". The effective interval
+	// is clamped to a 15-second floor at runtime.
+	WorkIntervalSeconds int `toml:"work_interval_seconds"`
 }
+
+// defaultScanIntervalSeconds is the built-in scheduler scan interval (15 min).
+const defaultScanIntervalSeconds = 900
 
 // ProvidersConfig holds lyrics provider selection settings.
 type ProvidersConfig struct {
@@ -77,7 +87,7 @@ func defaults() Config {
 		API:          APIConfig{Cooldown: 15, CircuitOpenDuration: circuitOpenDefaultSeconds},
 		Output:       OutputConfig{Dir: "lyrics"},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
-		Server:       ServerConfig{Addr: "127.0.0.1:3876"},
+		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch"},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
 	}
@@ -147,7 +157,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -192,6 +202,22 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MXLRC_WEBHOOK_API_KEY"); v != "" {
 		cfg.Server.WebhookAPIKeys = splitCSV(v)
+	}
+	if v := os.Getenv("MXLRC_SCAN_INTERVAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_INTERVAL", "value", v, "current", cfg.Server.ScanIntervalSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Server.ScanIntervalSeconds = n
+		}
+	}
+	if v := os.Getenv("MXLRC_WORK_INTERVAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_WORK_INTERVAL", "value", v, "current", cfg.Server.WorkIntervalSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Server.WorkIntervalSeconds = n
+		}
 	}
 	if v := os.Getenv("MXLRC_PROVIDER_PRIMARY"); v != "" {
 		cfg.Providers.Primary = v

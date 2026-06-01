@@ -18,6 +18,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_API_COOLDOWN", "MXLRC_COOLDOWN",
 		"MXLRC_API_CIRCUIT_OPEN_DURATION",
 		"MXLRC_OUTPUT_DIR", "MXLRC_SERVER_ADDR", "MXLRC_WEBHOOK_API_KEY",
+		"MXLRC_SCAN_INTERVAL", "MXLRC_WORK_INTERVAL",
 		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED",
 		"MXLRC_VERIFICATION_ENABLED", "MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL",
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
@@ -219,6 +220,76 @@ func TestLoad_EnvCooldownInvalidIsIgnored(t *testing.T) {
 	}
 	if cfg.API.Cooldown != 15 {
 		t.Errorf("cooldown = %d; want 15 (default) after invalid env var", cfg.API.Cooldown)
+	}
+}
+
+// TestLoad_ServerIntervalDefaults verifies the service-loop intervals fall back
+// to their built-in defaults: scan 900s and work 0 (meaning "use api.cooldown").
+func TestLoad_ServerIntervalDefaults(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.ScanIntervalSeconds != 900 {
+		t.Errorf("scan_interval_seconds = %d; want 900", cfg.Server.ScanIntervalSeconds)
+	}
+	if cfg.Server.WorkIntervalSeconds != 0 {
+		t.Errorf("work_interval_seconds = %d; want 0 (fall back to api.cooldown)", cfg.Server.WorkIntervalSeconds)
+	}
+}
+
+// TestLoad_EnvServerIntervals verifies MXLRC_SCAN_INTERVAL and MXLRC_WORK_INTERVAL
+// override the config values.
+func TestLoad_EnvServerIntervals(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_SCAN_INTERVAL", "300")
+	t.Setenv("MXLRC_WORK_INTERVAL", "20")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.ScanIntervalSeconds != 300 {
+		t.Errorf("scan_interval_seconds = %d; want 300", cfg.Server.ScanIntervalSeconds)
+	}
+	if cfg.Server.WorkIntervalSeconds != 20 {
+		t.Errorf("work_interval_seconds = %d; want 20", cfg.Server.WorkIntervalSeconds)
+	}
+}
+
+// TestLoad_EnvServerIntervalZeroIsValid verifies a zero scan interval is honored
+// (it disables repeat scanning) rather than being re-defaulted.
+func TestLoad_EnvServerIntervalZeroIsValid(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_SCAN_INTERVAL", "0")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.ScanIntervalSeconds != 0 {
+		t.Errorf("scan_interval_seconds = %d; want 0", cfg.Server.ScanIntervalSeconds)
+	}
+}
+
+// TestLoad_EnvServerIntervalInvalidIsIgnored verifies a non-numeric interval env
+// var falls back to the current value rather than crashing.
+func TestLoad_EnvServerIntervalInvalidIsIgnored(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_SCAN_INTERVAL", "notanumber")
+	t.Setenv("MXLRC_WORK_INTERVAL", "-5")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.ScanIntervalSeconds != 900 {
+		t.Errorf("scan_interval_seconds = %d; want 900 (default) after invalid env var", cfg.Server.ScanIntervalSeconds)
+	}
+	if cfg.Server.WorkIntervalSeconds != 0 {
+		t.Errorf("work_interval_seconds = %d; want 0 (default) after invalid env var", cfg.Server.WorkIntervalSeconds)
 	}
 }
 

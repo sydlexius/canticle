@@ -119,6 +119,49 @@ func TestDBQueue_EnqueueDedupesNormalizedArtistTitle(t *testing.T) {
 	}
 }
 
+func TestDBQueue_CountByStatus(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	// Empty queue: no rows, so no status keys.
+	counts, err := q.CountByStatus(ctx)
+	if err != nil {
+		t.Fatalf("CountByStatus empty: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("empty counts = %v; want no entries", counts)
+	}
+
+	// Two pending rows.
+	for _, name := range []string{"One", "Two"} {
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: name}}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue %s: %v", name, err)
+		}
+	}
+	// Claim one (pending -> processing) and complete it (processing -> done).
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if err := q.Complete(ctx, claimed.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	counts, err = q.CountByStatus(ctx)
+	if err != nil {
+		t.Fatalf("CountByStatus: %v", err)
+	}
+	if counts[StatusPending] != 1 {
+		t.Errorf("pending = %d; want 1", counts[StatusPending])
+	}
+	if counts[StatusDone] != 1 {
+		t.Errorf("done = %d; want 1", counts[StatusDone])
+	}
+	if _, ok := counts[StatusProcessing]; ok {
+		t.Errorf("processing present = %v; want absent (no processing rows)", counts[StatusProcessing])
+	}
+}
+
 func TestDBQueue_DequeueClaimsHighestPriorityReadyItem(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
@@ -283,7 +326,7 @@ func TestDBQueue_EnqueueDuplicatePreservesFailedBackoff(t *testing.T) {
 		Track:    models.Track{ArtistName: " artist ", TrackName: "title"},
 		Outdir:   "duplicate-out",
 		Filename: "duplicate.lrc",
-	}, 10)
+	}, PriorityScan)
 	if err != nil {
 		t.Fatalf("Enqueue duplicate: %v", err)
 	}
@@ -304,6 +347,66 @@ func TestDBQueue_EnqueueDuplicatePreservesFailedBackoff(t *testing.T) {
 	}
 	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("Dequeue during preserved backoff error = %v; want sql.ErrNoRows", err)
+	}
+}
+
+// TestDBQueue_EnqueueWebhookDuplicateResetsFailedBackoff verifies a webhook
+// (high-priority) duplicate of a failed row resets next_attempt_at to now so the
+// work becomes immediately retry-eligible, without changing the attempt count.
+func TestDBQueue_EnqueueWebhookDuplicateResetsFailedBackoff(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:   "failed-out",
+		Filename: "failed.lrc",
+	}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	failed, err := q.Fail(ctx, claimed.ID, errors.New("rate limited"))
+	if err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if !failed.NextAttemptAt.After(now) {
+		t.Fatalf("failed next attempt = %s; want a future backoff after %s", failed.NextAttemptAt, now)
+	}
+
+	dup, err := q.Enqueue(ctx, models.Inputs{
+		Track:    models.Track{ArtistName: " artist ", TrackName: "title"},
+		Outdir:   "duplicate-out",
+		Filename: "duplicate.lrc",
+	}, PriorityWebhook)
+	if err != nil {
+		t.Fatalf("Enqueue webhook duplicate: %v", err)
+	}
+	if dup.ID != failed.ID {
+		t.Fatalf("duplicate ID = %d; want %d", dup.ID, failed.ID)
+	}
+	if dup.Status != StatusFailed {
+		t.Fatalf("duplicate status = %q; want %q (status is unchanged)", dup.Status, StatusFailed)
+	}
+	if dup.Attempts != failed.Attempts {
+		t.Fatalf("duplicate attempts = %d; want %d (attempts preserved)", dup.Attempts, failed.Attempts)
+	}
+	if !dup.NextAttemptAt.Equal(now) {
+		t.Fatalf("duplicate next attempt = %s; want %s (reset to now)", dup.NextAttemptAt, now)
+	}
+	if dup.Priority != PriorityWebhook {
+		t.Fatalf("duplicate priority = %d; want %d", dup.Priority, PriorityWebhook)
+	}
+	claimed2, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue after webhook reset = %v; want the reset row to be claimable", err)
+	}
+	if claimed2.ID != failed.ID {
+		t.Fatalf("Dequeue claimed ID = %d; want %d", claimed2.ID, failed.ID)
 	}
 }
 

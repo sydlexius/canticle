@@ -227,6 +227,105 @@ func TestLidarrWebhookAuthAndEnqueueErrors(t *testing.T) {
 	})
 }
 
+type fakeReadiness struct{ err error }
+
+func (f *fakeReadiness) PingContext(_ context.Context) error { return f.err }
+
+type fakeStats struct {
+	counts map[string]int64
+	err    error
+}
+
+func (f *fakeStats) CountByStatus(_ context.Context) (map[string]int64, error) {
+	return f.counts, f.err
+}
+
+func TestHealthzReturnsOK(t *testing.T) {
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d; want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("healthz body = %q; want status ok", rec.Body.String())
+	}
+}
+
+func TestReadyzReportsDatabase(t *testing.T) {
+	t.Run("ready", func(t *testing.T) {
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", WithReadiness(&fakeReadiness{}))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("readyz status = %d; want 200", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"database":"ok"`) {
+			t.Fatalf("readyz body = %q; want database ok", rec.Body.String())
+		}
+	})
+
+	t.Run("no checker omits database claim", func(t *testing.T) {
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics") // no WithReadiness
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("readyz status = %d; want 200", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"status":"ready"`) {
+			t.Fatalf("readyz body = %q; want status ready", rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "database") {
+			t.Fatalf("readyz body = %q; must not claim a database check when none is configured", rec.Body.String())
+		}
+	})
+
+	t.Run("database unavailable", func(t *testing.T) {
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", WithReadiness(&fakeReadiness{err: errors.New("db file /secret/path down")}))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("readyz status = %d; want 503", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "secret") {
+			t.Fatalf("readyz body = %q; leaked error detail", rec.Body.String())
+		}
+	})
+}
+
+func TestStatusRequiresAdminAndReportsQueue(t *testing.T) {
+	a := &fakeAuth{}
+	stats := &fakeStats{counts: map[string]int64{"pending": 3, "failed": 1}}
+	h := NewHandler(a, &fakeQueue{}, "lyrics", WithReadiness(&fakeReadiness{}), WithStatusReporter(stats))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/status?apikey=secret", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d; want 200", rec.Code)
+	}
+	if a.required != auth.ScopeAdmin {
+		t.Fatalf("status required scope = %q; want admin", a.required)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"pending":3`) || !strings.Contains(body, `"failed":1`) {
+		t.Fatalf("status body = %q; want queue counts", body)
+	}
+}
+
+func TestStatusForbiddenWithoutAdminScope(t *testing.T) {
+	h := NewHandler(&fakeAuth{err: auth.ErrForbiddenScope}, &fakeQueue{}, "lyrics", WithStatusReporter(&fakeStats{}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/status?apikey=key", nil))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status code = %d; want 403", rec.Code)
+	}
+}
+
 func TestRedactURIHidesAPIKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/lidarr?apikey=secret&x=1", nil)
 	got := redactURI(req.URL)

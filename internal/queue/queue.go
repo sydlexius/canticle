@@ -118,6 +118,15 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 	if err != nil {
 		return WorkItem{}, err
 	}
+	// High-priority (webhook) duplicates of a failed row reset next_attempt_at to
+	// now so the work becomes immediately retry-eligible rather than waiting out
+	// the previous backoff. Scan-priority duplicates preserve the existing backoff
+	// so rate-limit protection stays in effect for bulk scan traffic. The worker's
+	// global circuit breaker still guards against actual upstream rate limits.
+	refreshFailedBackoff := 0
+	if priority >= PriorityWebhook {
+		refreshFailedBackoff = 1
+	}
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: begin enqueue tx: %w", err)
@@ -161,7 +170,9 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE 'pending'
              END,
              next_attempt_at = CASE
-                 WHEN work_queue.status IN ('done', 'processing', 'failed') THEN work_queue.next_attempt_at
+                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.next_attempt_at
+                 WHEN work_queue.status = 'failed' AND ? = 1 THEN excluded.next_attempt_at
+                 WHEN work_queue.status = 'failed' THEN work_queue.next_attempt_at
                  ELSE excluded.next_attempt_at
              END,
              last_error = CASE
@@ -186,6 +197,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		StatusPending,
 		priority,
 		now,
+		refreshFailedBackoff,
 	)
 	item, err := scanWorkItem(row)
 	if err != nil {
@@ -518,6 +530,31 @@ func (q *DBQueue) CountDone(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("queue: count done: %w", err)
 	}
 	return n, nil
+}
+
+// CountByStatus returns the number of work_queue rows grouped by status.
+// Statuses with no rows are omitted from the map.
+func (q *DBQueue) CountByStatus(ctx context.Context) (map[string]int64, error) {
+	rows, err := q.db.QueryContext(ctx,
+		`SELECT status, COUNT(*) FROM work_queue GROUP BY status`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("queue: count by status: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is not actionable
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("queue: scan status count: %w", err)
+		}
+		counts[status] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: count by status rows: %w", err)
+	}
+	return counts, nil
 }
 
 // CancelByLibrary rebuilds or deletes pending/failed work_queue rows whose

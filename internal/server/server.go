@@ -28,17 +28,43 @@ type WorkQueue interface {
 	Cleanup(ctx context.Context, inputs models.Inputs) (int64, error)
 }
 
+// Readiness reports whether backing dependencies (e.g. the database) are
+// reachable. *sql.DB satisfies this interface via PingContext.
+type Readiness interface {
+	PingContext(ctx context.Context) error
+}
+
+// StatusReporter returns queue depth grouped by status for the status endpoint.
+type StatusReporter interface {
+	CountByStatus(ctx context.Context) (map[string]int64, error)
+}
+
 // Handler serves the HTTP API.
 type Handler struct {
 	auth     Authenticator
 	queue    WorkQueue
 	outdir   string
 	priority int
+	ready    Readiness
+	stats    StatusReporter
 	mux      *http.ServeMux
 }
 
+// Option configures optional Handler dependencies.
+type Option func(*Handler)
+
+// WithReadiness wires a readiness checker used by GET /readyz.
+func WithReadiness(r Readiness) Option {
+	return func(h *Handler) { h.ready = r }
+}
+
+// WithStatusReporter wires a queue summary source used by GET /api/v1/status.
+func WithStatusReporter(s StatusReporter) Option {
+	return func(h *Handler) { h.stats = s }
+}
+
 // NewHandler creates an HTTP API handler.
-func NewHandler(a Authenticator, q WorkQueue, outdir string) *Handler {
+func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Handler {
 	h := &Handler{
 		auth:     a,
 		queue:    q,
@@ -46,8 +72,88 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string) *Handler {
 		priority: queue.PriorityWebhook,
 		mux:      http.NewServeMux(),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
 	h.mux.HandleFunc("POST /api/v1/webhooks/lidarr", h.handleLidarr)
+	h.mux.HandleFunc("GET /healthz", h.handleHealthz)
+	h.mux.HandleFunc("GET /readyz", h.handleReadyz)
+	h.mux.HandleFunc("GET /api/v1/status", h.handleStatus)
 	return h
+}
+
+// writeJSON serializes v as JSON with the given status code. Encoding failures
+// are logged rather than surfaced because the status line is already written.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Warn("failed to encode JSON response", "error", err)
+	}
+}
+
+// handleHealthz reports process liveness. It performs no dependency checks so a
+// 200 means only that the HTTP server is accepting requests.
+func (h *Handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReadyz reports readiness by checking database reachability. When no
+// readiness checker is configured the endpoint still reports ready, but omits
+// the database check from the response rather than claiming a check that never
+// ran. Error detail is intentionally omitted to avoid leaking filesystem paths
+// or connection strings.
+func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if h.ready == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
+		return
+	}
+	if err := h.ready.PingContext(r.Context()); err != nil {
+		slog.Warn("readiness check failed", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "unavailable",
+			"checks": map[string]string{"database": "error"},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ready",
+		"checks": map[string]string{"database": "ok"},
+	})
+}
+
+// handleStatus returns a queue summary. It requires an admin-scoped API key so
+// operational detail is not exposed to unauthenticated callers, and never
+// includes tokens, webhook keys, or filesystem paths.
+func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if h.auth == nil {
+		http.Error(w, "auth unavailable", http.StatusInternalServerError)
+		return
+	}
+	if _, err := h.auth.ValidateKey(r.Context(), apiKey(r), auth.ScopeAdmin); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrForbiddenScope):
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		case errors.Is(err, auth.ErrInvalidKey), errors.Is(err, auth.ErrRevokedKey):
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		default:
+			slog.Error("status authentication failed", "error", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	resp := map[string]any{"status": "ok"}
+	if h.stats != nil {
+		counts, err := h.stats.CountByStatus(r.Context())
+		if err != nil {
+			slog.Error("status queue summary failed", "error", err)
+			http.Error(w, "status unavailable", http.StatusInternalServerError)
+			return
+		}
+		resp["queue"] = counts
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ServeHTTP logs requests and dispatches them to API routes.
