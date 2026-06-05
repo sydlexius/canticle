@@ -2,9 +2,12 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"io/fs"
 	"path/filepath"
 	"testing"
 
+	"github.com/pressly/goose/v3"
 	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
 )
 
@@ -289,6 +292,87 @@ func TestOpen_WorkQueueBackoffMigration(t *testing.T) {
 	}
 	if dequeueIndexCount != 1 {
 		t.Fatalf("work queue dequeue index count = %d; want 1", dequeueIndexCount)
+	}
+}
+
+// TestMigration011BackfillsKeysAndDownMigrates drives migration 011 directly:
+// it migrates to v10, seeds a pre-011 row with non-ASCII metadata, applies 011,
+// and asserts the artist_key/title_key backfill and index, then down-migrates
+// and asserts the columns are removed.
+func TestMigration011BackfillsKeysAndDownMigrates(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mig011.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	sqlDB.SetMaxOpenConns(1)
+
+	migFS, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("sub migrations fs: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, migFS)
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+
+	// Migrate to v10: scan_results has no artist_key/title_key yet.
+	if _, err := provider.UpTo(ctx, 10); err != nil {
+		t.Fatalf("UpTo(10): %v", err)
+	}
+
+	// Seed a pre-011 row with non-ASCII, space-padded metadata.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO libraries (path, name) VALUES (?, ?)`, "/music", "Music"); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO scan_results (library_id, file_path, artist, title) VALUES (?, ?, ?, ?)`,
+		1, "/music/x.flac", "  Beyoncé ", " Café Tacvba "); err != nil {
+		t.Fatalf("insert scan_result: %v", err)
+	}
+
+	// Apply 011 and verify the best-effort backfill (lower(trim())).
+	if _, err := provider.UpTo(ctx, 11); err != nil {
+		t.Fatalf("UpTo(11): %v", err)
+	}
+	var artistKey, titleKey string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT artist_key, title_key FROM scan_results WHERE file_path = ?`, "/music/x.flac").
+		Scan(&artistKey, &titleKey); err != nil {
+		t.Fatalf("query keys: %v", err)
+	}
+	if artistKey != "beyoncé" {
+		t.Errorf("artist_key = %q; want %q (lower(trim(artist)))", artistKey, "beyoncé")
+	}
+	if titleKey != "café tacvba" {
+		t.Errorf("title_key = %q; want %q", titleKey, "café tacvba")
+	}
+
+	var idxCount int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_scan_results_keys'`).
+		Scan(&idxCount); err != nil {
+		t.Fatalf("query index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Errorf("idx_scan_results_keys count = %d; want 1", idxCount)
+	}
+
+	// Down-migrate 011 and confirm the added columns are gone.
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	var colCount int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('scan_results') WHERE name IN ('artist_key','title_key')`).
+		Scan(&colCount); err != nil {
+		t.Fatalf("query columns after down: %v", err)
+	}
+	if colCount != 0 {
+		t.Errorf("artist_key/title_key columns after down-migration = %d; want 0", colCount)
 	}
 }
 

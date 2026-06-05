@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
 )
 
 const (
@@ -48,11 +49,13 @@ func (r *Repo) Upsert(ctx context.Context, libraryID int64, results []models.Sca
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const baseUpsert = `INSERT INTO scan_results (library_id, file_path, artist, title, outdir, filename, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+	const baseUpsert = `INSERT INTO scan_results (library_id, file_path, artist, title, artist_key, title_key, outdir, filename, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(library_id, file_path) DO UPDATE SET
                  artist = excluded.artist,
                  title = excluded.title,
+                 artist_key = excluded.artist_key,
+                 title_key = excluded.title_key,
                  outdir = excluded.outdir,
                  filename = excluded.filename`
 	stmt := baseUpsert
@@ -71,6 +74,8 @@ func (r *Repo) Upsert(ctx context.Context, libraryID int64, results []models.Sca
 			res.FilePath,
 			res.Track.ArtistName,
 			res.Track.TrackName,
+			normalize.NormalizeKey(res.Track.ArtistName),
+			normalize.NormalizeKey(res.Track.TrackName),
 			res.Outdir,
 			res.Filename,
 			insertStatus,
@@ -213,6 +218,47 @@ func (r *Repo) List(ctx context.Context, filter Filter) (results []models.ScanRe
 	results, err = scanResultRows(rows)
 	if err != nil {
 		return nil, fmt.Errorf("scan: list rows: %w", err)
+	}
+	return results, nil
+}
+
+// FindByTrack returns scan results whose normalized artist and title keys match
+// the given artist and title. The inputs are normalized with the same function
+// used when rows are stored, so callers pass raw artist/title strings. Results
+// are ordered so rows not yet done (pending, processing, failed) come first,
+// then by id, so a caller that wants a single match can prefer work that still
+// needs doing.
+//
+// Matching is by normalized key only and is NOT scoped to a library: if the same
+// artist/title exists under multiple configured libraries, rows from all of them
+// are returned and the cross-library order is just the id tiebreak. This is low
+// impact in practice (the caller picks one via pickByAlbum) but means a match is
+// not guaranteed to come from any particular library.
+func (r *Repo) FindByTrack(ctx context.Context, artist, title string) (results []models.ScanResult, retErr error) {
+	artistKey := normalize.NormalizeKey(artist)
+	titleKey := normalize.NormalizeKey(title)
+	if artistKey == "" || titleKey == "" {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, library_id, file_path, artist, title, outdir, filename, status, created_at
+                       FROM scan_results
+                       WHERE artist_key = ? AND title_key = ?
+                       ORDER BY CASE status WHEN 'done' THEN 1 ELSE 0 END ASC, id ASC`,
+		artistKey, titleKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scan: find by track: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("scan: close find rows: %w", err)
+		}
+	}()
+
+	results, err = scanResultRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan: find by track rows: %w", err)
 	}
 	return results, nil
 }

@@ -98,6 +98,14 @@ func (e *Enqueuer) OnScanComplete(ctx context.Context, lib models.Library, _ []m
 	return e.EnqueuePending(ctx, lib.ID)
 }
 
+// ResultInputs converts a scan result into queue inputs using the same outdir,
+// filename, source path, and output-path derivation as scan-created work. The
+// webhook resolver uses this so inventory-matched work is enqueued identically
+// to work the scheduler enqueues.
+func ResultInputs(res models.ScanResult) (models.Inputs, error) {
+	return scanInputs(res)
+}
+
 func scanInputs(res models.ScanResult) (models.Inputs, error) {
 	outdir := res.Outdir
 	if outdir == "" && res.FilePath != "" {

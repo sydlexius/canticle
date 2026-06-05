@@ -8,6 +8,7 @@ require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/joho/godotenv v1.5.1
 	github.com/pressly/goose/v3 v3.27.0
+	github.com/rjeczalik/notify v0.9.3
 	github.com/valyala/fastjson v1.6.10
 	golang.org/x/text v0.36.0
 	modernc.org/sqlite v1.48.2

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
 )
 
@@ -71,24 +72,57 @@ func (s *Scheduler) RunOnceFor(ctx context.Context, libs []models.Library) error
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		results, err := s.Scanner.ScanLibrary(ctx, v.Path, s.Options)
-		if err != nil {
-			return fmt.Errorf("scan: scan library %d: %w", v.ID, err)
+		if err := s.scanAndPersist(ctx, v, v.Path); err != nil {
+			return err
 		}
-		for i := range results {
-			results[i].LibraryID = v.ID
-			if results[i].Status == "" {
-				results[i].Status = StatusPending
-			}
+	}
+	return nil
+}
+
+// RunOnceForPath scans a single directory subtree and persists the results
+// against lib, then runs the completion callback. The filesystem watcher uses
+// this to react to events without rescanning every configured library. path
+// should be a directory within lib.Path; because results are keyed by
+// (library_id, file_path), only the touched files are upserted.
+func (s *Scheduler) RunOnceForPath(ctx context.Context, lib models.Library, path string) error {
+	if s.Results == nil {
+		return fmt.Errorf("scan: scheduler results dependency is nil")
+	}
+	if s.Scanner == nil {
+		return fmt.Errorf("scan: scheduler scanner dependency is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// The path originates from a filesystem watcher reacting to events; refuse to
+	// scan or persist anything outside the owning library root so an unexpected
+	// event path can never widen the scan beyond the configured library.
+	if !pathutil.WithinRoot(lib.Path, path) {
+		return fmt.Errorf("scan: path %q is outside library root %q", path, lib.Path)
+	}
+	return s.scanAndPersist(ctx, lib, path)
+}
+
+// scanAndPersist scans path, stamps results with lib.ID and a default status,
+// upserts them, and invokes OnScanComplete.
+func (s *Scheduler) scanAndPersist(ctx context.Context, lib models.Library, path string) error {
+	results, err := s.Scanner.ScanLibrary(ctx, path, s.Options)
+	if err != nil {
+		return fmt.Errorf("scan: scan library %d: %w", lib.ID, err)
+	}
+	for i := range results {
+		results[i].LibraryID = lib.ID
+		if results[i].Status == "" {
+			results[i].Status = StatusPending
 		}
-		upsertOpts := UpsertOptions{ForceStatus: s.Options.Update || s.Options.Upgrade}
-		if err := s.Results.Upsert(ctx, v.ID, results, upsertOpts); err != nil {
-			return fmt.Errorf("scan: persist library %d: %w", v.ID, err)
-		}
-		if s.OnScanComplete != nil {
-			if err := s.OnScanComplete(ctx, v, results); err != nil {
-				return fmt.Errorf("scan: complete library %d: %w", v.ID, err)
-			}
+	}
+	upsertOpts := UpsertOptions{ForceStatus: s.Options.Update || s.Options.Upgrade}
+	if err := s.Results.Upsert(ctx, lib.ID, results, upsertOpts); err != nil {
+		return fmt.Errorf("scan: persist library %d: %w", lib.ID, err)
+	}
+	if s.OnScanComplete != nil {
+		if err := s.OnScanComplete(ctx, lib, results); err != nil {
+			return fmt.Errorf("scan: complete library %d: %w", lib.ID, err)
 		}
 	}
 	return nil

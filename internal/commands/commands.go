@@ -34,6 +34,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
 	"github.com/sydlexius/mxlrcgo-svc/internal/server"
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
+	"github.com/sydlexius/mxlrcgo-svc/internal/watcher"
 	"github.com/sydlexius/mxlrcgo-svc/internal/worker"
 )
 
@@ -480,16 +481,30 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		defer wg.Done()
 		runScheduler(runCtx, sqlDB, cfg, args)
 	}()
+	if watchCfg := watcher.ConfigFromEnv(); watchCfg.Enabled {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runWatcher(runCtx, sqlDB, args, watchCfg)
+		}()
+	}
 
 	addr := cfg.Server.Addr
 	if args.Listen != nil {
 		addr = *args.Listen
 	}
+	// Snapshot the configured library roots so the webhook handler can confine
+	// raw payload paths to them (path-injection guard). Listing failure is not
+	// fatal: the handler simply disables raw-payload-path resolution and falls
+	// back to inventory or metadata.
+	allowedRoots := webhookAllowedRoots(runCtx, sqlDB)
 	srv := &http.Server{
 		Addr: addr,
 		Handler: server.NewHandler(authSvc, workQ, outdir,
 			server.WithReadiness(sqlDB),
 			server.WithStatusReporter(workQ),
+			server.WithInventory(scan.New(sqlDB)),
+			server.WithAllowedRoots(allowedRoots),
 		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -604,6 +619,46 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 	if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		slog.Warn("scheduler failed", "error", err)
 	}
+}
+
+// runWatcher runs the optional filesystem watcher, triggering a targeted scan of
+// the changed directory under the owning library. The periodic scheduler remains
+// the reconciliation backstop; the watcher only lowers latency for new files.
+func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, cfg watcher.Config) {
+	sched := scheduler(sqlDB, scanner.ScanOptions{
+		Update:   args.Update,
+		Upgrade:  args.Upgrade,
+		MaxDepth: args.Depth,
+		BFS:      args.BFS,
+	})
+	wch := watcher.New(cfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
+		return sched.RunOnceForPath(ctx, lib, path)
+	})
+	// The watcher is best-effort and explicitly never a replacement for the
+	// periodic scheduler (see README), so a setup or runtime failure must not
+	// take down serve. Surface it at error level so an operator who enabled the
+	// watcher sees the failure loudly while the scheduler keeps reconciling.
+	if err := wch.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Error("watcher stopped; continuing without it (periodic scheduler remains the source of truth)", "error", err)
+	}
+}
+
+// webhookAllowedRoots returns the configured library root paths used to confine
+// webhook payload paths. A listing failure is logged and treated as "no roots",
+// which disables raw-payload-path resolution rather than failing startup.
+func webhookAllowedRoots(ctx context.Context, sqlDB *sql.DB) []string {
+	libs, err := library.New(sqlDB).List(ctx)
+	if err != nil {
+		slog.Warn("failed to list libraries for webhook path confinement; raw payload-path resolution disabled", "error", err)
+		return nil
+	}
+	roots := make([]string, 0, len(libs))
+	for _, lib := range libs {
+		if lib.Path != "" {
+			roots = append(roots, lib.Path)
+		}
+	}
+	return roots
 }
 
 // runScanCmd dispatches the scan subcommand. When neither nested subcommand
