@@ -10,7 +10,7 @@ require (
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/rjeczalik/notify v0.9.3
 	github.com/valyala/fastjson v1.6.10
-	golang.org/x/text v0.36.0
+	golang.org/x/text v0.37.0
 	modernc.org/sqlite v1.51.0
 )
 
