@@ -11,8 +11,10 @@ cd "$REPO_ROOT"
 status=0
 
 # golangci-lint: the version: input on the CI action vs the pre-commit rev.
-ci_glci="$(grep -oE 'version: v[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/ci.yml | head -1 | awk '{print $2}')"
-pc_glci="$(awk '/golangci\/golangci-lint/{f=1} f&&/rev:/{print $2; exit}' .pre-commit-config.yaml)"
+# `|| true` keeps `set -euo pipefail` from aborting the script when a pattern or
+# file is absent; the `-z` checks below report the parse failure with context.
+ci_glci="$(grep -oE 'version: v[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/ci.yml 2>/dev/null | head -1 | awk '{print $2}' || true)"
+pc_glci="$(awk '/golangci\/golangci-lint/{f=1} f&&/rev:/{print $2; exit}' .pre-commit-config.yaml 2>/dev/null || true)"
 if [ -z "$ci_glci" ] || [ -z "$pc_glci" ]; then
   echo "FAIL: could not parse golangci-lint version (ci='$ci_glci' pre-commit='$pc_glci')." >&2
   status=1

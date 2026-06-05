@@ -89,6 +89,32 @@ func TestWriteLRC_ConfinedRefusesEscapingSymlinkSwap(t *testing.T) {
 	}
 }
 
+// TestWriteLRC_RefusesNonBaseFilename verifies the writer rejects a filename
+// that is not a single path component, so a crafted filename cannot traverse
+// out of outdir via filepath.Join, independent of the symlink re-resolution.
+func TestWriteLRC_RefusesNonBaseFilename(t *testing.T) {
+	root := t.TempDir()
+	w := NewLRCWriter(root)
+	cases := []string{
+		"../escape.lrc",
+		"sub/escape.lrc",
+		filepath.Join(t.TempDir(), "abs.lrc"), // absolute path
+	}
+	for _, name := range cases {
+		if err := w.WriteLRC(syncedSong(), name, root); err == nil {
+			t.Errorf("expected refusal of non-base filename %q, got nil error", name)
+		}
+	}
+	// The confined root must contain no files written by the rejected calls.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("readdir root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rejected non-base filenames still wrote into root: %v", entries)
+	}
+}
+
 // TestWriteLRC_ConfinedRefusesSymlinkedOutdir covers the outdir itself being a
 // symlink that escapes the root.
 func TestWriteLRC_ConfinedRefusesSymlinkedOutdir(t *testing.T) {

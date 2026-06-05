@@ -96,6 +96,14 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		fn = Slugify(fmt.Sprintf("%s - %s", song.Track.ArtistName, song.Track.TrackName)) + ext
 	}
 
+	// The output filename must be a single path component. Reject path
+	// separators or an absolute path so a crafted filename cannot traverse out
+	// of outdir via filepath.Join below (defense in depth alongside the
+	// confinement-root re-resolution that follows).
+	if filepath.IsAbs(fn) || strings.ContainsAny(fn, `/\`) {
+		return fmt.Errorf("refusing to write: output filename %q is not a base name", fn)
+	}
+
 	// When the output directory falls under a confinement root, re-resolve and
 	// re-confine it right before the write so a symlink swapped in since the
 	// caller validated the path cannot redirect the write outside the root.
