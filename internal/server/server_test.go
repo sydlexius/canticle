@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -225,6 +228,351 @@ func TestLidarrWebhookAuthAndEnqueueErrors(t *testing.T) {
 			t.Fatalf("status = %d; want %d", rec.Code, http.StatusInternalServerError)
 		}
 	})
+}
+
+type fakeInventory struct {
+	results []models.ScanResult
+	err     error
+	artist  string
+	title   string
+}
+
+func (f *fakeInventory) FindByTrack(_ context.Context, artist, title string) ([]models.ScanResult, error) {
+	f.artist = artist
+	f.title = title
+	return f.results, f.err
+}
+
+const downloadBody = `{"eventType":"Download","artist":{"artistName":"Artist"},"album":{"title":"Album"},"tracks":[{"title":"Song"}]}`
+
+func postWebhook(t *testing.T, h *Handler, body string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/lidarr?apikey=key", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+}
+
+// postDownloadWithPaths posts a Download webhook with the given track titles and
+// trackFiles paths, JSON-encoding the body so real filesystem paths (which may
+// contain characters needing escaping) are transmitted safely.
+func postDownloadWithPaths(t *testing.T, h *Handler, titles, paths []string) {
+	t.Helper()
+	tracks := make([]map[string]string, len(titles))
+	for i, title := range titles {
+		tracks[i] = map[string]string{"title": title}
+	}
+	trackFiles := make([]map[string]string, len(paths))
+	for i, p := range paths {
+		trackFiles[i] = map[string]string{"path": p}
+	}
+	body, err := json.Marshal(map[string]any{
+		"eventType":  "Download",
+		"artist":     map[string]string{"artistName": "Artist"},
+		"album":      map[string]string{"title": "Album"},
+		"tracks":     tracks,
+		"trackFiles": trackFiles,
+	})
+	if err != nil {
+		t.Fatalf("marshal webhook body: %v", err)
+	}
+	postWebhook(t, h, string(body))
+}
+
+func TestLidarrWebhookResolvesThroughInventory(t *testing.T) {
+	q := &fakeQueue{}
+	inv := &fakeInventory{results: []models.ScanResult{{
+		ID:       7,
+		FilePath: "/music/Artist/Album/song.flac",
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Song"},
+		Outdir:   "/music/Artist/Album",
+		Filename: "song.lrc",
+		Status:   "pending",
+	}}}
+	h := NewHandler(&fakeAuth{}, q, "lyrics", WithInventory(inv))
+	postWebhook(t, h, downloadBody)
+
+	if inv.artist != "Artist" || inv.title != "Song" {
+		t.Fatalf("FindByTrack args = %q/%q; want Artist/Song", inv.artist, inv.title)
+	}
+	if len(q.items) != 1 {
+		t.Fatalf("enqueued %d items; want 1", len(q.items))
+	}
+	got := q.items[0]
+	if got.SourcePath != "/music/Artist/Album/song.flac" {
+		t.Errorf("SourcePath = %q; want the inventory file path", got.SourcePath)
+	}
+	if got.Outdir != "/music/Artist/Album" || got.Filename != "song.lrc" {
+		t.Errorf("output = %q/%q; want inventory outdir/filename", got.Outdir, got.Filename)
+	}
+	if got.ScanResultID != 7 {
+		t.Errorf("ScanResultID = %d; want 7 (linked to scan result)", got.ScanResultID)
+	}
+	if len(got.OutputPaths) != 1 || got.OutputPaths[0].Outdir != "/music/Artist/Album" {
+		t.Errorf("OutputPaths = %+v; want single inventory destination", got.OutputPaths)
+	}
+}
+
+func TestLidarrWebhookUsesDirectPayloadPath(t *testing.T) {
+	root := t.TempDir()
+	artistDir := filepath.Join(root, "Artist")
+	if err := os.MkdirAll(artistDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := filepath.Join(artistDir, "song.flac")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics",
+		WithInventory(&fakeInventory{}),
+		WithAllowedRoots([]string{root}),
+	)
+	postDownloadWithPaths(t, h, []string{"Song"}, []string{file})
+
+	if len(q.items) != 1 {
+		t.Fatalf("enqueued %d items; want 1", len(q.items))
+	}
+	got := q.items[0]
+	// The handler must carry the resolved (symlink-free) path forward so the
+	// checked path and the written path are identical.
+	if got.SourcePath != resolved {
+		t.Errorf("SourcePath = %q; want the resolved payload path %q", got.SourcePath, resolved)
+	}
+	if got.Outdir != filepath.Dir(resolved) || got.Filename != "song.lrc" {
+		t.Errorf("output = %q/%q; want resolved path-derived destination", got.Outdir, got.Filename)
+	}
+}
+
+func TestLidarrWebhookFallsBackWhenPayloadPathUnusable(t *testing.T) {
+	// The path is within a configured root but does not exist, so resolution
+	// fails and the handler falls back to metadata rather than targeting it.
+	root := t.TempDir()
+	missing := filepath.Join(root, "Artist", "song.flac")
+
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics",
+		WithInventory(&fakeInventory{}),
+		WithAllowedRoots([]string{root}),
+	)
+	postDownloadWithPaths(t, h, []string{"Song"}, []string{missing})
+
+	if len(q.items) != 1 {
+		t.Fatalf("enqueued %d items; want 1", len(q.items))
+	}
+	got := q.items[0]
+	if got.SourcePath != "" {
+		t.Errorf("SourcePath = %q; want empty (unusable path must not be used)", got.SourcePath)
+	}
+	if got.Outdir != "lyrics" {
+		t.Errorf("Outdir = %q; want metadata fallback to configured outdir", got.Outdir)
+	}
+}
+
+func TestLidarrWebhookRejectsSymlinkEscape(t *testing.T) {
+	// A symlink that lives inside a configured root but points outside it passes
+	// the lexical check yet must be rejected once symlinks are resolved, so the
+	// .lrc write cannot be steered out of the root. (Fails before the symlink
+	// hardening, passes after.)
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.flac")
+	if err := os.WriteFile(secret, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	link := filepath.Join(root, "song.flac")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics",
+		WithInventory(&fakeInventory{}),
+		WithAllowedRoots([]string{root}),
+	)
+	postDownloadWithPaths(t, h, []string{"Song"}, []string{link})
+
+	if len(q.items) != 1 {
+		t.Fatalf("enqueued %d items; want 1", len(q.items))
+	}
+	got := q.items[0]
+	if got.SourcePath != "" {
+		t.Errorf("SourcePath = %q; want empty (symlink escaping the root must be rejected)", got.SourcePath)
+	}
+	if got.Outdir != "lyrics" {
+		t.Errorf("Outdir = %q; want metadata fallback, not the symlink target's directory", got.Outdir)
+	}
+}
+
+func TestLidarrWebhookMultiTrackPayloadPathConfinement(t *testing.T) {
+	// Two tracks: one payload path inside the root (usable) and one outside it
+	// (rejected). Confinement must be applied per path within the multi-track
+	// loop, not just to the first.
+	root := t.TempDir()
+	inRoot := filepath.Join(root, "SongOne.flac")
+	if err := os.WriteFile(inRoot, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write in-root file: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(inRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "SongTwo.flac")
+
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics",
+		WithInventory(&fakeInventory{}),
+		WithAllowedRoots([]string{root}),
+	)
+	postDownloadWithPaths(t, h, []string{"SongOne", "SongTwo"}, []string{inRoot, outside})
+
+	if len(q.items) != 2 {
+		t.Fatalf("enqueued %d items; want 2", len(q.items))
+	}
+	if q.items[0].SourcePath != resolved {
+		t.Errorf("SongOne SourcePath = %q; want the resolved in-root path %q", q.items[0].SourcePath, resolved)
+	}
+	if q.items[1].SourcePath != "" || q.items[1].Outdir != "lyrics" {
+		t.Errorf("SongTwo = %q/%q; want metadata fallback (path outside root)", q.items[1].SourcePath, q.items[1].Outdir)
+	}
+}
+
+func TestPickByAlbumDisambiguatesByAlbum(t *testing.T) {
+	results := []models.ScanResult{
+		{ID: 1, FilePath: "/music/Artist/Greatest Hits/song.flac"},
+		{ID: 2, FilePath: "/music/Artist/Live Album/song.flac"},
+	}
+	got, ok := pickByAlbum(results, "Live Album")
+	if !ok || got.ID != 2 {
+		t.Errorf("pickByAlbum(Live Album) = %+v, ok=%v; want ID 2", got, ok)
+	}
+	// No album hint falls back to the first result (FindByTrack's ordering).
+	got, ok = pickByAlbum(results, "")
+	if !ok || got.ID != 1 {
+		t.Errorf("pickByAlbum(empty) = %+v, ok=%v; want first result ID 1", got, ok)
+	}
+	// An album hint that matches nothing also falls back to the first result.
+	got, ok = pickByAlbum(results, "Nonexistent Album")
+	if !ok || got.ID != 1 {
+		t.Errorf("pickByAlbum(no match) = %+v, ok=%v; want first result ID 1", got, ok)
+	}
+	if _, ok := pickByAlbum(nil, "x"); ok {
+		t.Error("pickByAlbum(nil) ok = true; want false")
+	}
+}
+
+func TestLidarrWebhookRejectsPayloadPathOutsideRoots(t *testing.T) {
+	// A payload path that "exists" (checker always succeeds) but lies outside
+	// every configured library root must NOT be used as a write target; it falls
+	// back to metadata. This is the path-injection guard for alert #14.
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics",
+		WithInventory(&fakeInventory{}),
+		WithAllowedRoots([]string{"/media/music"}),
+		WithPathChecker(func(string) error { return nil }), // pretend everything exists
+	)
+	body := `{"eventType":"Download","artist":{"artistName":"Artist"},"tracks":[{"title":"Song"}],"trackFiles":[{"path":"/etc/cron.d/evil"}]}`
+	postWebhook(t, h, body)
+
+	if len(q.items) != 1 {
+		t.Fatalf("enqueued %d items; want 1", len(q.items))
+	}
+	got := q.items[0]
+	if got.SourcePath != "" {
+		t.Errorf("SourcePath = %q; want empty (path outside library roots must be rejected)", got.SourcePath)
+	}
+	if got.Outdir != "lyrics" {
+		t.Errorf("Outdir = %q; want metadata fallback, not the attacker-chosen directory", got.Outdir)
+	}
+}
+
+func TestLidarrWebhookRejectsTraversalOutOfRoot(t *testing.T) {
+	// A traversal payload path that resolves outside the root after cleaning is
+	// rejected even though its textual prefix matches the root.
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics",
+		WithInventory(&fakeInventory{}),
+		WithAllowedRoots([]string{"/media/music"}),
+		WithPathChecker(func(string) error { return nil }),
+	)
+	body := `{"eventType":"Download","artist":{"artistName":"Artist"},"tracks":[{"title":"Song"}],"trackFiles":[{"path":"/media/music/../../etc/evil.mp3"}]}`
+	postWebhook(t, h, body)
+
+	got := q.items[0]
+	if got.SourcePath != "" || got.Outdir != "lyrics" {
+		t.Errorf("got %q/%q; want metadata fallback (traversal escaped the root)", got.SourcePath, got.Outdir)
+	}
+}
+
+func TestLidarrWebhookPayloadPathDisabledWithoutRoots(t *testing.T) {
+	// With no configured roots there is no trusted base to confine against, so
+	// raw payload paths are never used regardless of whether they "exist".
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics",
+		WithInventory(&fakeInventory{}),
+		WithPathChecker(func(string) error { return nil }),
+	)
+	body := `{"eventType":"Download","artist":{"artistName":"Artist"},"tracks":[{"title":"Song"}],"trackFiles":[{"path":"/media/music/Artist/song.mp3"}]}`
+	postWebhook(t, h, body)
+
+	got := q.items[0]
+	if got.SourcePath != "" || got.Outdir != "lyrics" {
+		t.Errorf("got %q/%q; want metadata fallback when no roots are configured", got.SourcePath, got.Outdir)
+	}
+}
+
+func TestDefaultPathCheckerRejectsDirectories(t *testing.T) {
+	dir := t.TempDir()
+	if err := defaultPathChecker(dir); err == nil {
+		t.Error("defaultPathChecker(dir) = nil; want error (directories are not valid targets)")
+	}
+	file := filepath.Join(dir, "song.flac")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := defaultPathChecker(file); err != nil {
+		t.Errorf("defaultPathChecker(file) = %v; want nil for a regular file", err)
+	}
+	if err := defaultPathChecker(filepath.Join(dir, "missing.flac")); err == nil {
+		t.Error("defaultPathChecker(missing) = nil; want error for a nonexistent path")
+	}
+}
+
+func TestLidarrWebhookFallsBackToMetadata(t *testing.T) {
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics", WithInventory(&fakeInventory{}))
+	postWebhook(t, h, downloadBody)
+
+	if len(q.items) != 1 {
+		t.Fatalf("enqueued %d items; want 1", len(q.items))
+	}
+	got := q.items[0]
+	if got.SourcePath != "" || got.Outdir != "lyrics" {
+		t.Errorf("got %q/%q; want empty source and configured outdir fallback", got.SourcePath, got.Outdir)
+	}
+	if got.Track.AlbumName != "Album" {
+		t.Errorf("AlbumName = %q; want Album carried through metadata fallback", got.Track.AlbumName)
+	}
+}
+
+func TestLidarrWebhookInventoryErrorDoesNotHardFail(t *testing.T) {
+	q := &fakeQueue{}
+	h := NewHandler(&fakeAuth{}, q, "lyrics", WithInventory(&fakeInventory{err: errors.New("inventory db down")}))
+	postWebhook(t, h, downloadBody)
+
+	if len(q.items) != 1 {
+		t.Fatalf("enqueued %d items; want 1 (inventory error must fall back, not fail)", len(q.items))
+	}
+	if q.items[0].Outdir != "lyrics" {
+		t.Errorf("Outdir = %q; want metadata fallback after inventory error", q.items[0].Outdir)
+	}
 }
 
 type fakeReadiness struct{ err error }

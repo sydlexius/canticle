@@ -11,6 +11,32 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
 )
 
+func TestResultInputs(t *testing.T) {
+	in, err := scan.ResultInputs(models.ScanResult{
+		ID:       4,
+		FilePath: "/music/Artist/song.flac",
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Song"},
+	})
+	if err != nil {
+		t.Fatalf("ResultInputs: %v", err)
+	}
+	if in.SourcePath != "/music/Artist/song.flac" {
+		t.Errorf("SourcePath = %q; want the file path", in.SourcePath)
+	}
+	if in.Outdir != "/music/Artist" {
+		t.Errorf("Outdir = %q; want the file's directory", in.Outdir)
+	}
+	if in.Filename != "song.lrc" {
+		t.Errorf("Filename = %q; want song.lrc", in.Filename)
+	}
+	if in.ScanResultID != 4 {
+		t.Errorf("ScanResultID = %d; want 4", in.ScanResultID)
+	}
+	if _, err := scan.ResultInputs(models.ScanResult{}); err == nil {
+		t.Error("ResultInputs with empty result = nil error; want failure")
+	}
+}
+
 type fakePendingStore struct {
 	results   []models.ScanResult
 	status    []statusCall

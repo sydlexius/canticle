@@ -72,6 +72,88 @@ func TestRepo_UpsertAndListByLibrary(t *testing.T) {
 	}
 }
 
+func TestRepo_FindByTrackMatchesNormalizedKeys(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	libRepo := library.New(sqlDB)
+	scanRepo := scan.New(sqlDB)
+
+	lib, err := libRepo.Add(ctx, "/music", "Music")
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	results := []models.ScanResult{{
+		FilePath: "/music/Bjork/Joga.mp3",
+		Track:    models.Track{ArtistName: "Björk", TrackName: "Jóga"},
+		Outdir:   "/music/Bjork",
+		Filename: "Joga.lrc",
+		Status:   scan.StatusPending,
+	}}
+	if err := scanRepo.Upsert(ctx, lib.ID, results, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Webhook metadata that differs by diacritics and case must still match
+	// because both sides go through NormalizeKey.
+	got, err := scanRepo.FindByTrack(ctx, "bjork", "joga")
+	if err != nil {
+		t.Fatalf("FindByTrack: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("FindByTrack returned %d; want 1", len(got))
+	}
+	if got[0].FilePath != "/music/Bjork/Joga.mp3" {
+		t.Errorf("FilePath = %q; want /music/Bjork/Joga.mp3", got[0].FilePath)
+	}
+
+	none, err := scanRepo.FindByTrack(ctx, "Unknown", "Nothing")
+	if err != nil {
+		t.Fatalf("FindByTrack miss: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("FindByTrack miss returned %d; want 0", len(none))
+	}
+}
+
+func TestRepo_FindByTrackOrdersNonTerminalFirst(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	libRepo := library.New(sqlDB)
+	scanRepo := scan.New(sqlDB)
+
+	lib, err := libRepo.Add(ctx, "/music", "Music")
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	// Same artist/title on two albums: one already done, one still pending.
+	results := []models.ScanResult{
+		{
+			FilePath: "/music/live/song.mp3",
+			Track:    models.Track{ArtistName: "Artist", TrackName: "Song"},
+			Status:   scan.StatusDone,
+		},
+		{
+			FilePath: "/music/studio/song.mp3",
+			Track:    models.Track{ArtistName: "Artist", TrackName: "Song"},
+			Status:   scan.StatusPending,
+		},
+	}
+	if err := scanRepo.Upsert(ctx, lib.ID, results, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	got, err := scanRepo.FindByTrack(ctx, "Artist", "Song")
+	if err != nil {
+		t.Fatalf("FindByTrack: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("FindByTrack returned %d; want 2", len(got))
+	}
+	if got[0].Status != scan.StatusPending {
+		t.Errorf("first result status = %q; want pending (non-terminal rows first)", got[0].Status)
+	}
+}
+
 func TestRepo_UpsertWithForceStatusOverwritesExisting(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)

@@ -95,6 +95,90 @@ func TestScheduler_RunOncePersistsAndCallsCallback(t *testing.T) {
 	}
 }
 
+type recordingScanner struct {
+	results []models.ScanResult
+	paths   []string
+}
+
+func (r *recordingScanner) ScanLibrary(_ context.Context, root string, _ scanner.ScanOptions) ([]models.ScanResult, error) {
+	r.paths = append(r.paths, root)
+	return r.results, nil
+}
+
+func TestScheduler_RunOnceForPathScansGivenSubtree(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeResults{}
+	rec := &recordingScanner{results: []models.ScanResult{{
+		FilePath: "/music/Artist/Album/a.mp3",
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+	}}}
+	var callbackLib models.Library
+	s := scan.Scheduler{
+		Results: store,
+		Scanner: rec,
+		OnScanComplete: func(_ context.Context, lib models.Library, _ []models.ScanResult) error {
+			callbackLib = lib
+			return nil
+		},
+	}
+	lib := models.Library{ID: 9, Path: "/music", Name: "Music"}
+
+	if err := s.RunOnceForPath(ctx, lib, "/music/Artist/Album"); err != nil {
+		t.Fatalf("RunOnceForPath: %v", err)
+	}
+	if len(rec.paths) != 1 || rec.paths[0] != "/music/Artist/Album" {
+		t.Fatalf("scanned paths = %v; want [/music/Artist/Album]", rec.paths)
+	}
+	if len(store.calls) != 1 || store.calls[0].libraryID != 9 {
+		t.Fatalf("Upsert calls = %+v; want one call for library 9", store.calls)
+	}
+	if store.calls[0].results[0].LibraryID != 9 || store.calls[0].results[0].Status != scan.StatusPending {
+		t.Errorf("result = %+v; want library 9, pending", store.calls[0].results[0])
+	}
+	if callbackLib.ID != 9 {
+		t.Errorf("callback lib ID = %d; want 9", callbackLib.ID)
+	}
+}
+
+func TestScheduler_RunOnceForPathRequiresDependencies(t *testing.T) {
+	ctx := context.Background()
+	s := scan.Scheduler{}
+	if err := s.RunOnceForPath(ctx, models.Library{ID: 1, Path: "/m"}, "/m/sub"); err == nil {
+		t.Fatal("RunOnceForPath with nil deps = nil error; want failure")
+	}
+}
+
+func TestScheduler_RunOnceForPathRejectsPathOutsideLibrary(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeResults{}
+	rec := &recordingScanner{}
+	s := scan.Scheduler{Results: store, Scanner: rec}
+
+	err := s.RunOnceForPath(ctx, models.Library{ID: 1, Path: "/music"}, "/etc/passwd")
+	if err == nil {
+		t.Fatal("RunOnceForPath with path outside library root = nil error; want rejection")
+	}
+	if len(rec.paths) != 0 || len(store.calls) != 0 {
+		t.Fatalf("scanner/store were invoked (%v / %d calls); want none for a path outside the library", rec.paths, len(store.calls))
+	}
+}
+
+func TestScheduler_RunOnceForPathRejectsTraversal(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeResults{}
+	rec := &recordingScanner{}
+	s := scan.Scheduler{Results: store, Scanner: rec}
+
+	// Lexically rooted at /music but uses ../ to climb out; must be rejected.
+	err := s.RunOnceForPath(ctx, models.Library{ID: 1, Path: "/music"}, "/music/../etc")
+	if err == nil {
+		t.Fatal("RunOnceForPath with ../ traversal = nil error; want rejection")
+	}
+	if len(rec.paths) != 0 || len(store.calls) != 0 {
+		t.Fatalf("scanner/store were invoked (%v / %d calls); want none for a traversal path", rec.paths, len(store.calls))
+	}
+}
+
 func TestScheduler_PassesForceStatusOnUpdateOrUpgrade(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
