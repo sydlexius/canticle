@@ -38,6 +38,20 @@ warn() {
 }
 
 # --------------------------------------------------------------------------
+# 0. conflict markers -- reject unresolved merge markers in staged content
+# --------------------------------------------------------------------------
+# git diff --check flags leftover conflict markers (and whitespace errors); we
+# grep for just the conflict-marker lines so whitespace nits are left to the
+# dedicated hooks. git's own detector avoids markdown setext false positives.
+CONFLICT_HITS=$(git diff --cached --check 2>/dev/null | grep -i 'conflict marker' || true)
+if [ -n "$CONFLICT_HITS" ]; then
+    echo -e "${RED}${BOLD}FAIL${RESET} conflict markers:"
+    echo "$CONFLICT_HITS"
+    exit 1
+fi
+pass "conflict markers"
+
+# --------------------------------------------------------------------------
 # 1. typos -- spell check staged files
 # --------------------------------------------------------------------------
 if git diff --cached --name-only --diff-filter=ACM -- | grep -q .; then

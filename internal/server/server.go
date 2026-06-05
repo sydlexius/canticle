@@ -455,10 +455,12 @@ func (h *Handler) usablePath(paths []string, title string, single bool) string {
 // returns ok=false when no roots are configured, the path lies outside every
 // root, a symlink escapes its root, or the path does not exist (fail closed).
 //
-// Containment is enforced lexically and via EvalSymlinks at request time; the
+// Containment is enforced lexically and via EvalSymlinks at request time. The
 // residual write-time symlink-swap TOCTOU (a path component swapped for a
-// symlink before the worker writes) is not closed here and is tracked in #102
-// for the writing layer.
+// symlink before the worker writes) is not closed here but in the writing
+// layer: lyrics.LRCWriter re-resolves and re-confines the output dir
+// immediately before the write (#102), so the same roots passed here also
+// confine the worker's write.
 func (h *Handler) confinedPayloadPath(path string) (string, bool) {
 	for _, root := range h.allowedRoots {
 		if resolved, ok := pathutil.ResolveWithinRoot(root, path); ok {

@@ -99,7 +99,7 @@ func runStartupWithDotenv(t *testing.T, args []string, rec *runRecord, loadDoten
 			rec.token = token
 			return &fakeFetcher{rec: rec}
 		},
-		newWriter: func() lyrics.Writer {
+		newWriter: func(roots ...string) lyrics.Writer {
 			return fakeWriter{}
 		},
 		newApp: func(_ musixmatch.Fetcher, _ lyrics.Writer, inputs *queue.InputsQueue, cooldown int, mode string) appRunner {
@@ -134,7 +134,7 @@ func TestRunWithOptions_HelpDoesNotStartApplication(t *testing.T) {
 			rec.token = token
 			return &fakeFetcher{rec: rec}
 		},
-		newWriter: func() lyrics.Writer { return fakeWriter{} },
+		newWriter: func(roots ...string) lyrics.Writer { return fakeWriter{} },
 		newApp: func(musixmatch.Fetcher, lyrics.Writer, *queue.InputsQueue, int, string) appRunner {
 			rec.appCreated = true
 			return fakeRunner{rec: rec}
@@ -193,7 +193,7 @@ func TestRunWithOptions_SubcommandHelpShowsSelectedCommand(t *testing.T) {
 					rec.token = token
 					return &fakeFetcher{rec: rec}
 				},
-				newWriter: func() lyrics.Writer { return fakeWriter{} },
+				newWriter: func(roots ...string) lyrics.Writer { return fakeWriter{} },
 				newApp: func(musixmatch.Fetcher, lyrics.Writer, *queue.InputsQueue, int, string) appRunner {
 					rec.appCreated = true
 					return fakeRunner{rec: rec}

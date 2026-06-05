@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# pre-push hook: run the full deterministic gate before any push so a broken
+# build, failing test, lint/vuln finding, workflow-lint error, or unresolved
+# conflict marker is caught locally instead of in CI.
+#
+# Wire with: make hooks  (sets core.hooksPath=.githooks, so every worktree
+# inherits both this hook and .githooks/pre-commit).
+#
+# Skip with: git push --no-verify  (use sparingly).
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec bash "$REPO_ROOT/scripts/pre-push-gate.sh"

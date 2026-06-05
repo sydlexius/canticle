@@ -62,6 +62,12 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		slog.Info("searching song", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName)
 		song, err := a.fetcher.FindLyrics(ctx, cur.Track)
+		// A benign miss (no matching track, or a match with no fetchable lyrics)
+		// means the upstream result is stable and will not change on a near-term
+		// retry, so it must not trip the geometric backoff or increment the
+		// failure counter. It still goes to the failed bucket so it is reported
+		// as not-fetched.
+		benignMiss := err != nil && musixmatch.IsBenignMiss(err)
 		if err == nil {
 			a.failureCount = 0
 			cur, err = a.inputs.Pop()
@@ -75,8 +81,12 @@ func (a *App) Run(ctx context.Context) error {
 				a.failed.Push(cur)
 			}
 		} else {
-			a.failureCount++
-			slog.Error("lyrics fetch failed", "error", err)
+			if benignMiss {
+				slog.Info("no lyrics available", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName, "reason", err)
+			} else {
+				a.failureCount++
+				slog.Error("lyrics fetch failed", "error", err)
+			}
 			item, popErr := a.inputs.Pop()
 			if popErr != nil {
 				slog.Error("unexpected empty queue on pop", "error", popErr)
@@ -84,7 +94,7 @@ func (a *App) Run(ctx context.Context) error {
 			}
 			a.failed.Push(item)
 		}
-		if err != nil {
+		if err != nil && !benignMiss {
 			a.backoffTimer(ctx, a.failureCount)
 		} else {
 			a.timer(ctx)

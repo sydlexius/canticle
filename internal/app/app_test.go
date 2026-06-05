@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
 
@@ -130,6 +132,44 @@ func TestRunWritesFailedFileOnFetchFailure(t *testing.T) {
 	}
 	if string(got) != "Failure Artist,Failure Song\n" {
 		t.Fatalf("failed file content = %q", got)
+	}
+}
+
+func TestRunBenignMissDoesNotBackOff(t *testing.T) {
+	for name, sentinel := range map[string]error{
+		"not found": musixmatch.ErrNotFound,
+		"no lyrics": musixmatch.ErrNoLyrics,
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs := queue.NewInputsQueue()
+			inputs.Push(models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "One"}})
+			inputs.Push(models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "Two"}})
+			inputs.Push(models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "Three"}})
+			fetcher := &fakeFetcher{err: fmt.Errorf("lookup: %w", sentinel)}
+
+			a := NewApp(fetcher, lyrics.NewLRCWriter(), inputs, 0, "dir")
+			a.baseBackoff = time.Second
+			a.maxBackoff = time.Hour
+			var sleeps []time.Duration
+			a.sleep = func(_ context.Context, d time.Duration) bool {
+				sleeps = append(sleeps, d)
+				return true
+			}
+
+			if err := a.Run(context.Background()); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if len(sleeps) != 0 {
+				t.Fatalf("sleeps = %v; want none (benign misses must not trip the backoff timer)", sleeps)
+			}
+			if a.failureCount != 0 {
+				t.Fatalf("failureCount = %d; want 0 (benign misses must not increment the failure counter)", a.failureCount)
+			}
+			if a.failed.Len() != 3 {
+				t.Fatalf("failed bucket = %d; want 3 (benign misses are still reported as not-fetched)", a.failed.Len())
+			}
+		})
 	}
 }
 

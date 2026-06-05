@@ -20,15 +20,19 @@ import (
 // can assert that an item was returned to the pending pool without a failure
 // being recorded against it.
 type fakeQueue struct {
-	items       []queue.WorkItem
-	processing  []queue.WorkItem
-	completed   []int64
-	failed      []int64
-	released    []int64
-	failCauses  []error
-	completeErr error
-	failErr     error
-	releaseErr  error
+	items          []queue.WorkItem
+	processing     []queue.WorkItem
+	completed      []int64
+	failed         []int64
+	released       []int64
+	deferred       []int64
+	failCauses     []error
+	deferCauses    []error
+	deferDurations []time.Duration
+	completeErr    error
+	failErr        error
+	deferErr       error
+	releaseErr     error
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -57,6 +61,17 @@ func (q *fakeQueue) Fail(_ context.Context, id int64, cause error) (queue.WorkIt
 	q.removeFromProcessing(id)
 	q.failed = append(q.failed, id)
 	q.failCauses = append(q.failCauses, cause)
+	return queue.WorkItem{ID: id, Status: queue.StatusFailed}, nil
+}
+
+func (q *fakeQueue) Defer(_ context.Context, id int64, retryAfter time.Duration, cause error) (queue.WorkItem, error) {
+	if q.deferErr != nil {
+		return queue.WorkItem{}, q.deferErr
+	}
+	q.removeFromProcessing(id)
+	q.deferred = append(q.deferred, id)
+	q.deferCauses = append(q.deferCauses, cause)
+	q.deferDurations = append(q.deferDurations, retryAfter)
 	return queue.WorkItem{ID: id, Status: queue.StatusFailed}, nil
 }
 
@@ -406,6 +421,130 @@ func TestRunOnceFailureMarksQueueFailed(t *testing.T) {
 	}
 	if !errors.Is(q.failCauses[0], wantErr) {
 		t.Fatalf("fail cause = %v; want %v", q.failCauses[0], wantErr)
+	}
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none", q.completed)
+	}
+}
+
+func TestRunOnceBenignMissRequeuesDeferredWithoutCounter(t *testing.T) {
+	for name, sentinel := range map[string]error{
+		"not found": musixmatch.ErrNotFound,
+		"no lyrics": musixmatch.ErrNoLyrics,
+	} {
+		t.Run(name, func(t *testing.T) {
+			track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+			q := &fakeQueue{items: []queue.WorkItem{{
+				ID:     42,
+				Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"},
+			}}}
+			fetcher := &fakeFetcher{err: fmt.Errorf("upstream: %w", sentinel)}
+			w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+
+			if err := w.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			// A no-result requeues via Defer (fixed cooldown) so it is
+			// re-attempted later -- it is NOT terminal -- but it must NOT bump
+			// the consecutive-failure counter and must NOT use Fail's geometric
+			// backoff.
+			if len(q.deferred) != 1 || q.deferred[0] != 42 {
+				t.Fatalf("deferred (requeued) = %v; want [42]", q.deferred)
+			}
+			if len(q.failed) != 0 {
+				t.Fatalf("failed = %v; want none (a benign miss defers, not fails)", q.failed)
+			}
+			if len(q.completed) != 0 {
+				t.Fatalf("completed = %v; want none (no lyrics written)", q.completed)
+			}
+			if w.consecutiveFailures != 0 {
+				t.Fatalf("consecutiveFailures = %d; want 0 (a no-result must not trip backoff)", w.consecutiveFailures)
+			}
+			if len(q.deferCauses) != 1 || !errors.Is(q.deferCauses[0], sentinel) {
+				t.Fatalf("requeue cause = %v; want errors.Is(_, %v)", q.deferCauses, sentinel)
+			}
+			if len(q.deferDurations) != 1 || q.deferDurations[0] != benignMissCooldown {
+				t.Fatalf("defer cooldown = %v; want fixed %v", q.deferDurations, benignMissCooldown)
+			}
+		})
+	}
+}
+
+func TestRunOnceBenignMissSurfacesRequeueError(t *testing.T) {
+	deferErr := errors.New("requeue write failed")
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID:     55,
+			Inputs: models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}},
+		}},
+		deferErr: deferErr,
+	}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+
+	err := w.RunOnce(context.Background())
+	if !errors.Is(err, deferErr) {
+		t.Fatalf("RunOnce error = %v; want wrapped requeue failure", err)
+	}
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (a no-result never trips backoff, even when the requeue errors)", w.consecutiveFailures)
+	}
+}
+
+// TestRunOnceBenignMissDeferNoRowsIsBenign covers requeueDeferred treating a
+// sql.ErrNoRows from queue.Defer as a benign "item moved on" (the row is no
+// longer 'processing' because it was canceled or re-dequeued out from under us).
+// RunOnce must NOT propagate an error and must NOT trip the failure counter.
+func TestRunOnceBenignMissDeferNoRowsIsBenign(t *testing.T) {
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID:     77,
+			Inputs: models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}},
+		}},
+		deferErr: sql.ErrNoRows,
+	}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v; want nil (a Defer no-rows is benign, the item moved on)", err)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none (a Defer no-rows must not be recorded as a failure)", q.failed)
+	}
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none", q.completed)
+	}
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (a benign Defer no-rows must not trip backoff)", w.consecutiveFailures)
+	}
+}
+
+func TestRunBenignMissesDoNotBackOff(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 500, Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"}},
+		{ID: 501, Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "b.lrc"}},
+		{ID: 502, Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "c.lrc"}},
+	}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.baseBackoff = time.Second
+	w.maxBackoff = time.Hour
+	var sleeps []time.Duration
+	w.sleep = func(_ context.Context, d time.Duration) {
+		sleeps = append(sleeps, d)
+	}
+
+	if err := w.run(context.Background(), nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sleeps) != 0 {
+		t.Fatalf("sleeps = %v; want none (no-results must not back off the worker)", sleeps)
+	}
+	// All three are requeued via Defer (fixed cooldown), not failed/terminal.
+	if len(q.deferred) != 3 {
+		t.Fatalf("deferred (requeued) = %v; want all 3 items", q.deferred)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none (benign misses defer, not fail)", q.failed)
 	}
 	if len(q.completed) != 0 {
 		t.Fatalf("completed = %v; want none", q.completed)

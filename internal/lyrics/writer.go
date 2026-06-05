@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
 )
 
 // Writer abstracts LRC file output.
@@ -17,51 +18,101 @@ type Writer interface {
 }
 
 // LRCWriter writes songs to .lrc files.
-type LRCWriter struct{}
+//
+// When constructed with one or more confinement roots, a write whose output
+// directory falls under a root is re-resolved and re-confined to that root
+// immediately before the write (pathutil.ResolveWithinRoot, which follows
+// symlinks with filepath.EvalSymlinks). This is the write-time half of the
+// fix for #102 and closes the realistic write-time TOCTOU left open by the
+// handler-side check in PR #98: a directory component swapped for a symlink
+// that escapes the root between the handler check and the worker write is
+// rejected here instead of redirecting the write outside the root, while
+// legitimate in-root symlinks (e.g. a symlinked album directory) still resolve
+// and write normally. Output outside every configured root, and writers built
+// with no roots (e.g. directory mode), use the plain path.
+//
+// This re-confine-before-write narrows the exposure from the handler-to-worker
+// queue latency to the microseconds between the resolve and the open; it is not
+// a fully race-free guarantee. An open-time guard (os.Root / openat2) would be,
+// but os.Root rejects every symlinked path component, including in-root ones,
+// which would break symlinked library layouts -- so it is intentionally not used
+// here.
+type LRCWriter struct {
+	roots []string
+}
 
-// NewLRCWriter creates a new LRCWriter.
-func NewLRCWriter() *LRCWriter {
-	return &LRCWriter{}
+// NewLRCWriter creates a new LRCWriter. Any non-empty roots passed become
+// write-time confinement boundaries (see LRCWriter); pass none for unconfined
+// writes. Roots are cleaned once here so confinement checks need not re-derive
+// them on every write.
+func NewLRCWriter(roots ...string) *LRCWriter {
+	cleaned := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r != "" {
+			cleaned = append(cleaned, filepath.Clean(r))
+		}
+	}
+	return &LRCWriter{roots: cleaned}
 }
 
 // WriteLRC writes the song lyrics to an LRC or TXT file in the given output directory.
-// Synced lyrics and instrumentals are written as .lrc; unsynced lyrics are written as .txt.
+// Only synced lyrics are written as .lrc; unsynced lyrics and instrumentals are
+// written as .txt (the .lrc extension is reserved for timed/synced content).
 func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (retErr error) {
-	// Eligibility gate -- determine content type before touching disk.
+	// Eligibility gate -- determine content type before touching disk. synced
+	// drives the file extension (.lrc only for synced lyrics, .txt otherwise);
+	// writeTags drives whether the LRC metadata header is emitted.
 	var writeContent func(*bufio.Writer) error
 	var writeTags bool
+	var synced bool
 	switch {
 	case len(song.Subtitles.Lines) > 0:
 		slog.Info("saving synced lyrics")
 		writeContent = func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf) }
 		writeTags = true
+		synced = true
 	case song.Lyrics.LyricsBody != "":
 		slog.Info("saving unsynced lyrics")
 		writeContent = func(buf *bufio.Writer) error { return writeUnsyncedLRC(song, buf) }
-		writeTags = false
 	case song.Track.Instrumental == 1:
 		slog.Info("saving instrumental")
-		writeContent = writeInstrumentalLRC
-		writeTags = true
+		writeContent = writeInstrumental
+		// Instrumentals are a plain .txt marker: no timestamp, no tag headers.
 	default:
 		return fmt.Errorf("nothing to save for %s - %s", song.Track.ArtistName, song.Track.TrackName)
 	}
 
+	ext := ".txt"
+	if synced {
+		ext = ".lrc"
+	}
+
 	var fn string
-	switch {
-	case filename != "":
-		// In dir mode the scanner sets an explicit .lrc filename. For unsynced
-		// content, swap the extension to .txt so the file type matches content.
-		if !writeTags {
-			fn = strings.TrimSuffix(filename, filepath.Ext(filename)) + ".txt"
-			slog.Info("save unsynced lyrics", "path", filepath.Join(outdir, fn))
-		} else {
-			fn = filename
+	if filename != "" {
+		// In dir mode the scanner sets an explicit .lrc filename. Swap the
+		// extension to match the content type (.lrc only for synced lyrics).
+		fn = strings.TrimSuffix(filename, filepath.Ext(filename)) + ext
+	} else {
+		fn = Slugify(fmt.Sprintf("%s - %s", song.Track.ArtistName, song.Track.TrackName)) + ext
+	}
+
+	// When the output directory falls under a confinement root, re-resolve and
+	// re-confine it right before the write so a symlink swapped in since the
+	// caller validated the path cannot redirect the write outside the root.
+	if root, ok := w.matchRoot(outdir); ok {
+		resolved, ok := pathutil.ResolveWithinRoot(root, outdir)
+		if !ok {
+			// ResolveWithinRoot fails (EvalSymlinks) both when the dir does not
+			// exist and when it escapes the root via a symlink. Distinguish the
+			// two so the error is not misleading: a missing dir is a plain setup
+			// error, not a confinement violation. (No MkdirAll here -- behavior is
+			// unchanged; os.CreateTemp below already requires the dir to exist.)
+			if _, statErr := os.Stat(outdir); os.IsNotExist(statErr) {
+				return fmt.Errorf("refusing to write: output dir %q does not exist", outdir)
+			}
+			return fmt.Errorf("refusing to write to %q: output dir escapes confinement root %q or is unresolvable", outdir, root)
 		}
-	case writeTags:
-		fn = Slugify(fmt.Sprintf("%s - %s", song.Track.ArtistName, song.Track.TrackName)) + ".lrc"
-	default:
-		fn = Slugify(fmt.Sprintf("%s - %s", song.Track.ArtistName, song.Track.TrackName)) + ".txt"
+		outdir = resolved
 	}
 	fp := filepath.Join(outdir, fn)
 
@@ -144,6 +195,19 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	return nil
 }
 
+// matchRoot returns the longest configured confinement root that outdir is
+// lexically under, or ok=false when outdir is under none. Roots are already
+// cleaned by NewLRCWriter.
+func (w *LRCWriter) matchRoot(outdir string) (string, bool) {
+	best := ""
+	for _, r := range w.roots {
+		if pathutil.WithinRoot(r, outdir) && len(r) > len(best) {
+			best = r
+		}
+	}
+	return best, best != ""
+}
+
 func writeSyncedLRC(song models.Song, buff *bufio.Writer) error {
 	var text string
 	var fLine string
@@ -173,8 +237,10 @@ func writeUnsyncedLRC(song models.Song, buff *bufio.Writer) error {
 	return nil
 }
 
-func writeInstrumentalLRC(buff *bufio.Writer) error {
-	line := "[00:00.00]\u266a Instrumental \u266a"
+// writeInstrumental emits a plain instrumental marker (no [00:00.00] timestamp,
+// no tag headers) so the .txt output carries only the single marker line.
+func writeInstrumental(buff *bufio.Writer) error {
+	line := "\u266a Instrumental \u266a"
 	if _, err := buff.WriteString(line + "\n"); err != nil {
 		return fmt.Errorf("writing instrumental line: %w", err)
 	}

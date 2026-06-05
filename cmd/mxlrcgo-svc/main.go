@@ -27,7 +27,7 @@ type runOptions struct {
 	ctx        context.Context
 	loadDotenv func() error
 	newFetcher func(token string) musixmatch.Fetcher
-	newWriter  func() lyrics.Writer
+	newWriter  func(roots ...string) lyrics.Writer
 	newApp     func(fetcher musixmatch.Fetcher, writer lyrics.Writer, inputs *queue.InputsQueue, cooldown int, mode string) commands.AppRunner
 }
 
@@ -61,7 +61,7 @@ func runWithOptions(opts runOptions) int {
 	}
 	newWriter := opts.newWriter
 	if newWriter == nil {
-		newWriter = func() lyrics.Writer { return lyrics.NewLRCWriter() }
+		newWriter = func(roots ...string) lyrics.Writer { return lyrics.NewLRCWriter(roots...) }
 	}
 	newApp := opts.newApp
 	if newApp == nil {

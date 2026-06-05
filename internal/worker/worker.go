@@ -23,6 +23,7 @@ type Queue interface {
 	Dequeue(ctx context.Context) (queue.WorkItem, error)
 	Complete(ctx context.Context, id int64) error
 	Fail(ctx context.Context, id int64, cause error) (queue.WorkItem, error)
+	Defer(ctx context.Context, id int64, retryAfter time.Duration, cause error) (queue.WorkItem, error)
 	Release(ctx context.Context, id int64) error
 }
 
@@ -37,6 +38,16 @@ type Cache interface {
 // is configured via SetCircuitOpenDuration. Mirrors the config default so
 // non-server callers (tests, ad-hoc CLI runs) get sensible behavior.
 const defaultCircuitOpenDuration = 30 * time.Minute
+
+// benignMissCooldown is the fixed delay applied when a track resolves to a
+// benign miss (no matching track, or a match with no usable lyrics). A miss
+// is not our failure and does not retire the queue row, but the catalog
+// rarely gains the missing lyrics on an hourly cadence, so a generous
+// days-scale cooldown keeps
+// the worker from re-querying upstream for the same dead track on every
+// library scan. Unlike geometric backoff, this delay does not ramp with the
+// attempt count: each re-check waits the same fixed window.
+const benignMissCooldown = 7 * 24 * time.Hour
 
 // Worker consumes queued lyrics work one item at a time. The scan_results
 // writeback for successful completions is handled atomically inside
@@ -200,6 +211,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			}
 			return errQueueEmpty
 		}
+		// A no-result (no matching track, or a match with no usable lyrics) is
+		// not our failure and does NOT retire the queue row: the catalog grows
+		// and more sources may be added, so requeue it after a generous fixed
+		// cooldown but do NOT ratchet the consecutive-failure counter (which
+		// would otherwise spam geometric backoff on routine library scans).
+		if musixmatch.IsBenignMiss(err) {
+			slog.Info("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
+			return w.requeueDeferred(ctx, item, err)
+		}
 		slog.Warn("worker song resolution failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 		return w.fail(ctx, item, err)
 	}
@@ -312,6 +332,35 @@ func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) err
 	if _, err := w.queue.Fail(context.WithoutCancel(ctx), item.ID, cause); err != nil {
 		return fmt.Errorf("worker: fail item %d after %v: %w", item.ID, cause, err)
 	}
+	return nil
+}
+
+// requeueDeferred re-queues a no-result item after a fixed cooldown
+// (benignMissCooldown, via Defer) WITHOUT tripping the consecutive-failure
+// counter. The queue row is not retired: it stays re-dequeueable once the
+// cooldown elapses and re-enqueueable by a later scan or webhook, so it is
+// retried eventually as the catalog grows, while the worker neither slows down
+// nor re-queries upstream hourly for the same dead track. Defer leaves the row
+// in the deferred 'failed' state and does not increment attempts, so the
+// cooldown is fixed (not geometric). On a SCAN-priority re-enqueue the cooldown
+// survives: Enqueue preserves next_attempt_at for 'failed' rows. A WEBHOOK
+// re-enqueue intentionally resets it to now to force an immediate retry (see
+// DBQueue.Enqueue).
+//
+// A sql.ErrNoRows from Defer is benign here: it means the row is no longer
+// 'processing' because it was canceled or re-dequeued out from under us
+// (a lost race), not a real failure. Log it at debug and return nil so the run
+// loop does not surface a scary "worker run failed" warning for a no-result.
+func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause error) error {
+	deferred, err := w.queue.Defer(context.WithoutCancel(ctx), item.ID, benignMissCooldown, cause)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			slog.Debug("benign miss defer skipped; item moved on", "id", item.ID, "cause", cause)
+			return nil
+		}
+		return fmt.Errorf("worker: requeue item %d after %v: %w", item.ID, cause, err)
+	}
+	slog.Info("benign miss deferred", "id", item.ID, "retry_after", benignMissCooldown, "next_attempt_at", deferred.NextAttemptAt)
 	return nil
 }
 

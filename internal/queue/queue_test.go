@@ -162,6 +162,122 @@ func TestDBQueue_CountByStatus(t *testing.T) {
 	}
 }
 
+func TestDBQueue_NoResultRequeueIsDeferredButReprocessable(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+
+	// The worker requeues a no-result via Defer (fixed cooldown). It must NOT be
+	// terminal: the row stays re-dequeueable once the cooldown window elapses, so
+	// the track is re-attempted later as the catalog grows.
+	const cooldown = 7 * 24 * time.Hour
+	deferred, err := q.Defer(ctx, claimed.ID, cooldown, errors.New("musixmatch: no results found"))
+	if err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if deferred.Status != StatusFailed {
+		t.Fatalf("status = %q; want %q (deferred, not terminal)", deferred.Status, StatusFailed)
+	}
+
+	// The cooldown is fixed: next_attempt_at is exactly now+cooldown and attempts
+	// is unchanged (Defer does not ramp like geometric backoff).
+	if want := now.Add(cooldown); !deferred.NextAttemptAt.Equal(want) {
+		t.Fatalf("next_attempt_at = %v; want fixed %v", deferred.NextAttemptAt, want)
+	}
+	if deferred.Attempts != claimed.Attempts {
+		t.Fatalf("attempts = %d; want unchanged %d (a fixed cooldown must not ramp)", deferred.Attempts, claimed.Attempts)
+	}
+
+	// Deferred: not eligible immediately.
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("immediate Dequeue = %v; want sql.ErrNoRows (item is deferred by cooldown)", err)
+	}
+
+	// The cooldown survives a later library scan: re-enqueuing at scan priority
+	// must preserve next_attempt_at (the row stays 'failed', not reset to now),
+	// so the track is not re-queried upstream on every scan.
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue (rescan): %v", err)
+	}
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Dequeue after rescan = %v; want sql.ErrNoRows (cooldown must survive a scan)", err)
+	}
+
+	// Re-processable: eligible again once the cooldown elapses.
+	q.now = func() time.Time { return deferred.NextAttemptAt.Add(time.Second) }
+	again, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue after cooldown: %v", err)
+	}
+	if again.ID != claimed.ID {
+		t.Fatalf("re-dequeued ID = %d; want %d (a no-result must remain re-processable)", again.ID, claimed.ID)
+	}
+}
+
+// TestDBQueue_WebhookEnqueueResetsDeferredCooldown proves the asymmetry
+// documented on Defer: a webhook-priority Enqueue of a deferred (cooldown)
+// row resets next_attempt_at to now so an explicit webhook forces an immediate
+// re-check, while a scan-priority Enqueue preserves the cooldown.
+func TestDBQueue_WebhookEnqueueResetsDeferredCooldown(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	inputs := models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}
+	if _, err := q.Enqueue(ctx, inputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+
+	// Defer the row into a future cooldown window.
+	const cooldown = 7 * 24 * time.Hour
+	deferred, err := q.Defer(ctx, claimed.ID, cooldown, errors.New("musixmatch: no results found"))
+	if err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if deferred.Status != StatusFailed {
+		t.Fatalf("status = %q; want %q", deferred.Status, StatusFailed)
+	}
+
+	// Control: a scan-priority Enqueue must NOT reset the cooldown.
+	if _, err := q.Enqueue(ctx, inputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue (scan): %v", err)
+	}
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Dequeue after scan Enqueue = %v; want sql.ErrNoRows (scan must preserve cooldown)", err)
+	}
+
+	// A webhook-priority Enqueue resets next_attempt_at to (approximately) now,
+	// so the row becomes immediately dequeueable despite the cooldown.
+	refreshed, err := q.Enqueue(ctx, inputs, PriorityWebhook)
+	if err != nil {
+		t.Fatalf("Enqueue (webhook): %v", err)
+	}
+	if !refreshed.NextAttemptAt.Equal(now) {
+		t.Fatalf("next_attempt_at = %v; want reset to now %v (webhook must force a re-check)", refreshed.NextAttemptAt, now)
+	}
+	again, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue after webhook Enqueue: %v", err)
+	}
+	if again.ID != claimed.ID {
+		t.Fatalf("re-dequeued ID = %d; want %d (webhook reset must make the same row eligible)", again.ID, claimed.ID)
+	}
+}
+
 func TestDBQueue_DequeueClaimsHighestPriorityReadyItem(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))

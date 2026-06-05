@@ -57,6 +57,8 @@ mxlrcgo-svc "Dream Theater"
 ```
 > **_This option overrides the `-o/--outdir` argument which means the lyrics will be saved in the same directory as the given input._**
 >
+> **_The output extension depends on the lyric type: `.lrc` when synced lyrics are found, and `.txt` when only unsynced lyrics or an instrumental marker is written._**
+>
 > **_The `-d/--depth` argument limits the depth of subdirectories to scan; use `-d 0` or `--depth 0` to only scan the specified directory._**
 
 ### Lidarr webhook server
@@ -224,16 +226,30 @@ An Unraid Community Applications template is provided at `unraid/mxlrcgo-svc.xml
 
 ## Development
 
-Run the lightweight CLI smoke test:
+`make help` lists every target. The entrypoint is `cmd/mxlrcgo-svc`, so use `go run ./cmd/mxlrcgo-svc [args]` (not `go run .`).
+
+### Quality gate and git hooks
+
+Wire the tracked git hooks once (sets `core.hooksPath=.githooks`, a relative shared setting, so every worktree -- including any you add later -- inherits them with no extra setup):
 
 ```sh
-make smoke
+make hooks      # enable the pre-commit + pre-push hooks
+make doctor     # verify the hooks are wired and tool-version pins agree
 ```
 
-Generate a local coverage profile and HTML report:
+`make gate` runs the full pre-push gate (the same chain `.githooks/pre-push` runs): conflict-marker check, gofmt, build, race tests, patch coverage, golangci-lint, actionlint, and govulncheck. The pre-commit hook runs a faster subset on each commit.
+
+Other useful targets:
 
 ```sh
-make test-cover
+make smoke               # lightweight CLI smoke test
+make test                # race tests
+make test-shuffle        # race tests with randomized order (-shuffle=on)
+make test-cover          # coverage profile + HTML report
+make coverage-floor      # enforce the per-package coverage floor
+make vulncheck           # govulncheck (pinned)
+make scan                # build the Docker image and scan it for HIGH+ CVEs (needs Docker + grype)
+make sync-tool-versions  # assert the golangci-lint pin matches across CI and pre-commit
 ```
 
 ---

@@ -29,7 +29,7 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 - None - Pure Go standard library for HTTP, I/O, and CLI orchestration
 - `github.com/alexflint/go-arg` v1.6.1 - CLI argument parsing via struct tags (`Args` in `cmd/mxlrcgo-svc/main.go`)
 - Go standard `testing` package - No third-party test framework
-- Make (`Makefile`) - Build orchestration (build, test, lint, fmt, clean)
+- Make (`Makefile`) - Build orchestration and the quality gate (build, run, test, test-shuffle, test-cover, patch-cover, gate, scan, vulncheck, coverage-floor, lint, fmt, hooks, doctor, sync-tool-versions, smoke, clean). `make help` lists every target with a one-liner
 - GoReleaser (`.goreleaser.yml`) - Cross-platform release builds
 - golangci-lint v2.11.4 (`.golangci.yml`) - Linter aggregator with 12 enabled linters
 ## Key Dependencies
@@ -56,25 +56,35 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 - `.gitattributes` - Line ending normalization (LF everywhere)
 - `.typos.toml` - Spell-checker config (excludes `go.sum`)
 - `.pre-commit-config.yaml` - Pre-commit framework hooks: trailing-whitespace, end-of-file-fixer, check-yaml, check-added-large-files (500KB), check-merge-conflict, typos, gitleaks, golangci-lint, gofmt, conventional-pre-commit
-- `.githooks/pre-commit` - Manual pre-commit hook: typos, gofmt, go build, golangci-lint, govulncheck
+- `.githooks/pre-commit` - Tracked pre-commit hook: conflict-marker check, typos, gofmt, go build, golangci-lint, govulncheck
+- `.githooks/pre-push` - Tracked pre-push hook: runs the full gate (`scripts/pre-push-gate.sh`). Wired via `make hooks` (`core.hooksPath=.githooks`, a relative shared setting so every worktree inherits both hooks); `scripts/check-hooks.sh` / `make doctor` verify the wiring
+- `scripts/pre-push-gate.sh` - Deterministic gate: conflict markers, gofmt, build, race tests, patch coverage, golangci-lint, actionlint, govulncheck, behind a per-worktree run-lock
+- `scripts/check-tool-versions.sh` - Asserts the golangci-lint pin agrees across `ci.yml` and `.pre-commit-config.yaml` (`make sync-tool-versions`)
+- `scripts/coverage-floor.sh` + `scripts/coverage-floor.json` - One-way per-package coverage floor (`make coverage-floor`)
 ## Platform Requirements
 - Go 1.26.2+
 - golangci-lint v2.11+ (for linting)
 - typos-cli (for spell checking)
-- govulncheck (for vulnerability scanning)
+- govulncheck (for vulnerability scanning; the gate/`make vulncheck` pin `v1.1.4`)
+- actionlint (for workflow linting in the gate)
 - goimports (optional, for import formatting)
 - pre-commit (optional, for `.pre-commit-config.yaml` hooks)
+- grype + Docker (optional, for `make scan` image CVE scanning; CI runs it regardless)
+- jq (optional, for `make coverage-floor`)
 - Standalone static binary (CGO_ENABLED=0)
 - No runtime dependencies
 - Supported platforms: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
 ## CI/CD Pipeline
-- `ci.yml` - Lint + Test + Build matrix (linux/darwin/windows x amd64/arm64). Uses `dorny/paths-filter` to skip on non-code changes. Build requires lint+test to pass first.
+- `ci.yml` - Lint + Test + image CVE Scan (grype via `anchore/scan-action`, fail on HIGH+) + Build matrix (linux/darwin/windows x amd64/arm64). Uses `dorny/paths-filter` to skip on non-code changes. Build requires lint+test to pass first.
 - `release.yml` - GoReleaser on `v*.*.*` tags. Produces cross-platform archives with conventional-commit changelogs.
+- `nightly.yml` - Nightly Docker image build/push to GHCR from `main`.
 - `codeql.yml` - GitHub CodeQL security analysis for Go. Runs on push/PR to main and weekly (Monday 04:17 UTC).
+- `claude.yml` / `claude-code-review.yml` - Claude bot (issue/PR assist + auto review). All actions SHA-pinned with `persist-credentials: false`.
 - `dependabot-auto-approve.yml` - Auto-approves Dependabot PRs for patch/minor updates.
 - `dependabot-merge.yml` - Auto-merges approved Dependabot PRs after CI passes (squash merge, delete branch).
-- Weekly updates (Monday) for `gomod` and `github-actions` ecosystems
-- Conventional commit prefixes (`chore(deps)` for Go, `ci` for Actions)
+- All workflow actions are SHA-pinned (`# vX` comment) with `persist-credentials: false` on checkouts; job-level `permissions` include `contents: read`.
+- Weekly updates (Monday) for `gomod`, `github-actions`, and `docker` ecosystems
+- Conventional commit prefixes (`chore(deps)` for Go/Docker, `ci` for Actions)
 
 ## Conventions
 
@@ -83,7 +93,7 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 - `internal/<package>/<file>.go` - lowercase single-word filenames per package: `client.go`, `fetcher.go`, `writer.go`, `slugify.go`, `scanner.go`, `app.go`, `queue.go`, `models.go`
 - Test files use Go's standard `_test.go` suffix: `slugify_test.go`
 - PascalCase for all exported identifiers: `NewClient()`, `FindLyrics()`, `WriteLRC()`, `InputsQueue`, `Track`, `Song`
-- camelCase for unexported identifiers: `writeSyncedLRC()`, `writeUnsyncedLRC()`, `writeInstrumentalLRC()`
+- camelCase for unexported identifiers: `writeSyncedLRC()`, `writeUnsyncedLRC()`, `writeInstrumental()`
 - Method receivers are short abbreviations: `c` for `Client`, `w` for `LRCWriter`, `q` for `InputsQueue`, `sc` for `Scanner`
 - Short, abbreviated names preferred: `fn` (filename), `fp` (filepath), `cur` (current), `res` (response)
 - Loop variables are single-letter: `i`, `f`, `m`, `v`
@@ -173,7 +183,7 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 - Used by: `internal/app` (via `Fetcher` interface)
 - Purpose: Format song data into LRC format and write to disk
 - Location: `internal/lyrics/writer.go`, `internal/lyrics/slugify.go`
-- Contains: `LRCWriter`, `WriteLRC()`, `writeSyncedLRC()`, `writeUnsyncedLRC()`, `writeInstrumentalLRC()`, `Slugify()`, `Writer` interface
+- Contains: `LRCWriter`, `WriteLRC()`, `writeSyncedLRC()`, `writeUnsyncedLRC()`, `writeInstrumental()`, `Slugify()`, `Writer` interface
 - Depends on: `internal/models`, `golang.org/x/text/unicode/norm`
 - Used by: `internal/app` (via `Writer` interface)
 - Purpose: Input parsing and directory scanning

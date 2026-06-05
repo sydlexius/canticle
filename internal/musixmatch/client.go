@@ -31,7 +31,26 @@ var (
 	// ErrNotFound indicates HTTP 404 or an inner status_code 404 from the
 	// Musixmatch API meaning no matching track or lyrics were found.
 	ErrNotFound = errors.New("musixmatch: no results found")
+	// ErrNoLyrics indicates the track was matched but no usable lyrics could be
+	// obtained: the catalog has no synced or plain lyrics, the lyrics are
+	// restricted, or the response omitted the lyrics payload. Like ErrNotFound,
+	// this is a benign miss (see IsBenignMiss): there are no fetchable lyrics
+	// now and the upstream result is stable (it will not change on a near-term
+	// retry), so callers must not count it as a fetch failure for backoff.
+	ErrNoLyrics = errors.New("musixmatch: no lyrics available")
 )
+
+// IsBenignMiss reports whether err represents a benign miss: the track has no
+// fetchable lyrics now (either no match at all, or a match with no usable
+// lyrics). These outcomes are not failures of the API or the network, and the
+// upstream result is stable -- it will not change on a near-term retry. Callers
+// (worker, app) use this to skip the geometric backoff and the immediate retry
+// that genuine, transient failures warrant. (This concerns only the upstream
+// result; the queue row is not retired -- the worker re-checks it later on a
+// generous cooldown as the catalog grows.)
+func IsBenignMiss(err error) bool {
+	return errors.Is(err, ErrNotFound) || errors.Is(err, ErrNoLyrics)
+}
 
 // Client communicates with the Musixmatch desktop API.
 type Client struct {
@@ -132,7 +151,10 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	case 200:
 		trackNode := mtg.Get("body", "track")
 		if trackNode == nil {
-			return song, errors.New("musixmatch API response missing track data")
+			// status_code 200 with no track body is an unexpected upstream shape,
+			// not a benign miss -- intentionally returned as a genuine/transient
+			// error (IsBenignMiss is false) so it retries rather than deferring.
+			return song, errors.New("musixmatch: matcher status_code 200 but response missing track data")
 		}
 		if err := json.Unmarshal(trackNode.MarshalTo(nil), &song.Track); err != nil {
 			return song, err
@@ -142,7 +164,11 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	case 404:
 		return song, ErrNotFound
 	default:
-		return song, errors.New("unknown error")
+		// An unexpected matcher status_code is a genuine/transient upstream
+		// condition, not a benign miss -- intentionally returned non-sentinel
+		// (IsBenignMiss is false) so it is retried, and it carries the observed
+		// code for diagnosis.
+		return song, fmt.Errorf("musixmatch: unexpected matcher status_code %d", mtg.GetInt("header", "status_code"))
 	}
 
 	if song.Track.HasSubtitles == 1 {
@@ -153,11 +179,11 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 		slog.Info("no synced lyrics found")
 		if song.Track.HasLyrics == 1 {
 			if tlg.GetInt("body", "lyrics", "restricted") == 1 {
-				return song, errors.New("restricted lyrics")
+				return song, fmt.Errorf("%w: restricted", ErrNoLyrics)
 			}
 			lyricsNode := tlg.Get("body", "lyrics")
 			if lyricsNode == nil {
-				return song, errors.New("musixmatch API response missing lyrics data")
+				return song, fmt.Errorf("%w: response missing lyrics data", ErrNoLyrics)
 			}
 			if err := json.Unmarshal(lyricsNode.MarshalTo(nil), &song.Lyrics); err != nil {
 				return song, err
@@ -165,7 +191,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 		} else if song.Track.Instrumental == 1 {
 			slog.Info("song is instrumental")
 		} else {
-			return song, errors.New("no lyrics found")
+			return song, fmt.Errorf("%w: no synced or unsynced lyrics", ErrNoLyrics)
 		}
 	}
 	return song, nil

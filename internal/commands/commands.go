@@ -248,7 +248,7 @@ type AppRunner interface {
 type Deps struct {
 	LoadDotenv func() error
 	NewFetcher func(token string) musixmatch.Fetcher
-	NewWriter  func() lyrics.Writer
+	NewWriter  func(roots ...string) lyrics.Writer
 	NewApp     func(fetcher musixmatch.Fetcher, writer lyrics.Writer, inputs *queue.InputsQueue, cooldown int, mode string) AppRunner
 }
 
@@ -267,7 +267,7 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 		deps.NewFetcher = func(token string) musixmatch.Fetcher { return musixmatch.NewClient(token) }
 	}
 	if deps.NewWriter == nil {
-		deps.NewWriter = func() lyrics.Writer { return lyrics.NewLRCWriter() }
+		deps.NewWriter = func(roots ...string) lyrics.Writer { return lyrics.NewLRCWriter(roots...) }
 	}
 	if deps.NewApp == nil {
 		deps.NewApp = func(fetcher musixmatch.Fetcher, writer lyrics.Writer, inputs *queue.InputsQueue, cooldown int, mode string) AppRunner {
@@ -370,7 +370,7 @@ func legacyServe(args LegacyArgs) ServeCmd {
 	}
 }
 
-func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func() lyrics.Writer, newApp func(musixmatch.Fetcher, lyrics.Writer, *queue.InputsQueue, int, string) AppRunner) int {
+func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer, newApp func(musixmatch.Fetcher, lyrics.Writer, *queue.InputsQueue, int, string) AppRunner) int {
 	if len(args.Song) == 0 {
 		_, _ = fmt.Fprintln(out, "missing required positional argument: Song")
 		return 2
@@ -425,7 +425,7 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 	return 0
 }
 
-func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func() lyrics.Writer) int {
+func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
 	cfg, err := config.Load(args.ConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -466,7 +466,14 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		return 1
 	}
 	workQ := queue.NewDBQueue(sqlDB)
-	w := worker.New(workQ, cache.New(sqlDB), fetcher, newWriter())
+	// Snapshot the configured library roots once at startup. They confine both
+	// the webhook handler's raw payload paths (path-injection guard) and the
+	// worker's write-time output, so a symlink swapped in below a root after the
+	// handler check cannot redirect the .lrc write outside the root. Listing
+	// failure is not fatal: confinement is simply skipped (the writer falls back
+	// to its unconfined path) and the handler degrades as documented below.
+	allowedRoots := webhookAllowedRoots(ctx, sqlDB)
+	w := worker.New(workQ, cache.New(sqlDB), fetcher, newWriter(allowedRoots...))
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
 	configureWorkerVerification(w, cfg, verifier)
 
@@ -493,11 +500,6 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	if args.Listen != nil {
 		addr = *args.Listen
 	}
-	// Snapshot the configured library roots so the webhook handler can confine
-	// raw payload paths to them (path-injection guard). Listing failure is not
-	// fatal: the handler simply disables raw-payload-path resolution and falls
-	// back to inventory or metadata.
-	allowedRoots := webhookAllowedRoots(runCtx, sqlDB)
 	srv := &http.Server{
 		Addr: addr,
 		Handler: server.NewHandler(authSvc, workQ, outdir,
@@ -649,7 +651,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, cfg watcher.C
 func webhookAllowedRoots(ctx context.Context, sqlDB *sql.DB) []string {
 	libs, err := library.New(sqlDB).List(ctx)
 	if err != nil {
-		slog.Warn("failed to list libraries for webhook path confinement; raw payload-path resolution disabled", "error", err)
+		slog.Warn("failed to list libraries for path confinement; confinement disabled for both the webhook handler (raw payload-path resolution) and worker writes (write-time output confinement)", "error", err)
 		return nil
 	}
 	roots := make([]string, 0, len(libs))

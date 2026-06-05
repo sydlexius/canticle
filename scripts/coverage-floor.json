@@ -1,0 +1,23 @@
+{
+  "github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc": 66.7,
+  "github.com/sydlexius/mxlrcgo-svc/internal/app": 67.0,
+  "github.com/sydlexius/mxlrcgo-svc/internal/auth": 76.2,
+  "github.com/sydlexius/mxlrcgo-svc/internal/backoff": 91.7,
+  "github.com/sydlexius/mxlrcgo-svc/internal/cache": 84.2,
+  "github.com/sydlexius/mxlrcgo-svc/internal/commands": 42.8,
+  "github.com/sydlexius/mxlrcgo-svc/internal/config": 86.8,
+  "github.com/sydlexius/mxlrcgo-svc/internal/db": 60.5,
+  "github.com/sydlexius/mxlrcgo-svc/internal/library": 82.1,
+  "github.com/sydlexius/mxlrcgo-svc/internal/lyrics": 77.4,
+  "github.com/sydlexius/mxlrcgo-svc/internal/musixmatch": 80.0,
+  "github.com/sydlexius/mxlrcgo-svc/internal/normalize": 92.3,
+  "github.com/sydlexius/mxlrcgo-svc/internal/pathutil": 92.0,
+  "github.com/sydlexius/mxlrcgo-svc/internal/providers": 94.4,
+  "github.com/sydlexius/mxlrcgo-svc/internal/queue": 80.1,
+  "github.com/sydlexius/mxlrcgo-svc/internal/scan": 76.2,
+  "github.com/sydlexius/mxlrcgo-svc/internal/scanner": 50.0,
+  "github.com/sydlexius/mxlrcgo-svc/internal/server": 83.9,
+  "github.com/sydlexius/mxlrcgo-svc/internal/verification": 79.2,
+  "github.com/sydlexius/mxlrcgo-svc/internal/watcher": 90.5,
+  "github.com/sydlexius/mxlrcgo-svc/internal/worker": 76.6
+}

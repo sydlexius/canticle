@@ -235,7 +235,7 @@ func TestFindLyricsErrors(t *testing.T) {
 					}
 				}
 			}`),
-			wantErr: "restricted lyrics",
+			wantErr: "restricted",
 		},
 		"missing track": {
 			client: newTestClient(http.StatusOK, `{
@@ -290,6 +290,69 @@ func TestFindLyricsReturnsSentinelErrors(t *testing.T) {
 			}
 			if !errors.Is(err, tt.sentinel) {
 				t.Fatalf("error = %v; want errors.Is(_, %v)", err, tt.sentinel)
+			}
+		})
+	}
+}
+
+func TestFindLyricsBenignMissesAreClassifiable(t *testing.T) {
+	restricted := `{
+		"message": {"header": {"status_code": 200}, "body": {"macro_calls": {
+			"matcher.track.get": {"message": {"header": {"status_code": 200}, "body": {"track": {"track_name": "title", "artist_name": "artist", "has_subtitles": 0, "has_lyrics": 1}}}},
+			"track.lyrics.get": {"message": {"body": {"lyrics": {"restricted": 1}}}},
+			"track.subtitles.get": {"message": {"body": {}}}
+		}}}
+	}`
+	missingLyrics := `{
+		"message": {"header": {"status_code": 200}, "body": {"macro_calls": {
+			"matcher.track.get": {"message": {"header": {"status_code": 200}, "body": {"track": {"track_name": "title", "artist_name": "artist", "has_subtitles": 0, "has_lyrics": 1}}}},
+			"track.lyrics.get": {"message": {"body": {}}},
+			"track.subtitles.get": {"message": {"body": {}}}
+		}}}
+	}`
+	noLyrics := `{
+		"message": {"header": {"status_code": 200}, "body": {"macro_calls": {
+			"matcher.track.get": {"message": {"header": {"status_code": 200}, "body": {"track": {"track_name": "title", "artist_name": "artist", "has_subtitles": 0, "has_lyrics": 0}}}},
+			"track.lyrics.get": {"message": {"body": {}}},
+			"track.subtitles.get": {"message": {"body": {}}}
+		}}}
+	}`
+
+	tests := map[string]struct {
+		client   *Client
+		sentinel error
+	}{
+		"http 404":            {newTestClient(http.StatusNotFound, ""), ErrNotFound},
+		"restricted lyrics":   {newTestClient(http.StatusOK, restricted), ErrNoLyrics},
+		"missing lyrics data": {newTestClient(http.StatusOK, missingLyrics), ErrNoLyrics},
+		"no lyrics found":     {newTestClient(http.StatusOK, noLyrics), ErrNoLyrics},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := tt.client.FindLyrics(context.Background(), models.Track{TrackName: "title", ArtistName: "artist"})
+			if err == nil {
+				t.Fatal("FindLyrics returned nil error")
+			}
+			if !errors.Is(err, tt.sentinel) {
+				t.Fatalf("error = %v; want errors.Is(_, %v)", err, tt.sentinel)
+			}
+			if !IsBenignMiss(err) {
+				t.Fatalf("IsBenignMiss(%v) = false; want true (benign terminal miss)", err)
+			}
+		})
+	}
+}
+
+func TestIsBenignMissRejectsGenuineErrors(t *testing.T) {
+	for name, err := range map[string]error{
+		"unauthorized": ErrUnauthorized,
+		"rate limited": ErrRateLimited,
+		"transport":    errors.New("network down"),
+		"nil":          nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if IsBenignMiss(err) {
+				t.Fatalf("IsBenignMiss(%v) = true; want false", err)
 			}
 		})
 	}

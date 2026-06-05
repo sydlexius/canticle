@@ -384,6 +384,49 @@ func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, er
 	return item, nil
 }
 
+// Defer reschedules a processing item after a fixed retryAfter delay without
+// counting the attempt against the retry budget. Unlike Fail, attempts is left
+// unchanged so the delay does not ramp into geometric backoff: every Defer of
+// the same row waits the same fixed window. The row is left in the 'failed'
+// state (not 'pending') on purpose -- Enqueue preserves next_attempt_at for
+// 'failed' rows but resets 'pending' rows to now, so keeping the deferred row
+// 'failed' is what makes the cooldown survive a later library scan rather than
+// being un-deferred on every scan. The reset is asymmetric, matching Enqueue's
+// refreshFailedBackoff logic: a scan-priority Enqueue preserves the deferred
+// next_attempt_at (the cooldown survives bulk scans), but a webhook-priority
+// Enqueue (priority >= PriorityWebhook) resets next_attempt_at to now, so an
+// explicit webhook can force an immediate re-check despite the cooldown. Used by
+// the worker for benign misses (no matching track, or a match with no usable
+// lyrics).
+func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration, cause error) (WorkItem, error) {
+	nextAttemptAt := formatTime(q.now().Add(retryAfter))
+	lastError := ""
+	if cause != nil {
+		lastError = cause.Error()
+	}
+	row := q.db.QueryRowContext(ctx,
+		`UPDATE work_queue
+         SET status = 'failed',
+             next_attempt_at = ?,
+             last_error = ?
+         WHERE id = ?
+           AND status = 'processing'
+         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+                   next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+		nextAttemptAt,
+		lastError,
+		id,
+	)
+	item, err := scanWorkItem(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkItem{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return WorkItem{}, fmt.Errorf("queue: defer: %w", err)
+	}
+	return item, nil
+}
+
 // ListFilter narrows the rows returned by List.
 type ListFilter struct {
 	// Status optionally restricts results to a single status value (e.g.

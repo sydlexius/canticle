@@ -57,7 +57,8 @@ func TestWriteLRC_Instrumental(t *testing.T) {
 		t.Fatalf("expected nil error for instrumental, got: %v", err)
 	}
 
-	fn := Slugify("Test Artist - Instrumental Track") + ".lrc"
+	// Instrumentals are unsynced content and must be saved as .txt, not .lrc.
+	fn := Slugify("Test Artist - Instrumental Track") + ".txt"
 	fp := filepath.Join(tmpDir, fn)
 	data, err := os.ReadFile(fp) //nolint:gosec // test path constructed from known test data
 	if err != nil {
@@ -67,9 +68,61 @@ func TestWriteLRC_Instrumental(t *testing.T) {
 	if len(content) == 0 {
 		t.Fatal("expected non-empty file content for instrumental")
 	}
-	const want = "[00:00.00]\u266a Instrumental \u266a"
-	if !strings.Contains(content, want) {
-		t.Fatalf("expected content to contain %q, got: %q", want, content)
+	// Instrumentals are a plain marker: the single line with no timestamp and no
+	// tag headers.
+	const want = "\u266a Instrumental \u266a\n"
+	if content != want {
+		t.Fatalf("expected content to equal %q, got: %q", want, content)
+	}
+	if strings.Contains(content, "[00:00.00]") {
+		t.Fatalf("instrumental marker must not contain an LRC timestamp, got: %q", content)
+	}
+	if strings.Contains(content, "[by:") || strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
+		t.Fatalf("instrumental marker must not contain tag headers, got: %q", content)
+	}
+
+	// No .lrc file should have been created for an instrumental.
+	lrcFn := Slugify("Test Artist - Instrumental Track") + ".lrc"
+	if _, err := os.Stat(filepath.Join(tmpDir, lrcFn)); err == nil {
+		t.Fatal("expected no .lrc file for instrumental, but one was created")
+	}
+}
+
+func TestWriteLRC_InstrumentalExplicitFilename(t *testing.T) {
+	w := NewLRCWriter()
+	tmpDir := t.TempDir()
+
+	song := models.Song{
+		Track: models.Track{
+			ArtistName:   "Test Artist",
+			TrackName:    "Instrumental Track",
+			Instrumental: 1,
+		},
+	}
+
+	// Dir mode passes an explicit .lrc filename; an instrumental must still be
+	// written as .txt.
+	if err := w.WriteLRC(song, "song.lrc", tmpDir); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	txtPath := filepath.Join(tmpDir, "song.txt")
+	data, err := os.ReadFile(txtPath) //nolint:gosec // test path constructed from known test data
+	if err != nil {
+		t.Fatalf("expected file song.txt to exist: %v", err)
+	}
+	content := string(data)
+	const want = "♪ Instrumental ♪\n"
+	if content != want {
+		t.Fatalf("expected content to equal %q, got: %q", want, content)
+	}
+	if strings.Contains(content, "[00:00.00]") {
+		t.Fatalf("instrumental marker must not contain an LRC timestamp, got: %q", content)
+	}
+	if strings.Contains(content, "[by:") || strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
+		t.Fatalf("instrumental marker must not contain tag headers, got: %q", content)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "song.lrc")); err == nil {
+		t.Fatal("expected no .lrc file for instrumental, but one was created")
 	}
 }
 

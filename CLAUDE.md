@@ -19,19 +19,23 @@ When the user says **"next"**, **"what's next"**, **"keep going"**, or any equiv
 - The entrypoint lives in `cmd/mxlrcgo-svc`, so `go run .` does not work. Use `go run ./cmd/mxlrcgo-svc [args]`.
 - A single test: `go test -run TestFoo ./internal/<pkg>` (tests live next to the code they cover under `internal/`).
 
+Run `make hooks` once to enable the tracked git hooks, and `make gate` before pushing. See "Quality gating and CI" below for the full target list.
+
 ## Architecture (one-paragraph orientation)
 
 Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the only entry point and owns no business logic; it parses args, loads config + DB, builds the dependency graph, and runs `app.App.Run`. Under `internal/`: `app` owns the processing loop and queues; `musixmatch` calls the API (exposes a `Fetcher` interface); `lyrics` writes `.lrc` / `.txt` / instrumental output (exposes a `Writer` interface); `scanner` parses CLI/text-file/directory input into the queue; `config` resolves TOML config (XDG paths) with token precedence CLI > env > file; `db` is pure-Go SQLite (`modernc.org/sqlite`, no CGO) with goose migrations in `internal/db/migrations/`; `cache` is the lyrics cache repo over the DB; `normalize` builds NFKC cache lookup keys; `models` holds the shared data types and depends on nothing else internal. `app` depends on `Fetcher` and `Writer` interfaces, never concrete types -- mock at those boundaries. There is no global mutable state. See `AGENTS.md` for full layer/data-flow detail.
 
 ## CLI usage and input modes
 
-See `README.md` for flags and examples. Worth flagging: directory mode overrides `--outdir` (writes `.lrc` next to the audio file), and `--upgrade` re-fetches songs that previously got `.txt` (unsynced) to promote them when synced lyrics become available.
+See `README.md` for flags and examples. Worth flagging: directory mode overrides `--outdir` (writes the output next to the audio file; the extension depends on lyric type - `.lrc` when synced lyrics are found, `.txt` when only unsynced lyrics or an instrumental marker is written), and `--upgrade` re-fetches songs that previously got `.txt` (unsynced) to promote them when synced lyrics become available.
 
 ## Quality gating and CI
 
-- Pre-commit hook: `make hooks` installs `.githooks/pre-commit` (typos -> gofmt -> build -> golangci-lint -> govulncheck).
-- Linter config: `.golangci.yml`. Always include a `// reason` comment after any `//nolint:linter` directive.
-- CI workflows live in `.github/workflows/` (`ci.yml`, `release.yml`, `codeql.yml`).
+- Local gate: `make gate` (`scripts/pre-push-gate.sh`) runs the full pre-push chain behind a per-worktree run-lock: conflict-marker check, gofmt, build, race tests, patch coverage (Codecov parity; skipped if the estimator is absent), golangci-lint, actionlint, govulncheck.
+- Git hooks: `make hooks` sets `core.hooksPath=.githooks` (a relative, shared git setting), so every worktree -- including new ones -- inherits the hooks with no per-worktree setup. `.githooks/pre-commit` runs a conflict-marker check then typos -> gofmt -> build -> golangci-lint -> govulncheck; `.githooks/pre-push` runs the full gate. Verify the wiring with `make doctor` (or `scripts/check-hooks.sh`).
+- Make targets (`make help` lists all): `gate` (full pre-push gate), `doctor` (verify hook wiring + tool-version pins), `scan` (build the Docker image and grype it for HIGH+ CVEs), `test-shuffle` (`go test -race -shuffle=on`), `sync-tool-versions` (assert the golangci-lint pin agrees across CI and pre-commit, via `scripts/check-tool-versions.sh`), `vulncheck` (pinned `govulncheck@v1.1.4`), `coverage-floor` (one-way per-package coverage floor, `scripts/coverage-floor.sh` + `scripts/coverage-floor.json`).
+- Linter config: `.golangci.yml`. Always include a `// reason` comment after any `//nolint:linter` directive. Keep the golangci-lint pin aligned across `ci.yml` and `.pre-commit-config.yaml` (`make sync-tool-versions` enforces it).
+- CI workflows live in `.github/workflows/` (`ci.yml` -- incl. an image CVE `scan` job, `release.yml`, `nightly.yml`, `codeql.yml`). Pin every action to a commit SHA with a `# vX` comment and set `persist-credentials: false` on checkouts.
 - Releases: `git tag vX.Y.Z && git push --tags` triggers GoReleaser.
 
 ## Style (non-discoverable rules)
