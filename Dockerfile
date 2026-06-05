@@ -12,6 +12,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mxlrcgo
 
 FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 
+# Runtime stage. KEEP IN SYNC with build/docker/Dockerfile.goreleaser (the goreleaser
+# release image): identical base digest, apk packages, user, ENV, EXPOSE, VOLUME, entrypoint.
+# The two differ only in how the binary arrives (built here vs copied by goreleaser).
 LABEL org.opencontainers.image.source="https://github.com/sydlexius/mxlrcgo-svc" \
       org.opencontainers.image.description="Fetch synced lyrics from Musixmatch and save .lrc files" \
       org.opencontainers.image.licenses="MIT"

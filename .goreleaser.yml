@@ -6,6 +6,10 @@ builds:
     binary: mxlrcgo-svc
     env:
       - CGO_ENABLED=0
+    # -trimpath: reproducible builds; strips local source paths from the binary.
+    # Parity with the root Dockerfile and ci.yml build so every shipped artifact matches.
+    flags:
+      - -trimpath
     goos:
       - linux
       - darwin
