@@ -20,6 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      # Emitted here so non-code PRs get an empty matrix (zero build legs, zero
+      # checks) instead of a skipped build job whose check surfaces the literal,
+      # unexpanded "Build (${{ matrix.goos }}, ${{ matrix.goarch }})" name.
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -39,6 +43,15 @@ jobs:
               - '.golangci.yml'
               - 'Dockerfile'
               - 'build/docker/**'
+
+      - name: Compute build matrix
+        id: matrix
+        run: |
+          if [ "${{ steps.filter.outputs.code }}" = "true" ]; then
+            echo 'matrix={"include":[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"},{"goos":"darwin","goarch":"amd64"},{"goos":"darwin","goarch":"arm64"},{"goos":"windows","goarch":"amd64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+          fi
 
   lint:
     name: Lint
@@ -112,14 +125,13 @@ jobs:
     name: Build (${{ matrix.goos }}, ${{ matrix.goarch }})
     runs-on: ubuntu-latest
     needs: [changes, lint, test]
-    if: needs.changes.outputs.code == 'true'
+    # Avoid a job-level `if: code == 'true'`: a skipped matrix job surfaces a check
+    # named with the literal, unexpanded ${{ matrix.* }} template. Running unless
+    # lint or test failed keeps the matrix empty on non-code PRs (see the `changes`
+    # job), so this expands to zero legs and zero checks.
+    if: ${{ !cancelled() && needs.lint.result != 'failure' && needs.test.result != 'failure' }}
     strategy:
-      matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64, arm64]
-        exclude:
-          - goos: windows
-            goarch: arm64
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

@@ -10,6 +10,10 @@ on:
   pull_request_review:
     types: [submitted]
 
+# Default to no privileges at the workflow level; the job below grants only what
+# it needs. Resolves Scorecard Token-Permissions (no top-level permission).
+permissions: {}
+
 jobs:
   claude:
     if: |
