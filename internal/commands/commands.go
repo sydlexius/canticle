@@ -123,21 +123,32 @@ type ScanClearCmd struct {
 
 // QueueCmd contains nested queue inspection and maintenance subcommands.
 type QueueCmd struct {
-	List   *QueueListCmd   `arg:"subcommand:list" help:"list work_queue rows"`
-	Failed *QueueFailedCmd `arg:"subcommand:failed" help:"list failed work_queue rows"`
-	Retry  *QueueRetryCmd  `arg:"subcommand:retry" help:"reset a failed work item back to pending"`
-	Clear  *QueueClearCmd  `arg:"subcommand:clear" help:"delete completed work_queue rows"`
+	List     *QueueListCmd     `arg:"subcommand:list" help:"list work_queue rows"`
+	Failed   *QueueFailedCmd   `arg:"subcommand:failed" help:"list failed work_queue rows"`
+	Deferred *QueueDeferredCmd `arg:"subcommand:deferred" help:"list deferred (benign-miss cooldown) work_queue rows"`
+	Retry    *QueueRetryCmd    `arg:"subcommand:retry" help:"reset a failed work item back to pending"`
+	Clear    *QueueClearCmd    `arg:"subcommand:clear" help:"delete completed work_queue rows"`
 }
 
 // QueueListCmd lists work_queue rows.
 type QueueListCmd struct {
-	Status     string `arg:"--status" help:"filter by status (pending, processing, failed, done)" default:""`
+	Status     string `arg:"--status" help:"filter by status (pending, processing, failed, deferred, done)" default:""`
 	Limit      int    `arg:"--limit" help:"maximum number of rows to return" default:"50"`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // QueueFailedCmd is a convenience for `queue list --status failed`.
 type QueueFailedCmd struct {
+	Limit      int    `arg:"--limit" help:"maximum number of rows to return" default:"50"`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// QueueDeferredCmd is a convenience for `queue list --status deferred`.
+// Deferred rows are benign-miss cooldowns: no matching track or usable lyrics
+// was found, and the row is scheduled for re-check after a fixed window. Use
+// `queue retry` on a failed row to reset it immediately; deferred rows cannot
+// be retried via that path -- use a webhook-priority enqueue instead.
+type QueueDeferredCmd struct {
 	Limit      int    `arg:"--limit" help:"maximum number of rows to return" default:"50"`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
@@ -1243,10 +1254,10 @@ func validateQueueStatus(s string) error {
 		return nil
 	}
 	switch s {
-	case queue.StatusPending, queue.StatusProcessing, queue.StatusFailed, queue.StatusDone:
+	case queue.StatusPending, queue.StatusProcessing, queue.StatusFailed, queue.StatusDone, queue.StatusDeferred:
 		return nil
 	default:
-		return fmt.Errorf("invalid status %q (want pending, processing, failed, or done)", s)
+		return fmt.Errorf("invalid status %q (want pending, processing, failed, deferred, or done)", s)
 	}
 }
 
@@ -1285,6 +1296,12 @@ func runQueueCmd(ctx context.Context, out io.Writer, args QueueCmd) int {
 			Status:     queue.StatusFailed,
 			Limit:      args.Failed.Limit,
 			ConfigPath: args.Failed.ConfigPath,
+		})
+	case args.Deferred != nil:
+		return runQueueList(ctx, out, QueueListCmd{
+			Status:     queue.StatusDeferred,
+			Limit:      args.Deferred.Limit,
+			ConfigPath: args.Deferred.ConfigPath,
 		})
 	case args.Retry != nil:
 		return runQueueRetry(ctx, out, *args.Retry)
@@ -1365,7 +1382,9 @@ func runQueueRetry(ctx context.Context, out io.Writer, args QueueRetryCmd) int {
 		_, _ = fmt.Fprintf(out, "queue: work item %d not found\n", args.ID)
 		return 1
 	case errors.Is(err, queue.ErrNotRetryable):
-		_, _ = fmt.Fprintf(out, "queue: work item %d is not in failed status; refusing to retry\n", args.ID)
+		_, _ = fmt.Fprintf(out, "queue: work item %d is not in failed status; refusing to retry\n"+
+			"  (deferred rows are benign-miss cooldowns -- use `queue deferred` to inspect them;\n"+
+			"   force an immediate re-check by re-enqueueing via the webhook path)\n", args.ID)
 		return 1
 	case err != nil:
 		slog.Error("failed to retry queue item", "error", err)

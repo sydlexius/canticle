@@ -340,12 +340,12 @@ func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) err
 // counter. The queue row is not retired: it stays re-dequeueable once the
 // cooldown elapses and re-enqueueable by a later scan or webhook, so it is
 // retried eventually as the catalog grows, while the worker neither slows down
-// nor re-queries upstream hourly for the same dead track. Defer leaves the row
-// in the deferred 'failed' state and does not increment attempts, so the
-// cooldown is fixed (not geometric). On a SCAN-priority re-enqueue the cooldown
-// survives: Enqueue preserves next_attempt_at for 'failed' rows. A WEBHOOK
-// re-enqueue intentionally resets it to now to force an immediate retry (see
-// DBQueue.Enqueue).
+// nor re-queries upstream hourly for the same dead track. Defer moves the row
+// to the distinct 'deferred' state and bumps miss_count without incrementing
+// attempts, so the cooldown is fixed (not geometric). On a SCAN-priority
+// re-enqueue the cooldown survives: Enqueue preserves next_attempt_at for
+// 'deferred' rows. A WEBHOOK re-enqueue intentionally resets it to now to force
+// an immediate retry (see DBQueue.Enqueue).
 //
 // A sql.ErrNoRows from Defer is benign here: it means the row is no longer
 // 'processing' because it was canceled or re-dequeued out from under us

@@ -1492,3 +1492,122 @@ func TestRunQueueRetry_ResetsLinkedScanResults(t *testing.T) {
 		t.Fatalf("scan_results status = %q after retry; want pending", scanStatus)
 	}
 }
+
+// TestValidateQueueStatus_AcceptsDeferred verifies the deferred status is
+// accepted by the validator (and that the error message names it).
+func TestValidateQueueStatus_AcceptsDeferred(t *testing.T) {
+	if err := validateQueueStatus(queue.StatusDeferred); err != nil {
+		t.Fatalf("validateQueueStatus(%q) = %v; want nil", queue.StatusDeferred, err)
+	}
+	err := validateQueueStatus("bogus")
+	if err == nil {
+		t.Fatal("validateQueueStatus(bogus) = nil; want error")
+	}
+	if !strings.Contains(err.Error(), "deferred") {
+		t.Fatalf("error message missing 'deferred': %q", err.Error())
+	}
+}
+
+// TestRunQueueRetry_RejectsDeferredRow verifies that retrying a deferred row
+// returns ErrNotRetryable with an informative message pointing at queue deferred.
+func TestRunQueueRetry_RejectsDeferredRow(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Deferred"}}, 1); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, claimed.ID, 7*24*time.Hour, errorsNew("no results")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := Run(ctx, []string{"queue", "retry", strconvFormatInt(claimed.ID), "--config", cfg}, &out, Deps{})
+	if code == 0 {
+		t.Fatalf("Run exit code = 0; want non-zero (retry on deferred must fail). out=%s", out.String())
+	}
+	if !strings.Contains(out.String(), "not in failed status") {
+		t.Fatalf("expected not-retryable message; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "deferred") {
+		t.Fatalf("expected deferred hint in message; got %q", out.String())
+	}
+}
+
+// TestRunQueueCmd_DeferredRoutesToList verifies the `queue deferred` convenience
+// subcommand returns the table header (and only lists deferred rows, not failed).
+func TestRunQueueCmd_DeferredRoutesToList(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+
+	// Enqueue one item, defer it (becomes StatusDeferred).
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Missed", TrackName: "Song"}}, 1); err != nil {
+		t.Fatalf("Enqueue deferred: %v", err)
+	}
+	ditem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, ditem.ID, 7*24*time.Hour, errorsNew("no results")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	// Enqueue another item, fail it (becomes StatusFailed).
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Failed", TrackName: "Song"}}, 1); err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
+	fitem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue failed: %v", err)
+	}
+	if _, err := q.Fail(ctx, fitem.ID, errorsNew("boom")); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := runQueueCmd(ctx, &out, QueueCmd{Deferred: &QueueDeferredCmd{ConfigPath: cfg, Limit: 50}})
+	if code != 0 {
+		t.Fatalf("queue deferred = %d; want 0. out=%s", code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "ID") {
+		t.Fatalf("queue deferred missing header: %q", got)
+	}
+	// Deferred artist must appear; failed artist must not.
+	if !strings.Contains(got, "Missed") {
+		t.Fatalf("deferred row missing from output: %q", got)
+	}
+	if strings.Contains(got, "Failed") {
+		t.Fatalf("failed row must not appear in queue deferred output: %q", got)
+	}
+}
+
+// TestRunQueueList_StatusDeferred verifies `queue list --status deferred` works.
+func TestRunQueueList_StatusDeferred(t *testing.T) {
+	cfg, _ := commandsTestEnv(t)
+	var out bytes.Buffer
+	code := Run(context.Background(), []string{"queue", "list", "--status", "deferred", "--config", cfg}, &out, Deps{})
+	if code != 0 {
+		t.Fatalf("queue list --status deferred = %d; want 0. out=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "ID") {
+		t.Fatalf("output missing header: %q", out.String())
+	}
+}
