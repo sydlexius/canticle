@@ -84,17 +84,24 @@ func TestPacerNoopWhenMinIntervalZero(t *testing.T) {
 
 func TestPacerEnforcesMinInterval(t *testing.T) {
 	minInterval := 10 * time.Second
-	// Start time; both calls happen at t=0 (simulated).
+	// Fake clock starts at base. The sleep function advances it by the
+	// requested duration so the re-check loop sees wait <= 0 after one sleep
+	// and terminates without spinning.
 	base := time.Unix(1000, 0)
-	callCount := 0
+	var mu sync.Mutex
+	fakeNow := base
 	nowFn := func() time.Time {
-		callCount++
-		return base // both pace() calls see the same wall clock
+		mu.Lock()
+		defer mu.Unlock()
+		return fakeNow
 	}
 
 	var gotSleep time.Duration
 	sleepFn := func(ctx context.Context, d time.Duration) bool {
 		gotSleep = d
+		mu.Lock()
+		fakeNow = fakeNow.Add(d)
+		mu.Unlock()
 		return true
 	}
 
@@ -102,7 +109,8 @@ func TestPacerEnforcesMinInterval(t *testing.T) {
 	track := models.Track{TrackName: "t", ArtistName: "a"}
 	ctx := context.Background()
 
-	// First call: no prior lastRequest, so no sleep. Sets lastRequest = base.
+	// First call: no prior lastRequest (zero time), so elapsed is huge and
+	// wait <= 0 -- no sleep. Sets lastRequest = fakeNow (base).
 	if _, err := c.FindLyrics(ctx, track); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
@@ -111,6 +119,7 @@ func TestPacerEnforcesMinInterval(t *testing.T) {
 	}
 
 	// Second call at the same simulated time (elapsed=0 < minInterval=10s).
+	// sleep advances the clock by minInterval so the re-check exits cleanly.
 	if _, err := c.FindLyrics(ctx, track); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
@@ -122,15 +131,16 @@ func TestPacerEnforcesMinInterval(t *testing.T) {
 func TestPacerNoSleepWhenAlreadyElapsed(t *testing.T) {
 	minInterval := 10 * time.Second
 	base := time.Unix(1000, 0)
-	call := 0
+	// Fake clock: starts at base (so first FindLyrics sets lastRequest=base),
+	// then advances to base+minInterval for the second FindLyrics so elapsed
+	// >= minInterval and no sleep is needed. A mutex guards fakeNow because
+	// pace() reads it under c.mu (different lock).
+	var mu sync.Mutex
+	fakeNow := base
 	nowFn := func() time.Time {
-		call++
-		if call <= 2 {
-			// first FindLyrics: pace() sees now=base (sets lastRequest)
-			return base
-		}
-		// second FindLyrics: pace() sees now=base+minInterval (elapsed >= minInterval)
-		return base.Add(minInterval)
+		mu.Lock()
+		defer mu.Unlock()
+		return fakeNow
 	}
 
 	sleepCalled := false
@@ -146,6 +156,11 @@ func TestPacerNoSleepWhenAlreadyElapsed(t *testing.T) {
 	if _, err := c.FindLyrics(ctx, track); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
+	// Advance fake clock by minInterval before second call so elapsed >= minInterval.
+	mu.Lock()
+	fakeNow = base.Add(minInterval)
+	mu.Unlock()
+
 	if _, err := c.FindLyrics(ctx, track); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
@@ -184,8 +199,24 @@ func TestPacerCtxCancelDuringSleep(t *testing.T) {
 
 func TestPacerGoroutineSafe(t *testing.T) {
 	// Multiple goroutines call FindLyrics concurrently; the pacer must not race.
-	// Use a zero interval so no actual sleeping occurs (just mutex correctness).
-	c := newPacerTestClient(0, time.Now, func(ctx context.Context, d time.Duration) bool { return true })
+	// Use a tiny non-zero interval so the 10 goroutines actually exercise the
+	// locked paced path (minInterval=0 skips the mutex entirely). The fake
+	// sleep advances a shared clock by the requested duration and returns true
+	// immediately so no real time elapses and the re-check loop always terminates.
+	var mu sync.Mutex
+	fakeNow := time.Unix(2000, 0)
+	nowFn := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return fakeNow
+	}
+	sleepFn := func(ctx context.Context, d time.Duration) bool {
+		mu.Lock()
+		fakeNow = fakeNow.Add(d)
+		mu.Unlock()
+		return true
+	}
+	c := newPacerTestClient(time.Nanosecond, nowFn, sleepFn)
 
 	var wg sync.WaitGroup
 	for range 10 {

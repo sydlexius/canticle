@@ -116,9 +116,12 @@ func (c *Client) MinInterval() time.Duration {
 
 // pace enforces the minimum request interval. It must be called at the top of
 // FindLyrics before the HTTP request is built. When minInterval is zero or
-// negative it returns immediately. Otherwise it reads the last request
-// timestamp under the mutex, waits for the remainder of the interval if
-// needed, then records the new timestamp.
+// negative it returns immediately. Otherwise it loops: under the lock it
+// checks how long remains until the next slot is free; if the slot is free it
+// reserves it (sets lastRequest = now) and returns; if not, it releases the
+// lock, sleeps for the remainder, and re-checks. Re-checking after each sleep
+// prevents concurrent callers from computing the same wait, sleeping together,
+// and then all proceeding in a burst.
 //
 // The wait is ctx-cancellable; if the context is canceled during the wait
 // pace returns ctx.Err() wrapped with context.
@@ -126,25 +129,22 @@ func (c *Client) pace(ctx context.Context) error {
 	if c.minInterval <= 0 {
 		return nil
 	}
+	for {
+		c.mu.Lock()
+		now := c.now()
+		wait := c.minInterval - now.Sub(c.lastRequest)
+		if wait <= 0 {
+			c.lastRequest = now
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
 
-	c.mu.Lock()
-	now := c.now()
-	elapsed := now.Sub(c.lastRequest)
-	wait := c.minInterval - elapsed
-	c.mu.Unlock()
-
-	if wait > 0 {
 		slog.Debug("musixmatch pacer: waiting before next request", "wait", wait)
 		if !c.sleep(ctx, wait) {
 			return fmt.Errorf("musixmatch: pace: %w", ctx.Err())
 		}
 	}
-
-	c.mu.Lock()
-	c.lastRequest = c.now()
-	c.mu.Unlock()
-
-	return nil
 }
 
 // Name returns the provider name.
