@@ -55,18 +55,24 @@ INSERT INTO work_queue_new (
 SELECT
     id, artist, title, artist_key, title_key, outdir, filename, source_path,
     output_paths, scan_result_id,
-    -- Backfill: rows with status='failed' AND attempts=0 AND next_attempt_at
-    -- > now were produced by Defer (which leaves attempts unchanged). Fail
-    -- always increments attempts to >=1, so this shape can only originate
-    -- from Defer. Reclassify them as 'deferred' so they appear in the right
-    -- query bucket.
+    -- Backfill: a 'failed' row with attempts=0 was produced by Defer, which
+    -- leaves attempts unchanged. Fail always increments attempts to >=1, so
+    -- that shape can only originate from Defer, regardless of next_attempt_at.
+    -- Reclassify every such row to 'deferred' (including ones whose cooldown
+    -- has already elapsed -- an overdue 'deferred' row is dequeue-eligible just
+    -- as it was as an overdue 'failed' row) so CountByStatus and /status stop
+    -- counting benign misses as failures. Seed miss_count=1 to record the miss
+    -- that already happened.
     CASE
-        WHEN status = 'failed' AND attempts = 0 AND next_attempt_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        WHEN status = 'failed' AND attempts = 0
         THEN 'deferred'
         ELSE status
     END AS status,
     priority, attempts,
-    0 AS miss_count,
+    CASE
+        WHEN status = 'failed' AND attempts = 0 THEN 1
+        ELSE 0
+    END AS miss_count,
     0 AS providers_version,
     next_attempt_at, last_error, completed_at,
     created_at, updated_at
