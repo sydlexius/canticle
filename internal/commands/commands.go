@@ -490,6 +490,8 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	allowedRoots := webhookAllowedRoots(ctx, sqlDB)
 	w := worker.New(workQ, cache.New(sqlDB), fetcher, newWriter(allowedRoots...))
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
+	w.SetMissBackoff(time.Duration(cfg.API.MissBackoffBaseHours)*time.Hour, time.Duration(cfg.API.MissBackoffCapHours)*time.Hour)
+	w.SetMaxMissAttempts(cfg.API.MaxMissAttempts)
 	configureWorkerVerification(w, cfg, verifier)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -1042,6 +1044,9 @@ func configKeys() []string {
 		"api.token",
 		"api.cooldown",
 		"api.circuit_open_duration",
+		"api.miss_backoff_base_hours",
+		"api.miss_backoff_cap_hours",
+		"api.max_miss_attempts",
 		"output.dir",
 		"db.path",
 		"server.addr",
@@ -1067,6 +1072,12 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.Itoa(cfg.API.Cooldown), true
 	case "api.circuit_open_duration":
 		return strconv.Itoa(cfg.API.CircuitOpenDuration), true
+	case "api.miss_backoff_base_hours":
+		return strconv.Itoa(cfg.API.MissBackoffBaseHours), true
+	case "api.miss_backoff_cap_hours":
+		return strconv.Itoa(cfg.API.MissBackoffCapHours), true
+	case "api.max_miss_attempts":
+		return strconv.Itoa(cfg.API.MaxMissAttempts), true
 	case "output.dir":
 		return cfg.Output.Dir, true
 	case "db.path":
@@ -1116,6 +1127,24 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("api.circuit_open_duration must be a positive integer (seconds)")
 		}
 		cfg.API.CircuitOpenDuration = n
+	case "api.miss_backoff_base_hours":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("api.miss_backoff_base_hours must be a positive integer (hours; minimum 1)")
+		}
+		cfg.API.MissBackoffBaseHours = n
+	case "api.miss_backoff_cap_hours":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("api.miss_backoff_cap_hours must be a positive integer (hours; minimum 1)")
+		}
+		cfg.API.MissBackoffCapHours = n
+	case "api.max_miss_attempts":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("api.max_miss_attempts must be a non-negative integer (0 means no cap)")
+		}
+		cfg.API.MaxMissAttempts = n
 	case "output.dir":
 		cfg.Output.Dir = value
 	case "db.path":

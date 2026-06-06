@@ -1904,3 +1904,261 @@ func TestDBQueue_CountByStatusIncludesDeferred(t *testing.T) {
 		t.Fatalf("failed count = %d; want 0 (deferred must not appear as failed)", counts[StatusFailed])
 	}
 }
+
+// TestDBQueue_DeferSetsPriorityMiss verifies that Defer sets the row priority
+// to PriorityMiss so deferred re-attempts sink below all fresh work.
+func TestDBQueue_DeferSetsPriorityMiss(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	deferred, err := q.Defer(ctx, item.ID, 24*time.Hour, errors.New("miss"))
+	if err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if deferred.Priority != PriorityMiss {
+		t.Fatalf("priority = %d; want PriorityMiss (%d)", deferred.Priority, PriorityMiss)
+	}
+}
+
+// TestDBQueue_EnqueueScanPreservesMissPriority confirms that a scan-priority
+// re-enqueue does NOT un-deprioritize a deferred miss row.
+func TestDBQueue_EnqueueScanPreservesMissPriority(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	inputs := models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}
+	if _, err := q.Enqueue(ctx, inputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, 24*time.Hour, errors.New("miss")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	// Scan-priority re-enqueue must preserve PriorityMiss.
+	refreshed, err := q.Enqueue(ctx, inputs, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue (scan): %v", err)
+	}
+	if refreshed.Priority != PriorityMiss {
+		t.Fatalf("priority after scan Enqueue = %d; want PriorityMiss (%d) (scan must not un-deprioritize)", refreshed.Priority, PriorityMiss)
+	}
+}
+
+// TestDBQueue_EnqueueWebhookRestoresPriority confirms that a webhook-priority
+// re-enqueue overrides PriorityMiss (the escape hatch).
+func TestDBQueue_EnqueueWebhookRestoresPriority(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	inputs := models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}
+	if _, err := q.Enqueue(ctx, inputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, 24*time.Hour, errors.New("miss")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	// Webhook-priority enqueue must override PriorityMiss.
+	refreshed, err := q.Enqueue(ctx, inputs, PriorityWebhook)
+	if err != nil {
+		t.Fatalf("Enqueue (webhook): %v", err)
+	}
+	if refreshed.Priority != PriorityWebhook {
+		t.Fatalf("priority after webhook Enqueue = %d; want PriorityWebhook (%d)", refreshed.Priority, PriorityWebhook)
+	}
+}
+
+// TestDBQueue_DequeuePicksScanOverMissRow verifies that a ready PriorityScan
+// item is dequeued before a ready PriorityMiss item.
+func TestDBQueue_DequeuePicksScanOverMissRow(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	// Enqueue and defer a miss item first (so it has a lower ID and would win
+	// on created_at if priority were equal).
+	missInputs := models.Inputs{Track: models.Track{ArtistName: "Miss", TrackName: "Song"}}
+	if _, err := q.Enqueue(ctx, missInputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue miss: %v", err)
+	}
+	missItem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue miss: %v", err)
+	}
+	// Defer sets PriorityMiss; advance clock so cooldown is in the past.
+	if _, err := q.Defer(ctx, missItem.ID, time.Millisecond, errors.New("miss")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	// Advance clock so the deferred row is ready.
+	q.now = func() time.Time { return now.Add(time.Second) }
+
+	// Enqueue a fresh scan-priority item (higher ID, but higher priority).
+	freshInputs := models.Inputs{Track: models.Track{ArtistName: "Fresh", TrackName: "Song"}}
+	if _, err := q.Enqueue(ctx, freshInputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue fresh: %v", err)
+	}
+
+	// The scan-priority item must be dequeued first despite having a higher ID.
+	first, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("first Dequeue: %v", err)
+	}
+	if first.Inputs.Track.ArtistName != "Fresh" {
+		t.Fatalf("first dequeued = %q; want Fresh (scan-priority must win over PriorityMiss)", first.Inputs.Track.ArtistName)
+	}
+
+	// The miss item is dequeued second.
+	second, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("second Dequeue: %v", err)
+	}
+	if second.Inputs.Track.ArtistName != "Miss" {
+		t.Fatalf("second dequeued = %q; want Miss", second.Inputs.Track.ArtistName)
+	}
+}
+
+// TestDBQueue_RetireMiss verifies that RetireMiss sets status=done with the
+// sentinel error message. When no scan_result_id is linked the call must
+// succeed without error (empty junction is a no-op on scan_results).
+func TestDBQueue_RetireMiss(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	retired, err := q.RetireMiss(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("RetireMiss: %v", err)
+	}
+	if retired.Status != StatusDone {
+		t.Fatalf("status = %q; want %q", retired.Status, StatusDone)
+	}
+	if retired.LastError != "miss limit reached" {
+		t.Fatalf("last_error = %q; want %q", retired.LastError, "miss limit reached")
+	}
+	if retired.CompletedAt == nil {
+		t.Fatal("completed_at = nil; want non-nil")
+	}
+	// No scan_result_id on this row; the scan_results UPDATE is a no-op but must
+	// not error. The linked-row writeback is covered by
+	// TestDBQueue_RetireMissWritesScanResultsDone.
+}
+
+// TestDBQueue_RetireMissWritesScanResultsDone verifies that RetireMiss
+// writes status='done' to every linked scan_results row (mirroring Complete's
+// writeback) so the scan layer does not strand the track in 'processing'.
+func TestDBQueue_RetireMissWritesScanResultsDone(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	// Insert a library and scan_result row to link.
+	var libID int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO libraries (path, name) VALUES ('/music', 'test') RETURNING id`,
+	).Scan(&libID); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	var srID int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO scan_results (library_id, artist, title, file_path, outdir, filename, status)
+         VALUES (?, 'Artist', 'Title', '/music/song.flac', 'out', 'song.lrc', 'pending')
+         RETURNING id`,
+		libID,
+	).Scan(&srID); err != nil {
+		t.Fatalf("insert scan_result: %v", err)
+	}
+
+	inputs := models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:       "out",
+		Filename:     "song.lrc",
+		ScanResultID: srID,
+	}
+	if _, err := q.Enqueue(ctx, inputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+
+	if _, err := q.RetireMiss(ctx, item.ID); err != nil {
+		t.Fatalf("RetireMiss: %v", err)
+	}
+
+	// scan_results must be 'done' so the track is not stranded as 'processing'.
+	var srStatus string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, srID).Scan(&srStatus); err != nil {
+		t.Fatalf("scan scan_result status: %v", err)
+	}
+	if srStatus != "done" {
+		t.Fatalf("scan_result status = %q; want %q (RetireMiss must write back done to unblock the scan layer)", srStatus, "done")
+	}
+}
+
+// TestPriorityConstantsSQLParity is a compile-time guard asserting that
+// PriorityMiss and PriorityWebhook match the SQL literals hardcoded in Defer
+// (priority = -100) and Enqueue (priority >= 10). The SQL driver cannot bind Go
+// constants, so a future rename or value change here would silently desync with
+// those queries; this test makes such a drift a build failure instead.
+func TestPriorityConstantsSQLParity(t *testing.T) {
+	if PriorityMiss != -100 {
+		t.Fatalf("PriorityMiss = %d; SQL literal in Defer is -100 -- update the SQL or this constant", PriorityMiss)
+	}
+	if PriorityWebhook != 10 {
+		t.Fatalf("PriorityWebhook = %d; SQL literal in Enqueue is 10 -- update the SQL or this constant", PriorityWebhook)
+	}
+}
+
+// TestDBQueue_RetireMissNoRowsWhenNotProcessing verifies that RetireMiss
+// returns sql.ErrNoRows when the row is not in processing status.
+func TestDBQueue_RetireMissNoRowsWhenNotProcessing(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	// Complete the item first (now it's done, not processing).
+	if err := q.Complete(ctx, item.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// RetireMiss on a non-processing row must return sql.ErrNoRows.
+	_, err = q.RetireMiss(ctx, item.ID)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("RetireMiss on non-processing row = %v; want sql.ErrNoRows", err)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
@@ -26,6 +27,7 @@ type fakeQueue struct {
 	failed         []int64
 	released       []int64
 	deferred       []int64
+	retired        []int64
 	failCauses     []error
 	deferCauses    []error
 	deferDurations []time.Duration
@@ -33,6 +35,7 @@ type fakeQueue struct {
 	failErr        error
 	deferErr       error
 	releaseErr     error
+	retireErr      error
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -82,6 +85,15 @@ func (q *fakeQueue) Release(_ context.Context, id int64) error {
 	q.removeFromProcessing(id)
 	q.released = append(q.released, id)
 	return nil
+}
+
+func (q *fakeQueue) RetireMiss(_ context.Context, id int64) (queue.WorkItem, error) {
+	if q.retireErr != nil {
+		return queue.WorkItem{}, q.retireErr
+	}
+	q.removeFromProcessing(id)
+	q.retired = append(q.retired, id)
+	return queue.WorkItem{ID: id, Status: queue.StatusDone}, nil
 }
 
 func (q *fakeQueue) removeFromProcessing(id int64) {
@@ -463,8 +475,9 @@ func TestRunOnceBenignMissRequeuesDeferredWithoutCounter(t *testing.T) {
 			if len(q.deferCauses) != 1 || !errors.Is(q.deferCauses[0], sentinel) {
 				t.Fatalf("requeue cause = %v; want errors.Is(_, %v)", q.deferCauses, sentinel)
 			}
-			if len(q.deferDurations) != 1 || q.deferDurations[0] != benignMissCooldown {
-				t.Fatalf("defer cooldown = %v; want fixed %v", q.deferDurations, benignMissCooldown)
+			// The first miss (miss_count=0+1=1) uses backoff.DefaultMissBase (168h / 7d).
+			if len(q.deferDurations) != 1 || q.deferDurations[0] != backoff.DefaultMissBase {
+				t.Fatalf("defer cooldown = %v; want first-miss base %v", q.deferDurations, backoff.DefaultMissBase)
 			}
 		})
 	}
@@ -980,5 +993,216 @@ func TestConfidence(t *testing.T) {
 
 	if score := Confidence(want, got); score != 1 {
 		t.Fatalf("Confidence() = %v; want 1", score)
+	}
+}
+
+// TestMissCadenceEscalates verifies that requeueDeferred uses escalating
+// geometric cooldowns driven by item.MissCount rather than a fixed window.
+func TestMissCadenceEscalates(t *testing.T) {
+	tests := []struct {
+		name      string
+		missCount int // current miss_count BEFORE this Defer (i.e. item.MissCount)
+		want      time.Duration
+	}{
+		{"miss1", 0, backoff.DefaultMissBase},     // 168h (7d)
+		{"miss2", 1, 2 * backoff.DefaultMissBase}, // 336h (14d)
+		{"miss3", 2, backoff.DefaultMissCap},      // 4*168h=672h = cap (28d)
+		{"miss4", 3, backoff.DefaultMissCap},      // cap; already at ceiling
+		// cap at DefaultMissCap (28 days = 672h)
+		{"miss7", 6, backoff.DefaultMissCap},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+			q := &fakeQueue{items: []queue.WorkItem{{
+				ID:        1,
+				MissCount: tc.missCount,
+				Inputs:    models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"},
+			}}}
+			w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+
+			if err := w.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if len(q.deferDurations) != 1 || q.deferDurations[0] != tc.want {
+				t.Fatalf("defer cooldown = %v; want %v (miss_count=%d)", q.deferDurations, tc.want, tc.missCount)
+			}
+			if len(q.deferred) != 1 {
+				t.Fatalf("deferred = %v; want one item", q.deferred)
+			}
+			if len(q.failed) != 0 {
+				t.Fatalf("failed = %v; want none", q.failed)
+			}
+		})
+	}
+}
+
+// TestSetMissBackoffOverridesDefaults confirms that SetMissBackoff customizes
+// the cadence used by requeueDeferred.
+func TestSetMissBackoffOverridesDefaults(t *testing.T) {
+	customBase := 12 * time.Hour
+	customCap := 48 * time.Hour
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:        1,
+		MissCount: 0,
+		Inputs:    models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"},
+	}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.SetMissBackoff(customBase, customCap)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.deferDurations) != 1 || q.deferDurations[0] != customBase {
+		t.Fatalf("defer cooldown = %v; want %v (custom base)", q.deferDurations, customBase)
+	}
+}
+
+// TestSetMissBackoffCapClamps verifies that a miss at a high count is bounded
+// by the custom cap.
+func TestSetMissBackoffCapClamps(t *testing.T) {
+	customBase := 10 * time.Hour
+	customCap := 20 * time.Hour
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:        1,
+		MissCount: 5, // would be 10*2^5 = 320h without cap
+		Inputs:    models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"},
+	}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.SetMissBackoff(customBase, customCap)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.deferDurations) != 1 || q.deferDurations[0] != customCap {
+		t.Fatalf("defer cooldown = %v; want cap %v", q.deferDurations, customCap)
+	}
+}
+
+// TestMaxMissAttemptsRetires verifies that when miss_count+1 >= maxMissAttempts
+// the worker calls RetireMiss instead of Defer. With cap=3, the 3rd miss
+// (MissCount=2, nextMissCount=3) is the retirement boundary -- exactly N
+// fetches occur before the row is retired.
+func TestMaxMissAttemptsRetires(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:        99,
+		MissCount: 2, // next miss_count=3 == cap; retires on the 3rd miss
+		Inputs:    models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"},
+	}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.SetMaxMissAttempts(3)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.retired) != 1 || q.retired[0] != 99 {
+		t.Fatalf("retired = %v; want [99]", q.retired)
+	}
+	if len(q.deferred) != 0 {
+		t.Fatalf("deferred = %v; want none (should have retired)", q.deferred)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none (retirement is not a failure)", q.failed)
+	}
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none (RetireMiss does not go through Complete)", q.completed)
+	}
+	// Consecutive failures must not be bumped on a retirement.
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (retirement is not a failure)", w.consecutiveFailures)
+	}
+}
+
+// TestMaxMissAttemptsRetiresBoundary verifies that max_miss_attempts=1 retires
+// on the very first miss (nextMissCount=1 >= cap=1).
+func TestMaxMissAttemptsRetiresBoundary(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:        101,
+		MissCount: 0, // next miss_count=1 == cap=1; retires on the 1st miss
+		Inputs:    models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"},
+	}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.SetMaxMissAttempts(1)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.retired) != 1 || q.retired[0] != 101 {
+		t.Fatalf("retired = %v; want [101] (max_miss_attempts=1 retires on first miss)", q.retired)
+	}
+	if len(q.deferred) != 0 {
+		t.Fatalf("deferred = %v; want none (should have retired on first miss)", q.deferred)
+	}
+}
+
+// TestMaxMissAttemptsZeroNeverRetires verifies that the default (0 = no cap)
+// defers indefinitely.
+func TestMaxMissAttemptsZeroNeverRetires(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:        1,
+		MissCount: 1000, // very high miss_count; cap is 0
+		Inputs:    models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"},
+	}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	// Default maxMissAttempts = 0 (no cap)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.retired) != 0 {
+		t.Fatalf("retired = %v; want none (max=0 means no cap)", q.retired)
+	}
+	if len(q.deferred) != 1 {
+		t.Fatalf("deferred = %v; want one item", q.deferred)
+	}
+}
+
+// TestRetireMissNoRowsIsBenign covers the lost-race path in requeueDeferred's
+// retire branch: if RetireMiss returns sql.ErrNoRows the worker must not error.
+func TestRetireMissNoRowsIsBenign(t *testing.T) {
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID:        88,
+			MissCount: 5,
+			Inputs:    models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}},
+		}},
+		retireErr: sql.ErrNoRows,
+	}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.SetMaxMissAttempts(3)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v; want nil (RetireMiss no-rows is benign)", err)
+	}
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0", w.consecutiveFailures)
+	}
+}
+
+// TestSetMissBackoffIgnoresZero confirms that zero values are silently ignored.
+func TestSetMissBackoffIgnoresZero(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	origBase := w.missBackoffBase
+	origCap := w.missBackoffCap
+	w.SetMissBackoff(0, 0)
+	if w.missBackoffBase != origBase {
+		t.Fatalf("missBackoffBase changed after SetMissBackoff(0,0)")
+	}
+	if w.missBackoffCap != origCap {
+		t.Fatalf("missBackoffCap changed after SetMissBackoff(0,0)")
+	}
+}
+
+// TestSetMaxMissAttemptsClampNegative verifies negative values clamp to 0.
+func TestSetMaxMissAttemptsClampNegative(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.SetMaxMissAttempts(-5)
+	if w.maxMissAttempts != 0 {
+		t.Fatalf("maxMissAttempts = %d; want 0 after clamping -5", w.maxMissAttempts)
 	}
 }

@@ -13,6 +13,31 @@ const (
 	DefaultMax  = time.Hour
 )
 
+// DefaultMissBase is the initial re-check delay for a benign miss (no matching
+// track or no usable lyrics). Doubling from here gives: 168h (7d), 336h (14d),
+// 672h (28d, cap), then stays at DefaultMissCap.
+const DefaultMissBase = 7 * 24 * time.Hour
+
+// DefaultMissCap is the maximum re-check delay for a benign miss (28 days).
+// Once miss_count is high enough for the geometric doubling to exceed this,
+// every subsequent Defer uses this ceiling.
+const DefaultMissCap = 28 * 24 * time.Hour
+
+// MissCooldown returns the re-check delay for a benign miss given the current
+// (post-increment) miss_count. It delegates to Geometric so the cadence is
+// consistent with the worker's failure-backoff formula:
+//
+//	miss_count=1: base (168h / 7d default)
+//	miss_count=2: 2*base (336h / 14d)
+//	miss_count=3: 4*base (672h / 28d = cap)
+//	...capped at max.
+//
+// A missCount < 1 is treated as 1 (same as Geometric). Zero or negative
+// base/max returns 0.
+func MissCooldown(missCount int, base, max time.Duration) time.Duration {
+	return Geometric(missCount, base, max)
+}
+
 // Geometric returns the wait duration for the given 1-indexed attempt count,
 // doubling from base each step and capping at max. Returns 0 if base or max
 // is non-positive. Attempts < 1 are treated as 1.

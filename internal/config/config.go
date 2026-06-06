@@ -30,6 +30,21 @@ type APIConfig struct {
 	// signal. Default 1800 (30 min). Values below circuitOpenMinSeconds are
 	// clamped at load time.
 	CircuitOpenDuration int `toml:"circuit_open_duration"`
+	// MissBackoffBaseHours is the initial re-check delay (in hours) for a
+	// benign miss (no matching track or no usable lyrics). The cadence doubles
+	// each miss: base, 2*base, 4*base, ... up to MissBackoffCapHours. Default 168.
+	// Values below 1 are clamped to 1 with a warning.
+	MissBackoffBaseHours int `toml:"miss_backoff_base_hours"`
+	// MissBackoffCapHours is the maximum re-check delay (in hours) for a
+	// benign miss. Default 672 (28 days). Must be >= MissBackoffBaseHours;
+	// smaller values are clamped to MissBackoffBaseHours with a warning.
+	MissBackoffCapHours int `toml:"miss_backoff_cap_hours"`
+	// MaxMissAttempts caps the total number of re-check attempts for a benign
+	// miss. When miss_count exceeds this value the queue row is retired
+	// (status='done', last_error='miss limit reached') without writing any
+	// scan_results success. Default 0 means no cap (retry indefinitely).
+	// Negative values are clamped to 0 with a warning.
+	MaxMissAttempts int `toml:"max_miss_attempts"`
 }
 
 // circuitOpenDefaultSeconds is the default circuit-open window (30 min).
@@ -38,6 +53,15 @@ const circuitOpenDefaultSeconds = 30 * 60
 // circuitOpenMinSeconds is the minimum permissible circuit-open window.
 // Values below this are clamped to this floor with a warning.
 const circuitOpenMinSeconds = 5 * 60
+
+// missBackoffBaseDefault is the default initial miss re-check delay (168 hours = 7 days).
+const missBackoffBaseDefault = 168
+
+// missBackoffCapDefault is the default maximum miss re-check delay (672 hours = 28 days).
+const missBackoffCapDefault = 672
+
+// missBackoffBaseMin is the minimum permissible miss backoff base (1 hour).
+const missBackoffBaseMin = 1
 
 // OutputConfig holds output-related configuration.
 type OutputConfig struct {
@@ -84,7 +108,13 @@ type VerificationConfig struct {
 // defaults sets built-in fallback values.
 func defaults() Config {
 	return Config{
-		API:          APIConfig{Cooldown: 15, CircuitOpenDuration: circuitOpenDefaultSeconds},
+		API: APIConfig{
+			Cooldown:             15,
+			CircuitOpenDuration:  circuitOpenDefaultSeconds,
+			MissBackoffBaseHours: missBackoffBaseDefault,
+			MissBackoffCapHours:  missBackoffCapDefault,
+			MaxMissAttempts:      15,
+		},
 		Output:       OutputConfig{Dir: "lyrics"},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
@@ -102,7 +132,8 @@ func Load(path string) (Config, error) {
 	}
 	if path != "" {
 		if _, err := os.Stat(path); err == nil {
-			if _, err := toml.DecodeFile(path, &cfg); err != nil {
+			md, err := toml.DecodeFile(path, &cfg)
+			if err != nil {
 				return cfg, fmt.Errorf("config: decode %s: %w", path, err)
 			}
 			// Re-apply defaults for any fields the file set to blank.
@@ -142,12 +173,30 @@ func Load(path string) (Config, error) {
 			if cfg.API.CircuitOpenDuration == 0 {
 				cfg.API.CircuitOpenDuration = d.API.CircuitOpenDuration
 			}
+			// MissBackoffBaseHours/MissBackoffCapHours: 0 means "not set in
+			// file"; restore defaults so a blank config.example.toml copy
+			// gets the documented cadence.
+			if cfg.API.MissBackoffBaseHours == 0 {
+				cfg.API.MissBackoffBaseHours = d.API.MissBackoffBaseHours
+			}
+			if cfg.API.MissBackoffCapHours == 0 {
+				cfg.API.MissBackoffCapHours = d.API.MissBackoffCapHours
+			}
+			// MaxMissAttempts: 0 is a valid user value (no cap), so a plain
+			// int TOML field cannot distinguish "omitted" from "explicit 0".
+			// Use MetaData.IsDefined to restore the default (15) only when the
+			// key is absent from the file; an explicit max_miss_attempts = 0
+			// is preserved as-is (user opts out of the cap).
+			if !md.IsDefined("api", "max_miss_attempts") {
+				cfg.API.MaxMissAttempts = d.API.MaxMissAttempts
+			}
 		} else if !os.IsNotExist(err) {
 			return cfg, fmt.Errorf("config: stat %s: %w", path, err)
 		}
 	}
 	applyEnvOverrides(&cfg)
 	clampCircuitOpenDuration(&cfg)
+	clampMissBackoff(&cfg)
 	if cfg.DB.Path == "" {
 		return cfg, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
 	}
@@ -157,7 +206,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -188,6 +237,31 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_API_CIRCUIT_OPEN_DURATION", "value", v, "current", cfg.API.CircuitOpenDuration) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.CircuitOpenDuration = n
+		}
+	}
+
+	if v := os.Getenv("MXLRC_MISS_BACKOFF_BASE_HOURS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_MISS_BACKOFF_BASE_HOURS", "value", v, "current", cfg.API.MissBackoffBaseHours) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.API.MissBackoffBaseHours = n
+		}
+	}
+	if v := os.Getenv("MXLRC_MISS_BACKOFF_CAP_HOURS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_MISS_BACKOFF_CAP_HOURS", "value", v, "current", cfg.API.MissBackoffCapHours) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.API.MissBackoffCapHours = n
+		}
+	}
+	if v := os.Getenv("MXLRC_MAX_MISS_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_MAX_MISS_ATTEMPTS", "value", v, "current", cfg.API.MaxMissAttempts) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.API.MaxMissAttempts = n
 		}
 	}
 
@@ -288,6 +362,25 @@ func clampCircuitOpenDuration(cfg *Config) {
 	if cfg.API.CircuitOpenDuration < circuitOpenMinSeconds {
 		slog.Warn("circuit_open_duration below minimum; clamping", "configured", cfg.API.CircuitOpenDuration, "minimum", circuitOpenMinSeconds)
 		cfg.API.CircuitOpenDuration = circuitOpenMinSeconds
+	}
+}
+
+// clampMissBackoff enforces valid ranges for the miss-cadence knobs.
+//   - MissBackoffBaseHours: clamped to missBackoffBaseMin (1h) from below.
+//   - MissBackoffCapHours: clamped to MissBackoffBaseHours from below (cap must >= base).
+//   - MaxMissAttempts: clamped to 0 from below (negative means no cap).
+func clampMissBackoff(cfg *Config) {
+	if cfg.API.MissBackoffBaseHours < missBackoffBaseMin {
+		slog.Warn("miss_backoff_base_hours below minimum; clamping", "configured", cfg.API.MissBackoffBaseHours, "minimum", missBackoffBaseMin)
+		cfg.API.MissBackoffBaseHours = missBackoffBaseMin
+	}
+	if cfg.API.MissBackoffCapHours < cfg.API.MissBackoffBaseHours {
+		slog.Warn("miss_backoff_cap_hours below base; clamping to base", "configured", cfg.API.MissBackoffCapHours, "base", cfg.API.MissBackoffBaseHours)
+		cfg.API.MissBackoffCapHours = cfg.API.MissBackoffBaseHours
+	}
+	if cfg.API.MaxMissAttempts < 0 {
+		slog.Warn("max_miss_attempts is negative; clamping to 0 (no cap)", "configured", cfg.API.MaxMissAttempts)
+		cfg.API.MaxMissAttempts = 0
 	}
 }
 

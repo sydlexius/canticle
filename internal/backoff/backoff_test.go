@@ -56,3 +56,44 @@ func TestGeometricDefaultsCadence(t *testing.T) {
 		}
 	}
 }
+
+// TestMissCooldownCadenceAndCap verifies the documented escalation schedule
+// for benign misses: 168h (7d), 336h (14d), 672h (28d, cap), 672h, ...
+func TestMissCooldownCadenceAndCap(t *testing.T) {
+	tests := []struct {
+		missCount int
+		want      time.Duration
+	}{
+		{1, 168 * time.Hour},
+		{2, 336 * time.Hour},
+		{3, 672 * time.Hour},  // cap
+		{4, 672 * time.Hour},  // still cap
+		{5, 672 * time.Hour},  // still cap
+		{6, 672 * time.Hour},  // still cap
+		{7, 672 * time.Hour},  // still cap
+		{10, 672 * time.Hour}, // still cap
+	}
+	for _, tc := range tests {
+		got := MissCooldown(tc.missCount, DefaultMissBase, DefaultMissCap)
+		if got != tc.want {
+			t.Fatalf("MissCooldown(%d) = %s; want %s", tc.missCount, got, tc.want)
+		}
+	}
+}
+
+// TestMissCooldownZeroAttemptTreatedAsOne ensures missCount<1 maps to base.
+func TestMissCooldownZeroAttemptTreatedAsOne(t *testing.T) {
+	if got := MissCooldown(0, DefaultMissBase, DefaultMissCap); got != DefaultMissBase {
+		t.Fatalf("MissCooldown(0) = %s; want %s (treat 0 as 1)", got, DefaultMissBase)
+	}
+}
+
+// TestMissCooldownZeroBaseOrCap returns 0 (inherits Geometric behavior).
+func TestMissCooldownZeroBaseOrCap(t *testing.T) {
+	if got := MissCooldown(3, 0, DefaultMissCap); got != 0 {
+		t.Fatalf("MissCooldown(3, 0, cap) = %s; want 0", got)
+	}
+	if got := MissCooldown(3, DefaultMissBase, 0); got != 0 {
+		t.Fatalf("MissCooldown(3, base, 0) = %s; want 0", got)
+	}
+}

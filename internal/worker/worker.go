@@ -25,6 +25,12 @@ type Queue interface {
 	Fail(ctx context.Context, id int64, cause error) (queue.WorkItem, error)
 	Defer(ctx context.Context, id int64, retryAfter time.Duration, cause error) (queue.WorkItem, error)
 	Release(ctx context.Context, id int64) error
+	// RetireMiss permanently closes a processing row that has exceeded the
+	// max-miss-attempts cap. It sets status='done' with last_error='miss limit
+	// reached' on both the work_queue row and every linked scan_results row,
+	// marking the track as terminal. The scan layer will show the track as done
+	// (not pending) so it is not mistaken for an in-flight item.
+	RetireMiss(ctx context.Context, id int64) (queue.WorkItem, error)
 }
 
 // Cache provides lyrics cache operations.
@@ -38,16 +44,6 @@ type Cache interface {
 // is configured via SetCircuitOpenDuration. Mirrors the config default so
 // non-server callers (tests, ad-hoc CLI runs) get sensible behavior.
 const defaultCircuitOpenDuration = 30 * time.Minute
-
-// benignMissCooldown is the fixed delay applied when a track resolves to a
-// benign miss (no matching track, or a match with no usable lyrics). A miss
-// is not our failure and does not retire the queue row, but the catalog
-// rarely gains the missing lyrics on an hourly cadence, so a generous
-// days-scale cooldown keeps the worker from re-querying upstream for the
-// same dead track on every library scan. Unlike geometric backoff, this
-// delay does not ramp with the attempt count: each re-check waits the same
-// fixed window.
-const benignMissCooldown = 7 * 24 * time.Hour
 
 // Worker consumes queued lyrics work one item at a time. The scan_results
 // writeback for successful completions is handled atomically inside
@@ -71,6 +67,9 @@ type Worker struct {
 	now                   func() time.Time
 	circuitOpenDuration   time.Duration
 	circuitOpenUntil      time.Time
+	missBackoffBase       time.Duration
+	missBackoffCap        time.Duration
+	maxMissAttempts       int
 }
 
 var errQueueEmpty = errors.New("worker queue empty")
@@ -88,6 +87,12 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		sleep:                 sleepCtx,
 		now:                   time.Now,
 		circuitOpenDuration:   defaultCircuitOpenDuration,
+		missBackoffBase:       backoff.DefaultMissBase,
+		missBackoffCap:        backoff.DefaultMissCap,
+		// maxMissAttempts defaults to 0 (no cap). Non-serve callers (tests, ad-hoc
+		// CLI runs) get indefinite deferral; the config layer sets the cap via
+		// SetMaxMissAttempts using [api].max_miss_attempts (default 15).
+		maxMissAttempts: 0,
 	}
 }
 
@@ -99,6 +104,30 @@ func (w *Worker) SetCircuitOpenDuration(d time.Duration) {
 	if d > 0 {
 		w.circuitOpenDuration = d
 	}
+}
+
+// SetMissBackoff overrides the geometric miss-cadence parameters. base sets the
+// initial re-check delay for the first miss; cap sets the ceiling (successive
+// misses double from base up to cap). Zero or negative values are ignored so a
+// misconfigured call cannot disable the cadence; clamping against any minimum
+// is the responsibility of the caller (typically the config layer).
+func (w *Worker) SetMissBackoff(base, cap time.Duration) {
+	if base > 0 {
+		w.missBackoffBase = base
+	}
+	if cap > 0 {
+		w.missBackoffCap = cap
+	}
+}
+
+// SetMaxMissAttempts overrides the miss-attempt cap. When miss_count exceeds
+// this value the queue row is retired rather than re-deferred. A value of 0
+// means no cap (retry indefinitely). Negative values are clamped to 0.
+func (w *Worker) SetMaxMissAttempts(n int) {
+	if n < 0 {
+		n = 0
+	}
+	w.maxMissAttempts = n
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) {
@@ -335,32 +364,52 @@ func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) err
 	return nil
 }
 
-// requeueDeferred re-queues a no-result item after a fixed cooldown
-// (benignMissCooldown, via Defer) WITHOUT tripping the consecutive-failure
-// counter. The queue row is not retired: it stays re-dequeueable once the
-// cooldown elapses and re-enqueueable by a later scan or webhook, so it is
-// retried eventually as the catalog grows, while the worker neither slows down
-// nor re-queries upstream hourly for the same dead track. Defer moves the row
-// to the distinct 'deferred' state and bumps miss_count without incrementing
-// attempts, so the cooldown is fixed (not geometric). On a SCAN-priority
-// re-enqueue the cooldown survives: Enqueue preserves next_attempt_at for
-// 'deferred' rows. A WEBHOOK re-enqueue intentionally resets it to now to force
-// an immediate retry (see DBQueue.Enqueue).
+// requeueDeferred reschedules a no-result item using the escalating miss
+// cadence (geometric doubling from missBackoffBase up to missBackoffCap) WITHOUT
+// tripping the consecutive-failure counter. The next miss_count (item.MissCount+1)
+// drives the delay so the first re-check is base, the second is 2*base, etc.
 //
-// A sql.ErrNoRows from Defer is benign here: it means the row is no longer
-// 'processing' because it was canceled or re-dequeued out from under us
-// (a lost race), not a real failure. Log it at debug and return nil so the run
-// loop does not surface a scary "worker run failed" warning for a no-result.
+// When maxMissAttempts > 0 and the next miss_count meets or exceeds the cap the
+// row is retired via RetireMiss (status='done' on work_queue and linked
+// scan_results, last_error='miss limit reached') rather than re-deferred. With
+// max_miss_attempts=N exactly N upstream fetches occur before retirement.
+//
+// A sql.ErrNoRows from Defer or RetireMiss is benign: the row is no longer
+// 'processing' because it was canceled or re-dequeued out from under us (a lost
+// race). Log at debug and return nil so the run loop stays quiet.
 func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause error) error {
-	deferred, err := w.queue.Defer(context.WithoutCancel(ctx), item.ID, benignMissCooldown, cause)
+	nextMissCount := item.MissCount + 1
+	noCancel := context.WithoutCancel(ctx)
+
+	if w.maxMissAttempts > 0 && nextMissCount >= w.maxMissAttempts {
+		retired, err := w.queue.RetireMiss(noCancel, item.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				slog.Debug("benign miss retire skipped; item moved on", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "cause", cause)
+				return nil
+			}
+			return fmt.Errorf("worker: retire miss item %d after %v: %w", item.ID, cause, err)
+		}
+		slog.Info("benign miss retired; track abandoned after max miss attempts",
+			"id", retired.ID,
+			"artist", item.Inputs.Track.ArtistName,
+			"track", item.Inputs.Track.TrackName,
+			"miss_count", retired.MissCount,
+			"max_miss_attempts", w.maxMissAttempts,
+		)
+		return nil
+	}
+
+	cooldown := backoff.MissCooldown(nextMissCount, w.missBackoffBase, w.missBackoffCap)
+	deferred, err := w.queue.Defer(noCancel, item.ID, cooldown, cause)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			slog.Debug("benign miss defer skipped; item moved on", "id", item.ID, "cause", cause)
+			slog.Debug("benign miss defer skipped; item moved on", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "cause", cause)
 			return nil
 		}
 		return fmt.Errorf("worker: requeue item %d after %v: %w", item.ID, cause, err)
 	}
-	slog.Info("benign miss deferred", "id", item.ID, "retry_after", benignMissCooldown, "next_attempt_at", deferred.NextAttemptAt)
+	slog.Info("benign miss deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "miss_count", deferred.MissCount, "retry_after", cooldown, "next_attempt_at", deferred.NextAttemptAt)
 	return nil
 }
 

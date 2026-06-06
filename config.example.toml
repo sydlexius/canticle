@@ -24,6 +24,21 @@ cooldown = 15
 # minimum 300 (5 min) -- smaller values are clamped at load time.
 circuit_open_duration = 1800
 
+# Escalating re-check cadence for benign misses (no matching track or no
+# usable lyrics). The delay doubles each miss: base, 2*base, 4*base, ... up to
+# cap. Overrides: MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS.
+# miss_backoff_base_hours = 168   # initial re-check delay (hours; 7 days); minimum 1
+# miss_backoff_cap_hours = 672    # maximum re-check delay (hours; 28 days)
+
+# Maximum number of miss fetches before retiring the queue row.
+# Retire after N miss fetches: when miss_count reaches this value the row is
+# closed (work_queue and linked scan_results both set to status=done,
+# last_error="miss limit reached"). This is terminal under current providers;
+# a future multi-source sweep (issue #103d) could revive it.
+# Default 15 (~1 year with the 7d base cadence). Set to 0 for no cap.
+# Override: MXLRC_MAX_MISS_ATTEMPTS.
+# max_miss_attempts = 15
+
 [output]
 # Default output directory for .lrc files.
 dir = "lyrics"

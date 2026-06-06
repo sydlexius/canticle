@@ -17,6 +17,7 @@ func isolateEnv(t *testing.T) {
 		"MUSIXMATCH_TOKEN", "MXLRC_API_TOKEN",
 		"MXLRC_API_COOLDOWN", "MXLRC_COOLDOWN",
 		"MXLRC_API_CIRCUIT_OPEN_DURATION",
+		"MXLRC_MISS_BACKOFF_BASE_HOURS", "MXLRC_MISS_BACKOFF_CAP_HOURS", "MXLRC_MAX_MISS_ATTEMPTS",
 		"MXLRC_OUTPUT_DIR", "MXLRC_SERVER_ADDR", "MXLRC_WEBHOOK_API_KEY",
 		"MXLRC_SCAN_INTERVAL", "MXLRC_WORK_INTERVAL",
 		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED",
@@ -531,5 +532,207 @@ func TestLoad_InvalidTOMLReturnsError(t *testing.T) {
 	_, err := Load(cfgFile)
 	if err == nil {
 		t.Fatal("Load with invalid TOML returned nil error; want an error")
+	}
+}
+
+// TestLoad_MissBackoffDefaults verifies that the built-in defaults for the
+// miss-cadence knobs match the documented values.
+func TestLoad_MissBackoffDefaults(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MissBackoffBaseHours != 168 {
+		t.Fatalf("MissBackoffBaseHours = %d; want 168", cfg.API.MissBackoffBaseHours)
+	}
+	if cfg.API.MissBackoffCapHours != 672 {
+		t.Fatalf("MissBackoffCapHours = %d; want 672", cfg.API.MissBackoffCapHours)
+	}
+	if cfg.API.MaxMissAttempts != 15 {
+		t.Fatalf("MaxMissAttempts = %d; want 15", cfg.API.MaxMissAttempts)
+	}
+}
+
+// TestLoad_MaxMissAttemptsOmittedInTOMLGetsDefault verifies that when
+// max_miss_attempts is absent from the TOML file, Load restores the default
+// (15) rather than leaving the TOML zero-value (0 = no cap). This matters
+// because plain-int TOML cannot distinguish "omitted" from "explicit 0";
+// MetaData.IsDefined is used to detect the omitted case.
+func TestLoad_MaxMissAttemptsOmittedInTOMLGetsDefault(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	// TOML file with [api] table but no max_miss_attempts key.
+	if err := os.WriteFile(cfgFile, []byte("[api]\ncooldown = 10\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MaxMissAttempts != 15 {
+		t.Fatalf("MaxMissAttempts = %d; want 15 (omitted key must restore default)", cfg.API.MaxMissAttempts)
+	}
+}
+
+// TestLoad_MaxMissAttemptsExplicitZeroInTOMLIsPreserved verifies that an
+// explicit max_miss_attempts = 0 in the TOML file is honored as "no cap"
+// and not overwritten by the default (15).
+func TestLoad_MaxMissAttemptsExplicitZeroInTOMLIsPreserved(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgFile, []byte("[api]\nmax_miss_attempts = 0\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MaxMissAttempts != 0 {
+		t.Fatalf("MaxMissAttempts = %d; want 0 (explicit 0 must be preserved as no-cap)", cfg.API.MaxMissAttempts)
+	}
+}
+
+// TestLoad_MaxMissAttemptsExplicitNonZeroInTOML verifies a positive
+// max_miss_attempts value in the TOML file is picked up correctly.
+func TestLoad_MaxMissAttemptsExplicitNonZeroInTOML(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgFile, []byte("[api]\nmax_miss_attempts = 5\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MaxMissAttempts != 5 {
+		t.Fatalf("MaxMissAttempts = %d; want 5", cfg.API.MaxMissAttempts)
+	}
+}
+
+// TestLoad_MaxMissAttemptsEnvZeroIsNoCapEvenWithDefault verifies that
+// MXLRC_MAX_MISS_ATTEMPTS=0 results in 0 (no cap), overriding the default of 15.
+func TestLoad_MaxMissAttemptsEnvZeroIsNoCap(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_MAX_MISS_ATTEMPTS", "0")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MaxMissAttempts != 0 {
+		t.Fatalf("MaxMissAttempts = %d; want 0 (MXLRC_MAX_MISS_ATTEMPTS=0 must mean no cap)", cfg.API.MaxMissAttempts)
+	}
+}
+
+// TestLoad_MissBackoffFromEnv verifies that the three miss-cadence env vars
+// override the defaults.
+func TestLoad_MissBackoffFromEnv(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_MISS_BACKOFF_BASE_HOURS", "48")
+	t.Setenv("MXLRC_MISS_BACKOFF_CAP_HOURS", "336")
+	t.Setenv("MXLRC_MAX_MISS_ATTEMPTS", "5")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MissBackoffBaseHours != 48 {
+		t.Fatalf("MissBackoffBaseHours = %d; want 48", cfg.API.MissBackoffBaseHours)
+	}
+	if cfg.API.MissBackoffCapHours != 336 {
+		t.Fatalf("MissBackoffCapHours = %d; want 336", cfg.API.MissBackoffCapHours)
+	}
+	if cfg.API.MaxMissAttempts != 5 {
+		t.Fatalf("MaxMissAttempts = %d; want 5", cfg.API.MaxMissAttempts)
+	}
+}
+
+// TestLoad_MissBackoffClampsBase verifies that base < 1h is clamped to 1h.
+func TestLoad_MissBackoffClampsBase(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_MISS_BACKOFF_BASE_HOURS", "0")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// 0 is treated as "not set" by env override (env override only applies >0);
+	// clampMissBackoff then raises 0 to the default, which after the env parse
+	// becomes the built-in default (168h / 7d).
+	if cfg.API.MissBackoffBaseHours < 1 {
+		t.Fatalf("MissBackoffBaseHours = %d; want >= 1 (clamped from 0)", cfg.API.MissBackoffBaseHours)
+	}
+}
+
+// TestLoad_MissBackoffClampsCapBelowBase verifies that cap < base is clamped
+// up to base.
+func TestLoad_MissBackoffClampsCapBelowBase(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_MISS_BACKOFF_BASE_HOURS", "48")
+	t.Setenv("MXLRC_MISS_BACKOFF_CAP_HOURS", "24")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MissBackoffCapHours < cfg.API.MissBackoffBaseHours {
+		t.Fatalf("MissBackoffCapHours (%d) < MissBackoffBaseHours (%d); should be clamped to base", cfg.API.MissBackoffCapHours, cfg.API.MissBackoffBaseHours)
+	}
+	if cfg.API.MissBackoffCapHours != 48 {
+		t.Fatalf("MissBackoffCapHours = %d; want 48 (clamped to base)", cfg.API.MissBackoffCapHours)
+	}
+}
+
+// TestLoad_MaxMissAttemptsClampsNegative verifies that negative MaxMissAttempts
+// is clamped to 0.
+func TestLoad_MaxMissAttemptsClampsNegative(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_MAX_MISS_ATTEMPTS", "-1")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// -1 is not parsed (env override only sets positive; negative falls through
+	// and clampMissBackoff clamps to 0).
+	if cfg.API.MaxMissAttempts != 0 {
+		t.Fatalf("MaxMissAttempts = %d; want 0 (clamped from negative)", cfg.API.MaxMissAttempts)
+	}
+}
+
+// TestLoad_MissBackoffFromTOML verifies that TOML values are picked up.
+func TestLoad_MissBackoffFromTOML(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgFile, []byte(`
+[api]
+miss_backoff_base_hours = 12
+miss_backoff_cap_hours = 96
+max_miss_attempts = 10
+`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.MissBackoffBaseHours != 12 {
+		t.Fatalf("MissBackoffBaseHours = %d; want 12", cfg.API.MissBackoffBaseHours)
+	}
+	if cfg.API.MissBackoffCapHours != 96 {
+		t.Fatalf("MissBackoffCapHours = %d; want 96", cfg.API.MissBackoffCapHours)
+	}
+	if cfg.API.MaxMissAttempts != 10 {
+		t.Fatalf("MaxMissAttempts = %d; want 10", cfg.API.MaxMissAttempts)
 	}
 }

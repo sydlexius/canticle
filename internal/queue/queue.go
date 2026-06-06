@@ -128,6 +128,14 @@ func NewDBQueue(db *sql.DB) *DBQueue {
 // scan_result_id, the link is also recorded in work_queue_scan_results so a
 // later Complete writeback can flip every collapsed scan_results row, not just
 // the first one observed.
+//
+// Priority update semantics on conflict:
+//   - A webhook-priority (>= PriorityWebhook) enqueue always overrides the
+//     stored priority so an explicit webhook can always preempt a deferred miss.
+//   - A scan-priority (< PriorityWebhook) enqueue preserves the stored priority
+//     when the row is deferred so that PriorityMiss deprioritization survives
+//     bulk library scans and the deferred row stays behind fresh work.
+//   - For all other states (pending, failed) the higher of the two priorities wins.
 func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority int) (WorkItem, error) {
 	now := formatTime(q.now())
 	outputPaths, err := marshalOutputPaths(inputs)
@@ -180,7 +188,11 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE excluded.output_paths
              END,
              scan_result_id = COALESCE(work_queue.scan_result_id, excluded.scan_result_id),
-             priority = max(work_queue.priority, excluded.priority),
+             priority = CASE
+                 WHEN excluded.priority >= 10 THEN excluded.priority           -- PriorityWebhook always wins
+                 WHEN work_queue.status = 'deferred' THEN work_queue.priority  -- preserve miss deprioritization
+                 ELSE max(work_queue.priority, excluded.priority)
+             END,
              status = CASE
                  WHEN work_queue.status IN ('done', 'processing', 'failed', 'deferred') THEN work_queue.status
                  ELSE 'pending'
@@ -426,9 +438,14 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
 		lastError = cause.Error()
 	}
 	row := q.db.QueryRowContext(ctx,
+		// priority is set to PriorityMiss (-100) so that re-attempts from the
+		// escalating miss cadence sink below all fresh work in the dequeue
+		// ORDER BY priority DESC sort. The literal -100 is used here rather than
+		// a Go constant because the SQL driver does not accept named Go values.
 		`UPDATE work_queue
          SET status = 'deferred',
              miss_count = miss_count + 1,
+             priority = -100,
              next_attempt_at = ?,
              last_error = ?
          WHERE id = ?
@@ -445,6 +462,66 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
 	}
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: defer: %w", err)
+	}
+	return item, nil
+}
+
+// RetireMiss permanently closes a processing row that has exceeded the
+// configured miss-attempt cap. It runs a transaction that mirrors Complete's
+// scan_results writeback: work_queue is set to status='done' with sentinel
+// last_error "miss limit reached", and every linked scan_results row is also
+// set to status='done' so the scan layer does not strand the track in
+// 'processing' forever. Unlike Complete (which signals a successful lyrics
+// fetch), the last_error clearly marks this as a miss-limit terminal; the
+// distinction is visible in the last_error field, not in the status column.
+//
+// Retirement is terminal under current providers. A future multi-source sweep
+// (issue #103, slice 103d) could revive a retired track by resetting its
+// scan_results row back to 'pending', but no such mechanism exists today.
+//
+// The guard AND status = 'processing' ensures only the worker that currently
+// holds the row can retire it; sql.ErrNoRows is returned if the row moved on
+// (a benign lost race).
+func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
+	now := formatTime(q.now())
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkItem{}, fmt.Errorf("queue: begin retire miss tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx,
+		`UPDATE work_queue
+         SET status = 'done',
+             completed_at = ?,
+             last_error = 'miss limit reached'
+         WHERE id = ?
+           AND status = 'processing'
+         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+		now,
+		id,
+	)
+	item, err := scanWorkItem(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkItem{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return WorkItem{}, fmt.Errorf("queue: retire miss: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE scan_results
+         SET status = 'done'
+         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+           AND status != 'done'`,
+		id,
+	); err != nil {
+		return WorkItem{}, fmt.Errorf("queue: retire miss scan_results writeback: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return WorkItem{}, fmt.Errorf("queue: commit retire miss tx: %w", err)
 	}
 	return item, nil
 }

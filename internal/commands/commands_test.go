@@ -1611,3 +1611,79 @@ func TestRunQueueList_StatusDeferred(t *testing.T) {
 		t.Fatalf("output missing header: %q", out.String())
 	}
 }
+
+// TestMissCadenceConfigKeys verifies that the three miss-cadence knobs are
+// accessible via configValue, setConfigValue, and configKeys.
+func TestMissCadenceConfigKeys(t *testing.T) {
+	cfg := config.Config{API: config.APIConfig{
+		MissBackoffBaseHours: 168,
+		MissBackoffCapHours:  672,
+		MaxMissAttempts:      15,
+	}}
+
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"api.miss_backoff_base_hours", "168"},
+		{"api.miss_backoff_cap_hours", "672"},
+		{"api.max_miss_attempts", "15"},
+	}
+	for _, tc := range tests {
+		got, ok := configValue(cfg, tc.key)
+		if !ok {
+			t.Fatalf("configValue(%q) ok = false; want true", tc.key)
+		}
+		if got != tc.want {
+			t.Fatalf("configValue(%q) = %q; want %q", tc.key, got, tc.want)
+		}
+	}
+
+	// setConfigValue round-trip.
+	if err := setConfigValue(&cfg, "api.miss_backoff_base_hours", "48"); err != nil {
+		t.Fatalf("setConfigValue miss_backoff_base_hours: %v", err)
+	}
+	if cfg.API.MissBackoffBaseHours != 48 {
+		t.Fatalf("MissBackoffBaseHours = %d; want 48", cfg.API.MissBackoffBaseHours)
+	}
+
+	if err := setConfigValue(&cfg, "api.miss_backoff_cap_hours", "336"); err != nil {
+		t.Fatalf("setConfigValue miss_backoff_cap_hours: %v", err)
+	}
+	if cfg.API.MissBackoffCapHours != 336 {
+		t.Fatalf("MissBackoffCapHours = %d; want 336", cfg.API.MissBackoffCapHours)
+	}
+
+	if err := setConfigValue(&cfg, "api.max_miss_attempts", "10"); err != nil {
+		t.Fatalf("setConfigValue max_miss_attempts: %v", err)
+	}
+	if cfg.API.MaxMissAttempts != 10 {
+		t.Fatalf("MaxMissAttempts = %d; want 10", cfg.API.MaxMissAttempts)
+	}
+
+	// Reject invalid values.
+	for _, bad := range []string{"", "abc", "-1", "0"} {
+		if err := setConfigValue(&cfg, "api.miss_backoff_base_hours", bad); err == nil {
+			t.Fatalf("setConfigValue accepted invalid miss_backoff_base_hours %q", bad)
+		}
+		if err := setConfigValue(&cfg, "api.miss_backoff_cap_hours", bad); err == nil {
+			t.Fatalf("setConfigValue accepted invalid miss_backoff_cap_hours %q", bad)
+		}
+	}
+	for _, bad := range []string{"", "abc", "-1"} {
+		if err := setConfigValue(&cfg, "api.max_miss_attempts", bad); err == nil {
+			t.Fatalf("setConfigValue accepted invalid max_miss_attempts %q", bad)
+		}
+	}
+	// 0 is valid for max_miss_attempts (means no cap).
+	if err := setConfigValue(&cfg, "api.max_miss_attempts", "0"); err != nil {
+		t.Fatalf("setConfigValue(max_miss_attempts, 0) = %v; want nil (0 is valid)", err)
+	}
+
+	// All three must appear in configKeys.
+	for _, key := range []string{"api.miss_backoff_base_hours", "api.miss_backoff_cap_hours", "api.max_miss_attempts"} {
+		if !slices.Contains(configKeys(), key) {
+			t.Fatalf("configKeys missing %q", key)
+		}
+	}
+}
