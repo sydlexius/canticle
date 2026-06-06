@@ -72,7 +72,7 @@ func (q *fakeQueue) Defer(_ context.Context, id int64, retryAfter time.Duration,
 	q.deferred = append(q.deferred, id)
 	q.deferCauses = append(q.deferCauses, cause)
 	q.deferDurations = append(q.deferDurations, retryAfter)
-	return queue.WorkItem{ID: id, Status: queue.StatusFailed}, nil
+	return queue.WorkItem{ID: id, Status: queue.StatusDeferred}, nil
 }
 
 func (q *fakeQueue) Release(_ context.Context, id int64) error {

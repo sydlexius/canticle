@@ -184,8 +184,11 @@ func TestDBQueue_NoResultRequeueIsDeferredButReprocessable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Defer: %v", err)
 	}
-	if deferred.Status != StatusFailed {
-		t.Fatalf("status = %q; want %q (deferred, not terminal)", deferred.Status, StatusFailed)
+	if deferred.Status != StatusDeferred {
+		t.Fatalf("status = %q; want %q (deferred, not terminal)", deferred.Status, StatusDeferred)
+	}
+	if deferred.MissCount != 1 {
+		t.Fatalf("miss_count = %d; want 1 (Defer must increment miss_count)", deferred.MissCount)
 	}
 
 	// The cooldown is fixed: next_attempt_at is exactly now+cooldown and attempts
@@ -248,8 +251,8 @@ func TestDBQueue_WebhookEnqueueResetsDeferredCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Defer: %v", err)
 	}
-	if deferred.Status != StatusFailed {
-		t.Fatalf("status = %q; want %q", deferred.Status, StatusFailed)
+	if deferred.Status != StatusDeferred {
+		t.Fatalf("status = %q; want %q", deferred.Status, StatusDeferred)
 	}
 
 	// Control: a scan-priority Enqueue must NOT reset the cooldown.
@@ -1174,6 +1177,21 @@ func TestDBQueue_RetryRejectsNonFailedStatus(t *testing.T) {
 	if _, err := q.Retry(ctx, 9999); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("Retry missing id error = %v; want sql.ErrNoRows", err)
 	}
+
+	// Deferred rows must also be rejected; they are not reset via Retry.
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "X", TrackName: "Deferred"}}, 1); err != nil {
+		t.Fatalf("Enqueue deferred candidate: %v", err)
+	}
+	ditem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue deferred candidate: %v", err)
+	}
+	if _, err := q.Defer(ctx, ditem.ID, 7*24*time.Hour, errors.New("no results")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if _, err := q.Retry(ctx, ditem.ID); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("Retry deferred error = %v; want ErrNotRetryable", err)
+	}
 }
 
 func TestDBQueue_ClearDoneRemovesOnlyDoneRows(t *testing.T) {
@@ -1769,5 +1787,120 @@ func TestDBQueue_CancelByLibraryTx_RunsInExternalTransaction(t *testing.T) {
 	}
 	if postCommit != 0 {
 		t.Fatalf("work_queue row %d count after commit = %d; want 0", item.ID, postCommit)
+	}
+}
+
+// TestDBQueue_DeferSetsDeferredStatus verifies that Defer transitions a
+// processing row to StatusDeferred (not StatusFailed) and increments miss_count.
+func TestDBQueue_DeferSetsDeferredStatus(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if item.MissCount != 0 {
+		t.Fatalf("initial miss_count = %d; want 0", item.MissCount)
+	}
+
+	deferred, err := q.Defer(ctx, item.ID, 7*24*time.Hour, errors.New("no results"))
+	if err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if deferred.Status != StatusDeferred {
+		t.Fatalf("status = %q; want %q", deferred.Status, StatusDeferred)
+	}
+	if deferred.MissCount != 1 {
+		t.Fatalf("miss_count = %d; want 1 after first Defer", deferred.MissCount)
+	}
+	if deferred.Attempts != item.Attempts {
+		t.Fatalf("attempts = %d; want unchanged %d", deferred.Attempts, item.Attempts)
+	}
+
+	// Second Defer: re-enqueue and defer again; miss_count increments further.
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityWebhook); err != nil {
+		t.Fatalf("Enqueue (force re-check): %v", err)
+	}
+	item2, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue 2: %v", err)
+	}
+	deferred2, err := q.Defer(ctx, item2.ID, 7*24*time.Hour, errors.New("still no results"))
+	if err != nil {
+		t.Fatalf("Defer 2: %v", err)
+	}
+	if deferred2.MissCount != 2 {
+		t.Fatalf("miss_count = %d; want 2 after second Defer", deferred2.MissCount)
+	}
+}
+
+// TestDBQueue_DeferredRowsArePickedUpByDequeue verifies that a deferred row
+// becomes eligible for Dequeue once its next_attempt_at window elapses.
+func TestDBQueue_DeferredRowsArePickedUpByDequeue(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	const cooldown = 7 * 24 * time.Hour
+	if _, err := q.Defer(ctx, item.ID, cooldown, errors.New("no results")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	// Not yet eligible.
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Dequeue before cooldown = %v; want sql.ErrNoRows", err)
+	}
+
+	// Advance time past the cooldown.
+	q.now = func() time.Time { return now.Add(cooldown + time.Second) }
+	again, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue after cooldown: %v", err)
+	}
+	if again.ID != item.ID {
+		t.Fatalf("re-dequeued ID = %d; want %d", again.ID, item.ID)
+	}
+}
+
+// TestDBQueue_CountByStatusIncludesDeferred verifies that CountByStatus
+// reports a non-zero deferred bucket once a row has been deferred.
+func TestDBQueue_CountByStatusIncludesDeferred(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "B"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, 7*24*time.Hour, errors.New("miss")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	counts, err := q.CountByStatus(ctx)
+	if err != nil {
+		t.Fatalf("CountByStatus: %v", err)
+	}
+	if counts[StatusDeferred] != 1 {
+		t.Fatalf("deferred count = %d; want 1. counts = %v", counts[StatusDeferred], counts)
+	}
+	if counts[StatusFailed] != 0 {
+		t.Fatalf("failed count = %d; want 0 (deferred must not appear as failed)", counts[StatusFailed])
 	}
 }

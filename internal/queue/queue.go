@@ -22,13 +22,24 @@ const (
 	StatusDone = "done"
 	// StatusFailed marks queued work that failed and may be retried after backoff.
 	StatusFailed = "failed"
+	// StatusDeferred marks queued work that produced a benign no-result miss and
+	// has been rescheduled after a fixed cooldown. Unlike StatusFailed, a deferred
+	// row does not count against the geometric retry budget: Defer leaves attempts
+	// unchanged so each re-check waits the same fixed window. Deferred rows are
+	// eligible for Dequeue once their next_attempt_at has elapsed, and they are
+	// preserved by scan-priority Enqueue so bulk library scans cannot un-defer
+	// them. A webhook-priority Enqueue resets next_attempt_at to now, providing
+	// an intentional force-recheck escape hatch.
+	StatusDeferred = "deferred"
 )
 
 const timeFormat = time.RFC3339
 
 // ErrNotRetryable is returned by Retry when the targeted work item is not in
-// the failed state and therefore cannot be safely reset (e.g. processing or
-// done). This avoids racing the worker on rows it currently owns.
+// the failed state and therefore cannot be safely reset (e.g. processing,
+// done, or deferred). Deferred rows must use the Enqueue webhook-priority path
+// to force an immediate re-check; Retry is intentionally not wired for them.
+// This avoids racing the worker on rows it currently owns.
 var ErrNotRetryable = errors.New("queue: work item is not in failed status")
 
 // InputsQueue is a FIFO queue for processing work items.
@@ -77,16 +88,21 @@ func (q *InputsQueue) Empty() bool {
 
 // WorkItem represents a persisted queue row.
 type WorkItem struct {
-	ID            int64
-	Inputs        models.Inputs
-	Status        string
-	Priority      int
-	Attempts      int
-	NextAttemptAt time.Time
-	LastError     string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	CompletedAt   *time.Time
+	ID        int64
+	Inputs    models.Inputs
+	Status    string
+	Priority  int
+	Attempts  int
+	MissCount int
+	// ProvidersVersion is a reserved seam for the future multi-source re-check
+	// sweep (issue #103, slice 103d). No code path writes it yet, so it is
+	// always 0 today; do not read a real provider generation from it.
+	ProvidersVersion int
+	NextAttemptAt    time.Time
+	LastError        string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	CompletedAt      *time.Time
 }
 
 // DBQueue is a SQLite-backed queue for durable lyrics work.
@@ -166,17 +182,19 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
              scan_result_id = COALESCE(work_queue.scan_result_id, excluded.scan_result_id),
              priority = max(work_queue.priority, excluded.priority),
              status = CASE
-                 WHEN work_queue.status IN ('done', 'processing', 'failed') THEN work_queue.status
+                 WHEN work_queue.status IN ('done', 'processing', 'failed', 'deferred') THEN work_queue.status
                  ELSE 'pending'
              END,
              next_attempt_at = CASE
                  WHEN work_queue.status IN ('done', 'processing') THEN work_queue.next_attempt_at
                  WHEN work_queue.status = 'failed' AND ? = 1 THEN excluded.next_attempt_at
                  WHEN work_queue.status = 'failed' THEN work_queue.next_attempt_at
+                 WHEN work_queue.status = 'deferred' AND ? = 1 THEN excluded.next_attempt_at
+                 WHEN work_queue.status = 'deferred' THEN work_queue.next_attempt_at
                  ELSE excluded.next_attempt_at
              END,
              last_error = CASE
-                 WHEN work_queue.status IN ('done', 'processing', 'failed') THEN work_queue.last_error
+                 WHEN work_queue.status IN ('done', 'processing', 'failed', 'deferred') THEN work_queue.last_error
                  ELSE ''
              END,
              completed_at = CASE
@@ -184,7 +202,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE NULL
              END
          RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
-                   next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		inputs.Track.ArtistName,
 		inputs.Track.TrackName,
 		normalize.NormalizeKey(inputs.Track.ArtistName),
@@ -197,6 +215,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		StatusPending,
 		priority,
 		now,
+		refreshFailedBackoff,
 		refreshFailedBackoff,
 	)
 	item, err := scanWorkItem(row)
@@ -227,13 +246,13 @@ func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
          WHERE id = (
              SELECT id
              FROM work_queue
-             WHERE status IN ('pending', 'failed')
+             WHERE status IN ('pending', 'failed', 'deferred')
                AND next_attempt_at <= ?
              ORDER BY priority DESC, created_at ASC, id ASC
              LIMIT 1
          )
          RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
-                   next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		now,
 	)
 	item, err := scanWorkItem(row)
@@ -320,7 +339,7 @@ func (q *DBQueue) Cleanup(ctx context.Context, inputs models.Inputs) (int64, err
 		`DELETE FROM work_queue
          WHERE artist_key = ?
            AND title_key = ?
-           AND status IN ('pending', 'failed')`,
+           AND status IN ('pending', 'failed', 'deferred')`,
 		normalize.NormalizeKey(inputs.Track.ArtistName),
 		normalize.NormalizeKey(inputs.Track.TrackName),
 	)
@@ -368,7 +387,7 @@ func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, er
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
-                   next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		nextAttempts,
 		nextAttemptAt,
 		lastError,
@@ -387,17 +406,19 @@ func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, er
 // Defer reschedules a processing item after a fixed retryAfter delay without
 // counting the attempt against the retry budget. Unlike Fail, attempts is left
 // unchanged so the delay does not ramp into geometric backoff: every Defer of
-// the same row waits the same fixed window. The row is left in the 'failed'
-// state (not 'pending') on purpose -- Enqueue preserves next_attempt_at for
-// 'failed' rows but resets 'pending' rows to now, so keeping the deferred row
-// 'failed' is what makes the cooldown survive a later library scan rather than
-// being un-deferred on every scan. The reset is asymmetric, matching Enqueue's
-// refreshFailedBackoff logic: a scan-priority Enqueue preserves the deferred
-// next_attempt_at (the cooldown survives bulk scans), but a webhook-priority
-// Enqueue (priority >= PriorityWebhook) resets next_attempt_at to now, so an
-// explicit webhook can force an immediate re-check despite the cooldown. Used by
-// the worker for benign misses (no matching track, or a match with no usable
-// lyrics).
+// the same row waits the same fixed window. miss_count is incremented so the
+// number of benign misses on a row is observable and available to future
+// escalation logic. The row is moved to the distinct 'deferred' state (not
+// 'pending' or 'failed'): 'deferred' is its own queryable status, so benign
+// misses do not pollute the failures view, and Enqueue preserves next_attempt_at
+// for 'deferred' rows just as it does for 'failed' ones, so the cooldown survives
+// a later library scan rather than being un-deferred on every scan. The reset is
+// asymmetric, matching Enqueue's refreshFailedBackoff logic: a scan-priority
+// Enqueue preserves the deferred next_attempt_at (the cooldown survives bulk
+// scans), but a webhook-priority Enqueue (priority >= PriorityWebhook) resets
+// next_attempt_at to now, so an explicit webhook can force an immediate re-check
+// despite the cooldown. Used by the worker for benign misses (no matching track,
+// or a match with no usable lyrics).
 func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration, cause error) (WorkItem, error) {
 	nextAttemptAt := formatTime(q.now().Add(retryAfter))
 	lastError := ""
@@ -406,13 +427,14 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
 	}
 	row := q.db.QueryRowContext(ctx,
 		`UPDATE work_queue
-         SET status = 'failed',
+         SET status = 'deferred',
+             miss_count = miss_count + 1,
              next_attempt_at = ?,
              last_error = ?
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
-                   next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		nextAttemptAt,
 		lastError,
 		id,
@@ -440,7 +462,7 @@ type ListFilter struct {
 // optionally filtered by status and capped by limit.
 func (q *DBQueue) List(ctx context.Context, filter ListFilter) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, outdir, filename, source_path, status, priority, attempts,
-                       next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
+                       miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
                        FROM work_queue`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	const limitClause = ` LIMIT ?`
@@ -505,7 +527,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'failed'
          RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
-                   next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		now,
 		id,
 	)
@@ -600,7 +622,7 @@ func (q *DBQueue) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	return counts, nil
 }
 
-// CancelByLibrary rebuilds or deletes pending/failed work_queue rows whose
+// CancelByLibrary rebuilds or deletes pending/failed/deferred work_queue rows whose
 // output_paths derive from libraryID. Each affected row's output_paths JSON is
 // filtered to retain only entries that appear in scan_results from libraries
 // other than libraryID. Rows whose filtered list is empty are deleted; the
@@ -657,7 +679,7 @@ func cancelByLibrary(ctx context.Context, tx *sql.Tx, libraryID int64, dryRun bo
          JOIN work_queue_scan_results j ON j.work_queue_id = wq.id
          JOIN scan_results sr ON sr.id = j.scan_result_id
          WHERE sr.library_id = ?
-           AND wq.status IN ('pending', 'failed')
+           AND wq.status IN ('pending', 'failed', 'deferred')
          ORDER BY wq.id ASC`,
 		libraryID,
 	)
@@ -705,7 +727,7 @@ func cancelByLibrary(ctx context.Context, tx *sql.Tx, libraryID int64, dryRun bo
 				continue
 			}
 			// The status guard here is belt-and-suspenders: candidates were
-			// selected with status IN ('pending', 'failed'), but SQLite WAL
+			// selected with status IN ('pending', 'failed', 'deferred'), but SQLite WAL
 			// admits a small window between candidate selection and this
 			// per-row write during which the worker could move the row to
 			// 'processing'. A 0 affected-rows result means the row moved on
@@ -713,7 +735,7 @@ func cancelByLibrary(ctx context.Context, tx *sql.Tx, libraryID int64, dryRun bo
 			res, err := tx.ExecContext(ctx,
 				`DELETE FROM work_queue
                  WHERE id = ?
-                   AND status IN ('pending', 'failed')`,
+                   AND status IN ('pending', 'failed', 'deferred')`,
 				c.id,
 			)
 			if err != nil {
@@ -745,7 +767,7 @@ func cancelByLibrary(ctx context.Context, tx *sql.Tx, libraryID int64, dryRun bo
 			`UPDATE work_queue
              SET output_paths = ?
              WHERE id = ?
-               AND status IN ('pending', 'failed')`,
+               AND status IN ('pending', 'failed', 'deferred')`,
 			string(newJSON), c.id,
 		)
 		if err != nil {
@@ -813,6 +835,8 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&item.Status,
 		&item.Priority,
 		&item.Attempts,
+		&item.MissCount,
+		&item.ProvidersVersion,
 		&nextAttemptAt,
 		&item.LastError,
 		&createdAt,

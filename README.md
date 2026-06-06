@@ -170,11 +170,17 @@ SQLite database by hand.
 # List the next 50 work_queue rows.
 mxlrcgo-svc queue list
 
-# Filter by status; failed is also exposed as a convenience subcommand.
+# Filter by status; failed and deferred are also exposed as convenience subcommands.
 mxlrcgo-svc queue list --status pending --limit 100
 mxlrcgo-svc queue failed
 
-# Reset a single failed row back to pending. Refused if the row is not failed.
+# List deferred rows: benign misses (a track Musixmatch has no lyrics for yet)
+# waiting out a fixed cooldown before re-check. These are NOT failures and are
+# kept out of `queue failed`.
+mxlrcgo-svc queue deferred
+
+# Reset a single failed row back to pending. Refused if the row is not failed
+# (a deferred row is refused; let it re-check on its own, or re-trigger via webhook).
 mxlrcgo-svc queue retry 42
 
 # Delete completed rows. Without --yes, prints what would be deleted.
