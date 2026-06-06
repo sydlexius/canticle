@@ -1731,3 +1731,299 @@ func TestSelectedProviderFakeInjectionUnaffected(t *testing.T) {
 		t.Fatal("fake fetcher was replaced; injection seam is broken")
 	}
 }
+
+// TestRunQueueRecheck_NoFlags verifies that calling queue recheck without
+// --deferred or --retired returns exit code 2 and a helpful error message.
+func TestRunQueueRecheck_NoFlags(t *testing.T) {
+	cfg, _ := commandsTestEnv(t)
+	var out bytes.Buffer
+	code := runQueueRecheck(context.Background(), &out, QueueRecheckCmd{ConfigPath: cfg})
+	if code != 2 {
+		t.Fatalf("no-flags exit code = %d; want 2", code)
+	}
+	if !strings.Contains(out.String(), "--deferred") || !strings.Contains(out.String(), "--retired") {
+		t.Fatalf("error message = %q; want --deferred and --retired mentioned", out.String())
+	}
+}
+
+// TestRunQueueRecheck_DryRun verifies the dry-run path (no --yes): counts are
+// printed without any modification and the "pass --yes" footer is shown.
+func TestRunQueueRecheck_DryRun(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	// Seed one deferred row and one retired row.
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Deferred", TrackName: "Song"},
+	}, queue.PriorityScan); err != nil {
+		t.Fatalf("Enqueue deferred: %v", err)
+	}
+	ditem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, ditem.ID, time.Hour, errorsNew("miss")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Retired", TrackName: "Song"},
+	}, queue.PriorityScan); err != nil {
+		t.Fatalf("Enqueue retired: %v", err)
+	}
+	ritem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue retired: %v", err)
+	}
+	if _, err := q.RetireMiss(ctx, ritem.ID); err != nil {
+		t.Fatalf("RetireMiss: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := runQueueRecheck(ctx, &out, QueueRecheckCmd{
+		ConfigPath: cfg,
+		Deferred:   true,
+		Retired:    true,
+	})
+	if code != 0 {
+		t.Fatalf("dry-run exit code = %d; want 0. out=%s", code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "would revive 1 deferred") {
+		t.Fatalf("output missing deferred count: %q", got)
+	}
+	if !strings.Contains(got, "would revive 1 retired") {
+		t.Fatalf("output missing retired count: %q", got)
+	}
+	if !strings.Contains(got, "pass --yes") {
+		t.Fatalf("output missing --yes footer: %q", got)
+	}
+
+	// Rows must NOT have been changed.
+	sqlDB2, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer sqlDB2.Close() //nolint:errcheck // test cleanup
+	q2 := queue.NewDBQueue(sqlDB2)
+	items, err := q2.List(ctx, queue.ListFilter{Status: queue.StatusDeferred})
+	if err != nil {
+		t.Fatalf("List deferred: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("deferred rows after dry-run = %d; want 1 (no change)", len(items))
+	}
+}
+
+// TestRunQueueRecheck_Apply verifies the --yes path: rows are actually revived.
+func TestRunQueueRecheck_Apply(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+
+	// Seed one deferred row.
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Def", TrackName: "Track"},
+	}, queue.PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	ditem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, ditem.ID, 7*24*time.Hour, errorsNew("miss")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := runQueueRecheck(ctx, &out, QueueRecheckCmd{
+		ConfigPath: cfg,
+		Deferred:   true,
+		Yes:        true,
+	})
+	if code != 0 {
+		t.Fatalf("apply exit code = %d; want 0. out=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "revived 1 deferred") {
+		t.Fatalf("output missing revive confirmation: %q", out.String())
+	}
+}
+
+// TestRunQueueRecheck_ApplyRetired verifies the --retired apply path revives a
+// row that was permanently retired after hitting the miss-attempt cap.
+func TestRunQueueRecheck_ApplyRetired(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Ret", TrackName: "Track"},
+	}, queue.PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.RetireMiss(ctx, item.ID); err != nil {
+		t.Fatalf("RetireMiss: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := runQueueRecheck(ctx, &out, QueueRecheckCmd{
+		ConfigPath: cfg,
+		Retired:    true,
+		Yes:        true,
+	})
+	if code != 0 {
+		t.Fatalf("apply exit code = %d; want 0. out=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "revived 1 retired") {
+		t.Fatalf("output missing retired revive confirmation: %q", out.String())
+	}
+
+	// The retired row must now be deferred again.
+	sqlDB2, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer sqlDB2.Close() //nolint:errcheck // test cleanup
+	items, err := queue.NewDBQueue(sqlDB2).List(ctx, queue.ListFilter{Status: queue.StatusDeferred})
+	if err != nil {
+		t.Fatalf("List deferred: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("deferred rows after retired revival = %d; want 1", len(items))
+	}
+}
+
+// TestRunQueueRecheck_LibraryNotFound verifies that an unresolvable --library
+// argument exits 1 with a not-found message and touches nothing.
+func TestRunQueueRecheck_LibraryNotFound(t *testing.T) {
+	cfg, _ := commandsTestEnv(t)
+	var out bytes.Buffer
+	code := runQueueRecheck(context.Background(), &out, QueueRecheckCmd{
+		ConfigPath: cfg,
+		Deferred:   true,
+		Library:    "no-such-library",
+	})
+	if code != 1 {
+		t.Fatalf("library-not-found exit code = %d; want 1. out=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "not found") {
+		t.Fatalf("output missing not-found message: %q", out.String())
+	}
+}
+
+// TestRunQueueRecheck_LibraryScoped verifies that --library resolves a library
+// by name and scopes the revival to it, printing the library label.
+func TestRunQueueRecheck_LibraryScoped(t *testing.T) {
+	cfg, dbPath := commandsTestEnv(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+
+	// Seed a deferred row linked to library "Target" via a scan_result.
+	var libID int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO libraries (path, name) VALUES ('/target', 'Target') RETURNING id`,
+	).Scan(&libID); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	var srID int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO scan_results (library_id, artist, title, file_path, outdir, filename, status)
+         VALUES (?, 'Scoped', 'T', '/target/s.flac', 'out', 's.lrc', 'processing')
+         RETURNING id`,
+		libID,
+	).Scan(&srID); err != nil {
+		t.Fatalf("insert scan_result: %v", err)
+	}
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Scoped", TrackName: "T"},
+		ScanResultID: srID,
+	}, queue.PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errorsNew("miss")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var out bytes.Buffer
+	code := runQueueRecheck(ctx, &out, QueueRecheckCmd{
+		ConfigPath: cfg,
+		Deferred:   true,
+		Library:    "Target",
+		Yes:        true,
+	})
+	if code != 0 {
+		t.Fatalf("scoped apply exit code = %d; want 0. out=%s", code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "revived 1 deferred") {
+		t.Fatalf("output missing revive count: %q", got)
+	}
+	if !strings.Contains(got, `for library "Target"`) {
+		t.Fatalf("output missing library label: %q", got)
+	}
+}
+
+// TestRunQueueRecheck_ConfigLoadError verifies a malformed config file exits 1.
+func TestRunQueueRecheck_ConfigLoadError(t *testing.T) {
+	isolateCommandsEnv(t)
+	bad := filepath.Join(t.TempDir(), "bad.toml")
+	if err := os.WriteFile(bad, []byte("this is = not valid = toml ]["), 0o600); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+	var out bytes.Buffer
+	code := runQueueRecheck(context.Background(), &out, QueueRecheckCmd{
+		ConfigPath: bad,
+		Deferred:   true,
+	})
+	if code != 1 {
+		t.Fatalf("config-load-error exit code = %d; want 1. out=%s", code, out.String())
+	}
+}
+
+// TestRunQueueRecheck_DBOpenError verifies an unopenable DB path exits 1. A
+// directory cannot be opened as a SQLite database file.
+func TestRunQueueRecheck_DBOpenError(t *testing.T) {
+	isolateCommandsEnv(t)
+	dir := t.TempDir()
+	cfg := writeCommandsConfig(t, dir)
+	var out bytes.Buffer
+	code := runQueueRecheck(context.Background(), &out, QueueRecheckCmd{
+		ConfigPath: cfg,
+		Deferred:   true,
+	})
+	if code != 1 {
+		t.Fatalf("db-open-error exit code = %d; want 1. out=%s", code, out.String())
+	}
+}

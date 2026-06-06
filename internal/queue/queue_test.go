@@ -2162,3 +2162,519 @@ func TestDBQueue_RetireMissNoRowsWhenNotProcessing(t *testing.T) {
 		t.Fatalf("RetireMiss on non-processing row = %v; want sql.ErrNoRows", err)
 	}
 }
+
+// insertLibraryAndScanResult inserts a library row and a scan_results row linked
+// to it. Returns the library ID and scan_result ID.
+func insertLibraryAndScanResult(t *testing.T, sqlDB *sql.DB, libPath, filePath string) (libID int64, srID int64) {
+	t.Helper()
+	ctx := context.Background()
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO libraries (path, name) VALUES (?, ?) RETURNING id`, libPath, libPath,
+	).Scan(&libID); err != nil {
+		t.Fatalf("insert library %s: %v", libPath, err)
+	}
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO scan_results (library_id, artist, title, file_path, outdir, filename, status)
+         VALUES (?, 'Artist', 'Title', ?, 'out', 'song.lrc', 'done')
+         RETURNING id`,
+		libID, filePath,
+	).Scan(&srID); err != nil {
+		t.Fatalf("insert scan_result %s: %v", filePath, err)
+	}
+	return libID, srID
+}
+
+// makeRetiredRow enqueues an item linked to srID, dequeues it, and calls
+// RetireMiss so the work_queue row lands in status='done' with the sentinel
+// last_error. Returns the work_queue ID.
+func makeRetiredRow(t *testing.T, ctx context.Context, q *DBQueue, srID int64, artistSuffix string) int64 {
+	t.Helper()
+	inputs := models.Inputs{
+		Track:        models.Track{ArtistName: "Artist" + artistSuffix, TrackName: "Title" + artistSuffix},
+		Outdir:       "out",
+		Filename:     "song.lrc",
+		ScanResultID: srID,
+	}
+	if _, err := q.Enqueue(ctx, inputs, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.RetireMiss(ctx, item.ID); err != nil {
+		t.Fatalf("RetireMiss: %v", err)
+	}
+	return item.ID
+}
+
+// TestDBQueue_RecheckDeferred verifies that RecheckDeferred resets
+// next_attempt_at to now for deferred rows and leaves status/priority/miss_count
+// and providers_version unchanged. Non-deferred rows are not touched.
+func TestDBQueue_RecheckDeferred(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	// Enqueue, dequeue, defer with a far-future cooldown.
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Artist", TrackName: "Title"},
+	}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	deferred, err := q.Defer(ctx, claimed.ID, 7*24*time.Hour, fmt.Errorf("no results"))
+	if err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if deferred.Status != StatusDeferred {
+		t.Fatalf("status = %q; want deferred", deferred.Status)
+	}
+	savedMissCount := deferred.MissCount
+	savedPriority := deferred.Priority
+	savedProvidersVersion := deferred.ProvidersVersion
+
+	// Also enqueue a non-deferred pending row to verify it is NOT touched.
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Other", TrackName: "Title"},
+	}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue other: %v", err)
+	}
+
+	// Advance clock to confirm the revived next_attempt_at == new now.
+	later := now.Add(time.Hour)
+	q.now = func() time.Time { return later }
+
+	n, err := q.RecheckDeferred(ctx, nil)
+	if err != nil {
+		t.Fatalf("RecheckDeferred: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RecheckDeferred count = %d; want 1", n)
+	}
+
+	// Verify the deferred row's next_attempt_at was reset; other fields unchanged.
+	var status string
+	var priority, missCount, providersVersion int
+	var nextAttemptAt string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, priority, miss_count, providers_version, next_attempt_at
+         FROM work_queue WHERE id = ?`, deferred.ID,
+	).Scan(&status, &priority, &missCount, &providersVersion, &nextAttemptAt); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != StatusDeferred {
+		t.Fatalf("status = %q; want deferred (RecheckDeferred must not change status)", status)
+	}
+	if priority != savedPriority {
+		t.Fatalf("priority = %d; want %d (unchanged)", priority, savedPriority)
+	}
+	if missCount != savedMissCount {
+		t.Fatalf("miss_count = %d; want %d (unchanged)", missCount, savedMissCount)
+	}
+	if providersVersion != savedProvidersVersion {
+		t.Fatalf("providers_version = %d; want %d (unchanged)", providersVersion, savedProvidersVersion)
+	}
+	wantTime := formatTime(later)
+	if nextAttemptAt != wantTime {
+		t.Fatalf("next_attempt_at = %q; want %q (reset to now)", nextAttemptAt, wantTime)
+	}
+
+	// The pending row must be untouched -- still status='pending' with a
+	// next_attempt_at of the original 'now', not 'later'.
+	var pendingStatus string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status FROM work_queue WHERE artist = 'Other'`,
+	).Scan(&pendingStatus); err != nil {
+		t.Fatalf("read pending row: %v", err)
+	}
+	if pendingStatus != StatusPending {
+		t.Fatalf("pending row status = %q; want pending", pendingStatus)
+	}
+}
+
+// TestDBQueue_CountRecheckDeferred verifies that CountRecheckDeferred matches
+// the rows affected by RecheckDeferred.
+func TestDBQueue_CountRecheckDeferred(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) }
+
+	// No deferred rows yet.
+	count, err := q.CountRecheckDeferred(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountRecheckDeferred empty: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d; want 0", count)
+	}
+
+	// Add two deferred rows and confirm count = 2.
+	for _, name := range []string{"Alpha", "Beta"} {
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: name, TrackName: "Song"}}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue %s: %v", name, err)
+		}
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue %s: %v", name, err)
+		}
+		if _, err := q.Defer(ctx, item.ID, time.Hour, fmt.Errorf("miss")); err != nil {
+			t.Fatalf("Defer %s: %v", name, err)
+		}
+	}
+
+	count, err = q.CountRecheckDeferred(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountRecheckDeferred: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d; want 2", count)
+	}
+
+	n, err := q.RecheckDeferred(ctx, nil)
+	if err != nil {
+		t.Fatalf("RecheckDeferred: %v", err)
+	}
+	if n != count {
+		t.Fatalf("RecheckDeferred = %d; CountRecheckDeferred = %d; must agree", n, count)
+	}
+}
+
+// TestDBQueue_RecheckRetired verifies that RecheckRetired revives
+// status='done'+sentinel rows to status='deferred' and resets their linked
+// scan_results from 'done' to 'pending'. Non-retired done rows must be
+// untouched. miss_count and providers_version must not change.
+func TestDBQueue_RecheckRetired(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	q.now = func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) }
+
+	_, srID := insertLibraryAndScanResult(t, sqlDB, "/music", "/music/song.flac")
+	wqID := makeRetiredRow(t, ctx, q, srID, "")
+
+	// A 'done' row with a DIFFERENT last_error must NOT be revived.
+	var otherWqID int64
+	{
+		if _, err := q.Enqueue(ctx, models.Inputs{
+			Track: models.Track{ArtistName: "Other", TrackName: "Done"},
+		}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue other: %v", err)
+		}
+		other, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue other: %v", err)
+		}
+		if err := q.Complete(ctx, other.ID); err != nil {
+			t.Fatalf("Complete other: %v", err)
+		}
+		otherWqID = other.ID
+	}
+
+	// Capture pre-revival miss_count and providers_version.
+	var preMissCount, preProvidersVersion int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT miss_count, providers_version FROM work_queue WHERE id = ?`, wqID,
+	).Scan(&preMissCount, &preProvidersVersion); err != nil {
+		t.Fatalf("read pre-revival: %v", err)
+	}
+
+	n, err := q.RecheckRetired(ctx, nil)
+	if err != nil {
+		t.Fatalf("RecheckRetired: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RecheckRetired count = %d; want 1", n)
+	}
+
+	// Retired row: must be 'deferred', priority=-100, last_error='', completed_at=NULL.
+	var status, lastError string
+	var priority, missCount, providersVersion int
+	var completedAt sql.NullString
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, priority, last_error, miss_count, providers_version, completed_at
+         FROM work_queue WHERE id = ?`, wqID,
+	).Scan(&status, &priority, &lastError, &missCount, &providersVersion, &completedAt); err != nil {
+		t.Fatalf("read revived row: %v", err)
+	}
+	if status != StatusDeferred {
+		t.Fatalf("status = %q; want deferred", status)
+	}
+	if priority != PriorityMiss {
+		t.Fatalf("priority = %d; want %d (PriorityMiss)", priority, PriorityMiss)
+	}
+	if lastError != "" {
+		t.Fatalf("last_error = %q; want ''", lastError)
+	}
+	if completedAt.Valid {
+		t.Fatalf("completed_at = %q; want NULL", completedAt.String)
+	}
+	if missCount != preMissCount {
+		t.Fatalf("miss_count = %d; want %d (unchanged)", missCount, preMissCount)
+	}
+	if providersVersion != preProvidersVersion {
+		t.Fatalf("providers_version = %d; want %d (unchanged)", providersVersion, preProvidersVersion)
+	}
+
+	// Linked scan_result must be 'pending'.
+	var srStatus string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, srID).Scan(&srStatus); err != nil {
+		t.Fatalf("read scan_result: %v", err)
+	}
+	if srStatus != "pending" {
+		t.Fatalf("scan_result status = %q; want pending (RecheckRetired must revive the scan layer)", srStatus)
+	}
+
+	// Non-retired done row must be untouched.
+	var otherStatus string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, otherWqID).Scan(&otherStatus); err != nil {
+		t.Fatalf("read other row: %v", err)
+	}
+	if otherStatus != StatusDone {
+		t.Fatalf("non-retired row status = %q; want done (must not be touched)", otherStatus)
+	}
+}
+
+// TestDBQueue_CountRecheckRetired verifies that CountRecheckRetired matches the
+// rows affected by RecheckRetired.
+func TestDBQueue_CountRecheckRetired(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	q.now = func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) }
+
+	// No retired rows yet.
+	count, err := q.CountRecheckRetired(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountRecheckRetired empty: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d; want 0", count)
+	}
+
+	_, srID1 := insertLibraryAndScanResult(t, sqlDB, "/lib1", "/lib1/a.mp3")
+	_, srID2 := insertLibraryAndScanResult(t, sqlDB, "/lib2", "/lib2/b.mp3")
+	makeRetiredRow(t, ctx, q, srID1, "A")
+	makeRetiredRow(t, ctx, q, srID2, "B")
+
+	count, err = q.CountRecheckRetired(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountRecheckRetired: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d; want 2", count)
+	}
+
+	n, err := q.RecheckRetired(ctx, nil)
+	if err != nil {
+		t.Fatalf("RecheckRetired: %v", err)
+	}
+	if n != count {
+		t.Fatalf("RecheckRetired = %d; CountRecheckRetired = %d; must agree", n, count)
+	}
+}
+
+// TestDBQueue_RecheckLibraryScoping verifies that passing a non-nil libraryID
+// scopes the recheck to only rows linked to that library. Rows in a different
+// library must not be touched.
+func TestDBQueue_RecheckLibraryScoping(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	q.now = func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) }
+
+	libID1, srID1 := insertLibraryAndScanResult(t, sqlDB, "/libA", "/libA/a.mp3")
+	_, srID2 := insertLibraryAndScanResult(t, sqlDB, "/libB", "/libB/b.mp3")
+
+	wqID1 := makeRetiredRow(t, ctx, q, srID1, "X")
+	wqID2 := makeRetiredRow(t, ctx, q, srID2, "Y")
+
+	// Recheck only libID1.
+	n, err := q.RecheckRetired(ctx, &libID1)
+	if err != nil {
+		t.Fatalf("RecheckRetired scoped: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RecheckRetired scoped = %d; want 1 (only libA)", n)
+	}
+
+	// wqID1 must be revived; wqID2 must remain 'done' with sentinel.
+	var s1, s2 string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, wqID1).Scan(&s1); err != nil {
+		t.Fatalf("read wqID1: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, wqID2).Scan(&s2); err != nil {
+		t.Fatalf("read wqID2: %v", err)
+	}
+	if s1 != StatusDeferred {
+		t.Fatalf("wqID1 status = %q; want deferred (in target library)", s1)
+	}
+	if s2 != StatusDone {
+		t.Fatalf("wqID2 status = %q; want done (different library, must be untouched)", s2)
+	}
+
+	// scan_result for srID2 must also remain 'done'.
+	var srStatus string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, srID2).Scan(&srStatus); err != nil {
+		t.Fatalf("read srID2: %v", err)
+	}
+	if srStatus != "done" {
+		t.Fatalf("srID2 status = %q; want done (different library)", srStatus)
+	}
+
+	// RecheckDeferred scoping: use fresh libraries and scan_results so the
+	// deferred rows are not confused with the revived wqID1 (which is already
+	// status='deferred' after RecheckRetired). Fresh libraries ensure each
+	// deferred row belongs to exactly one library.
+	libIDC, srIDC := insertLibraryAndScanResult(t, sqlDB, "/libC", "/libC/c.mp3")
+	_, srIDD := insertLibraryAndScanResult(t, sqlDB, "/libD", "/libD/d.mp3")
+	for i, srID := range []int64{srIDC, srIDD} {
+		if _, err := q.Enqueue(ctx, models.Inputs{
+			Track:        models.Track{ArtistName: fmt.Sprintf("Def%d", i), TrackName: "ScopedSong"},
+			ScanResultID: srID,
+		}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue deferred %d: %v", i, err)
+		}
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue deferred %d: %v", i, err)
+		}
+		if _, err := q.Defer(ctx, item.ID, time.Hour, fmt.Errorf("miss")); err != nil {
+			t.Fatalf("Defer %d: %v", i, err)
+		}
+	}
+
+	nDeferred, err := q.RecheckDeferred(ctx, &libIDC)
+	if err != nil {
+		t.Fatalf("RecheckDeferred scoped: %v", err)
+	}
+	if nDeferred != 1 {
+		t.Fatalf("RecheckDeferred scoped = %d; want 1 (only libC)", nDeferred)
+	}
+}
+
+// TestDBQueue_RecheckRetired_SharedRow verifies that a deduped work_queue row
+// linked to scan_results in two libraries is revived under --library X without
+// resetting the OTHER library's scan_result. Regression test for the
+// cross-library writeback leak: reviving the shared row is correct (one fetch
+// serves every linked library), but the scan_results writeback must stay scoped
+// to the target library so the non-target library's terminal state is preserved.
+func TestDBQueue_RecheckRetired_SharedRow(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	q.now = func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) }
+
+	libA, srA := insertLibraryAndScanResult(t, sqlDB, "/libA", "/libA/shared.mp3")
+	_, srB := insertLibraryAndScanResult(t, sqlDB, "/libB", "/libB/shared.mp3")
+
+	// Enqueue the same track (same artist/title) twice with different scan
+	// results so both collapse onto one deduped work_queue row, linked to both
+	// libraries via the work_queue_scan_results junction.
+	track := models.Track{ArtistName: "Shared", TrackName: "Track"}
+	first, err := q.Enqueue(ctx, models.Inputs{Track: track, Outdir: "out", Filename: "song.lrc", ScanResultID: srA}, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue A: %v", err)
+	}
+	second, err := q.Enqueue(ctx, models.Inputs{Track: track, Outdir: "out", Filename: "song.lrc", ScanResultID: srB}, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue B: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("expected dedup onto one row; got %d and %d", first.ID, second.ID)
+	}
+	wqID := first.ID
+
+	// Drive the shared row to retired.
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if item.ID != wqID {
+		t.Fatalf("dequeued %d; want shared row %d", item.ID, wqID)
+	}
+	if _, err := q.RetireMiss(ctx, wqID); err != nil {
+		t.Fatalf("RetireMiss: %v", err)
+	}
+
+	// Recheck only library A.
+	n, err := q.RecheckRetired(ctx, &libA)
+	if err != nil {
+		t.Fatalf("RecheckRetired scoped: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RecheckRetired scoped = %d; want 1 (shared row belongs to libA)", n)
+	}
+
+	// The shared work_queue row must be revived (deferred).
+	var wqStatus string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, wqID).Scan(&wqStatus); err != nil {
+		t.Fatalf("read shared row: %v", err)
+	}
+	if wqStatus != StatusDeferred {
+		t.Fatalf("shared row status = %q; want deferred", wqStatus)
+	}
+
+	// Library A's scan_result must be reset to pending.
+	var aStatus, bStatus string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, srA).Scan(&aStatus); err != nil {
+		t.Fatalf("read srA: %v", err)
+	}
+	if aStatus != "pending" {
+		t.Fatalf("srA status = %q; want pending (target library)", aStatus)
+	}
+
+	// Library B's scan_result must remain done -- no cross-library leak.
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, srB).Scan(&bStatus); err != nil {
+		t.Fatalf("read srB: %v", err)
+	}
+	if bStatus != "done" {
+		t.Fatalf("srB status = %q; want done (non-target library must be untouched)", bStatus)
+	}
+}
+
+// TestDBQueue_RecheckRetired_NoRetiredRows verifies RecheckRetired is a clean
+// no-op (0, nil) when no rows match the retired sentinel.
+func TestDBQueue_RecheckRetired_NoRetiredRows(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) }
+	n, err := q.RecheckRetired(ctx, nil)
+	if err != nil {
+		t.Fatalf("RecheckRetired empty: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("RecheckRetired empty = %d; want 0", n)
+	}
+}
+
+// TestDBQueue_RecheckClosedDB verifies the recheck methods return a wrapped
+// error (rather than panicking) when the underlying handle is closed.
+func TestDBQueue_RecheckClosedDB(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	_ = sqlDB.Close()
+	q := NewDBQueue(sqlDB)
+	q.now = func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) }
+
+	if _, err := q.RecheckDeferred(ctx, nil); err == nil {
+		t.Fatal("RecheckDeferred on closed db: want error, got nil")
+	}
+	if _, err := q.CountRecheckDeferred(ctx, nil); err == nil {
+		t.Fatal("CountRecheckDeferred on closed db: want error, got nil")
+	}
+	if _, err := q.RecheckRetired(ctx, nil); err == nil {
+		t.Fatal("RecheckRetired on closed db: want error, got nil")
+	}
+	if _, err := q.CountRecheckRetired(ctx, nil); err == nil {
+		t.Fatal("CountRecheckRetired on closed db: want error, got nil")
+	}
+}

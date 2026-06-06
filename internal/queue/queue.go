@@ -532,6 +532,206 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
 	return item, nil
 }
 
+// recheckLibraryClause returns the SQL predicate fragment and extra args for
+// scoping a recheck operation to a single library. When libraryID is nil the
+// clause is empty (all libraries). The subquery joins through
+// work_queue_scan_results -> scan_results so a work_queue row is considered
+// "in" a library when it has at least one linked scan_result belonging to that
+// library.
+func recheckLibraryClause(libraryID *int64) (clause string, args []any) {
+	if libraryID == nil {
+		return "", nil
+	}
+	return " AND id IN (SELECT wqsr.work_queue_id FROM work_queue_scan_results wqsr" +
+		" JOIN scan_results sr ON sr.id = wqsr.scan_result_id WHERE sr.library_id = ?)", []any{*libraryID}
+}
+
+// RecheckDeferred resets next_attempt_at to now for all rows currently in the
+// 'deferred' (benign-miss cooldown) state. The worker's deferred sweep will
+// pick them up on the next tick. status, priority, miss_count, and
+// providers_version are left unchanged.
+//
+// Unlike RecheckRetired, this deliberately does not touch the linked
+// scan_results: a deferred work_queue row is non-terminal and remains the
+// active driver for the track, so re-arming next_attempt_at is sufficient for
+// the worker to re-process it (which then updates scan_results as usual). Only
+// retired rows (status='done') need their scan layer revived.
+//
+// When libraryID is non-nil only rows linked to that library are revived.
+// Returns the number of rows affected.
+func (q *DBQueue) RecheckDeferred(ctx context.Context, libraryID *int64) (int64, error) {
+	now := formatTime(q.now())
+	libClause, libArgs := recheckLibraryClause(libraryID)
+	args := append([]any{now}, libArgs...)
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET next_attempt_at = ? WHERE status = 'deferred'`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		args...,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("queue: recheck deferred: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("queue: recheck deferred rows affected: %w", err)
+	}
+	return n, nil
+}
+
+// CountRecheckDeferred returns the number of 'deferred' rows that
+// RecheckDeferred would revive, without writing. Intended for dry-run output.
+func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (int64, error) {
+	libClause, libArgs := recheckLibraryClause(libraryID)
+	args := append([]any(nil), libArgs...)
+	var count int64
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE status = 'deferred'`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		args...,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("queue: count recheck deferred: %w", err)
+	}
+	return count, nil
+}
+
+// RecheckRetired revives work_queue rows that were permanently retired after
+// hitting the miss-attempt cap. A retired row is identified by
+// status='done' AND last_error = missLimitReachedError (the sentinel written by
+// RetireMiss). Revival reverses RetireMiss's terminal writeback:
+//   - work_queue: status='deferred', priority=-100, next_attempt_at=now,
+//     last_error=”, completed_at=NULL. miss_count and providers_version are
+//     left unchanged.
+//   - scan_results: rows linked via work_queue_scan_results whose status='done'
+//     are reset to 'pending' so the scan layer does not strand the track.
+//
+// When libraryID is non-nil the scan_results writeback is additionally scoped to
+// that library. A deduped work_queue row can link to scan_results in several
+// libraries (the row is collapsed on artist_key/title_key), so reviving a row
+// shared between libraries X and Y under `--library X` must not flip Y's
+// scan_results back to 'pending'. Reviving the shared work_queue row itself is
+// correct (re-fetching the deduped track once serves every linked library), and
+// Y's scan_result stays 'done' until the row reprocesses, at which point the
+// completion writeback re-confirms it.
+//
+// The scan_results guard is WHERE status='done' (not a literal mirror of
+// RetireMiss, which writes 'done' WHERE status != 'done'). This is intentional:
+// RetireMiss flips every linked scan_result to 'done', so at revival time they
+// are all 'done'; the guard reverts exactly those rows and avoids clobbering a
+// scan_result a future code path may legitimately leave in another state.
+//
+// Both mutations run in one transaction. When libraryID is non-nil only rows
+// linked to that library are revived.
+//
+// Enqueue dedup safety: after revival the work_queue row is status='deferred'.
+// A subsequent scan-priority Enqueue for the same artist/title will hit the
+// ON CONFLICT(artist_key, title_key) path and preserve the 'deferred' status
+// (the upsert keeps work_queue.status for deferred/done/processing rows), so
+// no duplicate work_queue row is created alongside the revived one.
+func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, error) {
+	now := formatTime(q.now())
+	libClause, libArgs := recheckLibraryClause(libraryID)
+
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("queue: begin recheck retired tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Collect the IDs of retired rows we are about to revive so the
+	// scan_results writeback can target exactly those rows.
+	selectArgs := append([]any{missLimitReachedError}, libArgs...)
+	idRows, err := tx.QueryContext(ctx,
+		`SELECT id FROM work_queue WHERE status = 'done' AND last_error = ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		selectArgs...,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("queue: recheck retired select ids: %w", err)
+	}
+	var ids []int64
+	for idRows.Next() {
+		var id int64
+		if err := idRows.Scan(&id); err != nil {
+			_ = idRows.Close()
+			return 0, fmt.Errorf("queue: recheck retired scan id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := idRows.Err(); err != nil {
+		_ = idRows.Close()
+		return 0, fmt.Errorf("queue: recheck retired id rows: %w", err)
+	}
+	_ = idRows.Close()
+
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	// Revive the work_queue rows. The query string is built from hardcoded SQL
+	// fragments only; libClause comes from recheckLibraryClause which returns a
+	// fixed constant (never user input), so the concatenation is safe.
+	const retireUpdateBase = `UPDATE work_queue
+         SET status = 'deferred',
+             priority = -100,
+             next_attempt_at = ?,
+             last_error = '',
+             completed_at = NULL
+         WHERE status = 'done' AND last_error = ?`
+	updateArgs := append([]any{now, missLimitReachedError}, libArgs...)
+	res, err := tx.ExecContext(ctx,
+		retireUpdateBase+libClause, //nolint:gosec // G202: libClause is a fixed constant from recheckLibraryClause, not user input
+		updateArgs...,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("queue: recheck retired update: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("queue: recheck retired rows affected: %w", err)
+	}
+
+	// Reset the linked scan_results rows from 'done' back to 'pending'.
+	// Target only the rows linked to the work_queue IDs we just revived, via
+	// the work_queue_scan_results junction. This mirrors RetireMiss's writeback.
+	// When scoped to a library, restrict the writeback to that library's
+	// scan_results so a shared (deduped) row does not strand-revive another
+	// library's terminal scan state. The libClause-bound subquery is reused via
+	// a fixed AND library_id = ? predicate (never user-built SQL).
+	writebackQuery := `UPDATE scan_results
+             SET status = 'pending'
+             WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+               AND status = 'done'`
+	if libraryID != nil {
+		writebackQuery += ` AND library_id = ?`
+	}
+	for _, id := range ids {
+		writebackArgs := []any{id}
+		if libraryID != nil {
+			writebackArgs = append(writebackArgs, *libraryID)
+		}
+		if _, err := tx.ExecContext(ctx, writebackQuery, writebackArgs...); err != nil {
+			return 0, fmt.Errorf("queue: recheck retired scan_results writeback for row %d: %w", id, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("queue: commit recheck retired tx: %w", err)
+	}
+	return n, nil
+}
+
+// CountRecheckRetired returns the number of retired rows that RecheckRetired
+// would revive, without writing. Intended for dry-run output.
+func (q *DBQueue) CountRecheckRetired(ctx context.Context, libraryID *int64) (int64, error) {
+	libClause, libArgs := recheckLibraryClause(libraryID)
+	args := append([]any{missLimitReachedError}, libArgs...)
+	var count int64
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE status = 'done' AND last_error = ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		args...,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("queue: count recheck retired: %w", err)
+	}
+	return count, nil
+}
+
 // ListFilter narrows the rows returned by List.
 type ListFilter struct {
 	// Status optionally restricts results to a single status value (e.g.

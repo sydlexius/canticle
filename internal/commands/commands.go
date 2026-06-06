@@ -128,6 +128,16 @@ type QueueCmd struct {
 	Deferred *QueueDeferredCmd `arg:"subcommand:deferred" help:"list deferred (benign-miss cooldown) work_queue rows"`
 	Retry    *QueueRetryCmd    `arg:"subcommand:retry" help:"reset a failed work item back to pending"`
 	Clear    *QueueClearCmd    `arg:"subcommand:clear" help:"delete completed work_queue rows"`
+	Recheck  *QueueRecheckCmd  `arg:"subcommand:recheck" help:"revive deferred or retired rows for another pass"`
+}
+
+// QueueRecheckCmd revives work_queue rows for another processing pass.
+type QueueRecheckCmd struct {
+	Deferred   bool   `arg:"--deferred" help:"revive deferred (benign-miss cooldown) rows for an immediate re-check"`
+	Retired    bool   `arg:"--retired" help:"revive rows retired after hitting the miss-attempt cap"`
+	Library    string `arg:"--library" help:"limit to a single library (name or id)" default:""`
+	Yes        bool   `arg:"--yes" help:"actually revive (without it, prints what would be revived)"`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // QueueListCmd lists work_queue rows.
@@ -1343,6 +1353,8 @@ func runQueueCmd(ctx context.Context, out io.Writer, args QueueCmd) int {
 		return runQueueRetry(ctx, out, *args.Retry)
 	case args.Clear != nil:
 		return runQueueClear(ctx, out, *args.Clear)
+	case args.Recheck != nil:
+		return runQueueRecheck(ctx, out, *args.Recheck)
 	default:
 		_, _ = fmt.Fprintln(out, "missing queue subcommand")
 		return 2
@@ -1463,6 +1475,83 @@ func runQueueClear(ctx context.Context, out io.Writer, args QueueClearCmd) int {
 		return 1
 	}
 	_, _ = fmt.Fprintf(out, "deleted %d completed queue rows\n", deleted)
+	return 0
+}
+
+func runQueueRecheck(ctx context.Context, out io.Writer, args QueueRecheckCmd) int {
+	if !args.Deferred && !args.Retired {
+		_, _ = fmt.Fprintln(out, "queue recheck requires --deferred and/or --retired")
+		return 2
+	}
+
+	cfg, err := config.Load(args.ConfigPath)
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		return 1
+	}
+	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	if err != nil {
+		slog.Error("failed to open database", "error", err)
+		return 1
+	}
+	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
+
+	q := queue.NewDBQueue(sqlDB)
+
+	var libID *int64
+	var libLabel string
+	if strings.TrimSpace(args.Library) != "" {
+		libRepo := library.New(sqlDB)
+		lib, err := resolveLibrary(ctx, libRepo, args.Library)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				_, _ = fmt.Fprintf(out, "library %q not found\n", args.Library)
+				return 1
+			}
+			slog.Error("failed to resolve library", "error", err)
+			return 1
+		}
+		libID = &lib.ID
+		libLabel = fmt.Sprintf(" for library %q (id=%d)", lib.Name, lib.ID)
+	}
+
+	if !args.Yes {
+		if args.Deferred {
+			count, err := q.CountRecheckDeferred(ctx, libID)
+			if err != nil {
+				slog.Error("failed to count deferred rows", "error", err)
+				return 1
+			}
+			_, _ = fmt.Fprintf(out, "would revive %d deferred row(s)%s\n", count, libLabel)
+		}
+		if args.Retired {
+			count, err := q.CountRecheckRetired(ctx, libID)
+			if err != nil {
+				slog.Error("failed to count retired rows", "error", err)
+				return 1
+			}
+			_, _ = fmt.Fprintf(out, "would revive %d retired row(s)%s\n", count, libLabel)
+		}
+		_, _ = fmt.Fprintln(out, "pass --yes to confirm")
+		return 0
+	}
+
+	if args.Deferred {
+		n, err := q.RecheckDeferred(ctx, libID)
+		if err != nil {
+			slog.Error("failed to revive deferred rows", "error", err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "revived %d deferred row(s)%s\n", n, libLabel)
+	}
+	if args.Retired {
+		n, err := q.RecheckRetired(ctx, libID)
+		if err != nil {
+			slog.Error("failed to revive retired rows", "error", err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "revived %d retired row(s)%s\n", n, libLabel)
+	}
 	return 0
 }
 
