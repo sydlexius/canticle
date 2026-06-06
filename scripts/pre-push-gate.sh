@@ -72,6 +72,29 @@ else
   echo "    (install claude-kit for the local check)"
 fi
 
+echo "==> codecov report validation (codecovcli dry-run)"
+# OPTIONAL local enhancement: validate that the coverage report parses and would
+# upload cleanly BEFORE burning PR/CI wall time. The dry-run runs the same CLI
+# the codecov-action wraps, but invokes it directly -- bypassing the action's
+# binary-download + GPG-signature bootstrap, a known flaky step that has failed
+# required CI in the past. --disable-search restricts to our profile so stray
+# *coverage* config files are not picked up. codecovcli is not a repo dependency,
+# so this is SKIPPED (not failed) when absent; CI's Upload Coverage job remains
+# the source of truth. Quiet on success; the captured log is shown on failure.
+if command -v codecovcli >/dev/null 2>&1; then
+  CC_LOG="$RUN_DIR/codecovcli.log"
+  if codecovcli do-upload --dry-run --disable-search --fail-on-error \
+      --file "$COVER_OUT" >"$CC_LOG" 2>&1; then
+    echo "    coverage report validated (dry-run, no upload)"
+  else
+    cat "$CC_LOG"
+    fail "codecovcli dry-run: coverage report failed validation"
+  fi
+else
+  echo "    codecovcli not installed; skipping (CI uploads coverage)."
+  echo "    (pipx install codecov-cli for the local check)"
+fi
+
 echo "==> golangci-lint"
 golangci-lint run ./... || fail "lint"
 
