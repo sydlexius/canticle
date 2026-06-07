@@ -130,6 +130,17 @@ Environment variables override the TOML file: `MXLRC_PROVIDER_PRIMARY`, `MXLRC_P
 
 When verification is enabled, `ffmpeg` must be installed or `ffmpeg_path` must point to an executable ffmpeg binary. The worker extracts a bounded mono 16 kHz WAV sample using `sample_duration_seconds`, then sends that sample to a Whisper-compatible `/v1/audio/transcriptions` sidecar for scanned audio whose Musixmatch metadata confidence is below `min_confidence`. The transcript must overlap the candidate lyrics by at least `min_similarity`.
 
+### Queue config
+
+The worker shuffles its dequeue order within each priority tier so it stops querying the upstream API in strict alphabetical (library insertion) order. A strictly alphabetical request stream is a plausible scraping fingerprint; randomizing removes that tell. This is **on by default** and affects only the library/serve worker path (`Dequeue`); inspection output (`queue list`) stays deterministic, and the one-shot `fetch` CLI never touches the work queue.
+
+```toml
+[queue]
+randomize = true
+```
+
+Set `randomize = false` (or `MXLRC_QUEUE_RANDOMIZE=false`) to restore the deterministic `created_at`/`id` ordering. The env var overrides the TOML key; an invalid value warns and keeps the current setting.
+
 ### Library and key management
 ```sh
 mxlrcgo-svc library add /data/media/music --name Music
@@ -241,6 +252,7 @@ All settings can come from a TOML config file, but for container deployments env
 | `MXLRC_WORK_INTERVAL` | `0` | Worker poll interval in seconds. `0` falls back to `api.cooldown` (15s floor). |
 | `MXLRC_PROVIDER_PRIMARY` | `musixmatch` | Primary lyrics provider. |
 | `MXLRC_PROVIDERS_DISABLED` | (none) | Comma-separated providers to disable. |
+| `MXLRC_QUEUE_RANDOMIZE` | `true` | Shuffle worker dequeue order within each priority tier (anti-fingerprint). `false` restores deterministic order. |
 | `MXLRCGO_WATCH_ENABLED` | `false` | Enable the optional low-latency filesystem watcher (see above). |
 | `MXLRCGO_WATCH_DEBOUNCE_MS` | `2000` | Watcher debounce window in milliseconds. |
 | `MXLRCGO_WATCH_MAX_DIRS` | `100000` | Watcher safety cap on directories watched. |

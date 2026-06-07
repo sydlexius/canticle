@@ -592,6 +592,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		return 1
 	}
 	workQ := queue.NewDBQueue(sqlDB)
+	workQ.SetRandomized(cfg.Queue.Randomize)
 	// Snapshot the configured library roots once at startup. They confine both
 	// the webhook handler's raw payload paths (path-injection guard) and the
 	// worker's write-time output, so a symlink swapped in below a root after the
@@ -1807,6 +1808,7 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 
 	scanRepo := scan.New(sqlDB)
 	workQueue := queue.NewDBQueue(sqlDB)
+	workQueue.SetRandomized(cfg.Queue.Randomize)
 	if !args.Yes {
 		count, err := scanRepo.CountByLibrary(ctx, lib.ID)
 		if err != nil {

@@ -533,6 +533,7 @@ func TestRunQueueList_FiltersByStatus(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	q := queue.NewDBQueue(sqlDB)
+	q.SetRandomized(false) // this test asserts FIFO dequeue order
 	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Pending", TrackName: "Track"}}, 1); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}

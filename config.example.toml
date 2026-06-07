@@ -4,7 +4,7 @@
 # MXLRC_API_TOKEN, MXLRC_API_COOLDOWN (or MXLRC_COOLDOWN),
 # MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_OUTPUT_DIR,
 # MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY,
-# MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED,
+# MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_QUEUE_RANDOMIZE,
 # MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL,
 # MXLRC_VERIFICATION_FFMPEG_PATH,
 # MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_MIN_CONFIDENCE,
@@ -102,3 +102,11 @@ ffmpeg_path = "ffmpeg"
 sample_duration_seconds = 30
 min_confidence = 0.85
 min_similarity = 0.35
+
+[queue]
+# Shuffle the worker dequeue order within each priority tier so requests do not
+# go out in strict alphabetical (library insertion) order, which is a plausible
+# scraping fingerprint. On by default; affects only the serve/worker Dequeue path
+# (inspection output stays deterministic). Set to false to restore the
+# deterministic created_at/id ordering. Env override: MXLRC_QUEUE_RANDOMIZE.
+randomize = true

@@ -19,6 +19,7 @@ type Config struct {
 	Server       ServerConfig       `toml:"server"`
 	Providers    ProvidersConfig    `toml:"providers"`
 	Verification VerificationConfig `toml:"verification"`
+	Queue        QueueConfig        `toml:"queue"`
 }
 
 // APIConfig holds API-related configuration.
@@ -116,6 +117,17 @@ type VerificationConfig struct {
 	MinSimilarity         float64 `toml:"min_similarity"`
 }
 
+// QueueConfig holds work-queue behavior settings.
+type QueueConfig struct {
+	// Randomize shuffles the dequeue order within each priority tier so the
+	// worker stops querying the upstream API in strict alphabetical (insertion)
+	// order. A strictly alphabetical request stream is a plausible scraping
+	// fingerprint; randomizing removes that tell at effectively zero cost.
+	// Defaults to true. Set queue.randomize = false (or MXLRC_QUEUE_RANDOMIZE=false)
+	// to restore the deterministic created_at/id ordering.
+	Randomize bool `toml:"randomize"`
+}
+
 // defaults sets built-in fallback values.
 func defaults() Config {
 	return Config{
@@ -131,6 +143,7 @@ func defaults() Config {
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch"},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
+		Queue:        QueueConfig{Randomize: true},
 	}
 }
 
@@ -221,7 +234,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_QUEUE_RANDOMIZE
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -323,6 +336,14 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_VERIFICATION_ENABLED", "value", v, "current", cfg.Verification.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.Enabled = enabled
+		}
+	}
+	if v := os.Getenv("MXLRC_QUEUE_RANDOMIZE"); v != "" {
+		randomize, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_QUEUE_RANDOMIZE", "value", v, "current", cfg.Queue.Randomize) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Queue.Randomize = randomize
 		}
 	}
 	whisperVar := "MXLRC_VERIFICATION_WHISPER_URL"
