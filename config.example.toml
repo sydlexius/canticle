@@ -102,3 +102,11 @@ ffmpeg_path = "ffmpeg"
 sample_duration_seconds = 30
 min_confidence = 0.85
 min_similarity = 0.35
+
+[queue]
+# Shuffle the worker dequeue order within each priority tier so requests do not
+# go out in strict alphabetical (library insertion) order, which is a plausible
+# scraping fingerprint. On by default; affects only the serve/worker Dequeue path
+# (inspection output stays deterministic). Set to false to restore the
+# deterministic created_at/id ordering. Env override: MXLRC_QUEUE_RANDOMIZE.
+randomize = true

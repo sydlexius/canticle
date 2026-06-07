@@ -25,6 +25,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
 		"MXLRC_VERIFICATION_MIN_CONFIDENCE", "MXLRC_VERIFICATION_MIN_SIMILARITY",
+		"MXLRC_QUEUE_RANDOMIZE",
 		"MXLRC_DOCKER",
 		"XDG_CONFIG_HOME", "XDG_DATA_HOME",
 	} {
@@ -734,5 +735,61 @@ max_miss_attempts = 10
 	}
 	if cfg.API.MaxMissAttempts != 10 {
 		t.Fatalf("MaxMissAttempts = %d; want 10", cfg.API.MaxMissAttempts)
+	}
+}
+
+func TestLoad_QueueRandomizeDefaultsTrue(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Queue.Randomize {
+		t.Fatal("queue.randomize = false; want default true")
+	}
+}
+
+func TestLoad_QueueRandomizeEnvOverride(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_QUEUE_RANDOMIZE", "false")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Queue.Randomize {
+		t.Fatal("queue.randomize = true; want env override false")
+	}
+}
+
+func TestLoad_QueueRandomizeTOMLFalse(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgFile, []byte("[queue]\nrandomize = false\n"), 0600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Queue.Randomize {
+		t.Fatal("queue.randomize = true; want TOML override false")
+	}
+}
+
+func TestLoad_QueueRandomizeInvalidEnvKeepsCurrent(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_QUEUE_RANDOMIZE", "notabool")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Invalid env warns and keeps the current (default true) value.
+	if !cfg.Queue.Randomize {
+		t.Fatal("queue.randomize = false; want unchanged default true on invalid env")
 	}
 }

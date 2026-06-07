@@ -111,6 +111,11 @@ type DBQueue struct {
 	baseBackoff time.Duration
 	maxBackoff  time.Duration
 	now         func() time.Time
+	// randomized shuffles the dequeue order within each priority tier to remove
+	// the strictly-alphabetical request fingerprint. On by default; flip to false
+	// (via SetRandomized) to restore deterministic created_at/id ordering. Also
+	// doubles as the test seam for deterministic ordering assertions.
+	randomized bool
 }
 
 // NewDBQueue returns a durable queue backed by db.
@@ -120,7 +125,15 @@ func NewDBQueue(db *sql.DB) *DBQueue {
 		baseBackoff: backoff.DefaultBase,
 		maxBackoff:  backoff.DefaultMax,
 		now:         time.Now,
+		randomized:  true,
 	}
+}
+
+// SetRandomized toggles whether Dequeue shuffles within a priority tier. It lets
+// callers apply the configured queue.randomize / MXLRC_QUEUE_RANDOMIZE setting
+// without changing the NewDBQueue call sites.
+func (q *DBQueue) SetRandomized(b bool) {
+	q.randomized = b
 }
 
 // Enqueue atomically inserts a new work item or refreshes an existing retryable
@@ -259,11 +272,26 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 	return item, nil
 }
 
-// Dequeue atomically claims the next ready item and marks it processing.
-func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
-	now := formatTime(q.now())
-	row := q.db.QueryRowContext(ctx,
-		`UPDATE work_queue
+// dequeueRandomizedSQL claims the next ready item, shuffling within a priority
+// tier (anti-scraping fingerprint). The ORDER BY lives inside the subquery, so
+// each variant is a complete, standalone statement (no concatenation, no
+// interpolation -> no gosec concern).
+const dequeueRandomizedSQL = `UPDATE work_queue
+         SET status = 'processing'
+         WHERE id = (
+             SELECT id
+             FROM work_queue
+             WHERE status IN ('pending', 'failed', 'deferred')
+               AND next_attempt_at <= ?
+             ORDER BY priority DESC, RANDOM()
+             LIMIT 1
+         )
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+
+// dequeueDeterministicSQL claims the next ready item in stable FIFO order within
+// a priority tier (created_at, then id).
+const dequeueDeterministicSQL = `UPDATE work_queue
          SET status = 'processing'
          WHERE id = (
              SELECT id
@@ -274,9 +302,16 @@ func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
-		now,
-	)
+                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+
+// Dequeue atomically claims the next ready item and marks it processing.
+func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
+	now := formatTime(q.now())
+	query := dequeueDeterministicSQL
+	if q.randomized {
+		query = dequeueRandomizedSQL
+	}
+	row := q.db.QueryRowContext(ctx, query, now)
 	item, err := scanWorkItem(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return WorkItem{}, sql.ErrNoRows

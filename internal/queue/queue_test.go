@@ -309,6 +309,7 @@ func TestDBQueue_DequeueClaimsHighestPriorityReadyItem(t *testing.T) {
 func TestDBQueue_DequeueKeepsFIFOWithinSamePriority(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
+	q.randomized = false
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	q.now = func() time.Time { return now }
 
@@ -342,9 +343,53 @@ func TestDBQueue_DequeueKeepsFIFOWithinSamePriority(t *testing.T) {
 	}
 }
 
+func TestDBQueue_DequeueRandomizedReturnsExpectedSet(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t)) // default randomized == true
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	want := map[string]bool{"One": true, "Two": true, "Three": true, "Four": true, "Five": true}
+	for name := range want {
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: name}}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue %q: %v", name, err)
+		}
+	}
+
+	got := make(map[string]bool, len(want))
+	for range want {
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue: %v", err)
+		}
+		name := item.Inputs.Track.TrackName
+		if got[name] {
+			t.Fatalf("duplicate dequeue of %q", name)
+		}
+		got[name] = true
+	}
+
+	// Randomized order is not asserted; the dequeued items must form the same set
+	// as the enqueued items (no drops, no duplicates).
+	if len(got) != len(want) {
+		t.Fatalf("dequeued set size = %d; want %d", len(got), len(want))
+	}
+	for name := range want {
+		if !got[name] {
+			t.Fatalf("missing %q from dequeued set", name)
+		}
+	}
+
+	// The queue is now empty.
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Dequeue after draining = %v; want sql.ErrNoRows", err)
+	}
+}
+
 func TestDBQueue_DequeuePrioritizesWebhookAheadOfScanBacklog(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
+	q.randomized = false
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	q.now = func() time.Time { return now }
 

@@ -218,6 +218,7 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 - Purpose: Durable SQLite-backed work queue for serve/worker mode
 - Location: `internal/queue/queue.go`
 - Pattern: `DBQueue` struct with `Enqueue`, `Dequeue`, `Complete`, `Fail`, `Cleanup`, plus inspection/maintenance methods `List(ctx, ListFilter)`, `Retry(ctx, id)` (rejects non-failed rows with `ErrNotRetryable`), `ClearDone(ctx)`, and `CountDone(ctx)`. Used by the `queue list / failed / retry / clear` CLI subcommands and the worker.
+- Dequeue ordering: `Dequeue` shuffles within each priority tier (`ORDER BY priority DESC, RANDOM()`) by default to avoid a strictly-alphabetical scraping fingerprint. The unexported `randomized` field (true by default) selects between two complete SQL constants; `SetRandomized(bool)` applies the `[queue] randomize` config key / `MXLRC_QUEUE_RANDOMIZE` env var (default true). `List` output stays deterministic.
 - Purpose: Persistence for library scan_results rows
 - Location: `internal/scan/repository.go`
 - Pattern: `Repo` struct with `Upsert`, `ListByLibrary`, `ListPendingByLibrary`, `SetStatus`, plus inspection/maintenance methods `List(ctx, Filter)` (filters by optional `LibraryID` and `Status`), `ClearByLibrary(ctx, libraryID)`, and `CountByLibrary(ctx, libraryID)`. Used by the `scan results` and `scan clear` CLI subcommands and the scheduler.
