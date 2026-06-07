@@ -113,7 +113,8 @@ func completionLibraryNames(ctx context.Context) []string {
 	if _, statErr := os.Stat(cfg.DB.Path); statErr != nil {
 		return nil
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	// Read-only: completion must not run migrations or otherwise mutate the DB.
+	sqlDB, err := db.OpenReadOnly(ctx, cfg.DB.Path)
 	if err != nil {
 		return nil
 	}

@@ -114,8 +114,21 @@ func generateRealistic(root string, spec GenSpec) (int, error) {
 	return count, nil
 }
 
-// sanitize replaces path separators in a tag value so it is safe as a directory
-// or file name component.
+// sanitize replaces characters that are invalid in a path component (on Windows
+// as well as Unix) so a catalog title like "(What's the Story) Morning Glory?"
+// yields a portable directory or file name. Trailing whitespace is trimmed
+// because Windows rejects path components ending in a space.
 func sanitize(s string) string {
-	return strings.NewReplacer("/", "-", string(os.PathSeparator), "-").Replace(s)
+	r := strings.NewReplacer(
+		"/", "-",
+		"\\", "-",
+		":", "-",
+		"*", "-",
+		"|", "-",
+		"?", "",
+		"\"", "'",
+		"<", "(",
+		">", ")",
+	)
+	return strings.TrimSpace(r.Replace(s))
 }

@@ -356,7 +356,7 @@ func (r *Repo) FindByTrack(ctx context.Context, artist, title string) (results [
 // through work_queue_scan_results is the only way to surface tracks that are
 // parked behind a miss cooldown rather than actively in flight.
 func (r *Repo) ListDeferred(ctx context.Context, filter Filter) (results []models.ScanResult, retErr error) {
-	query := `SELECT sr.id, sr.library_id, sr.file_path, sr.artist, sr.title, sr.album, sr.album_artist, sr.outdir, sr.filename, sr.status, sr.created_at
+	query := `SELECT DISTINCT sr.id, sr.library_id, sr.file_path, sr.artist, sr.title, sr.album, sr.album_artist, sr.outdir, sr.filename, sr.status, sr.created_at
               FROM scan_results sr
               JOIN work_queue_scan_results j ON j.scan_result_id = sr.id
               JOIN work_queue wq ON wq.id = j.work_queue_id

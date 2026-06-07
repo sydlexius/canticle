@@ -16,7 +16,7 @@ func TestResolveArtist(t *testing.T) {
 		{"various falls back", "Various", "Adele", "Adele"},
 		{"various artists case-insensitive", "various artists", "Adele", "Adele"},
 		{"VA lowercase", "va", "Adele", "Adele"},
-		{"album artist with surrounding space still preferred", "  Muse  ", "Muse feat. X", "  Muse  "},
+		{"album artist with surrounding space trimmed and preferred", "  Muse  ", "Muse feat. X", "Muse"},
 		{"both empty", "", "", ""},
 		{"placeholder album artist but empty track artist yields empty", "Various Artists", "", ""},
 	}

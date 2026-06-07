@@ -99,3 +99,31 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 
 	return sqlDB, nil
 }
+
+// OpenReadOnly opens an existing database for query-only access. Unlike Open it
+// does NOT create the data directory, does NOT enable WAL, and does NOT run
+// migrations, so it is safe for side-effect-free callers such as shell
+// completion: a tab-press must never mutate schema or data. The connection is
+// set query_only, so any accidental write is rejected. The caller is responsible
+// for ensuring the file exists; opening a missing database returns an error
+// rather than creating one.
+func OpenReadOnly(ctx context.Context, path string) (*sql.DB, error) {
+	if path == "" {
+		return nil, fmt.Errorf("db: path must not be empty")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("db: open read-only %s: %w", path, err)
+	}
+
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("db: open read-only %s: %w", path, err)
+	}
+	// Single connection so the query_only PRAGMA reliably applies to every query.
+	sqlDB.SetMaxOpenConns(1)
+	if _, err := sqlDB.ExecContext(ctx, "PRAGMA query_only=ON"); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("db: set query_only: %w", err)
+	}
+	return sqlDB, nil
+}

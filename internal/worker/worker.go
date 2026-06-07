@@ -264,9 +264,14 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// must not pin the worker in a permanent geometric backoff while it is
 		// otherwise healthily reaching the provider and getting clean misses.
 		if musixmatch.IsBenignMiss(err) {
-			w.consecutiveFailures = 0
 			slog.Info("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
-			return w.requeueDeferred(ctx, item, err)
+			if derr := w.requeueDeferred(ctx, item, err); derr != nil {
+				return derr
+			}
+			// Reset only after the deferral is durably recorded: if requeueDeferred
+			// failed above we keep the failure state so backoff still applies next run.
+			w.consecutiveFailures = 0
+			return nil
 		}
 		slog.Warn("worker song resolution failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 		return w.fail(ctx, item, err)

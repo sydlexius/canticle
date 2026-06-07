@@ -26,6 +26,11 @@ func main() {
 	realistic := flag.Bool("realistic", false, "generate real catalog-matchable artist/title/album names (for end-to-end fetch testing) instead of synthetic placeholders; ignores -artists/-albums/-tracks")
 	flag.Parse()
 
+	if *libraries <= 0 {
+		fmt.Fprintln(os.Stderr, "genlib: -libraries must be > 0")
+		os.Exit(2)
+	}
+
 	total := 0
 	for l := 1; l <= *libraries; l++ {
 		root := *out

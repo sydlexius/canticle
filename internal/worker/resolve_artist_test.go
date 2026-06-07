@@ -66,6 +66,30 @@ func TestRunOnceResolvesAlbumArtistForQueryAndCacheKey(t *testing.T) {
 	}
 }
 
+// TestRunOnceBenignMissDeferFailureKeepsBackoff verifies that when a benign
+// miss occurs but the deferral write fails, RunOnce surfaces the error AND
+// leaves consecutiveFailures intact. Resetting the counter before the defer is
+// durably recorded would silently drop the backoff state on the next run.
+func TestRunOnceBenignMissDeferFailureKeepsBackoff(t *testing.T) {
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID:     1,
+			Inputs: models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}, Outdir: "out", Filename: "a.lrc"},
+		}},
+		deferErr: fmt.Errorf("queue write failed"),
+	}
+	fetcher := &fakeFetcher{err: fmt.Errorf("upstream: %w", musixmatch.ErrNotFound)}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	w.consecutiveFailures = 3
+
+	if err := w.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce = nil; want the requeue error to surface")
+	}
+	if w.consecutiveFailures != 3 {
+		t.Fatalf("consecutiveFailures = %d; want 3 (a failed defer must not wipe backoff state)", w.consecutiveFailures)
+	}
+}
+
 func TestRunOnceBenignMissResetsConsecutiveFailures(t *testing.T) {
 	q := &fakeQueue{items: []queue.WorkItem{{
 		ID:     1,

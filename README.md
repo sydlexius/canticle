@@ -162,7 +162,7 @@ The watcher is **best-effort and in addition to** the periodic scan, never a rep
 
 Because the periodic scheduler remains the source of truth, you can run the watcher as the primary trigger and demote the periodic scan to a long reconcile backstop. Enable the watcher and raise the interval, e.g.:
 
-```
+```sh
 MXLRCGO_WATCH_ENABLED=1
 MXLRC_SCAN_INTERVAL=21600   # 6h reconcile backstop (seconds)
 ```

@@ -9,13 +9,15 @@ import "strings"
 // ID3v2.4 null-joined values). Generic compilation placeholders are NOT the
 // track's artist, so they fall back to the track artist instead.
 //
-// The chosen value is returned verbatim (not trimmed/normalized) so callers
-// retain the original tag text; key normalization happens separately via
-// NormalizeKey.
+// When the album-artist is chosen it is returned trimmed of surrounding
+// whitespace: the resolved value feeds the provider query directly (not only the
+// cache key, which NormalizeKey trims separately), so leading/trailing spaces
+// would otherwise degrade match quality. The track-artist fallback is returned
+// as-is.
 func ResolveArtist(albumArtist, artist string) string {
 	trimmed := strings.TrimSpace(albumArtist)
 	if trimmed != "" && !isGenericAlbumArtist(trimmed) {
-		return albumArtist
+		return trimmed
 	}
 	return artist
 }
