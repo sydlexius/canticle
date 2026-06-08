@@ -51,8 +51,10 @@ func buildWriter(cfg Config) io.Writer {
 		return os.Stderr
 	}
 
-	// Probe writability: attempt to open/create the file.
-	f, err := os.OpenFile(cfg.FilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644) //nolint:gosec // user-specified log file path
+	// Probe writability: attempt to open/create the file. 0600 keeps logs
+	// readable only by the owner (they can carry operational data); lumberjack
+	// reuses the existing file's mode, so this also governs the live log file.
+	f, err := os.OpenFile(cfg.FilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // user-specified log file path, owner-only perms
 	if err != nil {
 		slog.Warn("logging: log file is not writable; falling back to stderr", "path", cfg.FilePath, "error", err)
 		return os.Stderr

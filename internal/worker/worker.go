@@ -276,11 +276,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if w.now().Before(w.circuitOpenUntil) {
 			return errQueueEmpty
 		}
-		// Circuit window elapsed: enter half-open and probe the provider on the
-		// next dequeue. Recovery is only confirmed once a round-trip succeeds.
+		// Circuit window elapsed: enter half-open. The probe log is emitted at the
+		// actual provider call (see song) so an empty-queue ticker tick does not
+		// log a phantom probe. Recovery is only confirmed once a round-trip succeeds.
 		w.circuitProbing = true
 		w.circuitOpenUntil = time.Time{}
-		slog.Debug("worker circuit half-open; probing provider")
 	}
 	item, err := w.queue.Dequeue(ctx)
 	if err != nil {
@@ -414,6 +414,12 @@ func (w *Worker) song(ctx context.Context, track models.Track) (models.Song, boo
 		return models.Song{}, false, fmt.Errorf("worker: lookup fallback cache: %w", err)
 	}
 
+	if w.circuitProbing {
+		// Half-open probe: the first real provider call after the circuit window
+		// elapsed. Logged here (not at the gate) so it reflects an actual attempt
+		// rather than a bare ticker tick that found an empty queue.
+		slog.Debug("worker circuit half-open; probing provider")
+	}
 	song, err := w.fetcher.FindLyrics(ctx, track)
 	if err != nil {
 		return models.Song{}, false, fmt.Errorf("worker: find lyrics: %w", err)
