@@ -114,6 +114,25 @@ sample_duration_seconds = 30
 min_confidence = 0.85
 min_similarity = 0.35
 
+[guard]
+# Optional language/script guard. It rejects fetched lyrics whose body is
+# dominated by scripts outside the allowlist below, so a wrong-language match
+# (e.g. a Cyrillic or CJK body returned for a Latin-script track) is never
+# written or cached. A rejection is terminal: the track is completed without
+# output and is not retried (re-fetching yields the same wrong-language result).
+#
+# accepted_scripts is the allowlist of Unicode script buckets a lyric body may be
+# written in. Supported buckets: Latin, Han, Kana, Hangul, Other. An EMPTY list
+# (the default) DISABLES the guard. Env override: MXLRC_GUARD_ACCEPTED_SCRIPTS
+# (comma-separated). Example (Latin plus Japanese):
+# accepted_scripts = ["Latin", "Han", "Kana"]
+accepted_scripts = []
+
+# script_guard_threshold is the maximum tolerated share of foreign-script letters
+# (outside accepted_scripts) before a result is rejected. Default 0.20. Values
+# outside (0, 1] are reset to the default. Env override: MXLRC_GUARD_THRESHOLD.
+script_guard_threshold = 0.20
+
 [queue]
 # Shuffle the worker dequeue order within each priority tier so requests do not
 # go out in strict alphabetical (library insertion) order, which is a plausible

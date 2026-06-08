@@ -24,6 +24,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/cache"
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/db"
+	"github.com/sydlexius/mxlrcgo-svc/internal/langguard"
 	"github.com/sydlexius/mxlrcgo-svc/internal/library"
 	"github.com/sydlexius/mxlrcgo-svc/internal/logging"
 	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
@@ -634,6 +635,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	w.SetMissBackoff(time.Duration(cfg.API.MissBackoffBaseHours)*time.Hour, time.Duration(cfg.API.MissBackoffCapHours)*time.Hour)
 	w.SetMaxMissAttempts(cfg.API.MaxMissAttempts)
 	configureWorkerVerification(w, cfg, verifier)
+	configureWorkerGuard(w, newGuard(cfg))
 
 	runCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -774,6 +776,25 @@ func configureWorkerVerification(w *worker.Worker, cfg config.Config, verifier v
 		return
 	}
 	w.EnableVerification(verifier, cfg.Verification.MinConfidence)
+}
+
+// newGuard builds the language/script guard from config. It returns an UNTYPED
+// nil interface when no allowlist is configured (guard disabled). Returning a
+// typed-nil *langguard.Guard through the interface would be non-nil and defeat
+// the nil check in configureWorkerGuard, so the disabled path must return a bare
+// nil rather than a (*langguard.Guard)(nil).
+func newGuard(cfg config.Config) worker.ScriptGuard {
+	if len(cfg.Guard.AcceptedScripts) == 0 {
+		return nil
+	}
+	return langguard.NewGuard(cfg.Guard.AcceptedScripts, cfg.Guard.Threshold)
+}
+
+func configureWorkerGuard(w *worker.Worker, g worker.ScriptGuard) {
+	if g == nil {
+		return
+	}
+	w.EnableGuard(g)
 }
 
 func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd) {
@@ -1241,6 +1262,8 @@ func configKeys() []string {
 		"verification.sample_duration_seconds",
 		"verification.min_confidence",
 		"verification.min_similarity",
+		"guard.accepted_scripts",
+		"guard.script_guard_threshold",
 	}
 }
 
@@ -1288,6 +1311,10 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.FormatFloat(cfg.Verification.MinConfidence, 'f', -1, 64), true
 	case "verification.min_similarity":
 		return strconv.FormatFloat(cfg.Verification.MinSimilarity, 'f', -1, 64), true
+	case "guard.accepted_scripts":
+		return strings.Join(cfg.Guard.AcceptedScripts, ","), true
+	case "guard.script_guard_threshold":
+		return strconv.FormatFloat(cfg.Guard.Threshold, 'f', -1, 64), true
 	default:
 		return "", false
 	}
@@ -1389,6 +1416,15 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("verification.min_similarity must be a number between 0 and 1")
 		}
 		cfg.Verification.MinSimilarity = n
+	case "guard.accepted_scripts":
+		// An empty value is valid: it clears the allowlist and disables the guard.
+		cfg.Guard.AcceptedScripts = splitCSV(value)
+	case "guard.script_guard_threshold":
+		n, err := strconv.ParseFloat(value, 64)
+		if err != nil || n <= 0 || n > 1 {
+			return fmt.Errorf("guard.script_guard_threshold must be a number between 0 and 1")
+		}
+		cfg.Guard.Threshold = n
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}

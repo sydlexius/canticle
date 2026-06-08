@@ -33,6 +33,14 @@ type Queue interface {
 	RetireMiss(ctx context.Context, id int64) (queue.WorkItem, error)
 }
 
+// ScriptGuard rejects lyric results whose body is dominated by scripts outside
+// a configured allowlist. A nil guard, or one whose Enabled reports false,
+// imposes no filtering. See internal/langguard for the concrete implementation.
+type ScriptGuard interface {
+	Accept(models.Song) (bool, string)
+	Enabled() bool
+}
+
 // Cache provides lyrics cache operations.
 type Cache interface {
 	LookupExact(ctx context.Context, artist, title, album string) (string, error)
@@ -71,7 +79,11 @@ type Worker struct {
 	writer                lyrics.Writer
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
-	consecutiveFailures   int
+	// scriptGuard, when non-nil and Enabled, rejects fetched lyrics whose script
+	// mix falls outside the configured allowlist. Named scriptGuard (not guard)
+	// to avoid colliding with the guardReject helper. Default nil (no guard).
+	scriptGuard         ScriptGuard
+	consecutiveFailures int
 	// last* record the most recent hard failure so the backoff WARN can name the
 	// track it is throttling on (the failure cause is logged separately, but the
 	// periodic backoff line otherwise carried no identity).
@@ -201,6 +213,23 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 	if belowConfidence > 0 && belowConfidence <= 1 {
 		w.verifyBelowConfidence = belowConfidence
 	}
+}
+
+// EnableGuard configures the language/script guard used to reject lyric
+// results whose script mix falls outside the configured allowlist.
+func (w *Worker) EnableGuard(g ScriptGuard) {
+	w.scriptGuard = g
+}
+
+// guardReject reports whether the script guard rejects this song. It returns
+// (false, "") when no guard is configured or the guard is disabled, so the
+// caller can treat a nil/disabled guard as a no-op.
+func (w *Worker) guardReject(_ queue.WorkItem, song models.Song) (bool, string) {
+	if w.scriptGuard == nil || !w.scriptGuard.Enabled() {
+		return false, ""
+	}
+	ok, reason := w.scriptGuard.Accept(song)
+	return !ok, reason
 }
 
 // Run processes ready work items until the queue is empty or the context ends.
@@ -340,6 +369,19 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
 			return w.fail(ctx, item, err)
+		}
+		// Language/script guard runs only on the non-cache-hit path: cache hits are
+		// our own previously-vetted data, so re-screening them is wasteful. A guard
+		// rejection is terminal POLICY, not a retriable failure: re-fetching the
+		// same track yields the same wrong-language lyrics, so we Complete the item
+		// (so it is neither cached nor written, never retried, and does not trip the
+		// circuit) rather than calling w.fail (retriable) or deferring it.
+		if reject, reason := w.guardReject(item, song); reject {
+			slog.Warn("worker guard rejected lyrics", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", reason)
+			if err := w.queue.Complete(context.WithoutCancel(ctx), item.ID); err != nil {
+				return w.fail(ctx, item, fmt.Errorf("worker: complete guard-rejected item %d: %w", item.ID, err))
+			}
+			return nil
 		}
 		if err := w.store(ctx, resolvedTrack, song); err != nil {
 			slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
