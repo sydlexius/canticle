@@ -30,6 +30,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
+	"github.com/sydlexius/mxlrcgo-svc/internal/petitlyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
@@ -752,10 +753,17 @@ func selectedProvider(cfg config.Config, token string, newFetcher func(string) m
 	if mc, ok := fetcher.(*musixmatch.Client); ok {
 		mc.WithMinInterval(time.Duration(cfg.API.Cooldown) * time.Second)
 	}
+	// Petit Lyrics needs no token. It gets the same per-request pacing floor as
+	// Musixmatch for now; independent per-provider rate-limit tuning is future
+	// work (the upstreams' limits are independent). The selected provider's
+	// results are screened by the worker's language guard like any other.
+	petit := petitlyrics.NewClient()
+	petit.WithMinInterval(time.Duration(cfg.API.Cooldown) * time.Second)
 	return providers.Select(
 		cfg.Providers.Primary,
 		cfg.Providers.Disabled,
 		providers.New(providers.Musixmatch, fetcher),
+		providers.New(providers.PetitLyrics, petit),
 	)
 }
 

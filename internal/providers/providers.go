@@ -12,8 +12,8 @@ const (
 	// Musixmatch is the built-in Musixmatch provider name.
 	Musixmatch = "musixmatch"
 	// PetitLyrics is the Petit Lyrics provider name. The adapter lives in
-	// internal/petitlyrics; provider registration/selection is wired in a
-	// later phase, so this constant is currently a name reference only.
+	// internal/petitlyrics and is selectable via providers.primary =
+	// "petitlyrics" (wired in internal/commands.selectedProvider).
 	PetitLyrics = "petitlyrics"
 )
 

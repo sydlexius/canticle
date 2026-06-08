@@ -52,6 +52,17 @@ func TestSelectedProvider(t *testing.T) {
 	}
 }
 
+func TestSelectedProviderPetitLyrics(t *testing.T) {
+	cfg := config.Config{Providers: config.ProvidersConfig{Primary: "petitlyrics"}}
+	got, err := selectedProvider(cfg, "token", func(string) musixmatch.Fetcher { return fakeFetcher{} })
+	if err != nil {
+		t.Fatalf("selectedProvider: %v", err)
+	}
+	if got.Name() != "petitlyrics" {
+		t.Fatalf("provider name = %q; want petitlyrics", got.Name())
+	}
+}
+
 func TestNewVerifierRequiresURLWhenEnabled(t *testing.T) {
 	_, err := newVerifier(config.Config{
 		Verification: config.VerificationConfig{Enabled: true},

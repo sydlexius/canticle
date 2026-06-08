@@ -99,7 +99,10 @@ addr = "127.0.0.1:3876"
 # work_interval_seconds = 0
 
 [providers]
-# Active lyrics provider. Musixmatch is currently the only supported provider.
+# Active lyrics provider: "musixmatch" (default) or "petitlyrics".
+# petitlyrics has no public API; the adapter scrapes reverse-engineered
+# endpoints (Japanese catalog, JASRAC/NexTone-licensed text). Selecting it opts
+# into that access method - see docs and issue #149.
 primary = "musixmatch"
 
 # Provider names to disable explicitly.
