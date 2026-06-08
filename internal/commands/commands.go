@@ -1280,6 +1280,7 @@ func configKeys() []string {
 		"server.work_interval_seconds",
 		"providers.primary",
 		"providers.disabled",
+		"providers.mode",
 		"verification.enabled",
 		"verification.whisper_url",
 		"verification.ffmpeg_path",
@@ -1325,6 +1326,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return cfg.Providers.Primary, true
 	case "providers.disabled":
 		return strings.Join(cfg.Providers.Disabled, ","), true
+	case "providers.mode":
+		return cfg.Providers.Mode, true
 	case "verification.enabled":
 		return strconv.FormatBool(cfg.Verification.Enabled), true
 	case "verification.whisper_url":
@@ -1417,6 +1420,11 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 		cfg.Providers.Primary = value
 	case "providers.disabled":
 		cfg.Providers.Disabled = splitCSV(value)
+	case "providers.mode":
+		if m := strings.ToLower(strings.TrimSpace(value)); m != "ordered" {
+			return fmt.Errorf("providers.mode must be \"ordered\" (only supported mode)")
+		}
+		cfg.Providers.Mode = "ordered"
 	case "verification.enabled":
 		v, err := strconv.ParseBool(value)
 		if err != nil {

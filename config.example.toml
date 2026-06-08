@@ -116,6 +116,15 @@ primary = "musixmatch"
 # Provider names to disable explicitly.
 disabled = []
 
+# Multi-provider dispatch mode. Only "ordered" is implemented today: lanes are
+# queried in priority order and the first suitable result (passes the script
+# guard and carries synced or unsynced lyrics) wins; the next lane is consulted
+# only on a miss or an unsuitable result. The "parallel" race is reserved by
+# docs/multi-provider-orchestration.md and not yet built; any value other than
+# "ordered" is rejected at load. With a single provider this setting has no
+# observable effect. Override: MXLRC_PROVIDERS_MODE. Default "ordered".
+mode = "ordered"
+
 [verification]
 # Optional STT verification for low-confidence scanned audio.
 enabled = false

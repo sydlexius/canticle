@@ -14,6 +14,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
+	"github.com/sydlexius/mxlrcgo-svc/internal/orchestrator"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
 )
@@ -1104,32 +1105,52 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 }
 
 // newCircuitWorker builds a worker with a frozen clock and base=60s / cap=30m
-// for directly exercising tripCircuitIfRateLimited without driving RunOnce.
-func newCircuitWorker() (*Worker, *fakeQueue, time.Time) {
+// for directly exercising the lane's throttle classification (formerly the
+// worker's tripCircuitIfRateLimited) via tripViaLane, without driving full
+// RunOnce. The returned fakeFetcher is the lane's provider.
+func newCircuitWorker() (*Worker, *fakeQueue, *fakeFetcher, time.Time) {
 	q := &fakeQueue{}
-	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	f := &fakeFetcher{}
+	w := New(q, &fakeCache{}, f, &fakeWriter{})
 	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	w.setClock(func() time.Time { return fixed })
 	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
-	return w, q, fixed
+	return w, q, f, fixed
+}
+
+func tripViaLane(w *Worker, f *fakeFetcher, item queue.WorkItem, err error) (bool, error) {
+	f.err = err
+	if ou := w.circuit.OpenUntil(); !ou.IsZero() {
+		w.setClock(func() time.Time { return ou.Add(time.Nanosecond) })
+	}
+	_, ferr := w.lane.FindLyrics(context.Background(), item.Inputs.Track)
+	if orchestrator.ClassifyOutcome(ferr) == orchestrator.OutcomeAuthRateLimit {
+		return true, w.releaseAfterThrottle(context.Background(), item)
+	}
+	return false, nil
 }
 
 func TestCircuitRampIncrementsAndCaps(t *testing.T) {
-	w, _, fixed := newCircuitWorker()
+	w, _, f, _ := newCircuitWorker()
 	item := queue.WorkItem{ID: 1}
 	throttle := fmt.Errorf("upstream: %w", musixmatch.ErrRateLimited)
 
 	// trip 6 reaches the cap: 60 -> 120 -> 240 -> 480 -> 960 -> 1800 (capped).
-	wantDeltas := []time.Duration{
+	// Ported from the inline tripCircuitIfRateLimited (no open gate) to drive the
+	// lane (which enforces the open gate): tripViaLane advances the clock past
+	// each window before the next probe, so the geometric ramp is asserted as the
+	// WINDOW size measured from the clock at the moment of the trip, not relative
+	// to a single frozen base. Equivalent ramp/cap assertion.
+	wantWindows := []time.Duration{
 		60 * time.Second, 120 * time.Second, 240 * time.Second,
 		480 * time.Second, 960 * time.Second, 30 * time.Minute,
 	}
-	for i, want := range wantDeltas {
-		tripped, releaseErr := w.tripCircuitIfRateLimited(context.Background(), item, throttle)
+	for i, want := range wantWindows {
+		tripped, releaseErr := tripViaLane(w, f, item, throttle)
 		if !tripped || releaseErr != nil {
 			t.Fatalf("trip %d: tripped=%v releaseErr=%v; want tripped, no error", i+1, tripped, releaseErr)
 		}
-		if got := w.circuit.OpenUntil().Sub(fixed); got != want {
+		if got := w.circuit.OpenUntil().Sub(w.now()); got != want {
 			t.Fatalf("trip %d: window = %v; want %v", i+1, got, want)
 		}
 		if w.circuit.Trips() != i+1 {
@@ -1140,10 +1161,10 @@ func TestCircuitRampIncrementsAndCaps(t *testing.T) {
 
 func TestThrottleAfterSuccessLogsWarn(t *testing.T) {
 	recs := captureLogs(t)
-	w, _, fixed := newCircuitWorker()
+	w, _, f, fixed := newCircuitWorker()
 	w.circuit.RecordSuccess()
 
-	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+	tripViaLane(w, f, queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
 
 	if !hasLog(*recs, slog.LevelWarn, "provider throttling") {
 		t.Fatalf("logs = %+v; want Warn 'provider throttling' after a validated session", *recs)
@@ -1166,9 +1187,9 @@ func TestThrottleAfterSuccessLogsWarn(t *testing.T) {
 
 func TestThrottleBeforeAnySuccessLogsWarn(t *testing.T) {
 	recs := captureLogs(t)
-	w, _, _ := newCircuitWorker()
+	w, _, f, _ := newCircuitWorker()
 
-	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+	tripViaLane(w, f, queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
 
 	if !hasLog(*recs, slog.LevelWarn, "no successful fetch yet") {
 		t.Fatalf("logs = %+v; want Warn advising token verification before any success", *recs)
@@ -1177,12 +1198,12 @@ func TestThrottleBeforeAnySuccessLogsWarn(t *testing.T) {
 
 func TestEscalationWarnAfterThreshold(t *testing.T) {
 	recs := captureLogs(t)
-	w, _, _ := newCircuitWorker()
+	w, _, f, _ := newCircuitWorker()
 	w.circuit.RecordSuccess()
 	throttle := fmt.Errorf("x: %w", musixmatch.ErrRateLimited)
 
 	for i := 0; i < escalationThreshold; i++ {
-		w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, throttle)
+		tripViaLane(w, f, queue.WorkItem{ID: 1}, throttle)
 	}
 
 	if w.circuit.Trips() != escalationThreshold {
@@ -1195,12 +1216,12 @@ func TestEscalationWarnAfterThreshold(t *testing.T) {
 
 func TestRenewalHoldsFullCapAndDoesNotIncrementTrips(t *testing.T) {
 	recs := captureLogs(t)
-	w, q, fixed := newCircuitWorker()
+	w, q, f, fixed := newCircuitWorker()
 	// A genuine renewal is loud even after earlier success.
 	w.circuit.RecordSuccess()
 	renewal := fmt.Errorf("x: %w", musixmatch.ErrTokenRenewalRequired)
 
-	tripped, releaseErr := w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 7}, renewal)
+	tripped, releaseErr := tripViaLane(w, f, queue.WorkItem{ID: 7}, renewal)
 	if !tripped || releaseErr != nil {
 		t.Fatalf("tripped=%v releaseErr=%v; want tripped, no error", tripped, releaseErr)
 	}
@@ -1221,19 +1242,20 @@ func TestRenewalHoldsFullCapAndDoesNotIncrementTrips(t *testing.T) {
 	}
 
 	// A subsequent bare-401 throttle starts the ramp at the base, proving the
-	// renewal left the ramp position untouched.
-	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 8}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
-	if got := w.circuit.OpenUntil().Sub(fixed); got != 60*time.Second {
+	// renewal left the ramp position untouched. tripViaLane advances the clock
+	// past the renewal window first, so assert the WINDOW size from the trip clock.
+	tripViaLane(w, f, queue.WorkItem{ID: 8}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+	if got := w.circuit.OpenUntil().Sub(w.now()); got != 60*time.Second {
 		t.Fatalf("post-renewal throttle window = %v; want base 60s (ramp position preserved)", got)
 	}
 }
 
 func TestRenewalReleaseErrorIsSurfaced(t *testing.T) {
-	w, q, _ := newCircuitWorker()
+	w, q, f, _ := newCircuitWorker()
 	q.releaseErr = errors.New("release boom")
 	renewal := fmt.Errorf("x: %w", musixmatch.ErrTokenRenewalRequired)
 
-	tripped, releaseErr := w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 7}, renewal)
+	tripped, releaseErr := tripViaLane(w, f, queue.WorkItem{ID: 7}, renewal)
 	if !tripped {
 		t.Fatal("tripped = false; want true (renewal still opens the circuit)")
 	}
@@ -1359,7 +1381,7 @@ func TestRunOnceSurfacesReleaseFailureAfterCircuitTrip(t *testing.T) {
 }
 
 func TestThrottleResetsStaleFailureState(t *testing.T) {
-	w, _, _ := newCircuitWorker()
+	w, _, f, _ := newCircuitWorker()
 	// Simulate a prior hard failure having pinned the consecutive-failure WARN
 	// onto a now-stale victim.
 	w.consecutiveFailures = 4
@@ -1367,7 +1389,7 @@ func TestThrottleResetsStaleFailureState(t *testing.T) {
 	w.lastFailArtist = "Stale Artist"
 	w.lastFailTrack = "Stale Track"
 
-	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+	tripViaLane(w, f, queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
 
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; want 0 (a throttle is not the song's fault)", w.consecutiveFailures)

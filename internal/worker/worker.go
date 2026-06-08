@@ -15,6 +15,8 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
 	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
+	"github.com/sydlexius/mxlrcgo-svc/internal/orchestrator"
+	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
 )
@@ -75,9 +77,19 @@ const escalationThreshold = 5
 // concurrency-safe internal/circuit.Breaker, so it is already safe for the
 // per-provider concurrency that motivated the extraction.
 type Worker struct {
-	queue                 Queue
-	cache                 Cache
-	fetcher               musixmatch.Fetcher
+	queue Queue
+	cache Cache
+	// orch dispatches the lyrics lookup across one or more provider lanes. With a
+	// single Musixmatch lane (the only deployment today) it is a behavior-
+	// preserving pass-through of the prior single-fetch path. The lane owns the
+	// circuit interaction (open gate, half-open probe, trip, success/benign-miss
+	// reset, throttle classification and logging); the worker maps the
+	// orchestrator's outcome onto its queue side-effects.
+	orch *orchestrator.Orchestrator
+	// lane is the single Musixmatch lane held by orch. The worker keeps a direct
+	// reference so the throttle queue side-effects (release, stale-failure reset)
+	// can read the lane's breaker outcome; it shares w.circuit.
+	lane                  *orchestrator.Lane
 	writer                lyrics.Writer
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
@@ -113,10 +125,18 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 	now := time.Now
 	cb := circuit.New(defaultCircuitBackoffBase, defaultCircuitOpenDuration)
 	cb.SetClock(now)
+	// Wrap the injected fetcher as the single Musixmatch lane sharing this
+	// breaker, and build an ordered orchestrator over it. With one lane this is a
+	// pass-through; the lane owns the circuit interaction the worker previously
+	// drove inline. orchestrator.New only errors on an unknown mode, and
+	// ModeOrdered is a constant, so the error is impossible here.
+	lane := orchestrator.NewLane(providers.New(providers.Musixmatch, fetcher), cb)
+	orch, _ := orchestrator.New(orchestrator.ModeOrdered, lane)
 	return &Worker{
 		queue:                 q,
 		cache:                 c,
-		fetcher:               fetcher,
+		orch:                  orch,
+		lane:                  lane,
 		writer:                writer,
 		verifyBelowConfidence: 0.85,
 		baseBackoff:           backoff.DefaultBase,
@@ -208,6 +228,13 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 // results whose script mix falls outside the configured allowlist.
 func (w *Worker) EnableGuard(g ScriptGuard) {
 	w.scriptGuard = g
+	// The orchestrator's suitability guard is deliberately left unset here. With a
+	// single lane there is no fall-through decision for it to make, and setting it
+	// would screen every result twice (once for suitability, once for the worker's
+	// terminal policy check below). The worker's own guard therefore stays the
+	// single screening point, preserving exactly-one Accept call per result.
+	// Wiring w.orch.SetGuard belongs with the change that adds a second lane, where
+	// the guard genuinely governs whether to advance to the next provider.
 }
 
 // guardReject reports whether the script guard rejects this song. It returns
@@ -314,11 +341,26 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 
 	song, cacheHit, err := w.song(ctx, resolvedTrack)
 	if err != nil {
-		if tripped, releaseErr := w.tripCircuitIfRateLimited(ctx, item, err); tripped {
-			if releaseErr != nil {
+		switch orchestrator.ClassifyOutcome(err) {
+		case orchestrator.OutcomeUnavailable:
+			// Every available lane's breaker was open, so no lane was consulted.
+			// Release the item back to pending with no failure increment (the
+			// catalog answer is unknown) and idle, exactly like the open-gate path.
+			if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
+				return fmt.Errorf("worker: release item %d after lanes unavailable: %w", item.ID, releaseErr)
+			}
+			return errQueueEmpty
+		case orchestrator.OutcomeAuthRateLimit:
+			// A throttle / auth / renewal signal. The lane already tripped its
+			// breaker and emitted the honest classification log; the worker only
+			// performs the queue side-effects: clear stale failure state (a
+			// throttle is not the song's fault) and release the item to pending.
+			if releaseErr := w.releaseAfterThrottle(ctx, item); releaseErr != nil {
 				return releaseErr
 			}
 			return errQueueEmpty
+		case orchestrator.OutcomeSuccess, orchestrator.OutcomeBenignMiss, orchestrator.OutcomeTransport:
+			// Fall through to the miss / failure handling below.
 		}
 		// A no-result (no matching track, or a match with no usable lyrics) is
 		// not our failure and does NOT retire the queue row: the catalog grows
@@ -334,14 +376,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			}
 			// Reset only after the deferral is durably recorded: if requeueDeferred
 			// failed above we keep the failure state so backoff still applies next run.
+			// The lane already reset the circuit ramp for this benign miss (a clean
+			// round-trip proves we are not throttled); the worker only owns the
+			// consecutive-failure counter here.
 			w.consecutiveFailures = 0
-			// A clean benign miss proves the provider round-trip succeeded, so we
-			// are not being throttled: reset the circuit ramp too. (EverSucceeded is
-			// deliberately NOT set here -- it tracks genuine lyric matches, and a
-			// miss is a successful round-trip but not a match.)
-			if w.circuit.RecordBenignMiss() {
-				slog.Info("worker circuit closed; provider recovered")
-			}
 			return nil
 		}
 		slog.Warn("worker song resolution failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
@@ -350,15 +388,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	confidence := Confidence(item.Inputs.Track, song.Track)
 	slog.Debug("worker lyrics match", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "cache_hit", cacheHit)
 	if !cacheHit {
-		// A non-cache provider fetch succeeded: the token is proven good this
-		// session (a later bare 401 is throttling, not a dead token), so record the
-		// success and recover the circuit NOW, before downstream processing. The
-		// verify/guard/store steps below are not throttle signals; their failures
-		// continue through the normal queue backoff path, but the breaker must not
-		// forget that the fetch itself worked just because a later step failed.
-		if w.circuit.RecordSuccess() {
-			slog.Info("worker circuit closed; provider recovered")
-		}
+		// A non-cache provider fetch succeeded: the lane already recorded the
+		// success and recovered its breaker inside FindLyrics (before any
+		// downstream step), so a later bare 401 is correctly read as throttling
+		// rather than a dead token, and a verify/guard/store failure below does not
+		// make the breaker forget the fetch itself worked.
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
 			return w.fail(ctx, item, err)
@@ -447,15 +481,17 @@ func (w *Worker) song(ctx context.Context, track models.Track) (models.Song, boo
 		return models.Song{}, false, fmt.Errorf("worker: lookup fallback cache: %w", err)
 	}
 
-	if w.circuit.Allow() == circuit.StateHalfOpen {
-		// Half-open probe: the first real provider call after the circuit window
-		// elapsed. Logged here (not at the gate) so it reflects an actual attempt
-		// rather than a bare ticker tick that found an empty queue.
-		slog.Debug("worker circuit half-open; probing provider")
-	}
-	song, err := w.fetcher.FindLyrics(ctx, track)
+	// Dispatch through the orchestrator. The lane owns the circuit interaction:
+	// it short-circuits an open breaker (returning orchestrator.ErrLaneUnavailable
+	// without calling the provider), emits the half-open probe note, trips on a
+	// throttle, resets the ramp on a benign miss, and records success. The worker
+	// only maps the returned outcome onto its queue side-effects (see RunOnce).
+	// The orchestrator returns the best-available result (possibly instrumental)
+	// when no lane is suitable, so the worker still writes the instrumental marker
+	// fallback exactly as before.
+	song, err := w.orch.FindLyrics(ctx, track)
 	if err != nil {
-		return models.Song{}, false, fmt.Errorf("worker: find lyrics: %w", err)
+		return models.Song{}, false, err
 	}
 	return song, false, nil
 }
@@ -471,68 +507,25 @@ func (w *Worker) store(ctx context.Context, track models.Track, song models.Song
 	return nil
 }
 
-// tripCircuitIfRateLimited inspects the fetcher error for the upstream
-// rate-limit / unauthorized sentinels and, if matched, opens the circuit
-// breaker and releases the dequeued item back to the pending pool. The
-// first return value reports whether the error was a rate-limit signal
-// (and therefore the caller must NOT call w.fail on the item). The second
-// return value is non-nil when Release failed, in which case the item is
-// orphaned in 'processing' and RunOnce must surface the failure to the
-// outer loop rather than swallow it as errQueueEmpty.
+// releaseAfterThrottle performs the queue side-effects for a throttle / auth /
+// renewal outcome whose breaker the lane has ALREADY tripped and logged: it
+// clears the stale consecutive-failure state (a throttle is not the song's
+// fault, and the circuit's geometric ramp is the backoff mechanism) and
+// releases the dequeued item back to the pending pool. A non-nil return means
+// Release failed and the item is orphaned in 'processing', so RunOnce must
+// surface the failure to the outer loop rather than swallow it as errQueueEmpty.
 //
-// The breaker state mutation (window, ramp, probing) lives in the
-// internal/circuit.Breaker; this method only classifies the error, drives the
-// breaker, emits the operator-facing logs, and releases the item.
-func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkItem, err error) (bool, error) {
-	// Case 1 MUST precede the bare-401 check below: tokenRenewalError also
-	// satisfies errors.Is(_, ErrUnauthorized), so testing ErrUnauthorized first
-	// would wrongly fold a genuine renewal into the throttle ramp. A renewal is
-	// not throttling: hold the full window, stay loud, and do NOT advance the
-	// throttle counter (so a later real throttle resumes from its true position).
-	if errors.Is(err, musixmatch.ErrTokenRenewalRequired) {
-		res := w.circuit.TripRenewal()
-		// Renewal is not a per-song failure, so consecutiveFailures/lastFail* are
-		// left untouched.
-		slog.Warn("worker circuit opened: token renewal required; regenerate the usertoken",
-			"backoff", res.Window, "next_retry", res.OpenUntil, "id", item.ID, "cause", err)
-		if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
-			return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
-		}
-		return true, nil
-	}
-	if !errors.Is(err, musixmatch.ErrRateLimited) &&
-		!errors.Is(err, musixmatch.ErrUnauthorized) &&
-		!errors.Is(err, musixmatch.ErrTruncatedResponse) {
-		return false, nil
-	}
-	// Bare 401 / 429 / truncated body: treat as throttling and ramp the window
-	// geometrically. The log level reflects what we actually know this session.
-	res := w.circuit.Trip()
-	// Reset stale failure state: a throttle is not the song's fault, and the
-	// circuit's geometric ramp is the backoff mechanism. The separate
-	// consecutive-failure WARN must not keep naming a stale victim.
+// The breaker classification, ramp, and operator-facing logs now live in the
+// lane (internal/orchestrator.Lane); this method owns only the queue effects.
+func (w *Worker) releaseAfterThrottle(ctx context.Context, item queue.WorkItem) error {
 	w.consecutiveFailures = 0
 	w.lastFailID = 0
 	w.lastFailArtist = ""
 	w.lastFailTrack = ""
-	switch {
-	case errors.Is(err, musixmatch.ErrTruncatedResponse):
-		slog.Warn("worker circuit opened: provider returned truncated response; likely throttling",
-			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
-	case w.circuit.EverSucceeded() && res.Trips >= escalationThreshold:
-		slog.Warn("worker circuit opened: token validated earlier this session but has failed repeatedly; it may have expired",
-			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
-	case w.circuit.EverSucceeded():
-		slog.Warn("worker circuit opened: provider throttling; token validated earlier this session",
-			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
-	default:
-		slog.Warn("worker circuit opened: no successful fetch yet this session; verify your token",
-			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
-	}
 	if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
-		return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
+		return fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
 	}
-	return true, nil
+	return nil
 }
 
 func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) error {

@@ -20,7 +20,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_MISS_BACKOFF_BASE_HOURS", "MXLRC_MISS_BACKOFF_CAP_HOURS", "MXLRC_MAX_MISS_ATTEMPTS",
 		"MXLRC_OUTPUT_DIR", "MXLRC_BILINGUAL_OUTPUT", "MXLRC_SERVER_ADDR", "MXLRC_WEBHOOK_API_KEY",
 		"MXLRC_SCAN_INTERVAL", "MXLRC_WORK_INTERVAL",
-		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED",
+		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED", "MXLRC_PROVIDERS_MODE",
 		"MXLRC_VERIFICATION_ENABLED", "MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL",
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
@@ -57,6 +57,9 @@ func TestLoad_MissingConfigFileIsNotFatal(t *testing.T) {
 	}
 	if cfg.Providers.Primary != "musixmatch" {
 		t.Errorf("default provider = %q; want musixmatch", cfg.Providers.Primary)
+	}
+	if cfg.Providers.Mode != "ordered" {
+		t.Errorf("default providers mode = %q; want ordered", cfg.Providers.Mode)
 	}
 	if cfg.Verification.SampleDurationSeconds != 30 {
 		t.Errorf("default verification sample duration = %d; want 30", cfg.Verification.SampleDurationSeconds)
@@ -1150,4 +1153,42 @@ func TestLoad_LoggingCompressDefaultTrueWhenKeyOmitted(t *testing.T) {
 	if !cfg.Logging.Compress {
 		t.Error("Logging.Compress = false; want default true when key is omitted from TOML")
 	}
+}
+
+func TestProvidersModeEnvOverrideAndValidation(t *testing.T) {
+	t.Run("env override accepts ordered", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_MODE", "ORDERED") // case-insensitive
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.Mode != "ordered" {
+			t.Fatalf("providers.mode = %q; want ordered", cfg.Providers.Mode)
+		}
+	})
+
+	t.Run("unsupported mode is rejected", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_MODE", "parallel")
+		_, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err == nil {
+			t.Fatal("Load with providers.mode=parallel returned nil error; want a rejection (parallel not implemented)")
+		}
+	})
+
+	t.Run("blank mode restores default", func(t *testing.T) {
+		isolateEnv(t)
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[providers]\nmode = \"\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.Mode != "ordered" {
+			t.Fatalf("blank mode = %q; want ordered default", cfg.Providers.Mode)
+		}
+	})
 }

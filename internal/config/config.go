@@ -150,7 +150,16 @@ const defaultScanIntervalSeconds = 900
 type ProvidersConfig struct {
 	Primary  string   `toml:"primary"`
 	Disabled []string `toml:"disabled"`
+	// Mode is the multi-provider dispatch strategy. Only "ordered" (query lanes
+	// in priority order, first suitable result wins) is implemented today; any
+	// other value is rejected at load time. The "parallel" race is reserved by
+	// docs/multi-provider-orchestration.md and not yet built. Default "ordered".
+	// Override: MXLRC_PROVIDERS_MODE.
+	Mode string `toml:"mode"`
 }
+
+// providersModeDefault is the only supported dispatch mode today.
+const providersModeDefault = "ordered"
 
 // VerificationConfig holds optional STT verification settings.
 type VerificationConfig struct {
@@ -205,7 +214,7 @@ func defaults() Config {
 		Output:       OutputConfig{Dir: "lyrics", EmbeddedLyrics: "off"},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
-		Providers:    ProvidersConfig{Primary: "musixmatch"},
+		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
 		Guard:        GuardConfig{Threshold: guardThresholdDefault},
 		Queue:        QueueConfig{Randomize: true},
@@ -261,6 +270,9 @@ func Load(path string) (Config, error) {
 			}
 			if cfg.Providers.Primary == "" {
 				cfg.Providers.Primary = d.Providers.Primary
+			}
+			if cfg.Providers.Mode == "" {
+				cfg.Providers.Mode = d.Providers.Mode
 			}
 			if cfg.Verification.SampleDurationSeconds <= 0 {
 				cfg.Verification.SampleDurationSeconds = d.Verification.SampleDurationSeconds
@@ -339,6 +351,9 @@ func Load(path string) (Config, error) {
 	}
 	applyEnvOverrides(&cfg)
 	normalizeEmbeddedLyrics(&cfg)
+	if err := normalizeProvidersMode(&cfg); err != nil {
+		return cfg, err
+	}
 	clampCircuitOpenDuration(&cfg)
 	// Must run AFTER clampCircuitOpenDuration: the base is clamped against the
 	// final (clamped) cap value.
@@ -353,7 +368,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -465,6 +480,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MXLRC_PROVIDERS_DISABLED"); v != "" {
 		cfg.Providers.Disabled = splitCSV(v)
+	}
+	if v := os.Getenv("MXLRC_PROVIDERS_MODE"); v != "" {
+		cfg.Providers.Mode = v
 	}
 	if v := os.Getenv("MXLRC_VERIFICATION_ENABLED"); v != "" {
 		enabled, err := strconv.ParseBool(v)
@@ -595,6 +613,23 @@ func normalizeEmbeddedLyrics(cfg *Config) {
 		slog.Warn("invalid embedded_lyrics value; using off", "value", cfg.Output.EmbeddedLyrics) //nolint:gosec // G706: tainted config value passed as a structured slog field, not a format string
 		cfg.Output.EmbeddedLyrics = "off"
 	}
+}
+
+// normalizeProvidersMode lowercases and validates the provider dispatch mode.
+// An empty value restores the default ("ordered"). Only "ordered" is supported
+// today; any other value is rejected with an error so a typo or a not-yet-built
+// mode (for example "parallel") fails loudly at load rather than silently
+// degrading. See docs/multi-provider-orchestration.md.
+func normalizeProvidersMode(cfg *Config) error {
+	v := strings.ToLower(strings.TrimSpace(cfg.Providers.Mode))
+	if v == "" {
+		v = providersModeDefault
+	}
+	if v != providersModeDefault {
+		return fmt.Errorf("config: unsupported providers.mode %q (only %q is supported)", cfg.Providers.Mode, providersModeDefault)
+	}
+	cfg.Providers.Mode = v
+	return nil
 }
 
 // clampCircuitOpenDuration enforces the minimum window for the worker
