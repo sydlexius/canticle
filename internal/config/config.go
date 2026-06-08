@@ -36,6 +36,11 @@ type APIConfig struct {
 	// signal. Default 1800 (30 min). Values below circuitOpenMinSeconds are
 	// clamped at load time.
 	CircuitOpenDuration int `toml:"circuit_open_duration"`
+	// CircuitBackoffBase is the initial circuit-open window in seconds applied
+	// to the first throttle trip. Successive trips double from this base up to
+	// CircuitOpenDuration (the cap). Default 60. Clamped to circuitBackoffBaseMin
+	// (15s) from below and to CircuitOpenDuration from above at load time.
+	CircuitBackoffBase int `toml:"circuit_backoff_base_seconds"`
 	// MissBackoffBaseHours is the initial re-check delay (in hours) for a
 	// benign miss (no matching track or no usable lyrics). The cadence doubles
 	// each miss: base, 2*base, 4*base, ... up to MissBackoffCapHours. Default 168.
@@ -60,6 +65,13 @@ const circuitOpenDefaultSeconds = 30 * 60
 // circuitOpenMinSeconds is the minimum permissible circuit-open window.
 // Values below this are clamped to this floor with a warning.
 const circuitOpenMinSeconds = 5 * 60
+
+// circuitBackoffBaseDefault is the default trip-1 circuit window (60s).
+const circuitBackoffBaseDefault = 60
+
+// circuitBackoffBaseMin is the minimum permissible trip-1 circuit window. It
+// matches the worker tick floor; values below it are clamped up with a warning.
+const circuitBackoffBaseMin = 15
 
 // missBackoffBaseDefault is the default initial miss re-check delay (168 hours = 7 days).
 const missBackoffBaseDefault = 168
@@ -134,6 +146,7 @@ func defaults() Config {
 		API: APIConfig{
 			Cooldown:             15,
 			CircuitOpenDuration:  circuitOpenDefaultSeconds,
+			CircuitBackoffBase:   circuitBackoffBaseDefault,
 			MissBackoffBaseHours: missBackoffBaseDefault,
 			MissBackoffCapHours:  missBackoffCapDefault,
 			MaxMissAttempts:      15,
@@ -200,6 +213,11 @@ func Load(path string) (Config, error) {
 			if cfg.API.CircuitOpenDuration == 0 {
 				cfg.API.CircuitOpenDuration = d.API.CircuitOpenDuration
 			}
+			// CircuitBackoffBase: 0 means "not set in file"; restore the default
+			// so a blank config.example.toml copy keeps the documented ramp.
+			if cfg.API.CircuitBackoffBase == 0 {
+				cfg.API.CircuitBackoffBase = d.API.CircuitBackoffBase
+			}
 			// MissBackoffBaseHours/MissBackoffCapHours: 0 means "not set in
 			// file"; restore defaults so a blank config.example.toml copy
 			// gets the documented cadence.
@@ -224,6 +242,9 @@ func Load(path string) (Config, error) {
 	applyEnvOverrides(&cfg)
 	normalizeEmbeddedLyrics(&cfg)
 	clampCircuitOpenDuration(&cfg)
+	// Must run AFTER clampCircuitOpenDuration: the base is clamped against the
+	// final (clamped) cap value.
+	clampCircuitBackoffBase(&cfg)
 	clampMissBackoff(&cfg)
 	if cfg.DB.Path == "" {
 		return cfg, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
@@ -234,7 +255,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_QUEUE_RANDOMIZE
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_QUEUE_RANDOMIZE
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -265,6 +286,15 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_API_CIRCUIT_OPEN_DURATION", "value", v, "current", cfg.API.CircuitOpenDuration) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.CircuitOpenDuration = n
+		}
+	}
+
+	if v := os.Getenv("MXLRC_API_CIRCUIT_BACKOFF_BASE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_API_CIRCUIT_BACKOFF_BASE", "value", v, "current", cfg.API.CircuitBackoffBase) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.API.CircuitBackoffBase = n
 		}
 	}
 
@@ -417,6 +447,25 @@ func clampCircuitOpenDuration(cfg *Config) {
 	if cfg.API.CircuitOpenDuration < circuitOpenMinSeconds {
 		slog.Warn("circuit_open_duration below minimum; clamping", "configured", cfg.API.CircuitOpenDuration, "minimum", circuitOpenMinSeconds)
 		cfg.API.CircuitOpenDuration = circuitOpenMinSeconds
+	}
+}
+
+// clampCircuitBackoffBase keeps the trip-1 circuit window within valid bounds.
+// It MUST run after clampCircuitOpenDuration, since the upper bound is the
+// final (clamped) cap. Values <= 0 restore the default; values below
+// circuitBackoffBaseMin are raised to the floor; values above the cap are
+// lowered to the cap (the base can never exceed the ceiling it ramps toward).
+func clampCircuitBackoffBase(cfg *Config) {
+	if cfg.API.CircuitBackoffBase <= 0 {
+		cfg.API.CircuitBackoffBase = circuitBackoffBaseDefault
+	}
+	if cfg.API.CircuitBackoffBase < circuitBackoffBaseMin {
+		slog.Warn("circuit_backoff_base_seconds below minimum; clamping", "configured", cfg.API.CircuitBackoffBase, "minimum", circuitBackoffBaseMin)
+		cfg.API.CircuitBackoffBase = circuitBackoffBaseMin
+	}
+	if cfg.API.CircuitBackoffBase > cfg.API.CircuitOpenDuration {
+		slog.Warn("circuit_backoff_base_seconds above cap; clamping to circuit_open_duration", "configured", cfg.API.CircuitBackoffBase, "cap", cfg.API.CircuitOpenDuration)
+		cfg.API.CircuitBackoffBase = cfg.API.CircuitOpenDuration
 	}
 }
 

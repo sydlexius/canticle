@@ -2,7 +2,7 @@
 # Copy to ~/.config/mxlrcgo-svc/config.toml and edit as needed.
 # Environment variable overrides (in precedence order): MUSIXMATCH_TOKEN,
 # MXLRC_API_TOKEN, MXLRC_API_COOLDOWN (or MXLRC_COOLDOWN),
-# MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_OUTPUT_DIR,
+# MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_OUTPUT_DIR,
 # MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY,
 # MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_QUEUE_RANDOMIZE,
 # MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL,
@@ -21,11 +21,20 @@
 # have elapsed since the last one, even if the worker's paced pause is skipped.
 cooldown = 15
 
-# Worker circuit-breaker window in seconds. When the upstream API returns a
+# Worker circuit-breaker window cap in seconds. When the upstream API returns a
 # rate-limit (HTTP 429) or unauthorized (HTTP 401) signal, the worker stops
-# dequeuing for this many seconds before resuming. Default 1800 (30 min);
-# minimum 300 (5 min) -- smaller values are clamped at load time.
+# dequeuing. The window ramps geometrically from circuit_backoff_base_seconds up
+# to this value across consecutive trips. A genuine token-renewal signal opens
+# for the full cap immediately. Default 1800 (30 min); minimum 300 (5 min) --
+# smaller values are clamped at load time.
 circuit_open_duration = 1800
+
+# Initial circuit-breaker window in seconds applied to the first throttle trip.
+# Successive trips double from this base (60 -> 120 -> 240 -> ...) up to the
+# circuit_open_duration cap, then reset to base after a successful fetch or a
+# clean miss. Default 60; clamped to 15 from below and to circuit_open_duration
+# from above. Override: MXLRC_API_CIRCUIT_BACKOFF_BASE.
+# circuit_backoff_base_seconds = 60
 
 # Escalating re-check cadence for benign misses (no matching track or no
 # usable lyrics). The delay doubles each miss: base, 2*base, 4*base, ... up to

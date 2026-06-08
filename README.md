@@ -247,7 +247,8 @@ All settings can come from a TOML config file, but for container deployments env
 | `MXLRC_DB_PATH` | XDG / `/config/mxlrcgo.db` | SQLite database path. |
 | `MXLRC_DOCKER` | `false` | When `true`, storage defaults resolve under `/config`. Set automatically in the images. |
 | `MXLRC_API_COOLDOWN` | `15` | Seconds between Musixmatch requests. `MXLRC_COOLDOWN` is a lower-precedence alias. |
-| `MXLRC_API_CIRCUIT_OPEN_DURATION` | `1800` | Seconds the worker circuit breaker stays open after a rate-limit signal (floor 300). |
+| `MXLRC_API_CIRCUIT_OPEN_DURATION` | `1800` | Cap (seconds) for the worker circuit-breaker window; the window ramps geometrically up to this ceiling, and a token-renewal signal opens for the full cap (floor 300). |
+| `MXLRC_API_CIRCUIT_BACKOFF_BASE` | `60` | Trip-1 circuit-breaker window (seconds); doubles each consecutive throttle up to `MXLRC_API_CIRCUIT_OPEN_DURATION`, resets on a successful fetch or clean miss (floor 15, capped at the open-duration). |
 | `MXLRC_SCAN_INTERVAL` | `900` | `serve` library-scan interval in seconds. `0` scans once without repeating. |
 | `MXLRC_WORK_INTERVAL` | `0` | Worker poll interval in seconds. `0` falls back to `api.cooldown` (15s floor). |
 | `MXLRC_PROVIDER_PRIMARY` | `musixmatch` | Primary lyrics provider. |

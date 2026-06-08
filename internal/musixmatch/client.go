@@ -48,6 +48,25 @@ var (
 	ErrNoLyrics = errors.New("musixmatch: no lyrics available")
 )
 
+// tokenRenewalError marks the upstream "renew" hint: the usertoken must be
+// regenerated. It satisfies errors.Is for BOTH itself and ErrUnauthorized, so
+// the circuit breaker (which keys off ErrUnauthorized) still trips while callers
+// that care can distinguish a definite renewal from an ambiguous bare 401.
+type tokenRenewalError struct{}
+
+func (tokenRenewalError) Error() string { return "musixmatch: token renewal required" }
+
+func (tokenRenewalError) Is(target error) bool {
+	return target == ErrUnauthorized || target == ErrTokenRenewalRequired
+}
+
+// ErrTokenRenewalRequired indicates the upstream explicitly signaled the token
+// must be renewed (in-body status_code 401 with hint=renew). This is the one
+// genuine "renew your token" case, distinct from a bare 401 (which is, per
+// observed behavior, usually an egress-IP throttle). errors.Is reports true for
+// both ErrTokenRenewalRequired and ErrUnauthorized, so the circuit still trips.
+var ErrTokenRenewalRequired error = tokenRenewalError{}
+
 // IsBenignMiss reports whether err represents a benign miss: the track has no
 // fetchable lyrics now (either no match at all, or a match with no usable
 // lyrics). These outcomes are not failures of the API or the network, and the
@@ -197,7 +216,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	if res.StatusCode != http.StatusOK {
 		switch res.StatusCode {
 		case http.StatusUnauthorized:
-			return song, fmt.Errorf("%w: token may be invalid or expired", ErrUnauthorized)
+			return song, fmt.Errorf("%w: HTTP 401 (token rejected or, per observed behavior, egress IP throttled)", ErrUnauthorized)
 		case http.StatusTooManyRequests:
 			return song, fmt.Errorf("%w: increase the cooldown time and try again in a few minutes", ErrRateLimited)
 		case http.StatusNotFound:
@@ -224,7 +243,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	}
 
 	if v.GetInt("message", "header", "status_code") == 401 && string(v.GetStringBytes("message", "header", "hint")) == "renew" {
-		return song, fmt.Errorf("%w: token renewal required", ErrUnauthorized)
+		return song, fmt.Errorf("%w: token renewal required", ErrTokenRenewalRequired)
 	}
 
 	mtg := v.Get("message", "body", "macro_calls", "matcher.track.get", "message")
@@ -244,7 +263,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 			return song, err
 		}
 	case 401:
-		return song, fmt.Errorf("%w: token may be invalid or expired", ErrUnauthorized)
+		return song, fmt.Errorf("%w: HTTP 401 (token rejected or, per observed behavior, egress IP throttled)", ErrUnauthorized)
 	case 404:
 		return song, ErrNotFound
 	default:

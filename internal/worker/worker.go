@@ -45,6 +45,17 @@ type Cache interface {
 // non-server callers (tests, ad-hoc CLI runs) get sensible behavior.
 const defaultCircuitOpenDuration = 30 * time.Minute
 
+// defaultCircuitBackoffBase is the trip-1 circuit window when no value is
+// configured via SetCircuitBackoff. The window ramps geometrically from this
+// base up to circuitOpenDuration (the cap) across consecutive throttle trips.
+const defaultCircuitBackoffBase = 60 * time.Second
+
+// escalationThreshold is the number of consecutive circuit trips (with zero
+// intervening provider successes, after at least one earlier success) after
+// which the throttle log escalates from Info back to a Warn that the token,
+// valid earlier this session, may now have expired.
+const escalationThreshold = 5
+
 // Worker consumes queued lyrics work one item at a time. The scan_results
 // writeback for successful completions is handled atomically inside
 // queue.DBQueue.Complete, so the worker has no separate ledger dependency.
@@ -73,9 +84,23 @@ type Worker struct {
 	now                 func() time.Time
 	circuitOpenDuration time.Duration
 	circuitOpenUntil    time.Time
-	missBackoffBase     time.Duration
-	missBackoffCap      time.Duration
-	maxMissAttempts     int
+	circuitBackoffBase  time.Duration
+	// everProviderSuccess records whether any non-cache provider fetch has
+	// succeeded this session. It distinguishes a bare 401 that is almost
+	// certainly egress-IP throttling (token already proven good) from one seen
+	// before any success (token genuinely suspect).
+	//
+	// NOTE: this becomes a data race the moment per-provider concurrency lands;
+	// it is safe today only because RunOnce is single-goroutine (see the Worker
+	// type doc). Revisit with a mutex or atomic when that model changes.
+	everProviderSuccess bool
+	// consecutiveCircuitTrips counts back-to-back throttle trips with no
+	// intervening provider success or benign miss. It drives both the geometric
+	// circuit window and the escalation warning, and resets on either signal.
+	consecutiveCircuitTrips int
+	missBackoffBase         time.Duration
+	missBackoffCap          time.Duration
+	maxMissAttempts         int
 }
 
 var errQueueEmpty = errors.New("worker queue empty")
@@ -93,6 +118,7 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		sleep:                 sleepCtx,
 		now:                   time.Now,
 		circuitOpenDuration:   defaultCircuitOpenDuration,
+		circuitBackoffBase:    defaultCircuitBackoffBase,
 		missBackoffBase:       backoff.DefaultMissBase,
 		missBackoffCap:        backoff.DefaultMissCap,
 		// maxMissAttempts defaults to 0 (no cap). Non-serve callers (tests, ad-hoc
@@ -123,6 +149,22 @@ func (w *Worker) SetMissBackoff(base, cap time.Duration) {
 	}
 	if cap > 0 {
 		w.missBackoffCap = cap
+	}
+}
+
+// SetCircuitBackoff overrides the geometric circuit-breaker window parameters.
+// base is the trip-1 delay applied to the first throttle trip; cap is the
+// ceiling (successive trips double from base up to cap). cap is the same value
+// as SetCircuitOpenDuration's window, so callers pass circuit_open_duration as
+// the cap to preserve its meaning. Zero or negative values are ignored so a
+// misconfigured call cannot disable the window; clamping against any minimum is
+// the responsibility of the caller (typically the config layer).
+func (w *Worker) SetCircuitBackoff(base, cap time.Duration) {
+	if base > 0 {
+		w.circuitBackoffBase = base
+	}
+	if cap > 0 {
+		w.circuitOpenDuration = cap
 	}
 }
 
@@ -271,6 +313,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// Reset only after the deferral is durably recorded: if requeueDeferred
 			// failed above we keep the failure state so backoff still applies next run.
 			w.consecutiveFailures = 0
+			// A clean benign miss proves the provider round-trip succeeded, so we
+			// are not being throttled: reset the circuit ramp too. (everProviderSuccess
+			// is deliberately NOT set here -- it tracks genuine lyric matches, and a
+			// miss is a successful round-trip but not a match.)
+			w.consecutiveCircuitTrips = 0
 			return nil
 		}
 		slog.Warn("worker song resolution failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
@@ -287,6 +334,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 			return w.fail(ctx, item, err)
 		}
+		// A genuine non-cache provider fetch succeeded: the token is proven good
+		// this session, so a later bare 401 is throttling rather than a dead token.
+		// Reset the throttle ramp too. Placed here (not at the shared
+		// consecutiveFailures reset below) so cache hits, which never touch the
+		// provider, do not falsely mark a provider success.
+		w.everProviderSuccess = true
+		w.consecutiveCircuitTrips = 0
 	}
 
 	for _, p := range outputPaths(item.Inputs) {
@@ -372,11 +426,39 @@ func (w *Worker) store(ctx context.Context, track models.Track, song models.Song
 // orphaned in 'processing' and RunOnce must surface the failure to the
 // outer loop rather than swallow it as errQueueEmpty.
 func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkItem, err error) (bool, error) {
+	// Case 1 MUST precede the bare-401 check below: tokenRenewalError also
+	// satisfies errors.Is(_, ErrUnauthorized), so testing ErrUnauthorized first
+	// would wrongly fold a genuine renewal into the throttle ramp. A renewal is
+	// not throttling: hold the full window, stay loud, and do NOT advance the
+	// throttle counter (so a later real throttle resumes from its true position).
+	if errors.Is(err, musixmatch.ErrTokenRenewalRequired) {
+		w.circuitOpenUntil = w.now().Add(w.circuitOpenDuration)
+		slog.Warn("worker circuit opened: token renewal required; regenerate the usertoken",
+			"until", w.circuitOpenUntil, "id", item.ID, "cause", err)
+		if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
+			return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
+		}
+		return true, nil
+	}
 	if !errors.Is(err, musixmatch.ErrRateLimited) && !errors.Is(err, musixmatch.ErrUnauthorized) {
 		return false, nil
 	}
-	w.circuitOpenUntil = w.now().Add(w.circuitOpenDuration)
-	slog.Warn("worker circuit opened", "until", w.circuitOpenUntil, "id", item.ID, "cause", err)
+	// Bare 401 / 429: treat as throttling and ramp the window geometrically. The
+	// log level reflects what we actually know about the token this session.
+	w.consecutiveCircuitTrips++
+	switch {
+	case w.everProviderSuccess && w.consecutiveCircuitTrips >= escalationThreshold:
+		slog.Warn("worker circuit opened: token validated earlier this session but has failed repeatedly; it may have expired",
+			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err)
+	case w.everProviderSuccess:
+		slog.Info("worker circuit opened: provider throttling; token validated earlier this session",
+			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err)
+	default:
+		slog.Warn("worker circuit opened: no successful fetch yet this session; verify your token",
+			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err)
+	}
+	delay := backoff.Geometric(w.consecutiveCircuitTrips, w.circuitBackoffBase, w.circuitOpenDuration)
+	w.circuitOpenUntil = w.now().Add(delay)
 	if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
 		return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
 	}

@@ -16,7 +16,7 @@ func isolateEnv(t *testing.T) {
 	for _, k := range []string{
 		"MUSIXMATCH_TOKEN", "MXLRC_API_TOKEN",
 		"MXLRC_API_COOLDOWN", "MXLRC_COOLDOWN",
-		"MXLRC_API_CIRCUIT_OPEN_DURATION",
+		"MXLRC_API_CIRCUIT_OPEN_DURATION", "MXLRC_API_CIRCUIT_BACKOFF_BASE",
 		"MXLRC_MISS_BACKOFF_BASE_HOURS", "MXLRC_MISS_BACKOFF_CAP_HOURS", "MXLRC_MAX_MISS_ATTEMPTS",
 		"MXLRC_OUTPUT_DIR", "MXLRC_SERVER_ADDR", "MXLRC_WEBHOOK_API_KEY",
 		"MXLRC_SCAN_INTERVAL", "MXLRC_WORK_INTERVAL",
@@ -517,6 +517,115 @@ func TestLoad_CircuitOpenDurationClampsBelowMinimum(t *testing.T) {
 	}
 	if cfg.API.CircuitOpenDuration != 5*60 {
 		t.Fatalf("CircuitOpenDuration = %d; want 300 (clamped)", cfg.API.CircuitOpenDuration)
+	}
+}
+
+// TestLoad_CircuitBackoffBaseDefault verifies the default 60s trip-1 window.
+func TestLoad_CircuitBackoffBaseDefault(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.CircuitBackoffBase != 60 {
+		t.Fatalf("CircuitBackoffBase = %d; want 60", cfg.API.CircuitBackoffBase)
+	}
+}
+
+// TestLoad_CircuitBackoffBaseEnvOverride verifies the env var overrides the default.
+func TestLoad_CircuitBackoffBaseEnvOverride(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_API_CIRCUIT_BACKOFF_BASE", "120")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.CircuitBackoffBase != 120 {
+		t.Fatalf("CircuitBackoffBase = %d; want 120", cfg.API.CircuitBackoffBase)
+	}
+}
+
+// TestLoad_CircuitBackoffBaseClampsBelowMinimum verifies values below the 15s
+// floor are clamped up.
+func TestLoad_CircuitBackoffBaseClampsBelowMinimum(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_API_CIRCUIT_BACKOFF_BASE", "5")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.CircuitBackoffBase != 15 {
+		t.Fatalf("CircuitBackoffBase = %d; want 15 (clamped to floor)", cfg.API.CircuitBackoffBase)
+	}
+}
+
+// TestLoad_CircuitBackoffBaseClampedToCapWhenExceeds verifies the base cannot
+// exceed the circuit_open_duration cap.
+func TestLoad_CircuitBackoffBaseClampedToCapWhenExceeds(t *testing.T) {
+	isolateEnv(t)
+	// Cap clamps to its 300s floor; a 600s base must clamp down to that cap.
+	t.Setenv("MXLRC_API_CIRCUIT_OPEN_DURATION", "300")
+	t.Setenv("MXLRC_API_CIRCUIT_BACKOFF_BASE", "600")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.CircuitBackoffBase != 300 {
+		t.Fatalf("CircuitBackoffBase = %d; want 300 (clamped down to the cap)", cfg.API.CircuitBackoffBase)
+	}
+}
+
+// TestLoad_CircuitBackoffBaseExplicitZeroRedefaults verifies that an explicit
+// circuit_backoff_base_seconds = 0 in a config file restores the default rather
+// than leaving the breaker with a zero base (the Load() re-default block).
+func TestLoad_CircuitBackoffBaseExplicitZeroRedefaults(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[api]\ncircuit_backoff_base_seconds = 0\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.CircuitBackoffBase != 60 {
+		t.Fatalf("CircuitBackoffBase = %d; want 60 (explicit 0 re-defaulted)", cfg.API.CircuitBackoffBase)
+	}
+}
+
+// TestLoad_CircuitBackoffBaseInvalidEnvKeepsCurrent verifies a non-numeric env
+// value is ignored with a warning, leaving the current value intact.
+func TestLoad_CircuitBackoffBaseInvalidEnvKeepsCurrent(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_API_CIRCUIT_BACKOFF_BASE", "not-a-number")
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.CircuitBackoffBase != 60 {
+		t.Fatalf("CircuitBackoffBase = %d; want 60 (invalid env ignored)", cfg.API.CircuitBackoffBase)
+	}
+}
+
+// TestLoad_CircuitBackoffBaseNegativeClampsToDefault verifies an explicit
+// negative value in the file (which survives the zero re-default) is clamped
+// back to the default by clampCircuitBackoffBase.
+func TestLoad_CircuitBackoffBaseNegativeClampsToDefault(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[api]\ncircuit_backoff_base_seconds = -5\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.CircuitBackoffBase != 60 {
+		t.Fatalf("CircuitBackoffBase = %d; want 60 (negative clamped to default)", cfg.API.CircuitBackoffBase)
 	}
 }
 

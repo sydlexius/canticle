@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,49 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
 )
+
+// logRecord captures one emitted log line's level and message for assertions.
+type logRecord struct {
+	level slog.Level
+	msg   string
+}
+
+// captureHandler is a minimal slog.Handler that records every line's level and
+// message. It deliberately ignores attrs and groups: assertions match on the
+// stable message string, so attribute formatting cannot make them brittle.
+type captureHandler struct{ recs *[]logRecord }
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.recs = append(*h.recs, logRecord{level: r.Level, msg: r.Message})
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// captureLogs installs a recording slog handler as the default for the duration
+// of the test and restores the previous default on cleanup. The repo has no
+// other slog-level capture harness, so worker tests that assert Info-vs-Warn
+// routing rely on this. Returns a pointer to the slice so assertions read the
+// final state after the code under test has run.
+func captureLogs(t *testing.T) *[]logRecord {
+	t.Helper()
+	prev := slog.Default()
+	var recs []logRecord
+	slog.SetDefault(slog.New(&captureHandler{recs: &recs}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &recs
+}
+
+// hasLog reports whether any captured record matches level and contains msgSub.
+func hasLog(recs []logRecord, level slog.Level, msgSub string) bool {
+	for _, r := range recs {
+		if r.level == level && strings.Contains(r.msg, msgSub) {
+			return true
+		}
+	}
+	return false
+}
 
 // fakeQueue models DBQueue's status transitions for tests. Dequeue moves an
 // item out of the pending pool and into processing; Complete/Fail/Release
@@ -855,7 +900,7 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 			w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
 			fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 			w.now = func() time.Time { return fixed }
-			w.SetCircuitOpenDuration(30 * time.Minute)
+			w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
 
 			// First call dequeues, hits sentinel, opens circuit.
 			if err := w.RunOnce(context.Background()); err != nil {
@@ -875,8 +920,8 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 			if w.circuitOpenUntil.IsZero() {
 				t.Fatal("circuitOpenUntil = zero; want circuit opened")
 			}
-			if got, want := w.circuitOpenUntil, fixed.Add(30*time.Minute); !got.Equal(want) {
-				t.Fatalf("circuitOpenUntil = %v; want %v", got, want)
+			if got, want := w.circuitOpenUntil, fixed.Add(60*time.Second); !got.Equal(want) {
+				t.Fatalf("circuitOpenUntil = %v; want %v (trip 1 uses the geometric base, not the flat cap)", got, want)
 			}
 
 			// Subsequent call must skip dequeue entirely while circuit open.
@@ -907,6 +952,186 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 				t.Fatalf("fetcher.calls = %d; want >%d after circuit closed", fetcher.calls, callsBefore)
 			}
 		})
+	}
+}
+
+// newCircuitWorker builds a worker with a frozen clock and base=60s / cap=30m
+// for directly exercising tripCircuitIfRateLimited without driving RunOnce.
+func newCircuitWorker() (*Worker, *fakeQueue, time.Time) {
+	q := &fakeQueue{}
+	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return fixed }
+	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
+	return w, q, fixed
+}
+
+func TestCircuitRampIncrementsAndCaps(t *testing.T) {
+	w, _, fixed := newCircuitWorker()
+	item := queue.WorkItem{ID: 1}
+	throttle := fmt.Errorf("upstream: %w", musixmatch.ErrRateLimited)
+
+	// trip 6 reaches the cap: 60 -> 120 -> 240 -> 480 -> 960 -> 1800 (capped).
+	wantDeltas := []time.Duration{
+		60 * time.Second, 120 * time.Second, 240 * time.Second,
+		480 * time.Second, 960 * time.Second, 30 * time.Minute,
+	}
+	for i, want := range wantDeltas {
+		tripped, releaseErr := w.tripCircuitIfRateLimited(context.Background(), item, throttle)
+		if !tripped || releaseErr != nil {
+			t.Fatalf("trip %d: tripped=%v releaseErr=%v; want tripped, no error", i+1, tripped, releaseErr)
+		}
+		if got := w.circuitOpenUntil.Sub(fixed); got != want {
+			t.Fatalf("trip %d: window = %v; want %v", i+1, got, want)
+		}
+		if w.consecutiveCircuitTrips != i+1 {
+			t.Fatalf("trip %d: consecutiveCircuitTrips = %d; want %d", i+1, w.consecutiveCircuitTrips, i+1)
+		}
+	}
+}
+
+func TestThrottleAfterSuccessLogsInfo(t *testing.T) {
+	recs := captureLogs(t)
+	w, _, _ := newCircuitWorker()
+	w.everProviderSuccess = true
+
+	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+
+	if !hasLog(*recs, slog.LevelInfo, "provider throttling") {
+		t.Fatalf("logs = %+v; want Info 'provider throttling' after a validated session", *recs)
+	}
+	if hasLog(*recs, slog.LevelWarn, "verify your token") {
+		t.Fatal("logged the no-success Warn even though everProviderSuccess was set")
+	}
+}
+
+func TestThrottleBeforeAnySuccessLogsWarn(t *testing.T) {
+	recs := captureLogs(t)
+	w, _, _ := newCircuitWorker()
+
+	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+
+	if !hasLog(*recs, slog.LevelWarn, "no successful fetch yet") {
+		t.Fatalf("logs = %+v; want Warn advising token verification before any success", *recs)
+	}
+}
+
+func TestEscalationWarnAfterThreshold(t *testing.T) {
+	recs := captureLogs(t)
+	w, _, _ := newCircuitWorker()
+	w.everProviderSuccess = true
+	throttle := fmt.Errorf("x: %w", musixmatch.ErrRateLimited)
+
+	for i := 0; i < escalationThreshold; i++ {
+		w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, throttle)
+	}
+
+	if w.consecutiveCircuitTrips != escalationThreshold {
+		t.Fatalf("consecutiveCircuitTrips = %d; want %d", w.consecutiveCircuitTrips, escalationThreshold)
+	}
+	if !hasLog(*recs, slog.LevelWarn, "may have expired") {
+		t.Fatalf("logs = %+v; want escalation Warn after %d trips", *recs, escalationThreshold)
+	}
+}
+
+func TestRenewalHoldsFullCapAndDoesNotIncrementTrips(t *testing.T) {
+	recs := captureLogs(t)
+	w, q, fixed := newCircuitWorker()
+	// A genuine renewal is loud even after earlier success.
+	w.everProviderSuccess = true
+	renewal := fmt.Errorf("x: %w", musixmatch.ErrTokenRenewalRequired)
+
+	tripped, releaseErr := w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 7}, renewal)
+	if !tripped || releaseErr != nil {
+		t.Fatalf("tripped=%v releaseErr=%v; want tripped, no error", tripped, releaseErr)
+	}
+	if got := w.circuitOpenUntil.Sub(fixed); got != 30*time.Minute {
+		t.Fatalf("window = %v; want the full cap (30m), not the geometric base", got)
+	}
+	if w.consecutiveCircuitTrips != 0 {
+		t.Fatalf("consecutiveCircuitTrips = %d; want 0 (renewal must not advance the throttle ramp)", w.consecutiveCircuitTrips)
+	}
+	if got := q.released; len(got) != 1 || got[0] != 7 {
+		t.Fatalf("released = %v; want [7]", got)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none (circuit open is not a failure)", q.failed)
+	}
+	if !hasLog(*recs, slog.LevelWarn, "token renewal required") {
+		t.Fatalf("logs = %+v; want a loud Warn for a genuine renewal", *recs)
+	}
+
+	// A subsequent bare-401 throttle starts the ramp at the base, proving the
+	// renewal left the ramp position untouched.
+	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 8}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+	if got := w.circuitOpenUntil.Sub(fixed); got != 60*time.Second {
+		t.Fatalf("post-renewal throttle window = %v; want base 60s (ramp position preserved)", got)
+	}
+}
+
+func TestRenewalReleaseErrorIsSurfaced(t *testing.T) {
+	w, q, _ := newCircuitWorker()
+	q.releaseErr = errors.New("release boom")
+	renewal := fmt.Errorf("x: %w", musixmatch.ErrTokenRenewalRequired)
+
+	tripped, releaseErr := w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 7}, renewal)
+	if !tripped {
+		t.Fatal("tripped = false; want true (renewal still opens the circuit)")
+	}
+	if releaseErr == nil {
+		t.Fatal("releaseErr = nil; want the Release failure surfaced so the item is not silently orphaned")
+	}
+}
+
+func TestRunOnceResetsCircuitTripsOnNonCacheSuccess(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{ID: 5, Inputs: models.Inputs{Track: track, OutputPaths: []models.OutputPath{{Outdir: "out", Filename: "a.lrc"}}}}}}
+	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "fresh"}}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	w.consecutiveCircuitTrips = 3
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if w.consecutiveCircuitTrips != 0 {
+		t.Fatalf("consecutiveCircuitTrips = %d; want 0 after a non-cache success", w.consecutiveCircuitTrips)
+	}
+	if !w.everProviderSuccess {
+		t.Fatal("everProviderSuccess = false; want true after a non-cache provider fetch")
+	}
+}
+
+func TestRunOnceResetsCircuitTripsOnBenignMiss(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{ID: 6, Inputs: models.Inputs{Track: track}}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.consecutiveCircuitTrips = 3
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if w.consecutiveCircuitTrips != 0 {
+		t.Fatalf("consecutiveCircuitTrips = %d; want 0 after a benign miss (a clean 404 proves we are not throttled)", w.consecutiveCircuitTrips)
+	}
+	if w.everProviderSuccess {
+		t.Fatal("everProviderSuccess = true; a benign miss is not a provider match")
+	}
+}
+
+func TestRunOnceCacheHitDoesNotMarkProviderSuccess(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	cached, err := encodeSong(models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "cached"}})
+	if err != nil {
+		t.Fatalf("encodeSong: %v", err)
+	}
+	q := &fakeQueue{items: []queue.WorkItem{{ID: 9, Inputs: models.Inputs{Track: track, OutputPaths: []models.OutputPath{{Outdir: "out", Filename: "a.lrc"}}}}}}
+	w := New(q, &fakeCache{exact: cached}, &fakeFetcher{}, &fakeWriter{})
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if w.everProviderSuccess {
+		t.Fatal("everProviderSuccess = true after a cache hit; a cache hit never touches the provider")
 	}
 }
 

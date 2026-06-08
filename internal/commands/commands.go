@@ -602,6 +602,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	allowedRoots := webhookAllowedRoots(ctx, sqlDB)
 	w := worker.New(workQ, cache.New(sqlDB), fetcher, newWriter(allowedRoots...))
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
+	w.SetCircuitBackoff(time.Duration(cfg.API.CircuitBackoffBase)*time.Second, time.Duration(cfg.API.CircuitOpenDuration)*time.Second)
 	w.SetMissBackoff(time.Duration(cfg.API.MissBackoffBaseHours)*time.Hour, time.Duration(cfg.API.MissBackoffCapHours)*time.Hour)
 	w.SetMaxMissAttempts(cfg.API.MaxMissAttempts)
 	configureWorkerVerification(w, cfg, verifier)
