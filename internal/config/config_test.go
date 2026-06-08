@@ -26,6 +26,8 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
 		"MXLRC_VERIFICATION_MIN_CONFIDENCE", "MXLRC_VERIFICATION_MIN_SIMILARITY",
 		"MXLRC_QUEUE_RANDOMIZE",
+		"MXLRC_LOG_LEVEL", "MXLRC_LOG_FORMAT", "MXLRC_LOG_FILE",
+		"MXLRC_LOG_MAX_SIZE_MB", "MXLRC_LOG_MAX_FILES", "MXLRC_LOG_MAX_AGE_DAYS", "MXLRC_LOG_COMPRESS",
 		"MXLRC_DOCKER",
 		"XDG_CONFIG_HOME", "XDG_DATA_HOME",
 	} {
@@ -900,5 +902,167 @@ func TestLoad_QueueRandomizeInvalidEnvKeepsCurrent(t *testing.T) {
 	// Invalid env warns and keeps the current (default true) value.
 	if !cfg.Queue.Randomize {
 		t.Fatal("queue.randomize = false; want unchanged default true on invalid env")
+	}
+}
+
+// TestLoad_LoggingDefaults verifies built-in logging defaults when no TOML
+// section is present.
+func TestLoad_LoggingDefaults(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Logging.Level != "info" {
+		t.Errorf("Logging.Level = %q; want info", cfg.Logging.Level)
+	}
+	if cfg.Logging.Format != "text" {
+		t.Errorf("Logging.Format = %q; want text", cfg.Logging.Format)
+	}
+	if cfg.Logging.File != "" {
+		t.Errorf("Logging.File = %q; want empty", cfg.Logging.File)
+	}
+	if cfg.Logging.MaxSizeMB != 10 {
+		t.Errorf("Logging.MaxSizeMB = %d; want 10", cfg.Logging.MaxSizeMB)
+	}
+	if cfg.Logging.MaxFiles != 5 {
+		t.Errorf("Logging.MaxFiles = %d; want 5", cfg.Logging.MaxFiles)
+	}
+	if cfg.Logging.MaxAgeDays != 30 {
+		t.Errorf("Logging.MaxAgeDays = %d; want 30", cfg.Logging.MaxAgeDays)
+	}
+	if !cfg.Logging.Compress {
+		t.Error("Logging.Compress = false; want default true")
+	}
+}
+
+// TestLoad_LoggingFromTOML verifies that a [logging] section in the TOML file
+// is decoded correctly.
+func TestLoad_LoggingFromTOML(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	content := "[logging]\nlevel = \"debug\"\nformat = \"json\"\nfile = \"/var/log/mxlrc.log\"\nmax_size_mb = 20\nmax_files = 3\nmax_age_days = 7\ncompress = false\n"
+	if err := os.WriteFile(cfgFile, []byte(content), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Errorf("Logging.Level = %q; want debug", cfg.Logging.Level)
+	}
+	if cfg.Logging.Format != "json" {
+		t.Errorf("Logging.Format = %q; want json", cfg.Logging.Format)
+	}
+	if cfg.Logging.File != "/var/log/mxlrc.log" {
+		t.Errorf("Logging.File = %q; want /var/log/mxlrc.log", cfg.Logging.File)
+	}
+	if cfg.Logging.MaxSizeMB != 20 {
+		t.Errorf("Logging.MaxSizeMB = %d; want 20", cfg.Logging.MaxSizeMB)
+	}
+	if cfg.Logging.MaxFiles != 3 {
+		t.Errorf("Logging.MaxFiles = %d; want 3", cfg.Logging.MaxFiles)
+	}
+	if cfg.Logging.MaxAgeDays != 7 {
+		t.Errorf("Logging.MaxAgeDays = %d; want 7", cfg.Logging.MaxAgeDays)
+	}
+	if cfg.Logging.Compress {
+		t.Error("Logging.Compress = true; want explicit false from TOML")
+	}
+}
+
+// TestLoad_LoggingEnvOverrides verifies that MXLRC_LOG_* env vars override
+// TOML and default values, following the same precedence pattern as other
+// config sections.
+func TestLoad_LoggingEnvOverrides(t *testing.T) {
+	isolateEnv(t)
+
+	// Write a TOML file with non-default values to prove env wins.
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	content := "[logging]\nlevel = \"warn\"\nformat = \"json\"\nmax_size_mb = 50\n"
+	if err := os.WriteFile(cfgFile, []byte(content), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("MXLRC_LOG_LEVEL", "debug")
+	t.Setenv("MXLRC_LOG_FORMAT", "text")
+	t.Setenv("MXLRC_LOG_FILE", "/tmp/override.log")
+	t.Setenv("MXLRC_LOG_MAX_SIZE_MB", "25")
+	t.Setenv("MXLRC_LOG_MAX_FILES", "2")
+	t.Setenv("MXLRC_LOG_MAX_AGE_DAYS", "14")
+	t.Setenv("MXLRC_LOG_COMPRESS", "false")
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Errorf("Logging.Level = %q; want debug (env override)", cfg.Logging.Level)
+	}
+	if cfg.Logging.Format != "text" {
+		t.Errorf("Logging.Format = %q; want text (env override)", cfg.Logging.Format)
+	}
+	if cfg.Logging.File != "/tmp/override.log" {
+		t.Errorf("Logging.File = %q; want /tmp/override.log (env override)", cfg.Logging.File)
+	}
+	if cfg.Logging.MaxSizeMB != 25 {
+		t.Errorf("Logging.MaxSizeMB = %d; want 25 (env override)", cfg.Logging.MaxSizeMB)
+	}
+	if cfg.Logging.MaxFiles != 2 {
+		t.Errorf("Logging.MaxFiles = %d; want 2 (env override)", cfg.Logging.MaxFiles)
+	}
+	if cfg.Logging.MaxAgeDays != 14 {
+		t.Errorf("Logging.MaxAgeDays = %d; want 14 (env override)", cfg.Logging.MaxAgeDays)
+	}
+	if cfg.Logging.Compress {
+		t.Error("Logging.Compress = true; want false (env override)")
+	}
+}
+
+// TestLoad_LoggingEnvInvalidIntsIgnored verifies that non-numeric values for
+// integer logging env vars are silently ignored, leaving the current value intact.
+func TestLoad_LoggingEnvInvalidIntsIgnored(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_LOG_MAX_SIZE_MB", "notanumber")
+	t.Setenv("MXLRC_LOG_MAX_FILES", "bad")
+	t.Setenv("MXLRC_LOG_MAX_AGE_DAYS", "-5")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// All three should remain at their defaults.
+	if cfg.Logging.MaxSizeMB != 10 {
+		t.Errorf("MaxSizeMB = %d; want 10 (default after invalid env)", cfg.Logging.MaxSizeMB)
+	}
+	if cfg.Logging.MaxFiles != 5 {
+		t.Errorf("MaxFiles = %d; want 5 (default after invalid env)", cfg.Logging.MaxFiles)
+	}
+	if cfg.Logging.MaxAgeDays != 30 {
+		t.Errorf("MaxAgeDays = %d; want 30 (default after invalid env)", cfg.Logging.MaxAgeDays)
+	}
+}
+
+// TestLoad_LoggingCompressDefaultTrueWhenKeyOmitted verifies that an omitted
+// compress key in TOML restores the default (true), not the zero-value (false).
+func TestLoad_LoggingCompressDefaultTrueWhenKeyOmitted(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	// [logging] table exists but compress is not set.
+	if err := os.WriteFile(cfgFile, []byte("[logging]\nlevel = \"debug\"\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Logging.Compress {
+		t.Error("Logging.Compress = false; want default true when key is omitted from TOML")
 	}
 }

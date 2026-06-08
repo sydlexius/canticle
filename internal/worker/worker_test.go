@@ -17,24 +17,51 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
 )
 
-// logRecord captures one emitted log line's level and message for assertions.
+// logRecord captures one emitted log line's level, message, and attrs for
+// assertions.
 type logRecord struct {
 	level slog.Level
 	msg   string
+	attrs map[string]slog.Value
 }
 
-// captureHandler is a minimal slog.Handler that records every line's level and
-// message. It deliberately ignores attrs and groups: assertions match on the
-// stable message string, so attribute formatting cannot make them brittle.
+// captureHandler is a minimal slog.Handler that records every line's level,
+// message, and attributes. Assertions match on the stable message string; the
+// attrs are recorded so tests can verify structured fields (e.g. backoff,
+// next_retry) without depending on a particular text format.
 type captureHandler struct{ recs *[]logRecord }
 
 func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
 func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
-	*h.recs = append(*h.recs, logRecord{level: r.Level, msg: r.Message})
+	attrs := make(map[string]slog.Value, r.NumAttrs())
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value
+		return true
+	})
+	*h.recs = append(*h.recs, logRecord{level: r.Level, msg: r.Message, attrs: attrs})
 	return nil
 }
 func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// findLog returns the first captured record matching level and containing
+// msgSub, or nil if none matched.
+func findLog(recs []logRecord, level slog.Level, msgSub string) *logRecord {
+	for i := range recs {
+		if recs[i].level == level && strings.Contains(recs[i].msg, msgSub) {
+			return &recs[i]
+		}
+	}
+	return nil
+}
+
+func attrDuration(r *logRecord, key string) time.Duration {
+	return r.attrs[key].Duration()
+}
+
+func attrTime(r *logRecord, key string) time.Time {
+	return r.attrs[key].Time()
+}
 
 // captureLogs installs a recording slog handler as the default for the duration
 // of the test and restores the previous default on cleanup. The repo has no
@@ -990,18 +1017,29 @@ func TestCircuitRampIncrementsAndCaps(t *testing.T) {
 	}
 }
 
-func TestThrottleAfterSuccessLogsInfo(t *testing.T) {
+func TestThrottleAfterSuccessLogsWarn(t *testing.T) {
 	recs := captureLogs(t)
-	w, _, _ := newCircuitWorker()
+	w, _, fixed := newCircuitWorker()
 	w.everProviderSuccess = true
 
 	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
 
-	if !hasLog(*recs, slog.LevelInfo, "provider throttling") {
-		t.Fatalf("logs = %+v; want Info 'provider throttling' after a validated session", *recs)
+	if !hasLog(*recs, slog.LevelWarn, "provider throttling") {
+		t.Fatalf("logs = %+v; want Warn 'provider throttling' after a validated session", *recs)
 	}
 	if hasLog(*recs, slog.LevelWarn, "verify your token") {
 		t.Fatal("logged the no-success Warn even though everProviderSuccess was set")
+	}
+	// The circuit-open log must carry backoff and next_retry on this branch.
+	rec := findLog(*recs, slog.LevelWarn, "provider throttling")
+	if rec == nil {
+		t.Fatal("no captured record for the throttling Warn")
+	}
+	if got := attrDuration(rec, "backoff"); got != 60*time.Second {
+		t.Fatalf("backoff attr = %v; want 60s", got)
+	}
+	if got := attrTime(rec, "next_retry"); !got.Equal(fixed.Add(60 * time.Second)) {
+		t.Fatalf("next_retry attr = %v; want %v", got, fixed.Add(60*time.Second))
 	}
 }
 
@@ -1179,6 +1217,97 @@ func TestRunOnceSurfacesReleaseFailureAfterCircuitTrip(t *testing.T) {
 	}
 	if len(q.failed) != 0 {
 		t.Fatalf("failed = %v; want none on circuit-open trip even when release fails", q.failed)
+	}
+}
+
+func TestThrottleResetsStaleFailureState(t *testing.T) {
+	w, _, _ := newCircuitWorker()
+	// Simulate a prior hard failure having pinned the consecutive-failure WARN
+	// onto a now-stale victim.
+	w.consecutiveFailures = 4
+	w.lastFailID = 42
+	w.lastFailArtist = "Stale Artist"
+	w.lastFailTrack = "Stale Track"
+
+	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
+
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (a throttle is not the song's fault)", w.consecutiveFailures)
+	}
+	if w.lastFailID != 0 || w.lastFailArtist != "" || w.lastFailTrack != "" {
+		t.Fatalf("lastFail* = (%d, %q, %q); want all cleared so the WARN stops naming a stale victim",
+			w.lastFailID, w.lastFailArtist, w.lastFailTrack)
+	}
+}
+
+func TestTruncatedResponseOpensCircuitAndReleases(t *testing.T) {
+	recs := captureLogs(t)
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 77, Attempts: 0, Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"}},
+	}}
+	fetcher := &fakeFetcher{err: fmt.Errorf("upstream: %w", musixmatch.ErrTruncatedResponse)}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return fixed }
+	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
+
+	if err := w.RunOnce(context.Background()); !errors.Is(err, errQueueEmpty) {
+		t.Fatalf("RunOnce = %v; want errQueueEmpty (circuit opened cleanly)", err)
+	}
+	if w.circuitOpenUntil.IsZero() {
+		t.Fatal("circuitOpenUntil = zero; want circuit opened on a truncated response")
+	}
+	if got := q.released; len(got) != 1 || got[0] != 77 {
+		t.Fatalf("released = %v; want [77] (Release, not Fail)", got)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none (a truncated response is not the song's failure)", q.failed)
+	}
+	// Release leaves Attempts untouched (it does not increment the attempt count);
+	// the item is back in the pending pool unchanged.
+	if len(q.processing) != 0 {
+		t.Fatalf("processing = %v; want empty after release", q.processing)
+	}
+	if !hasLog(*recs, slog.LevelWarn, "truncated response") {
+		t.Fatalf("logs = %+v; want a Warn naming the truncated response", *recs)
+	}
+	rec := findLog(*recs, slog.LevelWarn, "truncated response")
+	if rec == nil {
+		t.Fatal("no captured truncated-response Warn")
+	}
+	if got := attrDuration(rec, "backoff"); got != 60*time.Second {
+		t.Fatalf("backoff attr = %v; want 60s", got)
+	}
+	if got := attrTime(rec, "next_retry"); !got.Equal(fixed.Add(60 * time.Second)) {
+		t.Fatalf("next_retry attr = %v; want %v", got, fixed.Add(60*time.Second))
+	}
+}
+
+func TestCircuitHalfOpenThenRecovers(t *testing.T) {
+	recs := captureLogs(t)
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 1, Inputs: models.Inputs{Track: track, OutputPaths: []models.OutputPath{{Outdir: "out", Filename: "a.lrc"}}}},
+	}}
+	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "fresh"}}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	// The circuit window has already elapsed: now() is past circuitOpenUntil.
+	w.now = func() time.Time { return fixed }
+	w.circuitOpenUntil = fixed.Add(-time.Minute)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !hasLog(*recs, slog.LevelDebug, "half-open") {
+		t.Fatalf("logs = %+v; want a Debug 'half-open' on the probe", *recs)
+	}
+	if !hasLog(*recs, slog.LevelInfo, "circuit closed; provider recovered") {
+		t.Fatalf("logs = %+v; want Info recovery after a successful probe round-trip", *recs)
+	}
+	if w.circuitProbing {
+		t.Fatal("circuitProbing = true; want cleared after recovery")
 	}
 }
 

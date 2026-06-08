@@ -60,7 +60,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return fmt.Errorf("watcher: list libraries: %w", err)
 	}
 	if len(libs) == 0 {
-		slog.Info("watcher: no libraries configured; nothing to watch")
+		slog.Warn("watcher: no libraries configured; nothing to watch")
 		return nil
 	}
 

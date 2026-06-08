@@ -60,7 +60,7 @@ func (a *App) Run(ctx context.Context) error {
 			slog.Error("unexpected empty queue", "error", err)
 			break
 		}
-		slog.Info("searching song", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName)
+		slog.Debug("searching song", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName)
 		song, err := a.fetcher.FindLyrics(ctx, cur.Track)
 		// A benign miss (no matching track, or a match with no fetchable lyrics)
 		// means the upstream result is stable and will not change on a near-term
@@ -75,14 +75,14 @@ func (a *App) Run(ctx context.Context) error {
 				slog.Error("unexpected empty queue on pop", "error", err)
 				break
 			}
-			slog.Info("formatting lyrics")
+			slog.Debug("formatting lyrics")
 			if writeErr := a.writer.WriteLRC(song, cur.Filename, cur.Outdir); writeErr != nil {
 				slog.Error("failed to save lyrics", "error", writeErr)
 				a.failed.Push(cur)
 			}
 		} else {
 			if benignMiss {
-				slog.Info("no lyrics available", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName, "reason", err)
+				slog.Debug("no lyrics available", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName, "reason", err)
 			} else {
 				a.failureCount++
 				slog.Error("lyrics fetch failed", "error", err)
@@ -162,7 +162,7 @@ func (a *App) handleFailed() error {
 	if a.failed.Empty() {
 		return nil
 	}
-	slog.Info("failed to fetch lyrics", "count", a.failed.Len())
+	slog.Warn("failed to fetch lyrics", "count", a.failed.Len())
 
 	if a.mode == "dir" {
 		slog.Info("you can try again with the same command")

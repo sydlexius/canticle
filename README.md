@@ -254,6 +254,13 @@ All settings can come from a TOML config file, but for container deployments env
 | `MXLRC_PROVIDER_PRIMARY` | `musixmatch` | Primary lyrics provider. |
 | `MXLRC_PROVIDERS_DISABLED` | (none) | Comma-separated providers to disable. |
 | `MXLRC_QUEUE_RANDOMIZE` | `true` | Shuffle worker dequeue order within each priority tier (anti-fingerprint). `false` restores deterministic order. |
+| `MXLRC_LOG_LEVEL` | `info` | Minimum log level: `debug`, `info`, `warn`, `error`. `debug` exposes per-request detail, worker idle-polls, and watcher events. |
+| `MXLRC_LOG_FORMAT` | `text` | Log output format: `text` (human-readable) or `json` (structured, for log aggregators). |
+| `MXLRC_LOG_FILE` | (none) | Log file path. Empty means console-only (stderr). When set, logs go to both stderr and the file with automatic rotation. |
+| `MXLRC_LOG_MAX_SIZE_MB` | `10` | Maximum log file size in megabytes before rotation. |
+| `MXLRC_LOG_MAX_FILES` | `5` | Number of rotated log files to retain. |
+| `MXLRC_LOG_MAX_AGE_DAYS` | `30` | Maximum age in days of retained rotated log files. |
+| `MXLRC_LOG_COMPRESS` | `true` | Compress rotated log files with gzip. |
 | `MXLRCGO_WATCH_ENABLED` | `false` | Enable the optional low-latency filesystem watcher (see above). |
 | `MXLRCGO_WATCH_DEBOUNCE_MS` | `2000` | Watcher debounce window in milliseconds. |
 | `MXLRCGO_WATCH_MAX_DIRS` | `100000` | Watcher safety cap on directories watched. |

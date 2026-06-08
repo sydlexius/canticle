@@ -105,7 +105,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	slog.Info("scanning directory", "path", dir)
+	slog.Debug("scanning directory", "path", dir)
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("reading directory %s: %w", dir, err)

@@ -98,9 +98,14 @@ type Worker struct {
 	// intervening provider success or benign miss. It drives both the geometric
 	// circuit window and the escalation warning, and resets on either signal.
 	consecutiveCircuitTrips int
-	missBackoffBase         time.Duration
-	missBackoffCap          time.Duration
-	maxMissAttempts         int
+	// circuitProbing records that the circuit window has elapsed and the worker
+	// is in a half-open state: it has resumed dequeuing to probe the provider but
+	// has not yet confirmed recovery. A subsequent successful round-trip closes
+	// the circuit (logging recovery); a fresh trip clears the flag and reopens.
+	circuitProbing  bool
+	missBackoffBase time.Duration
+	missBackoffCap  time.Duration
+	maxMissAttempts int
 }
 
 var errQueueEmpty = errors.New("worker queue empty")
@@ -271,9 +276,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if w.now().Before(w.circuitOpenUntil) {
 			return errQueueEmpty
 		}
-		// Circuit just closed; log once on the first dequeue attempt.
+		// Circuit window elapsed: enter half-open. The probe log is emitted at the
+		// actual provider call (see song) so an empty-queue ticker tick does not
+		// log a phantom probe. Recovery is only confirmed once a round-trip succeeds.
+		w.circuitProbing = true
 		w.circuitOpenUntil = time.Time{}
-		slog.Info("worker circuit closed")
 	}
 	item, err := w.queue.Dequeue(ctx)
 	if err != nil {
@@ -306,7 +313,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// must not pin the worker in a permanent geometric backoff while it is
 		// otherwise healthily reaching the provider and getting clean misses.
 		if musixmatch.IsBenignMiss(err) {
-			slog.Info("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
+			slog.Debug("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
 			if derr := w.requeueDeferred(ctx, item, err); derr != nil {
 				return derr
 			}
@@ -318,13 +325,17 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// is deliberately NOT set here -- it tracks genuine lyric matches, and a
 			// miss is a successful round-trip but not a match.)
 			w.consecutiveCircuitTrips = 0
+			if w.circuitProbing {
+				slog.Info("worker circuit closed; provider recovered")
+				w.circuitProbing = false
+			}
 			return nil
 		}
 		slog.Warn("worker song resolution failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 		return w.fail(ctx, item, err)
 	}
 	confidence := Confidence(item.Inputs.Track, song.Track)
-	slog.Info("worker lyrics match", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "cache_hit", cacheHit)
+	slog.Debug("worker lyrics match", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "cache_hit", cacheHit)
 	if !cacheHit {
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
@@ -341,6 +352,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// provider, do not falsely mark a provider success.
 		w.everProviderSuccess = true
 		w.consecutiveCircuitTrips = 0
+		if w.circuitProbing {
+			slog.Info("worker circuit closed; provider recovered")
+			w.circuitProbing = false
+		}
 	}
 
 	for _, p := range outputPaths(item.Inputs) {
@@ -372,7 +387,7 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 	if err != nil {
 		return fmt.Errorf("worker: verify lyrics: %w", err)
 	}
-	slog.Info("worker verification result", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "similarity", res.Similarity, "accepted", res.Accepted)
+	slog.Debug("worker verification result", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "similarity", res.Similarity, "accepted", res.Accepted)
 	if !res.Accepted {
 		return fmt.Errorf("worker: verification rejected lyrics: similarity %.3f", res.Similarity)
 	}
@@ -399,6 +414,12 @@ func (w *Worker) song(ctx context.Context, track models.Track) (models.Song, boo
 		return models.Song{}, false, fmt.Errorf("worker: lookup fallback cache: %w", err)
 	}
 
+	if w.circuitProbing {
+		// Half-open probe: the first real provider call after the circuit window
+		// elapsed. Logged here (not at the gate) so it reflects an actual attempt
+		// rather than a bare ticker tick that found an empty queue.
+		slog.Debug("worker circuit half-open; probing provider")
+	}
 	song, err := w.fetcher.FindLyrics(ctx, track)
 	if err != nil {
 		return models.Song{}, false, fmt.Errorf("worker: find lyrics: %w", err)
@@ -433,32 +454,49 @@ func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkIt
 	// throttle counter (so a later real throttle resumes from its true position).
 	if errors.Is(err, musixmatch.ErrTokenRenewalRequired) {
 		w.circuitOpenUntil = w.now().Add(w.circuitOpenDuration)
+		// A fresh open clears any half-open probe state. Renewal is not a
+		// per-song failure, so consecutiveFailures/lastFail* are left untouched.
+		w.circuitProbing = false
 		slog.Warn("worker circuit opened: token renewal required; regenerate the usertoken",
-			"until", w.circuitOpenUntil, "id", item.ID, "cause", err)
+			"backoff", w.circuitOpenDuration, "next_retry", w.circuitOpenUntil, "id", item.ID, "cause", err)
 		if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
 			return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
 		}
 		return true, nil
 	}
-	if !errors.Is(err, musixmatch.ErrRateLimited) && !errors.Is(err, musixmatch.ErrUnauthorized) {
+	if !errors.Is(err, musixmatch.ErrRateLimited) &&
+		!errors.Is(err, musixmatch.ErrUnauthorized) &&
+		!errors.Is(err, musixmatch.ErrTruncatedResponse) {
 		return false, nil
 	}
-	// Bare 401 / 429: treat as throttling and ramp the window geometrically. The
-	// log level reflects what we actually know about the token this session.
+	// Bare 401 / 429 / truncated body: treat as throttling and ramp the window
+	// geometrically. The log level reflects what we actually know this session.
 	w.consecutiveCircuitTrips++
-	switch {
-	case w.everProviderSuccess && w.consecutiveCircuitTrips >= escalationThreshold:
-		slog.Warn("worker circuit opened: token validated earlier this session but has failed repeatedly; it may have expired",
-			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err)
-	case w.everProviderSuccess:
-		slog.Info("worker circuit opened: provider throttling; token validated earlier this session",
-			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err)
-	default:
-		slog.Warn("worker circuit opened: no successful fetch yet this session; verify your token",
-			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err)
-	}
 	delay := backoff.Geometric(w.consecutiveCircuitTrips, w.circuitBackoffBase, w.circuitOpenDuration)
 	w.circuitOpenUntil = w.now().Add(delay)
+	// A fresh/re-open is full-open, not a probe.
+	w.circuitProbing = false
+	// Reset stale failure state: a throttle is not the song's fault, and the
+	// circuit's geometric ramp is the backoff mechanism. The separate
+	// consecutive-failure WARN must not keep naming a stale victim.
+	w.consecutiveFailures = 0
+	w.lastFailID = 0
+	w.lastFailArtist = ""
+	w.lastFailTrack = ""
+	switch {
+	case errors.Is(err, musixmatch.ErrTruncatedResponse):
+		slog.Warn("worker circuit opened: provider returned truncated response; likely throttling",
+			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
+	case w.everProviderSuccess && w.consecutiveCircuitTrips >= escalationThreshold:
+		slog.Warn("worker circuit opened: token validated earlier this session but has failed repeatedly; it may have expired",
+			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
+	case w.everProviderSuccess:
+		slog.Warn("worker circuit opened: provider throttling; token validated earlier this session",
+			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
+	default:
+		slog.Warn("worker circuit opened: no successful fetch yet this session; verify your token",
+			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
+	}
 	if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
 		return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
 	}
@@ -502,7 +540,7 @@ func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause
 			}
 			return fmt.Errorf("worker: retire miss item %d after %v: %w", item.ID, cause, err)
 		}
-		slog.Info("benign miss retired; track abandoned after max miss attempts",
+		slog.Warn("benign miss retired; track abandoned after max miss attempts",
 			"id", retired.ID,
 			"artist", item.Inputs.Track.ArtistName,
 			"track", item.Inputs.Track.TrackName,
@@ -521,7 +559,7 @@ func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause
 		}
 		return fmt.Errorf("worker: requeue item %d after %v: %w", item.ID, cause, err)
 	}
-	slog.Info("benign miss deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "miss_count", deferred.MissCount, "retry_after", cooldown, "next_attempt_at", deferred.NextAttemptAt)
+	slog.Debug("benign miss deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "miss_count", deferred.MissCount, "retry_after", cooldown, "next_attempt_at", deferred.NextAttemptAt)
 	return nil
 }
 
