@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
+	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
 	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
@@ -70,8 +71,9 @@ const escalationThreshold = 5
 //
 // Worker is intentionally single-goroutine: per-provider concurrency is the
 // architectural model (see CLAUDE.md). RunOnce must not be invoked
-// concurrently against the same Worker; the circuit-breaker state is
-// therefore stored without a mutex.
+// concurrently against the same Worker. The circuit-breaker state lives in the
+// concurrency-safe internal/circuit.Breaker, so it is already safe for the
+// per-provider concurrency that motivated the extraction.
 type Worker struct {
 	queue                 Queue
 	cache                 Cache
@@ -87,34 +89,18 @@ type Worker struct {
 	// last* record the most recent hard failure so the backoff WARN can name the
 	// track it is throttling on (the failure cause is logged separately, but the
 	// periodic backoff line otherwise carried no identity).
-	lastFailID          int64
-	lastFailArtist      string
-	lastFailTrack       string
-	baseBackoff         time.Duration
-	maxBackoff          time.Duration
-	sleep               func(context.Context, time.Duration)
-	now                 func() time.Time
-	circuitOpenDuration time.Duration
-	circuitOpenUntil    time.Time
-	circuitBackoffBase  time.Duration
-	// everProviderSuccess records whether any non-cache provider fetch has
-	// succeeded this session. It distinguishes a bare 401 that is almost
-	// certainly egress-IP throttling (token already proven good) from one seen
-	// before any success (token genuinely suspect).
-	//
-	// NOTE: this becomes a data race the moment per-provider concurrency lands;
-	// it is safe today only because RunOnce is single-goroutine (see the Worker
-	// type doc). Revisit with a mutex or atomic when that model changes.
-	everProviderSuccess bool
-	// consecutiveCircuitTrips counts back-to-back throttle trips with no
-	// intervening provider success or benign miss. It drives both the geometric
-	// circuit window and the escalation warning, and resets on either signal.
-	consecutiveCircuitTrips int
-	// circuitProbing records that the circuit window has elapsed and the worker
-	// is in a half-open state: it has resumed dequeuing to probe the provider but
-	// has not yet confirmed recovery. A subsequent successful round-trip closes
-	// the circuit (logging recovery); a fresh trip clears the flag and reopens.
-	circuitProbing  bool
+	lastFailID     int64
+	lastFailArtist string
+	lastFailTrack  string
+	baseBackoff    time.Duration
+	maxBackoff     time.Duration
+	sleep          func(context.Context, time.Duration)
+	now            func() time.Time
+	// circuit is the concurrency-safe breaker that owns the throttle/half-open
+	// state and the geometric backoff ramp. It is driven through Allow / Trip /
+	// TripRenewal / RecordSuccess / RecordBenignMiss / EverSucceeded so the
+	// worker carries no breaker state of its own. See internal/circuit.
+	circuit         *circuit.Breaker
 	missBackoffBase time.Duration
 	missBackoffCap  time.Duration
 	maxMissAttempts int
@@ -124,6 +110,9 @@ var errQueueEmpty = errors.New("worker queue empty")
 
 // New creates a queue consumer worker.
 func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Worker {
+	now := time.Now
+	cb := circuit.New(defaultCircuitBackoffBase, defaultCircuitOpenDuration)
+	cb.SetClock(now)
 	return &Worker{
 		queue:                 q,
 		cache:                 c,
@@ -133,9 +122,8 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		baseBackoff:           backoff.DefaultBase,
 		maxBackoff:            backoff.DefaultMax,
 		sleep:                 sleepCtx,
-		now:                   time.Now,
-		circuitOpenDuration:   defaultCircuitOpenDuration,
-		circuitBackoffBase:    defaultCircuitBackoffBase,
+		now:                   now,
+		circuit:               cb,
 		missBackoffBase:       backoff.DefaultMissBase,
 		missBackoffCap:        backoff.DefaultMissCap,
 		// maxMissAttempts defaults to 0 (no cap). Non-serve callers (tests, ad-hoc
@@ -150,16 +138,14 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 // less than or equal to zero are ignored; clamping against any minimum
 // is the responsibility of the caller (typically the config layer).
 func (w *Worker) SetCircuitOpenDuration(d time.Duration) {
-	if d > 0 {
-		w.circuitOpenDuration = d
-	}
+	w.circuit.SetOpenDuration(d)
 }
 
 // SetMissBackoff overrides the geometric miss-cadence parameters. base sets the
 // initial re-check delay for the first miss; cap sets the ceiling (successive
 // misses double from base up to cap). Zero or negative values are ignored so a
-// misconfigured call cannot disable the cadence; clamping against any minimum
-// is the responsibility of the caller (typically the config layer).
+// misconfigured call cannot disable the cadence; clamping against any minimum is
+// the responsibility of the caller (typically the config layer).
 func (w *Worker) SetMissBackoff(base, cap time.Duration) {
 	if base > 0 {
 		w.missBackoffBase = base
@@ -177,12 +163,7 @@ func (w *Worker) SetMissBackoff(base, cap time.Duration) {
 // misconfigured call cannot disable the window; clamping against any minimum is
 // the responsibility of the caller (typically the config layer).
 func (w *Worker) SetCircuitBackoff(base, cap time.Duration) {
-	if base > 0 {
-		w.circuitBackoffBase = base
-	}
-	if cap > 0 {
-		w.circuitOpenDuration = cap
-	}
+	w.circuit.SetBackoff(base, cap)
 }
 
 // SetMaxMissAttempts overrides the miss-attempt cap. When miss_count exceeds
@@ -193,6 +174,14 @@ func (w *Worker) SetMaxMissAttempts(n int) {
 		n = 0
 	}
 	w.maxMissAttempts = n
+}
+
+// setClock injects the time source into both the worker and its breaker so the
+// two never drift. Used by tests to freeze the clock; production uses time.Now
+// from New.
+func (w *Worker) setClock(now func() time.Time) {
+	w.now = now
+	w.circuit.SetClock(now)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) {
@@ -300,16 +289,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 	// Circuit breaker gate: while open, do not dequeue and do not mark any
 	// rows failed. Returning errQueueEmpty unwinds the run loop cleanly so
-	// the outer ticker idles for the configured window.
-	if !w.circuitOpenUntil.IsZero() {
-		if w.now().Before(w.circuitOpenUntil) {
-			return errQueueEmpty
-		}
-		// Circuit window elapsed: enter half-open. The probe log is emitted at the
-		// actual provider call (see song) so an empty-queue ticker tick does not
-		// log a phantom probe. Recovery is only confirmed once a round-trip succeeds.
-		w.circuitProbing = true
-		w.circuitOpenUntil = time.Time{}
+	// the outer ticker idles for the configured window. Allow performs the
+	// window-elapsed transition to half-open as a side effect; the probe log is
+	// emitted at the actual provider call (see song) so an empty-queue ticker
+	// tick does not log a phantom probe. Recovery is only confirmed once a
+	// round-trip succeeds.
+	if w.circuit.Allow() == circuit.StateOpen {
+		return errQueueEmpty
 	}
 	item, err := w.queue.Dequeue(ctx)
 	if err != nil {
@@ -350,13 +336,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// failed above we keep the failure state so backoff still applies next run.
 			w.consecutiveFailures = 0
 			// A clean benign miss proves the provider round-trip succeeded, so we
-			// are not being throttled: reset the circuit ramp too. (everProviderSuccess
-			// is deliberately NOT set here -- it tracks genuine lyric matches, and a
+			// are not being throttled: reset the circuit ramp too. (EverSucceeded is
+			// deliberately NOT set here -- it tracks genuine lyric matches, and a
 			// miss is a successful round-trip but not a match.)
-			w.consecutiveCircuitTrips = 0
-			if w.circuitProbing {
+			if w.circuit.RecordBenignMiss() {
 				slog.Info("worker circuit closed; provider recovered")
-				w.circuitProbing = false
 			}
 			return nil
 		}
@@ -366,6 +350,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	confidence := Confidence(item.Inputs.Track, song.Track)
 	slog.Debug("worker lyrics match", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "cache_hit", cacheHit)
 	if !cacheHit {
+		// A non-cache provider fetch succeeded: the token is proven good this
+		// session (a later bare 401 is throttling, not a dead token), so record the
+		// success and recover the circuit NOW, before downstream processing. The
+		// verify/guard/store steps below are not throttle signals; their failures
+		// continue through the normal queue backoff path, but the breaker must not
+		// forget that the fetch itself worked just because a later step failed.
+		if w.circuit.RecordSuccess() {
+			slog.Info("worker circuit closed; provider recovered")
+		}
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
 			return w.fail(ctx, item, err)
@@ -377,17 +370,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// (so it is neither cached nor written, never retried, and does not trip the
 		// circuit) rather than calling w.fail (retriable) or deferring it.
 		if reject, reason := w.guardReject(item, song); reject {
-			// The provider round-trip still SUCCEEDED (we fetched real lyrics and
-			// only rejected them on script policy), so recover throttle/circuit
-			// state exactly as the store-success path below does: the token is
-			// proven good and an earlier transient trip must not pin the worker in
-			// backoff after a healthy fetch.
-			w.everProviderSuccess = true
-			w.consecutiveCircuitTrips = 0
-			if w.circuitProbing {
-				slog.Info("worker circuit closed; provider recovered")
-				w.circuitProbing = false
-			}
+			// The provider round-trip already recorded circuit success above (the
+			// fetch worked; only the script policy rejected the result). Here we
+			// just finalize the policy rejection: neither cached nor written, and
+			// not retried.
 			slog.Warn("worker guard rejected lyrics", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", reason)
 			if err := w.queue.Complete(context.WithoutCancel(ctx), item.ID); err != nil {
 				return w.fail(ctx, item, fmt.Errorf("worker: complete guard-rejected item %d: %w", item.ID, err))
@@ -402,17 +388,6 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err := w.store(ctx, resolvedTrack, song); err != nil {
 			slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 			return w.fail(ctx, item, err)
-		}
-		// A genuine non-cache provider fetch succeeded: the token is proven good
-		// this session, so a later bare 401 is throttling rather than a dead token.
-		// Reset the throttle ramp too. Placed here (not at the shared
-		// consecutiveFailures reset below) so cache hits, which never touch the
-		// provider, do not falsely mark a provider success.
-		w.everProviderSuccess = true
-		w.consecutiveCircuitTrips = 0
-		if w.circuitProbing {
-			slog.Info("worker circuit closed; provider recovered")
-			w.circuitProbing = false
 		}
 	}
 
@@ -472,7 +447,7 @@ func (w *Worker) song(ctx context.Context, track models.Track) (models.Song, boo
 		return models.Song{}, false, fmt.Errorf("worker: lookup fallback cache: %w", err)
 	}
 
-	if w.circuitProbing {
+	if w.circuit.Allow() == circuit.StateHalfOpen {
 		// Half-open probe: the first real provider call after the circuit window
 		// elapsed. Logged here (not at the gate) so it reflects an actual attempt
 		// rather than a bare ticker tick that found an empty queue.
@@ -504,6 +479,10 @@ func (w *Worker) store(ctx context.Context, track models.Track, song models.Song
 // return value is non-nil when Release failed, in which case the item is
 // orphaned in 'processing' and RunOnce must surface the failure to the
 // outer loop rather than swallow it as errQueueEmpty.
+//
+// The breaker state mutation (window, ramp, probing) lives in the
+// internal/circuit.Breaker; this method only classifies the error, drives the
+// breaker, emits the operator-facing logs, and releases the item.
 func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkItem, err error) (bool, error) {
 	// Case 1 MUST precede the bare-401 check below: tokenRenewalError also
 	// satisfies errors.Is(_, ErrUnauthorized), so testing ErrUnauthorized first
@@ -511,12 +490,11 @@ func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkIt
 	// not throttling: hold the full window, stay loud, and do NOT advance the
 	// throttle counter (so a later real throttle resumes from its true position).
 	if errors.Is(err, musixmatch.ErrTokenRenewalRequired) {
-		w.circuitOpenUntil = w.now().Add(w.circuitOpenDuration)
-		// A fresh open clears any half-open probe state. Renewal is not a
-		// per-song failure, so consecutiveFailures/lastFail* are left untouched.
-		w.circuitProbing = false
+		res := w.circuit.TripRenewal()
+		// Renewal is not a per-song failure, so consecutiveFailures/lastFail* are
+		// left untouched.
 		slog.Warn("worker circuit opened: token renewal required; regenerate the usertoken",
-			"backoff", w.circuitOpenDuration, "next_retry", w.circuitOpenUntil, "id", item.ID, "cause", err)
+			"backoff", res.Window, "next_retry", res.OpenUntil, "id", item.ID, "cause", err)
 		if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
 			return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)
 		}
@@ -529,11 +507,7 @@ func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkIt
 	}
 	// Bare 401 / 429 / truncated body: treat as throttling and ramp the window
 	// geometrically. The log level reflects what we actually know this session.
-	w.consecutiveCircuitTrips++
-	delay := backoff.Geometric(w.consecutiveCircuitTrips, w.circuitBackoffBase, w.circuitOpenDuration)
-	w.circuitOpenUntil = w.now().Add(delay)
-	// A fresh/re-open is full-open, not a probe.
-	w.circuitProbing = false
+	res := w.circuit.Trip()
 	// Reset stale failure state: a throttle is not the song's fault, and the
 	// circuit's geometric ramp is the backoff mechanism. The separate
 	// consecutive-failure WARN must not keep naming a stale victim.
@@ -544,16 +518,16 @@ func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkIt
 	switch {
 	case errors.Is(err, musixmatch.ErrTruncatedResponse):
 		slog.Warn("worker circuit opened: provider returned truncated response; likely throttling",
-			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
-	case w.everProviderSuccess && w.consecutiveCircuitTrips >= escalationThreshold:
+			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+	case w.circuit.EverSucceeded() && res.Trips >= escalationThreshold:
 		slog.Warn("worker circuit opened: token validated earlier this session but has failed repeatedly; it may have expired",
-			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
-	case w.everProviderSuccess:
+			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+	case w.circuit.EverSucceeded():
 		slog.Warn("worker circuit opened: provider throttling; token validated earlier this session",
-			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
+			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
 	default:
 		slog.Warn("worker circuit opened: no successful fetch yet this session; verify your token",
-			"trips", w.consecutiveCircuitTrips, "id", item.ID, "cause", err, "backoff", delay, "next_retry", w.circuitOpenUntil)
+			"trips", res.Trips, "id", item.ID, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
 	}
 	if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
 		return true, fmt.Errorf("worker: release item %d after circuit open: %w", item.ID, releaseErr)

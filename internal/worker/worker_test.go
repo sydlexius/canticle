@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
+	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
@@ -569,6 +570,12 @@ func TestRunOnceRejectedVerificationMarksQueueFailed(t *testing.T) {
 	if len(q.completed) != 0 {
 		t.Fatalf("completed = %v; want none", q.completed)
 	}
+	// The provider fetch succeeded; only STT verification rejected the result. The
+	// circuit must still record the successful round-trip, so a later bare 401 is
+	// classified as throttling rather than a token that never worked.
+	if !w.circuit.EverSucceeded() {
+		t.Fatal("circuit EverSucceeded = false; a successful fetch must record success even when verification fails")
+	}
 }
 
 func TestRunOnceStoresCacheWithRequestedTrackKeys(t *testing.T) {
@@ -1040,7 +1047,7 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 			fetcher := &fakeFetcher{err: fmt.Errorf("upstream: %w", sentinel)}
 			w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
 			fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
-			w.now = func() time.Time { return fixed }
+			w.setClock(func() time.Time { return fixed })
 			w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
 
 			// First call dequeues, hits sentinel, opens circuit.
@@ -1058,10 +1065,10 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 			if len(q.processing) != 0 {
 				t.Fatalf("processing = %v; want empty after release", q.processing)
 			}
-			if w.circuitOpenUntil.IsZero() {
+			if w.circuit.OpenUntil().IsZero() {
 				t.Fatal("circuitOpenUntil = zero; want circuit opened")
 			}
-			if got, want := w.circuitOpenUntil, fixed.Add(60*time.Second); !got.Equal(want) {
+			if got, want := w.circuit.OpenUntil(), fixed.Add(60*time.Second); !got.Equal(want) {
 				t.Fatalf("circuitOpenUntil = %v; want %v (trip 1 uses the geometric base, not the flat cap)", got, want)
 			}
 
@@ -1084,7 +1091,7 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 
 			// Advance the clock past the window; next RunOnce closes the circuit
 			// and resumes processing (and trips again on the same fetcher).
-			w.now = func() time.Time { return fixed.Add(31 * time.Minute) }
+			w.setClock(func() time.Time { return fixed.Add(31 * time.Minute) })
 			err = w.RunOnce(context.Background())
 			if err != nil && !errors.Is(err, errQueueEmpty) {
 				t.Fatalf("RunOnce after window = %v; want nil or errQueueEmpty", err)
@@ -1102,7 +1109,7 @@ func newCircuitWorker() (*Worker, *fakeQueue, time.Time) {
 	q := &fakeQueue{}
 	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
 	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
-	w.now = func() time.Time { return fixed }
+	w.setClock(func() time.Time { return fixed })
 	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
 	return w, q, fixed
 }
@@ -1122,11 +1129,11 @@ func TestCircuitRampIncrementsAndCaps(t *testing.T) {
 		if !tripped || releaseErr != nil {
 			t.Fatalf("trip %d: tripped=%v releaseErr=%v; want tripped, no error", i+1, tripped, releaseErr)
 		}
-		if got := w.circuitOpenUntil.Sub(fixed); got != want {
+		if got := w.circuit.OpenUntil().Sub(fixed); got != want {
 			t.Fatalf("trip %d: window = %v; want %v", i+1, got, want)
 		}
-		if w.consecutiveCircuitTrips != i+1 {
-			t.Fatalf("trip %d: consecutiveCircuitTrips = %d; want %d", i+1, w.consecutiveCircuitTrips, i+1)
+		if w.circuit.Trips() != i+1 {
+			t.Fatalf("trip %d: consecutiveCircuitTrips = %d; want %d", i+1, w.circuit.Trips(), i+1)
 		}
 	}
 }
@@ -1134,7 +1141,7 @@ func TestCircuitRampIncrementsAndCaps(t *testing.T) {
 func TestThrottleAfterSuccessLogsWarn(t *testing.T) {
 	recs := captureLogs(t)
 	w, _, fixed := newCircuitWorker()
-	w.everProviderSuccess = true
+	w.circuit.RecordSuccess()
 
 	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
 
@@ -1171,15 +1178,15 @@ func TestThrottleBeforeAnySuccessLogsWarn(t *testing.T) {
 func TestEscalationWarnAfterThreshold(t *testing.T) {
 	recs := captureLogs(t)
 	w, _, _ := newCircuitWorker()
-	w.everProviderSuccess = true
+	w.circuit.RecordSuccess()
 	throttle := fmt.Errorf("x: %w", musixmatch.ErrRateLimited)
 
 	for i := 0; i < escalationThreshold; i++ {
 		w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 1}, throttle)
 	}
 
-	if w.consecutiveCircuitTrips != escalationThreshold {
-		t.Fatalf("consecutiveCircuitTrips = %d; want %d", w.consecutiveCircuitTrips, escalationThreshold)
+	if w.circuit.Trips() != escalationThreshold {
+		t.Fatalf("consecutiveCircuitTrips = %d; want %d", w.circuit.Trips(), escalationThreshold)
 	}
 	if !hasLog(*recs, slog.LevelWarn, "may have expired") {
 		t.Fatalf("logs = %+v; want escalation Warn after %d trips", *recs, escalationThreshold)
@@ -1190,18 +1197,18 @@ func TestRenewalHoldsFullCapAndDoesNotIncrementTrips(t *testing.T) {
 	recs := captureLogs(t)
 	w, q, fixed := newCircuitWorker()
 	// A genuine renewal is loud even after earlier success.
-	w.everProviderSuccess = true
+	w.circuit.RecordSuccess()
 	renewal := fmt.Errorf("x: %w", musixmatch.ErrTokenRenewalRequired)
 
 	tripped, releaseErr := w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 7}, renewal)
 	if !tripped || releaseErr != nil {
 		t.Fatalf("tripped=%v releaseErr=%v; want tripped, no error", tripped, releaseErr)
 	}
-	if got := w.circuitOpenUntil.Sub(fixed); got != 30*time.Minute {
+	if got := w.circuit.OpenUntil().Sub(fixed); got != 30*time.Minute {
 		t.Fatalf("window = %v; want the full cap (30m), not the geometric base", got)
 	}
-	if w.consecutiveCircuitTrips != 0 {
-		t.Fatalf("consecutiveCircuitTrips = %d; want 0 (renewal must not advance the throttle ramp)", w.consecutiveCircuitTrips)
+	if w.circuit.Trips() != 0 {
+		t.Fatalf("consecutiveCircuitTrips = %d; want 0 (renewal must not advance the throttle ramp)", w.circuit.Trips())
 	}
 	if got := q.released; len(got) != 1 || got[0] != 7 {
 		t.Fatalf("released = %v; want [7]", got)
@@ -1216,7 +1223,7 @@ func TestRenewalHoldsFullCapAndDoesNotIncrementTrips(t *testing.T) {
 	// A subsequent bare-401 throttle starts the ramp at the base, proving the
 	// renewal left the ramp position untouched.
 	w.tripCircuitIfRateLimited(context.Background(), queue.WorkItem{ID: 8}, fmt.Errorf("x: %w", musixmatch.ErrUnauthorized))
-	if got := w.circuitOpenUntil.Sub(fixed); got != 60*time.Second {
+	if got := w.circuit.OpenUntil().Sub(fixed); got != 60*time.Second {
 		t.Fatalf("post-renewal throttle window = %v; want base 60s (ramp position preserved)", got)
 	}
 }
@@ -1240,15 +1247,23 @@ func TestRunOnceResetsCircuitTripsOnNonCacheSuccess(t *testing.T) {
 	q := &fakeQueue{items: []queue.WorkItem{{ID: 5, Inputs: models.Inputs{Track: track, OutputPaths: []models.OutputPath{{Outdir: "out", Filename: "a.lrc"}}}}}}
 	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "fresh"}}}
 	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
-	w.consecutiveCircuitTrips = 3
+	// Prime the ramp to 3 trips, then advance past the window so the gate is
+	// half-open (not open) and RunOnce can proceed to a real provider fetch.
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	w.setClock(func() time.Time { return fixed })
+	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
+	w.circuit.Trip()
+	w.circuit.Trip()
+	w.circuit.Trip()
+	w.setClock(func() time.Time { return fixed.Add(time.Hour) })
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if w.consecutiveCircuitTrips != 0 {
-		t.Fatalf("consecutiveCircuitTrips = %d; want 0 after a non-cache success", w.consecutiveCircuitTrips)
+	if w.circuit.Trips() != 0 {
+		t.Fatalf("consecutiveCircuitTrips = %d; want 0 after a non-cache success", w.circuit.Trips())
 	}
-	if !w.everProviderSuccess {
+	if !w.circuit.EverSucceeded() {
 		t.Fatal("everProviderSuccess = false; want true after a non-cache provider fetch")
 	}
 }
@@ -1257,15 +1272,23 @@ func TestRunOnceResetsCircuitTripsOnBenignMiss(t *testing.T) {
 	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
 	q := &fakeQueue{items: []queue.WorkItem{{ID: 6, Inputs: models.Inputs{Track: track}}}}
 	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
-	w.consecutiveCircuitTrips = 3
+	// Prime the ramp to 3 trips, then advance past the window so the gate is
+	// half-open (not open) and RunOnce can proceed to a real provider fetch.
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	w.setClock(func() time.Time { return fixed })
+	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
+	w.circuit.Trip()
+	w.circuit.Trip()
+	w.circuit.Trip()
+	w.setClock(func() time.Time { return fixed.Add(time.Hour) })
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if w.consecutiveCircuitTrips != 0 {
-		t.Fatalf("consecutiveCircuitTrips = %d; want 0 after a benign miss (a clean 404 proves we are not throttled)", w.consecutiveCircuitTrips)
+	if w.circuit.Trips() != 0 {
+		t.Fatalf("consecutiveCircuitTrips = %d; want 0 after a benign miss (a clean 404 proves we are not throttled)", w.circuit.Trips())
 	}
-	if w.everProviderSuccess {
+	if w.circuit.EverSucceeded() {
 		t.Fatal("everProviderSuccess = true; a benign miss is not a provider match")
 	}
 }
@@ -1282,7 +1305,7 @@ func TestRunOnceCacheHitDoesNotMarkProviderSuccess(t *testing.T) {
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if w.everProviderSuccess {
+	if w.circuit.EverSucceeded() {
 		t.Fatal("everProviderSuccess = true after a cache hit; a cache hit never touches the provider")
 	}
 }
@@ -1290,8 +1313,9 @@ func TestRunOnceCacheHitDoesNotMarkProviderSuccess(t *testing.T) {
 func TestRunOnceWithOpenCircuitDoesNotIncrementBackoff(t *testing.T) {
 	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
 	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
-	w.now = func() time.Time { return fixed }
-	w.circuitOpenUntil = fixed.Add(10 * time.Minute)
+	w.setClock(func() time.Time { return fixed })
+	w.SetCircuitBackoff(10*time.Minute, 30*time.Minute)
+	w.circuit.Trip() // opens until fixed+10m
 
 	if err := w.RunOnce(context.Background()); !errors.Is(err, errQueueEmpty) {
 		t.Fatalf("RunOnce = %v; want errQueueEmpty", err)
@@ -1326,7 +1350,7 @@ func TestRunOnceSurfacesReleaseFailureAfterCircuitTrip(t *testing.T) {
 	// Circuit must still be opened even though release failed; we want the
 	// quiet window applied to upstream while operators investigate the
 	// orphaned row.
-	if w.circuitOpenUntil.IsZero() {
+	if w.circuit.OpenUntil().IsZero() {
 		t.Fatal("circuitOpenUntil = zero; want circuit opened despite release failure")
 	}
 	if len(q.failed) != 0 {
@@ -1363,13 +1387,13 @@ func TestTruncatedResponseOpensCircuitAndReleases(t *testing.T) {
 	fetcher := &fakeFetcher{err: fmt.Errorf("upstream: %w", musixmatch.ErrTruncatedResponse)}
 	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
 	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
-	w.now = func() time.Time { return fixed }
+	w.setClock(func() time.Time { return fixed })
 	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
 
 	if err := w.RunOnce(context.Background()); !errors.Is(err, errQueueEmpty) {
 		t.Fatalf("RunOnce = %v; want errQueueEmpty (circuit opened cleanly)", err)
 	}
-	if w.circuitOpenUntil.IsZero() {
+	if w.circuit.OpenUntil().IsZero() {
 		t.Fatal("circuitOpenUntil = zero; want circuit opened on a truncated response")
 	}
 	if got := q.released; len(got) != 1 || got[0] != 77 {
@@ -1407,9 +1431,12 @@ func TestCircuitHalfOpenThenRecovers(t *testing.T) {
 	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "fresh"}}}
 	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
 	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
-	// The circuit window has already elapsed: now() is past circuitOpenUntil.
-	w.now = func() time.Time { return fixed }
-	w.circuitOpenUntil = fixed.Add(-time.Minute)
+	// Open the circuit two minutes in the past (base window 60s elapsed by now),
+	// so now() is past openUntil and the next RunOnce probes (half-open).
+	w.setClock(func() time.Time { return fixed.Add(-2 * time.Minute) })
+	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
+	w.circuit.Trip()
+	w.setClock(func() time.Time { return fixed })
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -1420,8 +1447,8 @@ func TestCircuitHalfOpenThenRecovers(t *testing.T) {
 	if !hasLog(*recs, slog.LevelInfo, "circuit closed; provider recovered") {
 		t.Fatalf("logs = %+v; want Info recovery after a successful probe round-trip", *recs)
 	}
-	if w.circuitProbing {
-		t.Fatal("circuitProbing = true; want cleared after recovery")
+	if got := w.circuit.Allow(); got != circuit.StateClosed {
+		t.Fatalf("circuit state = %v; want StateClosed after recovery", got)
 	}
 }
 
