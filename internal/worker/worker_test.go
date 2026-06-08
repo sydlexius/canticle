@@ -267,6 +267,120 @@ func (v *fakeVerifier) Verify(_ context.Context, path string, song models.Song) 
 	return verification.Result{Accepted: res.accepted, Similarity: 1}, nil
 }
 
+// fakeGuard is a test ScriptGuard. enabled toggles Enabled(); accept toggles
+// Accept's verdict. calls records each Accept invocation's song so tests can
+// assert the guard saw the fetched lyrics.
+type fakeGuard struct {
+	enabled bool
+	accept  bool
+	reason  string
+	calls   []models.Song
+}
+
+func (g *fakeGuard) Enabled() bool { return g.enabled }
+
+func (g *fakeGuard) Accept(song models.Song) (bool, string) {
+	g.calls = append(g.calls, song)
+	if g.accept {
+		return true, ""
+	}
+	return false, g.reason
+}
+
+func TestRunOnceGuardRejectsTerminallyWithoutCacheOrWrite(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 80,
+		Inputs: models.Inputs{
+			Track:    track,
+			Outdir:   "out",
+			Filename: "artist-title.lrc",
+		},
+	}}}
+	cache := &fakeCache{}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "wrong-language lyrics"},
+	}}
+	writer := &fakeWriter{}
+	guard := &fakeGuard{enabled: true, accept: false, reason: "foreign-script share 0.90 exceeds 0.20"}
+
+	w := New(q, cache, fetcher, writer)
+	w.EnableGuard(guard)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(guard.calls) != 1 {
+		t.Fatalf("guard calls = %d; want 1", len(guard.calls))
+	}
+	if len(writer.writes) != 0 {
+		t.Fatalf("writes = %+v; want none (guard rejection must not write)", writer.writes)
+	}
+	if len(cache.stores) != 0 {
+		t.Fatalf("cache stores = %d; want none (guard rejection must not cache)", len(cache.stores))
+	}
+	// Guard rejection is terminal/policy: Complete (not Fail, not Defer).
+	if len(q.completed) != 1 || q.completed[0] != 80 {
+		t.Fatalf("completed = %v; want [80] (terminal completion)", q.completed)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none (guard rejection is not a retriable failure)", q.failed)
+	}
+	if len(q.deferred) != 0 {
+		t.Fatalf("deferred = %v; want none (re-fetching yields the same wrong-language result)", q.deferred)
+	}
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (guard rejection must not trip backoff)", w.consecutiveFailures)
+	}
+}
+
+func TestRunOnceDisabledGuardProceedsNormally(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	for name, guard := range map[string]*fakeGuard{
+		"nil guard":      nil,
+		"disabled guard": {enabled: false, accept: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			q := &fakeQueue{items: []queue.WorkItem{{
+				ID: 81,
+				Inputs: models.Inputs{
+					Track:    track,
+					Outdir:   "out",
+					Filename: "artist-title.lrc",
+				},
+			}}}
+			cache := &fakeCache{}
+			fetcher := &fakeFetcher{song: models.Song{
+				Track:  track,
+				Lyrics: models.Lyrics{LyricsBody: "fresh lyrics"},
+			}}
+			writer := &fakeWriter{}
+
+			w := New(q, cache, fetcher, writer)
+			if guard != nil {
+				w.EnableGuard(guard)
+			}
+
+			if err := w.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if len(writer.writes) != 1 {
+				t.Fatalf("writes = %+v; want one (disabled guard must not block)", writer.writes)
+			}
+			if len(cache.stores) != 1 {
+				t.Fatalf("cache stores = %d; want 1 (disabled guard must not block caching)", len(cache.stores))
+			}
+			if len(q.completed) != 1 || q.completed[0] != 81 {
+				t.Fatalf("completed = %v; want [81]", q.completed)
+			}
+			if len(q.failed) != 0 {
+				t.Fatalf("failed = %v; want none", q.failed)
+			}
+		})
+	}
+}
+
 func TestRunOnceCacheHitAvoidsFetcherAndCompletes(t *testing.T) {
 	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
 	song := models.Song{

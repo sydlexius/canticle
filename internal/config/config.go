@@ -19,6 +19,7 @@ type Config struct {
 	Server       ServerConfig       `toml:"server"`
 	Providers    ProvidersConfig    `toml:"providers"`
 	Verification VerificationConfig `toml:"verification"`
+	Guard        GuardConfig        `toml:"guard"`
 	Queue        QueueConfig        `toml:"queue"`
 	Logging      LoggingConfig      `toml:"logging"`
 }
@@ -155,6 +156,24 @@ type VerificationConfig struct {
 	MinSimilarity         float64 `toml:"min_similarity"`
 }
 
+// GuardConfig holds optional language/script guard settings. An empty
+// AcceptedScripts disables the guard.
+type GuardConfig struct {
+	// AcceptedScripts is the allowlist of Unicode script buckets a lyric body may
+	// be written in: Latin, Han, Kana, Hangul, Other. Empty disables the guard.
+	// Override: MXLRC_GUARD_ACCEPTED_SCRIPTS (comma-separated).
+	AcceptedScripts []string `toml:"accepted_scripts"`
+	// Threshold is the maximum tolerated share of foreign-script letters (outside
+	// AcceptedScripts) before a result is rejected. Default 0.20. Values outside
+	// (0,1] are reset to the default. Override: MXLRC_GUARD_THRESHOLD.
+	Threshold float64 `toml:"script_guard_threshold"`
+}
+
+// guardThresholdDefault is the default foreign-script share threshold. It
+// mirrors langguard's built-in default so an empty config and an empty
+// allowlist agree.
+const guardThresholdDefault = 0.20
+
 // QueueConfig holds work-queue behavior settings.
 type QueueConfig struct {
 	// Randomize shuffles the dequeue order within each priority tier so the
@@ -182,6 +201,7 @@ func defaults() Config {
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch"},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
+		Guard:        GuardConfig{Threshold: guardThresholdDefault},
 		Queue:        QueueConfig{Randomize: true},
 		Logging: LoggingConfig{
 			Level:      "info",
@@ -269,6 +289,13 @@ func Load(path string) (Config, error) {
 			if !md.IsDefined("api", "max_miss_attempts") {
 				cfg.API.MaxMissAttempts = d.API.MaxMissAttempts
 			}
+			// Guard: an empty accepted_scripts is valid (the guard is disabled),
+			// so it is never re-defaulted. The threshold default is restored when
+			// the key is absent (a plain float field cannot tell "omitted" from
+			// "explicit 0") or set out of the valid (0,1] range.
+			if !md.IsDefined("guard", "script_guard_threshold") || cfg.Guard.Threshold <= 0 || cfg.Guard.Threshold > 1 {
+				cfg.Guard.Threshold = d.Guard.Threshold
+			}
 			// Logging: restore defaults for blank string fields and zero ints.
 			if cfg.Logging.Level == "" {
 				cfg.Logging.Level = d.Logging.Level
@@ -312,7 +339,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -473,6 +500,17 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_VERIFICATION_MIN_SIMILARITY", "value", v, "current", cfg.Verification.MinSimilarity) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.MinSimilarity = n
+		}
+	}
+	if v := os.Getenv("MXLRC_GUARD_ACCEPTED_SCRIPTS"); v != "" {
+		cfg.Guard.AcceptedScripts = splitCSV(v)
+	}
+	if v := os.Getenv("MXLRC_GUARD_THRESHOLD"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || n <= 0 || n > 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_GUARD_THRESHOLD", "value", v, "current", cfg.Guard.Threshold) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Guard.Threshold = n
 		}
 	}
 	// Logging: string env overrides.

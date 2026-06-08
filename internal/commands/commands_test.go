@@ -81,6 +81,28 @@ func TestConfigureWorkerVerificationAcceptsNilVerifier(t *testing.T) {
 	configureWorkerVerification(w, config.Config{}, nil)
 }
 
+func TestNewGuardDisabledReturnsUntypedNil(t *testing.T) {
+	g := newGuard(config.Config{Guard: config.GuardConfig{Threshold: 0.20}})
+	if g != nil {
+		t.Fatalf("newGuard with empty allowlist = %#v; want untyped nil (not a typed-nil *Guard)", g)
+	}
+}
+
+func TestNewGuardEnabledReturnsGuard(t *testing.T) {
+	g := newGuard(config.Config{Guard: config.GuardConfig{AcceptedScripts: []string{"Latin"}, Threshold: 0.20}})
+	if g == nil {
+		t.Fatal("newGuard with a non-empty allowlist = nil; want a Guard")
+	}
+	if !g.Enabled() {
+		t.Fatal("newGuard returned a disabled guard; want Enabled() == true")
+	}
+}
+
+func TestConfigureWorkerGuardAcceptsNilGuard(t *testing.T) {
+	w := worker.New(nil, nil, fakeFetcher{}, fakeWriter{})
+	configureWorkerGuard(w, nil)
+}
+
 func TestRunSubcommandHelpShowsSelectedCommand(t *testing.T) {
 	tests := []struct {
 		name string
@@ -403,6 +425,57 @@ func TestVerificationConfigKeys(t *testing.T) {
 	}
 	if err := setConfigValue(&cfg, "verification.ffmpeg_path", " "); err == nil {
 		t.Fatal("setConfigValue accepted blank verification.ffmpeg_path")
+	}
+}
+
+func TestConfigGuardGetSetRoundTrip(t *testing.T) {
+	cfg := config.Config{
+		Guard: config.GuardConfig{
+			AcceptedScripts: []string{"Latin", "Han"},
+			Threshold:       0.3,
+		},
+	}
+	gets := map[string]string{
+		"guard.accepted_scripts":       "Latin,Han",
+		"guard.script_guard_threshold": "0.3",
+	}
+	for key, want := range gets {
+		got, ok := configValue(cfg, key)
+		if !ok {
+			t.Fatalf("configValue(%q) ok = false; want true", key)
+		}
+		if got != want {
+			t.Fatalf("configValue(%q) = %q; want %q", key, got, want)
+		}
+		if !slices.Contains(configKeys(), key) {
+			t.Fatalf("configKeys missing %q", key)
+		}
+	}
+
+	if err := setConfigValue(&cfg, "guard.accepted_scripts", "Latin, Hangul"); err != nil {
+		t.Fatalf("setConfigValue accepted_scripts: %v", err)
+	}
+	if len(cfg.Guard.AcceptedScripts) != 2 || cfg.Guard.AcceptedScripts[0] != "Latin" || cfg.Guard.AcceptedScripts[1] != "Hangul" {
+		t.Fatalf("accepted_scripts = %v; want [Latin Hangul]", cfg.Guard.AcceptedScripts)
+	}
+	// An empty accepted_scripts is valid: it disables the guard.
+	if err := setConfigValue(&cfg, "guard.accepted_scripts", ""); err != nil {
+		t.Fatalf("setConfigValue empty accepted_scripts: %v (empty is valid, disables the guard)", err)
+	}
+	if len(cfg.Guard.AcceptedScripts) != 0 {
+		t.Fatalf("accepted_scripts = %v; want empty", cfg.Guard.AcceptedScripts)
+	}
+
+	if err := setConfigValue(&cfg, "guard.script_guard_threshold", "0.5"); err != nil {
+		t.Fatalf("setConfigValue threshold: %v", err)
+	}
+	if cfg.Guard.Threshold != 0.5 {
+		t.Fatalf("threshold = %v; want 0.5", cfg.Guard.Threshold)
+	}
+	for _, bad := range []string{"abc", "0", "2", "-1"} {
+		if err := setConfigValue(&cfg, "guard.script_guard_threshold", bad); err == nil {
+			t.Fatalf("setConfigValue accepted invalid guard.script_guard_threshold %q", bad)
+		}
 	}
 }
 

@@ -25,6 +25,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
 		"MXLRC_VERIFICATION_MIN_CONFIDENCE", "MXLRC_VERIFICATION_MIN_SIMILARITY",
+		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
 		"MXLRC_QUEUE_RANDOMIZE",
 		"MXLRC_LOG_LEVEL", "MXLRC_LOG_FORMAT", "MXLRC_LOG_FILE",
 		"MXLRC_LOG_MAX_SIZE_MB", "MXLRC_LOG_MAX_FILES", "MXLRC_LOG_MAX_AGE_DAYS", "MXLRC_LOG_COMPRESS",
@@ -68,6 +69,90 @@ func TestLoad_MissingConfigFileIsNotFatal(t *testing.T) {
 	}
 	if cfg.Verification.MinSimilarity != 0.35 {
 		t.Errorf("default verification min similarity = %v; want 0.35", cfg.Verification.MinSimilarity)
+	}
+	if len(cfg.Guard.AcceptedScripts) != 0 {
+		t.Errorf("default guard accepted scripts = %v; want empty (disabled)", cfg.Guard.AcceptedScripts)
+	}
+	if cfg.Guard.Threshold != 0.20 {
+		t.Errorf("default guard threshold = %v; want 0.20", cfg.Guard.Threshold)
+	}
+}
+
+func TestLoad_GuardThresholdReDefaultsWhenUndefinedOrInvalid(t *testing.T) {
+	for name, tomlBody := range map[string]string{
+		"omitted":   "[guard]\naccepted_scripts = [\"Latin\"]\n",
+		"zero":      "[guard]\nscript_guard_threshold = 0.0\n",
+		"too large": "[guard]\nscript_guard_threshold = 1.5\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateEnv(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tomlBody), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Guard.Threshold != 0.20 {
+				t.Errorf("guard threshold = %v; want 0.20 (re-defaulted)", cfg.Guard.Threshold)
+			}
+		})
+	}
+}
+
+func TestLoad_GuardThresholdExplicitValueHonored(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "[guard]\naccepted_scripts = [\"Latin\", \"Han\"]\nscript_guard_threshold = 0.5\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Guard.Threshold != 0.5 {
+		t.Errorf("guard threshold = %v; want 0.5", cfg.Guard.Threshold)
+	}
+	if len(cfg.Guard.AcceptedScripts) != 2 || cfg.Guard.AcceptedScripts[0] != "Latin" || cfg.Guard.AcceptedScripts[1] != "Han" {
+		t.Errorf("guard accepted scripts = %v; want [Latin Han]", cfg.Guard.AcceptedScripts)
+	}
+}
+
+func TestLoad_EnvGuardOverrides(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_GUARD_ACCEPTED_SCRIPTS", "Latin, Hangul")
+	t.Setenv("MXLRC_GUARD_THRESHOLD", "0.4")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Guard.AcceptedScripts) != 2 || cfg.Guard.AcceptedScripts[0] != "Latin" || cfg.Guard.AcceptedScripts[1] != "Hangul" {
+		t.Errorf("guard accepted scripts = %v; want [Latin Hangul]", cfg.Guard.AcceptedScripts)
+	}
+	if cfg.Guard.Threshold != 0.4 {
+		t.Errorf("guard threshold = %v; want 0.4", cfg.Guard.Threshold)
+	}
+}
+
+func TestLoad_EnvGuardThresholdInvalidIsIgnored(t *testing.T) {
+	for name, val := range map[string]string{
+		"not a number": "abc",
+		"zero":         "0",
+		"too large":    "2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateEnv(t)
+			t.Setenv("MXLRC_GUARD_THRESHOLD", val)
+			cfg, err := Load("")
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Guard.Threshold != 0.20 {
+				t.Errorf("guard threshold = %v; want 0.20 (invalid env kept default)", cfg.Guard.Threshold)
+			}
+		})
 	}
 }
 
