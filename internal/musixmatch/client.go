@@ -46,6 +46,12 @@ var (
 	// catalogs and licensing change over time, and the days-scale cadence keeps
 	// the cost negligible.
 	ErrNoLyrics = errors.New("musixmatch: no lyrics available")
+	// ErrTruncatedResponse indicates a structurally valid response (HTTP 200,
+	// track present) whose inner data is missing -- e.g. has_subtitles=1 but the
+	// subtitle_body is empty. This is typically observed during egress-IP
+	// throttling, where the upstream returns a well-formed but hollow body.
+	// Treat as a circuit-breaker signal rather than a parse error.
+	ErrTruncatedResponse = errors.New("musixmatch: truncated or empty response body")
 )
 
 // tokenRenewalError marks the upstream "renew" hint: the usertoken must be
@@ -275,11 +281,15 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	}
 
 	if song.Track.HasSubtitles == 1 {
-		if err := json.Unmarshal(tsg.GetStringBytes("body", "subtitle_list", "0", "subtitle", "subtitle_body"), &song.Subtitles.Lines); err != nil {
+		subBody := tsg.GetStringBytes("body", "subtitle_list", "0", "subtitle", "subtitle_body")
+		if len(subBody) == 0 {
+			return song, fmt.Errorf("%w: subtitle_body empty despite HasSubtitles=1", ErrTruncatedResponse)
+		}
+		if err := json.Unmarshal(subBody, &song.Subtitles.Lines); err != nil {
 			return song, err
 		}
 	} else {
-		slog.Info("no synced lyrics found")
+		slog.Debug("no synced lyrics found")
 		if song.Track.HasLyrics == 1 {
 			if tlg.GetInt("body", "lyrics", "restricted") == 1 {
 				return song, fmt.Errorf("%w: restricted", ErrNoLyrics)
@@ -292,7 +302,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 				return song, err
 			}
 		} else if song.Track.Instrumental == 1 {
-			slog.Info("song is instrumental")
+			slog.Debug("song is instrumental")
 		} else {
 			return song, fmt.Errorf("%w: no synced or unsynced lyrics", ErrNoLyrics)
 		}

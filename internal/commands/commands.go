@@ -25,6 +25,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/db"
 	"github.com/sydlexius/mxlrcgo-svc/internal/library"
+	"github.com/sydlexius/mxlrcgo-svc/internal/logging"
 	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
@@ -412,6 +413,9 @@ func legacyServe(args LegacyArgs) ServeCmd {
 // info, warn, error). It uses SetLogLoggerLevel so the existing default-handler
 // output format is unchanged; only the threshold moves. Unset/unknown leaves the
 // default (info). DEBUG exposes the worker idle-poll and watcher event lines.
+// This bootstrap handler is active during dotenv load and config.Load(); once
+// config.Load() succeeds, initLogging installs the full handler (level, format,
+// optional file output, redaction) and takes over.
 func applyLogLevel() {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("MXLRC_LOG_LEVEL"))) {
 	case "debug":
@@ -425,6 +429,28 @@ func applyLogLevel() {
 	}
 }
 
+// Log-level rubric:
+//
+//	DEBUG: routine, high-frequency, normal-operation detail (per-request logs, per-item processing, cache hits).
+//	INFO:  meaningful, lower-frequency events (startup/shutdown, scan summaries, successful writes).
+//	WARN:  recoverable problems / degraded conditions (circuit open, rate-limit backoff, retries, fallbacks, giving up on a track, misconfig).
+//	ERROR: unrecoverable failures requiring attention.
+
+// initLogging installs the fully configured slog handler after config.Load()
+// succeeds. It maps cfg.Logging fields to a logging.Config and calls
+// logging.Init, which replaces the bootstrap handler set by applyLogLevel.
+func initLogging(cfg config.Config) {
+	logging.Init(logging.Config{
+		Level:      cfg.Logging.Level,
+		Format:     cfg.Logging.Format,
+		FilePath:   cfg.Logging.File,
+		MaxSizeMB:  cfg.Logging.MaxSizeMB,
+		MaxFiles:   cfg.Logging.MaxFiles,
+		MaxAgeDays: cfg.Logging.MaxAgeDays,
+		Compress:   cfg.Logging.Compress,
+	})
+}
+
 func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer, newApp func(musixmatch.Fetcher, lyrics.Writer, *queue.InputsQueue, int, string) AppRunner) int {
 	if len(args.Song) == 0 {
 		_, _ = fmt.Fprintln(out, "missing required positional argument: Song")
@@ -435,6 +461,7 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 		slog.Error("failed to load config", "error", err)
 		return 1
 	}
+	initLogging(cfg)
 	token := args.Token
 	if token == "" {
 		token = cfg.API.Token
@@ -557,6 +584,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		slog.Error("failed to load config", "error", err)
 		return 1
 	}
+	initLogging(cfg)
 	token := args.Token
 	if token == "" {
 		token = cfg.API.Token

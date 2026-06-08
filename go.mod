@@ -11,6 +11,7 @@ require (
 	github.com/rjeczalik/notify v0.9.3
 	github.com/valyala/fastjson v1.6.10
 	golang.org/x/text v0.37.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	modernc.org/sqlite v1.51.0
 )
 

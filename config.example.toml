@@ -8,7 +8,9 @@
 # MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL,
 # MXLRC_VERIFICATION_FFMPEG_PATH,
 # MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_MIN_CONFIDENCE,
-# MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_DOCKER
+# MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_DOCKER,
+# MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB,
+# MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 
 [api]
 # Musixmatch API token (required).
@@ -119,3 +121,37 @@ min_similarity = 0.35
 # (inspection output stays deterministic). Set to false to restore the
 # deterministic created_at/id ordering. Env override: MXLRC_QUEUE_RANDOMIZE.
 randomize = true
+
+[logging]
+# Minimum log level to emit: debug, info, warn, error. Default info.
+# DEBUG exposes per-request detail, worker idle-polls, and watcher events.
+# Env override: MXLRC_LOG_LEVEL.
+level = "info"
+
+# Log output format: text (human-readable) or json (structured, for log
+# aggregators). Default text. Env override: MXLRC_LOG_FORMAT.
+format = "text"
+
+# Log file path. When empty (the default) logs go to stderr only (console-only
+# mode). When set, logs are written to both stderr and the file. The directory
+# is created automatically if it does not exist. If the path is not writable,
+# the service falls back to stderr and logs a warning rather than crashing.
+# Env override: MXLRC_LOG_FILE.
+# Docker example: file = "/config/mxlrcgo.log"
+# file = ""
+
+# Maximum log file size in megabytes before rotation. Default 10.
+# Env override: MXLRC_LOG_MAX_SIZE_MB.
+# max_size_mb = 10
+
+# Number of rotated log files to retain (not counting the current file).
+# Default 5. Env override: MXLRC_LOG_MAX_FILES.
+# max_files = 5
+
+# Maximum age in days to retain rotated log files. Default 30.
+# Env override: MXLRC_LOG_MAX_AGE_DAYS.
+# max_age_days = 30
+
+# Compress rotated log files with gzip. Default true.
+# Env override: MXLRC_LOG_COMPRESS.
+# compress = true

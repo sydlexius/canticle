@@ -224,7 +224,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	h.mux.ServeHTTP(rec, r)
-	slog.Info("http request", "method", r.Method, "uri", redactURI(r.URL), "status", rec.status) //nolint:gosec // G706: request URI is logged as a structured slog field after apikey redaction; slog escapes values
+	slog.Debug("http request", "method", r.Method, "uri", redactURI(r.URL), "status", rec.status) //nolint:gosec // G706: request URI is logged as a structured slog field after apikey redaction; slog escapes values
 }
 
 func (h *Handler) handleLidarr(w http.ResponseWriter, r *http.Request) {
@@ -279,7 +279,7 @@ func (h *Handler) handleLidarr(w http.ResponseWriter, r *http.Request) {
 	case "Delete":
 		inputs, err := h.metadataInputs(payload)
 		if err != nil {
-			slog.Info("lidarr delete received without cleanup target", "artist", payload.Artist.ArtistName, "album", payload.Album.Title)
+			slog.Warn("lidarr delete received without cleanup target", "artist", payload.Artist.ArtistName, "album", payload.Album.Title)
 			break
 		}
 		var removed int64
@@ -470,7 +470,7 @@ func (h *Handler) confinedPayloadPath(path string) (string, bool) {
 	if len(h.allowedRoots) > 0 {
 		// Observability for a misconfiguration or an injection attempt: a payload
 		// path was supplied but matched no configured root after resolution.
-		slog.Info("webhook payload path rejected by library-root confinement; falling back", "path", path)
+		slog.Warn("webhook payload path rejected by library-root confinement; falling back", "path", path)
 	}
 	return "", false
 }
@@ -481,7 +481,7 @@ func (h *Handler) pathExists(path string) bool {
 		check = defaultPathChecker
 	}
 	if err := check(path); err != nil {
-		slog.Info("webhook payload path not usable inside container; falling back", "path", path, "error", err)
+		slog.Warn("webhook payload path not usable inside container; falling back", "path", path, "error", err)
 		return false
 	}
 	return true

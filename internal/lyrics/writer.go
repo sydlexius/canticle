@@ -75,15 +75,15 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	var synced bool
 	switch {
 	case len(song.Subtitles.Lines) > 0:
-		slog.Info("saving synced lyrics")
+		slog.Debug("saving synced lyrics")
 		writeContent = func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf) }
 		writeTags = true
 		synced = true
 	case song.Lyrics.LyricsBody != "":
-		slog.Info("saving unsynced lyrics")
+		slog.Debug("saving unsynced lyrics")
 		writeContent = func(buf *bufio.Writer) error { return writeUnsyncedLRC(song, buf) }
 	case song.Track.Instrumental == 1:
-		slog.Info("saving instrumental")
+		slog.Debug("saving instrumental")
 		writeContent = writeInstrumental
 		// Instrumentals are a plain .txt marker: no timestamp, no tag headers.
 	default:

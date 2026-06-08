@@ -20,6 +20,32 @@ type Config struct {
 	Providers    ProvidersConfig    `toml:"providers"`
 	Verification VerificationConfig `toml:"verification"`
 	Queue        QueueConfig        `toml:"queue"`
+	Logging      LoggingConfig      `toml:"logging"`
+}
+
+// LoggingConfig holds log-output settings.
+type LoggingConfig struct {
+	// Level is the minimum log level: debug, info, warn, error. Default info.
+	// Override: MXLRC_LOG_LEVEL.
+	Level string `toml:"level"`
+	// Format is the log format: text or json. Default text.
+	// Override: MXLRC_LOG_FORMAT.
+	Format string `toml:"format"`
+	// File is the log file path. Empty means console-only (stderr). Default "".
+	// Override: MXLRC_LOG_FILE.
+	File string `toml:"file"`
+	// MaxSizeMB is the maximum size in megabytes before rotation. Default 10.
+	// Override: MXLRC_LOG_MAX_SIZE_MB.
+	MaxSizeMB int `toml:"max_size_mb"`
+	// MaxFiles is the number of rotated log files to retain. Default 5.
+	// Override: MXLRC_LOG_MAX_FILES.
+	MaxFiles int `toml:"max_files"`
+	// MaxAgeDays is the maximum age in days of retained log files. Default 30.
+	// Override: MXLRC_LOG_MAX_AGE_DAYS.
+	MaxAgeDays int `toml:"max_age_days"`
+	// Compress enables gzip compression of rotated log files. Default true.
+	// Override: MXLRC_LOG_COMPRESS.
+	Compress bool `toml:"compress"`
 }
 
 // APIConfig holds API-related configuration.
@@ -157,6 +183,14 @@ func defaults() Config {
 		Providers:    ProvidersConfig{Primary: "musixmatch"},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
 		Queue:        QueueConfig{Randomize: true},
+		Logging: LoggingConfig{
+			Level:      "info",
+			Format:     "text",
+			MaxSizeMB:  10,
+			MaxFiles:   5,
+			MaxAgeDays: 30,
+			Compress:   true,
+		},
 	}
 }
 
@@ -235,6 +269,29 @@ func Load(path string) (Config, error) {
 			if !md.IsDefined("api", "max_miss_attempts") {
 				cfg.API.MaxMissAttempts = d.API.MaxMissAttempts
 			}
+			// Logging: restore defaults for blank string fields and zero ints.
+			if cfg.Logging.Level == "" {
+				cfg.Logging.Level = d.Logging.Level
+			}
+			if cfg.Logging.Format == "" {
+				cfg.Logging.Format = d.Logging.Format
+			}
+			if cfg.Logging.MaxSizeMB == 0 {
+				cfg.Logging.MaxSizeMB = d.Logging.MaxSizeMB
+			}
+			if cfg.Logging.MaxFiles == 0 {
+				cfg.Logging.MaxFiles = d.Logging.MaxFiles
+			}
+			if cfg.Logging.MaxAgeDays == 0 {
+				cfg.Logging.MaxAgeDays = d.Logging.MaxAgeDays
+			}
+			// Compress defaults to true but the bool zero-value is false, so
+			// "compress = false" in the file is indistinguishable from "not set"
+			// via simple equality. Use MetaData.IsDefined so an explicit
+			// compress = false is preserved and an omitted key restores the default.
+			if !md.IsDefined("logging", "compress") {
+				cfg.Logging.Compress = d.Logging.Compress
+			}
 		} else if !os.IsNotExist(err) {
 			return cfg, fmt.Errorf("config: stat %s: %w", path, err)
 		}
@@ -255,7 +312,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_QUEUE_RANDOMIZE
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -416,6 +473,50 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_VERIFICATION_MIN_SIMILARITY", "value", v, "current", cfg.Verification.MinSimilarity) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.MinSimilarity = n
+		}
+	}
+	// Logging: string env overrides.
+	if v := os.Getenv("MXLRC_LOG_LEVEL"); v != "" {
+		cfg.Logging.Level = v //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+	}
+	if v := os.Getenv("MXLRC_LOG_FORMAT"); v != "" {
+		cfg.Logging.Format = v //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+	}
+	if v := os.Getenv("MXLRC_LOG_FILE"); v != "" {
+		cfg.Logging.File = v //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+	}
+	// Logging: integer env overrides.
+	if v := os.Getenv("MXLRC_LOG_MAX_SIZE_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_MAX_SIZE_MB", "value", v, "current", cfg.Logging.MaxSizeMB) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Logging.MaxSizeMB = n
+		}
+	}
+	if v := os.Getenv("MXLRC_LOG_MAX_FILES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_MAX_FILES", "value", v, "current", cfg.Logging.MaxFiles) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Logging.MaxFiles = n
+		}
+	}
+	if v := os.Getenv("MXLRC_LOG_MAX_AGE_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_MAX_AGE_DAYS", "value", v, "current", cfg.Logging.MaxAgeDays) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Logging.MaxAgeDays = n
+		}
+	}
+	// Logging: bool env override.
+	if v := os.Getenv("MXLRC_LOG_COMPRESS"); v != "" {
+		compress, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_COMPRESS", "value", v, "current", cfg.Logging.Compress) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Logging.Compress = compress
 		}
 	}
 }

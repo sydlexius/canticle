@@ -97,6 +97,84 @@ func TestFindLyricsBuildsRequestAndParsesSyncedLyrics(t *testing.T) {
 	}
 }
 
+func TestFindLyricsTruncatedSubtitleBodyReturnsErrTruncatedResponse(t *testing.T) {
+	emptyBody := `{
+		"message": {
+			"header": {"status_code": 200},
+			"body": {
+				"macro_calls": {
+					"matcher.track.get": {
+						"message": {
+							"header": {"status_code": 200},
+							"body": {
+								"track": {
+									"track_name": "title",
+									"artist_name": "artist",
+									"has_subtitles": 1
+								}
+							}
+						}
+					},
+					"track.lyrics.get": {"message": {"body": {}}},
+					"track.subtitles.get": {
+						"message": {
+							"body": {
+								"subtitle_list": [
+									{"subtitle": {"subtitle_body": ""}}
+								]
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+	absentBody := `{
+		"message": {
+			"header": {"status_code": 200},
+			"body": {
+				"macro_calls": {
+					"matcher.track.get": {
+						"message": {
+							"header": {"status_code": 200},
+							"body": {
+								"track": {
+									"track_name": "title",
+									"artist_name": "artist",
+									"has_subtitles": 1
+								}
+							}
+						}
+					},
+					"track.lyrics.get": {"message": {"body": {}}},
+					"track.subtitles.get": {
+						"message": {
+							"body": {
+								"subtitle_list": [
+									{"subtitle": {}}
+								]
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+	cases := map[string]string{
+		"empty subtitle_body":  emptyBody,
+		"absent subtitle_body": absentBody,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			client := newTestClient(http.StatusOK, body)
+			_, err := client.FindLyrics(context.Background(), models.Track{TrackName: "title", ArtistName: "artist"})
+			if !errors.Is(err, ErrTruncatedResponse) {
+				t.Fatalf("FindLyrics error = %v; want errors.Is(_, ErrTruncatedResponse)", err)
+			}
+		})
+	}
+}
+
 func TestFindLyricsParsesUnsyncedLyrics(t *testing.T) {
 	client := newTestClient(http.StatusOK, `{
 		"message": {
