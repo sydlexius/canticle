@@ -70,12 +70,36 @@ type Client struct {
 // subsequent AJAX request.
 func NewClient() *Client {
 	jar, _ := cookiejar.New(nil)
-	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second, Jar: jar},
-		baseURL:    defaultBaseURL,
-		now:        time.Now,
-		sleep:      ctxSleep,
+	c := &Client{
+		baseURL: defaultBaseURL,
+		now:     time.Now,
+		sleep:   ctxSleep,
 	}
+	c.httpClient = &http.Client{
+		Timeout:       30 * time.Second,
+		Jar:           jar,
+		CheckRedirect: c.checkRedirect,
+	}
+	return c
+}
+
+// checkRedirect pins redirects to the configured base host. The default
+// http.Client follows up to 10 redirects without restricting the target host,
+// so a 3xx from petitlyrics.com could otherwise move a request to an arbitrary
+// host (an SSRF vector). This rejects cross-host redirects and preserves the
+// standard 10-hop cap.
+func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("petitlyrics: stopped after 10 redirects")
+	}
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return fmt.Errorf("petitlyrics: parse base URL: %w", err)
+	}
+	if req.URL.Host != base.Host {
+		return fmt.Errorf("petitlyrics: refusing cross-host redirect to %q", req.URL.Host)
+	}
+	return nil
 }
 
 // ctxSleep sleeps for d, returning true when the sleep completes and false when
@@ -138,7 +162,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, stage string) (*http
 	if err := c.pace(ctx); err != nil {
 		return nil, err
 	}
-	res, err := c.httpClient.Do(req) //nolint:gosec // G704: the request host is c.baseURL, a fixed petitlyrics.com const overridden only by tests; track inputs go in the form body, not the URL, so there is no user-controlled SSRF vector.
+	res, err := c.httpClient.Do(req) //nolint:gosec // G704: the request host is c.baseURL (fixed petitlyrics.com const, test-only override) and the client's CheckRedirect pins redirects to that host, so a 3xx cannot move the request off-host; track inputs go in the form body, not the URL. No SSRF vector.
 	if err != nil {
 		return nil, fmt.Errorf("petitlyrics: %s: %w", stage, err)
 	}

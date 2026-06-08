@@ -327,6 +327,27 @@ func TestWithMinIntervalReturnsClient(t *testing.T) {
 	}
 }
 
+func TestFindLyrics_RefusesCrossHostRedirect(t *testing.T) {
+	// A second host that must never be reached: the client should refuse to
+	// follow a cross-host redirect rather than fetch from an arbitrary host.
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("client followed a cross-host redirect to %s", r.URL.Path)
+	}))
+	t.Cleanup(other.Close)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search_lyrics", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/search_lyrics", http.StatusFound)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := newTestClient(srv)
+
+	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "x", ArtistName: "y"}); err == nil {
+		t.Fatal("expected error refusing cross-host redirect; got nil")
+	}
+}
+
 func TestFindLyrics_ContextCanceled(t *testing.T) {
 	f := &fixtureServer{
 		searchBody: searchHTMLWithID("1"),
