@@ -75,6 +75,7 @@ extra:
 
 nav:
   - Home: index.md
+  - Getting Started: GETTING_STARTED.md
   - User Guide: USER_GUIDE.md
   - CLI Reference: CLI_REFERENCE.md
   - Configuration: CONFIGURATION.md

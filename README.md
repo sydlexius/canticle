@@ -11,6 +11,7 @@ Command line tool and webhook service to fetch synced lyrics from [Musixmatch](h
 
 Full documentation is published at **<https://sydlexius.github.io/mxlrcgo-svc/>**:
 
+- [Getting Started](https://sydlexius.github.io/mxlrcgo-svc/GETTING_STARTED/) - onboarding guide: pick a path (one-shot, directory, or daemon) and get to working lyrics.
 - [User Guide](https://sydlexius.github.io/mxlrcgo-svc/USER_GUIDE/) - webhook server, Docker/Unraid, the filesystem watcher, inspection commands.
 - [CLI Reference](https://sydlexius.github.io/mxlrcgo-svc/CLI_REFERENCE/) - every subcommand and flag.
 - [Configuration](https://sydlexius.github.io/mxlrcgo-svc/CONFIGURATION/) - env vars, TOML keys, token precedence, XDG paths.

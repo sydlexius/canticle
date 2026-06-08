@@ -2,6 +2,8 @@
 
 `mxlrcgo-svc` is a Go command-line tool and webhook service that fetches synced lyrics from [Musixmatch](https://www.musixmatch.com/) and saves them as `.lrc` files (falling back to `.txt` for unsynced lyrics or instrumental markers). It runs one-shot from the CLI, recursively over a media directory, or as a long-running Lidarr webhook server with a durable work queue, scheduled library scans, and an optional filesystem watcher.
 
+New here? Start with the [Getting Started](GETTING_STARTED.md) guide - it picks a path for you (one-shot, directory, or daemon) and gets you to working lyrics.
+
 ## Features at a glance
 
 - One-shot `fetch` for a single song, multiple songs, or a text-file batch.
