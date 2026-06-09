@@ -223,6 +223,12 @@ func TestParallelParentCancelAfterHeldReturnsErr(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v; want context.Canceled (cancel must beat a held unsynced commit)", err)
 	}
+	// Both lanes must drain after the cancel: the held (fast) lane already returned,
+	// and the in-flight slow lane must observe the cancel and exit (no leak).
+	waitFor(t, func() bool {
+		return atomic.LoadInt32(&fast.finished) == atomic.LoadInt32(&fast.started) &&
+			atomic.LoadInt32(&slow.finished) == atomic.LoadInt32(&slow.started)
+	}, "provider goroutines did not terminate after parent cancel")
 }
 
 func TestParallelGuardDrivesSuitability(t *testing.T) {
