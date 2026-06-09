@@ -315,8 +315,13 @@ higher.
 
 ## Out of scope
 
-This document decides contracts; it ships no behavior. The following are
-explicit follow-up issues, each gated on approval of this design:
+This document decided contracts; it shipped no behavior of its own. The
+follow-up implementation is now complete: the `internal/circuit` extraction
+(#173), the lane abstraction and ordered dispatch (#174), the petitlyrics
+fallback lane plus `providers_version` write-and-compare (#175), and the
+parallel-race dispatch path with the `race_wait_seconds` upgrade window (#176)
+have all landed. The original out-of-scope notes are retained below for the
+record:
 
 - **No provider adapter is implemented here.** A second concurrent provider
   (for example the CJK/petitlyrics lane in parallel with Musixmatch) is separate

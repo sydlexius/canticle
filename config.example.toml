@@ -5,7 +5,8 @@
 # MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_OUTPUT_DIR,
 # MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY,
 # MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE,
-# MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_QUEUE_RANDOMIZE,
+# MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER,
+# MXLRC_QUEUE_RANDOMIZE,
 # MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL,
 # MXLRC_VERIFICATION_FFMPEG_PATH,
 # MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_MIN_CONFIDENCE,
@@ -117,16 +118,31 @@ primary = "musixmatch"
 # Provider names to disable explicitly.
 disabled = []
 
-# Multi-provider dispatch mode. Only "ordered" is implemented today: lanes are
-# queried in priority order and the first suitable result (passes the script
-# guard and carries synced or unsynced lyrics) wins; the next lane is consulted
-# on a miss, an unsuitable result, or a provider error (a rate-limit/auth or
-# transport error falls through to the next lane, and the highest-precedence
-# error is returned only if every lane fails). The "parallel" race is reserved by
-# docs/multi-provider-orchestration.md and not yet built; any value other than
-# "ordered" is rejected at load. With a single provider this setting has no
+# Multi-provider dispatch mode: "ordered" (default) or "parallel".
+#   "ordered": lanes are queried in priority order and the first suitable result
+#     (passes the script guard and carries synced or unsynced lyrics) wins; the
+#     next lane is consulted on a miss, an unsuitable result, or a provider error
+#     (a rate-limit/auth or transport error falls through to the next lane, and
+#     the highest-precedence error is returned only if every lane fails).
+#   "parallel": every available lane is dispatched concurrently and raced. The
+#     first synced result wins immediately; a faster unsynced result is held for
+#     up to race_wait_seconds so a slower synced result can preempt it (see
+#     below). Parallel makes MORE upstream calls (one per lane per lookup), so it
+#     is not advised against rate-limited providers (e.g. Musixmatch) unless
+#     latency matters more than call volume.
+# Any other value is rejected at load. With a single provider this setting has no
 # observable effect. Override: MXLRC_PROVIDERS_MODE. Default "ordered".
 mode = "ordered"
+
+# Parallel-mode upgrade window, in whole seconds. After a suitable unsynced result
+# arrives, the orchestrator waits up to this long for a synced result (a strict
+# quality upgrade) to preempt it before committing the unsynced one. A synced
+# result that arrives first always wins immediately, and a held unsynced result is
+# committed at once when no other lane can still upgrade it, so this only adds
+# latency when an unsynced result is in hand and a synced one may still arrive.
+# Non-positive values are clamped to the default. Only consulted in "parallel"
+# mode. Override: MXLRC_PROVIDERS_RACE_WAIT_SECONDS. Default 2.
+race_wait_seconds = 2
 
 # Fallback provider order: providers consulted, in order, AFTER `primary` when
 # the primary yields no suitable result (a miss, an unsuitable result, or a

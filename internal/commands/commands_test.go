@@ -592,6 +592,60 @@ func TestConfigGuardGetSetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigProvidersModeAndRaceWaitGetSetRoundTrip(t *testing.T) {
+	cfg := config.Config{
+		Providers: config.ProvidersConfig{Mode: "parallel", RaceWaitSeconds: 3},
+	}
+	gets := map[string]string{
+		"providers.mode":              "parallel",
+		"providers.race_wait_seconds": "3",
+	}
+	for key, want := range gets {
+		got, ok := configValue(cfg, key)
+		if !ok {
+			t.Fatalf("configValue(%q) ok = false; want true", key)
+		}
+		if got != want {
+			t.Fatalf("configValue(%q) = %q; want %q", key, got, want)
+		}
+		if !slices.Contains(configKeys(), key) {
+			t.Fatalf("configKeys missing %q", key)
+		}
+	}
+
+	// Both modes are settable; an unknown mode is rejected.
+	for _, mode := range []string{"ordered", "parallel"} {
+		if err := setConfigValue(&cfg, "providers.mode", mode); err != nil {
+			t.Fatalf("setConfigValue providers.mode=%q: %v", mode, err)
+		}
+		if cfg.Providers.Mode != mode {
+			t.Fatalf("providers.mode = %q; want %q", cfg.Providers.Mode, mode)
+		}
+	}
+	if err := setConfigValue(&cfg, "providers.mode", "sequential"); err == nil {
+		t.Fatal("setConfigValue accepted an unknown providers.mode")
+	}
+
+	if err := setConfigValue(&cfg, "providers.race_wait_seconds", "5"); err != nil {
+		t.Fatalf("setConfigValue race_wait_seconds: %v", err)
+	}
+	if cfg.Providers.RaceWaitSeconds != 5 {
+		t.Fatalf("race_wait_seconds = %d; want 5", cfg.Providers.RaceWaitSeconds)
+	}
+	// Non-positive is the "use the default" sentinel in the config stack (config
+	// load clamps it), so the CLI must accept it rather than reject it.
+	if err := setConfigValue(&cfg, "providers.race_wait_seconds", "0"); err != nil {
+		t.Fatalf("setConfigValue race_wait_seconds=0: %v (non-positive must be accepted; config load clamps it)", err)
+	}
+	if cfg.Providers.RaceWaitSeconds != 0 {
+		t.Fatalf("race_wait_seconds = %d; want 0 stored raw (clamped to the default only at load)", cfg.Providers.RaceWaitSeconds)
+	}
+	// Only a non-integer is rejected.
+	if err := setConfigValue(&cfg, "providers.race_wait_seconds", "abc"); err == nil {
+		t.Fatal("setConfigValue accepted a non-integer providers.race_wait_seconds")
+	}
+}
+
 func TestConfigBilingualOutputGetSetRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		Output: config.OutputConfig{BilingualOutput: true},

@@ -19,11 +19,14 @@ func laneFor(p *stubProvider) *Lane {
 
 func TestNewModeRejectsUnknown(t *testing.T) {
 	p := &stubProvider{name: "musixmatch"}
-	if _, err := New("parallel", laneFor(p)); err == nil {
-		t.Fatal("New(parallel) should error: only ordered is supported")
+	if _, err := New("sequential", laneFor(p)); err == nil {
+		t.Fatal("New(sequential) should error: unknown mode")
 	}
 	if _, err := New("ordered", laneFor(p)); err != nil {
 		t.Fatalf("New(ordered): %v", err)
+	}
+	if _, err := New("parallel", laneFor(p)); err != nil {
+		t.Fatalf("New(parallel): %v", err)
 	}
 	if _, err := New("", laneFor(p)); err != nil {
 		t.Fatalf("New(empty) should default to ordered: %v", err)

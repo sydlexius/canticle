@@ -133,6 +133,12 @@ type Worker struct {
 	// against the current provider set. 0 means "not configured" (cache always
 	// honored), preserving single-provider behavior.
 	providersVersion int
+	// mode is the orchestrator dispatch strategy (orchestrator.ModeOrdered or
+	// ModeParallel). raceWait is the parallel-mode synced-upgrade window. Both are
+	// applied to the orchestrator on every (re)build so setter ordering does not
+	// matter. Defaults: ordered, orchestrator.DefaultRaceWait.
+	mode     string
+	raceWait time.Duration
 }
 
 var errQueueEmpty = errors.New("worker queue empty")
@@ -170,7 +176,61 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		// CLI runs) get indefinite deferral; the config layer sets the cap via
 		// SetMaxMissAttempts using [api].max_miss_attempts (default 15).
 		maxMissAttempts: 0,
+		mode:            orchestrator.ModeOrdered,
+		raceWait:        orchestrator.DefaultRaceWait,
 	}
+}
+
+// rebuildOrchestrator reconstructs the orchestrator over the current lanes using
+// the worker's configured mode and race-wait window, and re-applies the guard
+// wiring rule. Every setter that changes the lanes, mode, race wait, or guard
+// calls this so their effect is order-independent. On the impossible New error
+// (the primary lane is always present and the mode is config-validated) the prior
+// orchestrator is kept.
+func (w *Worker) rebuildOrchestrator() error {
+	orch, err := orchestrator.New(w.mode, w.lanes...)
+	if err != nil {
+		slog.Error("worker: rebuild orchestrator", "error", err, "mode", w.mode)
+		return err
+	}
+	orch.SetRaceWait(w.raceWait)
+	// With more than one lane the guard governs fall-through, so wire it into
+	// suitability. With a single lane it stays unset (the worker's guardReject is
+	// the sole screen), preserving exactly-one Accept call per result.
+	if len(w.lanes) > 1 && w.scriptGuard != nil {
+		orch.SetGuard(w.scriptGuard)
+	}
+	w.orch = orch
+	return nil
+}
+
+// SetProvidersMode selects the orchestrator dispatch strategy and rebuilds the
+// orchestrator. An empty value restores ordered. Validation lives in the config
+// layer; as defense in depth, an unknown mode that fails the rebuild is rolled
+// back so w.mode never diverges from the live orchestrator (which would make every
+// later SetFallbackProviders / EnableGuard / SetRaceWait rebuild fail too).
+func (w *Worker) SetProvidersMode(mode string) {
+	if mode == "" {
+		mode = orchestrator.ModeOrdered
+	}
+	prev := w.mode
+	w.mode = mode
+	if err := w.rebuildOrchestrator(); err != nil {
+		w.mode = prev
+	}
+}
+
+// SetRaceWait overrides the parallel-mode synced-upgrade window. Non-positive
+// values are ignored so the default window is preserved. Only consulted in
+// parallel mode.
+func (w *Worker) SetRaceWait(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	w.raceWait = d
+	// The mode is unchanged (and already valid) and the primary lane is always
+	// present, so the rebuild cannot fail here; only SetProvidersMode acts on it.
+	_ = w.rebuildOrchestrator()
 }
 
 // SetCircuitOpenDuration overrides the window the worker stays quiet after
@@ -205,21 +265,12 @@ func (w *Worker) SetFallbackProviders(provs ...providers.LyricsProvider) {
 		cb.SetClock(w.now)
 		lanes = append(lanes, orchestrator.NewLane(p, cb))
 	}
-	orch, err := orchestrator.New(orchestrator.ModeOrdered, lanes...)
-	if err != nil {
-		// lanes always includes the non-nil primary and ModeOrdered is a constant,
-		// so New cannot error here; keep the prior orchestrator if it somehow does.
-		slog.Error("worker: rebuild orchestrator with fallback lanes", "error", err)
-		return
-	}
-	w.orch = orch
 	w.lanes = lanes
-	// With more than one lane the guard governs fall-through, so wire it into
-	// suitability. With a single lane it stays unset (the worker's guardReject is
-	// the sole screen), preserving exactly-one Accept call per result.
-	if len(w.lanes) > 1 && w.scriptGuard != nil {
-		w.orch.SetGuard(w.scriptGuard)
-	}
+	// Rebuild over the new lane set, re-applying the configured mode, race wait, and
+	// the guard-fall-through wiring (all order-independent across the setters). The
+	// mode is unchanged (and already valid) and the primary lane is always present,
+	// so the rebuild cannot fail here.
+	_ = w.rebuildOrchestrator()
 }
 
 // SetProvidersVersion sets the current providers generation used to invalidate
@@ -330,17 +381,16 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 // results whose script mix falls outside the configured allowlist.
 func (w *Worker) EnableGuard(g ScriptGuard) {
 	w.scriptGuard = g
-	// With more than one lane the guard governs fall-through (a guard-failing but
-	// quality-OK primary result must be unsuitable so the orchestrator advances to
-	// the next provider), so wire it into suitability. With a single lane there is
-	// no fall-through decision and setting it would screen every result twice (once
-	// in suitability, once in the worker's terminal guardReject below), so the
-	// worker's own guard stays the sole screening point, preserving exactly-one
-	// Accept call per result. SetFallbackProviders performs the same wiring when
-	// fallbacks are added after the guard, so the two are order-independent.
-	if len(w.lanes) > 1 {
-		w.orch.SetGuard(g)
-	}
+	// Rebuild so the guard-fall-through wiring rule is applied: with more than one
+	// lane the guard governs fall-through (a guard-failing but quality-OK primary
+	// result must be unsuitable so the orchestrator advances to the next provider),
+	// so it is wired into suitability. With a single lane it stays unset (setting it
+	// would screen every result twice, once in suitability and once in the worker's
+	// terminal guardReject below), preserving exactly-one Accept call per result.
+	// All setters route through rebuildOrchestrator, so their order does not matter.
+	// The mode is unchanged (and already valid) and the primary lane is always
+	// present, so the rebuild cannot fail here.
+	_ = w.rebuildOrchestrator()
 }
 
 // guardReject reports whether the script guard rejects this song. It returns

@@ -152,12 +152,20 @@ const defaultScanIntervalSeconds = 900
 type ProvidersConfig struct {
 	Primary  string   `toml:"primary"`
 	Disabled []string `toml:"disabled"`
-	// Mode is the multi-provider dispatch strategy. Only "ordered" (query lanes
-	// in priority order, first suitable result wins) is implemented today; any
-	// other value is rejected at load time. The "parallel" race is reserved by
-	// docs/multi-provider-orchestration.md and not yet built. Default "ordered".
-	// Override: MXLRC_PROVIDERS_MODE.
+	// Mode is the multi-provider dispatch strategy. "ordered" (the default) queries
+	// lanes in priority order and returns the first suitable result. "parallel"
+	// dispatches every lane concurrently and races them (the first synced result
+	// wins; a faster unsynced result is held briefly so a slower synced result can
+	// preempt it). Any other value is rejected at load time. Parallel makes more
+	// upstream calls, so it is not advised against rate-limited providers unless
+	// latency matters more than call volume. Override: MXLRC_PROVIDERS_MODE.
 	Mode string `toml:"mode"`
+	// RaceWaitSeconds bounds the parallel-mode upgrade window: after a suitable
+	// unsynced result arrives, the orchestrator waits up to this many seconds for a
+	// synced result (a strict quality upgrade) to preempt it before committing the
+	// unsynced one. Default 2. Non-positive values are clamped to the default. Only
+	// consulted in "parallel" mode. Override: MXLRC_PROVIDERS_RACE_WAIT_SECONDS.
+	RaceWaitSeconds int `toml:"race_wait_seconds"`
 	// FallbackOrder lists provider names consulted, in order, AFTER the primary
 	// when the primary yields no suitable result (ordered-fallback dispatch). Each
 	// name must be a known provider; unknown names are rejected at load. Empty (the
@@ -166,8 +174,13 @@ type ProvidersConfig struct {
 	FallbackOrder []string `toml:"fallback_order"`
 }
 
-// providersModeDefault is the only supported dispatch mode today.
-const providersModeDefault = "ordered"
+// providersModeDefault and providersModeParallel are the supported dispatch
+// modes. raceWaitSecondsDefault is the default parallel-mode upgrade window.
+const (
+	providersModeDefault   = "ordered"
+	providersModeParallel  = "parallel"
+	raceWaitSecondsDefault = 2
+)
 
 // VerificationConfig holds optional STT verification settings.
 type VerificationConfig struct {
@@ -222,7 +235,7 @@ func defaults() Config {
 		Output:       OutputConfig{Dir: "lyrics", EmbeddedLyrics: "off"},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
-		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault},
+		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault, RaceWaitSeconds: raceWaitSecondsDefault},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
 		Guard:        GuardConfig{Threshold: guardThresholdDefault},
 		Queue:        QueueConfig{Randomize: true},
@@ -362,6 +375,7 @@ func Load(path string) (Config, error) {
 	if err := normalizeProvidersMode(&cfg); err != nil {
 		return cfg, err
 	}
+	normalizeProvidersRaceWait(&cfg)
 	if err := normalizeProvidersFallback(&cfg); err != nil {
 		return cfg, err
 	}
@@ -379,7 +393,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -494,6 +508,14 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MXLRC_PROVIDERS_MODE"); v != "" {
 		cfg.Providers.Mode = v
+	}
+	if v := os.Getenv("MXLRC_PROVIDERS_RACE_WAIT_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_PROVIDERS_RACE_WAIT_SECONDS", "value", v, "current", cfg.Providers.RaceWaitSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Providers.RaceWaitSeconds = n
+		}
 	}
 	if v := os.Getenv("MXLRC_PROVIDERS_FALLBACK_ORDER"); v != "" {
 		cfg.Providers.FallbackOrder = splitCSV(v)
@@ -630,20 +652,28 @@ func normalizeEmbeddedLyrics(cfg *Config) {
 }
 
 // normalizeProvidersMode lowercases and validates the provider dispatch mode.
-// An empty value restores the default ("ordered"). Only "ordered" is supported
-// today; any other value is rejected with an error so a typo or a not-yet-built
-// mode (for example "parallel") fails loudly at load rather than silently
-// degrading. See docs/multi-provider-orchestration.md.
+// An empty value restores the default ("ordered"). "ordered" and "parallel" are
+// supported; any other value is rejected with an error so a typo fails loudly at
+// load rather than silently degrading. See docs/multi-provider-orchestration.md.
 func normalizeProvidersMode(cfg *Config) error {
 	v := strings.ToLower(strings.TrimSpace(cfg.Providers.Mode))
 	if v == "" {
 		v = providersModeDefault
 	}
-	if v != providersModeDefault {
-		return fmt.Errorf("config: unsupported providers.mode %q (only %q is supported)", cfg.Providers.Mode, providersModeDefault)
+	if v != providersModeDefault && v != providersModeParallel {
+		return fmt.Errorf("config: unsupported providers.mode %q (supported: %q, %q)", cfg.Providers.Mode, providersModeDefault, providersModeParallel)
 	}
 	cfg.Providers.Mode = v
 	return nil
+}
+
+// normalizeProvidersRaceWait clamps the parallel-mode upgrade window to the
+// default when it is non-positive, so a misconfigured value cannot produce a
+// zero-wait busy dispatch path. It is only consulted in "parallel" mode.
+func normalizeProvidersRaceWait(cfg *Config) {
+	if cfg.Providers.RaceWaitSeconds <= 0 {
+		cfg.Providers.RaceWaitSeconds = raceWaitSecondsDefault
+	}
 }
 
 // normalizeProvidersFallback lowercases, trims, drops blanks, and de-duplicates

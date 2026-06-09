@@ -4,15 +4,143 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
+	"github.com/sydlexius/mxlrcgo-svc/internal/orchestrator"
 	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
+
+// delayFetcher is a concurrency-safe fetcher with a configurable per-call delay
+// that honors context cancellation, used to drive parallel-mode races at the
+// worker level. Each lane gets its own instance, so calls is per-lane.
+type delayFetcher struct {
+	song  models.Song
+	err   error
+	delay time.Duration
+	calls int32
+}
+
+func (f *delayFetcher) FindLyrics(ctx context.Context, _ models.Track) (models.Song, error) {
+	atomic.AddInt32(&f.calls, 1)
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return models.Song{}, ctx.Err()
+		}
+	}
+	if f.err != nil {
+		return models.Song{}, f.err
+	}
+	return f.song, nil
+}
+
+// capturingWriter records the songs handed to it so a test can assert which lane's
+// result (synced vs unsynced) the orchestrator committed.
+type capturingWriter struct{ songs []models.Song }
+
+func (w *capturingWriter) WriteLRC(s models.Song, _ string, _ string) error {
+	w.songs = append(w.songs, s)
+	return nil
+}
+
+func syncedTrackSong(track models.Track) models.Song {
+	return models.Song{Track: track, Subtitles: models.Synced{Lines: []models.Lines{{Text: "synced"}}}}
+}
+
+func unsyncedTrackSong(track models.Track) models.Song {
+	return models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "unsynced body"}}
+}
+
+// TestProvidersModeDefaultsToOrdered asserts a freshly constructed worker uses
+// ordered dispatch (parallel is strictly opt-in).
+func TestProvidersModeDefaultsToOrdered(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	if w.mode != orchestrator.ModeOrdered {
+		t.Fatalf("default mode = %q; want %q", w.mode, orchestrator.ModeOrdered)
+	}
+}
+
+// TestSetProvidersModeInvalidRollsBack asserts that an unknown mode (which would
+// fail the orchestrator rebuild) is rolled back, so w.mode never diverges from the
+// live orchestrator and later setters keep working.
+func TestSetProvidersModeInvalidRollsBack(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.SetProvidersMode("parallel")
+	w.SetProvidersMode("sequential") // invalid: rebuild fails, must roll back
+
+	if w.mode != orchestrator.ModeParallel {
+		t.Fatalf("mode = %q; want %q (invalid mode must roll back to the prior valid mode)", w.mode, orchestrator.ModeParallel)
+	}
+	// A subsequent valid setter must still succeed (the orchestrator was not wedged).
+	w.SetFallbackProviders(providers.New(providers.PetitLyrics, &fakeFetcher{}))
+	if len(w.lanes) != 2 {
+		t.Fatalf("lanes = %d; want 2 (later setters must still work after a rejected mode)", len(w.lanes))
+	}
+}
+
+// TestRunOnceParallelSyncedPreemptsUnsynced verifies that in parallel mode a
+// faster unsynced primary result is held long enough for a slower synced fallback
+// to preempt it, so the committed (written) result is the synced one.
+func TestRunOnceParallelSyncedPreemptsUnsynced(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:     30,
+		Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "artist-title.lrc"},
+	}}}
+	primary := &delayFetcher{song: unsyncedTrackSong(track)}
+	secondary := &delayFetcher{song: syncedTrackSong(track), delay: 40 * time.Millisecond}
+	writer := &capturingWriter{}
+
+	w := New(q, &fakeCache{}, primary, writer)
+	w.SetFallbackProviders(providers.New(providers.PetitLyrics, secondary))
+	w.SetProvidersMode(orchestrator.ModeParallel) // after fallback: order-independent rebuild
+	w.SetRaceWait(500 * time.Millisecond)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(writer.songs) != 1 {
+		t.Fatalf("writes = %d; want 1", len(writer.songs))
+	}
+	if len(writer.songs[0].Subtitles.Lines) == 0 {
+		t.Fatalf("written song = %+v; want the synced result (synced preempts held unsynced within the window)", writer.songs[0])
+	}
+}
+
+// TestRunOnceParallelWindowElapsesCommitsUnsynced verifies that when the synced
+// upgrade arrives after the race window, the held unsynced result is committed.
+func TestRunOnceParallelWindowElapsesCommitsUnsynced(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:     31,
+		Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "artist-title.lrc"},
+	}}}
+	primary := &delayFetcher{song: unsyncedTrackSong(track)}
+	secondary := &delayFetcher{song: syncedTrackSong(track), delay: 200 * time.Millisecond}
+	writer := &capturingWriter{}
+
+	w := New(q, &fakeCache{}, primary, writer)
+	w.SetFallbackProviders(providers.New(providers.PetitLyrics, secondary))
+	w.SetProvidersMode(orchestrator.ModeParallel)
+	w.SetRaceWait(20 * time.Millisecond)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(writer.songs) != 1 {
+		t.Fatalf("writes = %d; want 1", len(writer.songs))
+	}
+	if writer.songs[0].Lyrics.LyricsBody == "" || len(writer.songs[0].Subtitles.Lines) != 0 {
+		t.Fatalf("written song = %+v; want the unsynced result (window elapsed before the synced upgrade)", writer.songs[0])
+	}
+}
 
 // TestRunOnceFallsBackToSecondaryLaneOnPrimaryMiss verifies that when the
 // primary (Musixmatch) lane returns a benign miss, the orchestrator advances to

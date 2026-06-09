@@ -21,6 +21,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_OUTPUT_DIR", "MXLRC_BILINGUAL_OUTPUT", "MXLRC_SERVER_ADDR", "MXLRC_WEBHOOK_API_KEY",
 		"MXLRC_SCAN_INTERVAL", "MXLRC_WORK_INTERVAL",
 		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED", "MXLRC_PROVIDERS_MODE", "MXLRC_PROVIDERS_FALLBACK_ORDER",
+		"MXLRC_PROVIDERS_RACE_WAIT_SECONDS",
 		"MXLRC_VERIFICATION_ENABLED", "MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL",
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
@@ -1168,12 +1169,24 @@ func TestProvidersModeEnvOverrideAndValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("env override accepts parallel", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_MODE", "PARALLEL") // case-insensitive
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load with providers.mode=parallel: %v", err)
+		}
+		if cfg.Providers.Mode != "parallel" {
+			t.Fatalf("providers.mode = %q; want parallel", cfg.Providers.Mode)
+		}
+	})
+
 	t.Run("unsupported mode is rejected", func(t *testing.T) {
 		isolateEnv(t)
-		t.Setenv("MXLRC_PROVIDERS_MODE", "parallel")
+		t.Setenv("MXLRC_PROVIDERS_MODE", "sequential")
 		_, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
 		if err == nil {
-			t.Fatal("Load with providers.mode=parallel returned nil error; want a rejection (parallel not implemented)")
+			t.Fatal("Load with providers.mode=sequential returned nil error; want a rejection (unknown mode)")
 		}
 	})
 
@@ -1189,6 +1202,73 @@ func TestProvidersModeEnvOverrideAndValidation(t *testing.T) {
 		}
 		if cfg.Providers.Mode != "ordered" {
 			t.Fatalf("blank mode = %q; want ordered default", cfg.Providers.Mode)
+		}
+	})
+}
+
+func TestProvidersRaceWaitSeconds(t *testing.T) {
+	t.Run("default is 2", func(t *testing.T) {
+		isolateEnv(t)
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.RaceWaitSeconds != 2 {
+			t.Fatalf("default race_wait_seconds = %d; want 2", cfg.Providers.RaceWaitSeconds)
+		}
+	})
+
+	t.Run("parsed from file", func(t *testing.T) {
+		isolateEnv(t)
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[providers]\nrace_wait_seconds = 5\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.RaceWaitSeconds != 5 {
+			t.Fatalf("race_wait_seconds = %d; want 5", cfg.Providers.RaceWaitSeconds)
+		}
+	})
+
+	t.Run("env override", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_RACE_WAIT_SECONDS", "7")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.RaceWaitSeconds != 7 {
+			t.Fatalf("race_wait_seconds = %d; want 7", cfg.Providers.RaceWaitSeconds)
+		}
+	})
+
+	t.Run("non-positive is clamped to default", func(t *testing.T) {
+		isolateEnv(t)
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[providers]\nrace_wait_seconds = 0\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.RaceWaitSeconds != 2 {
+			t.Fatalf("clamped race_wait_seconds = %d; want 2 (default)", cfg.Providers.RaceWaitSeconds)
+		}
+	})
+
+	t.Run("unparsable env is ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_RACE_WAIT_SECONDS", "abc")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.RaceWaitSeconds != 2 {
+			t.Fatalf("race_wait_seconds = %d; want 2 (unparsable env ignored)", cfg.Providers.RaceWaitSeconds)
 		}
 	})
 }

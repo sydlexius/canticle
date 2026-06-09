@@ -629,6 +629,11 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	w := worker.New(workQ, cache.New(sqlDB), fetcher, writer)
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
 	w.SetCircuitBackoff(time.Duration(cfg.API.CircuitBackoffBase)*time.Second, time.Duration(cfg.API.CircuitOpenDuration)*time.Second)
+	// Dispatch strategy and the parallel-mode synced-upgrade window. Set before the
+	// fallback lanes for clarity; the worker rebuilds the orchestrator on every
+	// setter, so the ordering is not load-bearing.
+	w.SetProvidersMode(cfg.Providers.Mode)
+	w.SetRaceWait(time.Duration(cfg.Providers.RaceWaitSeconds) * time.Second)
 	// Register fallback lanes (each with its own breaker) and stamp the active
 	// provider set's generation onto both the queue (write-on-enqueue) and the
 	// worker (compare-on-lookup) so a provider-set change invalidates stale cached
@@ -1347,6 +1352,7 @@ func configKeys() []string {
 		"providers.primary",
 		"providers.disabled",
 		"providers.mode",
+		"providers.race_wait_seconds",
 		"verification.enabled",
 		"verification.whisper_url",
 		"verification.ffmpeg_path",
@@ -1394,6 +1400,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strings.Join(cfg.Providers.Disabled, ","), true
 	case "providers.mode":
 		return cfg.Providers.Mode, true
+	case "providers.race_wait_seconds":
+		return strconv.Itoa(cfg.Providers.RaceWaitSeconds), true
 	case "verification.enabled":
 		return strconv.FormatBool(cfg.Verification.Enabled), true
 	case "verification.whisper_url":
@@ -1487,10 +1495,20 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	case "providers.disabled":
 		cfg.Providers.Disabled = splitCSV(value)
 	case "providers.mode":
-		if m := strings.ToLower(strings.TrimSpace(value)); m != "ordered" {
-			return fmt.Errorf("providers.mode must be \"ordered\" (only supported mode)")
+		m := strings.ToLower(strings.TrimSpace(value))
+		if m != "ordered" && m != "parallel" {
+			return fmt.Errorf("providers.mode must be \"ordered\" or \"parallel\"")
 		}
-		cfg.Providers.Mode = "ordered"
+		cfg.Providers.Mode = m
+	case "providers.race_wait_seconds":
+		// Accept any integer and let config normalization clamp it: a non-positive
+		// value is the "use the default" sentinel in the config stack, so rejecting
+		// it here would make that contract unreachable from the CLI.
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("providers.race_wait_seconds must be an integer (seconds; non-positive uses the default)")
+		}
+		cfg.Providers.RaceWaitSeconds = n
 	case "verification.enabled":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
