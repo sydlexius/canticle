@@ -48,7 +48,10 @@ func New(mode string, lanes ...*Lane) (*Orchestrator, error) {
 			return nil, fmt.Errorf("orchestrator: lane %d is nil", i)
 		}
 	}
-	return &Orchestrator{lanes: lanes, mode: mode}, nil
+	// Defensively copy so a caller mutating its slice after construction cannot
+	// alter the orchestrator's dispatch order or inject a nil lane.
+	owned := append([]*Lane(nil), lanes...)
+	return &Orchestrator{lanes: owned, mode: mode}, nil
 }
 
 // SetGuard installs the suitability script guard. A nil or disabled guard

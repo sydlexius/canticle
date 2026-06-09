@@ -43,6 +43,23 @@ func TestNewValidatesLanes(t *testing.T) {
 	}
 }
 
+func TestNewCopiesLanes(t *testing.T) {
+	p := &stubProvider{name: "musixmatch", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "primary"}}}
+	lanes := []*Lane{laneFor(p)}
+	o, err := New("ordered", lanes...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	lanes[0] = nil // mutate the caller's slice after construction
+	song, err := o.FindLyrics(context.Background(), models.Track{})
+	if err != nil {
+		t.Fatalf("FindLyrics after caller mutated its slice: %v", err)
+	}
+	if song.Lyrics.LyricsBody != "primary" {
+		t.Fatalf("body = %q; want primary (orchestrator must use its own lane copy)", song.Lyrics.LyricsBody)
+	}
+}
+
 func TestOrderedReturnsFirstSuitable(t *testing.T) {
 	p1 := &stubProvider{name: "musixmatch", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "primary"}}}
 	p2 := &stubProvider{name: "petitlyrics", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "secondary"}}}
