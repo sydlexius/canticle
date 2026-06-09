@@ -94,9 +94,12 @@ type WorkItem struct {
 	Priority  int
 	Attempts  int
 	MissCount int
-	// ProvidersVersion is a reserved seam for the future multi-source re-check
-	// sweep (issue #103, slice 103d). No code path writes it yet, so it is
-	// always 0 today; do not read a real provider generation from it.
+	// ProvidersVersion is the active provider-set generation (providers.Generation)
+	// stamped onto the row at enqueue time. It is written only on the initial
+	// insert; the ON CONFLICT refresh and the Defer/RecheckDeferred paths leave it
+	// unchanged, so a row keeps the generation it was first enqueued under. The
+	// worker compares it against the current generation to invalidate cached
+	// results when the provider set changes. 0 means "no generation configured".
 	ProvidersVersion int
 	NextAttemptAt    time.Time
 	LastError        string

@@ -178,9 +178,10 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 // less than or equal to zero are ignored; clamping against any minimum
 // is the responsibility of the caller (typically the config layer).
 func (w *Worker) SetCircuitOpenDuration(d time.Duration) {
-	if d > 0 {
-		w.circuitOpenDuration = d
+	if d <= 0 {
+		return // ignored per contract; do not fan a non-positive value to breakers
 	}
+	w.circuitOpenDuration = d
 	for _, l := range w.lanes {
 		l.Breaker().SetOpenDuration(d)
 	}
@@ -250,7 +251,17 @@ func (w *Worker) SetMissBackoff(base, cap time.Duration) {
 // the cap to preserve its meaning. Zero or negative values are ignored so a
 // misconfigured call cannot disable the window; clamping against any minimum is
 // the responsibility of the caller (typically the config layer).
+//
+// Each value is ignored when non-positive (matching the breaker's own setters),
+// and the breakers are driven with the EFFECTIVE stored values rather than the
+// raw arguments, so a partial call (for example base only) cannot push a zero
+// ceiling into a breaker and leave its runtime config inconsistent with the
+// worker's stored config. The two stored fields are also what a later
+// SetFallbackProviders uses to build a matching breaker.
 func (w *Worker) SetCircuitBackoff(base, cap time.Duration) {
+	if base <= 0 && cap <= 0 {
+		return
+	}
 	if base > 0 {
 		w.circuitBackoffBase = base
 	}
@@ -258,7 +269,7 @@ func (w *Worker) SetCircuitBackoff(base, cap time.Duration) {
 		w.circuitOpenDuration = cap
 	}
 	for _, l := range w.lanes {
-		l.Breaker().SetBackoff(base, cap)
+		l.Breaker().SetBackoff(w.circuitBackoffBase, w.circuitOpenDuration)
 	}
 }
 

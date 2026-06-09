@@ -2783,6 +2783,41 @@ func TestDBQueue_ProvidersVersionDefaultsZeroWithoutSetter(t *testing.T) {
 	}
 }
 
+// TestDBQueue_EnqueueOnConflictPreservesProvidersVersion verifies that a
+// re-enqueue of an existing retryable row (the ON CONFLICT refresh path) does
+// NOT restamp providers_version even when the configured generation has changed:
+// the stamp is written only on the initial insert, so a row keeps the generation
+// it was first enqueued under (the worker compares against it to detect a
+// provider-set change).
+func TestDBQueue_EnqueueOnConflictPreservesProvidersVersion(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	inputs := models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}
+
+	q.SetProvidersVersion(7)
+	first, err := q.Enqueue(ctx, inputs, PriorityScan)
+	if err != nil {
+		t.Fatalf("first Enqueue: %v", err)
+	}
+	if first.ProvidersVersion != 7 {
+		t.Fatalf("first Enqueue ProvidersVersion=%d; want 7", first.ProvidersVersion)
+	}
+
+	// Change the configured generation, then re-enqueue the same artist/title key
+	// while the row is still pending (the ON CONFLICT refresh path).
+	q.SetProvidersVersion(42)
+	second, err := q.Enqueue(ctx, inputs, PriorityScan)
+	if err != nil {
+		t.Fatalf("second Enqueue: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second Enqueue ID=%d; want %d (same key should refresh, not insert)", second.ID, first.ID)
+	}
+	if second.ProvidersVersion != 7 {
+		t.Fatalf("ON CONFLICT refresh ProvidersVersion=%d; want 7 (refresh must not restamp the generation)", second.ProvidersVersion)
+	}
+}
+
 // TestDBQueue_RecheckClosedDB verifies the recheck methods return a wrapped
 // error (rather than panicking) when the underlying handle is closed.
 func TestDBQueue_RecheckClosedDB(t *testing.T) {

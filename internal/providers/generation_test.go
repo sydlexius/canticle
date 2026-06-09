@@ -49,6 +49,21 @@ func TestGeneration_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestGeneration_DuplicateInsensitive verifies that duplicate entries do not
+// change the generation: it is a function of the provider SET, so a repeated
+// name must not produce a different hash than the deduplicated set.
+func TestGeneration_DuplicateInsensitive(t *testing.T) {
+	once := providers.Generation([]string{"musixmatch"})
+	twice := providers.Generation([]string{"musixmatch", "musixmatch"})
+	if once != twice {
+		t.Fatalf("generation should be duplicate-insensitive: got %d and %d", once, twice)
+	}
+	mixedDup := providers.Generation([]string{"musixmatch", "MUSIXMATCH", " musixmatch "})
+	if once != mixedDup {
+		t.Fatalf("generation should dedup after normalization: got %d and %d", once, mixedDup)
+	}
+}
+
 // TestGeneration_EmptySlice produces a stable (non-crashing) value for an empty
 // provider set.
 func TestGeneration_EmptySlice(t *testing.T) {

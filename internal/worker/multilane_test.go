@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
@@ -92,6 +93,33 @@ func TestFallbackLanesHaveIndependentBreakers(t *testing.T) {
 	}
 	if w.lanes[0].Breaker() == w.lanes[1].Breaker() {
 		t.Fatal("primary and fallback lanes share a breaker; each lane must own an independent breaker")
+	}
+}
+
+// TestCircuitConfigAppliesToFallbackLanes verifies the circuit-config setters
+// fan out to EVERY lane's breaker, including a fallback registered after them,
+// and that a non-positive value is ignored rather than fanned out.
+func TestCircuitConfigAppliesToFallbackLanes(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.SetCircuitOpenDuration(7 * time.Minute)
+	w.SetCircuitBackoff(90*time.Second, 7*time.Minute)
+	// Non-positive values are ignored (no panic, no override of the stored config).
+	w.SetCircuitOpenDuration(0)
+	w.SetCircuitBackoff(0, 0)
+	w.SetFallbackProviders(providers.New(providers.PetitLyrics, &fakeFetcher{}))
+
+	if len(w.lanes) != 2 {
+		t.Fatalf("lanes = %d; want 2", len(w.lanes))
+	}
+	// Trip each lane's breaker once; the open window must reflect the configured
+	// 90s trip-1 backoff (the fallback inherited the same parameters), proving the
+	// config reached the fallback breaker and not just the primary.
+	for i, l := range w.lanes {
+		b := l.Breaker()
+		res := b.Trip()
+		if res.Window != 90*time.Second {
+			t.Fatalf("lane %d trip-1 window = %v; want 90s (configured backoff base must reach every lane)", i, res.Window)
+		}
 	}
 }
 
