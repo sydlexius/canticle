@@ -2698,6 +2698,91 @@ func TestDBQueue_RecheckRetired_NoRetiredRows(t *testing.T) {
 	}
 }
 
+// TestDBQueue_EnqueueStampsProvidersVersion verifies that SetProvidersVersion
+// causes Enqueue to write the configured generation onto new work_queue rows and
+// that subsequent Dequeue returns the same generation in the WorkItem.
+func TestDBQueue_EnqueueStampsProvidersVersion(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetProvidersVersion(42)
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if item.ProvidersVersion != 42 {
+		t.Fatalf("Enqueue returned ProvidersVersion=%d; want 42", item.ProvidersVersion)
+	}
+
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if claimed.ProvidersVersion != 42 {
+		t.Fatalf("Dequeue returned ProvidersVersion=%d; want 42", claimed.ProvidersVersion)
+	}
+}
+
+// TestDBQueue_ProvidersVersionUnchangedOnDeferRevive verifies that Defer and
+// RecheckDeferred do NOT overwrite the stamped providers_version. A deferred
+// row retains the generation it was enqueued with so the worker can detect
+// whether the provider set has changed since the miss was recorded.
+func TestDBQueue_ProvidersVersionUnchangedOnDeferRevive(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+	q.SetProvidersVersion(99)
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	claimed, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if claimed.ProvidersVersion != 99 {
+		t.Fatalf("Dequeue ProvidersVersion=%d; want 99", claimed.ProvidersVersion)
+	}
+
+	deferred, err := q.Defer(ctx, claimed.ID, 24*time.Hour, fmt.Errorf("no match"))
+	if err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if deferred.ProvidersVersion != 99 {
+		t.Fatalf("Defer ProvidersVersion=%d; want 99 (Defer must not clobber the generation)", deferred.ProvidersVersion)
+	}
+
+	// Advance time past the cooldown and revive.
+	q.now = func() time.Time { return now.Add(25 * time.Hour) }
+	if _, err := q.RecheckDeferred(ctx, nil); err != nil {
+		t.Fatalf("RecheckDeferred: %v", err)
+	}
+	revived, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue after revive: %v", err)
+	}
+	if revived.ProvidersVersion != 99 {
+		t.Fatalf("revived ProvidersVersion=%d; want 99 (RecheckDeferred must not reset generation)", revived.ProvidersVersion)
+	}
+}
+
+// TestDBQueue_ProvidersVersionDefaultsZeroWithoutSetter verifies that Enqueue
+// writes 0 when SetProvidersVersion has not been called, preserving backward
+// compatibility with code paths that do not supply a generation.
+func TestDBQueue_ProvidersVersionDefaultsZeroWithoutSetter(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if item.ProvidersVersion != 0 {
+		t.Fatalf("Enqueue without setter ProvidersVersion=%d; want 0 (backward compat)", item.ProvidersVersion)
+	}
+}
+
 // TestDBQueue_RecheckClosedDB verifies the recheck methods return a wrapped
 // error (rather than panicking) when the underlying handle is closed.
 func TestDBQueue_RecheckClosedDB(t *testing.T) {

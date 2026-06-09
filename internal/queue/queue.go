@@ -116,6 +116,11 @@ type DBQueue struct {
 	// (via SetRandomized) to restore deterministic created_at/id ordering. Also
 	// doubles as the test seam for deterministic ordering assertions.
 	randomized bool
+	// providersVersion is the current providers generation stamped onto new
+	// work_queue rows by Enqueue. 0 means "not configured" and preserves
+	// backward compatibility with call sites that do not supply a generation.
+	// Set via SetProvidersVersion from the commands layer after config is loaded.
+	providersVersion int
 }
 
 // NewDBQueue returns a durable queue backed by db.
@@ -134,6 +139,14 @@ func NewDBQueue(db *sql.DB) *DBQueue {
 // without changing the NewDBQueue call sites.
 func (q *DBQueue) SetRandomized(b bool) {
 	q.randomized = b
+}
+
+// SetProvidersVersion configures the providers generation stamped onto new
+// work_queue rows by Enqueue. The generation is computed by providers.Generation
+// from the current active provider set and changes when providers are added or
+// removed. A value of 0 (the default) preserves backward compatibility.
+func (q *DBQueue) SetProvidersVersion(v int) {
+	q.providersVersion = v
 }
 
 // Enqueue atomically inserts a new work item or refreshes an existing retryable
@@ -172,9 +185,9 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
-             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, next_attempt_at
+             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, next_attempt_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(artist_key, title_key) DO UPDATE SET
              artist = CASE
                  WHEN work_queue.status IN ('done', 'processing') THEN work_queue.artist
@@ -249,6 +262,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		nullableID(inputs.ScanResultID),
 		StatusPending,
 		priority,
+		q.providersVersion,
 		now,
 		refreshFailedBackoff,
 		refreshFailedBackoff,
