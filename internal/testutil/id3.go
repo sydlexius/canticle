@@ -6,6 +6,7 @@ package testutil
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -174,15 +175,9 @@ func GenerateFLAC(sampleRate, totalSamples uint32) []byte {
 	//
 	// Pack into bytes 10-17 (8 bytes).
 	pack := (sr << 44) | (0 << 41) | (uint64(15) << 36) | (ts & 0xFFFFFFFFF)
-	//nolint:gosec // G115: shifts reduce pack to <=8 bits before truncation; no real overflow
-	si[10] = byte(pack >> 56)
-	si[11] = byte(pack >> 48) //nolint:gosec // G115: same
-	si[12] = byte(pack >> 40) //nolint:gosec // G115: same
-	si[13] = byte(pack >> 32) //nolint:gosec // G115: same
-	si[14] = byte(pack >> 24) //nolint:gosec // G115: same
-	si[15] = byte(pack >> 16) //nolint:gosec // G115: same
-	si[16] = byte(pack >> 8)  //nolint:gosec // G115: same
-	si[17] = byte(pack)       //nolint:gosec // G115: same
+	var packed [8]byte
+	binary.BigEndian.PutUint64(packed[:], pack)
+	copy(si[10:18], packed[:])
 	// si[18..33] = MD5, zeroed.
 
 	b.Write(si[:])

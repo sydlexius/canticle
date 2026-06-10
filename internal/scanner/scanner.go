@@ -24,18 +24,24 @@ import (
 // supportedFileTypes lists audio file extensions that can have metadata read.
 var supportedFileTypes = []string{".mp3", ".m4a", ".m4b", ".m4p", ".alac", ".flac", ".ogg", ".dsf"}
 
-// audioFileType maps a lower-case audio file extension to the audioduration type
-// constant used for header-only duration parsing. Extensions absent from this map
-// are not probed and get TrackLength=0.
-var audioFileType = map[string]int{
-	".flac": audioduration.TypeFlac,
-	".mp3":  audioduration.TypeMp3,
-	".m4a":  audioduration.TypeMp4,
-	".m4b":  audioduration.TypeMp4,
-	".m4p":  audioduration.TypeMp4,
-	".alac": audioduration.TypeMp4,
-	".ogg":  audioduration.TypeOgg,
-	".dsf":  audioduration.TypeDsd,
+// audioFileTypeForExt returns the audioduration type constant for a lower-case
+// audio file extension. Extensions not recognized return (0, false); callers
+// degrade to TrackLength=0 (the "unknown duration" sentinel).
+func audioFileTypeForExt(ext string) (int, bool) {
+	switch ext {
+	case ".flac":
+		return audioduration.TypeFlac, true
+	case ".mp3":
+		return audioduration.TypeMp3, true
+	case ".m4a", ".m4b", ".m4p", ".alac":
+		return audioduration.TypeMp4, true
+	case ".ogg":
+		return audioduration.TypeOgg, true
+	case ".dsf":
+		return audioduration.TypeDsd, true
+	default:
+		return 0, false
+	}
 }
 
 // Scanner handles parsing input sources and populating the work queue.
@@ -68,7 +74,7 @@ func NewScanner() *Scanner {
 // Returns 0 and a wrapped error for unknown extension or parse failure;
 // callers treat 0 as the "unknown duration" sentinel (duration_bucket=0).
 func audioDuration(r io.ReadSeeker, ext string) (int, error) {
-	ft, ok := audioFileType[ext]
+	ft, ok := audioFileTypeForExt(ext)
 	if !ok {
 		return 0, fmt.Errorf("no duration parser for %s", ext)
 	}
