@@ -17,6 +17,7 @@ import (
 	"github.com/dhowden/tag"
 	"github.com/dhowden/tag/mbz"
 	"github.com/lizc2003/audioduration"
+	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
@@ -113,6 +114,18 @@ func extractISRC(m tag.Metadata) string {
 // or "" if absent.
 func extractRecordingMBID(m tag.Metadata) string {
 	return mbz.Extract(m).Get(mbz.Recording)
+}
+
+// isInstrumentalTxt reports whether the file at path contains the instrumental
+// marker. Uses substring match rather than exact equality because files renamed
+// from .lrc carry LRC tag headers before the marker line. Returns false on any
+// read error so a scan failure never silently drops a track.
+func isInstrumentalTxt(path string) bool {
+	data, err := os.ReadFile(path) //nolint:gosec // path is constructed from directory scan within a validated root
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), lyrics.InstrumentalMarker)
 }
 
 // AssertInput validates a "artist,title" string and returns a Track, or nil if invalid.
@@ -229,6 +242,11 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		case lrcExists && !opts.Update:
 			// Synced lyrics already present and not asked to update -- skip.
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
+			continue
+		case txtExists && !lrcExists && !opts.Update && isInstrumentalTxt(filepath.Join(dir, txtFile)):
+			// Instrumental markers are terminal -- re-fetching would produce the same result.
+			// Skip regardless of --upgrade; only --update (explicit full re-fetch) overrides.
+			slog.Debug("skipping file, instrumental marker", "file", file.Name())
 			continue
 		case txtExists && !opts.Upgrade && !opts.Update && !lrcExists:
 			// Unsynced .txt present and not asked to upgrade or update -- skip.

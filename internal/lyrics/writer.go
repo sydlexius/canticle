@@ -12,6 +12,12 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
 )
 
+// InstrumentalMarker is the human-readable marker embedded in an instrumental .txt
+// sidecar (without trailing newline). Exported so consumers can detect the marker
+// via substring search -- e.g. files renamed from .lrc may carry LRC tag headers
+// before the marker line. The writer appends "\n" when writing the bare .txt form.
+const InstrumentalMarker = "♪ Instrumental ♪"
+
 // Writer abstracts LRC file output.
 type Writer interface {
 	WriteLRC(song models.Song, filename string, outdir string) error
@@ -90,6 +96,11 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	// writes are visible at the default Info level, not just under Debug.
 	var kind string
 	switch {
+	case song.Track.Instrumental == 1:
+		// Instrumental is authoritative: MM delivers a synced subtitle line alongside
+		// the flag, so this case must precede the subtitles check.
+		kind = "instrumental"
+		writeContent = writeInstrumental
 	case len(song.Subtitles.Lines) > 0:
 		kind = "synced"
 		writeContent = func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual) }
@@ -98,10 +109,6 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	case song.Lyrics.LyricsBody != "":
 		kind = "unsynced"
 		writeContent = func(buf *bufio.Writer) error { return writeUnsyncedLRC(song, buf) }
-	case song.Track.Instrumental == 1:
-		kind = "instrumental"
-		writeContent = writeInstrumental
-		// Instrumentals are a plain .txt marker: no timestamp, no tag headers.
 	default:
 		return fmt.Errorf("nothing to save for %s - %s", song.Track.ArtistName, song.Track.TrackName)
 	}
@@ -304,8 +311,7 @@ func writeUnsyncedLRC(song models.Song, buff *bufio.Writer) error {
 // writeInstrumental emits a plain instrumental marker (no [00:00.00] timestamp,
 // no tag headers) so the .txt output carries only the single marker line.
 func writeInstrumental(buff *bufio.Writer) error {
-	line := "\u266a Instrumental \u266a"
-	if _, err := buff.WriteString(line + "\n"); err != nil {
+	if _, err := buff.WriteString(InstrumentalMarker + "\n"); err != nil {
 		return fmt.Errorf("writing instrumental line: %w", err)
 	}
 	if err := buff.Flush(); err != nil {

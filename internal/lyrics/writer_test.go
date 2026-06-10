@@ -325,6 +325,46 @@ func TestWriteLRC_StaleSidecarCleanup(t *testing.T) {
 	})
 }
 
+// TestWriteLRC_InstrumentalWithSubtitles covers the real Musixmatch response: an
+// instrumental track carries both Track.Instrumental==1 AND a synced subtitle line.
+// The instrumental flag must win -- output must be .txt, not .lrc.
+func TestWriteLRC_InstrumentalWithSubtitles(t *testing.T) {
+	w := NewLRCWriter()
+	tmpDir := t.TempDir()
+
+	song := models.Song{
+		Track: models.Track{
+			ArtistName:   "Test Artist",
+			TrackName:    "Instrumental Track",
+			Instrumental: 1,
+		},
+		Subtitles: models.Synced{Lines: []models.Lines{
+			// Musixmatch delivers this synced line for instrumentals.
+			{Text: "♪ Instrumental ♪", Time: models.Time{Minutes: 0, Seconds: 0, Hundredths: 0}},
+		}},
+	}
+
+	if err := w.WriteLRC(song, "song.lrc", tmpDir); err != nil {
+		t.Fatalf("expected nil error for instrumental with subtitles, got: %v", err)
+	}
+
+	txtPath := filepath.Join(tmpDir, "song.txt")
+	data, err := os.ReadFile(txtPath) //nolint:gosec // test path constructed from known test data
+	if err != nil {
+		t.Fatalf("expected song.txt to exist: %v", err)
+	}
+	const want = "♪ Instrumental ♪\n"
+	if got := string(data); got != want {
+		t.Fatalf("content = %q; want %q", got, want)
+	}
+	if strings.Contains(string(data), "[00:00.00]") {
+		t.Fatalf("instrumental must not contain LRC timestamp, got: %q", string(data))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "song.lrc")); err == nil {
+		t.Fatal("expected no .lrc file for instrumental with subtitles, but one was created")
+	}
+}
+
 func TestWriteLRC_Synced(t *testing.T) {
 	w := NewLRCWriter()
 	tmpDir := t.TempDir()
