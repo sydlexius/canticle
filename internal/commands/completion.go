@@ -27,7 +27,7 @@ var completionSubcommands = []string{
 // offered after it. It is a curated set for completion convenience, not an
 // exhaustive mirror of every flag.
 var completionCandidates = map[string][]string{
-	"fetch":      {"--outdir", "--cooldown", "--depth", "--update", "--upgrade", "--bfs", "--token", "--config", "--album", "--probe"},
+	"fetch":      {"--outdir", "--cooldown", "--depth", "--update", "--upgrade", "--bfs", "--token", "--config", "--album", "--probe", "--isrc", "--duration", "--spotify-id"},
 	"serve":      {"--listen", "--outdir", "--token", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--scan-interval", "--work-interval"},
 	"scan":       {"results", "clear", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--only"},
 	"library":    {"add", "list", "remove", "update"},

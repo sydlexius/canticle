@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -197,9 +198,19 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 		"q_artist":          {track.ArtistName},
 		"q_artists":         {track.ArtistName},
 		"q_track":           {track.TrackName},
-		"track_spotify_id":  {""},
+		"track_spotify_id":  {track.SpotifyID},
 		"q_duration":        {""},
 		"f_subtitle_length": {""},
+	}
+	// Recording-level disambiguators, sent only when present so the normal scan
+	// path (which leaves these empty) keeps its existing request shape. q_duration
+	// and track_spotify_id reuse their existing slots; track_isrc is added only
+	// when supplied since it is not otherwise part of the request.
+	if track.TrackLength > 0 {
+		params.Set("q_duration", strconv.Itoa(track.TrackLength))
+	}
+	if track.ISRC != "" {
+		params.Set("track_isrc", track.ISRC)
 	}
 	baseURL.RawQuery = params.Encode()
 

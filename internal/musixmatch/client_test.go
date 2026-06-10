@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -509,6 +510,93 @@ func newTestClient(status int, body string) *Client {
 		return jsonResponse(status, body), nil
 	})}
 	return client
+}
+
+// minimalMatchBody is a successfully-parsing macro response with no lyrics,
+// used by request-shape tests that only care about the outgoing query params.
+const minimalMatchBody = `{
+	"message": {
+		"header": {"status_code": 200},
+		"body": {
+			"macro_calls": {
+				"matcher.track.get": {
+					"message": {
+						"header": {"status_code": 200},
+						"body": {"track": {"track_name": "title", "artist_name": "artist", "has_subtitles": 1, "has_lyrics": 1}}
+					}
+				},
+				"track.lyrics.get": {"message": {"body": {}}},
+				"track.subtitles.get": {
+					"message": {
+						"body": {
+							"subtitle_list": [
+								{"subtitle": {"subtitle_body": "[{\"text\":\"line one\",\"time\":{\"total\":1.23,\"minutes\":0,\"seconds\":1,\"hundredths\":23}}]"}}
+							]
+						}
+					}
+				}
+			}
+		}
+	}
+}`
+
+// captureURL returns a client whose transport records the outgoing request URL.
+func captureURL(t *testing.T, dst **url.URL) *Client {
+	t.Helper()
+	client := NewClient("test-token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		*dst = req.URL
+		return jsonResponse(http.StatusOK, minimalMatchBody), nil
+	})}
+	return client
+}
+
+func TestFindLyricsSendsRecordingIdentifiersWhenPresent(t *testing.T) {
+	var captured *url.URL
+	client := captureURL(t, &captured)
+	if _, err := client.FindLyrics(context.Background(), models.Track{
+		TrackName:   "title",
+		ArtistName:  "artist",
+		TrackLength: 215,
+		ISRC:        "USENC1234567",
+		SpotifyID:   "abc123xyz",
+	}); err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	q := captured.Query()
+	for key, want := range map[string]string{
+		"track_isrc":       "USENC1234567",
+		"q_duration":       "215",
+		"track_spotify_id": "abc123xyz",
+	} {
+		if got := q.Get(key); got != want {
+			t.Fatalf("%s = %q; want %q", key, got, want)
+		}
+	}
+}
+
+func TestFindLyricsOmitsRecordingIdentifiersWhenEmpty(t *testing.T) {
+	var captured *url.URL
+	client := captureURL(t, &captured)
+	// The normal scan path leaves ISRC/duration/spotify empty: track_isrc must
+	// not be sent at all, and the reused slots stay empty, preserving the
+	// pre-spike request shape.
+	if _, err := client.FindLyrics(context.Background(), models.Track{
+		TrackName:  "title",
+		ArtistName: "artist",
+	}); err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	q := captured.Query()
+	if _, ok := q["track_isrc"]; ok {
+		t.Fatalf("track_isrc should be absent when no ISRC is supplied, got %q", q.Get("track_isrc"))
+	}
+	if got := q.Get("q_duration"); got != "" {
+		t.Fatalf("q_duration = %q; want empty", got)
+	}
+	if got := q.Get("track_spotify_id"); got != "" {
+		t.Fatalf("track_spotify_id = %q; want empty", got)
+	}
 }
 
 func jsonResponse(status int, body string) *http.Response {

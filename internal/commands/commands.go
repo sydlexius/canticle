@@ -81,6 +81,9 @@ type FetchCmd struct {
 	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Album      string   `arg:"--album" help:"album name passed to the matcher (also a hint for --probe)" default:""`
 	Probe      bool     `arg:"--probe" help:"query the provider once for the first [artist,title] and print the matched result without writing files (diagnostic for matcher behavior)"`
+	ISRC       string   `arg:"--isrc" help:"(--probe diagnostic) ISRC passed to the matcher as track_isrc" default:""`
+	Duration   int      `arg:"--duration" help:"(--probe diagnostic) track duration in seconds passed to the matcher as q_duration" default:"0"`
+	SpotifyID  string   `arg:"--spotify-id" help:"(--probe diagnostic) Spotify track id passed to the matcher as track_spotify_id" default:""`
 }
 
 // ServeCmd runs the daemon.
@@ -485,9 +488,12 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 	if args.Probe {
 		artist, title := parseArtistTitle(args.Song[0])
 		return fetchProbe(ctx, out, models.Track{
-			ArtistName: artist,
-			TrackName:  title,
-			AlbumName:  args.Album,
+			ArtistName:  artist,
+			TrackName:   title,
+			AlbumName:   args.Album,
+			TrackLength: args.Duration,
+			ISRC:        args.ISRC,
+			SpotifyID:   args.SpotifyID,
 		}, fetcher)
 	}
 
@@ -524,7 +530,8 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 // characterized from a local build. A no-match is a valid outcome, not an error,
 // so it returns 0.
 func fetchProbe(ctx context.Context, out io.Writer, track models.Track, fetcher musixmatch.Fetcher) int {
-	_, _ = fmt.Fprintf(out, "query:   artist=%q title=%q album=%q\n", track.ArtistName, track.TrackName, track.AlbumName)
+	_, _ = fmt.Fprintf(out, "query:   artist=%q title=%q album=%q isrc=%q duration=%d spotify_id=%q\n",
+		track.ArtistName, track.TrackName, track.AlbumName, track.ISRC, track.TrackLength, track.SpotifyID)
 	song, err := fetcher.FindLyrics(ctx, track)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "result:  MISS (%v)\n", err)

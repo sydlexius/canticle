@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
 )
 
 type probeFetcher struct {
@@ -41,6 +43,44 @@ func TestFetchProbe_PrintsMatchedMetadataAndPreview(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("probe output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}
+
+// TestRunFetchProbe_EchoesRecordingIdentifiers drives the public fetch --probe
+// path so the runFetch probe branch (which builds the models.Track from the new
+// --isrc/--duration/--spotify-id flags) is exercised end to end. The injected
+// fetcher is a stub; the assertion targets the query echo, which is printed from
+// the input track before the provider is called.
+func TestRunFetchProbe_EchoesRecordingIdentifiers(t *testing.T) {
+	// runFetch calls initLogging, which replaces the global slog default logger.
+	// Restore it so this test does not leak logging state into TestApplyLogLevel.
+	prevLogger := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(prevLogger)
+		slog.SetLogLoggerLevel(slog.LevelInfo)
+	})
+	cfg, _ := commandsTestEnv(t)
+	deps := Deps{NewFetcher: func(string) musixmatch.Fetcher {
+		return probeFetcher{song: models.Song{Track: models.Track{ArtistName: "A", TrackName: "B"}}}
+	}}
+	var out bytes.Buffer
+	code := Run(context.Background(), []string{
+		"fetch", "--probe",
+		"--isrc", "USENC1234567",
+		"--duration", "215",
+		"--spotify-id", "abc123xyz",
+		"--token", "dummy",
+		"--config", cfg,
+		"Some Artist,Some Title",
+	}, &out, deps)
+	if code != 0 {
+		t.Fatalf("Run fetch --probe = %d; want 0\n--- output ---\n%s", code, out.String())
+	}
+	got := out.String()
+	for _, want := range []string{`isrc="USENC1234567"`, "duration=215", `spotify_id="abc123xyz"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("probe output missing %q\n--- output ---\n%s", want, got)
 		}
 	}
 }

@@ -10,6 +10,11 @@ type Track struct {
 	Instrumental int    `json:"instrumental,omitempty"`
 	HasLyrics    int    `json:"has_lyrics,omitempty"`
 	HasSubtitles int    `json:"has_subtitles,omitempty"`
+	// ISRC and SpotifyID are recording-level identifiers fed to the matcher when
+	// present (see internal/musixmatch). Currently populated only by the
+	// fetch --probe diagnostic flags; the normal scan path leaves them empty.
+	ISRC      string `json:"isrc,omitempty"`
+	SpotifyID string `json:"spotify_id,omitempty"`
 }
 
 // Lyrics holds unsynced lyrics text.
