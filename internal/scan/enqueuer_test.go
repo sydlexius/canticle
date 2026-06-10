@@ -68,7 +68,7 @@ type fakeLyricsCache struct {
 	err  error
 }
 
-func (f fakeLyricsCache) LookupFallback(_ context.Context, artist string, title string) (string, error) {
+func (f fakeLyricsCache) Lookup(_ context.Context, artist string, title string, _ int64) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}

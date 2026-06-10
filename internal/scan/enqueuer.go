@@ -20,7 +20,9 @@ type PendingResultStore interface {
 
 // LyricsCache reports whether lyrics already exist for a scanned track.
 type LyricsCache interface {
-	LookupFallback(ctx context.Context, artist, title string) (string, error)
+	// Lookup checks the cache for (artist, title, durationBucket).
+	// Pass durationBucket=0 when the recording duration is not yet known.
+	Lookup(ctx context.Context, artist, title string, durationBucket int64) (string, error)
 }
 
 // WorkQueue enqueues durable lyrics work.
@@ -63,7 +65,8 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, libraryID int64) (enqueue
 		if err := ctx.Err(); err != nil {
 			return enqueued, cacheHits, err
 		}
-		_, err := e.Cache.LookupFallback(ctx, res.Track.ArtistName, res.Track.TrackName)
+		// duration_bucket=0: unknown-duration sentinel until #191 wires in real duration.
+		_, err := e.Cache.Lookup(ctx, res.Track.ArtistName, res.Track.TrackName, 0)
 		switch {
 		case err == nil:
 			if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusDone); err != nil {

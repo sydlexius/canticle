@@ -46,9 +46,10 @@ type ScriptGuard interface {
 
 // Cache provides lyrics cache operations.
 type Cache interface {
-	LookupExact(ctx context.Context, artist, title, album string) (string, error)
-	LookupFallback(ctx context.Context, artist, title string) (string, error)
-	Store(ctx context.Context, artist, title, album, lyrics string) error
+	// Lookup returns cached lyrics for (artist, title, durationBucket).
+	// Use durationBucket=0 when the recording duration is unknown.
+	Lookup(ctx context.Context, artist, title string, durationBucket int64) (string, error)
+	Store(ctx context.Context, artist, title string, durationBucket int64, lyrics string) error
 }
 
 // defaultCircuitOpenDuration is the fallback window applied when no value
@@ -627,20 +628,13 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 // the cache lookup and the provider query so the cache read/write keys agree.
 func (w *Worker) song(ctx context.Context, track models.Track, bypassCache bool) (models.Song, bool, error) {
 	if !bypassCache {
-		cached, err := w.cache.LookupExact(ctx, track.ArtistName, track.TrackName, track.AlbumName)
+		// duration_bucket=0: unknown-duration sentinel until #191 wires in real duration.
+		cached, err := w.cache.Lookup(ctx, track.ArtistName, track.TrackName, 0)
 		if err == nil {
 			return decodeSong(cached, track), true, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return models.Song{}, false, fmt.Errorf("worker: lookup exact cache: %w", err)
-		}
-
-		cached, err = w.cache.LookupFallback(ctx, track.ArtistName, track.TrackName)
-		if err == nil {
-			return decodeSong(cached, track), true, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return models.Song{}, false, fmt.Errorf("worker: lookup fallback cache: %w", err)
+			return models.Song{}, false, fmt.Errorf("worker: lookup cache: %w", err)
 		}
 	}
 
@@ -664,7 +658,8 @@ func (w *Worker) store(ctx context.Context, track models.Track, song models.Song
 	if err != nil {
 		return err
 	}
-	if err := w.cache.Store(ctx, track.ArtistName, track.TrackName, track.AlbumName, encoded); err != nil {
+	// duration_bucket=0: unknown-duration sentinel until #191 wires in real duration.
+	if err := w.cache.Store(ctx, track.ArtistName, track.TrackName, 0, encoded); err != nil {
 		return fmt.Errorf("worker: store cache: %w", err)
 	}
 	return nil
@@ -772,6 +767,10 @@ func encodeSong(song models.Song) (string, error) {
 func decodeSong(s string, fallback models.Track) models.Song {
 	var song models.Song
 	if err := json.Unmarshal([]byte(s), &song); err == nil && (song.Track.ArtistName != "" || song.Track.TrackName != "") {
+		// Always pair cached lyrics with the live file's track metadata so that
+		// .lrc tags ([ar:]/[al:]/[ti:]) reflect the actual file being processed,
+		// not whatever was stored from a previous (possibly different) lookup.
+		song.Track = fallback
 		return song
 	}
 	return models.Song{

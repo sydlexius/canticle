@@ -182,39 +182,27 @@ func (q *fakeQueue) removeFromProcessing(id int64) {
 type cacheStore struct {
 	artist string
 	title  string
-	album  string
 	lyrics string
 }
 
 type fakeCache struct {
-	exact    string
-	fallback string
-	err      error
-	stores   []cacheStore
+	hit    string
+	err    error
+	stores []cacheStore
 }
 
-func (c *fakeCache) LookupExact(context.Context, string, string, string) (string, error) {
+func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, _ int64) (string, error) {
 	if c.err != nil {
 		return "", c.err
 	}
-	if c.exact == "" {
+	if c.hit == "" {
 		return "", sql.ErrNoRows
 	}
-	return c.exact, nil
+	return c.hit, nil
 }
 
-func (c *fakeCache) LookupFallback(context.Context, string, string) (string, error) {
-	if c.err != nil {
-		return "", c.err
-	}
-	if c.fallback == "" {
-		return "", sql.ErrNoRows
-	}
-	return c.fallback, nil
-}
-
-func (c *fakeCache) Store(_ context.Context, artist, title, album, lyrics string) error {
-	c.stores = append(c.stores, cacheStore{artist: artist, title: title, album: album, lyrics: lyrics})
+func (c *fakeCache) Store(_ context.Context, artist, title string, _ int64, lyrics string) error {
+	c.stores = append(c.stores, cacheStore{artist: artist, title: title, lyrics: lyrics})
 	return nil
 }
 
@@ -401,7 +389,7 @@ func TestRunOnceCacheHitAvoidsFetcherAndCompletes(t *testing.T) {
 			Filename: "artist-title.lrc",
 		},
 	}}}
-	cache := &fakeCache{exact: cached}
+	cache := &fakeCache{hit: cached}
 	fetcher := &fakeFetcher{}
 	writer := &fakeWriter{}
 
@@ -605,7 +593,7 @@ func TestRunOnceStoresCacheWithRequestedTrackKeys(t *testing.T) {
 		t.Fatalf("cache stores = %d; want 1", len(cache.stores))
 	}
 	store := cache.stores[0]
-	if store.artist != track.ArtistName || store.title != track.TrackName || store.album != track.AlbumName {
+	if store.artist != track.ArtistName || store.title != track.TrackName {
 		t.Fatalf("cache store key = %+v; want requested track %+v", store, track)
 	}
 }
@@ -1322,7 +1310,7 @@ func TestRunOnceCacheHitDoesNotMarkProviderSuccess(t *testing.T) {
 		t.Fatalf("encodeSong: %v", err)
 	}
 	q := &fakeQueue{items: []queue.WorkItem{{ID: 9, Inputs: models.Inputs{Track: track, OutputPaths: []models.OutputPath{{Outdir: "out", Filename: "a.lrc"}}}}}}
-	w := New(q, &fakeCache{exact: cached}, &fakeFetcher{}, &fakeWriter{})
+	w := New(q, &fakeCache{hit: cached}, &fakeFetcher{}, &fakeWriter{})
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -1480,7 +1468,7 @@ type fakeCacheToggle struct {
 	idx     int
 }
 
-func (c *fakeCacheToggle) LookupExact(context.Context, string, string, string) (string, error) {
+func (c *fakeCacheToggle) Lookup(_ context.Context, _ string, _ string, _ int64) (string, error) {
 	hit := false
 	if c.idx < len(c.hits) {
 		hit = c.hits[c.idx]
@@ -1492,11 +1480,7 @@ func (c *fakeCacheToggle) LookupExact(context.Context, string, string, string) (
 	return "", sql.ErrNoRows
 }
 
-func (c *fakeCacheToggle) LookupFallback(context.Context, string, string) (string, error) {
-	return "", sql.ErrNoRows
-}
-
-func (c *fakeCacheToggle) Store(context.Context, string, string, string, string) error {
+func (c *fakeCacheToggle) Store(context.Context, string, string, int64, string) error {
 	return nil
 }
 

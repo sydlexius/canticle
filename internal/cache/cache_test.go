@@ -21,95 +21,164 @@ func openTestDB(t *testing.T) *sql.DB {
 	return sqlDB
 }
 
-func TestStore_AndLookupExact(t *testing.T) {
+// TestSameRecordingAcrossAlbumsCollapsesToOneRow verifies that storing the same
+// artist+title+bucket twice (e.g. different album tags for the same recording)
+// upserts rather than creating a second row.
+func TestSameRecordingAcrossAlbumsCollapsesToOneRow(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))
 
-	// Store a row and retrieve it.
-	if err := repo.Store(ctx, "Artist", "Title", "Album", "lyrics text"); err != nil {
-		t.Fatalf("Store: %v", err)
+	if err := repo.Store(ctx, "Artist", "Song", 0, "lyrics v1"); err != nil {
+		t.Fatalf("Store v1: %v", err)
 	}
-	got, err := repo.LookupExact(ctx, "Artist", "Title", "Album")
+	// Same recording, different album tag - should upsert, not duplicate.
+	if err := repo.Store(ctx, "Artist", "Song", 0, "lyrics v2"); err != nil {
+		t.Fatalf("Store v2: %v", err)
+	}
+	got, err := repo.Lookup(ctx, "Artist", "Song", 0)
 	if err != nil {
-		t.Fatalf("LookupExact: %v", err)
+		t.Fatalf("Lookup: %v", err)
 	}
-	if got != "lyrics text" {
-		t.Errorf("LookupExact got %q, want %q", got, "lyrics text")
+	if got != "lyrics v2" {
+		t.Errorf("got %q, want %q", got, "lyrics v2")
 	}
 }
 
-func TestStore_Upsert(t *testing.T) {
+// TestDistinctDurationRecordingsCacheSeparately verifies that recordings with
+// meaningfully different durations (different 5-second buckets) produce separate
+// cache rows and return their own lyrics independently.
+func TestDistinctDurationRecordingsCacheSeparately(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))
 
-	if err := repo.Store(ctx, "Artist", "Title", "Album", "original"); err != nil {
-		t.Fatalf("Store initial: %v", err)
+	bucketA := cache.DurationBucket(180) // 36
+	bucketB := cache.DurationBucket(240) // 48
+
+	if err := repo.Store(ctx, "Artist", "Song", bucketA, "short version"); err != nil {
+		t.Fatalf("Store A: %v", err)
 	}
-	// Upsert same key with new lyrics.
-	if err := repo.Store(ctx, "Artist", "Title", "Album", "updated"); err != nil {
-		t.Fatalf("Store upsert: %v", err)
+	if err := repo.Store(ctx, "Artist", "Song", bucketB, "long version"); err != nil {
+		t.Fatalf("Store B: %v", err)
 	}
-	got, err := repo.LookupExact(ctx, "Artist", "Title", "Album")
+
+	gotA, err := repo.Lookup(ctx, "Artist", "Song", bucketA)
 	if err != nil {
-		t.Fatalf("LookupExact after upsert: %v", err)
+		t.Fatalf("Lookup A: %v", err)
 	}
-	if got != "updated" {
-		t.Errorf("after upsert: got %q, want %q", got, "updated")
+	if gotA != "short version" {
+		t.Errorf("bucket A: got %q, want %q", gotA, "short version")
+	}
+
+	gotB, err := repo.Lookup(ctx, "Artist", "Song", bucketB)
+	if err != nil {
+		t.Fatalf("Lookup B: %v", err)
+	}
+	if gotB != "long version" {
+		t.Errorf("bucket B: got %q, want %q", gotB, "long version")
 	}
 }
 
-func TestLookupExact_WrongAlbum(t *testing.T) {
+// TestMultiISRCSameDurationSharesOneRow verifies that multiple ISRC territorial
+// variants of the same recording (same duration, thus same bucket) collapse to
+// one cache row, not one per ISRC.
+func TestMultiISRCSameDurationSharesOneRow(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))
 
-	if err := repo.Store(ctx, "Artist", "Title", "Album", "lyrics"); err != nil {
+	bucket := cache.DurationBucket(210) // both ISRCs map here
+
+	// First ISRC territory.
+	if err := repo.Store(ctx, "Artist", "Song", bucket, "lyrics from US release"); err != nil {
+		t.Fatalf("Store ISRC-US: %v", err)
+	}
+	// Second ISRC territory - same duration bucket, should upsert.
+	if err := repo.Store(ctx, "Artist", "Song", bucket, "lyrics from EU release"); err != nil {
+		t.Fatalf("Store ISRC-EU: %v", err)
+	}
+	got, err := repo.Lookup(ctx, "Artist", "Song", bucket)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if got != "lyrics from EU release" {
+		t.Errorf("got %q, want last-written %q", got, "lyrics from EU release")
+	}
+}
+
+// TestUnknownDurationBehavesLikeArtistTitle verifies that bucket=0 (the unknown
+// sentinel) makes the effective key (artist, title) - one row per song,
+// regardless of which album tag the file carries.
+func TestUnknownDurationBehavesLikeArtistTitle(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	const bucket = 0 // unknown sentinel
+
+	if err := repo.Store(ctx, "Artist", "Song", bucket, "cached lyrics"); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	_, err := repo.LookupExact(ctx, "Artist", "Title", "WrongAlbum")
+	got, err := repo.Lookup(ctx, "Artist", "Song", bucket)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if got != "cached lyrics" {
+		t.Errorf("got %q, want %q", got, "cached lyrics")
+	}
+
+	// A second lookup with a different (but still unknown) call should hit the
+	// same row because both use bucket=0.
+	got2, err := repo.Lookup(ctx, "Artist", "Song", 0)
+	if err != nil {
+		t.Fatalf("Lookup 2: %v", err)
+	}
+	if got2 != "cached lyrics" {
+		t.Errorf("second lookup: got %q, want %q", got2, "cached lyrics")
+	}
+}
+
+func TestLookup_NotFound(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	_, err := repo.Lookup(ctx, "Nobody", "Nothing", 0)
 	if !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("LookupExact wrong album: got %v, want sql.ErrNoRows", err)
+		t.Errorf("got %v, want sql.ErrNoRows", err)
 	}
 }
 
-func TestLookupFallback_IgnoresAlbum(t *testing.T) {
+func TestLookup_NormalizesKeys(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))
 
-	if err := repo.Store(ctx, "Artist", "Title", "SomeAlbum", "fallback lyrics"); err != nil {
+	if err := repo.Store(ctx, "  Héllo  ", "  Wörld  ", 0, "normalized lyrics"); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	got, err := repo.LookupFallback(ctx, "Artist", "Title")
+	got, err := repo.Lookup(ctx, "hello", "world", 0)
 	if err != nil {
-		t.Fatalf("LookupFallback: %v", err)
-	}
-	if got != "fallback lyrics" {
-		t.Errorf("LookupFallback got %q, want %q", got, "fallback lyrics")
-	}
-}
-
-func TestLookupFallback_NotFound(t *testing.T) {
-	ctx := context.Background()
-	repo := cache.New(openTestDB(t))
-
-	_, err := repo.LookupFallback(ctx, "Unknown", "Unknown")
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("LookupFallback not found: got %v, want sql.ErrNoRows", err)
-	}
-}
-
-func TestLookupExact_NormalizesKeys(t *testing.T) {
-	ctx := context.Background()
-	repo := cache.New(openTestDB(t))
-
-	// Store with un-normalized casing/accents; lookup with different form.
-	if err := repo.Store(ctx, "  Héllo  ", "  Wörld  ", "  Álbum  ", "normalized lyrics"); err != nil {
-		t.Fatalf("Store: %v", err)
-	}
-	got, err := repo.LookupExact(ctx, "hello", "world", "album")
-	if err != nil {
-		t.Fatalf("LookupExact normalized: %v", err)
+		t.Fatalf("Lookup normalized: %v", err)
 	}
 	if got != "normalized lyrics" {
-		t.Errorf("LookupExact normalized: got %q, want %q", got, "normalized lyrics")
+		t.Errorf("got %q, want %q", got, "normalized lyrics")
+	}
+}
+
+func TestDurationBucket(t *testing.T) {
+	cases := []struct {
+		seconds int
+		want    int64
+	}{
+		{0, 0},
+		{4, 0},
+		{5, 1},
+		{9, 1},
+		{10, 2},
+		{180, 36},
+		{184, 36},
+		{185, 37},
+		{240, 48},
+	}
+	for _, c := range cases {
+		if got := cache.DurationBucket(c.seconds); got != c.want {
+			t.Errorf("DurationBucket(%d) = %d, want %d", c.seconds, got, c.want)
+		}
 	}
 }

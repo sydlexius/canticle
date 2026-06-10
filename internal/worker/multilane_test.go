@@ -308,7 +308,7 @@ func TestRunOnceStaleProvidersVersionBypassesCache(t *testing.T) {
 	}}}
 	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "fresh"}}}
 
-	w := New(q, &fakeCache{exact: cached}, fetcher, &fakeWriter{})
+	w := New(q, &fakeCache{hit: cached}, fetcher, &fakeWriter{})
 	w.SetProvidersVersion(42) // current generation differs from the item's 7
 
 	if err := w.RunOnce(context.Background()); err != nil {
@@ -335,7 +335,7 @@ func TestRunOnceMatchingProvidersVersionUsesCache(t *testing.T) {
 	}}}
 	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "fresh"}}}
 
-	w := New(q, &fakeCache{exact: cached}, fetcher, &fakeWriter{})
+	w := New(q, &fakeCache{hit: cached}, fetcher, &fakeWriter{})
 	w.SetProvidersVersion(42)
 
 	if err := w.RunOnce(context.Background()); err != nil {
