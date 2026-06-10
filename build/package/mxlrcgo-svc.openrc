@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+description="mxlrcgo-svc lyrics fetcher daemon"
+
+command=/usr/local/bin/mxlrcgo-svc
+command_args="serve"
+command_user=mxlrcgo-svc:mxlrcgo-svc
+command_background=yes
+pidfile=/run/mxlrcgo-svc/mxlrcgo-svc.pid
+
+export MXLRC_DB_PATH=/var/lib/mxlrcgo-svc/mxlrcgo.db
+export MXLRC_LOG_FORMAT=json
+
+depend() {
+    need net
+}
+
+start_pre() {
+    checkpath --directory --owner mxlrcgo-svc:mxlrcgo-svc --mode 0750 \
+        /run/mxlrcgo-svc \
+        /var/lib/mxlrcgo-svc
+}

@@ -19,9 +19,31 @@ Full documentation is published at **<https://sydlexius.github.io/mxlrcgo-svc/>*
 
 ## Install
 
-Versioned binaries for Linux, macOS, and Windows (amd64/arm64 where supported) are published on the [GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases) page.
+**Linux (.deb / .rpm / .apk):** Download the appropriate package for your distro
+from the [GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases)
+page and install it with your package manager:
 
-Build from source (requires Go 1.26.4+):
+```sh
+# Debian / Ubuntu
+sudo dpkg -i mxlrcgo-svc_*.deb
+
+# RHEL / Fedora / Rocky
+sudo rpm -i mxlrcgo-svc_*.rpm
+
+# Alpine
+sudo apk add --allow-untrusted mxlrcgo-svc_*.apk
+```
+
+The package installs the binary to `/usr/local/bin/mxlrcgo-svc`, a systemd unit
+(or OpenRC script on Alpine), and an example config at
+`/etc/mxlrcgo-svc/config.example.toml`. Copy the example to
+`/etc/mxlrcgo-svc/config.toml` and edit it before starting the service.
+
+**Tarballs / macOS / Windows:** Versioned archives for all platforms are also
+available on the [GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases)
+page.
+
+**Build from source** (requires Go 1.26.4+):
 
 ```sh
 go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest

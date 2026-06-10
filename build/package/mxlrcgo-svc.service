@@ -1,0 +1,26 @@
+[Unit]
+Description=mxlrcgo-svc lyrics fetcher daemon
+Documentation=https://sydlexius.github.io/mxlrcgo-svc/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mxlrcgo-svc
+Group=mxlrcgo-svc
+ExecStart=/usr/local/bin/mxlrcgo-svc serve
+Restart=on-failure
+RestartSec=5s
+
+Environment=MXLRC_DB_PATH=/var/lib/mxlrcgo-svc/mxlrcgo.db
+Environment=MXLRC_LOG_FORMAT=json
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/mxlrcgo-svc
+
+[Install]
+WantedBy=multi-user.target
