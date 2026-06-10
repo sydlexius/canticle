@@ -17,7 +17,7 @@ FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a
 # The two differ only in how the binary arrives (built here vs copied by goreleaser).
 LABEL org.opencontainers.image.source="https://github.com/sydlexius/mxlrcgo-svc" \
       org.opencontainers.image.description="Fetch synced lyrics from Musixmatch and save .lrc files" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="GPL-3.0"
 
 RUN apk add --no-cache bash ca-certificates su-exec tzdata && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \

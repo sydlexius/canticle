@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/dhowden/tag"
+	"github.com/dhowden/tag/mbz"
+	"github.com/lizc2003/audioduration"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
@@ -21,8 +24,32 @@ import (
 // supportedFileTypes lists audio file extensions that can have metadata read.
 var supportedFileTypes = []string{".mp3", ".m4a", ".m4b", ".m4p", ".alac", ".flac", ".ogg", ".dsf"}
 
+// audioFileTypeForExt returns the audioduration type constant for a lower-case
+// audio file extension. Extensions not recognized return (0, false); callers
+// degrade to TrackLength=0 (the "unknown duration" sentinel).
+func audioFileTypeForExt(ext string) (int, bool) {
+	switch ext {
+	case ".flac":
+		return audioduration.TypeFlac, true
+	case ".mp3":
+		return audioduration.TypeMp3, true
+	case ".m4a", ".m4b", ".m4p", ".alac":
+		return audioduration.TypeMp4, true
+	case ".ogg":
+		return audioduration.TypeOgg, true
+	case ".dsf":
+		return audioduration.TypeDsd, true
+	default:
+		return 0, false
+	}
+}
+
 // Scanner handles parsing input sources and populating the work queue.
-type Scanner struct{}
+type Scanner struct {
+	// probeFunc, when set, is used as the duration probe instead of audioduration
+	// (tests only -- lets tests inject a known duration without real audio fixtures).
+	probeFunc func(string) (int, error)
+}
 
 // ScanOptions controls library directory traversal and queue eligibility.
 type ScanOptions struct {
@@ -33,13 +60,59 @@ type ScanOptions struct {
 	// EmbeddedLyrics controls handling of unsynced lyrics embedded in tags:
 	// "off" (default) ignores them; "respect" skips fetching a file that already
 	// carries embedded lyrics; "extract" writes them to a .txt sidecar (and then
-	// skips fetching). Synced (SYLT) tags are intentionally out of scope.
+	// skips fetching). Synced (SYLT) tags are intentionally not handled. "off"
+	// (default) is a no-op.
 	EmbeddedLyrics string
 }
 
 // NewScanner creates a new Scanner.
 func NewScanner() *Scanner {
 	return &Scanner{}
+}
+
+// audioDuration reads the header of r to determine duration in seconds.
+// Returns 0 and a wrapped error for unknown extension or parse failure;
+// callers treat 0 as the "unknown duration" sentinel (duration_bucket=0).
+func audioDuration(r io.ReadSeeker, ext string) (int, error) {
+	ft, ok := audioFileTypeForExt(ext)
+	if !ok {
+		return 0, fmt.Errorf("no duration parser for %s", ext)
+	}
+	secs, err := audioduration.Duration(r, ft)
+	if err != nil {
+		return 0, fmt.Errorf("duration %s: %w", ext, err)
+	}
+	return int(secs), nil
+}
+
+// probeDuration returns the duration in seconds for the file at f.
+// Uses probeFunc when set (tests), otherwise calls audioDuration.
+func (sc *Scanner) probeDuration(f *os.File, ext string) (int, error) {
+	if sc.probeFunc != nil {
+		return sc.probeFunc(f.Name())
+	}
+	return audioDuration(f, ext)
+}
+
+// extractISRC returns the ISRC from audio tag metadata, or "" if absent.
+// Checks format-specific raw keys in priority order: TSRC (ID3v2.3/v2.4),
+// TRC (ID3v2.2), isrc/ISRC (Vorbis/FLAC), iTunes freeform atom (MP4).
+func extractISRC(m tag.Metadata) string {
+	raw := m.Raw()
+	for _, k := range []string{"TSRC", "TRC", "isrc", "ISRC", "----:com.apple.iTunes:ISRC"} {
+		if v, ok := raw[k]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// extractRecordingMBID returns the MusicBrainz recording ID from audio tag metadata,
+// or "" if absent.
+func extractRecordingMBID(m tag.Metadata) string {
+	return mbz.Extract(m).Get(mbz.Recording)
 }
 
 // AssertInput validates a "artist,title" string and returns a Track, or nil if invalid.
@@ -175,8 +248,8 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		}
 
 		m, err := tag.ReadFrom(f)
-		_ = f.Close()
 		if err != nil {
+			_ = f.Close()
 			slog.Warn("error reading metadata", "file", file.Name(), "error", err)
 			continue
 		}
@@ -196,24 +269,41 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 						// (rather than silently dropping it from the pipeline).
 						slog.Warn("failed to extract embedded lyrics; enqueuing for fetch instead", "file", file.Name(), "error", err)
 					} else {
+						_ = f.Close()
 						slog.Debug("extracted embedded lyrics to sidecar; skipping fetch", "file", file.Name())
 						continue
 					}
 				default: // "respect"
+					_ = f.Close()
 					slog.Debug("respecting embedded lyrics; skipping fetch", "file", file.Name())
 					continue
 				}
 			}
 		}
 
+		// Duration: audioduration reads only the file header (no audio decode).
+		// The library seeks to 0 internally, so f may be at any position from
+		// tag.ReadFrom above. Parse errors degrade gracefully to TrackLength=0
+		// (duration_bucket sentinel for "unknown").
+		filePath := filepath.Join(dir, file.Name())
+		dur, durErr := sc.probeDuration(f, ext)
+		_ = f.Close()
+		if durErr != nil {
+			slog.Debug("duration parse failed; using 0", "file", file.Name(), "error", durErr)
+			dur = 0
+		}
+
 		slog.Debug("adding file", "file", file.Name())
 		*results = append(*results, models.ScanResult{
-			FilePath: filepath.Join(dir, file.Name()),
+			FilePath: filePath,
 			Track: models.Track{
-				ArtistName:  m.Artist(),
-				TrackName:   m.Title(),
-				AlbumName:   m.Album(),
-				AlbumArtist: m.AlbumArtist(),
+				ArtistName:    m.Artist(),
+				TrackName:     m.Title(),
+				AlbumName:     m.Album(),
+				AlbumArtist:   m.AlbumArtist(),
+				TrackLength:   dur,
+				ISRC:          extractISRC(m),
+				RecordingMBID: extractRecordingMBID(m),
 			},
 			Outdir:   dir,
 			Filename: stem + ".lrc",

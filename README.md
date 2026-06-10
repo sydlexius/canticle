@@ -59,4 +59,4 @@ A Musixmatch API token is required. Supply it via the `--token` CLI flag, the `M
 
 ## License
 
-[MIT](LICENSE).
+[GPL-3.0](LICENSE). This project is a fork of [fashni/mxlrc-go](https://github.com/fashni/mxlrc-go), which is MIT-licensed; the original MIT copyright and permission notice are retained in [NOTICE](NOTICE).

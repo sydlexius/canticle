@@ -177,3 +177,32 @@ func TestScanLibrary_RespectsCanceledContext(t *testing.T) {
 		t.Fatalf("ScanLibrary error = %v; want context.Canceled", err)
 	}
 }
+
+// TestAudioFileTypeForExt covers every branch of the audioFileTypeForExt
+// switch including the default (unknown extension) path.
+func TestAudioFileTypeForExt(t *testing.T) {
+	cases := []struct {
+		ext    string
+		wantOK bool
+	}{
+		{".flac", true},
+		{".mp3", true},
+		{".m4a", true},
+		{".m4b", true},
+		{".m4p", true},
+		{".alac", true},
+		{".ogg", true},
+		{".dsf", true},
+		{".wav", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		ft, ok := audioFileTypeForExt(tc.ext)
+		if ok != tc.wantOK {
+			t.Errorf("audioFileTypeForExt(%q) ok=%v, want %v", tc.ext, ok, tc.wantOK)
+		}
+		if !ok && ft != 0 {
+			t.Errorf("audioFileTypeForExt(%q) returned non-zero type on miss: %d", tc.ext, ft)
+		}
+	}
+}
