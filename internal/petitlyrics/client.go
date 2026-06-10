@@ -49,6 +49,17 @@ var csrfTokenRe = regexp.MustCompile(`csrfToken\s*[:=]\s*["']([^"']+)["']`)
 // may be two or three digits in the wild; we normalize to hundredths.
 var lrcLineRe = regexp.MustCompile(`^\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\](.*)$`)
 
+// candidateBlockRe matches the inner content of a single <li> result block
+// (dot-all so the block can span multiple lines).
+var candidateBlockRe = regexp.MustCompile(`(?s)<li[^>]*>(.*?)</li>`)
+
+// candidateAlbumRe extracts the text from a lyrics-list-album element.
+// The class token may appear alongside other classes (e.g. "lyrics-list-album active").
+var candidateAlbumRe = regexp.MustCompile(`(?i)class=["'][^"']*\blyrics-list-album\b[^"']*["'][^>]*>([^<]+)<`)
+
+// candidateSyncedRe detects a text_sync marker anywhere in a candidate block.
+var candidateSyncedRe = regexp.MustCompile(`(?i)text_sync`)
+
 // Client communicates with petitlyrics.com over its reverse-engineered
 // endpoints.
 type Client struct {
@@ -247,11 +258,7 @@ func (c *Client) searchLyricsID(ctx context.Context, track models.Track) (string
 		return "", err
 	}
 
-	m := lyricsLinkRe.FindSubmatch(body)
-	if m == nil {
-		return "", fmt.Errorf("petitlyrics: search: no lyrics link found: %w", ErrNotFound)
-	}
-	return string(m[1]), nil
+	return selectCandidate(parseSearchCandidates(body), track.AlbumName)
 }
 
 // fetchCSRFToken fetches the static pl-lib.js file, scrapes the CSRF token, and
@@ -305,6 +312,91 @@ const (
 	lyricsTypeTranslation  = 4
 	lyricsTypeRomanization = 5
 )
+
+// searchCandidate holds one result from the /search_lyrics HTML response.
+type searchCandidate struct {
+	id     string // numeric id from /lyrics/<id>
+	album  string // text of lyrics-list-album element; empty if absent
+	synced bool   // true when text_sync marker is present in the item block
+}
+
+// normalizeAlbum lowercases, trims, and collapses internal whitespace so that
+// "(Deluxe Edition)" suffixes and minor spacing differences do not prevent a
+// prefix match.
+func normalizeAlbum(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
+}
+
+// albumMatches reports whether candidate matches query using a normalized
+// prefix comparison. Exact match and edition-suffix variants (e.g. "Album
+// Name (Deluxe Edition)" vs "Album Name") both return true. Substring-only
+// matches (e.g. "Hits" inside "Greatest Hits") do not. An empty candidate
+// or query never matches so that blank-album candidates fall through to the
+// fallback-to-all path rather than polluting an album-narrowed working set.
+func albumMatches(candidate, query string) bool {
+	nc := normalizeAlbum(candidate)
+	nq := normalizeAlbum(query)
+	if nc == "" || nq == "" {
+		return false
+	}
+	return strings.HasPrefix(nc, nq) || strings.HasPrefix(nq, nc)
+}
+
+// parseSearchCandidates extracts all lyrics candidates from the /search_lyrics
+// HTML response. Each <li> block is inspected for a /lyrics/<id> link; blocks
+// without one are skipped. Album and sync-type are extracted from the
+// lyrics-list-album class element and text_sync marker respectively.
+func parseSearchCandidates(body []byte) []searchCandidate {
+	blocks := candidateBlockRe.FindAllSubmatch(body, -1)
+	var candidates []searchCandidate
+	for _, block := range blocks {
+		inner := block[1]
+		m := lyricsLinkRe.FindSubmatch(inner)
+		if m == nil {
+			continue
+		}
+		album := ""
+		if am := candidateAlbumRe.FindSubmatch(inner); am != nil {
+			album = strings.TrimSpace(string(am[1]))
+		}
+		candidates = append(candidates, searchCandidate{
+			id:     string(m[1]),
+			album:  album,
+			synced: candidateSyncedRe.Match(inner),
+		})
+	}
+	return candidates
+}
+
+// selectCandidate picks the best candidate id from the search results.
+// When album is non-empty, candidates whose album field matches (via
+// albumMatches) form a preferred working set; if no candidates match the
+// album, all candidates are used (best-effort fallback). Within the working
+// set, the first synced candidate wins; otherwise the first candidate is
+// returned. An empty candidates slice returns ErrNotFound.
+func selectCandidate(candidates []searchCandidate, album string) (string, error) {
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("petitlyrics: search: no lyrics link found: %w", ErrNotFound)
+	}
+	working := candidates
+	if album != "" {
+		var matched []searchCandidate
+		for _, c := range candidates {
+			if albumMatches(c.album, album) {
+				matched = append(matched, c)
+			}
+		}
+		if len(matched) > 0 {
+			working = matched
+		}
+	}
+	for _, c := range working {
+		if c.synced {
+			return c.id, nil
+		}
+	}
+	return working[0].id, nil
+}
 
 // trackFromEntry decodes one ajaxEntry's base64 payload into synced lines via
 // parseLRC. It returns ok=false when the payload is empty, undecodable, or
