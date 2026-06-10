@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
 
@@ -39,6 +40,28 @@ func touchFile(t *testing.T, dir, name string) {
 	}
 }
 
+// writeInstrumentalTxt creates a .txt sidecar in dir with the plain instrumental
+// marker (matching what lyrics.writeInstrumental emits: marker + newline).
+func writeInstrumentalTxt(t *testing.T, dir, name string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(lyrics.InstrumentalMarker+"\n"), 0o644); err != nil {
+		t.Fatalf("writeInstrumentalTxt %s: %v", path, err)
+	}
+}
+
+// writeRenamedLRCInstrumentalTxt creates a .txt sidecar in dir that looks like a
+// .lrc file renamed to .txt (LRC tag headers followed by the marker line).
+// This is the format produced by the #199 cleanup of the ~2 k incorrectly-written .lrc files.
+func writeRenamedLRCInstrumentalTxt(t *testing.T, dir, name string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	content := "[by:fashni]\n[ar:X]\n[ti:Y]\n[al:Z]\n[length:00:01]\n[00:00.00]" + lyrics.InstrumentalMarker + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writeRenamedLRCInstrumentalTxt %s: %v", path, err)
+	}
+}
+
 // TestGetSongDir_SkipLogic covers the 12-case skip-logic matrix:
 // flags: (update, upgrade) × file states: (none, lrcOnly, txtOnly, both).
 //
@@ -66,12 +89,14 @@ func touchFile(t *testing.T, dir, name string) {
 //	  (same as update=true, upgrade=false — all four cases enqueue)
 func TestGetSongDir_SkipLogic(t *testing.T) {
 	tests := []struct {
-		name      string
-		update    bool
-		upgrade   bool
-		lrcExists bool
-		txtExists bool
-		wantQueue bool
+		name              string
+		update            bool
+		upgrade           bool
+		lrcExists         bool
+		txtExists         bool
+		txtIsInstrumental bool
+		txtIsRenamedLRC   bool
+		wantQueue         bool
 	}{
 		// update=false, upgrade=false
 		{name: "no_flags_no_files", update: false, upgrade: false, lrcExists: false, txtExists: false, wantQueue: true},
@@ -84,12 +109,19 @@ func TestGetSongDir_SkipLogic(t *testing.T) {
 		{name: "upgrade_lrc_only", update: false, upgrade: true, lrcExists: true, txtExists: false, wantQueue: false},
 		{name: "upgrade_txt_only", update: false, upgrade: true, lrcExists: false, txtExists: true, wantQueue: true},
 		{name: "upgrade_both", update: false, upgrade: true, lrcExists: true, txtExists: true, wantQueue: false},
+		// Instrumental .txt markers are terminal -- must not be re-queued even with --upgrade.
+		{name: "upgrade_txt_only_instrumental", update: false, upgrade: true, lrcExists: false, txtExists: true, txtIsInstrumental: true, wantQueue: false},
+		// Files renamed from .lrc carry LRC tag headers before the marker line --
+		// substring match must still detect them as instrumental and skip.
+		{name: "upgrade_txt_renamed_lrc_instrumental", update: false, upgrade: true, lrcExists: false, txtExists: true, txtIsRenamedLRC: true, wantQueue: false},
 
 		// update=true, upgrade=false
 		{name: "update_no_files", update: true, upgrade: false, lrcExists: false, txtExists: false, wantQueue: true},
 		{name: "update_lrc_only", update: true, upgrade: false, lrcExists: true, txtExists: false, wantQueue: true},
 		{name: "update_txt_only", update: true, upgrade: false, lrcExists: false, txtExists: true, wantQueue: true},
 		{name: "update_both", update: true, upgrade: false, lrcExists: true, txtExists: true, wantQueue: true},
+		// --update is an explicit full re-fetch; instrumental markers do not block it.
+		{name: "update_txt_only_instrumental", update: true, upgrade: false, lrcExists: false, txtExists: true, txtIsInstrumental: true, wantQueue: true},
 	}
 
 	for _, tc := range tests {
@@ -100,7 +132,14 @@ func TestGetSongDir_SkipLogic(t *testing.T) {
 				touchFile(t, dir, "track.lrc")
 			}
 			if tc.txtExists {
-				touchFile(t, dir, "track.txt")
+				switch {
+				case tc.txtIsRenamedLRC:
+					writeRenamedLRCInstrumentalTxt(t, dir, "track.txt")
+				case tc.txtIsInstrumental:
+					writeInstrumentalTxt(t, dir, "track.txt")
+				default:
+					touchFile(t, dir, "track.txt")
+				}
 			}
 
 			q := queue.NewInputsQueue()
