@@ -86,17 +86,20 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	var writeContent func(*bufio.Writer) error
 	var writeTags bool
 	var synced bool
+	// kind labels the per-track outcome on the "lyrics saved" log so instrumental
+	// writes are visible at the default Info level, not just under Debug.
+	var kind string
 	switch {
 	case len(song.Subtitles.Lines) > 0:
-		slog.Debug("saving synced lyrics")
+		kind = "synced"
 		writeContent = func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual) }
 		writeTags = true
 		synced = true
 	case song.Lyrics.LyricsBody != "":
-		slog.Debug("saving unsynced lyrics")
+		kind = "unsynced"
 		writeContent = func(buf *bufio.Writer) error { return writeUnsyncedLRC(song, buf) }
 	case song.Track.Instrumental == 1:
-		slog.Debug("saving instrumental")
+		kind = "instrumental"
 		writeContent = writeInstrumental
 		// Instrumentals are a plain .txt marker: no timestamp, no tag headers.
 	default:
@@ -231,7 +234,8 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 			slog.Warn("could not remove stale sidecar", "path", stale, "error", err)
 		}
 	}
-	slog.Info("lyrics saved", "path", fp)
+	slog.Info("lyrics saved", "path", fp, "kind", kind,
+		"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 	return nil
 }
 
