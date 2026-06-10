@@ -767,10 +767,13 @@ func encodeSong(song models.Song) (string, error) {
 func decodeSong(s string, fallback models.Track) models.Song {
 	var song models.Song
 	if err := json.Unmarshal([]byte(s), &song); err == nil && (song.Track.ArtistName != "" || song.Track.TrackName != "") {
-		// Always pair cached lyrics with the live file's track metadata so that
-		// .lrc tags ([ar:]/[al:]/[ti:]) reflect the actual file being processed,
-		// not whatever was stored from a previous (possibly different) lookup.
-		song.Track = fallback
+		// Pair cached lyrics with the live file's identity so .lrc [ar:]/[ti:]/[al:]
+		// tags reflect the actual file, but PRESERVE the cached recording attributes
+		// (Instrumental, HasLyrics, HasSubtitles, TrackLength) - fallback does not
+		// carry them, and overwriting Instrumental=1 would break cached-instrumental output.
+		song.Track.ArtistName = fallback.ArtistName
+		song.Track.TrackName = fallback.TrackName
+		song.Track.AlbumName = fallback.AlbumName
 		return song
 	}
 	return models.Song{

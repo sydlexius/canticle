@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1494,6 +1495,62 @@ func TestConfidence(t *testing.T) {
 
 	if score := Confidence(want, got); score != 1 {
 		t.Fatalf("Confidence() = %v; want 1", score)
+	}
+}
+
+// TestDecodeSong_InstrumentalPreserved verifies that a cached instrumental Song
+// (Track.Instrumental=1) retains its recording attributes after decodeSong pairs
+// it with a live fallback track that carries only file-identity fields
+// (ArtistName/TrackName/AlbumName) but has Instrumental=0.
+//
+// This is a regression guard: song.Track = fallback would wipe Instrumental=1
+// and break the writer's `song.Track.Instrumental == 1` branch on cache hits.
+func TestDecodeSong_InstrumentalPreserved(t *testing.T) {
+	cached := models.Song{
+		Track: models.Track{
+			ArtistName:   "Cached Artist",
+			TrackName:    "Cached Title",
+			AlbumName:    "Cached Album",
+			Instrumental: 1,
+			HasLyrics:    0,
+			HasSubtitles: 0,
+			TrackLength:  240,
+		},
+	}
+	b, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	fallback := models.Track{
+		ArtistName:   "Live Artist",
+		TrackName:    "Live Title",
+		AlbumName:    "Live Album",
+		Instrumental: 0, // file tag does not carry this; must NOT overwrite cached value
+	}
+
+	got := decodeSong(string(b), fallback)
+
+	// Identity fields must come from the live file.
+	if got.Track.ArtistName != "Live Artist" {
+		t.Errorf("ArtistName = %q; want %q", got.Track.ArtistName, "Live Artist")
+	}
+	if got.Track.TrackName != "Live Title" {
+		t.Errorf("TrackName = %q; want %q", got.Track.TrackName, "Live Title")
+	}
+	if got.Track.AlbumName != "Live Album" {
+		t.Errorf("AlbumName = %q; want %q", got.Track.AlbumName, "Live Album")
+	}
+
+	// Recording attributes must come from the cached blob, not fallback.
+	if got.Track.Instrumental != 1 {
+		t.Errorf("Instrumental = %d; want 1 (must not be overwritten by fallback)", got.Track.Instrumental)
+	}
+	if got.Track.HasSubtitles != 0 {
+		t.Errorf("HasSubtitles = %d; want 0", got.Track.HasSubtitles)
+	}
+	if got.Track.TrackLength != 240 {
+		t.Errorf("TrackLength = %d; want 240", got.Track.TrackLength)
 	}
 }
 
