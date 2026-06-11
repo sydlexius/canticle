@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
 	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
+	"github.com/sydlexius/mxlrcgo-svc/internal/detector"
 	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
@@ -99,6 +101,12 @@ type Worker struct {
 	writer                lyrics.Writer
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
+	// audioDetector, when non-nil, is invoked on provider misses to detect
+	// instrumental tracks via an external AudioSet classifier sidecar. It is
+	// optional (nil means disabled) and errors from it are non-fatal (the miss
+	// path continues normally). Enabled via EnableAudioDetector.
+	audioDetector       detector.Detector
+	detectMinConfidence float64
 	// scriptGuard, when non-nil and Enabled, rejects fetched lyrics whose script
 	// mix falls outside the configured allowlist. Named scriptGuard (not guard)
 	// to avoid colliding with the guardReject helper. Default nil (no guard).
@@ -378,6 +386,16 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 	}
 }
 
+// EnableAudioDetector configures the optional audio-based instrumental detector.
+// When enabled, the detector is invoked on provider misses (no lyrics found) to
+// determine whether the track is instrumental. A nil detector disables the feature.
+func (w *Worker) EnableAudioDetector(d detector.Detector, minConfidence float64) {
+	w.audioDetector = d
+	if minConfidence > 0 && minConfidence <= 1 {
+		w.detectMinConfidence = minConfidence
+	}
+}
+
 // EnableGuard configures the language/script guard used to reject lyric
 // results whose script mix falls outside the configured allowlist.
 func (w *Worker) EnableGuard(g ScriptGuard) {
@@ -533,6 +551,56 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// otherwise healthily reaching the provider and getting clean misses.
 		if musixmatch.IsBenignMiss(err) {
 			slog.Debug("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
+			// Optional audio-based instrumental detection. Only runs on provider
+			// misses (no lyrics and not already flagged instrumental). Errors are
+			// non-fatal: starvation of the detector sidecar is acceptable; the miss
+			// path continues unchanged when the detector is absent or fails.
+			instrumental, detErr := w.detectInstrumental(ctx, item)
+			if detErr != nil {
+				slog.Warn("worker instrumental detection failed; treating as miss", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", detErr)
+			}
+			if instrumental {
+				slog.Info("worker audio detector: instrumental track confirmed; writing marker", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "kind", "instrumental")
+				instrumentalSong := models.Song{
+					Track: models.Track{
+						ArtistName:   resolvedTrack.ArtistName,
+						TrackName:    resolvedTrack.TrackName,
+						AlbumName:    resolvedTrack.AlbumName,
+						Instrumental: 1,
+					},
+				}
+				encoded, encErr := encodeSong(instrumentalSong)
+				if encErr != nil {
+					slog.Warn("worker instrumental detection: cache encode failed; treating as miss", "id", item.ID, "error", encErr)
+				} else {
+					// duration_bucket=0: unknown-duration sentinel matching the existing miss path.
+					if storeErr := w.cache.Store(context.WithoutCancel(ctx), resolvedTrack.ArtistName, resolvedTrack.TrackName, 0, encoded); storeErr != nil {
+						slog.Warn("worker instrumental detection: cache store failed; continuing to write", "id", item.ID, "error", storeErr)
+					}
+				}
+				for _, p := range outputPaths(item.Inputs) {
+					if writeErr := w.writer.WriteLRC(instrumentalSong, p.Filename, p.Outdir); writeErr != nil {
+						writeErr = fmt.Errorf("worker: write instrumental item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, writeErr)
+						slog.Warn("worker instrumental detection: write failed; treating as miss", "id", item.ID, "error", writeErr)
+						if derr := w.requeueDeferred(ctx, item, err); derr != nil {
+							return derr
+						}
+						w.consecutiveFailures = 0
+						return nil
+					}
+				}
+				ctxNoCancel := context.WithoutCancel(ctx)
+				if completeErr := w.queue.Complete(ctxNoCancel, item.ID); completeErr != nil {
+					cause := fmt.Errorf("worker: complete instrumental item %d: %w", item.ID, completeErr)
+					w.consecutiveFailures++
+					if _, failErr := w.queue.Fail(ctxNoCancel, item.ID, cause); failErr != nil {
+						return fmt.Errorf("worker: complete instrumental item %d and mark failed: %w", item.ID, errors.Join(cause, failErr))
+					}
+					return fmt.Errorf("worker: complete instrumental item %d (marked failed): %w", item.ID, cause)
+				}
+				w.consecutiveFailures = 0
+				return nil
+			}
 			if derr := w.requeueDeferred(ctx, item, err); derr != nil {
 				return derr
 			}
@@ -621,6 +689,21 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 		return fmt.Errorf("worker: verification rejected lyrics: similarity %.3f", res.Similarity)
 	}
 	return nil
+}
+
+// detectInstrumental invokes the audio detector on the item's source path.
+// It returns (false, nil) when the detector is disabled or the source path is
+// absent. Any detector error is returned non-fatally: the caller logs a warning
+// and falls through to normal miss handling.
+func (w *Worker) detectInstrumental(ctx context.Context, item queue.WorkItem) (bool, error) {
+	if w.audioDetector == nil || strings.TrimSpace(item.Inputs.SourcePath) == "" {
+		return false, nil
+	}
+	res, err := w.audioDetector.Detect(ctx, item.Inputs.SourcePath)
+	if err != nil {
+		return false, err
+	}
+	return res.Instrumental, nil
 }
 
 // song looks up or fetches lyrics for track. The caller is responsible for

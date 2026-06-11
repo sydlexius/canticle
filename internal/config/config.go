@@ -15,15 +15,16 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	API          APIConfig          `toml:"api"`
-	Output       OutputConfig       `toml:"output"`
-	DB           DBConfig           `toml:"db"`
-	Server       ServerConfig       `toml:"server"`
-	Providers    ProvidersConfig    `toml:"providers"`
-	Verification VerificationConfig `toml:"verification"`
-	Guard        GuardConfig        `toml:"guard"`
-	Queue        QueueConfig        `toml:"queue"`
-	Logging      LoggingConfig      `toml:"logging"`
+	API                  APIConfig                  `toml:"api"`
+	Output               OutputConfig               `toml:"output"`
+	DB                   DBConfig                   `toml:"db"`
+	Server               ServerConfig               `toml:"server"`
+	Providers            ProvidersConfig            `toml:"providers"`
+	Verification         VerificationConfig         `toml:"verification"`
+	InstrumentalDetector InstrumentalDetectorConfig `toml:"instrumental_detector"`
+	Guard                GuardConfig                `toml:"guard"`
+	Queue                QueueConfig                `toml:"queue"`
+	Logging              LoggingConfig              `toml:"logging"`
 }
 
 // LoggingConfig holds log-output settings.
@@ -192,6 +193,41 @@ type VerificationConfig struct {
 	MinSimilarity         float64 `toml:"min_similarity"`
 }
 
+// InstrumentalDetectorConfig holds optional audio-based instrumental detection
+// settings. When Enabled is false (the default) no HTTP calls are made and the
+// feature is completely dormant. The detector runs ONLY on provider misses and
+// never overrides provider-supplied data.
+type InstrumentalDetectorConfig struct {
+	// Enabled activates the instrumental detector sidecar. Default false.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_ENABLED.
+	Enabled bool `toml:"enabled"`
+	// ClassifierURL is the base URL of the AudioSet classifier sidecar
+	// (e.g. "http://yamnet:8080"). Required when Enabled is true.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL.
+	ClassifierURL string `toml:"classifier_url"`
+	// FFmpegPath is the path to the ffmpeg binary used for audio sampling.
+	// Default "ffmpeg". Override: MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH.
+	FFmpegPath string `toml:"ffmpeg_path"`
+	// SampleDurationSeconds is the length of the audio sample extracted for
+	// classification, clamped to [30, 60]. Default 30.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS.
+	SampleDurationSeconds int `toml:"sample_duration_seconds"`
+	// MinConfidence is the minimum summed class probability required to mark a
+	// track instrumental. Values outside (0, 1] are reset to 0.90. Default 0.90.
+	// The threshold is intentionally conservative: false-instrumental errors
+	// (marking a vocal track as instrumental) are worse than false-misses.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE.
+	MinConfidence float64 `toml:"min_confidence"`
+	// InstrumentalClasses is the list of AudioSet class names whose probabilities
+	// are summed and compared against MinConfidence. Default ["Music", "Musical
+	// instrument"]. Override: MXLRC_INSTRUMENTAL_DETECTOR_CLASSES (CSV).
+	InstrumentalClasses []string `toml:"instrumental_classes"`
+	// CooldownSeconds is the minimum gap between consecutive inference calls.
+	// Default 5. A value of 0 disables the cooldown.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS.
+	CooldownSeconds int `toml:"cooldown_seconds"`
+}
+
 // GuardConfig holds optional language/script guard settings. An empty
 // AcceptedScripts disables the guard.
 type GuardConfig struct {
@@ -237,8 +273,15 @@ func defaults() Config {
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault, RaceWaitSeconds: raceWaitSecondsDefault},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
-		Guard:        GuardConfig{Threshold: guardThresholdDefault},
-		Queue:        QueueConfig{Randomize: true},
+		InstrumentalDetector: InstrumentalDetectorConfig{
+			FFmpegPath:            "ffmpeg",
+			SampleDurationSeconds: 30,
+			MinConfidence:         0.90,
+			InstrumentalClasses:   []string{"Music", "Musical instrument"},
+			CooldownSeconds:       5,
+		},
+		Guard: GuardConfig{Threshold: guardThresholdDefault},
+		Queue: QueueConfig{Randomize: true},
 		Logging: LoggingConfig{
 			Level:      "info",
 			Format:     "text",
@@ -306,6 +349,25 @@ func Load(path string) (Config, error) {
 			}
 			if cfg.Verification.MinSimilarity <= 0 || cfg.Verification.MinSimilarity > 1 {
 				cfg.Verification.MinSimilarity = d.Verification.MinSimilarity
+			}
+			// InstrumentalDetector: restore defaults for zero/blank fields.
+			// Enabled defaults to false, so it is intentionally not re-defaulted.
+			if cfg.InstrumentalDetector.SampleDurationSeconds <= 0 {
+				cfg.InstrumentalDetector.SampleDurationSeconds = d.InstrumentalDetector.SampleDurationSeconds
+			}
+			if cfg.InstrumentalDetector.FFmpegPath == "" {
+				cfg.InstrumentalDetector.FFmpegPath = d.InstrumentalDetector.FFmpegPath
+			}
+			if cfg.InstrumentalDetector.MinConfidence <= 0 || cfg.InstrumentalDetector.MinConfidence > 1 {
+				cfg.InstrumentalDetector.MinConfidence = d.InstrumentalDetector.MinConfidence
+			}
+			if len(cfg.InstrumentalDetector.InstrumentalClasses) == 0 {
+				cfg.InstrumentalDetector.InstrumentalClasses = d.InstrumentalDetector.InstrumentalClasses
+			}
+			// CooldownSeconds=0 is a valid user value (disable cooldown), so it is
+			// not re-defaulted. Negative values are clamped to 0.
+			if cfg.InstrumentalDetector.CooldownSeconds < 0 {
+				cfg.InstrumentalDetector.CooldownSeconds = 0
 			}
 			// CircuitOpenDuration: 0 means "not set in file"; restore the
 			// default so users copying config.example.toml don't disable
@@ -393,7 +455,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -576,6 +638,47 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_VERIFICATION_MIN_SIMILARITY", "value", v, "current", cfg.Verification.MinSimilarity) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.MinSimilarity = n
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_ENABLED", "value", v, "current", cfg.InstrumentalDetector.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.Enabled = enabled
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL"); v != "" {
+		cfg.InstrumentalDetector.ClassifierURL = v
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH"); v != "" {
+		cfg.InstrumentalDetector.FFmpegPath = v
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS", "value", v, "current", cfg.InstrumentalDetector.SampleDurationSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.SampleDurationSeconds = n
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || n <= 0 || n > 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "value", v, "current", cfg.InstrumentalDetector.MinConfidence) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.MinConfidence = n
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSES"); v != "" {
+		cfg.InstrumentalDetector.InstrumentalClasses = splitCSV(v)
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "value", v, "current", cfg.InstrumentalDetector.CooldownSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.CooldownSeconds = n
 		}
 	}
 	if v := os.Getenv("MXLRC_GUARD_ACCEPTED_SCRIPTS"); v != "" {

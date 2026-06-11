@@ -216,6 +216,69 @@ func TestConfigureWorkerGuardAcceptsNilGuard(t *testing.T) {
 	configureWorkerGuard(w, nil)
 }
 
+// TestNewAudioDetectorDisabledReturnsNil verifies that when
+// InstrumentalDetector.Enabled is false (the default), newAudioDetector returns
+// (nil, nil) and does not attempt to locate ffmpeg.
+func TestNewAudioDetectorDisabledReturnsNil(t *testing.T) {
+	got, err := newAudioDetector(config.Config{
+		InstrumentalDetector: config.InstrumentalDetectorConfig{
+			Enabled:    false,
+			FFmpegPath: "/path/that/does/not/exist",
+		},
+	})
+	if err != nil {
+		t.Fatalf("newAudioDetector: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("newAudioDetector = %#v; want nil (disabled)", got)
+	}
+}
+
+// TestNewAudioDetectorEnabledWithoutFFmpegErrors verifies that enabling the
+// detector with a non-existent ffmpeg path returns an error (not a nil detector).
+func TestNewAudioDetectorEnabledWithoutFFmpegErrors(t *testing.T) {
+	_, err := newAudioDetector(config.Config{
+		InstrumentalDetector: config.InstrumentalDetectorConfig{
+			Enabled:               true,
+			ClassifierURL:         "http://yamnet:8080",
+			FFmpegPath:            filepath.Join(t.TempDir(), "nonexistent-ffmpeg"),
+			SampleDurationSeconds: 30,
+			MinConfidence:         0.90,
+			InstrumentalClasses:   []string{"Music"},
+			CooldownSeconds:       5,
+		},
+	})
+	if err == nil {
+		t.Fatal("newAudioDetector with missing ffmpeg returned nil error; want error")
+	}
+}
+
+// TestNewAudioDetectorEnabledWithoutClassifierURLErrors verifies that enabling
+// the detector with a blank classifier URL returns an error.
+func TestNewAudioDetectorEnabledWithoutClassifierURLErrors(t *testing.T) {
+	_, err := newAudioDetector(config.Config{
+		InstrumentalDetector: config.InstrumentalDetectorConfig{
+			Enabled:               true,
+			ClassifierURL:         "", // blank
+			SampleDurationSeconds: 30,
+			MinConfidence:         0.90,
+			InstrumentalClasses:   []string{"Music"},
+		},
+	})
+	if err == nil {
+		t.Fatal("newAudioDetector with blank ClassifierURL returned nil error; want error")
+	}
+}
+
+// TestConfigureWorkerAudioDetectorAcceptsNilDetector verifies that passing a
+// nil detector to configureWorkerAudioDetector is a no-op and does not panic.
+func TestConfigureWorkerAudioDetectorAcceptsNilDetector(t *testing.T) {
+	w := worker.New(nil, nil, fakeFetcher{}, fakeWriter{})
+	configureWorkerAudioDetector(w, config.Config{
+		InstrumentalDetector: config.InstrumentalDetectorConfig{MinConfidence: 0.90},
+	}, nil)
+}
+
 func TestRunSubcommandHelpShowsSelectedCommand(t *testing.T) {
 	tests := []struct {
 		name string

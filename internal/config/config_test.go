@@ -1312,3 +1312,385 @@ func TestProvidersFallbackOrder(t *testing.T) {
 		}
 	})
 }
+
+// TestLoad_InstrumentalDetectorDefaults verifies built-in defaults for the
+// InstrumentalDetectorConfig section when no TOML or env overrides are present.
+func TestLoad_InstrumentalDetectorDefaults(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.Enabled {
+		t.Error("InstrumentalDetector.Enabled = true; want false (disabled by default)")
+	}
+	if cfg.InstrumentalDetector.FFmpegPath != "ffmpeg" {
+		t.Errorf("InstrumentalDetector.FFmpegPath = %q; want ffmpeg", cfg.InstrumentalDetector.FFmpegPath)
+	}
+	if cfg.InstrumentalDetector.SampleDurationSeconds != 30 {
+		t.Errorf("InstrumentalDetector.SampleDurationSeconds = %d; want 30", cfg.InstrumentalDetector.SampleDurationSeconds)
+	}
+	if cfg.InstrumentalDetector.MinConfidence != 0.90 {
+		t.Errorf("InstrumentalDetector.MinConfidence = %v; want 0.90", cfg.InstrumentalDetector.MinConfidence)
+	}
+	if len(cfg.InstrumentalDetector.InstrumentalClasses) != 2 ||
+		cfg.InstrumentalDetector.InstrumentalClasses[0] != "Music" ||
+		cfg.InstrumentalDetector.InstrumentalClasses[1] != "Musical instrument" {
+		t.Errorf("InstrumentalDetector.InstrumentalClasses = %v; want [Music, Musical instrument]", cfg.InstrumentalDetector.InstrumentalClasses)
+	}
+	if cfg.InstrumentalDetector.CooldownSeconds != 5 {
+		t.Errorf("InstrumentalDetector.CooldownSeconds = %d; want 5", cfg.InstrumentalDetector.CooldownSeconds)
+	}
+	if cfg.InstrumentalDetector.ClassifierURL != "" {
+		t.Errorf("InstrumentalDetector.ClassifierURL = %q; want empty (not set)", cfg.InstrumentalDetector.ClassifierURL)
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvEnabled verifies MXLRC_INSTRUMENTAL_DETECTOR_ENABLED
+// overrides the default disabled state.
+func TestLoad_InstrumentalDetectorEnvEnabled(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ENABLED", "true")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.InstrumentalDetector.Enabled {
+		t.Error("InstrumentalDetector.Enabled = false; want true (env override)")
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvEnabledInvalidIgnored verifies that an invalid
+// MXLRC_INSTRUMENTAL_DETECTOR_ENABLED value falls back to the current (default false).
+func TestLoad_InstrumentalDetectorEnvEnabledInvalidIgnored(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ENABLED", "notabool")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.Enabled {
+		t.Error("InstrumentalDetector.Enabled = true; want false (invalid env ignored)")
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvClassifierURL verifies MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL.
+func TestLoad_InstrumentalDetectorEnvClassifierURL(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL", "http://yamnet:8080")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.ClassifierURL != "http://yamnet:8080" {
+		t.Errorf("ClassifierURL = %q; want http://yamnet:8080", cfg.InstrumentalDetector.ClassifierURL)
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvFFmpegPath verifies MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH.
+func TestLoad_InstrumentalDetectorEnvFFmpegPath(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH", "/opt/ffmpeg")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.FFmpegPath != "/opt/ffmpeg" {
+		t.Errorf("FFmpegPath = %q; want /opt/ffmpeg", cfg.InstrumentalDetector.FFmpegPath)
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvSampleDuration verifies
+// MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS. Valid positive values
+// override the default; invalid/non-positive values are ignored.
+func TestLoad_InstrumentalDetectorEnvSampleDuration(t *testing.T) {
+	t.Run("valid override", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS", "45")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.SampleDurationSeconds != 45 {
+			t.Errorf("SampleDurationSeconds = %d; want 45", cfg.InstrumentalDetector.SampleDurationSeconds)
+		}
+	})
+
+	t.Run("invalid value is ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS", "notanumber")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.SampleDurationSeconds != 30 {
+			t.Errorf("SampleDurationSeconds = %d; want 30 (default after invalid env)", cfg.InstrumentalDetector.SampleDurationSeconds)
+		}
+	})
+
+	t.Run("zero is ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS", "0")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.SampleDurationSeconds != 30 {
+			t.Errorf("SampleDurationSeconds = %d; want 30 (zero is invalid)", cfg.InstrumentalDetector.SampleDurationSeconds)
+		}
+	})
+}
+
+// TestLoad_InstrumentalDetectorEnvMinConfidence verifies
+// MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE. Valid values in (0,1] override the
+// default; out-of-range values are ignored.
+func TestLoad_InstrumentalDetectorEnvMinConfidence(t *testing.T) {
+	t.Run("valid override", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "0.75")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.MinConfidence != 0.75 {
+			t.Errorf("MinConfidence = %v; want 0.75", cfg.InstrumentalDetector.MinConfidence)
+		}
+	})
+
+	t.Run("zero is ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "0")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.MinConfidence != 0.90 {
+			t.Errorf("MinConfidence = %v; want 0.90 (zero ignored)", cfg.InstrumentalDetector.MinConfidence)
+		}
+	})
+
+	t.Run("above 1 is ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "1.5")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.MinConfidence != 0.90 {
+			t.Errorf("MinConfidence = %v; want 0.90 (>1 ignored)", cfg.InstrumentalDetector.MinConfidence)
+		}
+	})
+
+	t.Run("not a number is ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "bad")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.MinConfidence != 0.90 {
+			t.Errorf("MinConfidence = %v; want 0.90 (bad value ignored)", cfg.InstrumentalDetector.MinConfidence)
+		}
+	})
+}
+
+// TestLoad_InstrumentalDetectorEnvClasses verifies MXLRC_INSTRUMENTAL_DETECTOR_CLASSES
+// accepts a CSV of class names.
+func TestLoad_InstrumentalDetectorEnvClasses(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSES", "Music, Silence, Wind instrument")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"Music", "Silence", "Wind instrument"}
+	if len(cfg.InstrumentalDetector.InstrumentalClasses) != len(want) {
+		t.Fatalf("InstrumentalClasses = %v; want %v", cfg.InstrumentalDetector.InstrumentalClasses, want)
+	}
+	for i, v := range want {
+		if cfg.InstrumentalDetector.InstrumentalClasses[i] != v {
+			t.Errorf("InstrumentalClasses[%d] = %q; want %q", i, cfg.InstrumentalDetector.InstrumentalClasses[i], v)
+		}
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvCooldownSeconds verifies
+// MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS. Zero is a valid value (disables
+// cooldown); negative values are ignored.
+func TestLoad_InstrumentalDetectorEnvCooldownSeconds(t *testing.T) {
+	t.Run("positive override", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "10")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.CooldownSeconds != 10 {
+			t.Errorf("CooldownSeconds = %d; want 10", cfg.InstrumentalDetector.CooldownSeconds)
+		}
+	})
+
+	t.Run("zero is valid (disables cooldown)", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "0")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.CooldownSeconds != 0 {
+			t.Errorf("CooldownSeconds = %d; want 0 (zero disables cooldown)", cfg.InstrumentalDetector.CooldownSeconds)
+		}
+	})
+
+	t.Run("negative is ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "-3")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.CooldownSeconds != 5 {
+			t.Errorf("CooldownSeconds = %d; want 5 (default after negative env)", cfg.InstrumentalDetector.CooldownSeconds)
+		}
+	})
+}
+
+// TestLoad_InstrumentalDetectorTOMLMerge verifies that an [instrumental_detector]
+// section in the TOML file is decoded correctly and re-default logic kicks in for
+// blank/zero fields.
+func TestLoad_InstrumentalDetectorTOMLMerge(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	content := `[instrumental_detector]
+enabled = true
+classifier_url = "http://yamnet:8080"
+ffmpeg_path = "/usr/bin/ffmpeg"
+sample_duration_seconds = 45
+min_confidence = 0.85
+instrumental_classes = ["Music", "Silence"]
+cooldown_seconds = 10
+`
+	if err := os.WriteFile(cfgFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.InstrumentalDetector.Enabled {
+		t.Error("InstrumentalDetector.Enabled = false; want true")
+	}
+	if cfg.InstrumentalDetector.ClassifierURL != "http://yamnet:8080" {
+		t.Errorf("ClassifierURL = %q; want http://yamnet:8080", cfg.InstrumentalDetector.ClassifierURL)
+	}
+	if cfg.InstrumentalDetector.FFmpegPath != "/usr/bin/ffmpeg" {
+		t.Errorf("FFmpegPath = %q; want /usr/bin/ffmpeg", cfg.InstrumentalDetector.FFmpegPath)
+	}
+	if cfg.InstrumentalDetector.SampleDurationSeconds != 45 {
+		t.Errorf("SampleDurationSeconds = %d; want 45", cfg.InstrumentalDetector.SampleDurationSeconds)
+	}
+	if cfg.InstrumentalDetector.MinConfidence != 0.85 {
+		t.Errorf("MinConfidence = %v; want 0.85", cfg.InstrumentalDetector.MinConfidence)
+	}
+	if len(cfg.InstrumentalDetector.InstrumentalClasses) != 2 ||
+		cfg.InstrumentalDetector.InstrumentalClasses[0] != "Music" ||
+		cfg.InstrumentalDetector.InstrumentalClasses[1] != "Silence" {
+		t.Errorf("InstrumentalClasses = %v; want [Music Silence]", cfg.InstrumentalDetector.InstrumentalClasses)
+	}
+	if cfg.InstrumentalDetector.CooldownSeconds != 10 {
+		t.Errorf("CooldownSeconds = %d; want 10", cfg.InstrumentalDetector.CooldownSeconds)
+	}
+}
+
+// TestLoad_InstrumentalDetectorTOMLZeroFieldsReDefault verifies that zero/blank
+// fields in the TOML file trigger re-default logic for the
+// InstrumentalDetectorConfig. Enabled is intentionally NOT re-defaulted (false is
+// the correct off state); sample_duration=0 gets the default (30); ffmpeg_path=""
+// gets "ffmpeg"; min_confidence out of range gets 0.90; empty classes get the
+// built-in defaults; negative cooldown is clamped to 0.
+func TestLoad_InstrumentalDetectorTOMLZeroFieldsReDefault(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	content := `[instrumental_detector]
+sample_duration_seconds = 0
+ffmpeg_path = ""
+min_confidence = 0
+instrumental_classes = []
+cooldown_seconds = -5
+`
+	if err := os.WriteFile(cfgFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Enabled stays false (zero value is the correct default).
+	if cfg.InstrumentalDetector.Enabled {
+		t.Error("InstrumentalDetector.Enabled = true; want false (zero value honored)")
+	}
+	// sample_duration_seconds=0 is re-defaulted to 30.
+	if cfg.InstrumentalDetector.SampleDurationSeconds != 30 {
+		t.Errorf("SampleDurationSeconds = %d; want 30 (zero re-defaulted)", cfg.InstrumentalDetector.SampleDurationSeconds)
+	}
+	// ffmpeg_path="" is re-defaulted to "ffmpeg".
+	if cfg.InstrumentalDetector.FFmpegPath != "ffmpeg" {
+		t.Errorf("FFmpegPath = %q; want ffmpeg (blank re-defaulted)", cfg.InstrumentalDetector.FFmpegPath)
+	}
+	// min_confidence=0 is out of (0,1]; re-defaulted to 0.90.
+	if cfg.InstrumentalDetector.MinConfidence != 0.90 {
+		t.Errorf("MinConfidence = %v; want 0.90 (zero out-of-range re-defaulted)", cfg.InstrumentalDetector.MinConfidence)
+	}
+	// Empty classes are re-defaulted to the built-in list.
+	if len(cfg.InstrumentalDetector.InstrumentalClasses) != 2 {
+		t.Errorf("InstrumentalClasses = %v; want default [Music, Musical instrument]", cfg.InstrumentalDetector.InstrumentalClasses)
+	}
+	// Negative cooldown is clamped to 0.
+	if cfg.InstrumentalDetector.CooldownSeconds != 0 {
+		t.Errorf("CooldownSeconds = %d; want 0 (negative clamped)", cfg.InstrumentalDetector.CooldownSeconds)
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvWinsOverTOML verifies that env vars override
+// values set in the TOML file for the InstrumentalDetectorConfig.
+func TestLoad_InstrumentalDetectorEnvWinsOverTOML(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	content := `[instrumental_detector]
+enabled = true
+classifier_url = "http://file-classifier:8080"
+min_confidence = 0.85
+`
+	if err := os.WriteFile(cfgFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ENABLED", "false")
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL", "http://env-classifier:9090")
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "0.95")
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.Enabled {
+		t.Error("InstrumentalDetector.Enabled = true; want false (env override)")
+	}
+	if cfg.InstrumentalDetector.ClassifierURL != "http://env-classifier:9090" {
+		t.Errorf("ClassifierURL = %q; want env value", cfg.InstrumentalDetector.ClassifierURL)
+	}
+	if cfg.InstrumentalDetector.MinConfidence != 0.95 {
+		t.Errorf("MinConfidence = %v; want 0.95 (env override)", cfg.InstrumentalDetector.MinConfidence)
+	}
+}

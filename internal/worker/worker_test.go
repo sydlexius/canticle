@@ -13,6 +13,7 @@ import (
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
 	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
+	"github.com/sydlexius/mxlrcgo-svc/internal/detector"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
 	"github.com/sydlexius/mxlrcgo-svc/internal/orchestrator"
@@ -1762,5 +1763,294 @@ func TestSetMaxMissAttemptsClampNegative(t *testing.T) {
 	w.SetMaxMissAttempts(-5)
 	if w.maxMissAttempts != 0 {
 		t.Fatalf("maxMissAttempts = %d; want 0 after clamping -5", w.maxMissAttempts)
+	}
+}
+
+// fakeDetector is a test detector.Detector that returns a fixed result or error.
+type fakeDetector struct {
+	instrumental bool
+	err          error
+	calls        []string
+}
+
+func (d *fakeDetector) Detect(_ context.Context, audioPath string) (detector.Result, error) {
+	d.calls = append(d.calls, audioPath)
+	if d.err != nil {
+		return detector.Result{}, d.err
+	}
+	return detector.Result{Instrumental: d.instrumental}, nil
+}
+
+// TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes verifies that when
+// the audio detector returns instrumental=true on a benign miss, the worker
+// writes an instrumental marker, stores it in the cache, and completes the item.
+func TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
+	audioPath := "/music/interlude.flac"
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 200,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "interlude.lrc",
+			SourcePath: audioPath,
+		},
+	}}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
+	writer := &fakeWriter{}
+	det := &fakeDetector{instrumental: true}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det, 0.90)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Detector must have been called with the source path.
+	if len(det.calls) != 1 || det.calls[0] != audioPath {
+		t.Fatalf("detector calls = %v; want [%s]", det.calls, audioPath)
+	}
+	// Item must be completed, not deferred or failed.
+	if len(q.completed) != 1 || q.completed[0] != 200 {
+		t.Fatalf("completed = %v; want [200]", q.completed)
+	}
+	if len(q.deferred) != 0 {
+		t.Fatalf("deferred = %v; want none (instrumental: completed not deferred)", q.deferred)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none", q.failed)
+	}
+	// Writer must have produced exactly one write (the instrumental .txt).
+	if len(writer.writes) != 1 {
+		t.Fatalf("writes = %v; want one instrumental marker write", writer.writes)
+	}
+	// Cache must have stored the encoded instrumental song.
+	if len(c.stores) != 1 {
+		t.Fatalf("cache stores = %d; want 1 (instrumental encoded result stored)", len(c.stores))
+	}
+	if c.stores[0].artist != "Composer" || c.stores[0].title != "Interlude" {
+		t.Fatalf("cache store key = %+v; want Composer/Interlude", c.stores[0])
+	}
+	// Consecutive failure counter must remain 0.
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0", w.consecutiveFailures)
+	}
+}
+
+// TestRunOnceDetectorReturnsFalseDefersNormally verifies that when the detector
+// returns instrumental=false on a benign miss, the worker falls through to the
+// normal deferred miss path (no write, item deferred).
+func TestRunOnceDetectorReturnsFalseDefersNormally(t *testing.T) {
+	track := models.Track{ArtistName: "Singer", TrackName: "Song"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 201,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "song.lrc",
+			SourcePath: "/music/song.flac",
+		},
+	}}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNoLyrics}
+	writer := &fakeWriter{}
+	det := &fakeDetector{instrumental: false}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det, 0.90)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(det.calls) != 1 {
+		t.Fatalf("detector calls = %d; want 1", len(det.calls))
+	}
+	// Not instrumental: no write, no cache store, item deferred.
+	if len(writer.writes) != 0 {
+		t.Fatalf("writes = %v; want none (not instrumental)", writer.writes)
+	}
+	if len(c.stores) != 0 {
+		t.Fatalf("cache stores = %d; want 0 (not instrumental)", len(c.stores))
+	}
+	if len(q.deferred) != 1 || q.deferred[0] != 201 {
+		t.Fatalf("deferred = %v; want [201]", q.deferred)
+	}
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none", q.completed)
+	}
+}
+
+// TestRunOnceDetectorErrorTreatsAsMiss verifies that a detector error is
+// non-fatal: it is logged and the normal miss path (deferred) proceeds unchanged.
+func TestRunOnceDetectorErrorTreatsAsMiss(t *testing.T) {
+	recs := captureLogs(t)
+	track := models.Track{ArtistName: "Artist", TrackName: "Opus"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 202,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "opus.lrc",
+			SourcePath: "/music/opus.flac",
+		},
+	}}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
+	writer := &fakeWriter{}
+	det := &fakeDetector{err: errors.New("sidecar timeout")}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det, 0.90)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Detector error should be logged as a warning.
+	if !hasLog(*recs, slog.LevelWarn, "instrumental detection failed") {
+		t.Fatalf("logs = %+v; want a warning about instrumental detection failure", *recs)
+	}
+	// Item must be deferred (normal miss path).
+	if len(q.deferred) != 1 || q.deferred[0] != 202 {
+		t.Fatalf("deferred = %v; want [202] (error treated as miss)", q.deferred)
+	}
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none", q.completed)
+	}
+	if len(writer.writes) != 0 {
+		t.Fatalf("writes = %v; want none (error treated as miss)", writer.writes)
+	}
+}
+
+// TestRunOnceDetectorDisabledWhenNilSourcePath verifies that the detector is
+// skipped when the source path is empty (no audio file available for detection).
+func TestRunOnceDetectorDisabledWhenNilSourcePath(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Opus"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 203,
+		Inputs: models.Inputs{
+			Track:    track,
+			Outdir:   "out",
+			Filename: "opus.lrc",
+			// SourcePath intentionally empty: no audio file.
+		},
+	}}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
+	writer := &fakeWriter{}
+	det := &fakeDetector{instrumental: true} // would produce instrumental if called
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det, 0.90)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Detector must NOT be called when source path is absent.
+	if len(det.calls) != 0 {
+		t.Fatalf("detector calls = %v; want none (no source path)", det.calls)
+	}
+	// Normal miss path: deferred.
+	if len(q.deferred) != 1 || q.deferred[0] != 203 {
+		t.Fatalf("deferred = %v; want [203]", q.deferred)
+	}
+}
+
+// TestRunOnceDetectorInstrumentalWriteErrorDefersAsMiss verifies that when the
+// writer fails while writing an instrumental marker, the item is deferred (not
+// completed) and no consecutive failure counter is incremented.
+func TestRunOnceDetectorInstrumentalWriteErrorDefersAsMiss(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Silent Piece"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 205,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "silent.lrc",
+			SourcePath: "/music/silent.flac",
+		},
+	}}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
+	writer := &fakeWriter{err: errors.New("write failed")}
+	det := &fakeDetector{instrumental: true}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det, 0.90)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Write failed: item must be deferred (miss path), not completed.
+	if len(q.deferred) != 1 || q.deferred[0] != 205 {
+		t.Fatalf("deferred = %v; want [205] (write error treated as miss)", q.deferred)
+	}
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none (write failed)", q.completed)
+	}
+	// consecutiveFailures must be 0 (write error in instrumental path is non-fatal).
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0", w.consecutiveFailures)
+	}
+}
+
+// TestEnableAudioDetectorConfidenceOutOfRangeIgnored verifies that values
+// outside (0,1] for minConfidence in EnableAudioDetector are ignored (leaving
+// the field at its zero value rather than clamping to an invalid threshold).
+func TestEnableAudioDetectorConfidenceOutOfRangeIgnored(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	det := &fakeDetector{}
+	w.EnableAudioDetector(det, 0) // zero: invalid, must not set
+	if w.detectMinConfidence != 0 {
+		t.Fatalf("detectMinConfidence = %v; want 0 (zero not in (0,1])", w.detectMinConfidence)
+	}
+	w.EnableAudioDetector(det, 1.5) // above 1: invalid, must not set
+	if w.detectMinConfidence != 0 {
+		t.Fatalf("detectMinConfidence = %v; want 0 (1.5 not in (0,1])", w.detectMinConfidence)
+	}
+	w.EnableAudioDetector(det, 0.85) // valid
+	if w.detectMinConfidence != 0.85 {
+		t.Fatalf("detectMinConfidence = %v; want 0.85", w.detectMinConfidence)
+	}
+}
+
+// TestRunOnceDetectorNotCalledOnSuccess verifies that the detector is NOT
+// invoked when the provider returns lyrics (only invoked on benign misses).
+func TestRunOnceDetectorNotCalledOnSuccess(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Hit"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 204,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "hit.lrc",
+			SourcePath: "/music/hit.flac",
+		},
+	}}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "found lyrics"},
+	}}
+	writer := &fakeWriter{}
+	det := &fakeDetector{instrumental: true} // must never be called
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det, 0.90)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(det.calls) != 0 {
+		t.Fatalf("detector calls = %v; want none (provider succeeded, detector must not run)", det.calls)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 204 {
+		t.Fatalf("completed = %v; want [204]", q.completed)
 	}
 }

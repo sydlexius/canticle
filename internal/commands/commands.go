@@ -24,6 +24,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/cache"
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/db"
+	"github.com/sydlexius/mxlrcgo-svc/internal/detector"
 	"github.com/sydlexius/mxlrcgo-svc/internal/langguard"
 	"github.com/sydlexius/mxlrcgo-svc/internal/library"
 	"github.com/sydlexius/mxlrcgo-svc/internal/logging"
@@ -654,6 +655,12 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	w.SetMissBackoff(time.Duration(cfg.API.MissBackoffBaseHours)*time.Hour, time.Duration(cfg.API.MissBackoffCapHours)*time.Hour)
 	w.SetMaxMissAttempts(cfg.API.MaxMissAttempts)
 	configureWorkerVerification(w, cfg, verifier)
+	audioDetector, err := newAudioDetector(cfg)
+	if err != nil {
+		slog.Error("failed to configure instrumental detector", "error", err)
+		return 1
+	}
+	configureWorkerAudioDetector(w, cfg, audioDetector)
 	configureWorkerGuard(w, newGuard(cfg))
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -867,6 +874,32 @@ func configureWorkerVerification(w *worker.Worker, cfg config.Config, verifier v
 		return
 	}
 	w.EnableVerification(verifier, cfg.Verification.MinConfidence)
+}
+
+// newAudioDetector builds the instrumental detector from config. Returns (nil, nil)
+// when the detector is disabled (the default). Callers must treat a nil return as
+// the disabled/no-op state.
+func newAudioDetector(cfg config.Config) (detector.Detector, error) {
+	if !cfg.InstrumentalDetector.Enabled {
+		return nil, nil
+	}
+	return detector.NewHTTPDetector(
+		cfg.InstrumentalDetector.ClassifierURL,
+		cfg.InstrumentalDetector.SampleDurationSeconds,
+		cfg.InstrumentalDetector.MinConfidence,
+		cfg.InstrumentalDetector.InstrumentalClasses,
+		cfg.InstrumentalDetector.FFmpegPath,
+		cfg.InstrumentalDetector.CooldownSeconds,
+	)
+}
+
+// configureWorkerAudioDetector wires the detector into the worker. It is a
+// no-op when d is nil (detector disabled).
+func configureWorkerAudioDetector(w *worker.Worker, cfg config.Config, d detector.Detector) {
+	if d == nil {
+		return
+	}
+	w.EnableAudioDetector(d, cfg.InstrumentalDetector.MinConfidence)
 }
 
 // newGuard builds the language/script guard from config. It returns an UNTYPED
