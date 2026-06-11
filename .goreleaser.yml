@@ -40,6 +40,58 @@ archives:
           - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+nfpms:
+  - id: mxlrcgo-svc
+    package_name: mxlrcgo-svc
+    ids:
+      - mxlrcgo-svc
+    vendor: sydlexius
+    homepage: https://sydlexius.github.io/mxlrcgo-svc/
+    maintainer: sydlexius <maintainer@placeholder.example>
+    description: Fetch synced lyrics from Musixmatch and save them as .lrc files
+    license: GPL-3.0
+    bindir: /usr/local/bin
+    formats:
+      - deb
+      - rpm
+      - apk
+    # Default contents and scripts apply to rpm (and as a fallback base).
+    # deb and apk use overrides below to adjust service unit path and init system.
+    contents:
+      - src: config.example.toml
+        dst: /etc/mxlrcgo-svc/config.example.toml
+        type: config|noreplace
+      - src: build/package/mxlrcgo-svc.service
+        dst: /usr/lib/systemd/system/mxlrcgo-svc.service
+    scripts:
+      postinstall: build/package/postinstall.sh
+      preremove: build/package/preremove.sh
+    overrides:
+      # Debian places systemd units under /lib/systemd/system/.
+      deb:
+        contents:
+          - src: config.example.toml
+            dst: /etc/mxlrcgo-svc/config.example.toml
+            type: config|noreplace
+          - src: build/package/mxlrcgo-svc.service
+            dst: /lib/systemd/system/mxlrcgo-svc.service
+        scripts:
+          postinstall: build/package/postinstall.sh
+          preremove: build/package/preremove.sh
+      # Alpine uses OpenRC; no systemd unit, no systemctl in lifecycle scripts.
+      apk:
+        contents:
+          - src: config.example.toml
+            dst: /etc/mxlrcgo-svc/config.example.toml
+            type: config|noreplace
+          - src: build/package/mxlrcgo-svc.openrc
+            dst: /etc/init.d/mxlrcgo-svc
+            file_info:
+              mode: 0755
+        scripts:
+          postinstall: build/package/postinstall-apk.sh
+          preremove: build/package/preremove-apk.sh
+
 dockers_v2:
   - id: mxlrcgo-svc
     images:
