@@ -12,8 +12,10 @@ docs_dir: docs
 site_dir: site
 
 # docs/superpowers/ holds internal planning docs that should not be published.
+# docs/design/ holds design-of-record documents and reference artifacts.
 exclude_docs: |
   superpowers/
+  design/
 
 theme:
   name: material
