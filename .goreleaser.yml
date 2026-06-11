@@ -40,6 +40,32 @@ archives:
           - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+homebrew_casks:
+  - name: mxlrcgo-svc
+    ids:
+      - default
+    # ffmpeg is only needed for the optional audio verification/instrumental
+    # sidecar; it is NOT a required runtime dependency and is not listed here.
+    binaries:
+      - mxlrcgo-svc
+    repository:
+      owner: sydlexius
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://sydlexius.github.io/mxlrcgo-svc/
+    description: Fetch synced lyrics from Musixmatch and save them as .lrc files
+    caveats: |
+      Set your Musixmatch token via MUSIXMATCH_TOKEN or in the config file:
+        ~/.config/mxlrcgo-svc/config.toml (XDG path)
+        See config.example.toml for all available options.
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "feat: update mxlrcgo-svc cask to {{ .Tag }}"
+    skip_upload: auto
+
 nfpms:
   - id: mxlrcgo-svc
     package_name: mxlrcgo-svc

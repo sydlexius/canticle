@@ -19,6 +19,12 @@ Full documentation is published at **<https://sydlexius.github.io/mxlrcgo-svc/>*
 
 ## Install
 
+**macOS / Linuxbrew (Homebrew):**
+
+```sh
+brew install sydlexius/tap/mxlrcgo-svc
+```
+
 **Linux (.deb / .rpm / .apk):** Download the appropriate package for your distro
 from the [GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases)
 page and install it with your package manager:
