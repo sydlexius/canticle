@@ -20,6 +20,7 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/mxlrcgo-svc"
       org.opencontainers.image.licenses="GPL-3.0"
 
 RUN apk add --no-cache bash ca-certificates su-exec tzdata && \
+    apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
     mkdir -p /config /music && \
