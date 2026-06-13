@@ -9,13 +9,14 @@ import (
 // log output. Matching is case-insensitive. "key" is intentionally excluded
 // because it is over-broad and would redact unrelated structured fields.
 var sensitiveKeys = map[string]struct{}{
-	"token":           {},
-	"api_key":         {},
-	"apikey":          {},
-	"authorization":   {},
-	"secret":          {},
-	"password":        {},
-	"webhook_api_key": {},
+	"token":            {},
+	"api_key":          {},
+	"apikey":           {},
+	"authorization":    {},
+	"secret":           {},
+	"password":         {},
+	"webhook_api_key":  {},
+	"webhook_api_keys": {},
 }
 
 // isSensitiveKey reports whether name is a known sensitive field name.

@@ -881,6 +881,75 @@ func clampMissBackoff(cfg *Config) {
 	}
 }
 
+// fieldEnvVars maps dotted config field paths to the environment variable
+// names that can override them, listed in priority order (highest first).
+// It is the canonical cross-reference between config field paths and env vars,
+// used by GetSetEnvVars to annotate which values were sourced from the
+// environment.
+var fieldEnvVars = map[string][]string{
+	"api.token":                                     {"MUSIXMATCH_TOKEN", "MXLRC_API_TOKEN"},
+	"api.cooldown":                                  {"MXLRC_API_COOLDOWN", "MXLRC_COOLDOWN"},
+	"api.circuit_open_duration":                     {"MXLRC_API_CIRCUIT_OPEN_DURATION"},
+	"api.circuit_backoff_base_seconds":              {"MXLRC_API_CIRCUIT_BACKOFF_BASE"},
+	"api.miss_backoff_base_hours":                   {"MXLRC_MISS_BACKOFF_BASE_HOURS"},
+	"api.miss_backoff_cap_hours":                    {"MXLRC_MISS_BACKOFF_CAP_HOURS"},
+	"api.max_miss_attempts":                         {"MXLRC_MAX_MISS_ATTEMPTS"},
+	"output.dir":                                    {"MXLRC_OUTPUT_DIR"},
+	"output.embedded_lyrics":                        {"MXLRC_EMBEDDED_LYRICS"},
+	"output.bilingual_output":                       {"MXLRC_BILINGUAL_OUTPUT"},
+	"db.path":                                       {"MXLRC_DB_PATH"},
+	"server.addr":                                   {"MXLRC_SERVER_ADDR"},
+	"server.webhook_api_keys":                       {"MXLRC_WEBHOOK_API_KEY"},
+	"server.scan_interval_seconds":                  {"MXLRC_SCAN_INTERVAL"},
+	"server.work_interval_seconds":                  {"MXLRC_WORK_INTERVAL"},
+	"providers.primary":                             {"MXLRC_PROVIDER_PRIMARY"},
+	"providers.disabled":                            {"MXLRC_PROVIDERS_DISABLED"},
+	"providers.mode":                                {"MXLRC_PROVIDERS_MODE"},
+	"providers.race_wait_seconds":                   {"MXLRC_PROVIDERS_RACE_WAIT_SECONDS"},
+	"providers.fallback_order":                      {"MXLRC_PROVIDERS_FALLBACK_ORDER"},
+	"verification.enabled":                          {"MXLRC_VERIFICATION_ENABLED"},
+	"verification.whisper_url":                      {"MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL"},
+	"verification.ffmpeg_path":                      {"MXLRC_VERIFICATION_FFMPEG_PATH"},
+	"verification.sample_duration_seconds":          {"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION"},
+	"verification.min_confidence":                   {"MXLRC_VERIFICATION_MIN_CONFIDENCE"},
+	"verification.min_similarity":                   {"MXLRC_VERIFICATION_MIN_SIMILARITY"},
+	"instrumental_detector.enabled":                 {"MXLRC_INSTRUMENTAL_DETECTOR_ENABLED"},
+	"instrumental_detector.classifier_url":          {"MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL"},
+	"instrumental_detector.ffmpeg_path":             {"MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH"},
+	"instrumental_detector.sample_duration_seconds": {"MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS"},
+	"instrumental_detector.min_confidence":          {"MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE"},
+	"instrumental_detector.instrumental_classes":    {"MXLRC_INSTRUMENTAL_DETECTOR_CLASSES"},
+	"instrumental_detector.cooldown_seconds":        {"MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS"},
+	"enrichment.enabled":                            {"MXLRC_ENRICHMENT_ENABLED"},
+	"guard.accepted_scripts":                        {"MXLRC_GUARD_ACCEPTED_SCRIPTS"},
+	"guard.script_guard_threshold":                  {"MXLRC_GUARD_THRESHOLD"},
+	"queue.randomize":                               {"MXLRC_QUEUE_RANDOMIZE"},
+	"logging.level":                                 {"MXLRC_LOG_LEVEL"},
+	"logging.format":                                {"MXLRC_LOG_FORMAT"},
+	"logging.file":                                  {"MXLRC_LOG_FILE"},
+	"logging.max_size_mb":                           {"MXLRC_LOG_MAX_SIZE_MB"},
+	"logging.max_files":                             {"MXLRC_LOG_MAX_FILES"},
+	"logging.max_age_days":                          {"MXLRC_LOG_MAX_AGE_DAYS"},
+	"logging.compress":                              {"MXLRC_LOG_COMPRESS"},
+}
+
+// GetSetEnvVars returns a map from config field paths to true for each field
+// whose corresponding MXLRC_* (or MUSIXMATCH_TOKEN) environment variable is
+// currently set to a non-empty value. Pass the result to FormatConfigText or
+// ConfigToSlogAttrs as the envSrc hint to annotate env-sourced values.
+func GetSetEnvVars() map[string]bool {
+	result := make(map[string]bool, len(fieldEnvVars))
+	for path, vars := range fieldEnvVars {
+		for _, v := range vars {
+			if os.Getenv(v) != "" {
+				result[path] = true
+				break
+			}
+		}
+	}
+	return result
+}
+
 func splitCSV(s string) []string {
 	var out []string
 	for _, v := range strings.Split(s, ",") {

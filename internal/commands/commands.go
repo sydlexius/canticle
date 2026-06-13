@@ -358,13 +358,13 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 	switch {
 	case !usesSubcommand(rawArgs):
 		if legacy.Serve {
-			return runServe(ctx, legacyServe(legacy), deps.NewFetcher, deps.NewWriter)
+			return runServe(ctx, out, legacyServe(legacy), deps.NewFetcher, deps.NewWriter)
 		}
 		return runFetch(ctx, out, legacyFetch(legacy), deps.NewFetcher, deps.NewWriter, deps.NewApp)
 	case args.Fetch != nil:
 		return runFetch(ctx, out, *args.Fetch, deps.NewFetcher, deps.NewWriter, deps.NewApp)
 	case args.Serve != nil:
-		return runServe(ctx, *args.Serve, deps.NewFetcher, deps.NewWriter)
+		return runServe(ctx, out, *args.Serve, deps.NewFetcher, deps.NewWriter)
 	case args.Scan != nil:
 		return runScanCmd(ctx, out, *args.Scan)
 	case args.Library != nil:
@@ -465,6 +465,35 @@ func initLogging(cfg config.Config) {
 	})
 }
 
+// logStartupBanner emits a startup banner to the console (out) and via slog.
+// The console receives the build version line followed by the full
+// FormatConfigText dump. slog INFO receives the version and key diagnostic
+// settings; slog DEBUG receives the complete structured config via
+// ConfigToSlogAttrs. Sensitive fields are redacted in all output paths.
+// cliSrc is a set of config field paths that were overridden on the command
+// line; it may be nil.
+func logStartupBanner(ctx context.Context, cfg config.Config, ver string, out io.Writer, cliSrc map[string]bool) {
+	envSrc := config.GetSetEnvVars()
+
+	// Console: version line + full TOML-style config dump.
+	_, _ = fmt.Fprintf(out, "%s\n\n", ver)
+	_, _ = fmt.Fprint(out, config.FormatConfigText(cfg, envSrc, cliSrc))
+	_, _ = fmt.Fprintln(out)
+
+	// slog INFO: version + key diagnostic settings (always visible at INFO level).
+	slog.InfoContext(ctx, "startup",
+		"version", ver,
+		"api_token_set", cfg.API.Token != "",
+		"output_dir", cfg.Output.Dir,
+		"log_level", cfg.Logging.Level,
+		"server_addr", cfg.Server.Addr,
+	)
+
+	// slog DEBUG: full structured config dump.
+	attrs := config.ConfigToSlogAttrs(cfg, envSrc, cliSrc)
+	slog.LogAttrs(ctx, slog.LevelDebug, "startup config", attrs...)
+}
+
 func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer, newApp func(musixmatch.Fetcher, lyrics.Writer, *queue.InputsQueue, int, string) AppRunner) int {
 	if len(args.Song) == 0 {
 		_, _ = fmt.Fprintln(out, "missing required positional argument: Song")
@@ -488,6 +517,24 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 	if args.Outdir != nil {
 		outdir = *args.Outdir
 	}
+
+	// Emit startup banner after initLogging (log file is ready) and after all
+	// CLI flag overrides are applied so the banner reflects effective values.
+	fetchBannerCfg := cfg
+	fetchBannerCfg.API.Token = token
+	fetchBannerCfg.API.Cooldown = cooldown
+	fetchBannerCfg.Output.Dir = outdir
+	fetchCLISrc := map[string]bool{}
+	if args.Token != "" {
+		fetchCLISrc["api.token"] = true
+	}
+	if args.Cooldown != nil {
+		fetchCLISrc["api.cooldown"] = true
+	}
+	if args.Outdir != nil {
+		fetchCLISrc["output.dir"] = true
+	}
+	logStartupBanner(ctx, fetchBannerCfg, VersionString(), out, fetchCLISrc)
 	fetcher, err := selectedProvider(cfg, token, newFetcher)
 	if err != nil {
 		slog.Error("failed to configure lyrics provider", "error", err)
@@ -594,7 +641,7 @@ func lyricPreview(song models.Song, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
+func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
 	cfg, err := config.Load(args.ConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -609,6 +656,28 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	if args.Outdir != nil {
 		outdir = *args.Outdir
 	}
+	addr := cfg.Server.Addr
+	if args.Listen != nil {
+		addr = *args.Listen
+	}
+
+	// Emit startup banner after initLogging (log file is ready) and after all
+	// CLI flag overrides are applied so the banner reflects effective values.
+	bannerCfg := cfg
+	bannerCfg.API.Token = token
+	bannerCfg.Output.Dir = outdir
+	bannerCfg.Server.Addr = addr
+	serveCLISrc := map[string]bool{}
+	if args.Token != "" {
+		serveCLISrc["api.token"] = true
+	}
+	if args.Outdir != nil {
+		serveCLISrc["output.dir"] = true
+	}
+	if args.Listen != nil {
+		serveCLISrc["server.addr"] = true
+	}
+	logStartupBanner(ctx, bannerCfg, VersionString(), out, serveCLISrc)
 	fetcher, err := selectedProvider(cfg, token, newFetcher)
 	if err != nil {
 		slog.Error("failed to configure lyrics provider", "error", err)
@@ -691,10 +760,6 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		}()
 	}
 
-	addr := cfg.Server.Addr
-	if args.Listen != nil {
-		addr = *args.Listen
-	}
 	srv := &http.Server{
 		Addr: addr,
 		Handler: server.NewHandler(authSvc, workQ, outdir,

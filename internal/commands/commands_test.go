@@ -2392,3 +2392,52 @@ func TestRunQueueRecheck_DBOpenError(t *testing.T) {
 		t.Fatalf("db-open-error exit code = %d; want 1. out=%s", code, out.String())
 	}
 }
+
+// TestLogStartupBanner_EmitsVersion verifies the startup banner writes the
+// version string to the console writer.
+func TestLogStartupBanner_EmitsVersion(t *testing.T) {
+	cfg := config.Config{
+		API:     config.APIConfig{Token: "topsecret", Cooldown: 15},
+		Output:  config.OutputConfig{Dir: "lyrics"},
+		Logging: config.LoggingConfig{Level: "info", Format: "text"},
+	}
+	var buf bytes.Buffer
+	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, nil)
+	got := buf.String()
+	if !strings.Contains(got, "mxlrcgo-svc test-ver") {
+		t.Errorf("version not in banner output: %q", got)
+	}
+}
+
+// TestLogStartupBanner_RedactsToken verifies the token never appears in
+// plaintext in the banner console output.
+func TestLogStartupBanner_RedactsToken(t *testing.T) {
+	cfg := config.Config{
+		API:     config.APIConfig{Token: "topsecret", Cooldown: 15},
+		Output:  config.OutputConfig{Dir: "lyrics"},
+		Logging: config.LoggingConfig{Level: "info", Format: "text"},
+	}
+	var buf bytes.Buffer
+	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, nil)
+	got := buf.String()
+	if strings.Contains(got, "topsecret") {
+		t.Errorf("token in plaintext in banner output: %q", got)
+	}
+}
+
+// TestLogStartupBanner_CLIAnnotation verifies the (cli) source annotation
+// appears in the console output when a field is in the cliSrc map.
+func TestLogStartupBanner_CLIAnnotation(t *testing.T) {
+	cfg := config.Config{
+		API:     config.APIConfig{Cooldown: 30},
+		Output:  config.OutputConfig{Dir: "custom-dir"},
+		Logging: config.LoggingConfig{Level: "info", Format: "text"},
+	}
+	cliSrc := map[string]bool{"output.dir": true}
+	var buf bytes.Buffer
+	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, cliSrc)
+	got := buf.String()
+	if !strings.Contains(got, "(cli)") {
+		t.Errorf("missing (cli) annotation in banner output: %q", got)
+	}
+}
