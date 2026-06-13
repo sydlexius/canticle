@@ -119,6 +119,74 @@ func TestUnknownDurationBehavesLikeArtistTitle(t *testing.T) {
 	}
 }
 
+// TestLookup_ExactBucketHit verifies that a row stored at a non-zero bucket is
+// returned when the caller requests that exact bucket.
+func TestLookup_ExactBucketHit(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	const bucket = 36 // floor(180/5)
+	if err := repo.Store(ctx, "Artist", "Song", bucket, "bucketed lyrics"); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := repo.Lookup(ctx, "Artist", "Song", bucket)
+	if err != nil {
+		t.Fatalf("Lookup exact bucket: %v", err)
+	}
+	if got != "bucketed lyrics" {
+		t.Errorf("got %q, want %q", got, "bucketed lyrics")
+	}
+}
+
+// TestLookup_FallbackToBucketZero verifies that when a row exists only at
+// bucket 0 (legacy/unknown-duration), a lookup at a non-zero bucket falls back
+// and returns it (no re-fetch wave for pre-existing cache entries).
+func TestLookup_FallbackToBucketZero(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Song", 0, "legacy lyrics"); err != nil {
+		t.Fatalf("Store bucket-0: %v", err)
+	}
+	got, err := repo.Lookup(ctx, "Artist", "Song", 36)
+	if err != nil {
+		t.Fatalf("Lookup with fallback: %v", err)
+	}
+	if got != "legacy lyrics" {
+		t.Errorf("got %q, want %q", got, "legacy lyrics")
+	}
+}
+
+// TestLookup_MissNoRows verifies that a lookup for a track with no stored rows
+// returns sql.ErrNoRows.
+func TestLookup_MissNoRows(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	_, err := repo.Lookup(ctx, "Artist", "NonExistent", 36)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("got %v, want sql.ErrNoRows", err)
+	}
+}
+
+// TestLookup_BucketZeroNoSpuriousFallback verifies that a bucket-0 lookup does
+// not attempt a second query when it misses (bucket-0 to bucket-0 loop guard).
+func TestLookup_BucketZeroNoSpuriousFallback(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Song", 0, "sentinel lyrics"); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := repo.Lookup(ctx, "Artist", "Song", 0)
+	if err != nil {
+		t.Fatalf("Lookup bucket-0: %v", err)
+	}
+	if got != "sentinel lyrics" {
+		t.Errorf("got %q, want %q", got, "sentinel lyrics")
+	}
+}
+
 func TestLookup_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))

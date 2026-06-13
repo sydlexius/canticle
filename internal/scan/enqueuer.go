@@ -10,6 +10,7 @@ import (
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
 
@@ -80,8 +81,7 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		if err := ctx.Err(); err != nil {
 			return enqueued, cacheHits, err
 		}
-		// duration_bucket=0: unknown-duration sentinel until #191 wires in real duration.
-		_, err := e.Cache.Lookup(ctx, res.Track.ArtistName, res.Track.TrackName, 0)
+		_, err := e.Cache.Lookup(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength))
 		switch {
 		case err == nil:
 			if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusDone); err != nil {

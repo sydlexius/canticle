@@ -584,8 +584,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 				if encErr != nil {
 					slog.Warn("worker instrumental detection: cache encode failed; treating as miss", "id", item.ID, "error", encErr)
 				} else {
-					// duration_bucket=0: unknown-duration sentinel matching the existing miss path.
-					if storeErr := w.cache.Store(context.WithoutCancel(ctx), resolvedTrack.ArtistName, resolvedTrack.TrackName, 0, encoded); storeErr != nil {
+					if storeErr := w.cache.Store(context.WithoutCancel(ctx), resolvedTrack.ArtistName, resolvedTrack.TrackName, normalize.DurationBucket(resolvedTrack.TrackLength), encoded); storeErr != nil {
 						slog.Warn("worker instrumental detection: cache store failed; continuing to write", "id", item.ID, "error", storeErr)
 					}
 				}
@@ -738,8 +737,7 @@ func (w *Worker) detectInstrumental(ctx context.Context, item queue.WorkItem) (b
 // the cache lookup and the provider query so the cache read/write keys agree.
 func (w *Worker) song(ctx context.Context, track models.Track, bypassCache bool) (models.Song, bool, error) {
 	if !bypassCache {
-		// duration_bucket=0: unknown-duration sentinel until #191 wires in real duration.
-		cached, err := w.cache.Lookup(ctx, track.ArtistName, track.TrackName, 0)
+		cached, err := w.cache.Lookup(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength))
 		if err == nil {
 			return decodeSong(cached, track), true, nil
 		}
@@ -768,8 +766,7 @@ func (w *Worker) store(ctx context.Context, track models.Track, song models.Song
 	if err != nil {
 		return err
 	}
-	// duration_bucket=0: unknown-duration sentinel until #191 wires in real duration.
-	if err := w.cache.Store(ctx, track.ArtistName, track.TrackName, 0, encoded); err != nil {
+	if err := w.cache.Store(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength), encoded); err != nil {
 		return fmt.Errorf("worker: store cache: %w", err)
 	}
 	return nil

@@ -32,6 +32,36 @@ func TestNormalizeKey(t *testing.T) {
 	}
 }
 
+func TestDurationBucket(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int
+		want    int
+	}{
+		// Sentinel: zero and negatives all return 0.
+		{name: "zero", seconds: 0, want: 0},
+		{name: "negative one", seconds: -1, want: 0},
+		{name: "negative large", seconds: -300, want: 0},
+		// Boundary cases.
+		{name: "one second", seconds: 1, want: 0},
+		{name: "four seconds", seconds: 4, want: 0},
+		{name: "five seconds", seconds: 5, want: 1},
+		{name: "six seconds", seconds: 6, want: 1},
+		// Representative values matching migration 014 comments.
+		{name: "180 seconds", seconds: 180, want: 36},
+		{name: "210 seconds", seconds: 210, want: 42},
+		{name: "240 seconds", seconds: 240, want: 48},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalize.DurationBucket(tc.seconds)
+			if got != tc.want {
+				t.Errorf("DurationBucket(%d) = %d, want %d", tc.seconds, got, tc.want)
+			}
+		})
+	}
+}
+
 func fptr(f float64) *float64 { return &f }
 
 func TestMatchConfidence(t *testing.T) {

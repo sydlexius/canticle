@@ -24,14 +24,36 @@ func New(db *sql.DB) *CacheRepo {
 
 // Lookup returns the cached lyrics for (artist, title, durationBucket) after
 // normalization. Pass durationBucket=0 when the recording duration is unknown.
-// Returns sql.ErrNoRows if not found.
+// When durationBucket != 0 and the exact bucket yields no row, Lookup falls back
+// to the legacy bucket-0 sentinel row so pre-existing cache entries continue to
+// serve without a re-fetch wave or data migration.
+// Returns sql.ErrNoRows only when no row is found under either key.
 func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error) {
+	normArtist := normalize.NormalizeKey(artist)
+	normTitle := normalize.NormalizeKey(title)
+
 	var lyrics string
 	err := r.db.QueryRowContext(ctx,
 		`SELECT lyrics FROM lyrics_cache WHERE artist=? AND title=? AND duration_bucket=? LIMIT 1`,
-		normalize.NormalizeKey(artist),
-		normalize.NormalizeKey(title),
+		normArtist,
+		normTitle,
 		durationBucket,
+	).Scan(&lyrics)
+	if err == nil {
+		return lyrics, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("cache: lookup: %w", err)
+	}
+	// Exact-bucket miss. Fall back to the legacy bucket-0 sentinel row only
+	// when the caller requested a real bucket; a bucket-0 miss is already final.
+	if durationBucket == 0 {
+		return "", sql.ErrNoRows
+	}
+	err = r.db.QueryRowContext(ctx,
+		`SELECT lyrics FROM lyrics_cache WHERE artist=? AND title=? AND duration_bucket=0 LIMIT 1`,
+		normArtist,
+		normTitle,
 	).Scan(&lyrics)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", sql.ErrNoRows

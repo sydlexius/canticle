@@ -23,6 +23,16 @@ func NormalizeKey(s string) string {
 	return strings.ToLower(strings.TrimSpace(result))
 }
 
+// DurationBucket maps a track length in seconds to the 5-second floor bucket
+// used as the duration component of the lyrics_cache key (migration 014).
+// Returns 0 (the unknown-duration sentinel) when seconds <= 0.
+func DurationBucket(seconds int) int {
+	if seconds <= 0 {
+		return 0
+	}
+	return seconds / 5
+}
+
 // MatchConfidence returns a Jaro-Winkler similarity score in [0.0, 1.0]
 // between NormalizeKey(a) and NormalizeKey(b).
 // 1.0 = identical, 0.0 = completely different.
