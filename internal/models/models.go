@@ -83,6 +83,20 @@ type Library struct {
 	Name      string `json:"name,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
+
+	// EnrichRecording and DetectInstrumental are tri-state per-library toggles.
+	// A nil pointer means "inherit the global default"; a non-nil pointer is an
+	// explicit on/off. They map to nullable INTEGER columns (NULL/0/1).
+	EnrichRecording    *bool `json:"enrich_recording,omitempty"`
+	DetectInstrumental *bool `json:"detect_instrumental,omitempty"`
+}
+
+// LibrarySettings carries the per-library tri-state toggles for create/update
+// operations. A nil field means "inherit" on Add and "leave unchanged" on
+// Update; a non-nil field is an explicit on/off.
+type LibrarySettings struct {
+	EnrichRecording    *bool
+	DetectInstrumental *bool
 }
 
 // ScanResult represents an audio file discovered during a library scan.

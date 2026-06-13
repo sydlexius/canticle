@@ -55,7 +55,7 @@ func TestRepo_UpsertConcurrentWriterRetries(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connA.Close() })
 
-	lib, err := library.New(connA).Add(ctx, "/music", "Music")
+	lib, err := library.New(connA).Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("add library: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestRepo_UpsertConcurrentWriterRetries(t *testing.T) {
 // through every batch and returning a generic aggregate failure.
 func TestRepo_UpsertContextCanceledAbortsEarly(t *testing.T) {
 	sqlDB := openTestDB(t)
-	lib, err := library.New(sqlDB).Add(context.Background(), "/music", "Music")
+	lib, err := library.New(sqlDB).Add(context.Background(), "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("add library: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestRepo_UpsertContextCanceledAbortsEarly(t *testing.T) {
 func TestRepo_UpsertPartialBatchFailure(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
-	lib, err := library.New(sqlDB).Add(ctx, "/music", "Music")
+	lib, err := library.New(sqlDB).Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("add library: %v", err)
 	}

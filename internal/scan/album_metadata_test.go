@@ -12,7 +12,7 @@ import (
 func TestRepo_UpsertRoundTripsAlbumMetadata(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
-	lib, err := library.New(sqlDB).Add(ctx, "/music", "Music")
+	lib, err := library.New(sqlDB).Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("add library: %v", err)
 	}

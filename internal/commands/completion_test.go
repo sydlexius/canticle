@@ -9,6 +9,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/db"
 	"github.com/sydlexius/mxlrcgo-svc/internal/library"
+	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 )
 
 func TestRunComplete_TopLevelPrefix(t *testing.T) {
@@ -44,7 +45,7 @@ func TestRunComplete_LibraryNamesFromDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if _, err := library.New(sqlDB).Add(ctx, "/music", "MyMusic"); err != nil {
+	if _, err := library.New(sqlDB).Add(ctx, "/music", "MyMusic", models.LibrarySettings{}); err != nil {
 		t.Fatalf("add library: %v", err)
 	}
 	_ = sqlDB.Close()

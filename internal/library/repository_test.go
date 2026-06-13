@@ -9,6 +9,7 @@ import (
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/db"
 	"github.com/sydlexius/mxlrcgo-svc/internal/library"
+	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
@@ -25,7 +26,7 @@ func TestAddGetListUpdateRemove(t *testing.T) {
 	ctx := context.Background()
 	repo := library.New(openTestDB(t))
 
-	added, err := repo.Add(ctx, "/music/rock", "Rock")
+	added, err := repo.Add(ctx, "/music/rock", "Rock", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestAddGetListUpdateRemove(t *testing.T) {
 		t.Fatalf("List got %+v; want [%+v]", list, added)
 	}
 
-	updated, err := repo.Update(ctx, added.ID, "/music/jazz", "Jazz")
+	updated, err := repo.Update(ctx, added.ID, "/music/jazz", "Jazz", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -73,10 +74,10 @@ func TestAdd_RejectsDuplicatePath(t *testing.T) {
 	ctx := context.Background()
 	repo := library.New(openTestDB(t))
 
-	if _, err := repo.Add(ctx, "/music", "Music"); err != nil {
+	if _, err := repo.Add(ctx, "/music", "Music", models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add initial: %v", err)
 	}
-	if _, err := repo.Add(ctx, "/music", "Duplicate"); err == nil {
+	if _, err := repo.Add(ctx, "/music", "Duplicate", models.LibrarySettings{}); err == nil {
 		t.Fatal("Add duplicate returned nil error; want constraint error")
 	}
 }
@@ -97,7 +98,7 @@ func TestAdd_ValidatesRequiredFields(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := repo.Add(ctx, tc.path, tc.lib); err == nil {
+			if _, err := repo.Add(ctx, tc.path, tc.lib, models.LibrarySettings{}); err == nil {
 				t.Fatal("Add returned nil error; want validation error")
 			}
 		})
@@ -108,7 +109,7 @@ func TestGetByName(t *testing.T) {
 	ctx := context.Background()
 	repo := library.New(openTestDB(t))
 
-	added, err := repo.Add(ctx, "/music/rock", "Rock")
+	added, err := repo.Add(ctx, "/music/rock", "Rock", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestUpdateRemove_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repo := library.New(openTestDB(t))
 
-	_, err := repo.Update(ctx, 123, "/music", "Music")
+	_, err := repo.Update(ctx, 123, "/music", "Music", models.LibrarySettings{})
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("Update missing got %v; want sql.ErrNoRows", err)
 	}
@@ -155,10 +156,10 @@ func TestGetByName_AmbiguousReturnsError(t *testing.T) {
 	ctx := context.Background()
 	repo := library.New(openTestDB(t))
 
-	if _, err := repo.Add(ctx, "/music/a", "Music"); err != nil {
+	if _, err := repo.Add(ctx, "/music/a", "Music", models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add a: %v", err)
 	}
-	if _, err := repo.Add(ctx, "/music/b", "Music"); err != nil {
+	if _, err := repo.Add(ctx, "/music/b", "Music", models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add b: %v", err)
 	}
 

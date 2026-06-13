@@ -198,9 +198,11 @@ type LibraryCmd struct {
 
 // LibraryAddCmd adds a library root.
 type LibraryAddCmd struct {
-	Path       string `arg:"positional,required" help:"library root path"`
-	Name       string `arg:"--name" help:"display name (default: directory base)" default:""`
-	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	Path               string `arg:"positional,required" help:"library root path"`
+	Name               string `arg:"--name" help:"display name (default: directory base)" default:""`
+	Enrich             *bool  `arg:"--enrich" help:"recording enrichment for this library; omit to inherit the global default, --enrich / --enrich=false to set"`
+	DetectInstrumental *bool  `arg:"--detect-instrumental" help:"instrumental detection for this library; omit to inherit the global default, --detect-instrumental / --detect-instrumental=false to set"`
+	ConfigPath         string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // LibraryListCmd lists library roots.
@@ -216,10 +218,12 @@ type LibraryRemoveCmd struct {
 
 // LibraryUpdateCmd updates a library root.
 type LibraryUpdateCmd struct {
-	ID         int64  `arg:"positional,required" help:"library id"`
-	Path       string `arg:"--path" help:"new library root path" default:""`
-	Name       string `arg:"--name" help:"new display name" default:""`
-	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	ID                 int64  `arg:"positional,required" help:"library id"`
+	Path               string `arg:"--path" help:"new library root path" default:""`
+	Name               string `arg:"--name" help:"new display name" default:""`
+	Enrich             *bool  `arg:"--enrich" help:"set recording enrichment for this library (--enrich / --enrich=false); omit to leave unchanged"`
+	DetectInstrumental *bool  `arg:"--detect-instrumental" help:"set instrumental detection for this library (--detect-instrumental / --detect-instrumental=false); omit to leave unchanged"`
+	ConfigPath         string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // KeysCmd contains nested key subcommands.
@@ -1125,7 +1129,10 @@ func runLibrary(ctx context.Context, out io.Writer, args LibraryCmd) int {
 		if name == "" {
 			name = filepath.Base(filepath.Clean(args.Add.Path))
 		}
-		lib, err := repo.Add(ctx, args.Add.Path, name)
+		lib, err := repo.Add(ctx, args.Add.Path, name, models.LibrarySettings{
+			EnrichRecording:    args.Add.Enrich,
+			DetectInstrumental: args.Add.DetectInstrumental,
+		})
 		if err != nil {
 			slog.Error("failed to add library", "error", err)
 			return 1
@@ -1147,8 +1154,9 @@ func runLibrary(ctx context.Context, out io.Writer, args LibraryCmd) int {
 		}
 		_, _ = fmt.Fprintf(out, "removed library %d\n", args.Remove.ID)
 	case args.Update != nil:
-		if args.Update.Path == "" && args.Update.Name == "" {
-			_, _ = fmt.Fprintln(out, "library update requires --path, --name, or both")
+		if args.Update.Path == "" && args.Update.Name == "" &&
+			args.Update.Enrich == nil && args.Update.DetectInstrumental == nil {
+			_, _ = fmt.Fprintln(out, "library update requires --path, --name, --enrich, or --detect-instrumental")
 			return 2
 		}
 		lib, err := repo.Get(ctx, args.Update.ID)
@@ -1169,7 +1177,10 @@ func runLibrary(ctx context.Context, out io.Writer, args LibraryCmd) int {
 		if args.Update.Name != "" {
 			name = args.Update.Name
 		}
-		lib, err = repo.Update(ctx, args.Update.ID, path, name)
+		lib, err = repo.Update(ctx, args.Update.ID, path, name, models.LibrarySettings{
+			EnrichRecording:    args.Update.Enrich,
+			DetectInstrumental: args.Update.DetectInstrumental,
+		})
 		if err != nil {
 			slog.Error("failed to update library", "error", err)
 			return 1

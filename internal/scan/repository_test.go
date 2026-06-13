@@ -28,7 +28,7 @@ func TestRepo_UpsertAndListByLibrary(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestRepo_FindByTrackMatchesNormalizedKeys(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestRepo_FindByTrackOrdersNonTerminalFirst(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRepo_UpsertWithForceStatusOverwritesExisting(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestRepo_UpsertDefaultsStatus(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestRepo_UpsertPreservesExistingStatusWhenStatusUnspecified(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -273,11 +273,11 @@ func TestRepo_ListByLibrary_IsolatedByLibrary(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	libA, err := libRepo.Add(ctx, "/music/a", "A")
+	libA, err := libRepo.Add(ctx, "/music/a", "A", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library A: %v", err)
 	}
-	libB, err := libRepo.Add(ctx, "/music/b", "B")
+	libB, err := libRepo.Add(ctx, "/music/b", "B", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library B: %v", err)
 	}
@@ -317,11 +317,11 @@ func TestRepo_ListWithFilters(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	libA, err := libRepo.Add(ctx, "/music/a", "A")
+	libA, err := libRepo.Add(ctx, "/music/a", "A", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library A: %v", err)
 	}
-	libB, err := libRepo.Add(ctx, "/music/b", "B")
+	libB, err := libRepo.Add(ctx, "/music/b", "B", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library B: %v", err)
 	}
@@ -380,11 +380,11 @@ func TestRepo_ClearByLibraryOnlyAffectsTargetedLibrary(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	libA, err := libRepo.Add(ctx, "/music/a", "A")
+	libA, err := libRepo.Add(ctx, "/music/a", "A", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library A: %v", err)
 	}
-	libB, err := libRepo.Add(ctx, "/music/b", "B")
+	libB, err := libRepo.Add(ctx, "/music/b", "B", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library B: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestRepo_ListPendingByLibraryAndSetStatus(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -494,11 +494,11 @@ func TestRepo_ClearByLibraryTx_CommitsViaCaller(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	libA, err := libRepo.Add(ctx, "/music/a", "A")
+	libA, err := libRepo.Add(ctx, "/music/a", "A", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library A: %v", err)
 	}
-	libB, err := libRepo.Add(ctx, "/music/b", "B")
+	libB, err := libRepo.Add(ctx, "/music/b", "B", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library B: %v", err)
 	}
@@ -573,7 +573,7 @@ func TestRepo_ClearByLibraryTx_RollbackPreservesRows(t *testing.T) {
 	libRepo := library.New(sqlDB)
 	scanRepo := scan.New(sqlDB)
 
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}

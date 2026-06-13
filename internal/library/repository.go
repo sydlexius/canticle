@@ -20,16 +20,19 @@ func New(db *sql.DB) *Repo {
 	return &Repo{db: db}
 }
 
-// Add creates a new library root. Path must be unique.
-func (r *Repo) Add(ctx context.Context, path, name string) (models.Library, error) {
+// Add creates a new library root. Path must be unique. A nil settings field is
+// stored as NULL (inherit the global default).
+func (r *Repo) Add(ctx context.Context, path, name string, settings models.LibrarySettings) (models.Library, error) {
 	path, name, err := validate(path, name)
 	if err != nil {
 		return models.Library{}, err
 	}
 	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO libraries (path, name) VALUES (?, ?)`,
+		`INSERT INTO libraries (path, name, enrich_recording, detect_instrumental) VALUES (?, ?, ?, ?)`,
 		path,
 		name,
+		boolToNullableInt(settings.EnrichRecording),
+		boolToNullableInt(settings.DetectInstrumental),
 	)
 	if err != nil {
 		return models.Library{}, fmt.Errorf("library: add: %w", err)
@@ -44,7 +47,7 @@ func (r *Repo) Add(ctx context.Context, path, name string) (models.Library, erro
 // List returns all configured library roots in stable ID order.
 func (r *Repo) List(ctx context.Context) (libs []models.Library, retErr error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, path, name, created_at, updated_at FROM libraries ORDER BY id ASC`,
+		`SELECT id, path, name, created_at, updated_at, enrich_recording, detect_instrumental FROM libraries ORDER BY id ASC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("library: list: %w", err)
@@ -57,9 +60,12 @@ func (r *Repo) List(ctx context.Context) (libs []models.Library, retErr error) {
 
 	for rows.Next() {
 		var lib models.Library
-		if err := rows.Scan(&lib.ID, &lib.Path, &lib.Name, &lib.CreatedAt, &lib.UpdatedAt); err != nil {
+		var enrich, detect sql.NullInt64
+		if err := rows.Scan(&lib.ID, &lib.Path, &lib.Name, &lib.CreatedAt, &lib.UpdatedAt, &enrich, &detect); err != nil {
 			return nil, fmt.Errorf("library: list scan: %w", err)
 		}
+		lib.EnrichRecording = nullableIntToBool(enrich)
+		lib.DetectInstrumental = nullableIntToBool(detect)
 		libs = append(libs, lib)
 	}
 	if err := rows.Err(); err != nil {
@@ -71,13 +77,16 @@ func (r *Repo) List(ctx context.Context) (libs []models.Library, retErr error) {
 // Get returns the library root with id. It returns sql.ErrNoRows when not found.
 func (r *Repo) Get(ctx context.Context, id int64) (models.Library, error) {
 	var lib models.Library
+	var enrich, detect sql.NullInt64
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, path, name, created_at, updated_at FROM libraries WHERE id = ?`,
+		`SELECT id, path, name, created_at, updated_at, enrich_recording, detect_instrumental FROM libraries WHERE id = ?`,
 		id,
-	).Scan(&lib.ID, &lib.Path, &lib.Name, &lib.CreatedAt, &lib.UpdatedAt)
+	).Scan(&lib.ID, &lib.Path, &lib.Name, &lib.CreatedAt, &lib.UpdatedAt, &enrich, &detect)
 	if err != nil {
 		return models.Library{}, fmt.Errorf("library: get: %w", err)
 	}
+	lib.EnrichRecording = nullableIntToBool(enrich)
+	lib.DetectInstrumental = nullableIntToBool(detect)
 	return lib, nil
 }
 
@@ -96,7 +105,7 @@ func (r *Repo) GetByName(ctx context.Context, name string) (models.Library, erro
 		return models.Library{}, fmt.Errorf("library: name must not be empty")
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, path, name, created_at, updated_at FROM libraries WHERE name = ? LIMIT 2`,
+		`SELECT id, path, name, created_at, updated_at, enrich_recording, detect_instrumental FROM libraries WHERE name = ? LIMIT 2`,
 		name,
 	)
 	if err != nil {
@@ -111,9 +120,12 @@ func (r *Repo) GetByName(ctx context.Context, name string) (models.Library, erro
 		return models.Library{}, fmt.Errorf("library: get by name: %w", sql.ErrNoRows)
 	}
 	var lib models.Library
-	if err := rows.Scan(&lib.ID, &lib.Path, &lib.Name, &lib.CreatedAt, &lib.UpdatedAt); err != nil {
+	var enrich, detect sql.NullInt64
+	if err := rows.Scan(&lib.ID, &lib.Path, &lib.Name, &lib.CreatedAt, &lib.UpdatedAt, &enrich, &detect); err != nil {
 		return models.Library{}, fmt.Errorf("library: get by name: %w", err)
 	}
+	lib.EnrichRecording = nullableIntToBool(enrich)
+	lib.DetectInstrumental = nullableIntToBool(detect)
 	if rows.Next() {
 		return models.Library{}, fmt.Errorf("library: get by name %q: %w", name, ErrAmbiguousLibraryName)
 	}
@@ -123,16 +135,25 @@ func (r *Repo) GetByName(ctx context.Context, name string) (models.Library, erro
 	return lib, nil
 }
 
-// Update changes the path and name for an existing library root.
-func (r *Repo) Update(ctx context.Context, id int64, path, name string) (models.Library, error) {
+// Update changes the path and name for an existing library root. A nil settings
+// field leaves that column unchanged; a non-nil field writes the explicit value
+// (COALESCE keeps the existing value when the parameter is NULL).
+func (r *Repo) Update(ctx context.Context, id int64, path, name string, settings models.LibrarySettings) (models.Library, error) {
 	path, name, err := validate(path, name)
 	if err != nil {
 		return models.Library{}, err
 	}
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE libraries SET path = ?, name = ? WHERE id = ?`,
+		`UPDATE libraries
+		   SET path = ?,
+		       name = ?,
+		       enrich_recording = COALESCE(?, enrich_recording),
+		       detect_instrumental = COALESCE(?, detect_instrumental)
+		 WHERE id = ?`,
 		path,
 		name,
+		boolToNullableInt(settings.EnrichRecording),
+		boolToNullableInt(settings.DetectInstrumental),
 		id,
 	)
 	if err != nil {
@@ -162,6 +183,28 @@ func (r *Repo) Remove(ctx context.Context, id int64) error {
 		return fmt.Errorf("library: remove missing: %w", sql.ErrNoRows)
 	}
 	return nil
+}
+
+// boolToNullableInt maps a tri-state *bool to a nullable SQL INTEGER parameter:
+// nil -> NULL, false -> 0, true -> 1.
+func boolToNullableInt(v *bool) any {
+	if v == nil {
+		return nil
+	}
+	if *v {
+		return 1
+	}
+	return 0
+}
+
+// nullableIntToBool maps a scanned nullable INTEGER back to a tri-state *bool:
+// NULL -> nil, 0 -> false, non-zero -> true.
+func nullableIntToBool(v sql.NullInt64) *bool {
+	if !v.Valid {
+		return nil
+	}
+	b := v.Int64 != 0
+	return &b
 }
 
 func validate(path, name string) (string, string, error) {

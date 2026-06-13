@@ -422,7 +422,7 @@ func TestSchedulerBuildsScanEnqueuer(t *testing.T) {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(context.Background(), "/music", "Music")
+	lib, err := libRepo.Add(context.Background(), "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -1035,7 +1035,7 @@ func TestRunScanResults_ResolvesLibraryByNameAndID(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(ctx, "/music", "MusicLib")
+	lib, err := libRepo.Add(ctx, "/music", "MusicLib", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -1074,7 +1074,7 @@ func TestRunScanClear_DryRunAndConfirm(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(ctx, "/music", "MusicLib")
+	lib, err := libRepo.Add(ctx, "/music", "MusicLib", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -1141,7 +1141,7 @@ func TestRunScanClear_CancelsLinkedWorkQueueRow(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(ctx, "/music", "MusicLib")
+	lib, err := libRepo.Add(ctx, "/music", "MusicLib", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -1215,11 +1215,11 @@ func TestRunScan_LibrarySelectorScansOnlyTheNamedLibrary(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	libA, err := libRepo.Add(ctx, dirA, "Alpha")
+	libA, err := libRepo.Add(ctx, dirA, "Alpha", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add Alpha: %v", err)
 	}
-	libB, err := libRepo.Add(ctx, dirB, "Beta")
+	libB, err := libRepo.Add(ctx, dirB, "Beta", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add Beta: %v", err)
 	}
@@ -1290,7 +1290,7 @@ func TestRunScan_LibrarySelectorReportsScanFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if _, err := library.New(sqlDB).Add(ctx, dir, "Alpha"); err != nil {
+	if _, err := library.New(sqlDB).Add(ctx, dir, "Alpha", models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add Alpha: %v", err)
 	}
 	_ = sqlDB.Close()
@@ -1333,11 +1333,11 @@ func TestRunScan_LibrarySelectorRejectsAmbiguousName(t *testing.T) {
 	// Two libraries where the second one is literally named after the first
 	// one's numeric id. Looking up "1" resolves to both: ID match (lib1) and
 	// name match (lib2). resolveLibrary must reject that as ambiguous.
-	lib1, err := libRepo.Add(ctx, t.TempDir(), "music")
+	lib1, err := libRepo.Add(ctx, t.TempDir(), "music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add lib1: %v", err)
 	}
-	if _, err := libRepo.Add(ctx, t.TempDir(), strconvFormatInt(lib1.ID)); err != nil {
+	if _, err := libRepo.Add(ctx, t.TempDir(), strconvFormatInt(lib1.ID), models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add lib2: %v", err)
 	}
 	_ = sqlDB.Close()
@@ -1575,7 +1575,7 @@ func TestRunScanClear_DryRunOnEmpty(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	if _, err := libRepo.Add(ctx, "/music", "Music"); err != nil {
+	if _, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
 	_ = sqlDB.Close()
@@ -1607,7 +1607,7 @@ func TestRunScanResults_FilterByLibraryByID(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -1642,7 +1642,7 @@ func TestResolveLibrary_NumericNameLooksUpByName(t *testing.T) {
 	}
 	defer func() { _ = sqlDB.Close() }()
 	repo := library.New(sqlDB)
-	added, err := repo.Add(ctx, "/music/numeric", "9999")
+	added, err := repo.Add(ctx, "/music/numeric", "9999", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -1666,11 +1666,11 @@ func TestResolveLibrary_NumericRefAmbiguousIDvsName(t *testing.T) {
 	defer func() { _ = sqlDB.Close() }()
 	repo := library.New(sqlDB)
 	// Library #1 (Music)
-	if _, err := repo.Add(ctx, "/music/a", "Music"); err != nil {
+	if _, err := repo.Add(ctx, "/music/a", "Music", models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add a: %v", err)
 	}
 	// Library #2 named "1" — ref "1" now matches BOTH id=1 and name="1".
-	if _, err := repo.Add(ctx, "/music/b", "1"); err != nil {
+	if _, err := repo.Add(ctx, "/music/b", "1", models.LibrarySettings{}); err != nil {
 		t.Fatalf("Add b: %v", err)
 	}
 
@@ -1692,7 +1692,7 @@ func TestRunScanResults_FilterByStatus(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -1731,7 +1731,7 @@ func TestRunScanResults_LimitTrimsResults(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
@@ -1770,7 +1770,7 @@ func TestRunQueueRetry_ResetsLinkedScanResults(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	libRepo := library.New(sqlDB)
-	lib, err := libRepo.Add(ctx, "/music", "Music")
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Add library: %v", err)
 	}
