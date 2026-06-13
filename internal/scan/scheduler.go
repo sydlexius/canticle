@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
@@ -38,6 +39,13 @@ type Scheduler struct {
 	Interval       time.Duration
 	MaxRuntime     time.Duration
 	OnScanComplete OnCompleteFunc
+	// EnrichOverride is the scan-CLI override for recording enrichment
+	// (--enrich/--no-enrich); nil means no override. GlobalEnrichDefault is the
+	// config default used when neither the override nor the per-library setting
+	// is set. scanAndPersist resolves EnrichRecording per library from these via
+	// config.ResolveBool and stamps it onto each scan's Options.
+	EnrichOverride      *bool
+	GlobalEnrichDefault bool
 }
 
 // RunOnce scans every configured library exactly once.
@@ -107,7 +115,12 @@ func (s *Scheduler) RunOnceForPath(ctx context.Context, lib models.Library, path
 // scanAndPersist scans path, stamps results with lib.ID and a default status,
 // upserts them, and invokes OnScanComplete.
 func (s *Scheduler) scanAndPersist(ctx context.Context, lib models.Library, path string) error {
-	results, err := s.Scanner.ScanLibrary(ctx, path, s.Options)
+	// Resolve recording enrichment for this library (CLI override > per-library
+	// setting > global default) and stamp it onto a per-scan copy of Options so
+	// the shared template is not mutated across libraries.
+	opts := s.Options
+	opts.EnrichRecording = config.ResolveBool(s.EnrichOverride, lib.EnrichRecording, s.GlobalEnrichDefault)
+	results, err := s.Scanner.ScanLibrary(ctx, path, opts)
 	if err != nil {
 		return fmt.Errorf("scan: scan library %d: %w", lib.ID, err)
 	}

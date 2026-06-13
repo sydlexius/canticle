@@ -64,6 +64,14 @@ type ScanOptions struct {
 	// skips fetching). Synced (SYLT) tags are intentionally not handled. "off"
 	// (default) is a no-op.
 	EmbeddedLyrics string
+	// EnrichRecording controls recording enrichment: reading ISRC, MusicBrainz
+	// recording ID, and duration from audio tags into the Track. When false, all
+	// three are skipped (the duration prober is not even invoked) and the track
+	// keeps the duration_bucket=0 fallback. Callers resolve this per library via
+	// config.ResolveBool; the scheduler stamps it before each ScanLibrary call.
+	// The zero value is false, so direct callers that want the historical
+	// always-on behavior must set it true explicitly.
+	EnrichRecording bool
 }
 
 // NewScanner creates a new Scanner.
@@ -299,19 +307,30 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 			}
 		}
 
-		// Duration: audioduration reads only the file header (no audio decode).
-		// The library seeks to 0 internally, so f may be at any position from
-		// tag.ReadFrom above. Parse errors degrade gracefully to TrackLength=0
-		// (duration_bucket sentinel for "unknown").
+		// Recording enrichment (ISRC, MusicBrainz recording ID, duration) is a
+		// single switch (#217). When off, skip all three: do not probe duration
+		// (avoids the header read entirely), leave ISRC/MBID empty, and let the
+		// track keep the duration_bucket=0 fallback.
 		filePath := filepath.Join(dir, file.Name())
-		dur, durErr := sc.probeDuration(f, ext)
-		_ = f.Close()
-		if durErr != nil {
-			slog.Debug("duration parse failed; using 0", "file", file.Name(), "error", durErr)
-			dur = 0
+		var dur int
+		var isrc, recordingMBID string
+		if opts.EnrichRecording {
+			// Duration: audioduration reads only the file header (no audio decode).
+			// The library seeks to 0 internally, so f may be at any position from
+			// tag.ReadFrom above. Parse errors degrade gracefully to TrackLength=0
+			// (duration_bucket sentinel for "unknown").
+			var durErr error
+			dur, durErr = sc.probeDuration(f, ext)
+			if durErr != nil {
+				slog.Debug("duration parse failed; using 0", "file", file.Name(), "error", durErr)
+				dur = 0
+			}
+			isrc = extractISRC(m)
+			recordingMBID = extractRecordingMBID(m)
 		}
+		_ = f.Close()
 
-		slog.Debug("adding file", "file", file.Name())
+		slog.Debug("adding file", "file", file.Name(), "enrich", opts.EnrichRecording)
 		*results = append(*results, models.ScanResult{
 			FilePath: filePath,
 			Track: models.Track{
@@ -320,8 +339,8 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 				AlbumName:     m.Album(),
 				AlbumArtist:   m.AlbumArtist(),
 				TrackLength:   dur,
-				ISRC:          extractISRC(m),
-				RecordingMBID: extractRecordingMBID(m),
+				ISRC:          isrc,
+				RecordingMBID: recordingMBID,
 			},
 			Outdir:   dir,
 			Filename: stem + ".lrc",
@@ -374,6 +393,10 @@ func (sc *Scanner) GetSongDir(dir string, songs *queue.InputsQueue, update bool,
 		Upgrade:  upgrade,
 		MaxDepth: limit - depth,
 		BFS:      bfs,
+		// Directory mode (legacy one-shot fetch) has no library row to carry a
+		// per-library setting, so it preserves the historical always-on
+		// enrichment behavior. Library scans resolve this per-library upstream.
+		EnrichRecording: true,
 	})
 	if err != nil {
 		return err

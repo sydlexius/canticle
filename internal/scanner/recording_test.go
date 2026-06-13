@@ -29,7 +29,7 @@ func TestExtractISRC_Present(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1})
+	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
 	if err != nil {
 		t.Fatalf("ScanLibrary: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestExtractISRC_Absent(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1})
+	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
 	if err != nil {
 		t.Fatalf("ScanLibrary: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestExtractRecordingMBID_Present(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1})
+	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
 	if err != nil {
 		t.Fatalf("ScanLibrary: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestExtractRecordingMBID_Absent(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1})
+	results, err := skipDurationScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
 	if err != nil {
 		t.Fatalf("ScanLibrary: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestProbeDuration_ProberCalled(t *testing.T) {
 		}
 		return 180, nil
 	}}
-	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1})
+	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
 	if err != nil {
 		t.Fatalf("ScanLibrary: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestProbeDuration_ProberError_GracefulDegrade(t *testing.T) {
 	}
 
 	sc := &Scanner{probeFunc: func(string) (int, error) { return 0, errors.New("corrupt file") }}
-	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1})
+	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
 	if err != nil {
 		t.Fatalf("ScanLibrary must not fail on per-file probe error: %v", err)
 	}

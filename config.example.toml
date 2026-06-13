@@ -172,6 +172,19 @@ sample_duration_seconds = 30
 min_confidence = 0.85
 min_similarity = 0.35
 
+[enrichment]
+# Recording enrichment reads the ISRC, MusicBrainz recording ID, and duration
+# from each file's audio tags and feeds them to the matcher to disambiguate
+# results. This is the GLOBAL DEFAULT; it can be overridden per library (via
+# `library add/update --enrich/--enrich=false`) and per run (via the scan
+# `--enrich` / `--no-enrich` flags). Resolution precedence (highest wins):
+# CLI flag > per-library setting > this global default.
+#
+# Default true, preserving the always-on behavior from before per-library
+# control existed. Set to false to skip enrichment by default (tracks then use
+# the duration_bucket=0 cache fallback). Env override: MXLRC_ENRICHMENT_ENABLED.
+enabled = true
+
 [guard]
 # Optional language/script guard. It rejects fetched lyrics whose body is
 # dominated by scripts outside the allowlist below, so a wrong-language match

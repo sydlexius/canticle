@@ -112,6 +112,8 @@ type ScanCmd struct {
 	Upgrade        bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
 	BFS            bool     `arg:"--bfs" help:"use breadth-first traversal"`
 	EmbeddedLyrics *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
+	Enrich         bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`
+	NoEnrich       bool     `arg:"--no-enrich" help:"force recording enrichment off for this scan, overriding per-library and global settings; mutually exclusive with --enrich"`
 	Libraries      []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
 
 	Results *ScanResultsCmd `arg:"subcommand:results" help:"list persisted scan_results rows"`
@@ -943,6 +945,9 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	})
+	// serve has no per-run enrichment override; resolve per library against the
+	// global default (and the per-library setting) inside the scheduler.
+	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	s.Interval = serveScanInterval(cfg, args)
 	if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		slog.Warn("scheduler failed", "error", err)
@@ -960,6 +965,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	})
+	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
 	})
@@ -1034,6 +1040,13 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	})
+	enrichOverride, err := resolveEnrichOverride(args.Enrich, args.NoEnrich)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
+	s.EnrichOverride = enrichOverride
+	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	if len(args.Libraries) > 0 {
 		libRepo := library.New(sqlDB)
 		libs := make([]models.Library, 0, len(args.Libraries))
@@ -1077,6 +1090,25 @@ func embeddedLyricsMode(flag *string, cfgVal string) string {
 		return "extract"
 	default:
 		return "off"
+	}
+}
+
+// resolveEnrichOverride converts the mutually-exclusive scan --enrich/--no-enrich
+// flags into a tri-state override for recording enrichment: nil = no override
+// (fall back to per-library then global), &true = force on, &false = force off.
+// Passing both flags is a usage error.
+func resolveEnrichOverride(enrich, noEnrich bool) (*bool, error) {
+	switch {
+	case enrich && noEnrich:
+		return nil, fmt.Errorf("--enrich and --no-enrich are mutually exclusive")
+	case enrich:
+		v := true
+		return &v, nil
+	case noEnrich:
+		v := false
+		return &v, nil
+	default:
+		return nil, nil
 	}
 }
 

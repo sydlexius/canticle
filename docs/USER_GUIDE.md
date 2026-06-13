@@ -192,6 +192,18 @@ Even signed binaries can trigger the "Windows protected your PC" prompt on first
 
 This prompt should not appear again after the first run. See [issue #183](https://github.com/sydlexius/mxlrcgo-svc/issues/183) for background on code signing.
 
+## Recording enrichment
+
+Recording enrichment reads the ISRC, MusicBrainz recording ID, and duration from each file's audio tags and passes them to the matcher to disambiguate results (for example, telling two same-titled recordings apart). It is on by default.
+
+You can control it at three levels, resolved with the precedence **CLI flag > per-library setting > global default**:
+
+- **Global default** (`config.toml`): `[enrichment] enabled = true` (env `MXLRC_ENRICHMENT_ENABLED`). Default `true`. Set `false` to skip enrichment everywhere unless a library or run opts back in.
+- **Per library**: `mxlrcgo-svc library add/update --enrich` (force on) or `--enrich=false` (force off). Omit the flag to inherit the global default.
+- **Per run**: `mxlrcgo-svc scan --enrich` or `--no-enrich` overrides both for that single scan (the two flags are mutually exclusive). The serve-mode scheduler has no per-run flag; it resolves per library against the global default.
+
+When enrichment is off for a track, the scanner skips ISRC, MBID, and duration extraction as a unit, and the track keeps the `duration_bucket = 0` cache fallback (no behavior regression). A per-library or global change only affects scans run after the change; it does not restamp already-scanned rows.
+
 ## Filesystem watcher (optional, low-latency scans)
 
 By default, `serve` only scans on the scheduler's tick (`--scan-interval`, default 900s), so a new track dropped into the library waits up to that interval before lyrics are fetched. An optional filesystem watcher reacts within seconds for the common single-host case. It is disabled by default and configured entirely through environment variables:

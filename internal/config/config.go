@@ -22,6 +22,7 @@ type Config struct {
 	Providers            ProvidersConfig            `toml:"providers"`
 	Verification         VerificationConfig         `toml:"verification"`
 	InstrumentalDetector InstrumentalDetectorConfig `toml:"instrumental_detector"`
+	Enrichment           EnrichmentConfig           `toml:"enrichment"`
 	Guard                GuardConfig                `toml:"guard"`
 	Queue                QueueConfig                `toml:"queue"`
 	Logging              LoggingConfig              `toml:"logging"`
@@ -228,6 +229,18 @@ type InstrumentalDetectorConfig struct {
 	CooldownSeconds int `toml:"cooldown_seconds"`
 }
 
+// EnrichmentConfig holds the global default for recording enrichment (reading
+// ISRC / MusicBrainz recording ID / duration from audio tags and feeding them to
+// the matcher). Per-library settings and the scan CLI override resolve against
+// this default via ResolveBool.
+type EnrichmentConfig struct {
+	// Enabled is the global default for recording enrichment. Default true,
+	// preserving the pre-#217 always-on behavior. A per-library setting or the
+	// scan --enrich/--no-enrich flag overrides it.
+	// Override: MXLRC_ENRICHMENT_ENABLED.
+	Enabled bool `toml:"enabled"`
+}
+
 // GuardConfig holds optional language/script guard settings. An empty
 // AcceptedScripts disables the guard.
 type GuardConfig struct {
@@ -280,8 +293,9 @@ func defaults() Config {
 			InstrumentalClasses:   []string{"Music", "Musical instrument"},
 			CooldownSeconds:       5,
 		},
-		Guard: GuardConfig{Threshold: guardThresholdDefault},
-		Queue: QueueConfig{Randomize: true},
+		Enrichment: EnrichmentConfig{Enabled: true},
+		Guard:      GuardConfig{Threshold: guardThresholdDefault},
+		Queue:      QueueConfig{Randomize: true},
 		Logging: LoggingConfig{
 			Level:      "info",
 			Format:     "text",
@@ -455,7 +469,7 @@ func Load(path string) (Config, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 func applyEnvOverrides(cfg *Config) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
@@ -646,6 +660,14 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_ENABLED", "value", v, "current", cfg.InstrumentalDetector.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.InstrumentalDetector.Enabled = enabled
+		}
+	}
+	if v := os.Getenv("MXLRC_ENRICHMENT_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_ENRICHMENT_ENABLED", "value", v, "current", cfg.Enrichment.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Enrichment.Enabled = enabled
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL"); v != "" {
