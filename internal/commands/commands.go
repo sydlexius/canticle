@@ -36,6 +36,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
+	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
 	"github.com/sydlexius/mxlrcgo-svc/internal/server"
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
 	"github.com/sydlexius/mxlrcgo-svc/internal/watcher"
@@ -660,10 +661,53 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		addr = *args.Listen
 	}
 
+	// Open the DB before the banner so the encrypted secret store can serve as
+	// the lowest-precedence source for the token and webhook key, and the banner
+	// reflects the effective (redacted) values.
+	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	if err != nil {
+		slog.Error("failed to open database", "error", err)
+		return 1
+	}
+
+	// Resolve the master key and build the encrypted secret store. On the Docker
+	// first-run case (no MXLRC_MASTER_KEY) print the onboarding hint to stderr
+	// exactly once and exit without serving - never run unencrypted. The hint and
+	// key bytes never go to the slog file.
+	store, firstRun, err := resolveSecretStore(cfg, sqlDB)
+	if err != nil {
+		_ = sqlDB.Close()
+		slog.Error("failed to initialize secret store", "error", err)
+		return 1
+	}
+	if firstRun != nil {
+		_ = sqlDB.Close()
+		_, _ = fmt.Fprintln(os.Stderr, firstRun.Message())
+		return 1
+	}
+
+	// DB is the lowest-precedence source for both secrets: consulted only when the
+	// higher tiers (CLI/env/TOML) are empty, and a DB-sourced value is never
+	// auto-persisted back.
+	token, tokenFromDB, err := resolveTokenWithStore(ctx, token, store)
+	if err != nil {
+		_ = sqlDB.Close()
+		slog.Error("failed to resolve musixmatch token", "error", err)
+		return 1
+	}
+	webhookKeys, webhookFromDB, err := resolveWebhookKeysWithStore(ctx, cfg.Server.WebhookAPIKeys, store)
+	if err != nil {
+		_ = sqlDB.Close()
+		slog.Error("failed to resolve webhook API key", "error", err)
+		return 1
+	}
+
 	// Emit startup banner after initLogging (log file is ready) and after all
-	// CLI flag overrides are applied so the banner reflects effective values.
+	// CLI flag overrides and DB-tier fallbacks are applied so the banner reflects
+	// effective values. DB-sourced secrets are redacted exactly like plaintext.
 	bannerCfg := cfg
 	bannerCfg.API.Token = token
+	bannerCfg.Server.WebhookAPIKeys = webhookKeys
 	bannerCfg.Output.Dir = outdir
 	bannerCfg.Server.Addr = addr
 	serveCLISrc := map[string]bool{}
@@ -676,24 +720,27 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if args.Listen != nil {
 		serveCLISrc["server.addr"] = true
 	}
+	if tokenFromDB {
+		slog.Info("musixmatch token sourced from encrypted secret store")
+	}
+	if webhookFromDB {
+		slog.Info("webhook API key sourced from encrypted secret store")
+	}
 	logStartupBanner(ctx, bannerCfg, VersionString(), out, envSrc, serveCLISrc)
 	fetcher, err := selectedProvider(cfg, token, newFetcher)
 	if err != nil {
+		_ = sqlDB.Close()
 		slog.Error("failed to configure lyrics provider", "error", err)
 		return 1
 	}
 	verifier, err := newVerifier(cfg)
 	if err != nil {
+		_ = sqlDB.Close()
 		slog.Error("failed to configure verification", "error", err)
 		return 1
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
-	if err != nil {
-		slog.Error("failed to open database", "error", err)
-		return 1
-	}
 
-	authSvc, err := keyService(ctx, sqlDB, cfg.Server.WebhookAPIKeys)
+	authSvc, err := keyService(ctx, sqlDB, webhookKeys)
 	if err != nil {
 		_ = sqlDB.Close()
 		slog.Error("failed to configure authentication", "error", err)
@@ -1409,6 +1456,69 @@ func parseScopes(values []string) ([]auth.Scope, error) {
 		scopes = append(scopes, auth.Scope(v))
 	}
 	return auth.NormalizeScopes(scopes)
+}
+
+// resolveSecretStore resolves the AES-256 master key and constructs the
+// SQL-backed encrypted secret store. The key is resolved from MXLRC_MASTER_KEY
+// (env, never logged) > the resolved secrets.key_file > the native default key
+// file, via secrets.ResolveKey.
+//
+// On the Docker first-run case (no MXLRC_MASTER_KEY in Docker mode) it returns a
+// non-nil *secrets.FirstRunError and a nil store, so the caller can print the
+// onboarding hint to stderr exactly once and exit without serving - the daemon
+// never runs unencrypted. Any other resolution failure (malformed master key,
+// unreadable key file) is returned as a wrapped error and is fatal at the call
+// site. The key bytes never touch slog.
+func resolveSecretStore(cfg config.Config, sqlDB *sql.DB) (secrets.Store, *secrets.FirstRunError, error) {
+	opts := cfg.SecretsKeyOptions()
+	opts.MasterKeyB64 = os.Getenv("MXLRC_MASTER_KEY")
+	key, err := secrets.ResolveKey(opts)
+	if err != nil {
+		var fr *secrets.FirstRunError
+		if errors.As(err, &fr) {
+			return nil, fr, nil
+		}
+		return nil, nil, fmt.Errorf("resolve secrets master key: %w", err)
+	}
+	return secrets.NewSQLStore(sqlDB, key), nil, nil
+}
+
+// resolveTokenWithStore appends the encrypted DB store as the LOWEST-precedence
+// Musixmatch token source. higher is the already-resolved value from the higher
+// tiers (--token CLI > MUSIXMATCH_TOKEN > MXLRC_API_TOKEN > TOML api.token). The
+// DB is consulted only when higher is empty; a present higher tier is used as-is
+// and is NEVER auto-persisted to the DB (import is an explicit operator action).
+func resolveTokenWithStore(ctx context.Context, higher string, store secrets.Store) (token string, fromDB bool, err error) {
+	if strings.TrimSpace(higher) != "" || store == nil {
+		return higher, false, nil
+	}
+	v, ok, err := store.Get(ctx, secrets.NameMusixmatchToken)
+	if err != nil {
+		return "", false, fmt.Errorf("read musixmatch token from secret store: %w", err)
+	}
+	if !ok {
+		return higher, false, nil
+	}
+	return v, true, nil
+}
+
+// resolveWebhookKeysWithStore appends the encrypted DB store as the
+// LOWEST-precedence webhook API key source. higher is the already-resolved value
+// from the higher tiers (CLI/env MXLRC_WEBHOOK_API_KEY > TOML
+// server.webhook_api_keys). The DB is consulted only when higher is empty; a
+// present higher tier is used as-is and is NEVER auto-persisted.
+func resolveWebhookKeysWithStore(ctx context.Context, higher []string, store secrets.Store) (keys []string, fromDB bool, err error) {
+	if len(higher) > 0 || store == nil {
+		return higher, false, nil
+	}
+	v, ok, err := store.Get(ctx, secrets.NameWebhookAPIKey)
+	if err != nil {
+		return nil, false, fmt.Errorf("read webhook API key from secret store: %w", err)
+	}
+	if !ok || strings.TrimSpace(v) == "" {
+		return higher, false, nil
+	}
+	return []string{v}, true, nil
 }
 
 func keyService(ctx context.Context, sqlDB *sql.DB, rawKeys []string) (*auth.Service, error) {

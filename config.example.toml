@@ -212,6 +212,17 @@ script_guard_threshold = 0.20
 # deterministic created_at/id ordering. Env override: MXLRC_QUEUE_RANDOMIZE.
 randomize = true
 
+[secrets]
+# Encrypted-at-rest storage for the Musixmatch token and webhook API key. The
+# 32-byte AES-256 master key is resolved from MXLRC_MASTER_KEY (recommended for
+# Docker; keeps the key out of the data volume) or a 0600 key file. key_file
+# overrides the default key-file location (the hidden .mxlrcgo.key beside the
+# database); leave empty to use that default. In Docker mode MXLRC_MASTER_KEY is
+# required and no key file is auto-created. The DB store is the LOWEST-precedence
+# source for both secrets: CLI/env/TOML still win. Env override:
+# MXLRC_SECRETS_KEY_FILE.
+key_file = ""
+
 [logging]
 # Minimum log level to emit: debug, info, warn, error. Default info.
 # DEBUG exposes per-request detail, worker idle-polls, and watcher events.

@@ -7,6 +7,15 @@ import (
 	"fmt"
 )
 
+// Stable secret names used as the `secrets` table primary keys. v1 wires only
+// these two; the table is a general store so future credentials reuse it.
+const (
+	// NameMusixmatchToken is the secret name for the Musixmatch API token.
+	NameMusixmatchToken = "musixmatch_token"
+	// NameWebhookAPIKey is the secret name for the serve-mode webhook API key.
+	NameWebhookAPIKey = "webhook_api_key" //nolint:gosec // G101: this is a stable secret-store row name (a lookup key), not a hardcoded credential value
+)
+
 // Store is the secret repository. Callers Set/Get/Delete plaintext values by
 // name; encryption and decryption happen inside the implementation so callers
 // never see ciphertext or the key. Get reports absence via ok=false (no error).

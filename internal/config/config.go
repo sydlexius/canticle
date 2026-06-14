@@ -11,6 +11,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
+	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
 )
 
 // Config holds all application configuration.
@@ -26,6 +27,35 @@ type Config struct {
 	Guard                GuardConfig                `toml:"guard"`
 	Queue                QueueConfig                `toml:"queue"`
 	Logging              LoggingConfig              `toml:"logging"`
+	Secrets              SecretsConfig              `toml:"secrets"`
+}
+
+// SecretsConfig holds the encrypted-at-rest secret store settings.
+type SecretsConfig struct {
+	// KeyFile is the path to the 32-byte AES-256 master key file used to
+	// encrypt secrets at rest. Empty (the default) resolves to the hidden file
+	// beside the database (xdgDataPath ".mxlrcgo.key"). The Docker path requires
+	// MXLRC_MASTER_KEY instead and never auto-creates a colocated key file.
+	// Override: MXLRC_SECRETS_KEY_FILE.
+	KeyFile string `toml:"key_file"`
+}
+
+// SecretsKeyOptions builds the secrets.KeyOptions used to resolve the master
+// key at startup, keeping the data-dir/Docker-mode logic in config (the single
+// source of those paths). MasterKeyB64 is sourced from MXLRC_MASTER_KEY by the
+// caller (it is never persisted in Config and must stay out of logs), so it is
+// left empty here; the caller fills it in. KeyFilePath is the resolved
+// secrets.key_file (env > TOML > default), and DockerMode mirrors the same
+// /config detection used for the XDG data dir.
+func (c *Config) SecretsKeyOptions() secrets.KeyOptions {
+	keyFile := strings.TrimSpace(c.Secrets.KeyFile)
+	if keyFile == "" {
+		keyFile = xdgDataPath("mxlrcgo-svc", secrets.DefaultKeyFileName)
+	}
+	return secrets.KeyOptions{
+		KeyFilePath: keyFile,
+		DockerMode:  dockerMode(),
+	}
 }
 
 // LoggingConfig holds log-output settings.
@@ -480,7 +510,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -581,6 +611,10 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_DB_PATH"); v != "" {
 		cfg.DB.Path = v
 		applied["db.path"] = true
+	}
+	if v := os.Getenv("MXLRC_SECRETS_KEY_FILE"); v != "" {
+		cfg.Secrets.KeyFile = v
+		applied["secrets.key_file"] = true
 	}
 	if v := os.Getenv("MXLRC_SERVER_ADDR"); v != "" {
 		cfg.Server.Addr = v

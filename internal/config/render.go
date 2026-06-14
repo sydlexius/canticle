@@ -126,6 +126,13 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("randomize = %t%s\n", cfg.Queue.Randomize, ann("queue.randomize"))
 	p("\n")
 
+	// [secrets]
+	// Only the key-file PATH is shown; the key bytes it contains are never read
+	// into Config and never logged.
+	p("[secrets]\n")
+	p("key_file = %s%s\n", cfg.Secrets.KeyFile, ann("secrets.key_file"))
+	p("\n")
+
 	// [logging]
 	p("[logging]\n")
 	p("level = %s%s\n", cfg.Logging.Level, ann("logging.level"))
@@ -310,6 +317,10 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 		),
 		group("queue",
 			boolAttr("randomize", "queue.randomize", cfg.Queue.Randomize),
+		),
+		group("secrets",
+			// Only the key-file path; key bytes are never read into Config.
+			strAttr("key_file", "secrets.key_file", cfg.Secrets.KeyFile),
 		),
 		group("logging",
 			strAttr("level", "logging.level", cfg.Logging.Level),
