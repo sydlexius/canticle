@@ -949,6 +949,36 @@ func (q *DBQueue) CountDone(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// CountFailuresByReason returns the count of work_queue rows with status
+// 'failed' grouped by last_error. Rows whose last_error is empty are grouped
+// under "unknown". Deferred rows (benign misses) are excluded because they are
+// not errors. Used by the GET /metrics endpoint.
+func (q *DBQueue) CountFailuresByReason(ctx context.Context) (map[string]int64, error) {
+	rows, err := q.db.QueryContext(ctx,
+		`SELECT COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*)
+         FROM work_queue
+         WHERE status = 'failed'
+         GROUP BY last_error`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("queue: count failures by reason: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is not actionable
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var reason string
+		var n int64
+		if err := rows.Scan(&reason, &n); err != nil {
+			return nil, fmt.Errorf("queue: scan failure reason count: %w", err)
+		}
+		counts[reason] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: count failures by reason rows: %w", err)
+	}
+	return counts, nil
+}
+
 // CountByStatus returns the number of work_queue rows grouped by status.
 // Statuses with no rows are omitted from the map.
 func (q *DBQueue) CountByStatus(ctx context.Context) (map[string]int64, error) {

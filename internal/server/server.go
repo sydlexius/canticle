@@ -75,6 +75,7 @@ type Handler struct {
 	priority     int
 	ready        Readiness
 	stats        StatusReporter
+	metrics      MetricsReporter
 	inventory    Inventory
 	allowedRoots []string
 	pathChecker  func(string) error
@@ -92,6 +93,11 @@ func WithReadiness(r Readiness) Option {
 // WithStatusReporter wires a queue summary source used by GET /api/v1/status.
 func WithStatusReporter(s StatusReporter) Option {
 	return func(h *Handler) { h.stats = s }
+}
+
+// WithMetricsReporter wires a metrics source used by GET /metrics.
+func WithMetricsReporter(m MetricsReporter) Option {
+	return func(h *Handler) { h.metrics = m }
 }
 
 // WithInventory wires the scan-result inventory used to resolve webhook events
@@ -143,6 +149,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 	h.mux.HandleFunc("GET /healthz", h.handleHealthz)
 	h.mux.HandleFunc("GET /readyz", h.handleReadyz)
 	h.mux.HandleFunc("GET /api/v1/status", h.handleStatus)
+	h.mux.HandleFunc("GET /metrics", h.handleMetrics)
 	return h
 }
 

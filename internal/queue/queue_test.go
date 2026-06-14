@@ -2818,6 +2818,86 @@ func TestDBQueue_EnqueueOnConflictPreservesProvidersVersion(t *testing.T) {
 	}
 }
 
+// TestDBQueue_CountFailuresByReason verifies the aggregate count used by the
+// /metrics endpoint.
+func TestDBQueue_CountFailuresByReason(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	enqAndFail := func(artist, title, reason string) {
+		t.Helper()
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: artist, TrackName: title}}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue %s/%s: %v", artist, title, err)
+		}
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue %s/%s: %v", artist, title, err)
+		}
+		var cause error
+		if reason != "" {
+			cause = errors.New(reason)
+		}
+		if _, err := q.Fail(ctx, item.ID, cause); err != nil {
+			t.Fatalf("Fail %s/%s: %v", artist, title, err)
+		}
+	}
+
+	// Empty queue: no failures.
+	counts, err := q.CountFailuresByReason(ctx)
+	if err != nil {
+		t.Fatalf("CountFailuresByReason empty: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("empty queue: got %v; want empty map", counts)
+	}
+
+	// Two failures with the same reason, one with a different reason, one with no reason.
+	enqAndFail("Artist A", "Track 1", "connection refused")
+	enqAndFail("Artist A", "Track 2", "connection refused")
+	enqAndFail("Artist B", "Track 3", "timeout")
+	enqAndFail("Artist C", "Track 4", "") // empty last_error -> "unknown"
+
+	counts, err = q.CountFailuresByReason(ctx)
+	if err != nil {
+		t.Fatalf("CountFailuresByReason: %v", err)
+	}
+	if counts["connection refused"] != 2 {
+		t.Errorf("connection refused = %d; want 2", counts["connection refused"])
+	}
+	if counts["timeout"] != 1 {
+		t.Errorf("timeout = %d; want 1", counts["timeout"])
+	}
+	if counts["unknown"] != 1 {
+		t.Errorf("unknown (empty reason) = %d; want 1", counts["unknown"])
+	}
+	if len(counts) != 3 {
+		t.Errorf("len(counts) = %d; want 3 (got %v)", len(counts), counts)
+	}
+
+	// Deferred rows (benign misses) must NOT appear in the failure counts.
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist D", TrackName: "Deferred Track"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue deferred: %v", err)
+	}
+	dItem, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue deferred: %v", err)
+	}
+	if _, err := q.Defer(ctx, dItem.ID, time.Hour, errors.New("no match")); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+
+	counts2, err := q.CountFailuresByReason(ctx)
+	if err != nil {
+		t.Fatalf("CountFailuresByReason after defer: %v", err)
+	}
+	if len(counts2) != 3 {
+		t.Errorf("deferred row leaked into failure counts: got %v; want same 3 reasons", counts2)
+	}
+}
+
 // TestDBQueue_RecheckClosedDB verifies the recheck methods return a wrapped
 // error (rather than panicking) when the underlying handle is closed.
 func TestDBQueue_RecheckClosedDB(t *testing.T) {
