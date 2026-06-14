@@ -28,15 +28,23 @@ To obtain a token, follow steps 1 to 5 from the [Spicetify guide](https://spicet
 
 For all settings, precedence is **CLI flag > environment variable > config file > built-in default**.
 
-## Storage paths (XDG defaults)
+## Storage paths
 
-`mxlrcgo-svc` resolves its config file and SQLite database using XDG base directories by default. When `MXLRC_DOCKER=true` (set automatically in the published images), storage defaults resolve under `/config` instead:
+`mxlrcgo-svc` resolves its config file and SQLite database using XDG base directories by default, with overrides for Docker and native packages.
 
-- Config file: XDG config dir, or `/config/config.toml` in Docker.
-- Database: XDG data dir, or `/config/mxlrcgo.db` in Docker.
-- Output dir: XDG, or `/music` (the image default).
+| Install method | Config file | Database |
+|----------------|-------------|----------|
+| XDG (default) | `$XDG_CONFIG_HOME/mxlrcgo-svc/config.toml` | `$XDG_DATA_HOME/mxlrcgo-svc/mxlrcgo.db` |
+| Docker (`MXLRC_DOCKER=true`) | `/config/config.toml` | `/config/mxlrcgo.db` |
+| Native package (`.deb`/`.rpm`/`.apk`) | `/etc/mxlrcgo-svc/config.toml` | `/var/lib/mxlrcgo-svc/mxlrcgo.db` |
 
-Override any of these explicitly with `MXLRC_DB_PATH`, `MXLRC_OUTPUT_DIR`, or the `--config` flag.
+Native packages run the service as the `mxlrcgo-svc` system user; that user owns `/var/lib/mxlrcgo-svc` (mode `0750`). The state directory and system user are preserved on package removal so the database survives an upgrade or reinstall.
+
+Override any path explicitly with `MXLRC_DB_PATH`, `MXLRC_OUTPUT_DIR`, or the `--config` flag.
+
+### Instrumental tracks and `--upgrade`
+
+Instrumental tracks always write a `.txt` marker file. These files are intentionally excluded from `--upgrade` promotion: re-fetching an instrumental would simply produce the same marker. Use `--update` (full re-fetch) if you want to force a re-check of an instrumental marker after a catalog change.
 
 ## Environment variables
 

@@ -192,6 +192,62 @@ Even signed binaries can trigger the "Windows protected your PC" prompt on first
 
 This prompt should not appear again after the first run. See [issue #183](https://github.com/sydlexius/mxlrcgo-svc/issues/183) for background on code signing.
 
+## Native packages
+
+The `.deb`, `.rpm`, and `.apk` packages install the binary, a service unit, and an example config. They do not enable or start the service on install; you must do that manually after setting your token.
+
+### System user and state directory
+
+The post-install script creates a `mxlrcgo-svc` system user and group (no login shell, no home-directory creation), then initializes `/var/lib/mxlrcgo-svc` (mode `0750`, owned by `mxlrcgo-svc:mxlrcgo-svc`). The service unit sets `MXLRC_DB_PATH=/var/lib/mxlrcgo-svc/mxlrcgo.db` and `MXLRC_LOG_FORMAT=json` in its environment.
+
+### Hardening
+
+The systemd unit runs with `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, and `NoNewPrivileges=true`. Only `/var/lib/mxlrcgo-svc` is writable. The OpenRC service on Alpine enforces the same ownership via `start_pre`.
+
+### Config file
+
+Copy the example and set your token before starting the service:
+
+```sh
+sudo cp /etc/mxlrcgo-svc/config.example.toml /etc/mxlrcgo-svc/config.toml
+sudo editor /etc/mxlrcgo-svc/config.toml
+```
+
+The service reads `/etc/mxlrcgo-svc/config.toml` automatically when `MXLRC_DB_PATH` is the native-package default. Pass `--config /etc/mxlrcgo-svc/config.toml` explicitly if you override the database path.
+
+### Service management
+
+**systemd (Debian / Ubuntu / RHEL / Fedora / Rocky):**
+
+```sh
+sudo systemctl enable mxlrcgo-svc   # start on boot
+sudo systemctl start mxlrcgo-svc
+sudo systemctl stop mxlrcgo-svc
+sudo systemctl restart mxlrcgo-svc
+sudo systemctl status mxlrcgo-svc
+sudo journalctl -u mxlrcgo-svc -f   # follow logs
+```
+
+**OpenRC (Alpine):**
+
+```sh
+sudo rc-update add mxlrcgo-svc default   # start on boot
+sudo rc-service mxlrcgo-svc start
+sudo rc-service mxlrcgo-svc stop
+sudo rc-service mxlrcgo-svc restart
+sudo rc-service mxlrcgo-svc status
+```
+
+### Data preservation on removal
+
+Package removal stops the service but intentionally preserves `/var/lib/mxlrcgo-svc` (the SQLite database and any config) and the `mxlrcgo-svc` system user. This means reinstalling or upgrading the package keeps your cache and settings. Remove the directory manually for a clean uninstall:
+
+```sh
+sudo rm -rf /var/lib/mxlrcgo-svc
+sudo userdel mxlrcgo-svc
+sudo groupdel mxlrcgo-svc
+```
+
 ## Recording enrichment
 
 Recording enrichment reads the ISRC, MusicBrainz recording ID, and duration from each file's audio tags and passes them to the matcher to disambiguate results (for example, telling two same-titled recordings apart). It is on by default.

@@ -42,8 +42,24 @@ sudo apk add --allow-untrusted mxlrcgo-svc_*.apk
 
 The package installs the binary to `/usr/local/bin/mxlrcgo-svc`, a systemd unit
 (or OpenRC script on Alpine), and an example config at
-`/etc/mxlrcgo-svc/config.example.toml`. Copy the example to
-`/etc/mxlrcgo-svc/config.toml` and edit it before starting the service.
+`/etc/mxlrcgo-svc/config.example.toml`. It also creates a `mxlrcgo-svc`
+system user and a state directory at `/var/lib/mxlrcgo-svc` (mode `0750`) that
+holds the SQLite database. The service does **not** start automatically on
+install.
+
+After installing, copy the example config, set your token, and start the service:
+
+```sh
+sudo cp /etc/mxlrcgo-svc/config.example.toml /etc/mxlrcgo-svc/config.toml
+# edit /etc/mxlrcgo-svc/config.toml and set [api] token = "YOUR_TOKEN"
+sudo systemctl enable --now mxlrcgo-svc   # systemd
+# or: sudo rc-update add mxlrcgo-svc default && sudo rc-service mxlrcgo-svc start  # Alpine OpenRC
+```
+
+The state directory and system user are preserved on package removal so the
+database survives upgrades and reinstalls. See the
+[User Guide](https://sydlexius.github.io/mxlrcgo-svc/USER_GUIDE/#native-packages)
+for service commands, log access, and data paths.
 
 **Tarballs / macOS / Windows:** Versioned archives for all platforms are also
 available on the [GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases)

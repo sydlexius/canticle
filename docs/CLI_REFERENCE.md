@@ -66,7 +66,9 @@ mxlrcgo-svc "Dream Theater"
 >
 > **_The `-d/--depth` argument limits the depth of subdirectories to scan; use `-d 0` or `--depth 0` to only scan the specified directory._**
 
-The `--upgrade` flag re-fetches songs that previously produced a `.txt` (unsynced) file, to promote them to `.lrc` when synced lyrics later become available.
+The `--upgrade` flag re-fetches tracks that previously produced a `.txt` (unsynced) file, to promote them to `.lrc` when synced lyrics later become available. Instrumental tracks are always written as `.txt` and are excluded from upgrade - only `--update` (full re-fetch) overrides them.
+
+In directory mode, when audio tags carry ISRC, MusicBrainz recording ID, or duration, those values are read and passed to Musixmatch to improve match precision - for example, distinguishing two recordings of the same title.
 
 ## Serve
 
