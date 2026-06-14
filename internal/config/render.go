@@ -154,59 +154,84 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 		return ""
 	}
 
+	// src returns the bare source token ("cli"/"env"/"") for a path, mirroring
+	// ann's precedence. Typed slog attrs (int/bool/float) keep their native type
+	// and emit this as a sibling "<key>_source" attr instead of inlining the
+	// annotation, so the value key's type never varies across runs.
+	src := func(path string) string {
+		if cliSrc[path] {
+			return "cli"
+		}
+		if envSrc[path] {
+			return "env"
+		}
+		return ""
+	}
+
 	// strAttr renders a string field, redacting sensitive values and appending
-	// the source annotation when present.
-	strAttr := func(key, path, val string) slog.Attr {
+	// the source annotation when present. String values do not type-vary, so the
+	// annotation stays inline (no sibling "_source" attr).
+	strAttr := func(key, path, val string) []slog.Attr {
 		display := RedactValue(path, val)
 		if a := ann(path); a != "" {
 			display += a
 		}
-		return slog.String(key, display)
+		return []slog.Attr{slog.String(key, display)}
 	}
 
-	// intAttr renders an integer field with optional source annotation.
-	intAttr := func(key, path string, val int) slog.Attr {
-		if a := ann(path); a != "" {
-			return slog.String(key, fmt.Sprintf("%d%s", val, a))
+	// intAttr renders an integer field, preserving the slog.Int type. When a
+	// source applies, a sibling "<key>_source" attr carries the bare source.
+	intAttr := func(key, path string, val int) []slog.Attr {
+		attrs := []slog.Attr{slog.Int(key, val)}
+		if s := src(path); s != "" {
+			attrs = append(attrs, slog.String(key+"_source", s))
 		}
-		return slog.Int(key, val)
+		return attrs
 	}
 
-	// boolAttr renders a boolean field with optional source annotation.
-	boolAttr := func(key, path string, val bool) slog.Attr {
-		if a := ann(path); a != "" {
-			return slog.String(key, fmt.Sprintf("%t%s", val, a))
+	// boolAttr renders a boolean field, preserving the slog.Bool type. When a
+	// source applies, a sibling "<key>_source" attr carries the bare source.
+	boolAttr := func(key, path string, val bool) []slog.Attr {
+		attrs := []slog.Attr{slog.Bool(key, val)}
+		if s := src(path); s != "" {
+			attrs = append(attrs, slog.String(key+"_source", s))
 		}
-		return slog.Bool(key, val)
+		return attrs
 	}
 
-	// floatAttr renders a float64 field with optional source annotation.
-	floatAttr := func(key, path string, val float64) slog.Attr {
-		if a := ann(path); a != "" {
-			return slog.String(key, fmt.Sprintf("%g%s", val, a))
+	// floatAttr renders a float64 field, preserving the slog.Float64 type. When
+	// a source applies, a sibling "<key>_source" attr carries the bare source.
+	floatAttr := func(key, path string, val float64) []slog.Attr {
+		attrs := []slog.Attr{slog.Float64(key, val)}
+		if s := src(path); s != "" {
+			attrs = append(attrs, slog.String(key+"_source", s))
 		}
-		return slog.Float64(key, val)
+		return attrs
 	}
 
-	// sliceAttr renders a slice field, redacting sensitive values.
-	sliceAttr := func(key, path string, vals []string) slog.Attr {
+	// sliceAttr renders a slice field, redacting sensitive values. An empty
+	// slice renders as "[]" (matching FormatConfigText's sliceVal) for both
+	// sensitive and non-sensitive paths, since an empty sensitive slice has
+	// nothing to redact.
+	sliceAttr := func(key, path string, vals []string) []slog.Attr {
 		var display string
-		if IsSensitiveConfigKey(path) {
-			if len(vals) > 0 {
-				display = "[REDACTED]"
-			}
-		} else {
+		switch {
+		case len(vals) == 0:
+			display = "[]"
+		case IsSensitiveConfigKey(path):
+			display = "[REDACTED]"
+		default:
 			display = strings.Join(vals, ", ")
 		}
 		if a := ann(path); a != "" {
 			display += a
 		}
-		return slog.String(key, display)
+		return []slog.Attr{slog.String(key, display)}
 	}
 
 	// tokenAttr handles the api.token field specially so empty shows as empty
 	// rather than "[REDACTED]" (lets caller distinguish unset from redacted).
-	tokenAttr := func() slog.Attr {
+	tokenAttr := func() []slog.Attr {
 		val := ""
 		if cfg.API.Token != "" {
 			val = "[REDACTED]"
@@ -214,11 +239,22 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 		if a := ann("api.token"); a != "" {
 			val += a
 		}
-		return slog.String("token", val)
+		return []slog.Attr{slog.String("token", val)}
+	}
+
+	// group flattens the per-field []slog.Attr results into a single named group.
+	group := func(name string, fields ...[]slog.Attr) slog.Attr {
+		var attrs []any
+		for _, f := range fields {
+			for _, a := range f {
+				attrs = append(attrs, a)
+			}
+		}
+		return slog.Group(name, attrs...)
 	}
 
 	return []slog.Attr{
-		slog.Group("api",
+		group("api",
 			tokenAttr(),
 			intAttr("cooldown", "api.cooldown", cfg.API.Cooldown),
 			intAttr("circuit_open_duration", "api.circuit_open_duration", cfg.API.CircuitOpenDuration),
@@ -227,28 +263,28 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			intAttr("miss_backoff_cap_hours", "api.miss_backoff_cap_hours", cfg.API.MissBackoffCapHours),
 			intAttr("max_miss_attempts", "api.max_miss_attempts", cfg.API.MaxMissAttempts),
 		),
-		slog.Group("output",
+		group("output",
 			strAttr("dir", "output.dir", cfg.Output.Dir),
 			strAttr("embedded_lyrics", "output.embedded_lyrics", cfg.Output.EmbeddedLyrics),
 			boolAttr("bilingual_output", "output.bilingual_output", cfg.Output.BilingualOutput),
 		),
-		slog.Group("db",
+		group("db",
 			strAttr("path", "db.path", cfg.DB.Path),
 		),
-		slog.Group("server",
+		group("server",
 			strAttr("addr", "server.addr", cfg.Server.Addr),
 			sliceAttr("webhook_api_keys", "server.webhook_api_keys", cfg.Server.WebhookAPIKeys),
 			intAttr("scan_interval_seconds", "server.scan_interval_seconds", cfg.Server.ScanIntervalSeconds),
 			intAttr("work_interval_seconds", "server.work_interval_seconds", cfg.Server.WorkIntervalSeconds),
 		),
-		slog.Group("providers",
+		group("providers",
 			strAttr("primary", "providers.primary", cfg.Providers.Primary),
 			sliceAttr("disabled", "providers.disabled", cfg.Providers.Disabled),
 			strAttr("mode", "providers.mode", cfg.Providers.Mode),
 			intAttr("race_wait_seconds", "providers.race_wait_seconds", cfg.Providers.RaceWaitSeconds),
 			sliceAttr("fallback_order", "providers.fallback_order", cfg.Providers.FallbackOrder),
 		),
-		slog.Group("verification",
+		group("verification",
 			boolAttr("enabled", "verification.enabled", cfg.Verification.Enabled),
 			strAttr("whisper_url", "verification.whisper_url", cfg.Verification.WhisperURL),
 			strAttr("ffmpeg_path", "verification.ffmpeg_path", cfg.Verification.FFmpegPath),
@@ -256,7 +292,7 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			floatAttr("min_confidence", "verification.min_confidence", cfg.Verification.MinConfidence),
 			floatAttr("min_similarity", "verification.min_similarity", cfg.Verification.MinSimilarity),
 		),
-		slog.Group("instrumental_detector",
+		group("instrumental_detector",
 			boolAttr("enabled", "instrumental_detector.enabled", cfg.InstrumentalDetector.Enabled),
 			strAttr("classifier_url", "instrumental_detector.classifier_url", cfg.InstrumentalDetector.ClassifierURL),
 			strAttr("ffmpeg_path", "instrumental_detector.ffmpeg_path", cfg.InstrumentalDetector.FFmpegPath),
@@ -265,17 +301,17 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			sliceAttr("instrumental_classes", "instrumental_detector.instrumental_classes", cfg.InstrumentalDetector.InstrumentalClasses),
 			intAttr("cooldown_seconds", "instrumental_detector.cooldown_seconds", cfg.InstrumentalDetector.CooldownSeconds),
 		),
-		slog.Group("enrichment",
+		group("enrichment",
 			boolAttr("enabled", "enrichment.enabled", cfg.Enrichment.Enabled),
 		),
-		slog.Group("guard",
+		group("guard",
 			sliceAttr("accepted_scripts", "guard.accepted_scripts", cfg.Guard.AcceptedScripts),
 			floatAttr("script_guard_threshold", "guard.script_guard_threshold", cfg.Guard.Threshold),
 		),
-		slog.Group("queue",
+		group("queue",
 			boolAttr("randomize", "queue.randomize", cfg.Queue.Randomize),
 		),
-		slog.Group("logging",
+		group("logging",
 			strAttr("level", "logging.level", cfg.Logging.Level),
 			strAttr("format", "logging.format", cfg.Logging.Format),
 			strAttr("file", "logging.file", cfg.Logging.File),

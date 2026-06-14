@@ -316,6 +316,45 @@ func TestLoad_EnvCooldownInvalidIsIgnored(t *testing.T) {
 	}
 }
 
+// TestLoadWithSources_EnvHintReflectsAppliedOverrides verifies that the
+// applied-env map returned by LoadWithSources marks a field "(env)" only when
+// its override actually took effect: a valid numeric env applies and is
+// recorded; an invalid one is rejected and is NOT recorded (the false-label bug
+// fixed in F1).
+func TestLoadWithSources_EnvHintReflectsAppliedOverrides(t *testing.T) {
+	t.Run("valid applies and is recorded", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_API_COOLDOWN", "30")
+
+		cfg, envSrc, err := LoadWithSources("")
+		if err != nil {
+			t.Fatalf("LoadWithSources: %v", err)
+		}
+		if cfg.API.Cooldown != 30 {
+			t.Errorf("cooldown = %d; want 30", cfg.API.Cooldown)
+		}
+		if !envSrc["api.cooldown"] {
+			t.Error("envSrc[api.cooldown] = false; want true when a valid env override applied")
+		}
+	})
+
+	t.Run("invalid is rejected and not recorded", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_API_COOLDOWN", "notanumber")
+
+		cfg, envSrc, err := LoadWithSources("")
+		if err != nil {
+			t.Fatalf("LoadWithSources: %v", err)
+		}
+		if cfg.API.Cooldown != 15 {
+			t.Errorf("cooldown = %d; want 15 (default) after invalid env var", cfg.API.Cooldown)
+		}
+		if envSrc["api.cooldown"] {
+			t.Error("envSrc[api.cooldown] = true; want false when the env value was invalid and rejected")
+		}
+	})
+}
+
 // TestLoad_ServerIntervalDefaults verifies the service-loop intervals fall back
 // to their built-in defaults: scan 900s and work 0 (meaning "use api.cooldown").
 func TestLoad_ServerIntervalDefaults(t *testing.T) {

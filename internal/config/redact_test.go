@@ -4,39 +4,6 @@ import (
 	"testing"
 )
 
-// TestGetSetEnvVars_ReturnsFalseWhenNotSet verifies that GetSetEnvVars returns
-// an empty (or all-false) map when no MXLRC_* env vars are set.
-func TestGetSetEnvVars_ReturnsFalseWhenNotSet(t *testing.T) {
-	// Isolate: clear every env var in fieldEnvVars.
-	for _, vars := range fieldEnvVars {
-		for _, v := range vars {
-			t.Setenv(v, "")
-		}
-	}
-	result := GetSetEnvVars()
-	for path, set := range result {
-		if set {
-			t.Errorf("GetSetEnvVars: path %q reported as set when env is clear", path)
-		}
-	}
-}
-
-// TestGetSetEnvVars_DetectsSetVar verifies that GetSetEnvVars marks a field
-// path as set when its env var has a non-empty value.
-func TestGetSetEnvVars_DetectsSetVar(t *testing.T) {
-	// Isolate all vars, then set one.
-	for _, vars := range fieldEnvVars {
-		for _, v := range vars {
-			t.Setenv(v, "")
-		}
-	}
-	t.Setenv("MXLRC_OUTPUT_DIR", "/tmp/test-lyrics")
-	result := GetSetEnvVars()
-	if !result["output.dir"] {
-		t.Error("GetSetEnvVars: output.dir not detected as set when MXLRC_OUTPUT_DIR is non-empty")
-	}
-}
-
 func TestIsSensitiveConfigKey(t *testing.T) {
 	sensitive := []string{"api.token", "server.webhook_api_keys"}
 	for _, k := range sensitive {

@@ -471,10 +471,9 @@ func initLogging(cfg config.Config) {
 // settings; slog DEBUG receives the complete structured config via
 // ConfigToSlogAttrs. Sensitive fields are redacted in all output paths.
 // cliSrc is a set of config field paths that were overridden on the command
-// line; it may be nil.
-func logStartupBanner(ctx context.Context, cfg config.Config, ver string, out io.Writer, cliSrc map[string]bool) {
-	envSrc := config.GetSetEnvVars()
-
+// line; envSrc is the set whose environment override actually applied (from
+// config.LoadWithSources). Both may be nil.
+func logStartupBanner(ctx context.Context, cfg config.Config, ver string, out io.Writer, envSrc, cliSrc map[string]bool) {
 	// Console: version line + full TOML-style config dump.
 	_, _ = fmt.Fprintf(out, "%s\n\n", ver)
 	_, _ = fmt.Fprint(out, config.FormatConfigText(cfg, envSrc, cliSrc))
@@ -499,7 +498,7 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 		_, _ = fmt.Fprintln(out, "missing required positional argument: Song")
 		return 2
 	}
-	cfg, err := config.Load(args.ConfigPath)
+	cfg, envSrc, err := config.LoadWithSources(args.ConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		return 1
@@ -534,7 +533,7 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 	if args.Outdir != nil {
 		fetchCLISrc["output.dir"] = true
 	}
-	logStartupBanner(ctx, fetchBannerCfg, VersionString(), out, fetchCLISrc)
+	logStartupBanner(ctx, fetchBannerCfg, VersionString(), out, envSrc, fetchCLISrc)
 	fetcher, err := selectedProvider(cfg, token, newFetcher)
 	if err != nil {
 		slog.Error("failed to configure lyrics provider", "error", err)
@@ -642,7 +641,7 @@ func lyricPreview(song models.Song, n int) string {
 }
 
 func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
-	cfg, err := config.Load(args.ConfigPath)
+	cfg, envSrc, err := config.LoadWithSources(args.ConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		return 1
@@ -677,7 +676,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if args.Listen != nil {
 		serveCLISrc["server.addr"] = true
 	}
-	logStartupBanner(ctx, bannerCfg, VersionString(), out, serveCLISrc)
+	logStartupBanner(ctx, bannerCfg, VersionString(), out, envSrc, serveCLISrc)
 	fetcher, err := selectedProvider(cfg, token, newFetcher)
 	if err != nil {
 		slog.Error("failed to configure lyrics provider", "error", err)

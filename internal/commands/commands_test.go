@@ -2402,7 +2402,7 @@ func TestLogStartupBanner_EmitsVersion(t *testing.T) {
 		Logging: config.LoggingConfig{Level: "info", Format: "text"},
 	}
 	var buf bytes.Buffer
-	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, nil)
+	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, nil, nil)
 	got := buf.String()
 	if !strings.Contains(got, "mxlrcgo-svc test-ver") {
 		t.Errorf("version not in banner output: %q", got)
@@ -2418,7 +2418,7 @@ func TestLogStartupBanner_RedactsToken(t *testing.T) {
 		Logging: config.LoggingConfig{Level: "info", Format: "text"},
 	}
 	var buf bytes.Buffer
-	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, nil)
+	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, nil, nil)
 	got := buf.String()
 	if strings.Contains(got, "topsecret") {
 		t.Errorf("token in plaintext in banner output: %q", got)
@@ -2435,7 +2435,7 @@ func TestLogStartupBanner_CLIAnnotation(t *testing.T) {
 	}
 	cliSrc := map[string]bool{"output.dir": true}
 	var buf bytes.Buffer
-	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, cliSrc)
+	logStartupBanner(context.Background(), cfg, "mxlrcgo-svc test-ver", &buf, nil, cliSrc)
 	got := buf.String()
 	if !strings.Contains(got, "(cli)") {
 		t.Errorf("missing (cli) annotation in banner output: %q", got)

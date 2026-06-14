@@ -310,7 +310,18 @@ func defaults() Config {
 // Load reads the TOML config file at path (or XDG default if empty),
 // then overlays environment variables. A missing config file is not an error.
 func Load(path string) (Config, error) {
+	cfg, _, err := LoadWithSources(path)
+	return cfg, err
+}
+
+// LoadWithSources is Load plus the set of config field paths whose environment
+// override was ACTUALLY APPLIED (invalid env values that were rejected are not
+// included). The returned map is suitable as the envSrc hint for
+// FormatConfigText / ConfigToSlogAttrs so a field is annotated "(env)" only
+// when its override truly took effect. The map is non-nil even on error.
+func LoadWithSources(path string) (Config, map[string]bool, error) {
 	cfg := defaults()
+	appliedEnv := map[string]bool{}
 	if path == "" {
 		path = xdgConfigPath("mxlrcgo-svc", "config.toml")
 	}
@@ -318,7 +329,7 @@ func Load(path string) (Config, error) {
 		if _, err := os.Stat(path); err == nil {
 			md, err := toml.DecodeFile(path, &cfg)
 			if err != nil {
-				return cfg, fmt.Errorf("config: decode %s: %w", path, err)
+				return cfg, appliedEnv, fmt.Errorf("config: decode %s: %w", path, err)
 			}
 			// Re-apply defaults for any fields the file set to blank.
 			// This prevents a user copying config.example.toml verbatim from
@@ -443,17 +454,17 @@ func Load(path string) (Config, error) {
 				cfg.Logging.Compress = d.Logging.Compress
 			}
 		} else if !os.IsNotExist(err) {
-			return cfg, fmt.Errorf("config: stat %s: %w", path, err)
+			return cfg, appliedEnv, fmt.Errorf("config: stat %s: %w", path, err)
 		}
 	}
-	applyEnvOverrides(&cfg)
+	applyEnvOverrides(&cfg, appliedEnv)
 	normalizeEmbeddedLyrics(&cfg)
 	if err := normalizeProvidersMode(&cfg); err != nil {
-		return cfg, err
+		return cfg, appliedEnv, err
 	}
 	normalizeProvidersRaceWait(&cfg)
 	if err := normalizeProvidersFallback(&cfg); err != nil {
-		return cfg, err
+		return cfg, appliedEnv, err
 	}
 	clampCircuitOpenDuration(&cfg)
 	// Must run AFTER clampCircuitOpenDuration: the base is clamped against the
@@ -461,21 +472,28 @@ func Load(path string) (Config, error) {
 	clampCircuitBackoffBase(&cfg)
 	clampMissBackoff(&cfg)
 	if cfg.DB.Path == "" {
-		return cfg, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
+		return cfg, appliedEnv, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
 	}
-	return cfg, nil
+	return cfg, appliedEnv, nil
 }
 
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
 // Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
-func applyEnvOverrides(cfg *Config) {
+//
+// applied (must be non-nil) records the dotted config field path for every
+// override that ACTUALLY took effect. Env values that are rejected (invalid
+// numeric/bool, out-of-range) leave the prior value in place and are NOT
+// recorded, so callers can annotate "(env)" only for overrides that applied.
+func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	// Token: MUSIXMATCH_TOKEN takes precedence over MXLRC_API_TOKEN (backward compat).
 	if v := os.Getenv("MUSIXMATCH_TOKEN"); v != "" {
 		cfg.API.Token = v
+		applied["api.token"] = true
 	} else if v := os.Getenv("MXLRC_API_TOKEN"); v != "" {
 		cfg.API.Token = v
+		applied["api.token"] = true
 	}
 
 	// Cooldown: MXLRC_API_COOLDOWN (section-scoped) takes precedence over MXLRC_COOLDOWN (short alias).
@@ -491,6 +509,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", cooldownVar, "value", v, "current", cfg.API.Cooldown) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.Cooldown = n
+			applied["api.cooldown"] = true
 		}
 	}
 
@@ -500,6 +519,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_API_CIRCUIT_OPEN_DURATION", "value", v, "current", cfg.API.CircuitOpenDuration) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.CircuitOpenDuration = n
+			applied["api.circuit_open_duration"] = true
 		}
 	}
 
@@ -509,6 +529,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_API_CIRCUIT_BACKOFF_BASE", "value", v, "current", cfg.API.CircuitBackoffBase) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.CircuitBackoffBase = n
+			applied["api.circuit_backoff_base_seconds"] = true
 		}
 	}
 
@@ -518,6 +539,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_MISS_BACKOFF_BASE_HOURS", "value", v, "current", cfg.API.MissBackoffBaseHours) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.MissBackoffBaseHours = n
+			applied["api.miss_backoff_base_hours"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_MISS_BACKOFF_CAP_HOURS"); v != "" {
@@ -526,6 +548,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_MISS_BACKOFF_CAP_HOURS", "value", v, "current", cfg.API.MissBackoffCapHours) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.MissBackoffCapHours = n
+			applied["api.miss_backoff_cap_hours"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_MAX_MISS_ATTEMPTS"); v != "" {
@@ -534,14 +557,17 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_MAX_MISS_ATTEMPTS", "value", v, "current", cfg.API.MaxMissAttempts) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.API.MaxMissAttempts = n
+			applied["api.max_miss_attempts"] = true
 		}
 	}
 
 	if v := os.Getenv("MXLRC_OUTPUT_DIR"); v != "" {
 		cfg.Output.Dir = v
+		applied["output.dir"] = true
 	}
 	if v := os.Getenv("MXLRC_EMBEDDED_LYRICS"); v != "" {
 		cfg.Output.EmbeddedLyrics = v
+		applied["output.embedded_lyrics"] = true
 	}
 	if v := os.Getenv("MXLRC_BILINGUAL_OUTPUT"); v != "" {
 		bilingual, err := strconv.ParseBool(v)
@@ -549,16 +575,20 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_BILINGUAL_OUTPUT", "value", v, "current", cfg.Output.BilingualOutput) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Output.BilingualOutput = bilingual
+			applied["output.bilingual_output"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_DB_PATH"); v != "" {
 		cfg.DB.Path = v
+		applied["db.path"] = true
 	}
 	if v := os.Getenv("MXLRC_SERVER_ADDR"); v != "" {
 		cfg.Server.Addr = v
+		applied["server.addr"] = true
 	}
 	if v := os.Getenv("MXLRC_WEBHOOK_API_KEY"); v != "" {
 		cfg.Server.WebhookAPIKeys = splitCSV(v)
+		applied["server.webhook_api_keys"] = true
 	}
 	if v := os.Getenv("MXLRC_SCAN_INTERVAL"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -566,6 +596,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_INTERVAL", "value", v, "current", cfg.Server.ScanIntervalSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Server.ScanIntervalSeconds = n
+			applied["server.scan_interval_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_WORK_INTERVAL"); v != "" {
@@ -574,16 +605,20 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_WORK_INTERVAL", "value", v, "current", cfg.Server.WorkIntervalSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Server.WorkIntervalSeconds = n
+			applied["server.work_interval_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_PROVIDER_PRIMARY"); v != "" {
 		cfg.Providers.Primary = v
+		applied["providers.primary"] = true
 	}
 	if v := os.Getenv("MXLRC_PROVIDERS_DISABLED"); v != "" {
 		cfg.Providers.Disabled = splitCSV(v)
+		applied["providers.disabled"] = true
 	}
 	if v := os.Getenv("MXLRC_PROVIDERS_MODE"); v != "" {
 		cfg.Providers.Mode = v
+		applied["providers.mode"] = true
 	}
 	if v := os.Getenv("MXLRC_PROVIDERS_RACE_WAIT_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -591,10 +626,12 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_PROVIDERS_RACE_WAIT_SECONDS", "value", v, "current", cfg.Providers.RaceWaitSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Providers.RaceWaitSeconds = n
+			applied["providers.race_wait_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_PROVIDERS_FALLBACK_ORDER"); v != "" {
 		cfg.Providers.FallbackOrder = splitCSV(v)
+		applied["providers.fallback_order"] = true
 	}
 	if v := os.Getenv("MXLRC_VERIFICATION_ENABLED"); v != "" {
 		enabled, err := strconv.ParseBool(v)
@@ -602,6 +639,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_VERIFICATION_ENABLED", "value", v, "current", cfg.Verification.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.Enabled = enabled
+			applied["verification.enabled"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_QUEUE_RANDOMIZE"); v != "" {
@@ -610,6 +648,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_QUEUE_RANDOMIZE", "value", v, "current", cfg.Queue.Randomize) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Queue.Randomize = randomize
+			applied["queue.randomize"] = true
 		}
 	}
 	whisperVar := "MXLRC_VERIFICATION_WHISPER_URL"
@@ -620,9 +659,11 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v != "" {
 		cfg.Verification.WhisperURL = v
+		applied["verification.whisper_url"] = true
 	}
 	if v := os.Getenv("MXLRC_VERIFICATION_FFMPEG_PATH"); v != "" {
 		cfg.Verification.FFmpegPath = v
+		applied["verification.ffmpeg_path"] = true
 	}
 	sampleDurationVar := "MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS"
 	v = os.Getenv(sampleDurationVar)
@@ -636,6 +677,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", sampleDurationVar, "value", v, "current", cfg.Verification.SampleDurationSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.SampleDurationSeconds = n
+			applied["verification.sample_duration_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_VERIFICATION_MIN_CONFIDENCE"); v != "" {
@@ -644,6 +686,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_VERIFICATION_MIN_CONFIDENCE", "value", v, "current", cfg.Verification.MinConfidence) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.MinConfidence = n
+			applied["verification.min_confidence"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_VERIFICATION_MIN_SIMILARITY"); v != "" {
@@ -652,6 +695,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_VERIFICATION_MIN_SIMILARITY", "value", v, "current", cfg.Verification.MinSimilarity) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Verification.MinSimilarity = n
+			applied["verification.min_similarity"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_ENABLED"); v != "" {
@@ -660,6 +704,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_ENABLED", "value", v, "current", cfg.InstrumentalDetector.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.InstrumentalDetector.Enabled = enabled
+			applied["instrumental_detector.enabled"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_ENRICHMENT_ENABLED"); v != "" {
@@ -668,13 +713,16 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_ENRICHMENT_ENABLED", "value", v, "current", cfg.Enrichment.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Enrichment.Enabled = enabled
+			applied["enrichment.enabled"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL"); v != "" {
 		cfg.InstrumentalDetector.ClassifierURL = v
+		applied["instrumental_detector.classifier_url"] = true
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH"); v != "" {
 		cfg.InstrumentalDetector.FFmpegPath = v
+		applied["instrumental_detector.ffmpeg_path"] = true
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -682,6 +730,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS", "value", v, "current", cfg.InstrumentalDetector.SampleDurationSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.InstrumentalDetector.SampleDurationSeconds = n
+			applied["instrumental_detector.sample_duration_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE"); v != "" {
@@ -690,10 +739,12 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "value", v, "current", cfg.InstrumentalDetector.MinConfidence) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.InstrumentalDetector.MinConfidence = n
+			applied["instrumental_detector.min_confidence"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSES"); v != "" {
 		cfg.InstrumentalDetector.InstrumentalClasses = splitCSV(v)
+		applied["instrumental_detector.instrumental_classes"] = true
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -701,10 +752,12 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "value", v, "current", cfg.InstrumentalDetector.CooldownSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.InstrumentalDetector.CooldownSeconds = n
+			applied["instrumental_detector.cooldown_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_GUARD_ACCEPTED_SCRIPTS"); v != "" {
 		cfg.Guard.AcceptedScripts = splitCSV(v)
+		applied["guard.accepted_scripts"] = true
 	}
 	if v := os.Getenv("MXLRC_GUARD_THRESHOLD"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
@@ -712,17 +765,21 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_GUARD_THRESHOLD", "value", v, "current", cfg.Guard.Threshold) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Guard.Threshold = n
+			applied["guard.script_guard_threshold"] = true
 		}
 	}
 	// Logging: string env overrides.
 	if v := os.Getenv("MXLRC_LOG_LEVEL"); v != "" {
 		cfg.Logging.Level = v //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		applied["logging.level"] = true
 	}
 	if v := os.Getenv("MXLRC_LOG_FORMAT"); v != "" {
 		cfg.Logging.Format = v //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		applied["logging.format"] = true
 	}
 	if v := os.Getenv("MXLRC_LOG_FILE"); v != "" {
 		cfg.Logging.File = v //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		applied["logging.file"] = true
 	}
 	// Logging: integer env overrides.
 	if v := os.Getenv("MXLRC_LOG_MAX_SIZE_MB"); v != "" {
@@ -731,6 +788,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_MAX_SIZE_MB", "value", v, "current", cfg.Logging.MaxSizeMB) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Logging.MaxSizeMB = n
+			applied["logging.max_size_mb"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_LOG_MAX_FILES"); v != "" {
@@ -739,6 +797,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_MAX_FILES", "value", v, "current", cfg.Logging.MaxFiles) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Logging.MaxFiles = n
+			applied["logging.max_files"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_LOG_MAX_AGE_DAYS"); v != "" {
@@ -747,6 +806,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_MAX_AGE_DAYS", "value", v, "current", cfg.Logging.MaxAgeDays) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Logging.MaxAgeDays = n
+			applied["logging.max_age_days"] = true
 		}
 	}
 	// Logging: bool env override.
@@ -756,6 +816,7 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_LOG_COMPRESS", "value", v, "current", cfg.Logging.Compress) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Logging.Compress = compress
+			applied["logging.compress"] = true
 		}
 	}
 }
@@ -879,75 +940,6 @@ func clampMissBackoff(cfg *Config) {
 		slog.Warn("max_miss_attempts is negative; clamping to 0 (no cap)", "configured", cfg.API.MaxMissAttempts)
 		cfg.API.MaxMissAttempts = 0
 	}
-}
-
-// fieldEnvVars maps dotted config field paths to the environment variable
-// names that can override them, listed in priority order (highest first).
-// It is the canonical cross-reference between config field paths and env vars,
-// used by GetSetEnvVars to annotate which values were sourced from the
-// environment.
-var fieldEnvVars = map[string][]string{
-	"api.token":                                     {"MUSIXMATCH_TOKEN", "MXLRC_API_TOKEN"},
-	"api.cooldown":                                  {"MXLRC_API_COOLDOWN", "MXLRC_COOLDOWN"},
-	"api.circuit_open_duration":                     {"MXLRC_API_CIRCUIT_OPEN_DURATION"},
-	"api.circuit_backoff_base_seconds":              {"MXLRC_API_CIRCUIT_BACKOFF_BASE"},
-	"api.miss_backoff_base_hours":                   {"MXLRC_MISS_BACKOFF_BASE_HOURS"},
-	"api.miss_backoff_cap_hours":                    {"MXLRC_MISS_BACKOFF_CAP_HOURS"},
-	"api.max_miss_attempts":                         {"MXLRC_MAX_MISS_ATTEMPTS"},
-	"output.dir":                                    {"MXLRC_OUTPUT_DIR"},
-	"output.embedded_lyrics":                        {"MXLRC_EMBEDDED_LYRICS"},
-	"output.bilingual_output":                       {"MXLRC_BILINGUAL_OUTPUT"},
-	"db.path":                                       {"MXLRC_DB_PATH"},
-	"server.addr":                                   {"MXLRC_SERVER_ADDR"},
-	"server.webhook_api_keys":                       {"MXLRC_WEBHOOK_API_KEY"},
-	"server.scan_interval_seconds":                  {"MXLRC_SCAN_INTERVAL"},
-	"server.work_interval_seconds":                  {"MXLRC_WORK_INTERVAL"},
-	"providers.primary":                             {"MXLRC_PROVIDER_PRIMARY"},
-	"providers.disabled":                            {"MXLRC_PROVIDERS_DISABLED"},
-	"providers.mode":                                {"MXLRC_PROVIDERS_MODE"},
-	"providers.race_wait_seconds":                   {"MXLRC_PROVIDERS_RACE_WAIT_SECONDS"},
-	"providers.fallback_order":                      {"MXLRC_PROVIDERS_FALLBACK_ORDER"},
-	"verification.enabled":                          {"MXLRC_VERIFICATION_ENABLED"},
-	"verification.whisper_url":                      {"MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL"},
-	"verification.ffmpeg_path":                      {"MXLRC_VERIFICATION_FFMPEG_PATH"},
-	"verification.sample_duration_seconds":          {"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION"},
-	"verification.min_confidence":                   {"MXLRC_VERIFICATION_MIN_CONFIDENCE"},
-	"verification.min_similarity":                   {"MXLRC_VERIFICATION_MIN_SIMILARITY"},
-	"instrumental_detector.enabled":                 {"MXLRC_INSTRUMENTAL_DETECTOR_ENABLED"},
-	"instrumental_detector.classifier_url":          {"MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL"},
-	"instrumental_detector.ffmpeg_path":             {"MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH"},
-	"instrumental_detector.sample_duration_seconds": {"MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS"},
-	"instrumental_detector.min_confidence":          {"MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE"},
-	"instrumental_detector.instrumental_classes":    {"MXLRC_INSTRUMENTAL_DETECTOR_CLASSES"},
-	"instrumental_detector.cooldown_seconds":        {"MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS"},
-	"enrichment.enabled":                            {"MXLRC_ENRICHMENT_ENABLED"},
-	"guard.accepted_scripts":                        {"MXLRC_GUARD_ACCEPTED_SCRIPTS"},
-	"guard.script_guard_threshold":                  {"MXLRC_GUARD_THRESHOLD"},
-	"queue.randomize":                               {"MXLRC_QUEUE_RANDOMIZE"},
-	"logging.level":                                 {"MXLRC_LOG_LEVEL"},
-	"logging.format":                                {"MXLRC_LOG_FORMAT"},
-	"logging.file":                                  {"MXLRC_LOG_FILE"},
-	"logging.max_size_mb":                           {"MXLRC_LOG_MAX_SIZE_MB"},
-	"logging.max_files":                             {"MXLRC_LOG_MAX_FILES"},
-	"logging.max_age_days":                          {"MXLRC_LOG_MAX_AGE_DAYS"},
-	"logging.compress":                              {"MXLRC_LOG_COMPRESS"},
-}
-
-// GetSetEnvVars returns a map from config field paths to true for each field
-// whose corresponding MXLRC_* (or MUSIXMATCH_TOKEN) environment variable is
-// currently set to a non-empty value. Pass the result to FormatConfigText or
-// ConfigToSlogAttrs as the envSrc hint to annotate env-sourced values.
-func GetSetEnvVars() map[string]bool {
-	result := make(map[string]bool, len(fieldEnvVars))
-	for path, vars := range fieldEnvVars {
-		for _, v := range vars {
-			if os.Getenv(v) != "" {
-				result[path] = true
-				break
-			}
-		}
-	}
-	return result
 }
 
 func splitCSV(s string) []string {
