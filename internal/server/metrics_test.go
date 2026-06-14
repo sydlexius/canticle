@@ -102,6 +102,11 @@ func TestMetricsResponseIsValidPrometheusFormat(t *testing.T) {
 		t.Fatalf("Content-Type = %q; want text/plain", ct)
 	}
 
+	cc := rec.Header().Get("Cache-Control")
+	if cc != "no-store" {
+		t.Fatalf("Cache-Control = %q; want no-store", cc)
+	}
+
 	body := rec.Body.String()
 
 	// Metric family: queue items.

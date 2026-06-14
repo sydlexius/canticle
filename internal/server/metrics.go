@@ -61,6 +61,7 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store") // prevent proxies from caching stale metrics
 	w.WriteHeader(http.StatusOK)
 	writeMetrics(w, statusCounts, failureCounts)
 }
