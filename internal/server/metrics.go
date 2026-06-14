@@ -77,10 +77,10 @@ func writeMetrics(w io.Writer, statusCounts, failureCounts map[string]int64) {
 		_, _ = fmt.Fprintf(w, "mxlrcgo_queue_items{status=\"%s\"} %d\n", promEscape(status), statusCounts[status])
 	}
 
-	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_failures_total Current number of failed work queue items by error reason.")
-	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_failures_total gauge")
+	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_queue_failures Current number of failed work queue items by error reason.")
+	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_queue_failures gauge")
 	for _, reason := range sortedKeys(failureCounts) {
-		_, _ = fmt.Fprintf(w, "mxlrcgo_failures_total{reason=\"%s\"} %d\n", promEscape(reason), failureCounts[reason])
+		_, _ = fmt.Fprintf(w, "mxlrcgo_queue_failures{reason=\"%s\"} %d\n", promEscape(reason), failureCounts[reason])
 	}
 }
 

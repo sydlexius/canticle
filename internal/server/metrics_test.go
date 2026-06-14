@@ -122,13 +122,13 @@ func TestMetricsResponseIsValidPrometheusFormat(t *testing.T) {
 	}
 
 	// Metric family: failures.
-	if !strings.Contains(body, "# HELP mxlrcgo_failures_total") {
-		t.Errorf("missing HELP line for mxlrcgo_failures_total\nbody:\n%s", body)
+	if !strings.Contains(body, "# HELP mxlrcgo_queue_failures") {
+		t.Errorf("missing HELP line for mxlrcgo_queue_failures\nbody:\n%s", body)
 	}
-	if !strings.Contains(body, "# TYPE mxlrcgo_failures_total gauge") {
-		t.Errorf("missing TYPE gauge line for mxlrcgo_failures_total\nbody:\n%s", body)
+	if !strings.Contains(body, "# TYPE mxlrcgo_queue_failures gauge") {
+		t.Errorf("missing TYPE gauge line for mxlrcgo_queue_failures\nbody:\n%s", body)
 	}
-	if !strings.Contains(body, `mxlrcgo_failures_total{reason="connection refused"} 2`) {
+	if !strings.Contains(body, `mxlrcgo_queue_failures{reason="connection refused"} 2`) {
 		t.Errorf("missing failure sample\nbody:\n%s", body)
 	}
 }
@@ -153,11 +153,11 @@ func TestMetricsEmptyQueueProducesHelpAndTypeLines(t *testing.T) {
 	if !strings.Contains(body, "# TYPE mxlrcgo_queue_items gauge") {
 		t.Errorf("missing TYPE for mxlrcgo_queue_items\nbody:\n%s", body)
 	}
-	if !strings.Contains(body, "# HELP mxlrcgo_failures_total") {
-		t.Errorf("missing HELP for mxlrcgo_failures_total\nbody:\n%s", body)
+	if !strings.Contains(body, "# HELP mxlrcgo_queue_failures") {
+		t.Errorf("missing HELP for mxlrcgo_queue_failures\nbody:\n%s", body)
 	}
-	if !strings.Contains(body, "# TYPE mxlrcgo_failures_total gauge") {
-		t.Errorf("missing TYPE for mxlrcgo_failures_total\nbody:\n%s", body)
+	if !strings.Contains(body, "# TYPE mxlrcgo_queue_failures gauge") {
+		t.Errorf("missing TYPE for mxlrcgo_queue_failures\nbody:\n%s", body)
 	}
 }
 
