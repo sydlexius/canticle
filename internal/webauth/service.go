@@ -64,6 +64,9 @@ func WithClock(now func() time.Time) Option {
 
 // NewService returns a Service backed by the given stores.
 func NewService(users UserStore, sessions SessionStore, opts ...Option) *Service {
+	if users == nil || sessions == nil {
+		panic("webauth: NewService: users and sessions must not be nil")
+	}
 	s := &Service{
 		users:      users,
 		sessions:   sessions,
@@ -90,16 +93,20 @@ func (s *Service) Setup(ctx context.Context, username, password string) (User, e
 	}
 	exists, err := s.users.HasUsers(ctx)
 	if err != nil {
-		return User{}, err
+		return User{}, fmt.Errorf("webauth: setup: %w", err)
 	}
 	if exists {
 		return User{}, ErrUserExists
 	}
 	hash, err := HashPassword(password)
 	if err != nil {
-		return User{}, err
+		return User{}, fmt.Errorf("webauth: setup: %w", err)
 	}
-	return s.users.CreateFirstUser(ctx, username, hash)
+	user, err := s.users.CreateFirstUser(ctx, username, hash)
+	if err != nil {
+		return User{}, fmt.Errorf("webauth: setup: %w", err)
+	}
+	return user, nil
 }
 
 // Login verifies credentials and, on success, creates a session and returns its
@@ -109,7 +116,7 @@ func (s *Service) Setup(ctx context.Context, username, password string) (User, e
 func (s *Service) Login(ctx context.Context, username, password string) (string, error) {
 	user, ok, err := s.users.GetByUsername(ctx, username)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("webauth: login: %w", err)
 	}
 	if !ok {
 		// Spend comparable time so a missing user is indistinguishable from a
@@ -130,7 +137,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 	expiresAt := s.now().Add(s.sessionTTL)
 	token, err := s.sessions.CreateSession(ctx, user.ID, expiresAt)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("webauth: login: %w", err)
 	}
 	return token, nil
 }
@@ -143,14 +150,14 @@ func (s *Service) ValidateSession(ctx context.Context, rawToken string) (*User, 
 	}
 	sess, ok, err := s.sessions.GetSessionByToken(ctx, rawToken)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("webauth: validate session: %w", err)
 	}
 	if !ok {
 		return nil, ErrInvalidSession
 	}
 	user, ok, err := s.users.GetByID(ctx, sess.UserID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("webauth: validate session: %w", err)
 	}
 	if !ok {
 		// Session references a user that no longer exists; treat as invalid.
@@ -165,16 +172,27 @@ func (s *Service) Logout(ctx context.Context, rawToken string) error {
 	if rawToken == "" {
 		return nil
 	}
-	return s.sessions.DeleteSession(ctx, rawToken)
+	if err := s.sessions.DeleteSession(ctx, rawToken); err != nil {
+		return fmt.Errorf("webauth: logout: %w", err)
+	}
+	return nil
 }
 
 // CleanExpiredSessions deletes expired sessions and returns the count removed.
 // Intended to be called periodically by a background sweeper (a later lane).
 func (s *Service) CleanExpiredSessions(ctx context.Context) (int64, error) {
-	return s.sessions.CleanExpiredSessions(ctx)
+	n, err := s.sessions.CleanExpiredSessions(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("webauth: clean expired sessions: %w", err)
+	}
+	return n, nil
 }
 
 // HasUsers reports whether an admin account exists (first-run detection).
 func (s *Service) HasUsers(ctx context.Context) (bool, error) {
-	return s.users.HasUsers(ctx)
+	has, err := s.users.HasUsers(ctx)
+	if err != nil {
+		return false, fmt.Errorf("webauth: has users: %w", err)
+	}
+	return has, nil
 }

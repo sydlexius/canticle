@@ -32,6 +32,14 @@ const (
 	argonKeyLen  uint32 = 32
 )
 
+// Safe upper bounds on decoded Argon2id parameters. A hostile or corrupt PHC
+// string with extreme values would exhaust memory or CPU before verify returns.
+const (
+	maxArgonMemoryKiB uint32 = 8 * 1024 * 1024 // 8 GiB
+	maxArgonTime      uint32 = 100
+	maxArgonThreads   uint8  = 64
+)
+
 var (
 	// ErrInvalidHash is returned when an encoded hash is not a well-formed
 	// Argon2id PHC string.
@@ -67,6 +75,9 @@ func VerifyPassword(encoded, password string) (bool, error) {
 	memory, time, threads, salt, key, err := decodeHash(encoded)
 	if err != nil {
 		return false, err
+	}
+	if memory > maxArgonMemoryKiB || time > maxArgonTime || threads > maxArgonThreads {
+		return false, fmt.Errorf("webauth: argon2 parameters exceed safe bounds")
 	}
 	//nolint:gosec // reason: key length is bounded by decodeHash (non-empty, base64-decoded from our own PHC string whose key is argonKeyLen=32 bytes); no int->uint32 overflow is possible.
 	computed := argon2.IDKey([]byte(password), salt, time, memory, threads, uint32(len(key)))

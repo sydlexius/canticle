@@ -24,11 +24,11 @@ var ErrUserExists = errors.New("webauth: user already exists")
 // User is a web-UI admin account. PasswordHash is an Argon2id PHC string; the
 // plaintext password is never held here.
 type User struct {
-	ID           string
-	Username     string
-	PasswordHash string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID           string    `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // UserStore persists admin accounts. Implementations are storage-swappable

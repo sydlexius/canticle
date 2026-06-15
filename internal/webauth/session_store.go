@@ -21,10 +21,10 @@ const sessionTokenBytes = 32
 // raw token; the raw token itself is returned to the caller only at creation and
 // is never persisted.
 type Session struct {
-	TokenHash string
-	UserID    string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	TokenHash string    `json:"-"`
+	UserID    string    `json:"user_id,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 // SessionStore persists login sessions keyed by the SHA-256 of the raw token.

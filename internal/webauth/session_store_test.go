@@ -88,11 +88,15 @@ func TestSessionStoreExpired(t *testing.T) {
 	userID := newUserForSession(t, sqlDB)
 	store := NewSQLSessionStore(sqlDB)
 
-	// Expiry already in the past: GetSessionByToken must treat it as gone.
-	raw, err := store.CreateSession(ctx, userID, time.Now().Add(-time.Minute))
+	// Create a session that expires in 1 minute (valid at insert time; the
+	// CHECK constraint requires expires_at > created_at, so we cannot insert
+	// a session whose expiry is already in the past).
+	raw, err := store.CreateSession(ctx, userID, time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	// Advance the store clock past the expiry; GetSessionByToken must treat it as gone.
+	store.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 	if _, ok, err := store.GetSessionByToken(ctx, raw); err != nil || ok {
 		t.Fatalf("GetSessionByToken(expired) = (ok=%v, err=%v), want (false, nil)", ok, err)
 	}
@@ -126,14 +130,18 @@ func TestSessionStoreCleanExpired(t *testing.T) {
 	userID := newUserForSession(t, sqlDB)
 	store := NewSQLSessionStore(sqlDB)
 
-	validRaw, err := store.CreateSession(ctx, userID, time.Now().Add(time.Hour))
+	// Both sessions must be inserted with expires_at > created_at (CHECK constraint).
+	// Use a short-lived session (1 minute) and a long-lived one (2 hours); then
+	// advance the store clock to 90 minutes so only the short-lived one is swept.
+	validRaw, err := store.CreateSession(ctx, userID, time.Now().Add(2*time.Hour))
 	if err != nil {
 		t.Fatalf("CreateSession valid: %v", err)
 	}
-	if _, err := store.CreateSession(ctx, userID, time.Now().Add(-time.Hour)); err != nil {
-		t.Fatalf("CreateSession expired: %v", err)
+	if _, err := store.CreateSession(ctx, userID, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("CreateSession short-lived: %v", err)
 	}
 
+	store.now = func() time.Time { return time.Now().Add(90 * time.Minute) }
 	removed, err := store.CleanExpiredSessions(ctx)
 	if err != nil {
 		t.Fatalf("CleanExpiredSessions: %v", err)
@@ -142,7 +150,8 @@ func TestSessionStoreCleanExpired(t *testing.T) {
 		t.Fatalf("CleanExpiredSessions removed %d, want 1", removed)
 	}
 
-	// The valid session survives the sweep.
+	// Reset clock to real time; the 2-hour session is still valid.
+	store.now = time.Now
 	if _, ok, err := store.GetSessionByToken(ctx, validRaw); err != nil || !ok {
 		t.Fatalf("valid session removed by sweep (ok=%v, err=%v)", ok, err)
 	}

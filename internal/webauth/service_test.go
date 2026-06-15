@@ -17,6 +17,32 @@ func newTestService(t *testing.T) (*Service, *sql.DB) {
 	return svc, sqlDB
 }
 
+func TestNewServicePanicsOnNilStore(t *testing.T) {
+	sqlDB := newTestDB(t)
+	us := NewSQLUserStore(sqlDB)
+	ss := NewSQLSessionStore(sqlDB)
+
+	cases := []struct {
+		name     string
+		users    UserStore
+		sessions SessionStore
+	}{
+		{"nil users", nil, ss},
+		{"nil sessions", us, nil},
+		{"both nil", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatal("NewService did not panic on nil store")
+				}
+			}()
+			NewService(tc.users, tc.sessions)
+		})
+	}
+}
+
 func TestServiceSetupCreatesAdmin(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newTestService(t)
@@ -219,7 +245,7 @@ func TestServiceLogout(t *testing.T) {
 func TestServiceSessionExpiry(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := newTestDB(t)
-	clock := &fakeClock{t: time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)}
+	clock := &fakeClock{t: time.Now()}
 
 	sessStore := NewSQLSessionStore(sqlDB)
 	sessStore.now = clock.Now // white-box: drive the store's expiry checks off the fake clock

@@ -103,6 +103,19 @@ func TestVerifyPasswordMalformed(t *testing.T) {
 	}
 }
 
+func TestVerifyPasswordOversizedParamsRejected(t *testing.T) {
+	// A PHC string with m= exceeding the safe bound must be rejected before
+	// argon2.IDKey is called; otherwise a hostile hash could exhaust memory.
+	oversized := "$argon2id$v=19$m=9999999,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	ok, err := VerifyPassword(oversized, "any")
+	if ok {
+		t.Fatal("VerifyPassword returned true for an oversized-parameter hash")
+	}
+	if err == nil {
+		t.Fatal("VerifyPassword returned nil error for an oversized-parameter hash")
+	}
+}
+
 func TestVerifyPasswordIncompatibleVersion(t *testing.T) {
 	// A PHC string with a version other than the one this build uses.
 	encoded := "$argon2id$v=18$m=65536,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
