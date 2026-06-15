@@ -108,6 +108,32 @@ addr = "127.0.0.1:3876"
 # The --work-interval flag overrides this value.
 # work_interval_seconds = 0
 
+# Trusted-network allowlist (serve mode). Gates GET /metrics: only requests
+# whose resolved client IP is loopback (always implicitly trusted) or inside a
+# listed CIDR may scrape. No API key or session is required for trusted IPs.
+# Default closed (empty cidrs = loopback only).
+#
+# Migration note: before this change, /metrics was open to anyone who could
+# reach the port. After upgrade, a scraper on another host must either be added
+# to cidrs below, or (if it reaches the daemon through a reverse proxy) have the
+# proxy's address listed in trusted_proxies. Same-host scrapers keep working
+# with no config.
+#
+# An invalid CIDR in either list is a fatal startup error (fail fast).
+# Env overrides (comma-separated): MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES.
+[server.trusted_networks]
+# CIDRs of trusted client networks. Loopback (127.0.0.0/8, ::1) is always
+# trusted on top of this list.
+# cidrs = ["192.168.1.0/24", "10.0.0.0/8"]
+#
+# CIDRs of reverse proxies allowed to set X-Forwarded-For. Only when a request's
+# immediate peer is within one of these networks is XFF consulted (then walked
+# right-to-left, skipping proxies) to find the real client IP. Default empty =
+# XFF is never trusted, so a spoofed header cannot forge a trusted source.
+# Note: trusted_proxies entries must NOT overlap cidrs above - an IP in both
+# lists would be skipped as a proxy hop and could never be the resolved client.
+# trusted_proxies = ["172.16.0.0/12"]
+
 [providers]
 # Active lyrics provider: "musixmatch" (default) or "petitlyrics".
 # petitlyrics has no public API; the adapter scrapes reverse-engineered
