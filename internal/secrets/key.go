@@ -15,14 +15,12 @@ const DefaultKeyFileName = ".mxlrcgo.key"
 // KeyOptions describes how to resolve the 32-byte master key. The caller (the
 // config/startup layer) supplies the already-resolved inputs so this package
 // stays decoupled from config and easily testable: MasterKeyB64 is the raw
-// MXLRC_MASTER_KEY env value, KeyFilePath is the resolved key file location
-// (default DefaultKeyFileName under the data dir, or a secrets.key_file /
-// MXLRC_SECRETS_KEY_FILE override), and DockerMode reports whether the daemon
-// is running with /config paths.
+// MXLRC_MASTER_KEY env value (optional override), and KeyFilePath is the
+// resolved key file location (default DefaultKeyFileName under the data dir,
+// or a secrets.key_file / MXLRC_SECRETS_KEY_FILE override).
 type KeyOptions struct {
 	MasterKeyB64 string
 	KeyFilePath  string
-	DockerMode   bool
 	Logger       *slog.Logger
 }
 
@@ -33,44 +31,21 @@ func (o KeyOptions) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// FirstRunError is returned by ResolveKey on the first Docker run when no
-// MXLRC_MASTER_KEY is set. It carries a freshly generated, base64-encoded
-// suggested key. The caller must print Message() to stderr exactly once (never
-// to the slog file) and fatal-exit without serving; the daemon must never run
-// unencrypted. See decision A=(c) in the design of record.
-type FirstRunError struct {
-	SuggestedKeyB64 string
-}
-
-func (e *FirstRunError) Error() string {
-	return "secrets: MXLRC_MASTER_KEY is required in Docker mode; see the suggested key printed to stderr"
-}
-
-// Message returns the one-time onboarding text for stderr. The first line is the
-// copy-pasteable MXLRC_MASTER_KEY=<base64> assignment; the remainder explains
-// what to do. This must go to stderr only, never the rotating slog file.
-func (e *FirstRunError) Message() string {
-	return "MXLRC_MASTER_KEY=" + e.SuggestedKeyB64 + "\n" +
-		"\n" +
-		"No encryption master key is configured. A new one was generated above.\n" +
-		"Set MXLRC_MASTER_KEY to this value in your container/Unraid template (or a\n" +
-		".env kept outside the data volume) and restart. Store it safely: it will not\n" +
-		"be shown again, and losing it makes the encrypted secrets unrecoverable.\n" +
-		"The daemon will not start until MXLRC_MASTER_KEY is set."
-}
-
 // ResolveKey returns the 32-byte AES-256 master key.
 //
 // Resolution order (first present wins):
 //  1. MXLRC_MASTER_KEY (MasterKeyB64): base64 of exactly 32 bytes. A malformed
 //     value (bad base64 or wrong length) is a loud, fatal error - never a
 //     silent fallback to no encryption.
-//  2. Docker mode with no master key: returns *FirstRunError so the caller can
-//     print the onboarding hint and exit. A colocated key file is never
-//     auto-created in /config.
-//  3. Native key file: read it (warning on loose perms), or auto-generate a
-//     0600 file on first use. An unreadable/unwritable/malformed key file is a
-//     loud, fatal error.
+//  2. Key file (KeyFilePath): read it (warning on loose perms), or auto-generate
+//     a 0600 file on first use. This is the universal zero-setup default on all
+//     platforms including Docker. An unreadable/unwritable/malformed key file is
+//     a loud, fatal error.
+//
+// MXLRC_MASTER_KEY and MXLRC_SECRETS_KEY_FILE are optional overrides: set
+// MXLRC_MASTER_KEY to keep the key off the data volume (recommended when the
+// key file and DB share the same bind-mount), or point MXLRC_SECRETS_KEY_FILE
+// at a separately-mounted path for key/data separation without an env var.
 func ResolveKey(opts KeyOptions) ([]byte, error) {
 	if opts.MasterKeyB64 != "" {
 		key, err := decodeMasterKey(opts.MasterKeyB64)
@@ -78,14 +53,6 @@ func ResolveKey(opts KeyOptions) ([]byte, error) {
 			return nil, err
 		}
 		return key, nil
-	}
-
-	if opts.DockerMode {
-		suggested, err := GenerateKey()
-		if err != nil {
-			return nil, err
-		}
-		return nil, &FirstRunError{SuggestedKeyB64: base64.StdEncoding.EncodeToString(suggested)}
 	}
 
 	return loadOrCreateKeyFile(opts)
@@ -134,14 +101,37 @@ func loadOrCreateKeyFile(opts KeyOptions) ([]byte, error) {
 	}
 }
 
-// createKeyFile generates a fresh 32-byte key and writes it 0600.
+// createKeyFile generates a fresh 32-byte key and writes it 0600 via an
+// atomic exclusive create so that concurrent first-start races are safe: the
+// loser detects os.ErrExist and falls through to read the winner's key, so
+// both callers end up with the same key.
 func createKeyFile(path string) ([]byte, error) {
 	key, err := GenerateKey()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, key, 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // path is operator-configured, not attacker-controlled
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Lost the race: another process won; read its key.
+			existing, readErr := os.ReadFile(path) //nolint:gosec // path is operator-configured, not attacker-controlled
+			if readErr != nil {
+				return nil, fmt.Errorf("secrets: read key file %s after lost-race create: %w", path, readErr)
+			}
+			if len(existing) != KeySize {
+				return nil, fmt.Errorf("secrets: key file %s must contain %d bytes, got %d", path, KeySize, len(existing))
+			}
+			return existing, nil
+		}
 		return nil, fmt.Errorf("secrets: write key file %s: %w", path, err)
+	}
+	_, writeErr := f.Write(key)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return nil, fmt.Errorf("secrets: write key file %s: %w", path, writeErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("secrets: close key file %s: %w", path, closeErr)
 	}
 	return key, nil
 }

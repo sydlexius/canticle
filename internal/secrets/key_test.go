@@ -3,7 +3,6 @@ package secrets
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -110,41 +109,135 @@ func TestResolveKeyEmptyKeyFilePathFatal(t *testing.T) {
 	}
 }
 
-func TestResolveKeyDockerFirstRunHint(t *testing.T) {
-	_, err := ResolveKey(KeyOptions{DockerMode: true})
-	var fr *FirstRunError
-	if !errors.As(err, &fr) {
-		t.Fatalf("ResolveKey Docker first-run err = %v; want *FirstRunError", err)
+// TestCreateKeyFileRaceNoOverwrite verifies the concurrent-startup safe path: if
+// the key file already exists when createKeyFile is called (i.e. another process
+// won the race), the loser reads and returns the existing key without overwriting
+// it, and the file content is unchanged.
+func TestCreateKeyFileRaceNoOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, DefaultKeyFileName)
+
+	// Pre-create the file with a known key (simulates the winner's write).
+	existing := bytes.Repeat([]byte{0xCC}, KeySize)
+	if err := os.WriteFile(keyPath, existing, 0o600); err != nil {
+		t.Fatalf("pre-create key file: %v", err)
 	}
-	// The suggested key must be valid base64 of 32 bytes.
-	raw, decErr := base64.StdEncoding.DecodeString(fr.SuggestedKeyB64)
-	if decErr != nil {
-		t.Fatalf("suggested key not base64: %v", decErr)
+
+	// The loser calls createKeyFile on the same path; it must not overwrite.
+	got, err := createKeyFile(keyPath)
+	if err != nil {
+		t.Fatalf("createKeyFile on existing path: %v", err)
 	}
-	if len(raw) != KeySize {
-		t.Fatalf("suggested key decodes to %d bytes, want %d", len(raw), KeySize)
+	if !bytes.Equal(got, existing) {
+		t.Fatalf("createKeyFile returned a different key: got %x, want %x", got, existing)
 	}
-	// Message carries the copy-pasteable assignment line, once, for stderr.
-	msg := fr.Message()
-	if !strings.HasPrefix(msg, "MXLRC_MASTER_KEY="+fr.SuggestedKeyB64) {
-		t.Fatalf("Message does not start with the key assignment line: %q", msg)
+
+	// File content must be unchanged.
+	written, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key file after createKeyFile: %v", err)
 	}
-	if strings.Count(msg, "MXLRC_MASTER_KEY=") != 1 {
-		t.Fatalf("MXLRC_MASTER_KEY= should appear exactly once, got: %q", msg)
+	if !bytes.Equal(written, existing) {
+		t.Fatalf("key file content was modified: got %x, want %x", written, existing)
 	}
 }
 
-func TestResolveKeyDockerEnvKeyServes(t *testing.T) {
-	// Docker mode WITH a valid master key resolves normally (no hint, no file).
-	envKey := bytes.Repeat([]byte{0xCC}, KeySize)
-	got, err := ResolveKey(KeyOptions{
-		DockerMode:   true,
-		MasterKeyB64: base64.StdEncoding.EncodeToString(envKey),
-	})
-	if err != nil {
-		t.Fatalf("ResolveKey: %v", err)
+// TestCreateKeyFileLostRaceWrongLength verifies that if the winner's key file
+// contains a length other than KeySize, the loser returns a fatal error rather
+// than silently returning a truncated or padded key.
+func TestCreateKeyFileLostRaceWrongLength(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, DefaultKeyFileName)
+
+	// Pre-create with wrong length - simulates a corrupt winner write.
+	if err := os.WriteFile(keyPath, []byte("too short"), 0o600); err != nil {
+		t.Fatalf("pre-create key file: %v", err)
 	}
-	if !bytes.Equal(got, envKey) {
-		t.Fatal("docker-mode env key not resolved")
+
+	_, err := createKeyFile(keyPath)
+	if err == nil {
+		t.Fatal("createKeyFile on wrong-length existing file: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must contain 32 bytes") {
+		t.Fatalf("expected 'must contain 32 bytes' error, got: %v", err)
+	}
+}
+
+// TestCreateKeyFileParentDirMissing verifies that a non-race OpenFile failure
+// (parent directory missing, so ENOENT rather than EEXIST) is wrapped with
+// the "write key file" message and propagated as a fatal error.
+func TestCreateKeyFileParentDirMissing(t *testing.T) {
+	dir := t.TempDir()
+	// Path inside a non-existent subdirectory: OpenFile fails with ENOENT (not ErrExist).
+	keyPath := filepath.Join(dir, "nonexistent-subdir", DefaultKeyFileName)
+
+	_, err := createKeyFile(keyPath)
+	if err == nil {
+		t.Fatal("createKeyFile with missing parent dir: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "write key file") {
+		t.Fatalf("expected 'write key file' error, got: %v", err)
+	}
+}
+
+// TestCreateKeyFileLostRaceReadError verifies that if the winner's key file
+// exists (O_EXCL returns ErrExist) but is not readable (e.g. mode 000),
+// createKeyFile returns a fatal error naming the failed read rather than
+// silently returning an empty or wrong key.
+func TestCreateKeyFileLostRaceReadError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission-based read errors unreliable on Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("running as root; chmod 000 does not block reads")
+	}
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, DefaultKeyFileName)
+
+	// Pre-create with no-read permission: O_EXCL will return ErrExist, then
+	// os.ReadFile fails with EACCES.
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0xAB}, KeySize), 0o000); err != nil {
+		t.Fatalf("pre-create key file: %v", err)
+	}
+	// Restore before cleanup so t.TempDir can remove the directory.
+	t.Cleanup(func() { _ = os.Chmod(keyPath, 0o600) })
+
+	_, err := createKeyFile(keyPath)
+	// Restore perms before asserting so the deferred cleanup always succeeds.
+	if chmodErr := os.Chmod(keyPath, 0o600); chmodErr != nil {
+		t.Logf("restore chmod: %v", chmodErr)
+	}
+	if err == nil {
+		t.Fatal("createKeyFile with unreadable existing file: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "after lost-race create") {
+		t.Fatalf("expected 'after lost-race create' error, got: %v", err)
+	}
+}
+
+// TestResolveKeyAutoCreatesKeyFileUniversal proves that with no env key and no
+// existing key file, ResolveKey creates a 0600 key file and returns a valid
+// 32-byte key, regardless of Docker-ish env state (MXLRC_DOCKER).
+func TestResolveKeyAutoCreatesKeyFileUniversal(t *testing.T) {
+	for _, docker := range []string{"", "true", "1"} {
+		t.Run("MXLRC_DOCKER="+docker, func(t *testing.T) {
+			t.Setenv("MXLRC_DOCKER", docker)
+			dir := t.TempDir()
+			keyPath := filepath.Join(dir, DefaultKeyFileName)
+			got, err := ResolveKey(KeyOptions{KeyFilePath: keyPath})
+			if err != nil {
+				t.Fatalf("ResolveKey: %v", err)
+			}
+			if len(got) != KeySize {
+				t.Fatalf("key len = %d, want %d", len(got), KeySize)
+			}
+			info, statErr := os.Stat(keyPath)
+			if statErr != nil {
+				t.Fatalf("stat key file: %v", statErr)
+			}
+			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+				t.Fatalf("key file mode = %v, want 0600", info.Mode().Perm())
+			}
+		})
 	}
 }

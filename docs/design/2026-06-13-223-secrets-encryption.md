@@ -1,6 +1,6 @@
 # Encrypted-at-rest storage for secrets (Musixmatch token + webhook key)
 
-Status: design of record - SIGNED OFF 2026-06-13 (A=c + first-run key hint, B=yes, C=yes)
+Status: design of record - SIGNED OFF 2026-06-13 (A=c + first-run key hint, B=yes, C=yes); Decision A revised to (a) 2026-06-14 (#238)
 Date: 2026-06-13
 Issue: #223
 Related: #204 (web-UI auth / onboarding / TLS - the broader "secure the serve
@@ -13,9 +13,10 @@ Store the two recoverable runtime secrets - the Musixmatch API token
 (`server.webhook_api_keys` / `MXLRC_WEBHOOK_API_KEY`) - **encrypted at rest in
 the existing pure-Go SQLite DB** instead of as plaintext in TOML and environment
 variables. Encryption uses **AES-256-GCM** (Go stdlib AEAD) with a managed
-32-byte key. The key comes from one of two sources: an operator-supplied env
-master key (`MXLRC_MASTER_KEY`, recommended for Docker) or an auto-generated
-`0600` key file under the data dir (the stillwater pattern, for native installs).
+32-byte key. The key comes from one of two sources: an auto-generated `0600` key file under
+the data dir (the universal zero-setup default, all platforms including Docker)
+or an operator-supplied env master key (`MXLRC_MASTER_KEY`, opt-in for
+key/data separation).
 
 Existing env/TOML setups keep working unchanged: the DB is the **lowest**
 precedence source. A new `secrets` CLI command performs an explicit one-time
@@ -150,44 +151,28 @@ No CGO; `modernc.org/sqlite` + goose only.
 The encryption key is a 32-byte AES-256 key, resolved from these sources in
 precedence order (first present wins):
 
-1. **`MXLRC_MASTER_KEY` env var** - base64-encoded 32 bytes. When set, the key
-   file is neither read nor written. This is the Docker-recommended path: it keeps
-   the key out of the data volume entirely.
-2. **Key file** - 32 raw bytes, auto-generated on first use via `crypto/rand` and
-   written `0600`. Default location `xdgDataPath("mxlrcgo-svc",
-   ".mxlrcgo.key")` (hidden file alongside the DB). Overridable via a new
-   `secrets.key_file` config field / `MXLRC_SECRETS_KEY_FILE` env so it can point
-   at a separate volume.
+1. **Key file** - 32 raw bytes, auto-generated on first use via `crypto/rand` and
+   written `0600`. Default location `xdgDataPath("mxlrcgo-svc", ".mxlrcgo.key")`
+   (hidden file alongside the DB). Overridable via the `secrets.key_file` config
+   field / `MXLRC_SECRETS_KEY_FILE` env to point at a separate volume. This is the
+   **universal zero-setup default on all platforms, including Docker**.
+2. **`MXLRC_MASTER_KEY` env var** - base64-encoded 32 bytes. When set, it takes
+   precedence and the key file is neither read nor written. This is the opt-in
+   path for operators who want the key off the data volume entirely (the recommended
+   Docker hardening posture when threat model includes whole-volume theft).
 
-**Decision A is (c) with a first-run key hint (SIGNED OFF).** The auto-generated
-key file stays the **native** default (no change), but the daemon **refuses to
-auto-create a key file inside `/config`** (Docker mode - detected when
-`xdgDataPath`/`xdgConfigPath` resolve to `/config`). In Docker, `MXLRC_MASTER_KEY`
-is mandatory; the daemon never runs un-encrypted. Rather than a bare hard failure,
-first run is softened into a one-time onboarding wizard:
-
-- **First Docker run with no `MXLRC_MASTER_KEY` set:** the daemon generates a
-  random 32-byte key via `crypto/rand`, base64-encodes it, and **prints it once to
-  stderr/console** (the docker log) as a single copy-pasteable line,
-  `MXLRC_MASTER_KEY=<base64>`, with a clear instruction to set it as the
-  container/Unraid template variable and restart. It then **fatal-exits** (exit
-  non-zero) without serving. This is the standard self-hosted / linuxserver /
-  Unraid onboarding pattern: zero-friction key generation, operator stays in
-  control of where the key lives.
-- The suggested key is printed **once, to stderr only** - never to the rotating
-  `slog` log file, and never on subsequent runs. The operator is told to store it
-  safely because it will not be shown again.
-- **Native installs are unchanged:** they keep the auto-created `0600` key file
-  with no prompt.
-
-**Security caveat (documented honestly, not hidden):** the suggested key appears
-in the first-run docker log line once. That line is sensitive - if container logs
-are shipped or persisted, the key is exposed there. This is an accepted one-time
-onboarding tradeoff: the key is printed to stderr (not the rotating slog file)
-exactly once, the operator is instructed to store it safely, and rotation (the
-deferred follow-up) lets them roll it later. It does not weaken the
-env-key-separates-key-from-DB property once the operator sets the variable; the
-one-time log exposure is the cost of zero-friction onboarding.
+**Decision A is (a) - universal auto-generated key file (REVISED 2026-06-14, #238).**
+The original signed-off decision was (c): native gets an auto key file, Docker
+refuses to auto-create one and requires `MXLRC_MASTER_KEY`. Decision A has been
+revised to (a): the auto-generated `0600` key file is the universal default on
+all platforms including Docker. `MXLRC_MASTER_KEY` (and `MXLRC_SECRETS_KEY_FILE`)
+are optional overrides. Rationale: (c) imposed Docker-specific code complexity and
+a first-run print-and-exit flow; (a) eliminates that complexity while still
+defending the primary threat - DB-only exfiltration (backups, accidental commits,
+stray `.db` copies) - on all platforms. For operators who want stronger key/data
+separation (whole-volume theft protection), setting `MXLRC_MASTER_KEY` or pointing
+`MXLRC_SECRETS_KEY_FILE` at a separate mount is straightforward and fully supported;
+it is documented as the recommended Docker hardening posture, not a requirement.
 
 On read of an existing key file, if permissions are looser than `0600` the daemon
 emits an `slog` **warning** (not fatal; permission bits are unreliable on
@@ -199,30 +184,31 @@ fallback to "no encryption".
 **OS keyring is rejected** (CR design choice 2): a headless container has no
 keyring daemon, and it adds a CGO/dbus dependency surface the project avoids.
 
-### The Docker co-exfiltration reality (load-bearing)
+### The Docker co-exfiltration reality (honest documentation)
 
-Confirmed against the code: in Docker mode `xdgDataPath` and `xdgConfigPath` both
-resolve to **`/config/`** (`internal/config/config.go`). So the default key file
-at `/config/.mxlrcgo.key` sits in the **same bind-mount** as the DB at
-`/config/mxlrcgo.db`. An attacker who copies that one volume gets both the
-ciphertext and the key - the at-rest encryption then only protects against
-DB-*only* leakage (backups, accidental git commit, a stray copy of just the
-`.db`), not whole-volume theft.
+In Docker mode `xdgDataPath` and `xdgConfigPath` both resolve to **`/config/`**
+(`internal/config/config.go`). So the default key file at `/config/.mxlrcgo.key`
+sits in the **same bind-mount** as the DB at `/config/mxlrcgo.db`. An attacker
+who copies that one volume gets both the ciphertext and the key - the at-rest
+encryption then only protects against DB-*only* leakage (backups, accidental git
+commit, a stray copy of just the `.db`), not whole-volume theft.
 
-Therefore, for Docker the design **recommends the `MXLRC_MASTER_KEY` env path**,
-with the key sourced from a Docker/Compose secret or an env file kept **outside**
-the DB bind-mount:
+This is the accepted tradeoff under revised Decision A=(a): the auto-generated
+colocated key file is the zero-setup default on all platforms. It defends the
+DB-only-exfiltration threat, which is the most common real-world scenario.
+Operators who want stronger protection (whole-volume-theft defense) can opt in:
 
 ```yaml
-# docker-compose.yml - recommended: key separated from the data volume
+# docker-compose.yml - optional hardening: key separated from the data volume
 services:
   mxlrcgo-svc:
     image: ghcr.io/sydlexius/mxlrcgo-svc:latest
     environment:
-      # base64 of 32 random bytes: openssl rand -base64 32
+      # Optional. base64 of 32 random bytes: openssl rand -base64 32
+      # When set, takes precedence over the key file; keeps key off the data volume.
       MXLRC_MASTER_KEY: ${MXLRC_MASTER_KEY}   # from a .env NOT in the data volume
     volumes:
-      - ./config:/config                       # holds the DB; NO key file here
+      - ./config:/config
 ```
 
 ```yaml
@@ -233,21 +219,12 @@ services:
       - mxlrcgo_key
 ```
 
-The honest framing for the maintainer: the env-key path is what actually buys
-key/data separation. A colocated key file is still a real improvement over today's
-plaintext-in-config (it defends DB-only leaks) but does not survive whole-volume
-compromise. Per the signed-off Decision A=(c), Docker mode therefore **does not
-auto-create a colocated key file at all** - it requires `MXLRC_MASTER_KEY`.
-
-To keep first-run friction near zero, the first Docker run with no
-`MXLRC_MASTER_KEY` set runs the onboarding wizard described under "Key management":
-the daemon generates a random key, prints `MXLRC_MASTER_KEY=<base64>` **once to
-stderr** (the docker log), instructs the operator to set it as the
-container/Unraid template variable and restart, and fatal-exits without serving.
-The honest caveat travels with it: that one stderr line is sensitive - if logs are
-shipped or persisted the suggested key is exposed there once - so it is printed a
-single time, never to the rotating slog file, with an instruction to store it
-safely (it won't be shown again) and rotate later if needed.
+The honest framing: the env-key or separate-mount-key path is what buys key/data
+separation. The default colocated key file is still a significant improvement over
+plaintext-in-config: it defends DB-only-exfiltration (backups, accidental commits,
+stray `.db` copies). For whole-volume-theft protection, set `MXLRC_MASTER_KEY` or
+point `MXLRC_SECRETS_KEY_FILE` at a separate mount. This is documented as the
+recommended Docker hardening posture, not a requirement.
 
 ## Precedence and migration
 
@@ -351,27 +328,21 @@ Each Open Question from #223, with a recommended answer. Items tagged
   A: Follow-up. v1 stores self-describing blobs so rotation stays a per-row
   decrypt/re-encrypt later. (Resolved; flag a follow-up issue when scheduled.)
 
-### Maintainer sign-off decisions (DECIDED 2026-06-13)
+### Maintainer sign-off decisions (DECIDED 2026-06-13; Decision A revised 2026-06-14 by #238)
 
-- **Decision A - default key source. DECIDED: (c) + first-run key hint.**
-  - (a) Auto-generated `0600` key file as the universal default; `MXLRC_MASTER_KEY`
-    as an opt-in override. (Zero-config for native, env-override for Docker.) *Not
-    chosen.*
-  - (b) `MXLRC_MASTER_KEY` required (no auto key file at all). Most secure
-    key/data separation, but breaks zero-config native use and first-run UX. *Not
-    chosen.*
-  - **(c) CHOSEN.** Auto key file, but **refuse to auto-create it inside `/config`**
-    (Docker mode) and instead require `MXLRC_MASTER_KEY` there - i.e. env-key is
-    mandatory in Docker, key file is the native default. Strongest "safe by
-    default". **Refinement (signed off):** rather than a bare hard failure, the
-    first Docker run with no `MXLRC_MASTER_KEY` runs a one-time onboarding wizard -
-    it generates a random key, prints `MXLRC_MASTER_KEY=<base64>` once to stderr
-    (the docker log) with instructions to set it as the container/Unraid variable
-    and restart, then fatal-exits without serving. Native installs keep the
-    auto-created `0600` key file unchanged. Accepted caveat: the suggested key
-    appears once in the first-run docker log (sensitive if logs are persisted) -
-    printed once, to stderr only, never to the slog file; operator stores it safely
-    and can rotate later. See "Key management".
+- **Decision A - default key source. REVISED: (a). Original: (c) + first-run key hint.**
+  - **(a) CHOSEN (revised 2026-06-14, #238).** Auto-generated `0600` key file as
+    the universal zero-setup default on all platforms including Docker.
+    `MXLRC_MASTER_KEY` is an optional override for key/data separation. Rationale:
+    eliminates Docker-specific code complexity (no DockerMode field, no
+    FirstRunError, no print-and-exit flow) while still defending the primary
+    threat. For whole-volume-theft protection, `MXLRC_MASTER_KEY` or a separately-
+    mounted key file is documented as the recommended Docker hardening posture.
+  - (b) `MXLRC_MASTER_KEY` required (no auto key file at all). Not chosen.
+  - (c) ~~PREVIOUSLY CHOSEN.~~ Auto key file native only; Docker refuses and requires
+    `MXLRC_MASTER_KEY` with a first-run onboarding wizard. Revised to (a): the
+    Docker-specific path added complexity without improving the common-case
+    security posture (see "The Docker co-exfiltration reality" section).
 - **Decision B - AAD binding. DECIDED: yes.** Bind each ciphertext to its `name`
   via GCM AAD (prevents row-swap). Low cost, real benefit.
 - **Decision C - webhook-key model. DECIDED: yes.** The static configured webhook
@@ -395,17 +366,13 @@ implementation phases inside that issue:
 
 1. **Crypto + store foundation**: `internal/secrets` package (AES-256-GCM
    encrypt/decrypt helpers), migration 017 `secrets` table, repository + in-memory
-   store, key-resolution (`MXLRC_MASTER_KEY` > key file, loud failures). Include
-   the first-run key hint: on first Docker run (xdg paths resolve to `/config`)
-   with no `MXLRC_MASTER_KEY`, generate + print a suggested
-   `MXLRC_MASTER_KEY=<base64>` to stderr and fatal-exit; never run unencrypted;
-   print once (stderr only, not the slog file). Native keeps the auto-created
-   `0600` key file.
+   store, key-resolution (`MXLRC_MASTER_KEY` > key file, loud failures). Universal
+   key-file auto-create on all platforms (no Docker branch).
 2. **Precedence wiring**: add DB as lowest-precedence source for the Musixmatch
    token and webhook key; redaction parity for DB-sourced values.
 3. **CLI**: `secrets import` / `set` / `list` (no values in argv or logs).
-4. **Docs**: README + compose examples (env-key recommended for Docker), key-loss
-   recovery note.
+4. **Docs**: README + compose examples (zero-setup key-file default; MXLRC_MASTER_KEY
+   as optional hardening), key-loss recovery note.
 
 ## Testing
 
@@ -416,12 +383,8 @@ implementation phases inside that issue:
   (`file::memory:?cache=shared`), upsert overwrites, `Get` of an absent name
   returns not-found, `updated_at` advances on re-set.
 - **Key resolution**: env wins over file; malformed `MXLRC_MASTER_KEY` is fatal;
-  auto-generate-on-first-use writes `0600`; loose-perms warning fires.
-- **First-run key hint (Docker)**: first run in Docker mode (xdg paths resolve to
-  `/config`) with no `MXLRC_MASTER_KEY` prints a suggested `MXLRC_MASTER_KEY=` line
-  to stderr and the process exits non-zero (does not start serving); the line is
-  not written to the slog file; native mode auto-creates the `0600` key file and
-  serves normally.
+  auto-generate-on-first-use writes `0600`; loose-perms warning fires; auto-create
+  works identically regardless of Docker env state (universal default, all platforms).
 - **Precedence**: DB used only when all higher tiers absent; higher tier never
   auto-persists; redaction covers DB-sourced values.
 - **CLI**: `import` is idempotent; `list` never prints values; `set` rejects a

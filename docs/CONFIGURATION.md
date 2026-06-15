@@ -58,7 +58,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_OUTPUT_DIR` | XDG / `/music` | Fallback output directory for webhook jobs that resolve via metadata. |
 | `MXLRC_DB_PATH` | XDG / `/config/mxlrcgo.db` | SQLite database path. |
 | `MXLRC_DOCKER` | `false` | When `true`, storage defaults resolve under `/config`. Set automatically in the images. |
-| `MXLRC_MASTER_KEY` | (none) | Base64 of 32 random bytes; the master key for encrypted-at-rest secrets. When set, no key file is read or written. Required in Docker mode. Generate with `openssl rand -base64 32`. See the [Encrypted secrets](USER_GUIDE.md#encrypted-secrets) guide. |
+| `MXLRC_MASTER_KEY` | (none) | Optional. Base64 of 32 random bytes; overrides the auto-generated key file as the master key for encrypted-at-rest secrets. When set, no key file is read or written. Use for key/data separation (recommended Docker hardening when the threat model includes whole-volume theft). Generate with `openssl rand -base64 32`. See the [Encrypted secrets](USER_GUIDE.md#encrypted-secrets) guide. |
 | `MXLRC_SECRETS_KEY_FILE` | XDG / `/config/.mxlrcgo.key` | Override for the auto-generated `0600` key-file location (the native-install default; used only when `MXLRC_MASTER_KEY` is unset). Point it at a separate mount to keep the key off the data volume. |
 | `MXLRC_API_COOLDOWN` | `15` | Seconds between Musixmatch requests. `MXLRC_COOLDOWN` is a lower-precedence alias. |
 | `MXLRC_API_CIRCUIT_OPEN_DURATION` | `1800` | Cap (seconds) for the worker circuit-breaker window; the window ramps geometrically up to this ceiling, and a token-renewal signal opens for the full cap (floor 300). |
@@ -140,7 +140,7 @@ HTTP listen address, webhook keys, and the scheduler scan/worker poll intervals 
 # key_file = ""
 ```
 
-Key-file location override for encrypted-at-rest secrets (env: `MXLRC_SECRETS_KEY_FILE`). Empty uses the native default (the hidden `.mxlrcgo.key` beside the database). The master key itself comes from `MXLRC_MASTER_KEY` (preferred, and required in Docker) or this key file; it is never stored in the config. See the [Encrypted secrets](USER_GUIDE.md#encrypted-secrets) guide for the `secrets import` / `set` / `list` commands and key-loss recovery.
+Key-file location override for encrypted-at-rest secrets (env: `MXLRC_SECRETS_KEY_FILE`). Empty uses the default (the hidden `.mxlrcgo.key` beside the database, auto-generated `0600` on first use). The master key is resolved from `MXLRC_MASTER_KEY` first (when set, the key file is skipped entirely), then from this key file; it is never stored in the config. See the [Encrypted secrets](USER_GUIDE.md#encrypted-secrets) guide for the `secrets import` / `set` / `list` commands and key-loss recovery.
 
 ### `[providers]`
 

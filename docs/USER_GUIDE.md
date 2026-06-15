@@ -85,7 +85,7 @@ The two recoverable runtime secrets, the Musixmatch API token and the serve-mode
 
 ### What it protects (and what it does not)
 
-At-rest encryption defends a narrow boundary. It protects against database-only exfiltration: a copied or backed-up `.db` file, an accidental git commit, or a stray copy of just the database cannot be read back into the plaintext token. It does NOT protect a compromised running process (the decrypted values are in memory at use time), and it does NOT protect whole-volume theft when the key file lives in the same mount as the database. That last point is why the env-key path below is the recommended Docker posture.
+At-rest encryption defends a narrow boundary. It protects against database-only exfiltration: a copied or backed-up `.db` file, an accidental git commit, or a stray copy of just the database cannot be read back into the plaintext token. It does NOT protect a compromised running process (the decrypted values are in memory at use time), and it does NOT protect whole-volume theft when the key file lives in the same mount as the database. For whole-volume-theft protection, use `MXLRC_MASTER_KEY` or a separately-mounted key file (see below).
 
 ### Managing secrets
 
@@ -116,32 +116,31 @@ mxlrcgo-svc secrets list
 
 The 32-byte encryption key is resolved from one of two sources, in order:
 
-1. `MXLRC_MASTER_KEY` (base64 of 32 random bytes). When set, no key file is read or written. This is the recommended path for Docker because it keeps the key out of the data volume. Generate one with `openssl rand -base64 32`.
-2. A key file (32 raw bytes, auto-generated with `0600` permissions on first use). The default location is a hidden `.mxlrcgo.key` beside the database. This is the native-install default. Override the location with the `secrets.key_file` TOML key or the `MXLRC_SECRETS_KEY_FILE` environment variable, so the key file can live on a separate, narrower mount.
+1. `MXLRC_MASTER_KEY` (base64 of 32 random bytes). When set, it takes precedence and no key file is read or written. Use this to keep the key entirely off the data volume (recommended hardening when your threat model includes whole-volume theft). Generate one with `openssl rand -base64 32`.
+2. A key file (32 raw bytes, auto-generated with `0600` permissions on first use). The default location is a hidden `.mxlrcgo.key` beside the database. This is the **universal zero-setup default on all platforms, including Docker**. Override the location with the `secrets.key_file` TOML key or the `MXLRC_SECRETS_KEY_FILE` environment variable to place the key file on a separate, narrower mount.
 
-A missing-but-required key, a malformed `MXLRC_MASTER_KEY`, or an unreadable key file is a loud, fatal startup error. The daemon never silently falls back to running unencrypted.
+A malformed `MXLRC_MASTER_KEY` or an unreadable key file is a loud, fatal startup error. The daemon never silently falls back to running unencrypted.
 
-### Docker first-run wizard
+### Docker key setup
 
-In Docker mode (storage paths resolve under `/config`), the daemon refuses to auto-create a key file inside `/config`, because that would put the key in the same volume as the database it protects. `MXLRC_MASTER_KEY` is required there. To keep first-run friction low, the first Docker run with no `MXLRC_MASTER_KEY` set generates a random key, prints a single copy-pasteable `MXLRC_MASTER_KEY=<base64>` line to the container log (stderr only, never the rotating log file), and exits without serving. Copy that value into your container or Unraid template variable and restart.
+In Docker mode (storage paths resolve under `/config`), the daemon auto-creates a `0600` key file at `/config/.mxlrcgo.key` on first use - the same zero-setup behavior as native installs. No extra step is required to start.
 
-That one log line is sensitive: if your container logs are shipped or persisted, the suggested key is exposed there once. It is printed a single time, never on subsequent runs and never to the log file. Store it safely; it will not be shown again.
-
-The recommended Docker pattern keeps the key separated from the data volume, sourced from a `.env` file that is NOT inside the `/config` mount:
+**Important caveat:** `/config/.mxlrcgo.key` lives in the same bind-mount as the database. An attacker who copies the entire `/config` volume gets both the key and the ciphertext, so the at-rest encryption only protects against database-only exfiltration (backups, stray copies), not whole-volume theft. If that is in your threat model, set `MXLRC_MASTER_KEY` to keep the key off the data volume entirely:
 
 ```yaml
-# docker-compose.yml - recommended: key separated from the data volume
+# docker-compose.yml - optional hardening: key separated from the data volume
 services:
   mxlrcgo-svc:
     image: ghcr.io/sydlexius/mxlrcgo-svc:latest
     environment:
-      # base64 of 32 random bytes: openssl rand -base64 32
-      MXLRC_MASTER_KEY: ${MXLRC_MASTER_KEY}   # from a .env NOT in the data volume
+      # Optional. Generate once: openssl rand -base64 32
+      # Source from a .env file NOT inside the /config volume.
+      MXLRC_MASTER_KEY: ${MXLRC_MASTER_KEY}
     volumes:
-      - ./config:/config                       # holds the DB; NO key file here
+      - ./config:/config
 ```
 
-Alternatively, keep the key in a file on a separate, narrower mount instead of an env variable:
+Alternatively, point `MXLRC_SECRETS_KEY_FILE` at a separately-mounted file to get key/data separation without an environment variable:
 
 ```yaml
     environment:
@@ -161,7 +160,7 @@ A higher-precedence source is used as-is at runtime and is never auto-persisted 
 
 ### Key-loss recovery
 
-Losing the key (a deleted `.mxlrcgo.key` file or a lost `MXLRC_MASTER_KEY`) makes the encrypted secrets unrecoverable by design: there is no backdoor and no recovery key. The remedy is to re-enter the secrets with their original plaintext, by re-running `secrets import` (from a config or environment that still has the plaintext) or `secrets set`. Keep a copy of `MXLRC_MASTER_KEY` somewhere safe and separate from the data volume.
+Losing the key - a deleted `.mxlrcgo.key` file or a lost `MXLRC_MASTER_KEY` value - makes the encrypted secrets unrecoverable by design: there is no backdoor and no recovery key. The remedy is to re-enter the secrets with their original plaintext, by re-running `secrets import` (from a config or environment that still has the plaintext) or `secrets set`. Back up your key file or `MXLRC_MASTER_KEY` value in a safe location outside the data volume.
 
 ## Unraid
 

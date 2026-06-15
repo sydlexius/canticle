@@ -34,19 +34,21 @@ type Config struct {
 type SecretsConfig struct {
 	// KeyFile is the path to the 32-byte AES-256 master key file used to
 	// encrypt secrets at rest. Empty (the default) resolves to the hidden file
-	// beside the database (xdgDataPath ".mxlrcgo.key"). The Docker path requires
-	// MXLRC_MASTER_KEY instead and never auto-creates a colocated key file.
+	// beside the database (xdgDataPath ".mxlrcgo.key"). Auto-generated 0600 on
+	// first use on all platforms including Docker. Set MXLRC_MASTER_KEY to skip
+	// the key file entirely (key/data separation).
 	// Override: MXLRC_SECRETS_KEY_FILE.
 	KeyFile string `toml:"key_file"`
 }
 
 // SecretsKeyOptions builds the secrets.KeyOptions used to resolve the master
-// key at startup, keeping the data-dir/Docker-mode logic in config (the single
-// source of those paths). MasterKeyB64 is sourced from MXLRC_MASTER_KEY by the
-// caller (it is never persisted in Config and must stay out of logs), so it is
-// left empty here; the caller fills it in. KeyFilePath is the resolved
-// secrets.key_file (env > TOML > default), and DockerMode mirrors the same
-// /config detection used for the XDG data dir.
+// key at startup, keeping the data-dir logic in config (the single source of
+// those paths). MasterKeyB64 is sourced from MXLRC_MASTER_KEY by the caller
+// (it is never persisted in Config and must stay out of logs), so it is left
+// empty here; the caller fills it in. KeyFilePath is the resolved
+// secrets.key_file (env > TOML > default). The auto-generated 0600 key file
+// is the universal zero-setup default on all platforms including Docker;
+// MXLRC_MASTER_KEY is the opt-in override for key/data separation.
 func (c *Config) SecretsKeyOptions() secrets.KeyOptions {
 	keyFile := strings.TrimSpace(c.Secrets.KeyFile)
 	if keyFile == "" {
@@ -54,7 +56,6 @@ func (c *Config) SecretsKeyOptions() secrets.KeyOptions {
 	}
 	return secrets.KeyOptions{
 		KeyFilePath: keyFile,
-		DockerMode:  dockerMode(),
 	}
 }
 

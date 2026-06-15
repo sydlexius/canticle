@@ -19,10 +19,8 @@ import (
 var validSecretNames = []string{secrets.NameMusixmatchToken, secrets.NameWebhookAPIKey}
 
 // runSecrets dispatches the `secrets import|set|list` subcommands. Each opens the
-// config + DB and builds the encrypted store via resolveSecretStore. On the
-// Docker first-run case it prints the onboarding hint to stderr and exits
-// non-zero (same as runServe); other store-init errors are fatal. No subcommand
-// ever echoes or logs a secret value.
+// config + DB and builds the encrypted store via resolveSecretStore. Store-init
+// errors are fatal. No subcommand ever echoes or logs a secret value.
 func runSecrets(ctx context.Context, out io.Writer, args SecretsCmd) int {
 	path := secretsConfigPath(args)
 	cfg, err := config.Load(path)
@@ -37,13 +35,9 @@ func runSecrets(ctx context.Context, out io.Writer, args SecretsCmd) int {
 	}
 	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
 
-	store, firstRun, err := resolveSecretStore(cfg, sqlDB)
+	store, err := resolveSecretStore(cfg, sqlDB)
 	if err != nil {
 		slog.Error("failed to initialize secret store", "error", err)
-		return 1
-	}
-	if firstRun != nil {
-		_, _ = fmt.Fprintln(os.Stderr, firstRun.Message())
 		return 1
 	}
 
