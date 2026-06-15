@@ -701,19 +701,14 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		return 1
 	}
 
-	// Resolve the master key and build the encrypted secret store. On the Docker
-	// first-run case (no MXLRC_MASTER_KEY) print the onboarding hint to stderr
-	// exactly once and exit without serving - never run unencrypted. The hint and
-	// key bytes never go to the slog file.
-	store, firstRun, err := resolveSecretStore(cfg, sqlDB)
+	// Resolve the master key and build the encrypted secret store. The key is
+	// auto-generated on first use (0600 key file) on all platforms including
+	// Docker; MXLRC_MASTER_KEY is an optional override for key/data separation.
+	// Any resolution failure (malformed key, unreadable key file) is fatal.
+	store, err := resolveSecretStore(cfg, sqlDB)
 	if err != nil {
 		_ = sqlDB.Close()
 		slog.Error("failed to initialize secret store", "error", err)
-		return 1
-	}
-	if firstRun != nil {
-		_ = sqlDB.Close()
-		_, _ = fmt.Fprintln(os.Stderr, firstRun.Message())
 		return 1
 	}
 
@@ -1501,27 +1496,18 @@ func parseScopes(values []string) ([]auth.Scope, error) {
 
 // resolveSecretStore resolves the AES-256 master key and constructs the
 // SQL-backed encrypted secret store. The key is resolved from MXLRC_MASTER_KEY
-// (env, never logged) > the resolved secrets.key_file > the native default key
-// file, via secrets.ResolveKey.
-//
-// On the Docker first-run case (no MXLRC_MASTER_KEY in Docker mode) it returns a
-// non-nil *secrets.FirstRunError and a nil store, so the caller can print the
-// onboarding hint to stderr exactly once and exit without serving - the daemon
-// never runs unencrypted. Any other resolution failure (malformed master key,
-// unreadable key file) is returned as a wrapped error and is fatal at the call
-// site. The key bytes never touch slog.
-func resolveSecretStore(cfg config.Config, sqlDB *sql.DB) (secrets.Store, *secrets.FirstRunError, error) {
+// (env, never logged) > the resolved key file (auto-generated 0600 on first
+// use, universal default on all platforms including Docker), via
+// secrets.ResolveKey. Any resolution failure is returned as a wrapped error
+// and is fatal at the call site. The key bytes never touch slog.
+func resolveSecretStore(cfg config.Config, sqlDB *sql.DB) (secrets.Store, error) {
 	opts := cfg.SecretsKeyOptions()
 	opts.MasterKeyB64 = os.Getenv("MXLRC_MASTER_KEY")
 	key, err := secrets.ResolveKey(opts)
 	if err != nil {
-		var fr *secrets.FirstRunError
-		if errors.As(err, &fr) {
-			return nil, fr, nil
-		}
-		return nil, nil, fmt.Errorf("resolve secrets master key: %w", err)
+		return nil, fmt.Errorf("resolve secrets master key: %w", err)
 	}
-	return secrets.NewSQLStore(sqlDB, key), nil, nil
+	return secrets.NewSQLStore(sqlDB, key), nil
 }
 
 // resolveTokenWithStore appends the encrypted DB store as the LOWEST-precedence

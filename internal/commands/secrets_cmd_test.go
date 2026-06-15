@@ -386,19 +386,6 @@ func TestRunSecrets_StoreInitError(t *testing.T) {
 	}
 }
 
-func TestRunSecrets_DockerFirstRunExits(t *testing.T) {
-	t.Setenv("MXLRC_DOCKER", "true")
-	t.Setenv("MXLRC_MASTER_KEY", "")
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.toml")
-	writeServeConfig(t, cfgPath, filepath.Join(dir, "secrets.db"), false, "")
-	var out bytes.Buffer
-	code := runSecrets(context.Background(), &out, SecretsCmd{List: &SecretsListCmd{ConfigPath: cfgPath}})
-	if code != 1 {
-		t.Fatalf("docker first-run exit = %d, want 1", code)
-	}
-}
-
 func TestRunSecretsList_StoreError(t *testing.T) {
 	var out bytes.Buffer
 	if code := runSecretsList(context.Background(), &out, closedStore(t)); code != 1 {

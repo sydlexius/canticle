@@ -125,12 +125,13 @@ func TestResolveWebhookKeysWithStore_NoAutoPersist(t *testing.T) {
 	}
 }
 
-// TestResolveSecretStore_DockerFirstRun verifies the startup SEAM returns a
-// FirstRunError (rather than os.Exit) in Docker mode with no MXLRC_MASTER_KEY,
-// and that the hint Message carries the copy-pasteable assignment line.
-func TestResolveSecretStore_DockerFirstRun(t *testing.T) {
+// TestResolveSecretStore_DockerAutoCreatesKeyFile verifies that in Docker mode
+// with no MXLRC_MASTER_KEY, resolveSecretStore auto-creates a 0600 key file
+// and returns a usable store (universal zero-setup default, Decision A=(a)).
+func TestResolveSecretStore_DockerAutoCreatesKeyFile(t *testing.T) {
 	t.Setenv("MXLRC_DOCKER", "true")
 	t.Setenv("MXLRC_MASTER_KEY", "")
+	keyFile := filepath.Join(t.TempDir(), "test.key")
 
 	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
@@ -138,25 +139,27 @@ func TestResolveSecretStore_DockerFirstRun(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	cfg := config.Config{} // DockerMode is detected via MXLRC_DOCKER, not a field.
-	store, firstRun, err := resolveSecretStore(cfg, sqlDB)
+	cfg := config.Config{Secrets: config.SecretsConfig{KeyFile: keyFile}}
+	store, err := resolveSecretStore(cfg, sqlDB)
 	if err != nil {
-		t.Fatalf("resolveSecretStore: unexpected error %v", err)
+		t.Fatalf("resolveSecretStore Docker (no env key): %v", err)
 	}
-	if store != nil {
-		t.Fatalf("Docker first run: store must be nil")
+	if store == nil {
+		t.Fatalf("Docker mode with no env key: expected a usable store")
 	}
-	if firstRun == nil {
-		t.Fatalf("Docker first run: expected a FirstRunError")
+	// Round-trip confirms the auto-created key is consistent.
+	ctx := context.Background()
+	if err := store.Set(ctx, secrets.NameMusixmatchToken, "tok"); err != nil {
+		t.Fatalf("Set: %v", err)
 	}
-	msg := firstRun.Message()
-	if !strings.HasPrefix(msg, "MXLRC_MASTER_KEY=") {
-		t.Fatalf("first line must be the MXLRC_MASTER_KEY= assignment, got %q", msg)
+	if got, ok, err := store.Get(ctx, secrets.NameMusixmatchToken); err != nil || !ok || got != "tok" {
+		t.Fatalf("Get = (%q, %v, %v), want (tok, true, nil)", got, ok, err)
 	}
 }
 
-// TestResolveSecretStore_NativeAutoCreatesKeyFile verifies native mode (no
-// Docker) auto-creates a 0600 key file and builds a usable store.
+// TestResolveSecretStore_NativeAutoCreatesKeyFile verifies that with no env
+// key, resolveSecretStore auto-creates a 0600 key file and returns a usable
+// store. This is the canonical universal-behavior coverage test.
 func TestResolveSecretStore_NativeAutoCreatesKeyFile(t *testing.T) {
 	t.Setenv("MXLRC_DOCKER", "")
 	t.Setenv("MXLRC_MASTER_KEY", "")
@@ -169,12 +172,9 @@ func TestResolveSecretStore_NativeAutoCreatesKeyFile(t *testing.T) {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	cfg := config.Config{Secrets: config.SecretsConfig{KeyFile: keyFile}}
-	store, firstRun, err := resolveSecretStore(cfg, sqlDB)
+	store, err := resolveSecretStore(cfg, sqlDB)
 	if err != nil {
 		t.Fatalf("resolveSecretStore: %v", err)
-	}
-	if firstRun != nil {
-		t.Fatalf("native mode must not return a FirstRunError")
 	}
 	if store == nil {
 		t.Fatalf("native mode: expected a usable store")
@@ -189,9 +189,9 @@ func TestResolveSecretStore_NativeAutoCreatesKeyFile(t *testing.T) {
 	}
 }
 
-// TestResolveSecretStore_MalformedMasterKey verifies that a non-FirstRun key
-// resolution failure (a malformed MXLRC_MASTER_KEY) surfaces loudly as a wrapped
-// error, with no store and no FirstRunError, so the call site exits fatally.
+// TestResolveSecretStore_MalformedMasterKey verifies that a malformed
+// MXLRC_MASTER_KEY surfaces loudly as a wrapped error with no store, so the
+// call site exits fatally.
 func TestResolveSecretStore_MalformedMasterKey(t *testing.T) {
 	t.Setenv("MXLRC_DOCKER", "")
 	t.Setenv("MXLRC_MASTER_KEY", "not-valid-base64!!!")
@@ -202,12 +202,12 @@ func TestResolveSecretStore_MalformedMasterKey(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	store, firstRun, err := resolveSecretStore(config.Config{}, sqlDB)
+	store, err := resolveSecretStore(config.Config{}, sqlDB)
 	if err == nil {
 		t.Fatalf("malformed master key: expected a fatal error")
 	}
-	if store != nil || firstRun != nil {
-		t.Fatalf("malformed master key: want (nil store, nil firstRun), got (%v, %v)", store, firstRun)
+	if store != nil {
+		t.Fatalf("malformed master key: want nil store, got %v", store)
 	}
 	if !strings.Contains(err.Error(), "resolve secrets master key") {
 		t.Fatalf("error must be wrapped with context, got %q", err.Error())
@@ -290,17 +290,29 @@ func TestResolveWebhookKeysWithStore_BlankDBValue(t *testing.T) {
 	}
 }
 
-// TestRunServe_DockerFirstRun drives runServe through the startup wiring up to
-// the Docker first-run exit: it loads config, opens the DB, calls
-// resolveSecretStore, and (with no MXLRC_MASTER_KEY in Docker mode) prints the
-// onboarding hint to stderr and returns 1 without serving.
-func TestRunServe_DockerFirstRun(t *testing.T) {
+// TestRunServe_DockerAutoKeyFile drives runServe in Docker mode with no
+// MXLRC_MASTER_KEY: the auto-generated key file is the universal zero-setup
+// default, so the store should be initialized successfully. A token is supplied
+// so serve progresses past provider selection to verifier construction; the
+// nonexistent ffmpeg causes exit code 1 there. The key-file stat after the call
+// is the actual proof that the store initialized and created the file.
+func TestRunServe_DockerAutoKeyFile(t *testing.T) {
 	t.Setenv("MXLRC_DOCKER", "true")
 	t.Setenv("MXLRC_MASTER_KEY", "")
+	// In Docker mode xdgDataPath returns /config/... which is not writable in tests.
+	// Override the key file path via env so the auto-create lands in a temp dir.
+	keyFile := filepath.Join(t.TempDir(), "test.key")
+	t.Setenv("MXLRC_SECRETS_KEY_FILE", keyFile)
 
 	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "serve.db")
 	cfgPath := filepath.Join(dir, "config.toml")
-	writeServeConfig(t, cfgPath, filepath.Join(dir, "serve.db"), false, "")
+	// Nonexistent ffmpeg forces exit at verifier construction, after the store is
+	// successfully initialized - the exit-1 here is from the verifier, not the key.
+	writeServeConfig(t, cfgPath, dbPath, true, filepath.Join(dir, "no-such-ffmpeg"))
+
+	// Supply a token so serve progresses past provider selection to verifier construction.
+	t.Setenv("MUSIXMATCH_TOKEN", "tok")
 
 	var out bytes.Buffer
 	code := runServe(
@@ -310,8 +322,13 @@ func TestRunServe_DockerFirstRun(t *testing.T) {
 		func(string) musixmatch.Fetcher { return fakeFetcher{} },
 		func(...string) lyrics.Writer { return fakeWriter{} },
 	)
+	// Exit 1 from verifier failure confirms the store was built successfully.
 	if code != 1 {
-		t.Fatalf("Docker first run: exit code = %d, want 1", code)
+		t.Fatalf("Docker auto-key-file serve: exit code = %d, want 1", code)
+	}
+	// Key file creation is the definitive proof that the store initialized.
+	if _, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("expected auto-created key file at %q: %v", keyFile, err)
 	}
 }
 

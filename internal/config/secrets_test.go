@@ -27,9 +27,6 @@ func TestSecretsKeyOptionsDefaultPath(t *testing.T) {
 
 	cfg := defaults()
 	opts := cfg.SecretsKeyOptions()
-	if opts.DockerMode {
-		t.Fatalf("DockerMode should be false in native mode")
-	}
 	if !strings.HasSuffix(opts.KeyFilePath, filepath.Join("mxlrcgo-svc", ".mxlrcgo.key")) {
 		t.Fatalf("default KeyFilePath = %q, want a path ending in mxlrcgo-svc/.mxlrcgo.key", opts.KeyFilePath)
 	}
@@ -38,15 +35,18 @@ func TestSecretsKeyOptionsDefaultPath(t *testing.T) {
 	}
 }
 
-func TestSecretsKeyOptionsExplicitPathAndDocker(t *testing.T) {
-	t.Setenv("MXLRC_DOCKER", "true")
-	cfg := Config{Secrets: SecretsConfig{KeyFile: "/custom/key"}}
-	opts := cfg.SecretsKeyOptions()
-	if opts.KeyFilePath != "/custom/key" {
-		t.Fatalf("KeyFilePath = %q, want /custom/key", opts.KeyFilePath)
-	}
-	if !opts.DockerMode {
-		t.Fatalf("DockerMode should be true when MXLRC_DOCKER=true")
+// TestSecretsKeyOptionsExplicitPath verifies that a custom key_file config
+// value is passed through as KeyFilePath regardless of Docker env state.
+func TestSecretsKeyOptionsExplicitPath(t *testing.T) {
+	for _, docker := range []string{"", "true"} {
+		t.Run("MXLRC_DOCKER="+docker, func(t *testing.T) {
+			t.Setenv("MXLRC_DOCKER", docker)
+			cfg := Config{Secrets: SecretsConfig{KeyFile: "/custom/key"}}
+			opts := cfg.SecretsKeyOptions()
+			if opts.KeyFilePath != "/custom/key" {
+				t.Fatalf("KeyFilePath = %q, want /custom/key", opts.KeyFilePath)
+			}
+		})
 	}
 }
 

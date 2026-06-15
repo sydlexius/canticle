@@ -214,13 +214,14 @@ randomize = true
 
 [secrets]
 # Encrypted-at-rest storage for the Musixmatch token and webhook API key. The
-# 32-byte AES-256 master key is resolved from MXLRC_MASTER_KEY (recommended for
-# Docker; keeps the key out of the data volume) or a 0600 key file. key_file
+# 32-byte AES-256 master key is auto-generated as a 0600 key file on first use
+# (universal zero-setup default on all platforms including Docker). key_file
 # overrides the default key-file location (the hidden .mxlrcgo.key beside the
-# database); leave empty to use that default. In Docker mode MXLRC_MASTER_KEY is
-# required and no key file is auto-created. The DB store is the LOWEST-precedence
-# source for both secrets: CLI/env/TOML still win. Env override:
-# MXLRC_SECRETS_KEY_FILE.
+# database); leave empty to use that default. Set MXLRC_MASTER_KEY to a base64-
+# encoded 32-byte key as an optional override that skips the key file entirely
+# (use for whole-volume-theft protection; recommended Docker hardening). The DB
+# store is the LOWEST-precedence source for both secrets: CLI/env/TOML still win.
+# Env override: MXLRC_SECRETS_KEY_FILE.
 key_file = ""
 
 [logging]
