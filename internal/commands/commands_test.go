@@ -2499,7 +2499,11 @@ func TestServeHandlerWiresMetricsReporter(t *testing.T) {
 	)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=test-key", nil))
+	// /metrics is gated by the trusted-network allowlist (#204, S3); loopback is
+	// implicitly trusted, so scrape from 127.0.0.1 (no API key required).
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = "127.0.0.1:43210"
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /metrics status = %d; want 200 (body: %q)", rec.Code, rec.Body.String())

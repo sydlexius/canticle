@@ -19,6 +19,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
+	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
 	"github.com/sydlexius/mxlrcgo-svc/internal/web"
 )
 
@@ -82,6 +83,7 @@ type Handler struct {
 	allowedRoots []string
 	pathChecker  func(string) error
 	webui        *web.UI
+	trusted      *trustnet.Policy
 	mux          *http.ServeMux
 }
 
@@ -143,6 +145,18 @@ func WithWebUI(cfg config.Config, version string) Option {
 	return func(h *Handler) { h.webui = web.NewUI(cfg, version) }
 }
 
+// WithTrustedNetworks wires the trusted-network policy that gates GET /metrics
+// (issue #204, S3): only a request whose resolved client IP is loopback or
+// within a configured CIDR may scrape. A nil policy is ignored, leaving the
+// default-closed (loopback-only) policy installed by NewHandler.
+func WithTrustedNetworks(p *trustnet.Policy) Option {
+	return func(h *Handler) {
+		if p != nil {
+			h.trusted = p
+		}
+	}
+}
+
 // WithWebUIIf conditionally mounts the web UI. When enabled is false it
 // returns a no-op option so callers do not need an inline if-branch.
 func WithWebUIIf(enabled bool, cfg config.Config, version string) Option {
@@ -160,6 +174,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		outdir:      outdir,
 		priority:    queue.PriorityWebhook,
 		pathChecker: defaultPathChecker,
+		trusted:     trustnet.LoopbackOnly(),
 		mux:         http.NewServeMux(),
 	}
 	for _, opt := range opts {

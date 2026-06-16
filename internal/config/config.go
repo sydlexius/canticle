@@ -12,6 +12,7 @@ import (
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
 	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
+	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
 )
 
 // Config holds all application configuration.
@@ -180,6 +181,27 @@ type ServerConfig struct {
 	// Do NOT enable until the auth/onboarding layer (#204) ships -- enabling this
 	// before auth lands exposes an unauthenticated UI on the serve listener.
 	WebUIEnabled bool `toml:"web_ui_enabled"`
+	// TrustedNetworks configures the CIDR allowlist that gates trusted-network
+	// access (issue #204, Area 2): loopback-implicit access to GET /metrics and,
+	// once the login layer lands, the interactive-login bypass for the web UI.
+	TrustedNetworks TrustedNetworksConfig `toml:"trusted_networks"`
+}
+
+// TrustedNetworksConfig holds the trusted-network allowlist for serve mode.
+// Both lists are CIDR strings, validated at load (an invalid CIDR is a fatal
+// startup error). Default closed: an empty Cidrs trusts only loopback.
+type TrustedNetworksConfig struct {
+	// Cidrs is the allowlist of trusted client networks (e.g.
+	// "192.168.1.0/24"). Loopback (127.0.0.0/8, ::1) is always implicitly
+	// trusted on top of this list. Empty (the default) trusts only loopback.
+	// Override: MXLRC_TRUSTED_CIDRS (comma-separated).
+	Cidrs []string `toml:"cidrs"`
+	// TrustedProxies lists the CIDRs of reverse proxies permitted to set
+	// X-Forwarded-For. Only when a request's immediate peer is within one of
+	// these networks is XFF consulted (then walked right-to-left, skipping
+	// proxies) to find the real client IP. Empty (the default) means XFF is
+	// never trusted. Override: MXLRC_TRUSTED_PROXIES (comma-separated).
+	TrustedProxies []string `toml:"trusted_proxies"`
 }
 
 // defaultScanIntervalSeconds is the built-in scheduler scan interval (15 min).
@@ -506,6 +528,9 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	// final (clamped) cap value.
 	clampCircuitBackoffBase(&cfg)
 	clampMissBackoff(&cfg)
+	if err := validateTrustedNetworks(cfg); err != nil {
+		return cfg, appliedEnv, err
+	}
 	if cfg.DB.Path == "" {
 		return cfg, appliedEnv, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
 	}
@@ -515,7 +540,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -646,6 +671,14 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 			cfg.Server.WorkIntervalSeconds = n
 			applied["server.work_interval_seconds"] = true
 		}
+	}
+	if v := os.Getenv("MXLRC_TRUSTED_CIDRS"); v != "" {
+		cfg.Server.TrustedNetworks.Cidrs = splitCSV(v)
+		applied["server.trusted_networks.cidrs"] = true
+	}
+	if v := os.Getenv("MXLRC_TRUSTED_PROXIES"); v != "" {
+		cfg.Server.TrustedNetworks.TrustedProxies = splitCSV(v)
+		applied["server.trusted_networks.trusted_proxies"] = true
 	}
 	if v := os.Getenv("MXLRC_PROVIDER_PRIMARY"); v != "" {
 		cfg.Providers.Primary = v
@@ -979,6 +1012,21 @@ func clampMissBackoff(cfg *Config) {
 		slog.Warn("max_miss_attempts is negative; clamping to 0 (no cap)", "configured", cfg.API.MaxMissAttempts)
 		cfg.API.MaxMissAttempts = 0
 	}
+}
+
+// validateTrustedNetworks fails fast on an invalid CIDR in either
+// [server.trusted_networks] list. Parsing happens at load (not lazily at first
+// request) so a misconfiguration is a clear startup error rather than silently
+// failing open. The parsed networks are rebuilt by the serve listener; here we
+// only assert they are well-formed.
+func validateTrustedNetworks(cfg Config) error {
+	if _, err := trustnet.ParseCIDRs(cfg.Server.TrustedNetworks.Cidrs); err != nil {
+		return fmt.Errorf("config: server.trusted_networks.cidrs: %w", err)
+	}
+	if _, err := trustnet.ParseCIDRs(cfg.Server.TrustedNetworks.TrustedProxies); err != nil {
+		return fmt.Errorf("config: server.trusted_networks.trusted_proxies: %w", err)
+	}
+	return nil
 }
 
 func splitCSV(s string) []string {

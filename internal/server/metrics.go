@@ -2,15 +2,12 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
-
-	"github.com/sydlexius/mxlrcgo-svc/internal/auth"
 )
 
 // MetricsReporter provides aggregate queue data for the GET /metrics endpoint.
@@ -22,25 +19,16 @@ type MetricsReporter interface {
 	CountInstrumental(ctx context.Context) (int64, error)
 }
 
-// handleMetrics writes a Prometheus text-exposition response. It applies the
-// same admin-scope auth gate as handleStatus so operational data is not exposed
-// to unauthenticated callers. Metrics are computed from read-only DB queries at
-// request time (query-on-scrape); there is no in-process registry or caching.
+// handleMetrics writes a Prometheus text-exposition response. Access is gated
+// by the trusted-network allowlist (issue #204, S3), not by an API key or
+// session: only a request whose resolved client IP is loopback or within a
+// configured CIDR may scrape, and a spoofed X-Forwarded-For cannot forge a
+// trusted source (see trustnet.ClientIP). Metrics are computed from read-only
+// DB queries at request time (query-on-scrape); there is no in-process registry
+// or caching.
 func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if h.auth == nil {
-		http.Error(w, "auth unavailable", http.StatusInternalServerError)
-		return
-	}
-	if _, err := h.auth.ValidateKey(r.Context(), apiKey(r), auth.ScopeAdmin); err != nil {
-		switch {
-		case errors.Is(err, auth.ErrForbiddenScope):
-			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-		case errors.Is(err, auth.ErrInvalidKey), errors.Is(err, auth.ErrRevokedKey):
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		default:
-			slog.Error("metrics authentication failed", "error", err)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		}
+	if !h.trusted.Trusted(r) {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 

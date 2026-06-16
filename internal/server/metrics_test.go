@@ -8,8 +8,29 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/auth"
+	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
 )
+
+// metricsRequest builds a GET /metrics request from loopback, which is
+// implicitly trusted by the trusted-network gate so the content/format tests
+// reach the handler body. No API key is needed: /metrics is gated by client IP,
+// not by auth (issue #204, S3).
+func metricsRequest() *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r.RemoteAddr = "127.0.0.1:43210"
+	return r
+}
+
+// remoteMetricsRequest builds a GET /metrics request from a non-loopback IP,
+// optionally carrying an X-Forwarded-For header.
+func remoteMetricsRequest(remoteAddr, xff string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r.RemoteAddr = remoteAddr
+	if xff != "" {
+		r.Header.Set("X-Forwarded-For", xff)
+	}
+	return r
+}
 
 type fakeMetrics struct {
 	statusCounts      map[string]int64
@@ -44,51 +65,87 @@ func (f *fakeMetrics) CountInstrumental(_ context.Context) (int64, error) {
 	return f.instrumentalCount, f.instrumentalErr
 }
 
-func TestMetricsRequiresAdminAuth(t *testing.T) {
-	t.Run("no api key returns 401", func(t *testing.T) {
-		h := NewHandler(&fakeAuth{err: auth.ErrInvalidKey}, &fakeQueue{}, "lyrics",
-			WithMetricsReporter(&fakeMetrics{}))
+// TestMetricsTrustedNetworkGate verifies that GET /metrics is gated by the
+// trusted-network allowlist (issue #204, S3), not by an API key: loopback is
+// implicitly trusted, configured CIDRs are trusted, everything else is refused,
+// and a spoofed X-Forwarded-For cannot forge a trusted source.
+func TestMetricsTrustedNetworkGate(t *testing.T) {
+	okReporter := func() Option {
+		return WithMetricsReporter(&fakeMetrics{
+			statusCounts:  map[string]int64{},
+			failureCounts: map[string]int64{},
+		})
+	}
+
+	t.Run("loopback trusted with empty allowlist (default closed)", func(t *testing.T) {
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", okReporter())
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=bad", nil))
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d; want 401", rec.Code)
+		h.ServeHTTP(rec, metricsRequest())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
 		}
 	})
 
-	t.Run("webhook-scoped key returns 403", func(t *testing.T) {
-		h := NewHandler(&fakeAuth{err: auth.ErrForbiddenScope}, &fakeQueue{}, "lyrics",
-			WithMetricsReporter(&fakeMetrics{}))
+	t.Run("non-trusted IP refused with empty allowlist", func(t *testing.T) {
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", okReporter())
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=webhook-key", nil))
+		h.ServeHTTP(rec, remoteMetricsRequest("203.0.113.7:5555", ""))
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("status = %d; want 403", rec.Code)
 		}
 	})
 
-	t.Run("auth backend error returns 500", func(t *testing.T) {
-		h := NewHandler(&fakeAuth{err: errors.New("auth store down")}, &fakeQueue{}, "lyrics",
-			WithMetricsReporter(&fakeMetrics{}))
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d; want 500", rec.Code)
+	t.Run("in-allowlist IP trusted", func(t *testing.T) {
+		p, err := trustnet.NewPolicy([]string{"192.168.0.0/16"}, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
-
-	t.Run("valid admin key passes auth gate", func(t *testing.T) {
-		a := &fakeAuth{}
-		h := NewHandler(a, &fakeQueue{}, "lyrics",
-			WithMetricsReporter(&fakeMetrics{
-				statusCounts:  map[string]int64{},
-				failureCounts: map[string]int64{},
-			}))
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", okReporter(), WithTrustedNetworks(p))
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=admin", nil))
+		h.ServeHTTP(rec, remoteMetricsRequest("192.168.5.5:5555", ""))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
 		}
-		if a.required != auth.ScopeAdmin {
-			t.Fatalf("required scope = %q; want admin", a.required)
+	})
+
+	t.Run("out-of-allowlist IP refused", func(t *testing.T) {
+		p, err := trustnet.NewPolicy([]string{"192.168.0.0/16"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", okReporter(), WithTrustedNetworks(p))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, remoteMetricsRequest("203.0.113.7:5555", ""))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d; want 403", rec.Code)
+		}
+	})
+
+	t.Run("spoofed XFF cannot forge a trusted source", func(t *testing.T) {
+		p, err := trustnet.NewPolicy([]string{"192.168.0.0/16"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", okReporter(), WithTrustedNetworks(p))
+		rec := httptest.NewRecorder()
+		// Direct (untrusted) peer claims an allowlisted IP via XFF; no trusted
+		// proxy is configured, so XFF must be ignored and the request refused.
+		h.ServeHTTP(rec, remoteMetricsRequest("203.0.113.7:5555", "192.168.5.5"))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d; want 403 (spoofed XFF must not grant trust)", rec.Code)
+		}
+	})
+
+	t.Run("real client behind trusted proxy is allowed", func(t *testing.T) {
+		p, err := trustnet.NewPolicy([]string{"192.168.0.0/16"}, []string{"10.0.0.0/8"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", okReporter(), WithTrustedNetworks(p))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, remoteMetricsRequest("10.0.0.1:5555", "192.168.5.5"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
 		}
 	})
 }
@@ -96,7 +153,7 @@ func TestMetricsRequiresAdminAuth(t *testing.T) {
 func TestMetricsWithoutReporterReturns500(t *testing.T) {
 	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics") // no WithMetricsReporter
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 when no reporter configured", rec.Code)
 	}
@@ -109,7 +166,7 @@ func TestMetricsResponseIsValidPrometheusFormat(t *testing.T) {
 			failureCounts: map[string]int64{"connection refused": 2},
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
@@ -164,7 +221,7 @@ func TestMetricsEmptyQueueProducesHelpAndTypeLines(t *testing.T) {
 			failureCounts: map[string]int64{},
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200", rec.Code)
@@ -188,7 +245,7 @@ func TestMetricsStatusQueryErrorReturns500(t *testing.T) {
 	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
 		WithMetricsReporter(&fakeMetrics{statusErr: errors.New("db error")}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 on query error", rec.Code)
 	}
@@ -201,7 +258,7 @@ func TestMetricsFailureQueryErrorReturns500(t *testing.T) {
 			failureErr:   errors.New("db error"),
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 on query error", rec.Code)
 	}
@@ -261,7 +318,7 @@ func TestMetricsProviderOutcomesAndInstrumental(t *testing.T) {
 			instrumentalCount: 5,
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
@@ -325,7 +382,7 @@ func TestMetricsEmptyProviderTablesProduceHelpAndTypeLines(t *testing.T) {
 			providerMisses: map[string]int64{},
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200", rec.Code)
@@ -354,7 +411,7 @@ func TestMetricsProviderHitsQueryErrorReturns500(t *testing.T) {
 			hitsErr:       errors.New("db error"),
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 on provider hits query error", rec.Code)
 	}
@@ -369,7 +426,7 @@ func TestMetricsProviderMissesQueryErrorReturns500(t *testing.T) {
 			missesErr:     errors.New("db error"),
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 on provider misses query error", rec.Code)
 	}
@@ -385,7 +442,7 @@ func TestMetricsInstrumentalQueryErrorReturns500(t *testing.T) {
 			instrumentalErr: errors.New("db error"),
 		}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=key", nil))
+	h.ServeHTTP(rec, metricsRequest())
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 on instrumental query error", rec.Code)
 	}

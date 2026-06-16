@@ -38,6 +38,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
 	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
 	"github.com/sydlexius/mxlrcgo-svc/internal/server"
+	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
 	"github.com/sydlexius/mxlrcgo-svc/internal/watcher"
 	"github.com/sydlexius/mxlrcgo-svc/internal/worker"
@@ -817,6 +818,16 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// mxlrcgo_provider_misses_total{lane}).
 	configureWorkerProviderRecorder(w, workQ)
 
+	// Trusted-network policy gates GET /metrics (#204, S3). CIDRs were already
+	// validated at config load; rebuild here for the listener. A build failure
+	// would mean validation was bypassed, so it is a fatal startup error. Built
+	// before the cancelable run context so an early return cannot leak it.
+	trustPolicy, err := trustnet.NewPolicy(cfg.Server.TrustedNetworks.Cidrs, cfg.Server.TrustedNetworks.TrustedProxies)
+	if err != nil {
+		slog.Error("failed to build trusted-network policy", "error", err)
+		return 1
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -843,6 +854,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			server.WithStatusReporter(workQ),
 			// WithMetricsReporter is required: omitting it causes GET /metrics to return 500.
 			server.WithMetricsReporter(workQ),
+			// GET /metrics is gated by the trusted-network allowlist (loopback
+			// implicitly trusted); no API key or session is required (#204, S3).
+			server.WithTrustedNetworks(trustPolicy),
 			server.WithInventory(scan.New(sqlDB)),
 			server.WithAllowedRoots(allowedRoots),
 			// Mount the read-only web UI only when explicitly enabled (#210).
