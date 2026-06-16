@@ -149,6 +149,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     permissions:
       contents: read
+      security-events: write # required for upload-sarif to publish findings to the Security tab
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -158,11 +159,49 @@ jobs:
         run: docker build -t mxlrcgo-svc:scan -f Dockerfile .
 
       - name: Scan image for HIGH+ CVEs
+        id: scan
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: mxlrcgo-svc:scan
           severity-cutoff: high
           fail-build: true
+          grype-version: v0.114.0
+          only-fixed: true # transient unfixable CVEs from vuln-DB updates cause flakes that cannot be actioned
+          output-format: sarif
+
+      - name: Upload SARIF artifact
+        if: always() && steps.scan.outputs.sarif != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: grype-scan-sarif
+          path: ${{ steps.scan.outputs.sarif }}
+          retention-days: 1
+
+      - name: Upload to Security tab
+        if: always() && steps.scan.outputs.sarif != ''
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+
+      - name: Summarize findings on failure
+        if: failure()
+        env:
+          SARIF_FILE: ${{ steps.scan.outputs.sarif }}
+        run: |
+          if [ -z "$SARIF_FILE" ] || [ ! -f "$SARIF_FILE" ]; then
+            echo "No SARIF output file found; skipping summary."
+            exit 0
+          fi
+          echo "=== Grype findings summary ==="
+          jq -r '
+            .runs[0] |
+            . as $run |
+            ($run.tool.driver.rules // []) as $rules |
+            .results[] |
+            . as $result |
+            ($rules | map(select(.id == $result.ruleId)) | first) as $rule |
+            "CVE: \($result.ruleId)  severity: \(if $rule then ($rule.properties["security-severity"] // $rule.defaultConfiguration.level // "unknown") else "unknown" end)  package: \($result.message.text // "unknown")"
+          ' "$SARIF_FILE" || { echo "(jq failed to parse SARIF)"; cat "$SARIF_FILE"; }
 
   # Per-package coverage-floor CI enforcement is deferred: Codecov handles patch
   # coverage for PR gates, and scripts/coverage-floor.sh remains available for

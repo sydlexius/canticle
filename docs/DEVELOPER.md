@@ -25,6 +25,8 @@ make doctor     # verify the hooks are wired and tool-version pins agree
 
 `make gate` runs the full pre-push gate (the same chain `.githooks/pre-push` runs): conflict-marker check, gofmt, build, race tests, patch coverage, golangci-lint, actionlint, and govulncheck. The pre-commit hook runs a faster subset on each commit.
 
+`make scan` requires [grype](https://github.com/anchore/grype) v0.114.0 (the version pinned in CI). Install it and `make doctor` will verify the local version matches. CI runs grype with `only-fixed: true` to suppress CVEs that have no released fix, reducing flakes from transient vuln-DB churn that cannot be actioned.
+
 Other useful targets:
 
 ```sh
@@ -34,8 +36,8 @@ make test-shuffle        # race tests with randomized order (-shuffle=on)
 make test-cover          # coverage profile + HTML report
 make coverage-floor      # enforce the per-package coverage floor
 make vulncheck           # govulncheck (pinned)
-make scan                # build the Docker image and scan it for HIGH+ CVEs (needs Docker + grype)
-make sync-tool-versions  # assert the golangci-lint pin matches across CI and pre-commit
+make scan                # build the Docker image and scan it for HIGH+ CVEs (needs Docker + grype v0.114.0)
+make sync-tool-versions  # assert the golangci-lint and grype pins match across CI and local
 ```
 
 ## Documentation site

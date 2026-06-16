@@ -11,7 +11,7 @@ BINARY=mxlrcgo-svc
 TAILWIND ?= tailwindcss
 
 # Pinned govulncheck version for reproducible vulnerability scans. Manual pin:
-# scripts/check-tool-versions.sh currently asserts only the golangci-lint pin.
+# scripts/check-tool-versions.sh asserts the golangci-lint and grype version pins.
 GOVULNCHECK_VERSION=v1.1.4
 
 ## build: Build the binary
