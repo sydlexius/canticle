@@ -26,9 +26,9 @@ builds:
       # defaults). GoReleaser only auto-injects these when ldflags is unset, so
       # they are wired explicitly here. CommitDate (not Date) keeps the build
       # reproducible, matching the -trimpath stance above.
-      - -X github.com/sydlexius/mxlrcgo-svc/internal/commands.version={{ .Version }}
-      - -X github.com/sydlexius/mxlrcgo-svc/internal/commands.commit={{ .Commit }}
-      - -X github.com/sydlexius/mxlrcgo-svc/internal/commands.date={{ .CommitDate }}
+      - -X github.com/sydlexius/mxlrcgo-svc/internal/version.Version={{ .Version }}
+      - -X github.com/sydlexius/mxlrcgo-svc/internal/version.Commit={{ .Commit }}
+      - -X github.com/sydlexius/mxlrcgo-svc/internal/version.Date={{ .CommitDate }}
 
 archives:
   - id: default

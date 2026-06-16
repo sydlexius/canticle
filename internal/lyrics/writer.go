@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
+	"github.com/sydlexius/mxlrcgo-svc/internal/version"
 )
 
 // InstrumentalMarker is the human-readable marker embedded in an instrumental .txt
@@ -179,6 +181,19 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		if song.Track.TrackLength != 0 {
 			tags = append(tags, fmt.Sprintf("[length:%02d:%02d]", song.Track.TrackLength/60, song.Track.TrackLength%60))
 		}
+		if song.WinningLane != "" {
+			tags = append(tags, fmt.Sprintf("[source:%s]", song.WinningLane))
+		}
+		if !song.FetchedAt.IsZero() {
+			tags = append(tags, fmt.Sprintf("[fetched:%s]", song.FetchedAt.Format(time.RFC3339)))
+		}
+		tags = append(tags, fmt.Sprintf("[ve:%s]", version.Version))
+		if song.Track.ISRC != "" {
+			tags = append(tags, fmt.Sprintf("[isrc:%s]", song.Track.ISRC))
+		}
+		if song.Track.RecordingMBID != "" {
+			tags = append(tags, fmt.Sprintf("[mbid:%s]", song.Track.RecordingMBID))
+		}
 	}
 
 	// Write to a temp file in the same directory, then rename atomically so a
@@ -227,6 +242,8 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	if err := os.Rename(tmpPath, fp); err != nil {
 		return fmt.Errorf("renaming %s to %s: %w", tmpPath, fp, err)
 	}
+	// NEW-3: fsync the parent dir so the rename is durable across a hard crash.
+	fsyncDir(outdir)
 	// Remove the opposite sidecar so format transitions never leave both files on disk.
 	// Writing .lrc removes a stale .txt (upgrade), writing .txt removes a stale .lrc (downgrade).
 	switch filepath.Ext(fp) {

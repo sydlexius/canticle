@@ -712,6 +712,8 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	confidence := Confidence(item.Inputs.Track, song.Track)
 	slog.Debug("worker lyrics match", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "cache_hit", cacheHit)
 	if !cacheHit {
+		// Stamp the fetch time once, shared across all output paths.
+		song.FetchedAt = w.now()
 		// A non-cache provider fetch succeeded: record the hit and stamp the winning
 		// lane on the queue row before any downstream step so the counter and the
 		// per-track provenance are always written when the provider round-trip

@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // Track represents a song's metadata from the Musixmatch API.
 type Track struct {
 	TrackName    string `json:"track_name,omitempty"`
@@ -61,6 +63,11 @@ type Song struct {
 	// Empty on cache hits and zero-value songs. Used by the worker write-path to
 	// record per-lane hit counters without changing the Fetcher interface.
 	WinningLane string `json:"-"`
+	// FetchedAt is the time the song was fetched from the provider. Set by the
+	// worker immediately after a successful fetch and before any write path so
+	// all output formats share one consistent timestamp. Zero on cache hits
+	// (timestamp not available without a live fetch). Transient: not persisted.
+	FetchedAt time.Time `json:"-"`
 }
 
 // Inputs represents a single work item in the processing queue.

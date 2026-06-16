@@ -92,6 +92,7 @@ func TestRunFetchesAndWritesSyncedLyrics(t *testing.T) {
 		"[ti:Test Song]",
 		"[al:Test Album]",
 		"[length:02:03]",
+		"[ve:dev]",
 		"[00:01.23]first line",
 		"[00:02.34]second line",
 		"",
