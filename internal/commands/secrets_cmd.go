@@ -33,7 +33,7 @@ func runSecrets(ctx context.Context, out io.Writer, args SecretsCmd) int {
 		slog.Error("failed to open database", "error", err)
 		return 1
 	}
-	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
+	defer func() { _ = sqlDB.Close() }()
 
 	store, err := resolveSecretStore(cfg, sqlDB)
 	if err != nil {

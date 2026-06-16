@@ -114,7 +114,7 @@ func (s *SQLStore) List(ctx context.Context) ([]SecretInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("secrets: list: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+	defer func() { _ = rows.Close() }()
 	var out []SecretInfo
 	for rows.Next() {
 		var info SecretInfo
