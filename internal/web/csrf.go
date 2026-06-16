@@ -36,14 +36,14 @@ func isSameOriginRequest(r *http.Request) bool {
 		if err != nil || u.Host == "" {
 			return false
 		}
-		return u.Host == r.Host
+		return strings.EqualFold(u.Host, r.Host)
 	}
 	if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
 		u, err := url.Parse(referer)
 		if err != nil || u.Host == "" {
 			return false
 		}
-		return u.Host == r.Host
+		return strings.EqualFold(u.Host, r.Host)
 	}
 	if cookie, err := r.Cookie(SessionCookieName); err == nil && cookie.Value != "" {
 		return false

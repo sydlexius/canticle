@@ -112,6 +112,9 @@ func TestIsSameOriginRequest(t *testing.T) {
 		{name: "referer port mismatch", host: "example.com:8080", headers: map[string]string{"Referer": "http://example.com:9090/x"}, want: false},
 		{name: "referer empty host", host: "example.com", headers: map[string]string{"Referer": "not-a-url"}, want: false},
 		{name: "origin wins over referer", host: "example.com", headers: map[string]string{"Origin": "http://evil.example", "Referer": "http://example.com/x"}, want: false},
+		// Case-insensitive host comparison (RFC 7230: host is case-insensitive).
+		{name: "origin host uppercase allowed", host: "example.com", headers: map[string]string{"Origin": "http://Example.COM"}, want: true},
+		{name: "referer host uppercase allowed", host: "example.com", headers: map[string]string{"Referer": "http://Example.COM/setup"}, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
