@@ -2,14 +2,23 @@
  *
  * Build (dev-time only, no node runtime): `make ui` runs the Tailwind
  * standalone CLI to compile this file to output.css, which is go:embed'd and
- * served at /static/css/output.css. Tailwind v4 auto-detects source files
- * (including the generated *_templ.go), so the @source hint below is belt-and-
- * suspenders for the templ sources.
+ * served at /static/css/output.css.
+ *
+ * Automatic content detection is DISABLED via `source(none)`: Tailwind v4 would
+ * otherwise scan the whole repo and extract Go business-logic vocabulary (words
+ * like relative/absolute/capitalize/table/block/fixed/static/transform/filter
+ * that appear in internal/*.go) as utility classes, bloating output.css with
+ * junk it never serves (issue #271). The explicit @source globs below are the
+ * authoritative content list -- they must cover every web file that uses
+ * Tailwind classes (the templ sources and the generated *_templ.go where the
+ * class strings actually land). If you add a new web source with classes, add
+ * its glob here or the classes will be missing from output.css.
  */
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @import "./design-tokens.css";
 
-@source "../../templates";
+@source "../../templates/**/*.templ";
+@source "../../templates/**/*_templ.go";
 
 /* The UI is dark-only (issue #210): paint the document surface from the tokens
    and bind the base font so first paint matches the runtime. */
