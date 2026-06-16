@@ -108,6 +108,15 @@ First run is interactive. With no admin yet, every UI page redirects to `/setup`
 
 For headless deployments (Docker), you can skip the interactive form by setting both `MXLRC_WEBAUTH_ADMIN_USER` and `MXLRC_WEBAUTH_ADMIN_PASSWORD` in the environment. On startup, if no admin exists yet, the daemon creates one from these values (password must be at least 8 characters). It is idempotent (an existing admin is never overwritten) and the password is never logged. Treat these as bootstrap-only credentials: after first run, sign in and rotate the password, then remove the variables from the environment.
 
+### TLS
+
+TLS for the serve listener is off by default (plain HTTP), so deployments behind a TLS-terminating reverse proxy avoid double-encryption by leaving it disabled. Enable it under `[server.tls]` in one of two ways:
+
+- **Bring-your-own certificate:** set `cert_file` and `key_file` (both required together). The listener terminates TLS itself with a TLS 1.2 minimum. Env: `MXLRC_TLS_CERT_FILE`, `MXLRC_TLS_KEY_FILE`.
+- **Self-signed bootstrap:** set `self_signed = true` (mutually exclusive with `cert_file`/`key_file`). An ECDSA P-256 certificate (CN `mxlrcgo-svc`, ~365-day validity) is generated and persisted `0600` under `<dir(db_path)>/tls/`, and regenerated when missing or expired. Browsers show an untrusted-certificate prompt; this is intended for a LAN box, not public exposure. Env: `MXLRC_TLS_SELF_SIGNED`.
+
+When TLS is on, the session cookie's `Secure` flag is set automatically. An optional `redirect_http` listen address (e.g. `":80"`, env `MXLRC_TLS_REDIRECT_HTTP`) runs a plain-HTTP listener that 301-redirects every request to the HTTPS address. A contradictory configuration (`self_signed` combined with a cert/key, or only one of `cert_file`/`key_file`) is a fatal startup error. ACME/Let's Encrypt is a planned follow-up.
+
 ## Credits
 
 - [Spicetify Lyrics Plus](https://github.com/spicetify/spicetify-cli/tree/master/CustomApps/lyrics-plus)

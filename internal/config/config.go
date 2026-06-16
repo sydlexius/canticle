@@ -185,6 +185,43 @@ type ServerConfig struct {
 	// access (issue #204, Area 2): loopback-implicit access to GET /metrics and,
 	// once the login layer lands, the interactive-login bypass for the web UI.
 	TrustedNetworks TrustedNetworksConfig `toml:"trusted_networks"`
+	// TLS configures optional transport security for the serve listener (issue
+	// #204, Area 4). Off by default (plain HTTP), preserving pre-#204 behavior.
+	TLS TLSConfig `toml:"tls"`
+}
+
+// TLSConfig holds the optional TLS settings for the serve listener (issue #204,
+// Area 4). TLS is off by default. Two modes are supported: bring-your-own
+// certificate (CertFile + KeyFile, both required together) and a self-signed
+// bootstrap (SelfSigned, mutually exclusive with cert/key). Both are validated at
+// load (a contradictory combination is a fatal startup error). ACME autocert is a
+// deferred follow-up (lane 6); the listener wires a CertManager seam so it drops
+// in without a rewrite.
+type TLSConfig struct {
+	// CertFile is the PEM-encoded certificate path. With KeyFile set, the serve
+	// listener terminates TLS itself (MinVersion TLS 1.2). Override:
+	// MXLRC_TLS_CERT_FILE.
+	CertFile string `toml:"cert_file"`
+	// KeyFile is the PEM-encoded private key path. Required together with
+	// CertFile. Override: MXLRC_TLS_KEY_FILE.
+	KeyFile string `toml:"key_file"`
+	// SelfSigned generates and persists a self-signed certificate on first run
+	// (ECDSA P-256, CN=mxlrcgo-svc, ~365-day validity) under <dir(db_path)>/tls/,
+	// regenerating when missing or expired. Mutually exclusive with
+	// CertFile/KeyFile. Browsers show an untrusted-certificate prompt. Override:
+	// MXLRC_TLS_SELF_SIGNED.
+	SelfSigned bool `toml:"self_signed"`
+	// RedirectHTTP is an optional plain-HTTP listen address (e.g. ":80") whose
+	// every request 301-redirects to the HTTPS address. Empty (the default) means
+	// no redirect listener. Only honored when TLS is enabled. Override:
+	// MXLRC_TLS_REDIRECT_HTTP.
+	RedirectHTTP string `toml:"redirect_http"`
+}
+
+// Enabled reports whether TLS termination is configured (bring-your-own cert or
+// self-signed bootstrap). When false the serve listener stays plain HTTP.
+func (t TLSConfig) Enabled() bool {
+	return (t.CertFile != "" && t.KeyFile != "") || t.SelfSigned
 }
 
 // TrustedNetworksConfig holds the trusted-network allowlist for serve mode.
@@ -531,6 +568,9 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	if err := validateTrustedNetworks(cfg); err != nil {
 		return cfg, appliedEnv, err
 	}
+	if err := validateServerTLS(cfg); err != nil {
+		return cfg, appliedEnv, err
+	}
 	if cfg.DB.Path == "" {
 		return cfg, appliedEnv, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
 	}
@@ -540,7 +580,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -679,6 +719,27 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_TRUSTED_PROXIES"); v != "" {
 		cfg.Server.TrustedNetworks.TrustedProxies = splitCSV(v)
 		applied["server.trusted_networks.trusted_proxies"] = true
+	}
+	if v := os.Getenv("MXLRC_TLS_CERT_FILE"); v != "" {
+		cfg.Server.TLS.CertFile = v
+		applied["server.tls.cert_file"] = true
+	}
+	if v := os.Getenv("MXLRC_TLS_KEY_FILE"); v != "" {
+		cfg.Server.TLS.KeyFile = v
+		applied["server.tls.key_file"] = true
+	}
+	if v := os.Getenv("MXLRC_TLS_SELF_SIGNED"); v != "" {
+		selfSigned, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TLS_SELF_SIGNED", "value", v, "current", cfg.Server.TLS.SelfSigned) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Server.TLS.SelfSigned = selfSigned
+			applied["server.tls.self_signed"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_TLS_REDIRECT_HTTP"); v != "" {
+		cfg.Server.TLS.RedirectHTTP = v
+		applied["server.tls.redirect_http"] = true
 	}
 	if v := os.Getenv("MXLRC_PROVIDER_PRIMARY"); v != "" {
 		cfg.Providers.Primary = v
@@ -1025,6 +1086,22 @@ func validateTrustedNetworks(cfg Config) error {
 	}
 	if _, err := trustnet.ParseCIDRs(cfg.Server.TrustedNetworks.TrustedProxies); err != nil {
 		return fmt.Errorf("config: server.trusted_networks.trusted_proxies: %w", err)
+	}
+	return nil
+}
+
+// validateServerTLS fails fast on a contradictory [server.tls] configuration
+// (issue #204, Area 4): self_signed cannot be combined with an explicit
+// cert_file/key_file, and cert_file and key_file must be supplied together.
+// Validation happens at load so a misconfiguration is a clear startup error
+// rather than a confusing listener failure.
+func validateServerTLS(cfg Config) error {
+	t := cfg.Server.TLS
+	if t.SelfSigned && (t.CertFile != "" || t.KeyFile != "") {
+		return fmt.Errorf("config: server.tls: self_signed is mutually exclusive with cert_file/key_file")
+	}
+	if (t.CertFile == "") != (t.KeyFile == "") {
+		return fmt.Errorf("config: server.tls: cert_file and key_file must be set together")
 	}
 	return nil
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
 	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
 	"github.com/sydlexius/mxlrcgo-svc/internal/server"
+	"github.com/sydlexius/mxlrcgo-svc/internal/servetls"
 	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
 	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
 	"github.com/sydlexius/mxlrcgo-svc/internal/watcher"
@@ -845,6 +846,18 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		return 1
 	}
 
+	// Optional TLS (#204, lane 5): build the certificate manager from
+	// [server.tls]. Returns nil when TLS is disabled (plain HTTP, the default).
+	// The self-signed bootstrap persists under <dir(db_path)>/tls/. Built before
+	// the run context so a bad cert/key or generation failure is a clean early
+	// return rather than a leaked listener.
+	certMgr, err := servetls.BuildCertManager(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.SelfSigned, filepath.Dir(cfg.DB.Path))
+	if err != nil {
+		_ = sqlDB.Close()
+		slog.Error("failed to initialize TLS", "error", err)
+		return 1
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -904,6 +917,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	if certMgr != nil {
+		srv.TLSConfig = servetls.TLSConfig(certMgr)
+	}
 	go func() {
 		<-runCtx.Done()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(runCtx), 10*time.Second)
@@ -912,11 +928,49 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			slog.Warn("HTTP server shutdown failed", "error", err)
 		}
 	}()
-	slog.Info("starting HTTP server", "addr", addr)
+
+	// Optional plain-HTTP redirect listener (#204, lane 5): only when TLS is on
+	// and server.tls.redirect_http is set. Every request 301s to the HTTPS addr.
+	// Lifecycle mirrors the main server: graceful shutdown on context cancel.
+	var redirectSrv *http.Server
+	if certMgr != nil && cfg.Server.TLS.RedirectHTTP != "" {
+		redirectSrv = &http.Server{
+			Addr:              cfg.Server.TLS.RedirectHTTP,
+			Handler:           servetls.RedirectHandler(addr),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			go func() {
+				<-runCtx.Done()
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(runCtx), 10*time.Second)
+				defer shutdownCancel()
+				if err := redirectSrv.Shutdown(shutdownCtx); err != nil {
+					slog.Warn("HTTP redirect server shutdown failed", "error", err)
+				}
+			}()
+			slog.Info("starting HTTP->HTTPS redirect listener", "addr", redirectSrv.Addr, "target", addr)
+			if err := redirectSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("HTTP redirect server failed", "error", err)
+			}
+		}()
+	}
+
 	code := 0
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("HTTP server failed", "error", err)
-		code = 1
+	if certMgr != nil {
+		slog.Info("starting HTTPS server", "addr", addr)
+		// Empty cert/key paths: the certificate is supplied via TLSConfig.GetCertificate.
+		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("HTTPS server failed", "error", err)
+			code = 1
+		}
+	} else {
+		slog.Info("starting HTTP server", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("HTTP server failed", "error", err)
+			code = 1
+		}
 	}
 	cancel()
 	wg.Wait()
