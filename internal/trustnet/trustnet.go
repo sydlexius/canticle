@@ -197,6 +197,9 @@ func (p *Policy) ClientIP(r *http.Request) net.IP {
 // the peer address. A nil/unparsable RemoteAddr or an empty trusted-proxy list
 // yields false.
 func (p *Policy) FromTrustedProxy(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
 	return ipInAny(remoteAddrIP(r.RemoteAddr), p.proxies)
 }
 

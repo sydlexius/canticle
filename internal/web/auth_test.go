@@ -435,6 +435,29 @@ func TestUIWithAuthRoutes(t *testing.T) {
 	})
 }
 
+// TestClientKeyNilPolicyStripsPort verifies that the lockout key is stable for
+// the same IP regardless of the ephemeral source port when no proxy policy is
+// set. Without port-stripping an attacker can bypass the login lockout simply by
+// reconnecting (new ephemeral port -> different key -> counter resets).
+func TestClientKeyNilPolicyStripsPort(t *testing.T) {
+	// Auth with NO policy: clientKey must fall back to bare-IP extraction.
+	a, _ := newTestAuth(t, nil)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/login", nil)
+	req1.RemoteAddr = "203.0.113.9:51000"
+	req2 := httptest.NewRequest(http.MethodPost, "/login", nil)
+	req2.RemoteAddr = "203.0.113.9:51001"
+
+	key1 := a.clientKey(req1)
+	key2 := a.clientKey(req2)
+	if key1 != key2 {
+		t.Errorf("clientKey mismatch across ports: %q vs %q (lockout bypass possible)", key1, key2)
+	}
+	if key1 != "203.0.113.9" {
+		t.Errorf("clientKey = %q, want bare IP %q", key1, "203.0.113.9")
+	}
+}
+
 func TestSafeNext(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"/reports", "/reports"},

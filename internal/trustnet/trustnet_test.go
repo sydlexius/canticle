@@ -391,4 +391,8 @@ func TestPolicyFromTrustedProxy(t *testing.T) {
 	if LoopbackOnly().FromTrustedProxy(req("10.1.2.3:443", "")) {
 		t.Error("with no trusted proxies configured, FromTrustedProxy must be false")
 	}
+	// A nil request must not panic.
+	if p.FromTrustedProxy(nil) {
+		t.Error("FromTrustedProxy(nil) must return false, not panic")
+	}
 }

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -199,6 +200,9 @@ func (a *Auth) clientKey(r *http.Request) string {
 		if ip := a.policy.ClientIP(r); ip != nil {
 			return ip.String()
 		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
 	return r.RemoteAddr
 }
