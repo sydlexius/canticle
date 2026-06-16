@@ -36,7 +36,7 @@ See `README.md` for flags and examples. Worth flagging: directory mode overrides
 - Make targets (`make help` lists all): `gate` (full pre-push gate), `doctor` (verify hook wiring + tool-version pins), `scan` (build the Docker image and grype it for HIGH+ CVEs), `test-shuffle` (`go test -race -shuffle=on`), `sync-tool-versions` (assert the golangci-lint pin agrees across CI and pre-commit, via `scripts/check-tool-versions.sh`), `vulncheck` (pinned `govulncheck@v1.1.4`), `coverage-floor` (one-way per-package coverage floor, `scripts/coverage-floor.sh` + `scripts/coverage-floor.json`).
 - Linter config: `.golangci.yml`. Always include a `// reason` comment after any `//nolint:linter` directive. Keep the golangci-lint pin aligned across `ci.yml` and `.pre-commit-config.yaml` (`make sync-tool-versions` enforces it).
 - golangci-lint version policy: the version pinned in CI (`ci.yml`) is the source of truth. `make sync-tool-versions` only aligns the config-file pins; it does not pin the binary you have installed locally, so `make gate` / the pre-commit hook can pass locally on a different golangci-lint version while CI flags issues your version does not (and vice versa). The `gosec` taint analyzers (e.g. `G704` SSRF on `httpClient.Do`) are especially prone to version-specific phantom findings that do not reproduce locally. When CI flags one of these, treat CI as authoritative: apply a per-site `//nolint:gosec // reason` (the reason is required) rather than chasing local reproduction. Bumping the CI pin needs a probe PR -- run against a clean cache and confirm no analyzer-regression findings before merging. (Pattern from sydlexius/stillwater `lint-config.instructions.md`.)
-- CI workflows live in `.github/workflows/` (`ci.yml` -- incl. an image CVE `scan` job, `release.yml`, `nightly.yml`, `codeql.yml`). Pin every action to a commit SHA with a `# vX` comment and set `persist-credentials: false` on checkouts.
+- CI workflows live in `.github/workflows/` (`ci.yml` -- incl. an image CVE `scan` job, `release.yml`, `nightly.yml`, `codeql.yml`). (Action SHA-pinning + `persist-credentials: false` are user-global CI/CD rules.)
 - Releases: `git tag vX.Y.Z && git push --tags` triggers GoReleaser.
 
 ## Style (non-discoverable rules)
@@ -56,20 +56,7 @@ Everything else (formatting, naming, file layout) is enforced by `gofmt` + `.gol
 
 ## PR Workflow
 
-Prefer the global slash commands -- they encode the full workflow and stay maintained outside this repo:
-
-- `/commit` -- single commit (use during development)
-- `/prep-pr` -- pre-push gate: runs all checks, then squashes and pushes
-- `/commit-push-pr` -- one-shot: commit + push + open PR (small/simple changes)
-- `/handle-review` -- triage open bot review comments, fix in one pass, reply in batch, push once
-- `/review-stack` -- same as `/handle-review` but across an entire PR stack in dependency order
-- `/merge-pr` -- merge with CodeRabbit status check, squash, post-merge cleanup
-- `/post-merge-cleanup` -- update main, delete merged branches, prune refs
-- `/clean_gone` -- prune local branches whose remote is [gone]
-- `/review` or `/code-review:code-review` -- local code review before pushing
-- `/security-review` -- security review of pending changes
-
-Typical flow: develop -> `/commit` (repeat) -> `/review` -> fix findings -> `/prep-pr` -> open PR -> CodeRabbit reviews automatically -> `/handle-review` -> `/merge-pr`.
+Use the global slash commands (maintained outside this repo) for the full workflow: `/prep-pr` to open a PR, `/handle-review` to triage bot comments, `/merge-pr` to merge + clean up. The full command catalogue and typical flow live in the user-global instructions, not here.
 
 ### Reading PR comments (gh API gotcha)
 
