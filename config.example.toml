@@ -136,6 +136,33 @@ addr = "127.0.0.1:3876"
 # lists would be skipped as a proxy hop and could never be the resolved client.
 # trusted_proxies = ["172.16.0.0/12"]
 
+# Optional TLS for the serve listener. Off by default (plain HTTP), so operators
+# fronting the daemon with a TLS-terminating reverse proxy avoid double-encryption
+# by leaving this disabled. Two modes:
+#
+#   1. Bring-your-own certificate: set cert_file AND key_file (both required
+#      together). The listener terminates TLS itself (MinVersion TLS 1.2).
+#   2. Self-signed bootstrap: set self_signed = true (mutually exclusive with
+#      cert_file/key_file). An ECDSA P-256 cert (CN=mxlrcgo-svc, ~365-day
+#      validity) is generated and persisted 0600 under <dir(db_path)>/tls/,
+#      regenerated when missing or expired. Browsers show an untrusted-cert
+#      prompt - fine for a LAN box, not for public exposure.
+#
+# When TLS is on, the session cookie's Secure flag is set automatically. A
+# contradictory combination (self_signed with cert/key, or only one of cert/key)
+# is a fatal startup error.
+# Env overrides: MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED,
+# MXLRC_TLS_REDIRECT_HTTP.
+[server.tls]
+# cert_file = "/config/tls/server.crt"
+# key_file  = "/config/tls/server.key"
+# self_signed = true
+#
+# Optional plain-HTTP listen address that 301-redirects every request to the
+# HTTPS address. Empty (the default) means no redirect listener. Only honored
+# when TLS is enabled.
+# redirect_http = ":80"
+
 [providers]
 # Active lyrics provider: "musixmatch" (default) or "petitlyrics".
 # petitlyrics has no public API; the adapter scrapes reverse-engineered
