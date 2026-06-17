@@ -11,8 +11,11 @@
  * junk it never serves (issue #271). The explicit @source globs below are the
  * authoritative content list -- they must cover every web file that uses
  * Tailwind classes (the templ sources and the generated *_templ.go where the
- * class strings actually land). If you add a new web source with classes, add
- * its glob here or the classes will be missing from output.css.
+ * class strings actually land). If you add a new web source location with
+ * Tailwind classes, add a matching @source glob here or those classes will be
+ * silently absent from output.css -- this is a developer discipline requirement.
+ * The `make ui-check` size-band backstops gross scan drift (e.g. a too-broad
+ * glob re-leaking non-UI vocabulary) but does not verify per-view class coverage.
  */
 @import "tailwindcss" source(none);
 @import "./design-tokens.css";

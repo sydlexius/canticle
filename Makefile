@@ -120,6 +120,27 @@ ui-check: ui
 		echo "Generated web UI assets are stale or untracked. Run 'make ui' and commit the result."; \
 		exit 1; \
 	}
+	@# Guard the load-bearing shell-layout CSS rules (.mx-shell/.mx-sidebar/.mx-content,
+	@# authored directly in input.css as custom CSS) against an accidental committed
+	@# deletion. These classes are always emitted independent of @source globs; this
+	@# check is NOT an @source-glob coverage gate.
+	@for cls in mx-shell mx-sidebar mx-content; do \
+		if ! grep -q "\.$$cls{" web/static/css/output.css; then \
+			echo "ui-check: sentinel class .$$cls missing from output.css"; \
+			echo "  A @source glob may be missing from web/static/css/input.css for a new template location."; \
+			exit 1; \
+		fi; \
+	done
+	@# Size band: output.css should stay within 7000-15000 bytes.
+	@# Too small = a @source glob is too narrow (classes dropped silently).
+	@# Too large = Go vocabulary may be leaking back into output.css.
+	@# If an intentional change moves the size outside this band, update both bounds here.
+	@size=$$(wc -c < web/static/css/output.css | awk '{print $$1}'); \
+	if [ "$$size" -lt 7000 ] || [ "$$size" -gt 15000 ]; then \
+		echo "ui-check: output.css is $$size B, outside the expected 7000-15000 B band."; \
+		echo "  Update the band in the Makefile ui-check target if the change is intentional."; \
+		exit 1; \
+	fi
 
 ## clean: Remove build artifacts
 clean:
