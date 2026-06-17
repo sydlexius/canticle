@@ -35,13 +35,14 @@ const (
 // selfSignedCertManager serves a self-signed certificate persisted under dir. The
 // certificate is loaded (or generated and persisted) once at construction;
 // regeneration happens only at startup when the stored pair is missing, unreadable,
-// or expired.
+// expired, or when the persisted SANs do not cover the currently-configured extras.
 type selfSignedCertManager struct {
 	cert *tls.Certificate
 }
 
-func newSelfSignedCertManager(dir string) (*selfSignedCertManager, error) {
-	cert, err := ensureSelfSignedCert(dir)
+func newSelfSignedCertManager(dir string, extraHosts []string) (*selfSignedCertManager, error) {
+	extraDNS, extraIPs := parseSelfSignedHosts(extraHosts)
+	cert, err := ensureSelfSignedCert(dir, extraDNS, extraIPs)
 	if err != nil {
 		return nil, err
 	}
@@ -55,22 +56,26 @@ func (m *selfSignedCertManager) GetCertificate(*tls.ClientHelloInfo) (*tls.Certi
 }
 
 // ensureSelfSignedCert loads the persisted self-signed pair under dir, generating
-// and persisting a fresh one when the pair is missing, unreadable, or expired
-// (or expires within the renewal window). The private key is written 0600.
-func ensureSelfSignedCert(dir string) (*tls.Certificate, error) {
+// and persisting a fresh one when the pair is missing, unreadable, expired (or
+// expires within the renewal window), or when the persisted cert's SAN set does not
+// cover the desired extras (extraDNS, extraIPs). The private key is written 0600.
+func ensureSelfSignedCert(dir string, extraDNS []string, extraIPs []net.IP) (*tls.Certificate, error) {
 	certPath := filepath.Join(dir, selfSignedCertFile)
 	keyPath := filepath.Join(dir, selfSignedKeyFile)
 
 	if cert, ok := loadValidCert(certPath, keyPath); ok {
-		slog.Info("reusing persisted self-signed TLS certificate", "cert", certPath)
-		return cert, nil
+		if sansCovered(cert, extraDNS, extraIPs) {
+			slog.Info("reusing persisted self-signed TLS certificate", "cert", certPath)
+			return cert, nil
+		}
+		slog.Info("configured SANs not covered by persisted certificate; regenerating", "cert", certPath)
 	}
 
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("create TLS dir %s: %w", dir, err)
 	}
 	now := time.Now()
-	certPEM, keyPEM, err := generateSelfSignedCert(now, now.Add(selfSignedValidity))
+	certPEM, keyPEM, err := generateSelfSignedCert(now, now.Add(selfSignedValidity), extraDNS, extraIPs)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +128,9 @@ func loadValidCert(certPath, keyPath string) (*tls.Certificate, bool) {
 // generateSelfSignedCert builds an ECDSA P-256 self-signed certificate valid over
 // [notBefore, notAfter], returning the cert and key as PEM. CN=mxlrcgo-svc, with
 // loopback SANs so same-host HTTPS verifies against localhost/127.0.0.1/::1.
-func generateSelfSignedCert(notBefore, notAfter time.Time) (certPEM, keyPEM []byte, err error) {
+// extraDNS and extraIPs are appended to the built-in SANs; they must be pre-deduped
+// against the built-ins (parseSelfSignedHosts guarantees this).
+func generateSelfSignedCert(notBefore, notAfter time.Time, extraDNS []string, extraIPs []net.IP) (certPEM, keyPEM []byte, err error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate ECDSA key: %w", err)
@@ -140,8 +147,8 @@ func generateSelfSignedCert(notBefore, notAfter time.Time) (certPEM, keyPEM []by
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{selfSignedCommonName, "localhost"},
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		DNSNames:              append([]string{selfSignedCommonName, "localhost"}, extraDNS...),
+		IPAddresses:           append([]net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}, extraIPs...),
 	}
 	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
 	if err != nil {
@@ -154,6 +161,86 @@ func generateSelfSignedCert(notBefore, notAfter time.Time) (certPEM, keyPEM []by
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM, nil
+}
+
+// parseSelfSignedHosts splits a list of raw host strings (from self_signed_hosts)
+// into DNS names and IP addresses, deduplicating against the built-in loopback/localhost
+// SANs that generateSelfSignedCert always includes. Invalid entries are silently
+// skipped; config validation in validateServerTLS already rejects them before this
+// is called.
+func parseSelfSignedHosts(hosts []string) (dnsNames []string, ips []net.IP) {
+	builtinDNS := map[string]bool{selfSignedCommonName: true, "localhost": true}
+	builtinIPs := []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}
+	seenDNS := map[string]bool{}
+	seenIP := map[string]bool{}
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			isBuiltin := false
+			for _, b := range builtinIPs {
+				if b.Equal(ip) {
+					isBuiltin = true
+					break
+				}
+			}
+			if isBuiltin {
+				continue
+			}
+			key := ip.String()
+			if !seenIP[key] {
+				seenIP[key] = true
+				ips = append(ips, ip)
+			}
+		} else {
+			if builtinDNS[h] || seenDNS[h] {
+				continue
+			}
+			seenDNS[h] = true
+			dnsNames = append(dnsNames, h)
+		}
+	}
+	return dnsNames, ips
+}
+
+// sansCovered reports whether cert already carries all SANs in wantDNS and wantIPs.
+// A true result means the persisted cert covers the configured extras and can be
+// reused without regeneration. An empty want-set always returns true.
+func sansCovered(cert *tls.Certificate, wantDNS []string, wantIPs []net.IP) bool {
+	if len(wantDNS) == 0 && len(wantIPs) == 0 {
+		return true
+	}
+	leaf := cert.Leaf
+	if leaf == nil {
+		if len(cert.Certificate) == 0 {
+			return false
+		}
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return false
+		}
+		leaf = parsed
+	}
+	haveDNS := make(map[string]bool, len(leaf.DNSNames))
+	for _, d := range leaf.DNSNames {
+		haveDNS[d] = true
+	}
+	for _, want := range wantDNS {
+		if !haveDNS[want] {
+			return false
+		}
+	}
+	for _, wantIP := range wantIPs {
+		found := false
+		for _, haveIP := range leaf.IPAddresses {
+			if haveIP.Equal(wantIP) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // writeFileMode writes data to path with exactly the given mode, removing any

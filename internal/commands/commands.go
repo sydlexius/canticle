@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -851,11 +852,25 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// The self-signed bootstrap persists under <dir(db_path)>/tls/. Built before
 	// the run context so a bad cert/key or generation failure is a clean early
 	// return rather than a leaked listener.
-	certMgr, err := servetls.BuildCertManager(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.SelfSigned, filepath.Dir(cfg.DB.Path))
+	certMgr, err := servetls.BuildCertManager(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.SelfSigned, filepath.Dir(cfg.DB.Path), cfg.Server.TLS.SelfSignedHosts)
 	if err != nil {
 		_ = sqlDB.Close()
 		slog.Error("failed to initialize TLS", "error", err)
 		return 1
+	}
+
+	// Bind the redirect listener eagerly (before starting goroutines) so a bind
+	// failure is a clean startup error. An operator who explicitly configured
+	// redirect_http expects it to work; silently skipping it would be confusing.
+	var redirectLn net.Listener
+	if certMgr != nil && cfg.Server.TLS.RedirectHTTP != "" {
+		ln, listenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Server.TLS.RedirectHTTP)
+		if listenErr != nil {
+			_ = sqlDB.Close()
+			slog.Error("HTTP redirect listener failed to bind; aborting startup", "addr", cfg.Server.TLS.RedirectHTTP, "error", listenErr)
+			return 1
+		}
+		redirectLn = ln
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -929,16 +944,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		}
 	}()
 
-	// Optional plain-HTTP redirect listener (#204, lane 5): only when TLS is on
-	// and server.tls.redirect_http is set. Every request 301s to the HTTPS addr.
-	// Lifecycle mirrors the main server: graceful shutdown on context cancel.
-	var redirectSrv *http.Server
-	if certMgr != nil && cfg.Server.TLS.RedirectHTTP != "" {
-		redirectSrv = &http.Server{
-			Addr:              cfg.Server.TLS.RedirectHTTP,
-			Handler:           servetls.RedirectHandler(addr),
-			ReadHeaderTimeout: 5 * time.Second,
-		}
+	// Optional plain-HTTP redirect listener (#204, lane 5): listener already bound
+	// above (fail-fast on error); here we just start serving on it.
+	if redirectLn != nil {
+		redirectSrv := buildRedirectServer(cfg.Server.TLS.RedirectHTTP, addr)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -951,7 +960,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 				}
 			}()
 			slog.Info("starting HTTP->HTTPS redirect listener", "addr", redirectSrv.Addr, "target", addr)
-			if err := redirectSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := redirectSrv.Serve(redirectLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("HTTP redirect server failed", "error", err)
 			}
 		}()
@@ -978,6 +987,19 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		slog.Warn("failed to close database", "error", err)
 	}
 	return code
+}
+
+// buildRedirectServer constructs the HTTP->HTTPS redirect http.Server. Extracted so
+// the timeout values can be verified in tests without starting a live listener.
+func buildRedirectServer(redirectAddr, tlsAddr string) *http.Server {
+	return &http.Server{
+		Addr:              redirectAddr,
+		Handler:           servetls.RedirectHandler(tlsAddr),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
 }
 
 // buildWebAuth constructs the authenticated web UI subsystem for serve mode

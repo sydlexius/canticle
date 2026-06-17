@@ -16,7 +16,7 @@ import (
 
 func TestTLSConfigMinVersionAndCert(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "tls")
-	cm, err := newSelfSignedCertManager(dir)
+	cm, err := newSelfSignedCertManager(dir, nil)
 	if err != nil {
 		t.Fatalf("newSelfSignedCertManager: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestTLSConfigMinVersionAndCert(t *testing.T) {
 }
 
 func TestBuildCertManagerDisabled(t *testing.T) {
-	cm, err := BuildCertManager("", "", false, t.TempDir())
+	cm, err := BuildCertManager("", "", false, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("BuildCertManager: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestBuildCertManagerDisabled(t *testing.T) {
 
 func TestBuildCertManagerSelfSigned(t *testing.T) {
 	dbDir := t.TempDir()
-	cm, err := BuildCertManager("", "", true, dbDir)
+	cm, err := BuildCertManager("", "", true, dbDir, nil)
 	if err != nil {
 		t.Fatalf("BuildCertManager: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestBuildCertManagerSelfSigned(t *testing.T) {
 
 func TestBuildCertManagerBYO(t *testing.T) {
 	certPath, keyPath := writeFixturePair(t)
-	cm, err := BuildCertManager(certPath, keyPath, false, t.TempDir())
+	cm, err := BuildCertManager(certPath, keyPath, false, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("BuildCertManager: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestBuildCertManagerBYO(t *testing.T) {
 
 func TestBuildCertManagerBYOTakesPrecedenceOverSelfSigned(t *testing.T) {
 	certPath, keyPath := writeFixturePair(t)
-	cm, err := BuildCertManager(certPath, keyPath, true, t.TempDir())
+	cm, err := BuildCertManager(certPath, keyPath, true, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("BuildCertManager: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestServeTLSEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newFileCertManager: %v", err)
 	}
-	selfsigned, err := newSelfSignedCertManager(filepath.Join(t.TempDir(), "tls"))
+	selfsigned, err := newSelfSignedCertManager(filepath.Join(t.TempDir(), "tls"), nil)
 	if err != nil {
 		t.Fatalf("newSelfSignedCertManager: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestServeTLSEndToEnd(t *testing.T) {
 func writeFixturePair(t *testing.T) (certPath, keyPath string) {
 	t.Helper()
 	now := time.Now()
-	certPEM, keyPEM, err := generateSelfSignedCert(now, now.Add(selfSignedValidity))
+	certPEM, keyPEM, err := generateSelfSignedCert(now, now.Add(selfSignedValidity), nil, nil)
 	if err != nil {
 		t.Fatalf("generate fixture: %v", err)
 	}

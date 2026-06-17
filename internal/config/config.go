@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -216,6 +217,15 @@ type TLSConfig struct {
 	// no redirect listener. Only honored when TLS is enabled. Override:
 	// MXLRC_TLS_REDIRECT_HTTP.
 	RedirectHTTP string `toml:"redirect_http"`
+	// SelfSignedHosts lists extra hostnames and IP literals to include as Subject
+	// Alternative Names in the generated self-signed certificate, in addition to the
+	// built-in SANs (localhost, mxlrcgo-svc, 127.0.0.1, ::1). Allows browsers on
+	// LAN hosts to reach https://<lan-ip-or-hostname> without a name-mismatch error
+	// when they trust the cert. Each entry must be a valid hostname or IP literal;
+	// invalid entries are a startup error. Duplicates and entries already covered by
+	// the built-ins are silently ignored. Only honored when self_signed is true.
+	// Override: MXLRC_TLS_SELF_SIGNED_HOSTS (comma-separated).
+	SelfSignedHosts []string `toml:"self_signed_hosts"`
 }
 
 // Enabled reports whether TLS termination is configured (bring-your-own cert or
@@ -580,7 +590,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -740,6 +750,10 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_TLS_REDIRECT_HTTP"); v != "" {
 		cfg.Server.TLS.RedirectHTTP = v
 		applied["server.tls.redirect_http"] = true
+	}
+	if v := os.Getenv("MXLRC_TLS_SELF_SIGNED_HOSTS"); v != "" {
+		cfg.Server.TLS.SelfSignedHosts = splitCSV(v)
+		applied["server.tls.self_signed_hosts"] = true
 	}
 	if v := os.Getenv("MXLRC_PROVIDER_PRIMARY"); v != "" {
 		cfg.Providers.Primary = v
@@ -1093,6 +1107,7 @@ func validateTrustedNetworks(cfg Config) error {
 // validateServerTLS fails fast on a contradictory [server.tls] configuration
 // (issue #204, Area 4): self_signed cannot be combined with an explicit
 // cert_file/key_file, and cert_file and key_file must be supplied together.
+// Each entry in self_signed_hosts must parse as a valid IP literal or hostname.
 // Validation happens at load so a misconfiguration is a clear startup error
 // rather than a confusing listener failure.
 func validateServerTLS(cfg Config) error {
@@ -1103,7 +1118,35 @@ func validateServerTLS(cfg Config) error {
 	if (t.CertFile == "") != (t.KeyFile == "") {
 		return fmt.Errorf("config: server.tls: cert_file and key_file must be set together")
 	}
+	for _, h := range t.SelfSignedHosts {
+		if net.ParseIP(h) == nil && !isValidHostname(h) {
+			return fmt.Errorf("config: server.tls: self_signed_hosts: %q is not a valid hostname or IP address", h)
+		}
+	}
 	return nil
+}
+
+// isValidHostname reports whether s is a valid RFC 1123 hostname. Each dot-separated
+// label must be 1-63 characters of [a-zA-Z0-9-] with no leading or trailing hyphen.
+func isValidHostname(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		n := len(label)
+		if n == 0 || n > 63 {
+			return false
+		}
+		if label[0] == '-' || label[n-1] == '-' {
+			return false
+		}
+		for _, ch := range label {
+			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func splitCSV(s string) []string {

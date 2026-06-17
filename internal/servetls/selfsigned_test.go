@@ -2,6 +2,7 @@ package servetls
 
 import (
 	"crypto/x509"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,7 +12,7 @@ import (
 
 func TestGenerateSelfSignedCert(t *testing.T) {
 	now := time.Now()
-	certPEM, keyPEM, err := generateSelfSignedCert(now, now.Add(selfSignedValidity))
+	certPEM, keyPEM, err := generateSelfSignedCert(now, now.Add(selfSignedValidity), nil, nil)
 	if err != nil {
 		t.Fatalf("generateSelfSignedCert: %v", err)
 	}
@@ -33,7 +34,7 @@ func TestGenerateSelfSignedCert(t *testing.T) {
 
 func TestEnsureSelfSignedCertGeneratesAndPersists(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "tls")
-	cert, err := ensureSelfSignedCert(dir)
+	cert, err := ensureSelfSignedCert(dir, nil, nil)
 	if err != nil {
 		t.Fatalf("ensureSelfSignedCert: %v", err)
 	}
@@ -51,11 +52,11 @@ func TestEnsureSelfSignedCertGeneratesAndPersists(t *testing.T) {
 
 func TestEnsureSelfSignedCertReusesExisting(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "tls")
-	first, err := ensureSelfSignedCert(dir)
+	first, err := ensureSelfSignedCert(dir, nil, nil)
 	if err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
-	second, err := ensureSelfSignedCert(dir)
+	second, err := ensureSelfSignedCert(dir, nil, nil)
 	if err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestEnsureSelfSignedCertRegeneratesWhenExpired(t *testing.T) {
 	}
 	// Write an already-expired pair.
 	past := time.Now().Add(-2 * selfSignedValidity)
-	certPEM, keyPEM, err := generateSelfSignedCert(past, past.Add(selfSignedValidity))
+	certPEM, keyPEM, err := generateSelfSignedCert(past, past.Add(selfSignedValidity), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,7 @@ func TestEnsureSelfSignedCertRegeneratesWhenExpired(t *testing.T) {
 	}
 	expiredSerial := serialOfPEM(t, certPEM)
 
-	cert, err := ensureSelfSignedCert(dir)
+	cert, err := ensureSelfSignedCert(dir, nil, nil)
 	if err != nil {
 		t.Fatalf("ensureSelfSignedCert: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestLoadValidCertRejectsMissing(t *testing.T) {
 
 func TestNewSelfSignedCertManagerGetCertificate(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "tls")
-	m, err := newSelfSignedCertManager(dir)
+	m, err := newSelfSignedCertManager(dir, nil)
 	if err != nil {
 		t.Fatalf("newSelfSignedCertManager: %v", err)
 	}
@@ -120,6 +121,144 @@ func TestNewSelfSignedCertManagerGetCertificate(t *testing.T) {
 	}
 	if cert == nil || len(cert.Certificate) == 0 {
 		t.Fatal("nil/empty certificate from manager")
+	}
+}
+
+func TestGenerateSelfSignedCertWithExtraSANs(t *testing.T) {
+	now := time.Now()
+	extraDNS := []string{"nas.local"}
+	extraIPs := []net.IP{net.ParseIP("192.168.1.100")}
+	certPEM, _, err := generateSelfSignedCert(now, now.Add(selfSignedValidity), extraDNS, extraIPs)
+	if err != nil {
+		t.Fatalf("generateSelfSignedCert: %v", err)
+	}
+	cert := mustParseCert(t, certPEM)
+	if !blockHasDNS(cert, "nas.local") {
+		t.Errorf("extra DNS SAN missing: DNSNames=%v", cert.DNSNames)
+	}
+	if !blockHasDNS(cert, "localhost") {
+		t.Errorf("built-in SAN localhost missing: DNSNames=%v", cert.DNSNames)
+	}
+	found := false
+	for _, ip := range cert.IPAddresses {
+		if ip.Equal(net.ParseIP("192.168.1.100")) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("extra IP SAN 192.168.1.100 missing: IPAddresses=%v", cert.IPAddresses)
+	}
+}
+
+func TestEnsureSelfSignedCertRegeneratesOnSANChange(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tls")
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		t.Fatal(err)
+	}
+	// Persist a cert with no extra SANs.
+	now := time.Now()
+	certPEM, keyPEM, err := generateSelfSignedCert(now, now.Add(selfSignedValidity), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(dir, selfSignedCertFile)
+	keyPath := filepath.Join(dir, selfSignedKeyFile)
+	if err := os.WriteFile(certPath, certPEM, certFileMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, keyFileMode); err != nil {
+		t.Fatal(err)
+	}
+	originalSerial := serialOfPEM(t, certPEM)
+
+	// Request a cert with an extra DNS SAN the persisted cert doesn't cover.
+	cert, err := ensureSelfSignedCert(dir, []string{"nas.local"}, nil)
+	if err != nil {
+		t.Fatalf("ensureSelfSignedCert: %v", err)
+	}
+	if serialOf(t, cert) == originalSerial {
+		t.Error("certificate was reused; expected regeneration due to SAN change")
+	}
+	leaf := mustLeaf(t, cert)
+	if !blockHasDNS(leaf, "nas.local") {
+		t.Errorf("regenerated cert missing extra SAN nas.local; DNSNames=%v", leaf.DNSNames)
+	}
+}
+
+func TestEnsureSelfSignedCertReusesWhenSANsCovered(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tls")
+	cert1, err := ensureSelfSignedCert(dir, []string{"nas.local"}, nil)
+	if err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	serial1 := serialOf(t, cert1)
+	// Same extras: should reuse without regenerating.
+	cert2, err := ensureSelfSignedCert(dir, []string{"nas.local"}, nil)
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if serialOf(t, cert2) != serial1 {
+		t.Error("certificate was regenerated; expected reuse when configured SANs are already covered")
+	}
+}
+
+func TestParseSelfSignedHosts(t *testing.T) {
+	tests := []struct {
+		name     string
+		hosts    []string
+		wantDNS  []string
+		wantIPsN int
+	}{
+		{name: "empty input"},
+		{
+			name:    "hostname added",
+			hosts:   []string{"nas.local"},
+			wantDNS: []string{"nas.local"},
+		},
+		{
+			name:    "builtin hostnames deduplicated",
+			hosts:   []string{"localhost", selfSignedCommonName, "extra.host"},
+			wantDNS: []string{"extra.host"},
+		},
+		{
+			name:     "ip literal parsed",
+			hosts:    []string{"192.168.1.1"},
+			wantIPsN: 1,
+		},
+		{
+			name:     "builtin ips deduplicated",
+			hosts:    []string{"127.0.0.1", "::1", "192.168.1.1"},
+			wantIPsN: 1,
+		},
+		{
+			name:     "mixed hostname and ip",
+			hosts:    []string{"nas.local", "192.168.1.100"},
+			wantDNS:  []string{"nas.local"},
+			wantIPsN: 1,
+		},
+		{
+			name:    "dedup within extras",
+			hosts:   []string{"nas.local", "nas.local"},
+			wantDNS: []string{"nas.local"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dns, ips := parseSelfSignedHosts(tc.hosts)
+			if len(dns) != len(tc.wantDNS) {
+				t.Errorf("dnsNames = %v; want %v", dns, tc.wantDNS)
+			} else {
+				for i, want := range tc.wantDNS {
+					if dns[i] != want {
+						t.Errorf("dnsNames[%d] = %q; want %q", i, dns[i], want)
+					}
+				}
+			}
+			if len(ips) != tc.wantIPsN {
+				t.Errorf("ips count = %d; want %d (ips=%v)", len(ips), tc.wantIPsN, ips)
+			}
+		})
 	}
 }
 

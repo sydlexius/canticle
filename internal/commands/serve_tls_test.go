@@ -150,6 +150,78 @@ func TestRunServe_TLSSelfSignedServesHTTPS(t *testing.T) {
 	}
 }
 
+// TestBuildRedirectServer verifies that the redirect-only server struct carries all
+// four required timeout fields. A redirect server that can block indefinitely on
+// a slow client is a denial-of-service risk.
+func TestBuildRedirectServer(t *testing.T) {
+	srv := buildRedirectServer(":8080", ":8443")
+	if srv.ReadHeaderTimeout == 0 {
+		t.Error("ReadHeaderTimeout not set")
+	}
+	if srv.ReadTimeout == 0 {
+		t.Error("ReadTimeout not set")
+	}
+	if srv.WriteTimeout == 0 {
+		t.Error("WriteTimeout not set")
+	}
+	if srv.IdleTimeout == 0 {
+		t.Error("IdleTimeout not set")
+	}
+	if srv.Handler == nil {
+		t.Error("Handler not set")
+	}
+	if srv.Addr != ":8080" {
+		t.Errorf("Addr = %q; want :8080", srv.Addr)
+	}
+}
+
+// TestRunServe_TLSRedirectBindFails verifies that runServe exits with code 1 when the
+// redirect listener cannot bind. An explicitly-configured redirect that cannot start
+// is an operator error; startup must abort rather than silently skip the redirect.
+func TestRunServe_TLSRedirectBindFails(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	t.Setenv("MXLRC_DOCKER", "")
+	t.Setenv("MUSIXMATCH_TOKEN", "tok")
+	keyFile := filepath.Join(t.TempDir(), "test.key")
+	t.Setenv("MXLRC_SECRETS_KEY_FILE", keyFile)
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "serve.db")
+	httpsAddr := freePort(t)
+
+	// Hold the redirect port open so runServe cannot bind it.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("block listen: %v", err)
+	}
+	blockedAddr := blocker.Addr().String()
+	defer blocker.Close()
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	var b strings.Builder
+	b.WriteString("[db]\npath = " + tomlString(dbPath) + "\n\n")
+	b.WriteString("[providers]\nprimary = \"musixmatch\"\n\n")
+	b.WriteString("[server]\naddr = " + tomlString(httpsAddr) + "\n\n")
+	b.WriteString("[server.tls]\nself_signed = true\nredirect_http = " + tomlString(blockedAddr) + "\n")
+	if err := os.WriteFile(cfgPath, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := runServe(
+		context.Background(),
+		&out,
+		ServeCmd{ConfigPath: cfgPath},
+		func(string) musixmatch.Fetcher { return fakeFetcher{} },
+		func(...string) lyrics.Writer { return fakeWriter{} },
+	)
+	if code != 1 {
+		t.Fatalf("redirect bind fail: exit code = %d, want 1", code)
+	}
+}
+
 // TestRunServe_TLSBadCertFailsFast: a cert_file/key_file pointing at unreadable
 // PEM makes runServe fail before serving (exit 1).
 func TestRunServe_TLSBadCertFailsFast(t *testing.T) {

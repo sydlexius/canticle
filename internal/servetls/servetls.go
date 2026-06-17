@@ -29,16 +29,17 @@ type CertManager interface {
 // the config precedence: an explicit cert_file+key_file pair (bring-your-own)
 // wins, else self_signed bootstraps a persisted certificate under <dbDir>/tls/,
 // else TLS is disabled and (nil, nil) is returned so the caller serves plain
-// HTTP. The caller is responsible for having validated that cert_file/key_file
-// are set together and that self_signed is not combined with them (see
-// config.validateServerTLS); this function trusts that contract and only acts on
-// it.
-func BuildCertManager(certFile, keyFile string, selfSigned bool, dbDir string) (CertManager, error) {
+// HTTP. selfSignedHosts carries the self_signed_hosts config field and is only
+// used when selfSigned is true. The caller is responsible for having validated
+// that cert_file/key_file are set together and that self_signed is not combined
+// with them (see config.validateServerTLS); this function trusts that contract
+// and only acts on it.
+func BuildCertManager(certFile, keyFile string, selfSigned bool, dbDir string, selfSignedHosts []string) (CertManager, error) {
 	switch {
 	case certFile != "" && keyFile != "":
 		return newFileCertManager(certFile, keyFile)
 	case selfSigned:
-		return newSelfSignedCertManager(filepath.Join(dbDir, "tls"))
+		return newSelfSignedCertManager(filepath.Join(dbDir, "tls"), selfSignedHosts)
 	default:
 		return nil, nil
 	}

@@ -127,6 +127,72 @@ func TestLoad_TLSSelfSignedInvalidEnvIgnored(t *testing.T) {
 	}
 }
 
+func TestLoad_TLSSelfSignedHostsFromFile(t *testing.T) {
+	isolateEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := "[server.tls]\nself_signed = true\nself_signed_hosts = [\"nas.local\", \"192.168.1.10\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Server.TLS.SelfSignedHosts) != 2 {
+		t.Errorf("SelfSignedHosts = %v; want [nas.local 192.168.1.10]", cfg.Server.TLS.SelfSignedHosts)
+	}
+}
+
+func TestLoad_TLSSelfSignedHostsEnvOverride(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_TLS_SELF_SIGNED_HOSTS", "nas.local,192.168.1.10")
+	cfg, applied, err := LoadWithSources(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithSources returned error: %v", err)
+	}
+	if len(cfg.Server.TLS.SelfSignedHosts) != 2 {
+		t.Errorf("SelfSignedHosts = %v; want 2 entries", cfg.Server.TLS.SelfSignedHosts)
+	}
+	if !applied["server.tls.self_signed_hosts"] {
+		t.Error("expected server.tls.self_signed_hosts marked applied")
+	}
+}
+
+func TestLoad_TLSSelfSignedHostsValidationRejectsInvalid(t *testing.T) {
+	isolateEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := "[server.tls]\nself_signed = true\nself_signed_hosts = [\"not a valid host!\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for invalid host entry, got nil")
+	}
+	if !strings.Contains(err.Error(), "self_signed_hosts") {
+		t.Errorf("error = %q; want mention of self_signed_hosts", err.Error())
+	}
+}
+
+func TestLoad_TLSSelfSignedHostsValidationAcceptsValidEntries(t *testing.T) {
+	isolateEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := "[server.tls]\nself_signed = true\nself_signed_hosts = [\"nas.local\", \"myhost\", \"192.168.1.10\", \"2001:db8::1\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Server.TLS.SelfSignedHosts) != 4 {
+		t.Errorf("SelfSignedHosts = %v; want 4 entries", cfg.Server.TLS.SelfSignedHosts)
+	}
+}
+
 func TestLoad_TLSValidationFailsFast(t *testing.T) {
 	cases := []struct {
 		name string
