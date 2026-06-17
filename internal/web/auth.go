@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -128,7 +129,7 @@ func (a *Auth) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := safeNext(r.URL.Query().Get("next"))
-	renderLogin(w, r, a.version, "", next, "")
+	a.renderLogin(w, r, a.version, "", next, "")
 }
 
 // handleLogin verifies credentials (POST /login). On success it creates a
@@ -140,16 +141,21 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !enforceSameOrigin(w, r) {
 		return
 	}
+	// CSRF validation must come before the rate limiter so an attacker cannot
+	// exhaust the lockout counter for legitimate users with CSRF-invalid requests.
+	if !enforceCSRFToken(w, r) {
+		return
+	}
 	ip := a.clientKey(r)
 	if ok, retryAfter := a.limiter.allow(ip); !ok {
 		w.Header().Set("Retry-After", retryAfterSeconds(retryAfter))
-		renderLoginStatus(w, r, http.StatusTooManyRequests, a.version,
+		a.renderLoginStatus(w, r, http.StatusTooManyRequests, a.version,
 			"Too many failed attempts. Try again later.", safeNext(r.FormValue("next")), "")
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		renderLoginStatus(w, r, http.StatusBadRequest, a.version,
+		a.renderLoginStatus(w, r, http.StatusBadRequest, a.version,
 			"Invalid form submission.", "/config", "")
 		return
 	}
@@ -163,7 +169,7 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// returns the identical message (webauth.Login is itself enumeration-safe).
 		backoff := a.limiter.fail(ip)
 		a.sleep(backoff)
-		renderLoginStatus(w, r, http.StatusUnauthorized, a.version,
+		a.renderLoginStatus(w, r, http.StatusUnauthorized, a.version,
 			defaultLoginError, next, username)
 		return
 	}
@@ -261,19 +267,23 @@ func (a *Auth) secureRequest(r *http.Request) bool {
 }
 
 // renderLogin renders the login page with an implicit 200 status.
-func renderLogin(w http.ResponseWriter, r *http.Request, version, errMsg, next, username string) {
-	renderLoginStatus(w, r, http.StatusOK, version, errMsg, next, username)
+func (a *Auth) renderLogin(w http.ResponseWriter, r *http.Request, version, errMsg, next, username string) {
+	a.renderLoginStatus(w, r, http.StatusOK, version, errMsg, next, username)
 }
 
-// renderLoginStatus renders the login page with an explicit status code. The
-// page is rendered into a buffer first (via render) so a render failure yields a
-// clean 500, mirroring the rest of the web package; the status is written by the
-// render helper, so here we set it before delegating only for non-200 codes.
-func renderLoginStatus(w http.ResponseWriter, r *http.Request, status int, version, errMsg, next, username string) {
-	// Login pages must never be cached (they reflect attempt state and set
-	// session cookies).
+// renderLoginStatus renders the login page with an explicit status code. It
+// generates a fresh CSRF token, sets the CSRF cookie, then renders the page
+// into a buffer so a render failure yields a clean 500. Login pages are never
+// cached (they reflect attempt state and may set cookies).
+func (a *Auth) renderLoginStatus(w http.ResponseWriter, r *http.Request, status int, version, errMsg, next, username string) {
+	csrfToken, err := ensureCSRFToken(w, r, a.secureRequest(r))
+	if err != nil {
+		slog.Error("login: failed to generate CSRF token", "error", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	renderWithStatus(w, r, status, templates.LoginPage(version, errMsg, next, username))
+	renderWithStatus(w, r, status, templates.LoginPage(version, errMsg, next, username, csrfToken))
 }
 
 // retryAfterSeconds renders a Retry-After header value (whole seconds, min 1).

@@ -10,7 +10,7 @@ package templates
 // server-validated local return path carried through the POST so a deep link
 // resumes after login. username is echoed back on a failed attempt as a
 // convenience (the password never is).
-templ LoginPage(version string, errMsg string, next string, username string) {
+templ LoginPage(version string, errMsg string, next string, username string, csrfToken string) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -30,6 +30,7 @@ templ LoginPage(version string, errMsg string, next string, username string) {
 				}
 				<form class="mx-auth-form" method="post" action="/login">
 					<input type="hidden" name="next" value={ next }/>
+					<input type="hidden" name="csrf_token" value={ csrfToken }/>
 					<div class="mx-auth-field">
 						<label class="mx-auth-label" for="username">Username</label>
 						<input

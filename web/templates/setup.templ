@@ -15,7 +15,7 @@ import (
 // match", "Password must be at least 8 characters"). username is echoed back on
 // a failed submission as a convenience; the password and the optional secret
 // fields are never echoed.
-templ SetupPage(version string, errMsg string, username string) {
+templ SetupPage(version string, errMsg string, username string, csrfToken string) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -38,6 +38,7 @@ templ SetupPage(version string, errMsg string, username string) {
 					<div class="mx-auth-error" role="alert">{ errMsg }</div>
 				}
 				<form class="mx-auth-form" method="post" action="/setup">
+					<input type="hidden" name="csrf_token" value={ csrfToken }/>
 					<div class="mx-auth-field">
 						<label class="mx-auth-label" for="username">Admin username</label>
 						<input

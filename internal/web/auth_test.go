@@ -19,7 +19,34 @@ import (
 const (
 	testAdminUser = "admin"
 	testAdminPass = "correct-horse-battery"
+
+	// testCSRFToken is a fixed CSRF value used in handler-level tests where we
+	// call handleLogin directly (no GET round-trip). Must be exactly csrfTokenLen
+	// (64) chars to satisfy the enforceCSRFToken length guard.
+	testCSRFToken = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
 )
+
+// loginForm returns a url.Values suitable for a POST /login test, with a
+// matching CSRF token included. Callers must also add the CSRF cookie via
+// addLoginCSRF.
+func loginForm(extra ...url.Values) url.Values {
+	v := url.Values{
+		"username":   {testAdminUser},
+		"password":   {testAdminPass},
+		"csrf_token": {testCSRFToken},
+	}
+	for _, extra := range extra {
+		for k, vals := range extra {
+			v[k] = vals
+		}
+	}
+	return v
+}
+
+// addLoginCSRF adds the matching CSRF cookie to r so double-submit validation passes.
+func addLoginCSRF(r *http.Request) {
+	r.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: testCSRFToken})
+}
 
 // newTestAuth builds an Auth backed by a real webauth.Service over a migrated
 // in-memory SQLite DB (repo rule: real SQLite, not mocks), with a single admin
@@ -158,9 +185,10 @@ func TestRequireSessionTrustedBypass(t *testing.T) {
 func TestHandleLoginSuccess(t *testing.T) {
 	a, _ := newTestAuth(t, trustnet.LoopbackOnly())
 
-	form := url.Values{"username": {testAdminUser}, "password": {testAdminPass}, "next": {"/reports"}}
+	form := loginForm(url.Values{"next": {"/reports"}})
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addLoginCSRF(req)
 	rec := httptest.NewRecorder()
 	a.handleLogin(rec, req)
 
@@ -195,9 +223,10 @@ func TestHandleLoginSuccess(t *testing.T) {
 func TestHandleLoginSecureCookieUnderTLS(t *testing.T) {
 	a, _ := newTestAuth(t, trustnet.LoopbackOnly())
 
-	form := url.Values{"username": {testAdminUser}, "password": {testAdminPass}}
+	form := loginForm()
 	req := httptest.NewRequest(http.MethodPost, "https://example.test/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addLoginCSRF(req)
 	rec := httptest.NewRecorder()
 	a.handleLogin(rec, req)
 
@@ -214,11 +243,12 @@ func TestHandleLoginSecureCookieBehindTrustedProxy(t *testing.T) {
 	}
 	a, _ := newTestAuth(t, policy)
 
-	form := url.Values{"username": {testAdminUser}, "password": {testAdminPass}}
+	form := loginForm()
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = "192.0.2.9:443" // a trusted proxy terminated TLS upstream
 	req.Header.Set("X-Forwarded-Proto", "https")
+	addLoginCSRF(req)
 	rec := httptest.NewRecorder()
 	a.handleLogin(rec, req)
 
@@ -232,6 +262,7 @@ func TestHandleLoginSecureCookieBehindTrustedProxy(t *testing.T) {
 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req2.RemoteAddr = "198.51.100.4:443" // not a trusted proxy
 	req2.Header.Set("X-Forwarded-Proto", "https")
+	addLoginCSRF(req2)
 	rec2 := httptest.NewRecorder()
 	a.handleLogin(rec2, req2)
 	if findCookie(t, rec2.Result().Cookies()).Secure {
@@ -251,13 +282,14 @@ func TestHandleLoginFailureEnumerationSafe(t *testing.T) {
 	var statuses []int
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			form := url.Values{"username": {tc.user}, "password": {tc.pass}}
+			form := url.Values{"username": {tc.user}, "password": {tc.pass}, "csrf_token": {testCSRFToken}}
 			req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			req.RemoteAddr = "203.0.113.1:5000" // distinct IP per subtest to avoid cross-lockout
 			if tc.name == "unknown user" {
 				req.RemoteAddr = "203.0.113.2:5000"
 			}
+			addLoginCSRF(req)
 			rec := httptest.NewRecorder()
 			a.handleLogin(rec, req)
 
@@ -267,7 +299,7 @@ func TestHandleLoginFailureEnumerationSafe(t *testing.T) {
 			if !strings.Contains(rec.Body.String(), defaultLoginError) {
 				t.Errorf("body missing generic error %q", defaultLoginError)
 			}
-			// No cookie should be set on a failed login.
+			// No session cookie should be set on a failed login.
 			if c := findCookieOptional(rec.Result().Cookies()); c != nil {
 				t.Error("session cookie set on a failed login")
 			}
@@ -283,11 +315,12 @@ func TestHandleLoginLockout(t *testing.T) {
 	a, _ := newTestAuth(t, trustnet.LoopbackOnly())
 	const peer = "203.0.113.55:7000"
 
-	form := url.Values{"username": {testAdminUser}, "password": {"wrong"}}
+	form := url.Values{"username": {testAdminUser}, "password": {"wrong"}, "csrf_token": {testCSRFToken}}
 	for i := 0; i < defaultMaxFailures; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.RemoteAddr = peer
+		addLoginCSRF(req)
 		a.handleLogin(httptest.NewRecorder(), req)
 	}
 
@@ -295,6 +328,7 @@ func TestHandleLoginLockout(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = peer
+	addLoginCSRF(req)
 	rec := httptest.NewRecorder()
 	a.handleLogin(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
@@ -310,19 +344,21 @@ func TestHandleLoginLockoutResetsOnSuccess(t *testing.T) {
 	const peer = "203.0.113.77:8000"
 
 	// A handful of failures, short of the hard lockout.
-	bad := url.Values{"username": {testAdminUser}, "password": {"wrong"}}
+	bad := url.Values{"username": {testAdminUser}, "password": {"wrong"}, "csrf_token": {testCSRFToken}}
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(bad.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.RemoteAddr = peer
+		addLoginCSRF(req)
 		a.handleLogin(httptest.NewRecorder(), req)
 	}
 
 	// A success clears the counter.
-	good := url.Values{"username": {testAdminUser}, "password": {testAdminPass}}
+	good := loginForm()
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(good.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = peer
+	addLoginCSRF(req)
 	rec := httptest.NewRecorder()
 	a.handleLogin(rec, req)
 	if rec.Code != http.StatusSeeOther {
@@ -335,6 +371,7 @@ func TestHandleLoginLockoutResetsOnSuccess(t *testing.T) {
 		r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(bad.Encode()))
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		r.RemoteAddr = peer
+		addLoginCSRF(r)
 		rr := httptest.NewRecorder()
 		a.handleLogin(rr, r)
 		if rr.Code == http.StatusTooManyRequests {

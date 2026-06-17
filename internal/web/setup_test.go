@@ -50,13 +50,24 @@ func newTestOnboarding(t *testing.T, policy *trustnet.Policy) onboardingFixture 
 	return onboardingFixture{mux: mux, svc: svc, store: store}
 }
 
+// testCSRFSetupToken is the fixed CSRF value used by postSetup. Must be exactly
+// csrfTokenLen (64) chars to satisfy the enforceCSRFToken length guard.
+const testCSRFSetupToken = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+
 // postSetup submits the onboarding form from the given peer with the given form
-// values and returns the recorder.
+// values (plus a matching CSRF cookie+field) and returns the recorder.
 func postSetup(t *testing.T, mux *http.ServeMux, peer string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader(form.Encode()))
+	// Clone to avoid mutating the caller's values.
+	v := make(url.Values)
+	for k, vals := range form {
+		v[k] = vals
+	}
+	v.Set("csrf_token", testCSRFSetupToken)
+	req := httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader(v.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = peer
+	req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: testCSRFSetupToken})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return rec
@@ -426,8 +437,12 @@ func TestSetupHasUsersErrorReturns500(t *testing.T) {
 	})
 
 	t.Run("POST", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/setup", nil)
+		const csrfToken = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+		form := url.Values{"csrf_token": {csrfToken}}
+		req := httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.RemoteAddr = loopbackPeer
+		req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: csrfToken})
 		rec := httptest.NewRecorder()
 		onb.handleSetup(rec, req)
 		if rec.Code != http.StatusInternalServerError {
@@ -447,17 +462,21 @@ func TestSetupHasUsersErrorReturns500(t *testing.T) {
 	})
 }
 
-// postFakeSetup submits a valid form to a fake-backed onboarding handler.
+// postFakeSetup submits a valid form directly to a fake-backed onboarding
+// handler, including a matching CSRF cookie+field so the double-submit check passes.
 func postFakeSetup(onb *Onboarding) *httptest.ResponseRecorder {
+	const csrfToken = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
 	form := url.Values{
 		"username":         {"admin"},
 		"password":         {"correct-horse-battery"},
 		"confirm":          {"correct-horse-battery"},
 		"musixmatch_token": {"tok"},
+		"csrf_token":       {csrfToken},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = loopbackPeer
+	req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: csrfToken})
 	rec := httptest.NewRecorder()
 	onb.handleSetup(rec, req)
 	return rec

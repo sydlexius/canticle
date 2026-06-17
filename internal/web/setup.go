@@ -137,7 +137,7 @@ func (o *Onboarding) handleSetupForm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	renderSetup(w, r, http.StatusOK, o.version, "", "")
+	o.renderSetup(w, r, http.StatusOK, o.version, "", "")
 }
 
 // handleSetup processes the onboarding submission (POST /setup). It re-applies
@@ -151,6 +151,11 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	if !o.policy.Trusted(r) {
 		http.NotFound(w, r)
+		return
+	}
+	// CSRF validation after the trust gate: untrusted peers are already refused
+	// above; for trusted peers the double-submit token prevents login-CSRF.
+	if !enforceCSRFToken(w, r) {
 		return
 	}
 	has, err := o.hasAdmin(r.Context())
@@ -167,7 +172,7 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := r.ParseForm(); err != nil {
-		renderSetup(w, r, http.StatusBadRequest, o.version, "Invalid form submission.", "")
+		o.renderSetup(w, r, http.StatusBadRequest, o.version, "Invalid form submission.", "")
 		return
 	}
 	username := strings.TrimSpace(r.PostFormValue("username"))
@@ -175,15 +180,15 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 	confirm := r.PostFormValue("confirm")
 
 	if username == "" {
-		renderSetup(w, r, http.StatusBadRequest, o.version, "Username is required.", username)
+		o.renderSetup(w, r, http.StatusBadRequest, o.version, "Username is required.", username)
 		return
 	}
 	if len(password) < webauth.MinPasswordLength {
-		renderSetup(w, r, http.StatusBadRequest, o.version, passwordTooShortMsg, username)
+		o.renderSetup(w, r, http.StatusBadRequest, o.version, passwordTooShortMsg, username)
 		return
 	}
 	if password != confirm {
-		renderSetup(w, r, http.StatusBadRequest, o.version, "Passwords do not match.", username)
+		o.renderSetup(w, r, http.StatusBadRequest, o.version, "Passwords do not match.", username)
 		return
 	}
 
@@ -194,10 +199,10 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 			o.adminExists.Store(true)
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 		case errors.Is(err, webauth.ErrPasswordTooShort):
-			renderSetup(w, r, http.StatusBadRequest, o.version, passwordTooShortMsg, username)
+			o.renderSetup(w, r, http.StatusBadRequest, o.version, passwordTooShortMsg, username)
 		default:
 			slog.Error("onboarding: admin creation failed", "error", err)
-			renderSetup(w, r, http.StatusInternalServerError, o.version,
+			o.renderSetup(w, r, http.StatusInternalServerError, o.version,
 				"Could not create the admin account. Please try again.", username)
 		}
 		return
@@ -248,9 +253,16 @@ func (o *Onboarding) writeSecrets(ctx context.Context, mxToken, webhookKey strin
 	}
 }
 
-// renderSetup renders the setup page with the given status. Like the login page
-// it is never cached (it reflects setup state and the POST issues a cookie).
-func renderSetup(w http.ResponseWriter, r *http.Request, status int, version, errMsg, username string) {
+// renderSetup renders the setup page with the given status. It generates a
+// fresh CSRF token, sets the CSRF cookie, then renders the page. Like the login
+// page, the setup page is never cached (it reflects setup state and may set cookies).
+func (o *Onboarding) renderSetup(w http.ResponseWriter, r *http.Request, status int, version, errMsg, username string) {
+	csrfToken, err := ensureCSRFToken(w, r, o.auth.secureRequest(r))
+	if err != nil {
+		slog.Error("setup: failed to generate CSRF token", "error", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	renderWithStatus(w, r, status, templates.SetupPage(version, errMsg, username))
+	renderWithStatus(w, r, status, templates.SetupPage(version, errMsg, username, csrfToken))
 }

@@ -23,7 +23,7 @@ import (
 // match", "Password must be at least 8 characters"). username is echoed back on
 // a failed submission as a convenience; the password and the optional secret
 // fields are never echoed.
-func SetupPage(version string, errMsg string, username string) templ.Component {
+func SetupPage(version string, errMsg string, username string, csrfToken string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -67,72 +67,85 @@ func SetupPage(version string, errMsg string, username string) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<form class=\"mx-auth-form\" method=\"post\" action=\"/setup\"><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"username\">Admin username</label> <input class=\"mx-auth-input\" id=\"username\" name=\"username\" type=\"text\" value=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<form class=\"mx-auth-form\" method=\"post\" action=\"/setup\"><input type=\"hidden\" name=\"csrf_token\" value=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var3 string
-		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(username)
+		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(csrfToken)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 48, Col: 23}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 41, Col: 61}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\" autocomplete=\"username\" autofocus required></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"password\">Password</label> <input class=\"mx-auth-input\" id=\"password\" name=\"password\" type=\"password\" autocomplete=\"new-password\" minlength=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\"><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"username\">Admin username</label> <input class=\"mx-auth-input\" id=\"username\" name=\"username\" type=\"text\" value=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var4 string
-		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(webauth.MinPasswordLength))
+		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(username)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 62, Col: 58}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 49, Col: 23}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\" required> <span class=\"mx-auth-hint\">At least ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\" autocomplete=\"username\" autofocus required></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"password\">Password</label> <input class=\"mx-auth-input\" id=\"password\" name=\"password\" type=\"password\" autocomplete=\"new-password\" minlength=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var5 string
 		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(webauth.MinPasswordLength))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 65, Col: 83}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 63, Col: 58}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, " characters.</span></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"confirm\">Confirm password</label> <input class=\"mx-auth-input\" id=\"confirm\" name=\"confirm\" type=\"password\" autocomplete=\"new-password\" minlength=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "\" required> <span class=\"mx-auth-hint\">At least ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var6 string
 		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(webauth.MinPasswordLength))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 75, Col: 58}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 66, Col: 83}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "\" required></div><div class=\"mx-auth-section\"><span class=\"mx-auth-section-title\">Runtime secrets (optional)</span> <span class=\"mx-auth-hint\">Stored encrypted at rest. Leave a field blank to keep the value already set in config or the environment.</span></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"musixmatch_token\">Musixmatch token</label> <input class=\"mx-auth-input\" id=\"musixmatch_token\" name=\"musixmatch_token\" type=\"password\" autocomplete=\"off\"> <span class=\"mx-auth-hint\"><a class=\"mx-auth-link\" href=\"https://sydlexius.github.io/mxlrcgo-svc/GETTING_STARTED/#get-a-musixmatch-token\" target=\"_blank\" rel=\"noopener noreferrer\">How do I get a token?</a></span></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"webhook_api_key\">Webhook API key</label> <input class=\"mx-auth-input\" id=\"webhook_api_key\" name=\"webhook_api_key\" type=\"password\" autocomplete=\"off\"></div><button class=\"mx-auth-button\" type=\"submit\">Create account</button></form><p class=\"mx-auth-footer\">mxlrcgo-svc <span class=\"mx-auth-version\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, " characters.</span></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"confirm\">Confirm password</label> <input class=\"mx-auth-input\" id=\"confirm\" name=\"confirm\" type=\"password\" autocomplete=\"new-password\" minlength=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var7 string
-		templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(version)
+		templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(webauth.MinPasswordLength))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 111, Col: 81}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 76, Col: 58}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</span></p></main></body></html>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "\" required></div><div class=\"mx-auth-section\"><span class=\"mx-auth-section-title\">Runtime secrets (optional)</span> <span class=\"mx-auth-hint\">Stored encrypted at rest. Leave a field blank to keep the value already set in config or the environment.</span></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"musixmatch_token\">Musixmatch token</label> <input class=\"mx-auth-input\" id=\"musixmatch_token\" name=\"musixmatch_token\" type=\"password\" autocomplete=\"off\"> <span class=\"mx-auth-hint\"><a class=\"mx-auth-link\" href=\"https://sydlexius.github.io/mxlrcgo-svc/GETTING_STARTED/#get-a-musixmatch-token\" target=\"_blank\" rel=\"noopener noreferrer\">How do I get a token?</a></span></div><div class=\"mx-auth-field\"><label class=\"mx-auth-label\" for=\"webhook_api_key\">Webhook API key</label> <input class=\"mx-auth-input\" id=\"webhook_api_key\" name=\"webhook_api_key\" type=\"password\" autocomplete=\"off\"></div><button class=\"mx-auth-button\" type=\"submit\">Create account</button></form><p class=\"mx-auth-footer\">mxlrcgo-svc <span class=\"mx-auth-version\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var8 string
+		templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(version)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/setup.templ`, Line: 112, Col: 81}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</span></p></main></body></html>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
