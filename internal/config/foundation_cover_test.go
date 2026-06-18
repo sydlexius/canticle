@@ -66,6 +66,49 @@ func TestRegistry_ReturnsImmutableCopy(t *testing.T) {
 	}
 }
 
+// TestFieldLookups_ReturnImmutableEnvVars ensures FieldByPath/FieldByEnvVar do
+// not leak the package-global EnvVars backing slice (CR #289).
+func TestFieldLookups_ReturnImmutableEnvVars(t *testing.T) {
+	f, _ := FieldByPath("api.token")
+	if len(f.EnvVars) > 0 {
+		f.EnvVars[0] = "MXLRC_TAMPERED"
+	}
+	if fresh, _ := FieldByPath("api.token"); fresh.EnvVars[0] == "MXLRC_TAMPERED" {
+		t.Error("FieldByPath leaked mutable EnvVars backing storage")
+	}
+
+	g, _ := FieldByEnvVar("MUSIXMATCH_TOKEN")
+	if len(g.EnvVars) > 0 {
+		g.EnvVars[0] = "MXLRC_TAMPERED2"
+	}
+	if fresh, _ := FieldByEnvVar("MUSIXMATCH_TOKEN"); fresh.EnvVars[0] == "MXLRC_TAMPERED2" {
+		t.Error("FieldByEnvVar leaked mutable EnvVars backing storage")
+	}
+}
+
+// TestWriteAtomic_NonENOENTReadErrorAborts ensures WriteAtomic does NOT overwrite
+// the config when the backup read fails for a reason other than "file missing"
+// (CR #289): losing recoverability on an already-unhealthy path is worse than
+// failing the write.
+func TestWriteAtomic_NonENOENTReadErrorAborts(t *testing.T) {
+	doc, err := LoadDocument(writeTempConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make the target path a directory so the backup read fails with EISDIR
+	// (a non-ENOENT error), not "file not found".
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.Mkdir(cfgPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomic(cfgPath, doc); err == nil {
+		t.Error("expected WriteAtomic to abort on a non-ENOENT backup read error")
+	}
+	if fi, err := os.Stat(cfgPath); err != nil || !fi.IsDir() {
+		t.Error("target was overwritten despite the read error")
+	}
+}
+
 // --- writer: insert, missing section, type errors, load errors ---
 
 func TestSetValue_InsertsAbsentKeyIntoSection(t *testing.T) {

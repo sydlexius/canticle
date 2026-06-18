@@ -146,35 +146,45 @@ var fields = []FieldSpec{
 	{Path: "logging.compress", Section: "logging", Type: TypeBool, EnvVars: []string{"MXLRC_LOG_COMPRESS"}, Criticality: Safe, Editable: true},
 }
 
-// Registry returns a copy of the full field registry. Returning a copy (with
+// cloneFieldSpec returns a copy of f whose EnvVars slice is independent of the
+// package-global backing storage, so a caller cannot mutate f.EnvVars[...] and
+// silently alter the registry at runtime.
+func cloneFieldSpec(f FieldSpec) FieldSpec {
+	out := f
+	out.EnvVars = append([]string(nil), f.EnvVars...)
+	return out
+}
+
+// Registry returns a copy of the full field registry. Returning copies (with
 // EnvVars deep-copied) keeps the package-global table immutable to callers, so
 // a consumer cannot flip Editable/Sensitive or rename an env var at runtime and
 // desync validation / ApplyChanges.
 func Registry() []FieldSpec {
 	out := make([]FieldSpec, len(fields))
-	copy(out, fields)
-	for i := range out {
-		out[i].EnvVars = append([]string(nil), fields[i].EnvVars...)
+	for i := range fields {
+		out[i] = cloneFieldSpec(fields[i])
 	}
 	return out
 }
 
-// FieldByPath looks a field up by its dotted path.
+// FieldByPath looks a field up by its dotted path. The returned spec is a copy;
+// mutating it does not affect the registry.
 func FieldByPath(path string) (FieldSpec, bool) {
 	for _, f := range fields {
 		if f.Path == path {
-			return f, true
+			return cloneFieldSpec(f), true
 		}
 	}
 	return FieldSpec{}, false
 }
 
-// FieldByEnvVar looks a field up by any of its env var names.
+// FieldByEnvVar looks a field up by any of its env var names. The returned spec
+// is a copy; mutating it does not affect the registry.
 func FieldByEnvVar(envVar string) (FieldSpec, bool) {
 	for _, f := range fields {
 		for _, e := range f.EnvVars {
 			if e == envVar {
-				return f, true
+				return cloneFieldSpec(f), true
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,13 +122,21 @@ func WriteAtomic(path string, doc *tomledit.Document) error {
 	// content. Reading the original up front means a failure here aborts before
 	// the rename, leaving the live file untouched.
 	mode := os.FileMode(0o600)
-	if orig, err := os.ReadFile(path); err == nil { //nolint:gosec // G304: operator's own config file
+	orig, err := os.ReadFile(path) //nolint:gosec // G304: operator's own config file
+	switch {
+	case err == nil:
 		if fi, statErr := os.Stat(path); statErr == nil {
 			mode = fi.Mode()
 		}
 		if err := os.WriteFile(path+".bak", orig, mode); err != nil { //nolint:gosec // G304: .bak sits beside the operator's own config file; path is app-resolved, not attacker-controlled
 			return fmt.Errorf("config: write backup: %w", err)
 		}
+	case errors.Is(err, os.ErrNotExist):
+		// First write: there is nothing to back up.
+	default:
+		// A non-ENOENT read failure (permissions, I/O error) means we cannot
+		// guarantee a backup; abort rather than overwrite an unrecoverable file.
+		return fmt.Errorf("config: read existing config for backup: %w", err)
 	}
 	if err := os.Chmod(tmpName, mode); err != nil {
 		return fmt.Errorf("config: chmod temp file: %w", err)
