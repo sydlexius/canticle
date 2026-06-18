@@ -334,3 +334,15 @@ func TestReportSelectionHighlightMovesAcrossReports(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildReportViewUnimplementedKey exercises the defensive default case: a
+// reportDef whose key has no switch arm must fail fast with an error rather than
+// returning an empty (misleading) view. Unreachable via the HTTP path (keys are
+// validated upstream in handleReportFragment), so it is called directly.
+func TestBuildReportViewUnimplementedKey(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	ui := NewUI(config.Config{}, "v-test", WithReports(reports.New(sqlDB)))
+	if _, err := ui.buildReportView(context.Background(), reportDef{key: "no-such-report"}); err == nil {
+		t.Fatal("buildReportView with unknown key = nil error, want fail-fast error")
+	}
+}

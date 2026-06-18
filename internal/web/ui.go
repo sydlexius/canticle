@@ -290,6 +290,12 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Count:  strconv.FormatInt(g.Count, 10),
 			})
 		}
+	default:
+		// Unreachable in practice: def.key is validated upstream in
+		// handleReportFragment via lookupReportDef. Fail fast if a new
+		// reportDef is ever added without a matching case here, rather
+		// than silently rendering an empty report.
+		return templates.ReportView{}, fmt.Errorf("unimplemented report: %s", def.key)
 	}
 	return v, nil
 }
