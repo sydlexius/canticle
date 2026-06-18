@@ -39,6 +39,33 @@ func TestRegistry_LookupsAndFlags(t *testing.T) {
 	}
 }
 
+// TestRegistry_ReturnsImmutableCopy ensures a caller cannot mutate the global
+// registry through the returned slice (e.g. flipping Editable/Sensitive or an
+// env var name), which would desync validation/ApplyChanges.
+func TestRegistry_ReturnsImmutableCopy(t *testing.T) {
+	r := Registry()
+	origEditable := r[0].Editable
+	origEnv := ""
+	if len(r[0].EnvVars) > 0 {
+		origEnv = r[0].EnvVars[0]
+	}
+
+	// Tamper with the returned slice and its nested EnvVars.
+	r[0].Editable = !r[0].Editable
+	r[0].Sensitive = !r[0].Sensitive
+	if len(r[0].EnvVars) > 0 {
+		r[0].EnvVars[0] = "MXLRC_TAMPERED"
+	}
+
+	fresh := Registry()
+	if fresh[0].Editable != origEditable {
+		t.Error("mutating the returned slice changed the global registry (Editable)")
+	}
+	if len(fresh[0].EnvVars) > 0 && fresh[0].EnvVars[0] != origEnv {
+		t.Error("mutating the returned slice's EnvVars changed the global registry")
+	}
+}
+
 // --- writer: insert, missing section, type errors, load errors ---
 
 func TestSetValue_InsertsAbsentKeyIntoSection(t *testing.T) {

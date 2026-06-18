@@ -135,5 +135,13 @@ func WriteAtomic(path string, doc *tomledit.Document) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("config: rename temp file over config: %w", err)
 	}
+	// Fsync the containing directory so the rename itself is persisted, not just
+	// the file contents -- guards against losing the rename on a power failure
+	// right after WriteAtomic returns. Best-effort: some filesystems do not
+	// support directory fsync, and the data is already durably on disk.
+	if d, err := os.Open(dir); err == nil { //nolint:gosec // G304: dir is filepath.Dir of the operator's own config path
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }

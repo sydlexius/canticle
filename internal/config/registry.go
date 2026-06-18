@@ -146,8 +146,18 @@ var fields = []FieldSpec{
 	{Path: "logging.compress", Section: "logging", Type: TypeBool, EnvVars: []string{"MXLRC_LOG_COMPRESS"}, Criticality: Safe, Editable: true},
 }
 
-// Registry returns the full field registry.
-func Registry() []FieldSpec { return fields }
+// Registry returns a copy of the full field registry. Returning a copy (with
+// EnvVars deep-copied) keeps the package-global table immutable to callers, so
+// a consumer cannot flip Editable/Sensitive or rename an env var at runtime and
+// desync validation / ApplyChanges.
+func Registry() []FieldSpec {
+	out := make([]FieldSpec, len(fields))
+	copy(out, fields)
+	for i := range out {
+		out[i].EnvVars = append([]string(nil), fields[i].EnvVars...)
+	}
+	return out
+}
 
 // FieldByPath looks a field up by its dotted path.
 func FieldByPath(path string) (FieldSpec, bool) {
