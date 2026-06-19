@@ -236,6 +236,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 		mux.Handle("GET /config", guard(http.HandlerFunc(u.handleConfig)))
 		mux.Handle("GET /settings", guard(http.HandlerFunc(u.handleSettings)))
 		mux.Handle("POST /settings/field", guard(http.HandlerFunc(u.handleSaveField)))
+		mux.Handle("POST /settings/section", guard(http.HandlerFunc(u.handleSaveSection)))
 		return
 	}
 	mux.HandleFunc("GET /{$}", u.handleRoot)
@@ -244,6 +245,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /config", u.handleConfig)
 	mux.HandleFunc("GET /settings", u.handleSettings)
 	mux.HandleFunc("POST /settings/field", u.handleSaveField)
+	mux.HandleFunc("POST /settings/section", u.handleSaveSection)
 }
 
 // settingsPath is the single config destination. Settings replaced the old

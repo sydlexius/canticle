@@ -79,6 +79,9 @@ templ settingsField(field SettingsField) {
 		if field.Savable {
 			data-field-path={ field.Path }
 			data-field-tier={ field.Tier }
+			if field.SaveGroup != "" {
+				data-save-group={ field.SaveGroup }
+			}
 		}
 	>
 		<div class="mx-settings-field-head">

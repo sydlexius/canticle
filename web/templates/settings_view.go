@@ -116,6 +116,13 @@ type SettingsField struct {
 	// path is wired (view.Writable), the field is editable, and it is not locked
 	// by an env override. The template renders save controls only then.
 	Savable bool
+	// SaveGroup, when non-empty, marks this field as part of a paired/section
+	// save (#298): clicking Save on any card in the group POSTs every group
+	// member's value together to /settings/section as one atomic change, so a
+	// cross-field invariant (the [server.tls] cert+key pair) can be satisfied from
+	// an empty state where a single-field save would always 400. Empty for the
+	// normal one-field save path.
+	SaveGroup string
 }
 
 // SettingsOption is one choice for a bool / select / multiselect / ordered

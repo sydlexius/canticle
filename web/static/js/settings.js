@@ -323,6 +323,72 @@
     });
   }
 
+  // saveSection POSTs every field in the triggering card's save group together
+  // to /settings/section as one atomic change (#298): the [server.tls] cert+key
+  // pair must be written together to satisfy the "set together" invariant, which
+  // a single-field save cannot do from an empty state (each blank-partner POST
+  // 400s). Each group member is a card carrying the same data-save-group; its
+  // config path is data-field-path and its value is the card's single input.
+  function saveSection(field) {
+    var group = field.getAttribute("data-save-group");
+    var cards = document.querySelectorAll('[data-save-group="' + group + '"]');
+    if (!cards.length) {
+      return;
+    }
+    var token = csrfToken();
+    if (!token) {
+      setStatus(field, "Cannot save: missing CSRF token (reload the page)", true);
+      return;
+    }
+    var body = new URLSearchParams();
+    body.append("csrf_token", token);
+    var i;
+    for (i = 0; i < cards.length; i++) {
+      var path = cards[i].getAttribute("data-field-path");
+      if (!path) {
+        continue;
+      }
+      var input = cards[i].querySelector("input, select, textarea");
+      body.append("path", path);
+      body.append(path, input ? input.value.trim() : "");
+    }
+    for (i = 0; i < cards.length; i++) {
+      setStatus(cards[i], "Saving...", false);
+    }
+    fetch("/settings/section", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      credentials: "same-origin"
+    }).then(function (res) {
+      if (res.ok) {
+        for (var j = 0; j < cards.length; j++) {
+          setStatus(cards[j], "Saved - restart to apply", false);
+        }
+        return null;
+      }
+      return res.text().then(function (text) {
+        for (var k = 0; k < cards.length; k++) {
+          setStatus(cards[k], "Error: " + (text || ("HTTP " + res.status)), true);
+        }
+      });
+    }).catch(function (err) {
+      for (var m = 0; m < cards.length; m++) {
+        setStatus(cards[m], "Error: " + err, true);
+      }
+    });
+  }
+
+  // saveCard dispatches a card's save to the section endpoint when it is part of
+  // a save group, otherwise to the single-field endpoint.
+  function saveCard(card) {
+    if (card.getAttribute("data-save-group")) {
+      saveSection(card);
+    } else {
+      saveField(card);
+    }
+  }
+
   // --- Wiring --------------------------------------------------------------
   document.addEventListener("click", function (event) {
     var jumpLink = event.target.closest(".mx-settings-jump");
@@ -373,7 +439,7 @@
           return;
         }
       }
-      saveField(saveField2);
+      saveCard(saveField2);
     }
   });
 
@@ -405,7 +471,7 @@
     syncAll();
     var field = event.target.closest ? event.target.closest("[data-field-path]") : null;
     if (field && field.getAttribute("data-field-tier") === "safe") {
-      saveField(field);
+      saveCard(field);
     }
   });
   if (document.readyState === "loading") {

@@ -229,9 +229,22 @@ func (u *UI) settingsField(cfg config.Config, spec config.FieldSpec) templates.S
 	case "server.tls.redirect_http":
 		// G4: placeholder derived from this install's server.addr host.
 		f.Placeholder = redirectPlaceholder(cfg.Server.Addr)
+	case "server.tls.cert_file", "server.tls.key_file":
+		// #298: the [server.tls] cert+key invariant requires both set together, so
+		// the two cards share a save group; settings.js routes their Save to the
+		// atomic /settings/section endpoint, letting an operator bootstrap a custom
+		// cert pair from an empty state (a single-field save always 400s on the
+		// still-blank partner).
+		f.SaveGroup = tlsCertKeySaveGroup
 	}
 	return f
 }
+
+// tlsCertKeySaveGroup is the save-group token shared by the server.tls.cert_file
+// and server.tls.key_file cards so settings.js posts them together to
+// /settings/section as one atomic change (#298). The pair must be written
+// together to satisfy the [server.tls] "cert and key set together" invariant.
+const tlsCertKeySaveGroup = "tls-cert-key"
 
 // criticalityTier maps a registry Criticality to the save-trigger tier string
 // the template and settings.js branch on: safe hot-saves on change, caution
@@ -882,8 +895,8 @@ var settingsDescriptions = map[string]string{ //nolint:gosec // G101 false posit
 	"server.work_interval_seconds":                  "Seconds between work-queue drains in serve mode.",
 	"server.trusted_networks.cidrs":                 "Client CIDRs allowed to reach the server.",
 	"server.trusted_networks.trusted_proxies":       "Proxy CIDRs whose forwarded-for header is trusted.",
-	"server.tls.cert_file":                          "TLS certificate file path. Must be PEM-encoded (typically .pem or .crt).",
-	"server.tls.key_file":                           "TLS private key file path. Must be the PEM-encoded private key (typically .key).",
+	"server.tls.cert_file":                          "TLS certificate file path (PEM-encoded, typically .pem or .crt). Enter this together with the private key below and click Save on either - the pair is written in one step. Leave both blank (and turn on self-signed) if you don't have a custom certificate.",
+	"server.tls.key_file":                           "TLS private key file path (PEM-encoded, typically .key). Enter this together with the certificate above and click Save on either - the pair is written in one step.",
 	"server.tls.self_signed":                        "Generate and use a self-signed certificate.",
 	"server.tls.redirect_http":                      "HTTP listen address to redirect to HTTPS (blank disables).",
 	"server.tls.self_signed_hosts":                  "Hostnames to include in the self-signed certificate.",
