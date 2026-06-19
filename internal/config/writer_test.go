@@ -120,9 +120,12 @@ func TestWriterRoundTrip_AllTypes(t *testing.T) {
 	}
 }
 
-// TestWriteAtomic_KeepsBackupAndIsAtomic verifies a .bak of the prior file is
-// kept and the write replaces the original.
-func TestWriteAtomic_KeepsBackup(t *testing.T) {
+// TestWriteAtomic_PurgesBackupAfterSuccess verifies that a successful write
+// replaces the original and leaves NO lingering .bak on disk. The .bak is a
+// transient crash-safety copy for the write window only; keeping it would
+// leak a plaintext copy of a file-resident secret (server.webhook_api_keys)
+// after the write completes (#290).
+func TestWriteAtomic_PurgesBackupAfterSuccess(t *testing.T) {
 	path := writeTempConfig(t)
 	doc, err := LoadDocument(path)
 	if err != nil {
@@ -134,11 +137,85 @@ func TestWriteAtomic_KeepsBackup(t *testing.T) {
 	if err := WriteAtomic(path, doc); err != nil {
 		t.Fatalf("WriteAtomic: %v", err)
 	}
-	bak, err := os.ReadFile(path + ".bak")
+	// The new content is in place...
+	got, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read .bak: %v", err)
+		t.Fatalf("re-read config: %v", err)
 	}
-	if string(bak) != roundtripFixture {
-		t.Errorf(".bak is not the prior file content")
+	if !strings.Contains(string(got), `level = "warn"`) {
+		t.Errorf("write did not replace the original; got:\n%s", got)
+	}
+	// ...and the .bak is gone.
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("expected .bak to be purged after a successful write, stat err = %v", err)
+	}
+}
+
+// TestWriteAtomic_FailedWriteLeavesOriginalIntact verifies the crash-safety
+// guarantee: when the write fails (here, the containing directory is not
+// writable so the temp file cannot be created), the original config is left
+// byte-identical and no stray .bak is created. The purge step (#290) never
+// runs on a failed write, so it cannot destroy a recovery copy.
+func TestWriteAtomic_FailedWriteLeavesOriginalIntact(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root bypasses directory write permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(roundtripFixture), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	doc, err := LoadDocument(path)
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if err := SetValue(doc, "logging.level", TypeString, "warn"); err != nil {
+		t.Fatalf("SetValue: %v", err)
+	}
+	// Make the directory unwritable so os.CreateTemp (the first mutation) fails.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // let t.TempDir clean up
+	if err := WriteAtomic(path, doc); err == nil {
+		t.Fatal("expected WriteAtomic to fail on an unwritable directory")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("restore dir perms: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read config: %v", err)
+	}
+	if string(got) != roundtripFixture {
+		t.Errorf("original config was modified by a failed write:\n%s", got)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("a failed write must not leave a .bak, stat err = %v", err)
+	}
+}
+
+// TestApplyChanges_CreatesConfigWhenAbsent verifies the create-on-save path:
+// saving a setting when config.toml does not yet exist creates the file with
+// the change, rather than returning an error (#296). This mirrors the
+// absent-[section] create behavior added in #288.
+func TestApplyChanges_CreatesConfigWhenAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("precondition: config should be absent, stat err = %v", err)
+	}
+	if err := ApplyChanges(path, map[string]string{"logging.level": "debug"}); err != nil {
+		t.Fatalf("ApplyChanges on an absent config: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("config was not created: %v", err)
+	}
+	if !strings.Contains(string(got), `level = "debug"`) {
+		t.Errorf("created config missing the saved change:\n%s", got)
+	}
+	// First write: nothing to back up, so no .bak should exist either.
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("expected no .bak after a create-on-save write, stat err = %v", err)
 	}
 }

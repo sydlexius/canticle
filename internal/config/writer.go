@@ -21,6 +21,13 @@ import (
 func LoadDocument(path string) (*tomledit.Document, error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path is the operator's own config file, resolved by the app, not attacker-controlled
 	if err != nil {
+		// A missing config file is not an error on the write path: operators may
+		// save settings before any config.toml exists. Treat it as an empty
+		// document (create-on-save), mirroring SetValue's create-on-absent-section
+		// behavior and WriteAtomic's ErrNotExist tolerance for the .bak step.
+		if errors.Is(err, os.ErrNotExist) {
+			return &tomledit.Document{}, nil
+		}
 		return nil, fmt.Errorf("config: open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
@@ -154,7 +161,12 @@ func WriteAtomic(path string, doc *tomledit.Document) error {
 
 	// Mirror the original file's mode and keep a single .bak of the prior
 	// content. Reading the original up front means a failure here aborts before
-	// the rename, leaving the live file untouched.
+	// the rename, leaving the live file untouched. The .bak is a transient
+	// crash-safety copy for the write window only: it is purged once the new
+	// config is durably in place (see below), so no lingering plaintext copy of
+	// a file-resident secret (server.webhook_api_keys) survives the write (#290).
+	bakPath := path + ".bak"
+	wroteBak := false
 	mode := os.FileMode(0o600)
 	orig, err := os.ReadFile(path) //nolint:gosec // G304: operator's own config file
 	switch {
@@ -162,9 +174,10 @@ func WriteAtomic(path string, doc *tomledit.Document) error {
 		if fi, statErr := os.Stat(path); statErr == nil {
 			mode = fi.Mode()
 		}
-		if err := os.WriteFile(path+".bak", orig, mode); err != nil { //nolint:gosec // G304: .bak sits beside the operator's own config file; path is app-resolved, not attacker-controlled
+		if err := os.WriteFile(bakPath, orig, mode); err != nil { //nolint:gosec // G304: .bak sits beside the operator's own config file; path is app-resolved, not attacker-controlled
 			return fmt.Errorf("config: write backup: %w", err)
 		}
+		wroteBak = true
 	case errors.Is(err, os.ErrNotExist):
 		// First write: there is nothing to back up.
 	default:
@@ -185,6 +198,13 @@ func WriteAtomic(path string, doc *tomledit.Document) error {
 	if d, err := os.Open(dir); err == nil { //nolint:gosec // G304: dir is filepath.Dir of the operator's own config path
 		_ = d.Sync()
 		_ = d.Close()
+	}
+	// The new config is durably in place; the .bak has served its crash-safety
+	// purpose for this write window. Purge it so no lingering plaintext copy of
+	// a file-resident secret remains on disk. Best-effort: a removal failure does
+	// not corrupt the (already-renamed) config, so it must not fail the write.
+	if wroteBak {
+		_ = os.Remove(bakPath)
 	}
 	return nil
 }

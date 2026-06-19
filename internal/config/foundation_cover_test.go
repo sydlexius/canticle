@@ -205,8 +205,14 @@ func TestSetValue_TypeErrors(t *testing.T) {
 }
 
 func TestLoadDocument_MissingFile(t *testing.T) {
-	if _, err := LoadDocument(filepath.Join(t.TempDir(), "nope.toml")); err == nil {
-		t.Error("expected error loading a missing file")
+	// A missing config file is treated as an empty document (create-on-save),
+	// not an error, so settings can be saved before any config.toml exists (#296).
+	doc, err := LoadDocument(filepath.Join(t.TempDir(), "nope.toml"))
+	if err != nil {
+		t.Errorf("missing file should load as an empty document, got error: %v", err)
+	}
+	if doc == nil {
+		t.Error("expected a non-nil empty document for a missing file")
 	}
 }
 
@@ -241,9 +247,14 @@ func TestApplyChanges_EmptyMapNoOp(t *testing.T) {
 }
 
 func TestApplyChanges_LoadErrorPropagates(t *testing.T) {
-	// Valid change, but the config file does not exist -> load error surfaces.
-	missing := filepath.Join(t.TempDir(), "absent.toml")
-	if err := ApplyChanges(missing, map[string]string{"logging.level": "info"}); err == nil {
-		t.Error("expected a load error for a missing config file")
+	// Valid change, but the config file is present and malformed -> the parse
+	// error surfaces. (A MISSING file is not an error: it is create-on-save, see
+	// TestApplyChanges_CreatesConfigWhenAbsent.)
+	path := filepath.Join(t.TempDir(), "malformed.toml")
+	if err := os.WriteFile(path, []byte("this is = not [valid toml"), 0o600); err != nil {
+		t.Fatalf("write malformed fixture: %v", err)
+	}
+	if err := ApplyChanges(path, map[string]string{"logging.level": "info"}); err == nil {
+		t.Error("expected a parse error for a malformed config file")
 	}
 }
