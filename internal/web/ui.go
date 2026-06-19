@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -204,12 +205,24 @@ func (u *UI) handleReportFragment(w http.ResponseWriter, r *http.Request) {
 	render(w, r, templates.ReportsPage(u.version, rail, &view))
 }
 
+// reportPath builds the sidebar link target for a report key, encoding the key
+// as a single path segment so a key containing reserved characters cannot break
+// the URL. It is a no-op for the kebab-case canned-report keys.
+func reportPath(key string) string {
+	return "/reports/" + url.PathEscape(key)
+}
+
 // buildRail builds the sidebar report-nav view models in design-doc order,
 // marking activeKey selected.
 func (u *UI) buildRail(activeKey string) []templates.RailItem {
 	rail := make([]templates.RailItem, 0, len(reportDefs))
 	for _, d := range reportDefs {
-		rail = append(rail, templates.RailItem{Key: d.key, Title: d.title, Active: d.key == activeKey})
+		rail = append(rail, templates.RailItem{
+			Key:    d.key,
+			Path:   reportPath(d.key),
+			Title:  d.title,
+			Active: d.key == activeKey,
+		})
 	}
 	return rail
 }

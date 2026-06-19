@@ -70,8 +70,8 @@ templ reportNav(reports []RailItem, oob bool) {
 			<li>
 				<a
 					class="mx-nav-link mx-report-nav-link"
-					href={ templ.SafeURL("/reports/" + it.Key) }
-					hx-get={ "/reports/" + it.Key }
+					href={ templ.SafeURL(it.Path) }
+					hx-get={ it.Path }
 					hx-target="#mx-main"
 					hx-swap="innerHTML"
 					hx-push-url="true"

@@ -340,6 +340,41 @@ func TestReportSelectionHighlightMovesAcrossReports(t *testing.T) {
 	}
 }
 
+// TestBuildRailEncodesKeyPath verifies the rail link target is the report key
+// encoded as a single path segment (#286). For the canned kebab-case keys the
+// encoding is a no-op, so the rendered href stays byte-identical to the
+// pre-encoding "/reports/<key>" form; a key with reserved characters is escaped
+// so it cannot break the URL.
+func TestBuildRailEncodesKeyPath(t *testing.T) {
+	ui := NewUI(config.Config{}, "v-test")
+	rail := ui.buildRail("queue-summary")
+
+	wantKeys := []string{
+		"queue-summary",
+		"recent-outcomes",
+		"provider-effectiveness",
+		"instrumental-inventory",
+		"failure-analysis",
+	}
+	if len(rail) != len(wantKeys) {
+		t.Fatalf("buildRail returned %d items, want %d", len(rail), len(wantKeys))
+	}
+	for i, want := range wantKeys {
+		if rail[i].Key != want {
+			t.Errorf("rail[%d].Key = %q, want %q", i, rail[i].Key, want)
+		}
+		// Encoding is a no-op for kebab-case keys: the path is unchanged.
+		if got, exp := rail[i].Path, "/reports/"+want; got != exp {
+			t.Errorf("rail[%d].Path = %q, want %q (encoding must be a no-op here)", i, got, exp)
+		}
+	}
+
+	// A key with reserved characters is escaped per url.PathEscape semantics.
+	if got, want := reportPath("a b/c%d"), "/reports/a%20b%2Fc%25d"; got != want {
+		t.Errorf("reportPath(%q) = %q, want %q", "a b/c%d", got, want)
+	}
+}
+
 // TestBuildReportViewUnimplementedKey exercises the defensive default case: a
 // reportDef whose key has no switch arm must fail fast with an error rather than
 // returning an empty (misleading) view. Unreachable via the HTTP path (keys are

@@ -7,8 +7,13 @@ package templates
 
 // RailItem is one report row in the sidebar's REPORTS group.
 type RailItem struct {
-	// Key is the report's stable URL slug (e.g. "queue-summary").
+	// Key is the report's stable URL slug (e.g. "queue-summary"). Kept raw for
+	// the active-state comparison; Path is the encoded value used for links.
 	Key string
+	// Path is the pre-computed, path-segment-encoded link target
+	// (e.g. "/reports/queue-summary"). The handler builds it with
+	// url.PathEscape so a key with reserved characters cannot break the URL.
+	Path string
 	// Title is the human label shown in the sidebar row.
 	Title string
 	// Active marks the currently-selected report (drives the accent highlight).
