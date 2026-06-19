@@ -18,7 +18,7 @@
 CREATE TABLE lane_attempts (
     queue_id     INTEGER NOT NULL,
     lane         TEXT    NOT NULL,
-    hit          INTEGER NOT NULL,
+    hit          INTEGER NOT NULL CHECK (hit IN (0, 1)),
     attempted_at TEXT    NOT NULL,
     UNIQUE(queue_id, lane)
 );
