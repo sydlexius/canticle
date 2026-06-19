@@ -1,0 +1,21 @@
+# Grype vulnerability scanner configuration
+#
+# Ignored CVEs must include a justification and review-by date.
+# Remove entries once the upstream fix lands in Alpine stable.
+# The grype-ignore-expiry job in ci.yml fails when entries expire.
+
+ignore:
+  # rand 0.9.1 inside librav1e.so (the rav1e AV1 *encoder*), pulled transitively
+  # by the apk ffmpeg in the runtime image. Unreachable: mxlrcgo-svc only DECODES
+  # audio via ffmpeg and never AV1-encodes, so the rav1e code path -- and the rand
+  # 0.9.1 it embeds -- is never invoked. LOW severity; surfaces only as a code
+  # scanning alert (below the build's HIGH fail-on cutoff). Re-evaluate on any
+  # ffmpeg/base-image bump (fix is rand 0.9.3); a slimmed ffmpeg without librav1e
+  # would remove it outright (tracked in #297 as a future option).
+  # Upstream: https://github.com/advisories/GHSA-cq8v-f236-94qc
+  - vulnerability: GHSA-cq8v-f236-94qc
+    package:
+      name: rand
+      type: rust-crate
+    review-by: "2026-09-18"
+    reason: "Unreachable: librav1e is the AV1 encoder; mxlrcgo only decodes audio, never AV1-encodes. LOW severity. Fix is rand 0.9.3."
