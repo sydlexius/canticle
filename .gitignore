@@ -36,9 +36,13 @@ dist/
 
 # Local token config
 .env
+profile.env
 
 # Superpowers plans (local-only)
 docs/superpowers/
+
+# Design docs (local working notes; already-tracked docs stay tracked)
+docs/design/
 
 # Serena MCP
 .serena/

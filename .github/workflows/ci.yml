@@ -221,6 +221,10 @@ jobs:
             echo "No .grype.yaml found, nothing to check."
             exit 0
           fi
+          # escape_gha: escape %, CR, LF before echoing into GHA workflow
+          # commands so untrusted .grype.yaml values cannot forge annotations.
+          # Order matters: % must be escaped first (to %25) before CR/LF.
+          escape_gha() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g'; }
           today=$(date -u +%Y-%m-%d)
           errors=0
           vuln=""
@@ -235,11 +239,11 @@ jobs:
                 # Check previous entry had valid review-by and reason
                 if [ -n "$vuln" ]; then
                   if [ -z "$review_by" ]; then
-                    echo "::error::Grype ignore missing review-by: $vuln"
+                    echo "::error::Grype ignore missing review-by: $(escape_gha "$vuln")"
                     errors=$((errors + 1))
                   fi
                   if [ -z "$reason" ]; then
-                    echo "::error::Grype ignore missing reason: $vuln"
+                    echo "::error::Grype ignore missing reason: $(escape_gha "$vuln")"
                     errors=$((errors + 1))
                   fi
                 fi
@@ -250,14 +254,14 @@ jobs:
               *"review-by:"*)
                 review_by=$(echo "$trimmed" | sed 's/.*review-by:[[:space:]]*//; s/"//g')
                 if ! echo "$review_by" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
-                  echo "::error::Invalid review-by format for $vuln: $review_by (expected YYYY-MM-DD)"
+                  echo "::error::Invalid review-by format for $(escape_gha "$vuln"): $(escape_gha "$review_by") (expected YYYY-MM-DD)"
                   errors=$((errors + 1))
                 elif ! date -ud "$review_by" +%s >/dev/null 2>&1; then
-                  echo "::error::Invalid review-by date for $vuln: $review_by"
+                  echo "::error::Invalid review-by date for $(escape_gha "$vuln"): $(escape_gha "$review_by")"
                   errors=$((errors + 1))
                 # review-by is the last valid day; entry expires the day after
                 elif [ "$today" '>' "$review_by" ]; then
-                  echo "::error::Grype ignore expired: $vuln (review-by: $review_by)"
+                  echo "::error::Grype ignore expired: $(escape_gha "$vuln") (review-by: $(escape_gha "$review_by"))"
                   errors=$((errors + 1))
                 else
                   days_left=$(( ( $(date -ud "$review_by" +%s) - $(date -ud "$today" +%s) ) / 86400 ))
@@ -272,11 +276,11 @@ jobs:
           # Check the last entry in the file
           if [ -n "$vuln" ]; then
             if [ -z "$review_by" ]; then
-              echo "::error::Grype ignore missing review-by: $vuln"
+              echo "::error::Grype ignore missing review-by: $(escape_gha "$vuln")"
               errors=$((errors + 1))
             fi
             if [ -z "$reason" ]; then
-              echo "::error::Grype ignore missing reason: $vuln"
+              echo "::error::Grype ignore missing reason: $(escape_gha "$vuln")"
               errors=$((errors + 1))
             fi
           fi
