@@ -1,0 +1,202 @@
+package templates
+
+// The observability dashboard (#186): a read-only status surface for serve
+// mode. Three sections: work-queue stat tiles (including Instrumental), per-provider
+// hit tiles, and a recent-outcomes table. A small footer note documents /metrics.
+//
+// Async/queued copy throughout: the dashboard makes the background processing
+// model explicit so an operator does not expect on-demand search results.
+// There is no search box, no manual source selection, and no auto-refresh
+// (every render is triggered by a page load or explicit browser refresh).
+
+// DashboardPage is the full-page dashboard shell.
+templ DashboardPage(version string, reports []RailItem, view DashboardView) {
+	@Layout("Dashboard", "/dashboard", version, reports) {
+		@dashboardContent(view)
+	}
+}
+
+// dashboardContent is the main content column for the dashboard.
+templ dashboardContent(view DashboardView) {
+	<div class="mx-dash-page">
+		<div class="mx-dash-header">
+			<h1 class="mx-dash-title">Dashboard</h1>
+			<p class="mx-dash-sub">
+				Read-only. Queue and outcome data are from the database at render time; refresh the page to update.
+				if view.AsOf != "" {
+					<span class="mx-dash-asof"> As of { view.AsOf }.</span>
+				}
+			</p>
+		</div>
+		@dashQueueTiles(view.QueueTiles, view.InstrumentalCount)
+		@dashProviderTiles(view.ProviderTiles)
+		@dashRecentOutcomes(view.RecentRows)
+		<p class="mx-dash-metrics-note">
+			Prometheus metrics:
+			<code class="mx-dash-code">/metrics</code>
+			<span
+				title="Loopback by default; trusted-network gated. No API key required."
+				class="mx-dash-metrics-hint"
+			>(trusted network)</span>
+		</p>
+	</div>
+	<script>
+	(function() {
+		// Reformat <time data-tz="pending"> elements to the browser's local timezone.
+		// Skipped when data-tz-applied="1" (server already applied TZ env).
+		// Uses 'en-US' locale so timeZoneName:'short' always emits a 3-letter
+		// abbreviation (e.g. "PDT") rather than a "GMT-7" offset, regardless
+		// of the browser's default locale.
+		document.querySelectorAll('time[data-tz="pending"]').forEach(function(el) {
+			var iso = el.getAttribute('datetime');
+			if (!iso) return;
+			try {
+				var d = new Date(iso);
+				var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+				el.textContent = d.toLocaleString('en-US', {
+					year: 'numeric', month: '2-digit', day: '2-digit',
+					hour: '2-digit', minute: '2-digit',
+					timeZone: tz,
+					timeZoneName: 'short'
+				});
+			} catch (_) {}
+		});
+	})();
+	</script>
+}
+
+// dashQueueTiles renders the work-queue status tile row plus the Instrumental tile.
+// Instrumental is a detection/queue metric and belongs here, not in Lyrics Sources.
+templ dashQueueTiles(tiles []StatTile, instrumentalCount string) {
+	<section
+		class="mx-dash-section"
+		aria-labelledby="mx-dash-queue-heading"
+		title="Track counts by queue status. Values update on page refresh; processing is asynchronous."
+	>
+		<h2 class="mx-dash-section-title" id="mx-dash-queue-heading">Work Queue</h2>
+		<div class="mx-dash-tiles" role="list">
+			if len(tiles) == 0 {
+				<p class="mx-dash-empty">No queue data available.</p>
+			}
+			for _, t := range tiles {
+				<div class="mx-dash-tile" role="listitem" title={ dashQueueTileTooltip(t.Label) }>
+					<span class="mx-dash-tile-label">{ t.Label }</span>
+					<span class="mx-dash-tile-value">{ t.Value }</span>
+				</div>
+			}
+			<div
+				class="mx-dash-tile"
+				role="listitem"
+				title="Tracks detected as instrumental (no lyrics expected). Audio analysis runs during processing."
+			>
+				<span class="mx-dash-tile-label">Instrumental</span>
+				<span class="mx-dash-tile-value">{ instrumentalCount }</span>
+			</div>
+		</div>
+	</section>
+}
+
+// dashProviderTiles renders the per-lyrics-source tile row.
+templ dashProviderTiles(tiles []StatTile) {
+	<section
+		class="mx-dash-section"
+		aria-labelledby="mx-dash-provider-heading"
+		title="Hit count and rate per lyrics source as tracks are processed."
+	>
+		<h2 class="mx-dash-section-title" id="mx-dash-provider-heading">Lyrics Sources</h2>
+		<div class="mx-dash-tiles" role="list">
+			if len(tiles) == 0 {
+				<p class="mx-dash-empty">No lyrics source data yet. Data accrues as tracks are processed.</p>
+			}
+			for _, t := range tiles {
+				<div class="mx-dash-tile" role="listitem">
+					<span class="mx-dash-tile-label">{ t.Label }</span>
+					<span class="mx-dash-tile-value">{ t.Value }</span>
+					if t.Sub != "" {
+						<span class="mx-dash-tile-sub">{ t.Sub }</span>
+					}
+				</div>
+			}
+		</div>
+	</section>
+}
+
+// dashRecentOutcomes renders the recent-outcomes table (up to 20 rows).
+templ dashRecentOutcomes(rows []RecentOutcomeRow) {
+	<section
+		class="mx-dash-section"
+		aria-labelledby="mx-dash-outcomes-heading"
+		title="Up to 20 most recently completed tracks. A newly submitted track appears here after the background worker processes it."
+	>
+		<h2 class="mx-dash-section-title" id="mx-dash-outcomes-heading">Recent Outcomes</h2>
+		<p class="mx-dash-section-sub">Completion is asynchronous -- a newly submitted track may not appear until the worker processes it.</p>
+		if len(rows) == 0 {
+			<div class="mx-report-empty">
+				<span>No completed tracks yet. Tracks complete asynchronously in the background.</span>
+			</div>
+		} else {
+			<div class="mx-table-wrap">
+				<table class="mx-table" aria-label="Recent track outcomes">
+					<thead>
+						<tr>
+							<th>Artist</th>
+							<th>Title</th>
+							<th>Result</th>
+							<th>Source</th>
+							<th>Completed</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, row := range rows {
+							<tr>
+								<td>{ row.Artist }</td>
+								<td>{ row.Title }</td>
+								<td>{ row.Result }</td>
+								<td>{ row.Lane }</td>
+								<td class="mx-table-mono">
+									if row.CompletedAtISO != "" {
+										if row.CompletedAtTZApplied {
+											<time datetime={ row.CompletedAtISO } data-tz-applied="1">{ row.CompletedAt }</time>
+										} else {
+											<time datetime={ row.CompletedAtISO } data-tz="pending">{ row.CompletedAt }</time>
+										}
+									} else {
+										{ row.CompletedAt }
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
+		}
+	</section>
+}
+
+// dashQueueTileTooltip returns the hover description for a queue-status tile.
+func dashQueueTileTooltip(label string) string {
+	switch label {
+	case "Pending":
+		return "Tracks waiting to be picked up by the background worker."
+	case "Processing":
+		return "Tracks currently being fetched by the worker."
+	case "Done":
+		return "Tracks that completed successfully (lyrics written)."
+	case "Failed":
+		return "Tracks that exhausted all lyrics sources without a result."
+	case "Deferred":
+		return "Tracks skipped this cycle due to rate-limiting or transient errors."
+	default:
+		return ""
+	}
+}
+
+// iconDashboard is the grid glyph for the Dashboard sidebar nav item.
+templ iconDashboard() {
+	<svg class="mx-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+		<rect x="3" y="3" width="7" height="7"></rect>
+		<rect x="14" y="3" width="7" height="7"></rect>
+		<rect x="14" y="14" width="7" height="7"></rect>
+		<rect x="3" y="14" width="7" height="7"></rect>
+	</svg>
+}

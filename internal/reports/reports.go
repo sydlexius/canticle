@@ -292,6 +292,17 @@ func (r *Repo) InstrumentalInventory(ctx context.Context) ([]InstrumentalTrack, 
 	return out, nil
 }
 
+// CountInstrumental returns the number of work_queue rows the audio detector
+// confirmed as instrumental (instrumental_result = 1).
+func (r *Repo) CountInstrumental(ctx context.Context) (int64, error) {
+	var n int64
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE instrumental_result = 1`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("reports: count instrumental: %w", err)
+	}
+	return n, nil
+}
+
 // FailureGroup is a count of failed/deferred work_queue rows sharing one status
 // and reason.
 type FailureGroup struct {

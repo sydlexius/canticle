@@ -475,6 +475,52 @@ func TestQueryErrorsSurface(t *testing.T) {
 	if _, err := repo.FailureAnalysis(ctx); err == nil {
 		t.Error("FailureAnalysis on closed DB: want error")
 	}
+	if _, err := repo.CountInstrumental(ctx); err == nil {
+		t.Error("CountInstrumental on closed DB: want error")
+	}
+}
+
+// TestCountInstrumental verifies CountInstrumental returns the number of
+// work_queue rows with instrumental_result = 1, excluding other values.
+func TestCountInstrumental(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	// Start: zero instrumentals.
+	n, err := repo.CountInstrumental(ctx)
+	if err != nil {
+		t.Fatalf("CountInstrumental on empty DB: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("CountInstrumental = %d, want 0 on empty DB", n)
+	}
+
+	// Two confirmed instrumental, one not-instrumental (0), one not-run (nil).
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "i1", status: "done", instrumentalResult: 1})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "i2", status: "done", instrumentalResult: 1})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "v1", status: "done", instrumentalResult: 0})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "n1", status: "done", instrumentalResult: nil})
+
+	n, err = repo.CountInstrumental(ctx)
+	if err != nil {
+		t.Fatalf("CountInstrumental: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("CountInstrumental = %d, want 2 (only instrumental_result=1)", n)
+	}
+}
+
+// TestCountInstrumentalClosedDB verifies CountInstrumental surfaces the error
+// when the underlying query fails.
+func TestCountInstrumentalClosedDB(t *testing.T) {
+	sqlDB := openTestDB(t)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	if _, err := reports.New(sqlDB).CountInstrumental(context.Background()); err == nil {
+		t.Error("CountInstrumental on closed DB: want error, got nil")
+	}
 }
 
 func mustParse(t *testing.T, s string) time.Time {

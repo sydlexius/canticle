@@ -231,6 +231,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 			return sess
 		}
 		mux.Handle("GET /{$}", guard(http.HandlerFunc(u.handleRoot)))
+		mux.Handle("GET /dashboard", guard(http.HandlerFunc(u.handleDashboard)))
 		mux.Handle("GET /reports", guard(http.HandlerFunc(u.handleReports)))
 		mux.Handle("GET /reports/{key}", guard(http.HandlerFunc(u.handleReportFragment)))
 		mux.Handle("GET /config", guard(http.HandlerFunc(u.handleConfig)))
@@ -240,6 +241,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("GET /{$}", u.handleRoot)
+	mux.HandleFunc("GET /dashboard", u.handleDashboard)
 	mux.HandleFunc("GET /reports", u.handleReports)
 	mux.HandleFunc("GET /reports/{key}", u.handleReportFragment)
 	mux.HandleFunc("GET /config", u.handleConfig)

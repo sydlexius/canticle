@@ -53,6 +53,12 @@ type RecentOutcomeRow struct {
 	Result      string
 	Lane        string
 	CompletedAt string
+	// CompletedAtISO is the RFC3339 UTC value for the HTML <time datetime=> attribute.
+	// Empty when CompletedAt is the zero sentinel "-".
+	CompletedAtISO string
+	// CompletedAtTZApplied is true when the server formatted CompletedAt using the
+	// TZ env var, signaling that JS should not reformat it.
+	CompletedAtTZApplied bool
 }
 
 // ProviderRow is one provider lane's hit/miss tally and true per-track hit-rate.

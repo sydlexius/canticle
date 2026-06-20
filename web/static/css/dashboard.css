@@ -1,0 +1,141 @@
+/* Dashboard page components (#186). Uses design tokens from design-tokens.css
+ * (loaded via output.css, which runs first). All colors and sizes reference
+ * --mx-* custom properties so a future token swap propagates here automatically.
+ */
+
+/* -- Page shell ------------------------------------------------------------ */
+.mx-dash-page {
+  padding: 1.5rem 2rem 3rem;
+  max-width: var(--mx-content-max-width);
+}
+
+.mx-dash-header {
+  margin-bottom: 2rem;
+}
+
+.mx-dash-title {
+  font-family: var(--mx-font-sans);
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--mx-content-text);
+  margin: 0 0 0.25rem;
+}
+
+.mx-dash-sub {
+  font-family: var(--mx-font-sans);
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.mx-dash-asof {
+  font-family: var(--mx-font-mono);
+  font-size: 0.75rem;
+}
+
+/* -- Sections -------------------------------------------------------------- */
+.mx-dash-section {
+  margin-bottom: 2.5rem;
+}
+
+.mx-dash-section-title {
+  font-family: var(--mx-font-sans);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mx-content-text-secondary);
+  margin: 0 0 0.5rem;
+}
+
+.mx-dash-section-sub {
+  font-family: var(--mx-font-sans);
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+  margin: 0 0 0.875rem;
+  line-height: 1.5;
+}
+
+.mx-dash-empty {
+  font-family: var(--mx-font-sans);
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+  padding: 0.5rem 0;
+}
+
+/* -- Stat tiles ------------------------------------------------------------ */
+.mx-dash-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.mx-dash-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  background: var(--mx-surface-bg);
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-md);
+  padding: 0.875rem 1.125rem;
+  min-width: 7rem;
+}
+
+.mx-dash-tile-label {
+  font-family: var(--mx-font-sans);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--mx-content-text-secondary);
+}
+
+.mx-dash-tile-value {
+  font-family: var(--mx-font-mono);
+  font-size: 1.625rem;
+  font-weight: 500;
+  color: var(--mx-content-text);
+  line-height: 1.1;
+}
+
+.mx-dash-tile-sub {
+  font-family: var(--mx-font-sans);
+  font-size: 0.6875rem;
+  color: var(--mx-content-text-secondary);
+  margin-top: 0.125rem;
+}
+
+/* -- Metrics footer note --------------------------------------------------- */
+.mx-dash-metrics-note {
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+  margin-top: 1.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--mx-surface-border);
+}
+
+.mx-dash-metrics-hint {
+  color: var(--mx-content-text-secondary);
+  font-size: 0.75rem;
+}
+
+/* -- Code inline ----------------------------------------------------------- */
+.mx-dash-code {
+  font-family: var(--mx-font-mono);
+  font-size: 0.8125rem;
+  background: var(--mx-surface-bg);
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+  padding: 0.125rem 0.375rem;
+  color: var(--mx-accent);
+}
+
+.mx-dash-link {
+  color: var(--mx-accent);
+  text-decoration: none;
+}
+
+.mx-dash-link:hover {
+  text-decoration: underline;
+}

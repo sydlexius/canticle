@@ -25,6 +25,11 @@ templ Sidebar(active string, version string, reports []RailItem) {
 			</div>
 			<ul class="mx-nav-list" role="list">
 				<li>
+					@navLink("/dashboard", "Dashboard", active) {
+						@iconDashboard()
+					}
+				</li>
+				<li>
 					@navLink("/settings", "Settings", active) {
 						@iconSettings()
 					}

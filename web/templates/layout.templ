@@ -18,6 +18,7 @@ templ Layout(title string, active string, version string, reports []RailItem) {
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } - mxlrcgo-svc</title>
 			<link rel="stylesheet" href="/static/css/output.css"/>
+			<link rel="stylesheet" href="/static/css/dashboard.css"/>
 			// htmx powers the Reports workspace's on-demand fragment swaps. It is
 			// vendored and served from /static (no CDN), so the single binary stays
 			// self-contained and offline. defer keeps it non-render-blocking; htmx
