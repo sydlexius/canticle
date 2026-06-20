@@ -268,3 +268,203 @@ func TestCtxSleepReturnsFalseOnCancel(t *testing.T) {
 		t.Fatal("ctxSleep returned true on already-canceled ctx; want false")
 	}
 }
+
+// readAdaptiveLevel returns the client's adaptive level under the mutex.
+func readAdaptiveLevel(c *Client) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.adaptiveLevel
+}
+
+// readConsecutiveSuccesses returns the success counter under the mutex.
+func readConsecutiveSuccesses(c *Client) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.consecutiveSuccesses
+}
+
+func TestOnThrottleRatchetsToCap(t *testing.T) {
+	c := NewClient("token")
+	if got := readAdaptiveLevel(c); got != 0 {
+		t.Fatalf("initial level = %d; want 0", got)
+	}
+	want := []int{1, 2, 3, 3, 3} // 0->1->2->3, then stays capped at adaptiveMaxLevel
+	for i, w := range want {
+		c.OnThrottle()
+		if got := readAdaptiveLevel(c); got != w {
+			t.Fatalf("after OnThrottle call %d: level = %d; want %d", i+1, got, w)
+		}
+	}
+	if adaptiveMaxLevel != 3 {
+		t.Fatalf("adaptiveMaxLevel = %d; test assumes 3", adaptiveMaxLevel)
+	}
+}
+
+func TestOnThrottleIndependentOfTripCount(t *testing.T) {
+	// The pacer takes no trip-count parameter: each OnThrottle increments by
+	// exactly one regardless of any external counter. Verify monotonic +1 steps.
+	c := NewClient("token")
+	c.OnThrottle()
+	c.OnThrottle()
+	if got := readAdaptiveLevel(c); got != 2 {
+		t.Fatalf("level after two throttles = %d; want 2 (one step each)", got)
+	}
+}
+
+func TestOnSuccessStepsDownAfterThreshold(t *testing.T) {
+	c := NewClient("token")
+	// Ratchet up to level 2.
+	c.OnThrottle()
+	c.OnThrottle()
+	if got := readAdaptiveLevel(c); got != 2 {
+		t.Fatalf("level = %d; want 2", got)
+	}
+	// Below threshold: no step-down yet.
+	for i := 0; i < adaptiveSuccessThreshold-1; i++ {
+		c.OnSuccess()
+		if got := readAdaptiveLevel(c); got != 2 {
+			t.Fatalf("after %d successes: level = %d; want 2 (below threshold)", i+1, got)
+		}
+	}
+	// The threshold-th success steps the level down by one and resets the counter.
+	c.OnSuccess()
+	if got := readAdaptiveLevel(c); got != 1 {
+		t.Fatalf("after threshold successes: level = %d; want 1", got)
+	}
+	if got := readConsecutiveSuccesses(c); got != 0 {
+		t.Fatalf("success counter = %d after step-down; want 0", got)
+	}
+}
+
+func TestOnSuccessFlooredAtZero(t *testing.T) {
+	c := NewClient("token")
+	// No throttles: level is 0. A full streak must not drive it negative.
+	for i := 0; i < adaptiveSuccessThreshold; i++ {
+		c.OnSuccess()
+	}
+	if got := readAdaptiveLevel(c); got != 0 {
+		t.Fatalf("level = %d after streak at floor; want 0", got)
+	}
+}
+
+func TestOnThrottleResetsSuccessCounter(t *testing.T) {
+	c := NewClient("token")
+	c.OnThrottle() // level 1
+	// Accumulate a partial streak below the threshold.
+	c.OnSuccess()
+	c.OnSuccess()
+	if got := readConsecutiveSuccesses(c); got != 2 {
+		t.Fatalf("success counter = %d; want 2", got)
+	}
+	// A throttle mid-streak resets the success counter.
+	c.OnThrottle()
+	if got := readConsecutiveSuccesses(c); got != 0 {
+		t.Fatalf("success counter = %d after throttle; want 0", got)
+	}
+	if got := readAdaptiveLevel(c); got != 2 {
+		t.Fatalf("level = %d after second throttle; want 2", got)
+	}
+}
+
+func TestPaceUsesAdaptiveInterval(t *testing.T) {
+	minInterval := 10 * time.Second
+	base := time.Unix(1000, 0)
+	var mu sync.Mutex
+	fakeNow := base
+	nowFn := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return fakeNow
+	}
+	var gotSleep time.Duration
+	sleepFn := func(ctx context.Context, d time.Duration) bool {
+		gotSleep = d
+		mu.Lock()
+		fakeNow = fakeNow.Add(d)
+		mu.Unlock()
+		return true
+	}
+
+	c := newPacerTestClient(minInterval, nowFn, sleepFn)
+	track := models.Track{TrackName: "t", ArtistName: "a"}
+	ctx := context.Background()
+
+	// Ratchet to level 2 => effective interval = minInterval * (1 << 2) = 40s.
+	c.OnThrottle()
+	c.OnThrottle()
+
+	// First call sets lastRequest (huge elapsed, no sleep).
+	if _, err := c.FindLyrics(ctx, track); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if gotSleep != 0 {
+		t.Fatalf("first call slept %v; want 0", gotSleep)
+	}
+	// Second call at the same simulated instant must wait the derived interval.
+	if _, err := c.FindLyrics(ctx, track); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	wantWait := minInterval * time.Duration(1<<2)
+	if gotSleep != wantWait {
+		t.Fatalf("adaptive sleep = %v; want %v (minInterval * 1<<level)", gotSleep, wantWait)
+	}
+}
+
+func TestAdaptiveLevelPersistsAcrossRecovery(t *testing.T) {
+	// Simulate a circuit recovery cycle: throttle, then some (sub-threshold)
+	// successes as the breaker recovers, then another throttle. The level must
+	// NOT have reset to base on recovery -- it persists and ratchets further.
+	c := NewClient("token")
+	c.OnThrottle() // level 1
+	c.OnThrottle() // level 2
+	// Breaker recovers; a few successes arrive but not enough to step down.
+	for i := 0; i < adaptiveSuccessThreshold-1; i++ {
+		c.OnSuccess()
+	}
+	if got := readAdaptiveLevel(c); got != 2 {
+		t.Fatalf("level dropped during recovery = %d; want 2 (must persist)", got)
+	}
+	// IP throttles again: level keeps ratcheting from where it was, not from 0.
+	c.OnThrottle()
+	if got := readAdaptiveLevel(c); got != 3 {
+		t.Fatalf("level after re-throttle = %d; want 3 (ratchets from persisted 2)", got)
+	}
+}
+
+func TestAdaptiveStateConcurrencySafe(t *testing.T) {
+	// Hammer OnThrottle/OnSuccess/pace concurrently; the mutex must serialize all
+	// adaptive-state access. Run under -race to catch data races.
+	base := time.Unix(3000, 0)
+	var mu sync.Mutex
+	fakeNow := base
+	nowFn := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return fakeNow
+	}
+	sleepFn := func(ctx context.Context, d time.Duration) bool {
+		mu.Lock()
+		fakeNow = fakeNow.Add(d)
+		mu.Unlock()
+		return true
+	}
+	c := newPacerTestClient(time.Nanosecond, nowFn, sleepFn)
+
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				c.OnThrottle()
+				c.OnSuccess()
+				_ = c.pace(context.Background())
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := readAdaptiveLevel(c); got < 0 || got > adaptiveMaxLevel {
+		t.Fatalf("level = %d out of bounds [0,%d]", got, adaptiveMaxLevel)
+	}
+}

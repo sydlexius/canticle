@@ -63,3 +63,47 @@ func TestIsKnown(t *testing.T) {
 		}
 	}
 }
+
+// adaptiveFetcher implements both Fetcher and AdaptivePacer to verify the
+// namedProvider wrapper forwards adaptive notifications to the inner fetcher.
+type adaptiveFetcher struct {
+	throttles int
+	successes int
+}
+
+func (a *adaptiveFetcher) FindLyrics(context.Context, models.Track) (models.Song, error) {
+	return models.Song{}, nil
+}
+func (a *adaptiveFetcher) OnThrottle() { a.throttles++ }
+func (a *adaptiveFetcher) OnSuccess()  { a.successes++ }
+
+func TestNamedProviderForwardsAdaptivePacer(t *testing.T) {
+	af := &adaptiveFetcher{}
+	p := New(Musixmatch, af)
+
+	ap, ok := p.(AdaptivePacer)
+	if !ok {
+		t.Fatal("namedProvider does not satisfy AdaptivePacer")
+	}
+	ap.OnThrottle()
+	ap.OnThrottle()
+	ap.OnSuccess()
+	if af.throttles != 2 {
+		t.Fatalf("forwarded throttles = %d; want 2", af.throttles)
+	}
+	if af.successes != 1 {
+		t.Fatalf("forwarded successes = %d; want 1", af.successes)
+	}
+}
+
+func TestNamedProviderAdaptiveNoopForPlainFetcher(t *testing.T) {
+	// A fetcher without AdaptivePacer: the wrapper's methods must be safe no-ops.
+	p := New(Musixmatch, fakeFetcher{})
+	ap, ok := p.(AdaptivePacer)
+	if !ok {
+		t.Fatal("namedProvider should always satisfy AdaptivePacer")
+	}
+	// Must not panic even though the inner fetcher does not implement the iface.
+	ap.OnThrottle()
+	ap.OnSuccess()
+}

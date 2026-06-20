@@ -215,3 +215,215 @@ func TestLaneRecoveryLogsOnHalfOpenSuccess(t *testing.T) {
 		t.Fatalf("breaker state after recovery = %v; want closed", cb.Allow())
 	}
 }
+
+// adaptiveStubProvider implements both providers.LyricsProvider and
+// providers.AdaptivePacer, recording the adaptive notifications it receives so
+// tests can assert the Lane wiring drives it correctly.
+type adaptiveStubProvider struct {
+	name       string
+	song       models.Song
+	err        error
+	throttles  int
+	successes  int
+	pacerLevel int // mock ratchet: +1 per throttle (capped at 3), tracks independence
+}
+
+func (p *adaptiveStubProvider) Name() string { return p.name }
+func (p *adaptiveStubProvider) FindLyrics(context.Context, models.Track) (models.Song, error) {
+	if p.err != nil {
+		return models.Song{}, p.err
+	}
+	return p.song, nil
+}
+func (p *adaptiveStubProvider) OnThrottle() {
+	p.throttles++
+	if p.pacerLevel < 3 {
+		p.pacerLevel++
+	}
+}
+func (p *adaptiveStubProvider) OnSuccess() { p.successes++ }
+
+func TestLaneCallsOnThrottleOnTripAfterSuccess(t *testing.T) {
+	// A 401 AFTER the token has succeeded this session is an egress-IP throttle:
+	// the pacer must ratchet.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrUnauthorized)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	cb.RecordSuccess()
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrUnauthorized) {
+		t.Fatalf("err = %v; want ErrUnauthorized", err)
+	}
+	if p.throttles != 1 {
+		t.Fatalf("OnThrottle calls = %d; want 1 (throttle after a prior success)", p.throttles)
+	}
+	if p.successes != 0 {
+		t.Fatalf("OnSuccess calls = %d; want 0 on a throttle trip", p.successes)
+	}
+}
+
+func TestLaneCallsOnThrottleOnRateLimitNoPriorSuccess(t *testing.T) {
+	// A rate-limit is ALWAYS a throttle signal: the pacer must ratchet even with
+	// no successful fetch yet this session.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrRateLimited)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrRateLimited) {
+		t.Fatalf("err = %v; want ErrRateLimited", err)
+	}
+	if cb.EverSucceeded() {
+		t.Fatal("precondition: breaker must report !EverSucceeded for this case")
+	}
+	if p.throttles != 1 {
+		t.Fatalf("OnThrottle calls = %d; want 1 (rate-limit is always a throttle, even with no prior success)", p.throttles)
+	}
+}
+
+func TestLaneCallsOnThrottleOnRateLimitAfterSuccess(t *testing.T) {
+	// A rate-limit AFTER a prior success is likewise a throttle: the pacer must
+	// ratchet.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrRateLimited)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	cb.RecordSuccess()
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrRateLimited) {
+		t.Fatalf("err = %v; want ErrRateLimited", err)
+	}
+	if p.throttles != 1 {
+		t.Fatalf("OnThrottle calls = %d; want 1 (rate-limit after a prior success is a throttle)", p.throttles)
+	}
+}
+
+func TestLaneCallsOnThrottleOnTruncated(t *testing.T) {
+	// A truncated response is always a throttle signal, even with no prior
+	// success this session: the pacer must ratchet.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrTruncatedResponse)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrTruncatedResponse) {
+		t.Fatalf("err = %v; want ErrTruncatedResponse", err)
+	}
+	if p.throttles != 1 {
+		t.Fatalf("OnThrottle calls = %d; want 1 (truncated response is always a throttle)", p.throttles)
+	}
+}
+
+func TestLaneNoOnThrottleOnBadTokenNeverSucceeded(t *testing.T) {
+	// A bare 401 with NO successful fetch yet this session is a bad/expired token,
+	// not a throttle: the pacer must NOT ratchet. Slowing requests cannot fix a
+	// bad token.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrUnauthorized)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrUnauthorized) {
+		t.Fatalf("err = %v; want ErrUnauthorized", err)
+	}
+	if cb.EverSucceeded() {
+		t.Fatal("precondition: breaker must report !EverSucceeded for this case")
+	}
+	if p.throttles != 0 {
+		t.Fatalf("OnThrottle calls = %d; want 0 (bad token, never succeeded, is not a throttle)", p.throttles)
+	}
+}
+
+func TestLaneNoOnThrottleOnRenewal(t *testing.T) {
+	// A token-renewal trip is not an IP throttle: slowing requests cannot fix an
+	// expired token, so the pacer must NOT ratchet -- even after a prior success.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrTokenRenewalRequired)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	cb.RecordSuccess()
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrTokenRenewalRequired) {
+		t.Fatalf("err = %v; want ErrTokenRenewalRequired", err)
+	}
+	if p.throttles != 0 {
+		t.Fatalf("OnThrottle calls = %d; want 0 (token renewal is not a throttle)", p.throttles)
+	}
+}
+
+func TestLaneCallsOnSuccessOnFetch(t *testing.T) {
+	p := &adaptiveStubProvider{name: "musixmatch", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "ok"}}}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	l := NewLane(p, cb)
+
+	if _, err := l.FindLyrics(context.Background(), models.Track{}); err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if p.successes != 1 {
+		t.Fatalf("OnSuccess calls = %d; want 1 on a successful fetch", p.successes)
+	}
+	if p.throttles != 0 {
+		t.Fatalf("OnThrottle calls = %d; want 0 on success", p.throttles)
+	}
+}
+
+func TestLaneNoOnSuccessOnBenignMiss(t *testing.T) {
+	// A benign miss is a successful round-trip but not a catalog hit; the pacer
+	// must not be stabilized by it.
+	p := &adaptiveStubProvider{name: "musixmatch", err: musixmatch.ErrNotFound}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrNotFound) {
+		t.Fatalf("err = %v; want ErrNotFound", err)
+	}
+	if p.successes != 0 {
+		t.Fatalf("OnSuccess calls = %d; want 0 on a benign miss", p.successes)
+	}
+	if p.throttles != 0 {
+		t.Fatalf("OnThrottle calls = %d; want 0 on a benign miss", p.throttles)
+	}
+}
+
+func TestLaneBackwardCompatNonAdaptiveProvider(t *testing.T) {
+	// A provider that implements only LyricsProvider must drive the Lane fine; no
+	// adaptive notifications are attempted (the type assertion simply fails).
+	p := &stubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrUnauthorized)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	l := NewLane(p, cb)
+	if _, err := l.FindLyrics(context.Background(), models.Track{}); !errors.Is(err, musixmatch.ErrUnauthorized) {
+		t.Fatalf("err = %v; want ErrUnauthorized", err)
+	}
+	// Also exercise the success path on a non-adaptive provider.
+	ok := &stubProvider{name: "musixmatch", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "ok"}}}
+	l2 := NewLane(ok, circuit.New(60*time.Second, 30*time.Minute))
+	if _, err := l2.FindLyrics(context.Background(), models.Track{}); err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+}
+
+func TestLaneMultipleThrottlesRatchetMock(t *testing.T) {
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrUnauthorized)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	cb.RecordSuccess() // a 401 after a prior success this session is an egress-IP throttle
+	l := NewLane(p, cb)
+	fixed := time.Now()
+	cb.SetClock(func() time.Time { return fixed })
+
+	// Drive several throttle trips; the mock's level ratchets +1 each, capped at 3,
+	// independent of the breaker's own trip count.
+	for i := 0; i < 5; i++ {
+		// Advance past the window each round so the breaker re-trips rather than
+		// short-circuiting on an open gate.
+		cb.SetClock(func() time.Time { return fixed.Add(time.Duration(i) * time.Hour) })
+		_, _ = l.FindLyrics(context.Background(), models.Track{})
+	}
+	if p.throttles != 5 {
+		t.Fatalf("OnThrottle calls = %d; want 5", p.throttles)
+	}
+	if p.pacerLevel != 3 {
+		t.Fatalf("mock pacer level = %d; want 3 (ratchets capped, independent of trip count)", p.pacerLevel)
+	}
+}

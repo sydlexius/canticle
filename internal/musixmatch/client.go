@@ -20,6 +20,17 @@ import (
 
 const apiURL = "https://apic-desktop.musixmatch.com/ws/1.1/macro.subtitles.get"
 
+const (
+	// adaptiveMaxLevel caps the adaptive ratcheting level. The effective request
+	// interval is minInterval << adaptiveLevel, so a max level of 3 yields a
+	// maximum multiplier of 1 << 3 = 8x the configured cooldown floor.
+	adaptiveMaxLevel = 3
+	// adaptiveSuccessThreshold is the number of consecutive successful fetches
+	// required before the adaptive level steps down by one. Requiring a sustained
+	// clean streak prevents premature recovery that would restart the sawtooth.
+	adaptiveSuccessThreshold = 5
+)
+
 // Sentinel errors returned by the Musixmatch client. Callers should use
 // errors.Is to test for these classes rather than string-matching the message.
 var (
@@ -97,6 +108,14 @@ type Client struct {
 	lastRequest time.Time
 	now         func() time.Time
 	sleep       func(ctx context.Context, d time.Duration) bool
+
+	// Adaptive pacing state, guarded by mu. adaptiveLevel ratchets the effective
+	// request interval: effectiveMultiplier = 1 << adaptiveLevel (so level 0 ==
+	// 1x, the configured floor). It rises on throttle notifications and only
+	// falls after a sustained success streak, so it persists across circuit
+	// recovery cycles (the breaker's trip count is deliberately NOT used).
+	adaptiveLevel        int
+	consecutiveSuccesses int
 }
 
 // NewClient creates a new Musixmatch API client.
@@ -158,7 +177,14 @@ func (c *Client) pace(ctx context.Context) error {
 	for {
 		c.mu.Lock()
 		now := c.now()
-		wait := c.minInterval - now.Sub(c.lastRequest)
+		// Adaptive interval: minInterval scaled by the current ratcheting level.
+		// minInterval is the floor (level 0 == 1x), keeping api.cooldown as the
+		// explicit override the operator configured.
+		adaptiveLevel := c.adaptiveLevel
+		effectiveMultiplier := 1 << adaptiveLevel
+		baseInterval := c.minInterval
+		effectiveInterval := baseInterval * time.Duration(effectiveMultiplier)
+		wait := effectiveInterval - now.Sub(c.lastRequest)
 		if wait <= 0 {
 			c.lastRequest = now
 			c.mu.Unlock()
@@ -166,10 +192,48 @@ func (c *Client) pace(ctx context.Context) error {
 		}
 		c.mu.Unlock()
 
+		if adaptiveLevel > 0 {
+			slog.Debug("musixmatch pacer: adaptive interval in effect",
+				"level", adaptiveLevel, "multiplier", effectiveMultiplier,
+				"effective_interval", effectiveInterval, "base_interval", baseInterval)
+		}
+
 		slog.Debug("musixmatch pacer: waiting before next request", "wait", wait)
 		if !c.sleep(ctx, wait) {
 			return fmt.Errorf("musixmatch: pace: %w", ctx.Err())
 		}
+	}
+}
+
+// OnThrottle implements the providers.AdaptivePacer interface. It raises the
+// adaptive ratcheting level by one (capped at adaptiveMaxLevel), increasing the
+// effective request interval, and resets the consecutive-success counter. It
+// takes no parameter: the level is maintained independently of the circuit
+// breaker's trip count so it persists across circuit recovery cycles (using the
+// breaker's trips would snap the multiplier back to 1x on every recovery, the
+// exact sawtooth this fixes).
+func (c *Client) OnThrottle() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.adaptiveLevel < adaptiveMaxLevel {
+		c.adaptiveLevel++
+	}
+	c.consecutiveSuccesses = 0
+}
+
+// OnSuccess implements the providers.AdaptivePacer interface. It records a
+// successful fetch; once consecutiveSuccesses reaches adaptiveSuccessThreshold
+// it steps the adaptive level down by one (floored at 0) and resets the
+// counter, gradually easing the effective interval back toward the floor.
+func (c *Client) OnSuccess() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.consecutiveSuccesses++
+	if c.consecutiveSuccesses >= adaptiveSuccessThreshold {
+		if c.adaptiveLevel > 0 {
+			c.adaptiveLevel--
+		}
+		c.consecutiveSuccesses = 0
 	}
 }
 

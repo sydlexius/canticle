@@ -76,7 +76,27 @@ func (l *Lane) FindLyrics(ctx context.Context, track models.Track) (models.Song,
 	if l.breaker.RecordSuccess() {
 		slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
 	}
+	// Notify the adaptive pacer of a genuine lyric retrieval only. Benign misses
+	// are handled in classify and intentionally do not stabilize the pacer: they
+	// are successful HTTP round-trips but not catalog hits.
+	l.notifySuccess()
 	return song, nil
+}
+
+// notifyThrottle forwards a throttle notification to the provider when it
+// implements providers.AdaptivePacer; it is a no-op otherwise.
+func (l *Lane) notifyThrottle() {
+	if ap, ok := l.provider.(providers.AdaptivePacer); ok {
+		ap.OnThrottle()
+	}
+}
+
+// notifySuccess forwards a success notification to the provider when it
+// implements providers.AdaptivePacer; it is a no-op otherwise.
+func (l *Lane) notifySuccess() {
+	if ap, ok := l.provider.(providers.AdaptivePacer); ok {
+		ap.OnSuccess()
+	}
 }
 
 // classify drives the breaker for an error outcome and returns the error
@@ -111,6 +131,15 @@ func (l *Lane) classify(err error) error {
 		default:
 			slog.Warn("lane circuit opened: no successful fetch yet this session; verify your token",
 				"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		}
+		// Ratchet the adaptive pacer only on genuine throttle signals: a rate-limit
+		// or truncated response is ALWAYS throttling; a 401 is throttling only AFTER
+		// the token has succeeded this session (before that it's a bad token, not a
+		// throttle). Never ratchet on a never-succeeded 401.
+		if errors.Is(err, musixmatch.ErrRateLimited) ||
+			errors.Is(err, musixmatch.ErrTruncatedResponse) ||
+			(errors.Is(err, musixmatch.ErrUnauthorized) && l.breaker.EverSucceeded()) {
+			l.notifyThrottle()
 		}
 		return err
 	}

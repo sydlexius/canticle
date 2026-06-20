@@ -46,6 +46,23 @@ func (p namedProvider) FindLyrics(ctx context.Context, track models.Track) (mode
 	return p.fetcher.FindLyrics(ctx, track)
 }
 
+// OnThrottle forwards a throttle notification to the underlying fetcher when it
+// implements AdaptivePacer. It is a no-op for fetchers that do not, so the
+// wrapper itself always satisfies AdaptivePacer regardless of the inner type.
+func (p namedProvider) OnThrottle() {
+	if ap, ok := p.fetcher.(AdaptivePacer); ok {
+		ap.OnThrottle()
+	}
+}
+
+// OnSuccess forwards a success notification to the underlying fetcher when it
+// implements AdaptivePacer; it is a no-op otherwise.
+func (p namedProvider) OnSuccess() {
+	if ap, ok := p.fetcher.(AdaptivePacer); ok {
+		ap.OnSuccess()
+	}
+}
+
 // Select chooses the configured provider from the available candidates.
 func Select(primary string, disabled []string, candidates ...LyricsProvider) (LyricsProvider, error) {
 	primary = NormalizeName(primary)
