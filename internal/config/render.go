@@ -126,6 +126,13 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("randomize = %t%s\n", cfg.Queue.Randomize, ann("queue.randomize"))
 	p("\n")
 
+	// [watcher]
+	p("[watcher]\n")
+	p("enabled = %t%s\n", cfg.Watcher.Enabled, ann("watcher.enabled"))
+	p("debounce_ms = %d%s\n", cfg.Watcher.DebounceMS, ann("watcher.debounce_ms"))
+	p("max_dirs = %d%s\n", cfg.Watcher.MaxDirs, ann("watcher.max_dirs"))
+	p("\n")
+
 	// [secrets]
 	// Only the key-file PATH is shown; the key bytes it contains are never read
 	// into Config and never logged.
@@ -317,6 +324,11 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 		),
 		group("queue",
 			boolAttr("randomize", "queue.randomize", cfg.Queue.Randomize),
+		),
+		group("watcher",
+			boolAttr("enabled", "watcher.enabled", cfg.Watcher.Enabled),
+			intAttr("debounce_ms", "watcher.debounce_ms", cfg.Watcher.DebounceMS),
+			intAttr("max_dirs", "watcher.max_dirs", cfg.Watcher.MaxDirs),
 		),
 		group("secrets",
 			// Only the key-file path; key bytes are never read into Config.

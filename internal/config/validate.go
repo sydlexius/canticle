@@ -40,6 +40,23 @@ func ValidateNonNegativeInt() Validator {
 	}
 }
 
+// ValidatePositiveInt accepts an integer > 0. It mirrors the watcher.max_dirs
+// env-override rule (n <= 0 rejected): a non-positive cap would reject every
+// watch root, so the settings page refuses it at save time rather than letting
+// it abort the watcher at next boot.
+func ValidatePositiveInt() Validator {
+	return func(value string) error {
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("must be an integer")
+		}
+		if n <= 0 {
+			return fmt.Errorf("must be greater than zero")
+		}
+		return nil
+	}
+}
+
 // ValidateBool accepts a TOML boolean.
 func ValidateBool() Validator {
 	return func(value string) error {
@@ -197,6 +214,11 @@ func validatorFor(f FieldSpec) Validator {
 		return ValidateKnownProviders()
 	case "server.addr":
 		return ValidateListenAddr()
+	case "watcher.max_dirs":
+		// Strictly positive: a non-positive cap rejects every watch root (matches
+		// the MXLRCGO_WATCH_MAX_DIRS env rule). watcher.debounce_ms falls through to
+		// the default TypeInt non-negative validator (>= 0), matching its env rule.
+		return ValidatePositiveInt()
 	}
 	switch f.Type {
 	case TypeInt:

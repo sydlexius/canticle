@@ -28,6 +28,7 @@ type Config struct {
 	Enrichment           EnrichmentConfig           `toml:"enrichment"`
 	Guard                GuardConfig                `toml:"guard"`
 	Queue                QueueConfig                `toml:"queue"`
+	Watcher              WatcherConfig              `toml:"watcher"`
 	Logging              LoggingConfig              `toml:"logging"`
 	Secrets              SecretsConfig              `toml:"secrets"`
 }
@@ -374,6 +375,38 @@ type QueueConfig struct {
 	Randomize bool `toml:"randomize"`
 }
 
+// WatcherConfig holds the optional filesystem-watcher tuning. The watcher is a
+// latency optimization layered over the periodic scheduler (see the watcher
+// package doc); it is off by default. These values mirror the watcher package's
+// own defaults (defaultDebounceMS / defaultMaxDirs) so the central config and a
+// standalone ConfigFromEnv agree.
+type WatcherConfig struct {
+	// Enabled is the master switch for the watcher. Default false (off).
+	// Override: MXLRCGO_WATCH_ENABLED.
+	Enabled bool `toml:"enabled"`
+	// DebounceMS is the quiet period in milliseconds after the last filesystem
+	// event before a targeted scan fires; it coalesces event storms (taggers
+	// rewrite albums in bursts). Default 2000. A non-positive value is clamped to
+	// the watcher package default when the watcher is constructed.
+	// Override: MXLRCGO_WATCH_DEBOUNCE_MS.
+	DebounceMS int `toml:"debounce_ms"`
+	// MaxDirs caps how many directories may be watched before startup fails, a
+	// safety valve so a misconfigured root fails fast instead of silently
+	// exhausting the kernel inotify watch budget. Default 100000. A non-positive
+	// value is clamped to the watcher package default at construction.
+	// Override: MXLRCGO_WATCH_MAX_DIRS.
+	MaxDirs int `toml:"max_dirs"`
+}
+
+// watcherDebounceMSDefault and watcherMaxDirsDefault mirror the watcher
+// package's defaultDebounceMS / defaultMaxDirs. They are duplicated here (rather
+// than imported) to keep config free of an import on the watcher package;
+// TestWatcherDefaultsMatchConfigPackage (in the watcher package) guards drift.
+const (
+	watcherDebounceMSDefault = 2000
+	watcherMaxDirsDefault    = 100000
+)
+
 // defaults sets built-in fallback values.
 func defaults() Config {
 	return Config{
@@ -400,6 +433,7 @@ func defaults() Config {
 		Enrichment: EnrichmentConfig{Enabled: true},
 		Guard:      GuardConfig{Threshold: guardThresholdDefault},
 		Queue:      QueueConfig{Randomize: true},
+		Watcher:    WatcherConfig{Enabled: false, DebounceMS: watcherDebounceMSDefault, MaxDirs: watcherMaxDirsDefault},
 		Logging: LoggingConfig{
 			Level:      "info",
 			Format:     "text",
@@ -532,6 +566,19 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if !md.IsDefined("guard", "script_guard_threshold") || cfg.Guard.Threshold <= 0 || cfg.Guard.Threshold > 1 {
 				cfg.Guard.Threshold = d.Guard.Threshold
 			}
+			// Watcher: Enabled defaults to false (the bool zero-value), so it is
+			// never re-defaulted (an explicit enabled=false is honored). The two int
+			// fields use 0 == not-set-in-file: restore the default so a blank
+			// config.example.toml copy keeps the documented debounce/cap. New also
+			// clamps any non-positive value at construction, so a user-set 0 still
+			// works, but restoring the default here keeps the Raw config tab and
+			// provenance display sensible.
+			if cfg.Watcher.DebounceMS == 0 {
+				cfg.Watcher.DebounceMS = d.Watcher.DebounceMS
+			}
+			if cfg.Watcher.MaxDirs == 0 {
+				cfg.Watcher.MaxDirs = d.Watcher.MaxDirs
+			}
 			// Logging: restore defaults for blank string fields and zero ints.
 			if cfg.Logging.Level == "" {
 				cfg.Logging.Level = d.Logging.Level
@@ -588,7 +635,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -794,6 +841,33 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.Queue.Randomize = randomize
 			applied["queue.randomize"] = true
+		}
+	}
+	if v := os.Getenv("MXLRCGO_WATCH_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRCGO_WATCH_ENABLED", "value", v, "current", cfg.Watcher.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Watcher.Enabled = enabled
+			applied["watcher.enabled"] = true
+		}
+	}
+	if v := os.Getenv("MXLRCGO_WATCH_DEBOUNCE_MS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRCGO_WATCH_DEBOUNCE_MS", "value", v, "current", cfg.Watcher.DebounceMS) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Watcher.DebounceMS = n
+			applied["watcher.debounce_ms"] = true
+		}
+	}
+	if v := os.Getenv("MXLRCGO_WATCH_MAX_DIRS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRCGO_WATCH_MAX_DIRS", "value", v, "current", cfg.Watcher.MaxDirs) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Watcher.MaxDirs = n
+			applied["watcher.max_dirs"] = true
 		}
 	}
 	whisperVar := "MXLRC_VERIFICATION_WHISPER_URL"

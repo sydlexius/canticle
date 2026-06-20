@@ -53,6 +53,12 @@ type Config struct {
 
 // ConfigFromEnv builds a Config from the MXLRCGO_WATCH_* environment variables,
 // falling back to defaults and logging a warning when a value is invalid.
+//
+// SUPERSEDED for serve mode: the central [watcher] config
+// (config.WatcherConfig, applied via watcherConfigFromCentral in
+// internal/commands) is the source of truth there. ConfigFromEnv is retained
+// only for this package's own tests and standalone use; callers should prefer
+// the central config so the two parsers do not diverge.
 func ConfigFromEnv() Config {
 	return Config{
 		Enabled:  envBool(EnvEnabled),

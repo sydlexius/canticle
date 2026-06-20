@@ -899,7 +899,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		defer wg.Done()
 		runScheduler(runCtx, sqlDB, cfg, args)
 	}()
-	if watchCfg := watcher.ConfigFromEnv(); watchCfg.Enabled {
+	// Build the watcher config from the central config (TOML + env, env > file)
+	// rather than reading the environment directly, so the [watcher] section and
+	// the settings UI drive it. New clamps a non-positive Debounce/MaxDirs to the
+	// watcher package default, so DebounceMS <= 0 keeps the documented behavior.
+	if watchCfg := watcherConfigFromCentral(cfg); watchCfg.Enabled {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1389,6 +1393,19 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 // runWatcher runs the optional filesystem watcher, triggering a targeted scan of
 // the changed directory under the owning library. The periodic scheduler remains
 // the reconciliation backstop; the watcher only lowers latency for new files.
+// watcherConfigFromCentral maps the central [watcher] config onto the watcher
+// package's Config. DebounceMS (milliseconds) becomes a time.Duration. The
+// non-positive clamp is intentionally left to watcher.New (a 0 or negative
+// Debounce/MaxDirs is raised to the watcher package default there), so this
+// mapping is a straight translation and the clamp lives in exactly one place.
+func watcherConfigFromCentral(cfg config.Config) watcher.Config {
+	return watcher.Config{
+		Enabled:  cfg.Watcher.Enabled,
+		Debounce: time.Duration(cfg.Watcher.DebounceMS) * time.Millisecond,
+		MaxDirs:  cfg.Watcher.MaxDirs,
+	}
+}
+
 func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config) {
 	sched := scheduler(sqlDB, scanner.ScanOptions{
 		Update:         args.Update,

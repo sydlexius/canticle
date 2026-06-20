@@ -73,6 +73,7 @@ var settingsSectionOrder = []struct {
 	{"output", "Output"},
 	{"db", "Database"},
 	{"server", "Server"},
+	{"watcher", "Watcher"},
 	{"providers", "Providers"},
 	{"verification", "Verification"},
 	{"instrumental_detector", "Instrumental Detector"},
@@ -384,6 +385,7 @@ var boolLabels = map[string][2]string{
 	"instrumental_detector.enabled": {"Detect instrumental tracks", "Don't detect"},
 	"enrichment.enabled":            {"Look up extra track info first", "Skip the lookup"},
 	"queue.randomize":               {"Process in random order", "Process in order"},
+	"watcher.enabled":               {"Watch for new files", "Don't watch"},
 	"server.tls.self_signed":        {"Use a self-signed certificate", "Off"},
 	"logging.compress":              {"Compress old log files", "Don't compress"},
 }
@@ -726,6 +728,13 @@ func rawConfigValue(cfg config.Config, path string) string {
 	// [queue]
 	case "queue.randomize":
 		return strconv.FormatBool(cfg.Queue.Randomize)
+	// [watcher]
+	case "watcher.enabled":
+		return strconv.FormatBool(cfg.Watcher.Enabled)
+	case "watcher.debounce_ms":
+		return strconv.Itoa(cfg.Watcher.DebounceMS)
+	case "watcher.max_dirs":
+		return strconv.Itoa(cfg.Watcher.MaxDirs)
 	// [logging]
 	case "logging.level":
 		return cfg.Logging.Level
@@ -865,6 +874,9 @@ var settingsLabels = map[string]string{
 	"guard.accepted_scripts":                        "Writing systems to accept without asking",
 	"guard.script_guard_threshold":                  "Foreign-script sensitivity (0-1)",
 	"queue.randomize":                               "Process tracks in random order",
+	"watcher.enabled":                               "Watch for new files",
+	"watcher.debounce_ms":                           "Quiet period after file changes (milliseconds)",
+	"watcher.max_dirs":                              "Maximum directories to watch",
 	"logging.format":                                "Log format (text or json)",
 	"logging.file":                                  "Log file location (blank logs to the screen)",
 	"logging.max_size_mb":                           "Rotate the log after this size (MB)",
@@ -922,6 +934,9 @@ var settingsDescriptions = map[string]string{ //nolint:gosec // G101 false posit
 	"guard.accepted_scripts":                        "The foreign-script guard skips or flags lyrics whose share of characters outside these accepted writing systems exceeds the sensitivity threshold below. Valid buckets: Latin, Han, Kana, Hangul, Other. Empty disables the guard.",
 	"guard.script_guard_threshold":                  "The fraction of non-accepted-script characters that trips the guard (0-1). Higher is more tolerant (more foreign text allowed); lower is stricter.",
 	"queue.randomize":                               "Process queued tracks in random order.",
+	"watcher.enabled":                               "Watch library folders and trigger a targeted scan when files change. The periodic scan still runs; the watcher only lowers latency. Off by default. Takes effect on restart.",
+	"watcher.debounce_ms":                           "Milliseconds to wait after the last file change before scanning, so a burst of edits (a tagger rewriting an album) coalesces into one scan. Default 2000.",
+	"watcher.max_dirs":                              "Safety cap on how many folders the watcher may track. Startup fails fast above this instead of exhausting the OS watch budget. Default 100000.",
 	"logging.level":                                 "Log verbosity: debug, info, warn, or error. This single level governs both console and file output (there is no separate per-sink level).",
 	"logging.format":                                "Log format: text or json.",
 	"logging.file":                                  "Where to write logs. Leave blank to log to the console (stderr).",

@@ -136,6 +136,11 @@ var fields = []FieldSpec{
 	// [queue]
 	{Path: "queue.randomize", Section: "queue", Type: TypeBool, EnvVars: []string{"MXLRC_QUEUE_RANDOMIZE"}, Criticality: Safe, Editable: true},
 
+	// [watcher]
+	{Path: "watcher.enabled", Section: "watcher", Type: TypeBool, EnvVars: []string{"MXLRCGO_WATCH_ENABLED"}, Criticality: Safe, Editable: true},
+	{Path: "watcher.debounce_ms", Section: "watcher", Type: TypeInt, EnvVars: []string{"MXLRCGO_WATCH_DEBOUNCE_MS"}, Criticality: Safe, Editable: true},
+	{Path: "watcher.max_dirs", Section: "watcher", Type: TypeInt, EnvVars: []string{"MXLRCGO_WATCH_MAX_DIRS"}, Criticality: Safe, Editable: true},
+
 	// [logging]
 	{Path: "logging.level", Section: "logging", Type: TypeString, EnvVars: []string{"MXLRC_LOG_LEVEL"}, Criticality: Safe, Editable: true},
 	{Path: "logging.format", Section: "logging", Type: TypeString, EnvVars: []string{"MXLRC_LOG_FORMAT"}, Criticality: Safe, Editable: true},

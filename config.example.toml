@@ -267,6 +267,26 @@ script_guard_threshold = 0.20
 # deterministic created_at/id ordering. Env override: MXLRC_QUEUE_RANDOMIZE.
 randomize = true
 
+[watcher]
+# Optional filesystem watcher (serve mode). When enabled, file changes under the
+# library roots trigger a targeted scan, lowering latency between a file landing
+# and lyrics being fetched. It is a latency optimization layered over the periodic
+# scan, never a replacement: bind mounts, NFS, SMB, and Docker Desktop on macOS
+# frequently drop events, and events that fire while the process is down are lost.
+# The periodic scan remains the source of truth. Disabled by default.
+# Env override: MXLRCGO_WATCH_ENABLED.
+# enabled = false
+
+# Quiet period in milliseconds after the last file change before a scan fires.
+# Coalesces event storms (a tagger rewriting an album in a burst) into one scan.
+# Default 2000. Env override: MXLRCGO_WATCH_DEBOUNCE_MS.
+# debounce_ms = 2000
+
+# Safety cap on how many directories may be watched. Startup fails fast above this
+# instead of silently exhausting the kernel's inotify watch budget. Default 100000.
+# Env override: MXLRCGO_WATCH_MAX_DIRS.
+# max_dirs = 100000
+
 [secrets]
 # Encrypted-at-rest storage for the Musixmatch token and webhook API key. The
 # 32-byte AES-256 master key is auto-generated as a 0600 key file on first use
