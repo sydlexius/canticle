@@ -298,6 +298,27 @@ func TestRecentOutcomeNullCompletedAt(t *testing.T) {
 	}
 }
 
+// TestRecentOutcomesServerTimezone covers the serverLoc resolution branch in
+// buildReportView: with the TZ env set to a valid zone, completed-at timestamps
+// are formatted server-side in that zone (the tz != "" + LoadLocation-success +
+// serverLoc = loc path). "UTC" needs no tzdata file, so the test stays
+// env-independent.
+func TestRecentOutcomesServerTimezone(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	sqlDB := openReportsTestDB(t)
+	insertDone(t, sqlDB, "Song", "musixmatch", `[{"outdir":"/out","filename":"Song.lrc"}]`, "2026-06-17T12:00:00Z")
+	mux := newReportsUIServer(t, sqlDB)
+
+	body := getFragment(t, mux, "recent-outcomes").Body.String()
+	if !strings.Contains(body, "Song") {
+		t.Fatalf("recent-outcomes row missing; body:\n%s", body)
+	}
+	// The CompletedAt cell carries the UTC label from the resolved server zone.
+	if !strings.Contains(body, "2026-06-17 12:00:00 UTC") {
+		t.Errorf("completed_at should render in the server timezone with a UTC label; body:\n%s", body)
+	}
+}
+
 // TestReportFragmentQueryError fails with 500 when the underlying query errors
 // (here, a closed database), rather than rendering a partial or empty table.
 func TestReportFragmentQueryError(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -334,6 +335,18 @@ func (u *UI) buildRail(activeKey string) []templates.RailItem {
 // results onto the presentation view. LastRun is stamped by the caller.
 func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.ReportView, error) {
 	v := templates.ReportView{Key: def.key, Title: def.title, Subtitle: def.subtitle}
+
+	// Resolve the server display timezone for completed-at timestamps,
+	// mirroring buildDashboardView. If TZ env is set and valid, format
+	// server-side in that zone; otherwise leave timestamps in the zone they
+	// carry (UTC, as stored).
+	var serverLoc *time.Location
+	if tz := os.Getenv("TZ"); tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			serverLoc = loc
+		}
+	}
+
 	switch def.key {
 	case "queue-summary":
 		s, err := u.reports.QueueSummary(ctx)
@@ -361,7 +374,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Album:       o.Album,
 				Result:      string(o.Result),
 				Lane:        o.ProviderLane,
-				CompletedAt: formatReportTime(o.CompletedAt),
+				CompletedAt: formatReportTime(o.CompletedAt, serverLoc),
 			})
 		}
 	case "provider-effectiveness":
@@ -416,14 +429,19 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 	return v, nil
 }
 
-// formatReportTime renders a timestamp, or an em dash for the zero value (a NULL
+// formatReportTime renders a timestamp, or a hyphen for the zero value (a NULL
 // completed_at), so an empty cell reads as "no timestamp" rather than a bogus
-// epoch.
-func formatReportTime(t time.Time) string {
+// epoch. With a non-nil loc the timestamp is shown in that zone; with a nil loc
+// it is normalized to UTC (symmetric with formatDashboardTime), so a timestamp
+// that carries a non-UTC zone still renders with a UTC label.
+func formatReportTime(t time.Time, loc *time.Location) string {
 	if t.IsZero() {
 		return "-"
 	}
-	return t.Format(reportTimeFormat)
+	if loc != nil {
+		return t.In(loc).Format(reportTimeFormat)
+	}
+	return t.UTC().Format(reportTimeFormat)
 }
 
 // detectRequestedLabel maps the per-item detect_instrumental request flag to a
