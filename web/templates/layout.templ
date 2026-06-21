@@ -9,8 +9,10 @@ package templates
 // into the main column. The main column carries id="mx-main": it is the htmx
 // swap target for the sidebar report rows, so selecting a report from any page
 // replaces the content here. The UI is dark-only in v1, so the surface colors
-// come straight from the tokens with no theme class to toggle.
-templ Layout(title string, active string, version string, reports []RailItem) {
+// come straight from the tokens with no theme class to toggle. pageCSS is an
+// optional per-page stylesheet path (empty for none): it ships route-specific
+// CSS only on the page that needs it instead of on every page (issue #322).
+templ Layout(title string, active string, version string, reports []RailItem, pageCSS string) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -24,7 +26,13 @@ templ Layout(title string, active string, version string, reports []RailItem) {
 			<link rel="icon" href="/static/img/favicon.ico" sizes="any"/>
 			<link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png"/>
 			<link rel="stylesheet" href="/static/css/output.css"/>
-			<link rel="stylesheet" href="/static/css/dashboard.css"/>
+			// Optional per-page stylesheet: a page passes a path here (e.g. the
+			// dashboard's own sheet) so route-specific CSS ships only on that
+			// route, not on every page (issue #322). Empty for pages with no
+			// extra CSS.
+			if pageCSS != "" {
+				<link rel="stylesheet" href={ pageCSS }/>
+			}
 			// htmx powers the Reports workspace's on-demand fragment swaps. It is
 			// vendored and served from /static (no CDN), so the single binary stays
 			// self-contained and offline. defer keeps it non-render-blocking; htmx

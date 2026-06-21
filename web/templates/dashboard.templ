@@ -11,7 +11,7 @@ package templates
 
 // DashboardPage is the full-page dashboard shell.
 templ DashboardPage(version string, reports []RailItem, view DashboardView) {
-	@Layout("Dashboard", "/dashboard", version, reports) {
+	@Layout("Dashboard", "/dashboard", version, reports, "/static/css/dashboard.css") {
 		@dashboardContent(view)
 	}
 }

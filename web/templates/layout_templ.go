@@ -20,8 +20,10 @@ import templruntime "github.com/a-h/templ/runtime"
 // into the main column. The main column carries id="mx-main": it is the htmx
 // swap target for the sidebar report rows, so selecting a report from any page
 // replaces the content here. The UI is dark-only in v1, so the surface colors
-// come straight from the tokens with no theme class to toggle.
-func Layout(title string, active string, version string, reports []RailItem) templ.Component {
+// come straight from the tokens with no theme class to toggle. pageCSS is an
+// optional per-page stylesheet path (empty for none): it ships route-specific
+// CSS only on the page that needs it instead of on every page (issue #322).
+func Layout(title string, active string, version string, reports []RailItem, pageCSS string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -49,13 +51,36 @@ func Layout(title string, active string, version string, reports []RailItem) tem
 		var templ_7745c5c3_Var2 string
 		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs(title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/layout.templ`, Line: 19, Col: 17}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/layout.templ`, Line: 21, Col: 17}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " - mxlrcgo-svc</title><link rel=\"icon\" type=\"image/svg+xml\" href=\"/static/img/canticle-mark.svg\"><link rel=\"icon\" type=\"image/png\" sizes=\"48x48\" href=\"/static/img/favicon-48.png\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/img/favicon-32.png\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/img/favicon-16.png\"><link rel=\"icon\" href=\"/static/img/favicon.ico\" sizes=\"any\"><link rel=\"apple-touch-icon\" href=\"/static/img/apple-touch-icon.png\"><link rel=\"stylesheet\" href=\"/static/css/output.css\"><link rel=\"stylesheet\" href=\"/static/css/dashboard.css\"><script src=\"/static/js/htmx.min.js\" defer></script></head><body><div class=\"mx-shell\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " - mxlrcgo-svc</title><link rel=\"icon\" type=\"image/svg+xml\" href=\"/static/img/canticle-mark.svg\"><link rel=\"icon\" type=\"image/png\" sizes=\"48x48\" href=\"/static/img/favicon-48.png\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/img/favicon-32.png\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/img/favicon-16.png\"><link rel=\"icon\" href=\"/static/img/favicon.ico\" sizes=\"any\"><link rel=\"apple-touch-icon\" href=\"/static/img/apple-touch-icon.png\"><link rel=\"stylesheet\" href=\"/static/css/output.css\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		if pageCSS != "" {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<link rel=\"stylesheet\" href=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var3 templ.SafeURL
+			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinURLErrs(pageCSS)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/layout.templ`, Line: 34, Col: 41}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<script src=\"/static/js/htmx.min.js\" defer></script></head><body><div class=\"mx-shell\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -63,7 +88,7 @@ func Layout(title string, active string, version string, reports []RailItem) tem
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<main class=\"mx-content\" id=\"mx-main\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<main class=\"mx-content\" id=\"mx-main\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -71,7 +96,7 @@ func Layout(title string, active string, version string, reports []RailItem) tem
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</main></div></body></html>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</main></div></body></html>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

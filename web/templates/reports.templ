@@ -19,7 +19,7 @@ package templates
 // navigation the handler passes the rendered ReportView so the full page lands on
 // that report. reports is the sidebar report-nav model.
 templ ReportsPage(version string, reports []RailItem, view *ReportView) {
-	@Layout("Reports", "/reports", version, reports) {
+	@Layout("Reports", "/reports", version, reports, "") {
 		@reportPane(view)
 	}
 }

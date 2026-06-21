@@ -10,7 +10,7 @@ package templates
 // current value and a plain "Locked" pill when an override is active, but no
 // form submits yet. The write handlers arrive in Phase 2.
 templ SettingsPage(version string, view SettingsView, reports []RailItem) {
-	@Layout("Settings", "/settings", version, reports) {
+	@Layout("Settings", "/settings", version, reports, "") {
 		<h1 class="mx-page-title">Settings</h1>
 		<p class="mx-page-subtitle">
 			Edit the daemon configuration. Changes are written to the config file and take effect on restart.

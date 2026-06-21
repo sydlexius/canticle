@@ -64,6 +64,15 @@ body {
   padding: 0.5rem 0.5rem 1.25rem;
 }
 
+/* The brand mark in the sidebar header. The sidebar renders on every page, so
+   this rule lives in the globally-loaded stylesheet (not the dashboard-only
+   sheet) -- issue #322. */
+.mx-sidebar-logo {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
 .mx-sidebar-wordmark {
   font-family: var(--mx-font-sans);
   font-size: 1.05rem;
