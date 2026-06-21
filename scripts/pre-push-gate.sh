@@ -122,7 +122,7 @@ echo "==> ui-check (generated web assets up to date)"
 # steps above -- CI's ui-check job remains the source of truth.
 TAILWIND_BIN="${TAILWIND:-}"
 if [ -z "$TAILWIND_BIN" ]; then
-  TAILWIND_BIN="$(command -v tailwindcss 2>/dev/null || true)"
+  TAILWIND_BIN="$(command -v tailwindcss 2>/dev/null || command -v tailwind 2>/dev/null || true)"
 fi
 if [ -n "$TAILWIND_BIN" ]; then
   make ui-check TAILWIND="$TAILWIND_BIN" || fail "ui-check: generated web assets are stale; run 'make ui' and commit the result"
