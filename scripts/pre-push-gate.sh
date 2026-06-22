@@ -45,6 +45,29 @@ echo "==> gofmt"
 unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
 [ -n "$unformatted" ] && fail "gofmt needed:\n$unformatted"
 
+echo "==> generate web UI assets (templ + Tailwind)"
+# Generated web assets (web/templates/*_templ.go, web/static/css/output.css) are
+# no longer committed (issue #364): they are produced on build. web/static/embed.go
+# embeds output.css at COMPILE TIME, so generation MUST run BEFORE `go build`
+# below. templ is pinned via the go.mod tool directive; Tailwind is the v4
+# standalone CLI (resolved from a TAILWIND override or PATH). When tailwindcss is
+# absent we still run templ and fall back to the on-disk output.css so the gate
+# can pass without a network fetch -- CI regenerates from scratch and is the
+# source of truth.
+TAILWIND_BIN="${TAILWIND:-}"
+if [ -z "$TAILWIND_BIN" ]; then
+  TAILWIND_BIN="$(command -v tailwindcss 2>/dev/null || command -v tailwind 2>/dev/null || true)"
+fi
+if [ -n "$TAILWIND_BIN" ]; then
+  make generate TAILWIND="$TAILWIND_BIN" || fail "generate web UI assets"
+else
+  echo "    tailwindcss not found; running templ only and using the existing output.css."
+  echo "    (brew install tailwindcss, or set TAILWIND=/path/to/tailwindcss to regenerate CSS)"
+  go tool templ generate || fail "templ generate"
+  [ -f web/static/css/output.css ] || \
+    fail "web/static/css/output.css missing and tailwindcss unavailable; install tailwindcss and run 'make ui'"
+fi
+
 echo "==> go build"
 go build ./... || fail "build"
 
@@ -110,25 +133,6 @@ if command -v govulncheck >/dev/null 2>&1; then
   govulncheck ./... || fail "govulncheck"
 else
   echo "    govulncheck not installed; skipping (CI still enforces it)"
-fi
-
-echo "==> ui-check (generated web assets up to date)"
-# Catch stale generated web UI assets (web/static/css/output.css, *_templ.go)
-# locally instead of only on the remote "UI Assets" CI job (#321). The check
-# needs the Tailwind v4 standalone CLI; the single version pin lives in
-# .github/workflows/ci.yml, so we do NOT re-pin or download anything here.
-# Resolve a binary from a TAILWIND override (CI passes one) or PATH; when none
-# is found this is SKIPPED (not failed), exactly like the codecovcli/actionlint
-# steps above -- CI's ui-check job remains the source of truth.
-TAILWIND_BIN="${TAILWIND:-}"
-if [ -z "$TAILWIND_BIN" ]; then
-  TAILWIND_BIN="$(command -v tailwindcss 2>/dev/null || command -v tailwind 2>/dev/null || true)"
-fi
-if [ -n "$TAILWIND_BIN" ]; then
-  make ui-check TAILWIND="$TAILWIND_BIN" || fail "ui-check: generated web assets are stale; run 'make ui' and commit the result"
-else
-  echo "    tailwindcss not found; skipping ui-check (CI enforces it)."
-  echo "    (brew install tailwindcss, or set TAILWIND=/path/to/tailwindcss for the local check)"
 fi
 
 echo "OK: all pre-push checks passed"
