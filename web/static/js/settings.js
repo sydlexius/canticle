@@ -154,12 +154,80 @@
     }
   }
 
+  // --- ARIA tab semantics -------------------------------------------------
+  // Maps each radio id to the corresponding tabctl label id.
+  var TAB_RADIOS = ["mx-tab-common", "mx-tab-advanced", "mx-tab-raw"];
+  var TAB_CTLS   = ["mx-tabctl-common", "mx-tabctl-advanced", "mx-tabctl-raw"];
+
+  // Sync aria-selected + tabindex on the three tab labels to match which radio
+  // is :checked. Called on init (via syncAll) and after any radio state change.
+  function syncTabs() {
+    for (var i = 0; i < TAB_RADIOS.length; i++) {
+      var radio = document.getElementById(TAB_RADIOS[i]);
+      var ctl   = document.getElementById(TAB_CTLS[i]);
+      if (!radio || !ctl) {
+        console.error("settings.js syncTabs: missing element", TAB_RADIOS[i], TAB_CTLS[i]);
+        continue;
+      }
+      var active = radio.checked;
+      ctl.setAttribute("aria-selected", active ? "true" : "false");
+      ctl.setAttribute("tabindex", active ? "0" : "-1");
+    }
+  }
+
+  // Keyboard navigation for the tablist: Left/Right cycle through tabs,
+  // Home/End jump to the first/last tab. Checks the radio and focuses the label.
+  function initTabKeyboard() {
+    var tablist = document.querySelector(".mx-tablist");
+    if (!tablist) {
+      console.error("settings.js initTabKeyboard: .mx-tablist not found");
+      return;
+    }
+    tablist.addEventListener("keydown", function (event) {
+      var key = event.key;
+      if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "Home" && key !== "End") {
+        return;
+      }
+      event.preventDefault();
+      var currentIndex = -1;
+      for (var i = 0; i < TAB_RADIOS.length; i++) {
+        var radio = document.getElementById(TAB_RADIOS[i]);
+        if (radio && radio.checked) {
+          currentIndex = i;
+          break;
+        }
+      }
+      if (currentIndex === -1) {
+        return;
+      }
+      var nextIndex;
+      if (key === "ArrowLeft") {
+        nextIndex = (currentIndex - 1 + TAB_RADIOS.length) % TAB_RADIOS.length;
+      } else if (key === "ArrowRight") {
+        nextIndex = (currentIndex + 1) % TAB_RADIOS.length;
+      } else if (key === "Home") {
+        nextIndex = 0;
+      } else {
+        nextIndex = TAB_RADIOS.length - 1;
+      }
+      var nextRadio = document.getElementById(TAB_RADIOS[nextIndex]);
+      var nextCtl   = document.getElementById(TAB_CTLS[nextIndex]);
+      if (nextRadio && nextCtl) {
+        nextRadio.checked = true;
+        syncTabs();
+        nextCtl.focus();
+      }
+    });
+  }
+  // -------------------------------------------------------------------------
+
   function handleJump(link) {
     var tabId = link.getAttribute("data-jump-tab");
     var targetId = link.getAttribute("data-jump-target");
     var tab = tabId ? document.getElementById(tabId) : null;
     if (tab) {
       tab.checked = true; // switch the CSS-only tab to reveal the target panel
+      syncTabs();
     } else {
       console.error("settings.js: jump tab not found:", tabId);
     }
@@ -466,6 +534,7 @@
     syncGating();
     syncProviders();
     syncTLS();
+    syncTabs();
   }
   document.addEventListener("change", function (event) {
     syncAll();
@@ -475,8 +544,12 @@
     }
   });
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", syncAll);
+    document.addEventListener("DOMContentLoaded", function () {
+      syncAll();
+      initTabKeyboard();
+    });
   } else {
     syncAll();
+    initTabKeyboard();
   }
 })();
