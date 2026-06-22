@@ -1,6 +1,6 @@
 .PHONY: build run test test-shuffle test-cover patch-cover gate scan vulncheck \
         doctor sync-tool-versions coverage-floor smoke lint fmt hooks clean help \
-        docs docs-serve docs-deps templ tailwind ui ui-check
+        docs docs-serve docs-deps templ tailwind ui ui-check generate
 
 # Binary name
 BINARY=mxlrcgo-svc
@@ -113,6 +113,13 @@ tailwind:
 
 ## ui: Regenerate all web UI assets (templ + Tailwind)
 ui: templ tailwind
+
+## generate: Generate web UI assets (alias of `ui`) for scripts/CI build paths
+# Generated assets (web/templates/*_templ.go, web/static/css/output.css) are no
+# longer committed (issue #364); they are produced on build. web/static/embed.go
+# embeds output.css at COMPILE TIME, so this MUST run before `go build` in every
+# build path (gate, Dockerfile, GoReleaser, CI).
+generate: ui
 
 ## ui-check: Fail if committed web UI assets are stale or untracked vs their sources (CI gate)
 ui-check: ui
