@@ -3,8 +3,14 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
@@ -647,6 +654,41 @@ func touchFile(t *testing.T, dir, name string) string {
 	return p
 }
 
+// pemFile writes a self-signed certificate (or EC key) PEM file and returns its
+// path. Used for TLS cert/key fields that now require valid PEM content.
+func pemFile(t *testing.T, dir, name string) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("pemFile: generate key: %v", err)
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("pemFile: create cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("pemFile: marshal key: %v", err)
+	}
+	var data []byte
+	if filepath.Ext(name) == ".key" {
+		data = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	} else {
+		data = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatalf("pemFile: write %s: %v", name, err)
+	}
+	return p
+}
+
 // tlsTestUI seeds a config file with the given body and returns the handler +
 // path. The body must be a VALID config (config.Load is the write-path reload).
 func tlsTestUI(t *testing.T, body string) (http.Handler, string) {
@@ -727,8 +769,8 @@ func TestSaveFieldAcceptsSelfSignedAlone(t *testing.T) {
 
 func TestSaveFieldAcceptsCertChangeWhenKeySet(t *testing.T) {
 	dir := t.TempDir()
-	cert, key := touchFile(t, dir, "c.pem"), touchFile(t, dir, "k.key")
-	newCert := touchFile(t, dir, "c2.pem")
+	cert, key := pemFile(t, dir, "c.pem"), pemFile(t, dir, "k.key")
+	newCert := pemFile(t, dir, "c2.pem")
 	cfgPath := filepath.Join(dir, "config.toml")
 	body := "[server.tls]\ncert_file = \"" + cert + "\"\nkey_file = \"" + key + "\"\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {

@@ -8,7 +8,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
 )
@@ -53,7 +53,7 @@ func NewHTTPVerifier(baseURL string, sampleDurationSeconds int, minSimilarity fl
 	if baseURL == "" {
 		return nil, fmt.Errorf("verification: whisper_url must not be empty")
 	}
-	if _, err := url.ParseRequestURI(baseURL); err != nil {
+	if err := config.ValidateHTTPURL(baseURL); err != nil {
 		return nil, fmt.Errorf("verification: invalid whisper_url: %w", err)
 	}
 	sampleDurationSeconds = clampSampleDuration(sampleDurationSeconds)

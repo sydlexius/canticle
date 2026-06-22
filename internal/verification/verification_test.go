@@ -157,6 +157,15 @@ func TestNewHTTPVerifierErrorsWhenFFmpegMissing(t *testing.T) {
 	}
 }
 
+func TestNewHTTPVerifierRejectsSchemelesURL(t *testing.T) {
+	for _, u := range []string{"/whisper", "whisper:9000", "example.com"} {
+		_, err := NewHTTPVerifier(u, 30, 0.5, "ffmpeg")
+		if err == nil {
+			t.Errorf("NewHTTPVerifier(%q) returned nil error; want rejection of scheme-less URL", u)
+		}
+	}
+}
+
 func TestHTTPVerifierCleansSampleAfterFFmpegFailure(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)

@@ -34,7 +34,7 @@ func postSection(t *testing.T, h http.Handler, pairs [][2]string) *httptest.Resp
 
 func TestSaveSectionBootstrapsCertKeyPairFromEmpty(t *testing.T) {
 	dir := t.TempDir()
-	cert, key := touchFile(t, dir, "c.pem"), touchFile(t, dir, "k.key")
+	cert, key := pemFile(t, dir, "c.pem"), pemFile(t, dir, "k.key")
 	cfgPath := filepath.Join(dir, "config.toml")
 	// No [server.tls] at all: neither cert nor key is set. A single-field save
 	// could never get here (cert alone 400s on the blank key); the section save
@@ -115,8 +115,8 @@ func TestSaveSectionKeyOnlyRejected(t *testing.T) {
 
 func TestSaveSectionChangesCertKeyWhenBothSet(t *testing.T) {
 	dir := t.TempDir()
-	cert, key := touchFile(t, dir, "c.pem"), touchFile(t, dir, "k.key")
-	newCert, newKey := touchFile(t, dir, "c2.pem"), touchFile(t, dir, "k2.key")
+	cert, key := pemFile(t, dir, "c.pem"), pemFile(t, dir, "k.key")
+	newCert, newKey := pemFile(t, dir, "c2.pem"), pemFile(t, dir, "k2.key")
 	cfgPath := filepath.Join(dir, "config.toml")
 	body := "[server.tls]\ncert_file = \"" + cert + "\"\nkey_file = \"" + key + "\"\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {

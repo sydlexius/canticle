@@ -1,11 +1,18 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateAndSet_RejectsUnknownKey(t *testing.T) {
@@ -44,7 +51,8 @@ func TestValidateAndSet_UnitInterval(t *testing.T) {
 	}
 }
 
-func TestValidateAndSet_PathExists(t *testing.T) {
+func TestValidateAndSet_TLSPEMFile(t *testing.T) {
+	// Missing file is rejected.
 	if err := ValidateAndSet("server.tls.cert_file", "/no/such/cert.pem"); err == nil {
 		t.Error("expected rejection of missing cert path")
 	}
@@ -52,13 +60,140 @@ func TestValidateAndSet_PathExists(t *testing.T) {
 	if err := ValidateAndSet("server.tls.cert_file", ""); err != nil {
 		t.Errorf("empty TLS path rejected: %v", err)
 	}
-	existing := filepath.Join(t.TempDir(), "cert.pem")
-	if err := os.WriteFile(existing, []byte("x"), 0o600); err != nil {
+	// Non-PEM content is rejected.
+	nonPEM := filepath.Join(t.TempDir(), "notapem.pem")
+	if err := os.WriteFile(nonPEM, []byte("not pem content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateAndSet("server.tls.cert_file", existing); err != nil {
-		t.Errorf("existing cert path rejected: %v", err)
+	if err := ValidateAndSet("server.tls.cert_file", nonPEM); err == nil {
+		t.Error("expected rejection of non-PEM file")
 	}
+	// A valid PEM file passes for both cert and key fields.
+	certPath, keyPath := makeTempPEMPair(t)
+	if err := ValidateAndSet("server.tls.cert_file", certPath); err != nil {
+		t.Errorf("valid cert PEM rejected: %v", err)
+	}
+	if err := ValidateAndSet("server.tls.key_file", keyPath); err != nil {
+		t.Errorf("valid key PEM rejected: %v", err)
+	}
+}
+
+func TestValidateHTTPURL(t *testing.T) {
+	accepted := []string{
+		"http://localhost:9000",
+		"https://infer.example.com/v1",
+		"http://whisper:9000/v1/audio/transcriptions",
+	}
+	for _, u := range accepted {
+		if err := ValidateHTTPURL(u); err != nil {
+			t.Errorf("ValidateHTTPURL(%q) rejected; want accepted: %v", u, err)
+		}
+	}
+	rejected := []string{
+		"not a url",
+		"/foo",             // scheme-less absolute path
+		"example.com/path", // scheme-less host
+		"example.com",      // no scheme, no path
+		"",                 // empty
+		"ftp://host",       // non-http(s) scheme
+		"file:///x",        // non-http(s) scheme
+		"ws://host",        // non-http(s) scheme
+	}
+	for _, u := range rejected {
+		if err := ValidateHTTPURL(u); err == nil {
+			t.Errorf("ValidateHTTPURL(%q) accepted; want rejected", u)
+		}
+	}
+}
+
+func TestValidateAndSet_URL(t *testing.T) {
+	// Empty means "unset" and is allowed.
+	if err := ValidateAndSet("verification.whisper_url", ""); err != nil {
+		t.Errorf("empty whisper_url rejected: %v", err)
+	}
+	if err := ValidateAndSet("instrumental_detector.classifier_url", ""); err != nil {
+		t.Errorf("empty classifier_url rejected: %v", err)
+	}
+	// A valid URL passes.
+	if err := ValidateAndSet("verification.whisper_url", "http://localhost:9000"); err != nil {
+		t.Errorf("valid whisper_url rejected: %v", err)
+	}
+	if err := ValidateAndSet("instrumental_detector.classifier_url", "https://infer.example.com/v1"); err != nil {
+		t.Errorf("valid classifier_url rejected: %v", err)
+	}
+	// Scheme-less inputs are rejected: bare hostname, absolute path, no-scheme host+path.
+	if err := ValidateAndSet("verification.whisper_url", "not a url"); err == nil {
+		t.Error("expected rejection of whisper_url with no scheme")
+	}
+	if err := ValidateAndSet("instrumental_detector.classifier_url", "not a url"); err == nil {
+		t.Error("expected rejection of classifier_url with no scheme")
+	}
+	if err := ValidateAndSet("verification.whisper_url", "/foo"); err == nil {
+		t.Error("expected rejection of whisper_url with scheme-less path /foo")
+	}
+	if err := ValidateAndSet("verification.whisper_url", "example.com"); err == nil {
+		t.Error("expected rejection of whisper_url with scheme-less host example.com")
+	}
+}
+
+func TestValidatePEMFile(t *testing.T) {
+	v := ValidatePEMFile()
+	// Empty passes.
+	if err := v(""); err != nil {
+		t.Errorf("empty value rejected: %v", err)
+	}
+	// Missing file is rejected.
+	if err := v("/no/such/file.pem"); err == nil {
+		t.Error("expected rejection of missing file")
+	}
+	// Existing file with no PEM block is rejected.
+	nonPEM := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(nonPEM, []byte("binary data, not PEM"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := v(nonPEM); err == nil {
+		t.Error("expected rejection of non-PEM file")
+	}
+	// A valid PEM file passes.
+	certPath, _ := makeTempPEMPair(t)
+	if err := v(certPath); err != nil {
+		t.Errorf("valid PEM file rejected: %v", err)
+	}
+}
+
+// makeTempPEMPair generates a self-signed ECDSA P-256 certificate and writes
+// the cert PEM and key PEM to separate temp files, returning their paths.
+func makeTempPEMPair(t *testing.T) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
 }
 
 func TestValidateAndSet_DBPathNotPathChecked(t *testing.T) {

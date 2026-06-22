@@ -8,7 +8,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 )
 
 // HTTPDetector calls an external AudioSet classifier over HTTP. It serializes
@@ -45,7 +46,7 @@ func NewHTTPDetector(classifierURL string, sampleDurationSeconds int, minConfide
 	if classifierURL == "" {
 		return nil, fmt.Errorf("detector: classifier_url must not be empty")
 	}
-	if _, err := url.ParseRequestURI(classifierURL); err != nil {
+	if err := config.ValidateHTTPURL(classifierURL); err != nil {
 		return nil, fmt.Errorf("detector: invalid classifier_url: %w", err)
 	}
 	sampleDurationSeconds = clampSampleDuration(sampleDurationSeconds)

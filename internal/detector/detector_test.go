@@ -470,6 +470,16 @@ func TestNewHTTPDetectorInvalidURL(t *testing.T) {
 	}
 }
 
+func TestNewHTTPDetectorRejectsSchemelesURL(t *testing.T) {
+	ffmpegPath := fakeFFmpeg(t)
+	for _, u := range []string{"/classify", "classifier:8080", "example.com"} {
+		_, err := NewHTTPDetector(u, 30, 0.90, nil, ffmpegPath, 0)
+		if err == nil {
+			t.Errorf("NewHTTPDetector(%q) returned nil error; want rejection of scheme-less URL", u)
+		}
+	}
+}
+
 // TestWrapWithPriority verifies the nice/ionice wrappers are layered when
 // available and skipped (degrading to ffmpeg run directly) when their resolved
 // path is empty.

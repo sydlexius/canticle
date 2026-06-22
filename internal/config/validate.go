@@ -1,10 +1,13 @@
 package config
 
 import (
+	"encoding/pem"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
 	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
@@ -118,8 +121,8 @@ func ValidateEnum(allowed ...string) Validator {
 }
 
 // ValidatePathExists accepts an empty value (meaning "unset") or a path that
-// exists and is readable. It is used only for TLS cert/key and ffmpeg paths;
-// db.path is deliberately excluded (the SQLite file is created on first boot).
+// exists and is readable. It is used only for ffmpeg paths; db.path is
+// deliberately excluded (the SQLite file is created on first boot).
 func ValidatePathExists() Validator {
 	return func(value string) error {
 		if value == "" {
@@ -127,6 +130,53 @@ func ValidatePathExists() Validator {
 		}
 		if _, err := os.Stat(value); err != nil {
 			return fmt.Errorf("path does not exist or is not readable")
+		}
+		return nil
+	}
+}
+
+// ValidateHTTPURL returns a non-nil error if s is not an http(s) URL with a
+// non-empty host. Used by both the settings-save validator (ValidateURL) and
+// the boot-time constructors in internal/verification and internal/detector, so
+// the UI rejects exactly the same inputs that boot would later reject.
+func ValidateHTTPURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("must be a valid http(s) URL with host (e.g. https://host/path)")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("must be a valid http(s) URL with host (e.g. https://host/path)")
+	}
+	return nil
+}
+
+// ValidateURL accepts an empty value (meaning "unset") or a string that passes
+// ValidateHTTPURL (non-empty scheme and host), mirroring the boot-time check in
+// internal/verification/verification.go and internal/detector/http.go.
+func ValidateURL() Validator {
+	return func(value string) error {
+		if value == "" {
+			return nil
+		}
+		return ValidateHTTPURL(value)
+	}
+}
+
+// ValidatePEMFile accepts an empty value (meaning "unset"), rejects a path that
+// does not exist or is not readable, and rejects a file whose content does not
+// contain a valid PEM block. Used for TLS cert and key paths.
+func ValidatePEMFile() Validator {
+	return func(value string) error {
+		if value == "" {
+			return nil
+		}
+		data, err := os.ReadFile(value) //nolint:gosec // G304: value is operator-supplied config path, not untrusted user input
+		if err != nil {
+			return fmt.Errorf("path does not exist or is not readable")
+		}
+		if b, _ := pem.Decode(data); b == nil {
+			return fmt.Errorf("file does not contain valid PEM data")
 		}
 		return nil
 	}
@@ -203,9 +253,12 @@ func validatorFor(f FieldSpec) Validator {
 	switch f.Path {
 	case "output.embedded_lyrics", "providers.mode", "logging.level", "logging.format":
 		return ValidateEnum(enumValues[f.Path]...)
-	case "server.tls.cert_file", "server.tls.key_file",
-		"verification.ffmpeg_path", "instrumental_detector.ffmpeg_path":
+	case "server.tls.cert_file", "server.tls.key_file":
+		return ValidatePEMFile()
+	case "verification.ffmpeg_path", "instrumental_detector.ffmpeg_path":
 		return ValidatePathExists()
+	case "verification.whisper_url", "instrumental_detector.classifier_url":
+		return ValidateURL()
 	case "server.trusted_networks.cidrs", "server.trusted_networks.trusted_proxies":
 		return ValidateCIDRList()
 	case "server.tls.self_signed_hosts":
