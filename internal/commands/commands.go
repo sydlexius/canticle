@@ -695,8 +695,8 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// serve mode always writes next to the audio file; output.dir/MXLRC_OUTPUT_DIR/--outdir
 	// are fetch-mode-only and are ignored here. The fixed default is used as the
 	// metadata-only webhook fallback when no library path is resolvable.
-	outdir := "lyrics"
-	if args.Outdir != nil || envSrc["output.dir"] || cfg.Output.Dir != "lyrics" {
+	outdir := config.DefaultOutputDir
+	if args.Outdir != nil || envSrc["output.dir"] || cfg.Output.Dir != config.DefaultOutputDir {
 		slog.Warn("output.dir/MXLRC_OUTPUT_DIR/--outdir are ignored in serve mode; " +
 			"lyrics are written next to the audio file, and the metadata-only webhook fallback " +
 			"uses the internal default (\"lyrics\"); use CLI --outdir for fetch mode")

@@ -1702,6 +1702,55 @@ cooldown_seconds = -5
 	}
 }
 
+// TestLoad_OutputDirEnvOverride verifies MXLRC_OUTPUT_DIR resolution behavior:
+// the env var overrides both the built-in default and a TOML-supplied value,
+// and LoadWithSources records it in the applied map. The default is
+// DefaultOutputDir ("lyrics"), the single source of truth shared with the
+// serve-mode fallback (see serve path in commands.go, #292).
+func TestLoad_OutputDirEnvOverride(t *testing.T) {
+	t.Run("default is DefaultOutputDir", func(t *testing.T) {
+		isolateEnv(t)
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Output.Dir != DefaultOutputDir {
+			t.Errorf("Output.Dir = %q; want DefaultOutputDir (%q)", cfg.Output.Dir, DefaultOutputDir)
+		}
+	})
+
+	t.Run("env overrides default and is recorded in applied map", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_OUTPUT_DIR", "/custom/outdir")
+		cfg, envSrc, err := LoadWithSources(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("LoadWithSources: %v", err)
+		}
+		if cfg.Output.Dir != "/custom/outdir" {
+			t.Errorf("Output.Dir = %q; want /custom/outdir (MXLRC_OUTPUT_DIR override)", cfg.Output.Dir)
+		}
+		if !envSrc["output.dir"] {
+			t.Error("envSrc[output.dir] = false; want true when MXLRC_OUTPUT_DIR applied")
+		}
+	})
+
+	t.Run("env overrides TOML value", func(t *testing.T) {
+		isolateEnv(t)
+		cfgFile := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(cfgFile, []byte("[output]\ndir = \"/from/toml\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("MXLRC_OUTPUT_DIR", "/from/env")
+		cfg, err := Load(cfgFile)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Output.Dir != "/from/env" {
+			t.Errorf("Output.Dir = %q; want /from/env (env wins over TOML)", cfg.Output.Dir)
+		}
+	})
+}
+
 // TestLoad_InstrumentalDetectorEnvWinsOverTOML verifies that env vars override
 // values set in the TOML file for the InstrumentalDetectorConfig.
 func TestLoad_InstrumentalDetectorEnvWinsOverTOML(t *testing.T) {
