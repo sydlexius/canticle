@@ -171,8 +171,8 @@ func TestSettingsViewNeverEchoesSecrets(t *testing.T) {
 }
 
 // TestSettingsLockedFieldFromEnv confirms an env override marks the field locked
-// with a plain "Locked" pill (the variable name is intentionally NOT exposed)
-// and the field carries the locked modifier class.
+// with a "Locked" pill and that the winning env var name appears only on the
+// pill's tooltip (title attribute), never as visible text (#307).
 func TestSettingsLockedFieldFromEnv(t *testing.T) {
 	t.Setenv("MXLRC_LOG_LEVEL", "debug")
 
@@ -188,9 +188,37 @@ func TestSettingsLockedFieldFromEnv(t *testing.T) {
 	if !strings.Contains(body, "mx-field-pill-locked") {
 		t.Error("locked field should carry the plain Locked pill")
 	}
-	// The env variable name must NOT be exposed on the card (decluttered).
-	if strings.Contains(body, "MXLRC_LOG_LEVEL") {
-		t.Error("locked card must not expose the env variable name")
+	// After #307 the env var name is surfaced as a title= tooltip on the pill
+	// so operators can see which variable to clear, without cluttering the card.
+	if !strings.Contains(body, `title="Locked by MXLRC_LOG_LEVEL"`) {
+		t.Error("locked pill should carry a title tooltip with the winning env var name")
+	}
+}
+
+// TestSettingsNonWritableModeInputsDisabled confirms that in non-writable mode
+// (no config file path configured), all editable controls render with the
+// disabled attribute so the page is genuinely read-only, not misleadingly
+// interactive (#306).
+func TestSettingsNonWritableModeInputsDisabled(t *testing.T) {
+	mux := newUIServer(config.Config{}, "v0")
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /settings status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// No CSRF token in non-writable mode.
+	if strings.Contains(body, "mx-csrf-token") {
+		t.Error("non-writable page must not embed the CSRF token")
+	}
+	// In non-writable mode, every editable control must carry disabled.
+	// Before the fix, !Savable alone did not add disabled; only locked fields were.
+	// Verify disabled appears (there are no locked env vars in this test).
+	if !strings.Contains(body, "disabled") {
+		t.Error("non-writable settings page rendered no disabled inputs; editable controls must be disabled when !Savable (#306)")
 	}
 }
 
@@ -303,9 +331,12 @@ func TestSettingsTokenNotLockedByForeignEnv(t *testing.T) {
 		t.Fatalf("expected both api.token and api.cooldown on the Common tab (token=%v cooldown=%v)", sawToken, sawCooldown)
 	}
 
-	// Rendered HTML (the real GET /settings handler path): the token input must
-	// not carry a disabled attribute.
-	mux := newUIServer(cfg, "v0")
+	// Rendered HTML in WRITABLE mode: the token input must not carry disabled
+	// because it is not locked by its own env vars. Uses writableTestUI so the
+	// page is in writable mode (Savable=true for unlocked editable fields),
+	// isolating the lock-contamination check from the non-writable-mode behavior
+	// where ALL inputs are intentionally disabled (#306).
+	mux, _ := writableTestUI(t, newFakeSecretStore())
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)

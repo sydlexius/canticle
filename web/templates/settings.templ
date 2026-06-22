@@ -34,7 +34,7 @@ templ SettingsPage(version string, view SettingsView, reports []RailItem) {
 			<div class="mx-tablist" role="tablist" aria-label="Settings sections">
 				<label class="mx-tab" id="mx-tabctl-common" for="mx-tab-common" role="tab" aria-controls="mx-panel-common" aria-selected="false" tabindex="0">Common</label>
 				<label class="mx-tab" id="mx-tabctl-advanced" for="mx-tab-advanced" role="tab" aria-controls="mx-panel-advanced" aria-selected="false" tabindex="-1">Advanced</label>
-				<label class="mx-tab" id="mx-tabctl-raw" for="mx-tab-raw" role="tab" aria-controls="mx-panel-raw" aria-selected="false" tabindex="-1">Raw config</label>
+				<label class="mx-tab" id="mx-tabctl-raw" for="mx-tab-raw" role="tab" aria-controls="mx-panel-raw" aria-selected="false" tabindex="-1">Config file</label>
 			</div>
 			<div class="mx-tabpanel" id="mx-panel-common" role="tabpanel" aria-labelledby="mx-tabctl-common">
 				<section class="mx-settings-section">
@@ -49,8 +49,26 @@ templ SettingsPage(version string, view SettingsView, reports []RailItem) {
 				}
 			</div>
 			<div class="mx-tabpanel" id="mx-panel-raw" role="tabpanel" aria-labelledby="mx-tabctl-raw">
-				<p class="mx-settings-field-desc">The current effective configuration, with secrets redacted. Read-only.</p>
-				<pre class="mx-code-block" aria-label="Effective configuration">{ view.RawTOML }</pre>
+				<div class="mx-config-toggle-wrap">
+					<input type="radio" name="mx-config-view" id="mx-config-view-effective" class="mx-config-toggle-radio" checked/>
+					<input type="radio" name="mx-config-view" id="mx-config-view-raw-file" class="mx-config-toggle-radio"/>
+					<div class="mx-config-toggle" role="group" aria-label="Config view">
+						<label for="mx-config-view-effective" class="mx-config-toggle-label">Effective</label>
+						<label for="mx-config-view-raw-file" class="mx-config-toggle-label">Raw</label>
+					</div>
+					<div id="mx-config-panel-effective" class="mx-config-panel">
+						<p class="mx-settings-field-desc">The current merged configuration, with secrets redacted. Read-only.</p>
+						<pre class="mx-code-block" aria-label="Effective configuration">{ view.RawTOML }</pre>
+					</div>
+					<div id="mx-config-panel-raw-file" class="mx-config-panel">
+						if view.RawFileTOML != "" {
+							<p class="mx-settings-field-desc">The config.toml file as written on disk, with secrets redacted. Read-only.</p>
+							<pre class="mx-code-block" aria-label="Raw config file">{ view.RawFileTOML }</pre>
+						} else {
+							<p class="mx-settings-field-desc">No config file is configured.</p>
+						}
+					</div>
+				</div>
 			</div>
 		</div>
 	}
@@ -87,7 +105,11 @@ templ settingsField(field SettingsField) {
 		<div class="mx-settings-field-head">
 			<label class="mx-settings-field-label" for={ field.DOMID }>{ field.Label }</label>
 			if field.Locked {
-				<span class="mx-field-pill-locked">Locked</span>
+				if field.LockSource != "" {
+					<span class="mx-field-pill-locked" title={ "Locked by " + field.LockSource }>Locked</span>
+				} else {
+					<span class="mx-field-pill-locked">Locked</span>
+				}
 			}
 		</div>
 		if field.Description != "" {
@@ -172,7 +194,7 @@ templ editableField(field SettingsField) {
 					step="any"
 				}
 				value={ field.EffectiveValue }
-				if field.Locked {
+				if field.Locked || !field.Savable {
 					disabled
 				}
 			/>
@@ -184,7 +206,7 @@ templ editableField(field SettingsField) {
 				type="text"
 				placeholder="comma-separated values"
 				value={ field.EffectiveValue }
-				if field.Locked {
+				if field.Locked || !field.Savable {
 					disabled
 				}
 			/>
@@ -198,7 +220,7 @@ templ editableField(field SettingsField) {
 					placeholder={ field.Placeholder }
 				}
 				value={ field.EffectiveValue }
-				if field.Locked {
+				if field.Locked || !field.Savable {
 					disabled
 				}
 			/>
@@ -219,7 +241,7 @@ templ radioGroup(field SettingsField) {
 					if opt.Selected {
 						checked
 					}
-					if field.Locked || opt.Fixed {
+					if field.Locked || !field.Savable || opt.Fixed {
 						disabled
 					}
 				/>
@@ -235,7 +257,7 @@ templ selectControl(field SettingsField) {
 		class="mx-settings-select"
 		id={ field.DOMID }
 		name={ field.Path }
-		if field.Locked {
+		if field.Locked || !field.Savable {
 			disabled
 		}
 	>
@@ -261,7 +283,7 @@ templ checkboxList(field SettingsField) {
 					if opt.Selected {
 						checked
 					}
-					if field.Locked || opt.Fixed {
+					if field.Locked || !field.Savable || opt.Fixed {
 						disabled
 					}
 				/>
@@ -293,14 +315,14 @@ templ tagListControl(field SettingsField) {
 				name={ field.Path }
 				type="text"
 				placeholder={ field.Placeholder }
-				if field.Locked {
+				if field.Locked || !field.Savable {
 					disabled
 				}
 			/>
 			<button
 				type="button"
 				class="mx-settings-genbtn mx-taglist-addbtn"
-				if field.Locked {
+				if field.Locked || !field.Savable {
 					disabled
 				}
 			>Add</button>
@@ -319,7 +341,7 @@ templ durationControl(field SettingsField) {
 			type="number"
 			step="any"
 			value={ field.DisplayValue }
-			if field.Locked {
+			if field.Locked || !field.Savable {
 				disabled
 			}
 		/>
@@ -328,7 +350,7 @@ templ durationControl(field SettingsField) {
 			id={ field.DOMID + "-unit" }
 			name={ field.Path + ".unit" }
 			aria-label="Unit"
-			if field.Locked {
+			if field.Locked || !field.Savable {
 				disabled
 			}
 		>
@@ -349,7 +371,7 @@ templ secretControl(field SettingsField) {
 		type="password"
 		autocomplete="off"
 		placeholder="Leave blank to keep existing value"
-		if field.Locked {
+		if field.Locked || !field.Savable {
 			disabled
 		}
 	/>
@@ -368,7 +390,7 @@ templ webhookControl(field SettingsField) {
 			type="text"
 			autocomplete="off"
 			placeholder="Leave blank to keep existing value"
-			if field.Locked {
+			if field.Locked || !field.Savable {
 				disabled
 			}
 		/>
@@ -378,7 +400,7 @@ templ webhookControl(field SettingsField) {
 			data-generate-key
 			data-target={ field.DOMID }
 			data-prefix={ field.GenPrefix }
-			if field.Locked {
+			if field.Locked || !field.Savable {
 				disabled
 			}
 		>Generate key</button>

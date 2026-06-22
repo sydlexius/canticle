@@ -220,17 +220,26 @@ func (u *UI) formValueForField(spec config.FieldSpec, r *http.Request) (string, 
 	}
 }
 
-// fieldEnvLocked reports whether an env override is currently active for the
-// field (its first non-empty env var is set). It is the single lock signal
-// shared by the read path (the Locked pill) and the write path (rejecting a
-// forged save of a locked field).
-func fieldEnvLocked(spec config.FieldSpec) bool {
+// fieldEnvLockSource returns the winning env var name and whether the field is
+// locked by an env override. The name is the first env var in spec.EnvVars
+// that is currently set and non-empty. Both the read path (Locked pill + tooltip)
+// and the write path (rejecting a forged save) use fieldEnvLocked; the read
+// path additionally calls this to show the source on hover (#307).
+func fieldEnvLockSource(spec config.FieldSpec) (name string, locked bool) {
 	for _, ev := range spec.EnvVars {
 		if v, ok := os.LookupEnv(ev); ok && v != "" {
-			return true
+			return ev, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// fieldEnvLocked reports whether an env override is currently active for the
+// field. It delegates to fieldEnvLockSource and is the single bool-only signal
+// shared by the write path (rejecting a forged save of a locked field).
+func fieldEnvLocked(spec config.FieldSpec) bool {
+	_, locked := fieldEnvLockSource(spec)
+	return locked
 }
 
 // providerDisabledFromEnabled inverts the enabled-provider checkbox set into the

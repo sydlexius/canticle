@@ -948,3 +948,52 @@ body {
   color: var(--mx-content-text);
   border-bottom-color: var(--mx-accent);
 }
+
+/* -- Config file tab: Raw / Effective toggle (#319) ----------------------- */
+.mx-config-toggle-wrap {
+  position: relative;
+}
+
+.mx-config-toggle-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mx-config-toggle {
+  display: inline-flex;
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.mx-config-toggle-label {
+  padding: 0.25rem 0.875rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--mx-content-text-secondary);
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.mx-config-toggle-label:hover {
+  color: var(--mx-content-text);
+}
+
+.mx-config-panel {
+  display: none;
+}
+
+#mx-config-view-effective:checked ~ .mx-config-toggle label[for="mx-config-view-effective"],
+#mx-config-view-raw-file:checked ~ .mx-config-toggle label[for="mx-config-view-raw-file"] {
+  color: var(--mx-content-text);
+  background-color: rgba(148, 163, 184, 0.14);
+}
+
+#mx-config-view-effective:checked ~ #mx-config-panel-effective,
+#mx-config-view-raw-file:checked ~ #mx-config-panel-raw-file {
+  display: block;
+}

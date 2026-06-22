@@ -847,3 +847,25 @@ func TestSaveFieldConcurrentSingleWriter(t *testing.T) {
 		t.Errorf("providers.disabled = %v, want [petitlyrics]", cfg.Providers.Disabled)
 	}
 }
+
+// TestFieldEnvLockSource verifies that fieldEnvLockSource returns the winning
+// env var name when locked and empty string when not locked (#307).
+func TestFieldEnvLockSource(t *testing.T) {
+	spec, ok := config.FieldByPath("logging.level")
+	if !ok {
+		t.Fatal("logging.level not found in registry")
+	}
+
+	// With no env var set: not locked, empty name.
+	name, locked := fieldEnvLockSource(spec)
+	if locked || name != "" {
+		t.Errorf("no env set: got (%q, %v), want (%q, false)", name, locked, "")
+	}
+
+	// With the winning env var set: locked, returns that var's name.
+	t.Setenv("MXLRC_LOG_LEVEL", "debug")
+	name, locked = fieldEnvLockSource(spec)
+	if !locked || name != "MXLRC_LOG_LEVEL" {
+		t.Errorf("env set: got (%q, %v), want (%q, true)", name, locked, "MXLRC_LOG_LEVEL")
+	}
+}

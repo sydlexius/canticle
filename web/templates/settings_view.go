@@ -23,8 +23,12 @@ type SettingsView struct {
 	// every field already shown on the Common tab.
 	Sections []SettingsSection
 	// RawTOML is the effective config rendered as TOML with secrets redacted,
-	// shown read-only on the Raw config tab.
+	// shown on the "Config file" tab's Effective toggle.
 	RawTOML string
+	// RawFileTOML is the literal content of the config file on disk with secrets
+	// redacted, shown on the "Config file" tab's Raw toggle. Empty when no config
+	// file path is configured.
+	RawFileTOML string
 	// CSRFToken is the double-submit token embedded in the page for the save
 	// POSTs; settings.js sends it as the csrf_token field. Empty when the write
 	// path is not wired (the page is then read-only).
@@ -100,8 +104,12 @@ type SettingsField struct {
 	JumpLabel    string
 	// Locked is true when an environment variable (or CLI flag) overrides the
 	// file value, so the field is read-only until the override is removed. The
-	// card shows only a plain "Locked" pill (the variable name is not exposed).
+	// card shows a "Locked" pill; hover reveals LockSource when set (#307).
 	Locked bool
+	// LockSource is the winning env var name when Locked is true (e.g.
+	// "MXLRC_API_TOKEN"). Empty when the field is not locked. Rendered as a
+	// title= tooltip on the Locked pill so operators know which var to clear (#307).
+	LockSource string
 	// Sensitive marks a secret field: never echoes the stored secret.
 	Sensitive bool
 	// Editable is false for fields the writer must never rewrite (only

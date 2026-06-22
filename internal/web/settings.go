@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -134,9 +135,10 @@ func (u *UI) buildSettingsView(cfg config.Config) templates.SettingsView {
 	view := templates.SettingsView{
 		// FormatConfigText is the single redaction source of truth (shared with
 		// the logging layer); secrets are masked before the text reaches the
-		// template. Source-hint maps are nil: the Raw tab shows merged effective
-		// values, not per-field provenance.
-		RawTOML: annotateRawConfig(config.FormatConfigText(cfg, nil, nil)),
+		// template. Source-hint maps are nil: the Config file tab shows merged
+		// effective values, not per-field provenance.
+		RawTOML:     annotateRawConfig(config.FormatConfigText(cfg, nil, nil)),
+		RawFileTOML: u.buildRawFileTOML(),
 	}
 
 	// Common tab: build in commonPaths order. A path missing from the registry
@@ -189,10 +191,9 @@ func (u *UI) settingsField(cfg config.Config, spec config.FieldSpec) templates.S
 	// Lock status: the field is locked when one of its own env vars is set
 	// non-empty (an active override). CLI overrides are not visible to a
 	// long-running daemon's process env, so the env presence check is the
-	// read-path signal. The card shows only a plain "Locked" pill, never the
-	// variable name. fieldEnvLocked is shared with the write path so a locked
-	// field is rejected on save, not just disabled in the UI.
-	f.Locked = fieldEnvLocked(spec)
+	// read-path signal. fieldEnvLockSource also returns the winning var name so
+	// the template can surface it on the Locked pill tooltip (#307).
+	f.LockSource, f.Locked = fieldEnvLockSource(spec)
 
 	f.EffectiveValue = u.effectiveValue(cfg, spec)
 	f.InputType = settingsInputType(spec)
@@ -589,6 +590,59 @@ func annotateRawConfig(raw string) string {
 				b.WriteString("# ")
 				b.WriteString(label)
 				b.WriteByte('\n')
+			}
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// buildRawFileTOML reads the config file on disk and returns its contents with
+// secrets redacted. Returns empty string when no config path is wired or the
+// file cannot be read (#319 Raw toggle).
+func (u *UI) buildRawFileTOML() string {
+	if u.configPath == "" {
+		return ""
+	}
+	data, err := os.ReadFile(u.configPath)
+	if err != nil {
+		return ""
+	}
+	return redactRawTOML(string(data))
+}
+
+// redactRawTOML replaces the value of sensitive TOML keys (those whose registry
+// entry carries Sensitive: true) with "(redacted)", so the raw file view never
+// exposes the stored secret text. It tracks the current section header to match
+// the section+key pair against the registry.
+func redactRawTOML(raw string) string {
+	type secKey struct{ section, key string }
+	sensitive := map[secKey]bool{}
+	for _, spec := range config.Registry() {
+		if spec.Sensitive {
+			key := strings.TrimPrefix(spec.Path, spec.Section+".")
+			sensitive[secKey{spec.Section, key}] = true
+		}
+	}
+
+	var b strings.Builder
+	section := ""
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")
+			b.WriteString(line)
+			b.WriteByte('\n')
+			continue
+		}
+		if eq := strings.Index(line, " = "); eq > 0 && !strings.HasPrefix(trimmed, "#") {
+			key := strings.TrimSpace(line[:eq])
+			if sensitive[secKey{section, key}] {
+				b.WriteString(key)
+				b.WriteString(` = "(redacted)"`)
+				b.WriteByte('\n')
+				continue
 			}
 		}
 		b.WriteString(line)
