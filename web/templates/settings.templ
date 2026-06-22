@@ -32,23 +32,23 @@ templ SettingsPage(version string, view SettingsView, reports []RailItem) {
 			<input type="radio" name="mx-settings-tab" id="mx-tab-advanced" class="mx-tab-radio"/>
 			<input type="radio" name="mx-settings-tab" id="mx-tab-raw" class="mx-tab-radio"/>
 			<div class="mx-tablist" role="tablist" aria-label="Settings sections">
-				<label class="mx-tab" for="mx-tab-common">Common</label>
-				<label class="mx-tab" for="mx-tab-advanced">Advanced</label>
-				<label class="mx-tab" for="mx-tab-raw">Raw config</label>
+				<label class="mx-tab" id="mx-tabctl-common" for="mx-tab-common" role="tab" aria-controls="mx-panel-common" aria-selected="false" tabindex="0">Common</label>
+				<label class="mx-tab" id="mx-tabctl-advanced" for="mx-tab-advanced" role="tab" aria-controls="mx-panel-advanced" aria-selected="false" tabindex="-1">Advanced</label>
+				<label class="mx-tab" id="mx-tabctl-raw" for="mx-tab-raw" role="tab" aria-controls="mx-panel-raw" aria-selected="false" tabindex="-1">Raw config</label>
 			</div>
-			<div class="mx-tabpanel" id="mx-panel-common">
+			<div class="mx-tabpanel" id="mx-panel-common" role="tabpanel" aria-labelledby="mx-tabctl-common">
 				<section class="mx-settings-section">
 					for _, field := range view.Common {
 						@settingsField(field)
 					}
 				</section>
 			</div>
-			<div class="mx-tabpanel" id="mx-panel-advanced">
+			<div class="mx-tabpanel" id="mx-panel-advanced" role="tabpanel" aria-labelledby="mx-tabctl-advanced">
 				for _, section := range view.Sections {
 					@settingsSection(section)
 				}
 			</div>
-			<div class="mx-tabpanel" id="mx-panel-raw">
+			<div class="mx-tabpanel" id="mx-panel-raw" role="tabpanel" aria-labelledby="mx-tabctl-raw">
 				<p class="mx-settings-field-desc">The current effective configuration, with secrets redacted. Read-only.</p>
 				<pre class="mx-code-block" aria-label="Effective configuration">{ view.RawTOML }</pre>
 			</div>

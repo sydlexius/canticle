@@ -692,9 +692,14 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if token == "" {
 		token = cfg.API.Token
 	}
-	outdir := cfg.Output.Dir
-	if args.Outdir != nil {
-		outdir = *args.Outdir
+	// serve mode always writes next to the audio file; output.dir/MXLRC_OUTPUT_DIR/--outdir
+	// are fetch-mode-only and are ignored here. The fixed default is used as the
+	// metadata-only webhook fallback when no library path is resolvable.
+	outdir := config.DefaultOutputDir
+	if args.Outdir != nil || envSrc["output.dir"] || cfg.Output.Dir != config.DefaultOutputDir {
+		slog.Warn("output.dir/MXLRC_OUTPUT_DIR/--outdir are ignored in serve mode; " +
+			"lyrics are written next to the audio file, and the metadata-only webhook fallback " +
+			"uses the internal default (\"lyrics\"); use CLI --outdir for fetch mode")
 	}
 	addr := cfg.Server.Addr
 	if args.Listen != nil {
@@ -743,14 +748,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	bannerCfg := cfg
 	bannerCfg.API.Token = token
 	bannerCfg.Server.WebhookAPIKeys = webhookKeys
-	bannerCfg.Output.Dir = outdir
 	bannerCfg.Server.Addr = addr
 	serveCLISrc := map[string]bool{}
 	if args.Token != "" {
 		serveCLISrc["api.token"] = true
-	}
-	if args.Outdir != nil {
-		serveCLISrc["output.dir"] = true
 	}
 	if args.Listen != nil {
 		serveCLISrc["server.addr"] = true

@@ -73,7 +73,7 @@ func SettingsPage(version string, view SettingsView, reports []RailItem) templ.C
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, " <div class=\"mx-tabs\"><input type=\"radio\" name=\"mx-settings-tab\" id=\"mx-tab-common\" class=\"mx-tab-radio\" checked> <input type=\"radio\" name=\"mx-settings-tab\" id=\"mx-tab-advanced\" class=\"mx-tab-radio\"> <input type=\"radio\" name=\"mx-settings-tab\" id=\"mx-tab-raw\" class=\"mx-tab-radio\"><div class=\"mx-tablist\" role=\"tablist\" aria-label=\"Settings sections\"><label class=\"mx-tab\" for=\"mx-tab-common\">Common</label> <label class=\"mx-tab\" for=\"mx-tab-advanced\">Advanced</label> <label class=\"mx-tab\" for=\"mx-tab-raw\">Raw config</label></div><div class=\"mx-tabpanel\" id=\"mx-panel-common\"><section class=\"mx-settings-section\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, " <div class=\"mx-tabs\"><input type=\"radio\" name=\"mx-settings-tab\" id=\"mx-tab-common\" class=\"mx-tab-radio\" checked> <input type=\"radio\" name=\"mx-settings-tab\" id=\"mx-tab-advanced\" class=\"mx-tab-radio\"> <input type=\"radio\" name=\"mx-settings-tab\" id=\"mx-tab-raw\" class=\"mx-tab-radio\"><div class=\"mx-tablist\" role=\"tablist\" aria-label=\"Settings sections\"><label class=\"mx-tab\" id=\"mx-tabctl-common\" for=\"mx-tab-common\" role=\"tab\" aria-controls=\"mx-panel-common\" aria-selected=\"false\" tabindex=\"0\">Common</label> <label class=\"mx-tab\" id=\"mx-tabctl-advanced\" for=\"mx-tab-advanced\" role=\"tab\" aria-controls=\"mx-panel-advanced\" aria-selected=\"false\" tabindex=\"-1\">Advanced</label> <label class=\"mx-tab\" id=\"mx-tabctl-raw\" for=\"mx-tab-raw\" role=\"tab\" aria-controls=\"mx-panel-raw\" aria-selected=\"false\" tabindex=\"-1\">Raw config</label></div><div class=\"mx-tabpanel\" id=\"mx-panel-common\" role=\"tabpanel\" aria-labelledby=\"mx-tabctl-common\"><section class=\"mx-settings-section\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -83,7 +83,7 @@ func SettingsPage(version string, view SettingsView, reports []RailItem) templ.C
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</section></div><div class=\"mx-tabpanel\" id=\"mx-panel-advanced\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</section></div><div class=\"mx-tabpanel\" id=\"mx-panel-advanced\" role=\"tabpanel\" aria-labelledby=\"mx-tabctl-advanced\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -93,7 +93,7 @@ func SettingsPage(version string, view SettingsView, reports []RailItem) templ.C
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</div><div class=\"mx-tabpanel\" id=\"mx-panel-raw\"><p class=\"mx-settings-field-desc\">The current effective configuration, with secrets redacted. Read-only.</p><pre class=\"mx-code-block\" aria-label=\"Effective configuration\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</div><div class=\"mx-tabpanel\" id=\"mx-panel-raw\" role=\"tabpanel\" aria-labelledby=\"mx-tabctl-raw\"><p class=\"mx-settings-field-desc\">The current effective configuration, with secrets redacted. Read-only.</p><pre class=\"mx-code-block\" aria-label=\"Effective configuration\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

@@ -359,6 +359,11 @@ type GuardConfig struct {
 	Threshold float64 `toml:"script_guard_threshold"`
 }
 
+// DefaultOutputDir is the default output directory name used in both the
+// config defaults() path and the serve-mode fallback so the value is defined
+// once and stays in sync.
+const DefaultOutputDir = "lyrics"
+
 // guardThresholdDefault is the default foreign-script share threshold. It
 // mirrors langguard's built-in default so an empty config and an empty
 // allowlist agree.
@@ -418,7 +423,7 @@ func defaults() Config {
 			MissBackoffCapHours:  missBackoffCapDefault,
 			MaxMissAttempts:      15,
 		},
-		Output:       OutputConfig{Dir: "lyrics", EmbeddedLyrics: "off"},
+		Output:       OutputConfig{Dir: DefaultOutputDir, EmbeddedLyrics: "off"},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault, RaceWaitSeconds: raceWaitSecondsDefault},

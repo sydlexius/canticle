@@ -58,7 +58,10 @@ circuit_open_duration = 1800
 # max_miss_attempts = 15
 
 [output]
-# Default output directory for .lrc files.
+# Output directory for .lrc files (fetch mode only).
+# In serve mode this value is ignored: lyrics are written next to the audio file,
+# and the metadata-only webhook fallback uses the internal default ("lyrics").
+# Override with --outdir flag or MXLRC_OUTPUT_DIR env var (fetch mode only).
 dir = "lyrics"
 
 # Embedded (unsynced) lyrics handling (env: MXLRC_EMBEDDED_LYRICS; CLI:
