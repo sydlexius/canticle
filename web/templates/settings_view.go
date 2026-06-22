@@ -29,6 +29,11 @@ type SettingsView struct {
 	// redacted, shown on the "Config file" tab's Raw toggle. Empty when no config
 	// file path is configured.
 	RawFileTOML string
+	// RawFileTOMLError is a non-empty user-facing message when the config file
+	// path is wired but the file could not be read (#367). The template renders
+	// this read-error state distinctly from the unconfigured/empty state so a
+	// genuine read failure is not silently shown as an empty raw view.
+	RawFileTOMLError string
 	// CSRFToken is the double-submit token embedded in the page for the save
 	// POSTs; settings.js sends it as the csrf_token field. Empty when the write
 	// path is not wired (the page is then read-only).

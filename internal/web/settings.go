@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -132,13 +133,24 @@ func (u *UI) buildSettingsView(cfg config.Config) templates.SettingsView {
 		common[p] = true
 	}
 
+	// The raw on-disk view distinguishes three states: a read error (path wired
+	// but unreadable), the rendered file, and the unconfigured state (no path).
+	// A read error sets RawFileTOMLError so the template renders it distinctly
+	// from the empty/unconfigured case rather than silently showing a blank view.
+	rawFileTOML, rawFileErr := u.buildRawFileTOML()
 	view := templates.SettingsView{
 		// FormatConfigText is the single redaction source of truth (shared with
 		// the logging layer); secrets are masked before the text reaches the
 		// template. Source-hint maps are nil: the Config file tab shows merged
 		// effective values, not per-field provenance.
 		RawTOML:     annotateRawConfig(config.FormatConfigText(cfg, nil, nil)),
-		RawFileTOML: u.buildRawFileTOML(),
+		RawFileTOML: rawFileTOML,
+	}
+	if rawFileErr != nil {
+		// Surface a generic message to the page (the underlying error may name the
+		// on-disk path, which the read-only view should not expose); log the detail.
+		slog.Error("settings: reading raw config file failed", "error", rawFileErr)
+		view.RawFileTOMLError = "The config file could not be read."
 	}
 
 	// Common tab: build in commonPaths order. A path missing from the registry
@@ -599,30 +611,33 @@ func annotateRawConfig(raw string) string {
 }
 
 // buildRawFileTOML reads the config file on disk and returns its contents with
-// secrets redacted. Returns empty string when no config path is wired or the
-// file cannot be read (#319 Raw toggle).
-func (u *UI) buildRawFileTOML() string {
+// secrets redacted (#319 Raw toggle). It distinguishes two empty-string cases by
+// the error return: a nil error with an empty string means no config path is
+// wired (the unconfigured state), while a non-nil error means the path is wired
+// but the file could not be read (a genuine read failure the page must surface
+// distinctly, #367).
+func (u *UI) buildRawFileTOML() (string, error) {
 	if u.configPath == "" {
-		return ""
+		return "", nil
 	}
 	data, err := os.ReadFile(u.configPath)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read config file: %w", err)
 	}
-	return redactRawTOML(string(data))
+	return redactRawTOML(string(data)), nil
 }
 
 // redactRawTOML replaces the value of sensitive TOML keys (those whose registry
 // entry carries Sensitive: true) with "(redacted)", so the raw file view never
 // exposes the stored secret text. It tracks the current section header to match
-// the section+key pair against the registry.
+// the section+key pair against the registry, and preserves a sensitive line's
+// leading indentation, key token, and any trailing inline comment verbatim
+// (#367): only the value is replaced.
 func redactRawTOML(raw string) string {
-	type secKey struct{ section, key string }
-	sensitive := map[secKey]bool{}
+	sensitive := map[string]bool{}
 	for _, spec := range config.Registry() {
 		if spec.Sensitive {
-			key := strings.TrimPrefix(spec.Path, spec.Section+".")
-			sensitive[secKey{spec.Section, key}] = true
+			sensitive[spec.Path] = true
 		}
 	}
 
@@ -639,19 +654,35 @@ func redactRawTOML(raw string) string {
 		}
 		// Section headers cover both [table] and [[array-of-tables]]; trimming
 		// all surrounding brackets yields the dotted-section name in either case.
+		// normalizeTOMLKeyPath unquotes any quoted segments so a header written as
+		// ["server"."tls"] resolves to the same dotted name as [server.tls].
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			section = strings.Trim(trimmed, "[]")
+			section = normalizeTOMLKeyPath(strings.Trim(trimmed, "[]"))
 			b.WriteString(line)
 			b.WriteByte('\n')
 			continue
 		}
 		// Locate the key/value split on the first '=' regardless of surrounding
-		// whitespace, so key=value and key = value are both redacted.
+		// whitespace, so key=value and key = value are both redacted. The key
+		// region (everything left of '=') may itself be a dotted and/or quoted
+		// path (e.g. tls.cert_file or "token"); normalize it to the registry's
+		// dotted form before matching.
 		if eq := strings.IndexByte(line, '='); eq > 0 {
-			key := strings.TrimSpace(line[:eq])
-			if sensitive[secKey{section, key}] {
-				b.WriteString(key)
+			keyPath := normalizeTOMLKeyPath(line[:eq])
+			full := keyPath
+			if section != "" {
+				full = section + "." + keyPath
+			}
+			if sensitive[full] {
+				// Preserve the original indentation + key token (trim only the
+				// run of whitespace before '='), redact the value, and re-attach
+				// any trailing inline comment verbatim.
+				b.WriteString(strings.TrimRight(line[:eq], " \t"))
 				b.WriteString(` = "(redacted)"`)
+				if comment := trailingTOMLComment(line[eq+1:]); comment != "" {
+					b.WriteByte(' ')
+					b.WriteString(comment)
+				}
 				b.WriteByte('\n')
 				continue
 			}
@@ -660,6 +691,62 @@ func redactRawTOML(raw string) string {
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// normalizeTOMLKeyPath turns a TOML key path or section name into its canonical
+// dotted form: it splits on '.', then strips surrounding whitespace and matched
+// quotes from each segment, so api.token, "api"."token", and ' api . token '
+// all normalize to "api.token". This lets the redaction match a quoted or
+// loosely-spaced key against the registry's plain dotted paths.
+func normalizeTOMLKeyPath(s string) string {
+	parts := strings.Split(s, ".")
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) >= 2 {
+			if (p[0] == '"' && p[len(p)-1] == '"') || (p[0] == '\'' && p[len(p)-1] == '\'') {
+				p = p[1 : len(p)-1]
+			}
+		}
+		parts[i] = p
+	}
+	return strings.Join(parts, ".")
+}
+
+// trailingTOMLComment returns the trailing inline comment (including its leading
+// '#') from a TOML value region (the text to the right of '='), or "" when there
+// is none. It is quote-aware: a '#' inside a "basic" or 'literal' string is part
+// of the value, not a comment, so key = "a#b" has no comment. This lets the
+// redaction strip a sensitive value while keeping its trailing comment verbatim.
+func trailingTOMLComment(after string) string {
+	inBasic := false   // inside a "..." basic string
+	inLiteral := false // inside a '...' literal string
+	for i := 0; i < len(after); i++ {
+		c := after[i]
+		switch {
+		case inBasic:
+			switch c {
+			case '\\':
+				i++ // skip the escaped character (e.g. \" does not close the string)
+			case '"':
+				inBasic = false
+			}
+		case inLiteral:
+			// Literal strings have no escapes; only a closing quote ends them.
+			if c == '\'' {
+				inLiteral = false
+			}
+		default:
+			switch c {
+			case '"':
+				inBasic = true
+			case '\'':
+				inLiteral = true
+			case '#':
+				return after[i:]
+			}
+		}
+	}
+	return ""
 }
 
 // effectiveValue renders the field's current merged value as a string. Secret
