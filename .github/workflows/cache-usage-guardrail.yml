@@ -1,0 +1,39 @@
+name: Cache Usage Guardrail
+
+# Weekly heads-up on Actions cache pressure. Reads the repo's active cache usage
+# and emits a ::warning:: annotation once it crosses 8 GB (80% of the 10 GB/repo
+# cap), so growth is caught before the global LRU starts evicting live caches.
+# Read-only: it observes, it never deletes.
+
+on:
+  schedule:
+    # Mondays 08:00 UTC.
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check-usage:
+    name: Check cache usage
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Warn if active cache usage exceeds 8 GB
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # 8 GB in bytes (8 * 1024^3).
+          THRESHOLD_BYTES: '8589934592'
+        run: |
+          set -euo pipefail
+          bytes=$(gh api "repos/$GH_REPO/actions/cache/usage" \
+            --jq '.active_caches_size_in_bytes')
+          gib=$(awk -v b="$bytes" 'BEGIN { printf "%.2f", b / (1024*1024*1024) }')
+          echo "Active Actions cache usage: ${gib} GiB (${bytes} bytes)"
+          if [ "$bytes" -gt "$THRESHOLD_BYTES" ]; then
+            echo "::warning::Actions cache usage is ${gib} GiB, above the 8 GiB guardrail (10 GiB/repo cap). Investigate cache growth or prune stale entries."
+          else
+            echo "Within guardrail (<= 8 GiB)."
+          fi

@@ -1,0 +1,50 @@
+name: PR Cache Cleanup
+
+# Deletes a PR's Actions caches when it closes. GitHub never evicts
+# refs/pull/N/merge caches on its own, so without this they accumulate against
+# the 10 GB/repo cap until the global LRU starts evicting live branch caches.
+# Scope is strictly this PR's own merge ref -- refs/heads/* (main and release
+# branches) are never touched.
+
+on:
+  pull_request:
+    types: [closed]
+
+# Least privilege: the workflow grants nothing by default; only the cleanup job
+# elevates to actions:write to delete caches.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete PR caches
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete caches for this PR's merge ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # Hardcoded to the PR's own merge ref; never refs/heads/*.
+          PR_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          echo "Listing caches for ref: $PR_REF"
+          # Defensive: the API is already scoped by ?ref=, but re-assert the ref
+          # client-side so a misfiled cache can never be deleted by this job.
+          ids=$(gh api --paginate \
+            "repos/$GH_REPO/actions/caches?ref=$PR_REF" \
+            --jq '.actions_caches[] | select(.ref == env.PR_REF) | .id')
+          if [ -z "$ids" ]; then
+            echo "No caches found for $PR_REF; nothing to delete."
+            exit 0
+          fi
+          for id in $ids; do
+            echo "Deleting cache id=$id"
+            gh api -X DELETE "repos/$GH_REPO/actions/caches/$id"
+          done
+          echo "Cache cleanup complete for $PR_REF."
