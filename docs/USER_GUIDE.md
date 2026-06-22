@@ -196,6 +196,8 @@ The browser UI is **off by default**. The serve listener only mounts the web rou
 -e MXLRC_WEBAUTH_ADMIN_PASSWORD=your-strong-password
 ```
 
+**Secret hygiene.** Never hardcode the bootstrap password in a compose file or source control. Supply it from an uncommitted `.env` file or a secret manager using `${MXLRC_WEBAUTH_ADMIN_PASSWORD}` interpolation, as shown in `docker-compose.example.yml`. The binary reads `MXLRC_WEBAUTH_ADMIN_PASSWORD` from the environment variable only - it does not read Docker or Swarm secret files (`/run/secrets/...`) directly. If you store the password as a Docker Secret, export it into the variable in your container entrypoint before the service starts: `export MXLRC_WEBAUTH_ADMIN_PASSWORD="$(cat /run/secrets/webauth_admin_password)"`.
+
 Bootstrap behavior:
 
 - **Both vars required.** Setting only one logs a warning and skips the bootstrap.
