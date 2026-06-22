@@ -10,6 +10,14 @@ services:
       MXLRC_SERVER_ADDR: "0.0.0.0:50705"
       # Enable the browser UI (overrides web_ui_enabled in config.toml).
       MXLRC_WEB_UI_ENABLED: "true"
+      # Bootstrap the first web-UI admin on a headless host (the /setup page is
+      # loopback/trusted-CIDR only). Both vars are required; the password must be
+      # at least 8 characters. The bootstrap is idempotent (skipped once an admin
+      # exists). Rotate the password in the UI and remove these vars after first
+      # login. See docs/USER_GUIDE.md "Web UI enablement" for secret-hygiene guidance.
+      # Supply MXLRC_WEBAUTH_ADMIN_PASSWORD from an uncommitted .env file -- never hardcode it here.
+      # MXLRC_WEBAUTH_ADMIN_USER: "admin"
+      # MXLRC_WEBAUTH_ADMIN_PASSWORD: "${MXLRC_WEBAUTH_ADMIN_PASSWORD}"
       MXLRC_OUTPUT_DIR: "/data/media/music"
       PUID: "99"
       PGID: "100"

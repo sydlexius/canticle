@@ -183,6 +183,31 @@ docker exec mxlrcgo-svc mxlrcgo-svc scan
 
 If your music instead lives in several separate top-level shares, map their common parent once, or add one **Path** mapping per share beneath `/data/media` (for example `/mnt/user/<share>` to `/data/media/<share>`) and register each with `library add`. Lyrics are written next to each audio file, so libraries do not need a shared output root; set `MXLRC_OUTPUT_DIR` only for the webhook metadata-fallback case (step 3 under [Path resolution](#path-resolution-dockerunraid)).
 
+### Web UI enablement
+
+The browser UI is **off by default**. The serve listener only mounts the web routes when the UI is explicitly enabled, so a fresh Docker or Unraid deployment serves the webhook API alone until you turn it on.
+
+**Enable it (headless).** Set `MXLRC_WEB_UI_ENABLED=true` in the container environment (the Unraid template ships this variable, and `docker-compose.example.yml` sets it). The equivalent config-file setting is `web_ui_enabled = true` under `[server]` in `config.toml`; the env var overrides the file when both are present. With the UI off, neither the pages nor the `/login` or `/setup` routes exist.
+
+**Bootstrap the first admin (headless).** The setup page (`/setup`) is reachable **only from loopback or a configured trusted CIDR**, so a remote Unraid box cannot complete first-run setup through the browser. For headless deployments, create the first admin from the environment instead:
+
+```sh
+-e MXLRC_WEBAUTH_ADMIN_USER=admin
+-e MXLRC_WEBAUTH_ADMIN_PASSWORD=your-strong-password
+```
+
+**Secret hygiene.** Never hardcode the bootstrap password in a compose file or source control. Supply it from an uncommitted `.env` file or a secret manager using `${MXLRC_WEBAUTH_ADMIN_PASSWORD}` interpolation, as shown in `docker-compose.example.yml`. The binary reads `MXLRC_WEBAUTH_ADMIN_PASSWORD` from the environment variable only - it does not read Docker or Swarm secret files (`/run/secrets/...`) directly. If you store the password as a Docker Secret, export it into the variable in your container entrypoint before the service starts: `export MXLRC_WEBAUTH_ADMIN_PASSWORD="$(cat /run/secrets/webauth_admin_password)"`.
+
+Bootstrap behavior:
+
+- **Both vars required.** Setting only one logs a warning and skips the bootstrap.
+- **Password floor.** The password must be at least 8 characters. A shorter one is a **fatal startup error** (the container will not start), not a silent skip.
+- **Idempotent.** The bootstrap runs only when no admin exists yet. Once any admin account is present it is skipped (never an overwrite), so leaving the vars set across restarts is harmless. The password is never logged.
+
+**First login and cleanup.** After the container is up, browse to `http://[host]:[port]/login` and sign in with the bootstrapped credentials. Then **rotate the password from inside the UI and remove the `MXLRC_WEBAUTH_ADMIN_USER` / `MXLRC_WEBAUTH_ADMIN_PASSWORD` env vars** (and restart). Because the bootstrap is idempotent, the stale vars do nothing on the next start, but removing them keeps the plaintext password out of the container environment.
+
+If the UI is reachable beyond your local machine, also read [Security considerations](#security-considerations) below: put it behind TLS so the session cookie is not sent in cleartext.
+
 ## Windows
 
 Download the signed `.zip` archive for `windows/amd64` from the [GitHub releases page](https://github.com/sydlexius/mxlrcgo-svc/releases). Extract `mxlrcgo-svc.exe` to one of:
@@ -401,6 +426,8 @@ mxlrcgo-svc completion fish > ~/.config/fish/completions/mxlrcgo-svc.fish
 The scripts call a hidden `__complete` handler; library-name completion never creates the database.
 
 ## Security considerations
+
+**Web UI and admin bootstrap.** The browser UI is off by default; enabling it and bootstrapping the first admin on a headless Docker/Unraid host is covered in [Web UI enablement](#web-ui-enablement) under the Unraid section. The short version: enable with `MXLRC_WEB_UI_ENABLED=true`, bootstrap with `MXLRC_WEBAUTH_ADMIN_USER` / `MXLRC_WEBAUTH_ADMIN_PASSWORD` (8-char minimum, idempotent), then rotate the password and remove those env vars after first login. The interactive `/setup` page is restricted to loopback or a trusted CIDR, so env-bootstrap is the headless path.
 
 **Session cookie and TLS.** The browser session cookie (`mxlrc_session`) has its `Secure` flag set automatically when the connection is TLS - either a direct TLS listener or a trusted reverse proxy that sets `X-Forwarded-Proto: https`. On a plain-HTTP deployment the `Secure` flag is off and the cookie is sent in cleartext, which exposes it to network interception. If the web UI is reachable from outside your local machine, run it behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik) or enable the built-in TLS listener (`[server.tls]` in `config.toml`). See `README.md` for TLS configuration options.
 

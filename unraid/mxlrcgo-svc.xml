@@ -16,7 +16,7 @@
   <Overview>Fetch synced lyrics from Musixmatch and save them as .lrc files for music libraries.</Overview>
   <Description>mxlrcgo-svc fetches synced lyrics from the Musixmatch API, writes .lrc files, and can run as a small HTTP service for Lidarr webhook-driven lyric fetching.</Description>
   <Category>MediaApp:Music</Category>
-  <WebUI/>
+  <WebUI>http://[IP]:[PORT:50705]/</WebUI>
   <Icon>https://raw.githubusercontent.com/sydlexius/unraid-templates/main/icon.svg</Icon>
   <ExtraParams/>
   <PostArgs/>
