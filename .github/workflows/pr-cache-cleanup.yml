@@ -41,16 +41,20 @@ jobs:
             exit 0
           fi
           PR_REF="refs/pull/${PR_NUMBER}/merge"
+          export PR_REF
           echo "Listing caches for ref: $PR_REF"
           # Defensive: the API is already scoped by ?ref=, but re-assert the ref
-          # client-side (via --arg, never string-interpolated into the filter) so
-          # a misfiled cache can never be deleted by this job.
-          # $ref below is a jq variable (set via --arg), not a shell expansion, so it must stay single-quoted.
-          # shellcheck disable=SC2016
+          # client-side (via env.PR_REF in the jq filter) so a misfiled cache
+          # can never be deleted by this job. export (not a command-prefix
+          # assignment) is required because PR_REF is reused in the URL and
+          # echo lines below: a command-prefix assignment (PR_REF=x gh api
+          # "...$PR_REF...") is applied to the child's environment only after
+          # the current shell expands all words, so $PR_REF in the URL would
+          # expand to the old (empty) value. gh api also does not support jq's
+          # --arg flag, so env.PR_REF is the only safe injection point.
           ids=$(gh api --paginate \
             "repos/$GH_REPO/actions/caches?ref=$PR_REF" \
-            --jq '.actions_caches[] | select(.ref == $ref) | .id' \
-            --arg ref "$PR_REF")
+            --jq '.actions_caches[] | select(.ref == env.PR_REF) | .id')
           if [ -z "$ids" ]; then
             echo "No caches found for $PR_REF; nothing to delete."
             exit 0
