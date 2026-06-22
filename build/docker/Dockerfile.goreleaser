@@ -5,7 +5,8 @@ FROM alpine:3.24.0@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acae
 # The two differ only in how the binary arrives (copied here vs built in the root Dockerfile).
 LABEL org.opencontainers.image.source="https://github.com/sydlexius/mxlrcgo-svc" \
       org.opencontainers.image.description="Fetch synced lyrics from Musixmatch and save .lrc files" \
-      org.opencontainers.image.licenses="GPL-3.0"
+      org.opencontainers.image.licenses="GPL-3.0" \
+      net.unraid.docker.webui="http://[IP]:[PORT:50705]/"
 
 RUN apk add --no-cache bash ca-certificates ffmpeg su-exec tzdata && \
     apk upgrade --no-cache && \

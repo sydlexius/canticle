@@ -87,6 +87,12 @@ dir = "lyrics"
 # HTTP listen address for --serve mode.
 addr = "127.0.0.1:3876"
 
+# Enable the browser UI on the serve listener. Off by default; the web routes
+# (including /login and /setup) only mount when this is true. The
+# MXLRC_WEB_UI_ENABLED env var overrides this value. See docs/USER_GUIDE.md
+# "Web UI enablement" for headless admin bootstrap.
+# web_ui_enabled = false
+
 # API keys accepted by webhook endpoints. Generate/store these outside the file
 # when possible; MXLRC_WEBHOOK_API_KEY can also provide one or more comma-separated keys.
 # webhook_api_keys = ["mxlrc_your-webhook-key"]
