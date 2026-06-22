@@ -229,6 +229,58 @@ func TestPacerGoroutineSafe(t *testing.T) {
 	wg.Wait()
 }
 
+func TestPacerConcurrentSlotAllocation(t *testing.T) {
+	// Two callers race pace() against a FROZEN clock (now never advances). The
+	// pacer reserves each caller's slot under the lock by advancing lastRequest,
+	// so the two callers claim sequential slots: the first waits 0, the second
+	// waits exactly one interval. Total sleep is ~1x interval, NOT 2x (the
+	// convoy bug, where both would read the same lastRequest and each sleep a
+	// full interval). adaptiveLevel is 0 at the start, so the effective interval
+	// equals minInterval (multiplier 1).
+	//
+	// Note: this test would HANG under the pre-fix loop-and-recheck pace(): with
+	// a frozen clock the waiting caller would recompute the same wait forever.
+	// Reserving the slot under the lock is what makes it terminate.
+	minInterval := 10 * time.Second
+	base := time.Unix(5000, 0)
+	nowFn := func() time.Time { return base } // frozen
+
+	var mu sync.Mutex
+	var totalSleep time.Duration
+	sleepFn := func(ctx context.Context, d time.Duration) bool {
+		mu.Lock()
+		totalSleep += d
+		mu.Unlock()
+		return true
+	}
+
+	c := newPacerTestClient(minInterval, nowFn, sleepFn)
+	if got := readAdaptiveLevel(c); got != 0 {
+		t.Fatalf("adaptiveLevel = %d at test start; want 0 (multiplier 1)", got)
+	}
+	track := models.Track{TrackName: "t", ArtistName: "a"}
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.FindLyrics(ctx, track); err != nil {
+				t.Errorf("FindLyrics: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	got := totalSleep
+	mu.Unlock()
+	if got != minInterval {
+		t.Fatalf("total sleep across 2 concurrent callers = %v; want %v (1x interval, not 2x convoy)", got, minInterval)
+	}
+}
+
 func TestWithMinIntervalReturnsClient(t *testing.T) {
 	c := NewClient("token")
 	got := c.WithMinInterval(5 * time.Second)

@@ -161,12 +161,13 @@ func (c *Client) MinInterval() time.Duration {
 
 // pace enforces the minimum request interval. It must be called at the top of
 // FindLyrics before the HTTP request is built. When minInterval is zero or
-// negative it returns immediately. Otherwise it loops: under the lock it
-// checks how long remains until the next slot is free; if the slot is free it
-// reserves it (sets lastRequest = now) and returns; if not, it releases the
-// lock, sleeps for the remainder, and re-checks. Re-checking after each sleep
-// prevents concurrent callers from computing the same wait, sleeping together,
-// and then all proceeding in a burst.
+// negative it returns immediately. Otherwise, under the lock, it computes the
+// next free slot from lastRequest and the adaptive interval, advances
+// lastRequest to that slot (reserving it before releasing the lock), then
+// sleeps outside the lock for whatever wait remains. Reserving the slot under
+// the lock is what prevents convoying: N concurrent callers each claim a
+// distinct, sequential slot rather than all reading the same lastRequest,
+// computing the same wait, and bursting together when their sleeps elapse.
 //
 // The wait is ctx-cancellable; if the context is canceled during the wait
 // pace returns ctx.Err() wrapped with context.
@@ -174,35 +175,42 @@ func (c *Client) pace(ctx context.Context) error {
 	if c.minInterval <= 0 {
 		return nil
 	}
-	for {
-		c.mu.Lock()
-		now := c.now()
-		// Adaptive interval: minInterval scaled by the current ratcheting level.
-		// minInterval is the floor (level 0 == 1x), keeping api.cooldown as the
-		// explicit override the operator configured.
-		adaptiveLevel := c.adaptiveLevel
-		effectiveMultiplier := 1 << adaptiveLevel
-		baseInterval := c.minInterval
-		effectiveInterval := baseInterval * time.Duration(effectiveMultiplier)
-		wait := effectiveInterval - now.Sub(c.lastRequest)
-		if wait <= 0 {
-			c.lastRequest = now
-			c.mu.Unlock()
-			return nil
-		}
-		c.mu.Unlock()
 
-		if adaptiveLevel > 0 {
-			slog.Debug("musixmatch pacer: adaptive interval in effect",
-				"level", adaptiveLevel, "multiplier", effectiveMultiplier,
-				"effective_interval", effectiveInterval, "base_interval", baseInterval)
-		}
+	c.mu.Lock()
+	now := c.now()
+	// Adaptive interval: minInterval scaled by the current ratcheting level.
+	// minInterval is the floor (level 0 == 1x), keeping api.cooldown as the
+	// explicit override the operator configured.
+	adaptiveLevel := c.adaptiveLevel
+	effectiveMultiplier := 1 << adaptiveLevel
+	baseInterval := c.minInterval
+	effectiveInterval := baseInterval * time.Duration(effectiveMultiplier)
+	// Reserve this caller's slot under the lock. The earliest the next request
+	// may proceed is one effective interval after the previously reserved slot;
+	// if that is already in the past, the slot is now. Advancing lastRequest to
+	// the reserved slot means the next caller computes its own later slot, so
+	// concurrent callers serialize instead of all sleeping the same wait.
+	next := c.lastRequest.Add(effectiveInterval)
+	if next.Before(now) {
+		next = now
+	}
+	c.lastRequest = next
+	wait := next.Sub(now)
+	c.mu.Unlock()
 
+	if adaptiveLevel > 0 {
+		slog.Debug("musixmatch pacer: adaptive interval in effect",
+			"level", adaptiveLevel, "multiplier", effectiveMultiplier,
+			"effective_interval", effectiveInterval, "base_interval", baseInterval)
+	}
+
+	if wait > 0 {
 		slog.Debug("musixmatch pacer: waiting before next request", "wait", wait)
 		if !c.sleep(ctx, wait) {
 			return fmt.Errorf("musixmatch: pace: %w", ctx.Err())
 		}
 	}
+	return nil
 }
 
 // OnThrottle implements the providers.AdaptivePacer interface. It raises the
