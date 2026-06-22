@@ -327,8 +327,30 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// setSecurityHeaders applies a conservative baseline of security headers to
+// every serve-mode response (static assets and pages alike). It must be called
+// before any handler writes a status line or body, otherwise the headers are
+// dropped.
+func setSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	// 'unsafe-inline' in script-src is required by the dashboard's inline
+	// timezone-rewrite <script> IIFE (web/templates/dashboard.templ), which
+	// runs before paint to localize timestamps. A stricter script-src would
+	// break that page. Future hardening: replace 'unsafe-inline' with a
+	// per-request nonce or a precomputed hash for that one inline block.
+	// There are no inline styles, so style-src stays at 'self'.
+	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
+}
+
 // ServeHTTP logs requests and dispatches them to API routes.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Set security headers before dispatch so they are present on every
+	// response, including ones whose handlers write status/body immediately.
+	// statusRecorder embeds w and does not override Header(), so setting on w
+	// is equivalent to setting on rec.
+	setSecurityHeaders(w)
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	h.mux.ServeHTTP(rec, r)
 	slog.Debug("http request", "method", r.Method, "uri", redactURI(r.URL), "status", rec.status) //nolint:gosec // G706: request URI is logged as a structured slog field after apikey redaction; slog escapes values
