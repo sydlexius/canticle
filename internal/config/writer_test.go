@@ -52,7 +52,7 @@ func TestWriterRoundTrip_PreservesEverythingButEditedValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDocument: %v", err)
 	}
-	if err := SetValue(doc, "logging.level", TypeString, "debug"); err != nil {
+	if err := SetValue(doc, "logging.level", TypeString, "debug", ""); err != nil {
 		t.Fatalf("SetValue: %v", err)
 	}
 	if err := WriteAtomic(path, doc); err != nil {
@@ -98,7 +98,7 @@ func TestWriterRoundTrip_AllTypes(t *testing.T) {
 		{"providers.fallback_order", TypeStringSlice, "musixmatch,petitlyrics", `fallback_order = ["musixmatch", "petitlyrics"]`},
 	}
 	for _, e := range edits {
-		if err := SetValue(doc, e.path, e.ftype, e.value); err != nil {
+		if err := SetValue(doc, e.path, e.ftype, e.value, ""); err != nil {
 			t.Fatalf("SetValue(%s): %v", e.path, err)
 		}
 	}
@@ -131,7 +131,7 @@ func TestWriteAtomic_PurgesBackupAfterSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDocument: %v", err)
 	}
-	if err := SetValue(doc, "logging.level", TypeString, "warn"); err != nil {
+	if err := SetValue(doc, "logging.level", TypeString, "warn", ""); err != nil {
 		t.Fatalf("SetValue: %v", err)
 	}
 	if err := WriteAtomic(path, doc); err != nil {
@@ -169,7 +169,7 @@ func TestWriteAtomic_FailedWriteLeavesOriginalIntact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDocument: %v", err)
 	}
-	if err := SetValue(doc, "logging.level", TypeString, "warn"); err != nil {
+	if err := SetValue(doc, "logging.level", TypeString, "warn", ""); err != nil {
 		t.Fatalf("SetValue: %v", err)
 	}
 	// Make the directory unwritable so os.CreateTemp (the first mutation) fails.

@@ -38,6 +38,52 @@ func LoadDocument(path string) (*tomledit.Document, error) {
 	return doc, nil
 }
 
+// managedCommentMarker prefixes every comment line this package stamps. It
+// survives parser.Comments.Clean() (which prepends "# "), so a stamped line
+// renders as "# mxlrc: <description>" and can be recognized again on the next
+// load to distinguish our managed comment from an operator's hand-written one.
+const managedCommentMarker = "mxlrc:"
+
+// managedComment builds the managed block comment for a field description. The
+// returned Comments has no leading "#": Clean() (run by the formatter on write)
+// prepends "# ", yielding "# mxlrc: <desc>".
+func managedComment(desc string) parser.Comments {
+	return parser.Comments{managedCommentMarker + " " + desc}
+}
+
+// isManaged reports whether b is a comment block this package stamped (every
+// cleaned line carries the managed marker), as opposed to an operator's
+// hand-written comment. An empty block is not managed. Comparing against the
+// Clean()'d form makes the check stable across a load/save round-trip.
+func isManaged(b parser.Comments) bool {
+	cleaned := b.Clean()
+	if len(cleaned) == 0 {
+		return false
+	}
+	for _, line := range cleaned {
+		if !strings.HasPrefix(line, "# "+managedCommentMarker) {
+			return false
+		}
+	}
+	return true
+}
+
+// stampComment returns the block comment to use for a key given its existing
+// block and the field description. It stamps the managed "# mxlrc: <desc>"
+// comment only when a description is present AND the existing block is either
+// absent or itself a previously-stamped managed block. A non-empty operator
+// comment is never overwritten. Re-stamping the same description is idempotent:
+// the result Clean()s to byte-identical output.
+func stampComment(existing parser.Comments, desc string) parser.Comments {
+	if desc == "" {
+		return existing
+	}
+	if len(existing) != 0 && !isManaged(existing) {
+		return existing
+	}
+	return managedComment(desc)
+}
+
 // SetValue sets the value of a known dotted key in the document, preserving all
 // other content. The field's type drives serialization (strings are quoted,
 // slices become inline arrays, etc.). If the key already exists its value is
@@ -45,7 +91,12 @@ func LoadDocument(path string) (*tomledit.Document, error) {
 // [section] table is itself absent (operators hand-write minimal configs with
 // only the sections they set) the table is created. Comments, blank lines, and
 // ordering elsewhere are untouched.
-func SetValue(doc *tomledit.Document, path string, ftype FieldType, value string) error {
+//
+// When description is non-empty, a managed "# mxlrc: <description>" block
+// comment is stamped above the key, but only if the key has no existing block
+// comment or its block is itself a previously-stamped managed one -- an
+// operator's hand-written comment is never overwritten.
+func SetValue(doc *tomledit.Document, path string, ftype FieldType, value, description string) error {
 	keys := strings.Split(path, ".")
 	val, err := tomlValue(ftype, value)
 	if err != nil {
@@ -53,12 +104,14 @@ func SetValue(doc *tomledit.Document, path string, ftype FieldType, value string
 	}
 	if entry := doc.First(keys...); entry != nil && entry.KeyValue != nil {
 		entry.Value = val
+		entry.Block = stampComment(entry.Block, description)
 		return nil
 	}
 	// Key absent: insert into its table (the last element is the leaf key).
 	name := keys[len(keys)-1]
 	table := keys[:len(keys)-1]
 	kv := &parser.KeyValue{Name: parser.Key{name}, Value: val}
+	kv.Block = stampComment(nil, description)
 	if tab := transform.FindTable(doc, table...); tab != nil && tab.Section != nil {
 		transform.InsertMapping(tab.Section, kv, true)
 		return nil

@@ -325,7 +325,7 @@ func ApplyChanges(configPath string, changes map[string]string) error {
 	}
 	for path, value := range changes {
 		f, _ := FieldByPath(path)
-		if err := SetValue(doc, path, f.Type, value); err != nil {
+		if err := SetValue(doc, path, f.Type, value, f.Description); err != nil {
 			return err
 		}
 	}

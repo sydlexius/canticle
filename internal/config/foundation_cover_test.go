@@ -118,7 +118,7 @@ func TestSetValue_InsertsAbsentKeyIntoSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	// api.circuit_open_duration is absent from the [api] section in the fixture.
-	if err := SetValue(doc, "api.circuit_open_duration", TypeInt, "5"); err != nil {
+	if err := SetValue(doc, "api.circuit_open_duration", TypeInt, "5", ""); err != nil {
 		t.Fatalf("SetValue insert: %v", err)
 	}
 	if err := WriteAtomic(path, doc); err != nil {
@@ -141,7 +141,7 @@ func TestSetValue_CreatesAbsentSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	// [enrichment] is not present in the fixture.
-	if err := SetValue(doc, "enrichment.enabled", TypeBool, "true"); err != nil {
+	if err := SetValue(doc, "enrichment.enabled", TypeBool, "true", ""); err != nil {
 		t.Fatalf("SetValue into an absent section should create it, got: %v", err)
 	}
 	if err := WriteAtomic(path, doc); err != nil {
@@ -198,7 +198,7 @@ func TestSetValue_TypeErrors(t *testing.T) {
 		{"verification.min_confidence", TypeFloat64, "high"},
 	}
 	for _, c := range cases {
-		if err := SetValue(doc, c.path, c.ftype, c.value); err == nil {
+		if err := SetValue(doc, c.path, c.ftype, c.value, ""); err == nil {
 			t.Errorf("SetValue(%s,%q) should have failed type conversion", c.path, c.value)
 		}
 	}
