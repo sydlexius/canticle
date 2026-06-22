@@ -84,6 +84,19 @@ type UI struct {
 	// cannot interleave ApplyChanges' load/modify/atomic-rename cycle (#290
 	// single-writer guard).
 	saveMu sync.Mutex
+
+	// cacheStats supplies the process-lifetime lyrics-cache hit/lookup counters
+	// for the dashboard cache hit-rate tile (#308). It is nil when no cache seam
+	// is attached (e.g. some tests, or the web UI built without serve wiring), in
+	// which case the dashboard omits the cache tile rather than rendering zeros.
+	cacheStats CacheStatsProvider
+}
+
+// CacheStatsProvider supplies the process-lifetime lyrics-cache hit and lookup
+// counters that back the dashboard cache hit-rate tile (#308). *cache.CacheRepo
+// satisfies it.
+type CacheStatsProvider interface {
+	CacheStats() (hits, lookups int64)
 }
 
 // UIOption customizes a UI.
@@ -121,6 +134,18 @@ func WithReports(repo *reports.Repo) UIOption {
 // post-construction equivalent of WithReports, used by the server layer where
 // the UI is built first (WithWebUIAuth) and the reports repo attached after.
 func (u *UI) AttachReports(repo *reports.Repo) { u.reports = repo }
+
+// WithCacheStats attaches the lyrics-cache stats seam that backs the dashboard
+// cache hit-rate tile (#308). Omitting it leaves the dashboard without the cache
+// tile (no source wired) rather than rendering a misleading zero.
+func WithCacheStats(p CacheStatsProvider) UIOption {
+	return func(u *UI) { u.cacheStats = p }
+}
+
+// AttachCacheStats wires the cache stats seam onto an already-constructed UI, the
+// post-construction equivalent of WithCacheStats used by the server layer where
+// the UI is built first (WithWebUIAuth) and the seam attached after.
+func (u *UI) AttachCacheStats(p CacheStatsProvider) { u.cacheStats = p }
 
 // WithConfigPath sets the resolved config file path the settings save handlers
 // write through. Without it the settings page stays read-only (no write path).

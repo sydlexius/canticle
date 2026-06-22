@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
+	"github.com/sydlexius/mxlrcgo-svc/internal/reports"
 )
 
 // TestHandleDashboard_NoReports verifies that GET /dashboard returns 503 when
@@ -244,5 +245,78 @@ func TestHandleDashboard_AsyncCopy(t *testing.T) {
 	// Must not contain a search box.
 	if strings.Contains(body, `type="search"`) || strings.Contains(body, `<input`) && strings.Contains(body, "search") {
 		t.Error("dashboard must not contain a search box")
+	}
+}
+
+// fakeCacheStats is a test CacheStatsProvider returning fixed hit/lookup counts.
+type fakeCacheStats struct{ hits, lookups int64 }
+
+func (f fakeCacheStats) CacheStats() (hits, lookups int64) { return f.hits, f.lookups }
+
+// TestBuildCacheTiles verifies the cache tile value/rate formatting, including
+// the lookups==0 guard that must render 0% rather than dividing by zero.
+func TestBuildCacheTiles(t *testing.T) {
+	tests := []struct {
+		name               string
+		hits, lookups      int64
+		wantValue, wantSub string
+	}{
+		{"no lookups guard", 0, 0, "0/0", "0%"},
+		{"all hits", 5, 5, "5/5", "100%"},
+		{"three of four", 3, 4, "3/4", "75%"},
+		{"rounds to nearest", 1, 3, "1/3", "33%"},
+		{"zero hits with lookups", 0, 4, "0/4", "0%"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tiles := buildCacheTiles(tc.hits, tc.lookups)
+			if len(tiles) != 1 {
+				t.Fatalf("buildCacheTiles len = %d, want 1", len(tiles))
+			}
+			got := tiles[0]
+			if got.Label != "Cache" {
+				t.Errorf("Label = %q, want %q", got.Label, "Cache")
+			}
+			if got.Value != tc.wantValue {
+				t.Errorf("Value = %q, want %q", got.Value, tc.wantValue)
+			}
+			if got.Sub != tc.wantSub {
+				t.Errorf("Sub = %q, want %q", got.Sub, tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestHandleDashboard_CacheTile verifies that when a cache stats source is
+// attached the dashboard renders the Cache tile with its hit-rate, and omits it
+// otherwise.
+func TestHandleDashboard_CacheTile(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+
+	// With cache stats attached: tile and rate appear.
+	muxWith := http.NewServeMux()
+	uiWith := NewUI(config.Config{}, "v-test", WithReports(reports.New(sqlDB)))
+	uiWith.AttachCacheStats(fakeCacheStats{hits: 3, lookups: 4})
+	uiWith.Register(muxWith)
+
+	recWith := httptest.NewRecorder()
+	muxWith.ServeHTTP(recWith, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if recWith.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard status = %d, want 200", recWith.Code)
+	}
+	bodyWith := recWith.Body.String()
+	if !strings.Contains(bodyWith, ">Cache<") {
+		t.Error("dashboard with cache stats missing Cache tile label")
+	}
+	if !strings.Contains(bodyWith, "3/4") || !strings.Contains(bodyWith, "75%") {
+		t.Errorf("dashboard with cache stats missing 3/4 / 75%% values")
+	}
+
+	// Without cache stats: no Cache tile.
+	muxWithout := newReportsUIServer(t, sqlDB)
+	recWithout := httptest.NewRecorder()
+	muxWithout.ServeHTTP(recWithout, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if strings.Contains(recWithout.Body.String(), ">Cache<") {
+		t.Error("dashboard without cache stats must omit the Cache tile")
 	}
 }

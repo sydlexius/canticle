@@ -11,6 +11,9 @@ type DashboardView struct {
 	QueueTiles []StatTile
 	// ProviderTiles holds one tile per provider lane showing hit count + hit rate.
 	ProviderTiles []StatTile
+	// CacheTiles holds the lyrics-cache hit-rate tile(s) for the dashboard (#308).
+	// Empty when no cache stats source is wired, in which case the row is omitted.
+	CacheTiles []StatTile
 	// InstrumentalCount is the formatted count of audio-detected instrumental tracks.
 	InstrumentalCount string
 	// RecentRows holds the most recently completed tracks (newest first, capped at 20).

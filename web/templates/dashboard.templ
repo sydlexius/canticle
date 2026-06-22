@@ -29,7 +29,7 @@ templ dashboardContent(view DashboardView) {
 			</p>
 		</div>
 		@dashQueueTiles(view.QueueTiles, view.InstrumentalCount)
-		@dashProviderTiles(view.ProviderTiles)
+		@dashProviderTiles(view.ProviderTiles, view.CacheTiles)
 		@dashRecentOutcomes(view.RecentRows)
 		<p class="mx-dash-metrics-note">
 			Prometheus metrics:
@@ -96,8 +96,10 @@ templ dashQueueTiles(tiles []StatTile, instrumentalCount string) {
 	</section>
 }
 
-// dashProviderTiles renders the per-lyrics-source tile row.
-templ dashProviderTiles(tiles []StatTile) {
+// dashProviderTiles renders the per-lyrics-source tile row plus the lyrics-cache
+// hit-rate tile(s) (#308). The cache tile shares the same row and markup as the
+// provider tiles; it is omitted when no cache stats source is wired.
+templ dashProviderTiles(tiles []StatTile, cacheTiles []StatTile) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-provider-heading"
@@ -105,11 +107,24 @@ templ dashProviderTiles(tiles []StatTile) {
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-provider-heading">Lyrics Sources</h2>
 		<div class="mx-dash-tiles" role="list">
-			if len(tiles) == 0 {
+			if len(tiles) == 0 && len(cacheTiles) == 0 {
 				<p class="mx-dash-empty">No lyrics source data yet. Data accrues as tracks are processed.</p>
 			}
 			for _, t := range tiles {
 				<div class="mx-dash-tile" role="listitem">
+					<span class="mx-dash-tile-label">{ t.Label }</span>
+					<span class="mx-dash-tile-value">{ t.Value }</span>
+					if t.Sub != "" {
+						<span class="mx-dash-tile-sub">{ t.Sub }</span>
+					}
+				</div>
+			}
+			for _, t := range cacheTiles {
+				<div
+					class="mx-dash-tile"
+					role="listitem"
+					title="Lyrics-cache hits over lookups since the server started. A high rate means most tracks are served from cache without a provider fetch."
+				>
 					<span class="mx-dash-tile-label">{ t.Label }</span>
 					<span class="mx-dash-tile-value">{ t.Value }</span>
 					if t.Sub != "" {

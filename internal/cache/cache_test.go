@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/cache"
@@ -210,5 +211,78 @@ func TestLookup_NormalizesKeys(t *testing.T) {
 	}
 	if got != "normalized lyrics" {
 		t.Errorf("got %q, want %q", got, "normalized lyrics")
+	}
+}
+
+// TestCacheStats_CountsHitsAndLookups verifies CacheStats counts each Lookup
+// exactly once and counts a hit only on a success return: the exact-bucket hit,
+// the bucket-0 fallback hit, but never a miss.
+func TestCacheStats_CountsHitsAndLookups(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if hits, lookups := repo.CacheStats(); hits != 0 || lookups != 0 {
+		t.Fatalf("initial stats = (%d, %d), want (0, 0)", hits, lookups)
+	}
+
+	// Seed an exact-bucket row and a separate bucket-0 sentinel row.
+	if err := repo.Store(ctx, "Artist", "Exact", 36, "exact lyrics"); err != nil {
+		t.Fatalf("Store exact: %v", err)
+	}
+	if err := repo.Store(ctx, "Artist", "Legacy", 0, "legacy lyrics"); err != nil {
+		t.Fatalf("Store legacy: %v", err)
+	}
+
+	// 1) exact-bucket hit
+	if _, err := repo.Lookup(ctx, "Artist", "Exact", 36); err != nil {
+		t.Fatalf("exact-bucket Lookup: %v", err)
+	}
+	// 2) bucket-0 fallback hit: request a real bucket, fall back to the bucket-0 row
+	if _, err := repo.Lookup(ctx, "Artist", "Legacy", 48); err != nil {
+		t.Fatalf("fallback Lookup: %v", err)
+	}
+	// 3) miss: must count a lookup but not a hit
+	if _, err := repo.Lookup(ctx, "Nobody", "Nothing", 0); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("miss Lookup err = %v, want sql.ErrNoRows", err)
+	}
+
+	hits, lookups := repo.CacheStats()
+	if hits != 2 {
+		t.Errorf("hits = %d, want 2 (exact + fallback, not the miss)", hits)
+	}
+	if lookups != 3 {
+		t.Errorf("lookups = %d, want 3 (every Lookup counted once)", lookups)
+	}
+}
+
+// TestCacheStats_ConcurrentLookupsRace exercises the atomic counters under
+// concurrent Lookups so `go test -race` flags any data race.
+func TestCacheStats_ConcurrentLookupsRace(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+	if err := repo.Store(ctx, "Artist", "Song", 0, "lyrics"); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	const goroutines = 8
+	const perGoroutine = 25
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				_, _ = repo.Lookup(ctx, "Artist", "Song", 0)
+			}
+		}()
+	}
+	wg.Wait()
+
+	hits, lookups := repo.CacheStats()
+	if want := int64(goroutines * perGoroutine); lookups != want {
+		t.Errorf("lookups = %d, want %d", lookups, want)
+	}
+	if want := int64(goroutines * perGoroutine); hits != want {
+		t.Errorf("hits = %d, want %d (every concurrent lookup is a hit)", hits, want)
 	}
 }

@@ -90,6 +90,7 @@ type Handler struct {
 	reportsDB          *sql.DB
 	settingsConfigPath string
 	settingsStore      secrets.Store
+	cacheStats         web.CacheStatsProvider
 	trusted            *trustnet.Policy
 	mux                *http.ServeMux
 }
@@ -210,6 +211,14 @@ func WithSettingsWriter(configPath string, store secrets.Store) Option {
 	}
 }
 
+// WithCacheStatsUI wires the lyrics-cache stats seam that backs the dashboard
+// cache hit-rate tile (#308). The handler attaches it to the mounted web UI (see
+// NewHandler). Meaningful only alongside a mounted web UI; with no UI, or a nil
+// provider, it is a no-op (the dashboard omits the cache tile).
+func WithCacheStatsUI(p web.CacheStatsProvider) Option {
+	return func(h *Handler) { h.cacheStats = p }
+}
+
 // WithWebUIIf conditionally mounts the web UI. When enabled is false it
 // returns a no-op option so callers do not need an inline if-branch.
 func WithWebUIIf(enabled bool, cfg config.Config, version string) Option {
@@ -247,6 +256,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)
+		}
+		if h.cacheStats != nil {
+			h.webui.AttachCacheStats(h.cacheStats)
 		}
 		h.webui.Register(h.mux)
 	}
