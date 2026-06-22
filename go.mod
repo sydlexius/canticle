@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/a-h/templ v0.3.1001
+	github.com/a-h/templ v0.3.1020
 	github.com/alexflint/go-arg v1.6.1
 	github.com/creachadair/tomledit v0.0.29
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
