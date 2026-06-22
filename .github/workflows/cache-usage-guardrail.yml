@@ -28,8 +28,15 @@ jobs:
           THRESHOLD_BYTES: '8589934592'
         run: |
           set -euo pipefail
+          # The API call can fail or the field can be empty/null; never let a
+          # missing value emit a false warning. Default to empty on call failure,
+          # then require a non-empty, purely-numeric value before comparing.
           bytes=$(gh api "repos/$GH_REPO/actions/cache/usage" \
-            --jq '.active_caches_size_in_bytes')
+            --jq '.active_caches_size_in_bytes // empty' 2>/dev/null || true)
+          if [ -z "${bytes:-}" ] || ! printf '%s' "$bytes" | grep -Eq '^[0-9]+$'; then
+            echo "::notice::Could not read a numeric cache usage value (got '${bytes:-}'); skipping guardrail check."
+            exit 0
+          fi
           gib=$(awk -v b="$bytes" 'BEGIN { printf "%.2f", b / (1024*1024*1024) }')
           echo "Active Actions cache usage: ${gib} GiB (${bytes} bytes)"
           if [ "$bytes" -gt "$THRESHOLD_BYTES" ]; then
