@@ -1,6 +1,5 @@
-[versioning]
-file = "VERSION"
-pattern = '^(?P<version>\d+\.\d+\.\d+)$'
+# Version is derived from git tags via GoReleaser ldflags (stamped into
+# internal/version at build time); there is no checked-in version file.
 
 [build]
 working_dir = "."

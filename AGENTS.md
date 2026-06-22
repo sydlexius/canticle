@@ -2,7 +2,7 @@
 
 **mxlrcgo-svc (sydlexius/mxlrcgo-svc)**
 
-A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them as `.lrc` files. The project is being maintained under its own module path, with global state eliminated and the hardcoded API token externalized.
+A Go CLI tool that fetches synced lyrics from the Musixmatch API (and fallback providers) and saves them as `.lrc` files. The project is maintained under its own module path with global state eliminated and the API token externalized. Beyond the original one-shot `fetch` mode it now ships stateful, long-running features: a `serve` mode (HTTP server + durable SQLite work queue + background worker + library scan scheduler + optional filesystem watcher + browser-authenticated web UI), TOML config, multi-provider orchestration with per-lane circuit breakers, optional acoustic verification and instrumental detection sidecars, and encrypted-at-rest secrets.
 
 **Core Value:** The tool fetches synced lyrics reliably and writes correct `.lrc` files. Everything else (project structure, config handling, CI) exists to support that.
 
@@ -141,13 +141,58 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 - `error` return for write operations: `WriteLRC()`, `writeSyncedLRC()`, etc.
 - Pointer-or-nil for validation: `AssertInput(song string) *models.Track`
 ## Module Design
-- `cmd/mxlrcgo-svc/` - CLI entry point only; no business logic
-- `internal/models/` - shared data types; no dependencies on other internal packages
-- `internal/musixmatch/` - API client + `Fetcher` interface; depends on `models`
-- `internal/lyrics/` - LRC writer + `Writer` interface + `Slugify`; depends on `models`
-- `internal/scanner/` - input parsing and directory scan; depends on `app` and `models`
-- `internal/app/` - orchestration loop, `InputsQueue`; depends on `musixmatch`, `lyrics`, `models`
-- No global mutable variables -- all state is owned by `App` struct
+- `cmd/mxlrcgo-svc/` - CLI entry point only; parses args, loads config + DB, wires the dependency graph, dispatches to the selected subcommand. No business logic.
+- No global mutable variables -- state is owned by the constructed structs (`App`, `Worker`, server `Handler`, etc.); dependencies are injected through interfaces (`Fetcher`, `Writer`, `Store`, ...) so each layer is mockable at its boundary.
+- See the package catalogue below for the full `internal/` and `web/` surface.
+
+## Packages
+Every package is listed with a one-line purpose and its location. `cmd/mxlrcgo-svc/main.go` is the sole entry point; everything else lives under `internal/` except the embedded web assets under `web/`.
+
+### Core fetch/write path
+- `internal/models` - Shared data types (`Track`, `Song`, `Lyrics`, `Synced`, `Inputs`, `Library`, `ScanResult`, `LaneAttempt`, ...); depends on nothing else internal. Location: `internal/models/models.go`.
+- `internal/musixmatch` - Musixmatch desktop API client + `Fetcher` interface; parses the nested JSON into `models`. Location: `internal/musixmatch/client.go`, `internal/musixmatch/fetcher.go`.
+- `internal/petitlyrics` - Lyrics provider adapter for petitlyrics.com, used as a fallback lane. Location: `internal/petitlyrics/`.
+- `internal/providers` - Provider abstraction (`LyricsProvider`, `Fetcher`, `AdaptivePacer`) and provider-generation/version invalidation that retires stale cache entries when the provider set changes. Location: `internal/providers/`.
+- `internal/orchestrator` - Multi-provider/lane orchestration: `Lane`, `Orchestrator`, parallel-race + suitability scoring; composes `providers` with per-lane `circuit` breakers. Location: `internal/orchestrator/`.
+- `internal/circuit` - Concurrency-safe per-lane circuit breaker modelling a single provider's rate-limit/throttle response. Location: `internal/circuit/`.
+- `internal/backoff` - Shared retry-delay formula (1m, 2m, 4m, ..., capped at 1h) used by the worker, durable queue, and legacy fetch loop. Location: `internal/backoff/`.
+- `internal/lyrics` - LRC/TXT/instrumental writer (`Writer` interface, `LRCWriter`), `Slugify`, an `.lrc` parser, provenance-tag embedding, and fsync helpers. Location: `internal/lyrics/`.
+- `internal/normalize` - NFKC cache-key normalization, duration bucketing, fuzzy match confidence, and album-artist resolution. Location: `internal/normalize/`.
+- `internal/langguard` - Unicode-script classification/filtering of lyric text against a configured language allowlist. Location: `internal/langguard/`.
+- `internal/scanner` - Parses CLI/text-file/directory input into the in-memory queue (`Scanner`, `ScanOptions`). Location: `internal/scanner/scanner.go`.
+- `internal/app` - One-shot `fetch`-mode orchestration loop over the in-memory `InputsQueue`; depends on the `Fetcher` and `Writer` interfaces. Location: `internal/app/app.go`.
+
+### Persistence and stateful services
+- `internal/db` - Pure-Go SQLite (`modernc.org/sqlite`) open/migrate (goose), WAL mode, foreign keys, busy-retry, and a read-only open path. Migrations live in `internal/db/migrations/`. Location: `internal/db/`.
+- `internal/cache` - Lyrics cache repository (`CacheRepo`) over the SQLite DB. Location: `internal/cache/cache.go`.
+- `internal/queue` - Two queues: the in-memory `InputsQueue` (fetch mode) and the durable SQLite `DBQueue` (serve/worker mode) with priority tiers and randomized within-tier dequeue. Location: `internal/queue/`.
+- `internal/library` - Library-root CRUD repository (`Repo`: `Add`/`List`/`Get`/`GetByName`/`Update`/`Remove`). Location: `internal/library/repository.go`.
+- `internal/scan` - Library scanning: `Enqueuer`, the `scan_results` `Repo`, and the periodic scheduler that enqueues missing lyrics. Location: `internal/scan/`.
+- `internal/worker` - Durable-queue `Worker` that dequeues work items and processes them via the providers/orchestrator and cache. Location: `internal/worker/worker.go`.
+- `internal/reports` - Read-only, run-on-demand reports over existing SQLite data (`work_queue`, `scan_results`, `provider_outcomes`); no write paths. Location: `internal/reports/`.
+- `internal/secrets` - Encrypted-at-rest (AES-256-GCM) store for recoverable runtime secrets (Musixmatch token, serve-mode webhook key), persisted as opaque BLOBs in the DB. Location: `internal/secrets/`.
+- `internal/watcher` - Optional filesystem watcher that triggers targeted library scans on change; complements, never replaces, the periodic scheduler. Location: `internal/watcher/`.
+
+### Serve-mode HTTP surface and web UI
+- `internal/server` - Serve-mode HTTP `Handler` plus its seams (`Authenticator`, `WorkQueue`, `Readiness`, `StatusReporter`, `Inventory`, `MetricsReporter`) and metrics. Location: `internal/server/`.
+- `internal/auth` - Stateless API-key authentication (in-memory and SQL `Store`, `Scope`, `Key`) for the HTTP API. Location: `internal/auth/`.
+- `internal/webauth` - Browser authentication for the web UI: Argon2id password hashing, an admin user store, and a server-side session store (tokens hashed at rest). Kept separate from `auth` (different storage/lifecycle/threat model). Location: `internal/webauth/`.
+- `internal/trustnet` - Client-IP resolution and trusted-network allowlist for the HTTP surface, without trusting spoofable headers. Location: `internal/trustnet/`.
+- `internal/servetls` - Optional TLS for the serve listener behind a `CertManager` seam: bring-your-own PEM or a self-signed bootstrap. Location: `internal/servetls/`.
+- `internal/pathutil` - Path-containment checks confining filesystem targets to configured roots; shared by `server`, `watcher`, and `scan`. Location: `internal/pathutil/`.
+- `internal/web` - Serves the serve-mode web UI (fixed-sidebar shell, Reports placeholder, read-only Config view) from embedded templ templates and `go:embed`'d static assets. Location: `internal/web/`.
+- `web/static` - Embeds the compiled CSS and self-hosted fonts into the binary so the UI serves offline. Location: `web/static/`.
+- `web/templates` - templ source for the web UI shell; generated `*_templ.go` files are committed and CI-verified. Location: `web/templates/`.
+
+### Sidecars, config, and cross-cutting
+- `internal/verification` - Optional acoustic verification of fetched lyrics (`Verifier`, `HTTPVerifier`) against an external service, using a short audio sample. Location: `internal/verification/`.
+- `internal/detector` - Optional audio-based instrumental detection sidecar that queries an external AudioSet classifier. Location: `internal/detector/`.
+- `internal/ffmpeg` - Resolves an ffmpeg executable for the verification/detection sidecars, auto-provisioning a checksum-pinned static build when none is configured or on PATH. Location: `internal/ffmpeg/`.
+- `internal/config` - TOML config resolution (XDG paths, registry-driven keys, token precedence CLI > env > file) plus redaction, validation, and render/write. Location: `internal/config/`.
+- `internal/logging` - `slog` logger setup and secret redaction. Location: `internal/logging/`.
+- `internal/commands` - The CLI command tree: top-level `Args` and every subcommand (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `completion`) with their sub-subcommands. Location: `internal/commands/`.
+- `internal/version` - Build-time `Version`/`Commit`/`Date` metadata (overridden by GoReleaser ldflags) and `VersionString()` for `--version`. Location: `internal/version/version.go`.
+- `internal/testutil` - Generates synthetic ID3-tagged audio files for load/concurrency tests and the genlib tool. Location: `internal/testutil/`.
 ## Commit Conventions
 - Prefixes: `feat:`, `fix:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`
 - No emoji in commits, code, comments, or documentation
@@ -161,9 +206,11 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 
 ## Pattern Overview
 - `cmd/mxlrcgo-svc/` contains the CLI entry point; all business logic lives under `internal/`
-- Layered architecture with dependency injection via interfaces (`musixmatch.Fetcher`, `lyrics.Writer`)
-- No global mutable state -- all state is owned by the `App` struct
-- Sequential processing loop with cooldown timer between API calls
+- A subcommand tree (`internal/commands`) selects between a stateless one-shot `fetch` mode and stateful, long-running `serve`/`scan` modes
+- Layered architecture with dependency injection via interfaces (`musixmatch.Fetcher`, `lyrics.Writer`, `auth.Store`, provider/orchestrator seams) -- mock at the boundary
+- No global mutable state -- state is owned by the constructed structs (`App`, `Worker`, server `Handler`)
+- Fetch mode: sequential processing loop with a cooldown timer between API calls
+- Serve mode: durable SQLite work queue drained by a background worker, fed by a library scan scheduler (+ optional filesystem watcher), with an HTTP API and browser UI in front
 - Context propagation throughout for graceful shutdown on Ctrl+C / SIGTERM
 ## Layers
 - Purpose: Parse CLI arguments, resolve token, orchestrate startup
@@ -197,11 +244,23 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them 
 - Depends on: Nothing (pure data definitions)
 - Used by: Every other layer
 ## Data Flow
-- `main()` calls `scanner.ParseInput()` which populates an `*app.InputsQueue`
+`main()` parses the command tree (`internal/commands`), resolves config (`internal/config`) and, for stateful subcommands, opens the SQLite DB (`internal/db`), then dispatches to the selected subcommand. Two principal flows exist:
+
+### Fetch mode (`fetch`, one-shot, stateless)
+- `scanner.ParseInput()` populates an in-memory `*queue.InputsQueue`
 - `app.NewApp()` accepts the populated queue plus injected `Fetcher` and `Writer` dependencies
-- `app.Run(ctx)` processes the queue sequentially; failed items accumulate in a separate `failed` queue
-- Context cancellation (Ctrl+C / SIGTERM) exits the loop; `handleFailed()` writes a retry file
-- State is not persisted between runs (except the timestamp-named `_failed.txt` retry file)
+- `app.Run(ctx)` processes the queue sequentially with a cooldown between API calls; failed items accumulate in a separate `failed` queue
+- Context cancellation (Ctrl+C / SIGTERM) exits the loop; `handleFailed()` writes a timestamp-named `_failed.txt` retry file
+- No state is persisted between runs (except that retry file)
+
+### Serve mode (`serve` / `scan`, stateful, long-running)
+- `scan` (or the in-process scheduler under `serve`) walks configured library roots (`internal/library`, `internal/scan`), records `scan_results`, and enqueues missing-lyric work items into the durable SQLite `queue.DBQueue`
+- An optional `internal/watcher` lowers scan latency by triggering targeted re-scans on filesystem events; the periodic scheduler remains the source of truth
+- The `internal/worker` dequeues work items and resolves lyrics through the multi-provider `internal/orchestrator` (Musixmatch + petitlyrics lanes, each behind an `internal/circuit` breaker with `internal/backoff` retry cadence), consulting/updating the `internal/cache`, then writes output via `internal/lyrics`
+- Optional sidecars (`internal/verification`, `internal/detector` via `internal/ffmpeg`) gate or classify results; `internal/langguard` filters by language
+- The `internal/server` HTTP handler exposes API endpoints (authenticated via `internal/auth` API keys, IP-gated by `internal/trustnet`, optionally TLS via `internal/servetls`), and `internal/web` serves the browser UI behind `internal/webauth` sessions
+- Secrets are read from the encrypted `internal/secrets` store; `internal/reports` answers read-only queries over the accumulated DB state
+- All durable state lives in the WAL-mode SQLite DB; the process is restart-safe and resumes from the queue
 ## Key Abstractions
 - Purpose: FIFO queue holding items to process (or that failed)
 - Location: `internal/app/queue.go`

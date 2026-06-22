@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `mxlrcgo-svc` (module `github.com/sydlexius/mxlrcgo-svc`) is a Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them as `.lrc` files. It has been restructured to eliminate global state, externalize the API token, and add stateful features (TOML config, SQLite cache).
 
-For deeper detail on the stack, conventions, architecture, and data flow, read `AGENTS.md` -- it is the auto-generated reference and stays in sync with the codebase. Read it whenever you need detail this file omits.
+For deeper detail on the stack, conventions, architecture, and data flow, read `AGENTS.md` -- it is the hand-maintained reference for this codebase. Keep it current when you change the package surface, and read it whenever you need detail this file omits.
 
 ## What to work on next
 
