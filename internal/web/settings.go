@@ -643,7 +643,9 @@ func redactRawTOML(raw string) string {
 
 	var b strings.Builder
 	section := ""
-	for _, line := range strings.Split(raw, "\n") {
+	lines := strings.Split(raw, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		trimmed := strings.TrimSpace(line)
 		// Skip comment lines verbatim so they are never treated as key/value
 		// pairs or section headers.
@@ -684,6 +686,18 @@ func redactRawTOML(raw string) string {
 					b.WriteString(comment)
 				}
 				b.WriteByte('\n')
+				// If the sensitive value opens a TOML array that is not closed on
+				// this line, its real elements live on the continuation lines.
+				// The placeholder above already stands in for the whole value, so
+				// drop every continuation line until the array's brackets balance
+				// (the closing ']' line is part of the value and is dropped too).
+				// Without this, a multi-line array of secrets would leak every
+				// element after the first verbatim.
+				depth := tomlBracketDepth(line[eq+1:], 0)
+				for depth > 0 && i+1 < len(lines) {
+					i++
+					depth = tomlBracketDepth(lines[i], depth)
+				}
 				continue
 			}
 		}
@@ -747,6 +761,49 @@ func trailingTOMLComment(after string) string {
 		}
 	}
 	return ""
+}
+
+// tomlBracketDepth returns the running TOML array-bracket nesting depth after
+// scanning s, starting from the given depth. It is quote-aware in the same way
+// as trailingTOMLComment: a '[' or ']' inside a "basic" or 'literal' string is
+// part of the value text and does not change the depth (so a secret element
+// like "a]b" does not falsely close the array). A '#' outside any string starts
+// a comment that ends the line, so brackets after it are ignored. The redaction
+// uses this to find where a sensitive multi-line array value closes.
+func tomlBracketDepth(s string, depth int) int {
+	inBasic := false   // inside a "..." basic string
+	inLiteral := false // inside a '...' literal string
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inBasic:
+			switch c {
+			case '\\':
+				i++ // skip the escaped character (e.g. \" does not close the string)
+			case '"':
+				inBasic = false
+			}
+		case inLiteral:
+			// Literal strings have no escapes; only a closing quote ends them.
+			if c == '\'' {
+				inLiteral = false
+			}
+		default:
+			switch c {
+			case '"':
+				inBasic = true
+			case '\'':
+				inLiteral = true
+			case '#':
+				return depth // rest of the line is a comment
+			case '[':
+				depth++
+			case ']':
+				depth--
+			}
+		}
+	}
+	return depth
 }
 
 // effectiveValue renders the field's current merged value as a string. Secret

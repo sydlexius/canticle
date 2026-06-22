@@ -470,6 +470,49 @@ func TestRedactRawTOMLEdgeCases(t *testing.T) {
 			in:          "[server]\naddr = \"127.0.0.1:8080\" # bind host:port",
 			wantContain: []string{`addr = "127.0.0.1:8080" # bind host:port`},
 		},
+		{
+			// A sensitive value written as a multi-line array must collapse to the
+			// single redacted line; every continuation element is dropped, never
+			// emitted verbatim. This is the leak the prior suite missed: it only
+			// exercised a NON-sensitive multi-line array.
+			name: "sensitive multi-line array does not leak continuation elements",
+			in: strings.Join([]string{
+				"[server]",
+				"webhook_api_keys = [",
+				"  \"" + secret + "-1\",",
+				"  \"" + secret + "-2\",",
+				"]",
+				"addr = \"127.0.0.1:8080\"",
+			}, "\n"),
+			wantContain: []string{
+				`webhook_api_keys = "(redacted)"`,
+				// Lines after the closing ']' are unaffected.
+				`addr = "127.0.0.1:8080"`,
+			},
+			wantAbsent: []string{
+				secret + "-1",
+				secret + "-2",
+				// The opened array bracket must not survive on the redacted line.
+				`webhook_api_keys = "(redacted)" [`,
+			},
+		},
+		{
+			// A ']' inside a quoted array element must not be read as the array's
+			// close, or the redaction would stop short and leak later elements.
+			name: "sensitive multi-line array with bracket inside quoted element",
+			in: strings.Join([]string{
+				"[server]",
+				"webhook_api_keys = [",
+				"  \"a]b" + secret + "\",",
+				"  \"" + secret + "-tail\",",
+				"]",
+			}, "\n"),
+			wantContain: []string{`webhook_api_keys = "(redacted)"`},
+			wantAbsent: []string{
+				"a]b" + secret,
+				secret + "-tail",
+			},
+		},
 	}
 
 	for _, tc := range tests {
