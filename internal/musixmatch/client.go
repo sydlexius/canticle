@@ -170,7 +170,9 @@ func (c *Client) MinInterval() time.Duration {
 // computing the same wait, and bursting together when their sleeps elapse.
 //
 // The wait is ctx-cancellable; if the context is canceled during the wait
-// pace returns ctx.Err() wrapped with context.
+// pace returns ctx.Err() wrapped with context. A canceled caller releases its
+// reserved slot best-effort (see the rollback below) so it does not push every
+// later caller back one interval.
 func (c *Client) pace(ctx context.Context) error {
 	if c.minInterval <= 0 {
 		return nil
@@ -190,7 +192,8 @@ func (c *Client) pace(ctx context.Context) error {
 	// if that is already in the past, the slot is now. Advancing lastRequest to
 	// the reserved slot means the next caller computes its own later slot, so
 	// concurrent callers serialize instead of all sleeping the same wait.
-	next := c.lastRequest.Add(effectiveInterval)
+	prev := c.lastRequest
+	next := prev.Add(effectiveInterval)
 	if next.Before(now) {
 		next = now
 	}
@@ -207,6 +210,17 @@ func (c *Client) pace(ctx context.Context) error {
 	if wait > 0 {
 		slog.Debug("musixmatch pacer: waiting before next request", "wait", wait)
 		if !c.sleep(ctx, wait) {
+			// The wait was canceled before this caller ever used its slot.
+			// Release the reservation best-effort: only if lastRequest is still
+			// exactly the slot we reserved (no later caller has reserved past
+			// us) do we roll it back to the value we reserved from. If a later
+			// caller already advanced lastRequest, leave it alone rather than
+			// stomp a newer reservation. Use Equal for the time comparison.
+			c.mu.Lock()
+			if c.lastRequest.Equal(next) {
+				c.lastRequest = prev
+			}
+			c.mu.Unlock()
 			return fmt.Errorf("musixmatch: pace: %w", ctx.Err())
 		}
 	}
