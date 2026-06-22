@@ -807,7 +807,12 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	allowedRoots := webhookAllowedRoots(ctx, sqlDB)
 	writer := newWriter(allowedRoots...)
 	configureWriterBilingual(writer, cfg)
-	w := worker.New(workQ, cache.New(sqlDB), fetcher, writer)
+	// One shared cache repo across the worker, scheduler, and watcher so the
+	// dashboard cache hit-rate tile and /metrics counters (#308) cover every
+	// cache read in serve mode, not just the worker's. Its hit/lookup counters
+	// are process-lifetime and exposed via CacheStats.
+	cacheRepo := cache.New(sqlDB)
+	w := worker.New(workQ, cacheRepo, fetcher, writer)
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
 	w.SetCircuitBackoff(time.Duration(cfg.API.CircuitBackoffBase)*time.Second, time.Duration(cfg.API.CircuitOpenDuration)*time.Second)
 	// Dispatch strategy and the parallel-mode synced-upgrade window. Set before the
@@ -898,7 +903,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	}()
 	go func() {
 		defer wg.Done()
-		runScheduler(runCtx, sqlDB, cfg, args)
+		runScheduler(runCtx, sqlDB, cfg, args, cacheRepo)
 	}()
 	// Build the watcher config from the central config (TOML + env, env > file)
 	// rather than reading the environment directly, so the [watcher] section and
@@ -908,7 +913,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runWatcher(runCtx, sqlDB, args, watchCfg, cfg)
+			runWatcher(runCtx, sqlDB, args, watchCfg, cfg, cacheRepo)
 		}()
 	}
 	// Background session sweeper: periodically delete expired/revoked sessions,
@@ -926,7 +931,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		server.WithReadiness(sqlDB),
 		server.WithStatusReporter(workQ),
 		// WithMetricsReporter is required: omitting it causes GET /metrics to return 500.
-		server.WithMetricsReporter(workQ),
+		// Decorate the queue reporter with the shared cache repo so /metrics also
+		// exposes the lyrics-cache hit/lookup counters (#308).
+		server.WithMetricsReporter(server.WithCacheStats(workQ, cacheRepo)),
 		// GET /metrics is gated by the trusted-network allowlist (loopback
 		// implicitly trusted); no API key or session is required (#204, S3).
 		server.WithTrustedNetworks(trustPolicy),
@@ -949,6 +956,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// RESOLVED config file (never ""), and secret-field saves route to the
 			// encrypted store rather than the TOML.
 			server.WithSettingsWriter(config.ResolveConfigPath(args.ConfigPath), store),
+			// Back the dashboard cache hit-rate tile (#308) with the same shared
+			// cache repo the worker/scheduler/watcher read through.
+			server.WithCacheStatsUI(cacheRepo),
 		)
 	}
 	srv := &http.Server{
@@ -1372,7 +1382,7 @@ func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 	}
 }
 
-func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd) {
+func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd, cacheRepo *cache.CacheRepo) {
 	// serve has no per-run detect override; resolve per library against the global
 	// default (and the per-library setting) at enqueue time.
 	s := scheduler(sqlDB, scanner.ScanOptions{
@@ -1381,7 +1391,7 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo)
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
@@ -1407,14 +1417,14 @@ func watcherConfigFromCentral(cfg config.Config) watcher.Config {
 	}
 }
 
-func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config) {
+func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config, cacheRepo *cache.CacheRepo) {
 	sched := scheduler(sqlDB, scanner.ScanOptions{
 		Update:         args.Update,
 		Upgrade:        args.Upgrade,
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
@@ -1499,7 +1509,7 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, detectOverride, cfg.InstrumentalDetector.Enabled)
+	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil)
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	if len(args.Libraries) > 0 {
@@ -1578,11 +1588,18 @@ func resolveDetectOverride(detect, noDetect bool) (*bool, error) {
 	return resolveFlagOverride(detect, noDetect, "--detect-instrumental and --no-detect-instrumental")
 }
 
-func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool) scan.Scheduler {
+// scheduler builds the scan scheduler. cacheRepo is the cache used to skip
+// already-cached tracks at enqueue time; pass the worker's shared repo in serve
+// mode so the dashboard/metrics hit-rate covers scheduler lookups too (#308),
+// or nil for a one-shot scan (a fresh, uncounted repo is created).
+func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo) scan.Scheduler {
 	results := scan.New(sqlDB)
+	if cacheRepo == nil {
+		cacheRepo = cache.New(sqlDB)
+	}
 	enq := scan.Enqueuer{
 		Results:             results,
-		Cache:               cache.New(sqlDB),
+		Cache:               cacheRepo,
 		Queue:               queue.NewDBQueue(sqlDB),
 		Priority:            queue.PriorityScan,
 		DetectOverride:      detectOverride,

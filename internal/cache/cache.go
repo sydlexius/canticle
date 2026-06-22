@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
 )
@@ -13,8 +14,15 @@ import (
 // All artist/title strings are normalized before storage and lookup.
 // The unique cache key is (artist, title, duration_bucket); bucket 0 is the
 // unknown-duration sentinel (see #191 for real-duration wiring).
+//
+// hits and lookups are process-lifetime counters over Lookup, exposed via
+// CacheStats for the dashboard hit-rate tile (#308) and the /metrics endpoint.
+// They are atomic so concurrent worker/scheduler/watcher lookups against a
+// single shared CacheRepo do not race; they reset on restart (no persistence).
 type CacheRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	hits    atomic.Int64
+	lookups atomic.Int64
 }
 
 // New returns a CacheRepo backed by db.
@@ -29,6 +37,10 @@ func New(db *sql.DB) *CacheRepo {
 // serve without a re-fetch wave or data migration.
 // Returns sql.ErrNoRows only when no row is found under either key.
 func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error) {
+	// Count every lookup exactly once at entry; hits are counted only at the
+	// success-return sites below so the rate excludes miss/error paths.
+	r.lookups.Add(1)
+
 	normArtist := normalize.NormalizeKey(artist)
 	normTitle := normalize.NormalizeKey(title)
 
@@ -40,6 +52,7 @@ func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBu
 		durationBucket,
 	).Scan(&lyrics)
 	if err == nil {
+		r.hits.Add(1) // exact-bucket hit
 		return lyrics, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -61,7 +74,17 @@ func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBu
 	if err != nil {
 		return "", fmt.Errorf("cache: lookup: %w", err)
 	}
+	r.hits.Add(1) // bucket-0 fallback hit
 	return lyrics, nil
+}
+
+// CacheStats returns the process-lifetime cache hit and lookup counts. hits is
+// the number of Lookup calls served from cache (either the exact bucket or the
+// bucket-0 fallback); lookups is the total number of Lookup calls. Both are
+// monotonic since process start and safe to read concurrently. The caller
+// derives the hit rate as hits/lookups, guarding lookups==0.
+func (r *CacheRepo) CacheStats() (hits, lookups int64) {
+	return r.hits.Load(), r.lookups.Load()
 }
 
 // Store inserts or updates (upsert) the lyrics for (artist, title, durationBucket).

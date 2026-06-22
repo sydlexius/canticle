@@ -61,6 +61,13 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	}
 	view.QueueTiles = buildQueueTiles(qs)
 
+	// The cache hit-rate tile is wired only when a cache stats seam is attached
+	// (serve mode). Without it the tile is omitted rather than rendering 0/0.
+	if u.cacheStats != nil {
+		hits, lookups := u.cacheStats.CacheStats()
+		view.CacheTiles = buildCacheTiles(hits, lookups)
+	}
+
 	pe, err := u.reports.ProviderEffectiveness(ctx)
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: provider effectiveness: %w", err)
@@ -90,6 +97,24 @@ func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 		{Label: "Done", Value: strconv.FormatInt(qs.Done, 10)},
 		{Label: "Failed", Value: strconv.FormatInt(qs.Failed, 10)},
 		{Label: "Deferred", Value: strconv.FormatInt(qs.Deferred, 10)},
+	}
+}
+
+// buildCacheTiles shapes the lyrics-cache hit/lookup counters into the single
+// dashboard cache stat tile (#308). Value is hits/lookups and Sub is the hit
+// rate. A zero-lookup state (nothing looked up yet) renders "0%" rather than
+// dividing by zero, mirroring buildProviderTiles' format.
+func buildCacheTiles(hits, lookups int64) []templates.StatTile {
+	var rate float64
+	if lookups > 0 {
+		rate = float64(hits) / float64(lookups)
+	}
+	return []templates.StatTile{
+		{
+			Label: "Cache",
+			Value: fmt.Sprintf("%d/%d", hits, lookups),
+			Sub:   fmt.Sprintf("%.0f%%", rate*100),
+		},
 	}
 }
 

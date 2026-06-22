@@ -447,3 +447,72 @@ func TestMetricsInstrumentalQueryErrorReturns500(t *testing.T) {
 		t.Fatalf("status = %d; want 500 on instrumental query error", rec.Code)
 	}
 }
+
+// fakeCacheStatser is a test CacheStatser returning fixed hit/lookup counts.
+type fakeCacheStatser struct{ hits, lookups int64 }
+
+func (f fakeCacheStatser) CacheStats() (hits, lookups int64) { return f.hits, f.lookups }
+
+// TestMetricsCacheCountersEmittedWithDecorator verifies that wrapping the base
+// reporter with WithCacheStats adds the cache hit/lookup counter families to
+// /metrics (the scalar-counter layout, mirroring mxlrcgo_instrumental_tracks).
+func TestMetricsCacheCountersEmittedWithDecorator(t *testing.T) {
+	base := &fakeMetrics{
+		statusCounts:  map[string]int64{},
+		failureCounts: map[string]int64{},
+	}
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithMetricsReporter(WithCacheStats(base, fakeCacheStatser{hits: 7, lookups: 10})))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# HELP mxlrcgo_cache_hits_total",
+		"# TYPE mxlrcgo_cache_hits_total counter",
+		"mxlrcgo_cache_hits_total 7",
+		"# HELP mxlrcgo_cache_lookups_total",
+		"# TYPE mxlrcgo_cache_lookups_total counter",
+		"mxlrcgo_cache_lookups_total 10",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in body:\n%s", want, body)
+		}
+	}
+}
+
+// TestMetricsCacheCountersOmittedWithoutDecorator verifies that a bare reporter
+// (no cache seam) omits the cache families rather than failing the scrape.
+func TestMetricsCacheCountersOmittedWithoutDecorator(t *testing.T) {
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithMetricsReporter(&fakeMetrics{
+			statusCounts:  map[string]int64{},
+			failureCounts: map[string]int64{},
+		}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "mxlrcgo_cache_") {
+		t.Error("bare reporter must not emit cache counter families")
+	}
+}
+
+// TestWithCacheStatsForwardsBaseMetrics verifies the decorator forwards the
+// embedded reporter's queue metrics in addition to adding cache stats.
+func TestWithCacheStatsForwardsBaseMetrics(t *testing.T) {
+	base := &fakeMetrics{statusCounts: map[string]int64{"done": 4}}
+	dec := WithCacheStats(base, fakeCacheStatser{hits: 1, lookups: 2})
+	got, err := dec.CountByStatus(context.Background())
+	if err != nil {
+		t.Fatalf("CountByStatus: %v", err)
+	}
+	if got["done"] != 4 {
+		t.Errorf("forwarded status count = %d, want 4", got["done"])
+	}
+}
