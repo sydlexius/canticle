@@ -76,7 +76,9 @@ jobs:
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9
         with:
           version: v2.12.2
-          cache-invalidation-interval: 1
+          # Weekly (not daily) lint-cache key rotation: a daily interval cold-
+          # rebuilds the cache every calendar day and accretes ~7 entries/week.
+          cache-invalidation-interval: 7
 
   test:
     name: Test
@@ -156,8 +158,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
       - name: Build image
-        run: docker build -t mxlrcgo-svc:scan -f Dockerfile .
+        # buildx + GHA layer cache reuses the nightly's exported BuildKit layers
+        # instead of cold-building. load:true keeps mxlrcgo-svc:scan in the local
+        # daemon so the grype scan step below can still find it.
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: mxlrcgo-svc:scan
+          cache-from: type=gha
 
       - name: Scan image for HIGH+ CVEs
         id: scan
