@@ -8,6 +8,8 @@ services:
     environment:
       MXLRC_DOCKER: "true"
       MXLRC_SERVER_ADDR: "0.0.0.0:50705"
+      # Enable the browser UI (overrides web_ui_enabled in config.toml).
+      MXLRC_WEB_UI_ENABLED: "true"
       MXLRC_OUTPUT_DIR: "/data/media/music"
       PUID: "99"
       PGID: "100"

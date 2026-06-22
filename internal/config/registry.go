@@ -91,6 +91,7 @@ var fields = []FieldSpec{
 
 	// [server]
 	{Path: "server.addr", Section: "server", Type: TypeString, EnvVars: []string{"MXLRC_SERVER_ADDR"}, Criticality: Caution, Editable: true},
+	{Path: "server.web_ui_enabled", Section: "server", Type: TypeBool, EnvVars: []string{"MXLRC_WEB_UI_ENABLED"}, Criticality: Caution, Editable: true},
 	{Path: "server.webhook_api_keys", Section: "server", Type: TypeStringSlice, EnvVars: []string{"MXLRC_WEBHOOK_API_KEY"}, Sensitive: true, Criticality: Critical, Editable: true},
 	{Path: "server.scan_interval_seconds", Section: "server", Type: TypeInt, EnvVars: []string{"MXLRC_SCAN_INTERVAL"}, Criticality: Caution, Editable: true},
 	{Path: "server.work_interval_seconds", Section: "server", Type: TypeInt, EnvVars: []string{"MXLRC_WORK_INTERVAL"}, Criticality: Caution, Editable: true},

@@ -835,6 +835,7 @@ var settingsLabels = map[string]string{
 	"providers.primary":            "Main lyrics source",
 	"providers.mode":               "How to use multiple sources",
 	"server.addr":                  "Web page address",
+	"server.web_ui_enabled":        "Show the web page",
 	"server.webhook_api_keys":      "Webhook keys",
 	"server.scan_interval_seconds": "How often to scan the library (seconds)",
 	"enrichment.enabled":           "Look up extra track info first",
