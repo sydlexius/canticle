@@ -77,7 +77,7 @@ jobs:
           # That workflow already skips semver-major bumps, so requiring its
           # identity here means majors stay manual even if another reviewer
           # (e.g. CodeRabbit) auto-approves the PR.
-          APPROVER: github-actions[bot]
+          APPROVER: "github-actions[bot]"
         run: |
           # Check for an APPROVED review directly via the reviews API.
           # This works regardless of whether branch protection requires
@@ -90,7 +90,7 @@ jobs:
             APPROVED=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate \
               | jq -s --arg approver "$APPROVER" '
                 add
-                | map(select(.user.login == $approver))
+                | map(select(.user.login == $approver and .user.type == "Bot"))
                 | sort_by(.submitted_at)
                 | group_by(.user.login)
                 | map(last)
