@@ -202,7 +202,7 @@ Operators who want stronger protection (whole-volume-theft defense) can opt in:
 # docker-compose.yml - optional hardening: key separated from the data volume
 services:
   mxlrcgo-svc:
-    image: ghcr.io/sydlexius/mxlrcgo-svc:latest
+    image: ghcr.io/sydlexius/canticle:latest
     environment:
       # Optional. base64 of 32 random bytes: openssl rand -base64 32
       # When set, takes precedence over the key file; keeps key off the data volume.

@@ -16,13 +16,13 @@ templ LoginPage(version string, errMsg string, next string, username string, csr
 		<head>
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
-			<title>Sign in - mxlrcgo-svc</title>
+			<title>Sign in - Canticle</title>
 			<link rel="stylesheet" href="/static/css/output.css"/>
 		</head>
 		<body class="mx-auth-body">
 			<main class="mx-auth-card">
 				<div class="mx-auth-brand">
-					<span class="mx-auth-wordmark">mxlrcgo</span>
+					<span class="mx-auth-wordmark">canticle</span>
 				</div>
 				<h1 class="mx-auth-title">Sign in</h1>
 				if errMsg != "" {
@@ -57,7 +57,7 @@ templ LoginPage(version string, errMsg string, next string, username string, csr
 					</div>
 					<button class="mx-auth-button" type="submit">Sign in</button>
 				</form>
-				<p class="mx-auth-footer">mxlrcgo-svc <span class="mx-auth-version">{ version }</span></p>
+				<p class="mx-auth-footer">Canticle <span class="mx-auth-version">{ version }</span></p>
 			</main>
 		</body>
 	</html>

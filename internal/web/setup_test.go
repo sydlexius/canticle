@@ -122,7 +122,7 @@ func TestSetupRendersTokenHelpLink(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		"https://sydlexius.github.io/mxlrcgo-svc/GETTING_STARTED/#get-a-musixmatch-token",
+		"https://sydlexius.github.io/canticle/GETTING_STARTED/#get-a-musixmatch-token",
 		`target="_blank"`,
 		`rel="noopener noreferrer"`,
 		"How do I get a token?",

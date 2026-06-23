@@ -1,6 +1,6 @@
 ## Project
 
-**mxlrcgo-svc (sydlexius/mxlrcgo-svc)**
+**Canticle (sydlexius/canticle)**
 
 A Go CLI tool that fetches synced lyrics from the Musixmatch API (and fallback providers) and saves them as `.lrc` files. The project is maintained under its own module path with global state eliminated and the API token externalized. Beyond the original one-shot `fetch` mode it now ships stateful, long-running features: a `serve` mode (HTTP server + durable SQLite work queue + background worker + library scan scheduler + optional filesystem watcher + browser-authenticated web UI), TOML config, multi-provider orchestration with per-lane circuit breakers, optional acoustic verification and instrumental detection sidecars, and encrypted-at-rest secrets.
 
@@ -8,7 +8,7 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API (and fallback p
 
 ### Constraints
 
-- **Binary name**: `mxlrcgo-svc` (matches new module name)
+- **Binary name**: `canticle` (the Go module path remains `github.com/sydlexius/mxlrcgo-svc`; the repo, binary, and Docker image are rebranded to Canticle but the import path is intentionally unchanged)
 - **No CGO**: Must remain CGO_ENABLED=0 for cross-compilation
 - **Go 1.26.2+**: Minimum Go version per go.mod
 - **Behavior preservation**: All existing CLI flags and behaviors must work identically after restructuring
@@ -287,11 +287,11 @@ Every package is listed with a one-line purpose and its location. `cmd/mxlrcgo-s
 - Pattern: `Repo` struct with `Add`, `List`, `Get`, `GetByName`, `Update`, `Remove`. `GetByName` lets `scan` and other commands accept either a numeric library id or a human-readable name from `--library`.
 ## Entry Points
 - Location: `cmd/mxlrcgo-svc/main.go` (`func main()`)
-- Triggers: Direct CLI invocation (`mxlrcgo-svc [args]`)
+- Triggers: Direct CLI invocation (`canticle [args]`)
 - Responsibilities: Parses args, loads token, creates scanner/fetcher/writer, runs processing loop, handles failures and graceful shutdown
 - Location: `Makefile` and `.goreleaser.yml`
 - Triggers: `make build` or GoReleaser on tag push
-- Responsibilities: Compiles `cmd/mxlrcgo-svc` into `mxlrcgo-svc` binary
+- Responsibilities: Compiles `cmd/mxlrcgo-svc` into the `canticle` binary
 ## Runtime Error Handling
 - `FindLyrics()` returns `(Song, error)` -- caller logs the error and pushes to the `failed` queue
 - `WriteLRC()` returns `error` -- uses named return `retErr` to capture deferred close errors

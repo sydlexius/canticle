@@ -68,7 +68,9 @@ page.
 **Build from source** (requires Go 1.26.4+):
 
 ```sh
-go install github.com/sydlexius/canticle/cmd/mxlrcgo-svc@latest
+# The Go module path is unchanged by the Canticle rebrand; go install resolves
+# it from go.mod, which still declares github.com/sydlexius/mxlrcgo-svc.
+go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest
 ```
 
 > This fork starts its release line at `v1.0.0`. The upstream `fashni/mxlrc-go` repository does not publish semver release tags, so `v1.0.0` is reserved as the first `canticle` version.
