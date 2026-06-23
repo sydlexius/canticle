@@ -121,25 +121,21 @@ func (s *SQLStore) findByID(ctx context.Context, id string) (Key, error) {
 // RevokeByID records a revocation timestamp for the key with the given public ID.
 // id is the table's primary key, so it matches at most one row.
 func (s *SQLStore) RevokeByID(ctx context.Context, id string, revokedAt time.Time) (Key, error) {
-	key, err := s.findByID(ctx, id)
-	if err != nil {
-		return Key{}, err
-	}
-	// Idempotent: re-revoking an already-revoked key is a no-op that preserves the
-	// original revocation timestamp rather than re-stamping it to now.
-	if key.RevokedAt != nil {
-		return key, nil
-	}
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE api_key_metadata SET revoked_at = ? WHERE id = ?`,
-		formatTime(revokedAt),
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE api_key_metadata
+         SET revoked_at = ?
+         WHERE id = ? AND revoked_at IS NULL`,
+		formatTime(revokedAt.UTC()),
 		id,
 	)
 	if err != nil {
 		return Key{}, fmt.Errorf("auth: revoke key by id: %w", err)
 	}
-	key.RevokedAt = ptrTime(revokedAt.UTC())
-	return key, nil
+	// The WHERE ... AND revoked_at IS NULL makes this atomically idempotent: a
+	// second revoke matches 0 rows and leaves the original timestamp intact,
+	// with no read-then-write race between concurrent revokes. findByID maps a
+	// missing id to ErrInvalidKey (the caller already handles that).
+	return s.findByID(ctx, id)
 }
 
 // List returns all key metadata in stable creation order.

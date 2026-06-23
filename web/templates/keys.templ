@@ -43,7 +43,13 @@ templ WebhookKeysPanel(view WebhookKeysView) {
 	if view.NewKey != nil {
 		@keyReveal(view.NewKey)
 	}
-	@keyCreateForm(view)
+	if !view.Manageable {
+		<p class="mx-keys-unavailable" role="alert">
+			Key management is unavailable: the server is running without a key store wired.
+		</p>
+	} else {
+		@keyCreateForm(view)
+	}
 	@keyList(view)
 }
 
