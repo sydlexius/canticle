@@ -322,9 +322,19 @@ func TestHandleDashboard_Charts(t *testing.T) {
 	if !strings.Contains(body, `class="mx-dash-tile-bar-fill"`) || !strings.Contains(body, `data-hit-rate="75"`) {
 		t.Error("dashboard: provider tile missing inline hit-rate mini bar (data-hit-rate=\"75\")")
 	}
-	// The queue series labels are serialized into the canvas data attribute.
-	if !strings.Contains(body, "Pending") || !strings.Contains(body, "musixmatch") {
-		t.Error("dashboard charts: chart data attributes missing expected labels")
+	// The queue series labels must be serialized into the work-queue canvas's
+	// data-chart-labels JSON attribute, not merely appear somewhere in the body
+	// (a loose Contains would also match the stat-tile label text). templ
+	// HTML-escapes the JSON quotes to &#34; inside the attribute value.
+	const wantQueueLabelsAttr = `data-chart-labels="[&#34;Pending&#34;,&#34;Processing&#34;,&#34;Done&#34;,&#34;Failed&#34;,&#34;Deferred&#34;]"`
+	if !strings.Contains(body, wantQueueLabelsAttr) {
+		t.Errorf("dashboard charts: work-queue canvas missing serialized labels attribute %q", wantQueueLabelsAttr)
+	}
+	// The provider name no longer lives in a chart canvas; it renders as a tile
+	// whose inline mini hit-rate bar is asserted above. Confirm "musixmatch"
+	// appears as a tile label so the provider series is represented somewhere.
+	if !strings.Contains(body, "musixmatch") {
+		t.Error("dashboard: provider tile label \"musixmatch\" missing")
 	}
 	// No inline chart code: chart logic must be external (CSP script-src 'self').
 	if strings.Contains(body, "new Chart(") {

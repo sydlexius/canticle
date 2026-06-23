@@ -73,9 +73,9 @@ type StatTile struct {
 	Label string // short human label, e.g. "Pending" or a provider lane name
 	Value string // formatted numeric value
 	Sub   string // optional annotation, e.g. "75.0% hit rate"; empty = not shown
-	// ShowBar gates the inline mini hit-rate bar (#318). Set for tiles that carry
-	// a hit-rate percentage (provider and cache tiles); the work-queue tiles leave
-	// it false so no bar renders.
+	// ShowBar gates the inline mini hit-rate bar (#318). Set for provider tiles
+	// that carry a hit-rate percentage; the work-queue tiles leave it false so no
+	// bar renders.
 	ShowBar bool
 	// BarPct is the integer hit-rate percent (0-100) as a string, emitted in the
 	// fill's data-hit-rate attribute. chart-init.js applies it as the fill width
