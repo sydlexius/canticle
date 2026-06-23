@@ -106,6 +106,57 @@
   margin-top: 0.125rem;
 }
 
+/* Inline mini hit-rate bar inside a Lyrics Sources tile (#318): a thin rail
+ * with an accent-colored fill whose width encodes the hit-rate percent. The
+ * fill width is applied by chart-init.js from the data-hit-rate attribute (the
+ * serve-mode CSP forbids an inline style="" width). The fill reuses --mx-accent
+ * so it matches the former standalone hit-rate bar chart's series color. */
+.mx-dash-tile-bar {
+  margin-top: 0.5rem;
+  width: 100%;
+  height: 0.25rem;
+  background: var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+  overflow: hidden;
+}
+
+.mx-dash-tile-bar-fill {
+  width: 0; /* set client-side by chart-init.js from data-hit-rate */
+  height: 100%;
+  background: var(--mx-accent);
+  border-radius: inherit;
+}
+
+/* -- Charts (#318) --------------------------------------------------------- */
+/* The chart palette lives here as CSS custom properties so chart-init.js reads
+ * them via getComputedStyle; a future token swap re-themes the charts with no JS
+ * change. Status hues are semantic (success/error/warn) and intentionally
+ * distinct from the blue accent so the queue doughnut segments stay legible. */
+.mx-dash-page {
+  --mx-chart-pending: #94a3b8;    /* slate-400: waiting, neutral */
+  --mx-chart-processing: #3b82f6; /* blue-500: active (matches --mx-accent) */
+  --mx-chart-done: #22c55e;       /* green-500: success */
+  --mx-chart-failed: #ef4444;     /* red-500: failure */
+  --mx-chart-deferred: #f59e0b;   /* amber-500: rate-limited/transient */
+  --mx-chart-grid: rgba(255, 255, 255, 0.08); /* matches --mx-surface-border */
+  --mx-chart-text: #94a3b8;       /* slate-400: axis/legend labels */
+}
+
+/* Sized wrapper: Chart.js responsive sizing needs a bounded parent (the canvas
+ * fills it). Kept modest so the chart complements the tiles without dominating
+ * the page; full-width on narrow viewports. */
+.mx-dash-chart-wrap {
+  margin-top: 1.25rem;
+  max-width: 30rem;
+  height: 16rem;
+  position: relative;
+}
+
+.mx-dash-chart {
+  width: 100%;
+  height: 100%;
+}
+
 /* -- Metrics footer note --------------------------------------------------- */
 .mx-dash-metrics-note {
   font-size: 0.8125rem;

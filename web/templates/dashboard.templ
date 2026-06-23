@@ -28,8 +28,8 @@ templ dashboardContent(view DashboardView) {
 				}
 			</p>
 		</div>
-		@dashQueueTiles(view.QueueTiles, view.InstrumentalCount)
-		@dashProviderTiles(view.ProviderTiles, view.CacheTiles)
+		@dashQueueTiles(view.QueueTiles, view.InstrumentalCount, view.QueueChart)
+		@dashProviderTiles(view.ProviderTiles)
 		@dashRecentOutcomes(view.RecentRows)
 		<p class="mx-dash-metrics-note">
 			Prometheus metrics:
@@ -63,11 +63,21 @@ templ dashboardContent(view DashboardView) {
 		});
 	})();
 	</script>
+	// Vendored Chart.js (UMD, v4.4.9) + the dashboard chart init, both served
+	// from /static under the serve-mode CSP's script-src 'self' (no CDN, no
+	// chart code embedded in the page). defer keeps them non-render-blocking and preserves
+	// document order, so chart-init.js runs after Chart is defined and the
+	// canvases are parsed. Charts complement the tiles; if either script is
+	// blocked the tiles and table still render (see the noscript in dashChart).
+	<script src="/static/js/chart.umd.min.js" defer></script>
+	<script src="/static/js/chart-init.js" defer></script>
 }
 
 // dashQueueTiles renders the work-queue status tile row plus the Instrumental tile.
 // Instrumental is a detection/queue metric and belongs here, not in Lyrics Sources.
-templ dashQueueTiles(tiles []StatTile, instrumentalCount string) {
+// The status-distribution doughnut (#318) is rendered after the tiles as a
+// complementary visual; it is omitted when every queue count is zero.
+templ dashQueueTiles(tiles []StatTile, instrumentalCount string, chart ChartData) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-queue-heading"
@@ -93,13 +103,19 @@ templ dashQueueTiles(tiles []StatTile, instrumentalCount string) {
 				<span class="mx-dash-tile-value">{ instrumentalCount }</span>
 			</div>
 		</div>
+		if chart.HasData() {
+			@dashChart("mx-dash-queue-chart", "doughnut", "Work queue status distribution", "", chart)
+		}
 	</section>
 }
 
-// dashProviderTiles renders the per-lyrics-source tile row plus the lyrics-cache
-// hit-rate tile(s) (#308). The cache tile shares the same row and markup as the
-// provider tiles; it is omitted when no cache stats source is wired.
-templ dashProviderTiles(tiles []StatTile, cacheTiles []StatTile) {
+// dashProviderTiles renders the per-lyrics-source tile row. Each tile carries
+// its hit rate as an inline mini bar (#318) under the rate value, so the bar
+// aligns with its bubble by construction. The bar replaced a separate standalone
+// hit-rate bar chart. The fill width is applied by chart-init.js from the
+// data-hit-rate attribute -- the serve-mode CSP (style-src 'self', no
+// unsafe-inline) forbids an inline style="" width.
+templ dashProviderTiles(tiles []StatTile) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-provider-heading"
@@ -107,7 +123,7 @@ templ dashProviderTiles(tiles []StatTile, cacheTiles []StatTile) {
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-provider-heading">Lyrics Sources</h2>
 		<div class="mx-dash-tiles" role="list">
-			if len(tiles) == 0 && len(cacheTiles) == 0 {
+			if len(tiles) == 0 {
 				<p class="mx-dash-empty">No lyrics source data yet. Data accrues as tracks are processed.</p>
 			}
 			for _, t := range tiles {
@@ -117,23 +133,48 @@ templ dashProviderTiles(tiles []StatTile, cacheTiles []StatTile) {
 					if t.Sub != "" {
 						<span class="mx-dash-tile-sub">{ t.Sub }</span>
 					}
-				</div>
-			}
-			for _, t := range cacheTiles {
-				<div
-					class="mx-dash-tile"
-					role="listitem"
-					title="Lyrics-cache hits over lookups since the server started. A high rate means most tracks are served from cache without a provider fetch."
-				>
-					<span class="mx-dash-tile-label">{ t.Label }</span>
-					<span class="mx-dash-tile-value">{ t.Value }</span>
-					if t.Sub != "" {
-						<span class="mx-dash-tile-sub">{ t.Sub }</span>
-					}
+					@dashTileHitBar(t)
 				</div>
 			}
 		</div>
 	</section>
+}
+
+// dashTileHitBar renders the inline mini hit-rate bar for a provider/cache tile
+// (#318), shown only when the tile carries a hit rate (ShowBar). The track is a
+// thin rail; the fill's width is set client-side by chart-init.js from the
+// data-hit-rate integer percent (CSP-safe -- no inline style width). The title
+// gives the percent so the bar is not purely visual.
+templ dashTileHitBar(t StatTile) {
+	if t.ShowBar {
+		<div class="mx-dash-tile-bar" role="img" title={ t.BarLabel } aria-label={ t.BarLabel }>
+			<div class="mx-dash-tile-bar-fill" data-hit-rate={ t.BarPct }></div>
+		</div>
+	}
+}
+
+// dashChart renders one Chart.js canvas inside a sized wrapper. The series is
+// serialized into data-* attributes; the vendored, CSP-safe chart-init.js reads
+// them and draws the chart (colors are resolved client-side from design tokens).
+// kind is "doughnut" or "bar"; suffix (e.g. "%") annotates bar values. A
+// noscript fallback notes that the tiles above carry the same data, so the chart
+// is purely complementary -- nothing is lost when scripts are disabled.
+templ dashChart(canvasID, kind, ariaLabel, suffix string, chart ChartData) {
+	<div class="mx-dash-chart-wrap">
+		<canvas
+			id={ canvasID }
+			class="mx-dash-chart"
+			role="img"
+			aria-label={ ariaLabel }
+			data-chart-type={ kind }
+			data-chart-suffix={ suffix }
+			data-chart-labels={ chart.LabelsJSON() }
+			data-chart-values={ chart.ValuesJSON() }
+		></canvas>
+		<noscript>
+			<p class="mx-dash-empty">Chart requires JavaScript; the same data is shown in the tiles above.</p>
+		</noscript>
+	</div>
 }
 
 // dashRecentOutcomes renders the recent-outcomes table (up to 20 rows).

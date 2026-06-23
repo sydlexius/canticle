@@ -16,7 +16,7 @@ import (
 // unknown-duration sentinel (see #191 for real-duration wiring).
 //
 // hits and lookups are process-lifetime counters over Lookup, exposed via
-// CacheStats for the dashboard hit-rate tile (#308) and the /metrics endpoint.
+// CacheStats for the /metrics endpoint (#308).
 // They are atomic so concurrent worker/scheduler/watcher lookups against a
 // single shared CacheRepo do not race; they reset on restart (no persistence).
 type CacheRepo struct {

@@ -248,75 +248,167 @@ func TestHandleDashboard_AsyncCopy(t *testing.T) {
 	}
 }
 
-// fakeCacheStats is a test CacheStatsProvider returning fixed hit/lookup counts.
-type fakeCacheStats struct{ hits, lookups int64 }
-
-func (f fakeCacheStats) CacheStats() (hits, lookups int64) { return f.hits, f.lookups }
-
-// TestBuildCacheTiles verifies the cache tile value/rate formatting, including
-// the lookups==0 guard that must render 0% rather than dividing by zero.
-func TestBuildCacheTiles(t *testing.T) {
-	tests := []struct {
-		name               string
-		hits, lookups      int64
-		wantValue, wantSub string
-	}{
-		{"no lookups guard", 0, 0, "0/0", "0%"},
-		{"all hits", 5, 5, "5/5", "100%"},
-		{"three of four", 3, 4, "3/4", "75%"},
-		{"rounds to nearest", 1, 3, "1/3", "33%"},
-		{"zero hits with lookups", 0, 4, "0/4", "0%"},
+// TestBuildQueueChart verifies the queue doughnut series uses the fixed
+// status-label order (kept in sync with the chart-init color map) and the
+// corresponding counts, excluding Total.
+func TestBuildQueueChart(t *testing.T) {
+	c := buildQueueChart(reports.QueueSummary{
+		Pending: 1, Processing: 2, Done: 3, Failed: 4, Deferred: 5, Total: 15,
+	})
+	wantLabels := []string{"Pending", "Processing", "Done", "Failed", "Deferred"}
+	if len(c.Labels) != len(wantLabels) {
+		t.Fatalf("Labels len = %d, want %d", len(c.Labels), len(wantLabels))
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tiles := buildCacheTiles(tc.hits, tc.lookups)
-			if len(tiles) != 1 {
-				t.Fatalf("buildCacheTiles len = %d, want 1", len(tiles))
-			}
-			got := tiles[0]
-			if got.Label != "Cache" {
-				t.Errorf("Label = %q, want %q", got.Label, "Cache")
-			}
-			if got.Value != tc.wantValue {
-				t.Errorf("Value = %q, want %q", got.Value, tc.wantValue)
-			}
-			if got.Sub != tc.wantSub {
-				t.Errorf("Sub = %q, want %q", got.Sub, tc.wantSub)
-			}
-		})
+	for i, l := range wantLabels {
+		if c.Labels[i] != l {
+			t.Errorf("Labels[%d] = %q, want %q", i, c.Labels[i], l)
+		}
+	}
+	wantValues := []float64{1, 2, 3, 4, 5}
+	for i, v := range wantValues {
+		if c.Values[i] != v {
+			t.Errorf("Values[%d] = %v, want %v", i, c.Values[i], v)
+		}
+	}
+	if !c.HasData() {
+		t.Error("HasData() = false, want true for non-zero counts")
+	}
+	// An empty queue must report no data so the chart is omitted.
+	if buildQueueChart(reports.QueueSummary{}).HasData() {
+		t.Error("HasData() = true for all-zero queue, want false")
 	}
 }
 
-// TestHandleDashboard_CacheTile verifies that when a cache stats source is
-// attached the dashboard renders the Cache tile with its hit-rate, and omits it
-// otherwise.
-func TestHandleDashboard_CacheTile(t *testing.T) {
+// TestHandleDashboard_Charts verifies that when queue and provider data exist,
+// the dashboard renders both chart canvases with their data attributes and loads
+// the vendored Chart.js + init scripts from /static (CSP-safe, no CDN/inline).
+func TestHandleDashboard_Charts(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
-
-	// With cache stats attached: tile and rate appear.
-	muxWith := http.NewServeMux()
-	uiWith := NewUI(config.Config{}, "v-test", WithReports(reports.New(sqlDB)))
-	uiWith.AttachCacheStats(fakeCacheStats{hits: 3, lookups: 4})
-	uiWith.Register(muxWith)
-
-	recWith := httptest.NewRecorder()
-	muxWith.ServeHTTP(recWith, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
-	if recWith.Code != http.StatusOK {
-		t.Fatalf("GET /dashboard status = %d, want 200", recWith.Code)
+	insertDone(t, sqlDB, "song-a", "musixmatch", `[{"outdir":"/o","filename":"a.lrc"}]`, "2026-06-19T10:00:00Z")
+	for i, hit := range []int64{1, 1, 1, 0} {
+		if _, err := sqlDB.ExecContext(t.Context(),
+			`INSERT INTO lane_attempts (queue_id, lane, hit, attempted_at) VALUES (?, 'musixmatch', ?, '2026-06-18T00:00:00Z')`,
+			int64(i+1), hit); err != nil {
+			t.Fatalf("insert lane_attempts: %v", err)
+		}
 	}
-	bodyWith := recWith.Body.String()
-	if !strings.Contains(bodyWith, ">Cache<") {
-		t.Error("dashboard with cache stats missing Cache tile label")
-	}
-	if !strings.Contains(bodyWith, "3/4") || !strings.Contains(bodyWith, "75%") {
-		t.Errorf("dashboard with cache stats missing 3/4 / 75%% values")
-	}
+	mux := newReportsUIServer(t, sqlDB)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
 
-	// Without cache stats: no Cache tile.
-	muxWithout := newReportsUIServer(t, sqlDB)
-	recWithout := httptest.NewRecorder()
-	muxWithout.ServeHTTP(recWithout, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
-	if strings.Contains(recWithout.Body.String(), ">Cache<") {
-		t.Error("dashboard without cache stats must omit the Cache tile")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	wantFragments := []string{
+		`id="mx-dash-queue-chart"`,
+		`data-chart-type="doughnut"`,
+		`/static/js/chart.umd.min.js`,
+		`/static/js/chart-init.js`,
+	}
+	for _, frag := range wantFragments {
+		if !strings.Contains(body, frag) {
+			t.Errorf("dashboard charts: missing %q", frag)
+		}
+	}
+	// The standalone provider hit-rate bar chart was replaced by inline mini bars
+	// (#318); its canvas must no longer be rendered.
+	if strings.Contains(body, `id="mx-dash-provider-chart"`) {
+		t.Error("dashboard charts: standalone provider bar-chart canvas must be removed (replaced by inline mini bars)")
+	}
+	// The per-provider hit rate now renders as an inline mini bar inside its tile,
+	// carrying the percent in a data-hit-rate attribute (3 hits / 4 attempts = 75%).
+	if !strings.Contains(body, `class="mx-dash-tile-bar-fill"`) || !strings.Contains(body, `data-hit-rate="75"`) {
+		t.Error("dashboard: provider tile missing inline hit-rate mini bar (data-hit-rate=\"75\")")
+	}
+	// The queue series labels must be serialized into the work-queue canvas's
+	// data-chart-labels JSON attribute, not merely appear somewhere in the body
+	// (a loose Contains would also match the stat-tile label text). templ
+	// HTML-escapes the JSON quotes to &#34; inside the attribute value.
+	const wantQueueLabelsAttr = `data-chart-labels="[&#34;Pending&#34;,&#34;Processing&#34;,&#34;Done&#34;,&#34;Failed&#34;,&#34;Deferred&#34;]"`
+	if !strings.Contains(body, wantQueueLabelsAttr) {
+		t.Errorf("dashboard charts: work-queue canvas missing serialized labels attribute %q", wantQueueLabelsAttr)
+	}
+	// The provider name no longer lives in a chart canvas; it renders as a tile
+	// whose inline mini hit-rate bar is asserted above. Confirm "musixmatch"
+	// appears as a tile label so the provider series is represented somewhere.
+	if !strings.Contains(body, "musixmatch") {
+		t.Error("dashboard: provider tile label \"musixmatch\" missing")
+	}
+	// No inline chart code: chart logic must be external (CSP script-src 'self').
+	if strings.Contains(body, "new Chart(") {
+		t.Error("dashboard charts: inline Chart() call found; init must be in the static .js file")
+	}
+}
+
+// TestHandleDashboard_ChartsOmittedWhenEmpty verifies that with an empty DB the
+// chart canvases are not rendered (HasData false), so no blank chart appears.
+func TestHandleDashboard_ChartsOmittedWhenEmpty(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	mux := newReportsUIServer(t, sqlDB)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, `id="mx-dash-queue-chart"`) {
+		t.Error("empty dashboard must omit the queue chart canvas")
+	}
+	if strings.Contains(body, `id="mx-dash-provider-chart"`) {
+		t.Error("empty dashboard must omit the provider chart canvas")
+	}
+}
+
+// TestBuildProviderTiles verifies provider rows map to tiles carrying the hit
+// count/attempts value and an inline mini hit-rate bar (#318) whose percent
+// matches the displayed sub-label.
+func TestBuildProviderTiles(t *testing.T) {
+	tiles := buildProviderTiles([]reports.ProviderEffectiveness{
+		{Lane: "musixmatch", Hits: 3, Misses: 1, HitRate: 0.75},
+		{Lane: "petitlyrics", Hits: 0, Misses: 2, HitRate: 0},
+	})
+	if len(tiles) != 2 {
+		t.Fatalf("buildProviderTiles len = %d, want 2", len(tiles))
+	}
+	mx := tiles[0]
+	if mx.Label != "musixmatch" || mx.Value != "3/4" || mx.Sub != "75%" {
+		t.Errorf("musixmatch tile = %+v, want label=musixmatch value=3/4 sub=75%%", mx)
+	}
+	if !mx.ShowBar || mx.BarPct != "75" || mx.BarLabel != "Hit rate 75%" {
+		t.Errorf("musixmatch bar = {ShowBar:%v BarPct:%q BarLabel:%q}, want {true \"75\" \"Hit rate 75%%\"}", mx.ShowBar, mx.BarPct, mx.BarLabel)
+	}
+	pl := tiles[1]
+	if pl.BarPct != "0" || !pl.ShowBar {
+		t.Errorf("petitlyrics bar = {ShowBar:%v BarPct:%q}, want {true \"0\"}", pl.ShowBar, pl.BarPct)
+	}
+}
+
+// TestHandleDashboard_NoCacheTile verifies the lyrics-cache hit-rate tile is no
+// longer surfaced on the dashboard (removed per maintainer: cache hit rate is
+// not worth surfacing here). Even with provider data present, no Cache tile
+// renders. Cache stats remain available via /metrics, a separate path.
+func TestHandleDashboard_NoCacheTile(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	// Seed provider data so the Lyrics Sources row renders real tiles.
+	for i, hit := range []int64{1, 1, 1, 0} {
+		if _, err := sqlDB.ExecContext(t.Context(),
+			`INSERT INTO lane_attempts (queue_id, lane, hit, attempted_at) VALUES (?, 'musixmatch', ?, '2026-06-18T00:00:00Z')`,
+			int64(i+1), hit); err != nil {
+			t.Fatalf("insert lane_attempts: %v", err)
+		}
+	}
+	mux := newReportsUIServer(t, sqlDB)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "musixmatch") {
+		t.Fatal("dashboard missing provider tile; test precondition not met")
+	}
+	if strings.Contains(body, ">Cache<") {
+		t.Error("dashboard must not render the lyrics-cache tile (removed)")
 	}
 }

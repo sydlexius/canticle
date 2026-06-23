@@ -86,12 +86,6 @@ type UI struct {
 	// single-writer guard).
 	saveMu sync.Mutex
 
-	// cacheStats supplies the process-lifetime lyrics-cache hit/lookup counters
-	// for the dashboard cache hit-rate tile (#308). It is nil when no cache seam
-	// is attached (e.g. some tests, or the web UI built without serve wiring), in
-	// which case the dashboard omits the cache tile rather than rendering zeros.
-	cacheStats CacheStatsProvider
-
 	// keys is the managed (DB-backed) webhook API key store the key-management
 	// page (#300) lists, creates, and revokes against. Nil when no key seam is
 	// wired (e.g. some tests, or the web UI built without serve wiring), in which
@@ -109,13 +103,6 @@ type KeyManager interface {
 	ListKeys(ctx context.Context) ([]auth.Key, error)
 	CreateKey(ctx context.Context, name string, scopes []auth.Scope) (auth.CreatedKey, error)
 	RevokeKeyByID(ctx context.Context, id string) (auth.Key, error)
-}
-
-// CacheStatsProvider supplies the process-lifetime lyrics-cache hit and lookup
-// counters that back the dashboard cache hit-rate tile (#308). *cache.CacheRepo
-// satisfies it.
-type CacheStatsProvider interface {
-	CacheStats() (hits, lookups int64)
 }
 
 // UIOption customizes a UI.
@@ -153,18 +140,6 @@ func WithReports(repo *reports.Repo) UIOption {
 // post-construction equivalent of WithReports, used by the server layer where
 // the UI is built first (WithWebUIAuth) and the reports repo attached after.
 func (u *UI) AttachReports(repo *reports.Repo) { u.reports = repo }
-
-// WithCacheStats attaches the lyrics-cache stats seam that backs the dashboard
-// cache hit-rate tile (#308). Omitting it leaves the dashboard without the cache
-// tile (no source wired) rather than rendering a misleading zero.
-func WithCacheStats(p CacheStatsProvider) UIOption {
-	return func(u *UI) { u.cacheStats = p }
-}
-
-// AttachCacheStats wires the cache stats seam onto an already-constructed UI, the
-// post-construction equivalent of WithCacheStats used by the server layer where
-// the UI is built first (WithWebUIAuth) and the seam attached after.
-func (u *UI) AttachCacheStats(p CacheStatsProvider) { u.cacheStats = p }
 
 // WithKeyManager wires the managed webhook API key store the key-management page
 // (#300) operates on. Omitting it leaves the page reachable but renders an

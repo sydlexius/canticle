@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -60,13 +61,7 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		return templates.DashboardView{}, fmt.Errorf("dashboard: queue summary: %w", err)
 	}
 	view.QueueTiles = buildQueueTiles(qs)
-
-	// The cache hit-rate tile is wired only when a cache stats seam is attached
-	// (serve mode). Without it the tile is omitted rather than rendering 0/0.
-	if u.cacheStats != nil {
-		hits, lookups := u.cacheStats.CacheStats()
-		view.CacheTiles = buildCacheTiles(hits, lookups)
-	}
+	view.QueueChart = buildQueueChart(qs)
 
 	pe, err := u.reports.ProviderEffectiveness(ctx)
 	if err != nil {
@@ -100,33 +95,55 @@ func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 	}
 }
 
-// buildCacheTiles shapes the lyrics-cache hit/lookup counters into the single
-// dashboard cache stat tile (#308). Value is hits/lookups and Sub is the hit
-// rate. A zero-lookup state (nothing looked up yet) renders "0%" rather than
-// dividing by zero, mirroring buildProviderTiles' format.
-func buildCacheTiles(hits, lookups int64) []templates.StatTile {
-	var rate float64
-	if lookups > 0 {
-		rate = float64(hits) / float64(lookups)
-	}
-	return []templates.StatTile{
-		{
-			Label: "Cache",
-			Value: fmt.Sprintf("%d/%d", hits, lookups),
-			Sub:   fmt.Sprintf("%.0f%%", rate*100),
+// buildQueueChart shapes a QueueSummary into the work-queue doughnut chart
+// series (#318). The label order is fixed and matches the queue tiles so the
+// chart-init color map (keyed by label) stays in sync. Total is intentionally
+// excluded -- it is the sum of the segments, not a segment.
+func buildQueueChart(qs reports.QueueSummary) templates.ChartData {
+	return templates.ChartData{
+		Labels: []string{"Pending", "Processing", "Done", "Failed", "Deferred"},
+		Values: []float64{
+			float64(qs.Pending),
+			float64(qs.Processing),
+			float64(qs.Done),
+			float64(qs.Failed),
+			float64(qs.Deferred),
 		},
 	}
 }
 
-// buildProviderTiles shapes per-provider effectiveness rows into stat tiles.
+// hitRatePct rounds a 0-1 hit rate to an integer percent (0-100). It is the
+// single source for both the displayed "%" sub-label and the mini hit-rate
+// bar's data-hit-rate value, so the bar width always matches the text (#318).
+func hitRatePct(rate float64) int {
+	return int(math.Round(rate * 100))
+}
+
+// hitRateBarFields returns the Sub label and the inline hit-rate bar fields
+// (#318) for a tile carrying a 0-1 hit rate. ShowBar is always true here; the
+// caller wires it onto a StatTile. The percent feeds both the text and the bar.
+func hitRateBarFields(rate float64) (sub, barPct, barLabel string) {
+	pct := hitRatePct(rate)
+	sub = fmt.Sprintf("%d%%", pct)
+	barPct = strconv.Itoa(pct)
+	barLabel = fmt.Sprintf("Hit rate %d%%", pct)
+	return sub, barPct, barLabel
+}
+
+// buildProviderTiles shapes per-provider effectiveness rows into stat tiles,
+// each carrying its hit rate as an inline mini bar (#318).
 func buildProviderTiles(pe []reports.ProviderEffectiveness) []templates.StatTile {
 	tiles := make([]templates.StatTile, 0, len(pe))
 	for _, p := range pe {
 		attempts := p.Hits + p.Misses
+		sub, barPct, barLabel := hitRateBarFields(p.HitRate)
 		tiles = append(tiles, templates.StatTile{
-			Label: p.Lane,
-			Value: fmt.Sprintf("%d/%d", p.Hits, attempts),
-			Sub:   fmt.Sprintf("%.0f%%", p.HitRate*100),
+			Label:    p.Lane,
+			Value:    fmt.Sprintf("%d/%d", p.Hits, attempts),
+			Sub:      sub,
+			ShowBar:  true,
+			BarPct:   barPct,
+			BarLabel: barLabel,
 		})
 	}
 	return tiles

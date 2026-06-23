@@ -90,7 +90,6 @@ type Handler struct {
 	reportsDB          *sql.DB
 	settingsConfigPath string
 	settingsStore      secrets.Store
-	cacheStats         web.CacheStatsProvider
 	keyManager         web.KeyManager
 	trusted            *trustnet.Policy
 	mux                *http.ServeMux
@@ -212,14 +211,6 @@ func WithSettingsWriter(configPath string, store secrets.Store) Option {
 	}
 }
 
-// WithCacheStatsUI wires the lyrics-cache stats seam that backs the dashboard
-// cache hit-rate tile (#308). The handler attaches it to the mounted web UI (see
-// NewHandler). Meaningful only alongside a mounted web UI; with no UI, or a nil
-// provider, it is a no-op (the dashboard omits the cache tile).
-func WithCacheStatsUI(p web.CacheStatsProvider) Option {
-	return func(h *Handler) { h.cacheStats = p }
-}
-
 // WithKeyManagerUI wires the managed webhook API key store that backs the key
 // management page (#300). The handler attaches it to the mounted web UI (see
 // NewHandler). Meaningful only alongside a mounted web UI; with no UI, or a nil
@@ -265,9 +256,6 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)
-		}
-		if h.cacheStats != nil {
-			h.webui.AttachCacheStats(h.cacheStats)
 		}
 		if h.keyManager != nil {
 			h.webui.AttachKeyManager(h.keyManager)

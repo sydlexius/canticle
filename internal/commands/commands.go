@@ -808,9 +808,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	writer := newWriter(allowedRoots...)
 	configureWriterBilingual(writer, cfg)
 	// One shared cache repo across the worker, scheduler, and watcher so the
-	// dashboard cache hit-rate tile and /metrics counters (#308) cover every
-	// cache read in serve mode, not just the worker's. Its hit/lookup counters
-	// are process-lifetime and exposed via CacheStats.
+	// /metrics cache hit/lookup counters (#308) cover every cache read in serve
+	// mode, not just the worker's. Its hit/lookup counters are process-lifetime
+	// and exposed via CacheStats.
 	cacheRepo := cache.New(sqlDB)
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
@@ -956,9 +956,6 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// RESOLVED config file (never ""), and secret-field saves route to the
 			// encrypted store rather than the TOML.
 			server.WithSettingsWriter(config.ResolveConfigPath(args.ConfigPath), store),
-			// Back the dashboard cache hit-rate tile (#308) with the same shared
-			// cache repo the worker/scheduler/watcher read through.
-			server.WithCacheStatsUI(cacheRepo),
 			// Back the webhook key management page (#300) with the same managed key
 			// service that authenticates webhook calls, so keys created in the UI are
 			// immediately usable for webhook auth.
@@ -1594,7 +1591,7 @@ func resolveDetectOverride(detect, noDetect bool) (*bool, error) {
 
 // scheduler builds the scan scheduler. cacheRepo is the cache used to skip
 // already-cached tracks at enqueue time; pass the worker's shared repo in serve
-// mode so the dashboard/metrics hit-rate covers scheduler lookups too (#308),
+// mode so the /metrics hit-rate covers scheduler lookups too (#308),
 // or nil for a one-shot scan (a fresh, uncounted repo is created).
 func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo) scan.Scheduler {
 	results := scan.New(sqlDB)
