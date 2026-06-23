@@ -17,6 +17,13 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 	<html lang="en">
 		<head>
 			<meta charset="utf-8"/>
+				// Tell htmx NOT to inject its default .htmx-indicator <style> block on
+				// load: that inline <style> violates our strict CSP (style-src 'self',
+				// no 'unsafe-inline') and logs a console error on every htmx page. htmx
+				// reads this config before it would inject the style, so nothing inline
+				// is added; the equivalent rules ship in our own output.css instead.
+				// Must precede the htmx script so the config is set before htmx runs.
+				<meta name="htmx-config" content='{&#34;includeIndicatorStyles&#34;:false}'/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } - mxlrcgo-svc</title>
 			<link rel="icon" type="image/svg+xml" href="/static/img/canticle-mark.svg"/>

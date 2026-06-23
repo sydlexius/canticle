@@ -67,6 +67,32 @@ func (s *MemoryStore) RevokeByHash(ctx context.Context, hash string, revokedAt t
 	return cloneKey(key), nil
 }
 
+// RevokeByID records a revocation timestamp for the key with the given public ID
+// (Key.ID). IDs are unique (the SQL primary key), so the in-memory store mirrors
+// that by revoking the single matching entry.
+func (s *MemoryStore) RevokeByID(ctx context.Context, id string, revokedAt time.Time) (Key, error) {
+	if err := ctx.Err(); err != nil {
+		return Key{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for hash, key := range s.keys {
+		if key.ID != id {
+			continue
+		}
+		// Idempotent: re-revoking an already-revoked key preserves the original
+		// revocation timestamp rather than re-stamping it to now.
+		if key.RevokedAt != nil {
+			return cloneKey(key), nil
+		}
+		at := revokedAt.UTC()
+		key.RevokedAt = &at
+		s.keys[hash] = cloneKey(key)
+		return cloneKey(key), nil
+	}
+	return Key{}, ErrInvalidKey
+}
+
 // List returns all key metadata in stable creation order.
 func (s *MemoryStore) List(ctx context.Context) ([]Key, error) {
 	if err := ctx.Err(); err != nil {

@@ -1,0 +1,197 @@
+package templates
+
+// WebhookKeysPage renders the webhook API key management page (#300): a masked
+// list of the keys held in the managed (DB-backed) store, a per-key revoke
+// control, and a "Generate new key" form that shows the raw key exactly once.
+//
+// The create and revoke forms POST via htmx and swap the #mx-keys-panel content
+// with the re-rendered panel fragment (WebhookKeysPanel). The raw key is only
+// ever present in the immediate create response (view.NewKey); a later revoke
+// re-renders the panel without it, so it is never shown twice and never persists
+// in the rendered list.
+templ WebhookKeysPage(version string, view WebhookKeysView, reports []RailItem) {
+	@Layout("Webhook keys", "/settings/keys", version, reports, "/static/css/keys.css") {
+		// keys.js adds the one-time raw key's Copy button. Served from the embedded
+		// /static; the page works without it (the key sits in a selectable field).
+		<script src="/static/js/keys.js" defer></script>
+		<h1 class="mx-page-title">Webhook keys</h1>
+		<p class="mx-page-subtitle">
+			These keys authenticate Lidarr webhook calls to this server. Generate a key, copy it once,
+			and paste it into Lidarr. The key itself is never stored or shown again - only its name and
+			ID are kept here, so revoke and replace it if it is ever lost or leaked.
+		</p>
+		if !view.Manageable {
+			<p class="mx-keys-unavailable" role="alert">
+				Key management is unavailable: the server is running without a key store wired.
+			</p>
+		} else {
+			<div id="mx-keys-panel">
+				@WebhookKeysPanel(view)
+			</div>
+		}
+	}
+}
+
+// WebhookKeysPanel is the swappable inner content of #mx-keys-panel: an optional
+// error notice, the one-time raw-key reveal (only on a create response), the
+// create form, and the masked key list. Both POST handlers render this fragment
+// so an htmx innerHTML swap replaces the whole panel in place.
+templ WebhookKeysPanel(view WebhookKeysView) {
+	if view.Error != "" {
+		<p class="mx-keys-error" role="alert">{ view.Error }</p>
+	}
+	if view.NewKey != nil {
+		@keyReveal(view.NewKey)
+	}
+	@keyCreateForm(view)
+	@keyList(view)
+}
+
+// keyReveal shows a freshly created raw key once, with a copy affordance and a
+// blunt "won't be shown again" warning. The value sits in a readonly input so it
+// is selectable and copyable without JavaScript; keys.js adds a copy button.
+templ keyReveal(key *NewWebhookKey) {
+	<div class="mx-key-reveal" role="alert">
+		<p class="mx-key-reveal-title">Key created. Copy it now - it will not be shown again.</p>
+		if key.Name != "" {
+			<p class="mx-key-reveal-meta">Name: <span class="mx-key-reveal-name">{ key.Name }</span> &middot; ID: <code>{ key.ID }</code></p>
+		} else {
+			<p class="mx-key-reveal-meta">ID: <code>{ key.ID }</code></p>
+		}
+		<div class="mx-key-reveal-row">
+			<input
+				class="mx-settings-input mx-key-reveal-value"
+				id="mx-newkey-value"
+				type="text"
+				readonly
+				value={ key.Raw }
+				aria-label="New webhook key (copy now)"
+			/>
+			<button type="button" class="mx-settings-genbtn" data-copy-target="mx-newkey-value">Copy</button>
+		</div>
+		<p class="mx-key-reveal-hint">Store it in Lidarr's webhook settings. If you lose it, revoke this key and generate a new one.</p>
+	</div>
+}
+
+// keyCreateForm is the "Generate new key" form. It posts to /settings/keys; the
+// server generates the raw key, stores only its hash, and returns the panel with
+// the raw key revealed once.
+templ keyCreateForm(view WebhookKeysView) {
+	<section class="mx-keys-create" aria-labelledby="mx-keys-create-heading">
+		<h2 class="mx-settings-section-title" id="mx-keys-create-heading">Generate a new key</h2>
+		<form
+			class="mx-keys-create-form"
+			hx-post="/settings/keys"
+			hx-target="#mx-keys-panel"
+			hx-swap="innerHTML"
+		>
+			<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+			<div class="mx-keys-field">
+				<label class="mx-settings-field-label" for="mx-keys-name">Name (optional)</label>
+				<input
+					class="mx-settings-input"
+					id="mx-keys-name"
+					name="name"
+					type="text"
+					maxlength="120"
+					autocomplete="off"
+					placeholder="e.g. lidarr-main"
+				/>
+			</div>
+			<fieldset class="mx-keys-scopes">
+				<legend class="mx-settings-field-label">Scopes</legend>
+				for i, opt := range view.ScopeOptions {
+					<label class="mx-settings-checkbox-row">
+						<input
+							type="checkbox"
+							class="mx-settings-checkbox"
+							name="scope"
+							id={ OptionID("mx-keys-scope", i) }
+							value={ opt.Value }
+							if opt.Checked {
+								checked
+							}
+						/>
+						<span>{ opt.Label }</span>
+					</label>
+				}
+			</fieldset>
+			<button type="submit" class="mx-settings-genbtn mx-keys-generate">Generate key</button>
+		</form>
+	</section>
+}
+
+// keyTime renders a timestamp cell using the dashboard's viewer-local pattern: a
+// <time data-tz="pending"> element carrying the RFC3339 value, which keys.js
+// reformats to the browser's local zone with a 3-letter abbreviation. When the
+// server already applied a TZ-env zone (tzApplied) the element is marked
+// data-tz-applied so the client leaves it as-is; an empty ISO (zero time) renders
+// the plain display string.
+templ keyTime(display string, iso string, tzApplied bool) {
+	if iso == "" {
+		{ display }
+	} else if tzApplied {
+		<time datetime={ iso } data-tz-applied="1">{ display }</time>
+	} else {
+		<time datetime={ iso } data-tz="pending">{ display }</time>
+	}
+}
+
+// keyList renders the masked table of existing keys. It shows only metadata -
+// name, truncated public ID, scopes, created timestamp, and active/revoked
+// status - never the raw key or the full hash. An active key carries an inline
+// revoke form; a revoked key shows when it was revoked.
+templ keyList(view WebhookKeysView) {
+	<section class="mx-keys-list-section" aria-labelledby="mx-keys-list-heading">
+		<h2 class="mx-settings-section-title" id="mx-keys-list-heading">Existing keys</h2>
+		if len(view.Keys) == 0 {
+			<p class="mx-settings-field-desc">No keys yet. Generate one above to authenticate Lidarr webhooks.</p>
+		} else {
+			<table class="mx-keys-table">
+				<thead>
+					<tr>
+						<th scope="col">Name</th>
+						<th scope="col">ID</th>
+						<th scope="col">Scopes</th>
+						<th scope="col">Created</th>
+						<th scope="col">Status</th>
+						<th scope="col"><span class="mx-visually-hidden">Actions</span></th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, row := range view.Keys {
+						<tr class={ "mx-keys-row", templ.KV("mx-keys-row-revoked", row.Revoked) }>
+							<td>{ row.Name }</td>
+							<td><code class="mx-field-value">{ row.ID }</code></td>
+							<td>{ row.Scopes }</td>
+							<td>@keyTime(row.Created, row.CreatedISO, row.CreatedTZApplied)</td>
+							<td>
+								if row.Revoked {
+									<span class="mx-keys-status mx-keys-status-revoked">Revoked</span>
+									{ " " }
+									@keyTime(row.RevokedAt, row.RevokedAtISO, row.RevokedAtTZApplied)
+								} else {
+									<span class="mx-keys-status mx-keys-status-active">Active</span>
+								}
+							</td>
+							<td>
+								if !row.Revoked {
+									<form
+										hx-post="/settings/keys/revoke"
+										hx-target="#mx-keys-panel"
+										hx-swap="innerHTML"
+										hx-confirm="Revoke this key? Any client using it will immediately stop working."
+									>
+										<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+										<input type="hidden" name="id" value={ row.FullID }/>
+										<button type="submit" class="mx-keys-revoke">Revoke</button>
+									</form>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
+}

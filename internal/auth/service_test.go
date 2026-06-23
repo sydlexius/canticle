@@ -105,6 +105,59 @@ func TestService_RevokeKeyPreventsValidation(t *testing.T) {
 	}
 }
 
+func TestService_RevokeKeyByID(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	svc := NewService(store)
+	svc.rand = bytes.NewReader(bytes.Repeat([]byte{0x07}, keyBytes))
+	revokedAt := time.Date(2026, 4, 27, 13, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return revokedAt }
+
+	created, err := svc.CreateKey(ctx, "webhook", []Scope{ScopeWebhook})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	revoked, err := svc.RevokeKeyByID(ctx, created.Key.ID)
+	if err != nil {
+		t.Fatalf("RevokeKeyByID: %v", err)
+	}
+	if revoked.RevokedAt == nil || !revoked.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("RevokedAt = %v; want %s", revoked.RevokedAt, revokedAt)
+	}
+	// Validation by the raw key now fails: revocation by ID reached the same row.
+	if _, err := svc.ValidateKey(ctx, created.Raw, ScopeWebhook); !errors.Is(err, ErrRevokedKey) {
+		t.Fatalf("ValidateKey after RevokeKeyByID = %v; want ErrRevokedKey", err)
+	}
+
+	// Idempotent: re-revoking at a later time preserves the original timestamp.
+	svc.now = func() time.Time { return revokedAt.Add(time.Hour) }
+	again, err := svc.RevokeKeyByID(ctx, created.Key.ID)
+	if err != nil {
+		t.Fatalf("RevokeKeyByID (second): %v", err)
+	}
+	if again.RevokedAt == nil || !again.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("re-revoke RevokedAt = %v; want preserved %s", again.RevokedAt, revokedAt)
+	}
+
+	// A blank or unknown ID is a clean ErrInvalidKey, never a panic.
+	if _, err := svc.RevokeKeyByID(ctx, "  "); !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("RevokeKeyByID blank = %v; want ErrInvalidKey", err)
+	}
+	if _, err := svc.RevokeKeyByID(ctx, "nope"); !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("RevokeKeyByID unknown = %v; want ErrInvalidKey", err)
+	}
+}
+
+func TestService_RevokeKeyByIDNilDeps(t *testing.T) {
+	ctx := context.Background()
+	if _, err := (&Service{}).RevokeKeyByID(ctx, "id"); err == nil {
+		t.Fatal("RevokeKeyByID with nil store returned nil error")
+	}
+	if _, err := (&Service{store: NewMemoryStore()}).RevokeKeyByID(ctx, "id"); err == nil {
+		t.Fatal("RevokeKeyByID with nil now returned nil error")
+	}
+}
+
 func TestService_InvalidKeysAndScopes(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()

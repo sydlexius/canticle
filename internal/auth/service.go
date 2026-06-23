@@ -66,6 +66,7 @@ type Store interface {
 	Create(ctx context.Context, key Key) error
 	FindByHash(ctx context.Context, hash string) (Key, error)
 	RevokeByHash(ctx context.Context, hash string, revokedAt time.Time) (Key, error)
+	RevokeByID(ctx context.Context, id string, revokedAt time.Time) (Key, error)
 	List(ctx context.Context) ([]Key, error)
 }
 
@@ -169,6 +170,24 @@ func (s *Service) RevokeKey(ctx context.Context, raw string) (Key, error) {
 		return Key{}, err
 	}
 	return s.store.RevokeByHash(ctx, hash, s.now().UTC())
+}
+
+// RevokeKeyByID revokes the key identified by id (the public Key.ID) and returns
+// the updated metadata. It exists so the management UI can revoke a key it only
+// knows by its displayed ID: the raw key is never recoverable after creation, so
+// RevokeKey (which derives the hash from the raw key) cannot be used there. The
+// nil-dependency guards mirror RevokeKey.
+func (s *Service) RevokeKeyByID(ctx context.Context, id string) (Key, error) {
+	if s.store == nil {
+		return Key{}, fmt.Errorf("auth: store dependency is nil")
+	}
+	if s.now == nil {
+		return Key{}, fmt.Errorf("auth: now dependency is nil")
+	}
+	if strings.TrimSpace(id) == "" {
+		return Key{}, ErrInvalidKey
+	}
+	return s.store.RevokeByID(ctx, id, s.now().UTC())
 }
 
 // ListKeys returns stored key metadata without raw key material.

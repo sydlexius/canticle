@@ -37,6 +37,20 @@ body {
   min-height: 100vh;
 }
 
+/* htmx loading indicators. We disable htmx's built-in injected <style> via the
+   htmx-config meta (includeIndicatorStyles:false) because that inline style
+   violates our strict CSP (style-src 'self'); these are the equivalent rules,
+   now served from our own embedded stylesheet instead of inline. */
+.htmx-indicator {
+  opacity: 0;
+}
+.htmx-request .htmx-indicator {
+  opacity: 1;
+}
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
 /* -- App shell ------------------------------------------------------------- */
 .mx-shell {
   display: flex;
@@ -204,6 +218,32 @@ body {
   font-size: 0.9rem;
   color: var(--mx-content-text-secondary);
   margin: 0 0 1.75rem;
+}
+
+/* Settings sub-area link (e.g. Webhook keys): a labeled jump to a related
+   management page surfaced from within Settings, #300. */
+.mx-settings-subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  margin: 0 0 1.75rem;
+}
+
+.mx-settings-subnav-link {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--mx-sidebar-active-text);
+  text-decoration: none;
+  width: fit-content;
+}
+
+.mx-settings-subnav-link:hover {
+  text-decoration: underline;
+}
+
+.mx-settings-subnav-hint {
+  font-size: 0.8rem;
+  color: var(--mx-content-text-secondary);
 }
 
 /* -- Config view ----------------------------------------------------------- */

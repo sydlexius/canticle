@@ -67,6 +67,63 @@ func TestSQLStore_CreateListFindAndRevoke(t *testing.T) {
 	}
 }
 
+func TestSQLStore_RevokeByID(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
+	})
+
+	store := NewSQLStore(sqlDB)
+	key := Key{
+		ID:        "key-id",
+		Name:      "webhook",
+		Hash:      "0123456789abcdef",
+		Scopes:    []Scope{ScopeWebhook},
+		CreatedAt: time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
+	}
+	if err := store.Create(ctx, key); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	revokedAt := time.Date(2026, 4, 27, 13, 0, 0, 0, time.UTC)
+	revoked, err := store.RevokeByID(ctx, key.ID, revokedAt)
+	if err != nil {
+		t.Fatalf("RevokeByID: %v", err)
+	}
+	if revoked.RevokedAt == nil || !revoked.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("RevokedAt = %v; want %s", revoked.RevokedAt, revokedAt)
+	}
+	// The persisted row reflects the revocation.
+	got, err := store.FindByHash(ctx, key.Hash)
+	if err != nil {
+		t.Fatalf("FindByHash: %v", err)
+	}
+	if got.RevokedAt == nil || !got.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("persisted RevokedAt = %v; want %s", got.RevokedAt, revokedAt)
+	}
+
+	if _, err := store.RevokeByID(ctx, "missing-id", revokedAt); !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("RevokeByID missing error = %v; want ErrInvalidKey", err)
+	}
+
+	// Idempotent: a second revoke at a LATER time preserves the original
+	// revoked_at rather than re-stamping it.
+	later := revokedAt.Add(time.Hour)
+	again, err := store.RevokeByID(ctx, key.ID, later)
+	if err != nil {
+		t.Fatalf("RevokeByID (second) : %v", err)
+	}
+	if again.RevokedAt == nil || !again.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("re-revoke RevokedAt = %v; want preserved original %s", again.RevokedAt, revokedAt)
+	}
+}
+
 func TestSQLStore_InvalidRows(t *testing.T) {
 	ctx := context.Background()
 	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth.db"))

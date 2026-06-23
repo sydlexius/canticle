@@ -959,6 +959,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// Back the dashboard cache hit-rate tile (#308) with the same shared
 			// cache repo the worker/scheduler/watcher read through.
 			server.WithCacheStatsUI(cacheRepo),
+			// Back the webhook key management page (#300) with the same managed key
+			// service that authenticates webhook calls, so keys created in the UI are
+			// immediately usable for webhook auth.
+			server.WithKeyManagerUI(authSvc),
 		)
 	}
 	srv := &http.Server{

@@ -15,6 +15,7 @@ import (
 
 	"github.com/a-h/templ"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/auth"
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/reports"
 	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
@@ -90,6 +91,24 @@ type UI struct {
 	// is attached (e.g. some tests, or the web UI built without serve wiring), in
 	// which case the dashboard omits the cache tile rather than rendering zeros.
 	cacheStats CacheStatsProvider
+
+	// keys is the managed (DB-backed) webhook API key store the key-management
+	// page (#300) lists, creates, and revokes against. Nil when no key seam is
+	// wired (e.g. some tests, or the web UI built without serve wiring), in which
+	// case the page renders an "unavailable" notice and the create/revoke POSTs
+	// return 503 rather than panicking.
+	keys KeyManager
+}
+
+// KeyManager is the subset of *auth.Service the webhook key management page
+// (#300) needs: list existing keys (metadata only), create a key (returning the
+// one-time raw material), and revoke a key by its public ID (the raw key is not
+// recoverable after creation, so revocation is by ID). *auth.Service satisfies
+// it.
+type KeyManager interface {
+	ListKeys(ctx context.Context) ([]auth.Key, error)
+	CreateKey(ctx context.Context, name string, scopes []auth.Scope) (auth.CreatedKey, error)
+	RevokeKeyByID(ctx context.Context, id string) (auth.Key, error)
 }
 
 // CacheStatsProvider supplies the process-lifetime lyrics-cache hit and lookup
@@ -146,6 +165,19 @@ func WithCacheStats(p CacheStatsProvider) UIOption {
 // post-construction equivalent of WithCacheStats used by the server layer where
 // the UI is built first (WithWebUIAuth) and the seam attached after.
 func (u *UI) AttachCacheStats(p CacheStatsProvider) { u.cacheStats = p }
+
+// WithKeyManager wires the managed webhook API key store the key-management page
+// (#300) operates on. Omitting it leaves the page reachable but renders an
+// "unavailable" notice (no key backend wired); the create/revoke POSTs return
+// 503.
+func WithKeyManager(km KeyManager) UIOption {
+	return func(u *UI) { u.keys = km }
+}
+
+// AttachKeyManager wires the key store onto an already-constructed UI, the
+// post-construction equivalent of WithKeyManager used by the server layer where
+// the UI is built first (WithWebUIAuth) and the seam attached after.
+func (u *UI) AttachKeyManager(km KeyManager) { u.keys = km }
 
 // WithConfigPath sets the resolved config file path the settings save handlers
 // write through. Without it the settings page stays read-only (no write path).
@@ -264,6 +296,9 @@ func (u *UI) Register(mux *http.ServeMux) {
 		mux.Handle("GET /settings", guard(http.HandlerFunc(u.handleSettings)))
 		mux.Handle("POST /settings/field", guard(http.HandlerFunc(u.handleSaveField)))
 		mux.Handle("POST /settings/section", guard(http.HandlerFunc(u.handleSaveSection)))
+		mux.Handle("GET /settings/keys", guard(http.HandlerFunc(u.handleWebhookKeys)))
+		mux.Handle("POST /settings/keys", guard(http.HandlerFunc(u.handleCreateWebhookKey)))
+		mux.Handle("POST /settings/keys/revoke", guard(http.HandlerFunc(u.handleRevokeWebhookKey)))
 		return
 	}
 	mux.HandleFunc("GET /{$}", u.handleRoot)
@@ -274,6 +309,9 @@ func (u *UI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /settings", u.handleSettings)
 	mux.HandleFunc("POST /settings/field", u.handleSaveField)
 	mux.HandleFunc("POST /settings/section", u.handleSaveSection)
+	mux.HandleFunc("GET /settings/keys", u.handleWebhookKeys)
+	mux.HandleFunc("POST /settings/keys", u.handleCreateWebhookKey)
+	mux.HandleFunc("POST /settings/keys/revoke", u.handleRevokeWebhookKey)
 }
 
 // settingsPath is the single config destination. Settings replaced the old

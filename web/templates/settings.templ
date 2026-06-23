@@ -16,6 +16,13 @@ templ SettingsPage(version string, view SettingsView, reports []RailItem) {
 			Edit the daemon configuration. Changes are written to the config file and take effect on restart.
 			A field set by an environment variable or command-line flag is locked here; clear the override to edit it.
 		</p>
+		// Webhook keys live on their own page (managed in the database, not the
+		// config file), surfaced here as a Settings sub-area rather than a
+		// top-level nav entry (#300 UAT).
+		<p class="mx-settings-subnav">
+			<a class="mx-settings-subnav-link" href="/settings/keys">Manage webhook API keys &rarr;</a>
+			<span class="mx-settings-subnav-hint">Generate, view, and revoke the keys that authenticate Lidarr webhooks.</span>
+		</p>
 		// settings.js powers the guided controls, the reactive grey-out, and the
 		// save POSTs (#288 Phase 2). Served from the embedded /static.
 		<script src="/static/js/settings.js" defer></script>

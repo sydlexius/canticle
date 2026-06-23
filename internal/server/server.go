@@ -91,6 +91,7 @@ type Handler struct {
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	cacheStats         web.CacheStatsProvider
+	keyManager         web.KeyManager
 	trusted            *trustnet.Policy
 	mux                *http.ServeMux
 }
@@ -219,6 +220,14 @@ func WithCacheStatsUI(p web.CacheStatsProvider) Option {
 	return func(h *Handler) { h.cacheStats = p }
 }
 
+// WithKeyManagerUI wires the managed webhook API key store that backs the key
+// management page (#300). The handler attaches it to the mounted web UI (see
+// NewHandler). Meaningful only alongside a mounted web UI; with no UI, or a nil
+// manager, it is a no-op (the page renders an unavailable notice).
+func WithKeyManagerUI(km web.KeyManager) Option {
+	return func(h *Handler) { h.keyManager = km }
+}
+
 // WithWebUIIf conditionally mounts the web UI. When enabled is false it
 // returns a no-op option so callers do not need an inline if-branch.
 func WithWebUIIf(enabled bool, cfg config.Config, version string) Option {
@@ -259,6 +268,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.cacheStats != nil {
 			h.webui.AttachCacheStats(h.cacheStats)
+		}
+		if h.keyManager != nil {
+			h.webui.AttachKeyManager(h.keyManager)
 		}
 		h.webui.Register(h.mux)
 	}

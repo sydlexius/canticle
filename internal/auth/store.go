@@ -100,6 +100,48 @@ func (s *SQLStore) RevokeByHash(ctx context.Context, hash string, revokedAt time
 	return key, nil
 }
 
+// findByID returns key metadata by its public ID (hash[:16], the table's primary
+// key), mapping a missing row to ErrInvalidKey like FindByHash.
+func (s *SQLStore) findByID(ctx context.Context, id string) (Key, error) {
+	key, err := s.scanKey(s.db.QueryRowContext(ctx,
+		`SELECT id, name, hash, scopes, created_at, revoked_at
+         FROM api_key_metadata
+         WHERE id = ?`,
+		id,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Key{}, ErrInvalidKey
+	}
+	if err != nil {
+		return Key{}, fmt.Errorf("auth: find key by id: %w", err)
+	}
+	return key, nil
+}
+
+// RevokeByID records a revocation timestamp for the key with the given public ID.
+// id is the table's primary key, so it matches at most one row.
+func (s *SQLStore) RevokeByID(ctx context.Context, id string, revokedAt time.Time) (Key, error) {
+	key, err := s.findByID(ctx, id)
+	if err != nil {
+		return Key{}, err
+	}
+	// Idempotent: re-revoking an already-revoked key is a no-op that preserves the
+	// original revocation timestamp rather than re-stamping it to now.
+	if key.RevokedAt != nil {
+		return key, nil
+	}
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE api_key_metadata SET revoked_at = ? WHERE id = ?`,
+		formatTime(revokedAt),
+		id,
+	)
+	if err != nil {
+		return Key{}, fmt.Errorf("auth: revoke key by id: %w", err)
+	}
+	key.RevokedAt = ptrTime(revokedAt.UTC())
+	return key, nil
+}
+
 // List returns all key metadata in stable creation order.
 func (s *SQLStore) List(ctx context.Context) (keys []Key, retErr error) {
 	rows, err := s.db.QueryContext(ctx,
