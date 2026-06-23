@@ -5,7 +5,7 @@ This page documents every subcommand and flag. For operational guidance (running
 ## Usage
 
 ```text
-Usage: mxlrcgo-svc [fetch|serve|scan|library|keys|config|queue|provenance]
+Usage: canticle [fetch|serve|scan|library|keys|config|queue|provenance]
 
 Commands:
   fetch       fetch lyrics once without HTTP server or DB queue
@@ -22,13 +22,13 @@ Global flags:
   --help     show help for the program or a subcommand
 
 Legacy flag-only invocation is still supported:
-  mxlrcgo-svc [--outdir OUTDIR] [--cooldown COOLDOWN] [--depth DEPTH] [--update] [--upgrade] [--bfs] [--serve] [--listen LISTEN] [--token TOKEN] [--config CONFIG] [SONG ...]
+  canticle [--outdir OUTDIR] [--cooldown COOLDOWN] [--depth DEPTH] [--update] [--upgrade] [--bfs] [--serve] [--listen LISTEN] [--token TOKEN] [--config CONFIG] [SONG ...]
 ```
 
 ## Version
 
-`mxlrcgo-svc --version` prints the embedded build metadata, for example
-`mxlrcgo-svc v1.1.0 (commit 1a2b3c4, built 2026-06-05T00:00:00Z)`. Release
+`canticle --version` prints the embedded build metadata, for example
+`canticle v1.1.0 (commit 1a2b3c4, built 2026-06-05T00:00:00Z)`. Release
 binaries and the published Docker images carry the real tag; a `go build` or
 `go install` from source reports `dev` unless you inject the ldflags yourself.
 
@@ -39,26 +39,26 @@ One-shot lyric fetching without the HTTP server or DB queue.
 ### One song
 
 ```sh
-mxlrcgo-svc adele,hello
-mxlrcgo-svc fetch adele,hello
+canticle adele,hello
+canticle fetch adele,hello
 ```
 
 ### Multiple songs and a custom output directory
 
 ```sh
-mxlrcgo-svc adele,hello "the killers,mr. brightside" -o some_directory
+canticle adele,hello "the killers,mr. brightside" -o some_directory
 ```
 
 ### With a text file and a custom cooldown time
 
 ```sh
-mxlrcgo-svc example_input.txt -c 20
+canticle example_input.txt -c 20
 ```
 
 ### Directory mode (recursive)
 
 ```sh
-mxlrcgo-svc "Dream Theater"
+canticle "Dream Theater"
 ```
 
 > **_This option overrides the `-o/--outdir` argument which means the lyrics will be saved in the same directory as the given input._**
@@ -76,8 +76,8 @@ In directory mode, when audio tags carry ISRC, MusicBrainz recording ID, or dura
 Run the HTTP server, worker, and library scheduler. See the [User Guide](USER_GUIDE.md#lidarr-webhook-server) for full operational detail.
 
 ```sh
-mxlrcgo-svc serve --listen 127.0.0.1:3876
-mxlrcgo-svc serve --config path/to/config.toml
+canticle serve --listen 127.0.0.1:3876
+canticle serve --config path/to/config.toml
 ```
 
 Relevant serve flags: `--listen` (overrides `MXLRC_SERVER_ADDR`), `--scan-interval`, `--work-interval`, and `--config`.
@@ -85,12 +85,12 @@ Relevant serve flags: `--listen` (overrides `MXLRC_SERVER_ADDR`), `--scan-interv
 ## Library and key management
 
 ```sh
-mxlrcgo-svc library add /data/media/music --name Music
-mxlrcgo-svc library list
-mxlrcgo-svc scan
-mxlrcgo-svc keys create --name lidarr --scope webhook
-mxlrcgo-svc keys list
-mxlrcgo-svc config get db.path
+canticle library add /data/media/music --name Music
+canticle library list
+canticle scan
+canticle keys create --name lidarr --scope webhook
+canticle keys list
+canticle config get db.path
 ```
 
 ## Queue and scan inspection
@@ -99,7 +99,7 @@ The `queue` and `scan` subcommands expose the durable work queue and persisted s
 
 ## Provenance
 
-Synced `.lrc` files written by `mxlrcgo-svc` carry provenance tags in the header block that identify where and when each file came from. These tags appear after the standard metadata tags (`[by:]`, `[ar:]`, `[ti:]`, etc.) and before the first timestamped lyric line:
+Synced `.lrc` files written by `canticle` carry provenance tags in the header block that identify where and when each file came from. These tags appear after the standard metadata tags (`[by:]`, `[ar:]`, `[ti:]`, etc.) and before the first timestamped lyric line:
 
 ```text
 [source:musixmatch]
@@ -113,7 +113,7 @@ Synced `.lrc` files written by `mxlrcgo-svc` carry provenance tags in the header
 |---|---|---|
 | `[source:]` | provider lane name | e.g. `musixmatch`, `petitlyrics` |
 | `[fetched:]` | ISO 8601 fetch timestamp | UTC; absent on cache hits |
-| `[ve:]` | generating mxlrcgo-svc version | e.g. `v1.2.0`; `dev` on local builds |
+| `[ve:]` | generating canticle version | e.g. `v1.2.0`; `dev` on local builds |
 | `[isrc:]` | ISRC recording identifier | when available from the audio file or API response |
 | `[mbid:]` | MusicBrainz recording ID | when available from the audio file |
 
@@ -123,16 +123,16 @@ Existing `.lrc` files that predate this feature can have provenance tags injecte
 
 ```sh
 # Preview what would change (dry run)
-mxlrcgo-svc provenance backfill
+canticle provenance backfill
 
 # Target specific paths or directories
-mxlrcgo-svc provenance backfill /data/music/Artist
+canticle provenance backfill /data/music/Artist
 
 # Apply the changes
-mxlrcgo-svc provenance backfill --yes
+canticle provenance backfill --yes
 
 # Apply to specific paths
-mxlrcgo-svc provenance backfill --yes /data/music/Artist/Album
+canticle provenance backfill --yes /data/music/Artist/Album
 ```
 
 The backfill is idempotent: tags that already exist in a file are skipped; only genuinely absent tags are injected. The `[ve:]` tag is never injected on backfill (the originating version is not recorded in the database). Files for which the database has no matching row, or with only partial metadata, are reported as `partial` rather than `seeded`.
@@ -142,7 +142,7 @@ The backfill is idempotent: tags that already exist in a file are skipped; only 
 ## Shell completion
 
 ```sh
-mxlrcgo-svc completion <bash|zsh|fish>
+canticle completion <bash|zsh|fish>
 ```
 
 See [Shell completion](USER_GUIDE.md#shell-completion) for installation snippets.

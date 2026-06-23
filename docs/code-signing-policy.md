@@ -5,7 +5,7 @@ by [SignPath Foundation](https://signpath.org/).
 
 ## Scope
 
-All `mxlrcgo-svc` release binaries published to GitHub Releases are signed
+All Canticle release binaries published to GitHub Releases are signed
 using the SignPath free open-source program. Signing applies to the final
 binaries produced by the GoReleaser release pipeline.
 
@@ -45,4 +45,4 @@ signing workflow. For details on what SignPath processes during signing, see the
 
 - [SignPath.io](https://signpath.io/) - code signing provider
 - [SignPath Foundation](https://signpath.org/) - certificate authority for the free open-source program
-- [Privacy Policy](privacy-policy.md) - data handling policy for `mxlrcgo-svc`
+- [Privacy Policy](privacy-policy.md) - data handling policy for Canticle

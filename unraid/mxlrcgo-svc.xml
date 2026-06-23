@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>mxlrcgo-svc</Name>
-  <Repository>ghcr.io/sydlexius/mxlrcgo-svc</Repository>
-  <Registry>https://github.com/sydlexius/mxlrcgo-svc/pkgs/container/mxlrcgo-svc</Registry>
-  <TemplateURL>https://raw.githubusercontent.com/sydlexius/mxlrcgo-svc/main/unraid/mxlrcgo-svc.xml</TemplateURL>
+  <Name>Canticle</Name>
+  <Repository>ghcr.io/sydlexius/canticle</Repository>
+  <Registry>https://github.com/sydlexius/canticle/pkgs/container/canticle</Registry>
+  <TemplateURL>https://raw.githubusercontent.com/sydlexius/canticle/main/unraid/mxlrcgo-svc.xml</TemplateURL>
   <Branch>
     <Tag>latest</Tag>
     <TagDescription>Latest stable release</TagDescription>
@@ -11,10 +11,10 @@
   <Network>bridge</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/sydlexius/mxlrcgo-svc/issues</Support>
-  <Project>https://github.com/sydlexius/mxlrcgo-svc</Project>
+  <Support>https://github.com/sydlexius/canticle/issues</Support>
+  <Project>https://github.com/sydlexius/canticle</Project>
   <Overview>Fetch synced lyrics from Musixmatch and save them as .lrc files for music libraries.</Overview>
-  <Description>mxlrcgo-svc fetches synced lyrics from the Musixmatch API, writes .lrc files, and can run as a small HTTP service for Lidarr webhook-driven lyric fetching.</Description>
+  <Description>Canticle fetches synced lyrics from the Musixmatch API, writes .lrc files, and can run as a small HTTP service for Lidarr webhook-driven lyric fetching.</Description>
   <Category>MediaApp:Music</Category>
   <WebUI>http://[IP]:[PORT:50705]/</WebUI>
   <Icon>https://raw.githubusercontent.com/sydlexius/unraid-templates/main/icon.svg</Icon>
@@ -25,9 +25,9 @@
   <Requires/>
   <Config Name="Webhook Port" Target="50705" Default="50705" Mode="tcp" Description="HTTP webhook server port." Type="Port" Display="always" Required="true" Mask="false">50705</Config>
   <Config Name="Appdata" Target="/config" Default="" Mode="rw" Description="Stores configuration and the SQLite database." Type="Path" Display="always" Required="true" Mask="false"/>
-  <Config Name="Media Library" Target="/data" Default="/mnt/user/data" Mode="rw" Description="Your media parent, mapped to /data inside the container following the TRaSH Guides single-mount convention. Register libraries under it (for example /data/media/music) with 'mxlrcgo-svc library add'. For multiple shares, add one more Path mapping per share beneath /data/media." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data</Config>
+  <Config Name="Media Library" Target="/data" Default="/mnt/user/data" Mode="rw" Description="Your media parent, mapped to /data inside the container following the TRaSH Guides single-mount convention. Register libraries under it (for example /data/media/music) with 'canticle library add'. For multiple shares, add one more Path mapping per share beneath /data/media." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data</Config>
   <Config Name="Musixmatch Token" Target="MUSIXMATCH_TOKEN" Default="" Description="Musixmatch API token used to fetch lyrics." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="Webhook API Key" Target="MXLRC_WEBHOOK_API_KEY" Default="" Description="API key accepted by webhook endpoints. Generate one with mxlrcgo-svc keys create --scope webhook." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Webhook API Key" Target="MXLRC_WEBHOOK_API_KEY" Default="" Description="API key accepted by webhook endpoints. Generate one with canticle keys create --scope webhook." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="PUID" Target="PUID" Default="99" Description="User ID for file permissions. Default 99 maps to nobody on Unraid." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
   <Config Name="PGID" Target="PGID" Default="100" Description="Group ID for file permissions. Default 100 maps to users on Unraid." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
   <Config Name="Docker Mode" Target="MXLRC_DOCKER" Default="true" Description="Use Docker storage defaults under /config." Type="Variable" Display="advanced" Required="true" Mask="false">true</Config>

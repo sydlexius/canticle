@@ -1,6 +1,6 @@
 [Unit]
-Description=mxlrcgo-svc lyrics fetcher daemon
-Documentation=https://sydlexius.github.io/mxlrcgo-svc/
+Description=Canticle lyrics fetcher daemon
+Documentation=https://sydlexius.github.io/canticle/
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=mxlrcgo-svc
 Group=mxlrcgo-svc
-ExecStart=/usr/local/bin/mxlrcgo-svc serve
+ExecStart=/usr/local/bin/canticle serve
 Restart=on-failure
 RestartSec=5s
 

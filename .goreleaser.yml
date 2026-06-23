@@ -56,7 +56,7 @@ homebrew_casks:
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Casks
-    homepage: https://sydlexius.github.io/mxlrcgo-svc/
+    homepage: https://sydlexius.github.io/canticle/
     description: Fetch synced lyrics from Musixmatch and save them as .lrc files
     caveats: |
       Set your Musixmatch token via MUSIXMATCH_TOKEN or in the config file:
@@ -74,7 +74,7 @@ nfpms:
     ids:
       - mxlrcgo-svc
     vendor: sydlexius
-    homepage: https://sydlexius.github.io/mxlrcgo-svc/
+    homepage: https://sydlexius.github.io/canticle/
     maintainer: sydlexius <maintainer@placeholder.example>
     description: Fetch synced lyrics from Musixmatch and save them as .lrc files
     license: GPL-3.0
@@ -200,7 +200,7 @@ changelog:
 release:
   github:
     owner: sydlexius
-    name: mxlrcgo-svc
+    name: canticle
   prerelease: auto
   make_latest: '{{ if .Prerelease }}false{{ else }}true{{ end }}'
   header: |
@@ -211,7 +211,7 @@ release:
     **Docker:** `docker pull ghcr.io/sydlexius/canticle:{{ .Version }}`
 
     {{- if .PreviousTag }}
-    **Full Changelog:** [{{ .PreviousTag }}...{{ .Tag }}](https://github.com/sydlexius/mxlrcgo-svc/compare/{{ .PreviousTag }}...{{ .Tag }})
+    **Full Changelog:** [{{ .PreviousTag }}...{{ .Tag }}](https://github.com/sydlexius/canticle/compare/{{ .PreviousTag }}...{{ .Tag }})
     {{- else }}
-    **Full Changelog:** [{{ .Tag }}](https://github.com/sydlexius/mxlrcgo-svc/releases/tag/{{ .Tag }})
+    **Full Changelog:** [{{ .Tag }}](https://github.com/sydlexius/canticle/releases/tag/{{ .Tag }})
     {{- end }}

@@ -171,7 +171,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	var tags []string
 	if writeTags {
 		tags = []string{
-			"[by:mxlrcgo-svc]",
+			"[by:canticle]",
 			fmt.Sprintf("[ar:%s]", song.Track.ArtistName),
 			fmt.Sprintf("[ti:%s]", song.Track.TrackName),
 		}

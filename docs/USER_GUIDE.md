@@ -1,32 +1,32 @@
 # User Guide
 
-This guide covers running `mxlrcgo-svc` as a long-running service: the Lidarr webhook server, path resolution, health endpoints, Docker and Unraid deployment, the optional filesystem watcher, shell completion, and the inspection commands. For one-shot fetching and the full flag list, see the [CLI Reference](CLI_REFERENCE.md). For every setting, see [Configuration](CONFIGURATION.md).
+This guide covers running `canticle` as a long-running service: the Lidarr webhook server, path resolution, health endpoints, Docker and Unraid deployment, the optional filesystem watcher, shell completion, and the inspection commands. For one-shot fetching and the full flag list, see the [CLI Reference](CLI_REFERENCE.md). For every setting, see [Configuration](CONFIGURATION.md).
 
 ## Lidarr webhook server
 
 ```sh
-MUSIXMATCH_TOKEN=YOUR_TOKEN MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key mxlrcgo-svc --serve --listen 127.0.0.1:3876
-MUSIXMATCH_TOKEN=YOUR_TOKEN MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key mxlrcgo-svc serve --listen 127.0.0.1:3876
+MUSIXMATCH_TOKEN=YOUR_TOKEN MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key canticle --serve --listen 127.0.0.1:3876
+MUSIXMATCH_TOKEN=YOUR_TOKEN MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key canticle serve --listen 127.0.0.1:3876
 ```
 
-The server listens on `MXLRC_SERVER_ADDR` when `--listen` is not provided. Configure one or more webhook keys with `MXLRC_WEBHOOK_API_KEY`, use `mxlrcgo-svc keys create`, or put the server address and webhook keys in a config file and start with `mxlrcgo-svc serve --config path/to/config.toml`.
+The server listens on `MXLRC_SERVER_ADDR` when `--listen` is not provided. Configure one or more webhook keys with `MXLRC_WEBHOOK_API_KEY`, use `canticle keys create`, or put the server address and webhook keys in a config file and start with `canticle serve --config path/to/config.toml`.
 
 Webhook events are enqueued at high priority. If a webhook arrives for an artist/title that previously failed and is waiting out a retry backoff, the high-priority enqueue resets its retry timer so it becomes eligible immediately, jumping the queue. Scan-enqueued duplicates keep their existing backoff, so bulk scan traffic stays rate-limit protected. The worker's circuit breaker still pauses dequeuing globally when the upstream API signals rate limiting.
 
 ### Path resolution (Docker/Unraid)
 
-Configured library scans are the source of truth for filesystem paths. When a Lidarr webhook arrives, `mxlrcgo-svc` resolves the target file in this order:
+Configured library scans are the source of truth for filesystem paths. When a Lidarr webhook arrives, `canticle` resolves the target file in this order:
 
-1. **Scanned inventory.** The webhook artist/title is matched against persisted scan results (using the same normalization as the cache), and a match reuses the exact container-visible source path and output destination the scan recorded. This is why you should add and scan your libraries (`mxlrcgo-svc library add ...`, then `mxlrcgo-svc scan`) before relying on webhooks.
-2. **Direct payload path.** If there is no inventory match but the webhook payload carries a `trackFiles` path that, after cleaning, lies inside one of your configured library roots and exists inside the `mxlrcgo-svc` container, that path is used directly. Payload paths outside every configured root are never used as a write target; they fall back to metadata. This confinement is a security guard: it stops a webhook from directing a lyric write to an arbitrary location. As a result, raw payload-path resolution requires at least one configured library; with no libraries configured, step 2 is disabled and resolution goes straight from inventory to metadata.
+1. **Scanned inventory.** The webhook artist/title is matched against persisted scan results (using the same normalization as the cache), and a match reuses the exact container-visible source path and output destination the scan recorded. This is why you should add and scan your libraries (`canticle library add ...`, then `canticle scan`) before relying on webhooks.
+2. **Direct payload path.** If there is no inventory match but the webhook payload carries a `trackFiles` path that, after cleaning, lies inside one of your configured library roots and exists inside the `canticle` container, that path is used directly. Payload paths outside every configured root are never used as a write target; they fall back to metadata. This confinement is a security guard: it stops a webhook from directing a lyric write to an arbitrary location. As a result, raw payload-path resolution requires at least one configured library; with no libraries configured, step 2 is disabled and resolution goes straight from inventory to metadata.
 3. **Metadata fallback.** Otherwise the lyrics are written to the configured `output.dir` using the webhook metadata.
 
-On Unraid, Lidarr and `mxlrcgo-svc` often see the same media through different mount paths. Because resolution prefers the scanned inventory, you do not need to maintain host-to-container path mappings: a payload path that is not visible inside the container, or that falls outside your configured library roots, simply falls back to metadata rather than failing.
+On Unraid, Lidarr and `canticle` often see the same media through different mount paths. Because resolution prefers the scanned inventory, you do not need to maintain host-to-container path mappings: a payload path that is not visible inside the container, or that falls outside your configured library roots, simply falls back to metadata rather than failing.
 
 Two operational notes:
 
-- The library roots used to confine payload paths (step 2) are snapshotted when `serve` starts. A library added with `mxlrcgo-svc library add ...` while `serve` is running is not recognized for raw-payload-path resolution until `serve` is restarted. (The periodic scheduler and watcher still pick up new libraries without a restart; only the webhook payload-path confinement uses the startup snapshot.)
-- Inventory matching for tracks with non-ASCII artist/title metadata converges after one rescan following an upgrade. The key-backfill migration applies a best-effort ASCII fold to pre-existing rows; the exact normalized keys are written on the next library scan, so run `mxlrcgo-svc scan` once after upgrading to make non-ASCII webhook matches reliable.
+- The library roots used to confine payload paths (step 2) are snapshotted when `serve` starts. A library added with `canticle library add ...` while `serve` is running is not recognized for raw-payload-path resolution until `serve` is restarted. (The periodic scheduler and watcher still pick up new libraries without a restart; only the webhook payload-path confinement uses the startup snapshot.)
+- Inventory matching for tracks with non-ASCII artist/title metadata converges after one rescan following an upgrade. The key-backfill migration applies a best-effort ASCII fold to pre-existing rows; the exact normalized keys are written on the next library scan, so run `canticle scan` once after upgrading to make non-ASCII webhook matches reliable.
 
 The scheduler scan interval and worker poll interval are configurable for Docker/Unraid deployments. Set `scan_interval_seconds` and `work_interval_seconds` under `[server]` in the config file, or override with `MXLRC_SCAN_INTERVAL` and `MXLRC_WORK_INTERVAL`. Precedence is CLI flag (`--scan-interval`, `--work-interval`) > environment variable > config file > default. Defaults preserve current behavior: scan interval 900 seconds, and worker interval falls back to `api.cooldown` (clamped to a 15-second floor). A scan interval of 0 scans once without repeating.
 
@@ -90,17 +90,17 @@ Published GHCR tags:
 
 ```sh
 docker run -d \
-  --name mxlrcgo-svc \
+  --name canticle \
   -p 50705:50705 \
   -e MUSIXMATCH_TOKEN=YOUR_TOKEN \
   -e MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key \
   -e PUID=99 \
   -e PGID=100 \
   -e MXLRC_OUTPUT_DIR=/data/media/music \
-  -v mxlrcgo-svc-config:/config \
+  -v canticle-config:/config \
   -v /path/to/your/data:/data:rw \
   --restart unless-stopped \
-  ghcr.io/sydlexius/mxlrcgo-svc:latest
+  ghcr.io/sydlexius/canticle:latest
 ```
 
 For Compose, copy `docker-compose.example.yml`, set `MUSIXMATCH_TOKEN` and `MXLRC_WEBHOOK_API_KEY`, adjust the music volume, then run:
@@ -111,7 +111,7 @@ docker compose up -d
 
 `MXLRC_DOCKER=true` makes default storage paths resolve to `/config/config.toml` and `/config/mxlrcgo.db`.
 
-To inspect or maintain the queue and scan state inside the container, exec the same `mxlrcgo-svc queue` and `mxlrcgo-svc scan results` / `mxlrcgo-svc scan clear` commands documented in the [Inspection commands](#inspection-commands) section below (for example `docker exec mxlrcgo-svc mxlrcgo-svc queue failed`).
+To inspect or maintain the queue and scan state inside the container, exec the same `canticle queue` and `canticle scan results` / `canticle scan clear` commands documented in the [Inspection commands](#inspection-commands) section below (for example `docker exec canticle canticle queue failed`).
 
 ## Encrypted secrets
 
@@ -130,18 +130,18 @@ Three commands manage the encrypted store. None of them ever print a secret valu
 # the normal CLI/env/TOML precedence but skips the database itself as a source,
 # so it never copies the database onto itself. With no flag it imports both
 # currently-set secrets; scope it with --token or --webhook.
-mxlrcgo-svc secrets import
-mxlrcgo-svc secrets import --token
-mxlrcgo-svc secrets import --webhook
+canticle secrets import
+canticle secrets import --token
+canticle secrets import --webhook
 
 # Set one secret by name from stdin. The value is read from the terminal prompt
 # or a pipe, never from the command line (the command line lands in shell
 # history and ps). Valid names: musixmatch_token, webhook_api_key.
-mxlrcgo-svc secrets set musixmatch_token        # prompts for the value
-printf '%s' "$TOKEN" | mxlrcgo-svc secrets set musixmatch_token   # or pipe it
+canticle secrets set musixmatch_token        # prompts for the value
+printf '%s' "$TOKEN" | canticle secrets set musixmatch_token   # or pipe it
 
 # List stored secret names and their last-updated timestamps. Never prints values.
-mxlrcgo-svc secrets list
+canticle secrets list
 ```
 
 `secrets import` is idempotent: re-running overwrites the existing encrypted row. After a successful import, the command reminds you to remove the now-redundant plaintext from `config.toml` and your compose environment so it is no longer stored in the clear.
@@ -164,8 +164,8 @@ In Docker mode (storage paths resolve under `/config`), the daemon auto-creates 
 ```yaml
 # docker-compose.yml - optional hardening: key separated from the data volume
 services:
-  mxlrcgo-svc:
-    image: ghcr.io/sydlexius/mxlrcgo-svc:latest
+  canticle:
+    image: ghcr.io/sydlexius/canticle:latest
     environment:
       # Optional. Generate once: openssl rand -base64 32
       # Source from a .env file NOT inside the /config volume.
@@ -209,11 +209,11 @@ An Unraid Community Applications template is provided at `unraid/mxlrcgo-svc.xml
 Then register the library (or libraries) under it (paths are container-visible):
 
 ```sh
-docker exec mxlrcgo-svc mxlrcgo-svc library add /data/media/music --name Music
-docker exec mxlrcgo-svc mxlrcgo-svc scan
+docker exec canticle canticle library add /data/media/music --name Music
+docker exec canticle canticle scan
 ```
 
-(Unlike the *arr apps, mxlrcgo-svc never moves or hardlinks files; it only reads audio and writes a `.lrc`/`.txt` sibling. The single-mount convention is still worth following so paths match the rest of your stack.)
+(Unlike the *arr apps, Canticle never moves or hardlinks files; it only reads audio and writes a `.lrc`/`.txt` sibling. The single-mount convention is still worth following so paths match the rest of your stack.)
 
 If your music instead lives in several separate top-level shares, map their common parent once, or add one **Path** mapping per share beneath `/data/media` (for example `/mnt/user/<share>` to `/data/media/<share>`) and register each with `library add`. Lyrics are written next to each audio file, so libraries do not need a shared output root; set `MXLRC_OUTPUT_DIR` only for the webhook metadata-fallback case (step 3 under [Path resolution](#path-resolution-dockerunraid)).
 
@@ -283,25 +283,25 @@ Write operations use a double-submit cookie token (`mx-csrf-token`). This is tra
 
 ## Windows
 
-Download the signed `.zip` archive for `windows/amd64` from the [GitHub releases page](https://github.com/sydlexius/mxlrcgo-svc/releases). Extract `mxlrcgo-svc.exe` to one of:
+Download the signed `.zip` archive for `windows/amd64` from the [GitHub releases page](https://github.com/sydlexius/canticle/releases). Extract `canticle.exe` to one of:
 
 - **`%LOCALAPPDATA%\mxlrcgo-svc\`** - user-mode install; no administrator rights required.
 - **`C:\Program Files\mxlrcgo-svc\`** - system-wide install; requires administrator rights.
 
-Add the chosen directory to your `PATH` so `mxlrcgo-svc` is reachable from any shell.
+Add the chosen directory to your `PATH` so `canticle` is reachable from any shell.
 
 **Manual run.** To start the server from a terminal (useful for initial testing):
 
 ```cmd
 set MUSIXMATCH_TOKEN=YOUR_TOKEN
 set MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key
-mxlrcgo-svc serve --listen 127.0.0.1:3876
+canticle serve --listen 127.0.0.1:3876
 ```
 
 Or use a config file to keep credentials out of the shell environment:
 
 ```cmd
-mxlrcgo-svc serve --config C:\path\to\config.toml
+canticle serve --config C:\path\to\config.toml
 ```
 
 ### NSSM service installation
@@ -317,9 +317,9 @@ nssm install mxlrcgo-svc
 NSSM opens a GUI. Fill in the tabs:
 
 - **Application tab:**
-  - *Path*: full path to `mxlrcgo-svc.exe`, for example `C:\Program Files\mxlrcgo-svc\mxlrcgo-svc.exe`
+  - *Path*: full path to `canticle.exe`, for example `C:\Program Files\mxlrcgo-svc\canticle.exe`
   - *Arguments*: `serve --listen 0.0.0.0:3876` (or `serve --config C:\path\to\config.toml` if you use a config file)
-  - *Startup directory*: the directory containing `mxlrcgo-svc.exe`
+  - *Startup directory*: the directory containing `canticle.exe`
 
 - **Environment tab.** Add one variable per line:
 
@@ -353,7 +353,7 @@ To update the configuration after installation, run `nssm edit mxlrcgo-svc` from
 
 ### Data location
 
-Without an explicit `MXLRC_DB_PATH`, `mxlrcgo-svc` resolves storage paths via XDG base directories. On Windows these defaults resolve to:
+Without an explicit `MXLRC_DB_PATH`, `canticle` resolves storage paths via XDG base directories. On Windows these defaults resolve to:
 
 | Item | Default path |
 |------|-------------|
@@ -371,7 +371,7 @@ Even signed binaries can trigger the "Windows protected your PC" prompt on first
 1. Click **More info**.
 2. Click **Run anyway**.
 
-This prompt should not appear again after the first run. See [issue #183](https://github.com/sydlexius/mxlrcgo-svc/issues/183) for background on code signing.
+This prompt should not appear again after the first run. See [issue #183](https://github.com/sydlexius/canticle/issues/183) for background on code signing.
 
 ## Native packages
 
@@ -436,8 +436,8 @@ Recording enrichment reads the ISRC, MusicBrainz recording ID, and duration from
 You can control it at three levels, resolved with the precedence **CLI flag > per-library setting > global default**:
 
 - **Global default** (`config.toml`): `[enrichment] enabled = true` (env `MXLRC_ENRICHMENT_ENABLED`). Default `true`. Set `false` to skip enrichment everywhere unless a library or run opts back in.
-- **Per library**: `mxlrcgo-svc library add/update --enrich` (force on) or `--enrich=false` (force off). Omit the flag to inherit the global default.
-- **Per run**: `mxlrcgo-svc scan --enrich` or `--no-enrich` overrides both for that single scan (the two flags are mutually exclusive). The serve-mode scheduler has no per-run flag; it resolves per library against the global default.
+- **Per library**: `canticle library add/update --enrich` (force on) or `--enrich=false` (force off). Omit the flag to inherit the global default.
+- **Per run**: `canticle scan --enrich` or `--no-enrich` overrides both for that single scan (the two flags are mutually exclusive). The serve-mode scheduler has no per-run flag; it resolves per library against the global default.
 
 When enrichment is off for a track, the scanner skips ISRC, MBID, and duration extraction as a unit, and the track keeps the `duration_bucket = 0` cache fallback (no behavior regression). A per-library or global change only affects scans run after the change; it does not restamp already-scanned rows.
 
@@ -448,8 +448,8 @@ The optional instrumental-detection sidecar samples each track's audio with ffmp
 You control it at three levels, resolved with the precedence **CLI flag > per-library setting > global default**:
 
 - **Global default** (`config.toml`): `[instrumental_detector] enabled` (env `MXLRC_INSTRUMENTAL_DETECTOR_ENABLED`). Default `false`.
-- **Per library**: `mxlrcgo-svc library add/update --detect-instrumental` (force on) or `--detect-instrumental=false` (force off). Omit the flag to inherit the global default.
-- **Per run**: `mxlrcgo-svc scan --detect-instrumental` or `--no-detect-instrumental` overrides both for the tracks enqueued by that scan (the two flags are mutually exclusive). serve has no per-run flag; it resolves per library against the global default.
+- **Per library**: `canticle library add/update --detect-instrumental` (force on) or `--detect-instrumental=false` (force off). Omit the flag to inherit the global default.
+- **Per run**: `canticle scan --detect-instrumental` or `--no-detect-instrumental` overrides both for the tracks enqueued by that scan (the two flags are mutually exclusive). serve has no per-run flag; it resolves per library against the global default.
 
 The decision is resolved and stamped onto each work-queue item when it is enqueued (like the provider-set version), so a per-library or global change only affects tracks enqueued after the change. Tracks queued before per-library detection existed carry no decision and fall back to the global default at processing time. If an item requests detection but no `classifier_url` is configured, the worker logs an error and proceeds without detection (it never silently skips).
 
@@ -488,12 +488,12 @@ The watcher emits `INFO "watcher started"` at boot (with library and directory c
 
 ## Shell completion
 
-`mxlrcgo-svc completion <bash|zsh|fish>` prints a sourceable completion script that completes subcommands, flags, and configured library names (the last queried live from the database, degrading gracefully when it is absent):
+`canticle completion <bash|zsh|fish>` prints a sourceable completion script that completes subcommands, flags, and configured library names (the last queried live from the database, degrading gracefully when it is absent):
 
 ```bash
-source <(mxlrcgo-svc completion bash)                 # bash (e.g. in ~/.bashrc)
-source <(mxlrcgo-svc completion zsh)                  # zsh  (e.g. in ~/.zshrc)
-mxlrcgo-svc completion fish > ~/.config/fish/completions/mxlrcgo-svc.fish
+source <(canticle completion bash)                 # bash (e.g. in ~/.bashrc)
+source <(canticle completion zsh)                  # zsh  (e.g. in ~/.zshrc)
+canticle completion fish > ~/.config/fish/completions/canticle.fish
 ```
 
 The scripts call a hidden `__complete` handler; library-name completion never creates the database.
@@ -512,34 +512,34 @@ SQLite database by hand.
 
 ```sh
 # List the next 50 work_queue rows.
-mxlrcgo-svc queue list
+canticle queue list
 
 # Filter by status; failed and deferred are also exposed as convenience subcommands.
-mxlrcgo-svc queue list --status pending --limit 100
-mxlrcgo-svc queue failed
+canticle queue list --status pending --limit 100
+canticle queue failed
 
 # List deferred rows: benign misses (a track Musixmatch has no lyrics for yet)
 # waiting out a fixed cooldown before re-check. These are NOT failures and are
 # kept out of `queue failed`.
-mxlrcgo-svc queue deferred
+canticle queue deferred
 
 # Reset a single failed row back to pending. Refused if the row is not failed
 # (a deferred row is refused; let it re-check on its own, or re-trigger via webhook).
-mxlrcgo-svc queue retry 42
+canticle queue retry 42
 
 # Delete completed rows. Without --yes, prints what would be deleted.
-mxlrcgo-svc queue clear --done
-mxlrcgo-svc queue clear --done --yes
+canticle queue clear --done
+canticle queue clear --done --yes
 
 # List persisted scan_results, optionally filtered by library (name or id) and status.
-mxlrcgo-svc scan results
-mxlrcgo-svc scan results --library Music --status pending
-mxlrcgo-svc scan results --library 1 --limit 200
+canticle scan results
+canticle scan results --library Music --status pending
+canticle scan results --library 1 --limit 200
 
 # Delete every scan_results row for a single library. Without --yes, prints what would be deleted.
 # The library row itself is left intact.
-mxlrcgo-svc scan clear --library Music
-mxlrcgo-svc scan clear --library Music --yes
+canticle scan clear --library Music
+canticle scan clear --library Music --yes
 ```
 
 ## Reports workspace
@@ -577,4 +577,4 @@ Use this to audit which tracks the detector marked instrumental and whether they
 
 ### Failure analysis
 
-Lists failed and deferred work queue items grouped by status and error reason, with a count per group, ordered most-frequent first. "Failed" rows hit a hard error; "deferred" rows are benign misses waiting for a retry. Grouping keeps the two separate because they require different responses - deferred rows self-resolve on their retry schedule, while failed rows may need manual intervention (`mxlrcgo-svc queue retry <id>`).
+Lists failed and deferred work queue items grouped by status and error reason, with a count per group, ordered most-frequent first. "Failed" rows hit a hard error; "deferred" rows are benign misses waiting for a retry. Grouping keeps the two separate because they require different responses - deferred rows self-resolve on their retry schedule, while failed rows may need manual intervention (`canticle queue retry <id>`).

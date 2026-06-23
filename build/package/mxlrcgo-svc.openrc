@@ -1,8 +1,8 @@
 #!/sbin/openrc-run
 
-description="mxlrcgo-svc lyrics fetcher daemon"
+description="Canticle lyrics fetcher daemon"
 
-command=/usr/local/bin/mxlrcgo-svc
+command=/usr/local/bin/canticle
 command_args="serve"
 command_user=mxlrcgo-svc:mxlrcgo-svc
 command_background=yes

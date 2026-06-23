@@ -1,6 +1,6 @@
 # Getting Started
 
-`mxlrcgo-svc` fetches synced lyrics from [Musixmatch](https://www.musixmatch.com/) and saves them as `.lrc` files (falling back to `.txt` for unsynced lyrics or instrumental markers). This guide gets you from nothing to working lyrics, then points you at the reference pages for detail.
+Canticle fetches synced lyrics from [Musixmatch](https://www.musixmatch.com/) and saves them as `.lrc` files (falling back to `.txt` for unsynced lyrics or instrumental markers). This guide gets you from nothing to working lyrics, then points you at the reference pages for detail.
 
 ## Which path is for you?
 
@@ -36,7 +36,7 @@ See [Configuration](CONFIGURATION.md#token-precedence) for the full token and co
 With the token exported, fetch a single song. The query is `artist,title` - a comma, no spaces:
 
 ```sh
-mxlrcgo-svc adele,hello
+canticle adele,hello
 ```
 
 On success, a lyric file is written to the current directory (or to the directory you pass with `-o/--outdir`). What you get depends on what Musixmatch has:
@@ -53,7 +53,7 @@ For multiple songs, a text-file batch, and every flag, see the [CLI Reference](C
 Point the tool at a folder and it walks the tree, writing a lyric file next to each audio file:
 
 ```sh
-mxlrcgo-svc /path/to/music
+canticle /path/to/music
 ```
 
 Notes:
@@ -63,7 +63,7 @@ Notes:
 - `--upgrade` re-fetches tracks that previously produced a `.txt` (unsynced) file, to promote them to `.lrc` once synced lyrics become available. **Instrumental `.txt` files are excluded from upgrade**; use `--update` to force a re-fetch of those.
 - When audio files contain ISRC, MusicBrainz recording ID, or duration tags, the scanner reads them automatically and passes them to Musixmatch to improve match precision - especially useful for albums with tracks that share the same title. See [Recording enrichment](USER_GUIDE.md#recording-enrichment) for controls.
 
-A bare argument that matches an existing directory triggers a recursive scan. That means `mxlrcgo-svc "Dream Theater"` scans a folder named `Dream Theater`; it is not interpreted as a song query. Use the `artist,title` form for one-shot fetches.
+A bare argument that matches an existing directory triggers a recursive scan. That means `canticle "Dream Theater"` scans a folder named `Dream Theater`; it is not interpreted as a song query. Use the `artist,title` form for one-shot fetches.
 
 Test on a single album first to confirm the result before scanning a whole library. See the [CLI Reference](CLI_REFERENCE.md#directory-mode-recursive) for the full flag list.
 
@@ -76,11 +76,11 @@ If you installed via a `.deb`, `.rpm`, or `.apk` package, the service is managed
 Register a library, then start the server:
 
 ```sh
-mxlrcgo-svc library add /path/to/music --name Music
-mxlrcgo-svc serve
+canticle library add /path/to/music --name Music
+canticle serve
 ```
 
-`serve` listens on `MXLRC_SERVER_ADDR` (default `127.0.0.1:3876`) unless you pass `--listen`. Registering and scanning your libraries first is what lets webhooks reuse the exact file paths a scan discovered, so they work even when Lidarr and `mxlrcgo-svc` see the media through different mount paths.
+`serve` listens on `MXLRC_SERVER_ADDR` (default `127.0.0.1:3876`) unless you pass `--listen`. Registering and scanning your libraries first is what lets webhooks reuse the exact file paths a scan discovered, so they work even when Lidarr and `canticle` see the media through different mount paths.
 
 ### Lidarr webhook
 
@@ -93,7 +93,7 @@ POST /api/v1/webhooks/lidarr
 Create a webhook-scoped key for it:
 
 ```sh
-mxlrcgo-svc keys create --name lidarr --scope webhook
+canticle keys create --name lidarr --scope webhook
 ```
 
 The endpoint authenticates the key in one of two ways (the server accepts either):
@@ -105,28 +105,28 @@ Configure whichever your client supports. See the [User Guide](USER_GUIDE.md#lid
 
 ### Docker
 
-The published image is `ghcr.io/sydlexius/mxlrcgo-svc`. It runs the server on container port `50705`, sets `MXLRC_DOCKER=true` automatically (so storage defaults resolve under `/config`), and honors `PUID`/`PGID` for file ownership. Mount your media data parent once (for example to `/data`):
+The published image is `ghcr.io/sydlexius/canticle`. It runs the server on container port `50705`, sets `MXLRC_DOCKER=true` automatically (so storage defaults resolve under `/config`), and honors `PUID`/`PGID` for file ownership. Mount your media data parent once (for example to `/data`):
 
 ```sh
 docker run -d \
-  --name mxlrcgo-svc \
+  --name canticle \
   -p 50705:50705 \
   -e MUSIXMATCH_TOKEN=YOUR_TOKEN \
   -e MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key \
-  -v mxlrcgo-svc-config:/config \
+  -v canticle-config:/config \
   -v /path/to/your/data:/data:rw \
-  ghcr.io/sydlexius/mxlrcgo-svc:latest
+  ghcr.io/sydlexius/canticle:latest
 ```
 
 See the [User Guide](USER_GUIDE.md#docker) for the full Docker, Compose, and Unraid setup.
 
 ### Windows
 
-Download the `.zip` from the [releases page](https://github.com/sydlexius/mxlrcgo-svc/releases), extract `mxlrcgo-svc.exe`, and add it to your `PATH`. For a quick test:
+Download the `.zip` from the [releases page](https://github.com/sydlexius/canticle/releases), extract `canticle.exe`, and add it to your `PATH`. For a quick test:
 
 ```cmd
 set MUSIXMATCH_TOKEN=YOUR_TOKEN
-mxlrcgo-svc.exe serve --listen 127.0.0.1:3876
+canticle.exe serve --listen 127.0.0.1:3876
 ```
 
 For an always-on background service, use NSSM to wrap the binary as a Windows service. See the [User Guide](USER_GUIDE.md#windows) for the full NSSM setup, environment variable configuration, and data paths.
@@ -136,7 +136,7 @@ For an always-on background service, use NSSM to wrap the binary as a Windows se
 Confirm the build and that work is flowing.
 
 ```sh
-mxlrcgo-svc --version
+canticle --version
 ```
 
 For one-shot and directory runs, check that the expected `.lrc`/`.txt` files were written.
@@ -150,10 +150,10 @@ For `serve`, the HTTP endpoints report health and status:
 The inspection subcommands show queue and scan state:
 
 ```sh
-mxlrcgo-svc queue list
-mxlrcgo-svc queue list --status pending --limit 100
-mxlrcgo-svc scan results
-mxlrcgo-svc scan results --library Music --status pending
+canticle queue list
+canticle queue list --status pending --limit 100
+canticle scan results
+canticle scan results --library Music --status pending
 ```
 
 See the [User Guide](USER_GUIDE.md#inspection-commands) for the full inspection command set.

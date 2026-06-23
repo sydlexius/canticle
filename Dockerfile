@@ -15,7 +15,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 # Runtime stage. KEEP IN SYNC with build/docker/Dockerfile.goreleaser (the goreleaser
 # release image): identical base digest, apk packages, user, ENV, EXPOSE, VOLUME, entrypoint.
 # The two differ only in how the binary arrives (built here vs copied by goreleaser).
-LABEL org.opencontainers.image.source="https://github.com/sydlexius/mxlrcgo-svc" \
+LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
       org.opencontainers.image.description="Fetch synced lyrics from Musixmatch and save .lrc files" \
       org.opencontainers.image.licenses="GPL-3.0" \
       net.unraid.docker.webui="http://[IP]:[PORT:50705]/"

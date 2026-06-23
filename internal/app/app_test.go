@@ -87,7 +87,7 @@ func TestRunFetchesAndWritesSyncedLyrics(t *testing.T) {
 		t.Fatalf("reading LRC output: %v", err)
 	}
 	want := strings.Join([]string{
-		"[by:mxlrcgo-svc]",
+		"[by:canticle]",
 		"[ar:Test Artist]",
 		"[ti:Test Song]",
 		"[al:Test Album]",

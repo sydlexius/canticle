@@ -97,8 +97,8 @@ integration issue).
 
 ## Cross-references
 
-- Issue [#146](https://github.com/sydlexius/mxlrcgo-svc/issues/146) - decision record
-- Issue [#149](https://github.com/sydlexius/mxlrcgo-svc/issues/149) - CJK provider adapter (depends on this policy)
+- Issue [#146](https://github.com/sydlexius/canticle/issues/146) - decision record
+- Issue [#149](https://github.com/sydlexius/canticle/issues/149) - CJK provider adapter (depends on this policy)
 - `internal/langguard` - script classifier and guard
 - `internal/lyrics/writer.go` - current writer (single-track, no translation)
 - `internal/models/models.go` - `Song`, `Synced` types

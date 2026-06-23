@@ -1,8 +1,8 @@
-site_name: mxlrcgo-svc
+site_name: Canticle
 site_description: Command line tool and webhook service to fetch synced lyrics from Musixmatch and save them as .lrc files.
-site_url: https://sydlexius.github.io/mxlrcgo-svc/
-repo_url: https://github.com/sydlexius/mxlrcgo-svc
-repo_name: sydlexius/mxlrcgo-svc
+site_url: https://sydlexius.github.io/canticle/
+repo_url: https://github.com/sydlexius/canticle
+repo_name: sydlexius/canticle
 edit_uri: edit/main/docs/
 
 # Built with ProperDocs (a maintained, drop-in continuation of MkDocs 1.x) plus
@@ -73,7 +73,7 @@ extra:
   generator: false
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/sydlexius/mxlrcgo-svc
+      link: https://github.com/sydlexius/canticle
 
 nav:
   - Home: index.md

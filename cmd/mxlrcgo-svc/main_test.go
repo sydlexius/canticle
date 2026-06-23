@@ -146,7 +146,7 @@ func TestRunWithOptions_HelpDoesNotStartApplication(t *testing.T) {
 	if rec.appCreated {
 		t.Fatal("app was created; want help to stop before startup")
 	}
-	if !strings.Contains(out.String(), "Usage: mxlrcgo-svc") {
+	if !strings.Contains(out.String(), "Usage: canticle") {
 		t.Fatalf("help output = %q; want usage", out.String())
 	}
 }
@@ -162,22 +162,22 @@ func TestRunWithOptions_SubcommandHelpShowsSelectedCommand(t *testing.T) {
 		{
 			name: "serve",
 			args: []string{"serve", "--help"},
-			want: []string{"Usage: mxlrcgo-svc serve", "--scan-interval", "--work-interval"},
+			want: []string{"Usage: canticle serve", "--scan-interval", "--work-interval"},
 		},
 		{
 			name: "scan",
 			args: []string{"scan", "--help"},
-			want: []string{"Usage: mxlrcgo-svc scan", "--upgrade", "--bfs"},
+			want: []string{"Usage: canticle scan", "--upgrade", "--bfs"},
 		},
 		{
 			name: "library",
 			args: []string{"library", "--help"},
-			want: []string{"Usage: mxlrcgo-svc library", "add", "list"},
+			want: []string{"Usage: canticle library", "add", "list"},
 		},
 		{
 			name: "library add",
 			args: []string{"library", "add", "--help"},
-			want: []string{"Usage: mxlrcgo-svc library add", "--name", "--config"},
+			want: []string{"Usage: canticle library add", "--name", "--config"},
 		},
 	}
 

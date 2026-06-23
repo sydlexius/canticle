@@ -17,7 +17,7 @@ This page compares the available install methods and helps you pick one. For a q
 ## Native packages (Linux)
 
 Download the `.deb`, `.rpm`, or `.apk` for your distro from the
-[GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases) page.
+[GitHub Releases](https://github.com/sydlexius/canticle/releases) page.
 
 ```sh
 # Debian / Ubuntu
@@ -32,7 +32,7 @@ sudo apk add --allow-untrusted mxlrcgo-svc_*.apk
 
 **What the package does:**
 
-- Installs the binary to `/usr/local/bin/mxlrcgo-svc`.
+- Installs the binary to `/usr/local/bin/canticle`.
 - Creates a `mxlrcgo-svc` system user and group (no login shell).
 - Creates `/var/lib/mxlrcgo-svc` (mode `0750`, owned by `mxlrcgo-svc:mxlrcgo-svc`) for the SQLite database and state.
 - Installs a systemd unit with hardening (`ProtectSystem=strict`, `PrivateTmp`, `NoNewPrivileges`), or an OpenRC script on Alpine (manages ownership and permissions via `start_pre`).
@@ -86,7 +86,7 @@ full operational reference.
 
 ## Docker
 
-The published image is `ghcr.io/sydlexius/mxlrcgo-svc`. It runs the server on
+The published image is `ghcr.io/sydlexius/canticle`. It runs the server on
 port `50705` and stores config and the SQLite database under the `/config`
 volume. Mount your media data parent to `/data`:
 
@@ -99,16 +99,16 @@ export MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key
 
 ```sh
 docker run -d \
-  --name mxlrcgo-svc \
+  --name canticle \
   -p 50705:50705 \
   -e MUSIXMATCH_TOKEN \
   -e MXLRC_WEBHOOK_API_KEY \
   -e PUID=99 -e PGID=100 \
   -e MXLRC_OUTPUT_DIR=/data/media/music \
-  -v mxlrcgo-svc-config:/config \
+  -v canticle-config:/config \
   -v /path/to/your/data:/data:rw \
   --restart unless-stopped \
-  ghcr.io/sydlexius/mxlrcgo-svc:latest
+  ghcr.io/sydlexius/canticle:latest
 ```
 
 For Docker Compose, copy `docker-compose.example.yml`, fill in the token and
@@ -125,7 +125,7 @@ setup.
 brew install sydlexius/tap/mxlrcgo-svc
 ```
 
-Upgrade with `brew upgrade mxlrcgo-svc`. Run as a background service with
+Upgrade with `brew upgrade canticle`. Run as a background service with
 `brew services start mxlrcgo-svc`. Storage defaults follow XDG base directories.
 
 ---
@@ -133,9 +133,9 @@ Upgrade with `brew upgrade mxlrcgo-svc`. Run as a background service with
 ## Tarball / zip
 
 Download the archive for your platform from the
-[GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases) page,
+[GitHub Releases](https://github.com/sydlexius/canticle/releases) page,
 extract the binary, and place it on your `PATH`. On Windows, the signed `.zip`
-extracts `mxlrcgo-svc.exe`; see the [Windows](USER_GUIDE.md#windows) section of
+extracts `canticle.exe`; see the [Windows](USER_GUIDE.md#windows) section of
 the User Guide for NSSM service installation.
 
 ---
@@ -145,14 +145,14 @@ the User Guide for NSSM service installation.
 Requires Go 1.26.4 or later.
 
 ```sh
-go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest
+go install github.com/sydlexius/canticle/cmd/mxlrcgo-svc@latest
 ```
 
 Or clone the repository and use `make`:
 
 ```sh
-git clone https://github.com/sydlexius/mxlrcgo-svc.git
-cd mxlrcgo-svc
+git clone https://github.com/sydlexius/canticle.git
+cd canticle
 make build
 ```
 

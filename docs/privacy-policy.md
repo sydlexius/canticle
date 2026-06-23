@@ -1,6 +1,6 @@
 # Privacy Policy
 
-This page documents what data leaves your machine when you run `mxlrcgo-svc`,
+This page documents what data leaves your machine when you run `canticle`,
 and what does not.
 
 ## Musixmatch (default provider)
@@ -36,7 +36,7 @@ for this provider.
 
 ## Network metadata
 
-Like any application that makes internet requests, `mxlrcgo-svc` does not
+Like any application that makes internet requests, Canticle does not
 control what standard network metadata a remote server or intermediary receives.
 When the app contacts a lyrics provider, that provider - and any network
 intermediary on the path - inherently receives the request's source IP address
@@ -52,7 +52,7 @@ without contacting any external API.
 
 ## Telemetry, analytics, and crash reporting
 
-**None.** `mxlrcgo-svc` does not collect telemetry, analytics, or crash
+**None.** Canticle does not collect telemetry, analytics, or crash
 reports. No data is ever sent to the project maintainers or any third party
 other than the lyrics providers listed above.
 

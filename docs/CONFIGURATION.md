@@ -10,12 +10,12 @@ A Musixmatch API token is required. Supply it using any of the following methods
 
 1. **`--token` CLI flag** - highest priority.
    ```sh
-   mxlrcgo-svc --token YOUR_TOKEN adele,hello
+   canticle --token YOUR_TOKEN adele,hello
    ```
 2. **`MUSIXMATCH_TOKEN` environment variable** (`MXLRC_API_TOKEN` is accepted as a lower-precedence alias).
    ```sh
    export MUSIXMATCH_TOKEN=YOUR_TOKEN
-   mxlrcgo-svc adele,hello
+   canticle adele,hello
    ```
 3. **Config file / `.env` file** - place a `.env` in the working directory where you run the command, or set the token in the TOML config.
    ```sh
@@ -30,7 +30,7 @@ For all settings, precedence is **CLI flag > environment variable > config file 
 
 ## Storage paths
 
-`mxlrcgo-svc` resolves its config file and SQLite database using XDG base directories by default, with overrides for Docker and native packages.
+`canticle` resolves its config file and SQLite database using XDG base directories by default, with overrides for Docker and native packages.
 
 | Install method | Config file | Database |
 |----------------|-------------|----------|
@@ -53,7 +53,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MUSIXMATCH_TOKEN` | (required) | Musixmatch API token. `MXLRC_API_TOKEN` is accepted as a lower-precedence alias. |
-| `MXLRC_WEBHOOK_API_KEY` | (none) | Comma-separated webhook API key(s) accepted by the server. Generate with `mxlrcgo-svc keys create --scope webhook`. |
+| `MXLRC_WEBHOOK_API_KEY` | (none) | Comma-separated webhook API key(s) accepted by the server. Generate with `canticle keys create --scope webhook`. |
 | `MXLRC_SERVER_ADDR` | `127.0.0.1:3876` | HTTP listen address for `serve`. Docker images default this to `0.0.0.0:50705`. |
 | `MXLRC_WEB_UI_ENABLED` | `false` | Enable the browser UI on the serve listener. Env override of `web_ui_enabled` (precedence: env > file). Restart to apply. |
 | `MXLRC_TRUSTED_CIDRS` | (none) | Comma-separated CIDRs of trusted client networks (serve mode). Loopback is always trusted. Requests from listed CIDRs may scrape `GET /metrics` and bypass the web UI session requirement. |
