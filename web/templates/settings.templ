@@ -61,7 +61,9 @@ templ SettingsPage(version string, view SettingsView, reports []RailItem) {
 						<pre class="mx-code-block" aria-label="Effective configuration">{ view.RawTOML }</pre>
 					</div>
 					<div id="mx-config-panel-raw-file" class="mx-config-panel">
-						if view.RawFileTOML != "" {
+						if view.RawFileTOMLError != "" {
+							<p class="mx-settings-field-desc" role="alert">{ view.RawFileTOMLError }</p>
+						} else if view.RawFileTOML != "" {
 							<p class="mx-settings-field-desc">The config.toml file as written on disk, with secrets redacted. Read-only.</p>
 							<pre class="mx-code-block" aria-label="Raw config file">{ view.RawFileTOML }</pre>
 						} else {
