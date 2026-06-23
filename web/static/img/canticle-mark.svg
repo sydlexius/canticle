@@ -1,10 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="120" height="120"
-     role="img" aria-label="Canticle" style="color:#3B2F77">
-  <!-- Concept: "Fermata-C". An open ring reads as a C (Canticle) and as a fermata's
-       arch; the centred dot is the note being held/sung. One swappable color token
-       (style="color:..."); everything uses currentColor so it inherits when embedded.
-       Works monochrome, at favicon size, and on dark or light backgrounds. -->
-  <path d="M74 26 A34 34 0 1 0 74 74"
-        fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"/>
-  <circle cx="50" cy="50" r="8" fill="currentColor"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-45.9 71.0 923.0 923.0" role="img" aria-label="Canticle"><style>svg{color:#3B2F77}@media(prefers-color-scheme:dark){svg{color:#B3A4E6}}</style><path d="M263.0 890.0Q152.0 890.0 91.5 831.0Q31.0 772.0 31.0 678.0Q31.0 592.0 73.5 510.0Q116.0 428.0 181.0 359.0Q234.0 303.0 302.5 262.0Q371.0 221.0 446.5 198.0Q522.0 175.0 594.0 175.0Q651.0 175.0 697.0 190.5Q743.0 206.0 770.0 239.0Q797.0 272.0 797.0 325.0Q812.0 327.0 755.0 319.0Q755.0 254.0 711.0 224.0Q667.0 194.0 599.0 194.0Q522.0 194.0 446.5 223.0Q371.0 252.0 305.0 303.0Q239.0 354.0 187.0 420.0Q83.0 551.0 83.0 666.0Q83.0 727.0 111.0 769.5Q139.0 812.0 188.5 834.0Q238.0 856.0 302.0 856.0Q397.0 856.0 486.0 814.5Q575.0 773.0 638.0 703.0Q655.0 685.0 663.0 685.0Q669.0 685.0 669.0 694.0Q669.0 706.0 658.0 717.0Q624.0 753.0 577.0 784.0Q530.0 815.0 476.5 839.0Q423.0 863.0 368.0 876.5Q313.0 890.0 263.0 890.0Z" fill="currentColor"/><circle cx="570" cy="280.0" r="20" fill="currentColor"/></svg>
