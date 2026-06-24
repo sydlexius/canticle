@@ -92,6 +92,12 @@ type UI struct {
 	// case the page renders an "unavailable" notice and the create/revoke POSTs
 	// return 503 rather than panicking.
 	keys KeyManager
+
+	// musixmatchInactive is set when serve started without a usable Musixmatch
+	// token (#385): the shell renders a notice banner explaining lyrics fetching
+	// is disabled and linking to Settings to add a token. False (the default)
+	// renders nothing.
+	musixmatchInactive bool
 }
 
 // KeyManager is the subset of *auth.Service the webhook key management page
@@ -153,6 +159,18 @@ func WithKeyManager(km KeyManager) UIOption {
 // post-construction equivalent of WithKeyManager used by the server layer where
 // the UI is built first (WithWebUIAuth) and the seam attached after.
 func (u *UI) AttachKeyManager(km KeyManager) { u.keys = km }
+
+// WithMusixmatchInactive marks the Musixmatch provider as token-less so the
+// shell renders the lyrics-disabled notice banner (#385). Threaded from runServe
+// via server.WithMusixmatchInactive. Default (false) renders no banner.
+func WithMusixmatchInactive(inactive bool) UIOption {
+	return func(u *UI) { u.musixmatchInactive = inactive }
+}
+
+// AttachMusixmatchInactive sets the banner flag on an already-constructed UI,
+// the post-construction equivalent of WithMusixmatchInactive used by the server
+// layer (WithWebUIAuth builds the UI first).
+func (u *UI) AttachMusixmatchInactive(inactive bool) { u.musixmatchInactive = inactive }
 
 // WithConfigPath sets the resolved config file path the settings save handlers
 // write through. Without it the settings page stays read-only (no write path).
@@ -307,7 +325,7 @@ func (u *UI) handleRoot(w http.ResponseWriter, r *http.Request) {
 // operator to pick a report, keeping execution strictly user-initiated.
 func (u *UI) handleReports(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	render(w, r, templates.ReportsPage(u.version, u.buildRail(""), nil))
+	render(w, r, templates.ReportsPage(u.version, u.buildRail(""), nil, u.musixmatchInactive))
 }
 
 // handleReportFragment runs one canned report on demand and returns its results.
@@ -346,7 +364,7 @@ func (u *UI) handleReportFragment(w http.ResponseWriter, r *http.Request) {
 		render(w, r, templates.ReportFragment(rail, view))
 		return
 	}
-	render(w, r, templates.ReportsPage(u.version, rail, &view))
+	render(w, r, templates.ReportsPage(u.version, rail, &view, u.musixmatchInactive))
 }
 
 // reportPath builds the sidebar link target for a report key, encoding the key

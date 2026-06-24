@@ -9,8 +9,8 @@ package templates
 // Phase 1 is the READ path: every field renders a guided control with its
 // current value and a plain "Locked" pill when an override is active, but no
 // form submits yet. The write handlers arrive in Phase 2.
-templ SettingsPage(version string, view SettingsView, reports []RailItem) {
-	@Layout("Settings", "/settings", version, reports, "") {
+templ SettingsPage(version string, view SettingsView, reports []RailItem, musixmatchInactive bool) {
+	@Layout("Settings", "/settings", version, reports, "", musixmatchInactive) {
 		<h1 class="mx-page-title">Settings</h1>
 		<p class="mx-page-subtitle">
 			Edit the daemon configuration. Changes are written to the config file and take effect on restart.

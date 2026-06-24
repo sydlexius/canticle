@@ -35,7 +35,7 @@ func (u *UI) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dashboard unavailable", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, templates.DashboardPage(u.version, u.buildRail(""), view))
+	render(w, r, templates.DashboardPage(u.version, u.buildRail(""), view, u.musixmatchInactive))
 }
 
 // buildDashboardView queries the reports repo and assembles the dashboard view

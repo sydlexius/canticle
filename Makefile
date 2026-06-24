@@ -155,14 +155,15 @@ ui-validate:
 			exit 1; \
 		fi; \
 	done
-	@# Size band: output.css should stay within 7000-20000 bytes.
+	@# Size band: output.css should stay within 7000-21000 bytes.
 	@# Too small = a @source glob is too narrow (classes dropped silently).
 	@# Too large = Go vocabulary may be leaking back into output.css.
 	@# If an intentional change moves the size outside this band, update both bounds here.
-	@# Upper bound raised to 20000 for the #288 settings page (guided controls add CSS).
+	@# Upper bound raised to 20000 for the #288 settings page (guided controls add CSS),
+	@# then to 21000 for the #385 tokenless-Musixmatch notice banner.
 	@size=$$(wc -c < web/static/css/output.css | awk '{print $$1}'); \
-	if [ "$$size" -lt 7000 ] || [ "$$size" -gt 20000 ]; then \
-		echo "ui-check: output.css is $$size B, outside the expected 7000-20000 B band."; \
+	if [ "$$size" -lt 7000 ] || [ "$$size" -gt 21000 ]; then \
+		echo "ui-check: output.css is $$size B, outside the expected 7000-21000 B band."; \
 		echo "  Update the band in the Makefile ui-check target if the change is intentional."; \
 		exit 1; \
 	fi

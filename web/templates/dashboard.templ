@@ -10,8 +10,8 @@ package templates
 // (every render is triggered by a page load or explicit browser refresh).
 
 // DashboardPage is the full-page dashboard shell.
-templ DashboardPage(version string, reports []RailItem, view DashboardView) {
-	@Layout("Dashboard", "/dashboard", version, reports, "/static/css/dashboard.css") {
+templ DashboardPage(version string, reports []RailItem, view DashboardView, musixmatchInactive bool) {
+	@Layout("Dashboard", "/dashboard", version, reports, "/static/css/dashboard.css", musixmatchInactive) {
 		@dashboardContent(view)
 	}
 }

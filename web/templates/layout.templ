@@ -12,7 +12,10 @@ package templates
 // come straight from the tokens with no theme class to toggle. pageCSS is an
 // optional per-page stylesheet path (empty for none): it ships route-specific
 // CSS only on the page that needs it instead of on every page (issue #322).
-templ Layout(title string, active string, version string, reports []RailItem, pageCSS string) {
+// musixmatchInactive renders the lyrics-disabled notice banner (#385) at the top
+// of the main content column on every shell page. It is true only when serve
+// started without a usable Musixmatch token; false renders nothing.
+templ Layout(title string, active string, version string, reports []RailItem, pageCSS string, musixmatchInactive bool) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -50,9 +53,39 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 			<div class="mx-shell">
 				@Sidebar(active, version, reports)
 				<main class="mx-content" id="mx-main">
+					if musixmatchInactive {
+						@musixmatchBanner()
+					}
 					{ children... }
 				</main>
 			</div>
 		</body>
 	</html>
+}
+
+// musixmatchBanner is the notice shown on every shell page when serve started
+// with Musixmatch inactive because no token was configured (#385). It states
+// Musixmatch is disabled (without claiming all fetching is off, since a tokenless
+// provider may be covering), links to Settings to add a token or switch to a
+// tokenless provider (PetitLyrics, which also handles CJK lyrics well), and links
+// to the Spicetify FAQ for obtaining a token (new tab, noopener/noreferrer). The
+// copy notes a restart is needed because the token is read at startup.
+templ musixmatchBanner() {
+	<div class="mx-banner" role="status">
+		<svg class="mx-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+			<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+			<line x1="12" y1="9" x2="12" y2="13"></line>
+			<line x1="12" y1="17" x2="12.01" y2="17"></line>
+		</svg>
+		<div class="mx-banner-body">
+			<p class="mx-banner-title">Musixmatch lyric fetching is disabled</p>
+			<p class="mx-banner-text">
+				No Musixmatch API token is configured, so Musixmatch is disabled. In
+				<a class="mx-banner-link" href="/settings">Settings</a> you can add a token (then restart) to enable it,
+				or switch the provider to PetitLyrics, which needs no token and handles CJK lyrics well.
+				To obtain a Musixmatch token, see the
+				<a class="mx-banner-link" href="https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work" target="_blank" rel="noopener noreferrer">Spicetify FAQ</a>.
+			</p>
+		</div>
+	</div>
 }

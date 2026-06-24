@@ -764,7 +764,18 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		slog.Info("webhook API key sourced from encrypted secret store")
 	}
 	logStartupBanner(ctx, bannerCfg, VersionString(), out, envSrc, serveCLISrc)
-	fetcher, err := selectedProvider(cfg, token, newFetcher)
+	// Select the primary lyrics provider. When Musixmatch is primary and no token
+	// is configured, do NOT abort: degrade so the web UI still serves and the
+	// operator can add a token in Settings (#385). resolveServeProvider promotes a
+	// usable fallback to primary when one exists; otherwise it returns a no-op
+	// provider and signals lyricsDisabled so the worker/scheduler never start (the
+	// queue is left untouched rather than churned into permanent miss retirements).
+	fetcher, selErr := selectedProvider(cfg, token, newFetcher)
+	var promotedFallbacks []providers.LyricsProvider
+	if errors.Is(selErr, errNoMusixmatchToken) {
+		promotedFallbacks = fallbackProviders(cfg, token, providers.Musixmatch, newFetcher)
+	}
+	fetcher, musixmatchInactive, lyricsDisabled, err := resolveServeProvider(fetcher, selErr, promotedFallbacks)
 	if err != nil {
 		_ = sqlDB.Close()
 		slog.Error("failed to configure lyrics provider", "error", err)
@@ -897,15 +908,23 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 
 	runCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		runWorkerLoop(runCtx, w, serveWorkerInterval(cfg, args))
-	}()
-	go func() {
-		defer wg.Done()
-		runScheduler(runCtx, sqlDB, cfg, args, cacheRepo)
-	}()
+	// Start the worker and scheduler only when a lyrics provider is active. When
+	// lyricsDisabled (Musixmatch primary, no token, no fallback; #385) the queue
+	// must stay untouched: starting the worker would retry every track and retire
+	// it as a permanent miss, so the operator who later adds a token would find
+	// nothing left to fetch. The web server, watcher, and session sweeper still
+	// start so the UI is reachable to add the token.
+	if !lyricsDisabled {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			runWorkerLoop(runCtx, w, serveWorkerInterval(cfg, args))
+		}()
+		go func() {
+			defer wg.Done()
+			runScheduler(runCtx, sqlDB, cfg, args, cacheRepo)
+		}()
+	}
 	// Build the watcher config from the central config (TOML + env, env > file)
 	// rather than reading the environment directly, so the [watcher] section and
 	// the settings UI drive it. New clamps a non-positive Debounce/MaxDirs to the
@@ -961,6 +980,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// service that authenticates webhook calls, so keys created in the UI are
 			// immediately usable for webhook auth.
 			server.WithKeyManagerUI(authSvc),
+			// Surface the tokenless-Musixmatch banner on every authenticated shell
+			// page when serve started without a usable Musixmatch token (#385).
+			server.WithMusixmatchInactive(musixmatchInactive),
 		)
 	}
 	srv := &http.Server{
@@ -1221,6 +1243,52 @@ func buildProvider(name string, cfg config.Config, token string, newFetcher func
 	}
 }
 
+// errNoMusixmatchToken is the typed sentinel selectedProvider returns when
+// Musixmatch is the primary provider and no API token is configured. serve mode
+// detects it via errors.Is to degrade gracefully (serve the web UI so the
+// operator can add a token in Settings) instead of aborting startup (#385).
+var errNoMusixmatchToken = errors.New("no API token provided for the musixmatch provider: use --token, MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, or config file")
+
+// noopFetcher is a lyrics fetcher that always reports a miss. It backs the no-op
+// provider serve mode constructs when Musixmatch is primary, no token is set,
+// and no fallback is available (#385): the worker is built nil-safe even though
+// its loop is never started in that state (lyricsDisabled), so the fetcher is
+// never actually invoked.
+type noopFetcher struct{}
+
+func (noopFetcher) FindLyrics(context.Context, models.Track) (models.Song, error) {
+	return models.Song{}, musixmatch.ErrNotFound
+}
+
+// resolveServeProvider decides the effective lyrics fetcher and the serve-mode
+// degrade flags from the selectedProvider result and the available fallbacks
+// (#385). It is the testable core of the startup degrade decision:
+//
+//   - no error: pass the primary through; lyrics enabled.
+//   - errNoMusixmatchToken with at least one fallback: promote the first
+//     fallback to primary; musixmatchInactive (the token banner shows) but
+//     lyrics stay enabled via the fallback lane.
+//   - errNoMusixmatchToken with no fallback: return a no-op provider so worker
+//     construction stays nil-safe; musixmatchInactive AND lyricsDisabled (the
+//     worker/scheduler must not start, so the queue is never churned into
+//     permanent miss retirements).
+//   - any other error: propagated unchanged (a real, fatal misconfiguration).
+func resolveServeProvider(primary providers.LyricsProvider, selErr error, fallbacks []providers.LyricsProvider) (fetcher providers.LyricsProvider, musixmatchInactive, lyricsDisabled bool, err error) {
+	if selErr == nil {
+		return primary, false, false, nil
+	}
+	if !errors.Is(selErr, errNoMusixmatchToken) {
+		return nil, false, false, selErr
+	}
+	if len(fallbacks) > 0 {
+		fetcher = fallbacks[0]
+		slog.Warn("musixmatch token not configured; promoting fallback provider to primary", "primary", fetcher.Name())
+		return fetcher, true, false, nil
+	}
+	slog.Warn("no lyrics provider configured: Musixmatch needs an API token. Serving the web UI so you can add one in Settings, then restart the container.")
+	return providers.New(providers.Musixmatch, noopFetcher{}), true, true, nil
+}
+
 func selectedProvider(cfg config.Config, token string, newFetcher func(string) musixmatch.Fetcher) (providers.LyricsProvider, error) {
 	p, err := providers.Select(
 		cfg.Providers.Primary,
@@ -1234,7 +1302,7 @@ func selectedProvider(cfg config.Config, token string, newFetcher func(string) m
 	// The API token requirement is provider-specific: only Musixmatch needs one.
 	// petitlyrics is tokenless, so a missing token must not block it.
 	if p.Name() == providers.Musixmatch && strings.TrimSpace(token) == "" {
-		return nil, fmt.Errorf("no API token provided for the musixmatch provider: use --token, MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, or config file")
+		return nil, errNoMusixmatchToken
 	}
 	return p, nil
 }

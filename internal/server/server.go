@@ -91,6 +91,7 @@ type Handler struct {
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
+	musixmatchInactive bool
 	trusted            *trustnet.Policy
 	mux                *http.ServeMux
 }
@@ -219,6 +220,14 @@ func WithKeyManagerUI(km web.KeyManager) Option {
 	return func(h *Handler) { h.keyManager = km }
 }
 
+// WithMusixmatchInactive marks the Musixmatch provider as token-less (#385) so
+// the mounted web UI renders the lyrics-disabled notice banner on every shell
+// page. Threaded from runServe. Meaningful only alongside a mounted web UI; with
+// no UI it is a no-op.
+func WithMusixmatchInactive(inactive bool) Option {
+	return func(h *Handler) { h.musixmatchInactive = inactive }
+}
+
 // WithWebUIIf conditionally mounts the web UI. When enabled is false it
 // returns a no-op option so callers do not need an inline if-branch.
 func WithWebUIIf(enabled bool, cfg config.Config, version string) Option {
@@ -260,6 +269,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		if h.keyManager != nil {
 			h.webui.AttachKeyManager(h.keyManager)
 		}
+		h.webui.AttachMusixmatchInactive(h.musixmatchInactive)
 		h.webui.Register(h.mux)
 	}
 	return h

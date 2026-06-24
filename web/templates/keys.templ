@@ -9,8 +9,8 @@ package templates
 // ever present in the immediate create response (view.NewKey); a later revoke
 // re-renders the panel without it, so it is never shown twice and never persists
 // in the rendered list.
-templ WebhookKeysPage(version string, view WebhookKeysView, reports []RailItem) {
-	@Layout("Webhook keys", "/settings/keys", version, reports, "/static/css/keys.css") {
+templ WebhookKeysPage(version string, view WebhookKeysView, reports []RailItem, musixmatchInactive bool) {
+	@Layout("Webhook keys", "/settings/keys", version, reports, "/static/css/keys.css", musixmatchInactive) {
 		// keys.js adds the one-time raw key's Copy button. Served from the embedded
 		// /static; the page works without it (the key sits in a selectable field).
 		<script src="/static/js/keys.js" defer></script>

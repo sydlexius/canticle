@@ -18,8 +18,8 @@ package templates
 // selected, the placeholder pane shows); when a report is selected via a non-htmx
 // navigation the handler passes the rendered ReportView so the full page lands on
 // that report. reports is the sidebar report-nav model.
-templ ReportsPage(version string, reports []RailItem, view *ReportView) {
-	@Layout("Reports", "/reports", version, reports, "") {
+templ ReportsPage(version string, reports []RailItem, view *ReportView, musixmatchInactive bool) {
+	@Layout("Reports", "/reports", version, reports, "", musixmatchInactive) {
 		@reportPane(view)
 	}
 }

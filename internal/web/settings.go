@@ -52,7 +52,7 @@ func (u *UI) handleSettings(w http.ResponseWriter, r *http.Request) {
 			markSavable(view.Sections[i].Fields)
 		}
 	}
-	render(w, r, templates.SettingsPage(u.version, view, u.buildRail("")))
+	render(w, r, templates.SettingsPage(u.version, view, u.buildRail(""), u.musixmatchInactive))
 }
 
 // markSavable flags each field the page may write: editable and not locked by

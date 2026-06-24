@@ -59,9 +59,91 @@ func TestSelectedProvider(t *testing.T) {
 
 func TestSelectedProviderMusixmatchRequiresToken(t *testing.T) {
 	cfg := config.Config{Providers: config.ProvidersConfig{Primary: "musixmatch"}}
-	if _, err := selectedProvider(cfg, "  ", func(string) musixmatch.Fetcher { return fakeFetcher{} }); err == nil {
+	_, err := selectedProvider(cfg, "  ", func(string) musixmatch.Fetcher { return fakeFetcher{} })
+	if err == nil {
 		t.Fatal("musixmatch with an empty token must return an error")
 	}
+	// The error must be the typed sentinel so serve can detect the tokenless
+	// Musixmatch-primary case and degrade instead of aborting (#385).
+	if !errors.Is(err, errNoMusixmatchToken) {
+		t.Fatalf("error = %v; want errors.Is(err, errNoMusixmatchToken)", err)
+	}
+}
+
+// TestSelectedProviderPetitLyricsNotTokenSentinel proves a tokenless provider
+// (petitlyrics) primary with an empty token does NOT trip the Musixmatch token
+// sentinel, so the serve degrade path is Musixmatch-specific (#385).
+func TestSelectedProviderPetitLyricsNotTokenSentinel(t *testing.T) {
+	cfg := config.Config{Providers: config.ProvidersConfig{Primary: "petitlyrics"}}
+	_, err := selectedProvider(cfg, "", func(string) musixmatch.Fetcher { return fakeFetcher{} })
+	if err != nil {
+		t.Fatalf("selectedProvider petitlyrics: %v", err)
+	}
+	if errors.Is(err, errNoMusixmatchToken) {
+		t.Fatal("petitlyrics primary must not trip errNoMusixmatchToken")
+	}
+}
+
+// TestResolveServeProvider exercises the serve startup degrade decision (#385):
+// given the selectedProvider result and the available fallbacks, decide the
+// effective fetcher and the two display/behavior flags.
+func TestResolveServeProvider(t *testing.T) {
+	primary := providers.New(providers.Musixmatch, fakeFetcher{})
+	fb := providers.New(providers.PetitLyrics, fakeFetcher{})
+
+	t.Run("token present: pass through, lyrics enabled", func(t *testing.T) {
+		got, inactive, disabled, err := resolveServeProvider(primary, nil, nil)
+		if err != nil {
+			t.Fatalf("resolveServeProvider: %v", err)
+		}
+		if got != primary || inactive || disabled {
+			t.Fatalf("got=%v inactive=%v disabled=%v; want primary, false, false", got.Name(), inactive, disabled)
+		}
+	})
+
+	t.Run("no token, fallback available: promote, inactive, not disabled", func(t *testing.T) {
+		got, inactive, disabled, err := resolveServeProvider(nil, errNoMusixmatchToken, []providers.LyricsProvider{fb})
+		if err != nil {
+			t.Fatalf("resolveServeProvider: %v", err)
+		}
+		if got.Name() != providers.PetitLyrics {
+			t.Fatalf("promoted fetcher = %q; want petitlyrics", got.Name())
+		}
+		if !inactive {
+			t.Fatal("musixmatchInactive must be true when the token is missing")
+		}
+		if disabled {
+			t.Fatal("lyricsDisabled must be false when a fallback was promoted")
+		}
+	})
+
+	t.Run("no token, no fallback: noop provider, inactive AND disabled", func(t *testing.T) {
+		got, inactive, disabled, err := resolveServeProvider(nil, errNoMusixmatchToken, nil)
+		if err != nil {
+			t.Fatalf("resolveServeProvider: %v", err)
+		}
+		if got == nil {
+			t.Fatal("a non-nil no-op fetcher must be returned so worker construction is nil-safe")
+		}
+		if got.Name() != providers.Musixmatch {
+			t.Fatalf("noop provider name = %q; want musixmatch", got.Name())
+		}
+		// The no-op provider must report ErrNotFound, never panic.
+		if _, ferr := got.FindLyrics(context.Background(), models.Track{}); !errors.Is(ferr, musixmatch.ErrNotFound) {
+			t.Fatalf("noop FindLyrics err = %v; want ErrNotFound", ferr)
+		}
+		if !inactive || !disabled {
+			t.Fatalf("inactive=%v disabled=%v; want both true", inactive, disabled)
+		}
+	})
+
+	t.Run("other error: propagated", func(t *testing.T) {
+		sentinel := errors.New("boom")
+		_, _, _, err := resolveServeProvider(nil, sentinel, nil)
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("err = %v; want the original error propagated", err)
+		}
+	})
 }
 
 func TestSelectedProviderPetitLyrics(t *testing.T) {
