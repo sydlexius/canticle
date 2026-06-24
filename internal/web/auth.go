@@ -317,7 +317,7 @@ func safeReturnPath(r *http.Request) string {
 // scheme-relative "//host", and backslash tricks) to close the open-redirect
 // vector.
 func safeNext(raw string) string {
-	const fallback = "/dashboard"
+	const fallback = dashboardPath
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw[0] != '/' {
 		return fallback
