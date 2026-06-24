@@ -89,10 +89,9 @@ func TestSelectedProviderPetitLyricsNotTokenSentinel(t *testing.T) {
 // effective fetcher and the two display/behavior flags.
 func TestResolveServeProvider(t *testing.T) {
 	primary := providers.New(providers.Musixmatch, fakeFetcher{})
-	fb := providers.New(providers.PetitLyrics, fakeFetcher{})
 
 	t.Run("token present: pass through, lyrics enabled", func(t *testing.T) {
-		got, inactive, disabled, err := resolveServeProvider(primary, nil, nil)
+		got, inactive, disabled, err := resolveServeProvider(primary, nil)
 		if err != nil {
 			t.Fatalf("resolveServeProvider: %v", err)
 		}
@@ -101,24 +100,8 @@ func TestResolveServeProvider(t *testing.T) {
 		}
 	})
 
-	t.Run("no token, fallback available: promote, inactive, not disabled", func(t *testing.T) {
-		got, inactive, disabled, err := resolveServeProvider(nil, errNoMusixmatchToken, []providers.LyricsProvider{fb})
-		if err != nil {
-			t.Fatalf("resolveServeProvider: %v", err)
-		}
-		if got.Name() != providers.PetitLyrics {
-			t.Fatalf("promoted fetcher = %q; want petitlyrics", got.Name())
-		}
-		if !inactive {
-			t.Fatal("musixmatchInactive must be true when the token is missing")
-		}
-		if disabled {
-			t.Fatal("lyricsDisabled must be false when a fallback was promoted")
-		}
-	})
-
-	t.Run("no token, no fallback: noop provider, inactive AND disabled", func(t *testing.T) {
-		got, inactive, disabled, err := resolveServeProvider(nil, errNoMusixmatchToken, nil)
+	t.Run("no token: noop provider, inactive AND disabled", func(t *testing.T) {
+		got, inactive, disabled, err := resolveServeProvider(nil, errNoMusixmatchToken)
 		if err != nil {
 			t.Fatalf("resolveServeProvider: %v", err)
 		}
@@ -139,7 +122,7 @@ func TestResolveServeProvider(t *testing.T) {
 
 	t.Run("other error: propagated", func(t *testing.T) {
 		sentinel := errors.New("boom")
-		_, _, _, err := resolveServeProvider(nil, sentinel, nil)
+		_, _, _, err := resolveServeProvider(nil, sentinel)
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("err = %v; want the original error propagated", err)
 		}

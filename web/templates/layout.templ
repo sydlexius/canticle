@@ -6,9 +6,10 @@ package templates
 // Layout is the base HTML document for every page. It links the embedded
 // design-tokens + Tailwind output, mounts the fixed Sidebar (with the active
 // nav path, the app version, and the report-nav model), and renders page content
-// into the main column. The main column carries id="mx-main": it is the htmx
-// swap target for the sidebar report rows, so selecting a report from any page
-// replaces the content here. The UI is dark-only in v1, so the surface colors
+// into the main column. Inside the main column, an inner div carries
+// id="mx-main": it is the htmx swap target for the sidebar report rows, so
+// selecting a report from any page replaces the content there (the banner above
+// it stays put). The UI is dark-only in v1, so the surface colors
 // come straight from the tokens with no theme class to toggle. pageCSS is an
 // optional per-page stylesheet path (empty for none): it ships route-specific
 // CSS only on the page that needs it instead of on every page (issue #322).
@@ -52,11 +53,16 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 		<body>
 			<div class="mx-shell">
 				@Sidebar(active, version, reports)
-				<main class="mx-content" id="mx-main">
+				<main class="mx-content">
+					// The banner sits OUTSIDE #mx-main so it survives htmx report-rail
+					// swaps (the rail targets #mx-main's innerHTML; a banner inside it
+					// would vanish until a full page reload).
 					if musixmatchInactive {
 						@musixmatchBanner()
 					}
-					{ children... }
+					<div id="mx-main">
+						{ children... }
+					</div>
 				</main>
 			</div>
 		</body>
