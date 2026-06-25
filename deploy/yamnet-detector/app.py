@@ -31,6 +31,10 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 
 YAMNET_HANDLE = "https://tfhub.dev/google/yamnet/1"
 TARGET_SR = 16000  # YAMNet requires 16 kHz mono
+# Cap the in-memory read. Canticle sends at most a ~60s 16 kHz mono WAV (~2 MB);
+# 32 MB is a generous ceiling that rejects oversize/malicious uploads before they
+# can exhaust memory.
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 logger = logging.getLogger("canticle.yamnet")
 
@@ -66,7 +70,11 @@ def health():
 
 @app.post("/classify")
 async def classify(file: UploadFile = File(...)):
-    raw = await file.read()
+    # Read at most MAX_UPLOAD_BYTES + 1 so an oversize upload is rejected without
+    # buffering the whole body into memory.
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="audio file too large")
     try:
         wav, sr = sf.read(io.BytesIO(raw), dtype="float32")
     except Exception as e:  # noqa: BLE001 - surface a clean 400 to the caller

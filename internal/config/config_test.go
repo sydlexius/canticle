@@ -27,6 +27,12 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
 		"MXLRC_VERIFICATION_MIN_CONFIDENCE", "MXLRC_VERIFICATION_MIN_SIMILARITY",
+		"MXLRC_INSTRUMENTAL_DETECTOR_ENABLED", "MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL",
+		"MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH", "MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS",
+		"MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "MXLRC_INSTRUMENTAL_DETECTOR_CLASSES",
+		"MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES",
+		"MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE", "MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES",
+		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH",
 		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
 		"MXLRC_QUEUE_RANDOMIZE",
 		"MXLRCGO_WATCH_ENABLED", "MXLRCGO_WATCH_DEBOUNCE_MS", "MXLRCGO_WATCH_MAX_DIRS",
@@ -1535,7 +1541,8 @@ func TestLoad_InstrumentalDetectorEnvVocalGate(t *testing.T) {
 func TestLoad_InstrumentalDetectorVocalGateFileReDefaults(t *testing.T) {
 	isolateEnv(t)
 	path := filepath.Join(t.TempDir(), "config.toml")
-	content := "[instrumental_detector]\nclassifier_url = \"http://yamnet:8080\"\nvocal_max_confidence = 0\nspread_samples = 0\n"
+	// Omits spread_samples (-> default 6) and sets vocal_max_confidence = 0 (-> re-defaulted).
+	content := "[instrumental_detector]\nclassifier_url = \"http://yamnet:8080\"\nvocal_max_confidence = 0\n"
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1547,10 +1554,29 @@ func TestLoad_InstrumentalDetectorVocalGateFileReDefaults(t *testing.T) {
 		t.Errorf("VocalMaxConfidence = %v; want 0.03 (re-defaulted from 0)", cfg.InstrumentalDetector.VocalMaxConfidence)
 	}
 	if cfg.InstrumentalDetector.SpreadSamples != 6 {
-		t.Errorf("SpreadSamples = %d; want 6 (re-defaulted from 0)", cfg.InstrumentalDetector.SpreadSamples)
+		t.Errorf("SpreadSamples = %d; want 6 (omitted key defaults)", cfg.InstrumentalDetector.SpreadSamples)
 	}
 	if len(cfg.InstrumentalDetector.VocalClasses) == 0 {
 		t.Error("VocalClasses empty; want re-defaulted list")
+	}
+}
+
+// TestLoad_InstrumentalDetectorSpreadSamplesExplicitZeroHonored verifies that an
+// explicit spread_samples = 0 in TOML is preserved (disables spreading), not
+// re-defaulted to 6 -- the documented "< 2 disables" must be expressible.
+func TestLoad_InstrumentalDetectorSpreadSamplesExplicitZeroHonored(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := "[instrumental_detector]\nspread_samples = 0\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.SpreadSamples != 0 {
+		t.Errorf("SpreadSamples = %d; want 0 (explicit value honored, not re-defaulted)", cfg.InstrumentalDetector.SpreadSamples)
 	}
 }
 

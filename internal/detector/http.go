@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,7 +89,8 @@ func NewHTTPDetector(cfg Config) (*HTTPDetector, error) {
 		}
 	}
 	if ffprobePath == "" {
-		if p := filepath.Join(filepath.Dir(resolvedFFmpegPath), "ffprobe"); fileIsExecutable(p) {
+		// LookPath (not os.Stat) so a colocated ffprobe.exe is found on Windows.
+		if p, lookErr := exec.LookPath(filepath.Join(filepath.Dir(resolvedFFmpegPath), "ffprobe")); lookErr == nil {
 			ffprobePath = p
 		} else if p, lookErr := exec.LookPath("ffprobe"); lookErr == nil {
 			ffprobePath = p
@@ -105,18 +107,18 @@ func NewHTTPDetector(cfg Config) (*HTTPDetector, error) {
 	// contract and no construction path can silently disable the gate (an empty
 	// vocalClasses or a zero vocalMaxConfidence would otherwise neuter it). This
 	// mirrors the in-constructor defaulting of instrumentalClasses/minConfidence.
+	// Clone the package default so each detector owns its slice (no shared mutable
+	// state). spreadSamples is NOT defaulted here: 0/1 is a meaningful "single
+	// window" value, defaulted to 6 only for an omitted config key (config layer).
 	vocalClasses := cfg.VocalClasses
 	if len(vocalClasses) == 0 {
-		vocalClasses = defaultVocalClasses
+		vocalClasses = slices.Clone(defaultVocalClasses)
 	}
 	vocalMaxConfidence := cfg.VocalMaxConfidence
 	if vocalMaxConfidence <= 0 || vocalMaxConfidence > 1 {
 		vocalMaxConfidence = defaultVocalMaxConfidence
 	}
 	spreadSamples := cfg.SpreadSamples
-	if spreadSamples == 0 {
-		spreadSamples = defaultSpreadSamples
-	}
 	// ionice is Linux-specific (I/O scheduler class control). nice is POSIX but
 	// not guaranteed to be installed (e.g. a stripped container, or Windows).
 	// Resolve both up front; an empty path means the wrapper is skipped silently
@@ -336,11 +338,18 @@ func (d *HTTPDetector) spreadExpr(ctx context.Context, audioPath string) string 
 		slog.Warn("detector: duration probe failed; single-window fallback", "path", audioPath, "err", err)
 		return ""
 	}
-	segLen := d.sampleDuration / d.spreadSamples
+	// Cap the window count at the sample budget so total sampled audio never
+	// exceeds sampleDuration: with more windows than seconds, segLen would floor
+	// to 1 and numWindows*1 would overshoot the budget (multiplying inference work).
+	numWindows := d.spreadSamples
+	if numWindows > d.sampleDuration {
+		numWindows = d.sampleDuration
+	}
+	segLen := d.sampleDuration / numWindows
 	if segLen < 1 {
 		segLen = 1
 	}
-	return buildSpreadSelectExpr(dur, d.spreadSamples, segLen)
+	return buildSpreadSelectExpr(dur, numWindows, segLen)
 }
 
 // ffmpegSpreadSampleArgs builds the ffmpeg args that select+concatenate the
@@ -441,15 +450,6 @@ func (d *HTTPDetector) classify(ctx context.Context, samplePath string) (_ class
 		resp.Mean = flat
 	}
 	return resp, nil
-}
-
-// fileIsExecutable reports whether path is a regular file with any execute bit.
-func fileIsExecutable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	return info.Mode()&0o111 != 0
 }
 
 // probeDurationSeconds returns the track duration in seconds via ffprobe, or

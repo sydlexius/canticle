@@ -766,8 +766,8 @@ func TestNewHTTPDetectorDefaultsVocalGate(t *testing.T) {
 	if d.vocalMaxConfidence != 0.03 {
 		t.Errorf("vocalMaxConfidence = %v; want 0.03 (defaulted)", d.vocalMaxConfidence)
 	}
-	if d.spreadSamples != 6 {
-		t.Errorf("spreadSamples = %d; want 6 (defaulted)", d.spreadSamples)
+	if d.spreadSamples != 0 {
+		t.Errorf("spreadSamples = %d; want 0 (not constructor-defaulted; 0/1 means single window)", d.spreadSamples)
 	}
 	if len(d.vocalClasses) == 0 || d.vocalClasses[0] != "Singing" {
 		t.Errorf("vocalClasses = %v; want defaulted list starting with Singing", d.vocalClasses)

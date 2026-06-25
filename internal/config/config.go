@@ -567,9 +567,9 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if cfg.InstrumentalDetector.VocalMaxConfidence <= 0 || cfg.InstrumentalDetector.VocalMaxConfidence > 1 {
 				cfg.InstrumentalDetector.VocalMaxConfidence = d.InstrumentalDetector.VocalMaxConfidence
 			}
-			if cfg.InstrumentalDetector.SpreadSamples == 0 {
-				cfg.InstrumentalDetector.SpreadSamples = d.InstrumentalDetector.SpreadSamples
-			}
+			// SpreadSamples is intentionally NOT re-defaulted: defaults() seeds 6 and
+			// the TOML decode preserves it when the key is omitted, so an explicit
+			// spread_samples = 0 or 1 (single window) survives and is honored.
 			// CooldownSeconds=0 is a valid user value (disable cooldown), so it is
 			// not re-defaulted. Negative values are clamped to 0.
 			if cfg.InstrumentalDetector.CooldownSeconds < 0 {

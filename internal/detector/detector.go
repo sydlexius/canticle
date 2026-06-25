@@ -41,12 +41,12 @@ const (
 // that lands an empty value -- still gets a working vocal gate rather than one
 // silently disabled. Kept in sync with config.defaults() by convention, the same
 // way the instrumental-class default is duplicated.
-const (
-	defaultVocalMaxConfidence = 0.03
-	defaultSpreadSamples      = 6
-)
+const defaultVocalMaxConfidence = 0.03
 
-var defaultVocalClasses = []string{"Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"}
+// defaultVocalClasses is cloned per call in NewHTTPDetector (never assigned
+// directly) so each detector owns its slice. Speech is included so spoken-vocal
+// tracks (over music) are not marked instrumental.
+var defaultVocalClasses = []string{"Singing", "Speech", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"}
 
 // Result describes an instrumental detection decision.
 type Result struct {
@@ -74,10 +74,11 @@ type Detector interface {
 }
 
 // Config holds the construction parameters for an HTTPDetector. Zero values for
-// SampleDurationSeconds, MinConfidence, InstrumentalClasses, VocalClasses,
-// VocalMaxConfidence, and SpreadSamples are replaced with built-in defaults by
-// NewHTTPDetector; CooldownSeconds < 0 is clamped to 0. FFprobePath empty means
-// auto-discover (sibling of ffmpeg, then PATH).
+// SampleDurationSeconds, MinConfidence, InstrumentalClasses, VocalClasses, and
+// VocalMaxConfidence are replaced with built-in defaults by NewHTTPDetector;
+// CooldownSeconds < 0 is clamped to 0. SpreadSamples is used as given (0 or 1
+// means a single contiguous window); the config layer defaults an omitted key to
+// 6. FFprobePath empty means auto-discover (sibling of ffmpeg, then PATH).
 type Config struct {
 	ClassifierURL         string
 	SampleDurationSeconds int
