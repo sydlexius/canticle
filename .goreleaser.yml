@@ -14,7 +14,7 @@ before:
     - ./.tools/tailwindcss -i web/static/css/input.css -o web/static/css/output.css --minify
 
 builds:
-  - id: mxlrcgo-svc
+  - id: canticle
     main: ./cmd/mxlrcgo-svc
     binary: canticle
     env:
@@ -54,9 +54,17 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 homebrew_casks:
-  - name: mxlrcgo-svc
+  - name: canticle
     ids:
       - default
+    # Renamed from the pre-rebrand "mxlrcgo-svc" cask (issue #388). Unlike the
+    # nfpm packages, a cask cannot self-replace the old token; conflicts_with
+    # just prevents both being installed at once. Auto-migration of an existing
+    # `brew install sydlexius/tap/mxlrcgo-svc` needs a cask_renames entry in the
+    # sydlexius/homebrew-tap repo (tracked separately) plus removal of the stale
+    # Casks/mxlrcgo-svc.rb there.
+    conflicts:
+      - cask: mxlrcgo-svc
     # ffmpeg is only needed for the optional audio verification/instrumental
     # sidecar; it is NOT a required runtime dependency and is not listed here.
     binaries:
@@ -76,13 +84,34 @@ homebrew_casks:
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
-    commit_msg_template: "feat: update mxlrcgo-svc cask to {{ .Tag }}"
+    commit_msg_template: "feat: update canticle cask to {{ .Tag }}"
     skip_upload: auto
 
 nfpms:
-  - id: mxlrcgo-svc
-    package_name: mxlrcgo-svc
+  - id: canticle
+    package_name: canticle
     ids:
+      - canticle
+    # Upgrade path from the pre-rebrand package (issue #388). The Linux packages
+    # were named "mxlrcgo-svc" through v1.9.1; this transitions installs to the
+    # "canticle" name in a single step. nfpm maps these per format:
+    #   deb -> Replaces + Provides (+ Conflicts, set in overrides.deb below)
+    #   rpm -> Obsoletes + Provides
+    #   apk -> replaces + provides
+    # Replaces/Obsoletes remove the old mxlrcgo-svc package outright, so any
+    # stale binary it owned (v1.6.0/v1.7.0 installed /usr/local/bin/mxlrcgo-svc;
+    # v1.8.0+ already ship /usr/local/bin/canticle) is cleaned up. The unit,
+    # config, and state paths stay under /var/lib/mxlrcgo-svc et al. so the
+    # SQLite DB and any (non-Docker) service install survive the transition.
+    #
+    # Conflicts is deb-only (set in overrides.deb), NOT a top-level field: the
+    # Debian rename idiom is Replaces+Conflicts to force removal of the old
+    # package, but the Fedora idiom is Obsoletes+Provides WITHOUT Conflicts -- an
+    # rpm Conflicts tag makes `rpm`/`dnf` treat mxlrcgo-svc as a blocking
+    # conflict and breaks the in-place upgrade. apk needs only replaces+provides.
+    replaces:
+      - mxlrcgo-svc
+    provides:
       - mxlrcgo-svc
     vendor: sydlexius
     homepage: https://sydlexius.github.io/canticle/
@@ -108,6 +137,11 @@ nfpms:
     overrides:
       # Debian places systemd units under /lib/systemd/system/.
       deb:
+        # Conflicts is the Debian rename idiom (with Replaces) and forces the old
+        # mxlrcgo-svc package's removal on upgrade. Kept out of rpm/apk on purpose
+        # (see the package-rename note above).
+        conflicts:
+          - mxlrcgo-svc
         contents:
           - src: config.example.toml
             dst: /etc/mxlrcgo-svc/config.example.toml
@@ -132,7 +166,7 @@ nfpms:
           preremove: build/package/preremove-apk.sh
 
 dockers_v2:
-  - id: mxlrcgo-svc
+  - id: canticle
     images:
       - "ghcr.io/sydlexius/canticle"
     # dockers_v2 ignores empty tag templates, so prerelease gating is encoded

@@ -24,7 +24,7 @@ Full documentation is published at **<https://sydlexius.github.io/canticle/>**:
 **macOS / Linuxbrew (Homebrew):**
 
 ```sh
-brew install sydlexius/tap/mxlrcgo-svc
+brew install sydlexius/tap/canticle
 ```
 
 **Linux (.deb / .rpm / .apk):** Download the appropriate package for your distro
@@ -33,13 +33,13 @@ page and install it with your package manager:
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i mxlrcgo-svc_*.deb
+sudo apt install ./canticle_*.deb
 
 # RHEL / Fedora / Rocky
-sudo rpm -i mxlrcgo-svc_*.rpm
+sudo dnf install ./canticle_*.rpm
 
 # Alpine
-sudo apk add --allow-untrusted mxlrcgo-svc_*.apk
+sudo apk add --allow-untrusted canticle_*.apk
 ```
 
 The package installs the binary to `/usr/local/bin/canticle`, a systemd unit
