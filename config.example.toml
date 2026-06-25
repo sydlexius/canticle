@@ -285,7 +285,7 @@ min_similarity = 0.35
 # AudioSet vocal-class names whose peak score blocks an instrumental marking.
 # Defaults to the verified singing/vocal set. Env (CSV):
 # MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES.
-# vocal_classes = ["Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
+# vocal_classes = ["Singing", "Speech", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
 
 # Maximum vocal-class peak (0-1) tolerated before a track is excluded from being
 # instrumental. Conservative: biased toward "not instrumental". Default 0.03

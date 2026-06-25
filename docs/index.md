@@ -24,6 +24,7 @@ New here? Start with the [Getting Started](GETTING_STARTED.md) guide - it picks 
 - [User Guide](USER_GUIDE.md) - run the webhook server, Docker and Unraid deployment, native-package service management, path resolution, health endpoints, the filesystem watcher, shell completion, and inspection commands.
 - [CLI Reference](CLI_REFERENCE.md) - the full usage text, every subcommand and flag, `--version` output, and the library/key-management commands.
 - [Configuration](CONFIGURATION.md) - the complete environment-variable table, the TOML config keys, token precedence, and XDG/Docker/native-package path defaults.
+- [Instrumental Detection](instrumental-detection.md) - the optional audio-based instrumental detector: the two-gate decision model, the YAMNet sidecar setup and `{mean,max}` contract, deploy ordering, and threshold tuning.
 - [Developer Guide](DEVELOPER.md) - development setup, make targets, the quality gate, contributing notes, and design decisions.
 
 ## Legal

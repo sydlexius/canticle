@@ -83,6 +83,7 @@ nav:
   - User Guide: USER_GUIDE.md
   - CLI Reference: CLI_REFERENCE.md
   - Configuration: CONFIGURATION.md
+  - Instrumental Detection: instrumental-detection.md
   - Developer Guide:
       - Overview: DEVELOPER.md
       - Multilingual Output Policy: multilingual-output-policy.md
