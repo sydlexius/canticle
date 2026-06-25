@@ -493,6 +493,8 @@ When enrichment is off for a track, the scanner skips ISRC, MBID, and duration e
 
 The optional instrumental-detection sidecar samples each track's audio with ffmpeg and asks an external classifier whether it is instrumental, writing an instrumental marker on a provider miss. It runs only when a classifier URL is configured (`[instrumental_detector] classifier_url`). Because it costs an ffmpeg sample plus an inference call per track, you may want it on a small curated or soundtrack-heavy library but off on a large bulk one.
 
+For how the detector decides (the two-gate model), the YAMNet sidecar setup and `{mean,max}` contract, deploy ordering, and threshold tuning, see the dedicated [Instrumental Detection](instrumental-detection.md) reference. This section covers only the enable/override controls.
+
 You control it at three levels, resolved with the precedence **CLI flag > per-library setting > global default**:
 
 - **Global default** (`config.toml`): `[instrumental_detector] enabled` (env `MXLRC_INSTRUMENTAL_DETECTOR_ENABLED`). Default `false`.

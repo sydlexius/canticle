@@ -280,7 +280,7 @@ ffmpeg (used to extract the audio sample) is resolved automatically: see [ffmpeg
 # sample_duration_seconds = 30
 # min_confidence = 0.90
 # instrumental_classes = ["Music", "Musical instrument"]
-# vocal_classes = ["Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
+# vocal_classes = ["Singing", "Speech", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
 # vocal_max_confidence = 0.03
 # spread_samples = 6
 # ffprobe_path = ""
@@ -293,7 +293,7 @@ When enabled and a `classifier_url` is set, the detector samples each track's au
 
 To catch vocals that enter after an instrumental intro (arias, jazz, classical), the detector samples `spread_samples` short windows spread across the **whole** track, concatenated into one sample, and gates on the per-class **max-over-frames** peak (the loudest singing moment), which the frame mean dilutes. This requires the sidecar to return `{"mean": {...}, "max": {...}}`; a legacy mean-only sidecar degrades safely to never-instrumental.
 
-`sample_duration_seconds` is clamped to [30, 60]. `min_confidence` and `vocal_max_confidence` values outside (0, 1] reset to `0.90` and `0.03` respectively. `cooldown_seconds` is the minimum gap between consecutive inference calls; `0` disables the cooldown. Track-duration probing needs `ffprobe`; the auto-provisioned ffmpeg ships none, so set `ffprobe_path` (or rely on a PATH ffprobe) or the detector falls back to a single window. **Deploy order:** upgrade Canticle before the sidecar (new Canticle tolerates the old flat-map response; old Canticle cannot parse `{mean,max}`). See the [Instrumental detection](USER_GUIDE.md#instrumental-detection) guide for the per-library and per-run override controls.
+`sample_duration_seconds` is clamped to [30, 60]. `min_confidence` and `vocal_max_confidence` values outside (0, 1] reset to `0.90` and `0.03` respectively. `cooldown_seconds` is the minimum gap between consecutive inference calls; `0` disables the cooldown. Track-duration probing needs `ffprobe`; the auto-provisioned ffmpeg ships none, so set `ffprobe_path` (or rely on a PATH ffprobe) or the detector falls back to a single window. **Deploy order:** upgrade Canticle before the sidecar (new Canticle tolerates the old flat-map response; old Canticle cannot parse `{mean,max}`). See **[Instrumental Detection](instrumental-detection.md)** for the full reference (decision model, sidecar setup, and tuning), and the [Instrumental detection](USER_GUIDE.md#instrumental-detection) guide for the per-library and per-run override controls.
 
 ffmpeg resolution is shared with `[verification]`; see [ffmpeg resolution](#ffmpeg-resolution) below. Set `ffmpeg_path` here only to pin a binary separately from the verification path.
 
