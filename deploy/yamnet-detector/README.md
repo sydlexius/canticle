@@ -47,7 +47,10 @@ error on every detection until it is upgraded. So: Canticle, then sidecar.
 A response-shape test that stubs the model (no TensorFlow Hub download):
 
 ```bash
-pip install -r requirements.txt pytest
+# requirements.txt is hash-pinned (--require-hashes mode), so install pytest
+# in a separate step -- pip refuses to mix hashed and unhashed requirements.
+pip install --require-hashes -r requirements.txt
+pip install pytest
 pytest test_app.py -q
 ```
 
