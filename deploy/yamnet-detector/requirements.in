@@ -6,5 +6,7 @@ tensorflow-hub==0.16.1
 soundfile==0.12.1
 numpy==2.0.2
 # tensorflow-hub 0.16.1 imports pkg_resources at runtime, which setuptools
-# removed in 81.0. Pin below that so pkg_resources remains available.
-setuptools<81
+# removed in 81.0. Constrain to the latest 80.x so pkg_resources remains
+# available (explicit floor documents the intent; the lock pins the exact
+# version + hash, so this band only steers regen).
+setuptools>=80.10.2,<81
