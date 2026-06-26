@@ -64,7 +64,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TLS_REDIRECT_HTTP` | (none) | Plain-HTTP listen address (e.g. `:80`) that 301-redirects to HTTPS. Honored only when TLS is enabled. |
 | `MXLRC_TLS_SELF_SIGNED_HOSTS` | (none) | Comma-separated extra SAN hostnames/IPs for the self-signed certificate (on top of `localhost`, `canticle`, `127.0.0.1`, `::1`). Honored only when self-signed. |
 | `MXLRC_OUTPUT_DIR` | XDG / `/music` | Output directory for `fetch` mode. **Ignored in `serve` mode** (lyrics are written next to the audio file; the metadata-only webhook fallback uses the internal default). |
-| `MXLRC_EMBEDDED_LYRICS` | `off` | Embedded unsynced lyrics handling. `off` - ignore (default); `respect` - skip fetching when embedded lyrics exist; `extract` - write embedded lyrics to a `.txt` sidecar, then skip fetching. |
+| `MXLRC_EMBEDDED_LYRICS` | `off` | Embedded lyrics handling. `off` - ignore (default); `respect` - skip fetching when embedded lyrics exist; `extract` - write embedded lyrics to a sidecar, then skip fetching. A timestamped Vorbis `SYNCEDLYRICS` comment is written as a synced `.lrc` (preferred); unsynced lyrics become `.txt`. ID3 `SYLT` / MP4 atoms are not handled. |
 | `MXLRC_BILINGUAL_OUTPUT` | `false` | When `true` and a provider returns a translation track, interleave original and translated lines under shared timestamps in a single `.lrc`. |
 | `MXLRC_DB_PATH` | XDG / `/config/mxlrcgo.db` | SQLite database path. |
 | `MXLRC_DOCKER` | `false` | When `true`, storage defaults resolve under `/config`. Set automatically in the images. |
@@ -149,7 +149,7 @@ dir = "lyrics"
 
 Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`; CLI: `--embedded-lyrics`).
 
-`embedded_lyrics` controls how unsynced lyrics already embedded in the audio file's tags are handled. `off` (default) ignores them and always fetches from providers. `respect` skips fetching for files that already carry embedded lyrics. `extract` writes the embedded lyrics to a `.txt` sidecar (never overwriting an existing one) and then skips fetching. Synced (SYLT) tags are intentionally not handled.
+`embedded_lyrics` controls how lyrics already embedded in the audio file's tags are handled. `off` (default) ignores them and always fetches from providers. `respect` skips fetching for files that already carry embedded lyrics. `extract` writes the embedded lyrics to a sidecar (never overwriting an existing one) and then skips fetching: a Vorbis `SYNCEDLYRICS` comment carrying timestamped LRC text is written as a synced `.lrc` and takes precedence over unsynced lyrics, which are written as `.txt`. ID3 `SYLT` and MP4 synced-lyric atoms are intentionally not handled.
 
 `bilingual_output` (default `false`): when `true` and a provider returns a non-empty translation track, the original and translation lines are interleaved under shared timestamps in a single `.lrc`. See `docs/multilingual-output-policy.md`.
 

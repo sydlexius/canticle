@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -85,11 +86,13 @@ type ScanOptions struct {
 	Upgrade  bool
 	MaxDepth int
 	BFS      bool
-	// EmbeddedLyrics controls handling of unsynced lyrics embedded in tags:
-	// "off" (default) ignores them; "respect" skips fetching a file that already
-	// carries embedded lyrics; "extract" writes them to a .txt sidecar (and then
-	// skips fetching). Synced (SYLT) tags are intentionally not handled. "off"
-	// (default) is a no-op.
+	// EmbeddedLyrics controls handling of lyrics embedded in tags: "off"
+	// (default) ignores them; "respect" skips fetching a file that already
+	// carries embedded lyrics; "extract" writes them to a sidecar (and then skips
+	// fetching). A Vorbis SYNCEDLYRICS comment carrying timestamped LRC text is
+	// extracted as a synced .lrc and takes precedence; unsynced lyrics (the ID3
+	// USLT frame) become a .txt. ID3 SYLT and MP4 synced atoms are intentionally
+	// not handled.
 	EmbeddedLyrics string
 	// EnrichRecording controls recording enrichment: reading ISRC, MusicBrainz
 	// recording ID, and duration from audio tags into the Track. When false, all
@@ -341,23 +344,41 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 			continue
 		}
 
-		// Embedded (unsynced) lyrics handling. After sidecar checks and metadata
-		// load: in "respect" mode, a file that already carries embedded lyrics is
-		// skipped (the user has lyrics); in "extract" mode, those lyrics are
-		// written to a .txt sidecar and the file is then skipped. SYLT (synced)
-		// is intentionally not handled. "off" (default) is a no-op.
+		// Embedded lyrics handling. After sidecar checks and metadata load:
+		// "respect" skips a file that already carries embedded lyrics; "extract"
+		// writes them to a sidecar and then skips. Synced lyrics (Vorbis
+		// SYNCEDLYRICS, stored as LRC text) take precedence and write a .lrc;
+		// unsynced lyrics (m.Lyrics(), the ID3 USLT frame) write a .txt. ID3 SYLT
+		// and MP4 synced atoms are intentionally not handled. "off" is a no-op.
 		if opts.EmbeddedLyrics != "" && opts.EmbeddedLyrics != "off" {
-			if embedded := strings.TrimSpace(m.Lyrics()); embedded != "" {
+			synced := strings.TrimSpace(syncedLyrics(m))
+			unsynced := strings.TrimSpace(m.Lyrics())
+			hasSynced := synced != "" && looksLikeLRC(synced)
+			if synced != "" && !hasSynced {
+				// SYNCEDLYRICS present but not timestamped LRC: never write a bad
+				// .lrc -- warn (no silent failure) and fall through to the
+				// unsynced/fetch path.
+				slog.Warn("embedded SYNCEDLYRICS has no LRC timestamps; ignoring", "file", file.Name())
+			}
+			if hasSynced || unsynced != "" {
 				switch opts.EmbeddedLyrics {
 				case "extract":
-					if err := extractEmbeddedLyrics(dir, stem, m.Lyrics()); err != nil {
-						// Extraction failed: do NOT skip the track -- fall through
-						// and enqueue it so a normal fetch is still attempted
-						// (rather than silently dropping it from the pipeline).
+					// Prefer synced .lrc; else unsynced .txt. On a write failure do
+					// NOT skip the track -- fall through and enqueue so a normal
+					// fetch is still attempted (never silently dropped).
+					if hasSynced {
+						if err := extractEmbeddedSyncedLyrics(dir, stem, synced); err != nil {
+							slog.Warn("failed to extract embedded synced lyrics; enqueuing for fetch instead", "file", file.Name(), "error", err)
+						} else {
+							_ = f.Close()
+							slog.Debug("extracted embedded synced lyrics to .lrc sidecar; skipping fetch", "file", file.Name())
+							continue
+						}
+					} else if err := extractEmbeddedLyrics(dir, stem, unsynced); err != nil {
 						slog.Warn("failed to extract embedded lyrics; enqueuing for fetch instead", "file", file.Name(), "error", err)
 					} else {
 						_ = f.Close()
-						slog.Debug("extracted embedded lyrics to sidecar; skipping fetch", "file", file.Name())
+						slog.Debug("extracted embedded lyrics to .txt sidecar; skipping fetch", "file", file.Name())
 						continue
 					}
 				default: // "respect"
@@ -411,24 +432,44 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 	return nil
 }
 
-// extractEmbeddedLyrics writes embedded unsynced lyrics to a "<stem>.txt"
-// sidecar next to the audio file using exclusive-create semantics so an existing
-// sidecar is never overwritten. An already-present sidecar is treated as success.
-func extractEmbeddedLyrics(dir, stem, lyrics string) error {
-	path := filepath.Join(dir, stem+".txt")
-	// Write to a temp file in the same directory, then hard-link it into place.
-	// os.Link fails if the target already exists (atomic never-overwrite), and a
-	// partial or flush-failed write can never become the canonical sidecar
-	// because the temp file is always removed and only a fully written, closed
-	// file is linked. Close errors (where buffered-write failures surface) are
-	// returned rather than swallowed.
-	tmp, err := os.CreateTemp(dir, stem+".*.txt.tmp")
+// lrcTimestampRe matches a line beginning with an LRC timestamp, e.g.
+// "[00:12.34]". Used to vet that embedded SYNCEDLYRICS text is real synced LRC
+// before writing it as a .lrc sidecar -- writing prose as .lrc would win over a
+// real fetch forever via sidecar precedence.
+var lrcTimestampRe = regexp.MustCompile(`(?m)^\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]`)
+
+// looksLikeLRC reports whether s carries at least one LRC-timestamped line.
+func looksLikeLRC(s string) bool { return lrcTimestampRe.MatchString(s) }
+
+// syncedLyrics returns the embedded Vorbis SYNCEDLYRICS comment (FLAC/OGG) if
+// present, else "". dhowden/tag lowercases comment keys, so the raw key is
+// "syncedlyrics"; other formats (MP3/MP4) do not surface this key.
+func syncedLyrics(m tag.Metadata) string {
+	if raw := m.Raw(); raw != nil {
+		if s, ok := raw["syncedlyrics"].(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// linkSidecar writes content to a "<stem>.<ext>" sidecar next to the audio file
+// using exclusive-create semantics so an existing sidecar is never overwritten.
+// It writes to a temp file in the same directory, then hard-links it into place:
+// os.Link fails if the target already exists (atomic never-overwrite), and a
+// partial or flush-failed write can never become the canonical sidecar because
+// the temp file is always removed and only a fully written, closed file is
+// linked. Close errors (where buffered-write failures surface) are returned
+// rather than swallowed. An already-present sidecar is treated as success.
+func linkSidecar(dir, stem, ext, content string) error {
+	path := filepath.Join(dir, stem+"."+ext)
+	tmp, err := os.CreateTemp(dir, stem+".*."+ext+".tmp")
 	if err != nil {
 		return fmt.Errorf("scanner: create temp lyrics sidecar in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.WriteString(lyrics); err != nil {
+	if _, err := tmp.WriteString(content); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("scanner: write lyrics sidecar %s: %w", path, err)
 	}
@@ -442,6 +483,18 @@ func extractEmbeddedLyrics(dir, stem, lyrics string) error {
 		return fmt.Errorf("scanner: link lyrics sidecar %s: %w", path, err)
 	}
 	return nil
+}
+
+// extractEmbeddedLyrics writes embedded unsynced lyrics to a "<stem>.txt"
+// sidecar (never overwriting an existing one).
+func extractEmbeddedLyrics(dir, stem, lyrics string) error {
+	return linkSidecar(dir, stem, "txt", lyrics)
+}
+
+// extractEmbeddedSyncedLyrics writes embedded synced (LRC) lyrics to a
+// "<stem>.lrc" sidecar (never overwriting an existing one).
+func extractEmbeddedSyncedLyrics(dir, stem, lyrics string) error {
+	return linkSidecar(dir, stem, "lrc", lyrics)
 }
 
 // GetSongDir scans a directory for audio files and populates the queue with metadata.

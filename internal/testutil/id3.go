@@ -141,46 +141,76 @@ func WriteAudioFile(dir, filename, artist, title, album, lyrics string) error {
 //	bits 144-271: MD5 signature (128-bit, zeroed)
 func GenerateFLAC(sampleRate, totalSamples uint32) []byte {
 	var b bytes.Buffer
+	b.WriteString("fLaC") // stream marker
+	b.Write(flacStreaminfoBlock(sampleRate, totalSamples, true /* last block */))
+	return b.Bytes()
+}
 
-	// "fLaC" stream marker.
+// GenerateFLACExtended builds a header-only FLAC carrying the given Vorbis
+// comments (e.g. {"SYNCEDLYRICS": "[00:01.00]..."}) in a VORBIS_COMMENT block
+// after STREAMINFO. With no comments it is identical to GenerateFLAC. dhowden/tag
+// lowercases comment keys on read, so "SYNCEDLYRICS" surfaces via Raw() as
+// "syncedlyrics".
+func GenerateFLACExtended(sampleRate, totalSamples uint32, comments map[string]string) []byte {
+	if len(comments) == 0 {
+		return GenerateFLAC(sampleRate, totalSamples)
+	}
+	var b bytes.Buffer
 	b.WriteString("fLaC")
+	// STREAMINFO is no longer the final block; the VORBIS_COMMENT block is.
+	b.Write(flacStreaminfoBlock(sampleRate, totalSamples, false))
+	b.Write(flacVorbisCommentBlock(comments))
+	return b.Bytes()
+}
 
-	// STREAMINFO block header: last-metadata-block flag (0x80) | type 0.
-	b.WriteByte(0x80) // last metadata block, type = STREAMINFO (0)
-	// 24-bit block length = 34 bytes.
-	b.Write([]byte{0x00, 0x00, 0x22})
+// flacStreaminfoBlock builds a STREAMINFO metadata block (4-byte header + 34-byte
+// payload). last sets the final-metadata-block flag. channels=1, bps=16, frame
+// sizes unknown, MD5 zeroed -- enough for audioduration and tag parsing.
+func flacStreaminfoBlock(sampleRate, totalSamples uint32, last bool) []byte {
+	var b bytes.Buffer
+	hdr := byte(0x00) // block type 0 = STREAMINFO
+	if last {
+		hdr |= 0x80
+	}
+	b.WriteByte(hdr)
+	b.Write([]byte{0x00, 0x00, 0x22}) // 24-bit block length = 34 bytes
 
-	// 34-byte STREAMINFO payload -- build via bit-packing.
 	var si [34]byte
-
-	// min/max block size: 4096 (2 bytes each, big-endian).
-	si[0] = 0x10
-	si[1] = 0x00
-	si[2] = 0x10
-	si[3] = 0x00
-
-	// min/max frame size: 0 (3 bytes each, meaning unknown).
-	// si[4..9] already zero.
-
-	// Pack sample_rate (20 bits), channels-1 (3 bits), bps-1 (5 bits),
-	// total_samples (36 bits) into si[10..17].
-	// channels=1 (stored as 0), bps=16 (stored as 15=0x0F).
-	sr := uint64(sampleRate)
-	ts := uint64(totalSamples)
-
-	// Bits 80-99 = sample_rate (20 bits) at byte offset 10.
-	// Bits 100-102 = channels-1 (3 bits).
-	// Bits 103-107 = bps-1 (5 bits).
-	// Bits 108-143 = total_samples (36 bits).
-	//
-	// Pack into bytes 10-17 (8 bytes).
-	pack := (sr << 44) | (0 << 41) | (uint64(15) << 36) | (ts & 0xFFFFFFFFF)
-	var packed [8]byte
-	binary.BigEndian.PutUint64(packed[:], pack)
-	copy(si[10:18], packed[:])
-	// si[18..33] = MD5, zeroed.
-
+	si[0], si[2] = 0x10, 0x10 // min/max block size: 4096 (big-endian)
+	// Pack sample_rate (20 bits), channels-1 (3 bits, =0), bps-1 (5 bits, =15),
+	// total_samples (36 bits) into bytes 10-17.
+	pack := (uint64(sampleRate) << 44) | (uint64(15) << 36) | (uint64(totalSamples) & 0xFFFFFFFFF)
+	binary.BigEndian.PutUint64(si[10:18], pack)
 	b.Write(si[:])
+	return b.Bytes()
+}
+
+// flacVorbisCommentBlock builds a VORBIS_COMMENT metadata block (type 4) marked
+// as the last block. The FLAC block-length header is 24-bit big-endian, but the
+// payload's own length prefixes are 32-bit little-endian (the Vorbis spec).
+func flacVorbisCommentBlock(comments map[string]string) []byte {
+	var p bytes.Buffer
+	writeLE32 := func(n int) {
+		var u [4]byte
+		binary.LittleEndian.PutUint32(u[:], uint32(n)) //nolint:gosec // test-fixture comment sizes are small and non-negative; no overflow
+		p.Write(u[:])
+	}
+	vendor := []byte("canticle-testutil")
+	writeLE32(len(vendor))
+	p.Write(vendor)
+	writeLE32(len(comments))
+	for k, v := range comments {
+		kv := []byte(k + "=" + v)
+		writeLE32(len(kv))
+		p.Write(kv)
+	}
+	payload := p.Bytes()
+
+	var b bytes.Buffer
+	b.WriteByte(0x84) // last-block flag (0x80) | type 4 (VORBIS_COMMENT)
+	n := len(payload)
+	b.Write([]byte{byte(n >> 16), byte(n >> 8), byte(n)}) //nolint:gosec // 24-bit length of a tiny test fixture; no overflow
+	b.Write(payload)
 	return b.Bytes()
 }
 
@@ -189,6 +219,16 @@ func GenerateFLAC(sampleRate, totalSamples uint32) []byte {
 func WriteFLACFile(dir, filename string, sampleRate, totalSamples uint32) error {
 	path := filepath.Join(dir, filename)
 	if err := os.WriteFile(path, GenerateFLAC(sampleRate, totalSamples), 0o644); err != nil { //nolint:gosec // test fixture file
+		return fmt.Errorf("testutil: write flac file %s: %w", path, err)
+	}
+	return nil
+}
+
+// WriteFLACFileWithComments writes a header-only FLAC fixture carrying the given
+// Vorbis comments (e.g. {"SYNCEDLYRICS": "[00:01.00]..."}) into dir.
+func WriteFLACFileWithComments(dir, filename string, sampleRate, totalSamples uint32, comments map[string]string) error {
+	path := filepath.Join(dir, filename)
+	if err := os.WriteFile(path, GenerateFLACExtended(sampleRate, totalSamples, comments), 0o644); err != nil { //nolint:gosec // test fixture file
 		return fmt.Errorf("testutil: write flac file %s: %w", path, err)
 	}
 	return nil
