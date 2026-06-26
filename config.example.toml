@@ -65,13 +65,15 @@ circuit_open_duration = 1800
 # Override with --outdir flag or MXLRC_OUTPUT_DIR env var (fetch mode only).
 dir = "lyrics"
 
-# Embedded (unsynced) lyrics handling (env: MXLRC_EMBEDDED_LYRICS; CLI:
-# --embedded-lyrics). One of:
+# Embedded lyrics handling (env: MXLRC_EMBEDDED_LYRICS; CLI: --embedded-lyrics).
+# One of:
 #   off     - ignore embedded lyrics (default)
 #   respect - skip fetching for files that already carry embedded lyrics
-#   extract - write embedded lyrics to a .txt sidecar (never overwriting an
-#             existing one), then skip fetching
-# Synced (SYLT) tags are intentionally not handled.
+#   extract - write embedded lyrics to a sidecar (never overwriting an existing
+#             one), then skip fetching. A Vorbis SYNCEDLYRICS comment with
+#             timestamped LRC text is written as a synced .lrc and preferred over
+#             unsynced lyrics, which are written as .txt.
+# ID3 SYLT and MP4 synced-lyric atoms are intentionally not handled.
 # embedded_lyrics = "off"
 
 # Bilingual interleaved output (env: MXLRC_BILINGUAL_OUTPUT). Default false.
