@@ -84,8 +84,26 @@ def test_classify_returns_every_class_in_both_maps():
     """
     from fastapi.testclient import TestClient
 
-    classes = ["Music", "Musical instrument", "Singing", "Speech"]
-    appmod._state["model"] = _StubModel()
+    # Dedicated stub: "Silence" scores 0.0 across ALL frames. _StubModel has no
+    # all-zero class, so on its own this test would pass even against an
+    # implementation that dropped zero-scored classes. The zero class makes the
+    # full-map contract actually testable: a thresholding/top-N change that omits
+    # "Silence" now fails the asserts below.
+    classes = ["Music", "Musical instrument", "Singing", "Speech", "Silence"]
+
+    class _ZeroClassModel:
+        def __call__(self, wav):
+            scores = np.array(
+                [
+                    [0.90, 0.10, 0.00, 0.20, 0.0],
+                    [0.80, 0.20, 0.70, 0.10, 0.0],
+                    [0.85, 0.15, 0.10, 0.05, 0.0],
+                ],
+                dtype=np.float32,
+            )
+            return _Scores(scores), None, None
+
+    appmod._state["model"] = _ZeroClassModel()
     appmod._state["classes"] = classes
 
     client = TestClient(appmod.app)
@@ -95,3 +113,6 @@ def test_classify_returns_every_class_in_both_maps():
     body = resp.json()
     assert set(body["mean"].keys()) == set(classes)
     assert set(body["max"].keys()) == set(classes)
+    # The all-zero class must survive in BOTH maps with value 0.0 - never dropped.
+    assert body["mean"]["Silence"] == 0.0
+    assert body["max"]["Silence"] == 0.0

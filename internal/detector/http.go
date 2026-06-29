@@ -44,13 +44,15 @@ type HTTPDetector struct {
 	mu                  sync.Mutex
 	lastInference       time.Time
 	validateOnce        sync.Once
-	// vocalBaseline is the set of configured vocal classes confirmed present in
-	// the first healthy response (one with a non-empty max map). The per-decision
-	// gate enforces presence of THESE classes, not the raw configured list, so a
-	// class the sidecar never emits (a config typo) is dropped once rather than
-	// failing every decision forever. Guarded by mu (written under the Detect lock).
-	vocalBaseline    []string
-	vocalBaselineSet bool
+	// vocalBaseline is the GROWING set of configured vocal classes that have been
+	// seen in at least one healthy response (one with a non-empty max map). It only
+	// ever grows toward the configured list: a class the sidecar never emits (a
+	// config typo / permanent contract mismatch) never enters it, so the gate keeps
+	// running on the classes that ARE sent; a class transiently absent from an early
+	// response is enforced from the moment it first appears (no permanent drop). The
+	// per-decision gate enforces presence of THESE classes. Guarded by mu (written
+	// under the Detect lock).
+	vocalBaseline []string
 }
 
 // NewHTTPDetector creates a Detector that posts audio samples to the classifier
@@ -257,19 +259,33 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 		// the new protocol, so it is logged at Error.
 		slog.Warn("detector: classifier returned no max map; vocal gate cannot run, treating as not-instrumental", "path", audioPath)
 	}
-	// Baseline-presence gate: on the first healthy response, record the configured
-	// vocal classes the sidecar actually returns (permanent mismatches dropped and
-	// logged once). On every later decision, a baseline class missing from a
-	// non-empty max map is a partial/contract-violating response - the absent class
-	// would silently contribute 0 to vocalPeak and weaken the gate - so fail safe
-	// to not-instrumental and surface it on every occurrence.
+	// Baseline-presence gate: grow the vocal baseline with whatever configured vocal
+	// classes this healthy response carries (the baseline only ever grows toward the
+	// configured list - never persisting an empty or first-response-partial snapshot).
+	// Then fail safe to not-instrumental when EITHER
+	//   (a) no configured vocal class has ever appeared in a non-empty max map - an
+	//       empty baseline would otherwise silently disable the vocal gate and let a
+	//       garbage/all-missing response read as instrumental, or
+	//   (b) a class already in the baseline is missing from this non-empty max map - a
+	//       partial/contract-violating response whose absent class would contribute 0
+	//       to vocalPeak and weaken the gate.
+	// Surfaced on every occurrence. A class the sidecar never emits (a config typo /
+	// permanent mismatch) simply never enters the baseline, so it never trips (b) and
+	// the gate keeps running on the classes the sidecar does send.
 	baselineComplete := true
 	if maxAvailable {
-		d.establishVocalBaseline(resp)
-		if missing := d.missingBaselineClasses(resp); len(missing) > 0 {
+		d.growVocalBaseline(resp)
+		switch {
+		case len(d.vocalBaseline) == 0:
 			baselineComplete = false
-			slog.Error("detector: vocal classes missing from a non-empty classifier max map; treating as not-instrumental",
-				"path", audioPath, "missing_classes", missing)
+			slog.Error("detector: no configured vocal class present in any non-empty classifier max map; vocal gate cannot run, treating as not-instrumental",
+				"path", audioPath)
+		default:
+			if missing := d.missingBaselineClasses(resp); len(missing) > 0 {
+				baselineComplete = false
+				slog.Error("detector: vocal classes missing from a non-empty classifier max map; treating as not-instrumental",
+					"path", audioPath, "missing_classes", missing)
+			}
 		}
 	}
 	instrumental := music >= d.minConfidence && maxAvailable && baselineComplete &&
@@ -296,8 +312,8 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 // instrumental (music-gate) class absent from the classifier's mean map. A
 // missing name silently contributes 0 to the music sum, so surface it loudly
 // rather than let a typo'd class quietly weaken the gate. Vocal-class presence is
-// NOT validated here: it is established per healthy response in
-// establishVocalBaseline and enforced on every decision in Detect.
+// NOT validated here: the baseline is grown per healthy response in
+// growVocalBaseline and enforced on every decision in Detect.
 func (d *HTTPDetector) warnUnknownClassesOnce(resp classifyResponse) {
 	d.validateOnce.Do(func() {
 		for _, c := range d.instrumentalClasses {
@@ -318,31 +334,24 @@ func (d *HTTPDetector) warnUnknownClassesOnce(resp classifyResponse) {
 	})
 }
 
-// establishVocalBaseline records, once from the first healthy response (one with a
-// non-empty max map), the configured vocal classes the sidecar actually returns.
-// A configured class absent from that first healthy response is a permanent
-// config/contract mismatch (e.g. a typo, or a class this sidecar never emits): it
-// is logged once and excluded from the baseline so the per-decision presence check
-// does not fail forever on a class the sidecar never sends. Caller holds d.mu.
-func (d *HTTPDetector) establishVocalBaseline(resp classifyResponse) {
-	if d.vocalBaselineSet {
-		return
-	}
-	baseline := make([]string, 0, len(d.vocalClasses))
-	var dropped []string
+// growVocalBaseline adds to the vocal baseline any configured vocal class that
+// appears in this healthy response (one with a non-empty max map) and is not
+// already recorded. The baseline only grows toward the configured list, so:
+//   - a class transiently absent from an early response is NOT branded permanently
+//     absent; it is enforced from the moment it first appears, and
+//   - a class the sidecar never emits (a config typo / permanent contract mismatch)
+//     never enters the baseline, so the per-decision presence check keeps running on
+//     the classes the sidecar actually sends instead of failing forever.
+//
+// This deliberately never persists an empty or first-response-partial snapshot:
+// the caller fails safe to not-instrumental while the baseline is still empty (see
+// the baseline-presence gate in Detect). Caller holds d.mu.
+func (d *HTTPDetector) growVocalBaseline(resp classifyResponse) {
 	for _, c := range d.vocalClasses {
-		if _, ok := resp.Max[c]; ok {
-			baseline = append(baseline, c)
-		} else {
-			dropped = append(dropped, c)
+		if _, ok := resp.Max[c]; ok && !slices.Contains(d.vocalBaseline, c) {
+			d.vocalBaseline = append(d.vocalBaseline, c)
 		}
 	}
-	if len(dropped) > 0 {
-		slog.Error("detector: configured vocal classes absent from first healthy classifier response; dropping from vocal baseline",
-			"classes", dropped)
-	}
-	d.vocalBaseline = baseline
-	d.vocalBaselineSet = true
 }
 
 // missingBaselineClasses returns the baseline vocal classes absent from this

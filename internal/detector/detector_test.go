@@ -757,8 +757,8 @@ func TestDetectPartialMaxMapDropsBaselineClassIsNotInstrumental(t *testing.T) {
 }
 
 // A configured vocal class the sidecar NEVER returns is a permanent config/contract
-// mismatch: it is dropped from the baseline (logged once) so the gate keeps running
-// on the classes the sidecar actually emits, rather than failing every decision.
+// mismatch: it never enters the growing baseline, so the gate keeps running on the
+// classes the sidecar actually emits, rather than failing every decision.
 func TestDetectPermanentlyAbsentVocalClassKeepsGateRunning(t *testing.T) {
 	audioPath := filepath.Join(t.TempDir(), "song.flac")
 	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
@@ -785,8 +785,106 @@ func TestDetectPermanentlyAbsentVocalClassKeepsGateRunning(t *testing.T) {
 			t.Fatalf("detect %d: %v", i, err)
 		}
 		if !res.Instrumental {
-			t.Fatalf("decision %d: a permanently-absent configured vocal class must be dropped from the baseline, not fail the gate", i)
+			t.Fatalf("decision %d: a permanently-absent configured vocal class must never enter the baseline, not fail the gate", i)
 		}
+	}
+}
+
+// CR #406: the FIRST non-empty max map must NOT be persisted as an authoritative
+// baseline. A first response carrying NONE of the configured vocal classes would
+// otherwise leave an empty baseline that silently disables the vocal gate (every
+// later missingBaselineClasses returns nothing), letting a high-music response read
+// as instrumental. An empty baseline must instead fail safe until a usable response
+// arrives, then recover.
+func TestDetectEmptyFirstMaxMapFailsSafeThenRecovers(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.05},
+			// First response: a non-empty max map with NO configured vocal class.
+			"max": map[string]float64{"Music": 1.0},
+		}
+		if calls.Add(1) >= 2 {
+			// Later response is usable: a configured vocal class appears (low peak).
+			resp["max"] = map[string]float64{"Music": 1.0, "Singing": 0.004}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Vocal music"}, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// First decision: empty baseline -> must fail safe to NOT instrumental despite high music.
+	first, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 1: %v", err)
+	}
+	if first.Instrumental {
+		t.Fatal("an empty vocal baseline (first max map carries no configured vocal class) must force NOT instrumental")
+	}
+	// Second decision: a configured vocal class now present -> baseline non-empty, gate runs -> instrumental.
+	second, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 2: %v", err)
+	}
+	if !second.Instrumental {
+		t.Fatalf("once a configured vocal class appears the gate should run; vocal_peak=%.3f", second.VocalConfidence)
+	}
+}
+
+// CR #406: a class transiently absent from an early response must NOT be branded
+// permanently absent. Once it first appears it joins the growing baseline and is
+// enforced thereafter, so a later response that drops it fails safe. (Contrast
+// TestDetectPermanentlyAbsentVocalClassKeepsGateRunning, where the class is NEVER
+// sent and so never enters the baseline.)
+func TestDetectLateAppearingVocalClassJoinsBaselineThenEnforced(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		max := map[string]float64{"Music": 1.0, "Singing": 0.004}
+		if n == 2 {
+			// "Vocal music" appears for the first time on call 2 (low peak) -> joins baseline.
+			max["Vocal music"] = 0.004
+		}
+		// call 3+ drops "Vocal music" again -> now a baseline class is missing.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.05},
+			"max":  max,
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Vocal music"}, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// Call 1: only Singing seen -> baseline {Singing}, complete -> instrumental.
+	if r, _ := d.Detect(context.Background(), audioPath); !r.Instrumental {
+		t.Fatal("call 1: baseline {Singing} complete, should be instrumental")
+	}
+	// Call 2: Vocal music appears -> baseline grows to {Singing, Vocal music}; still complete -> instrumental.
+	if r, _ := d.Detect(context.Background(), audioPath); !r.Instrumental {
+		t.Fatal("call 2: Vocal music present, baseline complete, should be instrumental")
+	}
+	// Call 3: Vocal music dropped -> now a baseline class is missing -> fail safe.
+	r, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 3: %v", err)
+	}
+	if r.Instrumental {
+		t.Fatal("call 3: a now-baseline vocal class (Vocal music) dropped from max must force NOT instrumental")
 	}
 }
 
