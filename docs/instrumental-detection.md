@@ -28,34 +28,48 @@ Two rules bound when it can act:
 
 ## The decision model (the core)
 
-A track is marked instrumental only when **both** gates pass. Either gate failing
-means "not instrumental", and the track is left as a normal miss.
+A track is marked instrumental only when **all three** gates pass. Any gate
+failing means "not instrumental", and the track is left as a normal miss.
 
 | Gate | Condition | Default |
 |------|-----------|---------|
 | **Music gate** | The **mean** over frames of the summed `instrumental_classes` probabilities is at least `min_confidence`. | `min_confidence = 0.90`, `instrumental_classes = ["Music", "Musical instrument"]` |
-| **Vocal gate** (#384) | The **peak** (max over frames) of *every* `vocal_classes` score stays **below** `vocal_max_confidence`. | `vocal_max_confidence = 0.03`, `vocal_classes` = the singing/vocal set below |
+| **Sung-vocal gate** (#384) | The **peak** (max over frames) of *every* `vocal_classes` score stays **below** `vocal_max_confidence`. | `vocal_max_confidence = 0.03`, `vocal_classes` = the singing/vocal set below |
+| **Speech gate** (#403) | The summed frame **mean** of the `speech_classes` stays **below** `speech_max_confidence`. | `speech_max_confidence = 0.20` (provisional), `speech_classes = ["Speech"]` |
 
-The default `vocal_classes` set is:
+The default `vocal_classes` (sung-vocal) set is:
 
 ```
-Singing, Speech, Vocal music, Choir, A capella, Chant, Rapping,
+Singing, Vocal music, Choir, A capella, Chant, Rapping,
 Child singing, Synthetic singing, Yodeling, Humming
 ```
 
-Note that `Speech` is included on purpose: a spoken-vocal-over-music track (an
-intro, a monologue over a bed) should not be marked instrumental.
+`Speech` is **no longer** in `vocal_classes`: as of #403 it is governed by its own
+**speech gate** on sustained presence. A track with brief incidental speech (a
+crowd sample, an announcer, a single line of dialogue over a bed) should still be
+markable instrumental, whereas a *sustained* spoken-word track should not. The
+peak-based sung-vocal gate could not tell those apart (both produce a high single
+peak); the mean-based speech gate can. Any legacy config that still lists
+`Speech` in `vocal_classes` is **de-duplicated** at detector construction - the
+class is removed from the effective peak set so it is governed solely by the
+speech (mean) gate, delivering the fix without requiring you to edit your config.
 
-### Why mean for music but max for vocals
+### Why mean for music, max for sung vocals, and mean for speech
 
 This asymmetry is the heart of the design:
 
 - **Music** is gated on the frame **mean**, because instrumental backing is
   present throughout the track - a sustained, track-wide property.
-- **Vocals** are gated on the frame **max**, because singing can be *brief*. A
-  short sung passage is diluted to near-nothing by the mean but preserved by the
-  max. Gating vocals on their loudest single moment is what stops an
+- **Sung vocals** are gated on the frame **max**, because singing can be *brief*.
+  A short sung passage is diluted to near-nothing by the mean but preserved by
+  the max. Gating sung vocals on their loudest single moment is what stops an
   otherwise-instrumental aria from slipping through.
+- **Speech** is gated on the frame **mean**, because it models *sustained*
+  presence. A brief announcer or crowd transient has a high single peak but a
+  near-zero mean; a spoken-word track (monologue, narration over a bed) has a
+  high mean. Mean is robust to a single loud transient where a raised peak
+  threshold would not be, so brief incidental speech no longer wrongly blocks an
+  instrumental marking while sustained spoken word still does.
 
 ### Spread sampling
 
@@ -96,6 +110,15 @@ classes of each class's max-over-frames):
 Instrumentals top out near `0.021` and vocals floor near `0.059` - roughly a 3x
 margin - so `0.03` sits comfortably between them.
 
+The speech gate's `speech_max_confidence = 0.20` default (#403) is a different
+kind of value: it is a **provisional placeholder**, chosen conservatively low
+(biased toward "not instrumental", preserving lyric protection) pending a
+#384-style calibration sweep over the audit set to pin the final constant. Because
+the key is configurable, that calibration refines the value without a code change.
+The acceptance criterion - that incidental-speech instrumentals get re-confirmed -
+is satisfied by the **post-calibration** validation gate (re-running the audit
+set), not by the placeholder itself.
+
 ## Sidecar setup
 
 The classifier is a small YAMNet HTTP service. Canticle does not publish an image
@@ -104,9 +127,15 @@ for it; you build it on the host from the vendored source.
 - **Source:** `deploy/yamnet-detector/` in this repo (Dockerfile + FastAPI app).
 - **Response contract:** `POST /classify` returns
   `{"mean": {<class>: <prob>, ...}, "max": {<class>: <prob>, ...}}` - both the
-  mean and the max-over-frames reduction for every AudioSet class. The vocal gate
-  needs the `max` map; a legacy mean-only sidecar degrades safely to
-  never-instrumental rather than producing wrong markers.
+  mean and the max-over-frames reduction for **every** AudioSet class (a full map,
+  no thresholding or top-N). The vocal gate needs the `max` map; a legacy mean-only
+  sidecar degrades safely to never-instrumental rather than producing wrong
+  markers. The full-map guarantee matters: Canticle records the vocal classes a
+  healthy response carries and, on every later decision, treats a configured vocal
+  class **missing** from a non-empty `max` map as a partial/contract-violating
+  response and fails safe to not-instrumental (see Operations below). A custom
+  sidecar that omits zero-scored classes would trip this on normal tracks, so any
+  replacement must honor the full-map contract.
 - **Wire it up:** point `classifier_url` at the service, e.g.
   `http://yamnet:8080`.
 
@@ -147,8 +176,10 @@ All keys live under `[instrumental_detector]`; each has an
 | `spread_samples` | `6` | Windows spread across the track. `< 2` disables spreading. |
 | `min_confidence` | `0.90` | Music-gate threshold (mean). Values outside (0, 1] reset to `0.90`. |
 | `instrumental_classes` | `["Music", "Musical instrument"]` | Classes summed for the music gate. |
-| `vocal_max_confidence` | `0.03` | Vocal-gate threshold (peak). Values outside (0, 1] reset to `0.03`. |
-| `vocal_classes` | (the singing/vocal set above) | Classes whose peak blocks an instrumental marking. |
+| `vocal_max_confidence` | `0.03` | Sung-vocal-gate threshold (peak). Values outside (0, 1] reset to `0.03`. |
+| `vocal_classes` | (the singing/vocal set above) | Sung-vocal classes whose peak blocks an instrumental marking. |
+| `speech_max_confidence` | `0.20` (provisional) | Speech-gate threshold (summed mean). Values outside (0, 1] reset to `0.20`. |
+| `speech_classes` | `["Speech"]` | Speech classes gated on sustained mean (not peak). |
 | `cooldown_seconds` | `5` | Minimum gap between inference calls. `0` disables. |
 
 **The defaults are the calibrated values - do not change the thresholds without a
@@ -161,6 +192,11 @@ If you do tune:
   tracks pass as instrumental (more false instrumentals - the dangerous
   direction). **Lowering** it marks fewer tracks instrumental (safer, but you may
   re-query genuine instrumentals).
+- **`speech_max_confidence`** controls the speech gate the same way, on the
+  summed Speech **mean**. Its `0.20` default is provisional (see Calibration
+  evidence): raising it tolerates more sustained speech as instrumental; lowering
+  it blocks instrumental marking on less speech. Pin it from a calibration sweep
+  before relying on the exact value.
 - **`min_confidence`** rarely needs changing; lowering it admits non-music audio
   (field recordings, spoken word) as "instrumental".
 - **`spread_samples`** trades inference cost for coverage. Fewer windows risks
@@ -170,8 +206,8 @@ If you do tune:
 ## Operations and troubleshooting
 
 The decision is logged. Look for the detector decision line, which reports the
-computed `music_sum`, the `vocal_peak`, and the resulting verdict, so you can see
-*why* a track was or was not marked.
+computed `music_sum`, the `vocal_peak`, the `speech_mean`, and the resulting
+verdict, so you can see *why* a track was or was not marked.
 
 - **The borderline band.** A `vocal_peak` of roughly `0.03-0.05` is genuinely
   mixed material (quiet backing vocals, sparse vocal samples). The default
@@ -179,6 +215,30 @@ computed `music_sum`, the `vocal_peak`, and the resulting verdict, so you can se
 - **A false instrumental** (a vocal track wrongly marked) usually means a vocal
   that the sample under-weighted - check that `ffprobe` is present and spread
   sampling is actually running (a single-window fallback is the common culprit).
+- **Speech vs sung vocals are distinct failure modes.** A spoken-word track
+  wrongly *not* marked, or an incidental-speech instrumental wrongly *blocked*,
+  is the **speech gate** (`speech_mean` vs `speech_max_confidence`), not the
+  sung-vocal gate (`vocal_peak`). Read `speech_mean` in the decision line: a high
+  value is sustained speech (correctly blocked); a near-zero value with a high
+  Speech peak is brief incidental speech (correctly allowed through the now-split
+  gate). Tune `speech_max_confidence`, not `vocal_max_confidence`, for these.
+- **Partial classifier responses.** A non-empty `max` map that omits a vocal class
+  the sidecar normally returns is a contract violation (a truncated/corrupt
+  response): the absent class would silently contribute 0 to `vocal_peak` and
+  weaken the gate, so the detector treats that decision as **not instrumental** and
+  logs `detector: vocal classes missing from a non-empty classifier max map` at
+  `Error` on **every** occurrence (not once per process). A configured vocal class
+  the sidecar *never* returns is instead a permanent config/contract mismatch: it
+  is logged once and dropped from the baseline so the gate keeps running on the
+  classes the sidecar does emit. Note the deliberate severity split: a *fully*
+  absent `max` map is the expected legacy mean-only degradation and stays at
+  `Warn`, while a present-but-partial map is the unexpected violation at `Error`.
+  This fail-safe is scoped to the partial-response case only - it does not explain
+  the conservative `0.03-0.05` borderline band (by design) or other separately
+  tracked refinements (cross-version model drift). `Speech` activation on
+  non-lyrical audio is now handled by the dedicated sustained-mean speech gate
+  (#403). Persisting per-decision telemetry (scores + model version) for
+  auditability is a separate follow-up.
 - **Re-classifying / clearing stale markers.** After changing thresholds or
   fixing the sidecar, force a re-check of affected tracks with `--update` (a full
   re-fetch). Instrumental markers are otherwise sticky - `--upgrade` skips them

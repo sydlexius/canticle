@@ -32,6 +32,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE", "MXLRC_INSTRUMENTAL_DETECTOR_CLASSES",
 		"MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES",
 		"MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE", "MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES",
+		"MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES", "MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE",
 		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH",
 		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
 		"MXLRC_QUEUE_RANDOMIZE",
@@ -1470,8 +1471,100 @@ func TestLoad_InstrumentalDetectorVocalGateDefaults(t *testing.T) {
 	if len(cfg.InstrumentalDetector.VocalClasses) == 0 || cfg.InstrumentalDetector.VocalClasses[0] != "Singing" {
 		t.Errorf("VocalClasses = %v; want non-empty starting with Singing", cfg.InstrumentalDetector.VocalClasses)
 	}
+	for _, c := range cfg.InstrumentalDetector.VocalClasses {
+		if c == "Speech" {
+			t.Errorf("VocalClasses = %v; Speech must not be in the default sung-vocal set (#403)", cfg.InstrumentalDetector.VocalClasses)
+		}
+	}
 	if cfg.InstrumentalDetector.FFprobePath != "" {
 		t.Errorf("FFprobePath = %q; want empty (auto-discover)", cfg.InstrumentalDetector.FFprobePath)
+	}
+}
+
+// TestLoad_InstrumentalDetectorSpeechGateDefaults verifies the speech-gate
+// defaults (#403): speech_classes ["Speech"] and the provisional
+// speech_max_confidence 0.20.
+func TestLoad_InstrumentalDetectorSpeechGateDefaults(t *testing.T) {
+	isolateEnv(t)
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.SpeechMaxConfidence != 0.20 {
+		t.Errorf("SpeechMaxConfidence = %v; want 0.20", cfg.InstrumentalDetector.SpeechMaxConfidence)
+	}
+	if len(cfg.InstrumentalDetector.SpeechClasses) != 1 || cfg.InstrumentalDetector.SpeechClasses[0] != "Speech" {
+		t.Errorf("SpeechClasses = %v; want [Speech]", cfg.InstrumentalDetector.SpeechClasses)
+	}
+}
+
+// TestLoad_InstrumentalDetectorEnvSpeechGate verifies the speech-gate env
+// overrides and the invalid-value fallbacks (mirrors the vocal-gate test).
+func TestLoad_InstrumentalDetectorEnvSpeechGate(t *testing.T) {
+	t.Run("speech classes CSV", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES", "Speech,Narration")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.InstrumentalDetector.SpeechClasses) != 2 || cfg.InstrumentalDetector.SpeechClasses[1] != "Narration" {
+			t.Errorf("SpeechClasses = %v; want [Speech Narration]", cfg.InstrumentalDetector.SpeechClasses)
+		}
+	})
+	t.Run("speech max confidence valid", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE", "0.35")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.SpeechMaxConfidence != 0.35 {
+			t.Errorf("SpeechMaxConfidence = %v; want 0.35", cfg.InstrumentalDetector.SpeechMaxConfidence)
+		}
+	})
+	t.Run("speech max confidence out of range ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE", "1.5")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.SpeechMaxConfidence != 0.20 {
+			t.Errorf("SpeechMaxConfidence = %v; want 0.20 (invalid env ignored)", cfg.InstrumentalDetector.SpeechMaxConfidence)
+		}
+	})
+	t.Run("speech max confidence non-numeric ignored", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE", "notanumber")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.InstrumentalDetector.SpeechMaxConfidence != 0.20 {
+			t.Errorf("SpeechMaxConfidence = %v; want 0.20 (non-numeric env ignored)", cfg.InstrumentalDetector.SpeechMaxConfidence)
+		}
+	})
+}
+
+// TestLoad_InstrumentalDetectorSpeechGateFileReDefaults verifies that a config
+// file leaving the speech-gate fields blank/zero restores the built-in defaults.
+func TestLoad_InstrumentalDetectorSpeechGateFileReDefaults(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := "[instrumental_detector]\nclassifier_url = \"http://yamnet:8080\"\nspeech_max_confidence = 0\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstrumentalDetector.SpeechMaxConfidence != 0.20 {
+		t.Errorf("SpeechMaxConfidence = %v; want 0.20 (re-defaulted from 0)", cfg.InstrumentalDetector.SpeechMaxConfidence)
+	}
+	if len(cfg.InstrumentalDetector.SpeechClasses) == 0 {
+		t.Error("SpeechClasses empty; want re-defaulted list")
 	}
 }
 

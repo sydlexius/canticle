@@ -43,18 +43,42 @@ const (
 // way the instrumental-class default is duplicated.
 const defaultVocalMaxConfidence = 0.03
 
+// defaultSpeechMaxConfidence is the default summed-frame-MEAN threshold for the
+// Speech gate: a track is never marked instrumental when the summed mean of the
+// SpeechClasses reaches or exceeds it. Speech is gated on sustained presence
+// (mean) rather than peak so a brief incidental sample (crowd, announcer, a line
+// of dialog) -- high peak, near-zero mean -- no longer blocks an instrumental
+// marking, while a sustained spoken-word track (high mean) still does.
+//
+// PROVISIONAL: this value is a conservatively low placeholder biased toward
+// not-instrumental (preserving lyric protection), pending a #384-style
+// calibration sweep over the audit set to pin the final constant. The
+// acceptance criterion (incidental-speech instrumentals get re-confirmed) is
+// satisfied by that post-calibration validation gate, not by this placeholder.
+const defaultSpeechMaxConfidence = 0.20
+
 // defaultVocalClasses is cloned per call in NewHTTPDetector (never assigned
-// directly) so each detector owns its slice. Speech is included so spoken-vocal
-// tracks (over music) are not marked instrumental.
-var defaultVocalClasses = []string{"Singing", "Speech", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"}
+// directly) so each detector owns its slice. These are the SUNG-vocal classes,
+// gated on PEAK (max-over-frames). Speech is deliberately NOT here: it is gated
+// separately on sustained MEAN via defaultSpeechClasses (see the Speech gate in
+// Detect) so brief incidental speech does not block an instrumental marking.
+var defaultVocalClasses = []string{"Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"}
+
+// defaultSpeechClasses is cloned per call in NewHTTPDetector (never assigned
+// directly) so each detector owns its slice. These classes are gated on summed
+// frame MEAN (sustained presence) against SpeechMaxConfidence, separate from the
+// sung-vocal peak gate.
+var defaultSpeechClasses = []string{"Speech"}
 
 // Result describes an instrumental detection decision.
 type Result struct {
-	// Instrumental is true only when the summed mean probability of the
-	// configured InstrumentalClasses meets or exceeds MinConfidence (the music
-	// gate) AND the peak (max-over-frames) of every configured VocalClass stays
-	// below VocalMaxConfidence (the vocal gate). Any doubt resolves to false: a
-	// false instrumental suppresses a real lyrics fetch.
+	// Instrumental is true only when all three gates pass: the summed mean
+	// probability of the configured InstrumentalClasses meets or exceeds
+	// MinConfidence (the music gate) AND the peak (max-over-frames) of every
+	// configured VocalClass stays below VocalMaxConfidence (the sung-vocal peak
+	// gate) AND the summed frame mean of the configured SpeechClasses stays below
+	// SpeechMaxConfidence (the speech gate). Any doubt resolves to false: a false
+	// instrumental suppresses a real lyrics fetch.
 	Instrumental bool
 	// Confidence is the summed instrumental-class MEAN probability (the music
 	// score) for the classified sample.
@@ -63,6 +87,10 @@ type Result struct {
 	// VocalClasses of their max-over-frames value). A high value means vocals
 	// were detected somewhere in the sample.
 	VocalConfidence float64
+	// SpeechConfidence is the summed frame-MEAN of the configured SpeechClasses
+	// (the speech score). A high value means speech is sustained across the
+	// sample (a spoken-word track), as opposed to a brief incidental transient.
+	SpeechConfidence float64
 	// Classes is the per-class MEAN probability map from the classified sample,
 	// retained for debugging and observability.
 	Classes map[string]float64
@@ -74,22 +102,35 @@ type Detector interface {
 }
 
 // Config holds the construction parameters for an HTTPDetector. Zero values for
-// SampleDurationSeconds, MinConfidence, InstrumentalClasses, VocalClasses, and
-// VocalMaxConfidence are replaced with built-in defaults by NewHTTPDetector;
-// CooldownSeconds < 0 is clamped to 0. SpreadSamples is used as given (0 or 1
-// means a single contiguous window); the config layer defaults an omitted key to
-// 6. FFprobePath empty means auto-discover (sibling of ffmpeg, then PATH).
+// SampleDurationSeconds, MinConfidence, InstrumentalClasses, VocalClasses,
+// VocalMaxConfidence, SpeechClasses, and SpeechMaxConfidence are replaced with
+// built-in defaults by NewHTTPDetector; CooldownSeconds < 0 is clamped to 0.
+// SpreadSamples is used as given (0 or 1 means a single contiguous window); the
+// config layer defaults an omitted key to 6. FFprobePath empty means
+// auto-discover (sibling of ffmpeg, then PATH).
 type Config struct {
 	ClassifierURL         string
 	SampleDurationSeconds int
 	MinConfidence         float64
 	InstrumentalClasses   []string
-	VocalClasses          []string
-	VocalMaxConfidence    float64
-	SpreadSamples         int
-	FFmpegPath            string
-	FFprobePath           string
-	CooldownSeconds       int
+	// VocalClasses are the SUNG-vocal AudioSet classes gated on PEAK
+	// (max-over-frames) against VocalMaxConfidence. A class also listed in
+	// SpeechClasses is de-duplicated out of the effective vocal peak set by
+	// NewHTTPDetector (Speech is governed solely by the mean-based speech gate).
+	VocalClasses       []string
+	VocalMaxConfidence float64
+	// SpeechClasses are gated on summed frame MEAN (sustained presence) against
+	// SpeechMaxConfidence, separate from the sung-vocal peak gate, so brief
+	// incidental speech (a high peak with near-zero mean) does not block an
+	// instrumental marking while sustained spoken word (high mean) still does.
+	SpeechClasses []string
+	// SpeechMaxConfidence is the summed-frame-MEAN ceiling for the speech gate;
+	// values outside (0, 1] reset to defaultSpeechMaxConfidence.
+	SpeechMaxConfidence float64
+	SpreadSamples       int
+	FFmpegPath          string
+	FFprobePath         string
+	CooldownSeconds     int
 }
 
 // clampSampleDuration clamps d to [minSampleDurationSeconds, maxSampleDurationSeconds].

@@ -1130,6 +1130,8 @@ var settingsLabels = map[string]string{
 	"instrumental_detector.instrumental_classes":    "Sounds that count as instrumental",
 	"instrumental_detector.vocal_classes":           "Vocal sounds that rule out instrumental",
 	"instrumental_detector.vocal_max_confidence":    "Vocal-peak limit to still count as instrumental (0-1)",
+	"instrumental_detector.speech_classes":          "Speech sounds gated on sustained presence, not brief peaks",
+	"instrumental_detector.speech_max_confidence":   "Sustained-speech limit to still count as instrumental (0-1)",
 	"instrumental_detector.spread_samples":          "Number of samples taken across the track",
 	"instrumental_detector.ffprobe_path":            "ffprobe program location",
 	"instrumental_detector.cooldown_seconds":        "Wait between detector checks (seconds)",

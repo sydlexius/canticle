@@ -332,16 +332,34 @@ type InstrumentalDetectorConfig struct {
 	// Default 5. A value of 0 disables the cooldown.
 	// Override: MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS.
 	CooldownSeconds int `toml:"cooldown_seconds"`
-	// VocalClasses is the list of AudioSet class names whose PEAK (max-over-frames)
-	// score gates the instrumental decision: a track is never marked instrumental
-	// when any of these peaks at or above VocalMaxConfidence. Default is the
-	// verified singing/vocal set. Override: MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES (CSV).
+	// VocalClasses is the list of SUNG-vocal AudioSet class names whose PEAK
+	// (max-over-frames) score gates the instrumental decision: a track is never
+	// marked instrumental when any of these peaks at or above VocalMaxConfidence.
+	// Default is the verified singing/vocal set (Speech is NOT included -- it is
+	// gated separately on sustained mean, see SpeechClasses). A class also listed
+	// in SpeechClasses is de-duplicated out of the effective peak set at detector
+	// construction. Override: MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES (CSV).
 	VocalClasses []string `toml:"vocal_classes"`
-	// VocalMaxConfidence is the maximum tolerated vocal-class peak before a track
-	// is excluded from being marked instrumental. Conservative (biased toward
-	// "not instrumental"). Values outside (0, 1] reset to the default 0.03.
+	// VocalMaxConfidence is the maximum tolerated sung-vocal-class peak before a
+	// track is excluded from being marked instrumental. Conservative (biased
+	// toward "not instrumental"). Values outside (0, 1] reset to the default 0.03.
 	// Override: MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE.
 	VocalMaxConfidence float64 `toml:"vocal_max_confidence"`
+	// SpeechClasses is the list of AudioSet class names gated on SUSTAINED
+	// presence -- their summed frame MEAN (not peak) -- against
+	// SpeechMaxConfidence. This is a separate gate from the sung-vocal peak gate
+	// so brief incidental speech (crowd, announcer, a line of dialog: high peak,
+	// near-zero mean) no longer blocks an instrumental marking, while sustained
+	// spoken word (high mean) still does. Default ["Speech"].
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES (CSV).
+	SpeechClasses []string `toml:"speech_classes"`
+	// SpeechMaxConfidence is the maximum tolerated summed Speech-class frame MEAN
+	// before a track is excluded from being marked instrumental. Conservative
+	// (biased toward "not instrumental"). Values outside (0, 1] reset to the
+	// default 0.20. The default is a PROVISIONAL placeholder pending a #384-style
+	// calibration sweep; because the key is configurable, calibration refines it
+	// without a code change. Override: MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE.
+	SpeechMaxConfidence float64 `toml:"speech_max_confidence"`
 	// SpreadSamples is the number of short segments evenly distributed across the
 	// track and concatenated into one classifier sample, so late-entering vocals
 	// are captured. Total sampled audio stays SampleDurationSeconds; each segment
@@ -396,6 +414,13 @@ const guardThresholdDefault = 0.20
 // calibration sweep over the full instrumental-marked corpus (184/352 flipped,
 // 0 known-vocal false-positives). Conservative: biased toward "not instrumental".
 const detectorVocalMaxConfidenceDefault = 0.03
+
+// detectorSpeechMaxConfidenceDefault is the default summed-frame-MEAN threshold
+// for the instrumental detector's speech gate (sustained spoken-word presence).
+// PROVISIONAL: a conservatively low placeholder biased toward "not instrumental",
+// pending a #384-style calibration sweep to pin the final value. Mirrors the
+// detector package's defaultSpeechMaxConfidence by convention.
+const detectorSpeechMaxConfidenceDefault = 0.20
 
 // QueueConfig holds work-queue behavior settings.
 type QueueConfig struct {
@@ -463,6 +488,8 @@ func defaults() Config {
 			InstrumentalClasses:   []string{"Music", "Musical instrument"},
 			VocalClasses:          []string{"Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"},
 			VocalMaxConfidence:    detectorVocalMaxConfidenceDefault,
+			SpeechClasses:         []string{"Speech"},
+			SpeechMaxConfidence:   detectorSpeechMaxConfidenceDefault,
 			SpreadSamples:         6,
 			CooldownSeconds:       5,
 		},
@@ -566,6 +593,12 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			}
 			if cfg.InstrumentalDetector.VocalMaxConfidence <= 0 || cfg.InstrumentalDetector.VocalMaxConfidence > 1 {
 				cfg.InstrumentalDetector.VocalMaxConfidence = d.InstrumentalDetector.VocalMaxConfidence
+			}
+			if len(cfg.InstrumentalDetector.SpeechClasses) == 0 {
+				cfg.InstrumentalDetector.SpeechClasses = d.InstrumentalDetector.SpeechClasses
+			}
+			if cfg.InstrumentalDetector.SpeechMaxConfidence <= 0 || cfg.InstrumentalDetector.SpeechMaxConfidence > 1 {
+				cfg.InstrumentalDetector.SpeechMaxConfidence = d.InstrumentalDetector.SpeechMaxConfidence
 			}
 			// SpreadSamples is intentionally NOT re-defaulted: defaults() seeds 6 and
 			// the TOML decode preserves it when the key is omitted, so an explicit
@@ -680,7 +713,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -1039,6 +1072,19 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.InstrumentalDetector.VocalMaxConfidence = n
 			applied["instrumental_detector.vocal_max_confidence"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES"); v != "" {
+		cfg.InstrumentalDetector.SpeechClasses = splitCSV(v)
+		applied["instrumental_detector.speech_classes"] = true
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || n <= 0 || n > 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE", "value", v, "current", cfg.InstrumentalDetector.SpeechMaxConfidence) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.SpeechMaxConfidence = n
+			applied["instrumental_detector.speech_max_confidence"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES"); v != "" {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 )
 
@@ -709,6 +710,184 @@ func TestDetectMissingMaxMapIsNotInstrumental(t *testing.T) {
 	}
 }
 
+// A non-empty max map that DROPS a baseline vocal class (a class present in the
+// first healthy response) is a partial/contract-violating response and must fail
+// safe to NOT instrumental on that decision - a missing class otherwise silently
+// contributes 0 and weakens the vocal gate (the #402 production signature).
+func TestDetectPartialMaxMapDropsBaselineClassIsNotInstrumental(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.05, "Singing": 0.001, "Vocal music": 0.001},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.004, "Vocal music": 0.003},
+		}
+		if calls.Add(1) >= 2 {
+			// Partial response: the "Vocal music" baseline class is dropped from max.
+			resp["max"] = map[string]float64{"Music": 1.0, "Singing": 0.004}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Vocal music"}, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// First (healthy) decision establishes the baseline {Singing, Vocal music} and is instrumental.
+	first, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 1: %v", err)
+	}
+	if !first.Instrumental {
+		t.Fatalf("first healthy decision must be instrumental; vocal_peak=%.3f", first.VocalConfidence)
+	}
+	// Second decision drops the Speech baseline class -> partial response -> fail safe.
+	second, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 2: %v", err)
+	}
+	if second.Instrumental {
+		t.Fatal("a baseline vocal class missing from a non-empty max map must force NOT instrumental")
+	}
+}
+
+// A configured vocal class the sidecar NEVER returns is a permanent config/contract
+// mismatch: it never enters the growing baseline, so the gate keeps running on the
+// classes the sidecar actually emits, rather than failing every decision.
+func TestDetectPermanentlyAbsentVocalClassKeepsGateRunning(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// "Yodeling" is configured but never present in max.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.05},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.004, "Speech": 0.003},
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Speech", "Yodeling"}, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// Two decisions: the permanently-absent "Yodeling" must not force NOT-instrumental.
+	for i := 0; i < 2; i++ {
+		res, err := d.Detect(context.Background(), audioPath)
+		if err != nil {
+			t.Fatalf("detect %d: %v", i, err)
+		}
+		if !res.Instrumental {
+			t.Fatalf("decision %d: a permanently-absent configured vocal class must never enter the baseline, not fail the gate", i)
+		}
+	}
+}
+
+// CR #406: the FIRST non-empty max map must NOT be persisted as an authoritative
+// baseline. A first response carrying NONE of the configured vocal classes would
+// otherwise leave an empty baseline that silently disables the vocal gate (every
+// later missingBaselineClasses returns nothing), letting a high-music response read
+// as instrumental. An empty baseline must instead fail safe until a usable response
+// arrives, then recover.
+func TestDetectEmptyFirstMaxMapFailsSafeThenRecovers(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.05},
+			// First response: a non-empty max map with NO configured vocal class.
+			"max": map[string]float64{"Music": 1.0},
+		}
+		if calls.Add(1) >= 2 {
+			// Later response is usable: a configured vocal class appears (low peak).
+			resp["max"] = map[string]float64{"Music": 1.0, "Singing": 0.004}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Vocal music"}, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// First decision: empty baseline -> must fail safe to NOT instrumental despite high music.
+	first, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 1: %v", err)
+	}
+	if first.Instrumental {
+		t.Fatal("an empty vocal baseline (first max map carries no configured vocal class) must force NOT instrumental")
+	}
+	// Second decision: a configured vocal class now present -> baseline non-empty, gate runs -> instrumental.
+	second, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 2: %v", err)
+	}
+	if !second.Instrumental {
+		t.Fatalf("once a configured vocal class appears the gate should run; vocal_peak=%.3f", second.VocalConfidence)
+	}
+}
+
+// CR #406: a class transiently absent from an early response must NOT be branded
+// permanently absent. Once it first appears it joins the growing baseline and is
+// enforced thereafter, so a later response that drops it fails safe. (Contrast
+// TestDetectPermanentlyAbsentVocalClassKeepsGateRunning, where the class is NEVER
+// sent and so never enters the baseline.)
+func TestDetectLateAppearingVocalClassJoinsBaselineThenEnforced(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		max := map[string]float64{"Music": 1.0, "Singing": 0.004}
+		if n == 2 {
+			// "Vocal music" appears for the first time on call 2 (low peak) -> joins baseline.
+			max["Vocal music"] = 0.004
+		}
+		// call 3+ drops "Vocal music" again -> now a baseline class is missing.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.05},
+			"max":  max,
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Vocal music"}, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// Call 1: only Singing seen -> baseline {Singing}, complete -> instrumental.
+	if r, _ := d.Detect(context.Background(), audioPath); !r.Instrumental {
+		t.Fatal("call 1: baseline {Singing} complete, should be instrumental")
+	}
+	// Call 2: Vocal music appears -> baseline grows to {Singing, Vocal music}; still complete -> instrumental.
+	if r, _ := d.Detect(context.Background(), audioPath); !r.Instrumental {
+		t.Fatal("call 2: Vocal music present, baseline complete, should be instrumental")
+	}
+	// Call 3: Vocal music dropped -> now a baseline class is missing -> fail safe.
+	r, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect 3: %v", err)
+	}
+	if r.Instrumental {
+		t.Fatal("call 3: a now-baseline vocal class (Vocal music) dropped from max must force NOT instrumental")
+	}
+}
+
 func TestFFmpegSpreadSampleArgs(t *testing.T) {
 	got := ffmpegSpreadSampleArgs("song.flac", "out.wav", "between(t,1.00,6.00)+between(t,7.00,12.00)")
 	// The select expr MUST be wrapped in literal single quotes: ffmpeg's filter
@@ -772,6 +951,10 @@ func TestNewHTTPDetectorDefaultsVocalGate(t *testing.T) {
 	if len(d.vocalClasses) == 0 || d.vocalClasses[0] != "Singing" {
 		t.Errorf("vocalClasses = %v; want defaulted list starting with Singing", d.vocalClasses)
 	}
+	// Speech is NOT in the default sung-vocal peak set (it is gated separately).
+	if slices.Contains(d.vocalClasses, "Speech") {
+		t.Errorf("vocalClasses = %v; Speech must not be in the sung-vocal peak set", d.vocalClasses)
+	}
 	// Out-of-range vocalMaxConfidence resets to the default, mirroring minConfidence.
 	d2, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t), VocalMaxConfidence: 1.5})
 	if err != nil {
@@ -779,5 +962,185 @@ func TestNewHTTPDetectorDefaultsVocalGate(t *testing.T) {
 	}
 	if d2.vocalMaxConfidence != 0.03 {
 		t.Errorf("vocalMaxConfidence = %v; want 0.03 (out-of-range reset)", d2.vocalMaxConfidence)
+	}
+}
+
+// TestNewHTTPDetectorDefaultsSpeechGate mirrors the vocal-gate constructor test:
+// a minimal Config yields a working speech gate, and an out-of-range
+// SpeechMaxConfidence resets to the default.
+func TestNewHTTPDetectorDefaultsSpeechGate(t *testing.T) {
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t)})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if d.speechMaxConfidence != defaultSpeechMaxConfidence {
+		t.Errorf("speechMaxConfidence = %v; want %v (defaulted)", d.speechMaxConfidence, defaultSpeechMaxConfidence)
+	}
+	if len(d.speechClasses) != 1 || d.speechClasses[0] != "Speech" {
+		t.Errorf("speechClasses = %v; want [Speech] (defaulted)", d.speechClasses)
+	}
+	// Out-of-range SpeechMaxConfidence resets to the default.
+	d2, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t), SpeechMaxConfidence: 1.5})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if d2.speechMaxConfidence != defaultSpeechMaxConfidence {
+		t.Errorf("speechMaxConfidence = %v; want %v (out-of-range reset)", d2.speechMaxConfidence, defaultSpeechMaxConfidence)
+	}
+}
+
+// TestConstructorDeDupsSpeechFromVocalClasses asserts the backward-compat de-dup:
+// a legacy config that still lists "Speech" in VocalClasses has it removed from
+// the effective sung-vocal peak set, so Speech is governed solely by the
+// sustained-mean speech gate.
+func TestConstructorDeDupsSpeechFromVocalClasses(t *testing.T) {
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t),
+		VocalClasses:  []string{"Singing", "Speech"},
+		SpeechClasses: []string{"Speech"}})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if slices.Contains(d.vocalClasses, "Speech") {
+		t.Errorf("vocalClasses = %v; Speech must be de-duplicated out of the peak set", d.vocalClasses)
+	}
+	if !slices.Contains(d.vocalClasses, "Singing") {
+		t.Errorf("vocalClasses = %v; want Singing retained", d.vocalClasses)
+	}
+}
+
+// TestSpeechBriefPeakLowMeanIsInstrumental: a brief incidental Speech transient
+// (high PEAK, near-zero MEAN) over high music with no sung vocals is now
+// instrumental -- the false-negative the gate split fixes.
+func TestSpeechBriefPeakLowMeanIsInstrumental(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			// Speech peaks high once (a shouted word) but its sustained mean is
+			// near zero; no sung vocals.
+			"mean": map[string]float64{"Music": 0.93, "Musical instrument": 0.04, "Speech": 0.01, "Singing": 0.001},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.01, "Speech": 0.85},
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing"}, VocalMaxConfidence: 0.05,
+		SpeechClasses: []string{"Speech"}, SpeechMaxConfidence: 0.20})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !res.Instrumental {
+		t.Fatalf("brief Speech peak (mean %.3f < 0.20) must be instrumental", res.SpeechConfidence)
+	}
+}
+
+// TestSustainedSpeechMeanBlocksInstrumental: a high Speech MEAN (sustained
+// spoken word over music) is NOT instrumental.
+func TestSustainedSpeechMeanBlocksInstrumental(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.93, "Musical instrument": 0.02, "Speech": 0.40, "Singing": 0.001},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.01, "Speech": 0.9},
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing"}, VocalMaxConfidence: 0.05,
+		SpeechClasses: []string{"Speech"}, SpeechMaxConfidence: 0.20})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if res.Instrumental {
+		t.Fatalf("sustained Speech mean %.3f >= 0.20 must NOT be instrumental", res.SpeechConfidence)
+	}
+}
+
+// TestSungVocalPeakStillBlocksWithSpeechGate is a regression guard: the
+// sung-vocal peak gate is unchanged by the split -- a brief sung-vocal peak still
+// blocks an instrumental marking even when Speech is low.
+func TestSungVocalPeakStillBlocksWithSpeechGate(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.9, "Musical instrument": 0.05, "Singing": 0.02, "Speech": 0.001},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.30, "Speech": 0.003}, // sung peak -> block
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing"}, VocalMaxConfidence: 0.05,
+		SpeechClasses: []string{"Speech"}, SpeechMaxConfidence: 0.20})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if res.Instrumental {
+		t.Fatalf("sung-vocal peak %.2f >= 0.05 must NOT be instrumental (sung gate intact)", res.VocalConfidence)
+	}
+}
+
+// TestLegacyVocalSpeechDeDupBehavior exercises the de-dup end-to-end: with
+// "Speech" in VocalClasses (legacy config) AND in SpeechClasses, a high Speech
+// PEAK with near-zero MEAN is still instrumental (peak gate no longer applies to
+// Speech), while a high Speech MEAN blocks.
+func TestLegacyVocalSpeechDeDupBehavior(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	speechMean := 0.01
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.93, "Musical instrument": 0.04, "Speech": speechMean, "Singing": 0.001},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.01, "Speech": 0.85}, // high Speech PEAK
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Speech"}, VocalMaxConfidence: 0.05, // legacy: Speech in vocal set
+		SpeechClasses: []string{"Speech"}, SpeechMaxConfidence: 0.20})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// Low Speech mean: high Speech PEAK is NOT applied to the (de-duped) peak gate.
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect (low mean): %v", err)
+	}
+	if !res.Instrumental {
+		t.Fatalf("legacy Speech-in-vocal config: high Speech peak with low mean must be instrumental (de-dup), got speech_mean=%.3f", res.SpeechConfidence)
+	}
+	// Raise the sustained Speech mean: now the speech gate blocks.
+	speechMean = 0.40
+	res, err = d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect (high mean): %v", err)
+	}
+	if res.Instrumental {
+		t.Fatalf("sustained Speech mean %.3f >= 0.20 must block even with legacy config", res.SpeechConfidence)
 	}
 }

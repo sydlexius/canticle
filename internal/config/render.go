@@ -107,6 +107,12 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("sample_duration_seconds = %d%s\n", cfg.InstrumentalDetector.SampleDurationSeconds, ann("instrumental_detector.sample_duration_seconds"))
 	p("min_confidence = %g%s\n", cfg.InstrumentalDetector.MinConfidence, ann("instrumental_detector.min_confidence"))
 	p("instrumental_classes = %s%s\n", sliceVal("instrumental_detector.instrumental_classes", cfg.InstrumentalDetector.InstrumentalClasses), ann("instrumental_detector.instrumental_classes"))
+	p("vocal_classes = %s%s\n", sliceVal("instrumental_detector.vocal_classes", cfg.InstrumentalDetector.VocalClasses), ann("instrumental_detector.vocal_classes"))
+	p("vocal_max_confidence = %g%s\n", cfg.InstrumentalDetector.VocalMaxConfidence, ann("instrumental_detector.vocal_max_confidence"))
+	p("speech_classes = %s%s\n", sliceVal("instrumental_detector.speech_classes", cfg.InstrumentalDetector.SpeechClasses), ann("instrumental_detector.speech_classes"))
+	p("speech_max_confidence = %g%s\n", cfg.InstrumentalDetector.SpeechMaxConfidence, ann("instrumental_detector.speech_max_confidence"))
+	p("spread_samples = %d%s\n", cfg.InstrumentalDetector.SpreadSamples, ann("instrumental_detector.spread_samples"))
+	p("ffprobe_path = %s%s\n", cfg.InstrumentalDetector.FFprobePath, ann("instrumental_detector.ffprobe_path"))
 	p("cooldown_seconds = %d%s\n", cfg.InstrumentalDetector.CooldownSeconds, ann("instrumental_detector.cooldown_seconds"))
 	p("\n")
 
@@ -315,6 +321,8 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			sliceAttr("instrumental_classes", "instrumental_detector.instrumental_classes", cfg.InstrumentalDetector.InstrumentalClasses),
 			sliceAttr("vocal_classes", "instrumental_detector.vocal_classes", cfg.InstrumentalDetector.VocalClasses),
 			floatAttr("vocal_max_confidence", "instrumental_detector.vocal_max_confidence", cfg.InstrumentalDetector.VocalMaxConfidence),
+			sliceAttr("speech_classes", "instrumental_detector.speech_classes", cfg.InstrumentalDetector.SpeechClasses),
+			floatAttr("speech_max_confidence", "instrumental_detector.speech_max_confidence", cfg.InstrumentalDetector.SpeechMaxConfidence),
 			intAttr("spread_samples", "instrumental_detector.spread_samples", cfg.InstrumentalDetector.SpreadSamples),
 			strAttr("ffprobe_path", "instrumental_detector.ffprobe_path", cfg.InstrumentalDetector.FFprobePath),
 			intAttr("cooldown_seconds", "instrumental_detector.cooldown_seconds", cfg.InstrumentalDetector.CooldownSeconds),
