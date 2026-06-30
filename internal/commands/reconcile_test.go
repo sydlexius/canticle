@@ -105,6 +105,10 @@ func TestRunScanReconcile_ClearsStaleMarker(t *testing.T) {
 	if err := q.SetInstrumentalResult(ctx, item.ID, 1, queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.01, SpeechMean: 0.002, VocalClass: "Singing", DetectorVersion: "old"}); err != nil {
 		t.Fatalf("SetInstrumentalResult: %v", err)
 	}
+	// Reconcile only touches completed instrumental rows.
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET status = 'done', completed_at = ? WHERE id = ?`, "2026-06-25T00:00:00Z", item.ID); err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
 	_ = sqlDB.Close()
 
 	// Dry run: must not touch the marker.
@@ -176,6 +180,10 @@ func seedInstrumentalRow(t *testing.T, ctx context.Context, dbPath string, input
 	}
 	if err := q.SetInstrumentalResult(ctx, item.ID, 1, queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.01, SpeechMean: 0.002, VocalClass: "Singing", DetectorVersion: detVer}); err != nil {
 		t.Fatalf("SetInstrumentalResult: %v", err)
+	}
+	// Reconcile only touches completed instrumental rows.
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET status = 'done', completed_at = ? WHERE id = ?`, "2026-06-25T00:00:00Z", item.ID); err != nil {
+		t.Fatalf("mark done: %v", err)
 	}
 	return item.ID
 }

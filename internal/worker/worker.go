@@ -689,21 +689,6 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			}
 			if detResult.Instrumental {
 				slog.Info("worker audio detector: instrumental track confirmed; writing marker", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "kind", "instrumental")
-				// Stamp the audio-detection result (1 = instrumental) and telemetry on
-				// the queue row before Complete so the /metrics gauge reflects the
-				// outcome durably and the scores are queryable without re-running
-				// inference. Errors are non-fatal: a failed stamp is not worth aborting
-				// the write.
-				tel := queue.InstrumentalTelemetry{
-					MusicSum:        detResult.Confidence,
-					VocalPeak:       detResult.VocalConfidence,
-					SpeechMean:      detResult.SpeechConfidence,
-					VocalClass:      detResult.WinningVocalClass,
-					DetectorVersion: detResult.Version,
-				}
-				if stampErr := w.queue.SetInstrumentalResult(context.WithoutCancel(ctx), item.ID, 1, tel); stampErr != nil {
-					slog.Warn("worker instrumental detection: stamp result failed; continuing", "id", item.ID, "error", stampErr)
-				}
 				instrumentalSong := models.Song{
 					Track: models.Track{
 						ArtistName:   resolvedTrack.ArtistName,
@@ -732,10 +717,24 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 					}
 				}
 				ctxNoCancel := context.WithoutCancel(ctx)
+				// Stamp instrumental_result=1 + telemetry only AFTER the marker write
+				// succeeded (a failed WriteLRC above requeues and returns before here),
+				// so a transient write error never leaves a row tagged instrumental with
+				// stale telemetry. Still before Complete, so /metrics reflects it durably.
+				// Non-fatal: a failed stamp is not worth aborting the completed write.
+				tel := queue.InstrumentalTelemetry{
+					MusicSum:        detResult.Confidence,
+					VocalPeak:       detResult.VocalConfidence,
+					SpeechMean:      detResult.SpeechConfidence,
+					VocalClass:      detResult.WinningVocalClass,
+					DetectorVersion: detResult.Version,
+				}
+				if stampErr := w.queue.SetInstrumentalResult(ctxNoCancel, item.ID, 1, tel); stampErr != nil {
+					slog.Warn("worker instrumental detection: stamp result failed; continuing", "id", item.ID, "error", stampErr)
+				}
 				// Record the written outcome before Complete so reports count this
 				// (and every other instrumental source) as instrumental, not just
-				// rows with instrumental_result=1 (#379). Non-fatal, like the
-				// instrumental_result stamp above.
+				// rows with instrumental_result=1 (#379). Non-fatal, like the stamp above.
 				if stampErr := w.queue.SetOutcomeType(ctxNoCancel, item.ID, "instrumental"); stampErr != nil {
 					slog.Warn("worker instrumental detection: stamp outcome type failed; continuing", "id", item.ID, "error", stampErr)
 				}

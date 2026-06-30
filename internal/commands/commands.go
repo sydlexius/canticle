@@ -2921,13 +2921,25 @@ func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd)
 			errCount++
 			continue
 		}
+		deleteFailed := false
 		for _, p := range markerPaths {
 			if err := os.Remove(p); err != nil {
-				slog.Warn("reconcile: failed to delete marker; continuing", "id", item.ID, "path", p, "error", err)
+				if os.IsNotExist(err) {
+					// Already gone (removed out-of-band since the check); not a failure.
+					continue
+				}
+				slog.Warn("reconcile: failed to delete marker; leaving row tagged", "id", item.ID, "path", p, "error", err)
 				errCount++
+				deleteFailed = true
 				continue
 			}
 			sidecarsDeleted++
+		}
+		if deleteFailed {
+			// A marker remains on disk: do NOT clear the verdict, or the row would say
+			// "not instrumental" while the on-disk marker still says it is. Leave the
+			// row tagged so a later reconcile retries it.
+			continue
 		}
 		if n, err := workQueue.ResetInstrumental(ctx, item.ID); err != nil {
 			slog.Warn("reconcile: failed to reset row (marker already deleted)", "id", item.ID, "error", err)

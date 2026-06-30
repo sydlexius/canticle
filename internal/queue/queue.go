@@ -1288,9 +1288,12 @@ type ListInstrumentalOptions struct {
 // cross-version / un-scored rows); set opts.All for the full flagged population.
 // Read-only.
 func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOptions) (items []WorkItem, retErr error) {
+	// status = 'done' restricts to COMPLETED instrumental rows: the worker stamps
+	// instrumental_result = 1 just before Complete, so a still-'processing' row could
+	// otherwise be picked up and cleared mid-write.
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                        miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
-                       FROM work_queue WHERE instrumental_result = 1`
+                       FROM work_queue WHERE instrumental_result = 1 AND status = 'done'`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	query := baseQuery
 	var args []any
@@ -1337,7 +1340,8 @@ func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOpt
 func (q *DBQueue) CountInstrumentalNarrowed(ctx context.Context, currentVersion string, libraryID *int64) (int64, error) {
 	clause, args := instrumentalNarrowedPredicate(currentVersion)
 	libClause, libArgs := recheckLibraryClause(libraryID)
-	query := `SELECT COUNT(*) FROM work_queue WHERE instrumental_result = 1` + clause + libClause
+	// status = 'done' matches ListInstrumental: count only completed instrumental rows.
+	query := `SELECT COUNT(*) FROM work_queue WHERE instrumental_result = 1 AND status = 'done'` + clause + libClause
 	allArgs := append(args, libArgs...)
 	var n int64
 	if err := q.db.QueryRowContext(ctx, query, allArgs...).Scan(&n); err != nil { //nolint:gosec // G202: fragments are package constants / fixed library clause, not user input
@@ -1352,8 +1356,9 @@ func (q *DBQueue) CountInstrumentalNarrowed(ctx context.Context, currentVersion 
 // priority=-100 (dequeue-eligible but strictly behind priority>=0 foreground work -
 // the queue-level starvation guard), with instrumental_result, outcome_type,
 // completed_at and all five telemetry columns cleared to NULL, last_error cleared,
-// and next_attempt_at = now. Guarded by instrumental_result = 1, so it is a no-op
-// on any other row. Linked scan_results rows are reset to 'pending'. Returns the
+// and next_attempt_at = now. Guarded by instrumental_result = 1 AND status = 'done'
+// (a still-'processing' row mid-write is left alone), so it is a no-op on any other
+// row. Linked scan_results rows are reset to 'pending'. Returns the
 // number of work_queue rows affected (0 or 1).
 func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error) {
 	now := formatTime(q.now())
@@ -1377,7 +1382,7 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
              detector_version = NULL,
              last_error = '',
              next_attempt_at = ?
-         WHERE id = ? AND instrumental_result = 1`,
+         WHERE id = ? AND instrumental_result = 1 AND status = 'done'`,
 		now, id,
 	)
 	if err != nil {

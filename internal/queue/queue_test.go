@@ -3400,6 +3400,10 @@ func TestDBQueue_ListInstrumentalNarrowedAndAll(t *testing.T) {
 				t.Fatalf("SetInstrumentalResult %s: %v", artist, err)
 			}
 		}
+		// ListInstrumental only returns completed rows; mark done after stamping.
+		if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done', completed_at = ? WHERE id = ?`, "2026-06-25T00:00:00Z", it.ID); err != nil {
+			t.Fatalf("mark done %s: %v", artist, err)
+		}
 		return it.ID
 	}
 
