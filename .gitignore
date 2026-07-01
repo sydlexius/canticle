@@ -59,6 +59,3 @@ docs/design/
 # AI assistant config (local only — except shared release metadata)
 .claude/*
 !.claude/release.toml
-.opencode/get-shit-done/
-.opencode/node_modules/
-.opencode/settings.json

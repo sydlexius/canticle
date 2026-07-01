@@ -24,11 +24,12 @@ Rejected options:
 - **Emit both** (`song.lrc` + `song.<lang>.lrc`) - secondary file ignored by
   Emby/Jellyfin; adds file-management complexity for no player benefit; rejected.
 
-## Future writer contract
+## Writer contract
 
-These are the changes required in `models` and `lyrics` to support bilingual
-output. No implementation yet - these are the specified shapes for when CJK
-provider work lands.
+These are the shapes in `models` and `lyrics` that carry bilingual output. This
+began as a design record; the contract below is **now shipped** - `models.Song`
+carries the parallel subtitle fields and `writeSyncedLRC` implements the
+interleaved merge (see `internal/lyrics/writer_bilingual_test.go`).
 
 **`models.Song`** gains two optional parallel fields:
 
@@ -86,19 +87,17 @@ original is dropped. This is a conscious user choice, not an automatic fallback.
 Evaluating the translation track would require a per-track guard helper that
 does not exist yet; it is future work.
 
-**Unmet prerequisites.** This section describes intended behavior, not current
-behavior. As of this writing the `langguard` package exists with tests but is
-not wired in: there is no `accepted_scripts` (or threshold) TOML config, and
-nothing in `internal/worker` or `cmd/` calls `Guard.Accept`. Likewise
-`bilingual_output` and `prefer_translation` do not exist in the config layer.
-Wiring `langguard` into config and the worker pipeline is a prerequisite that
-must land before any of the opt-in behavior above can work (see the langguard
-integration issue).
+**Status.** The `langguard` guard is now wired in: `Guard.Accept` is called from
+`internal/worker` and `internal/orchestrator`, the `guard.accepted_scripts` config
+key exists (`MXLRC_GUARD_ACCEPTED_SCRIPTS`), and `output.bilingual_output`
+(`MXLRC_BILINGUAL_OUTPUT`) enables the interleaved output above. The one piece
+still absent is `prefer_translation` (the translation-only opt-in described
+above); that remains future work.
 
 ## Cross-references
 
 - Issue [#146](https://github.com/sydlexius/canticle/issues/146) - decision record
 - Issue [#149](https://github.com/sydlexius/canticle/issues/149) - CJK provider adapter (depends on this policy)
 - `internal/langguard` - script classifier and guard
-- `internal/lyrics/writer.go` - current writer (single-track, no translation)
+- `internal/lyrics/writer.go` - writer with bilingual interleave via `TranslationSubtitles`
 - `internal/models/models.go` - `Song`, `Synced` types

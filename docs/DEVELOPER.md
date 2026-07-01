@@ -63,7 +63,7 @@ Ratchet to *current actuals*, not aspirational targets - do not nickel-and-dime 
 The documentation site (this site) is built with [ProperDocs](https://github.com/properdocs/properdocs), a maintained drop-in continuation of MkDocs 1.x, using the Material theme. The pages live under `docs/` and the config is `properdocs.yml` at the repo root.
 
 ```sh
-make docs-deps    # install the Python doc tooling (pip install -r dev-requirements.txt)
+make docs-deps    # install the Python doc tooling (pip install --require-hashes -r dev-requirements.lock)
 make docs-serve   # live-reload preview at http://127.0.0.1:8000
 make docs         # strict build into ./site (the same check CI runs)
 ```

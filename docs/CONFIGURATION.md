@@ -280,16 +280,18 @@ ffmpeg (used to extract the audio sample) is resolved automatically: see [ffmpeg
 # sample_duration_seconds = 30
 # min_confidence = 0.90
 # instrumental_classes = ["Music", "Musical instrument"]
-# vocal_classes = ["Singing", "Speech", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
+# vocal_classes = ["Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
 # vocal_max_confidence = 0.03
+# speech_classes = ["Speech"]
+# speech_max_confidence = 0.20
 # spread_samples = 6
 # ffprobe_path = ""
 # cooldown_seconds = 5
 ```
 
-Optional audio-based instrumental detection sidecar (env: `MXLRC_INSTRUMENTAL_DETECTOR_ENABLED`, `MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL`, `MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH`, `MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS`, `MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE`, `MXLRC_INSTRUMENTAL_DETECTOR_CLASSES`, `MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES`, `MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE`, `MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES`, `MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH`, `MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS`).
+Optional audio-based instrumental detection sidecar (env: `MXLRC_INSTRUMENTAL_DETECTOR_ENABLED`, `MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL`, `MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH`, `MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS`, `MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE`, `MXLRC_INSTRUMENTAL_DETECTOR_CLASSES`, `MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES`, `MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE`, `MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES`, `MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE`, `MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES`, `MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH`, `MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS`).
 
-When enabled and a `classifier_url` is set, the detector samples each track's audio with ffmpeg and sends the sample to an external AudioSet classifier (a YAMNet sidecar; vendored at `deploy/yamnet-detector/`). It runs only on provider misses and never overrides provider-supplied data. A track is marked instrumental only when **both** gates pass: the **music gate** (summed mean probability of the `instrumental_classes` meets `min_confidence`) **and** the **vocal gate** (no `vocal_classes` member peaks at or above `vocal_max_confidence`). The decision is conservative: any doubt resolves to "not instrumental", because a false instrumental suppresses a real lyrics fetch.
+When enabled and a `classifier_url` is set, the detector samples each track's audio with ffmpeg and sends the sample to an external AudioSet classifier (a YAMNet sidecar; vendored at `deploy/yamnet-detector/`). It runs only on provider misses and never overrides provider-supplied data. A track is marked instrumental only when **all three** gates pass: the **music gate** (summed mean probability of the `instrumental_classes` meets `min_confidence`), the **sung-vocal gate** (no `vocal_classes` member peaks at or above `vocal_max_confidence`), and the **speech gate** (#403 -- the frame mean of `speech_classes` stays below `speech_max_confidence`; `Speech` moved out of `vocal_classes` into its own mean-based gate so sustained speech blocks while brief incidental speech does not). The decision is conservative: any doubt resolves to "not instrumental", because a false instrumental suppresses a real lyrics fetch.
 
 To catch vocals that enter after an instrumental intro (arias, jazz, classical), the detector samples `spread_samples` short windows spread across the **whole** track, concatenated into one sample, and gates on the per-class **max-over-frames** peak (the loudest singing moment), which the frame mean dilutes. This requires the sidecar to return `{"mean": {...}, "max": {...}}`; a legacy mean-only sidecar degrades safely to never-instrumental.
 

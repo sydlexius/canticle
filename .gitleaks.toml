@@ -6,5 +6,4 @@ useDefault = true
 description = "Allowlist for planning docs and path references"
 paths = [
   ".planning/",
-  ".opencode/",
 ]

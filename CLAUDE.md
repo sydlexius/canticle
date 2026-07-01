@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`mxlrcgo-svc` (module `github.com/sydlexius/mxlrcgo-svc`) is a Go CLI tool that fetches synced lyrics from the Musixmatch API and saves them as `.lrc` files. It has been restructured to eliminate global state, externalize the API token, and add stateful features (TOML config, SQLite cache).
+`canticle` (module `github.com/sydlexius/mxlrcgo-svc` -- the import path predates the Canticle rebrand and is intentionally unchanged) is a Go tool for fetching synced lyrics. It has two faces: a one-shot `fetch` CLI that writes `.lrc` / `.txt` files, and a stateful `serve` mode -- an HTTP server with a durable SQLite work queue, a background worker, a library scan scheduler (+ optional filesystem watcher), multi-provider orchestration, encrypted-at-rest secrets, and a browser-authenticated web UI. Global state is eliminated; the API token is externalized; config is TOML.
 
 For deeper detail on the stack, conventions, architecture, and data flow, read `AGENTS.md` -- it is the hand-maintained reference for this codebase. Keep it current when you change the package surface, and read it whenever you need detail this file omits.
 
 ## What to work on next
 
-When the user says **"next"**, **"what's next"**, **"keep going"**, or any equivalent lazy prompt with no specific task, inspect the open GitHub issues and milestones before starting. Confirm scope with the user first. The current dependency chain is scanner decoupling before M3 library-management work: issue #31 first, then M3 issues #15, #16, and #17.
+When the user says **"next"**, **"what's next"**, **"keep going"**, or any equivalent lazy prompt with no specific task, inspect the open GitHub issues and milestones before starting, then confirm scope with the user first. Do not assume a fixed backlog order -- the milestones and their dependency chains change as work ships; read the live issue tracker each time.
 
 ## Build & Test
 
@@ -25,7 +25,7 @@ Run `make hooks` once to enable the tracked git hooks, and `make gate` before pu
 
 ## Architecture (one-paragraph orientation)
 
-Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the only entry point and owns no business logic; it parses args, loads config + DB, builds the dependency graph, and runs `app.App.Run`. Under `internal/`: `app` owns the processing loop and queues; `musixmatch` calls the API (exposes a `Fetcher` interface); `lyrics` writes `.lrc` / `.txt` / instrumental output (exposes a `Writer` interface); `scanner` parses CLI/text-file/directory input into the queue; `config` resolves TOML config (XDG paths) with token precedence CLI > env > file; `db` is pure-Go SQLite (`modernc.org/sqlite`, no CGO) with goose migrations in `internal/db/migrations/`; `cache` is the lyrics cache repo over the DB; `normalize` builds NFKC cache lookup keys; `models` holds the shared data types and depends on nothing else internal. `app` depends on `Fetcher` and `Writer` interfaces, never concrete types -- mock at those boundaries. There is no global mutable state. See `AGENTS.md` for full layer/data-flow detail.
+Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the only entry point and owns no business logic; it parses the subcommand tree, loads config + DB, builds the dependency graph, and dispatches. The command tree lives in `internal/commands` (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `completion`). Two principal paths run under `internal/`: **fetch mode** -- `scanner` parses CLI/text-file/directory input into an in-memory `queue.InputsQueue`, `app` drains it sequentially, `musixmatch` fetches (a `Fetcher` interface), and `lyrics` writes `.lrc` / `.txt` / instrumental output (a `Writer` interface); and **serve mode** -- a `scan` scheduler over `library` roots enqueues work into the durable SQLite `queue.DBQueue`, a `worker` drains it through the multi-provider `orchestrator` (Musixmatch + petitlyrics `providers`, each behind a `circuit` breaker with `backoff` retry), consulting `cache`, gated by optional `verification` / `detector` sidecars (via `ffmpeg`) and `langguard`, fronted by the `server` HTTP handler (`auth` API keys, `trustnet` IP gating, optional `servetls`) and the `web` browser UI (`webauth` sessions). Shared infra: `config` (TOML, XDG paths, token precedence CLI > env > file), `db` (pure-Go SQLite `modernc.org/sqlite`, no CGO, goose migrations in `internal/db/migrations/`), `secrets` (AES-256-GCM at rest), `normalize` (NFKC cache keys), `models` (shared types, depends on nothing else internal). Dependencies are injected through interfaces -- mock at the boundary; there is no global mutable state. See `AGENTS.md` for the full package catalogue and data-flow detail.
 
 ## CLI usage and input modes
 

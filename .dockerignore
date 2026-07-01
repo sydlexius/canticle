@@ -3,7 +3,6 @@
 .planning
 .serena
 .claude
-.opencode
 
 .env
 *.out
