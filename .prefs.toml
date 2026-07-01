@@ -1,0 +1,54 @@
+# .prefs.toml -- UI-preference verification manifest (cc-orchestrator hostile/UX review).
+#
+# WHAT THIS FILE IS
+#   A per-repo map from each USER-CONFIGURABLE VISUAL preference to the concrete
+#   mechanism a rendered surface must wire into to honor it, plus a deterministic
+#   `verify` regex. The orchestrate adversarial-review charter (USER-PREFERENCE
+#   COVERAGE dimension) and the `prefs-coverage.py` gate read it to catch a template
+#   that consumes some design tokens but silently forgets a pref's tokens
+#   (the stillwater #1338 class of bug).
+#   Schema: cc-orchestrator skills/orchestrate/templates/prefs.toml.md
+#
+# WHY IT IS INTENTIONALLY EMPTY (no [[pref]] entries) RIGHT NOW
+#   The serve-mode web UI (web/templates/*.templ + web/static/css/design-tokens.css)
+#   ships ZERO user-configurable visual preferences by design:
+#     - dark theme only: no light theme, no theme toggle, no dual-token pairs
+#       (web/static/css/design-tokens.css header; issue #210)
+#     - exactly two fixed font families (Inter UI + JetBrains Mono code); no picker
+#     - no density / content-width / thumbnail-size / appearance controls
+#     - the "Settings" page (web/templates/settings.templ) configures APPLICATION
+#       config (providers, webhooks, tokens, tags, durations), not appearance
+#   The only preference honored is `@media (prefers-reduced-motion: reduce)` -- an
+#   OS-level pref applied GLOBALLY via the `*` selector in design-tokens.css, not a
+#   per-surface pref each template must wire in. It is therefore deliberately NOT a
+#   `[[pref]]` entry: an entry scoped to `web/templates/*.templ` would fire a false
+#   MISSING on every changed template, since the templates inherit it globally rather
+#   than each referencing `prefers-reduced-motion`.
+#
+#   Per the template's own rule, "a repo with no user prefs (e.g. a dark-only UI)
+#   needs no manifest, and that is valid, not an error" -- the consumer self-skips.
+#   This stub exists so the no-user-prefs state is recorded as a DELIBERATE decision
+#   (better to have and not need), not re-litigated each time someone asks why the
+#   manifest is absent. `prefs-coverage.py` treats a manifest with zero `[[pref]]`
+#   entries as a clean pass ("nothing to check", exit 0).
+#
+# WHEN TO POPULATE IT
+#   The moment the UI grows a real user-facing appearance preference (a theme
+#   toggle, a density control, a font/size chooser, a content-width setting):
+#     1. Add a `[[pref]]` table per new visual pref (key / applies_via / mechanism /
+#        surface / verify / severity) per the schema doc.
+#     2. Point `[source].file` at the authoritative pref list once one exists
+#        (a settings struct / registry), replacing the design-tokens pointer below.
+#     3. Wire the gate as an opt-in step. This repo's .gates.toml uses the simple
+#        `gate = "make gate"` form; the coverage check is intentionally NOT wired
+#        today because it would only self-skip while adding a dependency on a
+#        machine-local helper not guaranteed present in CI. Add it (guarded so it
+#        runs only where the helper is available) when there is a real pref to check.
+
+[source]
+# Human-read pointer only -- the consumer never executes anything from [source].
+# No pref registry exists yet; the design constraints (dark-only, fixed fonts, the
+# --mx-* token set) are declared authoritatively in the design-tokens stylesheet.
+file = "web/static/css/design-tokens.css"
+
+# No [[pref]] entries by design -- see "WHY IT IS INTENTIONALLY EMPTY" above.
