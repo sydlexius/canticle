@@ -29,7 +29,7 @@ updates:
       # version-mismatch error).
       codeql-action:
         patterns:
-          - "github/codeql-action*"
+          - "github/codeql-action/*"
 
   - package-ecosystem: docker
     directory: /
