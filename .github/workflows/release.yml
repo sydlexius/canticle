@@ -55,3 +55,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      # GoReleaser creates the release as a draft (release.draft in .goreleaser.yml)
+      # and uploads every asset to it, but does not publish. Flip it to published
+      # here so GitHub's immutable-releases lock applies only after all assets are
+      # attached -- avoiding the "422 Cannot upload assets to an immutable release"
+      # that the publish-first flow hits. A failed GoReleaser run leaves an
+      # unpublished draft (this step is skipped), which is recoverable, unlike a
+      # half-published immutable release.
+      - name: Publish release (flip draft to published)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Mark only stable tags as latest. A SemVer prerelease is any tag with
+          # a '-' identifier after the version (v1.2.3-rc1, -beta, -pre.1, ...),
+          # so keying off the '-' mirrors goreleaser's prerelease:auto + make_latest
+          # exactly (they test ctx.Semver.Prerelease, i.e. any '-' segment -- not a
+          # fixed rc/beta/alpha list).
+          latest_flag="--latest"
+          case "$TAG" in
+            *-*) latest_flag="--latest=false" ;;
+          esac
+          gh release edit "$TAG" --draft=false "$latest_flag"

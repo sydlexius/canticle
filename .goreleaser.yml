@@ -246,7 +246,19 @@ release:
   github:
     owner: doxazo-net
     name: canticle
+  # Create the GitHub release as a DRAFT so every asset uploads to a mutable
+  # release, then flip it to published in a follow-up step (release.yml). The
+  # doxazo-net org has GitHub "immutable releases" enabled, which locks a
+  # PUBLISHED release immediately -- so the default publish-first flow 422s on
+  # asset upload ("Cannot upload assets to an immutable release"), leaving CI red
+  # even though the assets land. Uploading to a draft and publishing last applies
+  # immutability only after all assets are attached, so the run goes green.
+  draft: true
+  # Remove a leftover draft from a failed prior run so a re-run starts clean.
+  replace_existing_draft: true
   prerelease: auto
+  # make_latest is applied by the publish step in release.yml (GoReleaser does
+  # not publish when draft is true), but is kept here as the source of intent.
   make_latest: '{{ if .Prerelease }}false{{ else }}true{{ end }}'
   header: |
     ## Canticle {{ .Tag }}
