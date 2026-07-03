@@ -105,6 +105,12 @@ func (e *redactedTokenError) Error() string {
 
 func (e *redactedTokenError) Unwrap() error { return e.err }
 
+// GoString satisfies fmt.GoStringer so the %#v verb -- which otherwise prints the
+// struct's raw fields, including the token -- renders the redacted message instead.
+// Error() already covers %v/%s/%+v (they use the error interface); %#v is the one
+// verb that bypasses it.
+func (e *redactedTokenError) GoString() string { return e.Error() }
+
 // tokenRenewalError marks the upstream "renew" hint: the usertoken must be
 // regenerated. It satisfies errors.Is for BOTH itself and ErrUnauthorized, so
 // the circuit breaker (which keys off ErrUnauthorized) still trips while callers

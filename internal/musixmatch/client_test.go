@@ -533,6 +533,13 @@ func TestFindLyricsTransportErrorRedactsToken(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Errorf("errors.Is broken by redaction: err = %v; want wrapped %v", err, wantErr)
 	}
+	// The %#v verb bypasses Error() and would otherwise print the struct's raw
+	// token field; GoString must keep it redacted too.
+	for _, verb := range []string{"%v", "%+v", "%s", "%#v"} {
+		if rendered := fmt.Sprintf(verb, err); strings.Contains(rendered, secret) {
+			t.Errorf("%s formatting leaks usertoken: %q", verb, rendered)
+		}
+	}
 }
 
 // TestRedactTokenEdgeCases covers the passthrough guards and the escaped-token
