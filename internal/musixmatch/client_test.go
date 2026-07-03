@@ -504,6 +504,71 @@ func TestFindLyricsReturnsTransportError(t *testing.T) {
 	}
 }
 
+// TestFindLyricsTransportErrorRedactsToken guards against the usertoken leaking
+// into error strings. net/http wraps a RoundTripper failure in a *url.Error
+// whose message embeds the full request URL, including the usertoken query
+// parameter. That error becomes work_queue.last_error and is rendered verbatim
+// on the failure-analysis screen (and logged), so the raw token must never
+// survive into the returned error's message.
+func TestFindLyricsTransportErrorRedactsToken(t *testing.T) {
+	const secret = "SUPER-SECRET-USERTOKEN-abc123"
+	wantErr := errors.New("network down")
+	client := NewClient(secret)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, wantErr
+	})}
+
+	_, err := client.FindLyrics(context.Background(), models.Track{TrackName: "title", ArtistName: "artist"})
+	if err == nil {
+		t.Fatal("FindLyrics returned nil error; want transport error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error message leaks usertoken: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "REDACTED") {
+		t.Errorf("error message should mark the redaction; got %q", err.Error())
+	}
+	// The underlying error chain must be preserved for errors.Is/As so callers
+	// (context cancellation, circuit breaker) still classify it correctly.
+	if !errors.Is(err, wantErr) {
+		t.Errorf("errors.Is broken by redaction: err = %v; want wrapped %v", err, wantErr)
+	}
+}
+
+// TestRedactTokenEdgeCases covers the passthrough guards and the escaped-token
+// branch of the redaction helper directly, since a live transport error only
+// exercises the common (raw, non-empty token) path.
+func TestRedactTokenEdgeCases(t *testing.T) {
+	t.Run("nil error passes through", func(t *testing.T) {
+		c := NewClient("tok")
+		if got := c.redactToken(nil); got != nil {
+			t.Errorf("redactToken(nil) = %v; want nil", got)
+		}
+	})
+
+	t.Run("empty token passes error through unchanged", func(t *testing.T) {
+		c := NewClient("")
+		orig := errors.New("boom")
+		if got := c.redactToken(orig); !errors.Is(got, orig) || got.Error() != "boom" {
+			t.Errorf("redactToken with empty token = %v; want unchanged %v", got, orig)
+		}
+	})
+
+	t.Run("escaped token form is redacted", func(t *testing.T) {
+		// A token with reserved characters is percent-escaped in the URL, so the
+		// error message contains the escaped form, not the raw token.
+		const secret = "a b/c&d"
+		c := NewClient(secret)
+		wrapped := c.redactToken(fmt.Errorf("Get %q: dial failed", "https://x/y?usertoken="+url.QueryEscape(secret)))
+		if strings.Contains(wrapped.Error(), url.QueryEscape(secret)) {
+			t.Errorf("escaped token leaked: %q", wrapped.Error())
+		}
+		if !strings.Contains(wrapped.Error(), "REDACTED") {
+			t.Errorf("missing redaction marker: %q", wrapped.Error())
+		}
+	})
+}
+
 func newTestClient(status int, body string) *Client {
 	client := NewClient("token")
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
