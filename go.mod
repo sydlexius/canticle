@@ -10,7 +10,7 @@ require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/joho/godotenv v1.5.1
 	github.com/lizc2003/audioduration v0.8.0
-	github.com/pressly/goose/v3 v3.27.1
+	github.com/pressly/goose/v3 v3.27.2
 	github.com/rjeczalik/notify v0.9.3
 	github.com/ulikunitz/xz v0.5.15
 	github.com/valyala/fastjson v1.6.10
