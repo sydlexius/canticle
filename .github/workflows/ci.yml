@@ -58,7 +58,7 @@ jobs:
           fi
 
   lint:
-    name: Lint
+    name: Lint (golangci-lint)
     runs-on: ubuntu-latest
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
@@ -89,7 +89,7 @@ jobs:
           cache-invalidation-interval: 7
 
   test:
-    name: Test
+    name: Test (go)
     runs-on: ubuntu-latest
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
@@ -409,3 +409,45 @@ jobs:
             echo "Build matrix failed or cancelled: $result"
             exit 1
           fi
+
+  # Always-running required-check wrappers for Lint/Test (mirrors the Build gate
+  # above). The real lint/test jobs are gated on `code` and SKIP on non-code PRs;
+  # a skipped job can never satisfy a required status check, which structurally
+  # blocked config/docs-only PRs. These wrappers always run and report the
+  # required "Lint"/"Test" contexts: pass when there are no code changes, else
+  # mirror the real job's result.
+  lint-gate:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: [changes, lint]
+    if: always()
+    steps:
+      - name: Gate on lint result
+        run: |
+          if [ "${{ needs.changes.outputs.code }}" != "true" ]; then
+            echo "No code changes detected; lint not required."
+            exit 0
+          fi
+          if [ "${{ needs.lint.result }}" != "success" ]; then
+            echo "Lint failed: ${{ needs.lint.result }}"
+            exit 1
+          fi
+          echo "Lint passed."
+
+  test-gate:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [changes, test]
+    if: always()
+    steps:
+      - name: Gate on test result
+        run: |
+          if [ "${{ needs.changes.outputs.code }}" != "true" ]; then
+            echo "No code changes detected; test not required."
+            exit 0
+          fi
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "Test failed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "Test passed."
