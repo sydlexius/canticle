@@ -22,6 +22,14 @@ updates:
       - dependencies
       - ci
     open-pull-requests-limit: 5
+    groups:
+      # CodeQL sub-actions (init/analyze/autobuild) cross-check versions at
+      # runtime and must move in lockstep; group them so a bump never splits
+      # init and analyze across separate PRs (which fails with a config
+      # version-mismatch error).
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   - package-ecosystem: docker
     directory: /
