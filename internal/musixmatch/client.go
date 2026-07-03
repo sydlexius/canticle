@@ -66,6 +66,51 @@ var (
 	ErrTruncatedResponse = errors.New("musixmatch: truncated or empty response body")
 )
 
+// redactToken wraps err so its message has every occurrence of the usertoken
+// replaced with "REDACTED", while preserving the wrapped error for errors.Is/As
+// (context cancellation, the circuit breaker's sentinel checks, *url.Error
+// detection). It is applied to the request-build and transport error paths,
+// which are the ones that echo the request URL -- and thus the usertoken query
+// parameter -- into their message. Returns err unchanged when there is nothing
+// to redact (nil error or empty token).
+func (c *Client) redactToken(err error) error {
+	if err == nil || c.Token == "" {
+		return err
+	}
+	return &redactedTokenError{err: err, token: c.Token}
+}
+
+// redactedTokenError overrides only the rendered message, delegating identity
+// (Unwrap) to the wrapped error so errors.Is/As are unaffected.
+//
+// Note: because Unwrap exposes the original error, errors.As(err, &urlErr) still
+// yields a *url.Error whose .URL field holds the raw token. That is safe only so
+// long as no caller logs urlErr.URL directly; every current consumer renders via
+// Error() (the redacted string). A future caller that reads the struct field must
+// redact it itself.
+type redactedTokenError struct {
+	err   error
+	token string
+}
+
+func (e *redactedTokenError) Error() string {
+	msg := strings.ReplaceAll(e.err.Error(), e.token, "REDACTED")
+	// url.Values.Encode percent-escapes the token in the URL; cover the escaped
+	// form too so a token containing reserved characters cannot slip through.
+	if esc := url.QueryEscape(e.token); esc != e.token {
+		msg = strings.ReplaceAll(msg, esc, "REDACTED")
+	}
+	return msg
+}
+
+func (e *redactedTokenError) Unwrap() error { return e.err }
+
+// GoString satisfies fmt.GoStringer so the %#v verb -- which otherwise prints the
+// struct's raw fields, including the token -- renders the redacted message instead.
+// Error() already covers %v/%s/%+v (they use the error interface); %#v is the one
+// verb that bypasses it.
+func (e *redactedTokenError) GoString() string { return e.Error() }
+
 // tokenRenewalError marks the upstream "renew" hint: the usertoken must be
 // regenerated. It satisfies errors.Is for BOTH itself and ErrUnauthorized, so
 // the circuit breaker (which keys off ErrUnauthorized) still trips while callers
@@ -302,7 +347,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 
 	req, err := http.NewRequestWithContext(ctx, "GET", baseURL.String(), nil)
 	if err != nil {
-		return song, err
+		return song, c.redactToken(err)
 	}
 
 	req.Header = http.Header{
@@ -312,7 +357,11 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return song, err
+		// A transport failure surfaces as a *url.Error whose message embeds the
+		// full request URL -- including the usertoken query parameter. Returning
+		// it raw would leak the secret into work_queue.last_error, the
+		// failure-analysis UI, and logs, so redact it at this boundary.
+		return song, c.redactToken(err)
 	}
 	defer func() { _ = res.Body.Close() }()
 

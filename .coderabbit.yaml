@@ -1,5 +1,11 @@
 # Disable CodeRabbit auto-review to honor this org's manual-reviews-only policy.
 # Manual `@coderabbitai review` still triggers a full review on demand.
 reviews:
+  # Use the request-changes workflow: CodeRabbit holds a PR in a blocking review
+  # state until its comments are resolved, then marks it APPROVED (so its
+  # approval can count toward required approvals). Enabling this also accepts the
+  # top-level `@coderabbitai approve` / `@coderabbitai resolve` commands, which
+  # are rejected when it is off.
+  request_changes_workflow: true
   auto_review:
     enabled: false
