@@ -20,7 +20,7 @@ type CompletionCmd struct {
 
 // completionSubcommands are the top-level subcommands offered at the first word.
 var completionSubcommands = []string{
-	"fetch", "serve", "scan", "library", "keys", "config", "queue", "provenance", "completion",
+	"fetch", "serve", "scan", "library", "keys", "secrets", "config", "queue", "provenance", "completion",
 }
 
 // completionCandidates maps a subcommand to the flags and/or nested subcommands
@@ -29,9 +29,10 @@ var completionSubcommands = []string{
 var completionCandidates = map[string][]string{
 	"fetch":      {"--outdir", "--cooldown", "--depth", "--update", "--upgrade", "--bfs", "--token", "--config", "--album", "--probe", "--isrc", "--duration", "--spotify-id"},
 	"serve":      {"--listen", "--outdir", "--token", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--scan-interval", "--work-interval"},
-	"scan":       {"results", "clear", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--only"},
+	"scan":       {"results", "clear", "reconcile", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--only"},
 	"library":    {"add", "list", "remove", "update"},
 	"keys":       {"create", "list", "revoke"},
+	"secrets":    {"import", "set", "list"},
 	"config":     {"get", "set", "list"},
 	"queue":      {"list", "failed", "deferred", "retry", "clear", "recheck"},
 	"provenance": {"backfill"},

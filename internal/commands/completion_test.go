@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,6 +12,104 @@ import (
 	"github.com/doxazo-net/canticle/internal/library"
 	"github.com/doxazo-net/canticle/internal/models"
 )
+
+// subcommandName returns the NAME from an `arg:"subcommand:NAME"` struct tag, or
+// "" if the tag declares no subcommand.
+func subcommandName(argTag string) string {
+	for _, part := range strings.Split(argTag, ",") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(part), "subcommand:"); ok {
+			return rest
+		}
+	}
+	return ""
+}
+
+// subcommandNames returns every `arg:"subcommand:..."` name declared on the
+// fields of struct type t -- the real command tree as go-arg sees it.
+func subcommandNames(t reflect.Type) []string {
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		if n := subcommandName(t.Field(i).Tag.Get("arg")); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// TestCompletionSubcommandsMatchCommandTree guards against the drift that this
+// change fixes: every top-level subcommand declared on Args must appear in the
+// hand-maintained completionSubcommands table, so a newly added command cannot
+// silently go missing from shell completion.
+func TestCompletionSubcommandsMatchCommandTree(t *testing.T) {
+	known := make(map[string]bool, len(completionSubcommands))
+	for _, s := range completionSubcommands {
+		known[s] = true
+	}
+	for _, name := range subcommandNames(reflect.TypeOf(Args{})) {
+		if !known[name] {
+			t.Errorf("completionSubcommands missing top-level subcommand %q (declared in Args); add it in completion.go", name)
+		}
+	}
+}
+
+// TestCompletionCandidatesCoverNestedSubcommands extends the same guard one level
+// down: for each top-level command that has nested subcommands (scan, secrets,
+// queue, ...), every declared nested subcommand must appear in its
+// completionCandidates slice. Leaf commands (flags only) are skipped.
+func TestCompletionCandidatesCoverNestedSubcommands(t *testing.T) {
+	argsT := reflect.TypeOf(Args{})
+	for i := 0; i < argsT.NumField(); i++ {
+		f := argsT.Field(i)
+		parent := subcommandName(f.Tag.Get("arg"))
+		if parent == "" {
+			continue
+		}
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		nested := subcommandNames(ft)
+		if len(nested) == 0 {
+			continue // leaf command: flags only, nothing nested to mirror
+		}
+		have := make(map[string]bool, len(completionCandidates[parent]))
+		for _, c := range completionCandidates[parent] {
+			have[c] = true
+		}
+		for _, name := range nested {
+			if !have[name] {
+				t.Errorf("completionCandidates[%q] missing nested subcommand %q (declared in %s); add it in completion.go", parent, name, ft.Name())
+			}
+		}
+	}
+}
+
+// TestRunComplete_SecretsSubcommand verifies the newly added secrets command
+// surfaces at the first word and offers its nested candidates.
+func TestRunComplete_SecretsSubcommand(t *testing.T) {
+	var buf bytes.Buffer
+	runComplete(context.Background(), &buf, []string{"sec"})
+	if !strings.Contains(buf.String(), "secrets") {
+		t.Fatalf("want 'secrets' for prefix 'sec'; got %q", buf.String())
+	}
+
+	buf.Reset()
+	runComplete(context.Background(), &buf, []string{"secrets", ""})
+	for _, want := range []string{"import", "set", "list"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("want %q in 'secrets' completions; got %q", want, buf.String())
+		}
+	}
+}
+
+// TestRunComplete_ScanReconcile verifies 'scan <TAB>' now offers reconcile.
+func TestRunComplete_ScanReconcile(t *testing.T) {
+	var buf bytes.Buffer
+	runComplete(context.Background(), &buf, []string{"scan", "rec"})
+	if !strings.Contains(buf.String(), "reconcile") {
+		t.Fatalf("want 'reconcile' for 'scan rec'; got %q", buf.String())
+	}
+}
 
 func TestRunComplete_TopLevelPrefix(t *testing.T) {
 	var buf bytes.Buffer
