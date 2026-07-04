@@ -80,7 +80,8 @@ var (
 // removes any need to scrub the token from the message.
 func transportError(err error) error {
 	cause := err
-	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
 		cause = urlErr.Err
 	}
 	return fmt.Errorf("musixmatch: transport error: %w", cause)
