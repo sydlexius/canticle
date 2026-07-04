@@ -504,76 +504,64 @@ func TestFindLyricsReturnsTransportError(t *testing.T) {
 	}
 }
 
-// TestFindLyricsTransportErrorRedactsToken guards against the usertoken leaking
-// into error strings. net/http wraps a RoundTripper failure in a *url.Error
-// whose message embeds the full request URL, including the usertoken query
-// parameter. That error becomes work_queue.last_error and is rendered verbatim
-// on the failure-analysis screen (and logged), so the raw token must never
-// survive into the returned error's message.
-func TestFindLyricsTransportErrorRedactsToken(t *testing.T) {
+// TestFindLyricsTransportErrorIsCleanAndGroupable verifies that a transport
+// failure is stored as a clean, groupable reason. net/http wraps a RoundTripper
+// failure in a *url.Error whose message embeds the full request URL -- the
+// usertoken plus the per-track query params (q_artist/q_track/q_album). That
+// string becomes work_queue.last_error and is rendered on the failure-analysis
+// screen, so it must contain neither the token nor the URL/metadata, and two
+// different tracks failing the same way must produce the SAME message so the
+// report groups them instead of splintering into one row per track.
+func TestFindLyricsTransportErrorIsCleanAndGroupable(t *testing.T) {
 	const secret = "SUPER-SECRET-USERTOKEN-abc123"
-	wantErr := errors.New("network down")
+	netErr := errors.New("dial tcp: connect: connection refused")
 	client := NewClient(secret)
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, wantErr
+		return nil, netErr
 	})}
 
-	_, err := client.FindLyrics(context.Background(), models.Track{TrackName: "title", ArtistName: "artist"})
-	if err == nil {
-		t.Fatal("FindLyrics returned nil error; want transport error")
+	_, err1 := client.FindLyrics(context.Background(), models.Track{ArtistName: "Artist One", TrackName: "Track One"})
+	_, err2 := client.FindLyrics(context.Background(), models.Track{ArtistName: "Artist Two", TrackName: "Track Two"})
+	if err1 == nil || err2 == nil {
+		t.Fatal("FindLyrics returned nil error; want transport errors")
 	}
-	if strings.Contains(err.Error(), secret) {
-		t.Errorf("error message leaks usertoken: %q", err.Error())
+
+	// Groupable: same failure on different tracks -> identical message.
+	if err1.Error() != err2.Error() {
+		t.Errorf("transport errors not groupable across tracks:\n  %q\n  %q", err1.Error(), err2.Error())
 	}
-	if !strings.Contains(err.Error(), "REDACTED") {
-		t.Errorf("error message should mark the redaction; got %q", err.Error())
-	}
-	// The underlying error chain must be preserved for errors.Is/As so callers
-	// (context cancellation, circuit breaker) still classify it correctly.
-	if !errors.Is(err, wantErr) {
-		t.Errorf("errors.Is broken by redaction: err = %v; want wrapped %v", err, wantErr)
-	}
-	// The %#v verb bypasses Error() and would otherwise print the struct's raw
-	// token field; GoString must keep it redacted too.
+
+	// No secret, no URL, no library metadata in any format verb.
+	banned := []string{secret, "usertoken", "http", "musixmatch.com", "Artist One", "Track One", "q_track", "q_artist"}
 	for _, verb := range []string{"%v", "%+v", "%s", "%#v"} {
-		if rendered := fmt.Sprintf(verb, err); strings.Contains(rendered, secret) {
-			t.Errorf("%s formatting leaks usertoken: %q", verb, rendered)
+		rendered := fmt.Sprintf(verb, err1)
+		for _, b := range banned {
+			if strings.Contains(rendered, b) {
+				t.Errorf("%s formatting leaks %q: %q", verb, b, rendered)
+			}
 		}
+	}
+
+	// The underlying cause is preserved for errors.Is/As so the worker still
+	// classifies the failure (retryable transport error, cancellation, etc.).
+	if !errors.Is(err1, netErr) {
+		t.Errorf("errors.Is(cause) broken by wrapping: %v", err1)
 	}
 }
 
-// TestRedactTokenEdgeCases covers the passthrough guards and the escaped-token
-// branch of the redaction helper directly, since a live transport error only
-// exercises the common (raw, non-empty token) path.
-func TestRedactTokenEdgeCases(t *testing.T) {
-	t.Run("nil error passes through", func(t *testing.T) {
-		c := NewClient("tok")
-		if got := c.redactToken(nil); got != nil {
-			t.Errorf("redactToken(nil) = %v; want nil", got)
-		}
-	})
+// TestFindLyricsTransportErrorPreservesCancellation ensures %w keeps the chain so
+// a context cancellation still satisfies errors.Is (the worker relies on this to
+// distinguish shutdown from a genuine failure).
+func TestFindLyricsTransportErrorPreservesCancellation(t *testing.T) {
+	client := NewClient("token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})}
 
-	t.Run("empty token passes error through unchanged", func(t *testing.T) {
-		c := NewClient("")
-		orig := errors.New("boom")
-		if got := c.redactToken(orig); !errors.Is(got, orig) || got.Error() != "boom" {
-			t.Errorf("redactToken with empty token = %v; want unchanged %v", got, orig)
-		}
-	})
-
-	t.Run("escaped token form is redacted", func(t *testing.T) {
-		// A token with reserved characters is percent-escaped in the URL, so the
-		// error message contains the escaped form, not the raw token.
-		const secret = "a b/c&d"
-		c := NewClient(secret)
-		wrapped := c.redactToken(fmt.Errorf("Get %q: dial failed", "https://x/y?usertoken="+url.QueryEscape(secret)))
-		if strings.Contains(wrapped.Error(), url.QueryEscape(secret)) {
-			t.Errorf("escaped token leaked: %q", wrapped.Error())
-		}
-		if !strings.Contains(wrapped.Error(), "REDACTED") {
-			t.Errorf("missing redaction marker: %q", wrapped.Error())
-		}
-	})
+	_, err := client.FindLyrics(context.Background(), models.Track{TrackName: "title", ArtistName: "artist"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("errors.Is(context.Canceled) = false; err = %v", err)
+	}
 }
 
 func newTestClient(status int, body string) *Client {

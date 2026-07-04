@@ -66,50 +66,25 @@ var (
 	ErrTruncatedResponse = errors.New("musixmatch: truncated or empty response body")
 )
 
-// redactToken wraps err so its message has every occurrence of the usertoken
-// replaced with "REDACTED", while preserving the wrapped error for errors.Is/As
-// (context cancellation, the circuit breaker's sentinel checks, *url.Error
-// detection). It is applied to the request-build and transport error paths,
-// which are the ones that echo the request URL -- and thus the usertoken query
-// parameter -- into their message. Returns err unchanged when there is nothing
-// to redact (nil error or empty token).
-func (c *Client) redactToken(err error) error {
-	if err == nil || c.Token == "" {
-		return err
+// transportError converts a request-build or transport failure into a clean,
+// groupable error that carries neither the request URL nor the usertoken. Go
+// wraps http.Client.Do and http.NewRequestWithContext failures in a *url.Error
+// whose message embeds the full request URL -- which contains the usertoken and
+// the per-track query params (q_artist/q_track/q_album). Storing that raw
+// fragments the failure-analysis grouping (every URL is unique, so each failure
+// becomes its own single-count reason) and writes secrets plus library metadata
+// into work_queue.last_error. Unwrapping to the underlying cause yields a stable
+// "musixmatch: transport error: <cause>" (e.g. connection refused, timeout) that
+// aggregates across tracks, while %w preserves errors.Is/As so the worker still
+// classifies context cancellation and the like. Dropping the URL entirely also
+// removes any need to scrub the token from the message.
+func transportError(err error) error {
+	cause := err
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+		cause = urlErr.Err
 	}
-	return &redactedTokenError{err: err, token: c.Token}
+	return fmt.Errorf("musixmatch: transport error: %w", cause)
 }
-
-// redactedTokenError overrides only the rendered message, delegating identity
-// (Unwrap) to the wrapped error so errors.Is/As are unaffected.
-//
-// Note: because Unwrap exposes the original error, errors.As(err, &urlErr) still
-// yields a *url.Error whose .URL field holds the raw token. That is safe only so
-// long as no caller logs urlErr.URL directly; every current consumer renders via
-// Error() (the redacted string). A future caller that reads the struct field must
-// redact it itself.
-type redactedTokenError struct {
-	err   error
-	token string
-}
-
-func (e *redactedTokenError) Error() string {
-	msg := strings.ReplaceAll(e.err.Error(), e.token, "REDACTED")
-	// url.Values.Encode percent-escapes the token in the URL; cover the escaped
-	// form too so a token containing reserved characters cannot slip through.
-	if esc := url.QueryEscape(e.token); esc != e.token {
-		msg = strings.ReplaceAll(msg, esc, "REDACTED")
-	}
-	return msg
-}
-
-func (e *redactedTokenError) Unwrap() error { return e.err }
-
-// GoString satisfies fmt.GoStringer so the %#v verb -- which otherwise prints the
-// struct's raw fields, including the token -- renders the redacted message instead.
-// Error() already covers %v/%s/%+v (they use the error interface); %#v is the one
-// verb that bypasses it.
-func (e *redactedTokenError) GoString() string { return e.Error() }
 
 // tokenRenewalError marks the upstream "renew" hint: the usertoken must be
 // regenerated. It satisfies errors.Is for BOTH itself and ErrUnauthorized, so
@@ -347,7 +322,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 
 	req, err := http.NewRequestWithContext(ctx, "GET", baseURL.String(), nil)
 	if err != nil {
-		return song, c.redactToken(err)
+		return song, transportError(err)
 	}
 
 	req.Header = http.Header{
@@ -358,10 +333,10 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	res, err := c.httpClient.Do(req)
 	if err != nil {
 		// A transport failure surfaces as a *url.Error whose message embeds the
-		// full request URL -- including the usertoken query parameter. Returning
-		// it raw would leak the secret into work_queue.last_error, the
-		// failure-analysis UI, and logs, so redact it at this boundary.
-		return song, c.redactToken(err)
+		// full request URL -- the usertoken and the per-track query params.
+		// transportError strips the URL down to the underlying cause so the
+		// stored reason is clean, groupable, and free of secrets/metadata.
+		return song, transportError(err)
 	}
 	defer func() { _ = res.Body.Close() }()
 
