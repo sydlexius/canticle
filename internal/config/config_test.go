@@ -19,7 +19,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_API_CIRCUIT_OPEN_DURATION", "MXLRC_API_CIRCUIT_BACKOFF_BASE",
 		"MXLRC_MISS_BACKOFF_BASE_HOURS", "MXLRC_MISS_BACKOFF_CAP_HOURS", "MXLRC_MAX_MISS_ATTEMPTS",
 		"MXLRC_OUTPUT_DIR", "MXLRC_BILINGUAL_OUTPUT", "MXLRC_SERVER_ADDR", "MXLRC_WEB_UI_ENABLED", "MXLRC_WEBHOOK_API_KEY",
-		"MXLRC_SCAN_INTERVAL", "MXLRC_WORK_INTERVAL",
+		"MXLRC_SCAN_INTERVAL", "MXLRC_SWEEP_INTERVAL", "MXLRC_WORK_INTERVAL",
 		"MXLRC_TRUSTED_CIDRS", "MXLRC_TRUSTED_PROXIES",
 		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED", "MXLRC_PROVIDERS_MODE", "MXLRC_PROVIDERS_FALLBACK_ORDER",
 		"MXLRC_PROVIDERS_RACE_WAIT_SECONDS",
@@ -48,6 +48,34 @@ func isolateEnv(t *testing.T) {
 	}
 	// Provide a non-empty DB path so Load doesn't error on path resolution.
 	t.Setenv("MXLRC_DB_PATH", filepath.Join(t.TempDir(), "test.db"))
+}
+
+// TestLoad_EnvSweepInterval covers the MXLRC_SWEEP_INTERVAL env overlay: a valid
+// value overrides the default; an invalid value is rejected and the default
+// (21600) is preserved.
+func TestLoad_EnvSweepInterval(t *testing.T) {
+	t.Run("valid override", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_SWEEP_INTERVAL", "120")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Server.SweepIntervalSeconds != 120 {
+			t.Errorf("sweep interval = %d; want 120", cfg.Server.SweepIntervalSeconds)
+		}
+	})
+	t.Run("invalid preserves default", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_SWEEP_INTERVAL", "notanumber")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Server.SweepIntervalSeconds != defaultSweepIntervalSeconds {
+			t.Errorf("sweep interval = %d; want default %d", cfg.Server.SweepIntervalSeconds, defaultSweepIntervalSeconds)
+		}
+	})
 }
 
 // TestLoad_MissingConfigFileIsNotFatal verifies that a non-existent config

@@ -1,0 +1,12 @@
+# OSV-Scanner ignore list, honored by the OpenSSF Scorecard Vulnerabilities check
+# (.github/workflows/scorecard.yml). Each entry documents why a known
+# vulnerability does not apply to this project.
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+# golang.org/x/crypto/openpgp is unmaintained and has no fixed version
+# ("Fixed in: N/A"). This module is pulled only for golang.org/x/crypto/argon2
+# (internal/webauth/password.go); the openpgp package is never imported.
+# govulncheck confirms 0 reachable call paths, so the advisory does not affect
+# this binary. No expiry: there is no upstream fix to wait for.
+reason = "x/crypto/openpgp is unused (only .../argon2 is imported); govulncheck reports 0 reachable, and no fixed version exists"

@@ -561,6 +561,7 @@ var durationUnits = map[string]durationUnit{
 	"api.miss_backoff_base_hours":                   {"hours", "days", []string{"hours", "days"}},
 	"api.miss_backoff_cap_hours":                    {"hours", "days", []string{"hours", "days"}},
 	"server.scan_interval_seconds":                  {"seconds", "minutes", []string{"seconds", "minutes", "hours"}},
+	"server.sweep_interval_seconds":                 {"seconds", "hours", []string{"seconds", "minutes", "hours"}},
 	"server.work_interval_seconds":                  {"seconds", "minutes", []string{"seconds", "minutes", "hours"}},
 	"verification.sample_duration_seconds":          {"seconds", "seconds", []string{"seconds", "minutes"}},
 	"instrumental_detector.sample_duration_seconds": {"seconds", "seconds", []string{"seconds", "minutes"}},
@@ -924,6 +925,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return cfg.Server.Addr
 	case "server.scan_interval_seconds":
 		return strconv.Itoa(cfg.Server.ScanIntervalSeconds)
+	case "server.sweep_interval_seconds":
+		return strconv.Itoa(cfg.Server.SweepIntervalSeconds)
 	case "server.work_interval_seconds":
 		return strconv.Itoa(cfg.Server.WorkIntervalSeconds)
 	case "server.trusted_networks.cidrs":
@@ -1102,19 +1105,20 @@ func settingsLabel(spec config.FieldSpec) string {
 // path segment in settingsLabel.
 var settingsLabels = map[string]string{
 	// Common tab (exact UAT labels).
-	"api.token":                    "Musixmatch token",
-	"api.cooldown":                 "Seconds to wait between requests",
-	"output.dir":                   "Where to save lyrics",
-	"output.embedded_lyrics":       "What to do with lyrics already in the file",
-	"output.bilingual_output":      "Save the original and the translation together",
-	"providers.primary":            "Main lyrics source",
-	"providers.mode":               "How to use multiple sources",
-	"server.addr":                  "Web page address",
-	"server.web_ui_enabled":        "Show the web page",
-	"server.webhook_api_keys":      "Webhook keys",
-	"server.scan_interval_seconds": "How often to scan the library (seconds)",
-	"enrichment.enabled":           "Look up extra track info first",
-	"logging.level":                "How much detail to log",
+	"api.token":                     "Musixmatch token",
+	"api.cooldown":                  "Seconds to wait between requests",
+	"output.dir":                    "Where to save lyrics",
+	"output.embedded_lyrics":        "What to do with lyrics already in the file",
+	"output.bilingual_output":       "Save the original and the translation together",
+	"providers.primary":             "Main lyrics source",
+	"providers.mode":                "How to use multiple sources",
+	"server.addr":                   "Web page address",
+	"server.web_ui_enabled":         "Show the web page",
+	"server.webhook_api_keys":       "Webhook keys",
+	"server.scan_interval_seconds":  "How often to scan the library (seconds)",
+	"server.sweep_interval_seconds": "How often to clean up rows for moved or deleted files (seconds)",
+	"enrichment.enabled":            "Look up extra track info first",
+	"logging.level":                 "How much detail to log",
 	// Advanced tab.
 	"api.circuit_open_duration":                     "Max pause after repeated rate-limiting (seconds)",
 	"api.circuit_backoff_base_seconds":              "First pause after rate-limiting (seconds)",

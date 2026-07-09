@@ -117,6 +117,17 @@ addr = "127.0.0.1:3876"
 # MXLRC_LOG_LEVEL=debug.
 # scan_interval_seconds = 900
 
+# Interval in seconds for the path-reconciliation sweep in `serve` mode (env:
+# MXLRC_SWEEP_INTERVAL). This backstop deletes queue/scan rows whose source audio
+# file has vanished (renamed, merged, or deleted by an external library manager),
+# so a moved track cannot leave a permanently-failing row behind. Default 21600
+# (6h): deliberately lazier than scan_interval_seconds because the filesystem
+# watcher reconciles deletions reactively and this only backstops it, so it need
+# not spin disks often. A value of 0 disables the periodic sweep (the reactive
+# watcher prune still runs). The `scan reconcile-paths` CLI runs the same
+# reconciliation on demand.
+# sweep_interval_seconds = 21600
+
 # Worker poll interval in seconds for `serve` mode (env: MXLRC_WORK_INTERVAL).
 # Default 0, which falls back to api.cooldown. Clamped to a 15-second floor.
 # The --work-interval flag overrides this value.

@@ -24,11 +24,17 @@ type LibraryLister interface {
 // ScanFunc performs a targeted scan of path on behalf of lib.
 type ScanFunc func(ctx context.Context, lib models.Library, path string) error
 
+// PruneFunc reconciles the database against the filesystem for a path that a
+// Remove/Rename event reported as vanished. It is DB-only (no rescan), so it is
+// disk-free relative to the watched tree and needs no debounce. May be nil.
+type PruneFunc func(ctx context.Context, path string) error
+
 // Watcher watches configured library roots and triggers targeted scans.
 type Watcher struct {
 	cfg       Config
 	libraries LibraryLister
 	scan      ScanFunc
+	prune     PruneFunc
 
 	// armed, when non-nil, is invoked with a path each time its debounce timer is
 	// set or reset in dispatch. It is a test-only synchronization seam (default
@@ -38,17 +44,20 @@ type Watcher struct {
 }
 
 // New creates a Watcher. scan is invoked (after debouncing) with the owning
-// library and the directory that changed. Non-positive Debounce or MaxDirs are
-// clamped to the package defaults: a zero Debounce would disable debouncing
-// (scan on every raw event), and a non-positive MaxDirs would reject all roots.
-func New(cfg Config, libraries LibraryLister, scan ScanFunc) *Watcher {
+// library and the directory that changed. prune (may be nil) is invoked
+// immediately, without debounce, for a Remove/Rename event whose path has
+// vanished, so the durable rows for a deleted/moved source are reconciled
+// reactively. Non-positive Debounce or MaxDirs are clamped to the package
+// defaults: a zero Debounce would disable debouncing (scan on every raw event),
+// and a non-positive MaxDirs would reject all roots.
+func New(cfg Config, libraries LibraryLister, scan ScanFunc, prune PruneFunc) *Watcher {
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = defaultDebounceMS * time.Millisecond
 	}
 	if cfg.MaxDirs <= 0 {
 		cfg.MaxDirs = defaultMaxDirs
 	}
-	return &Watcher{cfg: cfg, libraries: libraries, scan: scan}
+	return &Watcher{cfg: cfg, libraries: libraries, scan: scan, prune: prune}
 }
 
 // libEvent is a debounced, library-resolved scan request.
@@ -116,6 +125,7 @@ func (w *Watcher) translate(ctx context.Context, c <-chan notify.EventInfo, libs
 			if !ok {
 				continue
 			}
+			w.maybePrune(ctx, ei)
 			slog.Debug("watcher: event received", "event", ei.Event().String(), "path", ei.Path(), "library", lib.ID, "dir", dir)
 			select {
 			case <-ctx.Done():
@@ -186,11 +196,33 @@ func (w *Watcher) dispatch(ctx context.Context, events <-chan libEvent) {
 	}
 }
 
+// maybePrune runs the reactive database reconciliation for a Remove/Rename event
+// whose path has actually vanished, in addition to the parent-directory rescan
+// every event triggers. It is disk-free (a pure DB delete) and runs without
+// debounce. Create/Write events never prune, and a Rename whose reported path is
+// the NEW (still-present) name is skipped by the os.Stat guard. A nil PruneFunc
+// disables reactive reconciliation (the periodic sweep remains the backstop).
+func (w *Watcher) maybePrune(ctx context.Context, ei notify.EventInfo) {
+	if w.prune == nil {
+		return
+	}
+	if ei.Event()&(notify.Remove|notify.Rename) == 0 {
+		return
+	}
+	if _, err := os.Stat(ei.Path()); !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if err := w.prune(ctx, ei.Path()); err != nil {
+		slog.Warn("watcher: reactive prune failed; periodic sweep remains the backstop", "path", ei.Path(), "error", err)
+	}
+}
+
 // eventTarget returns the library that owns path and the directory to scan. A
 // file event scans the file's directory; a directory event scans that
 // directory. When path no longer exists (delete/rename), its parent directory
-// is rescanned to pick up sibling adds/changes; stale rows are not deleted here
-// (the upsert never removes rows; the periodic scheduler reconciles deletions).
+// is rescanned to pick up sibling adds/changes. Deletions are reconciled
+// separately: maybePrune deletes the vanished path's rows reactively on the same
+// Remove/Rename event, and a lazy periodic sweep (see runServe) is the backstop.
 // ok is false when no configured library contains path.
 func eventTarget(libs []models.Library, path string) (models.Library, string, bool) {
 	var best models.Library

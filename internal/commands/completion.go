@@ -28,8 +28,8 @@ var completionSubcommands = []string{
 // exhaustive mirror of every flag.
 var completionCandidates = map[string][]string{
 	"fetch":      {"--outdir", "--cooldown", "--depth", "--update", "--upgrade", "--bfs", "--token", "--config", "--album", "--probe", "--isrc", "--duration", "--spotify-id"},
-	"serve":      {"--listen", "--outdir", "--token", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--scan-interval", "--work-interval"},
-	"scan":       {"results", "clear", "reconcile", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--only"},
+	"serve":      {"--listen", "--outdir", "--token", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--scan-interval", "--sweep-interval", "--work-interval"},
+	"scan":       {"results", "clear", "reconcile", "reconcile-paths", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--only"},
 	"library":    {"add", "list", "remove", "update"},
 	"keys":       {"create", "list", "revoke"},
 	"secrets":    {"import", "set", "list"},

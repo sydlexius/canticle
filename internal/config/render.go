@@ -77,6 +77,7 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("addr = %s%s\n", cfg.Server.Addr, ann("server.addr"))
 	p("webhook_api_keys = %s%s\n", sliceVal("server.webhook_api_keys", cfg.Server.WebhookAPIKeys), ann("server.webhook_api_keys"))
 	p("scan_interval_seconds = %d%s\n", cfg.Server.ScanIntervalSeconds, ann("server.scan_interval_seconds"))
+	p("sweep_interval_seconds = %d%s\n", cfg.Server.SweepIntervalSeconds, ann("server.sweep_interval_seconds"))
 	p("work_interval_seconds = %d%s\n", cfg.Server.WorkIntervalSeconds, ann("server.work_interval_seconds"))
 	p("\n")
 
@@ -305,6 +306,7 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			strAttr("addr", "server.addr", cfg.Server.Addr),
 			sliceAttr("webhook_api_keys", "server.webhook_api_keys", cfg.Server.WebhookAPIKeys),
 			intAttr("scan_interval_seconds", "server.scan_interval_seconds", cfg.Server.ScanIntervalSeconds),
+			intAttr("sweep_interval_seconds", "server.sweep_interval_seconds", cfg.Server.SweepIntervalSeconds),
 			intAttr("work_interval_seconds", "server.work_interval_seconds", cfg.Server.WorkIntervalSeconds),
 		),
 		group("providers",

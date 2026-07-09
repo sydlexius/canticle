@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rjeczalik/notify"
+
 	"github.com/doxazo-net/canticle/internal/models"
 )
 
@@ -201,7 +203,7 @@ func TestDispatchCoalescesBurstIntoSingleScan(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	w := New(Config{Debounce: 30 * time.Millisecond}, nil, scan)
+	w := New(Config{Debounce: 30 * time.Millisecond}, nil, scan, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -249,7 +251,7 @@ func TestDispatchTrailingEdgeResetsTimer(t *testing.T) {
 		return nil
 	}
 	const debounce = 50 * time.Millisecond
-	w := New(Config{Debounce: debounce}, nil, scan)
+	w := New(Config{Debounce: debounce}, nil, scan, nil)
 	armed := make(chan string, 4)
 	// The callback runs synchronously inside dispatch immediately after the timer
 	// is set/reset, so lastArmAt tracks the real dispatch-side arm time (not a
@@ -321,7 +323,7 @@ func TestDispatchNoScanAfterCancelMidDebounce(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	w := New(Config{Debounce: 50 * time.Millisecond}, nil, scan)
+	w := New(Config{Debounce: 50 * time.Millisecond}, nil, scan, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	events := make(chan libEvent)
@@ -343,7 +345,7 @@ func TestDispatchNoScanAfterCancelMidDebounce(t *testing.T) {
 }
 
 func TestRunReturnsNilWhenNoLibraries(t *testing.T) {
-	w := New(Config{MaxDirs: defaultMaxDirs}, fakeLister{}, func(context.Context, models.Library, string) error { return nil })
+	w := New(Config{MaxDirs: defaultMaxDirs}, fakeLister{}, func(context.Context, models.Library, string) error { return nil }, nil)
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatalf("Run with no libraries = %v; want nil", err)
 	}
@@ -357,7 +359,7 @@ func TestRunFailsWhenWatchBudgetExceeded(t *testing.T) {
 	// root + sub = 2 directories, over the MaxDirs=1 cap. (MaxDirs must be
 	// positive now; New clamps <= 0 to the default, so 0 no longer forces this.)
 	w := New(Config{MaxDirs: 1, Debounce: time.Millisecond}, fakeLister{libs: []models.Library{{ID: 1, Path: root}}},
-		func(context.Context, models.Library, string) error { return nil })
+		func(context.Context, models.Library, string) error { return nil }, nil)
 	err := w.Run(context.Background())
 	if err == nil {
 		t.Fatal("Run with exceeded budget = nil; want a loud failure")
@@ -388,6 +390,7 @@ func TestRunTriggersScanOnFileCreate(t *testing.T) {
 			}
 			return nil
 		},
+		nil,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -404,6 +407,110 @@ func TestRunTriggersScanOnFileCreate(t *testing.T) {
 	case got := <-scanned:
 		if got != root {
 			t.Errorf("scanned path = %q; want %q", got, root)
+		}
+	case <-time.After(5 * time.Second):
+		t.Skip("no filesystem event delivered within 5s (best-effort watcher; may be unsupported here)")
+	}
+
+	cancel()
+	<-runErr
+}
+
+// fakeEventInfo is a stand-in notify.EventInfo for direct maybePrune tests, so
+// the prune-dispatch logic is covered without depending on real filesystem event
+// delivery (which some CI filesystems do not support).
+type fakeEventInfo struct {
+	ev   notify.Event
+	path string
+}
+
+func (f fakeEventInfo) Event() notify.Event { return f.ev }
+func (f fakeEventInfo) Path() string        { return f.path }
+func (f fakeEventInfo) Sys() any            { return nil }
+
+// TestMaybePrune covers the reactive-prune dispatch decision table directly.
+func TestMaybePrune(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "present.mp3")
+	if err := os.WriteFile(present, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	gone := filepath.Join(dir, "gone.mp3")
+
+	cases := []struct {
+		name     string
+		ev       notify.Event
+		path     string
+		nilPrune bool
+		want     bool
+	}{
+		{"remove-gone-prunes", notify.Remove, gone, false, true},
+		{"rename-gone-prunes", notify.Rename, gone, false, true},
+		{"create-never-prunes", notify.Create, gone, false, false},
+		{"write-never-prunes", notify.Write, gone, false, false},
+		{"remove-but-present-skips", notify.Remove, present, false, false},
+		{"nil-prune-is-noop", notify.Remove, gone, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			var pf PruneFunc
+			if !tc.nilPrune {
+				pf = func(_ context.Context, p string) error { got = p; return nil }
+			}
+			w := New(Config{}, nil, func(context.Context, models.Library, string) error { return nil }, pf)
+			w.maybePrune(context.Background(), fakeEventInfo{ev: tc.ev, path: tc.path})
+			if tc.want && got != tc.path {
+				t.Errorf("prune called with %q; want %q", got, tc.path)
+			}
+			if !tc.want && got != "" {
+				t.Errorf("prune called (%q) when it should not have been", got)
+			}
+		})
+	}
+}
+
+// TestRunPrunesOnRemove verifies a Remove event for a vanished path invokes the
+// injected PruneFunc with that path, while a Create does not.
+func TestRunPrunesOnRemove(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "gone.mp3")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	pruned := make(chan string, 4)
+	w := New(
+		Config{Debounce: 20 * time.Millisecond, MaxDirs: defaultMaxDirs},
+		fakeLister{libs: []models.Library{{ID: 7, Path: root}}},
+		func(context.Context, models.Library, string) error { return nil },
+		func(_ context.Context, path string) error {
+			select {
+			case pruned <- path:
+			default:
+			}
+			return nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+
+	time.Sleep(200 * time.Millisecond) // allow watch registration
+	// A create must not prune (only Remove/Rename of a vanished path does).
+	if err := os.WriteFile(filepath.Join(root, "created.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write created: %v", err)
+	}
+	// Remove the pre-existing file: its path is now gone, so it must prune.
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("remove target: %v", err)
+	}
+
+	select {
+	case got := <-pruned:
+		if got != target {
+			t.Errorf("pruned path = %q; want %q (a create must not prune)", got, target)
 		}
 	case <-time.After(5 * time.Second):
 		t.Skip("no filesystem event delivered within 5s (best-effort watcher; may be unsupported here)")

@@ -176,6 +176,14 @@ type ServerConfig struct {
 	// ScanIntervalSeconds is the scheduler scan interval in seconds for serve
 	// mode. Default 900. A value of 0 disables repeat scanning (scan once).
 	ScanIntervalSeconds int `toml:"scan_interval_seconds"`
+	// SweepIntervalSeconds is the interval in seconds for the serve-mode path
+	// reconciliation sweep, which deletes queue/scan rows whose source file has
+	// vanished (renamed/merged/deleted). Default 21600 (6h): deliberately lazier
+	// than the content scan because the filesystem watcher reconciles deletions
+	// reactively and this sweep is only a backstop, so it need not spin disks
+	// often. A value of 0 disables the periodic sweep (the reactive watcher prune
+	// still runs).
+	SweepIntervalSeconds int `toml:"sweep_interval_seconds"`
 	// WorkIntervalSeconds is the worker poll interval in seconds for serve mode.
 	// Default 0, which means "fall back to api.cooldown". The effective interval
 	// is clamped to a 15-second floor at runtime.
@@ -255,6 +263,11 @@ type TrustedNetworksConfig struct {
 
 // defaultScanIntervalSeconds is the built-in scheduler scan interval (15 min).
 const defaultScanIntervalSeconds = 900
+
+// defaultSweepIntervalSeconds is the built-in path-reconciliation sweep interval
+// (6h). Lazier than the content scan by design: the watcher reconciles deletions
+// reactively, so the sweep is only a backstop and need not spin disks often.
+const defaultSweepIntervalSeconds = 21600
 
 // ProvidersConfig holds lyrics provider selection settings.
 type ProvidersConfig struct {
@@ -525,7 +538,7 @@ func defaults() Config {
 		},
 		Output:       OutputConfig{Dir: DefaultOutputDir, EmbeddedLyrics: "off"},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
-		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
+		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds, SweepIntervalSeconds: defaultSweepIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault, RaceWaitSeconds: raceWaitSecondsDefault},
 		Verification: VerificationConfig{FFmpegPath: "ffmpeg", SampleDurationSeconds: 30, MinConfidence: 0.85, MinSimilarity: 0.35},
 		InstrumentalDetector: InstrumentalDetectorConfig{
@@ -904,6 +917,15 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.Server.ScanIntervalSeconds = n
 			applied["server.scan_interval_seconds"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_SWEEP_INTERVAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SWEEP_INTERVAL", "value", v, "current", cfg.Server.SweepIntervalSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Server.SweepIntervalSeconds = n
+			applied["server.sweep_interval_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_WORK_INTERVAL"); v != "" {

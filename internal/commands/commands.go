@@ -36,6 +36,7 @@ import (
 	"github.com/doxazo-net/canticle/internal/musixmatch"
 	"github.com/doxazo-net/canticle/internal/petitlyrics"
 	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/doxazo-net/canticle/internal/prune"
 	"github.com/doxazo-net/canticle/internal/queue"
 	"github.com/doxazo-net/canticle/internal/scan"
 	"github.com/doxazo-net/canticle/internal/scanfail"
@@ -111,6 +112,7 @@ type ServeCmd struct {
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
 	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
 	ScanInterval   *int    `arg:"--scan-interval" help:"scheduler interval in seconds (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
+	SweepInterval  *int    `arg:"--sweep-interval" help:"path-reconciliation sweep interval in seconds (default: server.sweep_interval_seconds or 21600; 0 disables the periodic sweep)"`
 	WorkInterval   *int    `arg:"--work-interval" help:"worker poll interval in seconds (default: server.work_interval_seconds or api.cooldown; minimum 15)"`
 }
 
@@ -130,9 +132,19 @@ type ScanCmd struct {
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
 
-	Results   *ScanResultsCmd   `arg:"subcommand:results" help:"list persisted scan_results rows"`
-	Clear     *ScanClearCmd     `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
-	Reconcile *ScanReconcileCmd `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
+	Results        *ScanResultsCmd        `arg:"subcommand:results" help:"list persisted scan_results rows"`
+	Clear          *ScanClearCmd          `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
+	Reconcile      *ScanReconcileCmd      `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
+	ReconcilePaths *ScanReconcilePathsCmd `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
+}
+
+// ScanReconcilePathsCmd deletes work_queue/scan_results rows whose source audio
+// file no longer exists on disk, at Exact granularity. Dry-run unless --yes.
+type ScanReconcilePathsCmd struct {
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
+	Yes        bool   `arg:"--yes" help:"actually delete rows (without it, prints what would be deleted)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of pruned rows (default: <db-dir>/reconcile-paths-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // ScanReconcileCmd re-runs the audio detector over instrumental-tagged tracks and,
@@ -949,6 +961,17 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			runWatcher(runCtx, sqlDB, args, watchCfg, cfg, cacheRepo)
 		}()
 	}
+	// Periodic path-reconciliation sweep (#453): deletes queue/scan rows whose
+	// source file vanished. It is the disk-cheap backstop to the watcher's
+	// reactive prune, so it runs regardless of the watcher toggle. A zero interval
+	// disables it (the reactive prune still runs when the watcher is enabled).
+	if sweepInterval := serveSweepInterval(cfg, args); sweepInterval > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runSweeper(runCtx, sqlDB, sweepInterval)
+		}()
+	}
 	// Background session sweeper: periodically delete expired/revoked sessions,
 	// mirroring the worker/scheduler goroutine + context-cancel pattern. Only
 	// runs when the authenticated UI is mounted (there are no sessions otherwise).
@@ -1227,6 +1250,17 @@ func serveScanInterval(cfg config.Config, args ServeCmd) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+// serveSweepInterval resolves the path-reconciliation sweep interval. Precedence:
+// CLI --sweep-interval > config server.sweep_interval_seconds (default 21600).
+// A zero result disables the periodic sweep (the reactive watcher prune remains).
+func serveSweepInterval(cfg config.Config, args ServeCmd) time.Duration {
+	seconds := cfg.Server.SweepIntervalSeconds
+	if args.SweepInterval != nil {
+		seconds = *args.SweepInterval
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func normalizeWorkerInterval(interval time.Duration) time.Duration {
 	if interval < 15*time.Second {
 		return 15 * time.Second
@@ -1491,6 +1525,40 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 	}
 }
 
+// runSweeper runs the periodic path-reconciliation sweep: on each tick it prunes
+// queue/scan rows whose source file has vanished, at Directory granularity (one
+// stat per directory) so the unattended backstop stays disk-cheap. Its first run
+// also reconciles any rows that predate this feature. Caller guarantees interval
+// > 0. A per-run failure is logged and the loop continues; the sweep is a
+// backstop and must never take down serve.
+func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration) {
+	pruner := prune.New(sqlDB)
+	sweep := func() {
+		res, err := pruner.Sweep(ctx, prune.SweepOptions{Granularity: prune.Directory})
+		if err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				slog.Warn("path-reconciliation sweep failed; will retry next interval", "error", err)
+			}
+			return
+		}
+		if res.ScanResults > 0 || res.WorkItems > 0 {
+			slog.Info("path-reconciliation sweep pruned rows for vanished sources", "scan_results", res.ScanResults, "work_items", res.WorkItems)
+		}
+	}
+	slog.Info("path-reconciliation sweeper started", "interval", interval)
+	sweep() // reconcile at startup, including any pre-existing dead-path rows
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
+
 // runWatcher runs the optional filesystem watcher, triggering a targeted scan of
 // the changed directory under the owning library. The periodic scheduler remains
 // the reconciliation backstop; the watcher only lowers latency for new files.
@@ -1516,8 +1584,14 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
+	pruner := prune.New(sqlDB)
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
+	}, func(ctx context.Context, path string) error {
+		// Reactive, disk-free reconciliation: the watcher already learned path
+		// vanished, so delete its rows without a rescan (Exact granularity).
+		_, err := pruner.PrunePath(ctx, path)
+		return err
 	})
 	// The watcher is best-effort and explicitly never a replacement for the
 	// periodic scheduler (see README), so a setup or runtime failure must not
@@ -1571,6 +1645,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runScanReconcile(ctx, out, sub)
+	case args.ReconcilePaths != nil:
+		sub := *args.ReconcilePaths
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcilePaths(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}
@@ -2068,6 +2148,7 @@ func configKeys() []string {
 		"server.addr",
 		"server.webhook_api_keys",
 		"server.scan_interval_seconds",
+		"server.sweep_interval_seconds",
 		"server.work_interval_seconds",
 		"providers.primary",
 		"providers.disabled",
@@ -2112,6 +2193,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strings.Join(cfg.Server.WebhookAPIKeys, ","), true
 	case "server.scan_interval_seconds":
 		return strconv.Itoa(cfg.Server.ScanIntervalSeconds), true
+	case "server.sweep_interval_seconds":
+		return strconv.Itoa(cfg.Server.SweepIntervalSeconds), true
 	case "server.work_interval_seconds":
 		return strconv.Itoa(cfg.Server.WorkIntervalSeconds), true
 	case "providers.primary":
@@ -2204,6 +2287,12 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("server.scan_interval_seconds must be a non-negative integer (seconds; 0 disables repeat)")
 		}
 		cfg.Server.ScanIntervalSeconds = n
+	case "server.sweep_interval_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("server.sweep_interval_seconds must be a non-negative integer (seconds; 0 disables the periodic sweep)")
+		}
+		cfg.Server.SweepIntervalSeconds = n
 	case "server.work_interval_seconds":
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 0 {
