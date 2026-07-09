@@ -80,6 +80,7 @@ var settingsSectionOrder = []struct {
 	{"verification", "Verification"},
 	{"instrumental_detector", "Instrumental Detector"},
 	{"enrichment", "Enrichment"},
+	{"realign", "Realign"},
 	{"guard", "Guard"},
 	{"queue", "Queue"},
 	{"logging", "Logging"},
@@ -397,6 +398,10 @@ var boolLabels = map[string][2]string{
 	"verification.enabled":          {"Verify lyrics against the audio", "Don't verify"},
 	"instrumental_detector.enabled": {"Detect instrumental tracks", "Don't detect"},
 	"enrichment.enabled":            {"Look up extra track info first", "Skip the lookup"},
+	"realign.enabled":               {"Re-attach orphaned lyric files (not yet active)", "Off"},
+	"realign.on_scan":               {"Realign after every scan (not yet active)", "Only when run manually"},
+	"realign.require_provenance":    {"Only move on an exact ID match", "Allow name-based matches too"},
+	"realign.cross_directory":       {"Allow matches across directories", "Same directory only"},
 	"queue.randomize":               {"Process in random order", "Process in order"},
 	"watcher.enabled":               {"Watch for new files", "Don't watch"},
 	"server.tls.self_signed":        {"Use a self-signed certificate", "Off"},
@@ -977,6 +982,19 @@ func rawConfigValue(cfg config.Config, path string) string {
 	// [enrichment]
 	case "enrichment.enabled":
 		return strconv.FormatBool(cfg.Enrichment.Enabled)
+	// [realign]
+	case "realign.enabled":
+		return strconv.FormatBool(cfg.Realign.Enabled)
+	case "realign.on_scan":
+		return strconv.FormatBool(cfg.Realign.OnScan)
+	case "realign.require_provenance":
+		return strconv.FormatBool(cfg.Realign.RequireProvenance)
+	case "realign.cross_directory":
+		return strconv.FormatBool(cfg.Realign.CrossDirectory)
+	case "realign.identity_keys":
+		return joinSlice(cfg.Realign.IdentityKeys)
+	case "realign.min_confidence":
+		return formatFloat(cfg.Realign.MinConfidence)
 	// [guard]
 	case "guard.accepted_scripts":
 		return joinSlice(cfg.Guard.AcceptedScripts)
@@ -1135,6 +1153,12 @@ var settingsLabels = map[string]string{
 	"instrumental_detector.spread_samples":          "Number of samples taken across the track",
 	"instrumental_detector.ffprobe_path":            "ffprobe program location",
 	"instrumental_detector.cooldown_seconds":        "Wait between detector checks (seconds)",
+	"realign.enabled":                               "Re-attach orphaned lyric files (not yet active)",
+	"realign.on_scan":                               "Realign automatically after each scan (not yet active)",
+	"realign.require_provenance":                    "Require an exact ID match to move a file",
+	"realign.cross_directory":                       "Allow moves across directories",
+	"realign.identity_keys":                         "Which IDs to match on (in order)",
+	"realign.min_confidence":                        "Minimum name-match similarity for a guess (0-1)",
 	"guard.accepted_scripts":                        "Writing systems to accept without asking",
 	"guard.script_guard_threshold":                  "Foreign-script sensitivity (0-1)",
 	"queue.randomize":                               "Process tracks in random order",

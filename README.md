@@ -96,6 +96,8 @@ MUSIXMATCH_TOKEN=YOUR_TOKEN MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key \
 
 Directory mode overrides `-o/--outdir`; the output extension is `.lrc` for synced lyrics and `.txt` for unsynced lyrics or an instrumental marker. See the [CLI Reference](https://doxazo-net.github.io/canticle/CLI_REFERENCE/) for every flag and the [User Guide](https://doxazo-net.github.io/canticle/USER_GUIDE/) for Docker, Unraid, and webhook deployment.
 
+Renamed an audio file and left its `.lrc`/`.txt` behind? `canticle realign` re-attaches orphaned lyric sidecars to their audio (dry-run by default; `--yes` to apply), and `contrib/lidarr-rename-sidecars.sh` is a Lidarr Custom Script that prevents the orphan at rename time. See [Realign](https://doxazo-net.github.io/canticle/CLI_REFERENCE/#realign).
+
 ## Token
 
 A Musixmatch API token is required. Supply it via the `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, or a `.env`/config file, in that order of precedence (CLI > env > file). To get a token, follow steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). See [Configuration](https://doxazo-net.github.io/canticle/CONFIGURATION/) for the full env-var and TOML surface.

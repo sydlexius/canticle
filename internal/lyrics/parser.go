@@ -18,7 +18,46 @@ type ProvenanceTags struct {
 	Fetched string // [fetched:] tag (RFC3339)
 	ISRC    string // [isrc:] tag
 	MBID    string // [mbid:] tag
+	// Artist and Title mirror the standard [ar:]/[ti:] LRC header tags. They are
+	// read-only identity signals (populated by ReadProvenanceTags for the realign
+	// name guard); InjectProvenance never writes them.
+	Artist string // [ar:] tag
+	Title  string // [ti:] tag
 	// Ve is intentionally absent: [ve:] is skipped on backfilled files (DC4).
+}
+
+// ReadProvenanceTags reads the LRC header of the file at path and returns the
+// identity-bearing tag values (ISRC, MBID) plus the standard [ar:]/[ti:] artist
+// and title tags, using the same lowercase key convention as InjectProvenance.
+// It works on any sidecar (.lrc or .txt); a file with no recognizable header
+// yields a zero-value ProvenanceTags and a nil error. Later occurrences of a key
+// win (matching how a rewrite would leave the final value in place).
+func ReadProvenanceTags(path string) (ProvenanceTags, error) {
+	tags, _, err := parseLRCHeader(path)
+	if err != nil {
+		return ProvenanceTags{}, err
+	}
+	var pt ProvenanceTags
+	for _, t := range tags {
+		if t.key == "" {
+			continue
+		}
+		switch strings.ToLower(t.key) {
+		case "isrc":
+			pt.ISRC = strings.TrimSpace(t.value)
+		case "mbid":
+			pt.MBID = strings.TrimSpace(t.value)
+		case "source":
+			pt.Source = strings.TrimSpace(t.value)
+		case "fetched":
+			pt.Fetched = strings.TrimSpace(t.value)
+		case "ar":
+			pt.Artist = strings.TrimSpace(t.value)
+		case "ti":
+			pt.Title = strings.TrimSpace(t.value)
+		}
+	}
+	return pt, nil
 }
 
 // lrcTag represents a parsed LRC header tag.

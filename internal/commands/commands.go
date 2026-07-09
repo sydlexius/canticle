@@ -62,6 +62,7 @@ type Args struct {
 	Config     *ConfigCmd     `arg:"subcommand:config" help:"inspect or update configuration"`
 	Queue      *QueueCmd      `arg:"subcommand:queue" help:"inspect or maintain the durable work queue"`
 	Provenance *ProvenanceCmd `arg:"subcommand:provenance" help:"embed or inspect provenance tags in .lrc files"`
+	Realign    *RealignCmd    `arg:"subcommand:realign" help:"re-attach orphaned .lrc/.txt sidecars to renamed audio files"`
 	Completion *CompletionCmd `arg:"subcommand:completion" help:"output a shell completion script (bash, zsh, or fish)"`
 }
 
@@ -431,6 +432,8 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 		return runQueueCmd(ctx, out, *args.Queue)
 	case args.Provenance != nil:
 		return runProvenance(ctx, out, *args.Provenance)
+	case args.Realign != nil:
+		return runRealign(ctx, out, *args.Realign)
 	case args.Completion != nil:
 		return runCompletion(out, *args.Completion)
 	default:
@@ -447,7 +450,7 @@ func usesSubcommand(rawArgs []string) bool {
 		return true
 	}
 	commands := map[string]bool{
-		"fetch": true, "serve": true, "scan": true, "library": true, "keys": true, "secrets": true, "config": true, "queue": true, "provenance": true, "completion": true,
+		"fetch": true, "serve": true, "scan": true, "library": true, "keys": true, "secrets": true, "config": true, "queue": true, "provenance": true, "realign": true, "completion": true,
 	}
 	return commands[rawArgs[0]]
 }

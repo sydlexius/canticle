@@ -133,6 +133,47 @@ func TestLoad_GuardThresholdExplicitValueHonored(t *testing.T) {
 	}
 }
 
+func TestLoad_RealignMinConfidenceReDefaultsWhenOutOfRange(t *testing.T) {
+	// A min_confidence outside (0,1] from TOML must reset to the default rather
+	// than silently disable the name guard (<=0) or block every heuristic realign
+	// (>1). Mirrors the env-override range check.
+	for name, tomlBody := range map[string]string{
+		"zero":      "[realign]\nmin_confidence = 0.0\n",
+		"negative":  "[realign]\nmin_confidence = -0.5\n",
+		"too large": "[realign]\nmin_confidence = 1.5\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateEnv(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tomlBody), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Realign.MinConfidence != realignMinConfidenceDefault {
+				t.Errorf("realign min_confidence = %v; want %v (re-defaulted)", cfg.Realign.MinConfidence, realignMinConfidenceDefault)
+			}
+		})
+	}
+}
+
+func TestLoad_RealignMinConfidenceExplicitValueHonored(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[realign]\nmin_confidence = 0.9\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Realign.MinConfidence != 0.9 {
+		t.Errorf("realign min_confidence = %v; want 0.9 (honored)", cfg.Realign.MinConfidence)
+	}
+}
+
 func TestLoad_EnvGuardOverrides(t *testing.T) {
 	isolateEnv(t)
 	t.Setenv("MXLRC_GUARD_ACCEPTED_SCRIPTS", "Latin, Hangul")
