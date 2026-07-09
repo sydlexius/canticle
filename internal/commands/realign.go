@@ -137,6 +137,12 @@ func runRealign(ctx context.Context, out io.Writer, args RealignCmd) int {
 	dirsChecked := 0
 	orphansSeen := 0
 
+	// claimed tracks target paths already spoken for by an earlier planned move
+	// in this run. Two orphans carrying the same ISRC/MBID (duplicated tags) can
+	// each resolve to the same audio file and target; without this, both pass the
+	// plan-time destinationBlocked check (nothing on disk yet) and the second
+	// os.Rename would clobber the first. A second claim on a target is a conflict.
+	claimed := map[string]bool{}
 	for _, lib := range libs {
 		root := lib.Path
 		resolvedRoot, ok := pathutil.ResolveWithinRoot(root, root)
@@ -219,6 +225,11 @@ func runRealign(ctx context.Context, out io.Writer, args RealignCmd) int {
 						skips = append(skips, realignSkip{kind: "conflict", path: orphan, reason: "destination " + target + " already exists"})
 						continue
 					}
+					if claimed[target] {
+						skips = append(skips, realignSkip{kind: "conflict", path: orphan, reason: "destination " + target + " already claimed by another orphan this run (duplicate provenance?)"})
+						continue
+					}
+					claimed[target] = true
 					moves = append(moves, realignMove{orphan: orphan, target: target, method: "exact", libraryID: lib.ID, eligible: true})
 				default: // "none": no provenance match
 					if !dirPair {
@@ -232,6 +243,10 @@ func runRealign(ctx context.Context, out io.Writer, args RealignCmd) int {
 						skips = append(skips, realignSkip{kind: "conflict", path: orphan, reason: "destination " + target + " already exists"})
 						continue
 					}
+					if claimed[target] {
+						skips = append(skips, realignSkip{kind: "conflict", path: orphan, reason: "destination " + target + " already claimed by another orphan this run (duplicate provenance?)"})
+						continue
+					}
 					ok, score := heuristicNameGuard(orphanTags, stemOf(orphan), getProv(audio), stemOf(audio), minConf)
 					if !ok {
 						// The lone in-directory pair exists but the name guard is not
@@ -239,6 +254,7 @@ func runRealign(ctx context.Context, out io.Writer, args RealignCmd) int {
 						skips = append(skips, realignSkip{kind: "ambiguous", path: orphan, reason: fmt.Sprintf("name similarity %.2f below min_confidence %.2f", score, minConf)})
 						continue
 					}
+					claimed[target] = true
 					mv := realignMove{orphan: orphan, target: target, method: "heuristic", libraryID: lib.ID, eligible: !rc.RequireProvenance, confidence: score}
 					if !mv.eligible {
 						mv.gateReason = "require_provenance is set; heuristic matches are not applied"

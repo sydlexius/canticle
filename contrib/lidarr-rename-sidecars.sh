@@ -64,10 +64,19 @@ for i in "${!old_paths[@]}"; do
         src="${old_stem}.${ext}"
         dst="${new_stem}.${ext}"
         if [[ -f "$src" && ! -e "$dst" ]]; then
-            mkdir -p "$(dirname "$dst")"
-            mv -- "$src" "$dst"
-            printf 'lidarr-rename-sidecars: moved %s -> %s\n' "$src" "$dst"
-            moved=$((moved + 1))
+            # Handle each move independently: under `set -e` a single failing mv
+            # (permissions, cross-device link) would otherwise abort the whole
+            # event and strand the remaining, unrelated sidecar pairs.
+            if ! mkdir -p "$(dirname "$dst")"; then
+                printf 'lidarr-rename-sidecars: mkdir failed for %s; skipping\n' "$dst" >&2
+                continue
+            fi
+            if mv -- "$src" "$dst"; then
+                printf 'lidarr-rename-sidecars: moved %s -> %s\n' "$src" "$dst"
+                moved=$((moved + 1))
+            else
+                printf 'lidarr-rename-sidecars: move failed %s -> %s; skipping\n' "$src" "$dst" >&2
+            fi
         fi
     done
 done

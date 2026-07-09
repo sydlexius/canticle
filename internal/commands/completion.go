@@ -75,7 +75,7 @@ func runComplete(ctx context.Context, out io.Writer, words []string) int {
 		candidates = append(candidates, completionCandidates[sub]...)
 		// Offer configured library names where a name argument is expected and
 		// the user is not partway through typing a flag.
-		if (sub == "scan" || sub == "library" || sub == "realign") && !strings.HasPrefix(cur, "-") {
+		if (sub == "scan" || sub == "library") && !strings.HasPrefix(cur, "-") {
 			candidates = append(candidates, completionLibraryNames(ctx)...)
 		}
 	}

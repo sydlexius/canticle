@@ -394,13 +394,14 @@ type EnrichmentConfig struct {
 // required, matches are confined to the orphan's directory, and identity is
 // matched MBID-first then ISRC.
 type RealignConfig struct {
-	// Enabled is the master switch for the realign feature. Default false. The
-	// realign CLI command runs regardless of this flag; it is here for the
-	// (reserved) on-scan integration and UI surfacing.
+	// Enabled is the master switch for the realign feature. Default false. Not
+	// yet active: the realign CLI command runs regardless of this flag; it is
+	// reserved for the serve-mode auto-realign integration (#450) and UI surfacing.
 	// Override: MXLRC_REALIGN_ENABLED.
 	Enabled bool `toml:"enabled"`
-	// OnScan runs realign automatically after each library scan. Reserved (the
-	// scheduler wiring is not yet built); default false.
+	// OnScan runs realign automatically after each library scan. Not yet active:
+	// reserved for the serve-mode auto-realign integration (#450, the scheduler
+	// wiring is not yet built); default false.
 	// Override: MXLRC_REALIGN_ON_SCAN.
 	OnScan bool `toml:"on_scan"`
 	// RequireProvenance restricts applied moves to the exact (ISRC/MBID) tier;

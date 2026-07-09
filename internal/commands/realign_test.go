@@ -210,6 +210,55 @@ func TestRealign_ExactProvenance(t *testing.T) {
 	}
 }
 
+// TestRealign_DuplicateProvenanceNoClobber guards the data-integrity fix: two
+// orphans carrying the same MBID both resolve (exact) to the same audio file and
+// thus the same target. Only one move may apply; the second must be a conflict
+// and must never clobber the first, preserving the "never clobbers" guarantee.
+func TestRealign_DuplicateProvenanceNoClobber(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	root := filepath.Join(dir, "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	seedRealignLibrary(t, ctx, dbPath, root, "main")
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRealignCfg(t, cfgPath, dbPath, "")
+
+	// One audio file; two orphans both tagged with its MBID (duplicated tags).
+	// Both resolve exact to aaa.mp3, so both target aaa.lrc.
+	writeMP3(t, root, "aaa.mp3", "Artist", "Title", "", realignTestMBID)
+	dup1 := writeSidecar(t, root, "dup1.lrc", "[mbid:"+realignTestMBID+"]", "[00:01.00]FIRST")
+	dup2 := writeSidecar(t, root, "dup2.lrc", "[mbid:"+realignTestMBID+"]", "[00:01.00]SECOND")
+	target := filepath.Join(root, "aaa.lrc")
+
+	var buf bytes.Buffer
+	if code := runRealign(ctx, &buf, RealignCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("apply exit=%d out=%s", code, buf.String())
+	}
+
+	// Exactly one orphan moved; the other was a conflict, so only one backup record.
+	mustExist(t, target)
+	if recs := readBackupRecords(t, dir); len(recs) != 1 {
+		t.Fatalf("backup records = %d; want exactly 1 (the second must not clobber)", len(recs))
+	}
+	// The surviving target holds the first orphan's content, not the second's.
+	got, err := os.ReadFile(target) //nolint:gosec // test-controlled path under t.TempDir()
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if !strings.Contains(string(got), "FIRST") || strings.Contains(string(got), "SECOND") {
+		t.Errorf("target content = %q; want the first orphan preserved (no clobber)", got)
+	}
+	// dup1 moved into place; dup2 stayed put and was reported as a conflict.
+	mustNotExist(t, dup1)
+	mustExist(t, dup2)
+	if !strings.Contains(buf.String(), "conflict") {
+		t.Errorf("output = %q; want a conflict report for the duplicate-provenance orphan", buf.String())
+	}
+}
+
 // TestRealign_ExactISRCViaIdentityKeys proves identity_keys order is honored:
 // with the orphan carrying only an ISRC, the exact tier matches via the isrc key.
 func TestRealign_ExactISRCViaIdentityKeys(t *testing.T) {
