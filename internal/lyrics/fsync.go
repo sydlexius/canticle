@@ -15,7 +15,13 @@ import (
 // risk. On platforms where opening a directory for sync is unsupported (e.g.
 // Windows), the open or Sync call fails and we warn + continue rather than
 // failing the whole operation.
-func fsyncDir(dir string) {
+func fsyncDir(dir string) { FsyncDir(dir) }
+
+// FsyncDir is the exported form of fsyncDir, so callers outside this package
+// (e.g. the realign command's clobber-safe rename) get the same crash-durable
+// parent-directory flush after an os.Rename. Semantics are identical: failures
+// are non-fatal and durability-only.
+func FsyncDir(dir string) {
 	d, err := os.Open(dir) //nolint:gosec // dir is the parent of a caller-controlled output path already validated upstream
 	if err != nil {
 		slog.Warn("fsync parent dir: open failed (durability-only, continuing)", "dir", dir, "error", err)

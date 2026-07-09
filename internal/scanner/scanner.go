@@ -26,6 +26,33 @@ import (
 // supportedFileTypes lists audio file extensions that can have metadata read.
 var supportedFileTypes = []string{".mp3", ".m4a", ".m4b", ".m4p", ".alac", ".flac", ".ogg", ".dsf"}
 
+// IsAudioFile reports whether name (a file name or path) carries a supported
+// audio extension. It is the single exported accessor over supportedFileTypes so
+// consumers outside the scan loop (e.g. the realign command) classify files
+// identically to scanDir and cannot drift from the scanner's own extension list.
+func IsAudioFile(name string) bool {
+	return slices.Contains(supportedFileTypes, strings.ToLower(filepath.Ext(name)))
+}
+
+// ReadAudioProvenance reads the ISRC and MusicBrainz recording MBID embedded in
+// the audio file at path, plus its artist/title tags, for a single file outside
+// the full-library scan loop. It wraps the same extractISRC/extractRecordingMBID
+// and tag readers scanDir uses, so realign's exact-match tier sees exactly the
+// identity signals a scan would. A missing tag yields an empty string, not an
+// error; only an open/parse failure returns an error.
+func ReadAudioProvenance(path string) (isrc, mbid, artist, title string, err error) {
+	f, oerr := os.Open(path) //nolint:gosec // G304: path is derived from a configured library root + scanned filename, confined via pathutil upstream by the caller
+	if oerr != nil {
+		return "", "", "", "", fmt.Errorf("open %s: %w", path, oerr)
+	}
+	defer func() { _ = f.Close() }()
+	m, terr := tag.ReadFrom(f)
+	if terr != nil {
+		return "", "", "", "", fmt.Errorf("read metadata %s: %w", path, terr)
+	}
+	return extractISRC(m), extractRecordingMBID(m), m.Artist(), m.Title(), nil
+}
+
 // audioFileTypeForExt returns the audioduration type constant for a lower-case
 // audio file extension. Extensions not recognized return (0, false); callers
 // degrade to TrackLength=0 (the "unknown duration" sentinel).

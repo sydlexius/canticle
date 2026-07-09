@@ -20,7 +20,7 @@ type CompletionCmd struct {
 
 // completionSubcommands are the top-level subcommands offered at the first word.
 var completionSubcommands = []string{
-	"fetch", "serve", "scan", "library", "keys", "secrets", "config", "queue", "provenance", "completion",
+	"fetch", "serve", "scan", "library", "keys", "secrets", "config", "queue", "provenance", "realign", "completion",
 }
 
 // completionCandidates maps a subcommand to the flags and/or nested subcommands
@@ -36,6 +36,7 @@ var completionCandidates = map[string][]string{
 	"config":     {"get", "set", "list"},
 	"queue":      {"list", "failed", "deferred", "retry", "clear", "recheck"},
 	"provenance": {"backfill"},
+	"realign":    {"--library", "--yes", "--backup", "--config"},
 	"completion": {"bash", "zsh", "fish"},
 }
 
@@ -74,7 +75,7 @@ func runComplete(ctx context.Context, out io.Writer, words []string) int {
 		candidates = append(candidates, completionCandidates[sub]...)
 		// Offer configured library names where a name argument is expected and
 		// the user is not partway through typing a flag.
-		if (sub == "scan" || sub == "library") && !strings.HasPrefix(cur, "-") {
+		if (sub == "scan" || sub == "library" || sub == "realign") && !strings.HasPrefix(cur, "-") {
 			candidates = append(candidates, completionLibraryNames(ctx)...)
 		}
 	}

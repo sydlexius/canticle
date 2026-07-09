@@ -340,6 +340,46 @@ min_similarity = 0.35
 # the duration_bucket=0 cache fallback). Env override: MXLRC_ENRICHMENT_ENABLED.
 enabled = true
 
+[realign]
+# Realign re-attaches orphaned .lrc/.txt lyric sidecars (left behind when an
+# audio file is renamed but its sidecar is not) to their audio via a four-tier
+# confidence resolver: exact (ISRC/MBID provenance match), heuristic (a single
+# orphan + single sidecar-less audio in a directory, gated by a name-similarity
+# guard), ambiguous (multiple/zero candidates - reported and skipped), and
+# conflict (contradictory signals or an existing destination - reported and
+# skipped). It only changes a sidecar's stem, never its extension. Drive it with
+# `canticle realign` (dry-run) / `canticle realign --yes`.
+
+# Master switch for the feature (reserved for on-scan integration and the web
+# UI). The realign CLI command runs regardless of this flag. Default false.
+# Env: MXLRC_REALIGN_ENABLED.
+enabled = false
+
+# Run realign automatically after each library scan. Reserved; the scheduler
+# wiring is not yet built. Default false. Env: MXLRC_REALIGN_ON_SCAN.
+on_scan = false
+
+# Only apply moves backed by an exact ISRC/MBID match; heuristic candidates are
+# reported but never renamed. Default false. Env: MXLRC_REALIGN_REQUIRE_PROVENANCE.
+require_provenance = false
+
+# Allow an exact provenance match to move a sidecar to an audio file in a
+# different directory within the same library root. Default false (matches are
+# confined to the orphan's own directory). Env: MXLRC_REALIGN_CROSS_DIRECTORY.
+cross_directory = false
+
+# Ordered provenance identifiers the exact tier matches on, most authoritative
+# first. Valid values: "mbid", "isrc". Default ["mbid", "isrc"].
+# Env: MXLRC_REALIGN_IDENTITY_KEYS (comma-separated).
+identity_keys = ["mbid", "isrc"]
+
+# Jaro-Winkler name-similarity floor (0-1) a heuristic rename must clear: the
+# orphan's [ar:]/[ti:] header (or, if absent, its file stem) versus the candidate
+# audio's artist/title tags. If neither side yields an artist/title the check is
+# skipped and pure positional matching applies. Default 0.75.
+# Env: MXLRC_REALIGN_MIN_CONFIDENCE.
+min_confidence = 0.75
+
 [guard]
 # Optional language/script guard. It rejects fetched lyrics whose body is
 # dominated by scripts outside the allowlist below, so a wrong-language match

@@ -13,6 +13,23 @@ The server listens on `MXLRC_SERVER_ADDR` when `--listen` is not provided. Confi
 
 Webhook events are enqueued at high priority. If a webhook arrives for an artist/title that previously failed and is waiting out a retry backoff, the high-priority enqueue resets its retry timer so it becomes eligible immediately, jumping the queue. Scan-enqueued duplicates keep their existing backoff, so bulk scan traffic stays rate-limit protected. The worker's circuit breaker still pauses dequeuing globally when the upstream API signals rate limiting.
 
+### Lidarr rename hook
+
+A lyric sidecar is orphaned when Lidarr renames a track file but leaves the
+`.lrc` / `.txt` next to it under the old name. You can clean those up after the
+fact with [`canticle realign`](#realign-orphaned-sidecars), but you can also
+prevent them entirely: `contrib/lidarr-rename-sidecars.sh` is a Lidarr **Custom
+Script** that moves each sidecar alongside its audio at rename time.
+
+Install it in Lidarr under *Settings -> Connect -> Add -> Custom Script*, point
+it at the script path, and enable the **On Rename** trigger (the script exits
+cleanly for every other event). It reads Lidarr's `Lidarr_TrackFile_PreviousPaths`
+and `Lidarr_TrackFile_Paths` environment variables, and for each renamed track
+moves the matching `.lrc` and `.txt` from the old stem to the new one - only when
+the source exists and the destination does not, so it never clobbers an existing
+file. Lidarr and the script must share the same view of the filesystem (identical
+mount paths). See `contrib/README.md` for details.
+
 ### Path resolution (Docker/Unraid)
 
 Configured library scans are the source of truth for filesystem paths. When a Lidarr webhook arrives, `canticle` resolves the target file in this order:
@@ -591,6 +608,55 @@ canticle scan results --library 1 --limit 200
 canticle scan clear --library Music
 canticle scan clear --library Music --yes
 ```
+
+### Realign orphaned sidecars
+
+When an audio file is renamed but its `.lrc` / `.txt` lyric sidecar is not, the
+sidecar is orphaned: it no longer shares a stem with any audio file, and a later
+scan re-fetches lyrics that already exist on disk. `canticle realign` re-attaches
+those orphaned sidecars to their audio, changing only the stem and never the
+extension (a synced `.lrc` stays `.lrc`; an instrumental `.txt` marker stays
+`.txt` and is never promoted).
+
+Each orphan is classified into one of four confidence tiers, and only clean
+matches are ever renamed:
+
+- **exact** - the orphan's `[isrc:]` / `[mbid:]` header uniquely matches one
+  audio file's embedded ISRC/MBID (matched in `identity_keys` order, default
+  `mbid` then `isrc`).
+- **heuristic** - exactly one orphaned sidecar and exactly one sidecar-less audio
+  file in the same directory, whose names match closely enough (a Jaro-Winkler
+  name guard at `min_confidence`). If neither the sidecar header nor the audio
+  tags yield an artist/title, the name check is skipped and the lone pair is
+  matched positionally.
+- **ambiguous** - zero or multiple candidates on either side. Reported and
+  skipped, never guessed.
+- **conflict** - contradictory signals (multiple exact matches) or a destination
+  sidecar that already exists. Reported and skipped, never clobbered.
+
+```sh
+# Preview what would change across all libraries (dry run, the default).
+canticle realign
+
+# Apply the moves; every rename is recorded in a JSONL backup first.
+canticle realign --yes
+
+# Limit to a single library, and choose the backup path.
+canticle realign --library Music --yes
+canticle realign --yes --backup /data/realign-undo.jsonl
+```
+
+The applied-move backup (`<db-dir>/realign-backup-<timestamp>.jsonl`, or the
+`--backup` path) records `{"old_path","new_path","library_id","method"}` per
+line; swap `old_path`/`new_path` to undo. The behavior is tuned by the
+[`[realign]` config section](CONFIGURATION.md#realign) - notably
+`require_provenance` (restrict applied moves to the exact tier), `cross_directory`
+(let an exact match move a sidecar between directories), and `min_confidence`
+(the heuristic name-guard floor).
+
+The exact tier requires ISRC/MBID-tagged audio; libraries whose files carry no
+such tags fall back to the heuristic tier. To prevent orphaning at the source,
+Lidarr users can install the [rename hook](#lidarr-rename-hook) below.
 
 ## Reports workspace
 

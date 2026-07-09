@@ -116,6 +116,12 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES` | `6` | Number of short windows spread across the track and concatenated into one classifier sample. `< 2` disables spreading (single contiguous window). |
 | `MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH` | (auto-discover) | Path to `ffprobe` used to read track duration for spread-sample placement. Empty auto-discovers (sibling of ffmpeg, then PATH). Set this when ffmpeg was auto-provisioned (no ffprobe). |
 | `MXLRC_ENRICHMENT_ENABLED` | `true` | Global default for recording enrichment (reading ISRC, MusicBrainz ID, and duration from audio tags). Per-library and per-run flags override this. |
+| `MXLRC_REALIGN_ENABLED` | `false` | Master switch for the realign feature (the CLI command runs regardless). |
+| `MXLRC_REALIGN_ON_SCAN` | `false` | Run realign automatically after each scan. Reserved. |
+| `MXLRC_REALIGN_REQUIRE_PROVENANCE` | `false` | Only apply exact ISRC/MBID matches; heuristic candidates are reported but skipped. |
+| `MXLRC_REALIGN_CROSS_DIRECTORY` | `false` | Allow an exact match to move a sidecar across directories within a library. |
+| `MXLRC_REALIGN_IDENTITY_KEYS` | `mbid,isrc` | Ordered provenance identifiers the exact tier matches on (valid: `mbid`, `isrc`). |
+| `MXLRC_REALIGN_MIN_CONFIDENCE` | `0.75` | Jaro-Winkler name-guard floor (0-1) for a heuristic rename. |
 | `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
 
 ## TOML config keys
@@ -309,6 +315,31 @@ enabled = true
 Global default for recording enrichment (env: `MXLRC_ENRICHMENT_ENABLED`). When enabled, the scanner reads the ISRC, MusicBrainz recording ID, and audio duration from each file's tags and passes them to the matcher to disambiguate results.
 
 Default `true`, preserving the always-on behavior from before per-library control existed. Per-library and per-run flags override this; see [Recording enrichment](USER_GUIDE.md#recording-enrichment) for the full precedence chain.
+
+### `[realign]`
+
+```toml
+[realign]
+enabled = false
+on_scan = false
+require_provenance = false
+cross_directory = false
+identity_keys = ["mbid", "isrc"]
+min_confidence = 0.75
+```
+
+Governs the `realign` command, which re-attaches orphaned `.lrc` / `.txt` sidecars to renamed audio via a four-tier confidence resolver (see [Realign](CLI_REFERENCE.md#realign)). Defaults are conservative: the feature is off, provenance is not required, matches are confined to the orphan's directory, and identity is matched MBID-first then ISRC.
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `MXLRC_REALIGN_ENABLED` | `false` | Master switch (reserved for on-scan integration and the web UI; the CLI command runs regardless). |
+| `on_scan` | `MXLRC_REALIGN_ON_SCAN` | `false` | Run realign automatically after each scan. Reserved; scheduler wiring is not yet built. |
+| `require_provenance` | `MXLRC_REALIGN_REQUIRE_PROVENANCE` | `false` | Only apply exact (ISRC/MBID) matches; heuristic candidates are reported but skipped. |
+| `cross_directory` | `MXLRC_REALIGN_CROSS_DIRECTORY` | `false` | Allow an exact match to move a sidecar to an audio file in a different directory within the same library. |
+| `identity_keys` | `MXLRC_REALIGN_IDENTITY_KEYS` | `["mbid","isrc"]` | Ordered provenance identifiers the exact tier matches on, most authoritative first. Valid values: `mbid`, `isrc`. |
+| `min_confidence` | `MXLRC_REALIGN_MIN_CONFIDENCE` | `0.75` | Jaro-Winkler name-similarity floor (0-1) for a heuristic rename. When neither side yields an artist/title the check is skipped (positional matching). |
+
+The exact tier requires ISRC/MBID-tagged audio; libraries without those tags fall back to the heuristic tier.
 
 ### ffmpeg resolution
 

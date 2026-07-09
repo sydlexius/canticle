@@ -176,6 +176,35 @@ The backfill is idempotent: tags that already exist in a file are skipped; only 
 
 **Cache-hit writes and missing `[source:]`/`[fetched:]` tags:** when a lyric fetch is served from the in-memory cache, `[ve:]` is written inline but `[source:]` and `[fetched:]` are absent because those fields are transient (not persisted alongside the cached result). Run `provenance backfill --yes` after a cache-hit write to pull the source lane and fetch timestamp from the work queue database and inject them retroactively.
 
+## Realign
+
+When an audio file is renamed but its `.lrc` / `.txt` lyric sidecar is not, the sidecar is orphaned: it no longer shares a stem with any audio file, so a later scan re-fetches lyrics that already exist on disk. `canticle realign` re-attaches those orphaned sidecars to their audio using a four-tier confidence resolver, and only ever changes a sidecar's stem, never its extension (a synced `.lrc` stays `.lrc`, an instrumental `.txt` marker stays `.txt`).
+
+The four tiers:
+
+- **exact** - the orphan's `[isrc:]` / `[mbid:]` header uniquely matches one audio file's embedded ISRC/MBID. Matched in `identity_keys` order (default `mbid`, then `isrc`).
+- **heuristic** - exactly one orphaned sidecar and exactly one audio file missing its sidecar in the same directory, and their names match closely enough (a Jaro-Winkler name guard at `min_confidence`).
+- **ambiguous** - zero or multiple candidates on either side. Reported and skipped, never guessed.
+- **conflict** - contradictory signals (multiple exact matches, or the destination sidecar already exists). Reported and skipped, never clobbered.
+
+```sh
+# Preview what would change across all libraries (dry run, the default)
+canticle realign
+
+# Apply the moves
+canticle realign --yes
+
+# Limit to a single library (name or numeric id)
+canticle realign --library "Main Music" --yes
+
+# Write the JSONL backup of applied moves to a chosen path
+canticle realign --yes --backup /data/realign-undo.jsonl
+```
+
+Every applied move is recorded (before the rename) as a JSONL line - `{"old_path","new_path","library_id","method"}` - in `<db-dir>/realign-backup-<timestamp>.jsonl` (or the `--backup` path); swap `old_path`/`new_path` to undo. Behavior is gated by the [`[realign]` config section](CONFIGURATION.md#realign): `require_provenance = true` restricts applied moves to the exact tier (heuristic candidates are reported but skipped), `cross_directory = true` lets an exact match move a sidecar into a different directory within the same library, and `min_confidence` sets the heuristic name-guard floor.
+
+**Note:** the exact tier requires ISRC/MBID-tagged audio. Libraries whose files carry no such tags fall back to the heuristic tier (single-candidate-per-directory + name guard).
+
 ## Shell completion
 
 ```sh

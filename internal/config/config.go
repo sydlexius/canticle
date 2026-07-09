@@ -26,6 +26,7 @@ type Config struct {
 	Verification         VerificationConfig         `toml:"verification"`
 	InstrumentalDetector InstrumentalDetectorConfig `toml:"instrumental_detector"`
 	Enrichment           EnrichmentConfig           `toml:"enrichment"`
+	Realign              RealignConfig              `toml:"realign"`
 	Guard                GuardConfig                `toml:"guard"`
 	Queue                QueueConfig                `toml:"queue"`
 	Watcher              WatcherConfig              `toml:"watcher"`
@@ -386,6 +387,51 @@ type EnrichmentConfig struct {
 	Enabled bool `toml:"enabled"`
 }
 
+// RealignConfig governs the realign feature, which re-attaches orphaned
+// .lrc/.txt sidecars (left behind when audio files are renamed) to their audio
+// via a four-tier confidence resolver. The fields gate which tiers are eligible
+// to apply. Defaults are conservative: the feature is off, provenance is not
+// required, matches are confined to the orphan's directory, and identity is
+// matched MBID-first then ISRC.
+type RealignConfig struct {
+	// Enabled is the master switch for the realign feature. Default false. The
+	// realign CLI command runs regardless of this flag; it is here for the
+	// (reserved) on-scan integration and UI surfacing.
+	// Override: MXLRC_REALIGN_ENABLED.
+	Enabled bool `toml:"enabled"`
+	// OnScan runs realign automatically after each library scan. Reserved (the
+	// scheduler wiring is not yet built); default false.
+	// Override: MXLRC_REALIGN_ON_SCAN.
+	OnScan bool `toml:"on_scan"`
+	// RequireProvenance restricts applied moves to the exact (ISRC/MBID) tier;
+	// heuristic candidates are reported but never renamed. Default false.
+	// Override: MXLRC_REALIGN_REQUIRE_PROVENANCE.
+	RequireProvenance bool `toml:"require_provenance"`
+	// CrossDirectory lets an exact provenance match move a sidecar to an audio
+	// file outside the orphan's directory (still within the library root).
+	// Default false. Override: MXLRC_REALIGN_CROSS_DIRECTORY.
+	CrossDirectory bool `toml:"cross_directory"`
+	// IdentityKeys is the ordered list of provenance identifiers the exact tier
+	// matches on, most authoritative first. Valid values: "mbid", "isrc".
+	// Default ["mbid", "isrc"]. Override: MXLRC_REALIGN_IDENTITY_KEYS (comma-separated).
+	IdentityKeys []string `toml:"identity_keys"`
+	// MinConfidence is the Jaro-Winkler name-similarity floor (0-1) a heuristic
+	// rename must clear: the orphan's [ar:]/[ti:] header (or sidecar stem) vs the
+	// candidate audio's artist/title. Default 0.75. Values outside (0,1] are reset
+	// to the default. Override: MXLRC_REALIGN_MIN_CONFIDENCE.
+	MinConfidence float64 `toml:"min_confidence"`
+}
+
+// realignMinConfidenceDefault is the default Jaro-Winkler name-similarity floor
+// for a heuristic-tier realign rename. Conservative: biased toward reporting a
+// borderline pair rather than renaming it.
+const realignMinConfidenceDefault = 0.75
+
+// realignIdentityKeysDefault is the default provenance match order for the exact
+// tier: MusicBrainz recording MBID first (globally unique per recording), then
+// ISRC. Kept in sync with the [realign] rendering and docs.
+func realignIdentityKeysDefault() []string { return []string{"mbid", "isrc"} }
+
 // GuardConfig holds optional language/script guard settings. An empty
 // AcceptedScripts disables the guard.
 type GuardConfig struct {
@@ -494,9 +540,17 @@ func defaults() Config {
 			CooldownSeconds:       5,
 		},
 		Enrichment: EnrichmentConfig{Enabled: true},
-		Guard:      GuardConfig{Threshold: guardThresholdDefault},
-		Queue:      QueueConfig{Randomize: true},
-		Watcher:    WatcherConfig{Enabled: false, DebounceMS: watcherDebounceMSDefault, MaxDirs: watcherMaxDirsDefault},
+		Realign: RealignConfig{
+			Enabled:           false,
+			OnScan:            false,
+			RequireProvenance: false,
+			CrossDirectory:    false,
+			IdentityKeys:      realignIdentityKeysDefault(),
+			MinConfidence:     realignMinConfidenceDefault,
+		},
+		Guard:   GuardConfig{Threshold: guardThresholdDefault},
+		Queue:   QueueConfig{Randomize: true},
+		Watcher: WatcherConfig{Enabled: false, DebounceMS: watcherDebounceMSDefault, MaxDirs: watcherMaxDirsDefault},
 		Logging: LoggingConfig{
 			Level:      "info",
 			Format:     "text",
@@ -713,7 +767,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_ENRICHMENT_ENABLED, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -1020,6 +1074,55 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.Enrichment.Enabled = enabled
 			applied["enrichment.enabled"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_REALIGN_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_ENABLED", "value", v, "current", cfg.Realign.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.Enabled = enabled
+			applied["realign.enabled"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_REALIGN_ON_SCAN"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_ON_SCAN", "value", v, "current", cfg.Realign.OnScan) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.OnScan = enabled
+			applied["realign.on_scan"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_REALIGN_REQUIRE_PROVENANCE"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_REQUIRE_PROVENANCE", "value", v, "current", cfg.Realign.RequireProvenance) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.RequireProvenance = enabled
+			applied["realign.require_provenance"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_REALIGN_CROSS_DIRECTORY"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_CROSS_DIRECTORY", "value", v, "current", cfg.Realign.CrossDirectory) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.CrossDirectory = enabled
+			applied["realign.cross_directory"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_REALIGN_IDENTITY_KEYS"); v != "" {
+		cfg.Realign.IdentityKeys = splitCSV(v)
+		applied["realign.identity_keys"] = true
+	}
+	if v := os.Getenv("MXLRC_REALIGN_MIN_CONFIDENCE"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || n <= 0 || n > 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_MIN_CONFIDENCE", "value", v, "current", cfg.Realign.MinConfidence) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.MinConfidence = n
+			applied["realign.min_confidence"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL"); v != "" {
