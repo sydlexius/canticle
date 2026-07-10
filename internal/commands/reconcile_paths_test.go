@@ -283,6 +283,9 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 	_ = cfgPath
 	gone := filepath.Join(root, "ArtistA", "01. gone.flac")
 	seedReconcilePathsRow(t, ctx, dbPath, gone)
+	// A surviving track in another artist keeps the library root non-empty, so the
+	// availability guard treats the root as mounted (an empty root is skipped).
+	seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistB", "01. kept.flac"))
 	// runSweeper uses Directory granularity, so remove the whole directory (a
 	// merged/renamed artist dir), not just the file.
 	if err := os.RemoveAll(filepath.Dir(gone)); err != nil {
@@ -307,12 +310,14 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 		}
 		return n
 	}
+	// The gone artist's row is pruned; the surviving artist's row remains, so the
+	// count settles at 1.
 	deadline := time.Now().Add(2 * time.Second)
-	for count() != 0 && time.Now().Before(deadline) {
+	for count() > 1 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if n := count(); n != 0 {
-		t.Errorf("startup sweep left %d scan_results, want 0", n)
+	if n := count(); n != 1 {
+		t.Errorf("startup sweep left %d scan_results, want 1 (gone pruned, kept survives)", n)
 	}
 	cancel()
 	<-done

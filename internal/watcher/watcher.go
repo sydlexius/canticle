@@ -25,8 +25,9 @@ type LibraryLister interface {
 type ScanFunc func(ctx context.Context, lib models.Library, path string) error
 
 // PruneFunc reconciles the database against the filesystem for a path that a
-// Remove/Rename event reported as vanished. It is DB-only (no rescan), so it is
-// disk-free relative to the watched tree and needs no debounce. May be nil.
+// Remove/Rename event reported as vanished. It does no rescan (disk-cheap: only
+// a handful of os.Stat existence checks plus DB work, never a directory walk),
+// so it needs no debounce. May be nil.
 type PruneFunc func(ctx context.Context, path string) error
 
 // Watcher watches configured library roots and triggers targeted scans.
@@ -198,8 +199,8 @@ func (w *Watcher) dispatch(ctx context.Context, events <-chan libEvent) {
 
 // maybePrune runs the reactive database reconciliation for a Remove/Rename event
 // whose path has actually vanished, in addition to the parent-directory rescan
-// every event triggers. It is disk-free (a pure DB delete) and runs without
-// debounce. Create/Write events never prune, and a Rename whose reported path is
+// every event triggers. It is disk-cheap (a few os.Stat checks plus DB work, no
+// rescan) and runs without debounce. Create/Write events never prune, and a Rename whose reported path is
 // the NEW (still-present) name is skipped by the os.Stat guard. A nil PruneFunc
 // disables reactive reconciliation (the periodic sweep remains the backstop).
 func (w *Watcher) maybePrune(ctx context.Context, ei notify.EventInfo) {

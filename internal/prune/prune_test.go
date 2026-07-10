@@ -134,16 +134,22 @@ func TestPrunePath_DeletesDoneRowWhenSourceGone(t *testing.T) {
 	}
 }
 
-// TestSweep_SkipsUnavailableRoot: when a whole library root is gone (e.g. an
-// unmounted mount), its rows are NOT pruned even though every child source
-// os.Stats as missing -- the unmount must not be read as a mass deletion.
+// TestSweep_SkipsUnavailableRoot: when a library root is present but EMPTY (the
+// realistic unmounted-share case -- the mountpoint directory still exists but is
+// empty), its rows are NOT pruned even though every child source os.Stats as
+// missing. A bare os.Stat(root) would read the empty mountpoint as "present"; the
+// non-empty guard is what prevents the mass deletion.
 func TestSweep_SkipsUnavailableRoot(t *testing.T) {
 	ctx, sqlDB, libID, root := openSeeded(t)
 	gone := filepath.Join(root, "ArtistX", "01. x.flac")
 	seedRow(t, ctx, sqlDB, libID, gone, "processing", "failed")
-	// Remove the ENTIRE library root, simulating an unmounted/absent library.
-	if err := os.RemoveAll(root); err != nil {
-		t.Fatalf("remove root: %v", err)
+	// Remove the root's CONTENTS but keep the root directory itself, simulating an
+	// unmounted share whose mountpoint remains present but empty.
+	if err := os.RemoveAll(filepath.Join(root, "ArtistX")); err != nil {
+		t.Fatalf("empty root: %v", err)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Fatalf("test setup: root should be empty, has %d entries", len(entries))
 	}
 	p := New(sqlDB)
 	res, err := p.Sweep(ctx, SweepOptions{Granularity: Exact})
@@ -236,6 +242,36 @@ func TestSweep_DirectoryVsExact(t *testing.T) {
 	}
 	if sr, _, _ := rowCounts(t, ctx, sqlDB); sr != 1 {
 		t.Fatalf("after exact sweep scan_results=%d, want 1 (kept.flac survives)", sr)
+	}
+}
+
+// TestPrunePath_PrefixBoundary: PrunePath scoped to ".../Foo" must not reconcile
+// rows under the sibling ".../Foobar", even when both sources are gone -- the
+// scope is a path-boundary containment, not a string prefix.
+func TestPrunePath_PrefixBoundary(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	fooGone := filepath.Join(root, "Foo", "01. a.flac")
+	barGone := filepath.Join(root, "Foobar", "01. b.flac")
+	seedRow(t, ctx, sqlDB, libID, fooGone, "processing", "failed")
+	seedRow(t, ctx, sqlDB, libID, barGone, "processing", "failed")
+	// Both source files are gone, but Foobar keeps the root non-empty.
+	if err := os.Remove(fooGone); err != nil {
+		t.Fatalf("remove foo: %v", err)
+	}
+	if err := os.Remove(barGone); err != nil {
+		t.Fatalf("remove bar: %v", err)
+	}
+	p := New(sqlDB)
+	res, err := p.PrunePath(ctx, filepath.Join(root, "Foo"))
+	if err != nil {
+		t.Fatalf("PrunePath: %v", err)
+	}
+	if res.ScanResults != 1 || res.WorkItems != 1 {
+		t.Fatalf("pruned scan=%d wq=%d, want 1/1 (only Foo, not Foobar)", res.ScanResults, res.WorkItems)
+	}
+	// Foobar's row must survive.
+	if sr, wq, _ := rowCounts(t, ctx, sqlDB); sr != 1 || wq != 1 {
+		t.Fatalf("sibling Foobar row touched: scan=%d wq=%d, want 1/1", sr, wq)
 	}
 }
 

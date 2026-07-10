@@ -91,8 +91,9 @@ func New(db *sql.DB) *Pruner {
 
 // PrunePath reconciles the rows whose source path is at or under path, statting
 // each candidate source file individually (Exact granularity). It is the
-// disk-free reactive entry point: the caller already learned path vanished from
-// a filesystem event, so this only touches the database. A removed directory is
+// reactive entry point: the caller already learned path vanished from a
+// filesystem event, so this does no rescan -- only per-candidate os.Stat checks
+// plus the DB deletes (disk-cheap, not a directory walk). A removed directory is
 // handled naturally -- every candidate source under it fails os.Stat.
 func (p *Pruner) PrunePath(ctx context.Context, path string) (Result, error) {
 	return p.reconcile(ctx, scope{prefix: path, scoped: true}, nil, Exact, false, nil)
@@ -117,6 +118,17 @@ func (s scope) matches(p string) bool {
 		return true
 	}
 	return p == s.prefix || pathutil.WithinRoot(s.prefix, p)
+}
+
+// childRange returns the half-open key range [lower, upper) that contains every
+// path strictly under s.prefix (i.e. "<prefix>/..."). Because the byte after the
+// path separator is its successor, all such strings sort within this range, so a
+// `col >= lower AND col < upper` predicate can seek an index on the column
+// instead of scanning every row. pathutil.WithinRoot remains the exact authority
+// applied in Go, so this range only narrows what the database returns.
+func (s scope) childRange() (lower, upper string) {
+	sep := string(filepath.Separator)
+	return s.prefix + sep, s.prefix + string(filepath.Separator+1)
 }
 
 // candidate is a source path with the row detail needed to prune and back it up.
@@ -206,9 +218,16 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 	return res, nil
 }
 
-// availableRoots returns the configured library root paths that currently exist
-// on disk. Deletion is confined to sources under these roots so an unmounted or
-// unavailable library cannot trigger a mass prune.
+// availableRoots returns the configured library root paths that are currently
+// mounted and populated. Deletion is confined to sources under these roots so an
+// unmounted or unavailable library cannot trigger a mass prune. A root must be
+// NON-EMPTY to count as available: an unmounted network share commonly leaves
+// its mountpoint directory present but empty, which os.Stat alone would read as
+// "exists" -- and then every child source stats ENOENT and the whole library
+// would be pruned. Requiring at least one entry treats an empty mountpoint as
+// unavailable. The trade-off is that a genuinely-emptied library is not
+// auto-pruned (its rows are left to `library remove`), which is the safe bias
+// for a destructive operation.
 func (p *Pruner) availableRoots(ctx context.Context) ([]string, error) {
 	var roots []string
 	if err := queryRows(ctx, p.db, `SELECT path FROM libraries WHERE path != ''`, nil, func(rows *sql.Rows) error {
@@ -216,7 +235,7 @@ func (p *Pruner) availableRoots(ctx context.Context) ([]string, error) {
 		if err := rows.Scan(&path); err != nil {
 			return err
 		}
-		if pathExists(path) {
+		if dirPopulated(path) {
 			roots = append(roots, path)
 		}
 		return nil
@@ -224,6 +243,22 @@ func (p *Pruner) availableRoots(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("prune: load library roots: %w", err)
 	}
 	return roots, nil
+}
+
+// dirPopulated reports whether path is a directory with at least one entry. Any
+// error (not a dir, unreadable, gone, or an unmounted-but-present empty
+// mountpoint) yields false, so the caller treats path as unavailable and skips
+// pruning under it.
+func dirPopulated(path string) bool {
+	f, err := os.Open(path) //nolint:gosec // path is a configured library root, not untrusted input
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	// Readdirnames(1) returns io.EOF for an empty directory; any names means
+	// populated. This reads at most one entry, so it stays cheap on large roots.
+	names, err := f.Readdirnames(1)
+	return err == nil && len(names) > 0
 }
 
 // underAvailableRoot reports whether src lies within one of the available roots.
@@ -246,6 +281,14 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 
 	srQuery := `SELECT id, file_path FROM scan_results WHERE file_path != ''`
 	var srArgs []any
+	if sc.scoped {
+		// Push the path scope into SQL so the reactive PrunePath (fired per
+		// filesystem event) narrows at the database instead of full-scanning and
+		// filtering every row in Go.
+		lower, upper := sc.childRange()
+		srQuery += ` AND (file_path = ? OR (file_path >= ? AND file_path < ?))`
+		srArgs = append(srArgs, sc.prefix, lower, upper)
+	}
 	if libraryID != nil {
 		srQuery += ` AND library_id = ?`
 		srArgs = append(srArgs, *libraryID)
@@ -277,6 +320,12 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
                    JOIN scan_results sr ON sr.id = j.scan_result_id
                    WHERE wq.source_path != '' AND sr.library_id = ?`
 		wqArgs = append(wqArgs, *libraryID)
+	} else if sc.scoped {
+		// Reactive path scope: same index-seekable range predicate as scan_results
+		// above, on the idx_work_queue_source_path index (migration 026).
+		lower, upper := sc.childRange()
+		wqQuery += ` AND (source_path = ? OR (source_path >= ? AND source_path < ?))`
+		wqArgs = append(wqArgs, sc.prefix, lower, upper)
 	}
 	if err := queryRows(ctx, p.db, wqQuery, wqArgs, func(rows *sql.Rows) error {
 		var id int64
@@ -314,7 +363,9 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 }
 
 // deletePruned deletes the pruned rows in a single transaction, invoking report
-// for each row before the commit so a backup is durable ahead of deletion.
+// once for each row AFTER the commit, and only for rows that actually lost at
+// least one row to the deletes, so a backup/log never records a row that a race
+// into 'processing' skipped or that a rollback left in place.
 //
 // Both deletes guard on the SAME condition -- the linked work_queue row is not
 // 'processing' -- so a row that raced into 'processing' between gather and delete
@@ -332,12 +383,9 @@ func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report fu
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	var applied []PrunedRow // rows that actually lost >=1 row, reported post-commit
 	for _, row := range pruned {
-		if report != nil {
-			if err := report(row); err != nil {
-				return 0, 0, fmt.Errorf("prune: report %q: %w", row.SourcePath, err)
-			}
-		}
+		before := scanDeleted + workDeleted
 		for _, id := range row.WorkItemIDs {
 			res, err := tx.ExecContext(ctx,
 				`DELETE FROM work_queue WHERE id = ? AND status != 'processing'`, id)
@@ -362,9 +410,21 @@ func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report fu
 			}
 			scanDeleted += rowsAffected(res)
 		}
+		if scanDeleted+workDeleted > before {
+			applied = append(applied, row)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("prune: commit tx: %w", err)
+	}
+	// Report only after the deletes are durably committed, so a backup record is
+	// never written for a row that survived (skipped mid-tx or rolled back).
+	if report != nil {
+		for _, row := range applied {
+			if err := report(row); err != nil {
+				return scanDeleted, workDeleted, fmt.Errorf("prune: report %q: %w", row.SourcePath, err)
+			}
+		}
 	}
 	return scanDeleted, workDeleted, nil
 }

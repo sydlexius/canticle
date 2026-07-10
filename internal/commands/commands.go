@@ -1588,7 +1588,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
 	}, func(ctx context.Context, path string) error {
-		// Reactive, disk-free reconciliation: the watcher already learned path
+		// Reactive, disk-cheap reconciliation: the watcher already learned path
 		// vanished, so delete its rows without a rescan (Exact granularity).
 		_, err := pruner.PrunePath(ctx, path)
 		return err
