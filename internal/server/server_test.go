@@ -93,6 +93,7 @@ func TestLidarrWebhookRenameRealignsOldAndNewDirs(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/lidarr?apikey=key", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+	h.bgRealign.Wait() // realign runs in a detached goroutine; wait for it before asserting
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200; body %q", rec.Code, rec.Body.String())
@@ -140,6 +141,7 @@ func TestLidarrWebhookDownloadRealignsTrackAndDeletedDirs(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/lidarr?apikey=key", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+	h.bgRealign.Wait() // realign runs in a detached goroutine; wait for it before asserting
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200; body %q", rec.Code, rec.Body.String())

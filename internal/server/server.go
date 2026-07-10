@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/doxazo-net/canticle/internal/auth"
 	"github.com/doxazo-net/canticle/internal/config"
@@ -95,6 +96,12 @@ type Handler struct {
 	musixmatchInactive bool
 	trusted            *trustnet.Policy
 	mux                *http.ServeMux
+
+	// bgRealign tracks reactive realign passes dispatched from the Lidarr
+	// webhook. They run in detached goroutines so a slow filesystem sweep never
+	// delays the webhook response; the WaitGroup lets a shutdown drain in-flight
+	// passes (and lets tests wait deterministically for them to finish).
+	bgRealign sync.WaitGroup
 }
 
 // Option configures optional Handler dependencies.
@@ -441,12 +448,12 @@ func (h *Handler) handleLidarr(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		slog.Info("lidarr webhook enqueued", "event", event, "count", len(inputs))
-		h.reactiveRealign(r.Context(), event, payload)
+		h.dispatchRealign(r.Context(), event, payload)
 	case "Grab":
 		slog.Info("lidarr grab received", "artist", payload.Artist.ArtistName, "album", payload.Album.Title)
 	case "Rename":
 		slog.Info("lidarr rename received", "artist", payload.Artist.ArtistName, "album", payload.Album.Title)
-		h.reactiveRealign(r.Context(), event, payload)
+		h.dispatchRealign(r.Context(), event, payload)
 	case "Delete":
 		inputs, err := h.metadataInputs(payload)
 		if err != nil {
@@ -479,6 +486,23 @@ func (h *Handler) handleLidarr(w http.ResponseWriter, r *http.Request) {
 // or any realign error is logged and never fails the webhook response, and it
 // relies on realign's idempotency to stay a no-op after the client-side contrib
 // script has already relocated a sidecar.
+// dispatchRealign runs a reactive realign pass in the background so a slow
+// filesystem sweep (especially under cross_directory, which walks the whole
+// library) never delays or times out the webhook response. The context is
+// detached from the request (WithoutCancel) so the sweep is not canceled when
+// the handler returns and writes 200 OK. A nil realigner spawns nothing.
+func (h *Handler) dispatchRealign(ctx context.Context, event string, payload lidarrWebhook) {
+	if h.realigner == nil {
+		return
+	}
+	bg := context.WithoutCancel(ctx)
+	h.bgRealign.Add(1)
+	go func() {
+		defer h.bgRealign.Done()
+		h.reactiveRealign(bg, event, payload)
+	}()
+}
+
 func (h *Handler) reactiveRealign(ctx context.Context, event string, payload lidarrWebhook) {
 	if h.realigner == nil {
 		return
