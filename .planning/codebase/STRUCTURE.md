@@ -43,7 +43,6 @@ mxlrc-go/
 ├── go.mod                      # Module: github.com/doxazo-net/canticle, Go 1.25
 ├── go.sum
 ├── Makefile
-├── AGENTS.md                   # Project guidance for AI assistants
 ├── README.md
 ├── LICENSE
 ├── .golangci.yml

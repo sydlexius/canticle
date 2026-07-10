@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `canticle` (module `github.com/doxazo-net/canticle`, matching the repo after the migration to the doxazo-net org; the `cmd/mxlrcgo-svc` directory, config paths, and systemd unit names retain the historical `mxlrcgo-svc` string) is a Go tool for fetching synced lyrics. It has two faces: a one-shot `fetch` CLI that writes `.lrc` / `.txt` files, and a stateful `serve` mode -- an HTTP server with a durable SQLite work queue, a background worker, a library scan scheduler (+ optional filesystem watcher), multi-provider orchestration, encrypted-at-rest secrets, and a browser-authenticated web UI. Global state is eliminated; the API token is externalized; config is TOML.
 
-For deeper detail on the stack, conventions, architecture, and data flow, read `AGENTS.md` -- it is the hand-maintained reference for this codebase. Keep it current when you change the package surface, and read it whenever you need detail this file omits.
+For the full per-package reference, see the "Package catalogue" section below. Deeper stack and convention detail is discoverable from `go.mod`, the `Makefile` (`make help`), `.golangci.yml`, and `docs/DEVELOPER.md` -- keep the catalogue current when the package surface changes.
 
 ## What to work on next
 
@@ -25,7 +25,59 @@ Run `make hooks` once to enable the tracked git hooks, and `make gate` before pu
 
 ## Architecture (one-paragraph orientation)
 
-Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the only entry point and owns no business logic; it parses the subcommand tree, loads config + DB, builds the dependency graph, and dispatches. The command tree lives in `internal/commands` (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `completion`). Two principal paths run under `internal/`: **fetch mode** -- `scanner` parses CLI/text-file/directory input into an in-memory `queue.InputsQueue`, `app` drains it sequentially, `musixmatch` fetches (a `Fetcher` interface), and `lyrics` writes `.lrc` / `.txt` / instrumental output (a `Writer` interface); and **serve mode** -- a `scan` scheduler over `library` roots enqueues work into the durable SQLite `queue.DBQueue`, a `worker` drains it through the multi-provider `orchestrator` (Musixmatch + petitlyrics `providers`, each behind a `circuit` breaker with `backoff` retry), consulting `cache`, gated by optional `verification` / `detector` sidecars (via `ffmpeg`) and `langguard`, fronted by the `server` HTTP handler (`auth` API keys, `trustnet` IP gating, optional `servetls`) and the `web` browser UI (`webauth` sessions). Shared infra: `config` (TOML, XDG paths, token precedence CLI > env > file), `db` (pure-Go SQLite `modernc.org/sqlite`, no CGO, goose migrations in `internal/db/migrations/`), `secrets` (AES-256-GCM at rest), `normalize` (NFKC cache keys), `models` (shared types, depends on nothing else internal). Dependencies are injected through interfaces -- mock at the boundary; there is no global mutable state. See `AGENTS.md` for the full package catalogue and data-flow detail.
+Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the only entry point and owns no business logic; it parses the subcommand tree, loads config + DB, builds the dependency graph, and dispatches. The command tree lives in `internal/commands` (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `completion`). Two principal paths run under `internal/`: **fetch mode** -- `scanner` parses CLI/text-file/directory input into an in-memory `queue.InputsQueue`, `app` drains it sequentially, `musixmatch` fetches (a `Fetcher` interface), and `lyrics` writes `.lrc` / `.txt` / instrumental output (a `Writer` interface); and **serve mode** -- a `scan` scheduler over `library` roots enqueues work into the durable SQLite `queue.DBQueue`, a `worker` drains it through the multi-provider `orchestrator` (Musixmatch + petitlyrics `providers`, each behind a `circuit` breaker with `backoff` retry), consulting `cache`, gated by optional `verification` / `detector` sidecars (via `ffmpeg`) and `langguard`, fronted by the `server` HTTP handler (`auth` API keys, `trustnet` IP gating, optional `servetls`) and the `web` browser UI (`webauth` sessions). Shared infra: `config` (TOML, XDG paths, token precedence CLI > env > file), `db` (pure-Go SQLite `modernc.org/sqlite`, no CGO, goose migrations in `internal/db/migrations/`), `secrets` (AES-256-GCM at rest), `normalize` (NFKC cache keys), `models` (shared types, depends on nothing else internal). Dependencies are injected through interfaces -- mock at the boundary; there is no global mutable state. See the "Package catalogue" below for the full `internal/`/`web/` surface.
+
+## Package catalogue
+
+Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the sole entry point; everything else lives under `internal/` (the directory matches the package name) except the embedded web assets under `web/`.
+
+**Core fetch/write path**
+- `models` -- shared data types (`Track`, `Song`, `Lyrics`, `Synced`, `Inputs`, `Library`, `ScanResult`, ...); depends on nothing else internal.
+- `musixmatch` -- Musixmatch desktop API client + `Fetcher` interface; parses the nested JSON into `models`.
+- `petitlyrics` -- petitlyrics.com provider adapter, used as a fallback lane.
+- `providers` -- provider abstraction (`LyricsProvider`, `Fetcher`, `AdaptivePacer`) plus provider-generation/version invalidation that retires stale cache entries when the provider set changes.
+- `orchestrator` -- multi-lane orchestration (`Lane`, `Orchestrator`, parallel-race + suitability scoring); composes `providers` with per-lane `circuit` breakers.
+- `circuit` -- concurrency-safe per-lane circuit breaker modelling a provider's rate-limit/throttle response.
+- `backoff` -- shared retry-delay formula (1m, 2m, 4m, ..., capped at 1h) used by the worker, durable queue, and fetch loop.
+- `lyrics` -- LRC/TXT/instrumental writer (`Writer`, `LRCWriter`), `Slugify`, an `.lrc` parser, provenance-tag embedding, and fsync helpers.
+- `normalize` -- NFKC cache-key normalization, duration bucketing, fuzzy-match confidence, album-artist resolution.
+- `langguard` -- Unicode-script classification/filtering of lyric text against a configured language allowlist.
+- `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`).
+- `app` -- one-shot `fetch`-mode orchestration loop over the in-memory `InputsQueue`; depends on the `Fetcher`/`Writer` interfaces.
+
+**Persistence and stateful services**
+- `db` -- pure-Go SQLite (`modernc.org/sqlite`) open/migrate (goose), WAL, foreign keys, busy-retry, and a read-only open path; migrations in `internal/db/migrations/`.
+- `cache` -- lyrics cache repository (`CacheRepo`) over SQLite.
+- `scanfail` -- `Store` recording files that consistently fail metadata read, so the scanner skips them until mtime/size changes; satisfies `scanner.MetadataFailureStore`.
+- `queue` -- the in-memory `InputsQueue` (fetch mode) and the durable SQLite `DBQueue` (serve/worker mode) with priority tiers and randomized within-tier dequeue.
+- `library` -- library-root CRUD repository (`Add`/`List`/`Get`/`GetByName`/`Update`/`Remove`).
+- `scan` -- library scanning: `Enqueuer`, the `scan_results` `Repo`, and the periodic scheduler that enqueues missing lyrics.
+- `worker` -- durable-queue `Worker` that drains work items through the providers/orchestrator and cache.
+- `reports` -- read-only, run-on-demand reports over existing SQLite data; no write paths.
+- `secrets` -- encrypted-at-rest (AES-256-GCM) store for recoverable runtime secrets, persisted as opaque BLOBs.
+- `watcher` -- optional filesystem watcher that triggers targeted library scans on change; complements, never replaces, the periodic scheduler.
+- `prune` -- reconciles `work_queue`/`scan_results` against the filesystem: rows whose source audio file has vanished are deleted (`os.Stat` is the sole authority; `Directory` granularity for the periodic sweep, `Exact` for the reactive prune and `scan reconcile-paths`; an in-flight guard defers rows whose linked work is still `processing`).
+
+**Serve-mode HTTP surface and web UI**
+- `server` -- serve-mode HTTP `Handler` plus its seams (`Authenticator`, `WorkQueue`, `Readiness`, `StatusReporter`, `Inventory`, `MetricsReporter`) and metrics.
+- `auth` -- stateless API-key authentication (in-memory and SQL `Store`, `Scope`, `Key`) for the HTTP API.
+- `webauth` -- browser auth for the web UI: Argon2id password hashing, an admin user store, and a server-side session store (tokens hashed at rest); kept separate from `auth` (different storage/lifecycle/threat model).
+- `trustnet` -- client-IP resolution and a trusted-network allowlist, without trusting spoofable headers.
+- `servetls` -- optional TLS for the serve listener behind a `CertManager` seam: bring-your-own PEM or a self-signed bootstrap.
+- `pathutil` -- path-containment checks confining filesystem targets to configured roots; shared by `server`, `watcher`, `scan`.
+- `web` -- serves the web UI (fixed-sidebar shell, Reports placeholder, read-only Config view) from embedded templ templates and `go:embed`'d static assets.
+- `web/static` -- compiled CSS and self-hosted fonts embedded into the binary so the UI serves offline.
+- `web/templates` -- templ source for the UI shell; generated `*_templ.go` are built on demand and gitignored (run `make ui` after a fresh clone before `go build`).
+
+**Sidecars, config, cross-cutting**
+- `verification` -- optional acoustic verification of fetched lyrics (`Verifier`, `HTTPVerifier`) against an external service, using a short audio sample.
+- `detector` -- optional audio-based instrumental detection sidecar (external AudioSet/YAMNet classifier, vendored at `deploy/yamnet-detector/`); a three-gated decision (music / sung-vocal / speech gates) sampling short windows across the track in one inference call; a legacy mean-only sidecar degrades safely to never-instrumental.
+- `ffmpeg` -- resolves an ffmpeg executable for the sidecars, auto-provisioning a checksum-pinned static build when none is configured or on PATH.
+- `config` -- TOML config resolution (XDG paths, registry-driven keys, token precedence CLI > env > file) plus redaction, validation, render/write.
+- `logging` -- `slog` logger setup and secret redaction.
+- `commands` -- the CLI command tree: top-level `Args` and every subcommand (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `completion`). `realign` re-attaches orphaned sidecars via a four-tier resolver (exact ISRC/MBID provenance, filesystem heuristic with a Jaro-Winkler name guard, ambiguous, conflict); `scan reconcile-paths` drives `prune` on demand. Both share the dry-run/`--yes`/JSONL-backup ergonomics of `scan reconcile`.
+- `version` -- build-time `Version`/`Commit`/`Date` (GoReleaser ldflags) and `VersionString()`.
+- `testutil` -- generates synthetic ID3-tagged audio for load/concurrency tests and the genlib tool.
 
 ## CLI usage and input modes
 

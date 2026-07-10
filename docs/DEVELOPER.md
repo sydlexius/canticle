@@ -78,7 +78,7 @@ CI publishes the site to GitHub Pages via `.github/workflows/pages.yml`. The bui
 - Wrap errors with `fmt.Errorf("context: %w", err)`.
 - Formatting, naming, and file layout are enforced by `gofmt` and `.golangci.yml` -- follow the linter.
 
-See `AGENTS.md` in the repository for a deeper reference on the stack, conventions, architecture, and data flow.
+See `CLAUDE.md` (the "Architecture" orientation and "Package catalogue" sections) for a deeper reference on the package surface, architecture, and data flow.
 
 ## Design decisions
 
