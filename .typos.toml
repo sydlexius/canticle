@@ -12,6 +12,10 @@ extend-exclude = [
 ]
 
 [default]
+# Enforce US English across ALL files (misspell in golangci-lint only covers
+# .go sources; this extends US-spelling enforcement to markdown, comments, and
+# everything else typos scans -- e.g. modelling -> modeling, queueing -> queuing).
+locale = "en-us"
 # Ignore git commit hashes (7-40 hex chars) to avoid false positives on hash substrings.
 extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b"]
 
@@ -20,3 +24,6 @@ extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b"]
 TIT2 = "TIT2"
 TPE1 = "TPE1"
 TPE = "TPE"
+# typos' en-us locale does not flag -logue/-log variants, so enforce the US
+# spelling explicitly (the repo standard; the rest of the tree uses "catalog").
+catalogue = "catalog"

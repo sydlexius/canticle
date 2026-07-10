@@ -14,7 +14,7 @@ import (
 	"github.com/doxazo-net/canticle/internal/queue"
 )
 
-// PendingResultStore reads and updates scan results eligible for queueing.
+// PendingResultStore reads and updates scan results eligible for queuing.
 type PendingResultStore interface {
 	ListPendingByLibrary(ctx context.Context, libraryID int64) ([]models.ScanResult, error)
 	SetStatus(ctx context.Context, ids []int64, status string) error
