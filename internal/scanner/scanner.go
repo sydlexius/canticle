@@ -50,7 +50,27 @@ func ReadAudioProvenance(path string) (isrc, mbid, artist, title string, err err
 	if terr != nil {
 		return "", "", "", "", fmt.Errorf("read metadata %s: %w", path, terr)
 	}
-	return extractISRC(m), extractRecordingMBID(m), m.Artist(), m.Title(), nil
+	return extractISRC(m), extractRecordingMBID(m), extractArtist(m), m.Title(), nil
+}
+
+// ReadArtistIdentity opens the audio file at path and returns its corrected
+// artist and album-artist, applying the same multi-value recovery a scan does
+// (extractArtist / extractAlbumArtist -- issue #466). It is the seam the
+// reconcile-identity backfill uses to re-derive a row's identity from disk,
+// where the mangled boundaries the DB already stored cannot be recovered. An
+// open or parse failure returns a non-empty error so the caller can skip the
+// row rather than mistake a read failure for a genuinely empty artist.
+func ReadArtistIdentity(path string) (artist, albumArtist string, err error) {
+	f, oerr := os.Open(path) //nolint:gosec // G304: path originates from a scan_results row whose file_path was written from a configured library root
+	if oerr != nil {
+		return "", "", fmt.Errorf("open %s: %w", path, oerr)
+	}
+	defer func() { _ = f.Close() }()
+	m, terr := tag.ReadFrom(f)
+	if terr != nil {
+		return "", "", fmt.Errorf("read metadata %s: %w", path, terr)
+	}
+	return extractArtist(m), extractAlbumArtist(m), nil
 }
 
 // audioFileTypeForExt returns the audioduration type constant for a lower-case
@@ -183,6 +203,78 @@ func extractISRC(m tag.Metadata) string {
 // or "" if absent.
 func extractRecordingMBID(m tag.Metadata) string {
 	return mbz.Extract(m).Get(mbz.Recording)
+}
+
+// artistValueSep joins the discrete values of a multi-value artist frame for
+// display and for the stored identity. Semicolon-space is the de facto
+// MusicBrainz/Picard multi-value separator and round-trips cleanly through
+// normalize.NormalizeKey.
+const artistValueSep = "; "
+
+// extractArtist returns the track artist, preferring a correctly-delimited
+// multi-value form when the file carries one.
+//
+// github.com/dhowden/tag mangles multi-value ID3v2.4 text frames: readTFrame
+// joins the NUL-separated values with an empty string, so m.Artist() returns
+// the discrete values run together ("ABC" for values A, B, C) with the value
+// boundaries destroyed at read time (issue #466). The parallel TXXX "ARTISTS"
+// frame that standard taggers (e.g. Picard) write alongside TPE1 is NOT mangled
+// -- readTextWithDescrFrame preserves its embedded NULs -- so we recover the
+// real boundaries from it when present and join them with a human-readable
+// separator. Files carrying only a multi-value TPE1 and no ARTISTS frame cannot
+// be recovered (the boundaries are already gone by the time m.Artist() runs);
+// they keep the run-together fallback.
+func extractArtist(m tag.Metadata) string {
+	if v := multiValueTag(m, "ARTISTS"); v != "" {
+		return v
+	}
+	return m.Artist()
+}
+
+// extractAlbumArtist mirrors extractArtist for the album-artist frame (TPE2 /
+// TXXX "ALBUMARTISTS").
+func extractAlbumArtist(m tag.Metadata) string {
+	if v := multiValueTag(m, "ALBUMARTISTS"); v != "" {
+		return v
+	}
+	return m.AlbumArtist()
+}
+
+// multiValueTag scans the raw ID3 frames for a TXXX frame whose description
+// matches desc (case-insensitively) and, when its value holds two or more
+// NUL-separated discrete values, returns them joined by artistValueSep.
+// Surrounding whitespace is trimmed and empty values dropped (real Picard output
+// terminates the frame with a trailing NUL, which would otherwise yield a
+// spurious empty value). Returns "" unless at least two values are present, so a
+// single-value frame falls through to the standard accessor -- this keeps the
+// fix scoped to the genuine multi-value case (issue #466) and never overrides a
+// correctly-read single-value TPE1/TPE2 with a differing single ARTISTS value.
+//
+// TXXX frames are keyed "TXXX", "TXXX_0", ... in Raw() when several are present,
+// so the whole map is scanned; other *tag.Comm frames (COMM, USLT) never carry
+// these descriptions and are skipped by the description match.
+func multiValueTag(m tag.Metadata, desc string) string {
+	raw := m.Raw()
+	if raw == nil {
+		return ""
+	}
+	for _, v := range raw {
+		c, ok := v.(*tag.Comm)
+		if !ok || !strings.EqualFold(c.Description, desc) {
+			continue
+		}
+		parts := strings.Split(c.Text, "\x00")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		if len(out) >= 2 {
+			return strings.Join(out, artistValueSep)
+		}
+	}
+	return ""
 }
 
 // isInstrumentalTxt reports whether the file at path contains the instrumental
@@ -443,10 +535,10 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		*results = append(*results, models.ScanResult{
 			FilePath: filePath,
 			Track: models.Track{
-				ArtistName:    m.Artist(),
+				ArtistName:    extractArtist(m),
 				TrackName:     m.Title(),
 				AlbumName:     m.Album(),
-				AlbumArtist:   m.AlbumArtist(),
+				AlbumArtist:   extractAlbumArtist(m),
 				TrackLength:   dur,
 				ISRC:          isrc,
 				RecordingMBID: recordingMBID,
