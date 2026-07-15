@@ -133,10 +133,22 @@ type ScanCmd struct {
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
 
-	Results        *ScanResultsCmd        `arg:"subcommand:results" help:"list persisted scan_results rows"`
-	Clear          *ScanClearCmd          `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
-	Reconcile      *ScanReconcileCmd      `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
-	ReconcilePaths *ScanReconcilePathsCmd `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
+	Results           *ScanResultsCmd           `arg:"subcommand:results" help:"list persisted scan_results rows"`
+	Clear             *ScanClearCmd             `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
+	Reconcile         *ScanReconcileCmd         `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
+	ReconcilePaths    *ScanReconcilePathsCmd    `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
+	ReconcileIdentity *ScanReconcileIdentityCmd `arg:"subcommand:reconcile-identity" help:"re-read tags and correct run-together multi-value artist rows ingested before the fix (issue #466)"`
+}
+
+// ScanReconcileIdentityCmd re-reads each scan_results row's file tags and
+// corrects the stored artist / album-artist (and the coupled work_queue row)
+// where a multi-value ID3v2.4 frame was ingested run-together before the fix.
+// Dry-run unless --yes.
+type ScanReconcileIdentityCmd struct {
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
+	Yes        bool   `arg:"--yes" help:"actually apply corrections (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of corrected rows (default: <db-dir>/reconcile-identity-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // ScanReconcilePathsCmd deletes work_queue/scan_results rows whose source audio
@@ -973,6 +985,16 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			runSweeper(runCtx, sqlDB, sweepInterval)
 		}()
 	}
+	// One-shot identity-repair backfill (#466): correct run-together multi-value
+	// artist rows ingested before the tag fix. It re-reads every scan_results
+	// file's tags, so it runs once in the background (marker-gated, non-blocking)
+	// rather than delaying startup; the idempotent CLI `scan reconcile-identity`
+	// covers reruns and fetch-only deployments.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runIdentityBackfill(runCtx, sqlDB)
+	}()
 	// Background session sweeper: periodically delete expired/revoked sessions,
 	// mirroring the worker/scheduler goroutine + context-cancel pattern. Only
 	// runs when the authenticated UI is mounted (there are no sessions otherwise).
@@ -1667,6 +1689,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcilePaths(ctx, out, sub)
+	case args.ReconcileIdentity != nil:
+		sub := *args.ReconcileIdentity
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileIdentity(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}

@@ -57,6 +57,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `secrets` -- encrypted-at-rest (AES-256-GCM) store for recoverable runtime secrets, persisted as opaque BLOBs.
 - `watcher` -- optional filesystem watcher that triggers targeted library scans on change; complements, never replaces, the periodic scheduler.
 - `prune` -- reconciles `work_queue`/`scan_results` against the filesystem: rows whose source audio file has vanished are deleted (`os.Stat` is the sole authority; `Directory` granularity for the periodic sweep, `Exact` for the reactive prune and `scan reconcile-paths`; an in-flight guard defers rows whose linked work is still `processing`).
+- `identityrepair` -- re-reads each `scan_results` file's tags (via the injected `IdentityReader` seam) to correct run-together multi-value artist rows ingested before the ID3v2.4 fix (issue #466); updates `scan_results` in place and re-keys the coupled `work_queue` row, merging on the `(artist_key, title_key)` unique conflict and skipping `processing` rows. Each correction's backup record is written and fsynced inside the transaction before the row commits (backup-first / write-ahead: a report failure rolls the change back), so an applied correction always has its restorable record. Shared by the dry-run-by-default `scan reconcile-identity` CLI command and a one-shot, marker-gated serve-mode startup backfill.
 
 **Serve-mode HTTP surface and web UI**
 - `server` -- serve-mode HTTP `Handler` plus its seams (`Authenticator`, `WorkQueue`, `Readiness`, `StatusReporter`, `Inventory`, `MetricsReporter`) and metrics.
@@ -76,7 +77,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `config` -- TOML config resolution (XDG paths, registry-driven keys, token precedence CLI > env > file) plus redaction, validation, render/write.
 - `logging` -- `slog` logger setup and secret redaction.
 - `realign` -- four-tier resolver (`Realigner`, `Move`, `Apply`) that re-attaches orphaned `.lrc`/`.txt` sidecars to renamed or moved audio: exact ISRC/MBID provenance, filesystem heuristic with a Jaro-Winkler name guard, ambiguous, conflict. Backup-first and clobber-safe; shared by the `realign` CLI command and serve-mode reactive realign (watcher / scan / Lidarr-webhook).
-- `commands` -- the CLI command tree: top-level `Args` and every subcommand (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `completion`). The `realign` subcommand is thin CLI wiring over the `realign` package (above); `scan reconcile-paths` drives `prune` on demand. Both share the dry-run/`--yes`/JSONL-backup ergonomics of `scan reconcile`.
+- `commands` -- the CLI command tree: top-level `Args` and every subcommand (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `completion`). The `realign` subcommand is thin CLI wiring over the `realign` package (above); `scan reconcile-paths` drives `prune` on demand and `scan reconcile-identity` drives `identityrepair` on demand. All share the dry-run/`--yes`/JSONL-backup ergonomics of `scan reconcile`.
 - `version` -- build-time `Version`/`Commit`/`Date` (GoReleaser ldflags) and `VersionString()`.
 - `testutil` -- generates synthetic ID3-tagged audio for load/concurrency tests and the genlib tool.
 
