@@ -403,3 +403,95 @@ func TestPacerEnforcesMinInterval(t *testing.T) {
 		}
 	}
 }
+
+// parseLRC expands a compressed multi-timestamp line into one cue per stamp
+// (#470). Simple player frontends read only the first timestamp on a line, so a
+// stranded trailing [t2] renders as literal lyric text and the repeat never
+// highlights. Each stamp must become its own cue carrying the shared text.
+func TestParseLRC_ExpandsStackedTimestamps(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		want   []models.Lines
+		wantOK bool
+	}{
+		{
+			name: "single timestamp is unchanged",
+			body: "[00:12.00]alpha\n",
+			want: []models.Lines{
+				{Text: "alpha", Time: models.Time{Total: 12, Minutes: 0, Seconds: 12, Hundredths: 0}},
+			},
+			wantOK: true,
+		},
+		{
+			name: "two stamps on one line become two cues sharing the text",
+			body: "[00:12.00][00:45.00]alpha\n",
+			want: []models.Lines{
+				{Text: "alpha", Time: models.Time{Total: 12, Minutes: 0, Seconds: 12, Hundredths: 0}},
+				{Text: "alpha", Time: models.Time{Total: 45, Minutes: 0, Seconds: 45, Hundredths: 0}},
+			},
+			wantOK: true,
+		},
+		{
+			name: "out-of-order stack sorts ascending",
+			body: "[02:14.00][00:45.00]alpha\n",
+			want: []models.Lines{
+				{Text: "alpha", Time: models.Time{Total: 45, Minutes: 0, Seconds: 45, Hundredths: 0}},
+				{Text: "alpha", Time: models.Time{Total: 134, Minutes: 2, Seconds: 14, Hundredths: 0}},
+			},
+			wantOK: true,
+		},
+		{
+			name:   "no timestamped line reports not-ok",
+			body:   "just text\n",
+			want:   nil,
+			wantOK: false,
+		},
+		{
+			// Behavior change vs the old regex parser, pinned deliberately: it
+			// returned cues in SOURCE order, so a non-ascending payload stayed
+			// non-ascending. Cues are now time-sorted regardless of source order.
+			name: "non-ascending source order is sorted, not preserved",
+			body: "[02:00.00]alpha\n[00:30.00]beta\n",
+			want: []models.Lines{
+				{Text: "beta", Time: models.Time{Total: 30, Minutes: 0, Seconds: 30, Hundredths: 0}},
+				{Text: "alpha", Time: models.Time{Total: 120, Minutes: 2, Seconds: 0, Hundredths: 0}},
+			},
+			wantOK: true,
+		},
+		{
+			// Millisecond precision narrows to hundredths, and CRLF payloads
+			// parse identically to LF (both were handled by the old parser).
+			name: "millisecond precision and CRLF line endings",
+			body: "[00:12.345]alpha\r\n[00:45.6]beta\r\n",
+			want: []models.Lines{
+				{Text: "alpha", Time: models.Time{Total: 12.34, Minutes: 0, Seconds: 12, Hundredths: 34}},
+				{Text: "beta", Time: models.Time{Total: 45.6, Minutes: 0, Seconds: 45, Hundredths: 60}},
+			},
+			wantOK: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseLRC(tc.body)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v; want %v", ok, tc.wantOK)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d cue(s); want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i].Text != tc.want[i].Text {
+					t.Errorf("cue %d text = %q; want %q", i, got[i].Text, tc.want[i].Text)
+				}
+				if got[i].Time.Total != tc.want[i].Time.Total {
+					t.Errorf("cue %d total = %v; want %v", i, got[i].Time.Total, tc.want[i].Time.Total)
+				}
+				if got[i].Time.Minutes != tc.want[i].Time.Minutes || got[i].Time.Seconds != tc.want[i].Time.Seconds {
+					t.Errorf("cue %d = %dm%ds; want %dm%ds", i,
+						got[i].Time.Minutes, got[i].Time.Seconds, tc.want[i].Time.Minutes, tc.want[i].Time.Seconds)
+				}
+			}
+		})
+	}
+}
