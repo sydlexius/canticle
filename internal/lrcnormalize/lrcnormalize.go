@@ -6,6 +6,7 @@
 package lrcnormalize
 
 import (
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -134,6 +135,111 @@ func Expand(s models.Synced) models.Synced {
 	return models.Synced{Lines: out}
 }
 
+// NormalizeBody expands stacked multi-timestamp lines in a raw LRC body in
+// place, one cue per timestamp, and returns the rewritten body plus whether any
+// line changed. It is minimally invasive: every non-stacked line (header tags,
+// single-timestamp cues, blank lines, enhanced <..> word-sync markup, non-cue
+// text) is preserved verbatim, the original timestamp substrings and formatting
+// are kept (no re-render / precision loss), and line endings plus the trailing-
+// newline state are preserved. Idempotent: a body with no stacked line returns
+// unchanged.
+func NormalizeBody(body string) (string, bool) {
+	changed := false
+	var b strings.Builder
+	b.Grow(len(body))
+	for _, seg := range splitKeepEOL(body) {
+		expanded, did := splitStackedLine(seg.content)
+		if !did {
+			b.WriteString(seg.content)
+			b.WriteString(seg.term)
+			continue
+		}
+		changed = true
+		// Separate the new sub-lines with the source line's own terminator so
+		// each untouched line keeps its exact EOL (mixed LF/CRLF preserved). When
+		// the stacked line had no terminator (EOF), use "\n" between the new lines
+		// but leave the final one unterminated to preserve the no-trailing-newline
+		// state.
+		sep := seg.term
+		if sep == "" {
+			sep = "\n"
+		}
+		for i, e := range expanded {
+			b.WriteString(e)
+			if i < len(expanded)-1 {
+				b.WriteString(sep)
+			} else {
+				b.WriteString(seg.term)
+			}
+		}
+	}
+	if !changed {
+		return body, false
+	}
+	return b.String(), true
+}
+
+// eolSegment is one source line: its content (terminator stripped) and the exact
+// terminator that followed it ("\n", "\r\n", or "" at EOF).
+type eolSegment struct {
+	content string
+	term    string
+}
+
+// splitKeepEOL splits body into lines while preserving each line's exact
+// terminator, so a rewrite can reproduce mixed line endings byte-for-byte.
+func splitKeepEOL(body string) []eolSegment {
+	var segs []eolSegment
+	for i := 0; i < len(body); {
+		j := strings.IndexByte(body[i:], '\n')
+		if j < 0 {
+			segs = append(segs, eolSegment{content: body[i:], term: ""})
+			break
+		}
+		content := body[i : i+j]
+		term := "\n"
+		if strings.HasSuffix(content, "\r") {
+			content = content[:len(content)-1]
+			term = "\r\n"
+		}
+		segs = append(segs, eolSegment{content: content, term: term})
+		i += j + 1
+	}
+	return segs
+}
+
+// splitStackedLine expands a single line carrying two or more adjacent leading
+// timestamps into one line per timestamp, each preserving the exact original
+// timestamp substring and the shared trailing text verbatim, sorted ascending by
+// time (stable). Returns (nil, false) for a line with fewer than two leading
+// timestamps -- adjacency is required (tsRe is anchored, so any non-'[' between
+// stamps, including whitespace, ends the run and the line is left untouched).
+func splitStackedLine(line string) ([]string, bool) {
+	type stamp struct {
+		raw   string
+		total float64
+	}
+	var stamps []stamp
+	rest := line
+	for {
+		m := tsRe.FindStringSubmatch(rest)
+		if m == nil {
+			break
+		}
+		stamps = append(stamps, stamp{raw: m[0], total: stampSeconds(m[1], m[2], m[3])})
+		rest = rest[len(m[0]):]
+	}
+	if len(stamps) < 2 {
+		return nil, false
+	}
+	sort.SliceStable(stamps, func(i, j int) bool { return stamps[i].total < stamps[j].total })
+	expanded := make([]string, len(stamps))
+	for i, s := range stamps {
+		expanded[i] = s.raw + rest
+	}
+	return expanded, true
+}
+
 // splitLines splits a body on newlines, trimming a trailing carriage return.
 func splitLines(body string) []string {
 	lines := regexp.MustCompile("\r?\n").Split(body, -1)
@@ -154,6 +260,22 @@ func newCue(min, sec, frac, text string) models.Lines {
 			Hundredths: h,
 		},
 	}
+}
+
+// stampSeconds returns a timestamp's absolute seconds at the fractional string's
+// full precision, so the within-line ascending sort orders stamps that differ
+// only in the third fractional digit correctly (normalizeHundredths would
+// truncate them to a tie). Used only as a sort key; emitted substrings are the
+// exact originals.
+func stampSeconds(min, sec, frac string) float64 {
+	m, _ := strconv.Atoi(min)
+	s, _ := strconv.Atoi(sec)
+	total := float64(m*60 + s)
+	if frac != "" {
+		n, _ := strconv.Atoi(frac)
+		total += float64(n) / math.Pow10(len(frac))
+	}
+	return total
 }
 
 // normalizeHundredths converts a captured fractional-second string (0-3 digits)

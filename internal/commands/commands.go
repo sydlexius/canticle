@@ -138,6 +138,18 @@ type ScanCmd struct {
 	Reconcile         *ScanReconcileCmd         `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
 	ReconcilePaths    *ScanReconcilePathsCmd    `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
 	ReconcileIdentity *ScanReconcileIdentityCmd `arg:"subcommand:reconcile-identity" help:"re-read tags and correct run-together multi-value artist rows ingested before the fix (issue #466)"`
+	ReconcileLRC      *ScanReconcileLRCCmd      `arg:"subcommand:reconcile-lrc" help:"rewrite existing .lrc sidecars that stack multiple timestamps on one line into the expanded, universally-readable form (issue #470)"`
+}
+
+// ScanReconcileLRCCmd walks the configured library roots and rewrites any .lrc
+// sidecar carrying compressed multi-timestamp lines (e.g. [t1][t2]text) into the
+// expanded one-cue-per-line form, backing up the pristine original to
+// <file>.lrc.orig. Dry-run unless --yes.
+type ScanReconcileLRCCmd struct {
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
+	Yes        bool   `arg:"--yes" help:"actually rewrite files (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL record of rewritten files (default: <db-dir>/reconcile-lrc-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // ScanReconcileIdentityCmd re-reads each scan_results row's file tags and
@@ -1695,6 +1707,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileIdentity(ctx, out, sub)
+	case args.ReconcileLRC != nil:
+		sub := *args.ReconcileLRC
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileLRC(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}
