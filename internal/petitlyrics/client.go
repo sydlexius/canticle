@@ -22,11 +22,11 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/doxazo-net/canticle/internal/lrcnormalize"
 	"github.com/doxazo-net/canticle/internal/models"
 )
 
@@ -44,10 +44,6 @@ var lyricsLinkRe = regexp.MustCompile(`/lyrics/(\d+)`)
 // csrfTokenRe extracts the CSRF token from the static pl-lib.js file. The token
 // is assigned to a JS variable as a quoted string in observed responses.
 var csrfTokenRe = regexp.MustCompile(`csrfToken\s*[:=]\s*["']([^"']+)["']`)
-
-// lrcLineRe matches a single LRC timestamped line: [mm:ss.xx]text. Hundredths
-// may be two or three digits in the wild; we normalize to hundredths.
-var lrcLineRe = regexp.MustCompile(`^\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\](.*)$`)
 
 // candidateBlockRe matches the inner content of a single <li> result block
 // (dot-all so the block can span multiple lines).
@@ -501,45 +497,14 @@ func applySecondaryTracks(song *models.Song, rest []ajaxEntry) {
 // parseLRC parses LRC-formatted text into synced lines. It returns ok=false
 // when no line carries a parseable [mm:ss.xx] timestamp, signaling the content
 // should be treated as plain lyrics instead.
+//
+// Expansion happens here rather than at write time (#470): a compressed line
+// carrying several leading stamps ([t1][t2]text) becomes one cue per stamp, so
+// everything downstream of this lane holds a one-cue-per-line model and every
+// future write is player-compatible. Simple player frontends read only the
+// first timestamp on a line, so a stranded [t2] would otherwise render as
+// literal lyric text and the repeat would never highlight.
 func parseLRC(text string) ([]models.Lines, bool) {
-	var lines []models.Lines
-	for _, raw := range strings.Split(text, "\n") {
-		raw = strings.TrimRight(raw, "\r")
-		m := lrcLineRe.FindStringSubmatch(raw)
-		if m == nil {
-			continue
-		}
-		minutes, _ := strconv.Atoi(m[1])
-		seconds, _ := strconv.Atoi(m[2])
-		hundredths := normalizeHundredths(m[3])
-		total := float64(minutes*60+seconds) + float64(hundredths)/100.0
-		lines = append(lines, models.Lines{
-			Text: strings.TrimSpace(m[4]),
-			Time: models.Time{
-				Total:      total,
-				Minutes:    minutes,
-				Seconds:    seconds,
-				Hundredths: hundredths,
-			},
-		})
-	}
-	return lines, len(lines) > 0
-}
-
-// normalizeHundredths converts a captured fractional-second string (1-3 digits)
-// to hundredths of a second. Empty means zero.
-func normalizeHundredths(frac string) int {
-	switch len(frac) {
-	case 0:
-		return 0
-	case 1:
-		n, _ := strconv.Atoi(frac)
-		return n * 10
-	case 2:
-		n, _ := strconv.Atoi(frac)
-		return n
-	default: // 3 digits: milliseconds -> hundredths
-		n, _ := strconv.Atoi(frac[:2])
-		return n
-	}
+	cues := lrcnormalize.ParseBody(text).Cues
+	return cues, len(cues) > 0
 }

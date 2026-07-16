@@ -2,7 +2,8 @@
 // cue per timestamp and classifies [key:value] ID-tag lines distinctly from
 // real cues. It is a pure transform (no I/O) intended as the shared foundation
 // for the LRC-text provider parse lanes, the write/backfill path, and the
-// upgrade match-scorer; no consumer is wired yet.
+// upgrade match-scorer. Wired into the petitlyrics parse lane (#470);
+// lrcbackfill drives the .lrc rewrite path.
 package lrcnormalize
 
 import (

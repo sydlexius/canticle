@@ -40,7 +40,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `circuit` -- concurrency-safe per-lane circuit breaker modeling a provider's rate-limit/throttle response.
 - `backoff` -- shared retry-delay formula (1m, 2m, 4m, ..., capped at 1h) used by the worker, durable queue, and fetch loop.
 - `lyrics` -- LRC/TXT/instrumental writer (`Writer`, `LRCWriter`), `Slugify`, an `.lrc` parser, provenance-tag embedding, and fsync helpers.
-- `lrcnormalize` -- pure transform (`ParseBody`, `Expand`) that expands compressed multi-timestamp LRC lines (`[t1][t2]text`) into one cue per timestamp and classifies `[key:value]` ID-tag lines distinctly from cues; no I/O. Intended as the shared foundation for the LRC-text parse lanes, the write/backfill path (#470), and the upgrade scorer (#472); no consumer wired yet.
+- `lrcnormalize` -- pure transform (`ParseBody`, `Expand`) that expands compressed multi-timestamp LRC lines (`[t1][t2]text`) into one cue per timestamp and classifies `[key:value]` ID-tag lines distinctly from cues; no I/O. The shared foundation for the LRC-text parse lanes, the write/backfill path (#470), and the upgrade scorer (#472). Wired into the `petitlyrics` parse lane, so stacked timestamps expand at parse time and every downstream write is one-cue-per-line; `lrcbackfill` drives the `.lrc` rewrite path. Not yet consumed by #472.
 - `normalize` -- NFKC cache-key normalization, duration bucketing, fuzzy-match confidence, album-artist resolution.
 - `langguard` -- Unicode-script classification/filtering of lyric text against a configured language allowlist.
 - `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`).
