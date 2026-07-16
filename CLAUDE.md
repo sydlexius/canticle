@@ -40,7 +40,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `circuit` -- concurrency-safe per-lane circuit breaker modeling a provider's rate-limit/throttle response.
 - `backoff` -- shared retry-delay formula (1m, 2m, 4m, ..., capped at 1h) used by the worker, durable queue, and fetch loop.
 - `lyrics` -- LRC/TXT/instrumental writer (`Writer`, `LRCWriter`), `Slugify`, an `.lrc` parser, provenance-tag embedding, and fsync helpers.
-- `lrcnormalize` -- pure transform (`ParseBody`, `Expand`) that expands compressed multi-timestamp LRC lines (`[t1][t2]text`) into one cue per timestamp and classifies `[key:value]` ID-tag lines distinctly from cues; no I/O, shared by the LRC-text parse lanes, the write/backfill path (#470), and the upgrade scorer (#472).
+- `lrcnormalize` -- pure transform (`ParseBody`, `Expand`) that expands compressed multi-timestamp LRC lines (`[t1][t2]text`) into one cue per timestamp and classifies `[key:value]` ID-tag lines distinctly from cues; no I/O. Intended as the shared foundation for the LRC-text parse lanes, the write/backfill path (#470), and the upgrade scorer (#472); no consumer wired yet.
 - `normalize` -- NFKC cache-key normalization, duration bucketing, fuzzy-match confidence, album-artist resolution.
 - `langguard` -- Unicode-script classification/filtering of lyric text against a configured language allowlist.
 - `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`).
