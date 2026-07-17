@@ -70,6 +70,16 @@ var defaultVocalClasses = []string{"Singing", "Vocal music", "Choir", "A capella
 // sung-vocal peak gate.
 var defaultSpeechClasses = []string{"Speech"}
 
+// Instrumental is the pure three-gate score predicate: a track is instrumental
+// when the summed music mean clears minConfidence, the sung-vocal peak stays
+// below vocalMax, and the speech mean stays below speechMax. Kept free of the
+// sidecar-completeness guards (maxAvailable/baselineComplete) so the same
+// decision can be re-applied to STORED telemetry by the calibration sweep and
+// the recalibration reopen path, which have no live sidecar response.
+func Instrumental(musicSum, vocalPeak, speechMean, minConfidence, vocalMax, speechMax float64) bool {
+	return musicSum >= minConfidence && vocalPeak < vocalMax && speechMean < speechMax
+}
+
 // Result describes an instrumental detection decision.
 type Result struct {
 	// Instrumental is true only when all three gates pass: the summed mean

@@ -297,8 +297,8 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 			}
 		}
 	}
-	instrumental := music >= d.minConfidence && maxAvailable && baselineComplete &&
-		vocalPeak < d.vocalMaxConfidence && speechMean < d.speechMaxConfidence
+	instrumental := maxAvailable && baselineComplete &&
+		Instrumental(music, vocalPeak, speechMean, d.minConfidence, d.vocalMaxConfidence, d.speechMaxConfidence)
 
 	// Surface the decision inputs: the worker only reads res.Instrumental, so
 	// without this line a misclassification leaves no trace of the music_sum /
