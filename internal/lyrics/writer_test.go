@@ -68,17 +68,17 @@ func TestWriteLRC_Instrumental(t *testing.T) {
 	if len(content) == 0 {
 		t.Fatal("expected non-empty file content for instrumental")
 	}
-	// Instrumentals are a plain marker: the single line with no timestamp and no
-	// tag headers.
-	const want = "\u266a Instrumental \u266a\n"
+	// Instrumentals carry a provenance header (#502): [by:canticle] but no
+	// [source:]/[dv:] since neither WinningLane nor DetectorVersion is set.
+	const want = "[by:canticle]\n\u266a Instrumental \u266a\n"
 	if content != want {
 		t.Fatalf("expected content to equal %q, got: %q", want, content)
 	}
 	if strings.Contains(content, "[00:00.00]") {
 		t.Fatalf("instrumental marker must not contain an LRC timestamp, got: %q", content)
 	}
-	if strings.Contains(content, "[by:") || strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
-		t.Fatalf("instrumental marker must not contain tag headers, got: %q", content)
+	if strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
+		t.Fatalf("instrumental marker must not contain synced tag headers, got: %q", content)
 	}
 
 	// No .lrc file should have been created for an instrumental.
@@ -111,15 +111,15 @@ func TestWriteLRC_InstrumentalExplicitFilename(t *testing.T) {
 		t.Fatalf("expected file song.txt to exist: %v", err)
 	}
 	content := string(data)
-	const want = "♪ Instrumental ♪\n"
+	const want = "[by:canticle]\n♪ Instrumental ♪\n"
 	if content != want {
 		t.Fatalf("expected content to equal %q, got: %q", want, content)
 	}
 	if strings.Contains(content, "[00:00.00]") {
 		t.Fatalf("instrumental marker must not contain an LRC timestamp, got: %q", content)
 	}
-	if strings.Contains(content, "[by:") || strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
-		t.Fatalf("instrumental marker must not contain tag headers, got: %q", content)
+	if strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
+		t.Fatalf("instrumental marker must not contain synced tag headers, got: %q", content)
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, "song.lrc")); err == nil {
 		t.Fatal("expected no .lrc file for instrumental, but one was created")
@@ -353,7 +353,7 @@ func TestWriteLRC_InstrumentalWithSubtitles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected song.txt to exist: %v", err)
 	}
-	const want = "♪ Instrumental ♪\n"
+	const want = "[by:canticle]\n♪ Instrumental ♪\n"
 	if got := string(data); got != want {
 		t.Fatalf("content = %q; want %q", got, want)
 	}
@@ -399,4 +399,55 @@ func TestWriteLRC_Synced(t *testing.T) {
 	if !strings.Contains(content, "[ar:Test Artist]") {
 		t.Fatalf("expected LRC tags in .lrc, got: %q", content)
 	}
+}
+
+func TestWriteLRC_InstrumentalDetectorProvenance(t *testing.T) {
+	dir := t.TempDir()
+	w := NewLRCWriter()
+	song := models.Song{
+		Track:           models.Track{ArtistName: "A", TrackName: "T", Instrumental: 1},
+		DetectorVersion: "9.9.9",
+	}
+	if err := w.WriteLRC(song, "", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	got := readOnlyTxt(t, dir)
+	for _, want := range []string{"[source:canticle-detector]", "[dv:9.9.9]", InstrumentalMarker} {
+		if !strings.Contains(got, want) {
+			t.Errorf("detector marker missing %q; got:\n%s", want, got)
+		}
+	}
+}
+
+func TestWriteLRC_InstrumentalProviderProvenance(t *testing.T) {
+	dir := t.TempDir()
+	w := NewLRCWriter()
+	song := models.Song{
+		Track:       models.Track{ArtistName: "A", TrackName: "T", Instrumental: 1},
+		WinningLane: "musixmatch",
+	}
+	if err := w.WriteLRC(song, "", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	got := readOnlyTxt(t, dir)
+	if !strings.Contains(got, "[source:musixmatch]") {
+		t.Errorf("provider marker missing [source:musixmatch]; got:\n%s", got)
+	}
+	if strings.Contains(got, "[dv:") {
+		t.Errorf("provider marker must not carry [dv:]; got:\n%s", got)
+	}
+}
+
+// readOnlyTxt returns the contents of the single .txt file written into dir.
+func readOnlyTxt(t *testing.T, dir string) string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*.txt"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected exactly one .txt in %s, got %v (err %v)", dir, matches, err)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("read %s: %v", matches[0], err)
+	}
+	return string(data)
 }
