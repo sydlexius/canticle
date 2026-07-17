@@ -46,6 +46,94 @@ func (e *detectorEnv) Close() {
 	_ = e.db.Close() //nolint:errcheck // reason: best-effort close on command exit
 }
 
+// queueEnv carries the dependencies a pure-stored-telemetry reconcile command
+// needs: resolved config, an open database, the durable queue, and the
+// optional single-library narrowing. Callers must Close it.
+//
+// Unlike detectorEnv, it never constructs an audio detector and never requires
+// one configured: instrumentalrecalib re-decides vocal-gate rejections from
+// telemetry already stamped on each row (music_sum/vocal_peak/speech_mean),
+// making no provider or sidecar calls, so gating it on a reachable classifier
+// would wrongly block a command that needs none.
+type queueEnv struct {
+	cfg   config.Config
+	db    *sql.DB
+	queue *queue.DBQueue
+
+	// libraryID narrows selection to one library when the operator passed
+	// --library; nil means every library. libLabel is the pre-rendered
+	// operator-facing suffix (" (library %q, id=%d)") or empty.
+	libraryID *int64
+	libLabel  string
+}
+
+// Close releases the database handle. Safe on a nil env.
+func (e *queueEnv) Close() {
+	if e == nil || e.db == nil {
+		return
+	}
+	_ = e.db.Close() //nolint:errcheck // reason: best-effort close on command exit
+}
+
+// resolveEnvLibrary resolves the operator-supplied --library argument (name or
+// numeric id) against lib, returning the narrowed id and its pre-rendered
+// operator-facing label. Shared by openDetectorEnv and openQueueEnv so the two
+// setups agree on --library semantics.
+func resolveEnvLibrary(ctx context.Context, out io.Writer, sqlDB *sql.DB, libraryArg string) (id *int64, label string, code int, err error) {
+	lib, rerr := resolveLibrary(ctx, library.New(sqlDB), libraryArg)
+	if rerr != nil {
+		if errors.Is(rerr, sql.ErrNoRows) {
+			_, _ = fmt.Fprintf(out, "library %q not found\n", libraryArg)
+			return nil, "", 1, fmt.Errorf("resolve library %q: %w", libraryArg, rerr)
+		}
+		slog.Error("failed to resolve library", "error", rerr)
+		return nil, "", 1, fmt.Errorf("resolve library %q: %w", libraryArg, rerr)
+	}
+	got := lib.ID
+	return &got, fmt.Sprintf(" (library %q, id=%d)", lib.Name, lib.ID), 0, nil
+}
+
+// openQueueEnv performs the setup shared by reconcile commands that re-decide
+// from stored telemetry alone: config, database, optional --library
+// narrowing, and the durable queue. It does not resolve ffmpeg or construct a
+// detector, so it works whether or not a classifier is configured or
+// reachable.
+//
+// On failure it returns a nil env and a process exit code, having already
+// written the operator-facing message to out or logged the internal error;
+// the caller returns that code verbatim. On success the caller owns the env
+// and must Close it.
+func openQueueEnv(ctx context.Context, out io.Writer, configPath, libraryArg string) (*queueEnv, int) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		return nil, 1
+	}
+	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	if err != nil {
+		slog.Error("failed to open database", "error", err)
+		return nil, 1
+	}
+
+	env := &queueEnv{cfg: cfg, db: sqlDB}
+
+	if strings.TrimSpace(libraryArg) != "" {
+		id, label, code, rerr := resolveEnvLibrary(ctx, out, sqlDB, libraryArg)
+		if rerr != nil {
+			env.Close()
+			return nil, code
+		}
+		env.libraryID = id
+		env.libLabel = label
+	}
+
+	workQueue := queue.NewDBQueue(sqlDB)
+	workQueue.SetRandomized(cfg.Queue.Randomize)
+	env.queue = workQueue
+
+	return env, 0
+}
+
 // openDetectorEnv performs the setup shared by the detector-driven reconcile
 // commands. verb names the caller in the not-configured message ("reconcile",
 // "backfill") so the operator is told which command went inert.

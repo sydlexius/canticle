@@ -1608,6 +1608,90 @@ func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOpt
 	return items, nil
 }
 
+// ListVocalGateRejectionsOptions narrows the stamped-not-instrumental listing.
+type ListVocalGateRejectionsOptions struct {
+	LibraryID *int64
+	Limit     int
+}
+
+// StampedRejection is one instrumental_result=0 row with its stored telemetry,
+// for re-deciding under a recalibrated threshold without re-scanning audio.
+type StampedRejection struct {
+	ID         int64
+	Artist     string
+	Title      string
+	SourcePath string
+	Tel        InstrumentalTelemetry
+}
+
+// ListVocalGateRejections returns deferred rows the detector previously marked
+// not-instrumental (instrumental_result=0) that carry re-decidable stored
+// telemetry (music_sum/vocal_peak/speech_mean non-NULL). Legacy rows missing
+// those scores are skipped: they cannot be re-decided from stored scores alone.
+//
+// The re-decision engine calls detector.Instrumental(music, vocalPeak,
+// speechMean, ...) using only these three stored scores, which deliberately
+// omits the live detector's maxAvailable/baselineComplete sidecar-completeness
+// guards (internal/detector/http.go) -- those guards are not reconstructable
+// from the three stored scores alone. A row where the vocal gate could not run
+// cleanly (a legacy mean-only sidecar, maxAvailable=false) is stamped with
+// vocal_peak=0.0 and an empty vocal_class, which can spuriously satisfy
+// detector.Instrumental's vocal-gate check and cause the re-decision engine to
+// settle it as instrumental -- a false instrumental marker that suppresses
+// real lyric fetches. Excluding empty vocal_class rows drops exactly that
+// degraded population: a genuine vocal-gate-buried instrumental always has a
+// non-empty vocal_class (the faint vocal class that peaked is why it was
+// rejected in the first place), and a complete detection with vocal_peak=0.0
+// that still resulted in instrumental_result=0 must have failed the
+// music/speech gates rather than the vocal gate, so it would be excluded from
+// re-decision anyway -- this filter is harmless to legitimate candidates. This
+// preserves the "any doubt resolves to not-instrumental" invariant.
+//
+// Residual gap: the rarer partial-baseline case (baselineComplete=false with a
+// non-empty vocal_class) is NOT fully closed by this guard. Closing it would
+// need a durable persisted "gate-complete" telemetry bit, tracked as a
+// follow-up.
+//
+// Read-only.
+func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGateRejectionsOptions) (out []StampedRejection, retErr error) {
+	query := `SELECT id, COALESCE(artist,''), COALESCE(title,''), COALESCE(source_path,''),
+	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,'')
+	          FROM work_queue
+	          WHERE instrumental_result = 0 AND status = 'deferred'
+	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL
+	            AND TRIM(COALESCE(vocal_class,'')) <> ''`
+	var args []any
+	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
+	query += libClause //nolint:gosec // G202: libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
+	args = append(args, libArgs...)
+	query += ` ORDER BY id`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: fragments are package constants / fixed clauses, never user-built SQL
+	if err != nil {
+		return nil, fmt.Errorf("queue: list vocal-gate rejections: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close list vocal-gate rejections rows: %w", err)
+		}
+	}()
+	for rows.Next() {
+		var r StampedRejection
+		if err := rows.Scan(&r.ID, &r.Artist, &r.Title, &r.SourcePath,
+			&r.Tel.MusicSum, &r.Tel.VocalPeak, &r.Tel.SpeechMean, &r.Tel.VocalClass, &r.Tel.DetectorVersion); err != nil {
+			return nil, fmt.Errorf("queue: scan vocal-gate rejection: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list vocal-gate rejections rows: %w", err)
+	}
+	return out, nil
+}
+
 // CountInstrumentalNarrowed returns how many instrumental_result = 1 rows the
 // telemetry-narrowed prefilter would select (the same predicate ListInstrumental
 // applies when opts.All is false), so reconcile can report prefiltered-vs-total
@@ -1689,6 +1773,38 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
 		return 0, fmt.Errorf("queue: commit reset instrumental tx: %w", err)
 	}
 	return n, nil
+}
+
+// ResetInstrumentalToUnclassified clears a stamped not-instrumental verdict
+// (instrumental_result = 0) back to NULL, without touching status, priority,
+// or the stored telemetry columns. Used by instrumentalrecalib when a
+// vocal-gate rejection now PASSES the reconfigured thresholds but was scored
+// by a detector_version other than the current one: the stale telemetry is
+// not trustworthy enough to settle on directly, so the row is dropped back
+// to "never classified" and picked up by the next reconcile/backfill pass,
+// which re-scans it with the current detector instead.
+//
+// Guarded on status = 'deferred' AND instrumental_result = 0 -- so a row a
+// worker has since claimed, or one concurrently re-stamped to a positive verdict
+// or already cleared, is left alone rather than having its verdict clobbered.
+// Returns whether the row was reset.
+func (q *DBQueue) ResetInstrumentalToUnclassified(ctx context.Context, id int64) (bool, error) {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET instrumental_result = NULL
+         WHERE id = ?
+           AND status = 'deferred'
+           AND instrumental_result = 0`,
+		id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: reset instrumental to unclassified: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: reset instrumental to unclassified rows affected: %w", err)
+	}
+	return n > 0, nil
 }
 
 // CancelByLibrary rebuilds or deletes pending/failed/deferred work_queue rows whose
