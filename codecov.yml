@@ -20,6 +20,11 @@ ignore:
   # internal/testutil.GenerateLibrary; main.go is just flag wiring and is not
   # shipped (excluded from GoReleaser's build allowlist).
   - "cmd/genlib/main.go"
+  # Dev-only vocal-gate calibration tool (#510). Its sweep/validate/sample logic
+  # lives in (and is tested via) internal/vocalcalib; main.go is flag wiring plus
+  # DB/detector plumbing, and is not shipped (excluded from GoReleaser's build
+  # allowlist).
+  - "cmd/vocalcalib/main.go"
   # Generated templ output (make ui / `templ generate`). Authored from the
   # *.templ sources and CI-verified current via `make ui-check`; the rendered
   # behavior is covered by internal/web tests, not by counting generated lines.
