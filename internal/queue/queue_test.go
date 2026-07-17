@@ -3648,3 +3648,78 @@ func TestDBQueue_ResetInstrumental(t *testing.T) {
 		t.Errorf("reset of result=0 row affected %d; want 0", n0)
 	}
 }
+
+// TestDBQueue_ListUnclassifiedFindsNeverScoredDeferredRows covers the population
+// ListInstrumental structurally cannot reach: rows the detector has never seen.
+// ListInstrumental selects `instrumental_result = 1 AND status = 'done'`, so it
+// only ever re-checks verdicts already confirmed. A row deferred on a provider
+// miss before the detector existed has instrumental_result IS NULL and is
+// invisible to it (issue #499).
+func TestDBQueue_ListUnclassifiedFindsNeverScoredDeferredRows(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC) }
+
+	mk := func(title, src string) int64 {
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:      models.Track{ArtistName: "Artist", TrackName: title},
+			Outdir:     "out",
+			Filename:   title + ".lrc",
+			SourcePath: src,
+		}, 1)
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", title, err)
+		}
+		return item.ID
+	}
+
+	// The target: deferred on a benign miss, never scored.
+	wanted := mk("never-scored", "/music/never-scored.flac")
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, wanted, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	// Already scored not-instrumental: the detector has seen it, so it is not a
+	// candidate.
+	scored := mk("already-scored", "/music/already-scored.flac")
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue scored: %v", err)
+	}
+	if _, err := q.Defer(ctx, scored, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer scored: %v", err)
+	}
+	if err := q.SetInstrumentalResult(ctx, scored, 0, InstrumentalTelemetry{DetectorVersion: "v1"}); err != nil {
+		t.Fatalf("stamp scored: %v", err)
+	}
+
+	// No source path: nothing to feed the detector.
+	noSrc := mk("no-source", "")
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue no-source: %v", err)
+	}
+	if _, err := q.Defer(ctx, noSrc, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer no-source: %v", err)
+	}
+
+	got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{})
+	if err != nil {
+		t.Fatalf("ListUnclassified: %v", err)
+	}
+
+	if len(got) != 1 {
+		var ids []int64
+		for _, it := range got {
+			ids = append(ids, it.ID)
+		}
+		t.Fatalf("ListUnclassified returned ids %v; want exactly [%d] (the never-scored deferred row)", ids, wanted)
+	}
+	if got[0].ID != wanted {
+		t.Fatalf("ListUnclassified id = %d; want %d", got[0].ID, wanted)
+	}
+	if got[0].Inputs.SourcePath != "/music/never-scored.flac" {
+		t.Fatalf("SourcePath = %q; want the hydrated source so the detector has a file to read", got[0].Inputs.SourcePath)
+	}
+}

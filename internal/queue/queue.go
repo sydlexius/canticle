@@ -1297,6 +1297,86 @@ type ListInstrumentalOptions struct {
 	CurrentVersion string
 }
 
+// ListUnclassifiedOptions narrows ListUnclassified.
+type ListUnclassifiedOptions struct {
+	// LibraryID, when non-nil, scopes results to rows linked to that library via
+	// the work_queue_scan_results junction.
+	LibraryID *int64
+	// Limit caps the number of returned rows when > 0.
+	Limit int
+}
+
+// ListUnclassified returns work_queue rows the detector has never scored
+// (instrumental_result IS NULL) that are parked on a benign provider miss
+// (status = 'deferred') and carry a source path to read.
+//
+// This is the population ListInstrumental structurally cannot reach: it selects
+// instrumental_result = 1 AND status = 'done', so it only re-checks verdicts the
+// detector already confirmed, in order to clear false positives. Nothing selects
+// the inverse -- rows never classified at all -- which is why a queue drained
+// before the detector shipped stays permanently unexamined (#499).
+//
+// 'deferred' is the operative status: those rows already lost their provider
+// round-trip, so classifying them costs no provider request. 'processing' rows are
+// excluded (in-flight), as are rows with no source_path (nothing to feed the
+// detector). Read-only.
+func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOptions) (items []WorkItem, retErr error) {
+	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
+                       FROM work_queue
+                       WHERE instrumental_result IS NULL
+                         AND status = 'deferred'
+                         AND TRIM(COALESCE(source_path, '')) <> ''`
+	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
+	query := baseQuery
+	var args []any
+	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
+	query += libClause
+	args = append(args, libArgs...)
+	query += orderClause
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: all concatenated fragments are package constants / recheckLibraryClause's fixed clause; never user-built SQL
+	if err != nil {
+		return nil, fmt.Errorf("queue: list unclassified: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close list unclassified rows: %w", err)
+		}
+	}()
+	for rows.Next() {
+		item, err := scanWorkItem(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: list unclassified scan: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list unclassified rows: %w", err)
+	}
+	return items, nil
+}
+
+// CountUnclassified returns the total number of rows ListUnclassified would
+// consider, ignoring Limit, so a run can report coverage against the backlog.
+func (q *DBQueue) CountUnclassified(ctx context.Context, libraryID *int64) (int, error) {
+	query := `SELECT COUNT(*) FROM work_queue
+              WHERE instrumental_result IS NULL
+                AND status = 'deferred'
+                AND TRIM(COALESCE(source_path, '')) <> ''`
+	libClause, libArgs := recheckLibraryClause(libraryID)
+	query += libClause
+	var n int
+	if err := q.db.QueryRowContext(ctx, query, libArgs...).Scan(&n); err != nil { //nolint:gosec // G202: fragments are package constants / recheckLibraryClause's fixed clause; never user-built SQL
+		return 0, fmt.Errorf("queue: count unclassified: %w", err)
+	}
+	return n, nil
+}
+
 // ListInstrumental returns work_queue rows flagged instrumental
 // (instrumental_result = 1), hydrated with full Inputs (SourcePath and
 // OutputPaths) so reconcile can locate audio sources and their sidecars. By
