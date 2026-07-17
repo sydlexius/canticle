@@ -2576,3 +2576,14 @@ func TestServeHandlerWiresMetricsReporter(t *testing.T) {
 		t.Errorf("response body missing mxlrcgo_queue_failures\nbody:\n%s", body)
 	}
 }
+
+func TestDetectorScanVersion(t *testing.T) {
+	enabled := config.Config{InstrumentalDetector: config.InstrumentalDetectorConfig{Enabled: true}}
+	if got := detectorScanVersion(enabled); got != version {
+		t.Errorf("enabled: detectorScanVersion = %q, want current app version %q", got, version)
+	}
+	disabled := config.Config{InstrumentalDetector: config.InstrumentalDetectorConfig{Enabled: false}}
+	if got := detectorScanVersion(disabled); got != "" {
+		t.Errorf("disabled: detectorScanVersion = %q, want empty (no version-invalidation churn)", got)
+	}
+}

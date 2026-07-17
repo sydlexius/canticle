@@ -1589,17 +1589,29 @@ func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 	}
 }
 
+// detectorScanVersion returns the app version to stamp into a scan's ScanOptions
+// for detector-marker version invalidation (#502), or "" when the audio detector
+// is disabled -- so a disabled detector never reopens provisional markers on a
+// version bump. It is the same value fed to detector.Config.Version.
+func detectorScanVersion(cfg config.Config) string {
+	if cfg.InstrumentalDetector.Enabled {
+		return version
+	}
+	return ""
+}
+
 func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd, cacheRepo *cache.CacheRepo) {
 	// serve has no per-run detect override; resolve per library against the global
 	// default (and the per-library setting) at enqueue time.
 	// Periodic scans realign only when realign.enabled AND realign.on_scan.
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
 	s := scheduler(sqlDB, scanner.ScanOptions{
-		Update:         args.Update,
-		Upgrade:        args.Upgrade,
-		MaxDepth:       args.Depth,
-		BFS:            args.BFS,
-		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		Update:          args.Update,
+		Upgrade:         args.Upgrade,
+		MaxDepth:        args.Depth,
+		BFS:             args.BFS,
+		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		DetectorVersion: detectorScanVersion(cfg),
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
@@ -1666,11 +1678,12 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 	// on_scan, which governs full periodic/manual scans).
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, false)
 	sched := scheduler(sqlDB, scanner.ScanOptions{
-		Update:         args.Update,
-		Upgrade:        args.Upgrade,
-		MaxDepth:       args.Depth,
-		BFS:            args.BFS,
-		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		Update:          args.Update,
+		Upgrade:         args.Upgrade,
+		MaxDepth:        args.Depth,
+		BFS:             args.BFS,
+		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		DetectorVersion: detectorScanVersion(cfg),
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
@@ -1796,11 +1809,12 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 	// off by default, so no behavior change unless opted in).
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
 	s := scheduler(sqlDB, scanner.ScanOptions{
-		Update:         args.Update,
-		Upgrade:        args.Upgrade,
-		MaxDepth:       args.Depth,
-		BFS:            args.BFS,
-		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		Update:          args.Update,
+		Upgrade:         args.Upgrade,
+		MaxDepth:        args.Depth,
+		BFS:             args.BFS,
+		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		DetectorVersion: detectorScanVersion(cfg),
 	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup)
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
