@@ -50,6 +50,49 @@ func TestListVocalGateRejections(t *testing.T) {
 	}
 }
 
+// TestListVocalGateRejections_ExcludesEmptyVocalClass verifies a row whose
+// vocal gate could not run cleanly (e.g. a legacy mean-only sidecar with
+// maxAvailable=false, stamped with an empty vocal_class) is excluded, since
+// that guard-completeness state cannot be reconstructed from stored scores
+// alone and re-deciding it risks a false instrumental marker.
+func TestListVocalGateRejections_ExcludesEmptyVocalClass(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	id := seedDeferredRow(t, q, "Degraded Artist", "Degraded", "/music/degraded.flac")
+	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.0, SpeechMean: 0.001, VocalClass: "", DetectorVersion: "1.17.0"}); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	got, err := q.ListVocalGateRejections(ctx, ListVocalGateRejectionsOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty-vocal_class row to be excluded, got: %+v", got)
+	}
+}
+
+// TestListVocalGateRejections_ExcludesNullTelemetry verifies a legacy row
+// stamped not-instrumental before the telemetry columns were populated
+// (instrumental_result=0 but music_sum/vocal_peak/speech_mean still NULL) is
+// excluded: it cannot be re-decided from stored scores alone. Raw SQL is used
+// here (rather than StampUnclassifiedMiss, which always writes concrete
+// telemetry values) to reproduce that legacy NULL-telemetry shape.
+func TestListVocalGateRejections_ExcludesNullTelemetry(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	id := seedDeferredRow(t, q, "Artist", "NeverScored", "/music/never-scored.flac")
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET instrumental_result = 0 WHERE id = ?`, id); err != nil {
+		t.Fatalf("stamp legacy null telemetry: %v", err)
+	}
+	got, err := q.ListVocalGateRejections(ctx, ListVocalGateRejectionsOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected NULL-telemetry row to be excluded, got: %+v", got)
+	}
+}
+
 func TestResetInstrumentalToUnclassified(t *testing.T) {
 	q := NewDBQueue(openQueueTestDB(t))
 	ctx := context.Background()

@@ -178,6 +178,52 @@ func TestRun_DryRunDoesNotMutate(t *testing.T) {
 	}
 }
 
+// TestRun_SkipsGuardDegradedRow verifies a guard-degraded row (the vocal gate
+// could not run cleanly, e.g. a legacy mean-only sidecar with
+// maxAvailable=false: stored vocal_class="" and vocal_peak=0) is not settled
+// by Run, because ListVocalGateRejections no longer returns it. Re-deciding
+// such a row from detector.Instrumental(music, vocalPeak, speechMean, ...)
+// alone would ignore the live detector's maxAvailable/baselineComplete guards
+// and could wrongly settle it as instrumental even though music/speech both
+// pass, since vocal_peak=0 spuriously satisfies the vocal-gate check.
+func TestRun_SkipsGuardDegradedRow(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	id := seedRejection(t, q, "/music/degraded.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.0, SpeechMean: 0.001, VocalClass: "", DetectorVersion: "1.18.0",
+	})
+
+	w := &fakeWriter{}
+	r := New(q, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Settled != 0 || res.MarkersWritten != 0 || w.calls != 0 {
+		t.Fatalf("expected the guard-degraded row not to be settled, got %+v (writer calls %d)", res, w.calls)
+	}
+
+	// SettleInstrumental (the only path that would flip instrumental_result to 1)
+	// also flips status to 'done', so the row remaining 'deferred' confirms it
+	// was never settled and instrumental_result is untouched at 0.
+	deferred, err := q.List(ctx, queue.ListFilter{Status: "deferred"})
+	if err != nil {
+		t.Fatalf("list deferred: %v", err)
+	}
+	found := false
+	for _, item := range deferred {
+		if item.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected guard-degraded row %d to remain deferred (instrumental_result=0), got deferred rows %+v", id, deferred)
+	}
+}
+
 func TestRun_ReportErrorSkipsRowButNotFatal(t *testing.T) {
 	ctx := context.Background()
 	q := openTestQueue(t)

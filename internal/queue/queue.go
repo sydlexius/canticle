@@ -1628,13 +1628,38 @@ type StampedRejection struct {
 // not-instrumental (instrumental_result=0) that carry re-decidable stored
 // telemetry (music_sum/vocal_peak/speech_mean non-NULL). Legacy rows missing
 // those scores are skipped: they cannot be re-decided from stored scores alone.
+//
+// The re-decision engine calls detector.Instrumental(music, vocalPeak,
+// speechMean, ...) using only these three stored scores, which deliberately
+// omits the live detector's maxAvailable/baselineComplete sidecar-completeness
+// guards (internal/detector/http.go) -- those guards are not reconstructable
+// from the three stored scores alone. A row where the vocal gate could not run
+// cleanly (a legacy mean-only sidecar, maxAvailable=false) is stamped with
+// vocal_peak=0.0 and an empty vocal_class, which can spuriously satisfy
+// detector.Instrumental's vocal-gate check and cause the re-decision engine to
+// settle it as instrumental -- a false instrumental marker that suppresses
+// real lyric fetches. Excluding empty vocal_class rows drops exactly that
+// degraded population: a genuine vocal-gate-buried instrumental always has a
+// non-empty vocal_class (the faint vocal class that peaked is why it was
+// rejected in the first place), and a complete detection with vocal_peak=0.0
+// that still resulted in instrumental_result=0 must have failed the
+// music/speech gates rather than the vocal gate, so it would be excluded from
+// re-decision anyway -- this filter is harmless to legitimate candidates. This
+// preserves the "any doubt resolves to not-instrumental" invariant.
+//
+// Residual gap: the rarer partial-baseline case (baselineComplete=false with a
+// non-empty vocal_class) is NOT fully closed by this guard. Closing it would
+// need a durable persisted "gate-complete" telemetry bit, tracked as a
+// follow-up.
+//
 // Read-only.
 func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGateRejectionsOptions) (out []StampedRejection, retErr error) {
 	query := `SELECT id, COALESCE(artist,''), COALESCE(title,''), COALESCE(source_path,''),
 	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,'')
 	          FROM work_queue
 	          WHERE instrumental_result = 0 AND status = 'deferred'
-	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL`
+	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL
+	            AND TRIM(COALESCE(vocal_class,'')) <> ''`
 	var args []any
 	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
 	query += libClause //nolint:gosec // G202: libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
