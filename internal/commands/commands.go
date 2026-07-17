@@ -3001,64 +3001,14 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 // applies. By default it re-infers only the telemetry-narrowed candidate set
 // (borderline / cross-version / un-scored rows); --all re-infers every tagged row.
 func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd) int {
-	cfg, err := config.Load(args.ConfigPath)
-	if err != nil {
-		slog.Error("failed to load config", "error", err)
-		return 1
+	env, code := openDetectorEnv(ctx, out, args.ConfigPath, args.Library, "reconcile")
+	if env == nil {
+		return code
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
-	if err != nil {
-		slog.Error("failed to open database", "error", err)
-		return 1
-	}
-	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
+	defer env.Close()
 
-	var libraryID *int64
-	var libLabel string
-	if strings.TrimSpace(args.Library) != "" {
-		lib, err := resolveLibrary(ctx, library.New(sqlDB), args.Library)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				_, _ = fmt.Fprintf(out, "library %q not found\n", args.Library)
-				return 1
-			}
-			slog.Error("failed to resolve library", "error", err)
-			return 1
-		}
-		id := lib.ID
-		libraryID = &id
-		libLabel = fmt.Sprintf(" (library %q, id=%d)", lib.Name, lib.ID)
-	}
-
-	// Bail before resolving (or auto-downloading) ffmpeg when no classifier is
-	// configured: reconcile is inert without the detector.
-	if strings.TrimSpace(cfg.InstrumentalDetector.ClassifierURL) == "" {
-		_, _ = fmt.Fprintln(out, "instrumental detector is not configured (set instrumental_detector.classifier_url); cannot reconcile")
-		return 1
-	}
-
-	// Build the detector from the same config/ffmpeg/cooldown wiring serve uses, so
-	// reconcile inherits the cooldown and low-priority ffmpeg sampling. The detector
-	// is process-local: it does not coordinate cooldown with a concurrently running
-	// serve process against the same classifier (queue-level starvation is instead
-	// guaranteed by the deferred + priority=-100 reset).
-	ffmpegPath, err := resolveFFmpeg(ctx, cfg)
-	if err != nil {
-		slog.Error("failed to resolve ffmpeg", "error", err)
-		return 1
-	}
-	det, err := newAudioDetector(cfg, ffmpegPath)
-	if err != nil {
-		slog.Error("failed to construct audio detector", "error", err)
-		return 1
-	}
-	if det == nil {
-		_, _ = fmt.Fprintln(out, "instrumental detector is not configured (set instrumental_detector.classifier_url); cannot reconcile")
-		return 1
-	}
-
-	workQueue := queue.NewDBQueue(sqlDB)
-	workQueue.SetRandomized(cfg.Queue.Randomize)
+	cfg, libraryID, libLabel := env.cfg, env.libraryID, env.libLabel
+	det, workQueue := env.detector, env.queue
 
 	total, err := workQueue.CountInstrumental(ctx)
 	if err != nil {
