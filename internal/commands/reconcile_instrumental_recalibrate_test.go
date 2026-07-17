@@ -219,3 +219,133 @@ func TestRunReconcileInstrumentalRecalibrate_VersionMismatchResets(t *testing.T)
 		t.Errorf("instrumental_result = %v; want NULL (reset to never-classified)", *result)
 	}
 }
+
+// TestRunReconcileInstrumentalRecalibrate_ConfigLoadFailure covers
+// openQueueEnv's config.Load error branch: a config file that exists but
+// fails to decode.
+func TestRunReconcileInstrumentalRecalibrate_ConfigLoadFailure(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("not valid toml [[["), 0o600); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+
+	var buf bytes.Buffer
+	code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{ConfigPath: cfgPath})
+	if code != 1 {
+		t.Fatalf("exit=%d; want 1 for an undecodable config", code)
+	}
+}
+
+// TestRunReconcileInstrumentalRecalibrate_LibraryNotFound covers
+// openQueueEnv/resolveEnvLibrary's not-found error branch.
+func TestRunReconcileInstrumentalRecalibrate_LibraryNotFound(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRecalibrateCfg(t, cfgPath, dbPath)
+	// db.Open creates the schema so resolveLibrary can run.
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var buf bytes.Buffer
+	code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{ConfigPath: cfgPath, Library: "no-such-library"})
+	if code != 1 {
+		t.Fatalf("exit=%d; want 1 for an unknown --library; out=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "not found") {
+		t.Errorf("want 'not found' message; got: %s", buf.String())
+	}
+}
+
+// TestRunReconcileInstrumentalRecalibrate_ScopedToLibrary covers
+// resolveEnvLibrary's success branch (id + label resolved) and confirms the
+// scoping actually narrows the candidate set: a row in a different library is
+// left untouched.
+func TestRunReconcileInstrumentalRecalibrate_ScopedToLibrary(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	outdir := filepath.Join(dir, "music")
+	if err := os.MkdirAll(outdir, 0o755); err != nil {
+		t.Fatalf("mkdir music: %v", err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRecalibrateCfg(t, cfgPath, dbPath)
+	id := seedVocalGateRejection(t, ctx, dbPath, outdir, version)
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	var libID int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO libraries (path, name) VALUES (?, ?) RETURNING id`, outdir, "music-lib",
+	).Scan(&libID); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	var buf bytes.Buffer
+	code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{ConfigPath: cfgPath, Library: "music-lib"})
+	if code != 0 {
+		t.Fatalf("exit=%d; want 0; out=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "library \"music-lib\"") {
+		t.Errorf("want the operator-facing library label in output; got: %s", buf.String())
+	}
+	// The row has no linked scan_results row for this library, so scoping to
+	// it must exclude the row: nothing considered.
+	if !strings.Contains(buf.String(), "0 vocal-gate-rejected row(s) considered") {
+		t.Errorf("expected the library scoping to exclude the unlinked row; got: %s", buf.String())
+	}
+
+	sqlDB2, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open verify: %v", err)
+	}
+	defer func() { _ = sqlDB2.Close() }()
+	var status string
+	if err := sqlDB2.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
+		t.Fatalf("verify row: %v", err)
+	}
+	if status != "deferred" {
+		t.Errorf("status = %q; want deferred (row outside the scoped library must be untouched)", status)
+	}
+}
+
+// TestRunReconcileInstrumentalRecalibrate_BackupOpenFailure covers Report's
+// backup-file-open error branch: an unwritable --backup path must count as a
+// per-row error (and thus a non-zero exit) rather than silently dropping the
+// backup record.
+func TestRunReconcileInstrumentalRecalibrate_BackupOpenFailure(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	outdir := filepath.Join(dir, "music")
+	if err := os.MkdirAll(outdir, 0o755); err != nil {
+		t.Fatalf("mkdir music: %v", err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRecalibrateCfg(t, cfgPath, dbPath)
+	seedVocalGateRejection(t, ctx, dbPath, outdir, version)
+
+	// A backup path inside a non-existent directory: os.OpenFile fails.
+	badBackup := filepath.Join(dir, "no-such-dir", "backup.jsonl")
+
+	var buf bytes.Buffer
+	code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{
+		ConfigPath: cfgPath, Yes: true, Backup: badBackup,
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d; want 1 when the backup file cannot be opened; out=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "errors=1") {
+		t.Errorf("want the backup-open failure counted as an error; got: %s", buf.String())
+	}
+}

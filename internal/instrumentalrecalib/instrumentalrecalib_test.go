@@ -12,9 +12,52 @@ import (
 	"github.com/doxazo-net/canticle/internal/queue"
 )
 
-type fakeWriter struct{ calls int }
+type fakeWriter struct {
+	calls int
+	err   error
+}
 
-func (f *fakeWriter) WriteLRC(_ models.Song, _ string, _ string) error { f.calls++; return nil }
+func (f *fakeWriter) WriteLRC(_ models.Song, _ string, _ string) error {
+	f.calls++
+	return f.err
+}
+
+// fakeStore wraps a real *queue.DBQueue so the common paths (list, reset)
+// behave exactly like production, while letting a test force
+// ListVocalGateRejections/SettleInstrumental/ResetInstrumentalToUnclassified
+// into an outcome or error a live SQLite queue will not produce on demand
+// (a peer-claim race, a vanished row, a listing/settle/reset failure).
+type fakeStore struct {
+	*queue.DBQueue
+	listErr       error
+	settleOutcome *queue.SettleOutcome
+	settleErr     error
+	resetErr      error
+}
+
+func (f *fakeStore) ListVocalGateRejections(ctx context.Context, opts queue.ListVocalGateRejectionsOptions) ([]queue.StampedRejection, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.DBQueue.ListVocalGateRejections(ctx, opts)
+}
+
+func (f *fakeStore) SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error) {
+	if f.settleErr != nil {
+		return queue.SettleFailed, f.settleErr
+	}
+	if f.settleOutcome != nil {
+		return *f.settleOutcome, nil
+	}
+	return f.DBQueue.SettleInstrumental(ctx, id, tel)
+}
+
+func (f *fakeStore) ResetInstrumentalToUnclassified(ctx context.Context, id int64) (bool, error) {
+	if f.resetErr != nil {
+		return false, f.resetErr
+	}
+	return f.DBQueue.ResetInstrumentalToUnclassified(ctx, id)
+}
 
 // seedRejection mirrors the queue-package seed pattern (see
 // internal/queue/queue_recalib_test.go's seedDeferredRow +
@@ -243,5 +286,186 @@ func TestRun_ReportErrorSkipsRowButNotFatal(t *testing.T) {
 	}
 	if res.Errors != 1 || res.Settled != 0 || w.calls != 0 {
 		t.Fatalf("expected a counted error and no mutation, got %+v (writer calls %d)", res, w.calls)
+	}
+}
+
+func TestRun_ListErrorReturnsError(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	store := &fakeStore{DBQueue: q, listErr: errors.New("list failed")}
+
+	w := &fakeWriter{}
+	r := New(store, w)
+	_, err := r.Run(ctx, Options{MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0"})
+	if err == nil {
+		t.Fatal("expected an error from a failing list")
+	}
+}
+
+// TestRun_WriteMarkerErrorCountsErrorNoSettle verifies a Writer failure is
+// counted as a non-fatal per-row error and never reaches SettleInstrumental
+// (the row stays deferred, not done).
+func TestRun_WriteMarkerErrorCountsErrorNoSettle(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	id := seedRejection(t, q, "/music/bassoon.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+
+	w := &fakeWriter{err: errors.New("write failed")}
+	r := New(q, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Errors != 1 || res.Settled != 0 || res.MarkersWritten != 0 {
+		t.Fatalf("expected a counted error and no settle, got %+v", res)
+	}
+
+	deferred, err := q.List(ctx, queue.ListFilter{Status: "deferred"})
+	if err != nil {
+		t.Fatalf("list deferred: %v", err)
+	}
+	found := false
+	for _, item := range deferred {
+		if item.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected row %d to remain deferred (a marker-write failure must not settle the row), got deferred rows %+v", id, deferred)
+	}
+}
+
+// TestRun_SettleErrorLeavesMarkerAndCountsError covers the AMBIGUOUS branch:
+// SettleInstrumental itself errors after the marker was written. The marker
+// must be left in place (an orphan is recoverable; a wrongly-deleted valid
+// result is not) and the row counted as an error.
+func TestRun_SettleErrorLeavesMarkerAndCountsError(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	seedRejection(t, q, "/music/clarinet.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	store := &fakeStore{DBQueue: q, settleErr: errors.New("commit failed")}
+
+	w := &fakeWriter{}
+	r := New(store, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Errors != 1 || res.Settled != 0 || res.MarkersWritten != 1 || w.calls != 1 {
+		t.Fatalf("expected 1 counted error and the marker left in place, got %+v (writer calls %d)", res, w.calls)
+	}
+}
+
+// TestRun_SettleClaimedRollsBackMarker covers the SettleClaimed arm: a
+// serve-mode worker claimed the row mid-recalibration, so nothing was
+// written to the DB and this run's orphan marker must be rolled back.
+func TestRun_SettleClaimedRollsBackMarker(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	seedRejection(t, q, "/music/trombone.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	outcome := queue.SettleClaimed
+	store := &fakeStore{DBQueue: q, settleOutcome: &outcome}
+
+	w := &fakeWriter{}
+	r := New(store, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.SkippedClaimed != 1 || res.Settled != 0 || res.MarkersWritten != 0 || res.Errors != 0 {
+		t.Fatalf("expected the orphan marker rolled back and 1 skipped-claimed, got %+v", res)
+	}
+}
+
+// TestRun_SettleRowGoneRollsBackMarker covers the SettleRowGone arm: the row
+// vanished (e.g. pruned) mid-recalibration, so the marker this run wrote is
+// an orphan and must come back off.
+func TestRun_SettleRowGoneRollsBackMarker(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	seedRejection(t, q, "/music/tuba.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	outcome := queue.SettleRowGone
+	store := &fakeStore{DBQueue: q, settleOutcome: &outcome}
+
+	w := &fakeWriter{}
+	r := New(store, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.SkippedClaimed != 1 || res.Settled != 0 || res.MarkersWritten != 0 || res.Errors != 0 {
+		t.Fatalf("expected the orphan marker rolled back and 1 skipped-claimed, got %+v", res)
+	}
+}
+
+// TestRun_SettleAlreadyInstrumentalKeepsMarker covers the
+// SettleAlreadyInstrumental arm: a peer backfill settled the row first with
+// the same verdict, so this run's (byte-identical) marker is correct and
+// must NOT be removed.
+func TestRun_SettleAlreadyInstrumentalKeepsMarker(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	seedRejection(t, q, "/music/piccolo.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	outcome := queue.SettleAlreadyInstrumental
+	store := &fakeStore{DBQueue: q, settleOutcome: &outcome}
+
+	w := &fakeWriter{}
+	r := New(store, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Settled != 0 || res.SkippedClaimed != 0 || res.Errors != 0 || res.MarkersWritten != 1 {
+		t.Fatalf("expected the marker kept and no error/skip/settle counted, got %+v", res)
+	}
+}
+
+// TestRun_ResetInstrumentalToUnclassifiedErrorCountsError covers the
+// reset-stale path's error branch: ResetInstrumentalToUnclassified itself
+// errors.
+func TestRun_ResetInstrumentalToUnclassifiedErrorCountsError(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	seedRejection(t, q, "/music/viola.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0",
+	})
+	store := &fakeStore{DBQueue: q, resetErr: errors.New("reset failed")}
+
+	w := &fakeWriter{}
+	r := New(store, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Errors != 1 || res.ResetStale != 0 || w.calls != 0 {
+		t.Fatalf("expected a counted reset error, got %+v (writer calls %d)", res, w.calls)
 	}
 }
