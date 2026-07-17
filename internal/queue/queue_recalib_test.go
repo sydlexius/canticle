@@ -154,6 +154,39 @@ func TestResetInstrumentalToUnclassified_NonDeferredRowNotReset(t *testing.T) {
 	}
 }
 
+// TestResetInstrumentalToUnclassified_NonZeroVerdictNotReset verifies the
+// instrumental_result = 0 guard: a row concurrently re-stamped to a positive
+// verdict (result = 1) while still deferred must not have that verdict cleared
+// out from under a peer settle.
+func TestResetInstrumentalToUnclassified_NonZeroVerdictNotReset(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
+	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	// Simulate a concurrent positive settle (still deferred) landing between the
+	// engine's selection and this reset.
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET instrumental_result = 1 WHERE id = ?`, id); err != nil {
+		t.Fatalf("set positive: %v", err)
+	}
+
+	reset, err := q.ResetInstrumentalToUnclassified(ctx, id)
+	if err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if reset {
+		t.Fatalf("expected a row with a positive verdict not to be reset")
+	}
+	var result *int
+	if err := q.db.QueryRowContext(ctx, `SELECT instrumental_result FROM work_queue WHERE id = ?`, id).Scan(&result); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if result == nil || *result != 1 {
+		t.Fatalf("instrumental_result = %v; want 1 (preserved)", result)
+	}
+}
+
 // TestListVocalGateRejections_ScopesToLibrary verifies the --library
 // narrowing actually filters the candidate set, mirroring
 // TestDBQueue_ListUnclassifiedScopesToLibrary.

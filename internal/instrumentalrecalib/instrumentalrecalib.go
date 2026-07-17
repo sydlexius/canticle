@@ -143,7 +143,7 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return res, fmt.Errorf("instrumentalrecalib: stop recalibration: %w", err)
 		}
 
 		pass := detector.Instrumental(row.Tel.MusicSum, row.Tel.VocalPeak, row.Tel.SpeechMean,

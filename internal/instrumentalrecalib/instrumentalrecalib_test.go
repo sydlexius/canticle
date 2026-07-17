@@ -3,11 +3,13 @@ package instrumentalrecalib
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	dbpkg "github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/lyrics"
 	"github.com/doxazo-net/canticle/internal/models"
 	"github.com/doxazo-net/canticle/internal/queue"
 )
@@ -20,6 +22,28 @@ type fakeWriter struct {
 func (f *fakeWriter) WriteLRC(_ models.Song, _ string, _ string) error {
 	f.calls++
 	return f.err
+}
+
+// fsWriter writes a REAL sidecar file at the exact path writeMarkers will later
+// try to roll back, and records it, so a test can assert on-disk state (the
+// marker preserved on an ambiguous settle error, removed on a claimed/gone
+// rollback) rather than only the Result counters. It derives the name the same
+// way writeMarkers does, so created[i] is precisely the path rollback removes.
+type fsWriter struct {
+	created []string
+}
+
+func (w *fsWriter) WriteLRC(song models.Song, filename, outdir string) error {
+	name, err := lyrics.SidecarName(song.Track.ArtistName, song.Track.TrackName, filename, false)
+	if err != nil {
+		return err
+	}
+	p := filepath.Join(outdir, name)
+	if err := os.WriteFile(p, []byte("[au:instrumental]\n"), 0o644); err != nil {
+		return err
+	}
+	w.created = append(w.created, p)
+	return nil
 }
 
 // fakeStore wraps a real *queue.DBQueue so the common paths (list, reset)
@@ -415,6 +439,71 @@ func TestRun_SettleRowGoneRollsBackMarker(t *testing.T) {
 	}
 	if res.SkippedClaimed != 1 || res.Settled != 0 || res.MarkersWritten != 0 || res.Errors != 0 {
 		t.Fatalf("expected the orphan marker rolled back and 1 skipped-claimed, got %+v", res)
+	}
+}
+
+// TestRun_SettleClaimedRemovesMarkerFile is the on-disk counterpart to
+// TestRun_SettleClaimedRollsBackMarker: with a writer that actually creates the
+// sidecar, a claimed row's orphan marker must be gone from the filesystem after
+// the rollback, not merely uncounted.
+func TestRun_SettleClaimedRemovesMarkerFile(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	src := filepath.Join(t.TempDir(), "trombone.flac")
+	seedRejection(t, q, src, queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	outcome := queue.SettleClaimed
+	store := &fakeStore{DBQueue: q, settleOutcome: &outcome}
+
+	w := &fsWriter{}
+	r := New(store, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(w.created) != 1 {
+		t.Fatalf("expected the writer to create exactly 1 marker, got %d", len(w.created))
+	}
+	if _, statErr := os.Stat(w.created[0]); !os.IsNotExist(statErr) {
+		t.Fatalf("claimed rollback must remove the orphan marker %s (stat err = %v)", w.created[0], statErr)
+	}
+	if res.SkippedClaimed != 1 || res.MarkersWritten != 0 {
+		t.Fatalf("expected 1 skipped-claimed and 0 markers retained, got %+v", res)
+	}
+}
+
+// TestRun_SettleErrorPreservesMarkerFile is the on-disk counterpart to
+// TestRun_SettleErrorLeavesMarkerAndCountsError: an ambiguous settle error must
+// leave the marker on disk (a recoverable orphan beats a wrongly-deleted valid
+// result).
+func TestRun_SettleErrorPreservesMarkerFile(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	src := filepath.Join(t.TempDir(), "clarinet.flac")
+	seedRejection(t, q, src, queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	store := &fakeStore{DBQueue: q, settleErr: errors.New("commit failed")}
+
+	w := &fsWriter{}
+	r := New(store, w)
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(w.created) != 1 {
+		t.Fatalf("expected the writer to create exactly 1 marker, got %d", len(w.created))
+	}
+	if _, statErr := os.Stat(w.created[0]); statErr != nil {
+		t.Fatalf("ambiguous settle error must preserve the marker %s (stat err = %v)", w.created[0], statErr)
+	}
+	if res.Errors != 1 || res.MarkersWritten != 1 {
+		t.Fatalf("expected 1 counted error and the marker kept, got %+v", res)
 	}
 }
 

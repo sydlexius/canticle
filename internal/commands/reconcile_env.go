@@ -84,10 +84,10 @@ func resolveEnvLibrary(ctx context.Context, out io.Writer, sqlDB *sql.DB, librar
 	if rerr != nil {
 		if errors.Is(rerr, sql.ErrNoRows) {
 			_, _ = fmt.Fprintf(out, "library %q not found\n", libraryArg)
-			return nil, "", 1, rerr
+			return nil, "", 1, fmt.Errorf("resolve library %q: %w", libraryArg, rerr)
 		}
 		slog.Error("failed to resolve library", "error", rerr)
-		return nil, "", 1, rerr
+		return nil, "", 1, fmt.Errorf("resolve library %q: %w", libraryArg, rerr)
 	}
 	got := lib.ID
 	return &got, fmt.Sprintf(" (library %q, id=%d)", lib.Name, lib.ID), 0, nil

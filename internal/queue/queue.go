@@ -1784,14 +1784,17 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
 // to "never classified" and picked up by the next reconcile/backfill pass,
 // which re-scans it with the current detector instead.
 //
-// Guarded on status = 'deferred' -- the same guard StampUnclassifiedMiss
-// uses -- so a row a worker has since claimed is left alone. Returns whether
-// the row was reset.
+// Guarded on status = 'deferred' AND instrumental_result = 0 -- so a row a
+// worker has since claimed, or one concurrently re-stamped to a positive verdict
+// or already cleared, is left alone rather than having its verdict clobbered.
+// Returns whether the row was reset.
 func (q *DBQueue) ResetInstrumentalToUnclassified(ctx context.Context, id int64) (bool, error) {
 	res, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue
          SET instrumental_result = NULL
-         WHERE id = ? AND status = 'deferred'`,
+         WHERE id = ?
+           AND status = 'deferred'
+           AND instrumental_result = 0`,
 		id,
 	)
 	if err != nil {
