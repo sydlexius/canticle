@@ -392,6 +392,102 @@ func (q *DBQueue) Complete(ctx context.Context, id int64) error {
 	return nil
 }
 
+// SettleInstrumental records an instrumental verdict on a DEFERRED row and
+// completes it, in ONE transaction: telemetry, instrumental_result=1,
+// outcome_type='instrumental', status='done', and the scan_results writeback all
+// commit together or not at all.
+//
+// It is a single guarded statement rather than the worker's
+// stamp-then-stamp-then-complete sequence because the backfill does NOT own its
+// rows. The worker holds its row in 'processing' for the whole write, so nothing
+// can race it. The backfill leaves rows 'deferred' while the (slow) detector runs,
+// and Dequeue selects status IN ('pending','failed','deferred') -- so a serve-mode
+// worker can and will claim one mid-classification. Guarding only the final step
+// would let the earlier stamps land on a row the worker already owns, leaving it
+// stamped instrumental while the worker goes on to complete it with real lyrics.
+//
+// Reports settled=false when the row is no longer deferred (a worker took it).
+// Nothing was written in that case, and the caller must undo any marker it wrote.
+func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel InstrumentalTelemetry) (settled bool, retErr error) {
+	now := formatTime(q.now())
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("queue: begin settle instrumental tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE work_queue
+         SET instrumental_result = 1,
+             music_sum = ?,
+             vocal_peak = ?,
+             speech_mean = ?,
+             vocal_class = ?,
+             detector_version = ?,
+             outcome_type = 'instrumental',
+             status = 'done',
+             completed_at = ?,
+             last_error = ''
+         WHERE id = ?
+           AND status = 'deferred'`,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion,
+		now, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: settle instrumental: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: settle instrumental rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil // no longer deferred: a worker owns it
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE scan_results
+         SET status = 'done'
+         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+           AND status != 'done'`,
+		id,
+	); err != nil {
+		return false, fmt.Errorf("queue: settle instrumental scan_results writeback: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("queue: commit settle instrumental tx: %w", err)
+	}
+	return true, nil
+}
+
+// StampUnclassifiedMiss records a NOT-instrumental verdict on a DEFERRED row,
+// leaving it deferred: a provider may still find lyrics for it. Guarded on
+// 'deferred' for the same reason as SettleInstrumental -- it must not stamp a row
+// a worker has since claimed and is writing its own verdict onto.
+//
+// Reports stamped=false when the row is no longer deferred.
+func (q *DBQueue) StampUnclassifiedMiss(ctx context.Context, id int64, tel InstrumentalTelemetry) (bool, error) {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET instrumental_result = 0,
+             music_sum = ?,
+             vocal_peak = ?,
+             speech_mean = ?,
+             vocal_class = ?,
+             detector_version = ?
+         WHERE id = ?
+           AND status = 'deferred'`,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: stamp unclassified miss: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: stamp unclassified miss rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
 // Release returns a processing item to the pending pool without recording a
 // failure. Used when the worker dequeued the item but cannot process it for a
 // reason that should not count against the row's retry budget (e.g. the

@@ -133,12 +133,13 @@ type ScanCmd struct {
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
 
-	Results           *ScanResultsCmd           `arg:"subcommand:results" help:"list persisted scan_results rows"`
-	Clear             *ScanClearCmd             `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
-	Reconcile         *ScanReconcileCmd         `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
-	ReconcilePaths    *ScanReconcilePathsCmd    `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
-	ReconcileIdentity *ScanReconcileIdentityCmd `arg:"subcommand:reconcile-identity" help:"re-read tags and correct run-together multi-value artist rows ingested before the fix (issue #466)"`
-	ReconcileLRC      *ScanReconcileLRCCmd      `arg:"subcommand:reconcile-lrc" help:"rewrite existing .lrc sidecars that stack multiple timestamps on one line into the expanded, universally-readable form (issue #470)"`
+	Results               *ScanResultsCmd               `arg:"subcommand:results" help:"list persisted scan_results rows"`
+	Clear                 *ScanClearCmd                 `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
+	Reconcile             *ScanReconcileCmd             `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
+	ReconcileInstrumental *ScanReconcileInstrumentalCmd `arg:"subcommand:reconcile-instrumental" help:"classify deferred rows the detector has never scored and write markers where it agrees; makes no provider requests (issue #499)"`
+	ReconcilePaths        *ScanReconcilePathsCmd        `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
+	ReconcileIdentity     *ScanReconcileIdentityCmd     `arg:"subcommand:reconcile-identity" help:"re-read tags and correct run-together multi-value artist rows ingested before the fix (issue #466)"`
+	ReconcileLRC          *ScanReconcileLRCCmd          `arg:"subcommand:reconcile-lrc" help:"rewrite existing .lrc sidecars that stack multiple timestamps on one line into the expanded, universally-readable form (issue #470)"`
 }
 
 // ScanReconcileLRCCmd walks the configured library roots and rewrites any .lrc
@@ -181,6 +182,23 @@ type ScanReconcileCmd struct {
 	Yes        bool   `arg:"--yes" help:"actually delete markers and re-queue rows (without it, prints what would change)"`
 	Limit      int    `arg:"--limit" help:"maximum number of candidate rows to process (0 = unlimited)" default:"0"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of cleared rows (default: <db-dir>/reconcile-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// ScanReconcileInstrumentalCmd classifies work_queue rows the detector has never
+// scored (instrumental_result IS NULL) that are parked on a benign provider miss,
+// writing an instrumental marker and completing the row where the detector agrees.
+// Dry-run unless --yes.
+//
+// The inverse of ScanReconcileCmd, which re-checks already-confirmed verdicts and
+// clears a marker on disagreement. Nothing previously reached the never-scored
+// population, so a queue drained before the detector shipped stayed permanently
+// unexamined (issue #499). Makes no provider requests.
+type ScanReconcileInstrumentalCmd struct {
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default covers every library"`
+	Yes        bool   `arg:"--yes" help:"actually write markers and settle rows (without it, prints what would change)"`
+	Limit      int    `arg:"--limit" help:"maximum number of candidate rows to process (0 = unlimited)" default:"0"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of classified rows (default: <db-dir>/reconcile-instrumental-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -1695,6 +1713,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runScanReconcile(ctx, out, sub)
+	case args.ReconcileInstrumental != nil:
+		sub := *args.ReconcileInstrumental
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileInstrumental(ctx, out, sub)
 	case args.ReconcilePaths != nil:
 		sub := *args.ReconcilePaths
 		if sub.ConfigPath == "" {

@@ -3723,3 +3723,200 @@ func TestDBQueue_ListUnclassifiedFindsNeverScoredDeferredRows(t *testing.T) {
 		t.Fatalf("SourcePath = %q; want the hydrated source so the detector has a file to read", got[0].Inputs.SourcePath)
 	}
 }
+
+// TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker pins the concurrency
+// contract (#499). The backfill does not own its rows: it leaves them 'deferred'
+// while the detector runs, and Dequeue selects deferred rows, so a serve-mode
+// worker can claim one mid-classification. Both writes must then apply NOTHING --
+// not merely skip the final step. A partial write would leave the row stamped
+// instrumental while the worker goes on to complete it with real lyrics.
+func TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	tel := InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.01, VocalClass: "Singing", DetectorVersion: "v1"}
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// A worker claims it: status becomes 'processing'.
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+
+	settled, err := q.SettleInstrumental(ctx, item.ID, tel)
+	if err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+	if settled {
+		t.Error("SettleInstrumental settled a row owned by a worker; the deferred guard must refuse it")
+	}
+	stamped, err := q.StampUnclassifiedMiss(ctx, item.ID, tel)
+	if err != nil {
+		t.Fatalf("StampUnclassifiedMiss: %v", err)
+	}
+	if stamped {
+		t.Error("StampUnclassifiedMiss stamped a row owned by a worker")
+	}
+
+	// Nothing may have landed: not the status, and not the verdict.
+	var status string
+	var result *int
+	var outcome *string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, instrumental_result, outcome_type FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &result, &outcome); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "processing" {
+		t.Errorf("status = %q; want processing (the row must be left to its owner)", status)
+	}
+	if result != nil {
+		t.Errorf("instrumental_result = %v; want NULL -- a refused write must write nothing at all", *result)
+	}
+	if outcome != nil {
+		t.Errorf("outcome_type = %v; want NULL -- a refused write must write nothing at all", *outcome)
+	}
+
+	// Complete still works for the worker that owns it.
+	if err := q.Complete(ctx, item.ID); err != nil {
+		t.Fatalf("Complete on a processing row: %v; want success", err)
+	}
+}
+
+// TestDBQueue_SettleInstrumentalCompletesDeferredRowAtomically: the happy path --
+// verdict, telemetry, outcome, and completion all land in one transaction.
+func TestDBQueue_SettleInstrumentalCompletesDeferredRowAtomically(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	tel := InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.01, VocalClass: "Singing", DetectorVersion: "v1"}
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	settled, err := q.SettleInstrumental(ctx, item.ID, tel)
+	if err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+	if !settled {
+		t.Fatal("SettleInstrumental reported not-settled for a deferred row")
+	}
+
+	var status string
+	var result int
+	var outcome string
+	var vocalClass string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, instrumental_result, outcome_type, vocal_class FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &result, &outcome, &vocalClass); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" || result != 1 || outcome != "instrumental" {
+		t.Errorf("row = (status %q, result %d, outcome %q); want (done, 1, instrumental)", status, result, outcome)
+	}
+	if vocalClass != "Singing" {
+		t.Errorf("vocal_class = %q; want the telemetry written in the same transaction", vocalClass)
+	}
+}
+
+// TestDBQueue_ListUnclassifiedScopesToLibrary: the --library narrowing must
+// actually filter, or a single-library backfill would silently classify the
+// whole install.
+func TestDBQueue_ListUnclassifiedScopesToLibrary(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA, srA := insertLibraryAndScanResult(t, sqlDB, "/libA", "/libA/a.mp3")
+	_, srB := insertLibraryAndScanResult(t, sqlDB, "/libB", "/libB/b.mp3")
+
+	mk := func(title, src string, scanResultID int64) int64 {
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:        models.Track{ArtistName: "Artist", TrackName: title},
+			Outdir:       "out",
+			Filename:     title + ".lrc",
+			SourcePath:   src,
+			ScanResultID: scanResultID,
+		}, PriorityScan)
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", title, err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue %s: %v", title, err)
+		}
+		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+			t.Fatalf("defer %s: %v", title, err)
+		}
+		return item.ID
+	}
+	inA := mk("in-lib-a", "/libA/a.mp3", srA)
+	_ = mk("in-lib-b", "/libB/b.mp3", srB)
+
+	got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{LibraryID: &libA})
+	if err != nil {
+		t.Fatalf("ListUnclassified: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != inA {
+		var ids []int64
+		for _, it := range got {
+			ids = append(ids, it.ID)
+		}
+		t.Fatalf("scoped list = %v; want only the libA row %d", ids, inA)
+	}
+
+	n, err := q.CountUnclassified(ctx, &libA)
+	if err != nil {
+		t.Fatalf("CountUnclassified: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("scoped count = %d; want 1", n)
+	}
+
+	// Unscoped sees both, so the filter above is doing real work.
+	all, err := q.CountUnclassified(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountUnclassified unscoped: %v", err)
+	}
+	if all != 2 {
+		t.Fatalf("unscoped count = %d; want 2", all)
+	}
+}
+
+// A database failure must surface, not be reported as an empty backlog: "0 rows
+// to classify" and "the database is gone" must never look the same.
+func TestDBQueue_UnclassifiedQueriesPropagateDBFailure(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if _, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{}); err == nil {
+		t.Error("ListUnclassified returned nil error on a closed database; an empty backlog and a dead database must not look alike")
+	}
+	if _, err := q.CountUnclassified(ctx, nil); err == nil {
+		t.Error("CountUnclassified returned nil error on a closed database")
+	}
+	if _, err := q.SettleInstrumental(ctx, 1, InstrumentalTelemetry{}); err == nil {
+		t.Error("SettleInstrumental returned nil error on a closed database")
+	}
+}
