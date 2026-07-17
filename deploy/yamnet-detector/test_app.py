@@ -1,8 +1,8 @@
 """Shape test for the /classify response.
 
-Stubs the YAMNet model so the test needs no TensorFlow Hub download. TestClient
-is used WITHOUT a `with` block so the lifespan (which would load the real model)
-never runs, and the stubbed _state is what the handler reads.
+Stubs the YAMNet model so the test needs no model download. TestClient is used
+WITHOUT a `with` block so the lifespan (which would load the real model) never
+runs, and the stubbed _state is what the handler reads.
 
 Run locally (not in CI; the Go suite is the gate):
     pip install -r requirements.txt pytest

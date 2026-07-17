@@ -276,7 +276,8 @@ WHERE instrumental_result = 1 AND detector_version <> '<current-version>';
 
 > The version is the Canticle app version, which captures Go-side gate/threshold
 > drift. If sidecar/model identity is wanted later, derive it from the sidecar's
-> `YAMNET_HANDLE` config or image tag rather than a new `/health` field.
+> pinned model `YAMNET_SHA256` build arg or image tag rather than a new `/health`
+> field.
 
 ### Reconciling stale markers (`scan reconcile`)
 

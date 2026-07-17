@@ -2,11 +2,11 @@ fastapi==0.138.0
 uvicorn[standard]==0.49.0
 python-multipart==0.0.32
 tensorflow-cpu==2.18.1
-tensorflow-hub==0.16.1
 soundfile==0.12.1
 numpy==2.0.2
-# tensorflow-hub 0.16.1 imports pkg_resources at runtime, which setuptools
-# removed in 81.0. Constrain to the latest 80.x so pkg_resources remains
-# available (explicit floor documents the intent; the lock pins the exact
-# version + hash, so this band only steers regen).
-setuptools>=80.10.2,<81
+# tensorflow-hub is deliberately absent (#491). It only resolved a URL to a local
+# cache and then called tf.saved_model.load; the Dockerfile bakes the model in at
+# build time, so app.py loads the SavedModel directly. Dropping it also drops the
+# runtime pkg_resources import that forced setuptools<81 and blocked the
+# CVE-2026-59890 fix (fixed in setuptools 83.0.0).
+setuptools>=83.0.0

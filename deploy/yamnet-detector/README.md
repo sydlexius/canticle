@@ -5,6 +5,10 @@ A thin FastAPI wrapper around Google's [YAMNet](https://tfhub.dev/google/yamnet/
 mono WAV sample to this service on a provider miss and uses the response to
 decide whether to write an instrumental marker.
 
+The SavedModel is fetched and sha256-verified at image build time and loaded
+with `tf.saved_model.load` -- `tensorflow-hub` is deliberately not a dependency
+(see the Dockerfile and issue #491).
+
 ## Contract
 
 - `POST /classify` (multipart field `file`, a 16 kHz mono WAV) returns:
@@ -44,7 +48,7 @@ error on every detection until it is upgraded. So: Canticle, then sidecar.
 
 ## Test
 
-A response-shape test that stubs the model (no TensorFlow Hub download):
+A response-shape test that stubs the model (no model download):
 
 ```bash
 # requirements.txt is hash-pinned (--require-hashes mode), so install pytest

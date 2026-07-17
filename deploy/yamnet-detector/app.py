@@ -26,10 +26,22 @@ from contextlib import asynccontextmanager
 import numpy as np
 import soundfile as sf
 import tensorflow as tf
-import tensorflow_hub as hub
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
-YAMNET_HANDLE = "https://tfhub.dev/google/yamnet/1"
+# Directory holding the unpacked YAMNet SavedModel, baked into the image at build
+# time (see Dockerfile). Loaded with tf.saved_model.load rather than
+# tensorflow_hub.load: hub.load() only resolves a URL to a local cache and then
+# calls tf.saved_model.load itself, and the Dockerfile already does the download
+# at build time, so hub contributed nothing at runtime while dragging in a
+# pkg_resources dependency that capped setuptools below the CVE-2026-59890 fix
+# (issue #491). Same SavedModel, same graph, same weights -- byte-identical
+# scores.
+#
+# Deliberately a constant, not an env override: a SavedModel is executable (its
+# graph is deserialized and run at load), so an overridable path would turn env
+# control into code execution. The model ships in the image and the path never
+# varies, so an override buys nothing.
+YAMNET_MODEL_DIR = "/app/yamnet"
 TARGET_SR = 16000  # YAMNet requires 16 kHz mono
 # Cap the in-memory read. Canticle sends at most a ~60s 16 kHz mono WAV (~2 MB);
 # 32 MB is a generous ceiling that rejects oversize/malicious uploads before they
@@ -51,9 +63,10 @@ def _load_class_names(csv_path: str) -> list[str]:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Load once at startup. The model is baked into the image at build time
-    # (TFHUB_CACHE_DIR), so this is offline and fast.
-    model = hub.load(YAMNET_HANDLE)
+    # Load once at startup. The model is baked into the image at build time, so
+    # this is offline and fast. class_map_path() is a SavedModel asset, so it
+    # survives the load without tensorflow_hub.
+    model = tf.saved_model.load(YAMNET_MODEL_DIR)
     _state["model"] = model
     _state["classes"] = _load_class_names(model.class_map_path().numpy().decode("utf-8"))
     yield
