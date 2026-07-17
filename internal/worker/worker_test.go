@@ -272,11 +272,13 @@ func (r *fakeProviderRecorder) RecordLaneAttempts(_ context.Context, queueID int
 
 type fakeWriter struct {
 	writes []models.OutputPath
+	songs  []models.Song
 	err    error
 }
 
-func (w *fakeWriter) WriteLRC(_ models.Song, filename string, outdir string) error {
+func (w *fakeWriter) WriteLRC(song models.Song, filename string, outdir string) error {
 	w.writes = append(w.writes, models.OutputPath{Outdir: outdir, Filename: filename})
+	w.songs = append(w.songs, song)
 	return w.err
 }
 
@@ -1816,6 +1818,7 @@ func TestSetMaxMissAttemptsClampNegative(t *testing.T) {
 // fakeDetector is a test detector.Detector that returns a fixed result or error.
 type fakeDetector struct {
 	instrumental bool
+	version      string
 	err          error
 	calls        []string
 }
@@ -1825,7 +1828,7 @@ func (d *fakeDetector) Detect(_ context.Context, audioPath string) (detector.Res
 	if d.err != nil {
 		return detector.Result{}, d.err
 	}
-	return detector.Result{Instrumental: d.instrumental}, nil
+	return detector.Result{Instrumental: d.instrumental, Version: d.version}, nil
 }
 
 // TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes verifies that when
@@ -1846,7 +1849,7 @@ func TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes(t *testing.T) {
 	c := &fakeCache{}
 	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
 	writer := &fakeWriter{}
-	det := &fakeDetector{instrumental: true}
+	det := &fakeDetector{instrumental: true, version: "9.9.9"}
 
 	w := New(q, c, fetcher, writer)
 	w.EnableAudioDetector(det)
@@ -1873,6 +1876,16 @@ func TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes(t *testing.T) {
 	// Writer must have produced exactly one write (the instrumental .txt).
 	if len(writer.writes) != 1 {
 		t.Fatalf("writes = %v; want one instrumental marker write", writer.writes)
+	}
+	// The instrumental song handed to the writer must carry the detector version
+	// so the marker is stamped with detector provenance (#502).
+	if len(writer.songs) != 1 || writer.songs[0].DetectorVersion != "9.9.9" {
+		t.Fatalf("written song DetectorVersion = %q; want \"9.9.9\"", func() string {
+			if len(writer.songs) == 1 {
+				return writer.songs[0].DetectorVersion
+			}
+			return "<no song captured>"
+		}())
 	}
 	// Cache must have stored the encoded instrumental song.
 	if len(c.stores) != 1 {

@@ -129,6 +129,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	var writeContent func(*bufio.Writer) error
 	var writeTags bool
 	var synced bool
+	var instrumental bool
 	// kind labels the per-track outcome on the "lyrics saved" log so instrumental
 	// writes are visible at the default Info level, not just under Debug.
 	var kind string
@@ -138,6 +139,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		// the flag, so this case must precede the subtitles check.
 		kind = "instrumental"
 		writeContent = writeInstrumental
+		instrumental = true
 	case len(song.Subtitles.Lines) > 0:
 		kind = "synced"
 		writeContent = func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual) }
@@ -202,6 +204,20 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		}
 		if song.Track.RecordingMBID != "" {
 			tags = append(tags, fmt.Sprintf("[mbid:%s]", song.Track.RecordingMBID))
+		}
+	}
+
+	if instrumental {
+		src := song.WinningLane
+		if song.DetectorVersion != "" {
+			src = SourceDetector
+		}
+		tags = append(tags, "[by:canticle]")
+		if src != "" {
+			tags = append(tags, fmt.Sprintf("[source:%s]", src))
+		}
+		if song.DetectorVersion != "" {
+			tags = append(tags, fmt.Sprintf("[dv:%s]", song.DetectorVersion))
 		}
 	}
 

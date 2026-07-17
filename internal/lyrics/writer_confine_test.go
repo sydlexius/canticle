@@ -169,16 +169,18 @@ func TestWriteLRC_ConfinedUnsyncedAndInstrumental(t *testing.T) {
 		t.Fatalf("reading instrumental: %v", err)
 	}
 	content := string(got)
-	// Plain marker: no timestamp, no tag headers.
-	const want = "♪ Instrumental ♪\n"
+	// Marker with a provenance header (#502): [by:canticle] but no
+	// [source:]/[dv:] since neither WinningLane nor DetectorVersion is set,
+	// and no [ar:]/[ti:] (those belong only to the synced-tag block).
+	const want = "[by:canticle]\n♪ Instrumental ♪\n"
 	if content != want {
 		t.Fatalf("instrumental content = %q, want %q", content, want)
 	}
 	if strings.Contains(content, "[00:00.00]") {
 		t.Fatalf("instrumental marker must not contain an LRC timestamp, got: %q", content)
 	}
-	if strings.Contains(content, "[by:") || strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
-		t.Fatalf("instrumental marker must not contain tag headers, got: %q", content)
+	if strings.Contains(content, "[ar:") || strings.Contains(content, "[ti:") {
+		t.Fatalf("instrumental marker must not contain synced tag headers, got: %q", content)
 	}
 }
 

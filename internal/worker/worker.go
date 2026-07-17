@@ -741,6 +741,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 						AlbumName:    resolvedTrack.AlbumName,
 						Instrumental: 1,
 					},
+					DetectorVersion: detResult.Version,
 				}
 				encoded, encErr := encodeSong(instrumentalSong)
 				if encErr != nil {

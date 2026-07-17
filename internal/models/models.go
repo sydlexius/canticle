@@ -75,6 +75,13 @@ type Song struct {
 	// all output formats share one consistent timestamp. Zero on cache hits
 	// (timestamp not available without a live fetch). Transient: not persisted.
 	FetchedAt time.Time `json:"-"`
+	// DetectorVersion is the audio detector's version string when this song is an
+	// instrumental verdict written by the detector (Track.Instrumental == 1 via the
+	// detector path). Empty for provider-sourced instrumentals and all other songs.
+	// The writer uses it to stamp [source:canticle-detector] + [dv:] provenance so
+	// a detector marker is later distinguishable from an editorial provider marker.
+	// Transient: not persisted, not serialized.
+	DetectorVersion string `json:"-"`
 }
 
 // LaneAttempt is one provider lane's outcome for a single track: the lane name
