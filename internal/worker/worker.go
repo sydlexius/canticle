@@ -190,7 +190,46 @@ type Worker struct {
 	raceWait time.Duration
 }
 
-var errQueueEmpty = errors.New("worker queue empty")
+// errIdle marks a RunOnce outcome that unwinds the run loop without recording a
+// failure. Every idle sentinel below wraps it, so the loop can decide "stop and
+// idle" with a single errors.Is while still reporting *why* it idled: the causes
+// are not interchangeable. An empty queue means there is no work; the others mean
+// there is work we cannot currently do, which is close to the opposite.
+var errIdle = errors.New("worker idle")
+
+// errQueueEmpty means the queue holds no item ready to dequeue.
+var errQueueEmpty = fmt.Errorf("%w: queue empty", errIdle)
+
+// errLanesUnavailable means every available lane's breaker is open, so no lane
+// was consulted. Ready work may be waiting; we simply cannot ask anyone about it.
+var errLanesUnavailable = fmt.Errorf("%w: all lanes unavailable", errIdle)
+
+// errThrottled means a lane reported a throttle / auth / renewal signal and the
+// item was released back to the queue untouched.
+var errThrottled = fmt.Errorf("%w: provider throttled", errIdle)
+
+// logIdle reports why the run loop is unwinding. The blocked causes stay at DEBUG
+// deliberately: the loop polls every few seconds, so a per-tick WARN would flood a
+// log for hours, and the transition into the blocked state is already reported at
+// WARN by the lane ("lane circuit opened" / "provider throttling"). What was
+// missing was not severity but honesty -- a blocked queue previously reported
+// itself as an empty one, which is what makes a livelocked worker read as idle.
+func logIdle(err error) {
+	switch {
+	case errors.Is(err, errLanesUnavailable):
+		slog.Debug("worker poll: all lanes unavailable; work may be ready but no lane can be consulted")
+	case errors.Is(err, errThrottled):
+		slog.Debug("worker poll: provider throttled; item released back to the queue")
+	case errors.Is(err, errQueueEmpty):
+		slog.Debug("worker poll: queue empty")
+	default:
+		// A future idle sentinel with no case above. Report it verbatim rather than
+		// falling through to "queue empty": defaulting an unknown cause to the
+		// empty-queue message is precisely the lie this function exists to remove,
+		// and it would reintroduce it silently. Unhelpful beats false.
+		slog.Debug("worker poll: idle", "reason", err)
+	}
+}
 
 // New creates a queue consumer worker.
 func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Worker {
@@ -578,8 +617,8 @@ func (w *Worker) run(ctx context.Context, pause func(context.Context) error) err
 			}
 		}
 		if err := w.RunOnce(ctx); err != nil {
-			if errors.Is(err, errQueueEmpty) {
-				slog.Debug("worker poll: queue empty")
+			if errors.Is(err, errIdle) {
+				logIdle(err)
 				return nil
 			}
 			if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
@@ -617,7 +656,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// tick does not log a phantom probe. Recovery is only confirmed once a
 	// round-trip succeeds.
 	if w.allLanesUnavailable() {
-		return errQueueEmpty
+		return errLanesUnavailable
 	}
 	item, err := w.queue.Dequeue(ctx)
 	if err != nil {
@@ -649,7 +688,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
 				return fmt.Errorf("worker: release item %d after lanes unavailable: %w", item.ID, releaseErr)
 			}
-			return errQueueEmpty
+			return errLanesUnavailable
 		case orchestrator.OutcomeAuthRateLimit:
 			// A throttle / auth / renewal signal. The lane already tripped its
 			// breaker and emitted the honest classification log; the worker only
@@ -658,7 +697,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			if releaseErr := w.releaseAfterThrottle(ctx, item); releaseErr != nil {
 				return releaseErr
 			}
-			return errQueueEmpty
+			return errThrottled
 		case orchestrator.OutcomeSuccess, orchestrator.OutcomeBenignMiss, orchestrator.OutcomeTransport:
 			// Fall through to the miss / failure handling below.
 		}

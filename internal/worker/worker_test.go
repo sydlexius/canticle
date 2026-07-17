@@ -1091,8 +1091,8 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 
 			// First call dequeues, hits sentinel, opens circuit.
 			if err := w.RunOnce(context.Background()); err != nil {
-				if !errors.Is(err, errQueueEmpty) {
-					t.Fatalf("RunOnce: %v; want nil or errQueueEmpty", err)
+				if !errors.Is(err, errIdle) {
+					t.Fatalf("RunOnce: %v; want nil or an idle sentinel", err)
 				}
 			}
 			if len(q.failed) != 0 {
@@ -1115,8 +1115,8 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 			callsBefore := fetcher.calls
 			itemsBefore := len(q.items)
 			err := w.RunOnce(context.Background())
-			if !errors.Is(err, errQueueEmpty) {
-				t.Fatalf("RunOnce while open = %v; want errQueueEmpty", err)
+			if !errors.Is(err, errLanesUnavailable) {
+				t.Fatalf("RunOnce while open = %v; want errLanesUnavailable", err)
 			}
 			if fetcher.calls != callsBefore {
 				t.Fatalf("fetcher.calls = %d; want unchanged %d (no dequeue while open)", fetcher.calls, callsBefore)
@@ -1132,8 +1132,8 @@ func TestRunOnceOpensCircuitOnRateLimitedAndDoesNotMarkFailed(t *testing.T) {
 			// and resumes processing (and trips again on the same fetcher).
 			w.setClock(func() time.Time { return fixed.Add(31 * time.Minute) })
 			err = w.RunOnce(context.Background())
-			if err != nil && !errors.Is(err, errQueueEmpty) {
-				t.Fatalf("RunOnce after window = %v; want nil or errQueueEmpty", err)
+			if err != nil && !errors.Is(err, errIdle) {
+				t.Fatalf("RunOnce after window = %v; want nil or an idle sentinel", err)
 			}
 			if fetcher.calls == callsBefore {
 				t.Fatalf("fetcher.calls = %d; want >%d after circuit closed", fetcher.calls, callsBefore)
@@ -1377,8 +1377,8 @@ func TestRunOnceWithOpenCircuitDoesNotIncrementBackoff(t *testing.T) {
 	w.SetCircuitBackoff(10*time.Minute, 30*time.Minute)
 	w.circuit.Trip() // opens until fixed+10m
 
-	if err := w.RunOnce(context.Background()); !errors.Is(err, errQueueEmpty) {
-		t.Fatalf("RunOnce = %v; want errQueueEmpty", err)
+	if err := w.RunOnce(context.Background()); !errors.Is(err, errLanesUnavailable) {
+		t.Fatalf("RunOnce = %v; want errLanesUnavailable", err)
 	}
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; want 0 (open-circuit must not trip backoff)", w.consecutiveFailures)
@@ -1401,8 +1401,8 @@ func TestRunOnceSurfacesReleaseFailureAfterCircuitTrip(t *testing.T) {
 	if err == nil {
 		t.Fatal("RunOnce returned nil; want release-failure error to be surfaced")
 	}
-	if errors.Is(err, errQueueEmpty) {
-		t.Fatalf("RunOnce returned errQueueEmpty; want a real error so the outer loop can react. got %v", err)
+	if errors.Is(err, errIdle) {
+		t.Fatalf("RunOnce returned an idle sentinel; want a real error so the outer loop can react. got %v", err)
 	}
 	if !errors.Is(err, q.releaseErr) {
 		t.Fatalf("RunOnce error %v; want errors.Is(_, releaseErr) so the cause is preserved", err)
@@ -1450,8 +1450,8 @@ func TestTruncatedResponseOpensCircuitAndReleases(t *testing.T) {
 	w.setClock(func() time.Time { return fixed })
 	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
 
-	if err := w.RunOnce(context.Background()); !errors.Is(err, errQueueEmpty) {
-		t.Fatalf("RunOnce = %v; want errQueueEmpty (circuit opened cleanly)", err)
+	if err := w.RunOnce(context.Background()); !errors.Is(err, errThrottled) {
+		t.Fatalf("RunOnce = %v; want errThrottled (circuit opened cleanly)", err)
 	}
 	if w.circuit.OpenUntil().IsZero() {
 		t.Fatal("circuitOpenUntil = zero; want circuit opened on a truncated response")
@@ -2388,5 +2388,119 @@ func TestRunOnceDetectorInstrumentalStampsOutcomeType(t *testing.T) {
 	}
 	if got := q.outcomeTypes[9]; got != "instrumental" {
 		t.Fatalf("outcome_type for id 9 = %q; want \"instrumental\"", got)
+	}
+}
+
+func TestOpenCircuitReturnsLanesUnavailableNotQueueEmpty(t *testing.T) {
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 1, Inputs: models.Inputs{
+			Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+			Outdir:   "out",
+			Filename: "a.lrc",
+		}},
+	}}
+	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	w.setClock(func() time.Time { return fixed })
+	w.SetCircuitBackoff(10*time.Minute, 30*time.Minute)
+	w.circuit.Trip() // every lane open until fixed+10m
+
+	err := w.RunOnce(context.Background())
+
+	if !errors.Is(err, errLanesUnavailable) {
+		t.Fatalf("RunOnce with an open circuit = %v; want errLanesUnavailable", err)
+	}
+	if errors.Is(err, errQueueEmpty) {
+		t.Fatal("RunOnce reported errQueueEmpty while a ready item sits in the queue and every lane is open-circuited: the queue is not empty, it is blocked")
+	}
+	if !errors.Is(err, errIdle) {
+		t.Fatalf("RunOnce = %v; want it to still satisfy errIdle so the run loop unwinds without recording a failure", err)
+	}
+}
+
+func TestThrottleReleaseReturnsThrottledNotQueueEmpty(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 42, Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"}},
+	}}
+	fetcher := &fakeFetcher{err: fmt.Errorf("upstream: %w", musixmatch.ErrRateLimited)}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	w.setClock(func() time.Time { return fixed })
+
+	err := w.RunOnce(context.Background())
+
+	if !errors.Is(err, errThrottled) {
+		t.Fatalf("RunOnce after a throttle = %v; want errThrottled", err)
+	}
+	if errors.Is(err, errQueueEmpty) {
+		t.Fatal("RunOnce reported errQueueEmpty after releasing a throttled item back to the queue: the item is still there")
+	}
+	if !errors.Is(err, errIdle) {
+		t.Fatalf("RunOnce = %v; want it to still satisfy errIdle", err)
+	}
+}
+
+func TestRunLoopDoesNotClaimQueueEmptyWhenLanesAreBlocked(t *testing.T) {
+	recs := captureLogs(t)
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 7, Inputs: models.Inputs{
+			Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+			Outdir:   "out",
+			Filename: "a.lrc",
+		}},
+	}}
+	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	w.setClock(func() time.Time { return fixed })
+	w.SetCircuitBackoff(10*time.Minute, 30*time.Minute)
+	w.circuit.Trip()
+
+	if err := w.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v; want nil (idle unwinds cleanly)", err)
+	}
+
+	if hasLog(*recs, slog.LevelDebug, "queue empty") {
+		t.Error("run loop logged \"queue empty\" while every lane was open-circuited and a ready item sat in the queue: this is the line that makes a livelocked worker look idle")
+	}
+	if !hasLog(*recs, slog.LevelDebug, "all lanes unavailable") {
+		t.Error("run loop did not report that all lanes were unavailable; the operator has no way to tell a blocked queue from an empty one")
+	}
+}
+
+// TestLogIdleNamesTheCauseNotJustEmptiness pins the whole point of issue #500:
+// each idle cause must report itself honestly, and an unrecognized one must NOT
+// claim the queue is empty. The default branch is the regression guard -- a future
+// sentinel wrapping errIdle with no case of its own would otherwise silently
+// re-arm exactly the lie this function exists to remove.
+func TestLogIdleNamesTheCauseNotJustEmptiness(t *testing.T) {
+	novelIdle := fmt.Errorf("%w: some future cause", errIdle)
+
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantSub string
+	}{
+		{"empty queue", errQueueEmpty, "queue empty"},
+		{"lanes unavailable", errLanesUnavailable, "all lanes unavailable"},
+		{"throttled", errThrottled, "provider throttled"},
+		{"unrecognized idle cause", novelIdle, "idle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := captureLogs(t)
+			logIdle(tc.err)
+			if !hasLog(*recs, slog.LevelDebug, tc.wantSub) {
+				t.Fatalf("logIdle(%v) did not log %q; got %v", tc.err, tc.wantSub, *recs)
+			}
+		})
+	}
+
+	// The guard, stated separately: only the genuinely-empty cause may ever say so.
+	for _, err := range []error{errLanesUnavailable, errThrottled, novelIdle} {
+		recs := captureLogs(t)
+		logIdle(err)
+		if hasLog(*recs, slog.LevelDebug, "queue empty") {
+			t.Errorf("logIdle(%v) claimed \"queue empty\"; only errQueueEmpty may say that (#500)", err)
+		}
 	}
 }
