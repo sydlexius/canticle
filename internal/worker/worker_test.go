@@ -1438,7 +1438,15 @@ func TestThrottleResetsStaleFailureState(t *testing.T) {
 	}
 }
 
-func TestTruncatedResponseOpensCircuitAndReleases(t *testing.T) {
+// TestTruncatedResponseRequeuesDeferredWithoutTrippingCircuit covers #496: a
+// truncated/empty-body response (HasSubtitles=1, empty subtitle_body) is a
+// deterministic per-request condition, not a transient rate limit, so it must
+// NOT route through the no-cost throttle Release (which left attempts/
+// miss_count/next_attempt_at untouched and returned the row to pending at
+// priority=0, spinning forever ahead of the miss-cadence-parked rows). It must
+// take the same state-advancing benign-miss Defer path as ErrNotFound /
+// ErrNoLyrics, and must never trip the circuit breaker or log as throttling.
+func TestTruncatedResponseRequeuesDeferredWithoutTrippingCircuit(t *testing.T) {
 	recs := captureLogs(t)
 	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
 	q := &fakeQueue{items: []queue.WorkItem{
@@ -1450,35 +1458,26 @@ func TestTruncatedResponseOpensCircuitAndReleases(t *testing.T) {
 	w.setClock(func() time.Time { return fixed })
 	w.SetCircuitBackoff(60*time.Second, 30*time.Minute)
 
-	if err := w.RunOnce(context.Background()); !errors.Is(err, errThrottled) {
-		t.Fatalf("RunOnce = %v; want errThrottled (circuit opened cleanly)", err)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v; want nil (a truncated response defers, it does not throttle-release)", err)
 	}
-	if w.circuit.OpenUntil().IsZero() {
-		t.Fatal("circuitOpenUntil = zero; want circuit opened on a truncated response")
+	if !w.circuit.OpenUntil().IsZero() {
+		t.Fatal("circuitOpenUntil != zero; a truncated response must NOT open the circuit")
 	}
-	if got := q.released; len(got) != 1 || got[0] != 77 {
-		t.Fatalf("released = %v; want [77] (Release, not Fail)", got)
+	if len(q.deferred) != 1 || q.deferred[0] != 77 {
+		t.Fatalf("deferred = %v; want [77] (Defer, not Release)", q.deferred)
+	}
+	if len(q.released) != 0 {
+		t.Fatalf("released = %v; want none (no-cost Release is the bug this guards against)", q.released)
 	}
 	if len(q.failed) != 0 {
 		t.Fatalf("failed = %v; want none (a truncated response is not the song's failure)", q.failed)
 	}
-	// Release leaves Attempts untouched (it does not increment the attempt count);
-	// the item is back in the pending pool unchanged.
-	if len(q.processing) != 0 {
-		t.Fatalf("processing = %v; want empty after release", q.processing)
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (a truncated response must not trip backoff)", w.consecutiveFailures)
 	}
-	if !hasLog(*recs, slog.LevelWarn, "truncated response") {
-		t.Fatalf("logs = %+v; want a Warn naming the truncated response", *recs)
-	}
-	rec := findLog(*recs, slog.LevelWarn, "truncated response")
-	if rec == nil {
-		t.Fatal("no captured truncated-response Warn")
-	}
-	if got := attrDuration(rec, "backoff"); got != 60*time.Second {
-		t.Fatalf("backoff attr = %v; want 60s", got)
-	}
-	if got := attrTime(rec, "next_retry"); !got.Equal(fixed.Add(60 * time.Second)) {
-		t.Fatalf("next_retry attr = %v; want %v", got, fixed.Add(60*time.Second))
+	if hasLog(*recs, slog.LevelWarn, "throttling") || hasLog(*recs, slog.LevelWarn, "rate limit") {
+		t.Fatalf("logs = %+v; want no throttle/rate-limit wording for a truncated response", *recs)
 	}
 }
 

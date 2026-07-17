@@ -708,7 +708,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// so reset the consecutive-failure counter: an earlier transient failure
 		// must not pin the worker in a permanent geometric backoff while it is
 		// otherwise healthily reaching the provider and getting clean misses.
-		if musixmatch.IsBenignMiss(err) {
+		//
+		// Gated on orchestrator.ClassifyOutcome rather than musixmatch.IsBenignMiss
+		// directly so this stays in lockstep with the outer switch above: a
+		// truncated/empty-body response now classifies as OutcomeBenignMiss (#496)
+		// and must take this same bounded-retry path, not the no-cost throttle
+		// release the outer switch reserves for genuine auth/rate-limit signals.
+		if orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeBenignMiss {
 			slog.Debug("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
 			// Every active lane was tried and none returned lyrics: record a miss for
 			// each. Errors are non-fatal; recording happens before the Defer/Complete

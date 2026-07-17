@@ -62,3 +62,4 @@ docs/design/
 
 # Orchestrate session checkpoint (machine-local, transient; never committed)
 /SESSION-STATE.md
+/FIX496-REPORT.md

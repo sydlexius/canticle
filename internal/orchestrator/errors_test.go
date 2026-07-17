@@ -19,9 +19,9 @@ func TestClassifyOutcome(t *testing.T) {
 		{"token renewal is auth", fmt.Errorf("x: %w", musixmatch.ErrTokenRenewalRequired), OutcomeAuthRateLimit},
 		{"unauthorized is auth", fmt.Errorf("x: %w", musixmatch.ErrUnauthorized), OutcomeAuthRateLimit},
 		{"rate limited is auth", fmt.Errorf("x: %w", musixmatch.ErrRateLimited), OutcomeAuthRateLimit},
-		{"truncated is auth", fmt.Errorf("x: %w", musixmatch.ErrTruncatedResponse), OutcomeAuthRateLimit},
 		{"not found is benign miss", fmt.Errorf("x: %w", musixmatch.ErrNotFound), OutcomeBenignMiss},
 		{"no lyrics is benign miss", fmt.Errorf("x: %w", musixmatch.ErrNoLyrics), OutcomeBenignMiss},
+		{"truncated is benign miss", fmt.Errorf("x: %w", musixmatch.ErrTruncatedResponse), OutcomeBenignMiss},
 		{"generic error is transport", errors.New("connection refused"), OutcomeTransport},
 	}
 	for _, tt := range tests {

@@ -60,9 +60,11 @@ var (
 	ErrNoLyrics = errors.New("musixmatch: no lyrics available")
 	// ErrTruncatedResponse indicates a structurally valid response (HTTP 200,
 	// track present) whose inner data is missing -- e.g. has_subtitles=1 but the
-	// subtitle_body is empty. This is typically observed during egress-IP
-	// throttling, where the upstream returns a well-formed but hollow body.
-	// Treat as a circuit-breaker signal rather than a parse error.
+	// subtitle_body is empty. This was originally observed during egress-IP
+	// throttling, but detection here only proves the body was hollow for THIS
+	// request; the callers (orchestrator, worker) classify it as a benign miss
+	// rather than a throttle signal, since an empty body is deterministic per
+	// request and not evidence of a transient rate limit (#496).
 	ErrTruncatedResponse = errors.New("musixmatch: truncated or empty response body")
 )
 

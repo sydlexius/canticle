@@ -183,14 +183,27 @@ func TestLaneHonest401EscalatesAfterThreshold(t *testing.T) {
 	}
 }
 
-func TestLaneHonest401Truncated(t *testing.T) {
+func TestLaneTruncatedResponseRecordsBenignMissNoTrip(t *testing.T) {
+	// An empty/truncated body is a deterministic per-request condition, not a
+	// throttle signal: it must be treated like a benign miss (reset the ramp,
+	// no trip) rather than opening the circuit.
 	p := &stubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrTruncatedResponse)}
-	l, _ := newTestLane(p)
+	l, cb := newTestLane(p)
+	fixed := time.Now()
+	cb.SetClock(func() time.Time { return fixed })
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrTruncatedResponse) {
+		t.Fatalf("err = %v; want ErrTruncatedResponse", err)
+	}
+	if cb.Trips() != 0 {
+		t.Fatalf("trips = %d; want 0 (a truncated response must not trip the breaker)", cb.Trips())
+	}
 	logs := captureLogs(t, func() {
 		_, _ = l.FindLyrics(context.Background(), models.Track{})
 	})
-	if !strings.Contains(logs, "truncated response") {
-		t.Fatalf("logs = %q; want truncated-response message", logs)
+	if strings.Contains(logs, "throttling") || strings.Contains(logs, "rate limit") {
+		t.Fatalf("logs = %q; want no throttle/rate-limit wording for a truncated response", logs)
 	}
 }
 
@@ -299,9 +312,9 @@ func TestLaneCallsOnThrottleOnRateLimitAfterSuccess(t *testing.T) {
 	}
 }
 
-func TestLaneCallsOnThrottleOnTruncated(t *testing.T) {
-	// A truncated response is always a throttle signal, even with no prior
-	// success this session: the pacer must ratchet.
+func TestLaneNoOnThrottleOnTruncated(t *testing.T) {
+	// A truncated/empty body is a deterministic per-request condition, not a
+	// throttle signal: the pacer must not ratchet on it.
 	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrTruncatedResponse)}
 	cb := circuit.New(60*time.Second, 30*time.Minute)
 	l := NewLane(p, cb)
@@ -310,8 +323,8 @@ func TestLaneCallsOnThrottleOnTruncated(t *testing.T) {
 	if !errors.Is(err, musixmatch.ErrTruncatedResponse) {
 		t.Fatalf("err = %v; want ErrTruncatedResponse", err)
 	}
-	if p.throttles != 1 {
-		t.Fatalf("OnThrottle calls = %d; want 1 (truncated response is always a throttle)", p.throttles)
+	if p.throttles != 0 {
+		t.Fatalf("OnThrottle calls = %d; want 0 (a truncated response is a benign miss, not a throttle)", p.throttles)
 	}
 }
 

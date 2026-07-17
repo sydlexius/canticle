@@ -49,8 +49,9 @@ func (l *Lane) Breaker() *circuit.Breaker { return l.breaker }
 //
 //   - If the breaker is open, it returns ErrLaneUnavailable WITHOUT calling the
 //     provider, so an open lane spends no calls.
-//   - On a benign miss it resets the breaker ramp (a clean miss is a successful
-//     round-trip, not a throttle) and returns the classified miss error.
+//   - On a benign miss (including a truncated/empty-body response, #496) it
+//     resets the breaker ramp (a clean round-trip is not a throttle) and
+//     returns the classified miss error.
 //   - On a rate-limit / auth / renewal signal it trips the breaker (or holds the
 //     full renewal window) and returns the classified error after emitting the
 //     honest four-way throttle log.
@@ -115,13 +116,9 @@ func (l *Lane) classify(err error) error {
 	}
 
 	if errors.Is(err, musixmatch.ErrRateLimited) ||
-		errors.Is(err, musixmatch.ErrUnauthorized) ||
-		errors.Is(err, musixmatch.ErrTruncatedResponse) {
+		errors.Is(err, musixmatch.ErrUnauthorized) {
 		res := l.breaker.Trip()
 		switch {
-		case errors.Is(err, musixmatch.ErrTruncatedResponse):
-			slog.Warn("lane circuit opened: provider returned truncated response; likely throttling",
-				"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
 		case l.breaker.EverSucceeded() && res.Trips >= escalationThreshold:
 			slog.Warn("lane circuit opened: token validated earlier this session but has failed repeatedly; it may have expired",
 				"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
@@ -133,21 +130,24 @@ func (l *Lane) classify(err error) error {
 				"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
 		}
 		// Ratchet the adaptive pacer only on genuine throttle signals: a rate-limit
-		// or truncated response is ALWAYS throttling; a 401 is throttling only AFTER
-		// the token has succeeded this session (before that it's a bad token, not a
-		// throttle). Never ratchet on a never-succeeded 401.
+		// is ALWAYS throttling; a 401 is throttling only AFTER the token has
+		// succeeded this session (before that it's a bad token, not a throttle).
+		// Never ratchet on a never-succeeded 401.
 		if errors.Is(err, musixmatch.ErrRateLimited) ||
-			errors.Is(err, musixmatch.ErrTruncatedResponse) ||
 			(errors.Is(err, musixmatch.ErrUnauthorized) && l.breaker.EverSucceeded()) {
 			l.notifyThrottle()
 		}
 		return err
 	}
 
-	if musixmatch.IsBenignMiss(err) {
+	if musixmatch.IsBenignMiss(err) || errors.Is(err, musixmatch.ErrTruncatedResponse) {
 		// A clean miss proves the provider round-trip succeeded, so we are not
 		// being throttled: reset the ramp. EverSucceeded is deliberately NOT set
-		// (a miss is a successful round-trip but not a genuine lyric match).
+		// (a miss is a successful round-trip but not a genuine lyric match). A
+		// truncated/empty body is bucketed here too (#496): it is a deterministic
+		// per-request condition, not a transient throttle, so it must not trip the
+		// breaker or ratchet the pacer -- the worker's benign-miss cadence bounds
+		// its cost instead.
 		if l.breaker.RecordBenignMiss() {
 			slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
 		}

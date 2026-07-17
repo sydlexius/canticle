@@ -25,15 +25,19 @@ const (
 	// no error precedence.
 	OutcomeSuccess OutcomeClass = iota
 	// OutcomeBenignMiss means the lane reached the provider and the track was
-	// absent or had no usable lyrics (ErrNotFound, ErrNoLyrics). The only signal
-	// that the track is genuinely absent.
+	// absent or had no usable lyrics (ErrNotFound, ErrNoLyrics), or the
+	// provider returned a structurally valid but hollow body
+	// (ErrTruncatedResponse). ErrTruncatedResponse is deterministic per
+	// request rather than a genuine catalog answer, but it is bucketed here
+	// (not with the throttle signals below) because it must take the same
+	// bounded-retry path as a clean miss -- see #496.
 	OutcomeBenignMiss
 	// OutcomeTransport means a retriable failure that is not a clean miss
 	// (timeout, connection failure, an unexpected error).
 	OutcomeTransport
 	// OutcomeAuthRateLimit means an auth or rate-limit / throttle signal
-	// (ErrUnauthorized, ErrTokenRenewalRequired, ErrRateLimited,
-	// ErrTruncatedResponse). The catalog answer is unknown.
+	// (ErrUnauthorized, ErrTokenRenewalRequired, ErrRateLimited). The catalog
+	// answer is unknown.
 	OutcomeAuthRateLimit
 	// OutcomeUnavailable means the lane's breaker was open and the provider was
 	// not called (ErrLaneUnavailable).
@@ -44,7 +48,11 @@ const (
 // success. The auth/rate-limit check folds in the Musixmatch throttle sentinels
 // the worker historically tripped the circuit on; classification is per-provider
 // today (only Musixmatch lanes exist) and lives here so the breaker stays
-// provider-agnostic.
+// provider-agnostic. ErrTruncatedResponse is deliberately NOT in the
+// auth/rate-limit bucket: it is a deterministic per-request condition (an
+// empty body), not a transient throttle, so it must classify as a benign miss
+// and take the bounded-retry path rather than the no-cost throttle release
+// (#496).
 func ClassifyOutcome(err error) OutcomeClass {
 	switch {
 	case err == nil:
@@ -53,10 +61,9 @@ func ClassifyOutcome(err error) OutcomeClass {
 		return OutcomeUnavailable
 	case errors.Is(err, musixmatch.ErrTokenRenewalRequired),
 		errors.Is(err, musixmatch.ErrUnauthorized),
-		errors.Is(err, musixmatch.ErrRateLimited),
-		errors.Is(err, musixmatch.ErrTruncatedResponse):
+		errors.Is(err, musixmatch.ErrRateLimited):
 		return OutcomeAuthRateLimit
-	case musixmatch.IsBenignMiss(err):
+	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse):
 		return OutcomeBenignMiss
 	default:
 		return OutcomeTransport
