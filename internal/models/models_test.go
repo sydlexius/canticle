@@ -29,3 +29,10 @@ func TestSongTranslationFieldsAssignable(t *testing.T) {
 		t.Errorf("RomanizationSubtitles text = %q, want %q", got, "romaji")
 	}
 }
+
+func TestSong_DetectorVersionField(t *testing.T) {
+	s := Song{DetectorVersion: "1.2.3"}
+	if s.DetectorVersion != "1.2.3" {
+		t.Fatalf("DetectorVersion not carried: %q", s.DetectorVersion)
+	}
+}
