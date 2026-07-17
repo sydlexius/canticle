@@ -438,13 +438,31 @@ func TestClassifyBackupExists_ReReadFailureIsAnErrorNotAVerdict(t *testing.T) {
 	}
 }
 
-// The dry-run path must surface the same failure the same way, or dry-run and
-// apply would disagree about what a run found.
+// The dry-run path must PROPAGATE a classifier re-read failure, not swallow it,
+// or dry-run and apply would disagree about what a run found. This must exercise
+// the re-read path, not a missing-file initial load: inspect only reaches classify
+// once the file is stacked AND a .orig exists, so a stacked file plus a .orig with
+// an injected classify error is the only setup that proves inspect surfaces the
+// re-read failure rather than counting the file clean.
 func TestInspect_ReReadFailureIsAnError(t *testing.T) {
 	dir := t.TempDir()
-	gone := filepath.Join(dir, "vanished.lrc")
+	path := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(path, []byte("[00:39.26][00:47.06]Chorus\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".orig", []byte("a pre-existing backup\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	if _, err := inspect(gone); err == nil {
-		t.Fatal("inspect on a missing file returned nil error; a dry run must report the failure, not silently count the file as clean")
+	prev := classify
+	t.Cleanup(func() { classify = prev })
+
+	wantErr := errors.New("re-read failed")
+	classify = func(string, string) (Result, error) {
+		return Result{}, wantErr
+	}
+
+	if _, err := inspect(path); !errors.Is(err, wantErr) {
+		t.Fatalf("inspect error = %v; want the classifier's re-read failure propagated -- a dry run must surface it, not swallow it and count the file clean", err)
 	}
 }
