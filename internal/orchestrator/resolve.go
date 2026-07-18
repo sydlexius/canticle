@@ -96,8 +96,6 @@ func providerClassifier(l *Lane, err error) error {
 // detectorClassifier is the error->breaker policy for a detector lane. A benign
 // miss (gate-negative) resets the ramp; an outage trips the breaker; any other
 // error is wrapped transport and leaves the breaker untouched.
-//
-//nolint:unused // foundation for the detector lane wired in a later task (#501 series); not yet referenced.
 func detectorClassifier(l *Lane, err error) error {
 	switch {
 	case errors.Is(err, ErrLaneBenignMiss):
