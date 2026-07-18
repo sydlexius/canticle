@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/secrets"
 )
 
 // stdinFile writes content to a temp file and returns it opened for reading, so

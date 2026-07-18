@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 func TestWriteLRC_NothingToSave(t *testing.T) {

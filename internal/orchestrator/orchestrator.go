@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // Mode names the dispatch strategy (docs/multi-provider-orchestration.md).

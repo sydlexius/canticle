@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
-	"github.com/doxazo-net/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/secrets"
 )
 
 // newSecretStore opens a migrated SQLite DB (temp file) and returns an encrypted

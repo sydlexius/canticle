@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/providers"
 )
 
 // handleSaveSection is the multi-field ("section") settings write endpoint

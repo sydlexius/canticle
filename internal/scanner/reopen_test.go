@@ -3,7 +3,7 @@ package scanner
 import (
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
 func TestReopenClassesFor(t *testing.T) {

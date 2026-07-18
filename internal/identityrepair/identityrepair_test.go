@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	dbpkg "github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/normalize"
+	dbpkg "github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/normalize"
 )
 
 // errReport is the sentinel a Report callback returns to assert Run aborts.

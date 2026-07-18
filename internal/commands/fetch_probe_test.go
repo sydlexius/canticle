@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/musixmatch"
 )
 
 type probeFetcher struct {

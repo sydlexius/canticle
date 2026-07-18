@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 func boolPtr(b bool) *bool { return &b }

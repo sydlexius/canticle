@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 func boolPtr(b bool) *bool { return &b }

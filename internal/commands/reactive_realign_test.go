@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/library"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/realign"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/realign"
 )
 
 // realignTestSetup opens a DB with one library rooted at a canonical temp dir.

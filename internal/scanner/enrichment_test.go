@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/testutil"
+	"github.com/sydlexius/canticle/internal/testutil"
 )
 
 // enrichFixtureDir writes a single track carrying both an ISRC and a MusicBrainz

@@ -15,11 +15,11 @@ import (
 
 	"github.com/a-h/templ"
 
-	"github.com/doxazo-net/canticle/internal/auth"
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/reports"
-	"github.com/doxazo-net/canticle/internal/secrets"
-	"github.com/doxazo-net/canticle/web/templates"
+	"github.com/sydlexius/canticle/internal/auth"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/web/templates"
 )
 
 // recentOutcomesLimit caps the Recent outcomes report. It is a display bound,

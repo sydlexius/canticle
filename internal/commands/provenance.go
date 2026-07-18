@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 )
 
 // ProvenanceCmd hosts nested provenance subcommands.

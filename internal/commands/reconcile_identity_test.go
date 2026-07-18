@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/normalize"
-	"github.com/doxazo-net/canticle/internal/testutil"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/testutil"
 )
 
 // setupReconcileIdentity builds a config + DB + one library with a real,

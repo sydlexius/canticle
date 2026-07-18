@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // Repo provides CRUD access to configured library roots.

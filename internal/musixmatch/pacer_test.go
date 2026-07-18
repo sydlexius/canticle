@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // newPacerTestClient is a thin helper that wires up a Client with injected

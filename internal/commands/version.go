@@ -1,6 +1,6 @@
 package commands
 
-import appversion "github.com/doxazo-net/canticle/internal/version"
+import appversion "github.com/sydlexius/canticle/internal/version"
 
 // version, commit, and date mirror internal/version's build-time vars so
 // callers within this package (e.g. server.WithWebUIIf, version_test.go) can

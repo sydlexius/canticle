@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 type fakeFetcher struct {

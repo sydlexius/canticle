@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/circuit"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
-	"github.com/doxazo-net/canticle/internal/orchestrator"
-	"github.com/doxazo-net/canticle/internal/providers"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/circuit"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/orchestrator"
+	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // delayFetcher is a concurrency-safe fetcher with a configurable per-call delay

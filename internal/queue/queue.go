@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/backoff"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/backoff"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/doxazo-net/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/detector"
 )
 
 // Gates holds the music and speech thresholds kept fixed while the vocal-peak

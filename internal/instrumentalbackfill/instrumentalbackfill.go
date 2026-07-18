@@ -22,10 +22,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/detector"
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // Store is the durable-queue surface a backfill needs. Satisfied by

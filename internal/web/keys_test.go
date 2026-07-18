@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/auth"
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/auth"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // errTest is a sentinel returned by errKeyManager to drive the handler error

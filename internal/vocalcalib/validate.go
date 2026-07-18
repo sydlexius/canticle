@@ -1,6 +1,6 @@
 package vocalcalib
 
-import "github.com/doxazo-net/canticle/internal/detector"
+import "github.com/sydlexius/canticle/internal/detector"
 
 // Report is the outcome of validating a fixed threshold against a labeled set.
 type Report struct {

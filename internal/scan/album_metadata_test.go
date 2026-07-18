@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/library"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/scan"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/scan"
 )
 
 func TestRepo_UpsertRoundTripsAlbumMetadata(t *testing.T) {

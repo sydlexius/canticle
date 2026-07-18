@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/testutil"
+	"github.com/sydlexius/canticle/internal/testutil"
 )
 
 // A multi-value ID3v2.4 TPE1 frame is NUL-separated on disk, but dhowden/tag

@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/normalize"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // PendingResultStore reads and updates scan results eligible for queuing.

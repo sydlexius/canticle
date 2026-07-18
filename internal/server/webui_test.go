@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
 )
 
 // TestWithWebUIServesPages verifies that mounting the web UI registers its

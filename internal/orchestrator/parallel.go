@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // laneResult carries one lane's outcome back from its dispatch goroutine. The

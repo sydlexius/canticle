@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // liBlock builds one <li> block for a multi-candidate search HTML fixture.

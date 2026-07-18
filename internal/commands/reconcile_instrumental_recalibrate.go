@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/instrumentalrecalib"
-	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/instrumentalrecalib"
+	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
 // reconcileInstrumentalRecalibrateBackup is one JSONL record per row this run

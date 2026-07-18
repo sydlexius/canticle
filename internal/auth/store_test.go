@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/db"
 )
 
 func TestSQLStore_CreateListFindAndRevoke(t *testing.T) {

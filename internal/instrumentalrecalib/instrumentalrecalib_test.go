@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	dbpkg "github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/queue"
+	dbpkg "github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 type fakeWriter struct {

@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/lrcnormalize"
-	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/lrcnormalize"
+	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
 // Options configures a backfill run over one or more library roots.

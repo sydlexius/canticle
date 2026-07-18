@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // seedDeferredRow enqueues a work_queue row, claims it (Dequeue), then defers

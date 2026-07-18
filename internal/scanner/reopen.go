@@ -1,6 +1,6 @@
 package scanner
 
-import "github.com/doxazo-net/canticle/internal/lyrics"
+import "github.com/sydlexius/canticle/internal/lyrics"
 
 // reopenClasses is the set of settled .txt states a scan is willing to reconsider.
 // Modeling re-check eligibility as classes (not a single bool) keeps the

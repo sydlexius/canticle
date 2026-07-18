@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/doxazo-net/canticle/internal/testutil"
+	"github.com/sydlexius/canticle/internal/testutil"
 )
 
 func main() {

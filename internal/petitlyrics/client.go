@@ -26,8 +26,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/lrcnormalize"
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/lrcnormalize"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // defaultBaseURL is the real petitlyrics.com host. Tests override baseURL to

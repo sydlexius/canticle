@@ -22,8 +22,8 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/pathutil"
 )
 
 // Granularity selects how a candidate source path is tested for existence.

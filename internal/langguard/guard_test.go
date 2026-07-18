@@ -3,7 +3,7 @@ package langguard
 import (
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 func synced(lines ...string) models.Song {

@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/library"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // seedReconcilePathsRow inserts a scan_results row for filePath plus a linked

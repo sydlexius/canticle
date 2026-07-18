@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // bilingualTestSong builds a synced song with an original track and (optionally)

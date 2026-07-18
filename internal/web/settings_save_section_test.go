@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // postSection issues a section save POST with a valid double-submit CSRF token.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // ajaxJSONMulti builds an AJAX response array from arbitrary (lyrics_type,

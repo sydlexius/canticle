@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/cache"
-	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/cache"
+	"github.com/sydlexius/canticle/internal/db"
 )
 
 func openTestDB(t *testing.T) *sql.DB {

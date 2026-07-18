@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/library"
-	"github.com/doxazo-net/canticle/internal/lrcbackfill"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lrcbackfill"
 )
 
 // runReconcileLRC walks the configured library roots and rewrites .lrc sidecars

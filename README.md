@@ -72,7 +72,7 @@ page.
 ```sh
 # go install resolves the module path from go.mod, which declares
 # github.com/doxazo-net/canticle.
-go install github.com/doxazo-net/canticle/cmd/mxlrcgo-svc@latest
+go install github.com/sydlexius/canticle/cmd/mxlrcgo-svc@latest
 ```
 
 > This fork starts its release line at `v1.0.0`. The upstream `fashni/mxlrc-go` repository does not publish semver release tags, so `v1.0.0` is reserved as the first `canticle` version.

@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/testutil"
+	"github.com/sydlexius/canticle/internal/testutil"
 )
 
 // ReadArtistIdentity is the seam the reconcile-identity backfill uses to re-read

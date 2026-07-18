@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/providers"
 )
 
 // Compile-time assertions that *Client satisfies the shared provider contracts.
