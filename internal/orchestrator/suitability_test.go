@@ -24,6 +24,15 @@ func instrumentalSong() models.Song {
 	return models.Song{Track: models.Track{ArtistName: "A", TrackName: "T", Instrumental: 1}}
 }
 
+// detectorInstrumentalSong is an instrumental carrying a DetectorVersion, i.e.
+// the detector-sourced verdict that IsSuitable treats as terminal.
+func detectorInstrumentalSong() models.Song {
+	return models.Song{
+		Track:           models.Track{ArtistName: "A", TrackName: "T", Instrumental: 1},
+		DetectorVersion: "1.5.0",
+	}
+}
+
 func emptySong() models.Song {
 	return models.Song{Track: models.Track{ArtistName: "A", TrackName: "T"}}
 }
@@ -89,6 +98,11 @@ func TestIsSuitable(t *testing.T) {
 		{"synced rejected by guard", syncedSong(), enabledReject, false},
 		{"unsynced rejected by guard", unsyncedSong(), enabledReject, false},
 		{"instrumental rejected even if guard accepts", instrumentalSong(), enabledAccept, false},
+		// A detector-sourced instrumental skips the quality gate, but must still be
+		// subject to the script guard: the new early condition must not bypass it.
+		{"detector instrumental passes enabled accepting guard", detectorInstrumentalSong(), enabledAccept, true},
+		{"detector instrumental rejected by guard", detectorInstrumentalSong(), enabledReject, false},
+		{"detector instrumental passes disabled guard", detectorInstrumentalSong(), disabled, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
