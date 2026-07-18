@@ -140,6 +140,20 @@ func TestWriteMarkerProvenance(t *testing.T) {
 		}
 	})
 
+	t.Run("nonexistent_path_returns_lstat_error", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "missing", "track.txt")
+		changed, err := WriteMarkerProvenance(p, InstrumentalProvenance{Source: SourceDetector})
+		if err == nil {
+			t.Fatal("expected an lstat error for a nonexistent path")
+		}
+		if changed {
+			t.Fatalf("changed=%v; want false on a nonexistent path", changed)
+		}
+		if !strings.Contains(err.Error(), "lstat") {
+			t.Fatalf("error = %q; want it to reference lstat", err.Error())
+		}
+	})
+
 	t.Run("symlink_is_skipped", func(t *testing.T) {
 		dir := t.TempDir()
 		real := filepath.Join(dir, "real.txt")

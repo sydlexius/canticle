@@ -410,3 +410,24 @@ func TestListDetectorInstrumentalMarkers_MalformedOutputPathsErrors(t *testing.T
 		t.Fatal("expected an error for malformed output_paths JSON, got nil")
 	}
 }
+
+// TestListDetectorInstrumentalMarkers_ClosedDBErrors verifies the query error
+// path is wrapped cleanly (not panicked) when the underlying connection is
+// already closed, a real failure mode distinct from the malformed-JSON scan
+// error covered above.
+func TestListDetectorInstrumentalMarkers_ClosedDBErrors(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
+	markDetectorInstrumental(t, q, id, "1.0.0")
+
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	if _, err := q.ListDetectorInstrumentalMarkers(ctx, ListInstrumentalMarkersOptions{}); err == nil {
+		t.Fatal("expected an error querying a closed database, got nil")
+	}
+}
