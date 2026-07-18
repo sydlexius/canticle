@@ -41,12 +41,6 @@ type SessionStore interface {
 	// CleanExpiredSessions deletes every session whose expires_at is at or before
 	// now and returns the number removed.
 	CleanExpiredSessions(ctx context.Context) (int64, error)
-	// DeleteSessionsForUser removes every session belonging to userID and returns
-	// the number removed. Deleting sessions for a user with none is a no-op.
-	// Rotation uses this so a password change actually ends existing logins: an
-	// operator rotating a compromised credential expects sessions minted with the
-	// old one to stop working immediately (#545).
-	DeleteSessionsForUser(ctx context.Context, userID string) (int64, error)
 }
 
 // SQLSessionStore persists sessions in the SQLite `sessions` table.
@@ -115,22 +109,6 @@ func (s *SQLSessionStore) DeleteSession(ctx context.Context, rawToken string) er
 		return fmt.Errorf("webauth: delete session: %w", err)
 	}
 	return nil
-}
-
-// DeleteSessionsForUser removes every session belonging to userID, regardless of
-// expiry. Used by credential rotation so a password change ends existing logins
-// rather than leaving tokens minted under the old password usable until they
-// expire on their own.
-func (s *SQLSessionStore) DeleteSessionsForUser(ctx context.Context, userID string) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID)
-	if err != nil {
-		return 0, fmt.Errorf("webauth: delete sessions for user: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("webauth: delete sessions for user rows: %w", err)
-	}
-	return n, nil
 }
 
 // CleanExpiredSessions deletes sessions whose expiry is at or before now.

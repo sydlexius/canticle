@@ -31,9 +31,6 @@ func (s rotationStore) GetByID(context.Context, string) (User, bool, error) {
 	return s.user, true, nil
 }
 func (s rotationStore) HasUsers(context.Context) (bool, error) { return true, nil }
-func (s rotationStore) UpdatePasswordHash(context.Context, string, string) error {
-	return s.updateErr
-}
 func (s rotationStore) RotateCredential(context.Context, string, string) (int64, error) {
 	if s.lookupErr != nil {
 		return 0, s.lookupErr
@@ -52,9 +49,6 @@ func (okSessionStore) GetSessionByToken(context.Context, string) (Session, bool,
 }
 func (okSessionStore) DeleteSession(context.Context, string) error         { return nil }
 func (okSessionStore) CleanExpiredSessions(context.Context) (int64, error) { return 0, nil }
-func (okSessionStore) DeleteSessionsForUser(context.Context, string) (int64, error) {
-	return 0, nil
-}
 
 func TestSetPassword_LookupFailurePropagates(t *testing.T) {
 	sentinel := errors.New("store down")
