@@ -188,6 +188,13 @@ type Worker struct {
 	// matter. Defaults: ordered, orchestrator.DefaultRaceWait.
 	mode     string
 	raceWait time.Duration
+	// detectorOrdering selects whether the detector lane (when audioDetector is
+	// non-nil) is inserted first ("front") or last (any other value, e.g. the
+	// default "demoted") among the dispatch lanes. Set via SetDetectorOrdering;
+	// applied on every rebuildOrchestrator call. A nil audioDetector means no
+	// detector lane is inserted regardless of this value - the detector stays
+	// opt-in.
+	detectorOrdering string
 }
 
 // errIdle marks a RunOnce outcome that unwinds the run loop without recording a
@@ -276,7 +283,24 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 // (the primary lane is always present and the mode is config-validated) the prior
 // orchestrator is kept.
 func (w *Worker) rebuildOrchestrator() error {
-	orch, err := orchestrator.New(w.mode, w.lanes...)
+	// The detector lane is inserted into a local copy of w.lanes, never into
+	// w.lanes itself: w.lanes tracks only the provider lanes (primary +
+	// fallbacks), which SetFallbackProviders and the circuit-config setters fan
+	// out across, so the detector (with its own independent breaker) stays out
+	// of that bookkeeping. A nil audioDetector inserts no detector lane at all,
+	// regardless of detectorOrdering - the detector stays strictly opt-in.
+	lanes := append([]*orchestrator.Lane(nil), w.lanes...)
+	if w.audioDetector != nil {
+		cb := circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
+		cb.SetClock(w.now)
+		detLane := orchestrator.NewDetectorLane(w.audioDetector, cb)
+		if w.detectorOrdering == "front" {
+			lanes = append([]*orchestrator.Lane{detLane}, lanes...)
+		} else {
+			lanes = append(lanes, detLane)
+		}
+	}
+	orch, err := orchestrator.New(w.mode, lanes...)
 	if err != nil {
 		slog.Error("worker: rebuild orchestrator", "error", err, "mode", w.mode)
 		return err
@@ -472,6 +496,11 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 // so the worker keeps no copy of it.
 func (w *Worker) EnableAudioDetector(d detector.Detector) {
 	w.audioDetector = d
+	// Rebuild so a detector configured after New (the common case: the config
+	// layer wires it in after construction) inserts the detector lane. The mode
+	// is unchanged (and already valid) and the primary lane is always present,
+	// so the rebuild cannot fail here.
+	_ = w.rebuildOrchestrator()
 }
 
 // SetInstrumentalDetectionDefault sets the global default used to resolve work
@@ -479,6 +508,17 @@ func (w *Worker) EnableAudioDetector(d detector.Detector) {
 // config.InstrumentalDetector.Enabled.
 func (w *Worker) SetInstrumentalDetectionDefault(enabled bool) {
 	w.detectInstrumentalDefault = enabled
+}
+
+// SetDetectorOrdering selects whether the detector lane goes first ("front") or
+// last (any other value, e.g. "demoted") among the dispatch lanes, then
+// rebuilds the orchestrator. A nil audioDetector makes this a no-op at build
+// time (rebuildOrchestrator inserts no detector lane regardless).
+func (w *Worker) SetDetectorOrdering(ordering string) {
+	w.detectorOrdering = ordering
+	// The mode is unchanged (and already valid) and the primary lane is always
+	// present, so the rebuild cannot fail here.
+	_ = w.rebuildOrchestrator()
 }
 
 // EnableGuard configures the language/script guard used to reject lyric
@@ -678,7 +718,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// provider set: bypass the cache so the orchestrator revalidates the track
 	// against today's lanes (Gap 1 of docs/multi-provider-orchestration.md).
 	bypassCache := w.providersVersion != 0 && item.ProvidersVersion != w.providersVersion
-	song, cacheHit, err := w.song(ctx, resolvedTrack, item.Inputs.SourcePath, bypassCache)
+	// detectorPath is the audio path handed to every lane via FindLyrics. It is
+	// deliberately empty when instrumental detection is disabled for this item
+	// (see detectorPathFor): the detector lane treats an empty path as a benign
+	// miss, so a disabled item cleanly skips the detector. Provider lanes never
+	// consult sourcePath, so this substitution has no effect on them.
+	detectorPath := w.detectorPathFor(item)
+	song, cacheHit, err := w.song(ctx, resolvedTrack, detectorPath, bypassCache)
 	if err != nil {
 		switch orchestrator.ClassifyOutcome(err) {
 		case orchestrator.OutcomeUnavailable:
@@ -714,7 +760,18 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// truncated/empty-body response now classifies as OutcomeBenignMiss (#496)
 		// and must take this same bounded-retry path, not the no-cost throttle
 		// release the outer switch reserves for genuine auth/rate-limit signals.
-		if orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeBenignMiss {
+		//
+		// Also takes this path on orchestrator.ErrLaneOutage (the detector lane's
+		// sidecar-unreachable signal): that error classifies as OutcomeTransport
+		// (Gap 4's "least-certain-negative wins" ranking is intentionally generic
+		// across lane types, see errors_test.go), which would otherwise escalate
+		// past the provider lanes' own clean OutcomeBenignMiss verdict into a hard
+		// w.fail. But a detector outage says nothing about whether the track has
+		// lyrics - the providers already answered that definitively - so it must
+		// not turn an ordinary miss into a queue failure/backoff event. A genuine
+		// provider transport error (no ErrLaneOutage involved) still falls through
+		// to w.fail below, unchanged.
+		if orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeBenignMiss || errors.Is(err, orchestrator.ErrLaneOutage) {
 			slog.Debug("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
 			// Every active lane was tried and none returned lyrics: record a miss for
 			// each. Errors are non-fatal; recording happens before the Defer/Complete
@@ -723,95 +780,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// Also persist the per-track attribution (all attempted lanes missed this
 			// track) for the true per-track hit-rate (#282). The orchestrator carries
 			// the attempts on the returned song even on the benign-miss error path.
+			//
+			// Optional audio-based instrumental detection already ran (if
+			// configured) as part of the FindLyrics dispatch above: a gate-positive
+			// detector verdict is terminal-suitable and returns via the success
+			// (err == nil) path below, never here. Reaching this branch means every
+			// lane - including the detector lane, if present - missed, so there is
+			// nothing further to detect; this branch owns only the miss-counter and
+			// defer/requeue duties.
 			w.recordLaneAttempts(context.WithoutCancel(ctx), item.ID, song.LaneAttempts)
-			// Optional audio-based instrumental detection. Only runs on provider
-			// misses (no lyrics and not already flagged instrumental). Errors are
-			// non-fatal: starvation of the detector sidecar is acceptable; the miss
-			// path continues unchanged when the detector is absent or fails.
-			detResult, detRan, detErr := w.detectInstrumental(ctx, item)
-			if detErr != nil {
-				slog.Warn("worker instrumental detection failed; treating as miss", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", detErr)
-			}
-			if detResult.Instrumental {
-				slog.Info("worker audio detector: instrumental track confirmed; writing marker", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "kind", "instrumental")
-				instrumentalSong := models.Song{
-					Track: models.Track{
-						ArtistName:   resolvedTrack.ArtistName,
-						TrackName:    resolvedTrack.TrackName,
-						AlbumName:    resolvedTrack.AlbumName,
-						Instrumental: 1,
-					},
-					DetectorVersion: detResult.Version,
-				}
-				encoded, encErr := encodeSong(instrumentalSong)
-				if encErr != nil {
-					slog.Warn("worker instrumental detection: cache encode failed; treating as miss", "id", item.ID, "error", encErr)
-				} else {
-					if storeErr := w.cache.Store(context.WithoutCancel(ctx), resolvedTrack.ArtistName, resolvedTrack.TrackName, normalize.DurationBucket(resolvedTrack.TrackLength), encoded); storeErr != nil {
-						slog.Warn("worker instrumental detection: cache store failed; continuing to write", "id", item.ID, "error", storeErr)
-					}
-				}
-				for _, p := range outputPaths(item.Inputs) {
-					if writeErr := w.writer.WriteLRC(instrumentalSong, p.Filename, p.Outdir); writeErr != nil {
-						writeErr = fmt.Errorf("worker: write instrumental item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, writeErr)
-						slog.Warn("worker instrumental detection: write failed; treating as miss", "id", item.ID, "error", writeErr)
-						if derr := w.requeueDeferred(ctx, item, err); derr != nil {
-							return derr
-						}
-						w.consecutiveFailures = 0
-						return nil
-					}
-				}
-				ctxNoCancel := context.WithoutCancel(ctx)
-				// Stamp instrumental_result=1 + telemetry only AFTER the marker write
-				// succeeded (a failed WriteLRC above requeues and returns before here),
-				// so a transient write error never leaves a row tagged instrumental with
-				// stale telemetry. Still before Complete, so /metrics reflects it durably.
-				// Non-fatal: a failed stamp is not worth aborting the completed write.
-				tel := queue.InstrumentalTelemetry{
-					MusicSum:        detResult.Confidence,
-					VocalPeak:       detResult.VocalConfidence,
-					SpeechMean:      detResult.SpeechConfidence,
-					VocalClass:      detResult.WinningVocalClass,
-					DetectorVersion: detResult.Version,
-				}
-				if stampErr := w.queue.SetInstrumentalResult(ctxNoCancel, item.ID, 1, tel); stampErr != nil {
-					slog.Warn("worker instrumental detection: stamp result failed; continuing", "id", item.ID, "error", stampErr)
-				}
-				// Record the written outcome before Complete so reports count this
-				// (and every other instrumental source) as instrumental, not just
-				// rows with instrumental_result=1 (#379). Non-fatal, like the stamp above.
-				if stampErr := w.queue.SetOutcomeType(ctxNoCancel, item.ID, "instrumental"); stampErr != nil {
-					slog.Warn("worker instrumental detection: stamp outcome type failed; continuing", "id", item.ID, "error", stampErr)
-				}
-				if completeErr := w.queue.Complete(ctxNoCancel, item.ID); completeErr != nil {
-					cause := fmt.Errorf("worker: complete instrumental item %d: %w", item.ID, completeErr)
-					w.consecutiveFailures++
-					if _, failErr := w.queue.Fail(ctxNoCancel, item.ID, cause); failErr != nil {
-						return fmt.Errorf("worker: complete instrumental item %d and mark failed: %w", item.ID, errors.Join(cause, failErr))
-					}
-					return fmt.Errorf("worker: complete instrumental item %d (marked failed): %w", item.ID, cause)
-				}
-				w.consecutiveFailures = 0
-				return nil
-			}
-			// Detection ran but the track is not instrumental: stamp result=0 and
-			// the telemetry so the row is distinguishable from "never detected"
-			// (NULL) and the borderline scores are queryable. Only stamp when
-			// detection actually ran (detRan=true); a disabled/no-source/no-detector
-			// path leaves the columns NULL.
-			if detErr == nil && detRan {
-				tel := queue.InstrumentalTelemetry{
-					MusicSum:        detResult.Confidence,
-					VocalPeak:       detResult.VocalConfidence,
-					SpeechMean:      detResult.SpeechConfidence,
-					VocalClass:      detResult.WinningVocalClass,
-					DetectorVersion: detResult.Version,
-				}
-				if stampErr := w.queue.SetInstrumentalResult(context.WithoutCancel(ctx), item.ID, 0, tel); stampErr != nil {
-					slog.Warn("worker instrumental detection: stamp non-instrumental result failed; continuing", "id", item.ID, "error", stampErr)
-				}
-			}
 			if derr := w.requeueDeferred(ctx, item, err); derr != nil {
 				return derr
 			}
@@ -825,6 +802,20 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		}
 		slog.Warn("worker song resolution failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 		return w.fail(ctx, item, err)
+	}
+	// A gate-positive detector verdict (whether terminal-suitable with telemetry,
+	// or merely best-available when every other lane also missed) flows back
+	// here on the success (err == nil) path rather than through the benign-miss
+	// branch above - checked before cacheHit's fetch-only bookkeeping runs.
+	// song.WinningLane is the discriminator: it identifies a song sourced fresh
+	// from the detector lane THIS dispatch (set only by findOrdered/resolve on a
+	// live lane result), and is safe against a cache hit resurrecting a false
+	// positive here because models.Song.WinningLane carries `json:"-"` - it is
+	// never round-tripped through the cache, so a decoded cache hit always
+	// leaves it empty. The redundant !cacheHit guard is kept as defense in
+	// depth against a future change to that tag.
+	if !cacheHit && song.WinningLane == detectorLaneName {
+		return w.completeDetectorInstrumental(ctx, item, resolvedTrack, song)
 	}
 	confidence := Confidence(item.Inputs.Track, song.Track)
 	slog.Debug("worker lyrics match", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "cache_hit", cacheHit)
@@ -922,40 +913,114 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 	return nil
 }
 
-// detectInstrumental invokes the audio detector on the item's source path when
-// instrumental detection is enabled for this item. The decision is resolved from
-// the per-item stamp (item.DetectInstrumental) falling back to the global default
-// when nil (NULL rows). It returns (Result{}, false, nil) when detection is off
-// for the item or the source path is absent - the false "ran" flag tells the
-// caller not to stamp telemetry (keeping the five telemetry columns NULL, which
-// preserves the pre-telemetry / detection-disabled semantics). When an item
-// requests detection but no classifier is configured, it logs an error and
-// proceeds without detection (loud-skip, never a silent no-op). Any detector
-// error is returned non-fatally: the caller logs a warning and falls through to
-// normal miss handling. The returned Result carries the full telemetry (scores +
-// winning class + version) on success; it is zero-valued when ran=false or on
-// error.
-func (w *Worker) detectInstrumental(ctx context.Context, item queue.WorkItem) (detector.Result, bool, error) {
+// detectorLaneName mirrors orchestrator.NewDetectorLane's lane name. It is
+// duplicated here (rather than exported from orchestrator) because the worker
+// only needs it as an equality check on models.Song.WinningLane to recognize a
+// song sourced fresh from the detector lane; see the RunOnce success-path
+// routing above completeDetectorInstrumental.
+const detectorLaneName = "detector"
+
+// detectionEnabledFor resolves whether instrumental detection is enabled for
+// item: the per-item stamp (item.DetectInstrumental) when set, falling back to
+// the global default (detectInstrumentalDefault) when nil (NULL rows, e.g.
+// pre-existing rows enqueued before the per-item column existed).
+func (w *Worker) detectionEnabledFor(item queue.WorkItem) bool {
 	detect := w.detectInstrumentalDefault
 	if item.DetectInstrumental != nil {
 		detect = *item.DetectInstrumental
 	}
-	if !detect {
-		return detector.Result{}, false, nil
+	return detect
+}
+
+// detectorPathFor resolves the audio path handed to the orchestrator's
+// detector lane for item. It is deliberately empty when detection is disabled
+// for this item, or when no source path is available, because NewDetectorLane's
+// resolve func treats an empty path as a benign miss - this keeps the per-item
+// DetectInstrumental override in the worker (which holds the item) without
+// widening the lane dispatch signature to carry it. When detection is enabled
+// but no classifier is configured, this logs an ERROR (loud-skip, never a
+// silent no-op) and returns empty, mirroring the pre-lane detectInstrumental
+// behavior this replaces.
+func (w *Worker) detectorPathFor(item queue.WorkItem) string {
+	if !w.detectionEnabledFor(item) {
+		return ""
 	}
 	if w.audioDetector == nil {
 		slog.Error("instrumental detection requested for item but no classifier is configured; skipping detection",
 			"id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName)
-		return detector.Result{}, false, nil
+		return ""
 	}
 	if strings.TrimSpace(item.Inputs.SourcePath) == "" {
-		return detector.Result{}, false, nil
+		return ""
 	}
-	res, err := w.audioDetector.Detect(ctx, item.Inputs.SourcePath)
-	if err != nil {
-		return detector.Result{}, false, err
+	return item.Inputs.SourcePath
+}
+
+// stampDetectorInstrumental records a detector-sourced instrumental settle from
+// the orchestrator result. It replaces the old inline hand-built song path,
+// reading telemetry off the Song the detector lane produced. ctxNoCancel mirrors
+// the prior stamp code so a canceled work context cannot drop the write.
+func (w *Worker) stampDetectorInstrumental(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) error {
+	tel := queue.InstrumentalTelemetry{
+		MusicSum:        song.DetectorMusicSum,
+		VocalPeak:       song.DetectorVocalPeak,
+		SpeechMean:      song.DetectorSpeechMean,
+		VocalClass:      song.DetectorVocalClass,
+		DetectorVersion: song.DetectorVersion,
 	}
-	return res, true, nil
+	if err := w.queue.SetInstrumentalResult(ctxNoCancel, item.ID, 1, tel); err != nil {
+		return fmt.Errorf("stamp instrumental result: %w", err)
+	}
+	if err := w.queue.SetOutcomeType(ctxNoCancel, item.ID, "instrumental"); err != nil {
+		return fmt.Errorf("stamp outcome_type: %w", err)
+	}
+	return nil
+}
+
+// completeDetectorInstrumental finalizes a fresh detector-lane instrumental
+// settle: cache-store the encoded song, write the instrumental marker to every
+// output path, stamp the instrumental result/telemetry/outcome type, and
+// complete the queue row. It mirrors the write/complete sequence the old inline
+// detector branch used, now sourced from the orchestrator's song rather than a
+// hand-built literal.
+func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.WorkItem, resolvedTrack models.Track, song models.Song) error {
+	slog.Info("worker audio detector: instrumental track confirmed; writing marker", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "kind", "instrumental")
+	encoded, encErr := encodeSong(song)
+	if encErr != nil {
+		slog.Warn("worker instrumental detection: cache encode failed; treating as miss", "id", item.ID, "error", encErr)
+	} else if storeErr := w.cache.Store(context.WithoutCancel(ctx), resolvedTrack.ArtistName, resolvedTrack.TrackName, normalize.DurationBucket(resolvedTrack.TrackLength), encoded); storeErr != nil {
+		slog.Warn("worker instrumental detection: cache store failed; continuing to write", "id", item.ID, "error", storeErr)
+	}
+	for _, p := range outputPaths(item.Inputs) {
+		if writeErr := w.writer.WriteLRC(song, p.Filename, p.Outdir); writeErr != nil {
+			writeErr = fmt.Errorf("worker: write instrumental item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, writeErr)
+			slog.Warn("worker instrumental detection: write failed; treating as miss", "id", item.ID, "error", writeErr)
+			if derr := w.requeueDeferred(ctx, item, writeErr); derr != nil {
+				return derr
+			}
+			w.consecutiveFailures = 0
+			return nil
+		}
+	}
+	ctxNoCancel := context.WithoutCancel(ctx)
+	// Stamp instrumental_result=1 + telemetry + outcome type only AFTER the
+	// marker write succeeded (a failed WriteLRC above requeues and returns before
+	// here), so a transient write error never leaves a row tagged instrumental
+	// with stale telemetry. Still before Complete, so /metrics reflects it
+	// durably. Non-fatal: a failed stamp is not worth aborting the completed write.
+	if stampErr := w.stampDetectorInstrumental(ctxNoCancel, item, song); stampErr != nil {
+		slog.Warn("worker instrumental detection: stamp failed; continuing", "id", item.ID, "error", stampErr)
+	}
+	if completeErr := w.queue.Complete(ctxNoCancel, item.ID); completeErr != nil {
+		cause := fmt.Errorf("worker: complete instrumental item %d: %w", item.ID, completeErr)
+		w.consecutiveFailures++
+		if _, failErr := w.queue.Fail(ctxNoCancel, item.ID, cause); failErr != nil {
+			return fmt.Errorf("worker: complete instrumental item %d and mark failed: %w", item.ID, errors.Join(cause, failErr))
+		}
+		return fmt.Errorf("worker: complete instrumental item %d (marked failed): %w", item.ID, cause)
+	}
+	w.consecutiveFailures = 0
+	return nil
 }
 
 // song looks up or fetches lyrics for track. The caller is responsible for

@@ -952,6 +952,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	}
 	configureWorkerAudioDetector(w, audioDetector)
 	w.SetInstrumentalDetectionDefault(cfg.InstrumentalDetector.Enabled)
+	w.SetDetectorOrdering(cfg.InstrumentalDetector.Ordering)
 	configureWorkerGuard(w, newGuard(cfg))
 	// Wire the DB-backed provider outcome recorder so hits and misses are persisted
 	// and exposed via GET /metrics (mxlrcgo_provider_hits_total{lane},

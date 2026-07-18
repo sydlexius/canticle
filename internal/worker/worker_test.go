@@ -1991,9 +1991,13 @@ func TestRunOnceDetectorErrorTreatsAsMiss(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	// Detector error should be logged as a warning.
-	if !hasLog(*recs, slog.LevelWarn, "instrumental detection failed") {
-		t.Fatalf("logs = %+v; want a warning about instrumental detection failure", *recs)
+	// A detector error now surfaces as ErrLaneOutage and is logged by the
+	// orchestrator's detectorClassifier (not the worker) as a circuit-open
+	// warning, since the detector runs as a lane inside FindLyrics rather than
+	// via an inline worker call (#502). The item must still end up deferred, as
+	// asserted below.
+	if !hasLog(*recs, slog.LevelWarn, "lane circuit opened: detector outage; degrading to providers") {
+		t.Fatalf("logs = %+v; want a warning about the detector lane circuit opening", *recs)
 	}
 	// Item must be deferred (normal miss path).
 	if len(q.deferred) != 1 || q.deferred[0] != 202 {
@@ -2117,6 +2121,57 @@ func TestRunOnceDetectorNotCalledOnSuccess(t *testing.T) {
 	}
 	if len(q.completed) != 1 || q.completed[0] != 204 {
 		t.Fatalf("completed = %v; want [204]", q.completed)
+	}
+}
+
+// TestRunOnceDetectorFrontSettlesWithoutProviders verifies that with "front"
+// ordering, a gate-positive detector verdict settles the item without
+// consulting any provider lane, and that the full detector telemetry
+// round-trips through the stamp path.
+func TestRunOnceDetectorFrontSettlesWithoutProviders(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 400,
+		Inputs: models.Inputs{
+			Track: track, Outdir: "out", Filename: "artist-title.lrc",
+			SourcePath: "/music/x.flac",
+		},
+	}}}
+	cache := &fakeCache{}
+	fetcher := &fakeFetcher{}
+	writer := &fakeWriter{}
+	det := &fakeDetector{result: detector.Result{
+		Instrumental: true, Confidence: 0.9, VocalConfidence: 0.01,
+		SpeechConfidence: 0.02, WinningVocalClass: "Singing", Version: "1.5.0",
+	}}
+
+	w := New(q, cache, fetcher, writer)
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetDetectorOrdering("front")
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if fetcher.calls != 0 {
+		t.Fatalf("fetcher.calls = %d; want 0 (detector settled in front)", fetcher.calls)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 400 {
+		t.Fatalf("completed = %v; want [400]", q.completed)
+	}
+	if len(q.instrumentalStamps) != 1 {
+		t.Fatalf("instrumentalStamps = %+v; want exactly one", q.instrumentalStamps)
+	}
+	got := q.instrumentalStamps[0]
+	if got.ID != 400 || got.Result != 1 {
+		t.Fatalf("stamp = %+v; want ID 400 result 1", got)
+	}
+	if got.Tel.DetectorVersion != "1.5.0" || got.Tel.MusicSum != 0.9 ||
+		got.Tel.VocalPeak != 0.01 || got.Tel.SpeechMean != 0.02 || got.Tel.VocalClass != "Singing" {
+		t.Fatalf("telemetry did not round-trip: %+v", got.Tel)
+	}
+	if q.outcomeTypes[400] != "instrumental" {
+		t.Fatalf("outcomeTypes[400] = %q; want instrumental", q.outcomeTypes[400])
 	}
 }
 
@@ -2533,5 +2588,21 @@ func TestLogIdleNamesTheCauseNotJustEmptiness(t *testing.T) {
 		if hasLog(*recs, slog.LevelDebug, "queue empty") {
 			t.Errorf("logIdle(%v) claimed \"queue empty\"; only errQueueEmpty may say that (#500)", err)
 		}
+	}
+}
+
+// TestRebuildOrchestrator_DetectorOrdering verifies SetDetectorOrdering places
+// the detector lane first ("front") or last (any other value, e.g. "demoted")
+// among the dispatch lanes.
+func TestRebuildOrchestrator_DetectorOrdering(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.EnableAudioDetector(&fakeDetector{})
+	w.SetDetectorOrdering("front")
+	if got := w.orch.LaneNames(); len(got) == 0 || got[0] != "detector" {
+		t.Fatalf("front ordering: lanes = %v, want detector first", got)
+	}
+	w.SetDetectorOrdering("demoted")
+	if last := w.orch.LaneNames(); len(last) == 0 || last[len(last)-1] != "detector" {
+		t.Fatalf("demoted ordering: lanes = %v, want detector last", last)
 	}
 }

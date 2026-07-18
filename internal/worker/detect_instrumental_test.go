@@ -87,7 +87,14 @@ func TestRunOnce_DetectNilFallsBackToDefaultOff(t *testing.T) {
 
 // TestDetectInstrumental_WantedButNoClassifierLoudSkips verifies that when an
 // item requests detection but no classifier is configured, the worker logs an
-// error (loud-skip, no silent no-op) and returns (false, nil).
+// error (loud-skip, no silent no-op) and resolves an empty detector path.
+//
+// This test previously called the now-removed w.detectInstrumental directly.
+// detectInstrumental was replaced by detectionEnabledFor (the enable decision,
+// unchanged logic) and detectorPathFor (the path-gating + loud-skip logging,
+// consulted at the FindLyrics call site instead of via an inline detector
+// call) as part of wiring the detector into the orchestrator as a lane
+// (#502). This ports the same assertions to the new split.
 func TestDetectInstrumental_WantedButNoClassifierLoudSkips(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -96,15 +103,13 @@ func TestDetectInstrumental_WantedButNoClassifierLoudSkips(t *testing.T) {
 
 	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
 	// no EnableAudioDetector: classifier unconfigured
-	res, ran, err := w.detectInstrumental(context.Background(), detectItem(303, boolPtr(true)))
-	if err != nil {
-		t.Fatalf("detectInstrumental err = %v; want nil (non-fatal loud-skip)", err)
+	item := detectItem(303, boolPtr(true))
+	if !w.detectionEnabledFor(item) {
+		t.Fatalf("detectionEnabledFor = false; want true (item opted in)")
 	}
-	if res.Instrumental {
-		t.Error("instrumental = true; want false when no classifier configured")
-	}
-	if ran {
-		t.Error("ran = true; want false when no classifier configured (loud-skip path)")
+	path := w.detectorPathFor(item)
+	if path != "" {
+		t.Errorf("detectorPathFor = %q; want empty when no classifier configured (loud-skip path)", path)
 	}
 	logged := buf.String()
 	if !strings.Contains(logged, "level=ERROR") || !strings.Contains(logged, "no classifier") {
