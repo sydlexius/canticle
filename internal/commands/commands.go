@@ -60,6 +60,7 @@ type Args struct {
 	Scan       *ScanCmd       `arg:"subcommand:scan" help:"scan configured libraries and enqueue missing lyrics"`
 	Library    *LibraryCmd    `arg:"subcommand:library" help:"manage library roots"`
 	Keys       *KeysCmd       `arg:"subcommand:keys" help:"manage API keys"`
+	Admin      *AdminCmd      `arg:"subcommand:admin" help:"manage the web-UI admin account"`
 	Secrets    *SecretsCmd    `arg:"subcommand:secrets" help:"manage encrypted-at-rest secrets"`
 	Config     *ConfigCmd     `arg:"subcommand:config" help:"inspect or update configuration"`
 	Queue      *QueueCmd      `arg:"subcommand:queue" help:"inspect or maintain the durable work queue"`
@@ -356,6 +357,25 @@ type KeysCreateCmd struct {
 	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
+// AdminCmd manages the web-UI admin account.
+type AdminCmd struct {
+	SetPassword *AdminSetPasswordCmd `arg:"subcommand:set-password" help:"set the web-UI admin password"`
+}
+
+// AdminSetPasswordCmd sets an existing web-UI admin's password (#545).
+//
+// This is the supported rotation path and the escape hatch when the UI is
+// unreachable: /setup is loopback/trusted-CIDR only (#461), and the env
+// bootstrap refuses to overwrite an existing admin, so without this the only
+// way to change the password was deleting the user row from the database.
+//
+// The password is read from stdin rather than taken as a flag, so it never
+// lands in shell history, the process table, or a CI log.
+type AdminSetPasswordCmd struct {
+	User       string `arg:"--user" help:"username whose password to set" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
 // KeysListCmd lists API keys.
 type KeysListCmd struct {
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
@@ -511,6 +531,8 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 		return runLibrary(ctx, out, *args.Library)
 	case args.Keys != nil:
 		return runKeys(ctx, out, *args.Keys)
+	case args.Admin != nil:
+		return runAdmin(ctx, out, os.Stdin, *args.Admin)
 	case args.Secrets != nil:
 		return runSecrets(ctx, out, *args.Secrets)
 	case args.Config != nil:
@@ -1248,7 +1270,17 @@ func bootstrapAdminFromEnv(ctx context.Context, svc *webauth.Service) error {
 		return fmt.Errorf("check for existing admin: %w", err)
 	}
 	if has {
-		slog.Info("web admin env-bootstrap skipped: an admin account already exists")
+		// WARN, not INFO. An operator who edited the bootstrap password and
+		// restarted expecting a rotation gets a healthy service and, previously, a
+		// reassuring INFO line -- while the OLD password stayed live. Every
+		// outward sign said the credential had been rotated when it had not
+		// (#545). Say plainly that the value is being ignored, and name the
+		// command that actually rotates it.
+		slog.Warn("web admin env-bootstrap SKIPPED: an admin already exists, so "+
+			envWebAdminPass+" is being IGNORED. If you changed it expecting a password "+
+			"rotation, it did NOT take effect and the previous password is still active. "+
+			"Rotate with: canticle admin set-password --user <name>",
+			"user", user)
 		return nil
 	}
 	if len(pass) < webauth.MinPasswordLength {

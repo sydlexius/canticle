@@ -64,8 +64,15 @@ func (failingUserStore) GetByID(context.Context, string) (User, bool, error) {
 	return User{}, false, errStore
 }
 func (failingUserStore) HasUsers(context.Context) (bool, error) { return false, errStore }
+func (failingUserStore) UpdatePasswordHash(context.Context, string, string) error {
+	return errStore
+}
 
 type failingSessionStore struct{}
+
+func (failingSessionStore) DeleteSessionsForUser(context.Context, string) (int64, error) {
+	return 0, errStore
+}
 
 func (failingSessionStore) CreateSession(context.Context, string, time.Time) (string, error) {
 	return "", errStore
@@ -113,8 +120,9 @@ func (s okUserStore) CreateFirstUser(context.Context, string, string) (User, err
 func (s okUserStore) GetByUsername(context.Context, string) (User, bool, error) {
 	return s.user, true, nil
 }
-func (s okUserStore) GetByID(context.Context, string) (User, bool, error) { return s.user, true, nil }
-func (s okUserStore) HasUsers(context.Context) (bool, error)              { return true, nil }
+func (s okUserStore) GetByID(context.Context, string) (User, bool, error)      { return s.user, true, nil }
+func (s okUserStore) HasUsers(context.Context) (bool, error)                   { return true, nil }
+func (s okUserStore) UpdatePasswordHash(context.Context, string, string) error { return nil }
 
 func TestServiceLoginSessionCreateError(t *testing.T) {
 	ctx := context.Background()

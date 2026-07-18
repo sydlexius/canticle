@@ -25,9 +25,14 @@ var (
 	// ErrInvalidSession is returned by ValidateSession for an unknown, expired, or
 	// orphaned session token.
 	ErrInvalidSession = errors.New("webauth: invalid session")
-	// ErrPasswordTooShort is returned by Setup when the password is shorter than
-	// MinPasswordLength.
+	// ErrPasswordTooShort is returned by Setup and SetPassword when the password
+	// is shorter than MinPasswordLength.
 	ErrPasswordTooShort = fmt.Errorf("webauth: password must be at least %d characters", MinPasswordLength)
+	// ErrUserNotFound is returned by SetPassword when the named user does not
+	// exist. Unlike Login, SetPassword is an administrative operation reached
+	// only by an operator who already controls the host or an authenticated
+	// session, so naming the failure is an aid rather than an enumeration risk.
+	ErrUserNotFound = errors.New("webauth: user not found")
 )
 
 // Service ties the user and session stores together into the browser-auth core:
@@ -107,6 +112,49 @@ func (s *Service) Setup(ctx context.Context, username, password string) (User, e
 		return User{}, fmt.Errorf("webauth: setup: %w", err)
 	}
 	return user, nil
+}
+
+// SetPassword replaces an existing user's password and revokes their sessions.
+//
+// This is the supported credential-rotation path (#545). Before it existed the
+// env bootstrap was the only way a password ever got set, and it deliberately
+// refuses to overwrite an existing admin -- so an operator who edited the
+// bootstrap value and restarted saw a healthy service, an INFO line reading
+// "skipped", and the OLD password still live. The only remaining route was
+// deleting the user row from the database.
+//
+// Sessions are revoked as part of the rotation. An operator changing a
+// compromised credential expects tokens minted under the old one to stop
+// working; leaving them valid until natural expiry would defeat the point. The
+// revoke is best-effort in ordering terms -- the hash is written first, so a
+// failure to clear sessions cannot leave the old password usable -- but its
+// error is returned so the caller learns the sessions outlived the change.
+func (s *Service) SetPassword(ctx context.Context, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("webauth: username must not be empty")
+	}
+	if len(password) < MinPasswordLength {
+		return ErrPasswordTooShort
+	}
+	user, ok, err := s.users.GetByUsername(ctx, username)
+	if err != nil {
+		return fmt.Errorf("webauth: set password: %w", err)
+	}
+	if !ok {
+		return ErrUserNotFound
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("webauth: set password: %w", err)
+	}
+	if err := s.users.UpdatePasswordHash(ctx, username, hash); err != nil {
+		return fmt.Errorf("webauth: set password: %w", err)
+	}
+	if _, err := s.sessions.DeleteSessionsForUser(ctx, user.ID); err != nil {
+		return fmt.Errorf("webauth: set password: revoke sessions: %w", err)
+	}
+	return nil
 }
 
 // Login verifies credentials and, on success, creates a session and returns its

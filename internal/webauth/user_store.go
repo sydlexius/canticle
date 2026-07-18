@@ -49,6 +49,12 @@ type UserStore interface {
 	GetByID(ctx context.Context, id string) (user User, ok bool, err error)
 	// HasUsers reports whether any user exists (used for first-run detection).
 	HasUsers(ctx context.Context) (bool, error)
+	// UpdatePasswordHash replaces the stored Argon2id hash for username
+	// (case-insensitive), leaving the user's identity and id intact. It returns
+	// ErrUserNotFound when no such user exists. This is the durable half of
+	// credential rotation (#545); before it existed the only way to change an
+	// admin password was deleting the row from the database.
+	UpdatePasswordHash(ctx context.Context, username, passwordHash string) error
 }
 
 // SQLUserStore persists users in the SQLite `users` table.
@@ -151,6 +157,37 @@ func (s *SQLUserStore) HasUsers(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("webauth: has users: %w", err)
 	}
 	return exists == 1, nil
+}
+
+// UpdatePasswordHash replaces the stored hash for username, matching the
+// case-insensitive lookup GetByUsername uses so a rotation cannot miss the row
+// it just read. The user's id and created_at are untouched: rotation changes a
+// credential, not an identity, so sessions, audit trails, and any future
+// per-user rows stay attached to the same account.
+func (s *SQLUserStore) UpdatePasswordHash(ctx context.Context, username, passwordHash string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("webauth: username must not be empty")
+	}
+	if passwordHash == "" {
+		return fmt.Errorf("webauth: password hash must not be empty")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE username = ? COLLATE NOCASE`,
+		passwordHash, username,
+	)
+	if err != nil {
+		return fmt.Errorf("webauth: update password hash: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("webauth: update password hash: %w", err)
+	}
+	if n == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 func (s *SQLUserStore) requireByID(ctx context.Context, id string) (User, error) {
