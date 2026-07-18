@@ -171,3 +171,26 @@ func TestRunCompletion_Scripts(t *testing.T) {
 		t.Fatalf("unsupported shell: code=%d want 2", code)
 	}
 }
+
+// TestUsesSubcommandCoversCommandTree guards the registration point that shipped
+// a broken command in v1.20.0.
+//
+// Adding a subcommand requires touching FOUR places: the Args struct, the
+// dispatch switch, the completion tables, and the usesSubcommand map that
+// decides whether to parse the modern subcommand tree or the legacy CLI. The
+// `admin` subcommand was added to the first three and missed here, so
+// `canticle admin set-password --user x` fell through to the legacy parser and
+// died with "unknown argument --user" -- a command that could not be invoked at
+// all, while every unit test passed because they called the handlers directly
+// and never went through the parser.
+//
+// The completion tables had a guard like this one and it caught their omission
+// immediately. This map had none, which is the only reason the bug shipped.
+func TestUsesSubcommandCoversCommandTree(t *testing.T) {
+	for _, name := range subcommandNames(reflect.TypeOf(Args{})) {
+		if !usesSubcommand([]string{name}) {
+			t.Errorf("usesSubcommand does not recognize %q (declared in Args); add it to the commands map in commands.go, "+
+				"or the command silently falls through to the legacy parser and cannot be invoked", name)
+		}
+	}
+}

@@ -253,8 +253,36 @@ Bootstrap behavior:
 - **Both vars required.** Setting only one logs a warning and skips the bootstrap.
 - **Password floor.** The password must be at least 8 characters. A shorter one is a **fatal startup error** (the container will not start), not a silent skip.
 - **Idempotent.** The bootstrap runs only when no admin exists yet. Once any admin account is present it is skipped (never an overwrite), so leaving the vars set across restarts is harmless. The password is never logged.
+- **It is a bootstrap, not a rotation control.** Changing `MXLRC_WEBAUTH_ADMIN_PASSWORD` after an admin exists and restarting **does not change the password**. The bootstrap is skipped, the service starts healthy, and the previous password stays active. Since v1.20.1 that skip is logged at warning level and names the command below; older builds logged it at info level, where it read as reassurance. To change an existing password, use [Changing or resetting the admin password](#changing-or-resetting-the-admin-password).
 
-**First login and cleanup.** After the container is up, browse to `http://[host]:[port]/login` and sign in with the bootstrapped credentials. Then **rotate the password from inside the UI and remove the `MXLRC_WEBAUTH_ADMIN_USER` / `MXLRC_WEBAUTH_ADMIN_PASSWORD` env vars** (and restart). Because the bootstrap is idempotent, the stale vars do nothing on the next start, but removing them keeps the plaintext password out of the container environment.
+**First login and cleanup.** After the container is up, browse to `http://[host]:[port]/login` and sign in with the bootstrapped credentials. Then **rotate the password with `canticle admin set-password` (see below) and remove the `MXLRC_WEBAUTH_ADMIN_USER` / `MXLRC_WEBAUTH_ADMIN_PASSWORD` env vars**. Because the bootstrap is idempotent, the stale vars do nothing on the next start, but removing them keeps the plaintext password out of the container environment.
+
+### Changing or resetting the admin password
+
+Use `canticle admin set-password`. This is the only supported way to change an existing admin password: there is no password-change screen in the web UI yet (tracked in issue #545), and editing the bootstrap environment variable does nothing once an admin exists.
+
+```sh
+printf '%s' 'your-new-password' | canticle admin set-password --user admin
+```
+
+In Docker or Unraid, run it inside the running container:
+
+```sh
+docker exec -i canticle sh -c 'printf "%s" "your-new-password" | canticle admin set-password --user admin'
+```
+
+Notes on how it behaves:
+
+- **The password is read from standard input, never a flag.** A `--password` flag would place the credential in your shell history and in the host's process list, where any other user on the machine can read it. Piping keeps it out of both. Prefer reading from a file (`canticle admin set-password --user admin < newpass.txt`) or a secret manager over typing it inline, since an inline `printf` still lands in shell history.
+- **A trailing newline is stripped**, so the usual `echo` and heredoc forms behave as expected. Leading and trailing spaces are preserved, because they may be part of the passphrase.
+- **Existing sessions are revoked.** Anyone signed in with the old password is signed out immediately. That is the point of rotating a compromised credential, and it means you will need to sign in again yourself.
+- **The change is atomic.** The password update and the session revocation happen in one database transaction, so a rotation either fully applies or leaves the account untouched. It cannot half-apply.
+- **No restart is needed.** The change takes effect immediately.
+- **The password is never printed**, and the minimum length is 8 characters.
+
+**If you are locked out entirely** (password lost, and no session), the same command works because it acts directly on the database rather than requiring a login. Run it on the host or inside the container as shown above. You do not need to delete anything from the database, and you should not: on releases before v1.20.1 the only route was removing the admin row by hand, which is no longer necessary and is easy to get wrong.
+
+**If your build predates v1.20.1**, `canticle admin set-password` is either absent or unreachable (in v1.20.0 the subcommand shipped but could not be invoked, falling through to the legacy argument parser with `unknown argument --user`). Upgrade to v1.20.1 or later, then use the command above.
 
 If the UI is reachable beyond your local machine, also read [Security considerations](#security-considerations) below: put it behind TLS so the session cookie is not sent in cleartext.
 

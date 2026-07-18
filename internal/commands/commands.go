@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -551,6 +552,42 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 	}
 }
 
+// topLevelSubcommands is the set of subcommand names declared on Args, derived
+// from its struct tags rather than hand-maintained.
+//
+// It used to be a hardcoded map, and that shipped a broken command in v1.20.0:
+// `admin` was added to Args, to the dispatch switch, and to the completion
+// tables, but not to the map. Because this function decides whether to parse the
+// modern subcommand tree or the legacy CLI, an unlisted command fell through to
+// the legacy parser and died with "unknown argument --user" -- it could not be
+// invoked at all. Unit tests missed it because they called the handlers
+// directly, never through the parser.
+//
+// Deriving the set from the same struct the parser uses removes the drift
+// entirely: a new subcommand is recognized the moment it is declared, with no
+// second place to remember. Computed once at init; Args is static.
+var topLevelSubcommands = func() map[string]bool {
+	out := make(map[string]bool)
+	t := reflect.TypeOf(Args{})
+	for i := range t.NumField() {
+		if name := subcommandTagName(t.Field(i).Tag.Get("arg")); name != "" {
+			out[name] = true
+		}
+	}
+	return out
+}()
+
+// subcommandTagName extracts the name from a go-arg `subcommand:<name>` tag,
+// returning "" for any tag that does not declare one.
+func subcommandTagName(tag string) string {
+	for part := range strings.SplitSeq(tag, ",") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(part), "subcommand:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
 func usesSubcommand(rawArgs []string) bool {
 	if len(rawArgs) == 0 {
 		return false
@@ -558,10 +595,7 @@ func usesSubcommand(rawArgs []string) bool {
 	if rawArgs[0] == "-h" || rawArgs[0] == "--help" {
 		return true
 	}
-	commands := map[string]bool{
-		"fetch": true, "serve": true, "scan": true, "library": true, "keys": true, "secrets": true, "config": true, "queue": true, "provenance": true, "realign": true, "completion": true,
-	}
-	return commands[rawArgs[0]]
+	return topLevelSubcommands[rawArgs[0]]
 }
 
 func legacyFetch(args LegacyArgs) FetchCmd {

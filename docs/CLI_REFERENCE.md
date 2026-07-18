@@ -97,6 +97,21 @@ canticle keys revoke <raw-api-key>
 
 `keys` has three subcommands: `create` (`--name`, repeatable `--scope` of `webhook` or `admin`; prints the raw key once), `list` (tab-separated public ID, name, scopes, revoked-at), and `revoke <raw-api-key>`. All accept `--config`. See [Webhook API keys](USER_GUIDE.md#webhook-api-keys) for the full workflow and the web UI equivalent.
 
+## Web UI admin password
+
+```sh
+printf '%s' 'your-new-password' | canticle admin set-password --user admin
+canticle admin set-password --user admin < newpass.txt
+```
+
+`admin set-password` changes an existing web-UI admin's password. It is the only supported way to do so: there is no password-change screen in the web UI yet (#545), and editing `MXLRC_WEBAUTH_ADMIN_PASSWORD` does nothing once an admin exists, because the environment bootstrap never overwrites an existing account.
+
+The password is read from **standard input, never a flag**, so it stays out of shell history and the host process list. Prefer a file or secret manager over an inline `printf`, which still lands in history. One trailing newline is stripped; leading and trailing spaces are preserved.
+
+The update and the revocation of that user's existing sessions happen in a single transaction, so a rotation cannot half-apply. Everyone signed in with the old password is signed out immediately, including you. No restart is required. Accepts `--config`.
+
+This also works when you are locked out, since it acts on the database rather than requiring a login. See [Changing or resetting the admin password](USER_GUIDE.md#changing-or-resetting-the-admin-password).
+
 ## Secrets
 
 The Musixmatch token and the webhook API key can be stored encrypted at rest in the database instead of as plaintext in `config.toml` or environment variables. The encrypted store is the lowest-precedence source, so CLI flags, env vars, and TOML still win over it.
