@@ -1692,6 +1692,70 @@ func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGat
 	return out, nil
 }
 
+// ListInstrumentalMarkersOptions narrows ListDetectorInstrumentalMarkers.
+type ListInstrumentalMarkersOptions struct {
+	LibraryID *int64
+	Limit     int
+}
+
+// InstrumentalMarkerRow is one detector-written instrumental row with the fields
+// needed to locate its on-disk .txt marker and its stored detector version.
+type InstrumentalMarkerRow struct {
+	ID              int64
+	Inputs          models.Inputs
+	DetectorVersion string
+}
+
+// ListDetectorInstrumentalMarkers returns the detector-written instrumental rows
+// (instrumental_result = 1, status = 'done'), each with its resolved output paths
+// and stored detector_version, so the marker-provenance backfill (#502) can stamp
+// [source:canticle-detector]/[dv:] onto the ones still lacking a header. Provider-
+// written instrumentals (outcome_type='instrumental' with instrumental_result
+// NULL) are excluded: a bare provider marker is already authoritative to the
+// scanner and the DB does not record which provider wrote it.
+//
+// Read-only.
+func (q *DBQueue) ListDetectorInstrumentalMarkers(ctx context.Context, opts ListInstrumentalMarkersOptions) (out []InstrumentalMarkerRow, retErr error) {
+	query := `SELECT id, artist, title, outdir, filename, source_path, output_paths, COALESCE(detector_version,'')
+	          FROM work_queue
+	          WHERE instrumental_result = 1 AND status = 'done'`
+	var args []any
+	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
+	query += libClause //nolint:gosec // G202: recheckLibraryClause returns a fixed parameterized clause, not user-built SQL
+	args = append(args, libArgs...)
+	query += ` ORDER BY id`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: fragments are package constants / recheckLibraryClause's fixed clause
+	if err != nil {
+		return nil, fmt.Errorf("queue: list detector instrumental markers: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close detector instrumental markers rows: %w", err)
+		}
+	}()
+	for rows.Next() {
+		var r InstrumentalMarkerRow
+		var outputPaths string
+		if err := rows.Scan(&r.ID, &r.Inputs.Track.ArtistName, &r.Inputs.Track.TrackName,
+			&r.Inputs.Outdir, &r.Inputs.Filename, &r.Inputs.SourcePath, &outputPaths, &r.DetectorVersion); err != nil {
+			return nil, fmt.Errorf("queue: scan detector instrumental marker: %w", err)
+		}
+		r.Inputs.OutputPaths, err = unmarshalOutputPaths(outputPaths, r.Inputs.Outdir, r.Inputs.Filename)
+		if err != nil {
+			return nil, fmt.Errorf("queue: unmarshal output paths for row %d: %w", r.ID, err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list detector instrumental markers rows: %w", err)
+	}
+	return out, nil
+}
+
 // CountInstrumentalNarrowed returns how many instrumental_result = 1 rows the
 // telemetry-narrowed prefilter would select (the same predicate ListInstrumental
 // applies when opts.All is false), so reconcile can report prefiltered-vs-total

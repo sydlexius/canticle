@@ -141,6 +141,7 @@ type ScanCmd struct {
 	ReconcilePaths                   *ScanReconcilePathsCmd                   `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
 	ReconcileIdentity                *ScanReconcileIdentityCmd                `arg:"subcommand:reconcile-identity" help:"re-read tags and correct run-together multi-value artist rows ingested before the fix (issue #466)"`
 	ReconcileLRC                     *ScanReconcileLRCCmd                     `arg:"subcommand:reconcile-lrc" help:"rewrite existing .lrc sidecars that stack multiple timestamps on one line into the expanded, universally-readable form (issue #470)"`
+	ReconcileMarkerProvenance        *ScanReconcileMarkerProvenanceCmd        `arg:"subcommand:reconcile-marker-provenance" help:"backfill provenance headers onto detector-written instrumental markers (#502)"`
 }
 
 // ScanReconcileLRCCmd walks the configured library roots and rewrites any .lrc
@@ -151,6 +152,16 @@ type ScanReconcileLRCCmd struct {
 	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
 	Yes        bool   `arg:"--yes" help:"actually rewrite files (without it, prints what would change)"`
 	Backup     string `arg:"--backup" help:"path for the JSONL record of rewritten files (default: <db-dir>/reconcile-lrc-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// ScanReconcileMarkerProvenanceCmd backfills provenance headers onto detector-
+// written instrumental markers so the scanner treats them as re-checkable (#502).
+type ScanReconcileMarkerProvenanceCmd struct {
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default all"`
+	Yes        bool   `arg:"--yes" help:"actually stamp markers (without it, prints what would change)"`
+	Limit      int    `arg:"--limit" help:"cap the number of detector rows considered (0 = no cap)" default:"0"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of stamped markers (default: <db-dir>/reconcile-marker-provenance-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -1777,6 +1788,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileLRC(ctx, out, sub)
+	case args.ReconcileMarkerProvenance != nil:
+		sub := *args.ReconcileMarkerProvenance
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileMarkerProvenance(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}

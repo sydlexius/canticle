@@ -29,7 +29,7 @@ var completionSubcommands = []string{
 var completionCandidates = map[string][]string{
 	"fetch":      {"--outdir", "--cooldown", "--depth", "--update", "--upgrade", "--bfs", "--token", "--config", "--album", "--probe", "--isrc", "--duration", "--spotify-id"},
 	"serve":      {"--listen", "--outdir", "--token", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--scan-interval", "--sweep-interval", "--work-interval"},
-	"scan":       {"results", "clear", "reconcile", "reconcile-instrumental", "reconcile-instrumental-recalibrate", "reconcile-paths", "reconcile-identity", "reconcile-lrc", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--only"},
+	"scan":       {"results", "clear", "reconcile", "reconcile-instrumental", "reconcile-instrumental-recalibrate", "reconcile-paths", "reconcile-identity", "reconcile-lrc", "reconcile-marker-provenance", "--config", "--depth", "--update", "--upgrade", "--bfs", "--embedded-lyrics", "--only"},
 	"library":    {"add", "list", "remove", "update"},
 	"keys":       {"create", "list", "revoke"},
 	"secrets":    {"import", "set", "list"},
