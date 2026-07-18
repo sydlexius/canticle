@@ -149,6 +149,12 @@ type ScanOptions struct {
 	// The zero value is false, so direct callers that want the historical
 	// always-on behavior must set it true explicitly.
 	EnrichRecording bool
+	// DetectorVersion is the current audio-detector version. When set (serve mode
+	// with the detector enabled), a provisional (detector-written) instrumental
+	// marker whose stored [dv:] differs is invalidated and re-checked, mirroring
+	// providers_version cache retirement. Empty (dir/CLI mode, or detector off)
+	// disables version invalidation. See #502.
+	DetectorVersion string
 }
 
 // NewScanner creates a new Scanner with the supplied options.
@@ -366,6 +372,9 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		return opts.BFS != id1
 	})
 
+	// reopen is loop-invariant for this directory scan (opts is fixed), so compute
+	// it once rather than per file.
+	reopen := reopenClassesFor(opts)
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -404,12 +413,21 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 			// Synced lyrics already present and not asked to update -- skip.
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
-		case txtExists && !lrcExists && !opts.Update && isInstrumentalTxt(filepath.Join(dir, txtFile)):
-			// Instrumental markers are terminal -- re-fetching would produce the same result.
-			// Skip regardless of --upgrade; only --update (explicit full re-fetch) overrides.
-			slog.Debug("skipping file, instrumental marker", "file", file.Name())
-			continue
-		case txtExists && !opts.Upgrade && !opts.Update && !lrcExists:
+		case txtExists && !lrcExists && isInstrumentalTxt(filepath.Join(dir, txtFile)):
+			// Instrumental markers are re-checkable by provenance (#502): a provider
+			// marker is authoritative (terminal), a detector marker is provisional and
+			// reopens on --upgrade or a detector-version bump.
+			prov, _, provErr := lyrics.ReadInstrumentalProvenance(filepath.Join(dir, txtFile))
+			if provErr != nil {
+				// Treat an unreadable header as terminal: fail conservatively toward terminal so a transient read error never reopens a settled marker.
+				slog.Warn("could not read instrumental provenance; treating marker as terminal", "file", file.Name(), "error", provErr)
+			}
+			if !instrumentalReopenable(prov, reopen, opts.DetectorVersion) {
+				slog.Debug("skipping file, instrumental marker (terminal)", "file", file.Name())
+				continue
+			}
+			// Provisional marker eligible for re-check: fall through to enqueue.
+		case txtExists && !lrcExists && !reopen.Unsynced:
 			// Unsynced .txt present and not asked to upgrade or update -- skip.
 			slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
 			continue

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/doxazo-net/canticle/internal/lyrics"
@@ -243,5 +244,62 @@ func TestAudioFileTypeForExt(t *testing.T) {
 		if !ok && ft != 0 {
 			t.Errorf("audioFileTypeForExt(%q) returned non-zero type on miss: %d", tc.ext, ft)
 		}
+	}
+}
+
+// writeMarkerWithHeader writes an instrumental .txt with a provenance header,
+// mirroring what the Unit A writer emits: [by:canticle], an optional [source:],
+// an optional [dv:], then the marker line.
+func writeMarkerWithHeader(t *testing.T, dir, name, source, dv string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("[by:canticle]\n")
+	if source != "" {
+		b.WriteString("[source:" + source + "]\n")
+	}
+	if dv != "" {
+		b.WriteString("[dv:" + dv + "]\n")
+	}
+	b.WriteString(lyrics.InstrumentalMarker + "\n")
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("writeMarkerWithHeader %s: %v", name, err)
+	}
+}
+
+// TestScanLibrary_InstrumentalProvenanceReopen verifies provenance-aware
+// re-check eligibility (#502): a detector marker is provisional (reopens on
+// --upgrade or a detector-version bump), a provider/legacy marker is terminal
+// (reopens only on --update).
+func TestScanLibrary_InstrumentalProvenanceReopen(t *testing.T) {
+	cases := []struct {
+		name        string
+		source      string
+		dv          string
+		opts        ScanOptions
+		wantEnqueue bool
+	}{
+		{"detector_upgrade_reopens", lyrics.SourceDetector, "1.0", ScanOptions{Upgrade: true}, true},
+		{"detector_no_flags_terminal", lyrics.SourceDetector, "1.0", ScanOptions{}, false},
+		{"detector_version_bump_reopens", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "2.0"}, true},
+		{"detector_same_version_terminal", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "1.0"}, false},
+		{"provider_upgrade_terminal", "musixmatch", "", ScanOptions{Upgrade: true}, false},
+		{"provider_update_reopens", "musixmatch", "", ScanOptions{Update: true}, true},
+		{"legacy_bare_upgrade_terminal", "", "", ScanOptions{Upgrade: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeAudioFile(t, dir, "song.mp3")
+			writeMarkerWithHeader(t, dir, "song.txt", tc.source, tc.dv)
+			sc := NewScanner()
+			results, err := sc.ScanLibrary(context.Background(), dir, tc.opts)
+			if err != nil {
+				t.Fatalf("ScanLibrary: %v", err)
+			}
+			gotEnqueue := len(results) > 0
+			if gotEnqueue != tc.wantEnqueue {
+				t.Errorf("source=%q dv=%q opts=%+v: enqueued=%v, want %v", tc.source, tc.dv, tc.opts, gotEnqueue, tc.wantEnqueue)
+			}
+		})
 	}
 }
