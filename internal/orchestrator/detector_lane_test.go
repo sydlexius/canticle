@@ -68,6 +68,27 @@ func TestDetectorLane_EmptyPathIsBenignMiss(t *testing.T) {
 	}
 }
 
+func TestDetectorClassifier_OtherErrorWrapsAndLeavesBreakerUntouched(t *testing.T) {
+	br := circuit.New(time.Minute, time.Hour)
+	lane := NewDetectorLane(&stubDetector{}, br)
+	cause := errors.New("unexpected decode failure")
+
+	wrapped := detectorClassifier(lane, cause)
+
+	if !errors.Is(wrapped, cause) {
+		t.Fatalf("wrapped error must wrap the cause: %v", wrapped)
+	}
+	if errors.Is(wrapped, ErrLaneBenignMiss) || errors.Is(wrapped, ErrLaneOutage) {
+		t.Fatalf("an unrelated error must not be reclassified as benign-miss or outage: %v", wrapped)
+	}
+	if br.Trips() != 0 {
+		t.Fatalf("an unrelated error must not trip the breaker, got %d trips", br.Trips())
+	}
+	if br.Allow() != circuit.StateClosed {
+		t.Fatalf("breaker must remain closed for an unrelated error, got %v", br.Allow())
+	}
+}
+
 func TestDetectorLane_OutageTripsBreaker(t *testing.T) {
 	d := &stubDetector{err: errors.New("connection refused")}
 	br := circuit.New(time.Minute, time.Hour)
