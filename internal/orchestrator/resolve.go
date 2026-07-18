@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/doxazo-net/canticle/internal/circuit"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
-	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/circuit"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/providers"
 )
 
 // ResolveFunc produces a Song for a track. sourcePath is the on-disk audio path

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/circuit"
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/circuit"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // resolveStubProvider is a minimal providers.LyricsProvider for lane tests.

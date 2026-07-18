@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/doxazo-net/canticle/internal/circuit"
-	"github.com/doxazo-net/canticle/internal/detector"
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/circuit"
+	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // detectorLaneName is the lane name a detector-backed lane reports.
