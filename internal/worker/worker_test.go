@@ -977,6 +977,97 @@ func TestRunPacedPausesAfterEachProcessedItem(t *testing.T) {
 	}
 }
 
+func TestRunPacedSkipsPauseWhenNoProviderWasContacted(t *testing.T) {
+	// The pause exists to protect providers from being called too often. An item
+	// settled entirely by local lanes (the detector, and later any other local
+	// lane) issues no provider request, so it must not consume that budget --
+	// otherwise a library of instrumentals drains at the provider rate despite
+	// never touching a provider (#534).
+	q := &fakeQueue{items: []queue.WorkItem{
+		detectItem(310, boolPtr(true)),
+		detectItem(311, boolPtr(true)),
+	}}
+	// The detector settles both items from local audio analysis. The fetcher would
+	// error if reached, so a pause here would mean the loop paced work no provider
+	// ever saw.
+	det := &fakeDetector{instrumental: true, version: "1.0.0"}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNoLyrics}, &fakeWriter{})
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetDetectorOrdering("front")
+
+	pauses := 0
+	if err := w.run(context.Background(), func(context.Context) error {
+		pauses++
+		return nil
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(q.completed) != 2 {
+		t.Fatalf("completed = %v; want both items settled by the detector", q.completed)
+	}
+	if pauses != 0 {
+		t.Fatalf("pauses = %d; want 0 -- no provider was contacted, so the provider pacing budget must not be spent", pauses)
+	}
+}
+
+func TestRunPacedStillPausesWhenAProviderWasContacted(t *testing.T) {
+	// The guard must be narrow. A mixed attempt set (a local lane plus a provider
+	// lane, as ModeParallel produces) DID issue a provider request, so the pause
+	// still applies. Keying off the winning lane instead of the attempted set
+	// would wrongly skip it here.
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 12, Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"}},
+	}}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "lyrics"},
+		LaneAttempts: []models.LaneAttempt{
+			{Lane: "detector", Hit: true, Local: true},
+			{Lane: "musixmatch", Hit: false},
+		},
+	}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+
+	pauses := 0
+	if err := w.run(context.Background(), func(context.Context) error {
+		pauses++
+		return nil
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if pauses != 1 {
+		t.Fatalf("pauses = %d; want 1 -- a provider lane was attempted, so the pause must still apply", pauses)
+	}
+}
+
+func TestRunPacedPausesWhenLaneAttributionIsAbsent(t *testing.T) {
+	// Fail safe: an empty attempt set means "unknown", not "provider-free". A
+	// fetcher that reports no lane attribution at all must keep the existing
+	// pacing behavior rather than silently losing the throttle.
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{
+		{ID: 13, Inputs: models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"}},
+	}}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "lyrics"},
+	}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+
+	pauses := 0
+	if err := w.run(context.Background(), func(context.Context) error {
+		pauses++
+		return nil
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if pauses != 1 {
+		t.Fatalf("pauses = %d; want 1 -- absent lane attribution must fail safe to pausing", pauses)
+	}
+}
+
 func TestRunBacksOffGeometricallyAfterConsecutiveFailures(t *testing.T) {
 	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
 	q := &fakeQueue{items: []queue.WorkItem{

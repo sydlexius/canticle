@@ -14,6 +14,10 @@ type laneResult struct {
 	song models.Song
 	err  error
 	name string // lane name, for WinningLane tagging
+	// local mirrors Lane.Local(): the lane resolved without an outbound provider
+	// request. Carried per result so parallel-mode attribution reports locality
+	// the same way ordered mode does (#534).
+	local bool
 }
 
 // findParallel dispatches every lane concurrently and races the results:
@@ -43,7 +47,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		lane := lane
 		go func() {
 			song, err := lane.FindLyrics(childCtx, track, sourcePath)
-			results <- laneResult{song: song, err: err, name: lane.Name()}
+			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local()}
 		}()
 	}
 
@@ -62,7 +66,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		// win, lanes still in flight have not reported and so get no row: we do not
 		// know their outcome, and recording them as misses would be the very
 		// over-count this table exists to avoid.
-		consulted []string
+		consulted []attemptedLane
 	)
 
 	for {
@@ -82,7 +86,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 				// Breaker open, provider not called: skip (matters only if ALL unavailable).
 			default:
 				r.consulted++
-				consulted = append(consulted, res.name)
+				consulted = append(consulted, attemptedLane{name: res.name, local: res.local})
 				switch {
 				case res.err == nil && IsSuitable(res.song, o.guard):
 					if QualityOf(res.song) >= QualitySynced {

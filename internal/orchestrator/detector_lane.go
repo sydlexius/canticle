@@ -24,6 +24,10 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker) *Lane {
 		name:        detectorLaneName,
 		breaker:     breaker,
 		classifyErr: detectorClassifier,
+		// The detector settles a track from local audio analysis: no outbound
+		// provider request, so an item settled here must not spend the
+		// provider-request pacing budget (#534).
+		local: true,
 		resolve: func(ctx context.Context, track models.Track, sourcePath string) (models.Song, error) {
 			// An empty sourcePath means instrumental detection is disabled for this
 			// item (e.g. no audio path on the work item); the detector must never be
