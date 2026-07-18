@@ -1,6 +1,6 @@
 services:
   canticle:
-    image: ghcr.io/doxazo-net/canticle:latest
+    image: ghcr.io/sydlexius/canticle:latest
     container_name: canticle
     restart: unless-stopped
     ports:

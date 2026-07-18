@@ -116,7 +116,7 @@ docker run -d \
   -v canticle-config:/config \
   -v /path/to/your/data:/data:rw \
   --restart unless-stopped \
-  ghcr.io/doxazo-net/canticle:latest
+  ghcr.io/sydlexius/canticle:latest
 ```
 
 For Compose, copy `docker-compose.example.yml`, set `MUSIXMATCH_TOKEN` and `MXLRC_WEBHOOK_API_KEY`, adjust the music volume, then run:
@@ -181,7 +181,7 @@ In Docker mode (storage paths resolve under `/config`), the daemon auto-creates 
 # docker-compose.yml - optional hardening: key separated from the data volume
 services:
   canticle:
-    image: ghcr.io/doxazo-net/canticle:latest
+    image: ghcr.io/sydlexius/canticle:latest
     environment:
       # Optional. Generate once: openssl rand -base64 32
       # Source from a .env file NOT inside the /config volume.
@@ -348,7 +348,7 @@ The CLI and the `MXLRC_WEBHOOK_API_KEY` environment variable are independent way
 
 ## Windows
 
-Download the signed `.zip` archive for `windows/amd64` from the [GitHub releases page](https://github.com/doxazo-net/canticle/releases). Extract `canticle.exe` to one of:
+Download the signed `.zip` archive for `windows/amd64` from the [GitHub releases page](https://github.com/sydlexius/canticle/releases). Extract `canticle.exe` to one of:
 
 - **`%LOCALAPPDATA%\mxlrcgo-svc\`** - user-mode install; no administrator rights required.
 - **`C:\Program Files\mxlrcgo-svc\`** - system-wide install; requires administrator rights.
@@ -436,7 +436,7 @@ Even signed binaries can trigger the "Windows protected your PC" prompt on first
 1. Click **More info**.
 2. Click **Run anyway**.
 
-This prompt should not appear again after the first run. See [issue #183](https://github.com/doxazo-net/canticle/issues/183) for background on code signing.
+This prompt should not appear again after the first run. See [issue #183](https://github.com/sydlexius/canticle/issues/183) for background on code signing.
 
 ## Native packages
 

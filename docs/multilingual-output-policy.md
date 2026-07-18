@@ -96,8 +96,8 @@ above); that remains future work.
 
 ## Cross-references
 
-- Issue [#146](https://github.com/doxazo-net/canticle/issues/146) - decision record
-- Issue [#149](https://github.com/doxazo-net/canticle/issues/149) - CJK provider adapter (depends on this policy)
+- Issue [#146](https://github.com/sydlexius/canticle/issues/146) - decision record
+- Issue [#149](https://github.com/sydlexius/canticle/issues/149) - CJK provider adapter (depends on this policy)
 - `internal/langguard` - script classifier and guard
 - `internal/lyrics/writer.go` - writer with bilingual interleave via `TranslationSubtitles`
 - `internal/models/models.go` - `Song`, `Synced` types
