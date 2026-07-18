@@ -105,7 +105,7 @@ Configure whichever your client supports. See the [User Guide](USER_GUIDE.md#lid
 
 ### Docker
 
-The published image is `ghcr.io/doxazo-net/canticle`. It runs the server on container port `50705`, sets `MXLRC_DOCKER=true` automatically (so storage defaults resolve under `/config`), and honors `PUID`/`PGID` for file ownership. Mount your media data parent once (for example to `/data`):
+The published image is `ghcr.io/sydlexius/canticle`. It runs the server on container port `50705`, sets `MXLRC_DOCKER=true` automatically (so storage defaults resolve under `/config`), and honors `PUID`/`PGID` for file ownership. Mount your media data parent once (for example to `/data`):
 
 ```sh
 docker run -d \
@@ -115,14 +115,14 @@ docker run -d \
   -e MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key \
   -v canticle-config:/config \
   -v /path/to/your/data:/data:rw \
-  ghcr.io/doxazo-net/canticle:latest
+  ghcr.io/sydlexius/canticle:latest
 ```
 
 See the [User Guide](USER_GUIDE.md#docker) for the full Docker, Compose, and Unraid setup.
 
 ### Windows
 
-Download the `.zip` from the [releases page](https://github.com/doxazo-net/canticle/releases), extract `canticle.exe`, and add it to your `PATH`. For a quick test:
+Download the `.zip` from the [releases page](https://github.com/sydlexius/canticle/releases), extract `canticle.exe`, and add it to your `PATH`. For a quick test:
 
 ```cmd
 set MUSIXMATCH_TOKEN=YOUR_TOKEN

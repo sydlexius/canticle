@@ -2,33 +2,33 @@
   <img src="docs/img/canticle-wordmark.svg" alt="Canticle" width="380"/>
 </p>
 
-[![CI](https://github.com/doxazo-net/canticle/actions/workflows/ci.yml/badge.svg)](https://github.com/doxazo-net/canticle/actions/workflows/ci.yml)
-[![Release](https://github.com/doxazo-net/canticle/actions/workflows/release.yml/badge.svg)](https://github.com/doxazo-net/canticle/actions/workflows/release.yml)
-[![codecov](https://codecov.io/gh/doxazo-net/canticle/branch/main/graph/badge.svg)](https://codecov.io/gh/doxazo-net/canticle)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/doxazo-net/canticle/badge)](https://securityscorecards.dev/viewer/?uri=github.com/doxazo-net/canticle)
+[![CI](https://github.com/sydlexius/canticle/actions/workflows/ci.yml/badge.svg)](https://github.com/sydlexius/canticle/actions/workflows/ci.yml)
+[![Release](https://github.com/sydlexius/canticle/actions/workflows/release.yml/badge.svg)](https://github.com/sydlexius/canticle/actions/workflows/release.yml)
+[![codecov](https://codecov.io/gh/sydlexius/canticle/branch/main/graph/badge.svg)](https://codecov.io/gh/sydlexius/canticle)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/sydlexius/canticle/badge)](https://securityscorecards.dev/viewer/?uri=github.com/sydlexius/canticle)
 
 Command line tool and webhook service to fetch synced lyrics from [Musixmatch](https://www.musixmatch.com/) and save them as `.lrc` files.
 
 ## Documentation
 
-Full documentation is published at **<https://doxazo-net.github.io/canticle/>**:
+Full documentation is published at **<https://sydlexius.github.io/canticle/>**:
 
-- [Getting Started](https://doxazo-net.github.io/canticle/GETTING_STARTED/) - onboarding guide: pick a path (one-shot, directory, or daemon) and get to working lyrics.
-- [User Guide](https://doxazo-net.github.io/canticle/USER_GUIDE/) - webhook server, Docker/Unraid, the filesystem watcher, inspection commands.
-- [CLI Reference](https://doxazo-net.github.io/canticle/CLI_REFERENCE/) - every subcommand and flag.
-- [Configuration](https://doxazo-net.github.io/canticle/CONFIGURATION/) - env vars, TOML keys, token precedence, XDG paths.
-- [Developer Guide](https://doxazo-net.github.io/canticle/DEVELOPER/) - build, test, the quality gate, design decisions.
+- [Getting Started](https://sydlexius.github.io/canticle/GETTING_STARTED/) - onboarding guide: pick a path (one-shot, directory, or daemon) and get to working lyrics.
+- [User Guide](https://sydlexius.github.io/canticle/USER_GUIDE/) - webhook server, Docker/Unraid, the filesystem watcher, inspection commands.
+- [CLI Reference](https://sydlexius.github.io/canticle/CLI_REFERENCE/) - every subcommand and flag.
+- [Configuration](https://sydlexius.github.io/canticle/CONFIGURATION/) - env vars, TOML keys, token precedence, XDG paths.
+- [Developer Guide](https://sydlexius.github.io/canticle/DEVELOPER/) - build, test, the quality gate, design decisions.
 
 ## Install
 
 **macOS / Linuxbrew (Homebrew):**
 
 ```sh
-brew install doxazo-net/tap/canticle
+brew install sydlexius/tap/canticle
 ```
 
 **Linux (.deb / .rpm / .apk):** Download the appropriate package for your distro
-from the [GitHub Releases](https://github.com/doxazo-net/canticle/releases)
+from the [GitHub Releases](https://github.com/sydlexius/canticle/releases)
 page and install it with your package manager:
 
 ```sh
@@ -60,11 +60,11 @@ sudo systemctl enable --now mxlrcgo-svc   # systemd
 
 The state directory and system user are preserved on package removal so the
 database survives upgrades and reinstalls. See the
-[User Guide](https://doxazo-net.github.io/canticle/USER_GUIDE/#native-packages)
+[User Guide](https://sydlexius.github.io/canticle/USER_GUIDE/#native-packages)
 for service commands, log access, and data paths.
 
 **Tarballs / macOS / Windows:** Versioned archives for all platforms are also
-available on the [GitHub Releases](https://github.com/doxazo-net/canticle/releases)
+available on the [GitHub Releases](https://github.com/sydlexius/canticle/releases)
 page.
 
 **Build from source** (requires Go 1.26.4+):
@@ -94,17 +94,17 @@ MUSIXMATCH_TOKEN=YOUR_TOKEN MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key \
   canticle serve --listen 127.0.0.1:3876
 ```
 
-Directory mode overrides `-o/--outdir`; the output extension is `.lrc` for synced lyrics and `.txt` for unsynced lyrics or an instrumental marker. See the [CLI Reference](https://doxazo-net.github.io/canticle/CLI_REFERENCE/) for every flag and the [User Guide](https://doxazo-net.github.io/canticle/USER_GUIDE/) for Docker, Unraid, and webhook deployment.
+Directory mode overrides `-o/--outdir`; the output extension is `.lrc` for synced lyrics and `.txt` for unsynced lyrics or an instrumental marker. See the [CLI Reference](https://sydlexius.github.io/canticle/CLI_REFERENCE/) for every flag and the [User Guide](https://sydlexius.github.io/canticle/USER_GUIDE/) for Docker, Unraid, and webhook deployment.
 
-Renamed an audio file and left its `.lrc`/`.txt` behind? `canticle realign` re-attaches orphaned lyric sidecars to their audio (dry-run by default; `--yes` to apply), and `contrib/lidarr-rename-sidecars.sh` is a Lidarr Custom Script that prevents the orphan at rename time. See [Realign](https://doxazo-net.github.io/canticle/CLI_REFERENCE/#realign).
+Renamed an audio file and left its `.lrc`/`.txt` behind? `canticle realign` re-attaches orphaned lyric sidecars to their audio (dry-run by default; `--yes` to apply), and `contrib/lidarr-rename-sidecars.sh` is a Lidarr Custom Script that prevents the orphan at rename time. See [Realign](https://sydlexius.github.io/canticle/CLI_REFERENCE/#realign).
 
 ## Token
 
-A Musixmatch API token is required. Supply it via the `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, or a `.env`/config file, in that order of precedence (CLI > env > file). To get a token, follow steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). See [Configuration](https://doxazo-net.github.io/canticle/CONFIGURATION/) for the full env-var and TOML surface.
+A Musixmatch API token is required. Supply it via the `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, or a `.env`/config file, in that order of precedence (CLI > env > file). To get a token, follow steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). See [Configuration](https://sydlexius.github.io/canticle/CONFIGURATION/) for the full env-var and TOML surface.
 
 ## Encrypted secrets
 
-The Musixmatch token and the webhook API key can be stored encrypted at rest in the SQLite database (AES-256-GCM) instead of as plaintext in config and environment variables. It is opt-in and backward compatible: the encrypted store is the lowest-precedence source, so existing env/TOML setups are unchanged. Import the current plaintext with `canticle secrets import`, set one by name from stdin with `canticle secrets set <name>`, and list stored names (never values) with `canticle secrets list`. The 32-byte master key is auto-generated as a `0600` key file on first use (the universal zero-setup default on all platforms including Docker). Set `MXLRC_MASTER_KEY` to an optional base64-encoded override for key/data separation (recommended when the threat model includes whole-volume theft). Losing the key makes the encrypted secrets unrecoverable by design; the remedy is to re-import or re-set them with the original plaintext. See the [Encrypted secrets guide](https://doxazo-net.github.io/canticle/USER_GUIDE/#encrypted-secrets).
+The Musixmatch token and the webhook API key can be stored encrypted at rest in the SQLite database (AES-256-GCM) instead of as plaintext in config and environment variables. It is opt-in and backward compatible: the encrypted store is the lowest-precedence source, so existing env/TOML setups are unchanged. Import the current plaintext with `canticle secrets import`, set one by name from stdin with `canticle secrets set <name>`, and list stored names (never values) with `canticle secrets list`. The 32-byte master key is auto-generated as a `0600` key file on first use (the universal zero-setup default on all platforms including Docker). Set `MXLRC_MASTER_KEY` to an optional base64-encoded override for key/data separation (recommended when the threat model includes whole-volume theft). Losing the key makes the encrypted secrets unrecoverable by design; the remedy is to re-import or re-set them with the original plaintext. See the [Encrypted secrets guide](https://sydlexius.github.io/canticle/USER_GUIDE/#encrypted-secrets).
 
 ## Web UI access (serve mode)
 
@@ -130,8 +130,8 @@ When TLS is on, the session cookie's `Secure` flag is set automatically. An opti
 
 ## Legal
 
-- [Privacy Policy](https://doxazo-net.github.io/canticle/privacy-policy/) - what data leaves your machine during a lyrics lookup and what does not.
-- [Code Signing Policy](https://doxazo-net.github.io/canticle/code-signing-policy/) - SignPath attribution, team roles, and release approval process.
+- [Privacy Policy](https://sydlexius.github.io/canticle/privacy-policy/) - what data leaves your machine during a lyrics lookup and what does not.
+- [Code Signing Policy](https://sydlexius.github.io/canticle/code-signing-policy/) - SignPath attribution, team roles, and release approval process.
 
 ## License
 
