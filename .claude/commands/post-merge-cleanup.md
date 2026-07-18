@@ -44,7 +44,7 @@ If the branch is not fully merged, stop and warn. Do not force-delete.
 
 ```bash
 encoded_branch=$(printf '%s' "$branch" | jq -sRr @uri)
-gh api "repos/doxazo-net/canticle/git/refs/heads/$encoded_branch" -X DELETE
+gh api "repos/sydlexius/canticle/git/refs/heads/$encoded_branch" -X DELETE
 ```
 
 If the remote branch is already deleted (404), note it and continue.

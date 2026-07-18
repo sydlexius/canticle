@@ -8,7 +8,7 @@ Security updates are provided for the current `main` branch and the latest relea
 
 Please report suspected vulnerabilities privately through GitHub Security Advisories:
 
-https://github.com/doxazo-net/canticle/security/advisories/new
+https://github.com/sydlexius/canticle/security/advisories/new
 
 Do not open a public issue for security-sensitive reports. Include a clear description, reproduction steps or proof of concept when available, affected versions, and any known mitigations.
 

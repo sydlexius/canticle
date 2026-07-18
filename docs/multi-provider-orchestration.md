@@ -354,10 +354,10 @@ the original out-of-scope notes:
 
 ## Cross-references
 
-- Issue [#148](https://github.com/doxazo-net/canticle/issues/148) - this design record
-- Issue [#146](https://github.com/doxazo-net/canticle/issues/146) - multilingual output policy (the suitability quality bar interacts with bilingual output)
-- Issue [#149](https://github.com/doxazo-net/canticle/issues/149) - second lyrics source; deferred per-provider cache handling to this design (resolved in Gap 1)
-- Issue [#163](https://github.com/doxazo-net/canticle/issues/163) - langguard wired into config and the worker pipeline (supplies the suitability script gate)
+- Issue [#148](https://github.com/sydlexius/canticle/issues/148) - this design record
+- Issue [#146](https://github.com/sydlexius/canticle/issues/146) - multilingual output policy (the suitability quality bar interacts with bilingual output)
+- Issue [#149](https://github.com/sydlexius/canticle/issues/149) - second lyrics source; deferred per-provider cache handling to this design (resolved in Gap 1)
+- Issue [#163](https://github.com/sydlexius/canticle/issues/163) - langguard wired into config and the worker pipeline (supplies the suitability script gate)
 - `internal/queue/queue.go` - `Complete` CAS guard, `Enqueue` busy-retry upserts, `providers_version` column
 - `internal/worker/worker.go` - current circuit-breaker fields and `tripCircuitIfRateLimited`
 - `internal/langguard/guard.go` - `Guard.Accept` suitability decision
