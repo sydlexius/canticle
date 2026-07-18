@@ -302,3 +302,111 @@ func TestListDetectorInstrumentalMarkers(t *testing.T) {
 		t.Errorf("OutputPaths = %+v, want one {out, a.lrc}", r.Inputs.OutputPaths)
 	}
 }
+
+// markDetectorInstrumental flips an existing work_queue row into the
+// detector-instrumental shape ListDetectorInstrumentalMarkers selects on
+// (instrumental_result=1, status='done').
+func markDetectorInstrumental(t *testing.T, q *DBQueue, id int64, detectorVersion string) {
+	t.Helper()
+	if _, err := q.db.ExecContext(context.Background(),
+		`UPDATE work_queue SET instrumental_result=1, status='done', outcome_type='instrumental', detector_version=? WHERE id=?`,
+		detectorVersion, id); err != nil {
+		t.Fatalf("mark detector-instrumental: %v", err)
+	}
+}
+
+// TestListDetectorInstrumentalMarkers_ScopesToLibrary verifies the --library
+// narrowing filters the candidate set, mirroring
+// TestListVocalGateRejections_ScopesToLibrary.
+func TestListDetectorInstrumentalMarkers_ScopesToLibrary(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	libA, srA := insertLibraryAndScanResult(t, sqlDB, "/libA", "/libA/a.mp3")
+	_, srB := insertLibraryAndScanResult(t, sqlDB, "/libB", "/libB/b.mp3")
+
+	mk := func(title, src string, scanResultID int64) int64 {
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:        models.Track{ArtistName: "Artist", TrackName: title},
+			Outdir:       "out",
+			Filename:     title + ".lrc",
+			SourcePath:   src,
+			ScanResultID: scanResultID,
+		}, PriorityScan)
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", title, err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue %s: %v", title, err)
+		}
+		if _, err := q.Defer(ctx, item.ID, 0, nil); err != nil {
+			t.Fatalf("defer %s: %v", title, err)
+		}
+		markDetectorInstrumental(t, q, item.ID, "1.5.0")
+		return item.ID
+	}
+	inA := mk("in-lib-a", "/libA/a.mp3", srA)
+	_ = mk("in-lib-b", "/libB/b.mp3", srB)
+
+	got, err := q.ListDetectorInstrumentalMarkers(ctx, ListInstrumentalMarkersOptions{LibraryID: &libA})
+	if err != nil {
+		t.Fatalf("ListDetectorInstrumentalMarkers: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != inA {
+		var ids []int64
+		for _, r := range got {
+			ids = append(ids, r.ID)
+		}
+		t.Fatalf("scoped list = %v; want only the libA row %d", ids, inA)
+	}
+}
+
+// TestListDetectorInstrumentalMarkers_Limit verifies the Limit option caps
+// the result set, and that LibraryID=nil returns all rows when unset.
+func TestListDetectorInstrumentalMarkers_Limit(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	for i := 0; i < 2; i++ {
+		id := seedDeferredRow(t, q, "Artist", fmt.Sprintf("Title%d", i), fmt.Sprintf("/music/%d.flac", i))
+		markDetectorInstrumental(t, q, id, "1.0.0")
+	}
+
+	all, err := q.ListDetectorInstrumentalMarkers(ctx, ListInstrumentalMarkersOptions{})
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("len(all) = %d; want 2 (nil LibraryID must not filter)", len(all))
+	}
+
+	limited, err := q.ListDetectorInstrumentalMarkers(ctx, ListInstrumentalMarkersOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("list limited: %v", err)
+	}
+	if len(limited) != 1 {
+		t.Fatalf("len(limited) = %d; want 1 (Limit must cap the result set)", len(limited))
+	}
+}
+
+// TestListDetectorInstrumentalMarkers_MalformedOutputPathsErrors verifies a
+// row whose stored output_paths column holds malformed JSON (a real form of
+// data corruption, not a fault-injected I/O failure) surfaces a clean error
+// rather than a panic or a silently wrong row.
+func TestListDetectorInstrumentalMarkers_MalformedOutputPathsErrors(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
+	markDetectorInstrumental(t, q, id, "1.0.0")
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET output_paths='not-json' WHERE id=?`, id); err != nil {
+		t.Fatalf("corrupt output_paths: %v", err)
+	}
+
+	if _, err := q.ListDetectorInstrumentalMarkers(ctx, ListInstrumentalMarkersOptions{}); err == nil {
+		t.Fatal("expected an error for malformed output_paths JSON, got nil")
+	}
+}

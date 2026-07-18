@@ -32,6 +32,7 @@ func TestReadInstrumentalProvenance(t *testing.T) {
 		{"provider", "[by:canticle]\n[source:musixmatch]\n" + InstrumentalMarker + "\n", true, "musixmatch", ""},
 		{"legacy-bare", InstrumentalMarker + "\n", true, "", ""},
 		{"not-a-marker", "[00:01.00]la la\n", false, "", ""},
+		{"marker-text-inside-a-header-tag", "[note:" + InstrumentalMarker + "]\n", true, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,6 +120,23 @@ func TestWriteMarkerProvenance(t *testing.T) {
 		data, _ := os.ReadFile(p)
 		if string(data) != orig {
 			t.Fatalf("non-marker must be untouched:\n%s", data)
+		}
+	})
+
+	t.Run("read_error_is_propagated", func(t *testing.T) {
+		// A directory Lstats successfully (not a symlink), but reading it as a
+		// marker file fails cleanly at the header-parse step.
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "not-a-file")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		changed, err := WriteMarkerProvenance(sub, InstrumentalProvenance{Source: SourceDetector})
+		if err == nil {
+			t.Fatal("expected an error reading a directory as a marker file")
+		}
+		if changed {
+			t.Fatalf("changed=%v; want false on a read error", changed)
 		}
 	})
 
