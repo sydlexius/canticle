@@ -809,6 +809,9 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	if err := validateServerTLS(cfg); err != nil {
 		return cfg, appliedEnv, err
 	}
+	if err := validateInstrumentalDetectorOrdering(cfg); err != nil {
+		return cfg, appliedEnv, err
+	}
 	if cfg.DB.Path == "" {
 		return cfg, appliedEnv, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
 	}
@@ -1498,6 +1501,30 @@ func validateServerTLS(cfg Config) error {
 		if net.ParseIP(h) == nil && !isValidHostname(h) {
 			return fmt.Errorf("config: server.tls: self_signed_hosts: %q is not a valid hostname or IP address", h)
 		}
+	}
+	return nil
+}
+
+// validateInstrumentalDetectorOrdering fails fast on a contradictory
+// combination of instrumental_detector.ordering="front" and
+// providers.mode="parallel". "front" exists to let a high-confidence
+// instrumental verdict settle a track with zero provider requests, which only
+// holds in ordered mode: findOrdered walks lanes in slice order and a
+// terminal-suitable result short-circuits the rest. In parallel mode
+// findParallel launches every lane concurrently, so lane position does not
+// determine dispatch and the provider lanes are already in flight before the
+// detector can settle anything - the combination silently fails to deliver
+// the guarantee its name promises. Staged dispatch that would make "front"
+// meaningful under parallel mode is tracked separately (issue #528) and is
+// out of scope here; this only rejects the contradictory configuration at
+// load so the failure is a clear startup error rather than a silent
+// no-op. Validation happens after both TOML and env overrides are resolved,
+// so it fires regardless of which source set either value.
+func validateInstrumentalDetectorOrdering(cfg Config) error {
+	if cfg.InstrumentalDetector.Ordering == detectorOrderingFront && cfg.Providers.Mode == providersModeParallel {
+		return fmt.Errorf("config: instrumental_detector.ordering=front requires providers.mode=ordered: " +
+			"providers.mode=parallel dispatches all lanes concurrently, so a detector-first ordering cannot " +
+			"prevent provider requests; set providers.mode=ordered or instrumental_detector.ordering=demoted")
 	}
 	return nil
 }
