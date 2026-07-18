@@ -13,6 +13,18 @@ import (
 // lane was actually consulted, so the catalog answer is unknown).
 var ErrLaneUnavailable = errors.New("orchestrator: lane unavailable (circuit open)")
 
+// ErrLaneBenignMiss is the provider-agnostic sentinel a non-provider lane
+// returns when it reached its backend and found no usable result (e.g. the
+// detector gate is negative). It classifies as a benign miss: the ramp resets
+// and the remaining lanes run.
+var ErrLaneBenignMiss = errors.New("orchestrator: lane benign miss (no result)")
+
+// ErrLaneOutage is the provider-agnostic sentinel a non-provider lane returns
+// when its backend call genuinely failed (e.g. the detector sidecar is
+// unreachable). It trips the lane's breaker so repeated outages open the lane
+// and it degrades to OutcomeUnavailable.
+var ErrLaneOutage = errors.New("orchestrator: lane outage")
+
 // OutcomeClass classifies a lane's outcome for cross-lane precedence (design
 // doc Gap 4). The precedence rule is "least-certain-negative wins": any signal
 // that we did not truly learn the track is absent (auth, rate-limit, transport,
@@ -63,7 +75,8 @@ func ClassifyOutcome(err error) OutcomeClass {
 		errors.Is(err, musixmatch.ErrUnauthorized),
 		errors.Is(err, musixmatch.ErrRateLimited):
 		return OutcomeAuthRateLimit
-	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse):
+	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse),
+		errors.Is(err, ErrLaneBenignMiss):
 		return OutcomeBenignMiss
 	default:
 		return OutcomeTransport

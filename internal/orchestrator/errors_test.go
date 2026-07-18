@@ -55,3 +55,12 @@ func TestErrLaneUnavailableIsSentinel(t *testing.T) {
 		t.Fatal("ErrLaneUnavailable must be matchable through wrapping")
 	}
 }
+
+func TestClassifyOutcome_LaneSentinels(t *testing.T) {
+	if got := ClassifyOutcome(ErrLaneBenignMiss); got != OutcomeBenignMiss {
+		t.Errorf("benign-miss sentinel = %v, want OutcomeBenignMiss", got)
+	}
+	if got := ClassifyOutcome(ErrLaneOutage); got != OutcomeTransport {
+		t.Errorf("outage sentinel = %v, want OutcomeTransport", got)
+	}
+}
