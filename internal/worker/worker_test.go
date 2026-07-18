@@ -332,6 +332,27 @@ type fakeGuard struct {
 
 func (g *fakeGuard) Enabled() bool { return g.enabled }
 
+// selectiveGuard rejects only a song whose lyric body exactly matches
+// rejectBody, accepting everything else (including a textless instrumental
+// result) - unlike fakeGuard, which rejects unconditionally regardless of
+// content. This models how a real script guard behaves: it screens lyric
+// text, so it has nothing to reject on a detector-sourced instrumental.
+type selectiveGuard struct {
+	rejectBody string
+	reason     string
+	calls      []models.Song
+}
+
+func (g *selectiveGuard) Enabled() bool { return true }
+
+func (g *selectiveGuard) Accept(song models.Song) (bool, string) {
+	g.calls = append(g.calls, song)
+	if song.Lyrics.LyricsBody == g.rejectBody {
+		return false, g.reason
+	}
+	return true, ""
+}
+
 func (g *fakeGuard) Accept(song models.Song) (bool, string) {
 	g.calls = append(g.calls, song)
 	if g.accept {
@@ -2084,6 +2105,71 @@ func TestRunOnceDetectorInstrumentalWriteErrorDefersAsMiss(t *testing.T) {
 	// consecutiveFailures must be 0 (write error in instrumental path is non-fatal).
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; want 0", w.consecutiveFailures)
+	}
+}
+
+// TestRunOnceGuardInstalledWithOneProviderPlusDetector verifies the guard is
+// wired into the orchestrator's suitability check in the common
+// one-provider-plus-detector configuration, not just when there are multiple
+// provider lanes. w.lanes (the provider-only slice) has length 1 here; the
+// EFFECTIVE dispatch list (provider + detector) has length 2. Before the fix,
+// rebuildOrchestrator tested len(w.lanes) > 1 and never installed the guard in
+// this shape, so a guard-rejected provider result was accepted outright
+// instead of falling through to the demoted detector lane.
+func TestRunOnceGuardInstalledWithOneProviderPlusDetector(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Aria"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 206,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "aria.lrc",
+			SourcePath: "/music/aria.flac",
+		},
+	}}}
+	c := &fakeCache{}
+	// The provider returns quality-OK (unsynced) lyrics that the guard rejects.
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "wrong-language lyrics"},
+	}}
+	writer := &fakeWriter{}
+	// A real script guard only rejects lyric bodies dominated by a disallowed
+	// script; it has nothing to reject on the detector's textless instrumental
+	// result. Model that here: reject only the provider's wrong-language body,
+	// accept everything else (including the detector's empty-body song), so the
+	// test isolates the fall-through wiring rather than an unconditional guard.
+	guard := &selectiveGuard{rejectBody: "wrong-language lyrics", reason: "foreign-script share exceeds threshold"}
+	det := &fakeDetector{instrumental: true, version: "1.2.3"}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det) // ordering defaults to demoted: provider first, detector fallback.
+	w.EnableGuard(guard)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// The guard must have been consulted on both the provider's result (rejected)
+	// and the detector's result (accepted): if it were never installed (the bug),
+	// it would be called zero times and the provider's rejected result would
+	// settle outright.
+	if len(guard.calls) != 2 {
+		t.Fatalf("guard calls = %d; want 2 (guard must be installed with one provider + detector)", len(guard.calls))
+	}
+	// A guard rejection must fall through to the demoted detector lane, not
+	// settle on the rejected provider result.
+	if len(det.calls) != 1 {
+		t.Fatalf("detector calls = %v; want 1 (guard rejection must fall through to the detector lane)", det.calls)
+	}
+	// The completed write must be the detector's instrumental settle, not the
+	// guard-rejected provider lyrics.
+	if len(writer.songs) != 1 || writer.songs[0].DetectorVersion != "1.2.3" {
+		t.Fatalf("written song DetectorVersion = %+v; want version 1.2.3 (detector fallback settle)", writer.songs)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 206 {
+		t.Fatalf("completed = %v; want [206]", q.completed)
 	}
 }
 

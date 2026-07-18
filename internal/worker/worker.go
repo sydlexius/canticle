@@ -308,8 +308,12 @@ func (w *Worker) rebuildOrchestrator() error {
 	orch.SetRaceWait(w.raceWait)
 	// With more than one lane the guard governs fall-through, so wire it into
 	// suitability. With a single lane it stays unset (the worker's guardReject is
-	// the sole screen), preserving exactly-one Accept call per result.
-	if len(w.lanes) > 1 && w.scriptGuard != nil {
+	// the sole screen), preserving exactly-one Accept call per result. This must
+	// test the EFFECTIVE lane list (including any detector lane appended above),
+	// not w.lanes: w.lanes tracks only the provider lanes, so a one-provider
+	// configuration with a detector lane would otherwise never install the guard,
+	// and a guard-rejected provider result could not fall through to the detector.
+	if len(lanes) > 1 && w.scriptGuard != nil {
 		orch.SetGuard(w.scriptGuard)
 	}
 	w.orch = orch
