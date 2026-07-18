@@ -1163,7 +1163,7 @@ func tripViaLane(w *Worker, f *fakeFetcher, item queue.WorkItem, err error) (boo
 	if ou := w.circuit.OpenUntil(); !ou.IsZero() {
 		w.setClock(func() time.Time { return ou.Add(time.Nanosecond) })
 	}
-	_, ferr := w.lane.FindLyrics(context.Background(), item.Inputs.Track)
+	_, ferr := w.lane.FindLyrics(context.Background(), item.Inputs.Track, "")
 	if orchestrator.ClassifyOutcome(ferr) == orchestrator.OutcomeAuthRateLimit {
 		return true, w.releaseAfterThrottle(context.Background(), item)
 	}

@@ -260,7 +260,7 @@ func TestFallbackBreakerIndependentOfPrimary(t *testing.T) {
 	primaryLane, secondaryLane := w.lanes[0], w.lanes[1]
 
 	// Trip the primary by driving its rate-limited fetcher through the lane.
-	if _, err := primaryLane.FindLyrics(context.Background(), models.Track{}); err == nil {
+	if _, err := primaryLane.FindLyrics(context.Background(), models.Track{}, ""); err == nil {
 		t.Fatal("primary FindLyrics returned nil error; expected the rate-limit signal")
 	}
 	if got := primaryLane.Breaker().Allow(); got != circuit.StateOpen {

@@ -2,13 +2,10 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/models"
-	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/providers"
 )
 
@@ -19,142 +16,59 @@ import (
 // the worker's prior constant of the same name (the classification moved here).
 const escalationThreshold = 5
 
-// Lane wraps a single lyrics provider with its own circuit breaker. It owns the
-// breaker interaction that previously lived inline in the worker: the open-gate
-// short-circuit, the half-open probe note, the throttle classification and
-// trip, the benign-miss reset, and the success/recovery recording. The breaker
-// is provider-agnostic; the rate-limit / auth / renewal classification is
-// per-provider and lives here.
-//
-// A Lane satisfies providers.Fetcher, so the orchestrator (and, with a single
-// lane, the worker) can treat it as a drop-in fetcher.
+// Lane wraps a single resolve func with its own circuit breaker. It owns the
+// breaker interaction (open-gate short-circuit, half-open probe note, the
+// error classification+trip, benign-miss reset, success recording). The
+// error->breaker policy is injected as classifyErr so a provider lane and a
+// detector lane can bring different semantics over the same breaker machinery.
 type Lane struct {
-	provider providers.LyricsProvider
-	breaker  *circuit.Breaker
+	name        string
+	resolve     ResolveFunc
+	breaker     *circuit.Breaker
+	classifyErr func(l *Lane, err error) error
+	pacer       providers.AdaptivePacer // optional; nil when the lane has no pacer
 }
 
-// NewLane builds a lane over a named provider and its dedicated breaker.
-func NewLane(provider providers.LyricsProvider, breaker *circuit.Breaker) *Lane {
-	return &Lane{provider: provider, breaker: breaker}
-}
+// Name reports the lane's name.
+func (l *Lane) Name() string { return l.name }
 
-// Name reports the underlying provider's name.
-func (l *Lane) Name() string { return l.provider.Name() }
-
-// Breaker exposes the lane's breaker. It is used by construction (to share the
-// worker's configured breaker) and by tests that assert ramp/recovery state.
+// Breaker exposes the lane's breaker (construction + tests asserting ramp state).
 func (l *Lane) Breaker() *circuit.Breaker { return l.breaker }
 
-// FindLyrics drives the lane's breaker around a provider fetch:
-//
-//   - If the breaker is open, it returns ErrLaneUnavailable WITHOUT calling the
-//     provider, so an open lane spends no calls.
-//   - On a benign miss (including a truncated/empty-body response, #496) it
-//     resets the breaker ramp (a clean round-trip is not a throttle) and
-//     returns the classified miss error.
-//   - On a rate-limit / auth / renewal signal it trips the breaker (or holds the
-//     full renewal window) and returns the classified error after emitting the
-//     honest four-way throttle log.
-//   - On any other (transport) error it returns the error without touching the
-//     breaker (a transport failure is not a throttle signal).
-//   - On success it records the success (recovering the breaker if it was
-//     probing) and returns the song.
-func (l *Lane) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
+// FindLyrics drives the lane's breaker around a resolve call. An open breaker
+// returns ErrLaneUnavailable without calling resolve. Errors run through the
+// lane's injected classifier; success records recovery and pacer stabilization.
+func (l *Lane) FindLyrics(ctx context.Context, track models.Track, sourcePath string) (models.Song, error) {
 	switch l.breaker.Allow() {
 	case circuit.StateOpen:
 		return models.Song{}, ErrLaneUnavailable
 	case circuit.StateHalfOpen:
-		// Half-open probe: the first real provider call after the window elapsed.
-		slog.Debug("lane circuit half-open; probing provider", "provider", l.Name())
+		slog.Debug("lane circuit half-open; probing", "lane", l.Name())
 	case circuit.StateClosed:
 	}
 
-	song, err := l.provider.FindLyrics(ctx, track)
+	song, err := l.resolve(ctx, track, sourcePath)
 	if err != nil {
-		return models.Song{}, l.classify(err)
+		return models.Song{}, l.classifyErr(l, err)
 	}
 
 	if l.breaker.RecordSuccess() {
 		slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
 	}
-	// Notify the adaptive pacer of a genuine lyric retrieval only. Benign misses
-	// are handled in classify and intentionally do not stabilize the pacer: they
-	// are successful HTTP round-trips but not catalog hits.
 	l.notifySuccess()
 	return song, nil
 }
 
-// notifyThrottle forwards a throttle notification to the provider when it
-// implements providers.AdaptivePacer; it is a no-op otherwise.
+// notifyThrottle forwards a throttle notification to the lane's pacer, if any.
 func (l *Lane) notifyThrottle() {
-	if ap, ok := l.provider.(providers.AdaptivePacer); ok {
-		ap.OnThrottle()
+	if l.pacer != nil {
+		l.pacer.OnThrottle()
 	}
 }
 
-// notifySuccess forwards a success notification to the provider when it
-// implements providers.AdaptivePacer; it is a no-op otherwise.
+// notifySuccess forwards a success notification to the lane's pacer, if any.
 func (l *Lane) notifySuccess() {
-	if ap, ok := l.provider.(providers.AdaptivePacer); ok {
-		ap.OnSuccess()
+	if l.pacer != nil {
+		l.pacer.OnSuccess()
 	}
-}
-
-// classify drives the breaker for an error outcome and returns the error
-// unchanged so the orchestrator can rank it. It preserves the worker's prior
-// classification order and honest-401 logging.
-func (l *Lane) classify(err error) error {
-	// A genuine token renewal must be tested BEFORE the bare-401 check: a renewal
-	// also satisfies errors.Is(_, ErrUnauthorized), so testing ErrUnauthorized
-	// first would wrongly fold a renewal into the throttle ramp. A renewal holds
-	// the full window, stays loud, and does NOT advance the throttle counter.
-	if errors.Is(err, musixmatch.ErrTokenRenewalRequired) {
-		res := l.breaker.TripRenewal()
-		slog.Warn("lane circuit opened: token renewal required; regenerate the usertoken",
-			"provider", l.Name(), "backoff", res.Window, "next_retry", res.OpenUntil, "cause", err)
-		return err
-	}
-
-	if errors.Is(err, musixmatch.ErrRateLimited) ||
-		errors.Is(err, musixmatch.ErrUnauthorized) {
-		res := l.breaker.Trip()
-		switch {
-		case l.breaker.EverSucceeded() && res.Trips >= escalationThreshold:
-			slog.Warn("lane circuit opened: token validated earlier this session but has failed repeatedly; it may have expired",
-				"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
-		case l.breaker.EverSucceeded():
-			slog.Warn("lane circuit opened: provider throttling; token validated earlier this session",
-				"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
-		default:
-			slog.Warn("lane circuit opened: no successful fetch yet this session; verify your token",
-				"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
-		}
-		// Ratchet the adaptive pacer only on genuine throttle signals: a rate-limit
-		// is ALWAYS throttling; a 401 is throttling only AFTER the token has
-		// succeeded this session (before that it's a bad token, not a throttle).
-		// Never ratchet on a never-succeeded 401.
-		if errors.Is(err, musixmatch.ErrRateLimited) ||
-			(errors.Is(err, musixmatch.ErrUnauthorized) && l.breaker.EverSucceeded()) {
-			l.notifyThrottle()
-		}
-		return err
-	}
-
-	if musixmatch.IsBenignMiss(err) || errors.Is(err, musixmatch.ErrTruncatedResponse) {
-		// A clean miss proves the provider round-trip succeeded, so we are not
-		// being throttled: reset the ramp. EverSucceeded is deliberately NOT set
-		// (a miss is a successful round-trip but not a genuine lyric match). A
-		// truncated/empty body is bucketed here too (#496): it is a deterministic
-		// per-request condition, not a transient throttle, so it must not trip the
-		// breaker or ratchet the pacer -- the worker's benign-miss cadence bounds
-		// its cost instead.
-		if l.breaker.RecordBenignMiss() {
-			slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
-		}
-		return err
-	}
-
-	// Transport / unexpected error: not a throttle signal, leave the breaker
-	// untouched. Wrap for context parity with the prior worker path.
-	return fmt.Errorf("lane %s: find lyrics: %w", l.Name(), err)
 }

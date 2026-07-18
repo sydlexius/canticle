@@ -10,11 +10,10 @@ import (
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
-	"github.com/sydlexius/canticle/internal/providers"
 )
 
 func laneFor(p *stubProvider) *Lane {
-	return NewLane(p, circuit.New(60*time.Second, 30*time.Minute))
+	return NewProviderLane(p, circuit.New(60*time.Second, 30*time.Minute))
 }
 
 func TestNewModeRejectsUnknown(t *testing.T) {
@@ -54,7 +53,7 @@ func TestNewCopiesLanes(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	lanes[0] = nil // mutate the caller's slice after construction
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics after caller mutated its slice: %v", err)
 	}
@@ -68,7 +67,7 @@ func TestOrderedReturnsFirstSuitable(t *testing.T) {
 	p2 := &stubProvider{name: "petitlyrics", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "secondary"}}}
 	o, _ := New("ordered", laneFor(p1), laneFor(p2))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -85,7 +84,7 @@ func TestOrderedFallsThroughToSuitable(t *testing.T) {
 	p2 := &stubProvider{name: "petitlyrics", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "secondary"}}}
 	o, _ := New("ordered", laneFor(p1), laneFor(p2))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -99,7 +98,7 @@ func TestOrderedSkipsUnsuitableInstrumentalForSyncedLater(t *testing.T) {
 	p2 := &stubProvider{name: "petitlyrics", song: models.Song{Subtitles: models.Synced{Lines: []models.Lines{{Text: "hi"}}}}}
 	o, _ := New("ordered", laneFor(p1), laneFor(p2))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -115,7 +114,7 @@ func TestOrderedReturnsBestAvailableWhenNoSuitable(t *testing.T) {
 	p2 := &stubProvider{name: "petitlyrics", song: models.Song{Track: models.Track{Instrumental: 1}}}
 	o, _ := New("ordered", laneFor(p1), laneFor(p2))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v (best-available instrumental should return nil err)", err)
 	}
@@ -128,7 +127,7 @@ func TestOrderedReturnsBenignMissWhenAllMiss(t *testing.T) {
 	p1 := &stubProvider{name: "musixmatch", err: musixmatch.ErrNotFound}
 	o, _ := New("ordered", laneFor(p1))
 
-	_, err := o.FindLyrics(context.Background(), models.Track{})
+	_, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !errors.Is(err, musixmatch.ErrNotFound) {
 		t.Fatalf("err = %v; want ErrNotFound (all lanes missed)", err)
 	}
@@ -141,7 +140,7 @@ func TestOrderedAuthOutranksBenignMiss(t *testing.T) {
 	p2 := &stubProvider{name: "petitlyrics", err: musixmatch.ErrNotFound}
 	o, _ := New("ordered", laneFor(p1), laneFor(p2))
 
-	_, err := o.FindLyrics(context.Background(), models.Track{})
+	_, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !errors.Is(err, musixmatch.ErrRateLimited) {
 		t.Fatalf("err = %v; want ErrRateLimited (auth outranks benign miss)", err)
 	}
@@ -155,7 +154,7 @@ func TestOrderedAllUnavailableReturnsSentinel(t *testing.T) {
 	l1.Breaker().Trip() // open it
 
 	o, _ := New("ordered", l1)
-	_, err := o.FindLyrics(context.Background(), models.Track{})
+	_, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !errors.Is(err, ErrLaneUnavailable) {
 		t.Fatalf("err = %v; want ErrLaneUnavailable (all lanes' breakers open)", err)
 	}
@@ -173,7 +172,7 @@ func TestOrderedGuardRejectionIsUnsuitable(t *testing.T) {
 	o, _ := New("ordered", laneFor(p1))
 	o.SetGuard(acceptGuard{enabled: true, accept: false})
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -181,9 +180,6 @@ func TestOrderedGuardRejectionIsUnsuitable(t *testing.T) {
 		t.Fatalf("quality = %v; want synced returned as best-available", QualityOf(song))
 	}
 }
-
-// Ensure the orchestrator satisfies providers.Fetcher (drop-in for the worker).
-var _ providers.Fetcher = (*Orchestrator)(nil)
 
 func TestLaneNamesReturnsAllLanesInOrder(t *testing.T) {
 	p1 := &stubProvider{name: "musixmatch"}
@@ -209,7 +205,7 @@ func TestWinningLaneSetOnOrderedHit(t *testing.T) {
 	p1 := &stubProvider{name: "musixmatch", song: synced}
 	o, _ := New("ordered", laneFor(p1))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -225,7 +221,7 @@ func TestWinningLaneSetOnBestAvailable(t *testing.T) {
 	p1 := &stubProvider{name: "musixmatch", song: instrumental}
 	o, _ := New("ordered", laneFor(p1))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -253,7 +249,7 @@ func TestLaneAttemptsOrderedLoserRecordsMiss(t *testing.T) {
 	synced := &stubProvider{name: "musixmatch", song: models.Song{Subtitles: models.Synced{Lines: []models.Lines{{Text: "lyric"}}}}}
 	o, _ := New("ordered", laneFor(miss), laneFor(synced))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -275,7 +271,7 @@ func TestLaneAttemptsOrderedLaterLaneNotConsulted(t *testing.T) {
 	never := &stubProvider{name: "zzz", song: models.Song{Subtitles: models.Synced{Lines: []models.Lines{{Text: "unused"}}}}}
 	o, _ := New("ordered", laneFor(synced), laneFor(never))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -293,7 +289,7 @@ func TestLaneAttemptsParallelAllMiss(t *testing.T) {
 	m2 := &stubProvider{name: "bbb", err: musixmatch.ErrNoLyrics}
 	o, _ := New("parallel", laneFor(m1), laneFor(m2))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !musixmatch.IsBenignMiss(err) {
 		t.Fatalf("err = %v; want benign miss", err)
 	}
@@ -317,7 +313,7 @@ func TestLaneAttemptsParallelExcludesUnavailable(t *testing.T) {
 	downLane.Breaker().Trip() // open the breaker: provider not called -> OutcomeUnavailable
 	o, _ := New("parallel", downLane, laneFor(synced))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -343,7 +339,7 @@ func TestLaneAttemptsAllMissRecorded(t *testing.T) {
 	m2 := &stubProvider{name: "bbb", err: musixmatch.ErrNoLyrics}
 	o, _ := New("ordered", laneFor(m1), laneFor(m2))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !musixmatch.IsBenignMiss(err) {
 		t.Fatalf("err = %v; want benign miss", err)
 	}
@@ -361,7 +357,7 @@ func TestWinningLaneEmptyOnBenignMiss(t *testing.T) {
 	p1 := &stubProvider{name: "musixmatch", err: musixmatch.ErrNoLyrics}
 	o, _ := New("ordered", laneFor(p1))
 
-	_, err := o.FindLyrics(context.Background(), models.Track{})
+	_, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !musixmatch.IsBenignMiss(err) {
 		t.Fatalf("err = %v; want benign miss", err)
 	}

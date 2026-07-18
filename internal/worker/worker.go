@@ -241,7 +241,7 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 	// pass-through; the lane owns the circuit interaction the worker previously
 	// drove inline. orchestrator.New only errors on an unknown mode, and
 	// ModeOrdered is a constant, so the error is impossible here.
-	lane := orchestrator.NewLane(providers.New(providers.Musixmatch, fetcher), cb)
+	lane := orchestrator.NewProviderLane(providers.New(providers.Musixmatch, fetcher), cb)
 	orch, _ := orchestrator.New(orchestrator.ModeOrdered, lane)
 	return &Worker{
 		queue:                 q,
@@ -351,7 +351,7 @@ func (w *Worker) SetFallbackProviders(provs ...providers.LyricsProvider) {
 		}
 		cb := circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
 		cb.SetClock(w.now)
-		lanes = append(lanes, orchestrator.NewLane(p, cb))
+		lanes = append(lanes, orchestrator.NewProviderLane(p, cb))
 	}
 	w.lanes = lanes
 	// Rebuild over the new lane set, re-applying the configured mode, race wait, and
@@ -678,7 +678,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// provider set: bypass the cache so the orchestrator revalidates the track
 	// against today's lanes (Gap 1 of docs/multi-provider-orchestration.md).
 	bypassCache := w.providersVersion != 0 && item.ProvidersVersion != w.providersVersion
-	song, cacheHit, err := w.song(ctx, resolvedTrack, bypassCache)
+	song, cacheHit, err := w.song(ctx, resolvedTrack, item.Inputs.SourcePath, bypassCache)
 	if err != nil {
 		switch orchestrator.ClassifyOutcome(err) {
 		case orchestrator.OutcomeUnavailable:
@@ -961,7 +961,7 @@ func (w *Worker) detectInstrumental(ctx context.Context, item queue.WorkItem) (d
 // song looks up or fetches lyrics for track. The caller is responsible for
 // resolving the matching artist (see RunOnce); song uses track verbatim for both
 // the cache lookup and the provider query so the cache read/write keys agree.
-func (w *Worker) song(ctx context.Context, track models.Track, bypassCache bool) (models.Song, bool, error) {
+func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string, bypassCache bool) (models.Song, bool, error) {
 	if !bypassCache {
 		cached, err := w.cache.Lookup(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength))
 		if err == nil {
@@ -980,7 +980,7 @@ func (w *Worker) song(ctx context.Context, track models.Track, bypassCache bool)
 	// The orchestrator returns the best-available result (possibly instrumental)
 	// when no lane is suitable, so the worker still writes the instrumental marker
 	// fallback exactly as before.
-	song, err := w.orch.FindLyrics(ctx, track)
+	song, err := w.orch.FindLyrics(ctx, track, sourcePath)
 	if err != nil {
 		// Propagate the orchestrator's song even on error: on the benign-miss path
 		// it carries song.LaneAttempts (every attempted lane missed this track),

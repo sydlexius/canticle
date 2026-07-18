@@ -30,7 +30,7 @@ type laneResult struct {
 // defer; the results channel is buffered to the launched-goroutine count so a losing
 // lane's send never blocks after cancel; the collector discards canceled-lane
 // results and does not wait for losers to drain.
-func (o *Orchestrator) findParallel(ctx context.Context, track models.Track) (models.Song, error) {
+func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sourcePath string) (models.Song, error) {
 	if err := ctx.Err(); err != nil {
 		return models.Song{}, err
 	}
@@ -42,7 +42,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track) (mo
 	for _, lane := range o.lanes {
 		lane := lane
 		go func() {
-			song, err := lane.FindLyrics(childCtx, track)
+			song, err := lane.FindLyrics(childCtx, track, sourcePath)
 			results <- laneResult{song: song, err: err, name: lane.Name()}
 		}()
 	}
