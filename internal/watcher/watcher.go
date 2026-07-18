@@ -100,7 +100,11 @@ func (w *Watcher) Run(ctx context.Context) error {
 		// which also covers directories created after registration.
 		if err := notify.Watch(filepath.Join(lib.Path, "..."), c, notify.Create, notify.Write, notify.Rename, notify.Remove); err != nil {
 			notify.Stop(c)
-			return fmt.Errorf("watcher: watch %s: %w", lib.Path, err)
+			// An exhausted inotify quota arrives as ENOSPC ("no space left on
+			// device"), which sends the reader to disk usage instead of a sysctl.
+			// annotateWatchErr says what actually happened; other errors pass
+			// through unchanged.
+			return annotateWatchErr(fmt.Errorf("watcher: watch %s: %w", lib.Path, err), dirs)
 		}
 	}
 	defer notify.Stop(c)
