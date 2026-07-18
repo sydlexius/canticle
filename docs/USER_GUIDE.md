@@ -214,7 +214,7 @@ Losing the key - a deleted `.mxlrcgo.key` file or a lost `MXLRC_MASTER_KEY` valu
 
 ## Unraid
 
-An Unraid Community Applications template is provided at `unraid/mxlrcgo-svc.xml`. It follows the same template conventions as the `doxazo-net/unraid-templates` repository: GHCR image, bridge networking, `/config` appdata, a music library mapping, and advanced `PUID`/`PGID` permission and tuning fields (scan/work intervals and the filesystem watcher).
+Canticle is available in Unraid Community Applications. The template is maintained in the [`sydlexius/unraid-templates`](https://github.com/sydlexius/unraid-templates) repository, which is the repository Community Applications indexes; it is not kept in this repository. The template provides a GHCR image, bridge networking, `/config` appdata, a music library mapping, and advanced `PUID`/`PGID` permission and tuning fields (scan/work intervals and the filesystem watcher).
 
 **Library mounts.** Prefer mapping the parent of your media into the container **once** and adding library roots beneath it, rather than a separate mount per library. This keeps container-visible paths stable and matches the single-mount convention used by the [TRaSH Guides Unraid layout](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Unraid/), which maps `/mnt/user/data` to `/data` with media under `/data/media`:
 

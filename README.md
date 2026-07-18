@@ -71,7 +71,7 @@ page.
 
 ```sh
 # go install resolves the module path from go.mod, which declares
-# github.com/doxazo-net/canticle.
+# github.com/sydlexius/canticle.
 go install github.com/sydlexius/canticle/cmd/mxlrcgo-svc@latest
 ```
 
