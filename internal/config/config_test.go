@@ -2100,3 +2100,43 @@ func TestInstrumentalDetectorOrdering_DefaultAndEnv(t *testing.T) {
 		t.Fatal("applied map missing instrumental_detector.ordering")
 	}
 }
+
+// TestInstrumentalDetectorOrdering_EnvInvalidValueRejected verifies that
+// applyEnvOverrides validates MXLRC_INSTRUMENTAL_DETECTOR_ORDERING itself: TOML
+// validation runs before applyEnvOverrides, so an unvalidated env override would
+// let a bogus value (or a padded/mixed-case one) reach the worker unchanged and
+// silently behave as "demoted".
+func TestInstrumentalDetectorOrdering_EnvInvalidValueRejected(t *testing.T) {
+	isolateEnv(t)
+	cfg := defaults()
+	cfg.InstrumentalDetector.Ordering = detectorOrderingFront // a known non-default current value
+
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", "sideways")
+	applied := map[string]bool{}
+	applyEnvOverrides(&cfg, applied)
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingFront {
+		t.Fatalf("ordering after invalid env = %q, want %q (current value preserved)", cfg.InstrumentalDetector.Ordering, detectorOrderingFront)
+	}
+	if applied["instrumental_detector.ordering"] {
+		t.Fatal("applied map must not mark instrumental_detector.ordering for a rejected value")
+	}
+}
+
+// TestInstrumentalDetectorOrdering_EnvPaddedMixedCaseNormalized verifies that
+// MXLRC_INSTRUMENTAL_DETECTOR_ORDERING is trimmed and lowercased before
+// validation, so a padded/mixed-case value like " FRONT " is accepted and
+// normalized rather than rejected as unrecognized.
+func TestInstrumentalDetectorOrdering_EnvPaddedMixedCaseNormalized(t *testing.T) {
+	isolateEnv(t)
+	cfg := defaults()
+
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", " FRONT ")
+	applied := map[string]bool{}
+	applyEnvOverrides(&cfg, applied)
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingFront {
+		t.Fatalf("ordering after padded/mixed-case env = %q, want %q (normalized)", cfg.InstrumentalDetector.Ordering, detectorOrderingFront)
+	}
+	if !applied["instrumental_detector.ordering"] {
+		t.Fatal("applied map missing instrumental_detector.ordering")
+	}
+}

@@ -110,6 +110,8 @@ func validEnvValue(f FieldSpec) string {
 		return "info"
 	case "logging.format":
 		return "json"
+	case "instrumental_detector.ordering":
+		return "front"
 	}
 	switch f.Type {
 	case TypeInt:

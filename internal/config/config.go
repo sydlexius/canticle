@@ -1273,8 +1273,13 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		applied["instrumental_detector.ffprobe_path"] = true
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING"); v != "" {
-		cfg.InstrumentalDetector.Ordering = v
-		applied["instrumental_detector.ordering"] = true
+		normalized := strings.ToLower(strings.TrimSpace(v))
+		if normalized != detectorOrderingFront && normalized != detectorOrderingDemoted {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", "value", v, "current", cfg.InstrumentalDetector.Ordering) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.Ordering = normalized
+			applied["instrumental_detector.ordering"] = true
+		}
 	}
 	if v := os.Getenv("MXLRC_GUARD_ACCEPTED_SCRIPTS"); v != "" {
 		cfg.Guard.AcceptedScripts = splitCSV(v)
