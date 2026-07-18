@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // TestSecurityHeadersOnEveryResponse confirms the baseline security headers are

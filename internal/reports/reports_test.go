@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/reports"
 )
 
 // openTestDB opens a temp-file SQLite with all migrations applied, mirroring the

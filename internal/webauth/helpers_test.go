@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/db"
 )
 
 // newTestDB opens a migrated SQLite database in a temp file (real SQLite, no

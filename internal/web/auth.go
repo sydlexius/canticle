@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/trustnet"
-	"github.com/doxazo-net/canticle/internal/webauth"
-	"github.com/doxazo-net/canticle/web/templates"
+	"github.com/sydlexius/canticle/internal/trustnet"
+	"github.com/sydlexius/canticle/internal/webauth"
+	"github.com/sydlexius/canticle/web/templates"
 )
 
 // SessionCookieName is the browser cookie carrying the raw session token. The

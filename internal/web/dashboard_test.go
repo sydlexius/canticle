@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/reports"
 )
 
 // TestHandleDashboard_NoReports verifies that GET /dashboard returns 503 when

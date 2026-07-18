@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // idAttrRE matches an id="..." attribute value in rendered HTML.

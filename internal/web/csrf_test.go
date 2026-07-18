@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/trustnet"
-	"github.com/doxazo-net/canticle/internal/webauth"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/trustnet"
+	"github.com/sydlexius/canticle/internal/webauth"
 )
 
 // sameOriginGuardCSRFToken is the fixed CSRF value injected into

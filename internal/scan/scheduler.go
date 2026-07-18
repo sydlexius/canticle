@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/pathutil"
-	"github.com/doxazo-net/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/scanner"
 )
 
 // LibraryLister lists configured library roots.

@@ -17,10 +17,10 @@ import (
 
 	"github.com/dhowden/tag"
 	"github.com/dhowden/tag/mbz"
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/queue"
 	"github.com/lizc2003/audioduration"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // supportedFileTypes lists audio file extensions that can have metadata read.

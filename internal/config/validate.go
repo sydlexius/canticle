@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/providers"
-	"github.com/doxazo-net/canticle/internal/trustnet"
+	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/trustnet"
 )
 
 // ValidationError is a per-field rejection: the field, the offending value, and

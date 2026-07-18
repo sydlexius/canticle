@@ -1,4 +1,4 @@
-module github.com/doxazo-net/canticle
+module github.com/sydlexius/canticle
 
 go 1.26.5
 

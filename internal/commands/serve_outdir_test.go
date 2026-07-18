@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/musixmatch"
 )
 
 // writeServeCfgWithOutputDir writes a minimal serve config that also sets an

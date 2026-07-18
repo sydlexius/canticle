@@ -3,7 +3,7 @@ package watcher
 import (
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // TestWatcherDefaultsMatchConfigPackage guards the duplicated defaults: the

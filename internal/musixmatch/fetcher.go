@@ -3,7 +3,7 @@ package musixmatch
 import (
 	"context"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // Fetcher abstracts lyrics lookup from the Musixmatch API.

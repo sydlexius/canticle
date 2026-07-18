@@ -11,9 +11,9 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/doxazo-net/canticle/internal/providers"
-	"github.com/doxazo-net/canticle/internal/secrets"
-	"github.com/doxazo-net/canticle/internal/trustnet"
+	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/trustnet"
 )
 
 // Config holds all application configuration.

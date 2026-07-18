@@ -10,7 +10,7 @@ import (
 
 	"github.com/rjeczalik/notify"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // waitFor polls cond until it returns true or a generous deadline elapses,

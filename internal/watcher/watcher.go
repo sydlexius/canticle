@@ -12,8 +12,8 @@ import (
 
 	"github.com/rjeczalik/notify"
 
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/pathutil"
 )
 
 // LibraryLister lists configured library roots.

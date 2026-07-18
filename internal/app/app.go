@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/backoff"
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/musixmatch"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/backoff"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // App owns all processing state and orchestrates the lyrics fetch loop.

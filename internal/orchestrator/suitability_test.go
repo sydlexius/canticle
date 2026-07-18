@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 func syncedSong() models.Song {

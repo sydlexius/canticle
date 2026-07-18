@@ -24,12 +24,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/normalize"
-	"github.com/doxazo-net/canticle/internal/pathutil"
-	"github.com/doxazo-net/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/scanner"
 )
 
 // LibraryLister lists and resolves configured library roots. Satisfied by

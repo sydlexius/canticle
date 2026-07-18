@@ -11,8 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/doxazo-net/canticle/internal/normalize"
 	"github.com/pressly/goose/v3"
+	"github.com/sydlexius/canticle/internal/normalize"
 	"modernc.org/sqlite" // pure-Go SQLite driver
 )
 

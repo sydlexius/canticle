@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/secrets"
-	"github.com/doxazo-net/canticle/internal/web"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/web"
 )
 
 // fakeSecretStore is an in-memory secrets.Store for the settings-writer test.

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/library"
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 func setupReconcileLRC(t *testing.T) (cfgPath, root string) {

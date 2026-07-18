@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/scanner"
-	"github.com/doxazo-net/canticle/internal/testutil"
+	"github.com/sydlexius/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/testutil"
 )
 
 func TestGenerateLibraryAndScan(t *testing.T) {

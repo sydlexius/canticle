@@ -152,7 +152,7 @@ the User Guide for NSSM service installation.
 Requires Go 1.26.4 or later.
 
 ```sh
-go install github.com/doxazo-net/canticle/cmd/mxlrcgo-svc@latest
+go install github.com/sydlexius/canticle/cmd/mxlrcgo-svc@latest
 ```
 
 Or clone the repository and use `make`:

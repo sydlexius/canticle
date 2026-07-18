@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/scan"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/scan"
 )
 
 func detectBoolPtr(b bool) *bool { return &b }

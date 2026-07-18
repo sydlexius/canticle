@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // instrumentalClassifierResponse is a stub classifier body that passes all three

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 const (

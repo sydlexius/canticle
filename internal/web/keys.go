@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/doxazo-net/canticle/internal/auth"
-	"github.com/doxazo-net/canticle/web/templates"
+	"github.com/sydlexius/canticle/internal/auth"
+	"github.com/sydlexius/canticle/web/templates"
 )
 
 // keyIDDisplayLen is how many leading characters of the public key ID are shown

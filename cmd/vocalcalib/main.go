@@ -27,11 +27,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/db"
-	"github.com/doxazo-net/canticle/internal/detector"
-	"github.com/doxazo-net/canticle/internal/ffmpeg"
-	"github.com/doxazo-net/canticle/internal/vocalcalib"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/ffmpeg"
+	"github.com/sydlexius/canticle/internal/vocalcalib"
 )
 
 func main() {

@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // tsRe matches one leading LRC timestamp token: [mm:ss], [mm:ss.xx], or

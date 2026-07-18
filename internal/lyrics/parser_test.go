@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // writeTestLRC is a helper that writes a minimal synced LRC file containing

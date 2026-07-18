@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // HTTPDetector calls an external AudioSet classifier over HTTP. It serializes

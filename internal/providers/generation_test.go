@@ -3,7 +3,7 @@ package providers_test
 import (
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/providers"
 )
 
 // TestGeneration_SortedOrderInsensitive verifies that changing the order of the

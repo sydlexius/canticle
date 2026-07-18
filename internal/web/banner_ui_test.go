@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // spicetifyFAQURL is the documented source for obtaining a Musixmatch token; the

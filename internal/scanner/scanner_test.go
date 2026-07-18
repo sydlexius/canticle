@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/lyrics"
-	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // minimalID3v2 is a minimal ID3v2.3 tag with TIT2 ("Test Title") and TPE1

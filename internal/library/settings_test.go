@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/library"
-	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 func bp(v bool) *bool { return &v }

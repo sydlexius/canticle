@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/backoff"
+	"github.com/sydlexius/canticle/internal/backoff"
 )
 
 // BreakerState reports whether a caller may proceed through the breaker.

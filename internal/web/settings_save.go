@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/providers"
-	"github.com/doxazo-net/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/secrets"
 )
 
 // handleSaveField is the single-field settings write endpoint (#288 Phase 2).

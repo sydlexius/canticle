@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 // TestWatcherConfigFromCentral verifies the central [watcher] config maps onto

@@ -14,17 +14,17 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/doxazo-net/canticle/internal/auth"
-	"github.com/doxazo-net/canticle/internal/config"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/normalize"
-	"github.com/doxazo-net/canticle/internal/pathutil"
-	"github.com/doxazo-net/canticle/internal/queue"
-	"github.com/doxazo-net/canticle/internal/reports"
-	"github.com/doxazo-net/canticle/internal/scan"
-	"github.com/doxazo-net/canticle/internal/secrets"
-	"github.com/doxazo-net/canticle/internal/trustnet"
-	"github.com/doxazo-net/canticle/internal/web"
+	"github.com/sydlexius/canticle/internal/auth"
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/scan"
+	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/trustnet"
+	"github.com/sydlexius/canticle/internal/web"
 )
 
 const maxWebhookBody = 1 << 20 // 1 MiB

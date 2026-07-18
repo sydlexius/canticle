@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/db"
 )
 
 // newTestStore opens a migrated SQLite DB (temp file) and returns a SQLStore

@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doxazo-net/canticle/internal/cache"
-	"github.com/doxazo-net/canticle/internal/library"
-	"github.com/doxazo-net/canticle/internal/models"
-	"github.com/doxazo-net/canticle/internal/queue"
-	"github.com/doxazo-net/canticle/internal/scan"
+	"github.com/sydlexius/canticle/internal/cache"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/scan"
 )
 
 func TestRepo_ListDeferred(t *testing.T) {
