@@ -282,7 +282,6 @@ func TestScanLibrary_InstrumentalProvenanceReopen(t *testing.T) {
 		{"detector_no_flags_terminal", lyrics.SourceDetector, "1.0", ScanOptions{}, false},
 		{"detector_version_bump_reopens", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "2.0"}, true},
 		{"detector_same_version_terminal", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "1.0"}, false},
-		{"detector_no_current_version_terminal", lyrics.SourceDetector, "1.0", ScanOptions{}, false},
 		{"provider_upgrade_terminal", "musixmatch", "", ScanOptions{Upgrade: true}, false},
 		{"provider_update_reopens", "musixmatch", "", ScanOptions{Update: true}, true},
 		{"legacy_bare_upgrade_terminal", "", "", ScanOptions{Upgrade: true}, false},

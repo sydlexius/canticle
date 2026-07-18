@@ -417,8 +417,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 			// reopens on --upgrade or a detector-version bump.
 			prov, _, provErr := lyrics.ReadInstrumentalProvenance(filepath.Join(dir, txtFile))
 			if provErr != nil {
-				// Treat an unreadable header as terminal (conservative: do not reopen
-				// on a read error), matching isInstrumentalTxt's fail-safe.
+				// Treat an unreadable header as terminal: fail conservatively toward terminal so a transient read error never reopens a settled marker.
 				slog.Warn("could not read instrumental provenance; treating marker as terminal", "file", file.Name(), "error", provErr)
 			}
 			if !instrumentalReopenable(prov, reopen, opts.DetectorVersion) {
