@@ -1,6 +1,6 @@
 [Unit]
 Description=Canticle lyrics fetcher daemon
-Documentation=https://doxazo-net.github.io/canticle/
+Documentation=https://sydlexius.github.io/canticle/
 After=network-online.target
 Wants=network-online.target
 

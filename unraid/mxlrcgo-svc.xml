@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>mxlrcgo-svc</Name>
-  <Repository>ghcr.io/doxazo-net/canticle</Repository>
-  <Registry>https://github.com/doxazo-net/canticle/pkgs/container/canticle</Registry>
-  <TemplateURL>https://raw.githubusercontent.com/doxazo-net/canticle/main/unraid/mxlrcgo-svc.xml</TemplateURL>
+  <Repository>ghcr.io/sydlexius/canticle</Repository>
+  <Registry>https://github.com/sydlexius/canticle/pkgs/container/canticle</Registry>
+  <TemplateURL>https://raw.githubusercontent.com/sydlexius/canticle/main/unraid/mxlrcgo-svc.xml</TemplateURL>
   <Branch>
     <Tag>latest</Tag>
     <TagDescription>Latest stable release</TagDescription>
@@ -11,13 +11,13 @@
   <Network>bridge</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/doxazo-net/canticle/issues</Support>
-  <Project>https://github.com/doxazo-net/canticle</Project>
+  <Support>https://github.com/sydlexius/canticle/issues</Support>
+  <Project>https://github.com/sydlexius/canticle</Project>
   <Overview>Fetch synced lyrics from Musixmatch and save them as .lrc files for music libraries.</Overview>
   <Description>Canticle fetches synced lyrics from the Musixmatch API, writes .lrc files, and can run as a small HTTP service for Lidarr webhook-driven lyric fetching.</Description>
   <Category>MediaApp:Music</Category>
   <WebUI>http://[IP]:[PORT:50705]/</WebUI>
-  <Icon>https://raw.githubusercontent.com/doxazo-net/unraid-templates/main/icon.svg</Icon>
+  <Icon>https://raw.githubusercontent.com/sydlexius/unraid-templates/main/icon.svg</Icon>
   <ExtraParams/>
   <PostArgs/>
   <DonateText/>
