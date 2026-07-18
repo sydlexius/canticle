@@ -36,3 +36,17 @@ func TestSong_DetectorVersionField(t *testing.T) {
 		t.Fatalf("DetectorVersion not carried: %q", s.DetectorVersion)
 	}
 }
+
+func TestSong_DetectorTelemetryFields(t *testing.T) {
+	s := Song{
+		DetectorVersion:    "1.5.0",
+		DetectorMusicSum:   0.9,
+		DetectorVocalPeak:  0.01,
+		DetectorSpeechMean: 0.02,
+		DetectorVocalClass: "Singing",
+	}
+	if s.DetectorMusicSum != 0.9 || s.DetectorVocalPeak != 0.01 ||
+		s.DetectorSpeechMean != 0.02 || s.DetectorVocalClass != "Singing" {
+		t.Fatalf("telemetry fields not carried: %+v", s)
+	}
+}
