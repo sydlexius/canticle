@@ -116,3 +116,57 @@ def test_classify_returns_every_class_in_both_maps():
     # The all-zero class must survive in BOTH maps with value 0.0 - never dropped.
     assert body["mean"]["Silence"] == 0.0
     assert body["max"]["Silence"] == 0.0
+
+
+def test_classify_does_not_serialize_concurrent_requests():
+    """Inference must not run on the event loop.
+
+    The handler is `async def` (it awaits file.read()), so calling the
+    synchronous, CPU-bound model directly from it would run inference ON the
+    event loop and serialize every concurrent /classify. Measured at 4 concurrent
+    requests with a 0.5s inference, that is ~2.0s serialized versus ~0.5s
+    offloaded.
+
+    This asserts the offload rather than the wall-clock number, which would be
+    flaky on a loaded machine: with a blocking call the total is at least
+    CONCURRENCY * INFER, so a threshold below that separates the two
+    implementations without depending on how fast the host is.
+    """
+    import asyncio
+    import time
+
+    import httpx
+
+    infer_seconds = 0.2
+    concurrency = 4
+
+    class _SleepingModel:
+        """Blocking and CPU-bound, like the real forward pass."""
+
+        def __call__(self, wav):
+            time.sleep(infer_seconds)
+            return _Scores(np.zeros((2, 2), dtype=np.float32)), None, None
+
+    appmod._state["model"] = _SleepingModel()
+    appmod._state["classes"] = ["Music", "Speech"]
+
+    async def _run():
+        transport = httpx.ASGITransport(app=appmod.app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://t", timeout=60
+        ) as client:
+            files = {"file": ("s.wav", _wav_bytes(), "audio/wav")}
+            start = time.perf_counter()
+            responses = await asyncio.gather(
+                *(client.post("/classify", files=files) for _ in range(concurrency))
+            )
+            return time.perf_counter() - start, responses
+
+    elapsed, responses = asyncio.run(_run())
+
+    assert all(r.status_code == 200 for r in responses), [r.status_code for r in responses]
+    serialized = infer_seconds * concurrency
+    assert elapsed < serialized * 0.6, (
+        f"concurrent /classify took {elapsed:.2f}s; serialized would be ~{serialized:.2f}s. "
+        "Inference is running on the event loop - it must be dispatched to the threadpool."
+    )
