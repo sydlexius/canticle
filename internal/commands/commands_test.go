@@ -820,6 +820,34 @@ func TestConfigProvidersModeAndRaceWaitGetSetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigInstrumentalDetectorOrderingGetSetRoundTrip(t *testing.T) {
+	cfg := config.Config{
+		InstrumentalDetector: config.InstrumentalDetectorConfig{Ordering: "demoted"},
+	}
+	got, ok := configValue(cfg, "instrumental_detector.ordering")
+	if !ok {
+		t.Fatal("configValue(instrumental_detector.ordering) ok = false; want true")
+	}
+	if got != "demoted" {
+		t.Fatalf("configValue(instrumental_detector.ordering) = %q; want %q", got, "demoted")
+	}
+	if !slices.Contains(configKeys(), "instrumental_detector.ordering") {
+		t.Fatal("configKeys missing instrumental_detector.ordering")
+	}
+
+	for _, ordering := range []string{"front", "demoted"} {
+		if err := setConfigValue(&cfg, "instrumental_detector.ordering", ordering); err != nil {
+			t.Fatalf("setConfigValue instrumental_detector.ordering=%q: %v", ordering, err)
+		}
+		if cfg.InstrumentalDetector.Ordering != ordering {
+			t.Fatalf("instrumental_detector.ordering = %q; want %q", cfg.InstrumentalDetector.Ordering, ordering)
+		}
+	}
+	if err := setConfigValue(&cfg, "instrumental_detector.ordering", "sideways"); err == nil {
+		t.Fatal("setConfigValue accepted an unknown instrumental_detector.ordering")
+	}
+}
+
 func TestConfigBilingualOutputGetSetRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		Output: config.OutputConfig{BilingualOutput: true},

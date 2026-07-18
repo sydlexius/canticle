@@ -30,8 +30,10 @@ const DefaultRaceWait = 2 * time.Second
 // prior single-fetch path: the one lane's breaker carries the throttle state, and
 // a suitable / best-available / classified-error result flows back unchanged.
 //
-// It satisfies providers.Fetcher, so the worker can hold it in place of a bare
-// fetcher.
+// FindLyrics takes the per-item sourcePath alongside the track (a file-reading
+// lane such as the detector needs the on-disk audio path), so Orchestrator no
+// longer matches the two-argument providers.Fetcher shape; the worker calls
+// FindLyrics directly rather than holding it behind that interface.
 type Orchestrator struct {
 	lanes []*Lane
 	guard ScriptGuard
@@ -96,11 +98,11 @@ func (o *Orchestrator) SetRaceWait(d time.Duration) {
 // lanes in priority order; parallel mode races them with a bounded synced-upgrade
 // window. Both share the same suitability rule and the same resolution precedence
 // (best-available > highest-precedence error > unavailable sentinel).
-func (o *Orchestrator) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
+func (o *Orchestrator) FindLyrics(ctx context.Context, track models.Track, sourcePath string) (models.Song, error) {
 	if o.mode == ModeParallel {
-		return o.findParallel(ctx, track)
+		return o.findParallel(ctx, track, sourcePath)
 	}
-	return o.findOrdered(ctx, track)
+	return o.findOrdered(ctx, track, sourcePath)
 }
 
 // findOrdered iterates lanes in priority order:
@@ -114,7 +116,7 @@ func (o *Orchestrator) FindLyrics(ctx context.Context, track models.Track) (mode
 //     instrumental / unsynced fallback.
 //   - If every lane errored, return the highest-precedence error (Gap 4).
 //   - If every available lane's breaker was open, return ErrLaneUnavailable.
-func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track) (models.Song, error) {
+func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sourcePath string) (models.Song, error) {
 	var r dispatchResult
 	// attempted accumulates the names of lanes actually CONSULTED (the provider was
 	// called), in order, so per-track hit/miss attribution counts only lanes that
@@ -127,7 +129,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track) (mod
 			return models.Song{}, err
 		}
 
-		song, err := lane.FindLyrics(ctx, track)
+		song, err := lane.FindLyrics(ctx, track, sourcePath)
 		class := ClassifyOutcome(err)
 
 		if class == OutcomeUnavailable {

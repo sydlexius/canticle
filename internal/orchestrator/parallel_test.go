@@ -44,7 +44,7 @@ func (p *delayProvider) FindLyrics(ctx context.Context, _ models.Track) (models.
 }
 
 func delayLane(p *delayProvider) *Lane {
-	return NewLane(p, circuit.New(60*time.Second, 30*time.Minute))
+	return NewProviderLane(p, circuit.New(60*time.Second, 30*time.Minute))
 }
 
 func waitFor(t *testing.T, cond func() bool, msg string) {
@@ -65,7 +65,7 @@ func TestParallelSyncedPreemptsSlowerUnsynced(t *testing.T) {
 	o, _ := New("parallel", delayLane(fast), delayLane(slow))
 	o.SetRaceWait(500 * time.Millisecond)
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestParallelUnsyncedCommittedWhenWindowElapses(t *testing.T) {
 	o, _ := New("parallel", delayLane(fast), delayLane(slow))
 	o.SetRaceWait(20 * time.Millisecond)
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestParallelFastSyncedWinsImmediately(t *testing.T) {
 	o.SetRaceWait(5 * time.Second)
 
 	start := time.Now()
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
@@ -117,7 +117,7 @@ func TestParallelSingleUnsyncedCommitsImmediately(t *testing.T) {
 	o.SetRaceWait(5 * time.Second)
 
 	start := time.Now()
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
@@ -135,7 +135,7 @@ func TestParallelAllMissReturnsBenignMiss(t *testing.T) {
 	p2 := &delayProvider{name: "petitlyrics", err: musixmatch.ErrNotFound}
 	o, _ := New("parallel", delayLane(p1), delayLane(p2))
 
-	_, err := o.FindLyrics(context.Background(), models.Track{})
+	_, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !errors.Is(err, musixmatch.ErrNotFound) {
 		t.Fatalf("err = %v; want ErrNotFound (all lanes missed)", err)
 	}
@@ -146,7 +146,7 @@ func TestParallelBestAvailableWhenNoSuitable(t *testing.T) {
 	p2 := &delayProvider{name: "petitlyrics", song: models.Song{Track: models.Track{Instrumental: 1}}}
 	o, _ := New("parallel", delayLane(p1), delayLane(p2))
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v (best-available instrumental should return nil err)", err)
 	}
@@ -160,7 +160,7 @@ func TestParallelAuthOutranksBenignMiss(t *testing.T) {
 	p2 := &delayProvider{name: "petitlyrics", err: musixmatch.ErrNotFound}
 	o, _ := New("parallel", delayLane(p1), delayLane(p2))
 
-	_, err := o.FindLyrics(context.Background(), models.Track{})
+	_, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if !errors.Is(err, musixmatch.ErrRateLimited) {
 		t.Fatalf("err = %v; want ErrRateLimited (auth outranks benign miss)", err)
 	}
@@ -171,7 +171,7 @@ func TestParallelNoGoroutineLeak(t *testing.T) {
 	slow := &delayProvider{name: "petitlyrics", song: syncedSong(), delay: 150 * time.Millisecond}
 	o, _ := New("parallel", delayLane(fast), delayLane(slow))
 
-	if _, err := o.FindLyrics(context.Background(), models.Track{}); err != nil {
+	if _, err := o.FindLyrics(context.Background(), models.Track{}, ""); err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestParallelParentCancelReturnsErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := o.FindLyrics(ctx, models.Track{})
+		_, err := o.FindLyrics(ctx, models.Track{}, "")
 		errCh <- err
 	}()
 	// Require the lane to be genuinely in flight before canceling; fail loudly if
@@ -223,7 +223,7 @@ func TestParallelParentCancelAfterHeldReturnsErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := o.FindLyrics(ctx, models.Track{})
+		_, err := o.FindLyrics(ctx, models.Track{}, "")
 		errCh <- err
 	}()
 	// Require the held-unsynced + armed-race-window state before canceling; fail
@@ -255,7 +255,7 @@ func TestParallelGuardDrivesSuitability(t *testing.T) {
 		return len(s.Subtitles.Lines) > 0 && s.Subtitles.Lines[0].Text == "keep"
 	}})
 
-	song, err := o.FindLyrics(context.Background(), models.Track{})
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
 	}

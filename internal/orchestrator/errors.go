@@ -13,6 +13,18 @@ import (
 // lane was actually consulted, so the catalog answer is unknown).
 var ErrLaneUnavailable = errors.New("orchestrator: lane unavailable (circuit open)")
 
+// ErrLaneBenignMiss is the provider-agnostic sentinel a non-provider lane
+// returns when it reached its backend and found no usable result (e.g. the
+// detector gate is negative). It classifies as a benign miss: the ramp resets
+// and the remaining lanes run.
+var ErrLaneBenignMiss = errors.New("orchestrator: lane benign miss (no result)")
+
+// ErrLaneOutage is the provider-agnostic sentinel a non-provider lane returns
+// when its backend call genuinely failed (e.g. the detector sidecar is
+// unreachable). It trips the lane's breaker so repeated outages open the lane
+// and it degrades to OutcomeUnavailable.
+var ErrLaneOutage = errors.New("orchestrator: lane outage")
+
 // OutcomeClass classifies a lane's outcome for cross-lane precedence (design
 // doc Gap 4). The precedence rule is "least-certain-negative wins": any signal
 // that we did not truly learn the track is absent (auth, rate-limit, transport,
@@ -32,6 +44,17 @@ const (
 	// (not with the throttle signals below) because it must take the same
 	// bounded-retry path as a clean miss -- see #496.
 	OutcomeBenignMiss
+	// OutcomeLaneOutage means a NON-PROVIDER lane (today: the detector) reached
+	// for its backend and the call genuinely failed (ErrLaneOutage). It ranks
+	// above a benign miss - we did not cleanly learn anything from that lane -
+	// but deliberately BELOW OutcomeTransport, because such a lane answers a
+	// different question than the providers do. A detector outage says nothing
+	// about whether the track has lyrics, so it must never outrank, or tie and
+	// then mask, a provider's own transport failure: at equal precedence rankErr
+	// keeps whichever lane reported FIRST, so a front-ordered detector outage
+	// would otherwise become the surfaced error and let the worker downgrade a
+	// genuine provider failure to a benign miss, suppressing its backoff.
+	OutcomeLaneOutage
 	// OutcomeTransport means a retriable failure that is not a clean miss
 	// (timeout, connection failure, an unexpected error).
 	OutcomeTransport
@@ -63,8 +86,11 @@ func ClassifyOutcome(err error) OutcomeClass {
 		errors.Is(err, musixmatch.ErrUnauthorized),
 		errors.Is(err, musixmatch.ErrRateLimited):
 		return OutcomeAuthRateLimit
-	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse):
+	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse),
+		errors.Is(err, ErrLaneBenignMiss):
 		return OutcomeBenignMiss
+	case errors.Is(err, ErrLaneOutage):
+		return OutcomeLaneOutage
 	default:
 		return OutcomeTransport
 	}
@@ -80,12 +106,14 @@ func (c OutcomeClass) precedence() int {
 		return 0
 	case OutcomeBenignMiss:
 		return 1
-	case OutcomeTransport:
+	case OutcomeLaneOutage:
 		return 2
+	case OutcomeTransport:
+		return 3
 	case OutcomeAuthRateLimit:
-		return 3
+		return 4
 	case OutcomeUnavailable:
-		return 3
+		return 4
 	default:
 		return 0
 	}

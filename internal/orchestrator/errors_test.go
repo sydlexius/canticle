@@ -55,3 +55,50 @@ func TestErrLaneUnavailableIsSentinel(t *testing.T) {
 		t.Fatal("ErrLaneUnavailable must be matchable through wrapping")
 	}
 }
+
+func TestClassifyOutcome_LaneSentinels(t *testing.T) {
+	if got := ClassifyOutcome(ErrLaneBenignMiss); got != OutcomeBenignMiss {
+		t.Errorf("benign-miss sentinel = %v, want OutcomeBenignMiss", got)
+	}
+	if got := ClassifyOutcome(ErrLaneOutage); got != OutcomeLaneOutage {
+		t.Errorf("outage sentinel = %v, want OutcomeLaneOutage", got)
+	}
+}
+
+// TestOutcomeLaneOutage_RanksBelowTransport pins the precedence relationship
+// that keeps a non-provider lane's outage from masking a provider's own
+// failure. A lane outage must outrank a clean benign miss (we genuinely learned
+// nothing from that lane) but must stay strictly below OutcomeTransport, so
+// that when a detector outage and a provider transport error are both in play
+// the PROVIDER error is the one dispatchResult surfaces - and the worker then
+// fails-with-backoff instead of downgrading to a benign miss.
+func TestOutcomeLaneOutage_RanksBelowTransport(t *testing.T) {
+	if OutcomeLaneOutage.precedence() <= OutcomeBenignMiss.precedence() {
+		t.Errorf("lane outage (%d) must outrank a benign miss (%d)",
+			OutcomeLaneOutage.precedence(), OutcomeBenignMiss.precedence())
+	}
+	if OutcomeLaneOutage.precedence() >= OutcomeTransport.precedence() {
+		t.Errorf("lane outage (%d) must rank BELOW transport (%d), else a detector outage can mask a provider failure",
+			OutcomeLaneOutage.precedence(), OutcomeTransport.precedence())
+	}
+}
+
+// TestRankErr_ProviderTransportBeatsDetectorOutage is the regression test for
+// the masking bug directly: a front-ordered detector reports its outage FIRST,
+// then a provider reports a transport error. rankErr keeps the first reporter
+// at equal precedence, so under the old shared-OutcomeTransport classification
+// the outage won and the worker swallowed the provider failure. The provider
+// error must win.
+func TestRankErr_ProviderTransportBeatsDetectorOutage(t *testing.T) {
+	transport := errors.New("provider: connection reset")
+	var r dispatchResult
+	r.rankErr(ErrLaneOutage, ClassifyOutcome(ErrLaneOutage))
+	r.rankErr(transport, ClassifyOutcome(transport))
+
+	if !errors.Is(r.topErr, transport) {
+		t.Fatalf("provider transport error must outrank a detector outage, got %v", r.topErr)
+	}
+	if errors.Is(r.topErr, ErrLaneOutage) {
+		t.Fatal("a detector outage must not be the surfaced error when a provider also failed")
+	}
+}

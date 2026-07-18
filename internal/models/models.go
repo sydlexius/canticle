@@ -82,6 +82,13 @@ type Song struct {
 	// a detector marker is later distinguishable from an editorial provider marker.
 	// Transient: not persisted, not serialized.
 	DetectorVersion string `json:"-"`
+	// Detector telemetry accompanying a detector-sourced instrumental verdict.
+	// Transient (never serialized): the worker reads them off the orchestrator
+	// result to stamp queue.InstrumentalTelemetry. Zero on non-detector songs.
+	DetectorMusicSum   float64 `json:"-"`
+	DetectorVocalPeak  float64 `json:"-"`
+	DetectorSpeechMean float64 `json:"-"`
+	DetectorVocalClass string  `json:"-"`
 }
 
 // LaneAttempt is one provider lane's outcome for a single track: the lane name

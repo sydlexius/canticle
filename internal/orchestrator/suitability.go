@@ -53,7 +53,11 @@ type ScriptGuard interface {
 // least unsynced. An instrumental marker or an empty body is never suitable on
 // its own: it is retained only as a best-available fallback by the orchestrator.
 func IsSuitable(song models.Song, guard ScriptGuard) bool {
-	if QualityOf(song) < QualityUnsynced {
+	// A detector-sourced instrumental (DetectorVersion set) is a terminal verdict:
+	// it settles the track and short-circuits the remaining lanes. A provider
+	// instrumental carries no DetectorVersion and stays best-available only.
+	detectorInstrumental := song.Track.Instrumental == 1 && song.DetectorVersion != ""
+	if !detectorInstrumental && QualityOf(song) < QualityUnsynced {
 		return false
 	}
 	if guard != nil && guard.Enabled() {

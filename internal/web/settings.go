@@ -1148,6 +1148,7 @@ var settingsLabels = map[string]string{
 	"verification.min_confidence":                   "Minimum transcription confidence (0-1)",
 	"verification.min_similarity":                   "Minimum lyric match similarity (0-1)",
 	"instrumental_detector.enabled":                 "Detect instrumental tracks",
+	"instrumental_detector.ordering":                "When to run the instrumental detector",
 	"instrumental_detector.classifier_url":          "Audio classifier service address",
 	"instrumental_detector.ffmpeg_path":             "ffmpeg program location",
 	"instrumental_detector.sample_duration_seconds": "Audio sample length to check (seconds)",

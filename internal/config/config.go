@@ -303,6 +303,15 @@ const (
 	raceWaitSecondsDefault = 2
 )
 
+// detectorOrderingDemoted and detectorOrderingFront are the supported
+// instrumental_detector.ordering values. Demoted (the default) consults the
+// detector lane only after a provider miss, preserving today's behavior;
+// front settles a high-confidence instrumental before any provider lane runs.
+const (
+	detectorOrderingDemoted = "demoted"
+	detectorOrderingFront   = "front"
+)
+
 // VerificationConfig holds optional STT verification settings.
 type VerificationConfig struct {
 	Enabled               bool    `toml:"enabled"`
@@ -386,6 +395,11 @@ type InstrumentalDetectorConfig struct {
 	// ffmpeg, then PATH). Set this when ffmpeg was auto-provisioned (which ships no
 	// ffprobe). Override: MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH.
 	FFprobePath string `toml:"ffprobe_path"`
+	// Ordering places the detector lane first ("front") so a high-confidence
+	// instrumental settles with zero provider requests, or last ("demoted",
+	// default) so it is consulted only on a provider miss (today's behavior).
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_ORDERING.
+	Ordering string `toml:"ordering"`
 }
 
 // EnrichmentConfig holds the global default for recording enrichment (reading
@@ -559,6 +573,7 @@ func defaults() Config {
 			SpeechMaxConfidence:   detectorSpeechMaxConfidenceDefault,
 			SpreadSamples:         6,
 			CooldownSeconds:       5,
+			Ordering:              detectorOrderingDemoted,
 		},
 		Enrichment: EnrichmentConfig{Enabled: true},
 		Realign: RealignConfig{
@@ -690,6 +705,14 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if cfg.InstrumentalDetector.CooldownSeconds < 0 {
 				cfg.InstrumentalDetector.CooldownSeconds = 0
 			}
+			// Ordering: blank (key omitted from TOML) restores the default; an
+			// unrecognized value is also reset to the default rather than left to
+			// silently behave as "demoted" via the worker's any-other-value
+			// fallback, so a typo in the file is visibly corrected rather than
+			// hidden.
+			if cfg.InstrumentalDetector.Ordering != detectorOrderingFront && cfg.InstrumentalDetector.Ordering != detectorOrderingDemoted {
+				cfg.InstrumentalDetector.Ordering = d.InstrumentalDetector.Ordering
+			}
 			// CircuitOpenDuration: 0 means "not set in file"; restore the
 			// default so users copying config.example.toml don't disable
 			// the breaker. Any non-zero value is honored and may be
@@ -786,6 +809,9 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	if err := validateServerTLS(cfg); err != nil {
 		return cfg, appliedEnv, err
 	}
+	if err := ValidateInstrumentalDetectorOrdering(cfg); err != nil {
+		return cfg, appliedEnv, err
+	}
 	if cfg.DB.Path == "" {
 		return cfg, appliedEnv, fmt.Errorf("config: cannot determine DB path: set MXLRC_DB_PATH or XDG_DATA_HOME")
 	}
@@ -795,7 +821,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -1249,6 +1275,15 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		cfg.InstrumentalDetector.FFprobePath = v
 		applied["instrumental_detector.ffprobe_path"] = true
 	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING"); v != "" {
+		normalized := strings.ToLower(strings.TrimSpace(v))
+		if normalized != detectorOrderingFront && normalized != detectorOrderingDemoted {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", "value", v, "current", cfg.InstrumentalDetector.Ordering) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.Ordering = normalized
+			applied["instrumental_detector.ordering"] = true
+		}
+	}
 	if v := os.Getenv("MXLRC_GUARD_ACCEPTED_SCRIPTS"); v != "" {
 		cfg.Guard.AcceptedScripts = splitCSV(v)
 		applied["guard.accepted_scripts"] = true
@@ -1466,6 +1501,30 @@ func validateServerTLS(cfg Config) error {
 		if net.ParseIP(h) == nil && !isValidHostname(h) {
 			return fmt.Errorf("config: server.tls: self_signed_hosts: %q is not a valid hostname or IP address", h)
 		}
+	}
+	return nil
+}
+
+// ValidateInstrumentalDetectorOrdering fails fast on a contradictory
+// combination of instrumental_detector.ordering="front" and
+// providers.mode="parallel". "front" exists to let a high-confidence
+// instrumental verdict settle a track with zero provider requests, which only
+// holds in ordered mode: findOrdered walks lanes in slice order and a
+// terminal-suitable result short-circuits the rest. In parallel mode
+// findParallel launches every lane concurrently, so lane position does not
+// determine dispatch and the provider lanes are already in flight before the
+// detector can settle anything - the combination silently fails to deliver
+// the guarantee its name promises. Staged dispatch that would make "front"
+// meaningful under parallel mode is tracked separately (issue #528) and is
+// out of scope here; this only rejects the contradictory configuration at
+// load so the failure is a clear startup error rather than a silent
+// no-op. Validation happens after both TOML and env overrides are resolved,
+// so it fires regardless of which source set either value.
+func ValidateInstrumentalDetectorOrdering(cfg Config) error {
+	if cfg.InstrumentalDetector.Ordering == detectorOrderingFront && cfg.Providers.Mode == providersModeParallel {
+		return fmt.Errorf("config: instrumental_detector.ordering=front requires providers.mode=ordered: " +
+			"providers.mode=parallel dispatches all lanes concurrently, so a detector-first ordering cannot " +
+			"prevent provider requests; set providers.mode=ordered or instrumental_detector.ordering=demoted")
 	}
 	return nil
 }

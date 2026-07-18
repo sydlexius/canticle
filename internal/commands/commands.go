@@ -952,6 +952,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	}
 	configureWorkerAudioDetector(w, audioDetector)
 	w.SetInstrumentalDetectionDefault(cfg.InstrumentalDetector.Enabled)
+	w.SetDetectorOrdering(cfg.InstrumentalDetector.Ordering)
 	configureWorkerGuard(w, newGuard(cfg))
 	// Wire the DB-backed provider outcome recorder so hits and misses are persisted
 	// and exposed via GET /metrics (mxlrcgo_provider_hits_total{lane},
@@ -2318,6 +2319,20 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 			_, _ = fmt.Fprintln(out, err)
 			return 2
 		}
+		// Re-check the cross-field invariants against the MERGED config before
+		// persisting. setConfigValue validates one key in isolation, but
+		// instrumental_detector.ordering and providers.mode are separately
+		// settable and only contradict each other in combination: setting either
+		// one alone can move the file into the rejected front+parallel state,
+		// which load-time validation would then fail on at the NEXT startup -
+		// after the write, so the operator gets a broken config file and a
+		// delayed, confusing boot error rather than an immediate rejection. This
+		// is the same share-one-validator arrangement ValidateTLSSelection uses
+		// across boot and the settings-save path.
+		if err := config.ValidateInstrumentalDetectorOrdering(cfg); err != nil {
+			_, _ = fmt.Fprintln(out, err)
+			return 2
+		}
 		if path == "" {
 			path = defaultConfigPath()
 		}
@@ -2387,6 +2402,7 @@ func configKeys() []string {
 		"verification.sample_duration_seconds",
 		"verification.min_confidence",
 		"verification.min_similarity",
+		"instrumental_detector.ordering",
 		"guard.accepted_scripts",
 		"guard.script_guard_threshold",
 	}
@@ -2444,6 +2460,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.FormatFloat(cfg.Verification.MinConfidence, 'f', -1, 64), true
 	case "verification.min_similarity":
 		return strconv.FormatFloat(cfg.Verification.MinSimilarity, 'f', -1, 64), true
+	case "instrumental_detector.ordering":
+		return cfg.InstrumentalDetector.Ordering, true
 	case "guard.accepted_scripts":
 		return strings.Join(cfg.Guard.AcceptedScripts, ","), true
 	case "guard.script_guard_threshold":
@@ -2576,6 +2594,12 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("verification.min_similarity must be a number between 0 and 1")
 		}
 		cfg.Verification.MinSimilarity = n
+	case "instrumental_detector.ordering":
+		m := strings.ToLower(strings.TrimSpace(value))
+		if m != "front" && m != "demoted" {
+			return fmt.Errorf("instrumental_detector.ordering must be \"front\" or \"demoted\"")
+		}
+		cfg.InstrumentalDetector.Ordering = m
 	case "guard.accepted_scripts":
 		// An empty value is valid: it clears the allowlist and disables the guard.
 		cfg.Guard.AcceptedScripts = splitCSV(value)

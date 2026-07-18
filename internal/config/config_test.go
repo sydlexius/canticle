@@ -33,7 +33,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES",
 		"MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE", "MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES",
 		"MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES", "MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE",
-		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH",
+		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH", "MXLRC_INSTRUMENTAL_DETECTOR_ORDERING",
 		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
 		"MXLRC_QUEUE_RANDOMIZE",
 		"MXLRCGO_WATCH_ENABLED", "MXLRCGO_WATCH_DEBOUNCE_MS", "MXLRCGO_WATCH_MAX_DIRS",
@@ -2078,5 +2078,65 @@ min_confidence = 0.85
 	}
 	if cfg.InstrumentalDetector.MinConfidence != 0.95 {
 		t.Errorf("MinConfidence = %v; want 0.95 (env override)", cfg.InstrumentalDetector.MinConfidence)
+	}
+}
+
+// TestInstrumentalDetectorOrdering_DefaultAndEnv covers the
+// instrumental_detector.ordering toggle: it defaults to "demoted" and can be
+// overridden via MXLRC_INSTRUMENTAL_DETECTOR_ORDERING.
+func TestInstrumentalDetectorOrdering_DefaultAndEnv(t *testing.T) {
+	isolateEnv(t)
+	cfg := defaults()
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingDemoted {
+		t.Fatalf("default ordering = %q, want %q", cfg.InstrumentalDetector.Ordering, detectorOrderingDemoted)
+	}
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", "front")
+	applied := map[string]bool{}
+	applyEnvOverrides(&cfg, applied)
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingFront {
+		t.Fatalf("env override ordering = %q, want %q", cfg.InstrumentalDetector.Ordering, detectorOrderingFront)
+	}
+	if !applied["instrumental_detector.ordering"] {
+		t.Fatal("applied map missing instrumental_detector.ordering")
+	}
+}
+
+// TestInstrumentalDetectorOrdering_EnvInvalidValueRejected verifies that
+// applyEnvOverrides validates MXLRC_INSTRUMENTAL_DETECTOR_ORDERING itself: TOML
+// validation runs before applyEnvOverrides, so an unvalidated env override would
+// let a bogus value (or a padded/mixed-case one) reach the worker unchanged and
+// silently behave as "demoted".
+func TestInstrumentalDetectorOrdering_EnvInvalidValueRejected(t *testing.T) {
+	isolateEnv(t)
+	cfg := defaults()
+	cfg.InstrumentalDetector.Ordering = detectorOrderingFront // a known non-default current value
+
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", "sideways")
+	applied := map[string]bool{}
+	applyEnvOverrides(&cfg, applied)
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingFront {
+		t.Fatalf("ordering after invalid env = %q, want %q (current value preserved)", cfg.InstrumentalDetector.Ordering, detectorOrderingFront)
+	}
+	if applied["instrumental_detector.ordering"] {
+		t.Fatal("applied map must not mark instrumental_detector.ordering for a rejected value")
+	}
+}
+
+// TestInstrumentalDetectorOrdering_EnvPaddedMixedCaseNormalized verifies that
+// MXLRC_INSTRUMENTAL_DETECTOR_ORDERING is trimmed and lowercased before
+// validation, so a padded/mixed-case value like " FRONT " is accepted and
+// normalized rather than rejected as unrecognized.
+func TestInstrumentalDetectorOrdering_EnvPaddedMixedCaseNormalized(t *testing.T) {
+	isolateEnv(t)
+	cfg := defaults()
+
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", " FRONT ")
+	applied := map[string]bool{}
+	applyEnvOverrides(&cfg, applied)
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingFront {
+		t.Fatalf("ordering after padded/mixed-case env = %q, want %q (normalized)", cfg.InstrumentalDetector.Ordering, detectorOrderingFront)
+	}
+	if !applied["instrumental_detector.ordering"] {
+		t.Fatal("applied map missing instrumental_detector.ordering")
 	}
 }
