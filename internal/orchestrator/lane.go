@@ -27,10 +27,19 @@ type Lane struct {
 	breaker     *circuit.Breaker
 	classifyErr func(l *Lane, err error) error
 	pacer       providers.AdaptivePacer // optional; nil when the lane has no pacer
+	// local marks a lane that resolves without an outbound provider request (the
+	// detector lane today). It is surfaced per-attempt on models.LaneAttempt so
+	// the worker can tell whether an item spent the provider-request pacing
+	// budget (#534). The zero value is false, so a lane is treated as remote
+	// unless it opts in -- a new lane cannot accidentally suppress pacing.
+	local bool
 }
 
 // Name reports the lane's name.
 func (l *Lane) Name() string { return l.name }
+
+// Local reports whether the lane resolves without an outbound provider request.
+func (l *Lane) Local() bool { return l.local }
 
 // Breaker exposes the lane's breaker (construction + tests asserting ramp state).
 func (l *Lane) Breaker() *circuit.Breaker { return l.breaker }

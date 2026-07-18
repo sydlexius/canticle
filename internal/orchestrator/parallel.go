@@ -14,6 +14,10 @@ type laneResult struct {
 	song models.Song
 	err  error
 	name string // lane name, for WinningLane tagging
+	// local mirrors Lane.Local(): the lane resolved without an outbound provider
+	// request. Carried per result so parallel-mode attribution reports locality
+	// the same way ordered mode does (#534).
+	local bool
 }
 
 // findParallel dispatches every lane concurrently and races the results:
@@ -43,7 +47,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		lane := lane
 		go func() {
 			song, err := lane.FindLyrics(childCtx, track, sourcePath)
-			results <- laneResult{song: song, err: err, name: lane.Name()}
+			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local()}
 		}()
 	}
 
@@ -54,6 +58,21 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		haveHeld bool // a suitable unsynced result is held, pending a synced upgrade
 		upgrade  <-chan time.Time
 		pending  = len(o.lanes)
+		// INVARIANT for the #534 pacing signal: a lane still in flight when an
+		// early winner returns is canceled and never lands here, so its locality
+		// is absent from the attribution. That is safe only while no LOCAL lane
+		// races a provider lane -- the worker installs no local lane under
+		// parallel dispatch (see rebuildOrchestrator; detection is inactive under
+		// parallel, tracked in #528), so every lane here is remote and the worker
+		// paces exactly as before.
+		//
+		// If that ever changes (staged dispatch per #528, or the extracted lane in
+		// #538), a local lane could win while a provider request is already in
+		// flight, leaving only Local:true attribution and skipping the pause --
+		// under-throttling the provider. Propagate an explicit
+		// request-started signal from the lane before relying on this in that
+		// configuration.
+		//
 		// consulted accumulates the names of lanes that ACTUALLY ran the provider
 		// (everything that increments r.consulted), so per-track attribution counts
 		// only attempted lanes -- mirroring ordered mode. A breaker-open lane
@@ -62,7 +81,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		// win, lanes still in flight have not reported and so get no row: we do not
 		// know their outcome, and recording them as misses would be the very
 		// over-count this table exists to avoid.
-		consulted []string
+		consulted []attemptedLane
 	)
 
 	for {
@@ -82,7 +101,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 				// Breaker open, provider not called: skip (matters only if ALL unavailable).
 			default:
 				r.consulted++
-				consulted = append(consulted, res.name)
+				consulted = append(consulted, attemptedLane{name: res.name, local: res.local})
 				switch {
 				case res.err == nil && IsSuitable(res.song, o.guard):
 					if QualityOf(res.song) >= QualitySynced {

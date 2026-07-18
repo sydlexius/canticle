@@ -152,6 +152,16 @@ type Worker struct {
 	// Warn). Nil means no recording (safe no-op). Set via SetProviderRecorder.
 	providerRecorder    ProviderRecorder
 	consecutiveFailures int
+	// lastItemContactedProvider reports whether the most recently processed item
+	// issued an outbound provider request. The run loop reads it to decide
+	// whether to spend the provider-request pacing budget on that item (#534).
+	//
+	// It is a field rather than a RunOnce return value because RunOnce has many
+	// exit paths and the pause is applied by run(); threading a second value
+	// through every path would be noisier than resetting one flag per iteration.
+	// It is reset at the top of RunOnce so a prior item's attribution can never
+	// leak into the next one's pacing decision.
+	lastItemContactedProvider bool
 	// last* record the most recent hard failure so the backoff WARN can name the
 	// track it is throttling on (the failure cause is logged separately, but the
 	// periodic backoff line otherwise carried no identity).
@@ -715,7 +725,10 @@ func (w *Worker) run(ctx context.Context, pause func(context.Context) error) err
 		if w.consecutiveFailures > 0 {
 			continue
 		}
-		if pause != nil {
+		// Only spend the pacing budget on an item that actually used it. An item
+		// settled entirely by local lanes issued no provider request, so pausing
+		// after it throttles work the provider never saw (#534).
+		if pause != nil && w.lastItemContactedProvider {
 			if err := pause(ctx); err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return nil
@@ -726,8 +739,43 @@ func (w *Worker) run(ctx context.Context, pause func(context.Context) error) err
 	}
 }
 
+// contactedProvider reports whether resolving this song issued an outbound
+// provider request, which is what the run loop's pacing budget exists to
+// protect.
+//
+// A cache hit contacts nothing. Otherwise the answer comes from the ATTEMPTED
+// lane set, never from the winning lane: ModeParallel races every lane at once,
+// so a local lane can win a dispatch that still issued provider requests, and
+// keying off the winner would drop the throttle exactly when the most requests
+// are in flight.
+//
+// An empty attempt set means "unknown", not "provider-free" -- a fetcher that
+// reports no lane attribution (any non-orchestrator caller) keeps the existing
+// pacing rather than silently losing the throttle.
+//
+// A cache hit is deliberately NOT treated as provider-free here, even though it
+// contacts nothing. It produces no lane attribution, so it falls into the
+// "unknown" case above and keeps its current pacing. Changing that is a
+// defensible separate decision (see #534) but it is a behavior change beyond
+// this fix, and TestRunResetsBackoffAfterSuccess pins the existing conduct.
+func contactedProvider(song models.Song) bool {
+	if len(song.LaneAttempts) == 0 {
+		return true
+	}
+	for _, a := range song.LaneAttempts {
+		if !a.Local {
+			return true
+		}
+	}
+	return false
+}
+
 // RunOnce claims and processes one ready queue item.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	// Fail safe: assume a provider was contacted until an item proves otherwise.
+	// Every early return below then keeps the existing pacing behavior, and only
+	// a resolved song with all-local lane attribution clears it.
+	w.lastItemContactedProvider = true
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -768,6 +816,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// consult sourcePath, so this substitution has no effect on them.
 	detectorPath := w.detectorPathFor(item)
 	song, cacheHit, err := w.song(ctx, resolvedTrack, detectorPath, bypassCache)
+	if err == nil {
+		w.lastItemContactedProvider = contactedProvider(song)
+	}
 	if err != nil {
 		switch orchestrator.ClassifyOutcome(err) {
 		case orchestrator.OutcomeUnavailable:

@@ -98,6 +98,16 @@ type Song struct {
 type LaneAttempt struct {
 	Lane string
 	Hit  bool
+	// Local reports whether the lane resolved the track without an outbound
+	// provider request (the detector lane today). The worker uses this to decide
+	// whether an item consumed the provider-request pacing budget: an item whose
+	// every attempted lane is Local made no provider request and must not be
+	// throttled at the provider rate (#534).
+	//
+	// Deliberately per-attempt rather than looked up from a lane registry, so a
+	// caller that is not orchestrator-driven still carries the attribution with
+	// the song, and a lane rename cannot silently change the classification.
+	Local bool
 }
 
 // Inputs represents a single work item in the processing queue.

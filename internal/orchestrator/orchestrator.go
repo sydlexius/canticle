@@ -123,7 +123,10 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 	// were tried. Ordered mode stops at the first suitable result, so lanes after
 	// the winner are never consulted and never appear here. Skipped (breaker-open)
 	// lanes are excluded too: the provider was not called, so it was not attempted.
-	var attempted []string
+	//
+	// Each entry carries the lane's locality alongside its name so the attribution
+	// can tell the worker whether an outbound provider request was made (#534).
+	var attempted []attemptedLane
 	for _, lane := range o.lanes {
 		if err := ctx.Err(); err != nil {
 			return models.Song{}, err
@@ -139,7 +142,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			continue
 		}
 		r.consulted++
-		attempted = append(attempted, lane.Name())
+		attempted = append(attempted, attemptedLane{name: lane.Name(), local: lane.Local()})
 
 		if err == nil {
 			if IsSuitable(song, o.guard) {
@@ -167,15 +170,24 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 // laneAttemptsFor builds the per-track attribution for the given attempted lane
 // names: Hit is true for the lane equal to winner (the empty string means no
 // winner -> all misses) and false for every other attempted lane.
-func laneAttemptsFor(attempted []string, winner string) []models.LaneAttempt {
+func laneAttemptsFor(attempted []attemptedLane, winner string) []models.LaneAttempt {
 	if len(attempted) == 0 {
 		return nil
 	}
 	out := make([]models.LaneAttempt, len(attempted))
-	for i, name := range attempted {
-		out[i] = models.LaneAttempt{Lane: name, Hit: name == winner}
+	for i, a := range attempted {
+		out[i] = models.LaneAttempt{Lane: a.name, Hit: a.name == winner, Local: a.local}
 	}
 	return out
+}
+
+// attemptedLane is one consulted lane: its name and whether it resolved without
+// an outbound provider request. Locality is captured at attempt time rather
+// than looked up later, so the attribution stays correct even if the lane set
+// is rebuilt between dispatch and use.
+type attemptedLane struct {
+	name  string
+	local bool
 }
 
 // dispatchResult accumulates the cross-lane outcome state shared by both dispatch
