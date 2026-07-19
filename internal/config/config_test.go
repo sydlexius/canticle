@@ -1523,7 +1523,7 @@ func TestLoad_InstrumentalDetectorEnvFFmpegPath(t *testing.T) {
 }
 
 // TestLoad_InstrumentalDetectorVocalGateDefaults verifies the vocal-gate
-// defaults (#384): vocal_max_confidence 0.03, spread_samples 6, a non-empty
+// defaults (#384): vocal_max_confidence 0.015, spread_samples 6, a non-empty
 // vocal-class list, and an empty ffprobe_path (auto-discover).
 func TestLoad_InstrumentalDetectorVocalGateDefaults(t *testing.T) {
 	isolateEnv(t)
@@ -1531,8 +1531,8 @@ func TestLoad_InstrumentalDetectorVocalGateDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.InstrumentalDetector.VocalMaxConfidence != 0.03 {
-		t.Errorf("VocalMaxConfidence = %v; want 0.03", cfg.InstrumentalDetector.VocalMaxConfidence)
+	if cfg.InstrumentalDetector.VocalMaxConfidence != 0.015 {
+		t.Errorf("VocalMaxConfidence = %v; want 0.015", cfg.InstrumentalDetector.VocalMaxConfidence)
 	}
 	if cfg.InstrumentalDetector.SpreadSamples != 6 {
 		t.Errorf("SpreadSamples = %d; want 6", cfg.InstrumentalDetector.SpreadSamples)
@@ -1669,8 +1669,8 @@ func TestLoad_InstrumentalDetectorEnvVocalGate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if cfg.InstrumentalDetector.VocalMaxConfidence != 0.03 {
-			t.Errorf("VocalMaxConfidence = %v; want 0.03 (invalid env ignored)", cfg.InstrumentalDetector.VocalMaxConfidence)
+		if cfg.InstrumentalDetector.VocalMaxConfidence != 0.015 {
+			t.Errorf("VocalMaxConfidence = %v; want 0.015 (invalid env ignored)", cfg.InstrumentalDetector.VocalMaxConfidence)
 		}
 	})
 	t.Run("spread samples", func(t *testing.T) {
@@ -1712,8 +1712,8 @@ func TestLoad_InstrumentalDetectorVocalGateFileReDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.InstrumentalDetector.VocalMaxConfidence != 0.03 {
-		t.Errorf("VocalMaxConfidence = %v; want 0.03 (re-defaulted from 0)", cfg.InstrumentalDetector.VocalMaxConfidence)
+	if cfg.InstrumentalDetector.VocalMaxConfidence != 0.015 {
+		t.Errorf("VocalMaxConfidence = %v; want 0.015 (re-defaulted from 0)", cfg.InstrumentalDetector.VocalMaxConfidence)
 	}
 	if cfg.InstrumentalDetector.SpreadSamples != 6 {
 		t.Errorf("SpreadSamples = %d; want 6 (omitted key defaults)", cfg.InstrumentalDetector.SpreadSamples)
