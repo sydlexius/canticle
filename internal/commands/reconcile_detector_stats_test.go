@@ -206,3 +206,78 @@ func TestRunReconcileDetectorStats_UnwritableBackupRollsBack(t *testing.T) {
 		t.Errorf("lane_attempts rows = %d; want 0 -- an unrecordable attribution must not be applied", got)
 	}
 }
+
+// failSecondAttribution installs a trigger that aborts the insert for the second
+// attributable row. The first row is then fully reported -- its backup record
+// written AND synced -- before the failure rolls the whole transaction back,
+// which is the only ordering that exposes an over-recording backup.
+func failSecondAttribution(t *testing.T, ctx context.Context, dbPath string) {
+	t.Helper()
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // reason: test cleanup
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`CREATE TRIGGER fail_second_attribution BEFORE INSERT ON lane_attempts
+         WHEN NEW.queue_id = (SELECT id FROM work_queue WHERE title = 'NotInstrumental')
+         BEGIN SELECT RAISE(ABORT, 'simulated insert failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+}
+
+// A run that fails partway must leave the backup file exactly as it found it.
+//
+// The engine reports each row from inside its transaction, before the single
+// commit, so by the time row 2 fails row 1's record is already durable on disk
+// -- describing an attribution the rollback then discarded. Left in place, a
+// restore driven from this file would delete lane_attempts rows the backfill
+// never created.
+func TestRunReconcileDetectorStats_FailedRunLeavesBackupUnchanged(t *testing.T) {
+	// Prior content is the load-bearing case: --backup may name a file holding
+	// earlier runs' records, so the cleanup must truncate to the pre-run size
+	// rather than emptying or removing the file.
+	prior := []byte(`{"queue_id":99,"lane":"detector","hit":true,"attempted_at":"2025-01-01T00:00:00Z"}` + "\n")
+
+	for _, tc := range []struct {
+		name  string
+		seed  []byte // nil means the backup file does not exist yet
+		want  []byte
+		exist bool
+	}{
+		{name: "with prior records", seed: prior, want: prior, exist: true},
+		{name: "no prior file", seed: nil, want: []byte{}, exist: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cfgPath, dbPath := setupDetectorStats(t)
+			backup := filepath.Join(t.TempDir(), "backup.jsonl")
+			if tc.seed != nil {
+				if err := os.WriteFile(backup, tc.seed, 0o600); err != nil {
+					t.Fatalf("seed backup: %v", err)
+				}
+			}
+			failSecondAttribution(t, ctx, dbPath)
+
+			var out bytes.Buffer
+			code := runReconcileDetectorStats(ctx, &out, ScanReconcileDetectorStatsCmd{
+				ConfigPath: cfgPath, Yes: true, Backup: backup,
+			})
+			if code != 1 {
+				t.Fatalf("exit code = %d; want 1 when a row fails to attribute. output:\n%s", code, out.String())
+			}
+			if got := countRows(t, ctx, dbPath, "lane_attempts"); got != 0 {
+				t.Fatalf("lane_attempts rows = %d; want 0 (the run rolled back)", got)
+			}
+
+			got, err := os.ReadFile(backup) //nolint:gosec // reason: G304: test-controlled path
+			if err != nil {
+				t.Fatalf("read backup: %v", err)
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Errorf("backup content = %q; want %q -- a rolled-back run must not leave records for attributions it never applied",
+					got, tc.want)
+			}
+		})
+	}
+}

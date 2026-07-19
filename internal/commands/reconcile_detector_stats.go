@@ -40,6 +40,37 @@ func appendReconcileDetectorStatsBackup(f *os.File, ch detectorbackfill.Change) 
 	return nil
 }
 
+// truncateReconcileDetectorStatsBackup restores the backup file to size,
+// discarding whatever the failed run appended.
+//
+// It is the failure-path counterpart to the engine's backup-first ordering.
+// detectorbackfill.runApply reports every row from inside one transaction,
+// before the single commit, so each record is durable on disk before the write
+// it protects lands. When a later row fails, that transaction rolls back EVERY
+// row -- and the records already synced describe attributions that were never
+// applied. A restore driven from that file would delete lane_attempts rows the
+// backfill never created, so the over-recording has to be undone here.
+//
+// Truncation is to the pre-run size, never to zero and never by deleting the
+// file: --backup may point at a file already holding earlier runs' records
+// (it is opened O_APPEND), and destroying those would be a worse bug than the
+// one this repairs.
+func truncateReconcileDetectorStatsBackup(f *os.File, size int64) error {
+	// The file is opened lazily on the first record, so f is nil exactly when
+	// this run wrote nothing -- including when the failure WAS the open itself.
+	// There is no over-recording to undo, and the file may not even exist.
+	if f == nil {
+		return nil
+	}
+	if err := f.Truncate(size); err != nil {
+		return fmt.Errorf("truncate detector-stats backup to %d bytes: %w", size, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync truncated detector-stats backup: %w", err)
+	}
+	return nil
+}
+
 // runReconcileDetectorStats attributes historical audio detections to the
 // detector lane in lane_attempts, correcting an under-count left by instrumentals
 // that settled before the detector became a lane (issue #537). It is driven
@@ -62,6 +93,13 @@ func runReconcileDetectorStats(ctx context.Context, out io.Writer, args ScanReco
 	backupPath := args.Backup
 	if backupPath == "" {
 		backupPath = filepath.Join(filepath.Dir(cfg.DB.Path), fmt.Sprintf("reconcile-detector-stats-backup-%s.jsonl", time.Now().UTC().Format("20060102-150405")))
+	}
+	// Size the backup BEFORE the run writes anything, so a failure can restore it
+	// to exactly that. A missing file sizes as 0, which is the correct target: a
+	// failed run that created the file leaves it empty rather than absent.
+	var backupPreSize int64
+	if fi, serr := os.Stat(backupPath); serr == nil {
+		backupPreSize = fi.Size()
 	}
 	var backupFile *os.File
 	defer func() {
@@ -99,6 +137,12 @@ func runReconcileDetectorStats(ctx context.Context, out io.Writer, args ScanReco
 	})
 	if err != nil {
 		slog.Error("reconcile-detector-stats failed", "error", err)
+		// The engine rolled every row back, so any record this run appended
+		// describes an attribution that was never applied. Undo it.
+		if terr := truncateReconcileDetectorStatsBackup(backupFile, backupPreSize); terr != nil {
+			slog.Error("failed to roll back the reconcile-detector-stats backup; it may describe attributions that were never applied",
+				"path", backupPath, "error", terr)
+		}
 		return 1
 	}
 
