@@ -1722,14 +1722,14 @@ func (q *DBQueue) ListVocalGateConfirmations(ctx context.Context, opts ListVocal
 	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL`
 	var args []any
 	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
-	query += libClause //nolint:gosec // G202: libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
+	query += libClause //nolint:gosec // reason: G202 -- libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
 	args = append(args, libArgs...)
 	query += ` ORDER BY id`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)
 	}
-	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: fragments are package constants / fixed clauses, never user-built SQL
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // reason: G202 -- fragments are package constants / fixed clauses, never user-built SQL
 	if err != nil {
 		return nil, fmt.Errorf("queue: list vocal-gate confirmations: %w", err)
 	}
