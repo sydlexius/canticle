@@ -144,6 +144,23 @@ type ScanCmd struct {
 	ReconcileIdentity                *ScanReconcileIdentityCmd                `arg:"subcommand:reconcile-identity" help:"re-read tags and correct run-together multi-value artist rows ingested before the fix (issue #466)"`
 	ReconcileLRC                     *ScanReconcileLRCCmd                     `arg:"subcommand:reconcile-lrc" help:"rewrite existing .lrc sidecars that stack multiple timestamps on one line into the expanded, universally-readable form (issue #470)"`
 	ReconcileMarkerProvenance        *ScanReconcileMarkerProvenanceCmd        `arg:"subcommand:reconcile-marker-provenance" help:"backfill provenance headers onto detector-written instrumental markers (#502)"`
+	ReconcileDetectorStats           *ScanReconcileDetectorStatsCmd           `arg:"subcommand:reconcile-detector-stats" help:"attribute historical audio detections to the detector lane's statistics; reads recorded verdicts only, makes no detector-sidecar requests (issue #537)"`
+}
+
+// ScanReconcileDetectorStatsCmd attributes historical audio detections to the
+// detector lane in lane_attempts, correcting an under-count left by instrumentals
+// that settled before the detector became a lane (#537). Driven entirely from
+// work_queue.instrumental_result; never re-runs detection. Dry-run unless --yes.
+//
+// There is no --library flag: work_queue rows reach a library only through the
+// work_queue_scan_results junction, and a row whose scan_results link has since
+// been cleared would silently drop out of a library-scoped run. Since the
+// counters this corrects are global, scoping would introduce a partial-fill
+// hazard for no operator benefit.
+type ScanReconcileDetectorStatsCmd struct {
+	Yes        bool   `arg:"--yes" help:"actually write the attributions (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of attributed rows (default: <db-dir>/reconcile-detector-stats-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // ScanReconcileLRCCmd walks the configured library roots and rewrites any .lrc
@@ -1877,6 +1894,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileMarkerProvenance(ctx, out, sub)
+	case args.ReconcileDetectorStats != nil:
+		sub := *args.ReconcileDetectorStats
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileDetectorStats(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}
