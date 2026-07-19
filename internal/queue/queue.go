@@ -2283,8 +2283,19 @@ func requireAffected(res sql.Result, op string) error {
 // alongside the work_queue row this method just returned to 'deferred'. The
 // work_queue row is the live work item; the scan result stays settled.
 //
-// priority is sunk to -100 to match Defer: these rows are a retry backlog and
-// must not jump ahead of fresh scan work in the dequeue ORDER BY.
+// priority returns to PriorityScan rather than sinking to PriorityMiss. Matching
+// Defer looks like the obvious choice and is wrong here: PriorityMiss exists for
+// rows that are LIKELY TO MISS AGAIN, and a reversed instrumental is the
+// opposite -- a track with real vocals the detector wrongly suppressed, so it is
+// unusually likely to resolve on the next attempt.
+//
+// The cost of getting this wrong is not theoretical. Dequeue randomizes within a
+// priority tier, so sinking a bounded correction into a deferred pool an order of
+// magnitude larger makes only (reversed / pool) of each draw a corrected row.
+// Measured on a production reversal: 880 rows dropped into a 15,634-row pool at
+// ~180 rows/hr drew ~10/hr, clearing half in 2.5 days and trailing to roughly
+// three weeks, versus about five hours at PriorityScan. These rows do not starve
+// fresh work -- they ARE the corrected work, and the set is finite.
 //
 // Guarded on status = 'done' AND instrumental_result = 1, so a row settled with
 // real lyrics, a row a worker has claimed, or one already reversed is left
@@ -2296,13 +2307,13 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
              outcome_type = NULL,
              status = 'deferred',
              completed_at = NULL,
-             priority = -100,
+             priority = ?,
              next_attempt_at = ?,
              last_error = 'instrumental verdict reversed by a tightened vocal gate'
          WHERE id = ?
            AND status = 'done'
            AND instrumental_result = 1`,
-		formatTime(q.now()), id,
+		PriorityScan, formatTime(q.now()), id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: unsettle instrumental: %w", err)

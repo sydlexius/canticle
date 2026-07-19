@@ -4248,3 +4248,49 @@ func TestDBQueue_ListVocalGateConfirmationsReturnsSettledRowsWithTelemetry(t *te
 		t.Errorf("vocal_peak = %v; want 0.02", rows[0].Tel.VocalPeak)
 	}
 }
+
+// TestDBQueue_UnsettleInstrumentalRequeuesAtScanPriority pins that a reversed
+// row returns at normal scan priority, NOT the miss-backoff tier. Deferred
+// misses sink to PriorityMiss because they are likely to miss again; a reversed
+// instrumental is the opposite -- a track with real vocals that was wrongly
+// suppressed, so it is unusually likely to succeed on retry. Sinking these to
+// PriorityMiss interleaves them randomly with the whole deferred pool and
+// stretches a bounded correction into a weeks-long tail.
+func TestDBQueue_UnsettleInstrumentalRequeuesAtScanPriority(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, PriorityScan)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
+		MusicSum: 0.95, VocalPeak: 0.02, VocalClass: "Singing", DetectorVersion: "v1",
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if _, err := q.UnsettleInstrumental(ctx, item.ID); err != nil {
+		t.Fatalf("unsettle: %v", err)
+	}
+
+	var priority int
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT priority FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&priority); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if priority != PriorityScan {
+		t.Errorf("priority = %d; want PriorityScan (%d) -- a reversal is a correction, not a miss retry", priority, PriorityScan)
+	}
+}
