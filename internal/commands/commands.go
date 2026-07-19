@@ -1259,6 +1259,22 @@ func buildRedirectServer(redirectAddr, tlsAddr string) *http.Server {
 // error.
 func buildWebAuth(ctx context.Context, cfg config.Config, sqlDB *sql.DB, store secrets.Store, policy *trustnet.Policy, version string) (*webauth.Service, *web.Auth, *web.Onboarding, error) {
 	if !cfg.Server.WebUIEnabled {
+		// Credentials were supplied for a feature that is switched off. Without
+		// this warning the operator gets a healthy startup, no admin account, and
+		// no explanation: the bootstrap below is never reached, so the variables
+		// silently do nothing. That is the same failure shape as editing the
+		// password variable after first run and believing a rotation happened
+		// (#545), and it is worth naming rather than inferring from an absence.
+		//
+		// Deliberately NOT bootstrapping anyway: an admin account is meaningless
+		// with no UI to sign in to, and creating one would make the later
+		// idempotent skip fire on a genuine first run once the UI is enabled.
+		if os.Getenv(envWebAdminUser) != "" || os.Getenv(envWebAdminPass) != "" {
+			slog.Warn("web admin bootstrap IGNORED: " + envWebAdminUser + "/" + envWebAdminPass +
+				" are set but the web UI is disabled, so no admin account is created. " +
+				"Enable it with web_ui_enabled = true under [server] (or MXLRC_WEB_UI_ENABLED=true), " +
+				"or remove the variables to keep the password out of the environment")
+		}
 		return nil, nil, nil, nil
 	}
 	svc := webauth.NewService(webauth.NewSQLUserStore(sqlDB), webauth.NewSQLSessionStore(sqlDB))

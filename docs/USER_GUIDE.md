@@ -250,6 +250,7 @@ The browser UI is **off by default**. The serve listener only mounts the web rou
 
 Bootstrap behavior:
 
+- **The web UI must be enabled.** The bootstrap only runs when `web_ui_enabled = true` under `[server]` (or `MXLRC_WEB_UI_ENABLED=true`). With the UI off the variables are ignored and no admin is created; since v1.20.1 that is logged at warning level naming the setting to change.
 - **Both vars required.** Setting only one logs a warning and skips the bootstrap.
 - **Password floor.** The password must be at least 8 characters. A shorter one is a **fatal startup error** (the container will not start), not a silent skip.
 - **Idempotent.** The bootstrap runs only when no admin exists yet. Once any admin account is present it is skipped (never an overwrite), so leaving the vars set across restarts is harmless. The password is never logged.
