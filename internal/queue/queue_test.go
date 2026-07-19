@@ -4294,3 +4294,51 @@ func TestDBQueue_UnsettleInstrumentalRequeuesAtScanPriority(t *testing.T) {
 		t.Errorf("priority = %d; want PriorityScan (%d) -- a reversal is a correction, not a miss retry", priority, PriorityScan)
 	}
 }
+
+// TestDBQueue_ListVocalGateConfirmationsRespectsLimit pins the --limit option
+// on the tightening-direction listing. Operators use it to rehearse a
+// recalibration on a bounded slice before running the whole backlog, so a limit
+// that silently did nothing would turn a "try 5 rows first" into a full pass.
+func TestDBQueue_ListVocalGateConfirmationsRespectsLimit(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	for i := 0; i < 3; i++ {
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:      models.Track{ArtistName: "Artist", TrackName: fmt.Sprintf("Title%d", i)},
+			Outdir:     "out",
+			Filename:   fmt.Sprintf("a%d.lrc", i),
+			SourcePath: fmt.Sprintf("/music/a%d.flac", i),
+		}, PriorityScan)
+		if err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue %d: %v", i, err)
+		}
+		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+			t.Fatalf("defer %d: %v", i, err)
+		}
+		if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
+			MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1",
+		}); err != nil {
+			t.Fatalf("settle %d: %v", i, err)
+		}
+	}
+
+	all, err := q.ListVocalGateConfirmations(ctx, ListVocalGateConfirmationsOptions{})
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("unlimited list = %d rows; want 3", len(all))
+	}
+
+	limited, err := q.ListVocalGateConfirmations(ctx, ListVocalGateConfirmationsOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("list limited: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Errorf("limited list = %d rows; want 2", len(limited))
+	}
+}

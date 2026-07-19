@@ -18,7 +18,9 @@ package instrumentalrecalib
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -465,7 +467,11 @@ func (r *Recalibrator) detectorOwnedMarker(row queue.StampedRejection) (path str
 	p := paths[0]
 	prov, isMarker, rerr := lyrics.ReadInstrumentalProvenance(p)
 	if rerr != nil {
-		if os.IsNotExist(rerr) {
+		// errors.Is, NOT os.IsNotExist: ReadInstrumentalProvenance WRAPS the
+		// underlying open error, and os.IsNotExist does not unwrap. Getting this
+		// wrong sent every already-deleted marker down the error path, counting
+		// an error and leaving a wrongly-settled row settled forever.
+		if errors.Is(rerr, fs.ErrNotExist) {
 			return "", true, nil
 		}
 		return "", false, fmt.Errorf("instrumentalrecalib: read marker provenance for %d: %w", row.ID, rerr)
