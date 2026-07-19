@@ -2,6 +2,7 @@ package instrumentalrecalib
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -53,10 +54,12 @@ func (w *fsWriter) WriteLRC(song models.Song, filename, outdir string) error {
 // (a peer-claim race, a vanished row, a listing/settle/reset failure).
 type fakeStore struct {
 	*queue.DBQueue
-	listErr       error
-	settleOutcome *queue.SettleOutcome
-	settleErr     error
-	resetErr      error
+	listErr        error
+	settleOutcome  *queue.SettleOutcome
+	settleErr      error
+	resetErr       error
+	unsettleErr    error
+	unsettleResult *bool
 }
 
 func (f *fakeStore) ListVocalGateRejections(ctx context.Context, opts queue.ListVocalGateRejectionsOptions) ([]queue.StampedRejection, error) {
@@ -81,6 +84,26 @@ func (f *fakeStore) ResetInstrumentalToUnclassified(ctx context.Context, id int6
 		return false, f.resetErr
 	}
 	return f.DBQueue.ResetInstrumentalToUnclassified(ctx, id)
+}
+
+func (f *fakeStore) ListVocalGateConfirmations(ctx context.Context, opts queue.ListVocalGateConfirmationsOptions) ([]queue.StampedRejection, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.DBQueue.ListVocalGateConfirmations(ctx, opts)
+}
+
+// UnsettleInstrumental lets a test force the two outcomes a live SQLite queue
+// will not produce on demand: a hard failure, and the worker-claimed race where
+// the guarded UPDATE matches nothing between the listing and the mutation.
+func (f *fakeStore) UnsettleInstrumental(ctx context.Context, id int64) (bool, error) {
+	if f.unsettleErr != nil {
+		return false, f.unsettleErr
+	}
+	if f.unsettleResult != nil {
+		return *f.unsettleResult, nil
+	}
+	return f.DBQueue.UnsettleInstrumental(ctx, id)
 }
 
 // seedRejection mirrors the queue-package seed pattern (see
@@ -109,6 +132,19 @@ func seedRejection(t *testing.T, q *queue.DBQueue, sourcePath string, tel queue.
 		t.Fatalf("stamp unclassified miss: %v", err)
 	}
 	return item.ID
+}
+
+// openTestQueueWithDB is openTestQueue plus the raw handle, for tests that
+// assert on columns the Store seam does not expose.
+func openTestQueueWithDB(t *testing.T) (*queue.DBQueue, *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	sqlDB, err := dbpkg.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return queue.NewDBQueue(sqlDB), sqlDB
 }
 
 func openTestQueue(t *testing.T) *queue.DBQueue {
@@ -556,5 +592,416 @@ func TestRun_ResetInstrumentalToUnclassifiedErrorCountsError(t *testing.T) {
 	}
 	if res.Errors != 1 || res.ResetStale != 0 || w.calls != 0 {
 		t.Fatalf("expected a counted reset error, got %+v (writer calls %d)", res, w.calls)
+	}
+}
+
+// seedConfirmation seeds a row the detector SETTLED instrumental and writes the
+// marker sidecar next to its source, with the given provenance header, so a
+// reverse run has a real file to act on.
+func seedConfirmation(t *testing.T, q *queue.DBQueue, sourcePath string, tel queue.InstrumentalTelemetry, source string) (int64, string) {
+	t.Helper()
+	ctx := context.Background()
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: sourcePath,
+	}, queue.PriorityScan)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	name, err := lyrics.SidecarName("Artist", "Title", filepath.Base(sourcePath), false)
+	if err != nil {
+		t.Fatalf("sidecar name: %v", err)
+	}
+	marker := filepath.Join(filepath.Dir(sourcePath), name)
+	body := "[by:canticle]\n[source:" + source + "]\n" + lyrics.InstrumentalMarker + "\n"
+	if err := os.WriteFile(marker, []byte(body), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	return item.ID, marker
+}
+
+// TestReverse_RevertsRowThatNowFailsTheVocalGate is the tightening direction:
+// a confirmed instrumental whose stored vocal_peak now sits at or above a
+// LOWERED VocalMax goes back to deferred and its detector marker comes off disk.
+func TestReverse_RevertsRowThatNowFailsTheVocalGate(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	id, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	rc := New(q, &fakeWriter{})
+	res, err := rc.Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 1 {
+		t.Errorf("Reversed = %d; want 1", res.Reversed)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Errorf("marker still on disk; want removed once the verdict is reversed")
+	}
+	var status string
+	var result int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, instrumental_result FROM work_queue WHERE id = ?`, id,
+	).Scan(&status, &result); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "deferred" || result != 0 {
+		t.Errorf("status/result = %q/%d; want deferred/0", status, result)
+	}
+}
+
+// TestReverse_LeavesRowThatStillPassesTheGate pins that a still-correct
+// instrumental is not disturbed.
+func TestReverse_LeavesRowThatStillPassesTheGate(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.001, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	_, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	rc := New(q, &fakeWriter{})
+	res, err := rc.Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 0 {
+		t.Errorf("Reversed = %d; want 0 -- the row still passes the tightened gate", res.Reversed)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("marker removed; want preserved for a still-passing row")
+	}
+}
+
+// TestReverse_PreservesProviderDeclaredInstrumental is the safety property: a
+// marker the PROVIDER wrote is editorially authoritative, not the detector's to
+// re-decide. It must survive a reverse run untouched, and its row must not be
+// reopened, even when the stored telemetry would fail the tightened gate.
+func TestReverse_PreservesProviderDeclaredInstrumental(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	id, marker := seedConfirmation(t, q, src, tel, "musixmatch")
+
+	rc := New(q, &fakeWriter{})
+	res, err := rc.Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 0 {
+		t.Errorf("Reversed = %d; want 0 -- a provider-declared instrumental is not the detector's to reverse", res.Reversed)
+	}
+	if res.SkippedProviderOwned != 1 {
+		t.Errorf("SkippedProviderOwned = %d; want 1", res.SkippedProviderOwned)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("provider marker removed; want preserved")
+	}
+	var status string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status FROM work_queue WHERE id = ?`, id,
+	).Scan(&status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" {
+		t.Errorf("status = %q; want done -- the provider verdict stands", status)
+	}
+}
+
+// TestReverse_ReversesLegacyBareMarker pins that a marker predating provenance
+// stamping is still the detector's to remove. The row carries
+// instrumental_result=1, which only SettleInstrumental sets, so the DATABASE
+// already proves the detector owns the verdict; an absent [source:] header is
+// an artifact of when the file was written, not evidence of provider ownership.
+// Treating bare as provider-owned stranded 95% of a real recalibration backlog.
+func TestReverse_ReversesLegacyBareMarker(t *testing.T) {
+	ctx := context.Background()
+	q, _ := openTestQueueWithDB(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+
+	// Seed with a BARE marker: the marker line only, no provenance header.
+	id, err := func() (int64, error) {
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+			Outdir:     "out",
+			Filename:   "a.lrc",
+			SourcePath: src,
+		}, queue.PriorityScan)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			return 0, err
+		}
+		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+			return 0, err
+		}
+		if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+			return 0, err
+		}
+		return item.ID, nil
+	}()
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	name, err := lyrics.SidecarName("Artist", "Title", "a.flac", false)
+	if err != nil {
+		t.Fatalf("sidecar name: %v", err)
+	}
+	marker := filepath.Join(dir, name)
+	if err := os.WriteFile(marker, []byte(lyrics.InstrumentalMarker+"\n"), 0o644); err != nil {
+		t.Fatalf("write bare marker: %v", err)
+	}
+
+	rc := New(q, &fakeWriter{})
+	res, err := rc.Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 1 {
+		t.Errorf("Reversed = %d; want 1 -- a bare marker on an instrumental_result=1 row is the detector's", res.Reversed)
+	}
+	if res.SkippedProviderOwned != 0 {
+		t.Errorf("SkippedProviderOwned = %d; want 0", res.SkippedProviderOwned)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Errorf("bare marker still on disk; want removed")
+	}
+	_ = id
+}
+
+// TestReverse_MissingMarkerStillRevertsRow pins that an absent sidecar does not
+// block the database correction. There is nothing to delete, but the row is
+// still wrongly settled, and leaving it settled would strand it forever.
+func TestReverse_MissingMarkerStillRevertsRow(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	id, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+	if err := os.Remove(marker); err != nil {
+		t.Fatalf("remove marker: %v", err)
+	}
+
+	res, err := New(q, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 1 {
+		t.Errorf("Reversed = %d; want 1 even with no marker on disk", res.Reversed)
+	}
+	if res.MarkersRemoved != 0 {
+		t.Errorf("MarkersRemoved = %d; want 0 -- nothing was there to remove", res.MarkersRemoved)
+	}
+	if res.Errors != 0 {
+		t.Errorf("Errors = %d; want 0 -- an absent marker is not an error", res.Errors)
+	}
+	var status string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "deferred" {
+		t.Errorf("status = %q; want deferred", status)
+	}
+}
+
+// TestReverse_LeavesForeignSidecarAlone pins that a sidecar which is not an
+// instrumental marker at all is never deleted. Something else owns that file,
+// and the reverse pass must not touch it or the row behind it.
+func TestReverse_LeavesForeignSidecarAlone(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	_, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+	// Overwrite the marker with ordinary sidecar content: no marker line.
+	if err := os.WriteFile(marker, []byte("just some text, not a marker\n"), 0o644); err != nil {
+		t.Fatalf("write foreign sidecar: %v", err)
+	}
+
+	res, err := New(q, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 0 || res.SkippedProviderOwned != 1 {
+		t.Errorf("Reversed=%d SkippedProviderOwned=%d; want 0/1 -- a non-marker sidecar is not ours",
+			res.Reversed, res.SkippedProviderOwned)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("foreign sidecar removed; want preserved")
+	}
+}
+
+// TestReverse_DryRunPreviewsWithoutMutating pins that a dry run reports through
+// Preview and changes neither the database nor the disk.
+func TestReverse_DryRunPreviewsWithoutMutating(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	id, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	previewed := 0
+	res, err := New(q, &fakeWriter{}).Reverse(ctx, Options{
+		DryRun: true, MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+		Preview: func(c Change) {
+			previewed++
+			if c.Action != "reverse" {
+				t.Errorf("Action = %q; want reverse", c.Action)
+			}
+		},
+		Report: func(Change) error {
+			t.Fatal("Report must not run in a dry run -- it is the durable backup record")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if previewed != 1 || res.Reversed != 0 {
+		t.Errorf("previewed=%d Reversed=%d; want 1/0 (counters are apply-only)", previewed, res.Reversed)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("marker removed during a dry run")
+	}
+	var status string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" {
+		t.Errorf("status = %q; want done -- a dry run must not mutate", status)
+	}
+}
+
+// TestReverse_ReportFailureLeavesRowAndMarkerIntact pins the backup-first rule
+// in the reverse direction: if the restorable record cannot be written, the
+// change must not happen at all.
+func TestReverse_ReportFailureLeavesRowAndMarkerIntact(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	id, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	res, err := New(q, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+		Report: func(Change) error { return errors.New("backup disk full") },
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 0 || res.Errors != 1 {
+		t.Errorf("Reversed=%d Errors=%d; want 0/1", res.Reversed, res.Errors)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("marker removed despite the backup failing")
+	}
+	var status string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" {
+		t.Errorf("status = %q; want done -- no backup, no change", status)
+	}
+}
+
+// TestReverse_SkipsRowClaimedMidRun pins the race window: when the guarded
+// UPDATE matches nothing because a worker re-claimed the row between the
+// listing and the mutation, the marker must be left alone rather than deleted
+// out from under whoever now owns the row.
+func TestReverse_SkipsRowClaimedMidRun(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	_, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	claimed := false
+	store := &fakeStore{DBQueue: q, unsettleResult: &claimed}
+	res, err := New(store, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 0 || res.SkippedClaimed != 1 {
+		t.Errorf("Reversed=%d SkippedClaimed=%d; want 0/1", res.Reversed, res.SkippedClaimed)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("marker removed for a row this run did not actually revert")
+	}
+}
+
+// TestReverse_UnsettleErrorIsCountedNotFatal pins that a per-row store failure
+// is counted and the run continues, matching Run's per-row error contract.
+func TestReverse_UnsettleErrorIsCountedNotFatal(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	_, marker := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	store := &fakeStore{DBQueue: q, unsettleErr: errors.New("database is locked")}
+	res, err := New(store, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: a per-row failure must not abort the run: %v", err)
+	}
+	if res.Errors != 1 || res.Reversed != 0 {
+		t.Errorf("Errors=%d Reversed=%d; want 1/0", res.Errors, res.Reversed)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("marker removed after the database write failed")
+	}
+}
+
+// TestReverse_ListErrorAborts pins the one failure that IS fatal: if the
+// candidate set cannot be enumerated, the run has nothing trustworthy to act on.
+func TestReverse_ListErrorAborts(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	store := &fakeStore{DBQueue: q, listErr: errors.New("no such table")}
+	if _, err := New(store, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	}); err == nil {
+		t.Fatal("Reverse: want an error when the listing fails")
 	}
 }

@@ -1692,6 +1692,66 @@ func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGat
 	return out, nil
 }
 
+// ListVocalGateConfirmationsOptions narrows the stamped-instrumental listing.
+type ListVocalGateConfirmationsOptions struct {
+	LibraryID *int64
+	Limit     int
+}
+
+// ListVocalGateConfirmations returns done rows the detector previously settled
+// as instrumental (instrumental_result = 1) that carry re-decidable stored
+// telemetry. It is the TIGHTENING-direction counterpart to
+// ListVocalGateRejections: those rows sit in a gap of their own, because
+// nothing revisits a confirmed positive once the thresholds move DOWN.
+//
+// Unlike the rejection listing, this one does not need the empty-vocal_class
+// filter that drops the degraded mean-only-sidecar population. That filter
+// exists because a vocal_peak stamped 0.0 by an incomplete sidecar can
+// spuriously SATISFY the vocal gate and settle a false instrumental. Here the
+// re-decision only ever acts when a row now FAILS the gate, which requires a
+// vocal_peak at or above the threshold -- a degraded 0.0 stamp can never
+// trigger a reversal. The filter would be inert, so it is omitted rather than
+// cargo-culted.
+//
+// Read-only.
+func (q *DBQueue) ListVocalGateConfirmations(ctx context.Context, opts ListVocalGateConfirmationsOptions) (out []StampedRejection, retErr error) {
+	query := `SELECT id, COALESCE(artist,''), COALESCE(title,''), COALESCE(source_path,''),
+	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,'')
+	          FROM work_queue
+	          WHERE instrumental_result = 1 AND status = 'done'
+	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL`
+	var args []any
+	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
+	query += libClause //nolint:gosec // reason: G202 -- libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
+	args = append(args, libArgs...)
+	query += ` ORDER BY id`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // reason: G202 -- fragments are package constants / fixed clauses, never user-built SQL
+	if err != nil {
+		return nil, fmt.Errorf("queue: list vocal-gate confirmations: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close list vocal-gate confirmations rows: %w", err)
+		}
+	}()
+	for rows.Next() {
+		var r StampedRejection
+		if err := rows.Scan(&r.ID, &r.Artist, &r.Title, &r.SourcePath,
+			&r.Tel.MusicSum, &r.Tel.VocalPeak, &r.Tel.SpeechMean, &r.Tel.VocalClass, &r.Tel.DetectorVersion); err != nil {
+			return nil, fmt.Errorf("queue: scan vocal-gate confirmation: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list vocal-gate confirmations rows: %w", err)
+	}
+	return out, nil
+}
+
 // ListInstrumentalMarkersOptions narrows ListDetectorInstrumentalMarkers.
 type ListInstrumentalMarkersOptions struct {
 	LibraryID *int64
@@ -2203,4 +2263,64 @@ func requireAffected(res sql.Result, op string) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// UnsettleInstrumental reverses SettleInstrumental for a row a TIGHTENED vocal
+// gate now rejects: the settled instrumental verdict is stamped back to
+// instrumental_result = 0 and the row returns to 'deferred' so the provider
+// lanes retry it.
+//
+// The stored telemetry columns are deliberately PRESERVED. They are the
+// evidence the re-decision was made from, and stamping 0 (rather than NULL)
+// records the truthful state -- the detector did score this row, and under the
+// current thresholds those scores say not-instrumental. NULL would claim the
+// row was never classified and would send it back for a needless re-scan.
+//
+// scan_results is deliberately NOT reverted, which is the asymmetry with
+// SettleInstrumental's 'done' writeback. The scan scheduler enqueues from
+// scan_results WHERE status = 'pending' (scan.ListPendingByLibrary), so
+// flipping it back would race the scheduler into enqueuing a DUPLICATE
+// alongside the work_queue row this method just returned to 'deferred'. The
+// work_queue row is the live work item; the scan result stays settled.
+//
+// priority returns to PriorityScan rather than sinking to PriorityMiss. Matching
+// Defer looks like the obvious choice and is wrong here: PriorityMiss exists for
+// rows that are LIKELY TO MISS AGAIN, and a reversed instrumental is the
+// opposite -- a track with real vocals the detector wrongly suppressed, so it is
+// unusually likely to resolve on the next attempt.
+//
+// The cost of getting this wrong is not theoretical. Dequeue randomizes within a
+// priority tier, so sinking a bounded correction into a deferred pool an order of
+// magnitude larger makes only (reversed / pool) of each draw a corrected row.
+// Measured on a production reversal: 880 rows dropped into a 15,634-row pool at
+// ~180 rows/hr drew ~10/hr, clearing half in 2.5 days and trailing to roughly
+// three weeks, versus about five hours at PriorityScan. These rows do not starve
+// fresh work -- they ARE the corrected work, and the set is finite.
+//
+// Guarded on status = 'done' AND instrumental_result = 1, so a row settled with
+// real lyrics, a row a worker has claimed, or one already reversed is left
+// alone rather than reopened. Returns whether the row was reverted.
+func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, error) {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET instrumental_result = 0,
+             outcome_type = NULL,
+             status = 'deferred',
+             completed_at = NULL,
+             priority = ?,
+             next_attempt_at = ?,
+             last_error = 'instrumental verdict reversed by a tightened vocal gate'
+         WHERE id = ?
+           AND status = 'done'
+           AND instrumental_result = 1`,
+		PriorityScan, formatTime(q.now()), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: unsettle instrumental: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: unsettle instrumental rows affected: %w", err)
+	}
+	return n > 0, nil
 }
