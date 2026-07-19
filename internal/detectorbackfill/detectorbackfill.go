@@ -164,7 +164,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 func (b *Backfiller) runDry(ctx context.Context, rows []row, res Result, opts Options) (Result, error) {
 	for _, rw := range rows {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return res, fmt.Errorf("detectorbackfill: dry run canceled: %w", err)
 		}
 		res.Scanned++
 
@@ -201,7 +201,7 @@ func (b *Backfiller) runApply(ctx context.Context, rows []row, res Result, opts 
 
 	for _, rw := range rows {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return res, fmt.Errorf("detectorbackfill: apply canceled: %w", err)
 		}
 		res.Scanned++
 
