@@ -96,7 +96,7 @@ func TestRunReconcileDetectorStats_ApplyWritesBothBucketsAndBackup(t *testing.T)
 		t.Errorf("output should state the uncountable ClearDone remainder:\n%s", s)
 	}
 
-	data, err := os.ReadFile(backup) //nolint:gosec // G304: test-controlled path
+	data, err := os.ReadFile(backup) //nolint:gosec // reason: G304: test-controlled path
 	if err != nil {
 		t.Fatalf("read backup: %v", err)
 	}

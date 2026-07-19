@@ -57,7 +57,7 @@ func runReconcileDetectorStats(ctx context.Context, out io.Writer, args ScanReco
 		slog.Error("failed to open database", "error", err)
 		return 1
 	}
-	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
+	defer sqlDB.Close() //nolint:errcheck // reason: best-effort close on shutdown
 
 	backupPath := args.Backup
 	if backupPath == "" {
@@ -84,7 +84,7 @@ func runReconcileDetectorStats(ctx context.Context, out io.Writer, args ScanReco
 			return nil
 		}
 		if backupFile == nil {
-			f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: backupPath is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
+			f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: G304: backupPath is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
 			if ferr != nil {
 				return fmt.Errorf("open reconcile-detector-stats backup %q: %w", backupPath, ferr)
 			}
