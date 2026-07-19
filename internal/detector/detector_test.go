@@ -944,8 +944,8 @@ func TestNewHTTPDetectorDefaultsVocalGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ctor: %v", err)
 	}
-	if d.vocalMaxConfidence != 0.03 {
-		t.Errorf("vocalMaxConfidence = %v; want 0.03 (defaulted)", d.vocalMaxConfidence)
+	if d.vocalMaxConfidence != 0.015 {
+		t.Errorf("vocalMaxConfidence = %v; want 0.015 (defaulted)", d.vocalMaxConfidence)
 	}
 	if d.spreadSamples != 0 {
 		t.Errorf("spreadSamples = %d; want 0 (not constructor-defaulted; 0/1 means single window)", d.spreadSamples)
@@ -962,8 +962,8 @@ func TestNewHTTPDetectorDefaultsVocalGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ctor: %v", err)
 	}
-	if d2.vocalMaxConfidence != 0.03 {
-		t.Errorf("vocalMaxConfidence = %v; want 0.03 (out-of-range reset)", d2.vocalMaxConfidence)
+	if d2.vocalMaxConfidence != 0.015 {
+		t.Errorf("vocalMaxConfidence = %v; want 0.015 (out-of-range reset)", d2.vocalMaxConfidence)
 	}
 }
 

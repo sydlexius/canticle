@@ -112,7 +112,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_INSTRUMENTAL_DETECTOR_CLASSES` | `Music,Musical instrument` | Comma-separated AudioSet class names whose probabilities are summed and compared against the confidence threshold. |
 | `MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS` | `5` | Minimum gap in seconds between consecutive classifier inference calls. `0` disables the cooldown. |
 | `MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES` | `Singing,Vocal music,Choir,...` | Comma-separated AudioSet vocal-class names whose peak (max-over-frames) score blocks an instrumental marking (the vocal gate). |
-| `MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE` | `0.03` | Maximum vocal-class peak (0-1) tolerated before a track is excluded from instrumental. Values outside (0, 1] reset to `0.03`. |
+| `MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE` | `0.015` | Maximum vocal-class peak (0-1) tolerated before a track is excluded from instrumental. Values outside (0, 1] reset to `0.015`. |
 | `MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES` | `6` | Number of short windows spread across the track and concatenated into one classifier sample. `< 2` disables spreading (single contiguous window). |
 | `MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH` | (auto-discover) | Path to `ffprobe` used to read track duration for spread-sample placement. Empty auto-discovers (sibling of ffmpeg, then PATH). Set this when ffmpeg was auto-provisioned (no ffprobe). |
 | `MXLRC_ENRICHMENT_ENABLED` | `true` | Global default for recording enrichment (reading ISRC, MusicBrainz ID, and duration from audio tags). Per-library and per-run flags override this. |
@@ -288,7 +288,7 @@ ffmpeg (used to extract the audio sample) is resolved automatically: see [ffmpeg
 # min_confidence = 0.90
 # instrumental_classes = ["Music", "Musical instrument"]
 # vocal_classes = ["Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
-# vocal_max_confidence = 0.03
+# vocal_max_confidence = 0.015
 # speech_classes = ["Speech"]
 # speech_max_confidence = 0.20
 # spread_samples = 6
@@ -302,7 +302,7 @@ When enabled and a `classifier_url` is set, the detector samples each track's au
 
 To catch vocals that enter after an instrumental intro (arias, jazz, classical), the detector samples `spread_samples` short windows spread across the **whole** track, concatenated into one sample, and gates on the per-class **max-over-frames** peak (the loudest singing moment), which the frame mean dilutes. This requires the sidecar to return `{"mean": {...}, "max": {...}}`; a legacy mean-only sidecar degrades safely to never-instrumental.
 
-`sample_duration_seconds` is clamped to [30, 60]. `min_confidence` and `vocal_max_confidence` values outside (0, 1] reset to `0.90` and `0.03` respectively. `cooldown_seconds` is the minimum gap between consecutive inference calls; `0` disables the cooldown. Track-duration probing needs `ffprobe`; the auto-provisioned ffmpeg ships none, so set `ffprobe_path` (or rely on a PATH ffprobe) or the detector falls back to a single window. **Deploy order:** upgrade Canticle before the sidecar (new Canticle tolerates the old flat-map response; old Canticle cannot parse `{mean,max}`). See **[Instrumental Detection](instrumental-detection.md)** for the full reference (decision model, sidecar setup, and tuning), and the [Instrumental detection](USER_GUIDE.md#instrumental-detection) guide for the per-library and per-run override controls.
+`sample_duration_seconds` is clamped to [30, 60]. `min_confidence` and `vocal_max_confidence` values outside (0, 1] reset to `0.90` and `0.015` respectively. `cooldown_seconds` is the minimum gap between consecutive inference calls; `0` disables the cooldown. Track-duration probing needs `ffprobe`; the auto-provisioned ffmpeg ships none, so set `ffprobe_path` (or rely on a PATH ffprobe) or the detector falls back to a single window. **Deploy order:** upgrade Canticle before the sidecar (new Canticle tolerates the old flat-map response; old Canticle cannot parse `{mean,max}`). See **[Instrumental Detection](instrumental-detection.md)** for the full reference (decision model, sidecar setup, and tuning), and the [Instrumental detection](USER_GUIDE.md#instrumental-detection) guide for the per-library and per-run override controls.
 
 ffmpeg resolution is shared with `[verification]`; see [ffmpeg resolution](#ffmpeg-resolution) below. Set `ffmpeg_path` here only to pin a binary separately from the verification path.
 

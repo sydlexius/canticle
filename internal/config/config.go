@@ -365,7 +365,7 @@ type InstrumentalDetectorConfig struct {
 	VocalClasses []string `toml:"vocal_classes"`
 	// VocalMaxConfidence is the maximum tolerated sung-vocal-class peak before a
 	// track is excluded from being marked instrumental. Conservative (biased
-	// toward "not instrumental"). Values outside (0, 1] reset to the default 0.03.
+	// toward "not instrumental"). Values outside (0, 1] reset to the default 0.015.
 	// Override: MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE.
 	VocalMaxConfidence float64 `toml:"vocal_max_confidence"`
 	// SpeechClasses is the list of AudioSet class names gated on SUSTAINED
@@ -494,7 +494,7 @@ const guardThresholdDefault = 0.20
 // for the instrumental detector's vocal gate. Pinned by the issue #384
 // calibration sweep over the full instrumental-marked corpus (184/352 flipped,
 // 0 known-vocal false-positives). Conservative: biased toward "not instrumental".
-const detectorVocalMaxConfidenceDefault = 0.03
+const detectorVocalMaxConfidenceDefault = 0.015
 
 // detectorSpeechMaxConfidenceDefault is the default summed-frame-MEAN threshold
 // for the instrumental detector's speech gate (sustained spoken-word presence).

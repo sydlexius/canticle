@@ -309,10 +309,12 @@ min_similarity = 0.35
 # vocal_classes = ["Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"]
 
 # Maximum sung-vocal-class peak (0-1) tolerated before a track is excluded from
-# being instrumental. Conservative: biased toward "not instrumental". Default 0.03
-# (pinned by the #384 calibration sweep). Values outside (0, 1] reset to 0.03.
+# being instrumental. Conservative: biased toward "not instrumental". Default 0.015
+# (calibrated 2026-07-19 on a 296-track labeled sample: 1.37% false-instrumental
+# on known-vocal tracks, 54% true-instrumental recovery). Values outside (0, 1]
+# reset to 0.015.
 # Env: MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE.
-# vocal_max_confidence = 0.03
+# vocal_max_confidence = 0.015
 
 # AudioSet speech-class names gated on SUSTAINED presence (summed frame MEAN, not
 # peak) so brief incidental speech does not block an instrumental marking.

@@ -41,7 +41,23 @@ const (
 // that lands an empty value -- still gets a working vocal gate rather than one
 // silently disabled. Kept in sync with config.defaults() by convention, the same
 // way the instrumental-class default is duplicated.
-const defaultVocalMaxConfidence = 0.03
+//
+// CALIBRATED (2026-07-19, issue #510 methodology): selected from a 296-track
+// labeled sample (146 provider-confirmed vocal, 150 provider-labeled
+// instrumental) scored by the live sidecar, holding the music gate at 0.9 and
+// the speech gate at 0.20. At 0.015 the false-instrumental rate on known-vocal
+// tracks is 1.37% (2/146) and true-instrumental recovery is 54% (81/150).
+//
+// This is deliberately NOT the value cmd/vocalcalib -mode sweep returns
+// (0.007589 at the tool's default 1% ceiling). That output is pinned exactly to
+// a single sample's vocal_peak -- moving it by 1e-5 doubles the error rate --
+// and it is dominated by 0.015, which costs no additional real errors while
+// recovering 22 more percentage points of true instrumentals. At n=146 one
+// track is 0.68%, so a 1% ceiling is finer than the sample can resolve and
+// forces the sweep into a strictly worse operating point.
+//
+// The prior 0.03 misclassified 4.79% (7/146) of known-vocal tracks.
+const defaultVocalMaxConfidence = 0.015
 
 // defaultSpeechMaxConfidence is the default summed-frame-MEAN threshold for the
 // Speech gate: a track is never marked instrumental when the summed mean of the

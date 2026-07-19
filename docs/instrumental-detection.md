@@ -34,7 +34,7 @@ failing means "not instrumental", and the track is left as a normal miss.
 | Gate | Condition | Default |
 |------|-----------|---------|
 | **Music gate** | The **mean** over frames of the summed `instrumental_classes` probabilities is at least `min_confidence`. | `min_confidence = 0.90`, `instrumental_classes = ["Music", "Musical instrument"]` |
-| **Sung-vocal gate** (#384) | The **peak** (max over frames) of *every* `vocal_classes` score stays **below** `vocal_max_confidence`. | `vocal_max_confidence = 0.03`, `vocal_classes` = the singing/vocal set below |
+| **Sung-vocal gate** (#384) | The **peak** (max over frames) of *every* `vocal_classes` score stays **below** `vocal_max_confidence`. | `vocal_max_confidence = 0.015`, `vocal_classes` = the singing/vocal set below |
 | **Speech gate** (#403) | The summed frame **mean** of the `speech_classes` stays **below** `speech_max_confidence`. | `speech_max_confidence = 0.20` (provisional), `speech_classes = ["Speech"]` |
 
 The default `vocal_classes` (sung-vocal) set is:
@@ -93,31 +93,43 @@ safe in that direction.
 
 ### Calibration evidence
 
-The `vocal_max_confidence = 0.03` default was pinned by a sweep over real library
-tracks plus known-vocal controls (issue #384). The separation between
-instrumentals and vocals on the production metric (`vocal_peak` = max over vocal
-classes of each class's max-over-frames):
+The `vocal_max_confidence = 0.015` default was calibrated on 2026-07-19 against a
+296-track labeled sample scored by the live sidecar: 146 tracks that provider
+lyrics prove are vocal, and 150 provider-labeled instrumentals. The music gate
+was held at `0.90` and the speech gate at `0.20`.
 
-| Track type | `vocal_peak` | Verdict |
-|------------|-------------|---------|
-| Baroque oratorio aria | ~0.39 | vocal (scored ~0.004 at a single 30s intro window - a false instrumental that spread sampling fixes) |
-| Jazz vocal | ~0.087 | vocal |
-| Country vocal | ~0.059 | vocal |
-| Orchestral ballet (instr.) | ~0.021 | instrumental |
-| Solo guitar (instr.) | ~0.013 | instrumental |
-| Baroque concerto (instr.) | ~0.005 | instrumental |
+**The two classes overlap; there is no clean separating margin.** An earlier
+6-track sample suggested instrumentals topped out near `0.021` while vocals
+floored near `0.059`, implying a comfortable 3x gap. The larger sample refutes
+that: known-vocal `vocal_peak` ranges from `0.0019` to `0.8861` (median `0.0959`,
+p5 `0.0257`), so genuinely-vocal tracks reach well into what looks like
+instrumental territory. Any threshold trades one error against the other.
 
-Instrumentals top out near `0.021` and vocals floor near `0.059` - roughly a 3x
-margin - so `0.03` sits comfortably between them.
+| `vocal_max_confidence` | False instrumental (of 146 known-vocal) | True instrumental recovered (of 150) |
+|---|---|---|
+| `0.005` | 0.68% | 24.0% |
+| `0.010` | 1.37% | 42.7% |
+| **`0.015`** (default) | **1.37%** | **54.0%** |
+| `0.020` | 2.05% | 58.7% |
+| `0.030` (prior default) | 4.79% | 66.0% |
 
-The speech gate's `speech_max_confidence = 0.20` default (#403) is a different
-kind of value: it is a **provisional placeholder**, chosen conservatively low
-(biased toward "not instrumental", preserving lyric protection) pending a
-#384-style calibration sweep over the audit set to pin the final constant. Because
-the key is configurable, that calibration refines the value without a code change.
-The acceptance criterion - that incidental-speech instrumentals get re-confirmed -
-is satisfied by the **post-calibration** validation gate (re-running the audit
-set), not by the placeholder itself.
+`0.015` is chosen because it recovers the most true instrumentals available at
+its error level: it costs no additional false instrumentals over `0.010`, and
+the prior `0.030` misclassified 4.79% of known-vocal tracks.
+
+Note that `cmd/vocalcalib -mode sweep` returns `0.007589` at its default 1%
+error ceiling. That output is **not** the default, deliberately. It is pinned
+exactly to one sample's `vocal_peak` (moving it by `1e-5` doubles the error
+rate), and it is dominated by `0.015` - same real error count, 22 points less
+recovery. At n=146 a single track is 0.68%, so a 1% ceiling is finer than the
+sample can resolve and pushes the sweep into a strictly worse operating point.
+Treat the sweep as evidence, not as the decision.
+
+**The music gate, not the vocal gate, is now the binding constraint on
+recovery.** 32 of the 150 labeled instrumentals (21%) score `music_sum < 0.90`
+and cannot be recovered at any vocal threshold. The speech gate blocks only 2 of
+150. Further recovery gains have to come from `min_confidence`, which has not
+been calibrated.
 
 ## Sidecar setup
 
@@ -176,7 +188,7 @@ All keys live under `[instrumental_detector]`; each has an
 | `spread_samples` | `6` | Windows spread across the track. `< 2` disables spreading. |
 | `min_confidence` | `0.90` | Music-gate threshold (mean). Values outside (0, 1] reset to `0.90`. |
 | `instrumental_classes` | `["Music", "Musical instrument"]` | Classes summed for the music gate. |
-| `vocal_max_confidence` | `0.03` | Sung-vocal-gate threshold (peak). Values outside (0, 1] reset to `0.03`. |
+| `vocal_max_confidence` | `0.015` | Sung-vocal-gate threshold (peak). Values outside (0, 1] reset to `0.015`. |
 | `vocal_classes` | (the singing/vocal set above) | Sung-vocal classes whose peak blocks an instrumental marking. |
 | `speech_max_confidence` | `0.20` (provisional) | Speech-gate threshold (summed mean). Values outside (0, 1] reset to `0.20`. |
 | `speech_classes` | `["Speech"]` | Speech classes gated on sustained mean (not peak). |
@@ -209,9 +221,9 @@ The decision is logged. Look for the detector decision line, which reports the
 computed `music_sum`, the `vocal_peak`, the `speech_mean`, and the resulting
 verdict, so you can see *why* a track was or was not marked.
 
-- **The borderline band.** A `vocal_peak` of roughly `0.03-0.05` is genuinely
+- **The borderline band.** A `vocal_peak` of roughly `0.015-0.05` is genuinely
   mixed material (quiet backing vocals, sparse vocal samples). The default
-  `0.03` deliberately keeps these on the "not instrumental" side.
+  `0.015` deliberately keeps these on the "not instrumental" side.
 - **A false instrumental** (a vocal track wrongly marked) usually means a vocal
   that the sample under-weighted - check that `ffprobe` is present and spread
   sampling is actually running (a single-window fallback is the common culprit).
@@ -234,7 +246,7 @@ verdict, so you can see *why* a track was or was not marked.
   absent `max` map is the expected legacy mean-only degradation and stays at
   `Warn`, while a present-but-partial map is the unexpected violation at `Error`.
   This fail-safe is scoped to the partial-response case only - it does not explain
-  the conservative `0.03-0.05` borderline band (by design) or other separately
+  the conservative `0.015-0.05` borderline band (by design) or other separately
   tracked refinements (cross-version model drift). `Speech` activation on
   non-lyrical audio is now handled by the dedicated sustained-mean speech gate
   (#403). Per-decision telemetry (the scores, the winning vocal class, and the
@@ -267,7 +279,7 @@ re-inference pass:
 ```sql
 -- borderline sung-vocal tracks worth a human look
 SELECT id, source_path, vocal_peak FROM work_queue
-WHERE instrumental_result = 1 AND vocal_peak BETWEEN 0.03 AND 0.05;
+WHERE instrumental_result = 1 AND vocal_peak BETWEEN 0.015 AND 0.05;
 
 -- markers written by an older detector build (model/threshold drift)
 SELECT id, source_path, detector_version FROM work_queue
