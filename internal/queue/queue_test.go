@@ -4098,3 +4098,153 @@ func TestDBQueue_ListUnclassifiedRespectsGlobalDefaultForNullStamps(t *testing.T
 		t.Errorf("global default off: got %d rows; want 0 (a NULL stamp is ineligible when the default is off)", len(off))
 	}
 }
+
+// TestDBQueue_UnsettleInstrumentalRevertsSettledRow pins the inverse of
+// SettleInstrumental: a row a tightened vocal gate now rejects goes back to
+// deferred so the provider lanes retry it, while its telemetry -- the evidence
+// the re-decision was made from -- survives.
+func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	tel := InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, VocalClass: "Singing", DetectorVersion: "v1"}
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+
+	reverted, err := q.UnsettleInstrumental(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("UnsettleInstrumental: %v", err)
+	}
+	if !reverted {
+		t.Fatalf("reverted = false; want true for a settled instrumental row")
+	}
+
+	var status, outcomeType string
+	var result int
+	var vocalPeak float64
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, instrumental_result, COALESCE(outcome_type,''), vocal_peak FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &result, &outcomeType, &vocalPeak); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "deferred" {
+		t.Errorf("status = %q; want deferred so the provider lanes retry the row", status)
+	}
+	if result != 0 {
+		t.Errorf("instrumental_result = %d; want 0 (re-decided not-instrumental, not re-scanned)", result)
+	}
+	if outcomeType != "" {
+		t.Errorf("outcome_type = %q; want cleared", outcomeType)
+	}
+	if vocalPeak != 0.02 {
+		t.Errorf("vocal_peak = %v; want 0.02 preserved as the re-decision evidence", vocalPeak)
+	}
+}
+
+// TestDBQueue_UnsettleInstrumentalLeavesNonInstrumentalRowsAlone pins the
+// guard: only a row the DETECTOR settled instrumental is reversible. A row
+// settled with real lyrics must never be dragged back into the queue.
+func TestDBQueue_UnsettleInstrumentalLeavesNonInstrumentalRowsAlone(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Complete(ctx, item.ID); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	reverted, err := q.UnsettleInstrumental(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("UnsettleInstrumental: %v", err)
+	}
+	if reverted {
+		t.Fatalf("reverted = true; want false -- a completed non-instrumental row must never be reopened")
+	}
+}
+
+// TestDBQueue_ListVocalGateConfirmationsReturnsSettledRowsWithTelemetry pins
+// the tightening-direction candidate set: rows the detector CONFIRMED
+// instrumental that carry re-decidable stored telemetry.
+func TestDBQueue_ListVocalGateConfirmationsReturnsSettledRowsWithTelemetry(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	settled, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Settled"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, settled.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if _, err := q.SettleInstrumental(ctx, settled.ID, InstrumentalTelemetry{
+		MusicSum: 0.95, VocalPeak: 0.02, VocalClass: "Singing", DetectorVersion: "v1",
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	// A plain completed row was never scored by the detector: it must not appear.
+	other, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Lyrics"},
+		Outdir:     "out",
+		Filename:   "b.lrc",
+		SourcePath: "/music/b.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue other: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue other: %v", err)
+	}
+	if err := q.Complete(ctx, other.ID); err != nil {
+		t.Fatalf("complete other: %v", err)
+	}
+
+	rows, err := q.ListVocalGateConfirmations(ctx, ListVocalGateConfirmationsOptions{})
+	if err != nil {
+		t.Fatalf("ListVocalGateConfirmations: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d; want 1 (only the detector-settled row)", len(rows))
+	}
+	if rows[0].ID != settled.ID {
+		t.Errorf("id = %d; want %d", rows[0].ID, settled.ID)
+	}
+	if rows[0].Tel.VocalPeak != 0.02 {
+		t.Errorf("vocal_peak = %v; want 0.02", rows[0].Tel.VocalPeak)
+	}
+}

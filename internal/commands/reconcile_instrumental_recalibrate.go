@@ -80,8 +80,20 @@ func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, arg
 		_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate%s: dry run; pass --yes to apply\n", env.libLabel)
 	}
 
+	// The engine's Result counters are APPLY-ONLY by design (a dry run reports
+	// through Preview and mutates nothing, pinned by
+	// TestRun_DryRunDoesNotMutate). Counting previews here keeps the dry-run
+	// summary honest: printing the apply-shaped counters after a preview-only
+	// pass renders "reversed=0" under a screenful of "would reverse" lines,
+	// which reads as "nothing to do" when the opposite is true.
+	previewed := 0
+
 	rc := instrumentalrecalib.New(env.queue, lyrics.NewLRCWriter())
-	res, err := rc.Run(ctx, instrumentalrecalib.Options{
+	run := rc.Run
+	if args.Reverse {
+		run = rc.Reverse
+	}
+	res, err := run(ctx, instrumentalrecalib.Options{
 		LibraryID:      env.libraryID,
 		Limit:          args.Limit,
 		DryRun:         !args.Yes,
@@ -90,9 +102,12 @@ func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, arg
 		SpeechMax:      env.cfg.InstrumentalDetector.SpeechMaxConfidence,
 		CurrentVersion: version,
 		Preview: func(ch instrumentalrecalib.Change) {
+			previewed++
 			switch ch.Action {
 			case "settle":
 				_, _ = fmt.Fprintf(out, "would settle: id=%d  %s  -> write instrumental marker + settle\n", ch.QueueID, ch.SourcePath)
+			case "reverse":
+				_, _ = fmt.Fprintf(out, "would reverse: id=%d  %s  vocal_peak=%.6f  -> remove detector marker + requeue for a provider fetch\n", ch.QueueID, ch.SourcePath, ch.VocalPeak)
 			default:
 				_, _ = fmt.Fprintf(out, "would reset: id=%d  %s  -> stale telemetry version, reset for re-scan\n", ch.QueueID, ch.SourcePath)
 			}
@@ -113,11 +128,32 @@ func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, arg
 		return 1
 	}
 
-	_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate%s: %d vocal-gate-rejected row(s) considered\n",
-		env.libLabel, res.Total)
-	_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate done: settled=%d markers-written=%d reset-stale=%d skipped(worker-claimed=%d) errors=%d\n",
-		res.Settled, res.MarkersWritten, res.ResetStale, res.SkippedClaimed, res.Errors)
-	if args.Yes && (res.Settled > 0 || res.ResetStale > 0) {
+	candidates := "vocal-gate-rejected"
+	if args.Reverse {
+		candidates = "confirmed-instrumental"
+	}
+	_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate%s: %d %s row(s) considered\n",
+		env.libLabel, res.Total, candidates)
+	if !args.Yes {
+		verb := "settle/reset"
+		if args.Reverse {
+			verb = "reverse"
+		}
+		_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate dry run: would %s %d row(s); skipped(provider-owned=%d) errors=%d\n",
+			verb, previewed, res.SkippedProviderOwned, res.Errors)
+		if res.Errors > 0 {
+			return 1
+		}
+		return 0
+	}
+	if args.Reverse {
+		_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate done: reversed=%d markers-removed=%d skipped(provider-owned=%d worker-claimed=%d) errors=%d\n",
+			res.Reversed, res.MarkersRemoved, res.SkippedProviderOwned, res.SkippedClaimed, res.Errors)
+	} else {
+		_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate done: settled=%d markers-written=%d reset-stale=%d skipped(worker-claimed=%d) errors=%d\n",
+			res.Settled, res.MarkersWritten, res.ResetStale, res.SkippedClaimed, res.Errors)
+	}
+	if args.Yes && (res.Settled > 0 || res.ResetStale > 0 || res.Reversed > 0) {
 		_, _ = fmt.Fprintf(out, "backup of changed rows written to %s\n", backupPath)
 	}
 	if res.Errors > 0 {

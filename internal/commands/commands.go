@@ -251,6 +251,11 @@ type ScanReconcileInstrumentalRecalibrateCmd struct {
 	Limit      int    `arg:"--limit" help:"maximum number of candidate rows to process (0 = unlimited)" default:"0"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of changed rows (default: <db-dir>/reconcile-instrumental-recalibrate-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	// Reverse selects the TIGHTENING direction: re-decide rows already settled
+	// instrumental and revert the ones a lowered vocal_max_confidence now
+	// rejects, removing their detector-written markers. The default (loosening)
+	// direction only ever promotes rows the old thresholds buried.
+	Reverse bool `arg:"--reverse" help:"re-decide CONFIRMED instrumentals under tightened thresholds, reverting the ones that no longer qualify (default direction promotes buried rows instead)"`
 }
 
 // ScanResultsCmd lists persisted scan results, optionally filtered.

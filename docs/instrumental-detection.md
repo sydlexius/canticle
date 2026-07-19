@@ -131,6 +131,46 @@ and cannot be recovered at any vocal threshold. The speech gate blocks only 2 of
 150. Further recovery gains have to come from `min_confidence`, which has not
 been calibrated.
 
+### Applying a threshold change to rows already decided
+
+Changing `vocal_max_confidence` only affects future detections. Rows the old
+value already decided are never revisited on their own, in either direction, so
+a recalibration is finished only once the backlog is re-decided:
+
+```sh
+# Thresholds LOOSENED: promote rows the old, tighter gate buried.
+canticle scan reconcile-instrumental-recalibrate
+
+# Thresholds TIGHTENED: revert rows the old, looser gate wrongly settled.
+canticle scan reconcile-instrumental-recalibrate --reverse
+```
+
+Both re-decide from the telemetry already stored on each row
+(`music_sum`/`vocal_peak`/`speech_mean`), so neither re-reads audio or calls the
+sidecar - they are arithmetic passes, not detection passes. Both are dry-run by
+default, print what they would change, and need `--yes` to apply; applying
+writes a JSONL backup of every changed row first.
+
+The `--reverse` direction removes marker sidecars, so it is guarded: a marker is
+deleted only when its `[source:]` header proves the **detector** wrote it. A
+provider-declared instrumental, or a legacy bare marker with no header (which is
+indistinguishable from one), is left untouched and counted as
+`skipped(provider-owned=N)`. Reverted rows return to the queue at low priority
+for a normal provider fetch.
+
+Rows with **no** stored telemetry (written before migration 025) are invisible to
+both directions - there are no scores to re-decide from. Those need a real
+re-scan via `scan reconcile`.
+
+The speech gate's `speech_max_confidence = 0.20` default (#403) is a different
+kind of value: it is a **provisional placeholder**, chosen conservatively low
+(biased toward "not instrumental", preserving lyric protection) pending a
+#384-style calibration sweep over the audit set to pin the final constant. Because
+the key is configurable, that calibration refines the value without a code change.
+The acceptance criterion - that incidental-speech instrumentals get re-confirmed -
+is satisfied by the **post-calibration** validation gate (re-running the audit
+set), not by the placeholder itself.
+
 ## Sidecar setup
 
 The classifier is a small YAMNet HTTP service. Canticle does not publish an image
