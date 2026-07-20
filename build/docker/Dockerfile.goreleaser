@@ -12,7 +12,10 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # The explicit version also cache-busts the GHA BuildKit layer so the image scan
 # stops reusing a stale 8.1.1-r0 layer. Keep in sync with the top-level Dockerfile;
 # raise/drop the floor when the base apk index ships a newer ffmpeg by default.
-RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" su-exec tzdata && \
+# mbedtls3 floor pinned to remediate the 3.6.6-r0 CVE batch (16 low-severity
+# Alpine CVEs, fixed in 3.6.7-r0); raise/drop when the base index ships it by
+# default.
+RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" su-exec tzdata && \
     apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
