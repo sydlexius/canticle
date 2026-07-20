@@ -395,6 +395,12 @@ const dequeueBatchedClaimSQL = `UPDATE work_queue
 // migration 004). batch_seq IS NULL restricts the draw to fresh rows; at draw
 // time every eligible row is unbuffered, since any eligible buffered row would
 // have been claimed before the draw ran.
+//
+// The subquery's `ORDER BY rn` before `LIMIT ?` is load-bearing: the window
+// ORDER BY only assigns rn, and SQLite leaves the final row order undefined
+// without a top-level ORDER BY, so LIMIT could otherwise keep an arbitrary N
+// rows rather than the top-N by priority -- dropping a high-priority (webhook)
+// row from the batch. Ordering by rn guarantees LIMIT takes ranks 1..N.
 const drawBatchSQL = `UPDATE work_queue
          SET batch_seq = ranked.rn
          FROM (
@@ -403,6 +409,7 @@ const drawBatchSQL = `UPDATE work_queue
              WHERE status IN ('pending', 'failed', 'deferred')
                AND next_attempt_at <= ?
                AND batch_seq IS NULL
+             ORDER BY rn
              LIMIT ?
          ) AS ranked
          WHERE work_queue.id = ranked.id`

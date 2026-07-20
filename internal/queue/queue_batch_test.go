@@ -262,6 +262,41 @@ func TestDBQueue_WebhookEnqueuePreemptsBatch(t *testing.T) {
 	}
 }
 
+// The draw must keep the top-N rows by priority, not an arbitrary N. With a pool
+// one larger than batch_size, LIMIT drops exactly one row; the highest-priority
+// (webhook) row must never be the one dropped. Without a top-level ORDER BY rn on
+// the ranked subquery, SQLite's LIMIT keeps an undefined subset, so the webhook
+// could be excluded from the batch and wait behind scan rows -- a priority
+// inversion (#571 review). Assert across several independent draws, since the
+// bug is order-dependent and would otherwise pass by luck.
+func TestDBQueue_DrawKeepsHighestPriorityUnderLimit(t *testing.T) {
+	ctx := context.Background()
+	for attempt := range 8 {
+		q := NewDBQueue(openQueueTestDB(t))
+		q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+		q.SetBatchSize(5)
+
+		// Five scan rows plus one webhook = pool of 6, one larger than the batch,
+		// so the draw's LIMIT 5 must drop one row -- never the webhook.
+		enqueueN(t, q, 5)
+		webhook, err := q.Enqueue(ctx, models.Inputs{
+			Track: models.Track{ArtistName: "Webhook", TrackName: "Urgent"},
+		}, PriorityWebhook)
+		if err != nil {
+			t.Fatalf("attempt %d: enqueue webhook: %v", attempt, err)
+		}
+
+		first, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("attempt %d: dequeue: %v", attempt, err)
+		}
+		if first.ID != webhook.ID {
+			t.Fatalf("attempt %d: first claim ID = %d (%q); want webhook %d -- highest-priority row dropped from the batch",
+				attempt, first.ID, first.Inputs.Track.TrackName, webhook.ID)
+		}
+	}
+}
+
 // The batched Dequeue surfaces a DB failure rather than swallowing it: a closed
 // DB fails BeginTx, and the error must propagate (not a silent empty claim).
 func TestDBQueue_BatchedDequeueSurfacesDBError(t *testing.T) {
