@@ -13,9 +13,11 @@ func TestReopenClassesFor(t *testing.T) {
 		want            reopenClasses
 	}{
 		{"neither", false, false, reopenClasses{}},
+		// --upgrade promotes a track toward synced, so it must never set Synced:
+		// there is nothing above a settled .lrc to promote it to (#575).
 		{"upgrade", false, true, reopenClasses{Unsynced: true, ProvisionalInstrumental: true}},
-		{"update", true, false, reopenClasses{Unsynced: true, ProvisionalInstrumental: true, AuthoritativeInstrumental: true}},
-		{"both", true, true, reopenClasses{Unsynced: true, ProvisionalInstrumental: true, AuthoritativeInstrumental: true}},
+		{"update", true, false, reopenClasses{Unsynced: true, ProvisionalInstrumental: true, AuthoritativeInstrumental: true, Synced: true}},
+		{"both", true, true, reopenClasses{Unsynced: true, ProvisionalInstrumental: true, AuthoritativeInstrumental: true, Synced: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

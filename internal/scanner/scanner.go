@@ -409,8 +409,10 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		}
 
 		switch {
-		case lrcExists && !opts.Update:
+		case lrcExists && !reopen.Synced:
 			// Synced lyrics already present and not asked to update -- skip.
+			// Gated on the Synced class rather than opts.Update directly so this
+			// and the embedded-lyrics hasSynced skip below cannot drift apart.
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
 		case txtExists && !lrcExists && isInstrumentalTxt(filepath.Join(dir, txtFile)):
@@ -506,6 +508,28 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 					if hasSynced {
 						if err := extractEmbeddedSyncedLyrics(dir, stem, synced); err != nil {
 							slog.Warn("failed to extract embedded synced lyrics; enqueuing for fetch instead", "file", file.Name(), "error", err)
+						} else if reopen.Synced {
+							// Extraction yielded a synced .lrc, but --update is a full
+							// re-fetch: embedded SYNCEDLYRICS is whatever previous
+							// tooling happened to write and is frequently worse than a
+							// provider result. Skipping here pinned the track to it with
+							// no supported way to refresh short of deleting the sidecar
+							// by hand (#575). The sidecar is already written -- the
+							// extraction above ran first -- so falling through costs
+							// nothing and lets a provider fetch replace it.
+							//
+							// Deliberately NOT gated on lrcExists (captured before
+							// extraction): that made the first --update pass write-and-
+							// skip while the second re-queued, so two identical passes
+							// disagreed. Mirrors the reopen.Unsynced branch below, which
+							// is likewise unconditional on an existing sidecar.
+							//
+							// f is deliberately NOT closed here, for the same reason as
+							// the reopen.Unsynced branch below: this falls through to the
+							// straight-line region that ends in a single unconditional
+							// f.Close(), and probeDuration still reads from the handle
+							// when EnrichRecording is set.
+							slog.Debug("extracted synced .lrc present; still enqueuing for update re-fetch", "file", file.Name())
 						} else {
 							_ = f.Close()
 							slog.Debug("extracted embedded synced lyrics to .lrc sidecar; skipping fetch", "file", file.Name())
