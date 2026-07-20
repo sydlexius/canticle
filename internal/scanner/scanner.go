@@ -513,6 +513,23 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 						}
 					} else if err := extractEmbeddedLyrics(dir, stem, unsynced); err != nil {
 						slog.Warn("failed to extract embedded lyrics; enqueuing for fetch instead", "file", file.Name(), "error", err)
+					} else if reopen.Unsynced {
+						// Extraction yielded the UNSYNCED form only, which is not a
+						// terminal result. When an upgrade/update pass asked for
+						// unsynced work to be reconsidered, the sidecar is written but
+						// the fetch must still run so a provider can promote the track
+						// to synced. Skipping here froze such tracks permanently at
+						// unsynced -- worse than an ordinary unsynced fetch, which
+						// upgrade does revisit (#538). Mirrors the txtExists case above,
+						// which already defers to reopen.Unsynced.
+						//
+						// f is deliberately NOT closed here. Unlike the skip branches,
+						// which close and continue, this one falls through to the
+						// straight-line region below that ends in a single
+						// unconditional f.Close(). Closing here would double-close, and
+						// would be a use-after-close whenever EnrichRecording is set,
+						// since probeDuration still reads from the handle first.
+						slog.Debug("extracted embedded lyrics to .txt sidecar; still enqueuing for synced upgrade", "file", file.Name())
 					} else {
 						_ = f.Close()
 						slog.Debug("extracted embedded lyrics to .txt sidecar; skipping fetch", "file", file.Name())
