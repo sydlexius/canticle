@@ -7,7 +7,7 @@
 # MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY,
 # MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE,
 # MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER,
-# MXLRC_QUEUE_RANDOMIZE,
+# MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE,
 # MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL,
 # MXLRC_VERIFICATION_FFMPEG_PATH,
 # MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_MIN_CONFIDENCE,
@@ -432,6 +432,14 @@ script_guard_threshold = 0.20
 # (inspection output stays deterministic). Set to false to restore the
 # deterministic created_at/id ordering. Env override: MXLRC_QUEUE_RANDOMIZE.
 randomize = true
+# Shuffled lookahead buffer size: the worker draws this many eligible rows at
+# random once per batch and serves them in a stable order, so the near-term
+# queue is knowable instead of reshuffling on every claim. The randomness moves
+# from per-item to per-batch, which preserves the anti-fingerprint property (an
+# observer still sees a randomly composed request stream). Default 10. Set to 0
+# to disable batching and restore the per-item random path (a clean rollback).
+# Only applies when randomize = true. Env override: MXLRC_QUEUE_BATCH_SIZE.
+batch_size = 10
 
 [watcher]
 # Optional filesystem watcher (serve mode). When enabled, file changes under the

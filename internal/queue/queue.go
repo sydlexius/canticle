@@ -125,6 +125,11 @@ type DBQueue struct {
 	// (via SetRandomized) to restore deterministic created_at/id ordering. Also
 	// doubles as the test seam for deterministic ordering assertions.
 	randomized bool
+	// batchSize is the shuffled lookahead buffer size (#571). When randomized and
+	// > 0, Dequeue draws this many eligible rows at random once per batch and
+	// serves them in a stamped order; <= 0 restores the per-item random path. Set
+	// via SetBatchSize from the commands layer after config is loaded.
+	batchSize int
 	// providersVersion is the current providers generation stamped onto new
 	// work_queue rows by Enqueue. 0 means "not configured" and preserves
 	// backward compatibility with call sites that do not supply a generation.
@@ -140,7 +145,21 @@ func NewDBQueue(db *sql.DB) *DBQueue {
 		maxBackoff:  backoff.DefaultMax,
 		now:         time.Now,
 		randomized:  true,
+		batchSize:   defaultBatchSize,
 	}
+}
+
+// defaultBatchSize keeps NewDBQueue self-consistent when a caller never calls
+// SetBatchSize. It mirrors config.queueBatchSizeDefault; the commands layer
+// wires the configured value over it at startup.
+const defaultBatchSize = 10
+
+// SetBatchSize sets the shuffled lookahead buffer size (#571). It lets callers
+// apply the configured queue.batch_size / MXLRC_QUEUE_BATCH_SIZE setting without
+// changing the NewDBQueue call sites. A value <= 0 disables batching and
+// restores the per-item random path.
+func (q *DBQueue) SetBatchSize(n int) {
+	q.batchSize = n
 }
 
 // SetRandomized toggles whether Dequeue shuffles within a priority tier. It lets

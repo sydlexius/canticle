@@ -129,6 +129,7 @@ func openQueueEnv(ctx context.Context, out io.Writer, configPath, libraryArg str
 
 	workQueue := queue.NewDBQueue(sqlDB)
 	workQueue.SetRandomized(cfg.Queue.Randomize)
+	workQueue.SetBatchSize(cfg.Queue.BatchSize)
 	env.queue = workQueue
 
 	return env, 0
@@ -204,6 +205,7 @@ func openDetectorEnv(ctx context.Context, out io.Writer, configPath, libraryArg,
 
 	workQueue := queue.NewDBQueue(sqlDB)
 	workQueue.SetRandomized(cfg.Queue.Randomize)
+	workQueue.SetBatchSize(cfg.Queue.BatchSize)
 	env.queue = workQueue
 
 	return env, 0

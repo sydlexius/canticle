@@ -159,6 +159,7 @@ var fields = []FieldSpec{
 
 	// [queue]
 	{Path: "queue.randomize", Section: "queue", Type: TypeBool, EnvVars: []string{"MXLRC_QUEUE_RANDOMIZE"}, Criticality: Safe, Editable: true, Description: "Process queued tracks in random order."},
+	{Path: "queue.batch_size", Section: "queue", Type: TypeInt, EnvVars: []string{"MXLRC_QUEUE_BATCH_SIZE"}, Criticality: Safe, Editable: true, Description: "Shuffled lookahead buffer size; 0 disables batching (per-item random)."},
 
 	// [watcher]
 	{Path: "watcher.enabled", Section: "watcher", Type: TypeBool, EnvVars: []string{"MXLRCGO_WATCH_ENABLED"}, Criticality: Safe, Editable: true, Description: "Watch library folders and trigger a targeted scan when files change. The periodic scan still runs; the watcher only lowers latency. Off by default. Takes effect on restart."},

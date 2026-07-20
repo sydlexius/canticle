@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io/fs"
 	"path/filepath"
 	"testing"
@@ -398,6 +399,65 @@ func TestMigration030AddsPrevStatusAndRepairsStrandedRows(t *testing.T) {
 	}
 	if prevStatus != "" {
 		t.Errorf("prev_status = %q; want empty sentinel", prevStatus)
+	}
+}
+
+// TestMigration031AddsBatchSeqColumn drives migration 031: it migrates to v30,
+// seeds a pre-031 row, applies 031, and asserts a nullable batch_seq column
+// exists and reads NULL for the pre-existing row (NULL means "unbuffered", the
+// correct initial state), then down-migrates and asserts the column is removed.
+func TestMigration031AddsBatchSeqColumn(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mig031.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	applyOpenPragmas(ctx, t, sqlDB)
+
+	migFS, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("sub migrations fs: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, migFS)
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 30); err != nil {
+		t.Fatalf("UpTo(30): %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, status, priority, next_attempt_at)
+         VALUES ('A', 'T', 'a', 't', 'pending', 0, '2026-01-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	if _, err := provider.UpTo(ctx, 31); err != nil {
+		t.Fatalf("UpTo(31): %v", err)
+	}
+
+	// The column exists and the pre-existing row reads NULL (unbuffered).
+	var batchSeq sql.NullInt64
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT batch_seq FROM work_queue WHERE artist_key = 'a'`).Scan(&batchSeq); err != nil {
+		t.Fatalf("query batch_seq: %v", err)
+	}
+	if batchSeq.Valid {
+		t.Errorf("batch_seq = %d; want NULL for a pre-existing (unbuffered) row", batchSeq.Int64)
+	}
+
+	// Down-migration removes the column.
+	if _, err := provider.DownTo(ctx, 30); err != nil {
+		t.Fatalf("DownTo(30): %v", err)
+	}
+	var name string
+	err = sqlDB.QueryRowContext(ctx,
+		`SELECT name FROM pragma_table_info('work_queue') WHERE name = 'batch_seq'`).Scan(&name)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("batch_seq column still present after down-migration (err=%v, name=%q); want removed", err, name)
 	}
 }
 

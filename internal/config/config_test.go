@@ -1111,6 +1111,64 @@ func TestLoad_QueueRandomizeInvalidEnvKeepsCurrent(t *testing.T) {
 	}
 }
 
+func TestLoad_QueueBatchSizeDefaultsTen(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Queue.BatchSize != 10 {
+		t.Fatalf("queue.batch_size = %d; want default 10", cfg.Queue.BatchSize)
+	}
+}
+
+func TestLoad_QueueBatchSizeEnvOverride(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_QUEUE_BATCH_SIZE", "25")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Queue.BatchSize != 25 {
+		t.Fatalf("queue.batch_size = %d; want env override 25", cfg.Queue.BatchSize)
+	}
+}
+
+func TestLoad_QueueBatchSizeTOMLZero(t *testing.T) {
+	isolateEnv(t)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgFile, []byte("[queue]\nbatch_size = 0\n"), 0600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// 0 is a valid, meaningful value (disables batching); it must survive as 0,
+	// not be re-defaulted to 10.
+	if cfg.Queue.BatchSize != 0 {
+		t.Fatalf("queue.batch_size = %d; want TOML override 0", cfg.Queue.BatchSize)
+	}
+}
+
+func TestLoad_QueueBatchSizeInvalidEnvKeepsCurrent(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_QUEUE_BATCH_SIZE", "notanint")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Invalid env warns and keeps the current (default 10) value.
+	if cfg.Queue.BatchSize != 10 {
+		t.Fatalf("queue.batch_size = %d; want unchanged default 10 on invalid env", cfg.Queue.BatchSize)
+	}
+}
+
 // TestLoad_LoggingDefaults verifies built-in logging defaults when no TOML
 // section is present.
 func TestLoad_LoggingDefaults(t *testing.T) {

@@ -88,6 +88,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_GUARD_ACCEPTED_SCRIPTS` | (none) | Comma-separated allowlist of Unicode script buckets a lyric body may use (Latin, Han, Kana, Hangul, Other). Empty disables the language/script guard. |
 | `MXLRC_GUARD_THRESHOLD` | `0.20` | Maximum tolerated share of foreign-script letters before a result is rejected. Values outside (0, 1] reset to the default. |
 | `MXLRC_QUEUE_RANDOMIZE` | `true` | Shuffle worker dequeue order within each priority tier (anti-fingerprint). `false` restores deterministic order. |
+| `MXLRC_QUEUE_BATCH_SIZE` | `10` | Shuffled lookahead buffer size: draw N eligible rows at random per batch and serve them in order, so the near-term queue is knowable. `0` disables batching (per-item random). Applies only when `randomize = true`. |
 | `MXLRC_LOG_LEVEL` | `info` | Minimum log level: `debug`, `info`, `warn`, `error`. `debug` exposes per-request detail, worker idle-polls, and watcher events. |
 | `MXLRC_LOG_FORMAT` | `text` | Log output format: `text` (human-readable) or `json` (structured, for log aggregators). |
 | `MXLRC_LOG_FILE` | (none) | Log file path. Empty means console-only (stderr). When set, logs go to both stderr and the file with automatic rotation. |
@@ -373,9 +374,12 @@ Optional language/script guard. It rejects fetched lyrics whose body is dominate
 ```toml
 [queue]
 randomize = true
+batch_size = 10
 ```
 
 The worker shuffles its dequeue order within each priority tier so it stops querying the upstream API in strict alphabetical (library insertion) order, which is a plausible scraping fingerprint. This is **on by default** and affects only the library/serve worker path (`Dequeue`); inspection output (`queue list`) stays deterministic, and the one-shot `fetch` CLI never touches the work queue. Set `randomize = false` (or `MXLRC_QUEUE_RANDOMIZE=false`) to restore the deterministic `created_at`/`id` ordering. The env var overrides the TOML key; an invalid value warns and keeps the current setting.
+
+`batch_size` controls a shuffled lookahead buffer: rather than reshuffling the whole eligible pool on every claim (`ORDER BY RANDOM()`), the worker draws `batch_size` rows at random once, stamps them with an order, and serves them in it before drawing again. This gives the queue a stable, knowable near-term order (so upcoming work can be displayed and starvation is observable) and lets the claim use an index instead of sorting the whole table each time. The randomness moves from per-item to per-batch, so an external observer still sees a randomly composed request stream and the anti-fingerprint property is preserved. Webhook-priority work still preempts within one dequeue. Default `10`; set `batch_size = 0` (or `MXLRC_QUEUE_BATCH_SIZE=0`) to disable batching and restore the per-item random path, a clean rollback. Only applies when `randomize = true`.
 
 ### `[watcher]`
 

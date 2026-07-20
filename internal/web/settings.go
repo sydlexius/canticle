@@ -1009,6 +1009,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 	// [queue]
 	case "queue.randomize":
 		return strconv.FormatBool(cfg.Queue.Randomize)
+	case "queue.batch_size":
+		return strconv.Itoa(cfg.Queue.BatchSize)
 	// [watcher]
 	case "watcher.enabled":
 		return strconv.FormatBool(cfg.Watcher.Enabled)
@@ -1171,6 +1173,7 @@ var settingsLabels = map[string]string{
 	"guard.accepted_scripts":                        "Writing systems to accept without asking",
 	"guard.script_guard_threshold":                  "Foreign-script sensitivity (0-1)",
 	"queue.randomize":                               "Process tracks in random order",
+	"queue.batch_size":                              "Shuffled lookahead buffer size (0 disables batching)",
 	"watcher.enabled":                               "Watch for new files",
 	"watcher.debounce_ms":                           "Quiet period after file changes (milliseconds)",
 	"watcher.max_dirs":                              "Maximum directories to watch",
