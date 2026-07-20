@@ -44,7 +44,7 @@ var reportDefs = []reportDef{
 	{"queue-summary", "Queue summary", "Work-queue rows grouped by status."},
 	{"recent-outcomes", "Recent outcomes", "The most recently completed tracks and their derived result."},
 	{"provider-effectiveness", "Provider effectiveness", "Per-lane hits, misses, and true per-track hit-rate."},
-	{"instrumental-inventory", "Instrumental inventory", "Tracks the audio detector confirmed instrumental."},
+	{"instrumental-inventory", "Instrumental inventory", "Tracks confirmed instrumental by the Instrumental Detector."},
 	{"failure-analysis", "Failure analysis", "Failed and deferred tracks grouped by reason."},
 }
 
@@ -431,7 +431,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Title:       o.Title,
 				Album:       o.Album,
 				Result:      string(o.Result),
-				Lane:        o.ProviderLane,
+				Lane:        laneLabel(o.ProviderLane),
 				CompletedAt: formatReportTime(o.CompletedAt, serverLoc),
 			})
 		}
@@ -443,7 +443,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 		v.ProviderRows = make([]templates.ProviderRow, 0, len(rows))
 		for _, p := range rows {
 			v.ProviderRows = append(v.ProviderRows, templates.ProviderRow{
-				Lane:    p.Lane,
+				Lane:    laneLabel(p.Lane),
 				Hits:    strconv.FormatInt(p.Hits, 10),
 				Misses:  strconv.FormatInt(p.Misses, 10),
 				HitRate: fmt.Sprintf("%.1f%%", p.HitRate*100),
