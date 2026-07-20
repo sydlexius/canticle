@@ -1109,6 +1109,105 @@ func TestDBQueue_ReleaseReturnsItemToPendingWithoutFailure(t *testing.T) {
 	}
 }
 
+// A deferred row claimed by the worker and then released by the throttle path
+// (every lane's breaker open) must return to 'deferred', not 'pending'. Forcing
+// it to 'pending' strands the row with the PriorityMiss (-100) deprioritization
+// still applied -- a pairing priority.go does not describe -- where it neither
+// sorts as fresh work nor is reachable by RecheckDeferred or `queue deferred`,
+// both of which are scoped WHERE status='deferred'.
+func TestDBQueue_ReleaseRestoresDeferredStatus(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	const cooldown = 7 * 24 * time.Hour
+	deferred, err := q.Defer(ctx, item.ID, cooldown, errors.New("musixmatch: no results"))
+	if err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if deferred.Priority != PriorityMiss {
+		t.Fatalf("priority after Defer = %d; want %d", deferred.Priority, PriorityMiss)
+	}
+
+	// Advance past the cooldown so the deferred row is claimable again.
+	q.now = func() time.Time { return now.Add(cooldown + time.Second) }
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue after cooldown: %v", err)
+	}
+
+	if err := q.Release(ctx, item.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	var status string
+	var priority int
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, priority FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &priority); err != nil {
+		t.Fatalf("query released row: %v", err)
+	}
+	if status != StatusDeferred {
+		t.Fatalf("status = %q; want %q (release must restore the pre-claim status, not force pending)", status, StatusDeferred)
+	}
+	if priority != PriorityMiss {
+		t.Fatalf("priority = %d; want %d (release must not disturb miss deprioritization)", priority, PriorityMiss)
+	}
+}
+
+// Release must not destroy the diagnostic on a row it restores to 'failed'.
+// Clearing last_error was harmless while every release forced the row to
+// 'pending' (it left the failures view anyway), but a status-preserving release
+// leaves the row in 'failed' -- with its reason wiped, it becomes an "unknown"
+// bucket in CountFailuresByReason and the operator loses the cause.
+func TestDBQueue_ReleasePreservesLastErrorOnFailedRow(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	failed, err := q.Fail(ctx, item.ID, errors.New("musixmatch: transport error"))
+	if err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+
+	// Advance past the geometric backoff so the failed row is claimable again.
+	q.now = func() time.Time { return failed.NextAttemptAt.Add(time.Second) }
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue after backoff: %v", err)
+	}
+	if err := q.Release(ctx, item.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	var status, lastError string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, last_error FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &lastError); err != nil {
+		t.Fatalf("query released row: %v", err)
+	}
+	if status != StatusFailed {
+		t.Fatalf("status = %q; want %q", status, StatusFailed)
+	}
+	if lastError == "" {
+		t.Fatal("last_error was cleared on a row restored to 'failed'; the failure reason must survive a throttle release")
+	}
+}
+
 func TestDBQueue_ReleaseRequiresProcessingStatus(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))

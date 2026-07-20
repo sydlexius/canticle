@@ -301,7 +301,8 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 // each variant is a complete, standalone statement (no concatenation, no
 // interpolation -> no gosec concern).
 const dequeueRandomizedSQL = `UPDATE work_queue
-         SET status = 'processing'
+         SET status = 'processing',
+             prev_status = status
          WHERE id = (
              SELECT id
              FROM work_queue
@@ -316,7 +317,8 @@ const dequeueRandomizedSQL = `UPDATE work_queue
 // dequeueDeterministicSQL claims the next ready item in stable FIFO order within
 // a priority tier (created_at, then id).
 const dequeueDeterministicSQL = `UPDATE work_queue
-         SET status = 'processing'
+         SET status = 'processing',
+             prev_status = status
          WHERE id = (
              SELECT id
              FROM work_queue
@@ -540,16 +542,45 @@ func (q *DBQueue) StampUnclassifiedMiss(ctx context.Context, id int64, tel Instr
 	return n > 0, nil
 }
 
-// Release returns a processing item to the pending pool without recording a
-// failure. Used when the worker dequeued the item but cannot process it for a
-// reason that should not count against the row's retry budget (e.g. the
-// global rate-limit circuit breaker tripped). Attempts and next_attempt_at
-// are left untouched so the row is immediately eligible for the next dequeue.
+// Release returns a processing item to the pool it was claimed from, without
+// recording a failure. Used when the worker dequeued the item but cannot
+// process it for a reason that should not count against the row's retry budget
+// (e.g. the global rate-limit circuit breaker tripped). Attempts and
+// next_attempt_at are left untouched so the row is immediately eligible for the
+// next dequeue.
+//
+// The restored status is prev_status, which Dequeue stamps with the row's
+// pre-claim status. A throttle release is therefore a true no-op round-trip: a
+// deferred row goes back to 'deferred', a failed row back to 'failed'. Forcing
+// every release to 'pending' (the pre-#569 behavior) stranded deferred rows in
+// status='pending' with the PriorityMiss deprioritization still applied, where
+// they sorted with the deferred backlog instead of as fresh work and were
+// invisible to RecheckDeferred and `queue deferred`, both being scoped
+// WHERE status = 'deferred'.
+//
+// last_error is cleared only when the row returns to 'pending'. A row restored
+// to 'failed' keeps its reason: a throttle is not the song's fault, but the
+// row stays in the failures view, and wiping the reason there would strand it
+// as an "unknown" bucket in CountFailuresByReason with its cause destroyed.
+//
+// Dequeue is the sole writer of status='processing' and always re-stamps
+// prev_status as it claims, so a stale prev_status from an earlier claim can
+// never be consumed. Any future path that sets 'processing' directly must
+// stamp prev_status too.
+//
+// An empty prev_status (a row claimed before migration 030 added the column)
+// falls back to 'pending', preserving the historical behavior.
 func (q *DBQueue) Release(ctx context.Context, id int64) error {
 	res, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue
-         SET status = 'pending',
-             last_error = ''
+         SET status = CASE
+                 WHEN prev_status = '' THEN 'pending'
+                 ELSE prev_status
+             END,
+             last_error = CASE
+                 WHEN prev_status IN ('', 'pending') THEN ''
+                 ELSE last_error
+             END
          WHERE id = ?
            AND status = 'processing'`,
 		id,
