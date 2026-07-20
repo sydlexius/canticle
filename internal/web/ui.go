@@ -44,7 +44,7 @@ var reportDefs = []reportDef{
 	{"queue-summary", "Queue summary", "Work-queue rows grouped by status."},
 	{"recent-outcomes", "Recent outcomes", "The most recently completed tracks and their derived result."},
 	{"provider-effectiveness", "Provider effectiveness", "Per-lane hits, misses, and true per-track hit-rate."},
-	{"instrumental-inventory", "Instrumental inventory", "Tracks the Instrumental Detector confirmed instrumental."},
+	{"instrumental-inventory", "Instrumental inventory", "Tracks confirmed instrumental by the Instrumental Detector."},
 	{"failure-analysis", "Failure analysis", "Failed and deferred tracks grouped by reason."},
 }
 

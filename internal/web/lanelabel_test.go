@@ -112,8 +112,8 @@ func TestLaneLabelDoesNotChangePersistedValue(t *testing.T) {
 		t.Fatalf("persisted detector lane string = %q; want %q -- changing it splits "+
 			"provider_outcomes history and zeroes existing queries", detectorbackfill.LaneName, "detector")
 	}
-	if _, ok := laneDisplayNames[detectorbackfill.LaneName]; !ok {
-		t.Errorf("laneDisplayNames has no entry for the persisted lane string %q; "+
-			"the UI would render the raw value", detectorbackfill.LaneName)
+	if got := laneLabel(detectorbackfill.LaneName); got == detectorbackfill.LaneName {
+		t.Errorf("laneLabel(%q) returned the raw persisted value; the UI would render "+
+			"the stored string instead of a display name", detectorbackfill.LaneName)
 	}
 }
