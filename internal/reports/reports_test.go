@@ -37,6 +37,13 @@ type workItem struct {
 	instrumentalResult any // int or nil
 	detectInstrumental any // int or nil
 	outcomeType        any // string ("synced"|"unsynced"|"instrumental") or nil
+	// Buffered-panel columns (#572). These are applied as a post-insert UPDATE
+	// only when non-zero/non-empty, so existing callers keep the schema defaults
+	// (priority 0, batch_seq NULL, next_attempt_at 1970 = eligible, created_at now).
+	priority      int    // 0 => default (PriorityScan); negative => miss tier
+	batchSeq      int    // 0 => NULL (unbuffered); >0 => buffered at this seq
+	nextAttemptAt string // "" => default (eligible); else RFC3339 (future => cooldown)
+	createdAt     string // "" => default (now); else RFC3339
 }
 
 func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
@@ -58,7 +65,26 @@ func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
 	if err != nil {
 		t.Fatalf("last insert id: %v", err)
 	}
+	setWorkItemColumn(t, sqlDB, id, "priority", w.priority != 0, w.priority)
+	setWorkItemColumn(t, sqlDB, id, "batch_seq", w.batchSeq != 0, w.batchSeq)
+	setWorkItemColumn(t, sqlDB, id, "next_attempt_at", w.nextAttemptAt != "", w.nextAttemptAt)
+	setWorkItemColumn(t, sqlDB, id, "created_at", w.createdAt != "", w.createdAt)
 	return id
+}
+
+// setWorkItemColumn updates one work_queue column on row id when set is true.
+// It keeps the base INSERT untouched for the NOT-NULL columns (priority,
+// next_attempt_at, created_at) so unset fields fall through to their schema
+// defaults instead of a NULL that would violate the constraint.
+func setWorkItemColumn(t *testing.T, sqlDB *sql.DB, id int64, col string, set bool, val any) {
+	t.Helper()
+	if !set {
+		return
+	}
+	if _, err := sqlDB.ExecContext(context.Background(),
+		"UPDATE work_queue SET "+col+" = ? WHERE id = ?", val, id); err != nil {
+		t.Fatalf("set work_queue.%s: %v", col, err)
+	}
 }
 
 func insertLibrary(t *testing.T, sqlDB *sql.DB) int64 {
@@ -497,6 +523,12 @@ func TestQueryErrorsSurface(t *testing.T) {
 	if _, err := repo.CountInstrumental(ctx); err == nil {
 		t.Error("CountInstrumental on closed DB: want error")
 	}
+	if _, err := repo.UpNext(ctx, 5); err == nil {
+		t.Error("UpNext on closed DB: want error")
+	}
+	if _, err := repo.QueueEligibility(ctx); err == nil {
+		t.Error("QueueEligibility on closed DB: want error")
+	}
 }
 
 // TestCountInstrumental verifies CountInstrumental counts every row whose
@@ -555,4 +587,120 @@ func mustParse(t *testing.T, s string) time.Time {
 		t.Fatalf("parse time %q: %v", s, err)
 	}
 	return parsed
+}
+
+// TestUpNext verifies the buffered list is returned in batch_seq order and that
+// only eligible buffered rows appear (non-buffered, done, and future-cooldown
+// rows are excluded), matching the batched-claim predicate. Synthetic fixtures.
+func TestUpNext(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	// Buffered rows stamped out of insertion order to prove ordering is by
+	// batch_seq, not id. Priorities span the miss/scan tiers.
+	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist 3", title: "Track Gamma", status: "pending", batchSeq: 3, priority: 0})
+	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist 1", title: "Track Alpha", album: "Album One", status: "failed", batchSeq: 1, priority: -100})
+	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist 2", title: "Track Beta", status: "deferred", batchSeq: 2, priority: 0})
+
+	// Excluded: not buffered (batch_seq NULL).
+	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist U", title: "Unbuffered", status: "pending"})
+	// Excluded: buffered but already done (fails the status predicate).
+	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist D", title: "Done", status: "done", batchSeq: 4})
+	// Excluded: buffered and pending but on cooldown (next_attempt_at in future).
+	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist C", title: "Cooldown", status: "deferred", batchSeq: 5, nextAttemptAt: "3000-01-01T00:00:00Z"})
+
+	got, err := repo.UpNext(ctx, 10)
+	if err != nil {
+		t.Fatalf("UpNext: %v", err)
+	}
+	wantTitles := []string{"Track Alpha", "Track Beta", "Track Gamma"}
+	if len(got) != len(wantTitles) {
+		t.Fatalf("UpNext returned %d rows, want %d: %+v", len(got), len(wantTitles), got)
+	}
+	for i, want := range wantTitles {
+		if got[i].Title != want {
+			t.Errorf("row %d: title = %q, want %q (order must be by batch_seq)", i, got[i].Title, want)
+		}
+	}
+	// Album passes through for its own column.
+	if got[0].Album != "Album One" {
+		t.Errorf("row 0 album = %q, want %q", got[0].Album, "Album One")
+	}
+	// Priority passes through raw for the handler's tier mapping.
+	if got[0].Priority != -100 {
+		t.Errorf("row 0 priority = %d, want -100 (miss tier)", got[0].Priority)
+	}
+	if got[1].Priority != 0 {
+		t.Errorf("row 1 priority = %d, want 0 (scan tier)", got[1].Priority)
+	}
+	if got[0].CreatedAt.IsZero() {
+		t.Error("row 0 CreatedAt is zero; want the schema-default timestamp parsed")
+	}
+}
+
+// TestUpNextLimit checks the limit guard and cap.
+func TestUpNextLimit(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	for i := 1; i <= 4; i++ {
+		insertWorkItem(t, sqlDB, workItem{artist: "A", title: "t" + string(rune('a'+i)), status: "pending", batchSeq: i})
+	}
+	if got, err := repo.UpNext(ctx, 0); err != nil || got != nil {
+		t.Errorf("UpNext(limit=0) = (%v, %v), want (nil, nil)", got, err)
+	}
+	got, err := repo.UpNext(ctx, 2)
+	if err != nil {
+		t.Fatalf("UpNext(limit=2): %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("UpNext(limit=2) returned %d rows, want 2", len(got))
+	}
+}
+
+// TestQueueEligibility checks the eligible/cooldown split and the exclusion of
+// done/processing rows, all sharing one now so the two counts cannot skew.
+func TestQueueEligibility(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	// Eligible: pending, failed, deferred with a past (default) next_attempt_at.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-pending", status: "pending"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-failed", status: "failed"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-deferred", status: "deferred"})
+	// Cooldown: same statuses but next_attempt_at in the future.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "cool-deferred", status: "deferred", nextAttemptAt: "3000-01-01T00:00:00Z"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "cool-failed", status: "failed", nextAttemptAt: "3000-01-01T00:00:00Z"})
+	// Excluded from both: done and processing are not part of the backlog.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "done", status: "done"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "proc", status: "processing"})
+
+	got, err := repo.QueueEligibility(ctx)
+	if err != nil {
+		t.Fatalf("QueueEligibility: %v", err)
+	}
+	if got.Eligible != 3 {
+		t.Errorf("Eligible = %d, want 3", got.Eligible)
+	}
+	if got.Cooldown != 2 {
+		t.Errorf("Cooldown = %d, want 2", got.Cooldown)
+	}
+}
+
+// TestQueueEligibilityEmpty confirms the SUM-over-no-rows NULL collapses to 0.
+func TestQueueEligibilityEmpty(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	got, err := repo.QueueEligibility(ctx)
+	if err != nil {
+		t.Fatalf("QueueEligibility: %v", err)
+	}
+	if got.Eligible != 0 || got.Cooldown != 0 {
+		t.Errorf("empty queue = %+v, want {0 0}", got)
+	}
 }

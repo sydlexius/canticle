@@ -157,6 +157,46 @@
   height: 100%;
 }
 
+/* -- Up next panel (#572) -------------------------------------------------- */
+/* The panel reuses .mx-table / .mx-table-wrap / .mx-cell-mono from the shared
+ * stylesheet; only the tier badge and the narrow numeric columns are panel
+ * specific. All colors reference --mx-* tokens so a token swap propagates. */
+
+/* Narrow, right-aligned numeric columns keep the position and waited values
+ * compact so the Artist - Title column takes the remaining width. */
+.mx-upnext-pos,
+.mx-upnext-waited {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* Tier badge: a small pill echoing the queue chart's semantic hues. "fresh"
+ * uses the blue accent (new scan/webhook work); "miss" uses the amber deferred
+ * hue muted, matching --mx-chart-deferred, so a long run of misses reads as the
+ * rate-limited backlog it is. */
+.mx-upnext-tier {
+  display: inline-block;
+  font-family: var(--mx-font-sans);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--mx-radius-sm);
+  border: 1px solid var(--mx-surface-border);
+}
+
+.mx-upnext-tier-fresh {
+  color: var(--mx-accent);
+  background: var(--mx-accent-glow);
+}
+
+.mx-upnext-tier-miss {
+  color: var(--mx-chart-deferred); /* amber: the rate-limited/deferred hue */
+  background: rgba(245, 158, 11, 0.12); /* amber-500 @ 12%; no alpha token exists */
+}
+
 /* -- Metrics footer note --------------------------------------------------- */
 .mx-dash-metrics-note {
   font-size: 0.8125rem;

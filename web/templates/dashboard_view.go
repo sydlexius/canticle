@@ -22,8 +22,35 @@ type DashboardView struct {
 	// RecentRows holds the most recently completed tracks (newest first, capped at 20).
 	// Uses the shared RecentOutcomeRow type from reports_view.go.
 	RecentRows []RecentOutcomeRow
+	// UpNextRows holds the buffered upcoming work in worker-claim order (#572).
+	// Empty when the lookahead buffer is empty or batching is disabled, which
+	// drives the panel's counts-only empty state.
+	UpNextRows []UpNextRow
+	// UpNextHeader is the pre-formatted "N buffered of M eligible" line shown
+	// above the table when rows are present. UpNextEmpty is the counts-only line
+	// (eligible + cooldown, no ordering claim) shown when UpNextRows is empty.
+	// The template picks one by branching on len(UpNextRows); all formatting
+	// (including thousands grouping) is done in the handler.
+	UpNextHeader string
+	UpNextEmpty  string
 	// AsOf is the formatted timestamp of this render, for the "as of" annotation.
 	AsOf string
+}
+
+// UpNextRow is one buffered work item in the dashboard "Up next" panel (#572).
+// Every field is pre-formatted by the handler; the template only renders strings.
+type UpNextRow struct {
+	// Position is the 1-based rank in claim order (the buffer sequence), as a
+	// pre-formatted string.
+	Position string
+	// Artist, Title, and Album are the track identity, each in its own column.
+	Artist string
+	Title  string
+	Album  string
+	// Tier is the priority-tier label ("miss" or "fresh").
+	Tier string
+	// Waited is the compact single-unit age of the item (e.g. "2m", "6d").
+	Waited string
 }
 
 // ChartData is the label/value series for one dashboard chart (#318). The

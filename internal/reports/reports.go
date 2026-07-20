@@ -354,3 +354,113 @@ func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 	}
 	return out, nil
 }
+
+// UpNextItem is one buffered work_queue row the worker will claim next, in the
+// order it will be claimed. Priority is the raw tier value; the caller maps it
+// to a display label ("miss"/"fresh"). CreatedAt drives the "waited" column.
+type UpNextItem struct {
+	Artist string
+	Title  string
+	// Album is the row's album, empty when not recorded.
+	Album    string
+	Priority int
+	// CreatedAt is when the row entered the queue (work_queue.created_at). Zero
+	// only if the stored value is unparsable, which the schema default prevents.
+	CreatedAt time.Time
+}
+
+// UpNext returns the shuffled lookahead buffer (#571) in claim order: the rows
+// the worker will process next, ordered by batch_seq ascending, capped at limit.
+//
+// Source: work_queue rows with a non-null batch_seq. A NULL batch_seq means
+// "unbuffered" -- either the buffer was never drawn (batching disabled via
+// queue.batch_size = 0, or an idle queue) or the row was already claimed
+// (Dequeue clears batch_seq atomically at claim). The predicate mirrors the
+// batched-claim SQL exactly (status IN ('pending','failed','deferred') AND
+// next_attempt_at <= now), so this lists only rows the worker would actually
+// serve; a buffered row that has since become ineligible is skipped here just as
+// the claim would skip it. An empty result is the panel's empty-state signal.
+//
+// now is compared as an RFC3339 UTC string, matching internal/queue.formatTime;
+// the stored timestamps are lexically ordered, so a string comparison is a
+// correct time comparison (do not substitute SQLite datetime('now'), which
+// mismatches the stored 'T...Z' layout).
+func (r *Repo) UpNext(ctx context.Context, limit int) ([]UpNextItem, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(timeFormat)
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT artist, title, album, priority, created_at
+         FROM work_queue
+         WHERE batch_seq IS NOT NULL
+           AND status IN ('pending', 'failed', 'deferred')
+           AND next_attempt_at <= ?
+         ORDER BY batch_seq ASC
+         LIMIT ?`,
+		now, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reports: up next: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []UpNextItem
+	for rows.Next() {
+		var (
+			it        UpNextItem
+			createdAt sql.NullString
+		)
+		if err := rows.Scan(&it.Artist, &it.Title, &it.Album, &it.Priority, &createdAt); err != nil {
+			return nil, fmt.Errorf("reports: scan up next: %w", err)
+		}
+		if createdAt.Valid && createdAt.String != "" {
+			t, err := time.Parse(timeFormat, createdAt.String)
+			if err != nil {
+				return nil, fmt.Errorf("reports: parse created_at %q: %w", createdAt.String, err)
+			}
+			it.CreatedAt = t
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reports: up next rows: %w", err)
+	}
+	return out, nil
+}
+
+// QueueEligibility partitions the not-yet-done backlog by readiness: Eligible
+// rows are claimable now, Cooldown rows are waiting out a backoff/retry delay.
+type QueueEligibility struct {
+	// Eligible counts rows the worker can claim now (status pending/failed/
+	// deferred, next_attempt_at <= now). This is the "of M eligible" header total.
+	Eligible int64
+	// Cooldown counts rows in the same statuses whose next_attempt_at is still in
+	// the future -- deferred/backoff rows not yet actionable. The empty state uses
+	// it to distinguish "nothing queued" from "everything waiting on cooldown".
+	Cooldown int64
+}
+
+// QueueEligibility returns the eligible and cooldown counts for the Up-next
+// panel header and empty state, in one query so both share a single now and
+// cannot skew against each other.
+//
+// Source: work_queue rows with status IN ('pending','failed','deferred'), split
+// on next_attempt_at <= now (see UpNext on the string-comparison contract). A
+// SUM over zero matching rows is NULL in SQLite, so each total is scanned
+// through sql.NullInt64 and defaults to 0.
+func (r *Repo) QueueEligibility(ctx context.Context) (QueueEligibility, error) {
+	now := time.Now().UTC().Format(timeFormat)
+	var eligible, cooldown sql.NullInt64
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT
+             SUM(CASE WHEN next_attempt_at <= ? THEN 1 ELSE 0 END),
+             SUM(CASE WHEN next_attempt_at >  ? THEN 1 ELSE 0 END)
+         FROM work_queue
+         WHERE status IN ('pending', 'failed', 'deferred')`,
+		now, now,
+	).Scan(&eligible, &cooldown); err != nil {
+		return QueueEligibility{}, fmt.Errorf("reports: queue eligibility: %w", err)
+	}
+	return QueueEligibility{Eligible: eligible.Int64, Cooldown: cooldown.Int64}, nil
+}

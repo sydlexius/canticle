@@ -30,6 +30,7 @@ templ dashboardContent(view DashboardView) {
 		</div>
 		@dashQueueTiles(view.QueueTiles, view.InstrumentalCount, view.QueueChart)
 		@dashProviderTiles(view.ProviderTiles)
+		@dashUpNext(view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
 		@dashRecentOutcomes(view.RecentRows)
 		<p class="mx-dash-metrics-note">
 			Prometheus metrics:
@@ -227,6 +228,63 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 			</div>
 		}
 	</section>
+}
+
+// dashUpNext renders the "Up next" panel (#572): the buffered work the worker
+// will claim next, in claim order. When the lookahead buffer is empty (an idle
+// queue, or batching disabled via queue.batch_size = 0) it shows the eligible/
+// cooldown counts only, with no ordered list and no ordering claim -- the empty
+// value carries that pre-formatted line. Reuses the mx-table styling from
+// dashRecentOutcomes so the two tables read as one system.
+templ dashUpNext(rows []UpNextRow, header, empty string) {
+	<section
+		class="mx-dash-section"
+		aria-labelledby="mx-dash-upnext-heading"
+		title="Buffered upcoming work in the order the background worker will claim it. Composed once per batch; refresh to update."
+	>
+		<h2 class="mx-dash-section-title" id="mx-dash-upnext-heading">Up Next</h2>
+		if len(rows) == 0 {
+			<p class="mx-dash-empty">{ empty }</p>
+		} else {
+			<p class="mx-dash-section-sub">{ header }</p>
+			<div class="mx-table-wrap">
+				<table class="mx-table" aria-label="Upcoming queue work">
+					<thead>
+						<tr>
+							<th class="mx-upnext-pos">#</th>
+							<th>Artist</th>
+							<th>Title</th>
+							<th>Album</th>
+							<th>Tier</th>
+							<th class="mx-upnext-waited">Waited</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, row := range rows {
+							<tr>
+								<td class="mx-cell-mono mx-upnext-pos">{ row.Position }</td>
+								<td>{ row.Artist }</td>
+								<td>{ row.Title }</td>
+								<td>{ row.Album }</td>
+								<td><span class={ dashUpNextTierClass(row.Tier) }>{ row.Tier }</span></td>
+								<td class="mx-cell-mono mx-upnext-waited">{ row.Waited }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
+		}
+	</section>
+}
+
+// dashUpNextTierClass returns the badge classes for an Up-next tier label. The
+// miss tier (deferred benign-miss backlog) gets a muted variant so a long run of
+// misses is visually distinct from fresh scan/webhook work at a glance.
+func dashUpNextTierClass(tier string) string {
+	if tier == "miss" {
+		return "mx-upnext-tier mx-upnext-tier-miss"
+	}
+	return "mx-upnext-tier mx-upnext-tier-fresh"
 }
 
 // dashQueueTileTooltip returns the hover description for a queue-status tile.

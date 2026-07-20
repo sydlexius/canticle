@@ -17,6 +17,13 @@ import (
 // Kept lower than the canned report (50) to keep the page scannable.
 const dashboardRecentLimit = 20
 
+// dashboardUpNextLimit caps the "Up next" panel (#572). The lookahead buffer is
+// DB-bounded by queue.batch_size (default 10), so a cap comfortably above any
+// realistic batch size means the panel shows the whole buffer and the "N
+// buffered" header equals the rendered row count. An operator running a larger
+// batch_size sees the first N; the buffer never lists more than batch_size rows.
+const dashboardUpNextLimit = 50
+
 // handleDashboard renders the read-only observability dashboard. It is gated
 // by the same auth guard as the other UI routes and is never cached (it exposes
 // queue state and config detail). When the reports repo is not wired (no DB
@@ -81,7 +88,96 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	}
 	view.RecentRows = buildRecentRows(recent, serverLoc)
 
+	upNext, err := u.reports.UpNext(ctx, dashboardUpNextLimit)
+	if err != nil {
+		return templates.DashboardView{}, fmt.Errorf("dashboard: up next: %w", err)
+	}
+	elig, err := u.reports.QueueEligibility(ctx)
+	if err != nil {
+		return templates.DashboardView{}, fmt.Errorf("dashboard: queue eligibility: %w", err)
+	}
+	view.UpNextRows = buildUpNextRows(upNext, time.Now())
+	view.UpNextHeader = fmt.Sprintf("%d buffered of %s eligible",
+		len(view.UpNextRows), groupThousands(elig.Eligible))
+	view.UpNextEmpty = fmt.Sprintf("Nothing buffered. %s eligible, %s waiting on cooldown.",
+		groupThousands(elig.Eligible), groupThousands(elig.Cooldown))
+
 	return view, nil
+}
+
+// buildUpNextRows shapes buffered work items into ordered panel rows (#572),
+// carrying artist/title/album as distinct columns, mapping the priority tier to
+// a label, and rendering the compact "waited" age from created_at against now.
+func buildUpNextRows(items []reports.UpNextItem, now time.Time) []templates.UpNextRow {
+	rows := make([]templates.UpNextRow, 0, len(items))
+	for i, it := range items {
+		rows = append(rows, templates.UpNextRow{
+			Position: strconv.Itoa(i + 1),
+			Artist:   it.Artist,
+			Title:    it.Title,
+			Album:    it.Album,
+			Tier:     tierLabel(it.Priority),
+			Waited:   formatWaited(it.CreatedAt, now),
+		})
+	}
+	return rows
+}
+
+// groupThousands formats n with comma thousands separators (e.g. 10102 ->
+// "10,102"), keeping the large eligible/cooldown counts readable in the panel
+// header and empty state. Negative values keep the sign.
+func groupThousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := ""
+	if n < 0 {
+		neg, s = "-", s[1:]
+	}
+	if len(s) <= 3 {
+		return neg + s
+	}
+	// Insert a comma every three digits from the right.
+	var b []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b = append(b, ',')
+		}
+		b = append(b, c)
+	}
+	return neg + string(b)
+}
+
+// tierLabel maps a raw work_queue.priority to the panel's tier label. Negative
+// priorities are the deferred benign-miss tier (queue.PriorityMiss = -100);
+// everything at or above the scan baseline (0) reads as "fresh". Kept in the
+// handler so relabeling never touches the query or template.
+func tierLabel(priority int) string {
+	if priority < 0 {
+		return "miss"
+	}
+	return "fresh"
+}
+
+// formatWaited renders how long an item has waited as one dominant unit (s, m,
+// h, d), matching the compact mock ("2m", "6d"). A zero timestamp or a
+// non-positive span renders "0s" so the column is never blank or negative.
+func formatWaited(since, now time.Time) string {
+	if since.IsZero() {
+		return "0s"
+	}
+	d := now.Sub(since)
+	switch {
+	case d < time.Minute:
+		if d < 0 {
+			d = 0
+		}
+		return strconv.Itoa(int(d/time.Second)) + "s"
+	case d < time.Hour:
+		return strconv.Itoa(int(d/time.Minute)) + "m"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d/time.Hour)) + "h"
+	default:
+		return strconv.Itoa(int(d/(24*time.Hour))) + "d"
+	}
 }
 
 // buildQueueTiles shapes a QueueSummary into the dashboard's queue stat tiles.
