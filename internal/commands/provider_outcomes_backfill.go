@@ -12,11 +12,16 @@ import (
 // runProviderOutcomesBackfill credits historical detector settles to the
 // detector lane's provider_outcomes hit counter, once per database (#548).
 //
-// Unlike runIdentityBackfill this is NOT run in a goroutine: it is one COUNT
-// plus one counter UPDATE in a single transaction, with no file I/O and no
-// detector calls, so it costs microseconds and finishes before serve is
-// listening. Backgrounding it would only add a race against the worker's own
-// live counter writes for no benefit.
+// Unlike runIdentityBackfill this is NOT run in a goroutine, and its CALL SITE
+// is deliberately ahead of the worker and scheduler. Both matter, for the same
+// reason: the live writer's counter increment and its provider_lane stamp are
+// two separate non-transactional writes (see the KNOWN IMPRECISION note in
+// detectorbackfill.BackfillProviderOutcomes), so a row caught between them
+// looks uncredited to this pass and gets permanently double-credited. Running
+// before any live writer exists closes that window; running synchronously but
+// AFTER the worker goroutine has started does not, which is what an earlier
+// revision got wrong. It is one COUNT plus one counter UPDATE against a small
+// index-free predicate, so paying for it inline at startup is cheap.
 //
 // Best-effort and non-fatal: a failure is logged and the marker is left unset,
 // so the next startup retries. The pass is atomic (counter + marker commit

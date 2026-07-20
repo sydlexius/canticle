@@ -1093,6 +1093,16 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// it as a permanent miss, so the operator who later adds a token would find
 	// nothing left to fetch. The web server, watcher, and session sweeper still
 	// start so the UI is reachable to add the token.
+	// Credit historical detector settles to provider_outcomes (#548) BEFORE the
+	// worker or scheduler can start. Ordering is load-bearing, not cosmetic: the
+	// live writer's two counter writes are non-transactional (see the KNOWN
+	// IMPRECISION note in internal/detectorbackfill/provider_outcomes.go), so a
+	// row caught mid-write -- already counted, not yet provider_lane-stamped --
+	// would be seen as uncredited by this pass and permanently double-credited.
+	// Running before any live writer exists closes that window entirely, which
+	// running synchronously AFTER the worker goroutine does not.
+	runProviderOutcomesBackfill(runCtx, sqlDB)
+
 	if !lyricsDisabled {
 		wg.Add(2)
 		go func() {
@@ -1136,11 +1146,6 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		defer wg.Done()
 		runIdentityBackfill(runCtx, sqlDB)
 	}()
-	// Credit historical detector settles to provider_outcomes (#548). Runs
-	// inline, not in a goroutine: it is one COUNT plus one counter UPDATE in a
-	// single transaction, so it finishes before the listener is up and does not
-	// race the worker's own live counter writes.
-	runProviderOutcomesBackfill(runCtx, sqlDB)
 	// Background session sweeper: periodically delete expired/revoked sessions,
 	// mirroring the worker/scheduler goroutine + context-cancel pattern. Only
 	// runs when the authenticated UI is mounted (there are no sessions otherwise).
