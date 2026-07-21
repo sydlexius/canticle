@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+  <status>00000000</status>
+  <returnedCount>1</returnedCount>
+  <songs>
+    <song>
+      <order>1</order>
+      <lyricsId>1000001</lyricsId>
+      <title>Lorem Ipsum</title>
+      <artistId>999001</artistId>
+      <artist>Dolor Sit</artist>
+      <album>Amet Consectetur</album>
+      <jancode>0000000000000</jancode>
+      <isrc>ZZZZZ0000001</isrc>
+      <writer>Adipiscing</writer>
+      <composer>Adipiscing</composer>
+      <duration>210000</duration>
+      <jasracID>00000000</jasracID>
+      <nextone></nextone>
+      <cdc>000000000000</cdc>
+      <lyricsType>3</lyricsType>
+      <availableLyricsType>3</availableLyricsType>
+      <prefferedLyricsType>3</prefferedLyricsType>
+      <lyricsData>PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPHdzeT4KICA8bGluZW51bT4zPC9saW5lbnVtPgogIDxsaW5lPgogICAgPGxpbmVzdHJpbmc+TG9yZW0gaXBzdW0gZG9sb3I8L2xpbmVzdHJpbmc+CiAgICA8d29yZG51bT4zPC93b3JkbnVtPgogICAgPHdvcmQ+PHN0YXJ0dGltZT4zNzkwPC9zdGFydHRpbWU+PGNoYW51bT41PC9jaGFudW0+PGVuZHRpbWU+NDU5MDwvZW5kdGltZT48d29yZHN0cmluZz5Mb3JlbTwvd29yZHN0cmluZz48L3dvcmQ+CiAgICA8d29yZD48c3RhcnR0aW1lPjQ2MDA8L3N0YXJ0dGltZT48Y2hhbnVtPjU8L2NoYW51bT48ZW5kdGltZT40ODcwPC9lbmR0aW1lPjx3b3Jkc3RyaW5nPmlwc3VtPC93b3Jkc3RyaW5nPjwvd29yZD4KICAgIDx3b3JkPjxzdGFydHRpbWU+NDg4MDwvc3RhcnR0aW1lPjxjaGFudW0+NTwvY2hhbnVtPjxlbmR0aW1lPjUxNTA8L2VuZHRpbWU+PHdvcmRzdHJpbmc+ZG9sb3I8L3dvcmRzdHJpbmc+PC93b3JkPgogIDwvbGluZT4KICA8bGluZT4KICAgIDxsaW5lc3RyaW5nPlNpdCBhbWV0IGNvbnNlY3RldHVyPC9saW5lc3RyaW5nPgogICAgPHdvcmRudW0+Mzwvd29yZG51bT4KICAgIDx3b3JkPjxzdGFydHRpbWU+NjQxMDwvc3RhcnR0aW1lPjxjaGFudW0+MzwvY2hhbnVtPjxlbmR0aW1lPjY1ODA8L2VuZHRpbWU+PHdvcmRzdHJpbmc+U2l0PC93b3Jkc3RyaW5nPjwvd29yZD4KICAgIDx3b3JkPjxzdGFydHRpbWU+NjU4Njwvc3RhcnR0aW1lPjxjaGFudW0+NDwvY2hhbnVtPjxlbmR0aW1lPjcwMDA8L2VuZHRpbWU+PHdvcmRzdHJpbmc+YW1ldDwvd29yZHN0cmluZz48L3dvcmQ+CiAgICA8d29yZD48c3RhcnR0aW1lPjcwMTA8L3N0YXJ0dGltZT48Y2hhbnVtPjExPC9jaGFudW0+PGVuZHRpbWU+NzYwMDwvZW5kdGltZT48d29yZHN0cmluZz5jb25zZWN0ZXR1cjwvd29yZHN0cmluZz48L3dvcmQ+CiAgPC9saW5lPgogIDxsaW5lPgogICAgPGxpbmVzdHJpbmc+QWRpcGlzY2luZyBlbGl0IHNlZDwvbGluZXN0cmluZz4KICAgIDx3b3JkbnVtPjM8L3dvcmRudW0+CiAgICA8d29yZD48c3RhcnR0aW1lPjkwMDA8L3N0YXJ0dGltZT48Y2hhbnVtPjEwPC9jaGFudW0+PGVuZHRpbWU+OTUwMDwvZW5kdGltZT48d29yZHN0cmluZz5BZGlwaXNjaW5nPC93b3Jkc3RyaW5nPjwvd29yZD4KICAgIDx3b3JkPjxzdGFydHRpbWU+OTAwMDwvc3RhcnR0aW1lPjxjaGFudW0+NDwvY2hhbnVtPjxlbmR0aW1lPjk1MDA8L2VuZHRpbWU+PHdvcmRzdHJpbmc+ZWxpdDwvd29yZHN0cmluZz48L3dvcmQ+CiAgICA8d29yZD48c3RhcnR0aW1lPjkwMDA8L3N0YXJ0dGltZT48Y2hhbnVtPjM8L2NoYW51bT48ZW5kdGltZT45NTAwPC9lbmR0aW1lPjx3b3Jkc3RyaW5nPnNlZDwvd29yZHN0cmluZz48L3dvcmQ+CiAgPC9saW5lPgo8L3dzeT4K</lyricsData>
+      <postUserId>000000000</postUserId>
+      <postUserName>lorem</postUserName>
+      <kashiMesse>0</kashiMesse>
+      <viewCount>1</viewCount>
+      <copyright>1</copyright>
+      <isOfficial>1</isOfficial>
+      <uploadDate>2000-01-01</uploadDate>
+      <releaseDate>2000-01-01</releaseDate>
+    </song>
+  </songs>
+</response>

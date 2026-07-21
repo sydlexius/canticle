@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+  <status>00000000</status>
+  <returnedCount>1</returnedCount>
+  <songs>
+    <song>
+      <order>1</order>
+      <lyricsId>1000001</lyricsId>
+      <title>Lorem Ipsum</title>
+      <artistId>999001</artistId>
+      <artist>Dolor Sit</artist>
+      <album>Amet Consectetur</album>
+      <jancode>0000000000000</jancode>
+      <isrc>ZZZZZ0000001</isrc>
+      <writer>Adipiscing</writer>
+      <composer>Adipiscing</composer>
+      <duration>210000</duration>
+      <jasracID>00000000</jasracID>
+      <nextone></nextone>
+      <cdc>000000000000</cdc>
+      <lyricsType>1</lyricsType>
+      <availableLyricsType>3</availableLyricsType>
+      <prefferedLyricsType>3</prefferedLyricsType>
+      <lyricsData>TG9yZW0gaXBzdW0gZG9sb3Igc2l0IGFtZXQKQ29uc2VjdGV0dXIgYWRpcGlzY2luZyBlbGl0ClNlZCBkbyBlaXVzbW9kIHRlbXBvcgo=</lyricsData>
+      <postUserId>000000000</postUserId>
+      <postUserName>lorem</postUserName>
+      <kashiMesse>0</kashiMesse>
+      <viewCount>1</viewCount>
+      <copyright>1</copyright>
+      <isOfficial>1</isOfficial>
+      <uploadDate>2000-01-01</uploadDate>
+      <releaseDate>2000-01-01</releaseDate>
+    </song>
+  </songs>
+</response>

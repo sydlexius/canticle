@@ -27,3 +27,7 @@ TPE = "TPE"
 # typos' en-us locale does not flag -logue/-log variants, so enforce the US
 # spelling explicitly (the repo standard; the rest of the tree uses "catalog").
 catalogue = "catalog"
+# The Petit Lyrics API really does spell its field <prefferedLyricsType>. It is a
+# wire-protocol identifier, not prose: "correcting" it in the test fixtures would
+# make them stop matching the responses they exist to represent.
+preffered = "preffered"

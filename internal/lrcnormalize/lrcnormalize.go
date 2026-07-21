@@ -67,10 +67,10 @@ func expandLine(raw string) []models.Lines {
 			break
 		}
 		stamps = append(stamps, m)
-		// Advance past the stamp, trimming surrounding whitespace. This matches
-		// petitlyrics.parseLRC's TrimSpace on cue text, keeps a whitespace-
-		// separated following stamp recognizable, and guarantees the remaining
-		// text can never re-expose a leading timestamp.
+		// Advance past the stamp, trimming surrounding whitespace. Trimming cue
+		// text is the shared convention across the provider parse lanes, keeps a
+		// whitespace-separated following stamp recognizable, and guarantees the
+		// remaining text can never re-expose a leading timestamp.
 		rest = strings.TrimSpace(rest[len(m[0]):])
 	}
 	if len(stamps) == 0 {

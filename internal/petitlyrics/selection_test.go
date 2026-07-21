@@ -1,312 +1,208 @@
 package petitlyrics
 
 import (
-	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
 )
 
-// liBlock builds one <li> block for a multi-candidate search HTML fixture.
-func liBlock(id, album string, synced bool) string {
-	var sb strings.Builder
-	sb.WriteString(`<li class="lyrics-list-item">`)
-	sb.WriteString(`<a href="/lyrics/` + id + `">Song Title</a>`)
-	if album != "" {
-		sb.WriteString(`<p class="lyrics-list-album">` + album + `</p>`)
-	}
-	if synced {
-		sb.WriteString(`<span class="text_sync"></span>`)
-	}
-	sb.WriteString(`</li>`)
-	return sb.String()
-}
-
-// searchHTMLMulti wraps a set of liBlock strings in a minimal search result page.
-func searchHTMLMulti(blocks ...string) string {
-	return `<html><body><ul class="lyrics-list">` +
-		strings.Join(blocks, "\n") +
-		`</ul></body></html>`
-}
-
-func TestParseSearchCandidates(t *testing.T) {
-	html := searchHTMLMulti(
-		liBlock("100", "Album One", true),
-		liBlock("200", "Album Two", false),
-		liBlock("300", "", false),
-		// spurious <li> with no lyrics link must be skipped
-		`<li class="nav-item"><a href="/about">About</a></li>`,
-	)
-	got := parseSearchCandidates([]byte(html))
-	if len(got) != 3 {
-		t.Fatalf("want 3 candidates, got %d", len(got))
-	}
-	if got[0].id != "100" || got[0].album != "Album One" || !got[0].synced {
-		t.Errorf("candidate 0 = %+v; want {id:100 album:Album One synced:true}", got[0])
-	}
-	if got[1].id != "200" || got[1].album != "Album Two" || got[1].synced {
-		t.Errorf("candidate 1 = %+v; want {id:200 album:Album Two synced:false}", got[1])
-	}
-	if got[2].id != "300" || got[2].album != "" || got[2].synced {
-		t.Errorf("candidate 2 = %+v; want {id:300 album: synced:false}", got[2])
+func TestSelectCandidate_EmptyIsNotFound(t *testing.T) {
+	if _, err := selectCandidate(nil, models.Track{}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("empty candidate list should be ErrNotFound, got %v", err)
 	}
 }
 
-func TestParseSearchCandidates_Empty(t *testing.T) {
-	if got := parseSearchCandidates([]byte(`<html><body>no results</body></html>`)); len(got) != 0 {
-		t.Fatalf("want 0 candidates for no-results page, got %d", len(got))
+// TestSelectCandidate_ISRCWins pins the strongest signal: an exact ISRC match
+// must beat a candidate that looks better on every text and duration signal.
+func TestSelectCandidate_ISRCWins(t *testing.T) {
+	songs := []apiSong{
+		{LyricsID: "decoy", Title: "Lorem Ipsum", Album: "Amet Consectetur", DurationMS: 210000},
+		{LyricsID: "want", Title: "Totally Different", Album: "Other", DurationMS: 1000, ISRC: "ZZZZZ0000001"},
+	}
+	got, err := selectCandidate(songs, models.Track{
+		TrackName: "Lorem Ipsum", AlbumName: "Amet Consectetur",
+		TrackLength: 210, ISRC: "ZZZZZ0000001",
+	})
+	if err != nil {
+		t.Fatalf("selectCandidate: %v", err)
+	}
+	if got.LyricsID != "want" {
+		t.Errorf("ISRC match should win, got %q", got.LyricsID)
 	}
 }
 
-// TestParseSearchCandidates_MultiClassAlbum verifies that the album class token
-// is matched even when additional classes appear on the same element.
-func TestParseSearchCandidates_MultiClassAlbum(t *testing.T) {
-	html := `<ul><li class="lyrics-list-item">` +
-		`<a href="/lyrics/42">Song</a>` +
-		`<p class="lyrics-list-album active">Multi Class Album</p>` +
-		`</li></ul>`
-	got := parseSearchCandidates([]byte(html))
-	if len(got) != 1 {
-		t.Fatalf("want 1 candidate, got %d", len(got))
+// TestSelectCandidate_ISRCSparsityDegrades is the case the live probe surfaced:
+// the provider's ISRC field is frequently empty. A candidate missing it must
+// still be selectable rather than being rejected outright.
+func TestSelectCandidate_ISRCSparsityDegrades(t *testing.T) {
+	songs := []apiSong{
+		{LyricsID: "wrong-duration", Title: "Lorem Ipsum", DurationMS: 120000},
+		{LyricsID: "right-duration", Title: "Lorem Ipsum", DurationMS: 210000},
 	}
-	if got[0].album != "Multi Class Album" {
-		t.Errorf("album = %q; want %q", got[0].album, "Multi Class Album")
+	got, err := selectCandidate(songs, models.Track{
+		TrackName: "Lorem Ipsum", TrackLength: 210, ISRC: "ZZZZZ0000001",
+	})
+	if err != nil {
+		t.Fatalf("selectCandidate: %v", err)
 	}
-}
-
-func TestNormalizeAlbum(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"Greatest Hits", "greatest hits"},
-		{"  Greatest  Hits  ", "greatest hits"},
-		{"Greatest Hits (Deluxe Edition)", "greatest hits (deluxe edition)"},
-	}
-	for _, tc := range cases {
-		if got := normalizeAlbum(tc.in); got != tc.want {
-			t.Errorf("normalizeAlbum(%q) = %q; want %q", tc.in, got, tc.want)
-		}
+	if got.LyricsID != "right-duration" {
+		t.Errorf("with no provider ISRC, duration should decide; got %q", got.LyricsID)
 	}
 }
 
-func TestAlbumMatches(t *testing.T) {
-	cases := []struct {
-		candidate, query string
-		want             bool
+func TestSelectCandidate_DurationTolerance(t *testing.T) {
+	songs := []apiSong{
+		{LyricsID: "far", Title: "Lorem Ipsum", DurationMS: 200000},
+		{LyricsID: "near", Title: "Lorem Ipsum", DurationMS: 212000},
+	}
+	got, err := selectCandidate(songs, models.Track{TrackName: "Lorem Ipsum", TrackLength: 210})
+	if err != nil {
+		t.Fatalf("selectCandidate: %v", err)
+	}
+	if got.LyricsID != "near" {
+		t.Errorf("nearest duration should win, got %q", got.LyricsID)
+	}
+}
+
+// TestScoreCandidate_TitleFloor pins the floor DIRECTLY, on the score.
+//
+// Testing it through selectCandidate does not work: with two candidates the
+// better title wins on relative score whether or not the floor exists, so the
+// floor never decides the outcome and deleting it leaves such a test passing.
+// (Verified by mutation -- that is exactly how the earlier version of this test
+// was vacuous.) Scoring a single candidate makes the floor the only thing that
+// can zero the contribution.
+//
+// "Ipsum Lorem" scores ~0.52 against "Lorem Ipsum" (same words, wrong order) and
+// "Lorpsum" ~0.85, so the two straddle the 0.80 floor.
+func TestScoreCandidate_TitleFloor(t *testing.T) {
+	track := models.Track{TrackName: "Lorem Ipsum"}
+
+	if got := scoreCandidate(apiSong{Title: "Ipsum Lorem"}, track); got != 0 {
+		t.Errorf("a sub-floor title must contribute nothing, got score %v", got)
+	}
+	if got := scoreCandidate(apiSong{Title: "Lorpsum"}, track); got <= 0 {
+		t.Errorf("an above-floor title must contribute, got score %v", got)
+	}
+	// And the floor must not swallow an exact match.
+	if got := scoreCandidate(apiSong{Title: "Lorem Ipsum"}, track); got <= 0 {
+		t.Errorf("an exact title match must contribute, got score %v", got)
+	}
+}
+
+// TestSelectCandidate_SubFloorTitleLosesToAlbum: with the floor in force, a
+// candidate whose only signal is a sub-floor title scores zero, so a candidate
+// matching on album alone wins.
+func TestSelectCandidate_SubFloorTitleLosesToAlbum(t *testing.T) {
+	songs := []apiSong{
+		{LyricsID: "subfloor-title", Title: "Ipsum Lorem"},
+		{LyricsID: "album-match", Title: "Zzzz Qqqq", Album: "Amet Consectetur"},
+	}
+	got, err := selectCandidate(songs, models.Track{
+		TrackName: "Lorem Ipsum", AlbumName: "Amet Consectetur",
+	})
+	if err != nil {
+		t.Fatalf("selectCandidate: %v", err)
+	}
+	if got.LyricsID != "album-match" {
+		t.Errorf("a sub-floor title contributes nothing, so the album match should win; got %q", got.LyricsID)
+	}
+}
+
+// TestScoreCandidate_WeightOrdering pins the invariant scoreCandidate's doc
+// asserts: a stronger signal can never be outvoted by a weaker one. Each case
+// pairs a candidate winning on one signal against a candidate winning on every
+// weaker signal combined.
+func TestScoreCandidate_WeightOrdering(t *testing.T) {
+	track := models.Track{
+		TrackName: "Lorem Ipsum", AlbumName: "Amet Consectetur",
+		TrackLength: 210, ISRC: "ZZZZZ0000001",
+	}
+	// Everything a weaker-signal candidate can possibly accumulate.
+	maxWeaker := apiSong{Title: "Lorem Ipsum", Album: "Amet Consectetur", DurationMS: 210000}
+
+	tests := []struct {
+		name           string
+		stronger       apiSong
+		weaker         apiSong
+		wantStrongerHi bool
 	}{
-		// exact match
-		{"Greatest Hits", "Greatest Hits", true},
-		// edition suffix on candidate, base in query
-		{"Greatest Hits (Deluxe Edition)", "Greatest Hits", true},
-		// edition suffix on query, base on candidate
-		{"Greatest Hits", "Greatest Hits (Deluxe Edition)", true},
-		// remaster variant
-		{"Greatest Hits (Remastered 2011)", "Greatest Hits", true},
-		// "Hits" must NOT match "Greatest Hits" (no prefix in either direction)
-		{"Greatest Hits", "Hits", false},
-		{"Hits", "Greatest Hits", false},
-		// empty candidate album must not match any non-empty query
-		{"", "Greatest Hits", false},
-		// empty query must not match any candidate
-		{"Greatest Hits", "", false},
-		// completely unrelated
-		{"Album One", "Album Two", false},
-	}
-	for _, tc := range cases {
-		got := albumMatches(tc.candidate, tc.query)
-		if got != tc.want {
-			t.Errorf("albumMatches(%q, %q) = %v; want %v", tc.candidate, tc.query, got, tc.want)
-		}
-	}
-}
-
-func TestSelectCandidate(t *testing.T) {
-	cases := []struct {
-		name       string
-		candidates []searchCandidate
-		album      string
-		wantID     string
-		wantErr    error
-	}{
 		{
-			name:    "zero candidates",
-			wantErr: ErrNotFound,
+			name:           "ISRC beats duration+title+album combined",
+			stronger:       apiSong{ISRC: "ZZZZZ0000001"},
+			weaker:         maxWeaker,
+			wantStrongerHi: true,
 		},
 		{
-			name:       "single candidate, no album arg",
-			candidates: []searchCandidate{{id: "1", synced: false}},
-			wantID:     "1",
+			name:           "exact duration beats title+album combined",
+			stronger:       apiSong{DurationMS: 210000},
+			weaker:         apiSong{Title: "Lorem Ipsum", Album: "Amet Consectetur"},
+			wantStrongerHi: true,
 		},
 		{
-			name: "multi, no album arg, no synced - return first",
-			candidates: []searchCandidate{
-				{id: "1", synced: false},
-				{id: "2", synced: false},
-			},
-			wantID: "1",
+			// DurationBucket floors to 5s, so 210s and 214s share bucket 42 and
+			// score identically. 216s is bucket 43 -- genuinely one bucket away.
+			name:           "exact duration beats adjacent-bucket duration",
+			stronger:       apiSong{DurationMS: 210000},
+			weaker:         apiSong{DurationMS: 216000},
+			wantStrongerHi: true,
 		},
 		{
-			name: "multi, no album arg, synced available - prefer synced",
-			candidates: []searchCandidate{
-				{id: "1", synced: false},
-				{id: "2", synced: true},
-			},
-			wantID: "2",
+			name:           "adjacent-bucket duration still scores above nothing",
+			stronger:       apiSong{DurationMS: 216000},
+			weaker:         apiSong{},
+			wantStrongerHi: true,
 		},
 		{
-			name: "album match with no synced in matched set - return album match",
-			candidates: []searchCandidate{
-				{id: "1", album: "A", synced: false},
-				{id: "2", album: "B", synced: true},
-			},
-			album:  "A",
-			wantID: "1",
+			// Same-bucket durations are deliberately indistinguishable: the bucket
+			// IS the tolerance, so a 4s difference must not break a tie.
+			name:           "same-bucket durations tie",
+			stronger:       apiSong{DurationMS: 210000},
+			weaker:         apiSong{DurationMS: 214000},
+			wantStrongerHi: false,
 		},
 		{
-			name: "album match with synced in matched set - prefer synced album match",
-			candidates: []searchCandidate{
-				{id: "1", album: "A", synced: false},
-				{id: "2", album: "A", synced: true},
-				{id: "3", album: "B", synced: true},
-			},
-			album:  "A",
-			wantID: "2",
+			name:           "title outweighs album",
+			stronger:       apiSong{Title: "Lorem Ipsum"},
+			weaker:         apiSong{Album: "Amet Consectetur"},
+			wantStrongerHi: true,
 		},
 		{
-			name: "no album match - fall back to all, prefer synced",
-			candidates: []searchCandidate{
-				{id: "1", album: "A", synced: false},
-				{id: "2", album: "B", synced: true},
-			},
-			album:  "Z",
-			wantID: "2",
-		},
-		{
-			name: "no album match - fall back to all, no synced - return first",
-			candidates: []searchCandidate{
-				{id: "1", album: "A", synced: false},
-				{id: "2", album: "B", synced: false},
-			},
-			album:  "Z",
-			wantID: "1",
-		},
-		{
-			name: "edition suffix in candidate album - matches base query",
-			candidates: []searchCandidate{
-				{id: "1", album: "Greatest Hits (Deluxe Edition)", synced: false},
-				{id: "2", album: "Other Album", synced: true},
-			},
-			album:  "Greatest Hits",
-			wantID: "1",
-		},
-		{
-			name: "substring non-match: Hits should not match Greatest Hits",
-			candidates: []searchCandidate{
-				{id: "1", album: "Greatest Hits", synced: false},
-				{id: "2", album: "Hits", synced: true},
-			},
-			album: "Hits",
-			// only id=2 matches "Hits" exactly; id=1 "Greatest Hits" does not
-			wantID: "2",
-		},
-		{
-			name: "empty album arg - ignore album, prefer synced",
-			candidates: []searchCandidate{
-				{id: "1", album: "A", synced: false},
-				{id: "2", album: "B", synced: true},
-			},
-			album:  "",
-			wantID: "2",
-		},
-		{
-			// Regression: a blank-album candidate must NOT enter the matched set
-			// when a non-empty query album is given. HasPrefix(nq, "") is always
-			// true without the empty-string guard, so id:1 would wrongly win.
-			name: "blank-album candidate must not match non-empty query (empty-string guard)",
-			candidates: []searchCandidate{
-				{id: "1", album: "", synced: false},
-				{id: "2", album: "Target Album", synced: false},
-			},
-			album:  "Target Album",
-			wantID: "2",
+			name:           "album similarity contributes something",
+			stronger:       apiSong{Album: "Amet Consectetur"},
+			weaker:         apiSong{},
+			wantStrongerHi: true,
 		},
 	}
-	for _, tc := range cases {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			id, err := selectCandidate(tc.candidates, tc.album)
-			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) {
-					t.Fatalf("err = %v; want %v", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if id != tc.wantID {
-				t.Fatalf("id = %q; want %q", id, tc.wantID)
+			hi := scoreCandidate(tc.stronger, track)
+			lo := scoreCandidate(tc.weaker, track)
+			if (hi > lo) != tc.wantStrongerHi {
+				t.Errorf("stronger=%.3f weaker=%.3f -- expected stronger>weaker to be %v",
+					hi, lo, tc.wantStrongerHi)
 			}
 		})
 	}
 }
 
-// TestFindLyrics_MultiCandidate_AlbumSelection verifies end-to-end that
-// FindLyrics picks the album-matched candidate and uses its id for the AJAX
-// lyrics fetch.
-func TestFindLyrics_MultiCandidate_AlbumSelection(t *testing.T) {
-	lrc := "[00:01.00]picked\n"
-	// Two candidates: id=100 (Album A, not synced) and id=200 (Album B, synced).
-	// With album="Album B" the selector should pick id=200 (album match + synced).
-	f := &fixtureServer{
-		searchBody: searchHTMLMulti(
-			liBlock("100", "Album A", false),
-			liBlock("200", "Album B", true),
-		),
-		jsBody:   validJS,
-		ajaxBody: ajaxJSON(b64(lrc), 2),
-	}
-	srv := newFixtureServer(t, f)
-	c := newTestClient(srv)
-
-	song, err := c.FindLyrics(context.Background(), models.Track{
-		TrackName:  "x",
-		ArtistName: "y",
-		AlbumName:  "Album B",
-	})
+func TestSelectCandidate_SingleCandidateAlwaysReturned(t *testing.T) {
+	// Even with no usable signals, one candidate is still a result: the provider
+	// matched on the query it was given.
+	songs := []apiSong{{LyricsID: "only"}}
+	got, err := selectCandidate(songs, models.Track{})
 	if err != nil {
-		t.Fatalf("FindLyrics: %v", err)
+		t.Fatalf("selectCandidate: %v", err)
 	}
-	if len(song.Subtitles.Lines) != 1 || song.Subtitles.Lines[0].Text != "picked" {
-		t.Fatalf("song = %+v; want one synced line 'picked'", song.Subtitles)
+	if got.LyricsID != "only" {
+		t.Errorf("got %q", got.LyricsID)
 	}
 }
 
-// TestFindLyrics_MultiCandidate_NoAlbumMatch_FallsBack verifies that when no
-// candidate matches the requested album, FindLyrics does not return an error
-// and instead falls back to the global synced-preference logic.
-func TestFindLyrics_MultiCandidate_NoAlbumMatch_FallsBack(t *testing.T) {
-	lrc := "[00:01.00]fallback\n"
-	f := &fixtureServer{
-		searchBody: searchHTMLMulti(
-			liBlock("100", "Album A", false),
-			liBlock("200", "Album B", true),
-		),
-		jsBody:   validJS,
-		ajaxBody: ajaxJSON(b64(lrc), 2),
-	}
-	srv := newFixtureServer(t, f)
-	c := newTestClient(srv)
-
-	// AlbumName="Z" matches nothing; should fall back and pick id=200 (synced).
-	song, err := c.FindLyrics(context.Background(), models.Track{
-		TrackName:  "x",
-		ArtistName: "y",
-		AlbumName:  "Z",
-	})
-	if err != nil {
-		t.Fatalf("FindLyrics with no album match should not error; got: %v", err)
-	}
-	if len(song.Subtitles.Lines) == 0 {
-		t.Fatal("expected lyrics from fallback candidate, got none")
+func TestScoreCandidate_ISRCCaseInsensitive(t *testing.T) {
+	hi := scoreCandidate(apiSong{ISRC: "zzzzz0000001"}, models.Track{ISRC: "ZZZZZ0000001"})
+	if hi < 100 {
+		t.Errorf("ISRC comparison should be case-insensitive, score=%v", hi)
 	}
 }

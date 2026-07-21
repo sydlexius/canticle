@@ -1,27 +1,40 @@
-// Package petitlyrics implements a lyrics provider adapter for petitlyrics.com.
+// Package petitlyrics implements a lyrics provider adapter for Petit Lyrics.
 //
-// Petit Lyrics has no public API. This adapter drives a set of reverse-
-// engineered endpoints (HTML search, a CSRF token embedded in a static JS
-// file, and an AJAX lyrics endpoint), so the request and response shapes are
-// inferred and may change without notice. The maintainer has accepted the
-// access-mechanism ToS risk; Petit Lyrics content is JASRAC/NexTone-licensed.
+// It targets the structured API at p0.petitlyrics.com used by the vendor's own
+// client applications: a single form-encoded POST returning an XML document that
+// carries track metadata and a base64 lyrics payload together. The request and
+// response shapes are inferred from observation and may change without notice.
+// The maintainer has accepted the access-mechanism ToS risk; Petit Lyrics
+// content is JASRAC/NexTone-licensed.
 //
-// The client mirrors the structure and pacing of internal/musixmatch: a
-// *Client holding an *http.Client, a min pacing interval, and (here) CSRF /
-// session state, exposing FindLyrics with the shared provider signature.
+// This replaces an earlier HTML-scraping client that drove three endpoints
+// (search page, a CSRF token in a static JS file, and an AJAX lyrics call). That
+// path was removed rather than repaired: it was broken in four independent ways
+// (issue #495), and even fully repaired the web surface exposes no timestamps
+// and no ISRC or duration, so it could not serve synced lyrics at all.
+//
+// Request cost is one call when the word-synced tier has the track, and two when
+// it does not (the client then retries at the unsynced tier). The scrape needed
+// three calls plus two large HTML pages in every case. The API also requires no
+// cookies, session, or CSRF token, and returns ISRC, duration, and word-level
+// timings, none of which the web surface exposes.
+//
+// The client mirrors the structure and pacing of internal/musixmatch: a *Client
+// holding an *http.Client and a min pacing interval, exposing FindLyrics with
+// the shared provider signature.
 package petitlyrics
 
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
-	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,39 +43,40 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 )
 
-// defaultBaseURL is the real petitlyrics.com host. Tests override baseURL to
+// defaultBaseURL is the real Petit Lyrics API host. Tests override baseURL to
 // point at an httptest.Server.
-const defaultBaseURL = "https://petitlyrics.com"
+const defaultBaseURL = "https://p0.petitlyrics.com"
+
+// apiPath is the single endpoint this client drives.
+const apiPath = "/api/GetPetitLyricsData.php"
 
 // providerName is the canonical name of this provider.
 const providerName = "petitlyrics"
 
-// lyricsLinkRe extracts the lyrics id from a "/lyrics/<id>" href in the search
-// response HTML. The id is numeric in observed responses.
-var lyricsLinkRe = regexp.MustCompile(`/lyrics/(\d+)`)
+// defaultClientAppID and terminalType identify the calling application to the
+// API. Both are required; the API returns no results without them.
+const (
+	defaultClientAppID = "p1110417"
+	terminalType       = "10"
+)
 
-// csrfTokenRe extracts the CSRF token from the static pl-lib.js file. The token
-// is assigned to a JS variable as a quoted string in observed responses.
-var csrfTokenRe = regexp.MustCompile(`csrfToken\s*[:=]\s*["']([^"']+)["']`)
+// userAgent identifies canticle honestly.
+//
+// This is load-bearing, not cosmetic. The service denylists known automation
+// User-Agents: Go's default "Go-http-client/1.1" was refused with HTTP 403 on
+// every request, which is the entire root cause of issue #495. A self-
+// identifying UA is accepted, so there is no need to impersonate a browser.
+const userAgent = "canticle/1.0 (+https://github.com/sydlexius/canticle)"
 
-// candidateBlockRe matches the inner content of a single <li> result block
-// (dot-all so the block can span multiple lines).
-var candidateBlockRe = regexp.MustCompile(`(?s)<li[^>]*>(.*?)</li>`)
-
-// candidateAlbumRe extracts the text from a lyrics-list-album element.
-// The class token may appear alongside other classes (e.g. "lyrics-list-album active").
-var candidateAlbumRe = regexp.MustCompile(`(?i)class=["'][^"']*\blyrics-list-album\b[^"']*["'][^>]*>([^<]+)<`)
-
-// candidateSyncedRe detects a text_sync marker anywhere in a candidate block.
-var candidateSyncedRe = regexp.MustCompile(`(?i)text_sync`)
-
-// Client communicates with petitlyrics.com over its reverse-engineered
-// endpoints.
+// Client communicates with the Petit Lyrics API.
 type Client struct {
 	httpClient *http.Client
 
 	// baseURL is the host root; injectable so tests can target httptest.
 	baseURL string
+
+	// clientAppID identifies the calling application; injectable for tests.
+	clientAppID string
 
 	// pacer fields -- zero value means no pacing (minInterval == 0).
 	mu          sync.Mutex
@@ -72,19 +86,16 @@ type Client struct {
 	sleep       func(ctx context.Context, d time.Duration) bool
 }
 
-// NewClient creates a new Petit Lyrics client. A cookie jar is installed so the
-// PLSESSION cookie set while fetching the CSRF token is carried into the
-// subsequent AJAX request.
+// NewClient creates a new Petit Lyrics client.
 func NewClient() *Client {
-	jar, _ := cookiejar.New(nil)
 	c := &Client{
-		baseURL: defaultBaseURL,
-		now:     time.Now,
-		sleep:   ctxSleep,
+		baseURL:     defaultBaseURL,
+		clientAppID: defaultClientAppID,
+		now:         time.Now,
+		sleep:       ctxSleep,
 	}
 	c.httpClient = &http.Client{
 		Timeout:       30 * time.Second,
-		Jar:           jar,
 		CheckRedirect: c.checkRedirect,
 	}
 	return c
@@ -92,9 +103,9 @@ func NewClient() *Client {
 
 // checkRedirect pins redirects to the configured base host. The default
 // http.Client follows up to 10 redirects without restricting the target host,
-// so a 3xx from petitlyrics.com could otherwise move a request to an arbitrary
-// host (an SSRF vector). This rejects cross-host redirects and preserves the
-// standard 10-hop cap.
+// so a 3xx from the API could otherwise move a request to an arbitrary host (an
+// SSRF vector). This rejects cross-host redirects and preserves the standard
+// 10-hop cap.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return fmt.Errorf("petitlyrics: stopped after 10 redirects")
@@ -122,10 +133,47 @@ func ctxSleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// MinAllowedInterval is the hard floor on the pacing interval for any positive
+// value. Petit Lyrics publishes no rate limits (no robots.txt on either host, no
+// rate-limit response headers), so the floor is set by policy rather than read
+// from the service: comfortably slower than anything plausibly enforced, and
+// deliberately not tuned by probing the service until it refuses.
+//
+// Note the interval is enforced per REQUEST, not per lookup, which is what makes
+// it safe for the two-request miss path: a track the provider does not have
+// costs a word-sync call plus an unsynced retry, and both are paced. Because
+// petitlyrics is a fallback lane that only sees what the primary provider
+// missed, that two-request path is the common case, not the exception -- so the
+// floor is set against it rather than against the cheaper hit path.
+const MinAllowedInterval = 10 * time.Second
+
+// DefaultMinInterval is the recommended pacing interval: 30s, or 120 tracks/hr.
+// Petit Lyrics is a fallback lane that only sees what the primary provider
+// misses, so real demand sits well under this.
+const DefaultMinInterval = 30 * time.Second
+
 // WithMinInterval sets the minimum duration between outbound requests and
-// returns the receiver for chaining. A zero or negative value disables pacing
-// (the default). Not goroutine-safe; call before sharing the client.
+// returns the receiver for chaining.
+//
+// A zero or negative value disables pacing (the default), which is what one-shot
+// CLI fetches and tests want. Any POSITIVE value is clamped up to
+// MinAllowedInterval, so a misconfigured cooldown cannot make this lane
+// impolite.
+//
+// The clamp bounds requests this client ISSUES. It does not bound redirect hops:
+// pacing runs once before http.Client.Do, and the transport follows any 3xx
+// inside that call. A server returning redirects can therefore drive up to the
+// 10-hop cap (same-host only, per checkRedirect) without waiting. Bounded and
+// same-host, so the exposure is small, but the guarantee is "paced calls", not
+// "paced HTTP round-trips".
+//
+// Not goroutine-safe; call before sharing the client.
 func (c *Client) WithMinInterval(d time.Duration) *Client {
+	if d > 0 && d < MinAllowedInterval {
+		slog.Warn("petitlyrics: configured cooldown is below the allowed floor; clamping",
+			"configured", d, "floor", MinAllowedInterval)
+		d = MinAllowedInterval
+	}
 	c.minInterval = d
 	return c
 }
@@ -137,9 +185,7 @@ func (c *Client) MinInterval() time.Duration {
 }
 
 // pace enforces the minimum request interval, mirroring the musixmatch pacer.
-// It is called before each outbound request (WithMinInterval is documented as a
-// minimum between requests, not between lookups), so a single FindLyrics, which
-// makes three calls, cannot burst. The wait is ctx-cancellable.
+// The wait is ctx-cancellable.
 func (c *Client) pace(ctx context.Context) error {
 	if c.minInterval <= 0 {
 		return nil
@@ -162,349 +208,208 @@ func (c *Client) pace(ctx context.Context) error {
 	}
 }
 
-// do enforces pacing then executes req, wrapping a transport error with the
-// stage label. Centralizing pacing here keeps WithMinInterval a per-request
-// minimum: every outbound request in a lookup passes through do.
-func (c *Client) do(ctx context.Context, req *http.Request, stage string) (*http.Response, error) {
-	if err := c.pace(ctx); err != nil {
-		return nil, err
-	}
-	res, err := c.httpClient.Do(req) //nolint:gosec // G704: the request host is c.baseURL (fixed petitlyrics.com const, test-only override) and the client's CheckRedirect pins redirects to that host, so a 3xx cannot move the request off-host; track inputs go in the form body, not the URL. No SSRF vector.
-	if err != nil {
-		return nil, fmt.Errorf("petitlyrics: %s: %w", stage, err)
-	}
-	return res, nil
-}
-
 // Name returns the provider name.
 func (c *Client) Name() string {
 	return providerName
 }
 
 // statusError maps a non-200 HTTP status to a sentinel error, or nil if the
-// status is 200. 403/429 -> ErrRateLimited, 401 -> ErrUnauthorized.
-func statusError(stage string, status int) error {
+// status is 200.
+func statusError(status int) error {
 	switch status {
 	case http.StatusOK:
 		return nil
 	case http.StatusUnauthorized:
-		return fmt.Errorf("petitlyrics: %s: %w", stage, ErrUnauthorized)
-	case http.StatusForbidden, http.StatusTooManyRequests:
-		return fmt.Errorf("petitlyrics: %s: HTTP %d: %w", stage, status, ErrRateLimited)
+		return fmt.Errorf("petitlyrics: HTTP 401: %w", ErrUnauthorized)
+	case http.StatusForbidden:
+		return fmt.Errorf("petitlyrics: HTTP 403: %w", ErrForbidden)
+	case http.StatusTooManyRequests:
+		return fmt.Errorf("petitlyrics: HTTP 429: %w", ErrRateLimited)
 	default:
-		return fmt.Errorf("petitlyrics: %s: unexpected HTTP status %d", stage, status)
+		return fmt.Errorf("petitlyrics: unexpected HTTP status %d", status)
 	}
 }
 
-const maxResponseSize = 2 << 20 // 2 MiB
+const maxResponseSize = 8 << 20 // 8 MiB; word-sync payloads run to a few hundred KB
 
 // readBody reads a capped response body.
-func readBody(stage string, res *http.Response) ([]byte, error) {
+func readBody(res *http.Response) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("petitlyrics: %s: read body: %w", stage, err)
+		return nil, fmt.Errorf("petitlyrics: read body: %w", err)
 	}
 	if len(body) > maxResponseSize {
-		return nil, fmt.Errorf("petitlyrics: %s: response too large (%d bytes)", stage, len(body))
+		return nil, fmt.Errorf("petitlyrics: response too large (%d bytes)", len(body))
 	}
 	return body, nil
 }
 
-// FindLyrics looks up lyrics for the given track from petitlyrics.com. It runs
-// the three-stage reverse-engineered flow: search for a lyrics id, fetch the
-// CSRF token, then request the lyrics payload via the AJAX endpoint.
-func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
-	id, err := c.searchLyricsID(ctx, track)
-	if err != nil {
-		return models.Song{}, err
-	}
-
-	token, err := c.fetchCSRFToken(ctx)
-	if err != nil {
-		return models.Song{}, err
-	}
-
-	return c.fetchLyrics(ctx, id, token)
+// apiResponse mirrors the XML document returned by the API.
+type apiResponse struct {
+	XMLName xml.Name  `xml:"response"`
+	Songs   []apiSong `xml:"songs>song"`
 }
 
-// searchLyricsID POSTs the search form and scrapes the first /lyrics/<id> link.
-func (c *Client) searchLyricsID(ctx context.Context, track models.Track) (string, error) {
-	form := url.Values{
-		"title":  {track.TrackName},
-		"artist": {track.ArtistName},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/search_lyrics", strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("petitlyrics: search: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	res, err := c.do(ctx, req, "search")
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = res.Body.Close() }()
-
-	if err := statusError("search", res.StatusCode); err != nil {
-		return "", err
-	}
-
-	body, err := readBody("search", res)
-	if err != nil {
-		return "", err
-	}
-
-	return selectCandidate(parseSearchCandidates(body), track.AlbumName)
+// apiSong is one <song> element. Only the fields this client uses are mapped;
+// the response carries additional metadata (writer, composer, jancode, jasracID,
+// cdc, upload/release dates) that is intentionally ignored.
+type apiSong struct {
+	LyricsID   string `xml:"lyricsId"`
+	Title      string `xml:"title"`
+	Artist     string `xml:"artist"`
+	Album      string `xml:"album"`
+	ISRC       string `xml:"isrc"`
+	DurationMS int    `xml:"duration"`
+	LyricsType int    `xml:"lyricsType"`
+	LyricsData string `xml:"lyricsData"`
 }
 
-// fetchCSRFToken fetches the static pl-lib.js file, scrapes the CSRF token, and
-// (via the cookie jar) captures the PLSESSION cookie for the AJAX request.
-func (c *Client) fetchCSRFToken(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/lib/pl-lib.js", nil)
-	if err != nil {
-		return "", fmt.Errorf("petitlyrics: csrf: build request: %w", err)
-	}
-
-	res, err := c.do(ctx, req, "csrf")
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = res.Body.Close() }()
-
-	if err := statusError("csrf", res.StatusCode); err != nil {
-		return "", err
-	}
-
-	body, err := readBody("csrf", res)
-	if err != nil {
-		return "", err
-	}
-
-	m := csrfTokenRe.FindSubmatch(body)
-	if m == nil {
-		return "", fmt.Errorf("petitlyrics: csrf: token not found in pl-lib.js")
-	}
-	return string(m[1]), nil
-}
-
-// ajaxEntry is one element of the AJAX lyrics response array. Field names are
-// inferred from observed reverse-engineered responses and may change.
-type ajaxEntry struct {
-	LyricsType int    `json:"lyrics_type"`
-	Lyrics     string `json:"lyrics"`
-}
-
-// lyrics_type sentinels for the secondary (non-original) tracks.
+// FindLyrics looks up lyrics for the given track.
 //
-// ASSUMPTION: lyrics_type values are UNVERIFIED. They are derived from synthetic
-// fixtures, not from observed petitlyrics.com responses. The mapping chosen here
-// is: the FIRST entry is always the original track (whatever its lyrics_type --
-// in observed fixtures 1 = unsynced text, 2 = line-synced, 3 = word-synced).
-// Among the remaining entries, lyrics_type == lyricsTypeTranslation (4) is the
-// translation track and lyrics_type == lyricsTypeRomanization (5) is the
-// romanization track. Any other secondary lyrics_type is ignored. Revisit this
-// mapping once real multi-track responses are captured.
-const (
-	lyricsTypeTranslation  = 4
-	lyricsTypeRomanization = 5
-)
-
-// searchCandidate holds one result from the /search_lyrics HTML response.
-type searchCandidate struct {
-	id     string // numeric id from /lyrics/<id>
-	album  string // text of lyrics-list-album element; empty if absent
-	synced bool   // true when text_sync marker is present in the item block
-}
-
-// normalizeAlbum lowercases, trims, and collapses internal whitespace so that
-// "(Deluxe Edition)" suffixes and minor spacing differences do not prevent a
-// prefix match.
-func normalizeAlbum(s string) string {
-	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
-}
-
-// albumMatches reports whether candidate matches query using a normalized
-// prefix comparison. Exact match and edition-suffix variants (e.g. "Album
-// Name (Deluxe Edition)" vs "Album Name") both return true. Substring-only
-// matches (e.g. "Hits" inside "Greatest Hits") do not. An empty candidate
-// or query never matches so that blank-album candidates fall through to the
-// fallback-to-all path rather than polluting an album-narrowed working set.
-func albumMatches(candidate, query string) bool {
-	nc := normalizeAlbum(candidate)
-	nq := normalizeAlbum(query)
-	if nc == "" || nq == "" {
-		return false
-	}
-	return strings.HasPrefix(nc, nq) || strings.HasPrefix(nq, nc)
-}
-
-// parseSearchCandidates extracts all lyrics candidates from the /search_lyrics
-// HTML response. Each <li> block is inspected for a /lyrics/<id> link; blocks
-// without one are skipped. Album and sync-type are extracted from the
-// lyrics-list-album class element and text_sync marker respectively.
-func parseSearchCandidates(body []byte) []searchCandidate {
-	blocks := candidateBlockRe.FindAllSubmatch(body, -1)
-	var candidates []searchCandidate
-	for _, block := range blocks {
-		inner := block[1]
-		m := lyricsLinkRe.FindSubmatch(inner)
-		if m == nil {
-			continue
-		}
-		album := ""
-		if am := candidateAlbumRe.FindSubmatch(inner); am != nil {
-			album = strings.TrimSpace(string(am[1]))
-		}
-		candidates = append(candidates, searchCandidate{
-			id:     string(m[1]),
-			album:  album,
-			synced: candidateSyncedRe.Match(inner),
-		})
-	}
-	return candidates
-}
-
-// selectCandidate picks the best candidate id from the search results.
-// When album is non-empty, candidates whose album field matches (via
-// albumMatches) form a preferred working set; if no candidates match the
-// album, all candidates are used (best-effort fallback). Within the working
-// set, the first synced candidate wins; otherwise the first candidate is
-// returned. An empty candidates slice returns ErrNotFound.
-func selectCandidate(candidates []searchCandidate, album string) (string, error) {
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("petitlyrics: search: no lyrics link found: %w", ErrNotFound)
-	}
-	working := candidates
-	if album != "" {
-		var matched []searchCandidate
-		for _, c := range candidates {
-			if albumMatches(c.album, album) {
-				matched = append(matched, c)
-			}
-		}
-		if len(matched) > 0 {
-			working = matched
-		}
-	}
-	for _, c := range working {
-		if c.synced {
-			return c.id, nil
-		}
-	}
-	return working[0].id, nil
-}
-
-// trackFromEntry decodes one ajaxEntry's base64 payload into synced lines via
-// parseLRC. It returns ok=false when the payload is empty, undecodable, or
-// carries no parseable timestamps (a secondary track is only adopted when it is
-// itself synced, matching the interleaved-output contract).
-func trackFromEntry(e ajaxEntry) (models.Synced, bool) {
-	if e.Lyrics == "" {
-		return models.Synced{}, false
-	}
-	decoded, err := base64.StdEncoding.DecodeString(e.Lyrics)
-	if err != nil {
-		slog.Debug("petitlyrics: secondary track failed base64 decode; skipping", "lyrics_type", e.LyricsType)
-		return models.Synced{}, false
-	}
-	lines, ok := parseLRC(string(decoded))
-	if !ok {
-		return models.Synced{}, false
-	}
-	return models.Synced{Lines: lines}, true
-}
-
-// fetchLyrics POSTs to the AJAX endpoint with the lyrics id and CSRF token,
-// then base64-decodes the payload into synced or plain lyrics.
-func (c *Client) fetchLyrics(ctx context.Context, id, token string) (models.Song, error) {
-	song := models.Song{}
-
-	form := url.Values{"lyrics_id": {id}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/com/get_lyrics.ajax", strings.NewReader(form.Encode()))
-	if err != nil {
-		return song, fmt.Errorf("petitlyrics: ajax: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-CSRF-Token", token)
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-
-	res, err := c.do(ctx, req, "ajax")
-	if err != nil {
-		return song, err
-	}
-	defer func() { _ = res.Body.Close() }()
-
-	if err := statusError("ajax", res.StatusCode); err != nil {
-		return song, err
-	}
-
-	body, err := readBody("ajax", res)
-	if err != nil {
-		return song, err
-	}
-	if len(strings.TrimSpace(string(body))) == 0 {
-		return song, fmt.Errorf("petitlyrics: ajax: empty response body: %w", ErrNotFound)
-	}
-
-	var entries []ajaxEntry
-	if err := json.Unmarshal(body, &entries); err != nil {
-		return song, fmt.Errorf("petitlyrics: ajax: decode JSON: %w", err)
-	}
-	if len(entries) == 0 || entries[0].Lyrics == "" {
-		return song, fmt.Errorf("petitlyrics: ajax: response carried no lyrics: %w", ErrNotFound)
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(entries[0].Lyrics)
-	if err != nil {
-		return song, fmt.Errorf("petitlyrics: ajax: base64 decode lyrics: %w", err)
-	}
-	text := string(decoded)
-
-	if lines, ok := parseLRC(text); ok {
-		song.Subtitles.Lines = lines
-		// Only a synced original gets secondary tracks merged in: bilingual
-		// interleaving (docs/multilingual-output-policy.md) needs the original to
-		// be synced, and a plain-text original has no timestamps to share.
-		applySecondaryTracks(&song, entries[1:])
+// It requests the word-synced tier first: word-sync is a superset of line-sync
+// (a line's cue is its first word's start time), and its payload is plain XML
+// whereas the line-sync tier is an encrypted binary blob this client cannot yet
+// decode. When the word-sync request yields nothing usable, it retries at the
+// unsynced tier so a track with only plain lyrics still produces a result.
+func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
+	song, err := c.lookup(ctx, track, tierWordSync)
+	if err == nil {
 		return song, nil
 	}
-
-	// No parseable timestamps: treat as plain lyrics.
-	song.Lyrics.LyricsBody = text
-	return song, nil
+	// A word-sync miss is not a track miss: fall back to plain lyrics. Transport
+	// and policy failures (401/403/429, context cancellation) are returned as-is
+	// so the circuit breaker sees them.
+	if !isTierMiss(err) {
+		return models.Song{}, err
+	}
+	slog.Debug("petitlyrics: word-sync tier unavailable, retrying unsynced",
+		"track", track.TrackName, "reason", err)
+	return c.lookup(ctx, track, tierUnsynced)
 }
 
-// applySecondaryTracks populates song.TranslationSubtitles and
-// song.RomanizationSubtitles from the non-first AJAX entries, keyed by the
-// (unverified) lyrics_type sentinels documented above. Entries with an
-// unrecognized lyrics_type, or that fail to decode to synced lines, are ignored
-// so an original-only response leaves the new fields empty.
-func applySecondaryTracks(song *models.Song, rest []ajaxEntry) {
-	for _, e := range rest {
-		switch e.LyricsType {
-		case lyricsTypeTranslation:
-			if track, ok := trackFromEntry(e); ok && len(song.TranslationSubtitles.Lines) == 0 {
-				song.TranslationSubtitles = track
-			}
-		case lyricsTypeRomanization:
-			if track, ok := trackFromEntry(e); ok && len(song.RomanizationSubtitles.Lines) == 0 {
-				song.RomanizationSubtitles = track
-			}
+// isTierMiss reports whether err means "this tier had nothing" rather than "the
+// request failed", which decides whether falling back to another tier is worth a
+// second request.
+func isTierMiss(err error) bool {
+	return errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnsupportedTier)
+}
+
+// lookup performs one API request at the given tier and decodes the result.
+func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (models.Song, error) {
+	songs, err := c.request(ctx, track, tier)
+	if err != nil {
+		return models.Song{}, err
+	}
+
+	candidate, err := selectCandidate(songs, track)
+	if err != nil {
+		return models.Song{}, fmt.Errorf("petitlyrics: no candidate matched: %w", err)
+	}
+	if candidate.LyricsData == "" {
+		return models.Song{}, fmt.Errorf("petitlyrics: candidate carried no lyrics payload: %w", ErrNotFound)
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(candidate.LyricsData)
+	if err != nil {
+		return models.Song{}, fmt.Errorf("petitlyrics: base64 decode lyrics: %w", err)
+	}
+
+	song := models.Song{Track: trackFromCandidate(candidate, track)}
+
+	switch classifyPayload(raw) {
+	case tierWordSync:
+		cues, _, err := decodeWordSync(raw)
+		if err != nil {
+			return models.Song{}, err
 		}
+		// Run the shared normalizer so this lane holds the same one-cue-per-line
+		// model as every other write path (#470).
+		song.Subtitles = lrcnormalize.Expand(models.Synced{Lines: cues})
+		return song, nil
+
+	case tierLineSync:
+		return models.Song{}, fmt.Errorf("petitlyrics: lyricsType 2 (encrypted LSY): %w", ErrUnsupportedTier)
+
+	default:
+		text := decodeUnsynced(raw)
+		if strings.TrimSpace(text) == "" {
+			return models.Song{}, fmt.Errorf("petitlyrics: empty lyrics payload: %w", ErrNotFound)
+		}
+		// A plain-text payload may still carry LRC timestamps; prefer them.
+		if doc := lrcnormalize.ParseBody(text); len(doc.Cues) > 0 {
+			song.Subtitles = models.Synced{Lines: doc.Cues}
+			return song, nil
+		}
+		song.Lyrics.LyricsBody = text
+		return song, nil
 	}
 }
 
-// parseLRC parses LRC-formatted text into synced lines. It returns ok=false
-// when no line carries a parseable [mm:ss.xx] timestamp, signaling the content
-// should be treated as plain lyrics instead.
-//
-// Expansion happens here rather than at write time (#470): a compressed line
-// carrying several leading stamps ([t1][t2]text) becomes one cue per stamp, so
-// everything downstream of this lane holds a one-cue-per-line model and every
-// future write is player-compatible. Simple player frontends read only the
-// first timestamp on a line, so a stranded [t2] would otherwise render as
-// literal lyric text and the repeat would never highlight.
-func parseLRC(text string) ([]models.Lines, bool) {
-	cues := lrcnormalize.ParseBody(text).Cues
-	return cues, len(cues) > 0
+// trackFromCandidate fills a models.Track from the provider's metadata, keeping
+// the local track's values where the provider has none.
+func trackFromCandidate(s apiSong, local models.Track) models.Track {
+	t := local
+	if s.Title != "" {
+		t.TrackName = s.Title
+	}
+	if s.Artist != "" {
+		t.ArtistName = s.Artist
+	}
+	if s.Album != "" {
+		t.AlbumName = s.Album
+	}
+	if s.ISRC != "" {
+		t.ISRC = s.ISRC
+	}
+	if s.DurationMS > 0 {
+		t.TrackLength = s.DurationMS / 1000
+	}
+	t.HasLyrics = 1
+	return t
+}
+
+// request performs the single form POST and decodes the XML envelope.
+func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]apiSong, error) {
+	form := url.Values{
+		"clientAppId":  {c.clientAppID},
+		"terminalType": {terminalType},
+		"lyricsType":   {strconv.Itoa(tier)},
+		"key_title":    {track.TrackName},
+		"key_artist":   {track.ArtistName},
+		"key_album":    {track.AlbumName},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+apiPath, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("petitlyrics: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", userAgent)
+
+	if err := c.pace(ctx); err != nil {
+		return nil, err
+	}
+	res, err := c.httpClient.Do(req) //nolint:gosec // G704: the request host is c.baseURL (a fixed const, test-only override) and CheckRedirect pins redirects to that host, so a 3xx cannot move the request off-host; track inputs go in the form body, not the URL. No SSRF vector.
+	if err != nil {
+		return nil, fmt.Errorf("petitlyrics: request: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	if err := statusError(res.StatusCode); err != nil {
+		return nil, err
+	}
+
+	body, err := readBody(res)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed apiResponse
+	if err := xml.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("petitlyrics: decode XML response: %w", err)
+	}
+	if len(parsed.Songs) == 0 {
+		return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+	}
+	return parsed.Songs, nil
 }

@@ -8,7 +8,8 @@ import (
 )
 
 func TestParseBody_TrimsCueText(t *testing.T) {
-	// Cue text is trimmed, matching petitlyrics.parseLRC (strings.TrimSpace).
+	// Cue text is trimmed (strings.TrimSpace), the shared convention across the
+	// provider parse lanes that feed this normalizer.
 	doc := ParseBody("[00:10.00]  Hello world  ")
 	if len(doc.Cues) != 1 {
 		t.Fatalf("want 1 cue, got %d", len(doc.Cues))

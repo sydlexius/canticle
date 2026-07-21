@@ -1523,6 +1523,10 @@ func buildProvider(name string, cfg config.Config, token string, newFetcher func
 		return providers.New(providers.Musixmatch, fetcher)
 	case providers.PetitLyrics:
 		petit := petitlyrics.NewClient()
+		// petitlyrics still inherits api.cooldown until it gets its own config
+		// key (#535). The client clamps any positive value up to its own policy
+		// floor, so an aggressive Musixmatch cooldown cannot make this lane
+		// impolite.
 		petit.WithMinInterval(time.Duration(cfg.API.Cooldown) * time.Second)
 		return providers.New(providers.PetitLyrics, petit)
 	default:
