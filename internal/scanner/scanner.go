@@ -73,6 +73,47 @@ func ReadArtistIdentity(path string) (artist, albumArtist string, err error) {
 	return extractArtist(m), extractAlbumArtist(m), nil
 }
 
+// AudioMetadata carries the recording disambiguators a provider query needs from
+// an audio file's tags. The zero values are the documented "absent" sentinels:
+// TrackLength 0 is the unknown-duration sentinel normalize.DurationBucket keys
+// on, and an empty string means the tag is absent.
+type AudioMetadata struct {
+	TrackLength int
+	ISRC        string
+	AlbumName   string
+}
+
+// ReadAudioMetadata opens the audio file at path and returns the recording
+// disambiguators a provider query needs: duration, ISRC, and album. It is the
+// seam serve mode uses to reach fetch-mode parity (#584): work_queue persists
+// neither duration nor ISRC, so the worker re-reads them from disk at fetch time
+// through exactly the readers a scan uses, which makes the two paths identical by
+// construction rather than by agreement.
+//
+// A missing tag, an unparsable duration, or an unsupported extension is not an
+// error and yields the zero-value sentinel; only an open or parse failure returns
+// an error, matching ReadAudioProvenance and ReadArtistIdentity.
+func ReadAudioMetadata(path string) (AudioMetadata, error) {
+	f, oerr := os.Open(path) //nolint:gosec // reason: G304 - path is a work_queue source_path, written from a configured library root and confined via pathutil upstream
+	if oerr != nil {
+		return AudioMetadata{}, fmt.Errorf("open %s: %w", path, oerr)
+	}
+	defer func() { _ = f.Close() }()
+	m, terr := tag.ReadFrom(f)
+	if terr != nil {
+		return AudioMetadata{}, fmt.Errorf("read metadata %s: %w", path, terr)
+	}
+	// audioduration seeks to 0 internally, so f may sit at any offset after
+	// tag.ReadFrom; no rewind is needed here. A parse failure degrades to the
+	// unknown-duration sentinel exactly as scanDir does.
+	dur, derr := audioDuration(f, strings.ToLower(filepath.Ext(path)))
+	if derr != nil {
+		slog.Debug("duration parse failed; using 0", "file", path, "error", derr)
+		dur = 0
+	}
+	return AudioMetadata{TrackLength: dur, ISRC: extractISRC(m), AlbumName: m.Album()}, nil
+}
+
 // audioFileTypeForExt returns the audioduration type constant for a lower-case
 // audio file extension. Extensions not recognized return (0, false); callers
 // degrade to TrackLength=0 (the "unknown duration" sentinel).

@@ -220,6 +220,7 @@ func (q *fakeQueue) removeFromProcessing(id int64) {
 type cacheStore struct {
 	artist string
 	title  string
+	bucket int
 	lyrics string
 }
 
@@ -227,9 +228,13 @@ type fakeCache struct {
 	hit    string
 	err    error
 	stores []cacheStore
+	// lookupBuckets records the duration bucket each Lookup was keyed on, so a
+	// test can assert the read and write keys agree (#584).
+	lookupBuckets []int
 }
 
-func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, _ int) (string, error) {
+func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, bucket int) (string, error) {
+	c.lookupBuckets = append(c.lookupBuckets, bucket)
 	if c.err != nil {
 		return "", c.err
 	}
@@ -239,8 +244,8 @@ func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, _ int) (string
 	return c.hit, nil
 }
 
-func (c *fakeCache) Store(_ context.Context, artist, title string, _ int, lyrics string) error {
-	c.stores = append(c.stores, cacheStore{artist: artist, title: title, lyrics: lyrics})
+func (c *fakeCache) Store(_ context.Context, artist, title string, bucket int, lyrics string) error {
+	c.stores = append(c.stores, cacheStore{artist: artist, title: title, bucket: bucket, lyrics: lyrics})
 	return nil
 }
 
@@ -248,10 +253,14 @@ type fakeFetcher struct {
 	song  models.Song
 	err   error
 	calls int
+	// tracks records each track handed to the provider, so a test can assert the
+	// recording disambiguators actually reached the query (#584).
+	tracks []models.Track
 }
 
-func (f *fakeFetcher) FindLyrics(context.Context, models.Track) (models.Song, error) {
+func (f *fakeFetcher) FindLyrics(_ context.Context, t models.Track) (models.Song, error) {
 	f.calls++
+	f.tracks = append(f.tracks, t)
 	if f.err != nil {
 		return models.Song{}, f.err
 	}

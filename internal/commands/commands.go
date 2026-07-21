@@ -1032,6 +1032,13 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	configureWorkerAudioDetector(w, audioDetector)
 	w.SetInstrumentalDetectionDefault(cfg.InstrumentalDetector.Enabled)
 	w.SetDetectorOrdering(cfg.InstrumentalDetector.Ordering)
+	// Gate the fetch-time recording-identity refresh (#584) on the GLOBAL
+	// enrichment default, so disabling enrichment keeps serve mode at CLI parity
+	// instead of reading tags the operator opted out of. Per-library overrides are
+	// NOT resolved here -- a scan resolves them via scan.Scheduler
+	// (config.ResolveBool over EnrichOverride/lib.EnrichRecording/global), but the
+	// worker holds no library context. See Worker.enrichRecordingDefault.
+	w.SetRecordingEnrichmentDefault(cfg.Enrichment.Enabled)
 	configureWorkerGuard(w, newGuard(cfg))
 	// Wire the DB-backed provider outcome recorder so hits and misses are persisted
 	// and exposed via GET /metrics (mxlrcgo_provider_hits_total{lane},

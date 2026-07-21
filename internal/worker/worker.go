@@ -20,6 +20,7 @@ import (
 	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/scanner"
 	"github.com/sydlexius/canticle/internal/verification"
 )
 
@@ -100,6 +101,13 @@ const defaultCircuitBackoffBase = 60 * time.Second
 // valid earlier this session, may now have expired.
 const escalationThreshold = 5
 
+// MetadataReader re-reads the recording disambiguators (duration, ISRC, album)
+// from an audio file at fetch time. It defaults to scanner.ReadAudioMetadata and
+// is injectable so worker tests exercise the refresh without binary audio
+// fixtures, following the seam precedent of realign's readProv and
+// identityrepair's IdentityReader.
+type MetadataReader func(path string) (scanner.AudioMetadata, error)
+
 // Worker consumes queued lyrics work one item at a time. The scan_results
 // writeback for successful completions is handled atomically inside
 // queue.DBQueue.Complete, so the worker has no separate ledger dependency.
@@ -112,6 +120,19 @@ const escalationThreshold = 5
 type Worker struct {
 	queue Queue
 	cache Cache
+	// readMetadata re-reads recording disambiguators from the item's source file
+	// at fetch time. work_queue persists neither duration nor ISRC (#584), so
+	// without this the provider query degrades to artist plus title and Musixmatch
+	// answers with its default recording, which writes a live or remastered cut's
+	// lyrics onto a studio track. Defaults to scanner.ReadAudioMetadata.
+	readMetadata MetadataReader
+	// enrichRecordingDefault mirrors config.Enrichment.Enabled. When false the
+	// operator has opted out of reading ISRC and duration, and a scan leaves them
+	// empty, so the fetch-time refresh is skipped too and serve mode sends exactly
+	// what the CLI would. Global default only: the worker holds no library context,
+	// so per-library enrichment overrides are not resolved here. Set via
+	// SetRecordingEnrichmentDefault.
+	enrichRecordingDefault bool
 	// orch dispatches the lyrics lookup across one or more provider lanes. With a
 	// single Musixmatch lane (the only deployment today) it is a behavior-
 	// preserving pass-through of the prior single-fetch path. The lane owns the
@@ -275,15 +296,20 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		lanes:                 []*orchestrator.Lane{lane},
 		writer:                writer,
 		verifyBelowConfidence: 0.85,
-		baseBackoff:           backoff.DefaultBase,
-		maxBackoff:            backoff.DefaultMax,
-		sleep:                 sleepCtx,
-		now:                   now,
-		circuit:               cb,
-		circuitBackoffBase:    defaultCircuitBackoffBase,
-		circuitOpenDuration:   defaultCircuitOpenDuration,
-		missBackoffBase:       backoff.DefaultMissBase,
-		missBackoffCap:        backoff.DefaultMissCap,
+		// Default to the scanner reader with enrichment on, matching
+		// config.Enrichment.Enabled's own default, so a caller that never calls the
+		// setters still gets fetch-mode parity rather than a silently disabled fix.
+		readMetadata:           scanner.ReadAudioMetadata,
+		enrichRecordingDefault: true,
+		baseBackoff:            backoff.DefaultBase,
+		maxBackoff:             backoff.DefaultMax,
+		sleep:                  sleepCtx,
+		now:                    now,
+		circuit:                cb,
+		circuitBackoffBase:     defaultCircuitBackoffBase,
+		circuitOpenDuration:    defaultCircuitOpenDuration,
+		missBackoffBase:        backoff.DefaultMissBase,
+		missBackoffCap:         backoff.DefaultMissCap,
 		// maxMissAttempts defaults to 0 (no cap). Non-serve callers (tests, ad-hoc
 		// CLI runs) get indefinite deferral; the config layer sets the cap via
 		// SetMaxMissAttempts using [api].max_miss_attempts (default 15).
@@ -567,6 +593,23 @@ func (w *Worker) SetInstrumentalDetectionDefault(enabled bool) {
 	w.detectInstrumentalDefault = enabled
 }
 
+// SetRecordingEnrichmentDefault sets whether the fetch-time recording-identity
+// refresh runs. It mirrors config.Enrichment.Enabled. Per-library overrides are
+// not resolved here; see the enrichRecordingDefault field comment.
+func (w *Worker) SetRecordingEnrichmentDefault(enabled bool) {
+	w.enrichRecordingDefault = enabled
+}
+
+// SetMetadataReader overrides the fetch-time metadata reader. Production uses the
+// scanner.ReadAudioMetadata default set in New; tests inject a fake. A nil reader
+// is ignored so the default can never be cleared into a no-op refresh.
+func (w *Worker) SetMetadataReader(r MetadataReader) {
+	if r == nil {
+		return
+	}
+	w.readMetadata = r
+}
+
 // SetDetectorOrdering selects whether the detector lane goes first ("front") or
 // last (any other value, e.g. "demoted") among the dispatch lanes, then
 // rebuilds the orchestrator. A nil audioDetector makes this a no-op at build
@@ -807,6 +850,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// cache keys always agree. Confidence still scores against the original tag.
 	resolvedTrack := item.Inputs.Track
 	resolvedTrack.ArtistName = normalize.ResolveArtist(item.Inputs.Track.AlbumArtist, item.Inputs.Track.ArtistName)
+	// Restore the recording identity work_queue does not persist (duration, ISRC)
+	// before anything reads resolvedTrack, so the cache lookup, the provider query,
+	// and the cache store all see the same values. Any later position would break
+	// the read/write key agreement the comment above promises.
+	resolvedTrack = w.refreshRecordingIdentity(item, resolvedTrack)
 
 	// A configured providers generation that no longer matches the stamp the item
 	// was enqueued under means a cached result (if any) predates the current
@@ -1072,6 +1120,47 @@ func (w *Worker) detectorPathFor(item queue.WorkItem) string {
 		return ""
 	}
 	return item.Inputs.SourcePath
+}
+
+// refreshRecordingIdentity returns track with its recording disambiguators
+// re-read from the item's source file. work_queue stores neither duration nor
+// ISRC, so a queue-path track always arrives with TrackLength 0 and ISRC "";
+// re-reading restores fetch-mode parity (#584) with no schema change, and stays
+// correct if the file was retagged after enqueue.
+//
+// Fresh-when-present: a field is replaced only when the read produced a value, so
+// a file whose album tag is absent cannot clear the album that migration 032
+// backfilled onto the row (q_album is sent unconditionally). SpotifyID is never
+// tag-derived and is left alone.
+//
+// Every non-success path returns track unchanged and is non-fatal: a metadata
+// read must never fail or defer an item, because a vanished file is prune's
+// business, not the fetch path's. A read error logs at Warn (loud-skip, mirroring
+// detectorPathFor); a disabled enrichment switch and an absent source path are
+// expected states and log nothing.
+func (w *Worker) refreshRecordingIdentity(item queue.WorkItem, track models.Track) models.Track {
+	if !w.enrichRecordingDefault || w.readMetadata == nil {
+		return track
+	}
+	if strings.TrimSpace(item.Inputs.SourcePath) == "" {
+		return track
+	}
+	meta, err := w.readMetadata(item.Inputs.SourcePath)
+	if err != nil {
+		slog.Warn("fetch-time metadata refresh failed; querying with enqueue-time identity",
+			"id", item.ID, "artist", track.ArtistName, "track", track.TrackName, "error", err)
+		return track
+	}
+	if meta.TrackLength > 0 {
+		track.TrackLength = meta.TrackLength
+	}
+	if meta.ISRC != "" {
+		track.ISRC = meta.ISRC
+	}
+	if meta.AlbumName != "" {
+		track.AlbumName = meta.AlbumName
+	}
+	return track
 }
 
 // stampDetectorInstrumental records a detector-sourced instrumental settle from
