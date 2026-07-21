@@ -94,7 +94,7 @@ type AudioMetadata struct {
 // error and yields the zero-value sentinel; only an open or parse failure returns
 // an error, matching ReadAudioProvenance and ReadArtistIdentity.
 func ReadAudioMetadata(path string) (AudioMetadata, error) {
-	f, oerr := os.Open(path) //nolint:gosec // G304: path is a work_queue source_path, written from a configured library root and confined via pathutil upstream
+	f, oerr := os.Open(path) //nolint:gosec // reason: G304 - path is a work_queue source_path, written from a configured library root and confined via pathutil upstream
 	if oerr != nil {
 		return AudioMetadata{}, fmt.Errorf("open %s: %w", path, oerr)
 	}
