@@ -387,22 +387,24 @@ const dequeueBatchedClaimSQL = `UPDATE work_queue
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
 
-// drawBatchSQL stamps batch_seq = 1..N on the top-N eligible unbuffered rows,
-// randomizing composition and intra-tier order once per batch while preserving
-// priority tiers (webhook rows draw first). The RANDOM() shuffle is the
-// anti-fingerprint mechanism, moved from per-claim to per-batch. ROW_NUMBER()
-// and UPDATE ... FROM are both supported by modernc.org/sqlite (proven in
-// migration 004). batch_seq IS NULL restricts the draw to fresh rows; at draw
-// time every eligible row is unbuffered, since any eligible buffered row would
-// have been claimed before the draw ran.
+// refillBufferSQL stamps batch_seq = offset + 1 .. offset + N on the next N
+// eligible unbuffered rows, randomizing composition and intra-tier order while
+// preserving priority tiers (webhook rows draw first). The RANDOM() shuffle is
+// the anti-fingerprint mechanism. The leading `?` is a batch_seq offset: refill
+// appends drawn rows AFTER the rows already buffered (offset = current max
+// batch_seq), so a rolling top-up never collides with, nor reorders, the buffer's
+// existing claim order (#587). Offset 0 is the empty-buffer case (stamps 1..N).
+// ROW_NUMBER() and UPDATE ... FROM are both supported by modernc.org/sqlite
+// (proven in migration 004). batch_seq IS NULL restricts the draw to rows not
+// already buffered.
 //
 // The subquery's `ORDER BY rn` before `LIMIT ?` is load-bearing: the window
 // ORDER BY only assigns rn, and SQLite leaves the final row order undefined
 // without a top-level ORDER BY, so LIMIT could otherwise keep an arbitrary N
 // rows rather than the top-N by priority -- dropping a high-priority (webhook)
-// row from the batch. Ordering by rn guarantees LIMIT takes ranks 1..N.
-const drawBatchSQL = `UPDATE work_queue
-         SET batch_seq = ranked.rn
+// row from the draw. Ordering by rn guarantees LIMIT takes ranks 1..N.
+const refillBufferSQL = `UPDATE work_queue
+         SET batch_seq = ranked.rn + ?
          FROM (
              SELECT id, ROW_NUMBER() OVER (ORDER BY priority DESC, RANDOM()) AS rn
              FROM work_queue
@@ -437,13 +439,45 @@ func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
 	return item, nil
 }
 
-// dequeueBatched serves the shuffled lookahead buffer: claim the lowest-batch_seq
-// eligible buffered row; if none exists, draw a fresh batch and claim again. The
-// draw (stamping batch_seq) and the claim are two statements, so they run in one
-// transaction -- the DB is single-connection, but each bare statement would
-// release it, letting a concurrent webhook Enqueue clear batch_seq between draw
-// and claim. Holding the connection across the brief draw+claim window keeps the
-// operation coherent. The claim itself stays a single atomic UPDATE ... RETURNING.
+// refillBuffer tops the lookahead buffer up to batchSize by drawing the next
+// eligible unbuffered rows and appending them AFTER the current max batch_seq. It
+// is what keeps the buffer populated between the worker's claim cycles (#587):
+// instead of draining to empty and only redrawing on the next Dequeue, the buffer
+// is refilled on every Dequeue, so the #572 panel always shows the next batchSize
+// items rather than going blank during the worker's pacer wait. Drawn rows keep
+// the RANDOM()-within-priority order (#571 anti-fingerprint) and, via the offset,
+// always sort after the rows already buffered -- so the lowest-batch_seq claim
+// order is preserved and no existing buffered row is reordered. A no-op once the
+// buffer already holds batchSize rows. Runs inside the caller's transaction.
+func (q *DBQueue) refillBuffer(ctx context.Context, tx *sql.Tx, now string) error {
+	var count, maxSeq int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MAX(batch_seq), 0) FROM work_queue WHERE batch_seq IS NOT NULL`,
+	).Scan(&count, &maxSeq); err != nil {
+		return fmt.Errorf("queue: buffer census: %w", err)
+	}
+	limit := int64(q.batchSize) - count
+	if limit <= 0 {
+		return nil // buffer already full
+	}
+	// maxSeq is read here (not as a SQL subquery inside the UPDATE) to avoid
+	// reading batch_seq while the same statement writes it.
+	if _, err := tx.ExecContext(ctx, refillBufferSQL, maxSeq, now, limit); err != nil {
+		return fmt.Errorf("queue: refill buffer: %w", err)
+	}
+	return nil
+}
+
+// dequeueBatched serves the shuffled lookahead buffer: top the buffer up to
+// batchSize, then claim the lowest-batch_seq eligible buffered row. Topping up on
+// every Dequeue (rather than only when the buffer drains to empty) keeps the
+// buffer populated between claim cycles, so the #572 "Up next" panel shows the
+// next batchSize items instead of going blank during the worker's pacer wait
+// (#587). The refill and the claim share one transaction -- the DB is
+// single-connection, but two bare statements would release it, letting a
+// concurrent webhook Enqueue clear batch_seq between them; holding the connection
+// across the refill+claim window keeps the operation coherent (the #571 reason).
+// The claim itself stays a single atomic UPDATE ... RETURNING.
 func (q *DBQueue) dequeueBatched(ctx context.Context, now string) (WorkItem, error) {
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -451,19 +485,12 @@ func (q *DBQueue) dequeueBatched(ctx context.Context, now string) (WorkItem, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Claim the lowest-batch_seq eligible buffered row. If the buffer holds none,
-	// draw a fresh batch and claim again. A single ErrNoRows check then covers
-	// both "nothing buffered yet" (first call) and "pool genuinely empty" (after
-	// the draw found nothing), so there is one claim-error path and one commit.
+	if err := q.refillBuffer(ctx, tx, now); err != nil {
+		return WorkItem{}, err
+	}
 	item, err := scanWorkItem(tx.QueryRowContext(ctx, dequeueBatchedClaimSQL, now))
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, derr := tx.ExecContext(ctx, drawBatchSQL, now, q.batchSize); derr != nil {
-			return WorkItem{}, fmt.Errorf("queue: draw batch: %w", derr)
-		}
-		item, err = scanWorkItem(tx.QueryRowContext(ctx, dequeueBatchedClaimSQL, now))
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return WorkItem{}, sql.ErrNoRows // pool empty even after a fresh draw
+		return WorkItem{}, sql.ErrNoRows // pool genuinely empty (refill drew nothing)
 	}
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: batched claim: %w", err)
