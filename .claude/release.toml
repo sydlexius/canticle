@@ -8,5 +8,31 @@ pre_checks = [
   "golangci-lint run",
 ]
 
+# Section grouping for generated release notes. Maps a merged PR's GitHub label
+# to the heading it lands under, matching the headings the last several releases
+# actually used. Without this, grouping is re-decided by judgment every release.
+#
+# PRECEDENCE: a PR commonly carries several of these (a bug fix labeled `go`, or
+# an `enhancement` also labeled `priority: high`). The change-kind labels win over
+# the catch-all buckets -- prefer `enhancement`/`bug` over `documentation`/`chore`/
+# `go`/`docker` when a PR carries both. Priority labels are deliberately absent:
+# they describe urgency, not the kind of change, so they never select a section.
+#
+# This governs GROUPING only. The surrounding structure -- the `### Highlights`
+# prose for a minor release, and the Docker-pull / full-changelog footer -- is not
+# expressible here; follow the previous release (`gh release view <prev-tag>`).
+[release_notes]
+default_group = "Maintenance"
+
+[release_notes.group_labels]
+enhancement = "New"
+bug = "Bug fixes"
+dependencies = "Security & dependencies"
+ci = "Security & dependencies"
+documentation = "Maintenance"
+chore = "Maintenance"
+go = "Maintenance"
+docker = "Maintenance"
+
 [release]
 tag_prefix = "v"
