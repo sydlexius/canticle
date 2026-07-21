@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -198,7 +200,7 @@ func TestDBQueue_BatchDrawsAreRandomized(t *testing.T) {
 		if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET batch_seq = NULL`); err != nil {
 			t.Fatalf("clear batch_seq: %v", err)
 		}
-		if _, err := q.db.ExecContext(ctx, drawBatchSQL, "2026-04-27T12:00:00Z", 5); err != nil {
+		if _, err := q.db.ExecContext(ctx, refillBufferSQL, 0, "2026-04-27T12:00:00Z", 5); err != nil {
 			t.Fatalf("draw: %v", err)
 		}
 		return bufferedIDsBySeq(t, q)
@@ -218,6 +220,99 @@ func TestDBQueue_BatchDrawsAreRandomized(t *testing.T) {
 	}
 	if same {
 		t.Fatalf("two draws produced identical order %v; randomness not retained", a)
+	}
+}
+
+// TestDBQueue_BufferRefillsEachDequeue verifies the buffer is topped back up to
+// batch_size on every Dequeue (not only when it drains to empty), so the #572
+// "Up next" panel never goes blank while eligible work exists (#587). With a pool
+// far larger than the batch, the buffered count stays at batch_size-1 after each
+// successive Dequeue (batch_size drawn, one just claimed). Discriminates the fix:
+// the old drain-then-redraw behavior would count down 4,3,2,1,0 before redrawing.
+func TestDBQueue_BufferRefillsEachDequeue(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+	q.SetBatchSize(5)
+
+	enqueueN(t, q, 30) // pool much larger than the batch so refill always succeeds
+
+	for i := range 6 {
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue %d: %v", i, err)
+		}
+		if got := len(bufferedIDsBySeq(t, q)); got != 4 {
+			t.Fatalf("after dequeue %d: buffered = %d; want 4 (batch_size-1, rolling refill)", i, got)
+		}
+	}
+}
+
+// TestDBQueue_BatchedDequeueEmptyPool: with batching on and nothing eligible, the
+// refill draws nothing and the claim returns sql.ErrNoRows (not a silent empty
+// item).
+func TestDBQueue_BatchedDequeueEmptyPool(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetBatchSize(5)
+
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Dequeue on empty batched queue: err = %v; want sql.ErrNoRows", err)
+	}
+}
+
+// TestDBQueue_RefillNoOpWhenBufferAtCapacity: when the buffered count already
+// meets (or exceeds) batch_size, the refill is a no-op. Exercised by shrinking
+// batch_size below the current buffer -- the guard must skip the draw rather than
+// pass a negative LIMIT, which SQLite treats as "no limit" and would drain the
+// whole pool into the buffer.
+func TestDBQueue_RefillNoOpWhenBufferAtCapacity(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+	q.SetBatchSize(5)
+	enqueueN(t, q, 30)
+
+	if _, err := q.Dequeue(ctx); err != nil { // refill(5) + claim -> 4 buffered
+		t.Fatalf("prime: %v", err)
+	}
+	// Shrink below the current buffered count (4): the next refill's limit is
+	// negative, so it must no-op instead of drawing the rest of the pool.
+	q.SetBatchSize(3)
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue after shrink: %v", err)
+	}
+	if got := len(bufferedIDsBySeq(t, q)); got != 3 {
+		t.Fatalf("buffered after shrink+claim = %d; want 3 (no refill, one claimed from 4)", got)
+	}
+}
+
+// TestDBQueue_BatchedDequeueSurfacesRefillError: a failure in the buffer refill
+// must surface, not be swallowed into a silent empty claim. Seed eligible rows
+// through a writable handle, then reopen the same file read-only so BeginTx and
+// the census SELECT succeed but the refill UPDATE is rejected (query_only).
+func TestDBQueue_BatchedDequeueSurfacesRefillError(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ro.db")
+
+	w, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open writable: %v", err)
+	}
+	enqueueN(t, NewDBQueue(w), 5)
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writable: %v", err)
+	}
+
+	ro, err := db.OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatalf("open read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	q := NewDBQueue(ro)
+	q.SetBatchSize(5)
+
+	if _, err := q.Dequeue(ctx); err == nil {
+		t.Fatal("Dequeue with a read-only DB (refill UPDATE rejected) returned nil error; want a surfaced failure")
 	}
 }
 
