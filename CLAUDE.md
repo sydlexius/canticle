@@ -4,6 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **On resume / handoff, read the gitignored `SESSION-STATE.md` at the repo root FIRST.** It is the running orchestration checkpoint (current main SHA, in-flight PRs/worktrees, ordered NEXT ACTIONS, standing directives). Transient session state lives there, never in this file or the auto-memory.
 
+## Memory MCP: query it, it will not come to you
+
+Durable, hard-won lessons for this repo live in the `memory-canticle` MCP server (repo tier) and
+`memory-global` (user tier). That store is PULL-only: it returns nothing unless you call
+`search_nodes`. An interactive session gets an index of its contents at startup, but **spawned
+subagents do not**, so an agent that never queries never sees any of it. If you dispatch a subagent
+into one of the areas below, either query first and put the answer in its brief, or tell it to query.
+
+QUERY BEFORE, not after, each of these:
+
+- **Releases** - notes formatting, and reading a red Release workflow correctly.
+- **Unraid / prod ops** - compose stack paths, picking up a new image, long detached jobs, egress.
+- **Debugging a "stuck" or idle-looking pipeline** - queue timestamps, log levels, throttling.
+  There is a standing "do not re-test this" result here; check before re-running an experiment.
+- **Review / merge mechanics** - what the merge oracle actually counts, and thread resolution.
+- Any "why is it done this way here" question where a prior decision or a refuted hypothesis exists.
+
+Natural phrasing works: word order, plurals, hyphens, and camelCase names are all handled. Prefer one
+broad query over guessing the stored wording. A miss costs one call; a silently-missed constraint has
+already cost real work here more than once.
+
+Detail lives in the auto-memory `.md` files, which remain canonical; the MCP holds a one-line hook
+plus a `Detail: <file>.md` pointer. Do not copy a fact back into the auto-memory index - one
+canonical home per fact.
+
 ## Project Overview
 
 `canticle` (module `github.com/sydlexius/canticle`, matching the repo after the transfer from the doxazo-net org to the sydlexius personal account; the `cmd/mxlrcgo-svc` directory, config paths, and systemd unit names retain the historical `mxlrcgo-svc` string) is a Go tool for fetching synced lyrics. It has two faces: a one-shot `fetch` CLI that writes `.lrc` / `.txt` files, and a stateful `serve` mode -- an HTTP server with a durable SQLite work queue, a background worker, a library scan scheduler (+ optional filesystem watcher), multi-provider orchestration, encrypted-at-rest secrets, and a browser-authenticated web UI. Global state is eliminated; the API token is externalized; config is TOML.
