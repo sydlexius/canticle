@@ -34,6 +34,43 @@ func IsAudioFile(name string) bool {
 	return slices.Contains(supportedFileTypes, strings.ToLower(filepath.Ext(name)))
 }
 
+// openAndReadTags opens the audio file at path and reads its tag metadata. It is
+// the single implementation of the open/read/error-wrap contract the three
+// exported single-file readers below share, so they cannot drift as that contract
+// evolves.
+//
+// The contract: only an open or parse failure returns an error, and each is
+// wrapped with the path. A missing TAG is never an error here -- that is the
+// caller's business, and each reader turns an absent tag into its own documented
+// zero-value sentinel.
+//
+// On success the caller owns the returned *os.File and MUST close it. The handle
+// is returned rather than closed here because ReadAudioMetadata needs the same
+// handle for audioDuration (which seeks to 0 internally, so the offset left by
+// tag.ReadFrom does not matter). On error the file is already closed and the
+// returned handle is nil, so a caller that checks the error first can never leak
+// it.
+func openAndReadTags(path string) (tag.Metadata, *os.File, error) {
+	// reason: G304 - path is never attacker-supplied at any of the three call
+	// sites, and the invariant differs per caller: ReadAudioProvenance takes a
+	// configured library root + scanned filename confined via pathutil upstream;
+	// ReadArtistIdentity takes a scan_results file_path written from a configured
+	// library root; ReadAudioMetadata takes a work_queue source_path, likewise
+	// written from a configured library root and confined via pathutil upstream.
+	f, oerr := os.Open(path) //nolint:gosec // reason: see the G304 note above -- all three callers supply a path derived from a configured library root
+	if oerr != nil {
+		return nil, nil, fmt.Errorf("open %s: %w", path, oerr)
+	}
+	m, terr := tag.ReadFrom(f)
+	if terr != nil {
+		// Close here rather than leaving it to the caller: on the error return the
+		// handle is nil, so the caller has nothing left to defer a close on.
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("read metadata %s: %w", path, terr)
+	}
+	return m, f, nil
+}
+
 // ReadAudioProvenance reads the ISRC and MusicBrainz recording MBID embedded in
 // the audio file at path, plus its artist/title tags, for a single file outside
 // the full-library scan loop. It wraps the same extractISRC/extractRecordingMBID
@@ -41,15 +78,11 @@ func IsAudioFile(name string) bool {
 // identity signals a scan would. A missing tag yields an empty string, not an
 // error; only an open/parse failure returns an error.
 func ReadAudioProvenance(path string) (isrc, mbid, artist, title string, err error) {
-	f, oerr := os.Open(path) //nolint:gosec // G304: path is derived from a configured library root + scanned filename, confined via pathutil upstream by the caller
-	if oerr != nil {
-		return "", "", "", "", fmt.Errorf("open %s: %w", path, oerr)
+	m, f, rerr := openAndReadTags(path)
+	if rerr != nil {
+		return "", "", "", "", rerr
 	}
 	defer func() { _ = f.Close() }()
-	m, terr := tag.ReadFrom(f)
-	if terr != nil {
-		return "", "", "", "", fmt.Errorf("read metadata %s: %w", path, terr)
-	}
 	return extractISRC(m), extractRecordingMBID(m), extractArtist(m), m.Title(), nil
 }
 
@@ -61,15 +94,11 @@ func ReadAudioProvenance(path string) (isrc, mbid, artist, title string, err err
 // open or parse failure returns a non-empty error so the caller can skip the
 // row rather than mistake a read failure for a genuinely empty artist.
 func ReadArtistIdentity(path string) (artist, albumArtist string, err error) {
-	f, oerr := os.Open(path) //nolint:gosec // G304: path originates from a scan_results row whose file_path was written from a configured library root
-	if oerr != nil {
-		return "", "", fmt.Errorf("open %s: %w", path, oerr)
+	m, f, rerr := openAndReadTags(path)
+	if rerr != nil {
+		return "", "", rerr
 	}
 	defer func() { _ = f.Close() }()
-	m, terr := tag.ReadFrom(f)
-	if terr != nil {
-		return "", "", fmt.Errorf("read metadata %s: %w", path, terr)
-	}
 	return extractArtist(m), extractAlbumArtist(m), nil
 }
 
@@ -94,15 +123,11 @@ type AudioMetadata struct {
 // error and yields the zero-value sentinel; only an open or parse failure returns
 // an error, matching ReadAudioProvenance and ReadArtistIdentity.
 func ReadAudioMetadata(path string) (AudioMetadata, error) {
-	f, oerr := os.Open(path) //nolint:gosec // reason: G304 - path is a work_queue source_path, written from a configured library root and confined via pathutil upstream
-	if oerr != nil {
-		return AudioMetadata{}, fmt.Errorf("open %s: %w", path, oerr)
+	m, f, rerr := openAndReadTags(path)
+	if rerr != nil {
+		return AudioMetadata{}, rerr
 	}
 	defer func() { _ = f.Close() }()
-	m, terr := tag.ReadFrom(f)
-	if terr != nil {
-		return AudioMetadata{}, fmt.Errorf("read metadata %s: %w", path, terr)
-	}
 	// audioduration seeks to 0 internally, so f may sit at any offset after
 	// tag.ReadFrom; no rewind is needed here. A parse failure degrades to the
 	// unknown-duration sentinel exactly as scanDir does.
