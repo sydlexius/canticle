@@ -231,33 +231,43 @@ func TestFindLyrics_CuesAreNormalized(t *testing.T) {
 	}
 }
 
-func TestFindLyrics_UnsyncedFallback(t *testing.T) {
-	// Word-sync returns nothing; the client should retry at the unsynced tier
-	// rather than reporting the track as a miss.
-	var calls int
-	c, fs := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		calls++
-		name := "type1_unsynced.xml"
-		if calls == 1 {
-			name = "empty.xml"
-		}
-		body, _ := os.ReadFile(filepath.Join("testdata", name))
-		_, _ = w.Write(body)
-	})
+// TestFindLyrics_UnsyncedFromSingleRequest pins the property that makes the tier
+// fallback unnecessary: a track whose only tier is unsynced still yields its
+// lyrics from ONE word-sync request, because the API returns whatever tier the
+// track actually has rather than only the tier asked for.
+func TestFindLyrics_UnsyncedFromSingleRequest(t *testing.T) {
+	c, fs := newTestClient(t, serveFixture(t, "type1_unsynced.xml"))
 
 	song, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"})
 	if err != nil {
-		t.Fatalf("FindLyrics should fall back to unsynced: %v", err)
+		t.Fatalf("FindLyrics: %v", err)
 	}
 	if song.Lyrics.LyricsBody == "" {
-		t.Error("fallback should produce plain lyrics")
+		t.Error("an unsynced-only track should still produce plain lyrics")
 	}
 	reqs := fs.snapshot()
-	if len(reqs) != 2 {
-		t.Fatalf("want 2 requests (word-sync then unsynced), got %d", len(reqs))
+	if len(reqs) != 1 {
+		t.Fatalf("want 1 request, got %d", len(reqs))
 	}
-	if reqs[0].form["lyricsType"] != "3" || reqs[1].form["lyricsType"] != "1" {
-		t.Errorf("tier order wrong: %q then %q", reqs[0].form["lyricsType"], reqs[1].form["lyricsType"])
+	if reqs[0].form["lyricsType"] != "3" {
+		t.Errorf("the single request should ask for word-sync, got %q", reqs[0].form["lyricsType"])
+	}
+}
+
+// TestFindLyrics_MissCostsOneRequest is the regression guard for #608. The
+// removed fallback retried at the unsynced tier on a miss, which could never
+// rescue anything (a tier-3 miss is a genuine miss) and doubled outbound volume
+// on the miss path -- the dominant path for a fallback lane. Assert on the wire,
+// not the return value: the defect was request count, not correctness.
+func TestFindLyrics_MissCostsOneRequest(t *testing.T) {
+	c, fs := newTestClient(t, serveFixture(t, "empty.xml"))
+
+	_, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Nothing"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if n := len(fs.snapshot()); n != 1 {
+		t.Errorf("a miss must cost exactly one request, got %d", n)
 	}
 }
 
@@ -270,8 +280,8 @@ func TestFindLyrics_LineSyncIsUnsupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("an encrypted line-sync payload must not be reported as success")
 	}
-	// After the word-sync attempt yields an unsupported tier, the fallback also
-	// serves the same binary payload, so the final error is still the tier error.
+	// The single request returns the track's actual tier, so a line-sync-only
+	// track surfaces the typed tier error directly -- no retry involved.
 	if !errors.Is(err, ErrUnsupportedTier) {
 		t.Errorf("want ErrUnsupportedTier, got %v", err)
 	}
