@@ -42,17 +42,42 @@ func TestQualityOf_WordTimingsWithoutCuesIsNotWordSynced(t *testing.T) {
 }
 
 // TestQualityOf_PartialWordCoverageStillRanksAbove pins the deliberate ranking
-// rule: ANY word timings promote the result. Coverage is uneven in practice
-// (measured: median 100% of words distinctly timed, worst case 51%), but a
-// partially timed result still carries every line cue a line-synced one would,
-// so preferring it can never produce worse output.
+// rule at its BOUNDARY: ANY word timings promote the result, even when most
+// lines carry none.
+//
+// The fixture must have a genuinely untimed line for this to test anything. An
+// earlier version reused syncedSong() -- which has exactly ONE cue -- plus one
+// timing, i.e. 100% coverage, so it was indistinguishable from the full-coverage
+// case and would have passed under any "promote if len(WordTimings) > 0"
+// implementation. Here 1 of 4 cues is timed: unambiguously partial.
+//
+// Rationale for promoting anyway: a partially timed result still carries every
+// line cue a line-synced one would, so preferring it can never produce worse
+// output. Coverage is uneven in the wild -- across 54 word-synced tracks
+// measured 2026-07-21, the median had 100% of words distinctly timed and the
+// worst 51%.
 //
 // This is a RANKING rule only. The higher bar for terminal-ness -- where marking
 // a half-timed result "done" would permanently exclude it from upgrade -- is
 // #553's call, not QualityOf's.
 func TestQualityOf_PartialWordCoverageStillRanksAbove(t *testing.T) {
-	partial := syncedSong()
-	partial.WordTimings = []models.WordTiming{{Line: 0, Text: "la", StartMS: 1000, EndMS: 1200}}
+	partial := models.Song{Subtitles: models.Synced{Lines: []models.Lines{
+		{Text: "one", Time: models.Time{Total: 1}},
+		{Text: "two", Time: models.Time{Total: 2}},
+		{Text: "three", Time: models.Time{Total: 3}},
+		{Text: "four", Time: models.Time{Total: 4}},
+	}}}
+	// Only the first of four cues carries word timings.
+	partial.WordTimings = []models.WordTiming{{Line: 0, Text: "one", StartMS: 1000, EndMS: 1200}}
+
+	timedLines := map[int]bool{}
+	for _, w := range partial.WordTimings {
+		timedLines[w.Line] = true
+	}
+	if len(timedLines) >= len(partial.Subtitles.Lines) {
+		t.Fatalf("fixture is not partial: %d of %d cues timed", len(timedLines), len(partial.Subtitles.Lines))
+	}
+
 	if got := QualityOf(partial); got != QualityWordSynced {
 		t.Errorf("partial word coverage should still rank as word-synced, got %d", got)
 	}

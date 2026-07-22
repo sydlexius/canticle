@@ -109,6 +109,62 @@ func TestParallelFastSyncedWinsImmediately(t *testing.T) {
 	}
 }
 
+// TestParallelWordSyncedCommitsImmediately covers the word-sync tier through
+// findParallel, which the rest of the #603 tests miss.
+//
+// The commit branch tests `QualityOf(res.song) >= QualitySynced`. A `==`
+// comparison there still passes every other test in the suite, yet it would stop
+// a word-synced result from short-circuiting the race: it would fall into the
+// "suitable but unsynced" branch, be HELD, arm the upgrade window, and become
+// preemptible by a later line-synced result. That is the exact quality inversion
+// #603 exists to prevent, in the dispatch mode where lanes actually race.
+//
+// Asserting on elapsed time is what makes the test bite: a held result waits for
+// the race window, so "committed immediately" and "was held" are distinguishable.
+func TestParallelWordSyncedCommitsImmediately(t *testing.T) {
+	fast := &delayProvider{name: "petitlyrics", song: wordSyncedSong()}
+	slow := &delayProvider{name: "musixmatch", song: syncedSong(), delay: 300 * time.Millisecond}
+	o, _ := New("parallel", delayLane(fast), delayLane(slow))
+	o.SetRaceWait(5 * time.Second)
+
+	start := time.Now()
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if QualityOf(song) != QualityWordSynced {
+		t.Fatalf("quality = %v; want word-synced", QualityOf(song))
+	}
+	if song.WinningLane != "petitlyrics" {
+		t.Fatalf("winning lane = %q; the word-synced lane must win", song.WinningLane)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("returned in %v; a word-synced result must commit immediately, not be held for the race window", elapsed)
+	}
+}
+
+// TestParallelWordSyncedNotPreemptedByLineSynced: even when a line-synced lane
+// reports FIRST, the word-synced result must not lose. The first suitable synced
+// result commits, so this asserts the ranking holds in the losing arrival order.
+func TestParallelWordSyncedNotPreemptedByLineSynced(t *testing.T) {
+	word := &delayProvider{name: "petitlyrics", song: wordSyncedSong()}
+	line := &delayProvider{name: "musixmatch", song: syncedSong(), delay: 200 * time.Millisecond}
+	o, _ := New("parallel", delayLane(word), delayLane(line))
+	o.SetRaceWait(2 * time.Second)
+
+	song, err := o.FindLyrics(context.Background(), models.Track{}, "")
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if QualityOf(song) != QualityWordSynced {
+		t.Fatalf("quality = %v; want word-synced to survive", QualityOf(song))
+	}
+	if len(song.WordTimings) == 0 {
+		t.Error("the committed song must retain its word timings")
+	}
+}
+
 func TestParallelSingleUnsyncedCommitsImmediately(t *testing.T) {
 	// A held unsynced result with no other lane in flight cannot be upgraded, so it
 	// must commit immediately rather than burn the full race window.

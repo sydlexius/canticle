@@ -39,10 +39,10 @@ const (
 //
 // That is a ranking rule, NOT a terminal-state rule. Whether a result is good
 // enough to stop improving needs a higher bar, because coverage is uneven in
-// practice (measured: median 100% of words distinctly timed, worst case 51%).
-// Marking a half-timed result terminal would permanently exclude it from
-// upgrade. That threshold belongs to the upgrade-eligibility policy (#553),
-// which owns terminal-ness; this function only orders results.
+// practice -- see the measurement cited on models.Song.WordTimings. Marking a
+// half-timed result terminal would permanently exclude it from upgrade. That
+// threshold belongs to the upgrade-eligibility policy (#553), which owns
+// terminal-ness; this function only orders results.
 func QualityOf(song models.Song) Quality {
 	switch {
 	case len(song.Subtitles.Lines) > 0 && len(song.WordTimings) > 0:

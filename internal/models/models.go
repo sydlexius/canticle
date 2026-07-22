@@ -44,8 +44,10 @@ type WordTiming struct {
 	Line int
 	// Text is the word as the provider supplied it.
 	Text string
-	// StartMS and EndMS are milliseconds from the start of the track. Both are
-	// clamped to be non-negative by the producing provider.
+	// StartMS and EndMS are milliseconds from the start of the track.
+	// Producers MUST clamp both to be non-negative; this is a requirement on
+	// providers, not a guarantee the type enforces, so a consumer hardening
+	// against a future provider should not assume it.
 	StartMS int
 	EndMS   int
 }
@@ -82,10 +84,16 @@ type Song struct {
 	// line-synced. Each entry's Line indexes into Subtitles.Lines.
 	//
 	// Coverage is NOT uniform in practice: a provider may return word timings for
-	// most lines and a single shared timestamp for others (measured: median 100%
-	// of words distinctly timed, worst case 51%). Consumers that need genuine
-	// per-word detail must inspect the timings rather than assume every line has
-	// them. Transient: not persisted, not serialized.
+	// most lines and a single shared timestamp for others. Measured across 54
+	// word-synced tracks (2026-07-21), the median had 100% of words distinctly
+	// timed and the worst 51%. Consumers that need genuine per-word detail must
+	// inspect the timings rather than assume every line has them.
+	//
+	// Transient: not persisted, not serialized. Note the consequence for caching
+	// -- the worker stores songs as JSON, so a cache HIT returns a song with no
+	// timings and QualityOf classifies it as merely line-synced. Harmless while
+	// nothing consumes them; a constraint on the Enhanced-LRC writer (#480),
+	// which will only see word data on a cache miss.
 	WordTimings []WordTiming `json:"-"`
 	// WinningLane is the provider lane name that returned this song. It is set by
 	// the orchestrator for both suitable results and best-available fallbacks.
