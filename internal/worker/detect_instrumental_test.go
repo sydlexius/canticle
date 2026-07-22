@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -114,5 +115,54 @@ func TestDetectInstrumental_WantedButNoClassifierLoudSkips(t *testing.T) {
 	logged := buf.String()
 	if !strings.Contains(logged, "level=ERROR") || !strings.Contains(logged, "no classifier") {
 		t.Errorf("expected an ERROR loud-skip log mentioning the missing classifier; got: %q", logged)
+	}
+}
+
+// TestDetectorBreakerStateSurvivesRebuild verifies that a rebuild of the
+// orchestrator preserves the detector breaker's accumulated state (#531).
+//
+// Before the fix, rebuildOrchestrator constructed a brand-new circuit.Breaker
+// for the detector lane on every call, so any trip count and open-until deadline
+// were silently discarded. That was latent while every rebuild-triggering setter
+// ran only at startup, but it would let a runtime rebuild (e.g. a settings save
+// that re-wires the worker) reset a tripped detector breaker and immediately
+// hammer a sidecar that is known to be unreachable.
+//
+// The assertion is on the breaker's OBSERVABLE state rather than on pointer
+// identity: reusing the instance and transferring its state are both valid
+// fixes, and the invariant that matters is that a tripped detector stays
+// tripped across a rebuild.
+func TestDetectorBreakerStateSurvivesRebuild(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.EnableAudioDetector(&fakeDetector{})
+	w.SetDetectorOrdering("front")
+
+	lane := w.detectorLane
+	if lane == nil {
+		t.Fatal("detector lane not installed; cannot exercise the rebuild invariant")
+	}
+
+	// Trip the detector breaker so there is state worth preserving.
+	lane.Breaker().Trip()
+	trips := lane.Breaker().Trips()
+	if trips == 0 {
+		t.Fatal("breaker reports 0 trips after Trip(); test cannot discriminate")
+	}
+	if got := lane.Breaker().Allow(); got != circuit.StateOpen {
+		t.Fatalf("breaker state after Trip() = %v; want StateOpen", got)
+	}
+
+	// Any rebuild-triggering setter will do; ordering is the cheapest.
+	w.SetDetectorOrdering("demoted")
+
+	rebuilt := w.detectorLane
+	if rebuilt == nil {
+		t.Fatal("detector lane missing after rebuild")
+	}
+	if got := rebuilt.Breaker().Trips(); got != trips {
+		t.Errorf("trips after rebuild = %d; want %d (breaker state was discarded)", got, trips)
+	}
+	if got := rebuilt.Breaker().Allow(); got != circuit.StateOpen {
+		t.Errorf("breaker state after rebuild = %v; want StateOpen (a tripped detector must stay tripped)", got)
 	}
 }

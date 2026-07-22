@@ -233,6 +233,13 @@ type Worker struct {
 	// NOT part of w.lanes, which tracks provider lanes exclusively and which the
 	// circuit-config setters fan out across.
 	detectorLane *orchestrator.Lane
+	// detectorBreaker is the detector lane's circuit breaker, held on the worker
+	// so it OUTLIVES any single rebuildOrchestrator call (#531). The lane itself
+	// is rebuilt freely; its breaker must not be, or a tripped detector would be
+	// silently reopened. It is deliberately separate from w.lanes, which the
+	// circuit-config setters fan out across -- the detector's breaker is
+	// independent, so tripping it never pauses a provider lane and vice versa.
+	detectorBreaker *circuit.Breaker
 }
 
 // errIdle marks a RunOnce outcome that unwinds the run loop without recording a
@@ -349,8 +356,29 @@ func (w *Worker) rebuildOrchestrator() error {
 			slog.Warn("worker: instrumental detection is INACTIVE under parallel provider dispatch; the detector lane is not installed. Set providers.mode=ordered to enable it (see #528)", "mode", w.mode)
 			w.detectorLane = nil
 		} else {
-			cb := circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
-			cb.SetClock(w.now)
+			// REUSE the existing detector breaker across rebuilds (#531).
+			// Constructing a fresh one here discarded the accumulated trip count
+			// and open-until deadline, so a rebuild silently un-tripped a
+			// detector that had just been shut off for being unreachable -- the
+			// sidecar would be hammered again immediately instead of staying
+			// open for its backoff window. Reconfiguring in place mirrors how
+			// the circuit setters fan out across the provider lanes rather than
+			// replacing their breakers.
+			//
+			// This was latent while every rebuild-triggering setter ran only at
+			// startup (where there is no state worth keeping); it becomes live
+			// the moment anything rebuilds at runtime, e.g. a settings save that
+			// re-wires the worker.
+			cb := w.detectorBreaker
+			if cb == nil {
+				cb = circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
+				cb.SetClock(w.now)
+				w.detectorBreaker = cb
+			}
+			// No reconfiguration here: SetCircuitBackoff, SetCircuitOpenDuration
+			// and setClock now fan out to w.detectorBreaker directly, so a
+			// surviving breaker is already current. Re-applying config on every
+			// rebuild would be a second, order-dependent path to the same state.
 			// Share the primary provider lane's pacer so a detector settle credits
 			// the same ratchet-down counter the musixmatch client's OnThrottle
 			// ratchets up (#550) -- this is a decay CREDIT only; the detector lane
@@ -426,6 +454,13 @@ func (w *Worker) SetCircuitOpenDuration(d time.Duration) {
 	w.circuitOpenDuration = d
 	for _, l := range w.lanes {
 		l.Breaker().SetOpenDuration(d)
+	}
+	// The detector breaker is not in w.lanes (it is independent by design), but
+	// it now OUTLIVES rebuilds (#531), so it must be reconfigured here too. Before
+	// the breaker persisted, a rebuild recreated it with current config and hid
+	// this gap; a long-lived breaker would otherwise keep a stale window forever.
+	if w.detectorBreaker != nil {
+		w.detectorBreaker.SetOpenDuration(d)
 	}
 }
 
@@ -504,6 +539,9 @@ func (w *Worker) SetCircuitBackoff(base, cap time.Duration) {
 	for _, l := range w.lanes {
 		l.Breaker().SetBackoff(w.circuitBackoffBase, w.circuitOpenDuration)
 	}
+	if w.detectorBreaker != nil { // see SetCircuitOpenDuration (#531)
+		w.detectorBreaker.SetBackoff(w.circuitBackoffBase, w.circuitOpenDuration)
+	}
 }
 
 // SetMaxMissAttempts overrides the miss-attempt cap. When miss_count exceeds
@@ -523,6 +561,9 @@ func (w *Worker) setClock(now func() time.Time) {
 	w.now = now
 	for _, l := range w.lanes {
 		l.Breaker().SetClock(now)
+	}
+	if w.detectorBreaker != nil { // see SetCircuitOpenDuration (#531)
+		w.detectorBreaker.SetClock(now)
 	}
 }
 
