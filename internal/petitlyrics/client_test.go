@@ -155,6 +155,56 @@ func TestFindLyrics_WordSyncProducesCues(t *testing.T) {
 	}
 }
 
+// TestFindLyrics_AttachesWordTimings pins that the decoded per-word timings
+// actually reach models.Song. They were decoded and discarded before #603; the
+// orchestrator now needs them to rank a word-synced result above a line-synced
+// one, and #480's A2 writer will consume them.
+func TestFindLyrics_AttachesWordTimings(t *testing.T) {
+	c, _ := newTestClient(t, serveFixture(t, "type3_wordsync.xml"))
+	song, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"})
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if len(song.WordTimings) == 0 {
+		t.Fatal("word-synced result must carry word timings")
+	}
+	// Every timing must index a real cue, or downstream grouping is corrupt.
+	for i, w := range song.WordTimings {
+		if w.Line < 0 || w.Line >= len(song.Subtitles.Lines) {
+			t.Fatalf("timing %d indexes line %d, outside 0..%d",
+				i, w.Line, len(song.Subtitles.Lines)-1)
+		}
+	}
+}
+
+// TestFindLyrics_DropsTimingsWhenNormalizationShiftsCues covers the alignment
+// guard. Word timings are positional indices into the cue slice, so if
+// lrcnormalize.Expand splits a cue (it does that for a cue whose TEXT carries an
+// embedded timestamp) every later index shifts and the timings would point at
+// the wrong words. The client must drop them rather than ship misaligned data --
+// the result degrades to line-sync quality, which is correct but lesser.
+func TestFindLyrics_DropsTimingsWhenNormalizationShiftsCues(t *testing.T) {
+	inner := `<wsy><line><linestring>[00:09.00]Lorem ipsum</linestring>` +
+		`<word><starttime>3000</starttime><endtime>4000</endtime><wordstring>Lorem</wordstring></word>` +
+		`</line></wsy>`
+	body := `<response><songs><song><lyricsId>1</lyricsId><title>Lorem Ipsum</title>` +
+		`<lyricsData>` + base64.StdEncoding.EncodeToString([]byte(inner)) +
+		`</lyricsData></song></songs></response>`
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	})
+	song, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"})
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if len(song.Subtitles.Lines) != 2 {
+		t.Fatalf("expected the embedded stamp to expand to 2 cues, got %d", len(song.Subtitles.Lines))
+	}
+	if len(song.WordTimings) != 0 {
+		t.Errorf("timings must be dropped when normalization changes the cue set, got %d", len(song.WordTimings))
+	}
+}
+
 // TestFindLyrics_MultiCandidateIntegration exercises the whole path end to end
 // on real XML -- parse envelope, score candidates, decode payload -- rather than
 // unit-testing selectCandidate against hand-built structs. The fixture holds two

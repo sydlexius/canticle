@@ -318,13 +318,27 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 
 	switch classifyPayload(raw) {
 	case tierWordSync:
-		cues, _, err := decodeWordSync(raw)
+		cues, timings, err := decodeWordSync(raw)
 		if err != nil {
 			return models.Song{}, err
 		}
 		// Run the shared normalizer so this lane holds the same one-cue-per-line
 		// model as every other write path (#470).
-		song.Subtitles = lrcnormalize.Expand(models.Synced{Lines: cues})
+		expanded := lrcnormalize.Expand(models.Synced{Lines: cues})
+		song.Subtitles = expanded
+		// Word timings index into the cue slice, so they are only safe to attach
+		// when normalization left that slice untouched. Expand splits a cue whose
+		// TEXT carries an embedded timestamp, which shifts every later index; the
+		// timings would then point at the wrong cue. decodeWordSync already sorts,
+		// so a well-formed payload is unchanged here and the timings survive --
+		// but a payload with stray in-text stamps drops to line-sync quality
+		// rather than shipping misaligned word data.
+		if len(expanded.Lines) == len(cues) {
+			song.WordTimings = timings
+		} else {
+			slog.Debug("petitlyrics: cue normalization changed the line set; dropping word timings",
+				"before", len(cues), "after", len(expanded.Lines))
+		}
 		return song, nil
 
 	case tierLineSync:

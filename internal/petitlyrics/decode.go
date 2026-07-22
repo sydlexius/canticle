@@ -18,18 +18,11 @@ const (
 	tierWordSync = 3 // base64 <wsy> XML with per-word timings
 )
 
-// WordTiming is one word's timing within a synced line. Emitted alongside the
-// line-level cues so the Enhanced-LRC (A2) writer (#480) has word granularity
-// without re-parsing the payload.
-type WordTiming struct {
-	// Line is the zero-based index of the owning line in the returned cues.
-	Line int
-	// Text is the word as it appears in the payload.
-	Text string
-	// StartMS and EndMS are milliseconds from the start of the track.
-	StartMS int
-	EndMS   int
-}
+// WordTiming is the shared models type, aliased here so this package's decoder
+// signature stays readable. It lives in models because the orchestrator needs it
+// to rank a word-synced result above a line-synced one, and because the
+// Enhanced-LRC (A2) writer (#480) will consume it from models.Song.
+type WordTiming = models.WordTiming
 
 // wsyDoc mirrors the <wsy> word-sync payload. Element names are taken from
 // observed responses: <wsy> holds <line> elements, each with a <linestring>

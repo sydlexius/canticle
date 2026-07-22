@@ -31,6 +31,25 @@ type Synced struct {
 	Lines []Lines
 }
 
+// WordTiming is one word's timing within a synced line, carrying the word-level
+// granularity that line cues cannot express. Providers that expose per-word
+// timings (currently petitlyrics' word-synced tier) populate these alongside
+// Song.Subtitles; providers that do not leave the slice empty.
+//
+// This is what lets the orchestrator rank a word-synced result above a merely
+// line-synced one: the cues look identical either way, so the timings are the
+// only signal that the richer tier was served.
+type WordTiming struct {
+	// Line is the zero-based index of the owning cue in Song.Subtitles.Lines.
+	Line int
+	// Text is the word as the provider supplied it.
+	Text string
+	// StartMS and EndMS are milliseconds from the start of the track. Both are
+	// clamped to be non-negative by the producing provider.
+	StartMS int
+	EndMS   int
+}
+
 // Lines represents a single synced lyrics line with text and timestamp.
 type Lines struct {
 	Text string `json:"text,omitempty"`
@@ -58,6 +77,16 @@ type Song struct {
 	// Subtitles. Zero value (empty Lines) means absent. Not interleaved by
 	// default; reserved for a future romanization output flag.
 	RomanizationSubtitles Synced
+	// WordTimings carries per-word timings parallel to Subtitles, when the
+	// provider served a word-synced result. Empty means the result is at most
+	// line-synced. Each entry's Line indexes into Subtitles.Lines.
+	//
+	// Coverage is NOT uniform in practice: a provider may return word timings for
+	// most lines and a single shared timestamp for others (measured: median 100%
+	// of words distinctly timed, worst case 51%). Consumers that need genuine
+	// per-word detail must inspect the timings rather than assume every line has
+	// them. Transient: not persisted, not serialized.
+	WordTimings []WordTiming `json:"-"`
 	// WinningLane is the provider lane name that returned this song. It is set by
 	// the orchestrator for both suitable results and best-available fallbacks.
 	// Empty on cache hits and zero-value songs. Used by the worker write-path to

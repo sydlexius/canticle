@@ -58,9 +58,10 @@ func TestQualityOf(t *testing.T) {
 }
 
 func TestQualityOrdering(t *testing.T) {
-	if QualitySynced <= QualityUnsynced || QualityUnsynced <= QualityInstrumental || QualityInstrumental <= QualityNone {
-		t.Fatalf("quality ordering broken: synced=%d unsynced=%d instrumental=%d none=%d",
-			QualitySynced, QualityUnsynced, QualityInstrumental, QualityNone)
+	if QualityWordSynced <= QualitySynced || QualitySynced <= QualityUnsynced ||
+		QualityUnsynced <= QualityInstrumental || QualityInstrumental <= QualityNone {
+		t.Fatalf("quality ordering broken: wordsynced=%d synced=%d unsynced=%d instrumental=%d none=%d",
+			QualityWordSynced, QualitySynced, QualityUnsynced, QualityInstrumental, QualityNone)
 	}
 }
 

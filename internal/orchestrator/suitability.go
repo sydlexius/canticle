@@ -17,16 +17,36 @@ const (
 	QualityInstrumental
 	// QualityUnsynced means the result carries an unsynced lyric body.
 	QualityUnsynced
-	// QualitySynced means the result carries time-synced subtitle lines.
+	// QualitySynced means the result carries line-level time-synced subtitles.
 	QualitySynced
+	// QualityWordSynced means the result carries per-word timings in addition to
+	// line cues. It ranks above QualitySynced because it is strictly more
+	// information: the line cues are still present, plus word-level detail the
+	// Enhanced-LRC (A2) writer can use.
+	QualityWordSynced
 )
 
 // QualityOf classifies a song's lyric quality. The precedence mirrors the LRC
 // writer's content selection (synced lines, then an unsynced body, then an
 // instrumental marker), so the orchestrator's ranking agrees with what the
 // writer will actually emit.
+//
+// Word-sync is recognized by the presence of WordTimings alongside line cues.
+// ANY word timings promote the result, deliberately: for RANKING purposes a
+// partially word-timed result is still strictly better than a line-only one --
+// the line cues are unchanged and the word detail is a bonus, so preferring it
+// can never make output worse.
+//
+// That is a ranking rule, NOT a terminal-state rule. Whether a result is good
+// enough to stop improving needs a higher bar, because coverage is uneven in
+// practice (measured: median 100% of words distinctly timed, worst case 51%).
+// Marking a half-timed result terminal would permanently exclude it from
+// upgrade. That threshold belongs to the upgrade-eligibility policy (#553),
+// which owns terminal-ness; this function only orders results.
 func QualityOf(song models.Song) Quality {
 	switch {
+	case len(song.Subtitles.Lines) > 0 && len(song.WordTimings) > 0:
+		return QualityWordSynced
 	case len(song.Subtitles.Lines) > 0:
 		return QualitySynced
 	case song.Lyrics.LyricsBody != "":
