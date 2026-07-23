@@ -1998,7 +1998,7 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		// for a cohort that predates the database. Echo the resolved instant so the
 		// operator can confirm the window before a long repair run, and so the run's
 		// scope is recoverable from the log afterwards.
-		_, _ = fmt.Fprintf(out, "repair window: re-fetching only unsynced .txt sidecars modified before %s\n", unsyncedBefore.UTC().Format(time.RFC3339))
+		_, _ = fmt.Fprintln(out, repairWindowNotice(unsyncedBefore))
 	}
 	// A manual scan realigns only when realign.enabled AND realign.on_scan (both
 	// off by default, so no behavior change unless opted in).

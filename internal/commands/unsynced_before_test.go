@@ -94,3 +94,35 @@ func TestScanSubcommandSelected(t *testing.T) {
 		})
 	}
 }
+
+// TestRepairWindowNotice covers the operator-facing line echoed at the start of a
+// dated run. It exists so the run's scope is confirmable before a long repair and
+// recoverable from the log afterwards, so the resolved instant must appear in UTC
+// regardless of the zone the operator supplied.
+func TestRepairWindowNotice(t *testing.T) {
+	cases := []struct {
+		name   string
+		cutoff time.Time
+		want   string
+	}{
+		{
+			name:   "utc instant is echoed as given",
+			cutoff: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			want:   "repair window: reopening only .txt sidecars modified before 2026-04-01T00:00:00Z",
+		},
+		{
+			// A non-UTC cutoff must be normalized, so two operators comparing logs
+			// are never reading the same instant under different labels.
+			name:   "non-utc instant is normalized to UTC",
+			cutoff: time.Date(2026, 4, 1, 0, 0, 0, 0, time.FixedZone("PDT", -7*60*60)),
+			want:   "repair window: reopening only .txt sidecars modified before 2026-04-01T07:00:00Z",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := repairWindowNotice(tc.cutoff); got != tc.want {
+				t.Errorf("repairWindowNotice()\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}

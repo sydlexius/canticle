@@ -17,6 +17,15 @@ import (
 // boundary can express it exactly with the RFC3339 form.
 var unsyncedBeforeLayouts = []string{"2006-01-02", time.RFC3339}
 
+// repairWindowNotice builds the operator-facing line echoed at the start of a
+// dated run. The cutoff is normalized to UTC so two operators comparing logs can
+// never read the same instant under different labels, and so the run's scope
+// stays recoverable from the log after a repair that takes hours.
+func repairWindowNotice(cutoff time.Time) string {
+	return fmt.Sprintf("repair window: reopening only .txt sidecars modified before %s",
+		cutoff.UTC().Format(time.RFC3339))
+}
+
 // scanSubcommandSelected reports whether a `scan` invocation selected one of its
 // subcommands rather than running the scan itself. Kept beside the cutoff parser
 // because its only caller is the --unsynced-before guard: the flag is declared on
