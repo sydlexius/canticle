@@ -269,6 +269,128 @@ func TestRunScanReconcile_ConfirmedAllMode(t *testing.T) {
 	}
 }
 
+// TestRunScanReconcile_StampsTelemetryOnConfirm covers #557: a row decided
+// before migration 025 carries instrumental_result=1 with NULL telemetry, and
+// every re-decision path is arithmetic over those scores, so it is skipped by
+// construction and never revisited. Reconcile re-runs live detection against
+// exactly these rows, so its confirm branch is the one place the missing
+// evidence can be recovered -- it previously just counted them and moved on.
+//
+// Without this test the wiring is unguarded: deleting the stamp call leaves
+// every other reconcile test green.
+func TestRunScanReconcile_StampsTelemetryOnConfirm(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	outdir := filepath.Join(dir, "music")
+	if err := os.MkdirAll(outdir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	srcPath := filepath.Join(outdir, "song.flac")
+	_ = os.WriteFile(srcPath, []byte("audio"), 0o600)
+	_ = os.WriteFile(filepath.Join(outdir, "song.txt"), []byte(lyrics.InstrumentalMarker+"\n"), 0o600)
+
+	// Classifier confirms instrumental, so the run takes the confirm branch. Each
+	// of the three scores is a DISTINCT non-zero value (music 0.95, speech 0.03,
+	// vocal peak 0.01) so every telemetry field is independently constrained --
+	// with a zero or shared value, wiring one field from another's source would
+	// satisfy the assertions anyway. Speech stays under the 0.2 gate so the
+	// instrumental verdict still holds.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"mean":{"Music":0.95,"Speech":0.03},"max":{"Music":1.0,"Singing":0.01}}`))
+	}))
+	defer srv.Close()
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeReconcileCfg(t, cfgPath, dbPath, srv.URL, fakeFFmpegCmd(t))
+	id := seedInstrumentalRow(t, ctx, dbPath, models.Inputs{
+		Track:       models.Track{ArtistName: "A", TrackName: "Song"},
+		SourcePath:  srcPath,
+		OutputPaths: []models.OutputPath{{Outdir: outdir, Filename: "song.flac"}},
+	}, "current")
+
+	// Reduce the row to the pre-025 shape the issue describes: the verdict
+	// persisted, the evidence behind it not.
+	clearTelemetry(t, ctx, dbPath, id)
+
+	// DRY RUN FIRST. The command's contract is that --yes changes only whether the
+	// write happens, never which rows are reported, so the dry run must report the
+	// same telemetry-stamped count the apply does -- and must write nothing.
+	var dry bytes.Buffer
+	if code := runScanReconcile(ctx, &dry, ScanReconcileCmd{ConfigPath: cfgPath, All: true}); code != 0 {
+		t.Fatalf("dry-run exit=%d out=%s", code, dry.String())
+	}
+	if !strings.Contains(dry.String(), "telemetry-stamped=1") {
+		t.Errorf("dry run must PREVIEW the stamp it would make; want telemetry-stamped=1, got: %s", dry.String())
+	}
+	if m, _, _, _ := readTelemetry(t, ctx, dbPath, id); m != nil {
+		t.Errorf("dry run wrote telemetry (music_sum=%v); it must write nothing", *m)
+	}
+
+	var buf bytes.Buffer
+	if code := runScanReconcile(ctx, &buf, ScanReconcileCmd{ConfigPath: cfgPath, All: true, Yes: true}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "telemetry-stamped=1") {
+		t.Errorf("want telemetry-stamped=1 in the summary; got: %s", buf.String())
+	}
+
+	music, vocal, speech, dv := readTelemetry(t, ctx, dbPath, id)
+	if music == nil || vocal == nil || speech == nil {
+		t.Fatalf("telemetry still NULL after confirm: music=%v vocal=%v speech=%v", music, vocal, speech)
+	}
+	// The scores must be the ones this detection produced, not placeholders:
+	// the classifier above reports mean Music 0.95 and max Singing 0.01.
+	if *music != 0.95 {
+		t.Errorf("music_sum = %v; want 0.95 (the live detection's score)", *music)
+	}
+	if *vocal != 0.01 {
+		t.Errorf("vocal_peak = %v; want 0.01 (the live detection's score)", *vocal)
+	}
+	// Asserted exactly, and distinct from the other two, so a field wired from the
+	// wrong source on the Result cannot pass.
+	if *speech != 0.03 {
+		t.Errorf("speech_mean = %v; want 0.03 (the live detection's score)", *speech)
+	}
+	if dv == "" {
+		t.Error("detector_version is empty; a stamped row must record which detector confirmed it")
+	}
+}
+
+// clearTelemetry reduces a row to the pre-migration-025 shape: an instrumental
+// verdict with no evidence behind it.
+func clearTelemetry(t *testing.T, ctx context.Context, dbPath string, id int64) {
+	t.Helper()
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET music_sum = NULL, vocal_peak = NULL, speech_mean = NULL,
+             vocal_class = NULL, detector_version = NULL WHERE id = ?`, id); err != nil {
+		t.Fatalf("clear telemetry: %v", err)
+	}
+}
+
+func readTelemetry(t *testing.T, ctx context.Context, dbPath string, id int64) (music, vocal, speech *float64, dv string) {
+	t.Helper()
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	var dvNull *string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT music_sum, vocal_peak, speech_mean, detector_version FROM work_queue WHERE id = ?`, id,
+	).Scan(&music, &vocal, &speech, &dvNull); err != nil {
+		t.Fatalf("read telemetry: %v", err)
+	}
+	if dvNull != nil {
+		dv = *dvNull
+	}
+	return music, vocal, speech, dv
+}
+
 // TestRunScanReconcile_SkipsNoSourceAndNoMarker: a row with no source path is
 // skipped before detection; a disagreeing row with no on-disk marker is left
 // untouched (never reset on the basis of a missing marker).

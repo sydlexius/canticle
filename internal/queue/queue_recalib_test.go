@@ -34,6 +34,246 @@ func seedDeferredRow(t *testing.T, q *DBQueue, artist, title, sourcePath string)
 	return item.ID
 }
 
+// TestStampInstrumentalTelemetry covers the #557 write: a row that already
+// carries an instrumental verdict but no evidence gains its scores without the
+// verdict changing. These rows were decided before migration 025 added the
+// telemetry columns, and every re-decision path is arithmetic over those scores,
+// so until this write exists they are skipped by construction forever.
+func TestStampInstrumentalTelemetry(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
+
+	// Reproduce the pre-025 shape: verdict persisted, telemetry NULL.
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET instrumental_result = 1, status = 'done' WHERE id = ?`, id); err != nil {
+		t.Fatalf("seed pre-telemetry row: %v", err)
+	}
+	var music, vocal, speech *float64
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT music_sum, vocal_peak, speech_mean FROM work_queue WHERE id = ?`, id,
+	).Scan(&music, &vocal, &speech); err != nil {
+		t.Fatalf("read initial telemetry: %v", err)
+	}
+	if music != nil || vocal != nil || speech != nil {
+		t.Fatalf("precondition: telemetry should start NULL, got (%v,%v,%v)", music, vocal, speech)
+	}
+
+	// A SECOND unscored instrumental row, never passed to the stamp. It must come
+	// back untouched: without it, a WHERE clause that matched every row (or the
+	// wrong row) would satisfy every other assertion here.
+	otherID := seedDeferredRow(t, q, "Other", "Other Title", "/music/b.flac")
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET instrumental_result = 1, status = 'done' WHERE id = ?`, otherID); err != nil {
+		t.Fatalf("seed second row: %v", err)
+	}
+
+	tel := InstrumentalTelemetry{MusicSum: 0.91, VocalPeak: 0.02, SpeechMean: 0.003, VocalClass: "Singing", DetectorVersion: "1.26.0"}
+	stamped, err := q.StampInstrumentalTelemetry(ctx, id, tel)
+	if err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if !stamped {
+		t.Fatal("stamped = false; want true for a row still carrying the verdict")
+	}
+
+	var result int
+	var status, vocalClass, dv string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT instrumental_result, status, music_sum, vocal_peak, speech_mean, vocal_class, detector_version
+         FROM work_queue WHERE id = ?`, id,
+	).Scan(&result, &status, &music, &vocal, &speech, &vocalClass, &dv); err != nil {
+		t.Fatalf("read stamped telemetry: %v", err)
+	}
+	// The verdict must be untouched: this write attaches evidence, it never
+	// re-decides. A stamp that flipped the verdict would silently rewrite history.
+	if result != 1 {
+		t.Errorf("instrumental_result = %d; want 1 (unchanged)", result)
+	}
+	// Nor may it move the row's status: re-queuing a completed instrumental as a
+	// side effect of a backfill would be invisible in the summary.
+	if status != "done" {
+		t.Errorf("status = %q; want \"done\" (unchanged)", status)
+	}
+	if music == nil || *music != tel.MusicSum {
+		t.Errorf("music_sum = %v; want %v", music, tel.MusicSum)
+	}
+	if vocal == nil || *vocal != tel.VocalPeak {
+		t.Errorf("vocal_peak = %v; want %v", vocal, tel.VocalPeak)
+	}
+	// Asserted exactly, not merely non-nil: a distinct value per field is what
+	// catches one telemetry field being wired from another's source.
+	if speech == nil || *speech != tel.SpeechMean {
+		t.Errorf("speech_mean = %v; want %v", speech, tel.SpeechMean)
+	}
+	if vocalClass != tel.VocalClass || dv != tel.DetectorVersion {
+		t.Errorf("vocal_class/detector_version = (%q,%q); want (%q,%q)", vocalClass, dv, tel.VocalClass, tel.DetectorVersion)
+	}
+
+	var otherMusic *float64
+	if err := q.db.QueryRowContext(ctx, `SELECT music_sum FROM work_queue WHERE id = ?`, otherID).Scan(&otherMusic); err != nil {
+		t.Fatalf("read second row: %v", err)
+	}
+	if otherMusic != nil {
+		t.Errorf("second row's music_sum = %v; want NULL -- the stamp must touch only the id it was given", *otherMusic)
+	}
+}
+
+// TestNeedsInstrumentalTelemetryMirrorsTheStamp is the anti-drift test. The dry
+// run's honesty depends on this predicate selecting exactly the rows the stamp
+// writes, and the two are separate SQL strings that can drift apart silently --
+// so each case asserts BOTH answers agree, rather than checking the predicate
+// alone. A divergence here means the operator is previewing one set and applying
+// another, which is the failure the dry-run contract exists to prevent.
+func TestNeedsInstrumentalTelemetryMirrorsTheStamp(t *testing.T) {
+	ctx := context.Background()
+	tel := InstrumentalTelemetry{MusicSum: 0.91, VocalPeak: 0.02, SpeechMean: 0.003, DetectorVersion: "1.26.0"}
+
+	cases := []struct {
+		name  string
+		setup string // applied to the seeded row
+		want  bool
+	}{
+		{"unscored done instrumental", `instrumental_result = 1, status = 'done'`, true},
+		{"already scored", `instrumental_result = 1, status = 'done', music_sum = 0.5`, false},
+		{"still processing", `instrumental_result = 1, status = 'processing'`, false},
+		{"not instrumental", `instrumental_result = 0, status = 'done'`, false},
+		{"no verdict", `instrumental_result = NULL, status = 'done'`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := NewDBQueue(openQueueTestDB(t))
+			id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
+			if _, err := q.db.ExecContext(ctx,
+				fmt.Sprintf(`UPDATE work_queue SET %s WHERE id = ?`, tc.setup), id); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			needs, err := q.NeedsInstrumentalTelemetry(ctx, id)
+			if err != nil {
+				t.Fatalf("needs: %v", err)
+			}
+			if needs != tc.want {
+				t.Errorf("NeedsInstrumentalTelemetry = %v; want %v", needs, tc.want)
+			}
+			// The stamp must reach the same verdict, or the dry run previews a
+			// different set than the apply writes.
+			stamped, err := q.StampInstrumentalTelemetry(ctx, id, tel)
+			if err != nil {
+				t.Fatalf("stamp: %v", err)
+			}
+			if stamped != needs {
+				t.Errorf("predicate and stamp disagree: needs=%v stamped=%v -- the dry run would mispreview this row", needs, stamped)
+			}
+		})
+	}
+
+	// A missing row is previewable as "no", never an error.
+	q := NewDBQueue(openQueueTestDB(t))
+	needs, err := q.NeedsInstrumentalTelemetry(ctx, 999999)
+	if err != nil || needs {
+		t.Errorf("missing id: got (needs=%v, err=%v); want (false, nil)", needs, err)
+	}
+}
+
+// TestStampInstrumentalTelemetrySkipsScoredAndProcessing pins the two guard terms
+// that are not about the verdict itself.
+//
+// status='done' mirrors ListInstrumental's own selector, which excludes
+// 'processing' because the worker stamps instrumental_result=1 just BEFORE
+// Complete -- so a row can carry the verdict while a worker is mid-write, and a
+// verdict-only guard would clobber that worker's fresh scores with this run's.
+//
+// music_sum IS NULL confines the write to the population this exists for: a row
+// that already has evidence is not #557's business.
+func TestStampInstrumentalTelemetrySkipsScoredAndProcessing(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	tel := InstrumentalTelemetry{MusicSum: 0.91, VocalPeak: 0.02, SpeechMean: 0.003, DetectorVersion: "1.26.0"}
+
+	t.Run("already scored", func(t *testing.T) {
+		id := seedDeferredRow(t, q, "Artist", "Scored", "/music/scored.flac")
+		if _, err := q.db.ExecContext(ctx,
+			`UPDATE work_queue SET instrumental_result = 1, status = 'done', music_sum = 0.5 WHERE id = ?`, id); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		stamped, err := q.StampInstrumentalTelemetry(ctx, id, tel)
+		if err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		if stamped {
+			t.Error("stamped = true on a row that already carries telemetry; the backfill must not overwrite it")
+		}
+		var music float64
+		if err := q.db.QueryRowContext(ctx, `SELECT music_sum FROM work_queue WHERE id = ?`, id).Scan(&music); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if music != 0.5 {
+			t.Errorf("music_sum = %v; want the original 0.5 preserved", music)
+		}
+	})
+
+	t.Run("still processing", func(t *testing.T) {
+		id := seedDeferredRow(t, q, "Artist", "InFlight", "/music/inflight.flac")
+		// The worker's shape mid-write: verdict stamped, row not yet completed.
+		if _, err := q.db.ExecContext(ctx,
+			`UPDATE work_queue SET instrumental_result = 1, status = 'processing' WHERE id = ?`, id); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		stamped, err := q.StampInstrumentalTelemetry(ctx, id, tel)
+		if err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		if stamped {
+			t.Error("stamped = true on a 'processing' row; that is the mid-write window ListInstrumental excludes")
+		}
+		var music *float64
+		if err := q.db.QueryRowContext(ctx, `SELECT music_sum FROM work_queue WHERE id = ?`, id).Scan(&music); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if music != nil {
+			t.Errorf("music_sum = %v; want NULL -- a worker's in-flight row must not be written", *music)
+		}
+	})
+}
+
+// TestStampInstrumentalTelemetryGuardsOnVerdict pins the guard. If the verdict
+// changed or was cleared underneath the run -- a concurrent reconcile or a
+// worker re-decision -- there is nothing to attach evidence to, and stamping
+// anyway would describe a verdict that no longer exists.
+func TestStampInstrumentalTelemetryGuardsOnVerdict(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
+
+	// instrumental_result = 0: the detector looked and said NOT instrumental.
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET instrumental_result = 0 WHERE id = ?`, id); err != nil {
+		t.Fatalf("seed non-instrumental row: %v", err)
+	}
+	stamped, err := q.StampInstrumentalTelemetry(ctx, id,
+		InstrumentalTelemetry{MusicSum: 0.91, VocalPeak: 0.02, SpeechMean: 0.003, DetectorVersion: "1.26.0"})
+	if err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if stamped {
+		t.Error("stamped = true on a row whose verdict is not instrumental; the guard must reject it")
+	}
+	var music *float64
+	if err := q.db.QueryRowContext(ctx, `SELECT music_sum FROM work_queue WHERE id = ?`, id).Scan(&music); err != nil {
+		t.Fatalf("read telemetry: %v", err)
+	}
+	if music != nil {
+		t.Errorf("music_sum = %v; want NULL -- nothing should have been written", *music)
+	}
+
+	// A missing id is a benign no-op, matching the sibling stamps.
+	if stamped, err := q.StampInstrumentalTelemetry(ctx, 999999,
+		InstrumentalTelemetry{MusicSum: 0.5, DetectorVersion: "1.26.0"}); err != nil || stamped {
+		t.Errorf("missing id: got (stamped=%v, err=%v); want (false, nil)", stamped, err)
+	}
+}
+
 func TestListVocalGateRejections(t *testing.T) {
 	q := NewDBQueue(openQueueTestDB(t))
 	ctx := context.Background()

@@ -695,6 +695,81 @@ func (q *DBQueue) StampUnclassifiedMiss(ctx context.Context, id int64, tel Instr
 	return n > 0, nil
 }
 
+// StampInstrumentalTelemetry records the evidence behind an instrumental verdict
+// the row already carries, without changing the verdict itself (#557).
+//
+// It exists for rows decided before migration 025 added the telemetry columns:
+// the verdict was persisted and the scores behind it were not, so every
+// re-decision path skips them by construction (all of them are arithmetic over
+// stored scores). `scan reconcile` re-runs live detection against exactly these
+// rows but its confirm branch only counted them, so a confirmed row kept its
+// NULL columns and the blind-spot population never drained. This is the write
+// that lets it reach zero.
+//
+// The guard mirrors ListInstrumental's selector exactly -- `instrumental_result
+// = 1 AND status = 'done'` -- and the status term is the load-bearing half. The
+// worker stamps instrumental_result = 1 just BEFORE Complete, so a row can carry
+// the verdict while still 'processing'. Detection takes seconds to minutes, and
+// in that window a worker can re-claim the row and begin writing its own live
+// telemetry; a verdict-only guard would match and clobber those fresh scores
+// with this run's stale ones. Re-confirming the AUDIO says nothing about who
+// owns the ROW, so the verdict alone is not sufficient to write.
+//
+// `music_sum IS NULL` confines the write to the population this exists for.
+// These rows are defined by having no evidence, so a row that already has scores
+// is not this issue's business and its telemetry is left alone -- without it, an
+// --all run would re-stamp every confirmed row on every pass.
+//
+// Any of those failing reports stamped=false and writes nothing, which is benign.
+//
+// NeedsInstrumentalTelemetry is the read-only form of the same predicate, so a
+// dry run can preview exactly this write without performing it.
+func (q *DBQueue) StampInstrumentalTelemetry(ctx context.Context, id int64, tel InstrumentalTelemetry) (bool, error) {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET music_sum = ?,
+             vocal_peak = ?,
+             speech_mean = ?,
+             vocal_class = ?,
+             detector_version = ?
+         WHERE id = ?
+           AND instrumental_result = 1
+           AND status = 'done'
+           AND music_sum IS NULL`,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: stamp instrumental telemetry: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: stamp instrumental telemetry rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// NeedsInstrumentalTelemetry reports whether a row is one StampInstrumentalTelemetry
+// would write to, using the same predicate. It exists so a dry run previews exactly
+// the set an apply mutates: reconcile's contract is that --yes changes only whether
+// the write happens, never which rows are reported, and a counter that disagreed
+// between the two modes would quietly break that.
+//
+// Read-only. A missing row reports false.
+func (q *DBQueue) NeedsInstrumentalTelemetry(ctx context.Context, id int64) (bool, error) {
+	var n int
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue
+         WHERE id = ?
+           AND instrumental_result = 1
+           AND status = 'done'
+           AND music_sum IS NULL`,
+		id,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("queue: needs instrumental telemetry for id %d: %w", id, err)
+	}
+	return n > 0, nil
+}
+
 // Release returns a processing item to the pool it was claimed from, without
 // recording a failure. Used when the worker dequeued the item but cannot
 // process it for a reason that should not count against the row's retry budget

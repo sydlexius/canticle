@@ -3325,6 +3325,7 @@ func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd)
 		checked, confirmed, disagreed    int
 		sidecarsDeleted, rowsReset       int
 		skippedNoSource, skippedNoMarker int
+		telemetryStamped                 int
 		errCount                         int
 	)
 
@@ -3358,6 +3359,54 @@ func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd)
 		checked++
 		if res.Instrumental {
 			confirmed++
+			// The verdict stands, but this run may be the only thing that ever
+			// re-derives its evidence. A row decided before migration 025 carries
+			// instrumental_result=1 with NULL telemetry, and the re-decision paths
+			// that read those scores skip it by construction, so it is never
+			// revisited (#557). Stamping the fresh scores here is what lets that
+			// population drain instead of staying permanently invisible.
+			//
+			// A row already carrying telemetry is not this population, and the
+			// stamp's own guard excludes it -- so only a row that would really be
+			// stamped is previewed or counted.
+			if !args.Yes {
+				// Dry run must preview exactly what apply does: this counter is part
+				// of the summary line the operator verifies against, so it counts the
+				// same rows in both modes and only the WRITE is gated. The predicate
+				// is the stamp's own, so the two can never disagree.
+				needs, nerr := workQueue.NeedsInstrumentalTelemetry(ctx, item.ID)
+				if nerr != nil {
+					slog.Warn("reconcile: telemetry preview check failed", "id", item.ID, "error", nerr)
+				} else if needs {
+					_, _ = fmt.Fprintf(out, "  would stamp telemetry: id=%d\n", item.ID)
+					telemetryStamped++
+				}
+			} else {
+				tel := queue.InstrumentalTelemetry{
+					MusicSum:        res.Confidence,
+					VocalPeak:       res.VocalConfidence,
+					SpeechMean:      res.SpeechConfidence,
+					VocalClass:      res.WinningVocalClass,
+					DetectorVersion: res.Version,
+				}
+				stamped, serr := workQueue.StampInstrumentalTelemetry(ctx, item.ID, tel)
+				switch {
+				case serr != nil:
+					// Advisory: the verdict is unchanged and the next reconcile can
+					// stamp it again, so this must not abort the run. Deliberately NOT
+					// counted into errCount -- that counter drives the exit code and
+					// otherwise means "a detection or mutation failed", which a lost
+					// backfill write is not.
+					slog.Warn("reconcile: stamp telemetry failed; verdict unchanged, run continues", "id", item.ID, "error", serr)
+				case !stamped:
+					// The row was re-claimed or re-decided between the detection and the
+					// stamp, or already carried telemetry. Nothing to attach evidence
+					// to -- benign, and exactly what the guard exists to produce.
+					slog.Info("reconcile: telemetry not stamped; row no longer a completed unscored instrumental", "id", item.ID)
+				default:
+					telemetryStamped++
+				}
+			}
 			continue
 		}
 		disagreed++
@@ -3421,8 +3470,8 @@ func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd)
 		}
 	}
 
-	_, _ = fmt.Fprintf(out, "reconcile done: checked=%d confirmed=%d disagreed=%d markers-deleted=%d rows-reset=%d skipped(no-source=%d,no-marker=%d) errors=%d\n",
-		checked, confirmed, disagreed, sidecarsDeleted, rowsReset, skippedNoSource, skippedNoMarker, errCount)
+	_, _ = fmt.Fprintf(out, "reconcile done: checked=%d confirmed=%d(telemetry-stamped=%d) disagreed=%d markers-deleted=%d rows-reset=%d skipped(no-source=%d,no-marker=%d) errors=%d\n",
+		checked, confirmed, telemetryStamped, disagreed, sidecarsDeleted, rowsReset, skippedNoSource, skippedNoMarker, errCount)
 	if args.Yes && rowsReset > 0 {
 		_, _ = fmt.Fprintf(out, "backup of cleared rows written to %s\n", backupPath)
 	}
