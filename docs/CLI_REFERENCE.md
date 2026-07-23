@@ -77,7 +77,7 @@ The `--upgrade` flag re-fetches tracks that previously produced a `.txt` (unsync
 
 `scan --unsynced-before <cutoff>` narrows a single run's `.txt` re-fetch to sidecars last modified before a cutoff. It exists for a one-time repair: when an identifiable batch of sidecars was written by an older, buggier version, a plain `--upgrade` would re-fetch the entire unsynced population, including files that are already correct.
 
-**Pair it with `--upgrade`, not `--update`.** The cutoff applies only to `.txt` sidecars. `--update` also reopens settled `.lrc` files, and those are re-fetched regardless of the cutoff - so `--update --unsynced-before` still sweeps every synced track in the library. That is the opposite of a scoped repair, and it rewrites exactly the files a repair is trying not to disturb.
+**It pairs with `--upgrade`, and is refused with `--update`.** The cutoff applies only to `.txt` sidecars. `--update` also reopens settled `.lrc` files, and those would be re-fetched regardless of the cutoff - so the pairing would present as a scoped repair while sweeping every synced track in the library, rewriting exactly the files a repair is trying not to disturb. Rather than warn about that, canticle rejects the combination outright.
 
 ```sh
 # Re-fetch only sidecars written before 2026-04-01
@@ -95,8 +95,8 @@ Why bother narrowing, rather than just re-fetching everything:
 Behavior worth knowing before you rely on it:
 
 - **It only ever subtracts from one run.** The flag narrows a re-fetch that was already going to happen; it can never reopen something the reopen rules exclude, and it writes no state. A file skipped by a dated run is fully eligible under the next ordinary scan.
-- **It covers every reopenable `.txt` class** - unsynced sidecars, provisional (detector-written) instrumental markers, and the authoritative markers that only `--update` reopens - for the evidence reason above. It does **not** cover `.lrc` files, which is why it pairs with `--upgrade`.
-- **It requires `--upgrade` or `--update`,** and is rejected without one rather than silently matching nothing. One reopen path is outside its reach: a detector-version bump re-checks provisional markers on its own, with no flag set. The cutoff still narrows that re-check when a scan supplies one, but it cannot be requested on its own.
+- **It covers both `.txt` classes `--upgrade` reopens** - unsynced sidecars and provisional (detector-written) instrumental markers - for the evidence reason above. It does **not** cover `.lrc` files, which is why it is refused with `--update`. (Authoritative instrumental markers are reopened only by `--update`, so they are out of reach here too.)
+- **It requires `--upgrade`,** and is rejected without it rather than silently matching nothing. One reopen path is outside its reach: a detector-version bump re-checks provisional markers on its own, with no flag set. The cutoff still narrows that re-check when a scan supplies one, but it cannot be requested on its own.
 - **The comparison is strict.** A sidecar stamped exactly at the cutoff is excluded.
 - **A bare date is read as midnight UTC.** Use the RFC3339 form when you need a different zone.
 - **An unreadable sidecar is skipped**, not swept in: a bulk repair should touch only files positively identified as belonging to it.

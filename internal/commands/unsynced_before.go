@@ -21,9 +21,13 @@ var unsyncedBeforeLayouts = []string{"2006-01-02", time.RFC3339}
 // dated run. The cutoff is normalized to UTC so two operators comparing logs can
 // never read the same instant under different labels, and so the run's scope
 // stays recoverable from the log after a repair that takes hours.
+// RFC3339Nano, not RFC3339: a cutoff parsed from an RFC3339 input keeps its
+// fractional seconds and is ENFORCED at that precision, so a second-precision
+// format would report a scope the run did not use. This line is the durable
+// record of what a multi-hour repair covered; it has to match the cutoff exactly.
 func repairWindowNotice(cutoff time.Time) string {
 	return fmt.Sprintf("repair window: reopening only .txt sidecars modified before %s",
-		cutoff.UTC().Format(time.RFC3339))
+		cutoff.UTC().Format(time.RFC3339Nano))
 }
 
 // scanSubcommandSelected reports whether a `scan` invocation selected one of its
@@ -52,16 +56,32 @@ func scanSubcommandSelected(args ScanCmd) bool {
 // ScanOptions filter (#617). An empty value returns the zero time, which
 // disables the filter so an ordinary --upgrade is unaffected.
 //
-// The cutoff requires --upgrade or --update because it can only NARROW an
-// unsynced reopen. Without one of those the unsynced class is never reopened at
-// all, so the flag would silently do nothing -- an error is more useful than a
-// run that quietly matches zero files.
+// The cutoff requires --upgrade, and is REFUSED with --update.
+//
+// It requires a reopen flag because it can only NARROW a re-fetch that was
+// already going to happen; with neither flag the flag would silently match
+// nothing, and an error is more useful than a run that quietly does nothing.
+//
+// It refuses --update because the cutoff applies ONLY to .txt sidecars -- the
+// scanner consults it inside the two .txt branches and nowhere else -- while
+// --update also reopens settled .lrc files, which are then re-fetched whatever
+// the cutoff says. The pairing is accepted-looking but incoherent: it presents
+// as a scoped repair while rewriting the entire synced population, which is
+// exactly the data a repair must not disturb (and, where a cohort is identified
+// by sidecar mtime, destroys the evidence that made it identifiable). Refusing
+// is better than warning: the run's own preview line would otherwise announce
+// "reopening only .txt sidecars" while doing considerably more than that.
 func resolveUnsyncedBefore(raw string, upgrade, update bool) (time.Time, error) {
 	if raw == "" {
 		return time.Time{}, nil
 	}
-	if !upgrade && !update {
-		return time.Time{}, fmt.Errorf("--unsynced-before requires --upgrade or --update: it narrows an unsynced re-fetch, and without one of those no unsynced sidecar is reopened")
+	// Checked before the reopen-flag requirement so that passing BOTH flags is
+	// still refused: --upgrade does not redeem an --update sweep.
+	if update {
+		return time.Time{}, fmt.Errorf("--unsynced-before cannot be combined with --update: the cutoff applies only to .txt sidecars, so --update would still re-fetch every settled .lrc regardless of it. Use --upgrade for a scoped repair, or drop --unsynced-before for a full re-fetch")
+	}
+	if !upgrade {
+		return time.Time{}, fmt.Errorf("--unsynced-before requires --upgrade: it narrows a .txt re-fetch, and without --upgrade no .txt sidecar is reopened")
 	}
 	for _, layout := range unsyncedBeforeLayouts {
 		if t, err := time.Parse(layout, raw); err == nil {

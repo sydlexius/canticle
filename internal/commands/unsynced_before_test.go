@@ -20,6 +20,11 @@ func TestResolveUnsyncedBefore(t *testing.T) {
 		{name: "empty -> no filter", in: "", upgrade: true, wantZero: true},
 		{name: "date only -> midnight UTC", in: "2026-04-01", upgrade: true, wantUTC: "2026-04-01T00:00:00Z"},
 		{name: "rfc3339 -> exact instant", in: "2026-04-01T12:30:00Z", upgrade: true, wantUTC: "2026-04-01T12:30:00Z"},
+		// time.Parse accepts fractional seconds against the RFC3339 layout, and the
+		// cutoff is APPLIED at that precision, so it must survive the round trip
+		// here and in the notice -- otherwise the logged scope disagrees with the
+		// scope actually used.
+		{name: "fractional seconds are preserved", in: "2026-04-01T12:30:00.123Z", upgrade: true, wantUTC: "2026-04-01T12:30:00.123Z"},
 		{name: "garbage -> error", in: "not-a-date", upgrade: true, wantError: true},
 		{name: "wrong order -> error", in: "01-04-2026", upgrade: true, wantError: true},
 		// The filter only narrows an unsynced reopen, so requiring it to accompany
@@ -44,20 +49,41 @@ func TestResolveUnsyncedBefore(t *testing.T) {
 				}
 				return
 			}
-			if got.UTC().Format(time.RFC3339) != tc.wantUTC {
-				t.Errorf("cutoff = %s; want %s", got.UTC().Format(time.RFC3339), tc.wantUTC)
+			// RFC3339Nano, not RFC3339: formatting with the second-precision layout
+			// would DISCARD any fractional part before comparing, so the
+			// fractional-seconds case above would pass no matter what resolve
+			// returned. Assert at the precision the value actually carries.
+			if got.UTC().Format(time.RFC3339Nano) != tc.wantUTC {
+				t.Errorf("cutoff = %s; want %s", got.UTC().Format(time.RFC3339Nano), tc.wantUTC)
 			}
 		})
 	}
 }
 
-// TestResolveUnsyncedBefore_UpdateAlsoAccepted confirms --update satisfies the
-// reopen requirement: it reopens the unsynced class too, so a dated --update is
-// a coherent (if broader) repair run.
-func TestResolveUnsyncedBefore_UpdateAlsoAccepted(t *testing.T) {
-	got, err := resolveUnsyncedBefore("2026-04-01", false, true)
+// TestResolveUnsyncedBefore_UpdateRejected covers the --update pairing, which is
+// refused rather than merely discouraged.
+//
+// This inverts an earlier assertion that --update was "a coherent (if broader)
+// repair run". It is not. The cutoff can only narrow a .txt reopen -- the scanner
+// applies it inside the two .txt branches and nowhere else -- so under --update
+// every settled .lrc is re-fetched whatever the cutoff says. That is the opposite
+// of a scoped repair, and it rewrites precisely the files a repair must leave
+// alone, while the run's own preview line claims it is touching only .txt.
+// Documenting that was not enough: a program that prints a false statement about
+// what it is about to do has to stop doing it, not explain itself elsewhere.
+func TestResolveUnsyncedBefore_UpdateRejected(t *testing.T) {
+	if _, err := resolveUnsyncedBefore("2026-04-01", false, true); err == nil {
+		t.Fatal("expected --update + --unsynced-before to be rejected; got nil error")
+	}
+	// --upgrade --update together is still --update's unscoped sweep, so the
+	// rejection must not be escapable by passing both.
+	if _, err := resolveUnsyncedBefore("2026-04-01", true, true); err == nil {
+		t.Fatal("expected --upgrade --update + --unsynced-before to be rejected; got nil error")
+	}
+	// The plain --upgrade path must keep working.
+	got, err := resolveUnsyncedBefore("2026-04-01", true, false)
 	if err != nil {
-		t.Fatalf("unexpected error with --update: %v", err)
+		t.Fatalf("unexpected error with --upgrade alone: %v", err)
 	}
 	if got.IsZero() {
 		t.Fatal("cutoff = zero; want the parsed instant")
@@ -116,6 +142,16 @@ func TestRepairWindowNotice(t *testing.T) {
 			name:   "non-utc instant is normalized to UTC",
 			cutoff: time.Date(2026, 4, 1, 0, 0, 0, 0, time.FixedZone("PDT", -7*60*60)),
 			want:   "repair window: reopening only .txt sidecars modified before 2026-04-01T07:00:00Z",
+		},
+		{
+			// The cutoff is APPLIED at sub-second precision, so the notice has to
+			// report it at that precision too. A second-precision format would
+			// print ...00Z for a cutoff enforced at ...00.123Z, leaving the logged
+			// scope quietly disagreeing with the scope actually used -- and this
+			// line is the only durable record of what a long repair run covered.
+			name:   "fractional seconds survive into the notice",
+			cutoff: time.Date(2026, 4, 1, 0, 0, 0, 123000000, time.UTC),
+			want:   "repair window: reopening only .txt sidecars modified before 2026-04-01T00:00:00.123Z",
 		},
 	}
 	for _, tc := range cases {
