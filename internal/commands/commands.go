@@ -134,7 +134,7 @@ type ScanCmd struct {
 	DetectInstrumental   bool     `arg:"--detect-instrumental" help:"force instrumental detection on for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --no-detect-instrumental"`
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
-	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade/--update, reopen only .txt sidecars (unsynced lyrics and provisional instrumental markers) last modified before this cutoff; for a one-time repair of a historical cohort (issue #617). Accepts a date (2026-04-01, read as midnight UTC) or an RFC3339 instant; the comparison is strict, so a sidecar stamped exactly at the cutoff is excluded"`
+	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade, reopen only .txt sidecars (unsynced lyrics and provisional instrumental markers) last modified before this cutoff; for a one-time repair of a historical cohort (issue #617). Refused with --update, which re-fetches every settled .lrc regardless of the cutoff. Accepts a date (2026-04-01, read as midnight UTC) or an RFC3339 instant; the comparison is strict, so a sidecar stamped exactly at the cutoff is excluded"`
 
 	Results                          *ScanResultsCmd                          `arg:"subcommand:results" help:"list persisted scan_results rows"`
 	Clear                            *ScanClearCmd                            `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
@@ -1998,7 +1998,7 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		// for a cohort that predates the database. Echo the resolved instant so the
 		// operator can confirm the window before a long repair run, and so the run's
 		// scope is recoverable from the log afterwards.
-		_, _ = fmt.Fprintf(out, "repair window: re-fetching only unsynced .txt sidecars modified before %s\n", unsyncedBefore.UTC().Format(time.RFC3339))
+		_, _ = fmt.Fprintln(out, repairWindowNotice(unsyncedBefore))
 	}
 	// A manual scan realigns only when realign.enabled AND realign.on_scan (both
 	// off by default, so no behavior change unless opted in).

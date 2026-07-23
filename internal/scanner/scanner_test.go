@@ -379,6 +379,14 @@ func TestSidecarWithinWindow(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 
+	exact := filepath.Join(dir, "exact.txt")
+	if err := os.WriteFile(exact, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chtimes(exact, cutoff, cutoff); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
 	missing := filepath.Join(dir, "does-not-exist.txt")
 
 	cases := []struct {
@@ -391,6 +399,11 @@ func TestSidecarWithinWindow(t *testing.T) {
 		{"zero cutoff ignores a missing file", missing, time.Time{}, true},
 		{"mtime before cutoff is in window", before, cutoff, true},
 		{"mtime after cutoff is out of window", after, cutoff, false},
+		// The comparison is strict (time.Before), matching the flag's "before"
+		// wording: a sidecar stamped exactly at the cutoff is excluded. This is the
+		// boundary most likely to regress silently, since flipping Before to
+		// !After would keep every other case in this table passing.
+		{"mtime equal to cutoff is out of window (strict)", exact, cutoff, false},
 		// Fail closed: a bulk repair must only touch files positively identified
 		// as belonging to the cohort, so an unstattable sidecar is left alone.
 		{"unreadable sidecar fails closed", missing, cutoff, false},

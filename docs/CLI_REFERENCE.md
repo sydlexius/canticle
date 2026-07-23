@@ -73,6 +73,37 @@ canticle "Dream Theater"
 
 The `--upgrade` flag re-fetches tracks that previously produced a `.txt` (unsynced) file, to promote them to `.lrc` when synced lyrics later become available. Instrumental tracks are always written as `.txt` and are excluded from upgrade - only `--update` (full re-fetch) overrides them.
 
+### Scoping an upgrade to an older cohort
+
+`scan --unsynced-before <cutoff>` narrows a single run's `.txt` re-fetch to sidecars last modified before a cutoff. It exists for a one-time repair: when an identifiable batch of sidecars was written by an older, buggier version, a plain `--upgrade` would re-fetch the entire unsynced population, including files that are already correct.
+
+**It pairs with `--upgrade`, and is refused with `--update`.** The cutoff applies only to `.txt` sidecars. `--update` also reopens settled `.lrc` files, and those would be re-fetched regardless of the cutoff - so the pairing would present as a scoped repair while sweeping every synced track in the library, rewriting exactly the files a repair is trying not to disturb. Rather than warn about that, canticle rejects the combination outright.
+
+```sh
+# Re-fetch only sidecars written before 2026-04-01
+canticle scan --upgrade --unsynced-before 2026-04-01
+
+# An exact instant, when a bare date is too coarse
+canticle scan --upgrade --unsynced-before 2026-04-01T12:00:00Z
+```
+
+Why bother narrowing, rather than just re-fetching everything:
+
+- **Provider traffic.** Re-fetching a correct file spends a request to learn nothing. Requests are paced by [`api.cooldown`](CONFIGURATION.md) (15s by default), and the adaptive pacer multiplies that base by up to 8x while a provider is throttling, so a few thousand unnecessary tracks can mean many hours of wall-clock.
+- **It destroys the evidence.** Re-fetching rewrites the sidecar and bumps its mtime. Where a repair cohort is identified *by* mtime - which is the case for any batch predating the database - a full re-fetch erases the only signal distinguishing the damaged files from the healthy ones, and the run cannot be scoped again.
+
+Behavior worth knowing before you rely on it:
+
+- **It only ever subtracts from one run.** The flag narrows a re-fetch that was already going to happen; it can never reopen something the reopen rules exclude, and it writes no state. A file skipped by a dated run is fully eligible under the next ordinary scan.
+- **It covers both `.txt` classes `--upgrade` reopens** - unsynced sidecars and provisional (detector-written) instrumental markers - for the evidence reason above. It does **not** cover `.lrc` files, which is why it is refused with `--update`. (Authoritative instrumental markers are reopened only by `--update`, so they are out of reach here too.)
+- **It requires `--upgrade`,** and is rejected without it rather than silently matching nothing. One reopen path is outside its reach: a detector-version bump re-checks provisional markers on its own, with no flag set. The cutoff still narrows that re-check when a scan supplies one, but it cannot be requested on its own.
+- **The comparison is strict.** A sidecar stamped exactly at the cutoff is excluded.
+- **A bare date is read as midnight UTC.** Use the RFC3339 form when you need a different zone.
+- **An unreadable sidecar is skipped**, not swept in: a bulk repair should touch only files positively identified as belonging to it.
+- **`scan` only.** Serve mode's scheduler never applies a cutoff, so ongoing upgrades are unaffected.
+
+Choosing a cutoff is an evidence question, not a guess. Sidecar mtime is a filesystem attribute, and a copy or restore can rewrite it, so confirm it still reflects write time before trusting it: canticle never writes audio files, so if the sidecars in a suspected cohort carry timestamps that their sibling audio files do not share, no bulk filesystem event produced them. A genuine write cohort also spreads across time at roughly the provider's pace, where a bulk copy compresses into seconds.
+
 In directory mode, when audio tags carry ISRC, MusicBrainz recording ID, or duration, those values are read and passed to Musixmatch to improve match precision - for example, distinguishing two recordings of the same title.
 
 ## Serve
