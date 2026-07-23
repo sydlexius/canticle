@@ -1,6 +1,19 @@
 # Disable CodeRabbit auto-review to honor this org's manual-reviews-only policy.
 # Manual `@coderabbitai review` still triggers a full review on demand.
+#
+# THIS IS THE ONLY CodeRabbit CONFIG. A `.coderabbit.yml` (note: .yml, not .yaml)
+# was also tracked until #551; CodeRabbit loaded THIS file and silently ignored
+# that one, so edits to it did nothing and raised no warning. Do not re-add a
+# second file under either extension.
+language: en-US
+
 reviews:
+  # Emit the high-level summary and the review-status block: both are review
+  # output this project actually reads. Carried over from the ignored .yml,
+  # where they never took effect.
+  high_level_summary: true
+  review_status: true
+  poem: false
   # Use the request-changes workflow: CodeRabbit holds a PR in a blocking review
   # state until its comments are resolved, then marks it APPROVED (so its
   # approval can count toward required approvals). Enabling this also accepts the
