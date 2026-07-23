@@ -222,33 +222,47 @@ type ScanOptions struct {
 	// providers_version cache retirement. Empty (dir/CLI mode, or detector off)
 	// disables version invalidation. See #502.
 	DetectorVersion string
-	// UnsyncedBefore narrows an unsynced-.txt reopen to sidecars last modified
-	// before this instant, for a one-time repair of a historical cohort (#617).
+	// UnsyncedBefore narrows a .txt-sidecar reopen to sidecars last modified before
+	// this instant, for a one-time repair of a historical cohort (#617). It applies
+	// to BOTH .txt classes a scan can reopen -- a settled unsynced sidecar and a
+	// provisional (detector-written) instrumental marker -- because a dated run
+	// that rewrote recent markers would destroy the same mtime evidence the cutoff
+	// depends on. It does NOT apply to a settled .lrc: --update reopens those, and
+	// a synced file is not part of any unsynced-repair cohort.
+	//
 	// The zero value disables the filter entirely, so an ordinary --upgrade (and
-	// serve mode, which never sets this) keeps reopening every unsynced sidecar.
+	// serve mode, which never sets this) keeps reopening every eligible sidecar.
 	//
 	// It SUBTRACTS from one run's scope and never from a track's eligibility: no
 	// state is written, no marker is set, and the reopen classes are untouched, so
 	// a file skipped by a dated run is fully eligible under the next unfiltered
-	// scan. It also cannot resurrect a class reopenClassesFor excludes -- it only
-	// further narrows a reopen that was already going to happen.
+	// scan. It cannot resurrect a class reopenClassesFor excludes, and that is
+	// structural rather than incidental: each check runs inside the branch that
+	// granted the reopen, so it can only ever subtract from one.
 	UnsyncedBefore time.Time
 }
 
-// unsyncedWithinWindow reports whether an unsynced .txt sidecar is inside a dated
-// repair run's window (#617). A zero cutoff disables the filter, so every sidecar
-// is in-window and an ordinary --upgrade is unaffected.
+// sidecarWithinWindow reports whether a .txt sidecar is inside a dated repair
+// run's window (#617). A zero cutoff disables the filter, so every sidecar is
+// in-window and an ordinary --upgrade is unaffected.
 //
 // The window is keyed on the SIDECAR's mtime, which for this cohort is the only
 // available evidence of when canticle wrote it: the affected tracks predate the
 // database entirely (3 of ~9,995 have a work_queue or scan_results row), so no
 // query can identify them.
 //
+// The comparison is STRICT: a sidecar whose mtime equals the cutoff exactly is
+// OUT of window, matching the flag's "before" wording.
+//
 // An unreadable sidecar is treated as OUT of window. The filter exists to narrow
 // a bulk repair to files positively identified as belonging to it, so failing
 // closed skips an unprovable file rather than pulling it into a rewrite -- the
 // conservative direction when the run's whole premise is "only touch the cohort".
-func unsyncedWithinWindow(path string, before time.Time) bool {
+//
+// Callers must invoke this INSIDE the branch that already granted a reopen, never
+// as a sibling switch case; see the call sites for why that placement is what
+// makes "can only narrow a reopen" structural rather than incidental.
+func sidecarWithinWindow(path string, before time.Time) bool {
 	if before.IsZero() {
 		return true
 	}
@@ -531,18 +545,35 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 				slog.Debug("skipping file, instrumental marker (terminal)", "file", file.Name())
 				continue
 			}
+			// Reopen granted. A dated repair run narrows it to the target cohort --
+			// checked HERE, inside the branch that granted the reopen, so a marker
+			// this switch already decided to reconsider cannot escape the window.
+			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+				slog.Debug("skipping file, instrumental marker outside repair window", "file", file.Name())
+				continue
+			}
 			// Provisional marker eligible for re-check: fall through to enqueue.
-		case txtExists && !lrcExists && !reopen.Unsynced:
-			// Unsynced .txt present and not asked to upgrade or update -- skip.
-			slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
-			continue
-		case txtExists && !lrcExists && !unsyncedWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore):
-			// Reopen was granted, but a dated repair run (#617) narrows this pass to
-			// sidecars written before the cutoff. Ordering matters: this case sits
-			// AFTER the !reopen.Unsynced skip so the filter can only narrow a reopen
-			// that was already going to happen, never resurrect a terminal class.
-			slog.Debug("skipping file, unsynced sidecar outside repair window", "file", file.Name())
-			continue
+		case txtExists && !lrcExists:
+			// A settled unsynced .txt. Reopen it only when the Unsynced class was
+			// requested, and then only when a dated repair run (#617) has not scoped
+			// this pass to an earlier cohort.
+			//
+			// Both checks live INSIDE this branch on purpose. An earlier revision put
+			// the window test in a sibling `case` after this one, which made the
+			// "can only narrow a reopen" invariant a property of case ORDERING in a
+			// first-match switch rather than of the code: it silently exempted the
+			// instrumental branch above (which matches first and breaks), and any
+			// future reordering would have broken it with no test failing. Nesting
+			// makes the invariant structural -- the window can only ever subtract
+			// from a reopen this branch already granted.
+			if !reopen.Unsynced {
+				slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
+				continue
+			}
+			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+				slog.Debug("skipping file, unsynced sidecar outside repair window", "file", file.Name())
+				continue
+			}
 		}
 
 		if !slices.Contains(supportedFileTypes, ext) {

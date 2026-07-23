@@ -134,7 +134,7 @@ type ScanCmd struct {
 	DetectInstrumental   bool     `arg:"--detect-instrumental" help:"force instrumental detection on for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --no-detect-instrumental"`
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
-	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade/--update, re-fetch only unsynced .txt sidecars last modified before this date (2026-04-01) or RFC3339 instant; for a one-time repair of a historical cohort (issue #617)"`
+	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade/--update, reopen only .txt sidecars (unsynced lyrics and provisional instrumental markers) last modified before this cutoff; for a one-time repair of a historical cohort (issue #617). Accepts a date (2026-04-01, read as midnight UTC) or an RFC3339 instant; the comparison is strict, so a sidecar stamped exactly at the cutoff is excluded"`
 
 	Results                          *ScanResultsCmd                          `arg:"subcommand:results" help:"list persisted scan_results rows"`
 	Clear                            *ScanClearCmd                            `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
@@ -1890,6 +1890,15 @@ func webhookAllowedRoots(ctx context.Context, sqlDB *sql.DB) []string {
 // is forwarded to the nested subcommand when the subcommand did not specify
 // its own --config value.
 func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
+	// --unsynced-before is parsed on ScanCmd, so it is accepted syntactically on
+	// every `scan` subcommand -- but only the bare scan (runScan) consults it.
+	// Reject it on a subcommand rather than letting it read as applied: a silently
+	// ignored repair-window flag is exactly the failure the --upgrade/--update
+	// guard in resolveUnsyncedBefore exists to prevent.
+	if args.UnsyncedBefore != "" && scanSubcommandSelected(args) {
+		_, _ = fmt.Fprintln(out, "--unsynced-before applies only to `scan` itself, not to a scan subcommand; it narrows which sidecars a re-fetch reopens")
+		return 1
+	}
 	switch {
 	case args.Results != nil:
 		sub := *args.Results

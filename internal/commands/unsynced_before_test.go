@@ -63,3 +63,34 @@ func TestResolveUnsyncedBefore_UpdateAlsoAccepted(t *testing.T) {
 		t.Fatal("cutoff = zero; want the parsed instant")
 	}
 }
+
+// TestScanSubcommandSelected covers the guard that keeps --unsynced-before from
+// being silently accepted-and-ignored on a `scan` subcommand (it is parsed on
+// ScanCmd, so it binds syntactically everywhere, but only runScan consults it).
+func TestScanSubcommandSelected(t *testing.T) {
+	if scanSubcommandSelected(ScanCmd{}) {
+		t.Error("bare scan reported as a subcommand; --unsynced-before must be allowed there")
+	}
+	cases := []struct {
+		name string
+		args ScanCmd
+	}{
+		{"results", ScanCmd{Results: &ScanResultsCmd{}}},
+		{"clear", ScanCmd{Clear: &ScanClearCmd{}}},
+		{"reconcile", ScanCmd{Reconcile: &ScanReconcileCmd{}}},
+		{"reconcile-instrumental", ScanCmd{ReconcileInstrumental: &ScanReconcileInstrumentalCmd{}}},
+		{"reconcile-instrumental-recalibrate", ScanCmd{ReconcileInstrumentalRecalibrate: &ScanReconcileInstrumentalRecalibrateCmd{}}},
+		{"reconcile-paths", ScanCmd{ReconcilePaths: &ScanReconcilePathsCmd{}}},
+		{"reconcile-identity", ScanCmd{ReconcileIdentity: &ScanReconcileIdentityCmd{}}},
+		{"reconcile-lrc", ScanCmd{ReconcileLRC: &ScanReconcileLRCCmd{}}},
+		{"reconcile-marker-provenance", ScanCmd{ReconcileMarkerProvenance: &ScanReconcileMarkerProvenanceCmd{}}},
+		{"reconcile-detector-stats", ScanCmd{ReconcileDetectorStats: &ScanReconcileDetectorStatsCmd{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !scanSubcommandSelected(tc.args) {
+				t.Errorf("%s not detected as a subcommand; --unsynced-before would be silently ignored", tc.name)
+			}
+		})
+	}
+}

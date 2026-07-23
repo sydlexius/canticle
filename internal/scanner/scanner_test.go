@@ -353,3 +353,156 @@ func TestScanLibrary_UnsyncedBefore(t *testing.T) {
 		})
 	}
 }
+
+// TestSidecarWithinWindow covers the repair-window predicate directly, including
+// the fail-closed stat-error branch that ScanLibrary cannot reach (it only calls
+// this after its own os.Stat already succeeded).
+func TestSidecarWithinWindow(t *testing.T) {
+	cutoff := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+
+	before := filepath.Join(dir, "before.txt")
+	if err := os.WriteFile(before, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	old := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(before, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	after := filepath.Join(dir, "after.txt")
+	if err := os.WriteFile(after, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	recent := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(after, recent, recent); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	missing := filepath.Join(dir, "does-not-exist.txt")
+
+	cases := []struct {
+		name   string
+		path   string
+		cutoff time.Time
+		want   bool
+	}{
+		{"zero cutoff disables the filter", after, time.Time{}, true},
+		{"zero cutoff ignores a missing file", missing, time.Time{}, true},
+		{"mtime before cutoff is in window", before, cutoff, true},
+		{"mtime after cutoff is out of window", after, cutoff, false},
+		// Fail closed: a bulk repair must only touch files positively identified
+		// as belonging to the cohort, so an unstattable sidecar is left alone.
+		{"unreadable sidecar fails closed", missing, cutoff, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sidecarWithinWindow(tc.path, tc.cutoff); got != tc.want {
+				t.Errorf("sidecarWithinWindow = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestScanLibrary_UnsyncedBefore_InstrumentalMarkers covers the repair window's
+// effect on provisional (detector-written) instrumental markers. A dated run must
+// narrow these too: rewriting a recent marker bumps its mtime and destroys the
+// same evidence the cutoff depends on.
+//
+// An authoritative (provider or legacy bare) marker stays terminal under --upgrade
+// regardless of the window, so the cutoff must not resurrect one.
+func TestScanLibrary_UnsyncedBefore_InstrumentalMarkers(t *testing.T) {
+	cutoff := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	old := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name        string
+		source      string
+		markerTime  time.Time
+		opts        ScanOptions
+		wantEnqueue bool
+	}{
+		// The gap this test was written for: without the window check inside the
+		// instrumental branch, a recent provisional marker is reopened by a dated
+		// run and rewritten, destroying its mtime.
+		{"provisional_recent_outside_window_skipped", lyrics.SourceDetector, recent,
+			ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, false},
+		{"provisional_old_within_window_reopens", lyrics.SourceDetector, old,
+			ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, true},
+		// Zero value stays inert for markers too.
+		{"provisional_recent_no_cutoff_reopens", lyrics.SourceDetector, recent,
+			ScanOptions{Upgrade: true}, true},
+		// The window must never resurrect a terminal class.
+		{"authoritative_old_within_window_stays_terminal", "musixmatch", old,
+			ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeAudioFile(t, dir, "song.mp3")
+			writeMarkerWithHeader(t, dir, "song.txt", tc.source, "1.0")
+			marker := filepath.Join(dir, "song.txt")
+			if err := os.Chtimes(marker, tc.markerTime, tc.markerTime); err != nil {
+				t.Fatalf("chtimes: %v", err)
+			}
+			sc := NewScanner()
+			results, err := sc.ScanLibrary(context.Background(), dir, tc.opts)
+			if err != nil {
+				t.Fatalf("ScanLibrary: %v", err)
+			}
+			if got := len(results) > 0; got != tc.wantEnqueue {
+				t.Errorf("source=%q mtime=%s opts=%+v: enqueued=%v, want %v",
+					tc.source, tc.markerTime.Format("2006-01"), tc.opts, got, tc.wantEnqueue)
+			}
+		})
+	}
+}
+
+// TestScanLibrary_WindowNeverResurrectsATerminalClass guards the ordering
+// invariant directly. The window check must run only INSIDE a branch that already
+// granted a reopen, so a sidecar the reopen rules exclude stays excluded no matter
+// what the cutoff says.
+//
+// The load-bearing case is the recent sidecar with NO reopen flag: an earlier
+// revision expressed the window as a sibling switch case, and hoisting that case
+// above the reopen check let an out-of-window file reach enqueue for the wrong
+// reason. Every case here must stay non-enqueued because the class was never
+// reopened -- never because the mtime happened to agree.
+func TestScanLibrary_WindowNeverResurrectsATerminalClass(t *testing.T) {
+	cutoff := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	old := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name        string
+		sidecarTime time.Time
+	}{
+		{"in_window_sidecar_without_reopen_stays_terminal", old},
+		{"out_of_window_sidecar_without_reopen_stays_terminal", recent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeAudioFile(t, dir, "song.mp3")
+			txt := filepath.Join(dir, "song.txt")
+			if err := os.WriteFile(txt, []byte("an unsynced lyric body\n"), 0o644); err != nil {
+				t.Fatalf("write sidecar: %v", err)
+			}
+			if err := os.Chtimes(txt, tc.sidecarTime, tc.sidecarTime); err != nil {
+				t.Fatalf("chtimes: %v", err)
+			}
+			sc := NewScanner()
+			// No Upgrade, no Update: the Unsynced class is never reopened, so the
+			// cutoff must not matter in either direction.
+			results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{UnsyncedBefore: cutoff})
+			if err != nil {
+				t.Fatalf("ScanLibrary: %v", err)
+			}
+			if len(results) > 0 {
+				t.Errorf("mtime=%s: enqueued without a reopen flag; the window must never resurrect a terminal class",
+					tc.sidecarTime.Format("2006-01"))
+			}
+		})
+	}
+}
