@@ -4535,3 +4535,108 @@ func TestDBQueue_ListVocalGateConfirmationsRespectsLimit(t *testing.T) {
 		t.Errorf("limited list = %d rows; want 2", len(limited))
 	}
 }
+
+// TestDBQueue_SetTimingOutcome verifies the timing verdict and its magnitude
+// persist on a work_queue row through a real SQLite DB (#440), and that the
+// no-comparison cases land as SQL NULL rather than 0. NULL vs 0 is load-bearing
+// here: 0 is a legitimate overrun (a lyric ending exactly at the audio end),
+// so writing 0 for "no comparison was made" would be indistinguishable from a
+// real measurement.
+func TestDBQueue_SetTimingOutcome(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	q.now = func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) }
+
+	newRow := func(title string) int64 {
+		t.Helper()
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: title}}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue: %v", err)
+		}
+		return item.ID
+	}
+
+	read := func(id int64) (outcome *string, mag, ratio *float64, evaluated *string) {
+		t.Helper()
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at
+			   FROM work_queue WHERE id = ?`, id).Scan(&outcome, &mag, &ratio, &evaluated); err != nil {
+			t.Fatalf("read timing columns: %v", err)
+		}
+		return
+	}
+
+	id := newRow("T1")
+
+	// Fresh row: every timing column is NULL until stamped.
+	if outcome, mag, ratio, evaluated := read(id); outcome != nil || mag != nil || ratio != nil || evaluated != nil {
+		t.Fatalf("initial timing columns = %v/%v/%v/%v; want all NULL", outcome, mag, ratio, evaluated)
+	}
+
+	// A measured verdict persists all four values.
+	when := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	if err := q.SetTimingOutcome(ctx, id, TimingRecord{
+		Outcome:     "mis_synced",
+		Magnitude:   12.5,
+		Ratio:       1.25,
+		Measured:    true,
+		EvaluatedAt: when,
+	}); err != nil {
+		t.Fatalf("SetTimingOutcome: %v", err)
+	}
+	outcome, mag, ratio, evaluated := read(id)
+	if outcome == nil || *outcome != "mis_synced" {
+		t.Errorf("timing_outcome = %v; want mis_synced", outcome)
+	}
+	if mag == nil || *mag != 12.5 {
+		t.Errorf("overrun_magnitude = %v; want 12.5", mag)
+	}
+	if ratio == nil || *ratio != 1.25 {
+		t.Errorf("overrun_ratio = %v; want 1.25", ratio)
+	}
+	if evaluated == nil {
+		t.Error("evaluated_at = NULL; want a timestamp")
+	}
+
+	// An UNMEASURED verdict (unknown duration) records the outcome but leaves
+	// the magnitudes NULL: no comparison was made, and 0 would read as one.
+	id2 := newRow("T2")
+	if err := q.SetTimingOutcome(ctx, id2, TimingRecord{
+		Outcome:     "unknown_duration",
+		Measured:    false,
+		EvaluatedAt: when,
+	}); err != nil {
+		t.Fatalf("SetTimingOutcome unmeasured: %v", err)
+	}
+	outcome2, mag2, ratio2, evaluated2 := read(id2)
+	if outcome2 == nil || *outcome2 != "unknown_duration" {
+		t.Errorf("timing_outcome = %v; want unknown_duration", outcome2)
+	}
+	if mag2 != nil || ratio2 != nil {
+		t.Errorf("magnitudes = %v/%v; want NULL when no comparison was made", mag2, ratio2)
+	}
+	if evaluated2 == nil {
+		t.Error("evaluated_at = NULL; want a timestamp even when unmeasured")
+	}
+
+	// A negative magnitude (lyric ends before the audio) round-trips intact --
+	// it is the common case, not an error.
+	id3 := newRow("T3")
+	if err := q.SetTimingOutcome(ctx, id3, TimingRecord{
+		Outcome: "ok", Magnitude: -42.5, Ratio: 0.9, Measured: true, EvaluatedAt: when,
+	}); err != nil {
+		t.Fatalf("SetTimingOutcome negative: %v", err)
+	}
+	if _, mag3, _, _ := read(id3); mag3 == nil || *mag3 != -42.5 {
+		t.Errorf("overrun_magnitude = %v; want -42.5", mag3)
+	}
+
+	// A missing id is a benign no-op (no error), matching the sibling stamps.
+	if err := q.SetTimingOutcome(ctx, 999999, TimingRecord{Outcome: "ok", Measured: true, EvaluatedAt: when}); err != nil {
+		t.Errorf("SetTimingOutcome on missing id: want nil error, got %v", err)
+	}
+}

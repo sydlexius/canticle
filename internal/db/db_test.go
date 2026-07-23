@@ -827,3 +827,86 @@ func TestMigration032BackfillsAlbumFromScanResults(t *testing.T) {
 		})
 	}
 }
+
+// TestMigration034TimingOutcomeUpDown drives migration 034 directly: it migrates
+// to v33, seeds a pre-034 row, applies 034, and asserts the four timing columns
+// exist and read NULL on the pre-existing row -- NULL means "not evaluated", and
+// nothing backfills it, because the verdict depends on an audio duration no
+// completed row ever stored. Then it down-migrates and asserts the columns are
+// removed (#440).
+func TestMigration034TimingOutcomeUpDown(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mig034.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	applyOpenPragmas(ctx, t, sqlDB)
+
+	migFS, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("sub migrations fs: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, migFS)
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 33); err != nil {
+		t.Fatalf("UpTo(33): %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, status, priority, next_attempt_at)
+         VALUES ('A', 'T', 'a', 't', 'done', 0, '2026-01-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	if _, err := provider.UpTo(ctx, 34); err != nil {
+		t.Fatalf("UpTo(34): %v", err)
+	}
+
+	// Every timing column reads NULL on a row that completed before the column
+	// existed. NULL is "not evaluated", never "compliant".
+	var outcome sql.NullString
+	var magnitude, ratio sql.NullFloat64
+	var evaluatedAt sql.NullString
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at
+           FROM work_queue WHERE artist_key = 'a'`).Scan(&outcome, &magnitude, &ratio, &evaluatedAt); err != nil {
+		t.Fatalf("query timing columns: %v", err)
+	}
+	if outcome.Valid || magnitude.Valid || ratio.Valid || evaluatedAt.Valid {
+		t.Errorf("pre-existing row has non-NULL timing columns (%v/%v/%v/%v); want all NULL",
+			outcome, magnitude, ratio, evaluatedAt)
+	}
+
+	// A negative magnitude round-trips: a lyric ending before the audio does is
+	// the common case, so the column must be signed, not an unsigned error size.
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET timing_outcome = 'ok', overrun_magnitude = -42.5, overrun_ratio = 0.9
+           WHERE artist_key = 'a'`); err != nil {
+		t.Fatalf("update timing columns: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT overrun_magnitude FROM work_queue WHERE artist_key = 'a'`).Scan(&magnitude); err != nil {
+		t.Fatalf("re-query magnitude: %v", err)
+	}
+	if !magnitude.Valid || magnitude.Float64 != -42.5 {
+		t.Errorf("overrun_magnitude = %v; want -42.5", magnitude)
+	}
+
+	// Down-migration removes every column.
+	if _, err := provider.DownTo(ctx, 33); err != nil {
+		t.Fatalf("DownTo(33): %v", err)
+	}
+	for _, col := range []string{"timing_outcome", "overrun_magnitude", "overrun_ratio", "evaluated_at"} {
+		var name string
+		err := sqlDB.QueryRowContext(ctx,
+			`SELECT name FROM pragma_table_info('work_queue') WHERE name = ?`, col).Scan(&name)
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("%s column still present after down-migration (err=%v, name=%q); want removed", col, err, name)
+		}
+	}
+}

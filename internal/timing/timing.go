@@ -52,14 +52,24 @@ const (
 	CategoricalRatio = 1.5
 )
 
-// Magnitude carries the metrics companions to a TimingOutcome. It is zero for
-// the UnknownDuration and no-timing-evidence cases, where no comparison was made.
+// Magnitude carries the metrics companions to a TimingOutcome. It is the zero
+// value whenever no comparison was made -- both the UnknownDuration case and the
+// Ok-with-no-timing-evidence case (empty or all-decorative lines) -- and
+// Measured is the explicit signal for that. Callers persisting these numbers
+// MUST gate on Measured: a real measurement of 0 is a lyric ending exactly at
+// the audio end, which is a distinct fact from "nothing was compared", and the
+// two outcomes both surface as OverrunSeconds 0 without this flag.
 type Magnitude struct {
 	// OverrunSeconds is correctedMax - duration. Negative for a lyric that ends
-	// before the audio does (e.g. a long instrumental outro).
+	// before the audio does (e.g. a long instrumental outro). Meaningful only
+	// when Measured.
 	OverrunSeconds float64
-	// Ratio is correctedMax / duration.
+	// Ratio is correctedMax / duration. Meaningful only when Measured.
 	Ratio float64
+	// Measured reports whether a real comparison against a known duration and a
+	// text-bearing lyric happened. False for both no-evidence cases, where the
+	// other two fields are zero and carry no information.
+	Measured bool
 }
 
 // Evaluate classifies song's synced lines against durationSeconds, returning the
@@ -87,7 +97,7 @@ func Evaluate(song models.Song, durationSeconds int) (TimingOutcome, Magnitude) 
 		return Ok, Magnitude{}
 	}
 	duration := float64(durationSeconds)
-	mag := Magnitude{OverrunSeconds: maxTS - duration, Ratio: maxTS / duration}
+	mag := Magnitude{OverrunSeconds: maxTS - duration, Ratio: maxTS / duration, Measured: true}
 
 	switch {
 	case mag.OverrunSeconds <= Tolerance:
