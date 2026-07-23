@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -299,6 +300,55 @@ func TestScanLibrary_InstrumentalProvenanceReopen(t *testing.T) {
 			gotEnqueue := len(results) > 0
 			if gotEnqueue != tc.wantEnqueue {
 				t.Errorf("source=%q dv=%q opts=%+v: enqueued=%v, want %v", tc.source, tc.dv, tc.opts, gotEnqueue, tc.wantEnqueue)
+			}
+		})
+	}
+}
+
+// TestScanLibrary_UnsyncedBefore covers the dated repair filter (#617): --upgrade
+// reopens an unsynced .txt, and UnsyncedBefore narrows a single run to sidecars
+// written before a cutoff so a one-time repair of a historical cohort does not
+// re-fetch (and rewrite the mtime of) sidecars already known to be correct.
+func TestScanLibrary_UnsyncedBefore(t *testing.T) {
+	cutoff := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	old := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name        string
+		sidecarTime time.Time
+		opts        ScanOptions
+		wantEnqueue bool
+	}{
+		// The filter narrows an upgrade run to the pre-cutoff cohort.
+		{"old_sidecar_within_window_reopens", old, ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, true},
+		{"recent_sidecar_outside_window_skipped", recent, ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, false},
+		// Zero value must be inert: unfiltered --upgrade keeps reopening everything,
+		// so serve mode and a plain CLI upgrade are unaffected.
+		{"zero_value_reopens_recent", recent, ScanOptions{Upgrade: true}, true},
+		{"zero_value_reopens_old", old, ScanOptions{Upgrade: true}, true},
+		// The filter must not resurrect a class the reopen rules exclude.
+		{"no_upgrade_flag_stays_terminal", old, ScanOptions{UnsyncedBefore: cutoff}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeAudioFile(t, dir, "song.mp3")
+			txt := filepath.Join(dir, "song.txt")
+			if err := os.WriteFile(txt, []byte("an unsynced lyric body\n"), 0o644); err != nil {
+				t.Fatalf("write sidecar: %v", err)
+			}
+			if err := os.Chtimes(txt, tc.sidecarTime, tc.sidecarTime); err != nil {
+				t.Fatalf("chtimes: %v", err)
+			}
+			sc := NewScanner()
+			results, err := sc.ScanLibrary(context.Background(), dir, tc.opts)
+			if err != nil {
+				t.Fatalf("ScanLibrary: %v", err)
+			}
+			if got := len(results) > 0; got != tc.wantEnqueue {
+				t.Errorf("sidecar mtime=%s opts=%+v: enqueued=%v, want %v",
+					tc.sidecarTime.Format("2006-01"), tc.opts, got, tc.wantEnqueue)
 			}
 		})
 	}

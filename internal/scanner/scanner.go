@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dhowden/tag"
 	"github.com/dhowden/tag/mbz"
@@ -221,6 +222,42 @@ type ScanOptions struct {
 	// providers_version cache retirement. Empty (dir/CLI mode, or detector off)
 	// disables version invalidation. See #502.
 	DetectorVersion string
+	// UnsyncedBefore narrows an unsynced-.txt reopen to sidecars last modified
+	// before this instant, for a one-time repair of a historical cohort (#617).
+	// The zero value disables the filter entirely, so an ordinary --upgrade (and
+	// serve mode, which never sets this) keeps reopening every unsynced sidecar.
+	//
+	// It SUBTRACTS from one run's scope and never from a track's eligibility: no
+	// state is written, no marker is set, and the reopen classes are untouched, so
+	// a file skipped by a dated run is fully eligible under the next unfiltered
+	// scan. It also cannot resurrect a class reopenClassesFor excludes -- it only
+	// further narrows a reopen that was already going to happen.
+	UnsyncedBefore time.Time
+}
+
+// unsyncedWithinWindow reports whether an unsynced .txt sidecar is inside a dated
+// repair run's window (#617). A zero cutoff disables the filter, so every sidecar
+// is in-window and an ordinary --upgrade is unaffected.
+//
+// The window is keyed on the SIDECAR's mtime, which for this cohort is the only
+// available evidence of when canticle wrote it: the affected tracks predate the
+// database entirely (3 of ~9,995 have a work_queue or scan_results row), so no
+// query can identify them.
+//
+// An unreadable sidecar is treated as OUT of window. The filter exists to narrow
+// a bulk repair to files positively identified as belonging to it, so failing
+// closed skips an unprovable file rather than pulling it into a rewrite -- the
+// conservative direction when the run's whole premise is "only touch the cohort".
+func unsyncedWithinWindow(path string, before time.Time) bool {
+	if before.IsZero() {
+		return true
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		slog.Warn("could not stat unsynced sidecar; treating as outside the repair window", "path", path, "error", err)
+		return false
+	}
+	return info.ModTime().Before(before)
 }
 
 // NewScanner creates a new Scanner with the supplied options.
@@ -498,6 +535,13 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		case txtExists && !lrcExists && !reopen.Unsynced:
 			// Unsynced .txt present and not asked to upgrade or update -- skip.
 			slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
+			continue
+		case txtExists && !lrcExists && !unsyncedWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore):
+			// Reopen was granted, but a dated repair run (#617) narrows this pass to
+			// sidecars written before the cutoff. Ordering matters: this case sits
+			// AFTER the !reopen.Unsynced skip so the filter can only narrow a reopen
+			// that was already going to happen, never resurrect a terminal class.
+			slog.Debug("skipping file, unsynced sidecar outside repair window", "file", file.Name())
 			continue
 		}
 
