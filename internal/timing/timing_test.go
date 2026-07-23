@@ -421,6 +421,42 @@ func TestEvaluate_ShortAudioToleranceFloor(t *testing.T) {
 	}
 }
 
+// TestEvaluate_MeasuredFlag pins the distinction that keeps a persisted 0 from
+// being confused with "no comparison made". A real Ok is Measured; both
+// no-evidence cases (unknown duration, all-decorative lyric) are not, even
+// though all three can surface OverrunSeconds 0.
+func TestEvaluate_MeasuredFlag(t *testing.T) {
+	tests := []struct {
+		name         string
+		song         models.Song
+		duration     int
+		wantOutcome  TimingOutcome
+		wantMeasured bool
+	}{
+		{"real ok", song(line(50, "a")), 100, Ok, true},
+		{"real overrun", song(line(120, "a")), 100, MisSynced, true},
+		{"unknown duration", song(line(50, "a")), 0, UnknownDuration, false},
+		{"all-decorative synced lyric", song(line(400, "♪"), line(500, "[ar:x]")), 100, Ok, false},
+		{"empty subtitles", song(), 100, Ok, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outcome, mag := Evaluate(tt.song, tt.duration)
+			if outcome != tt.wantOutcome {
+				t.Errorf("outcome = %q, want %q", outcome, tt.wantOutcome)
+			}
+			if mag.Measured != tt.wantMeasured {
+				t.Errorf("Measured = %v, want %v", mag.Measured, tt.wantMeasured)
+			}
+			// When unmeasured, the numeric fields must be the zero value: a
+			// consumer that ignores Measured would otherwise persist them.
+			if !mag.Measured && (mag.OverrunSeconds != 0 || mag.Ratio != 0) {
+				t.Errorf("unmeasured magnitude carries data: %+v", mag)
+			}
+		})
+	}
+}
+
 func TestThresholdsMatchCalibration(t *testing.T) {
 	// Pinned by the 28.7k-corpus recalibration on issue #438. Changing either
 	// value invalidates that calibration.

@@ -108,6 +108,8 @@ type fakeQueue struct {
 	outcomeTypes       map[int64]string
 	provenance         map[int64]queue.CompletionProvenance
 	provenanceErr      error
+	timingOutcomes     map[int64]queue.TimingRecord
+	timingOutcomeErr   error
 	onComplete         func(id int64)
 	failCauses         []error
 	deferCauses        []error
@@ -216,6 +218,17 @@ func (q *fakeQueue) SetCompletionProvenance(_ context.Context, id int64, prov qu
 		q.provenance = make(map[int64]queue.CompletionProvenance)
 	}
 	q.provenance[id] = prov
+	return nil
+}
+
+func (q *fakeQueue) SetTimingOutcome(_ context.Context, id int64, rec queue.TimingRecord) error {
+	if q.timingOutcomeErr != nil {
+		return q.timingOutcomeErr
+	}
+	if q.timingOutcomes == nil {
+		q.timingOutcomes = make(map[int64]queue.TimingRecord)
+	}
+	q.timingOutcomes[id] = rec
 	return nil
 }
 

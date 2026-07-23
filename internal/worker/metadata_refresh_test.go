@@ -201,3 +201,47 @@ func TestRefresh_SkippedWhenEnrichmentDisabled(t *testing.T) {
 		t.Errorf("TrackLength = %d; want 0", got)
 	}
 }
+
+// TestRefresh_TimingOutcomeUsesFileDurationNotProviderLength pins the call site
+// that stamps the timing verdict (#440). The unit tests call the helper with a
+// hand-passed duration, so nothing there catches a regression that feeds the
+// provider's catalog length instead of the audio file's -- the exact I2 bug.
+// This drives the full RunOnce path: the metadata reader supplies a 180s file
+// duration onto resolvedTrack, while the provider returns a song whose own
+// Track.TrackLength is a much larger 600s and whose last cue at 300s overruns
+// the FILE but sits comfortably inside the provider length. The verdict must be
+// categorical (300 vs 180), proving the file duration reached the stamp; against
+// the provider length it would read ok and this test fails.
+func TestRefresh_TimingOutcomeUsesFileDurationNotProviderLength(t *testing.T) {
+	q := &fakeQueue{items: []queue.WorkItem{queuedItem("/library/track.flac")}}
+	f := &fakeFetcher{song: models.Song{
+		Track: models.Track{TrackLength: 600}, // provider catalog length
+		Subtitles: models.Synced{Lines: []models.Lines{
+			{Text: "a", Time: models.Time{Total: 10}},
+			{Text: "b", Time: models.Time{Total: 300}}, // overruns 180, fits 600
+		}},
+	}}
+	r := &fakeMetadataReader{meta: scanner.AudioMetadata{TrackLength: 180}} // file duration
+
+	w := newRefreshWorker(t, q, &fakeCache{}, f, r)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	rec, ok := q.timingOutcomes[1]
+	if !ok {
+		t.Fatal("no timing outcome stamped")
+	}
+	if rec.Outcome != "categorical" {
+		t.Errorf("timing_outcome = %q; want categorical (300s cue vs 180s file). "+
+			"ok would mean the provider's 600s length was used instead of the file duration", rec.Outcome)
+	}
+	if !rec.Measured {
+		t.Errorf("Measured = false; want true (a real comparison against the 180s file happened)")
+	}
+	// magnitude is 300 - 180 = 120 against the file; against the provider it
+	// would be negative.
+	if rec.Magnitude != 120 {
+		t.Errorf("overrun magnitude = %v; want 120 (300s - 180s file duration)", rec.Magnitude)
+	}
+}

@@ -1593,6 +1593,73 @@ func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType stri
 	return nil
 }
 
+// TimingRecord carries a row's timing verdict and, when one was actually
+// computed, its magnitude (#440).
+//
+// Measured is what separates "no comparison was made" from a real measurement of
+// zero. A lyric ending exactly at the audio end is a legitimate 0.0 overrun, so
+// writing 0 for the unknown-duration case would be indistinguishable from that
+// and would quietly corrupt any aggregate over the column. When Measured is
+// false both magnitude columns are stored NULL regardless of the struct's
+// numeric fields.
+type TimingRecord struct {
+	// Outcome is an internal/timing TimingOutcome value, stored verbatim:
+	// "ok", "mis_synced", "categorical", or "unknown_duration".
+	Outcome string
+	// Magnitude is (corrected max timestamp - duration) in seconds. Negative for
+	// the common case of a lyric ending before the audio does; it is a signed
+	// offset, not an error size. Ignored unless Measured.
+	Magnitude float64
+	// Ratio is (corrected max timestamp / duration). Ignored unless Measured.
+	Ratio float64
+	// Measured reports whether a comparison against a known duration happened.
+	// False for the unknown-duration verdict.
+	Measured bool
+	// EvaluatedAt is when the verdict was reached. Recorded even when the
+	// verdict is unmeasured, so the sweep watermark advances either way.
+	EvaluatedAt time.Time
+}
+
+// SetTimingOutcome records how a row's synced lyric compared against the audio
+// duration (#440). The worker calls this before Complete while the row is still
+// in 'processing'; the UPDATE keys on id alone (no status guard, matching
+// SetOutcomeType/SetInstrumentalResult), and is a no-op for a missing id, which
+// is benign.
+//
+// This RECORDS a verdict, it does not act on one: nothing here changes what is
+// written to disk. The guard that rejects or demotes on this verdict is #439.
+func (q *DBQueue) SetTimingOutcome(ctx context.Context, id int64, rec TimingRecord) error {
+	if rec.Outcome == "" {
+		return nil
+	}
+	var magnitude, ratio any
+	if rec.Measured {
+		magnitude = rec.Magnitude
+		ratio = rec.Ratio
+	}
+	var evaluatedAt any
+	if !rec.EvaluatedAt.IsZero() {
+		evaluatedAt = formatTime(rec.EvaluatedAt)
+	}
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET timing_outcome = ?,
+             overrun_magnitude = ?,
+             overrun_ratio = ?,
+             evaluated_at = ?
+         WHERE id = ?`,
+		rec.Outcome,
+		magnitude,
+		ratio,
+		evaluatedAt,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("queue: set timing outcome for id %d: %w", id, err)
+	}
+	return nil
+}
+
 // CompletionProvenance carries the identifiers and writer version a work_queue
 // row was settled with (#620). Every field is optional: an empty string or zero
 // time leaves the corresponding column NULL, which means "not recorded" and

@@ -21,6 +21,7 @@ import (
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/timing"
 	"github.com/sydlexius/canticle/internal/verification"
 	"github.com/sydlexius/canticle/internal/version"
 )
@@ -60,6 +61,12 @@ type Queue interface {
 	// all -- still records what produced it (#620). Call before Complete while the
 	// row is still in processing status; a wholly empty provenance is a no-op.
 	SetCompletionProvenance(ctx context.Context, id int64, prov queue.CompletionProvenance) error
+	// SetTimingOutcome records how the row's synced lyric compared against the
+	// audio duration (#440), for observability and as the sweep watermark. Call
+	// before Complete while the row is still in processing status; an empty
+	// outcome is a no-op. It records a verdict only -- it never changes what was
+	// written (that guard is #439).
+	SetTimingOutcome(ctx context.Context, id int64, rec queue.TimingRecord) error
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -769,6 +776,47 @@ func outcomeTypeFromSong(song models.Song) string {
 	}
 }
 
+// timingRecordFromSong derives the row's timing verdict by DELEGATING to
+// internal/timing -- it deliberately owns no comparison logic of its own (#440).
+//
+// This is the whole point of #438 landing first. The naive derivation (take the
+// last cue's timestamp and compare it to the duration) falsely flags ~31% of the
+// overrunning tail: those are perfectly-synced lyrics whose only past-duration
+// timestamp is a decorative marker. timing.Evaluate applies the corrected max,
+// and the calibrated thresholds are valid ONLY against that. A second
+// implementation here would drift from the one the guard (#439) and the sweep
+// (#443) consume, which is exactly the divergence the shared package exists to
+// prevent.
+//
+// Only a synced result carries line timing, so every other outcome returns a
+// zero record and leaves the columns NULL: there is no verdict to record, which
+// is distinct from a verdict of "fine".
+//
+// durationSeconds must be the AUDIO-FILE duration, not song.Track.TrackLength.
+// On the fetch path song.Track is overwritten wholesale from the provider
+// payload, so its length is the provider's own catalog value -- the same length
+// the lyric was timed against, which makes the comparison near-circular and
+// biases every verdict toward ok. The worker holds the file's duration on the
+// resolvedTrack that refreshRecordingIdentity re-read from the tags; that is the
+// ground truth timing.Evaluate documents it needs.
+func timingRecordFromSong(song models.Song, durationSeconds int, now time.Time) queue.TimingRecord {
+	if len(song.Subtitles.Lines) == 0 {
+		return queue.TimingRecord{}
+	}
+	outcome, mag := timing.Evaluate(song, durationSeconds)
+	return queue.TimingRecord{
+		Outcome:   string(outcome),
+		Magnitude: mag.OverrunSeconds,
+		Ratio:     mag.Ratio,
+		// mag.Measured, not "outcome != UnknownDuration": Evaluate has TWO
+		// no-comparison cases -- unknown duration AND an all-decorative lyric
+		// that returns Ok with a zero magnitude. Both must persist as NULL, or a
+		// fake measured 0 corrupts any aggregate over the column.
+		Measured:    mag.Measured,
+		EvaluatedAt: now,
+	}
+}
+
 // provenanceFromSong reads the completion provenance off the same Song the
 // writer consumes, so the row records exactly what the synced .lrc tag block
 // would have emitted -- no parallel derivation (#620). The values are read, not
@@ -798,6 +846,42 @@ func (w *Worker) stampCompletionProvenance(ctxNoCancel context.Context, id int64
 	if err := w.queue.SetCompletionProvenance(ctxNoCancel, id, provenanceFromSong(song)); err != nil {
 		slog.Warn("worker: stamp completion provenance failed; continuing", "id", id, "error", err)
 	}
+}
+
+// stampTimingOutcome records the row's timing verdict and, for a non-compliant
+// one, emits the structured event (#440). Rejections and demotions eventually
+// move or discard user files, so the reason must be visible rather than silent;
+// this is that surface until the metrics counters land.
+//
+// Non-fatal like the sibling stamps: a bookkeeping write must never fail an item
+// whose output is already on disk.
+func (w *Worker) stampTimingOutcome(ctxNoCancel context.Context, item queue.WorkItem, song models.Song, durationSeconds int) {
+	rec := timingRecordFromSong(song, durationSeconds, w.now())
+	if rec.Outcome == "" {
+		// Not a synced result: no line timing exists to judge.
+		return
+	}
+	if err := w.queue.SetTimingOutcome(ctxNoCancel, item.ID, rec); err != nil {
+		slog.Warn("worker: stamp timing outcome failed; continuing", "id", item.ID, "error", err)
+	}
+	if rec.Outcome == string(timing.Ok) || rec.Outcome == string(timing.UnknownDuration) {
+		// Compliant, or not judgeable. Neither is an event worth a Warn: the
+		// unknown-duration case is a routine fail-open, not an anomaly.
+		return
+	}
+	// Artist and track name identify the row for an operator reading their own
+	// logs, matching every sibling warn here. They stay in the log line only and
+	// are never routed to a metric label or any shared surface.
+	slog.Warn("worker: synced lyric timing overruns the audio",
+		"id", item.ID,
+		"outcome", rec.Outcome,
+		"overrun_seconds", rec.Magnitude,
+		"ratio", rec.Ratio,
+		"lane", song.WinningLane,
+		"duration_seconds", durationSeconds,
+		"artist", item.Inputs.Track.ArtistName,
+		"track", item.Inputs.Track.TrackName,
+	)
 }
 
 // Run processes ready work items until the queue is empty or the context ends.
@@ -1135,6 +1219,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// .txt is plain lyric text and carries no tag block, so without this the row
 	// is indistinguishable from one written by the 2022 code.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
+	// Record how the synced timing compared against the audio duration (#440).
+	// OBSERVABILITY ONLY at this point: the .lrc above is already written, and
+	// nothing here changes that. The guard that acts on the verdict is #439.
+	w.stampTimingOutcome(ctxNoCancel, item, song, resolvedTrack.TrackLength)
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++
