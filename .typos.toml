@@ -31,3 +31,12 @@ catalogue = "catalog"
 # wire-protocol identifier, not prose: "correcting" it in the test fixtures would
 # make them stop matching the responses they exist to represent.
 preffered = "preffered"
+[default.extend-identifiers]
+# MisSynced is the timing-outcome type name fixed by issue #438. typos splits
+# the identifier and reads the "mis" stem as a misspelling of "miss"/"mist".
+# Allowlisted as IDENTIFIERS, not as a word: a bare "mis" in prose stays flagged,
+# so a real "miss" typo is still caught. Note typos splits on the hyphen before
+# any lookup, so "mis-synced" cannot be allowlisted as a unit -- prose therefore
+# says "MisSynced" (the type) rather than the hyphenated adjective.
+MisSynced = "MisSynced"
+mis_synced = "mis_synced"
