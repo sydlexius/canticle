@@ -1514,6 +1514,80 @@ func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType stri
 	return nil
 }
 
+// CompletionProvenance carries the identifiers and writer version a work_queue
+// row was settled with (#620). Every field is optional: an empty string or zero
+// time leaves the corresponding column NULL, which means "not recorded" and
+// never "absent from the provider result". The cache-hit path in particular
+// records no FetchedAt, because models.Song carries it as `json:"-"` and a
+// decoded cache hit leaves it zero.
+type CompletionProvenance struct {
+	// ISRC is the recording's ISRC from the resolved provider result.
+	ISRC string
+	// MBID is the MusicBrainz recording ID from the resolved provider result.
+	MBID string
+	// FetchedAt is when the provider round-trip completed. Zero on a cache hit.
+	FetchedAt time.Time
+	// WriterVersion is the app version that produced the output
+	// (internal/version.Version), matching the .lrc [ve:] tag.
+	WriterVersion string
+}
+
+// IsZero reports whether the provenance carries nothing worth writing, letting
+// the caller skip the UPDATE entirely rather than stamping four NULLs over four
+// NULLs and firing the updated_at trigger for no reason.
+func (p CompletionProvenance) IsZero() bool {
+	return p.ISRC == "" && p.MBID == "" && p.FetchedAt.IsZero() && p.WriterVersion == ""
+}
+
+// SetCompletionProvenance stamps the identifiers and writer version onto a
+// work_queue row in a single UPDATE, so an outcome that writes no tag block --
+// an unsynced .txt above all, which by maintainer decision stays byte-identical
+// plain lyric text -- still records what it was settled with (#620). Together
+// with outcome_type (migration 024) this lets the upgrade ladder (#553) judge
+// whether re-fetching a settled row would do better, which knowing only that it
+// settled unsynced does not support.
+//
+// Advisory bookkeeping, so it mirrors SetOutcomeType rather than the detector
+// stamps: call before Complete while the row is still in 'processing', and treat
+// a failure as non-fatal. Nothing in the processing path reads these columns.
+// Each empty field is written as NULL ("not recorded"); a wholly empty
+// provenance is a no-op.
+func (q *DBQueue) SetCompletionProvenance(ctx context.Context, id int64, prov CompletionProvenance) error {
+	if prov.IsZero() {
+		return nil
+	}
+	var fetchedAt any
+	if !prov.FetchedAt.IsZero() {
+		fetchedAt = formatTime(prov.FetchedAt)
+	}
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET isrc = ?,
+             mbid = ?,
+             fetched_at = ?,
+             writer_version = ?
+         WHERE id = ?`,
+		nullIfEmpty(prov.ISRC),
+		nullIfEmpty(prov.MBID),
+		fetchedAt,
+		nullIfEmpty(prov.WriterVersion),
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("queue: set completion provenance for id %d: %w", id, err)
+	}
+	return nil
+}
+
+// nullIfEmpty maps an empty string to a SQL NULL so an unrecorded provenance
+// field is distinguishable from one the provider genuinely returned as empty.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // ProviderHits returns a map from lane name to cumulative hit count. Lanes that
 // have never recorded a hit are omitted.
 func (q *DBQueue) ProviderHits(ctx context.Context) (map[string]int64, error) {

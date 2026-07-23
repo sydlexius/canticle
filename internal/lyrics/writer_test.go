@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -165,6 +166,59 @@ func TestWriteLRC_Unsynced(t *testing.T) {
 	lrcFn := Slugify("Test Artist - Lyric Track") + ".lrc"
 	if _, err := os.Stat(filepath.Join(tmpDir, lrcFn)); err == nil {
 		t.Fatal("expected no .lrc file for unsynced lyrics, but one was created")
+	}
+}
+
+// TestWriteLRC_UnsyncedIsExactlyTheLyricBody pins the maintainer's decision from
+// #620: provenance must NEVER appear in an unsynced lyric file. An unsynced .txt
+// is plain lyric text that players render verbatim, so any header block would
+// show up as the first lines of the displayed lyrics.
+//
+// This asserts the EXACT bytes rather than substrings, because that is the only
+// form that catches the regression this guards against. Every other unsynced
+// test here checks "contains the lyrics" and would keep passing if a
+// [by:canticle]/[isrc:]/[ve:] block were prepended -- exactly the change this
+// decision forbids. Completion provenance lives on the work_queue row instead
+// (queue.SetCompletionProvenance); if you are here because you want a file to
+// carry provenance, that is the mechanism, and this test is not the obstacle to
+// route around.
+func TestWriteLRC_UnsyncedIsExactlyTheLyricBody(t *testing.T) {
+	w := NewLRCWriter()
+	tmpDir := t.TempDir()
+
+	body := "First line\nSecond line"
+	// Every field that feeds the synced .lrc tag block is populated, so if the
+	// unsynced branch ever started emitting tags there would be real values to
+	// emit and the byte comparison would fail loudly.
+	song := models.Song{
+		Track: models.Track{
+			ArtistName:    "Test Artist",
+			TrackName:     "Lyric Track",
+			AlbumName:     "Test Album",
+			TrackLength:   215,
+			ISRC:          "USABC1234567",
+			RecordingMBID: "8f3471b5-7e6a-4d3f-9c21-0a1b2c3d4e5f",
+		},
+		Lyrics:      models.Lyrics{LyricsBody: body},
+		WinningLane: "musixmatch",
+		FetchedAt:   time.Date(2026, 7, 23, 12, 30, 0, 0, time.UTC),
+	}
+
+	if err := w.WriteLRC(song, "", tmpDir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+
+	fp := filepath.Join(tmpDir, Slugify("Test Artist - Lyric Track")+".txt")
+	data, err := os.ReadFile(fp) //nolint:gosec // test path constructed from known test data
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+
+	// The body verbatim, with no trailing newline added: this is the writer's
+	// current byte-exact output, captured so any change to it is deliberate.
+	want := body
+	if string(data) != want {
+		t.Errorf("unsynced .txt bytes changed.\n got: %q\nwant: %q\n\nAn unsynced .txt must be the lyric body and nothing else (#620).", string(data), want)
 	}
 }
 

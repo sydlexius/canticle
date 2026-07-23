@@ -3482,6 +3482,100 @@ func TestDBQueue_SetOutcomeType(t *testing.T) {
 	}
 }
 
+// TestDBQueue_SetCompletionProvenance verifies the identifiers and writer
+// version persist on a work_queue row through a real SQLite DB (#620), and that
+// an unset field lands as SQL NULL rather than an empty string -- the
+// distinction between "not recorded" and "the provider returned nothing" is the
+// whole point of the column.
+func TestDBQueue_SetCompletionProvenance(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	q.now = func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+
+	readRow := func() (isrc, mbid, fetchedAt, writerVersion *string) {
+		t.Helper()
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT isrc, mbid, fetched_at, writer_version FROM work_queue WHERE id = ?`, item.ID,
+		).Scan(&isrc, &mbid, &fetchedAt, &writerVersion); err != nil {
+			t.Fatalf("read provenance columns: %v", err)
+		}
+		return isrc, mbid, fetchedAt, writerVersion
+	}
+
+	// Fresh row: every provenance column is NULL until stamped.
+	if isrc, mbid, fetchedAt, ver := readRow(); isrc != nil || mbid != nil || fetchedAt != nil || ver != nil {
+		t.Fatalf("initial provenance = (%v, %v, %v, %v); want all NULL", isrc, mbid, fetchedAt, ver)
+	}
+
+	// A wholly empty provenance is a no-op: it must not stamp four NULLs over
+	// four NULLs (and fire the updated_at trigger) for nothing.
+	var beforeUpdatedAt string
+	if err := q.db.QueryRowContext(ctx, `SELECT updated_at FROM work_queue WHERE id = ?`, item.ID).Scan(&beforeUpdatedAt); err != nil {
+		t.Fatalf("read updated_at: %v", err)
+	}
+	if err := q.SetCompletionProvenance(ctx, item.ID, CompletionProvenance{}); err != nil {
+		t.Fatalf("SetCompletionProvenance empty: %v", err)
+	}
+	var afterUpdatedAt string
+	if err := q.db.QueryRowContext(ctx, `SELECT updated_at FROM work_queue WHERE id = ?`, item.ID).Scan(&afterUpdatedAt); err != nil {
+		t.Fatalf("read updated_at after empty stamp: %v", err)
+	}
+	if afterUpdatedAt != beforeUpdatedAt {
+		t.Errorf("empty provenance bumped updated_at (%q -> %q); it must be a no-op, not four NULLs over four NULLs", beforeUpdatedAt, afterUpdatedAt)
+	}
+
+	fetched := time.Date(2026, 7, 23, 12, 30, 0, 0, time.UTC)
+	prov := CompletionProvenance{
+		ISRC:          "USABC1234567",
+		MBID:          "8f3471b5-7e6a-4d3f-9c21-0a1b2c3d4e5f",
+		FetchedAt:     fetched,
+		WriterVersion: "v1.26.0",
+	}
+	if err := q.SetCompletionProvenance(ctx, item.ID, prov); err != nil {
+		t.Fatalf("SetCompletionProvenance: %v", err)
+	}
+	isrc, mbid, fetchedAt, ver := readRow()
+	if isrc == nil || *isrc != prov.ISRC {
+		t.Errorf("isrc = %v; want %q", isrc, prov.ISRC)
+	}
+	if mbid == nil || *mbid != prov.MBID {
+		t.Errorf("mbid = %v; want %q", mbid, prov.MBID)
+	}
+	if ver == nil || *ver != prov.WriterVersion {
+		t.Errorf("writer_version = %v; want %q", ver, prov.WriterVersion)
+	}
+	if fetchedAt == nil || *fetchedAt != formatTime(fetched) {
+		t.Errorf("fetched_at = %v; want %q", fetchedAt, formatTime(fetched))
+	}
+
+	// A partial provenance (the cache-hit shape: identifiers but no fetch time)
+	// must leave fetched_at NULL rather than writing a zero timestamp, which
+	// would read as "fetched in year 1".
+	if err := q.SetCompletionProvenance(ctx, item.ID, CompletionProvenance{
+		ISRC:          "USABC1234567",
+		WriterVersion: "v1.26.0",
+	}); err != nil {
+		t.Fatalf("SetCompletionProvenance partial: %v", err)
+	}
+	if _, mbid, fetchedAt, _ := readRow(); fetchedAt != nil || mbid != nil {
+		t.Errorf("partial stamp: fetched_at = %v, mbid = %v; want both NULL", fetchedAt, mbid)
+	}
+
+	// A missing id is a benign no-op (no error), matching the sibling stamps.
+	if err := q.SetCompletionProvenance(ctx, 999999, prov); err != nil {
+		t.Errorf("SetCompletionProvenance on missing id: want nil error, got %v", err)
+	}
+}
+
 // TestDBQueue_RecheckClosedDB verifies the recheck methods return a wrapped
 // error (rather than panicking) when the underlying handle is closed.
 func TestDBQueue_RecheckClosedDB(t *testing.T) {
