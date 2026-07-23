@@ -22,6 +22,7 @@ import (
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/scanner"
 	"github.com/sydlexius/canticle/internal/verification"
+	"github.com/sydlexius/canticle/internal/version"
 )
 
 // Queue provides durable worker queue operations.
@@ -54,6 +55,11 @@ type Queue interface {
 	// for per-track provenance. Call at completion time before Complete so the row
 	// permanently records which provider served it. An empty lane is a no-op.
 	SetProviderLane(ctx context.Context, id int64, lane string) error
+	// SetCompletionProvenance stamps the identifiers and writer version the row was
+	// settled with, so an outcome that writes no tag block -- an unsynced .txt above
+	// all -- still records what produced it (#620). Call before Complete while the
+	// row is still in processing status; a wholly empty provenance is a no-op.
+	SetCompletionProvenance(ctx context.Context, id int64, prov queue.CompletionProvenance) error
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -763,6 +769,37 @@ func outcomeTypeFromSong(song models.Song) string {
 	}
 }
 
+// provenanceFromSong reads the completion provenance off the same Song the
+// writer consumes, so the row records exactly what the synced .lrc tag block
+// would have emitted -- no parallel derivation (#620). The values are read, not
+// recomputed: ISRC/MBID come from the resolved provider result, FetchedAt is the
+// single fetch timestamp the worker stamps for all output paths, and the writer
+// version is the same version.Version the [ve:] tag carries.
+//
+// A cache hit legitimately yields a zero FetchedAt: models.Song carries it as
+// `json:"-"`, so it never round-trips through the cache. That leaves the column
+// NULL, meaning "not recorded" -- the honest answer, since the fetch that
+// produced those lyrics happened on an earlier dispatch.
+func provenanceFromSong(song models.Song) queue.CompletionProvenance {
+	return queue.CompletionProvenance{
+		ISRC:          song.Track.ISRC,
+		MBID:          song.Track.RecordingMBID,
+		FetchedAt:     song.FetchedAt,
+		WriterVersion: version.Version,
+	}
+}
+
+// stampCompletionProvenance records the completion provenance best-effort. It is
+// advisory bookkeeping that nothing in the processing path reads, so a failure
+// is logged and the settle proceeds -- deliberately unlike the detector stamps,
+// where a stamp failure defers the row. Losing a provenance write must never
+// cost an otherwise-good result.
+func (w *Worker) stampCompletionProvenance(ctxNoCancel context.Context, id int64, song models.Song) {
+	if err := w.queue.SetCompletionProvenance(ctxNoCancel, id, provenanceFromSong(song)); err != nil {
+		slog.Warn("worker: stamp completion provenance failed; continuing", "id", id, "error", err)
+	}
+}
+
 // Run processes ready work items until the queue is empty or the context ends.
 func (w *Worker) Run(ctx context.Context) error {
 	return w.run(ctx, nil)
@@ -1093,6 +1130,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			slog.Warn("worker: stamp outcome type failed; continuing", "id", item.ID, "error", stampErr)
 		}
 	}
+	// Record what the row was settled WITH, alongside outcome_type's what was
+	// settled TO (#620). This is the only home for it on an unsynced settle: the
+	// .txt is plain lyric text and carries no tag block, so without this the row
+	// is indistinguishable from one written by the 2022 code.
+	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++
@@ -1281,6 +1323,20 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 		w.consecutiveFailures = 0
 		return nil
 	}
+	// Provenance is advisory and stamped OUTSIDE stampDetectorInstrumental, whose
+	// stamps are deliberately required: a failed provenance write must not defer a
+	// settle whose marker is already on disk and whose verdict is already
+	// recorded.
+	//
+	// This path records the WRITER VERSION ONLY. A detector settle resolves no
+	// identifiers (there is no provider result), and it never carries a fetch
+	// time: song.FetchedAt is assigned inside the !cacheHit block further down
+	// runOne, which this branch has already returned before reaching. So
+	// fetched_at stays NULL here, and a detector row is indistinguishable from a
+	// cache hit on that column alone -- use provider_lane / instrumental_result
+	// to tell them apart. The detector's own timing lives in completed_at and the
+	// detector telemetry, so nothing is lost by not inventing one here.
+	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
 	if completeErr := w.queue.Complete(ctxNoCancel, item.ID); completeErr != nil {
 		cause := fmt.Errorf("worker: complete instrumental item %d: %w", item.ID, completeErr)
 		w.consecutiveFailures++

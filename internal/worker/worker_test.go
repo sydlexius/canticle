@@ -19,6 +19,7 @@ import (
 	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/verification"
+	"github.com/sydlexius/canticle/internal/version"
 )
 
 // logRecord captures one emitted log line's level, message, and attrs for
@@ -105,6 +106,9 @@ type fakeQueue struct {
 	deferred           []int64
 	retired            []int64
 	outcomeTypes       map[int64]string
+	provenance         map[int64]queue.CompletionProvenance
+	provenanceErr      error
+	onComplete         func(id int64)
 	failCauses         []error
 	deferCauses        []error
 	deferDurations     []time.Duration
@@ -129,6 +133,9 @@ func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
 }
 
 func (q *fakeQueue) Complete(_ context.Context, id int64) error {
+	if q.onComplete != nil {
+		q.onComplete(id)
+	}
 	if q.completeErr != nil {
 		return q.completeErr
 	}
@@ -198,6 +205,17 @@ func (q *fakeQueue) SetOutcomeType(_ context.Context, id int64, outcomeType stri
 		q.outcomeTypes = make(map[int64]string)
 	}
 	q.outcomeTypes[id] = outcomeType
+	return nil
+}
+
+func (q *fakeQueue) SetCompletionProvenance(_ context.Context, id int64, prov queue.CompletionProvenance) error {
+	if q.provenanceErr != nil {
+		return q.provenanceErr
+	}
+	if q.provenance == nil {
+		q.provenance = make(map[int64]queue.CompletionProvenance)
+	}
+	q.provenance[id] = prov
 	return nil
 }
 
@@ -2673,6 +2691,170 @@ func TestRunOnceDetectorInstrumentalStampsOutcomeType(t *testing.T) {
 	}
 	if got := q.outcomeTypes[9]; got != "instrumental" {
 		t.Fatalf("outcome_type for id 9 = %q; want \"instrumental\"", got)
+	}
+}
+
+// TestRunOnceDetectorInstrumentalStampsProvenance covers the SECOND production
+// call site (#620). Without it, deleting the stamp from the detector path leaves
+// the whole suite green -- every other provenance test drives the normal write
+// path only.
+//
+// It also pins what that path can and cannot record: a detector settle resolves
+// no identifiers and never reaches the FetchedAt assignment (that lives in the
+// !cacheHit block, which this branch returns before), so writer_version is the
+// only field it carries. Asserting the zero FetchedAt keeps the code comment
+// honest -- an earlier version of it claimed a fetch time was recorded here.
+func TestRunOnceDetectorInstrumentalStampsProvenance(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Silent Piece"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 10,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "silent.lrc",
+			SourcePath: "/music/silent.flac",
+		},
+	}}}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
+	det := &fakeDetector{instrumental: true}
+
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 10 {
+		t.Fatalf("completed = %v; want [10] (precondition for this test)", q.completed)
+	}
+	prov, ok := q.provenance[10]
+	if !ok {
+		t.Fatal("no completion provenance stamped on the detector-instrumental path")
+	}
+	if prov.WriterVersion != version.Version {
+		t.Errorf("WriterVersion = %q; want %q", prov.WriterVersion, version.Version)
+	}
+	if !prov.FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %v; want zero -- the detector path never reaches the FetchedAt assignment", prov.FetchedAt)
+	}
+	if prov.ISRC != "" || prov.MBID != "" {
+		t.Errorf("identifiers = (%q, %q); want both empty -- a detector settle resolves none", prov.ISRC, prov.MBID)
+	}
+}
+
+// TestRunOnceStampsCompletionProvenanceOnUnsynced is the core of #620: an
+// unsynced settle writes a plain .txt with no tag block, so the queue row is the
+// ONLY place the identifiers survive. Without this stamp a row settled by the
+// 2022 code and one settled today are indistinguishable.
+func TestRunOnceStampsCompletionProvenanceOnUnsynced(t *testing.T) {
+	track := models.Track{
+		ArtistName:    "Artist",
+		TrackName:     "Title",
+		ISRC:          "USABC1234567",
+		RecordingMBID: "8f3471b5-7e6a-4d3f-9c21-0a1b2c3d4e5f",
+	}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:     11,
+		Inputs: models.Inputs{Track: track},
+	}}}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "plain unsynced text"},
+	}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := q.outcomeTypes[11]; got != "unsynced" {
+		t.Fatalf("outcome_type = %q; want \"unsynced\" (precondition for this test)", got)
+	}
+	prov, ok := q.provenance[11]
+	if !ok {
+		t.Fatal("no completion provenance stamped for id 11")
+	}
+	if prov.ISRC != track.ISRC {
+		t.Errorf("ISRC = %q; want %q", prov.ISRC, track.ISRC)
+	}
+	if prov.MBID != track.RecordingMBID {
+		t.Errorf("MBID = %q; want %q", prov.MBID, track.RecordingMBID)
+	}
+	if prov.WriterVersion != version.Version {
+		t.Errorf("WriterVersion = %q; want %q", prov.WriterVersion, version.Version)
+	}
+	// A fresh (non-cache) fetch must record when the round-trip happened; a zero
+	// value here would make every row look like a cache hit.
+	if prov.FetchedAt.IsZero() {
+		t.Error("FetchedAt is zero on a fresh fetch; want the stamped fetch time")
+	}
+}
+
+// TestRunOnceStampsProvenanceBeforeComplete pins the ordering. The stamp keys on
+// the row while it is still 'processing'; if it ran after Complete the UPDATE
+// would still match by id today, but the invariant every other Set* stamp
+// documents would be silently broken.
+func TestRunOnceStampsProvenanceBeforeComplete(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title", ISRC: "USABC1234567"}
+	q := &fakeQueue{items: []queue.WorkItem{{ID: 12, Inputs: models.Inputs{Track: track}}}}
+	q.onComplete = func(id int64) {
+		if _, stamped := q.provenance[id]; !stamped {
+			t.Errorf("Complete(%d) ran before the provenance stamp", id)
+		}
+	}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "plain unsynced text"},
+	}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.completed) != 1 {
+		t.Fatalf("completed = %v; want one row", q.completed)
+	}
+}
+
+// TestRunOnceProvenanceStampFailureIsNonFatal asserts the stamp is advisory:
+// provenance is bookkeeping nothing in the processing path reads, so losing the
+// write must never cost an otherwise-good settle. This is deliberately UNLIKE
+// the detector stamps, where a failure defers the row.
+func TestRunOnceProvenanceStampFailureIsNonFatal(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{
+		items:         []queue.WorkItem{{ID: 13, Inputs: models.Inputs{Track: track}}},
+		provenanceErr: errors.New("boom"),
+	}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "plain unsynced text"},
+	}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce returned an error on a failed advisory stamp: %v", err)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 13 {
+		t.Fatalf("completed = %v; want [13] despite the stamp failure", q.completed)
+	}
+	if len(q.failed) != 0 || len(q.deferred) != 0 {
+		t.Fatalf("row was failed/deferred by an advisory stamp failure: failed=%v deferred=%v", q.failed, q.deferred)
+	}
+}
+
+// TestProvenanceFromSongCacheHitLeavesFetchedAtZero documents the honest gap: a
+// cache hit never sets FetchedAt (models.Song carries it as `json:"-"`, so it
+// does not round-trip), leaving the column NULL. NULL means "not recorded", not
+// "fetched at the zero time" -- the fetch that produced those lyrics happened on
+// an earlier dispatch.
+func TestProvenanceFromSongCacheHitLeavesFetchedAtZero(t *testing.T) {
+	prov := provenanceFromSong(models.Song{
+		Track:  models.Track{ArtistName: "Artist", TrackName: "Title", ISRC: "USABC1234567"},
+		Lyrics: models.Lyrics{LyricsBody: "cached text"},
+	})
+	if !prov.FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %v; want zero for a song carrying no fetch time", prov.FetchedAt)
+	}
+	if prov.ISRC != "USABC1234567" {
+		t.Errorf("ISRC = %q; want the identifier to survive a cache hit", prov.ISRC)
 	}
 }
 
