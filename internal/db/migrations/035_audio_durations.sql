@@ -31,6 +31,48 @@
 -- uninformative; no backfill is required and none is possible without reading
 -- every file.
 --
+-- KEY CANONICALIZATION (#643, settled before either write path was released --
+-- Lookup has no caller yet, so this table has never held a row that mattered).
+-- file_path IS: the operator-configured library root, resolved to an absolute,
+-- symlink-free path ONCE PER SCAN (filepath.Abs then filepath.EvalSymlinks),
+-- with the walk-relative remainder of the file's path joined back on. Both
+-- capture sites build the key this way:
+--   - internal/scanner.Scanner.ScanLibrary resolves the root once at the start
+--     of a library scan and reuses it for every file underneath, so recursing
+--     a large tree costs exactly one EvalSymlinks, not one per file -- the
+--     array-stays-spun-down property this whole cache exists for.
+--   - internal/worker.Worker.refreshRecordingIdentity resolves
+--     item.Inputs.SourcePath (Abs then EvalSymlinks) immediately before the
+--     cache write, by which point the file is already open (or was just
+--     closed) for the metadata read, so the resolve costs no extra I/O.
+-- A library root configured with a relative path can no longer produce a
+-- working-directory-dependent key: internal/library.validate now rejects a
+-- non-absolute path outright, and both capture sites additionally run
+-- filepath.Abs before EvalSymlinks as a second, independent guard.
+--
+-- This collapses the two spellings problem #643 identified (a scan writing
+-- the configured root's literal spelling vs. a webhook item keyed on an
+-- EvalSymlinks-resolved SourcePath): both now resolve to the same canonical
+-- form for the same inode. It also fixes the readdir-side validation trap for
+-- a SYMLINKED LIBRARY ROOT specifically (the realistic deployment shape here,
+-- e.g. /music -> /mnt/array/music): the key is no longer itself a symlink
+-- path, so an Lstat of the key agrees with the handle-derived (mtime, size)
+-- stamp taken via the open file descriptor.
+--
+-- SCOPE LIMIT, DELIBERATE: only the library ROOT is resolved. A symlink for
+-- an individual file (or an intermediate directory) deeper in an otherwise-
+-- real tree is not separately resolved -- doing so would mean an EvalSymlinks
+-- per file, exactly the per-file disk-spin cost this design exists to avoid.
+-- That narrower case is not what #643 was filed against (a symlinked root,
+-- the whole-library layout the maintainer actually runs) and is not covered
+-- here; a file symlinked individually below a real root can still produce a
+-- key/stamp mismatch.
+--
+-- EXISTING ROWS: none. This table shipped in this same migration, unreleased,
+-- with zero callers of Lookup, so there is nothing to migrate or discard --
+-- there was never a row written under the old (uncanonicalized) scheme in any
+-- released build.
+--
 -- duration_seconds is only ever a POSITIVE measured value. The unknown case is
 -- represented by the ABSENCE of a row, never by a stored 0, so that "we have
 -- never read this file" and "this file is zero seconds long" stay distinct.

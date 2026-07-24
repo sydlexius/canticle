@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/testutil"
 )
@@ -550,7 +551,14 @@ func TestScanRecordsDurationWhenEnriching(t *testing.T) {
 	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	path := filepath.Join(dir, "song.flac")
+	// The cache key is canonicalized (#643: absolute, symlink-resolved root),
+	// so it may differ from the literal t.TempDir() spelling -- e.g. on macOS
+	// /var is itself a symlink to /private/var. Compare against
+	// filepath.EvalSymlinks of the real path rather than the raw join.
+	wantPath, err := filepath.EvalSymlinks(filepath.Join(dir, "song.flac"))
+	if err != nil {
+		t.Fatalf("EvalSymlinks fixture path: %v", err)
+	}
 
 	store := &recordingDurationStore{}
 	sc := NewScanner(WithDurationStore(store))
@@ -566,8 +574,8 @@ func TestScanRecordsDurationWhenEnriching(t *testing.T) {
 	if len(store.paths) != 1 {
 		t.Fatalf("recorded %d durations, want 1", len(store.paths))
 	}
-	if store.paths[0] != path {
-		t.Fatalf("recorded path %q, want %q", store.paths[0], path)
+	if store.paths[0] != wantPath {
+		t.Fatalf("recorded path %q, want canonical %q", store.paths[0], wantPath)
 	}
 	if store.seconds[0] != 210 {
 		t.Fatalf("recorded %ds, want 210s", store.seconds[0])
@@ -722,4 +730,119 @@ func TestScanRecordsNothingForZeroDuration(t *testing.T) {
 	if len(store.paths) != 0 {
 		t.Fatalf("recorded %d durations for a zero duration, want 0", len(store.paths))
 	}
+}
+
+// lookupDurationStore is a minimal in-memory audiodur.Store stand-in keyed
+// exactly like the real table (file_path is the whole key; mtime/size are
+// stored alongside but not needed to prove the KEY-collapse property this
+// test targets). It lets the test assert a real cache HIT, not just that two
+// path strings look equal in prose.
+type lookupDurationStore struct {
+	rows map[string]int
+}
+
+func (s *lookupDurationStore) Record(_ context.Context, path string, _, _ int64, seconds int) error {
+	if s.rows == nil {
+		s.rows = make(map[string]int)
+	}
+	s.rows[path] = seconds
+	return nil
+}
+
+func (s *lookupDurationStore) Lookup(_ context.Context, path string) (int, bool) {
+	seconds, ok := s.rows[path]
+	return seconds, ok
+}
+
+// TestScanLibrary_SymlinkedRootCollapsesToOneCanonicalKey exercises the #643
+// fix end-to-end against a REAL symlinked directory layout, the deployment
+// shape the issue was filed against (a container's /music mounted as a
+// symlink to the array's real path, e.g. /music -> /mnt/array/music).
+//
+// It asserts two things a prose claim cannot stand in for:
+//  1. The key the scanner actually writes is the canonical (symlink-resolved)
+//     spelling, not the configured root's literal, possibly-symlinked one.
+//  2. A lookup keyed the way a consumer would key it -- by canonicalizing
+//     whatever source path it was handed, exactly as worker.recordDuration
+//     now does via pathutil.CanonicalPath -- actually HITS the row the scan
+//     wrote, whether that consumer's own path happened to be spelled via the
+//     symlink or via the real target.
+func TestScanLibrary_SymlinkedRootCollapsesToOneCanonicalKey(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real-array-music")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatalf("mkdir real root: %v", err)
+	}
+	symlinkRoot := filepath.Join(base, "music")
+	if err := os.Symlink(realRoot, symlinkRoot); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(realRoot, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	// The library root as an operator would configure it: the symlink path,
+	// not the real target.
+	store := &lookupDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+	results, err := sc.ScanLibrary(context.Background(), symlinkRoot, ScanOptions{MaxDepth: 1, EnrichRecording: true})
+	if err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results; want 1", len(results))
+	}
+
+	wantKey, err := filepath.EvalSymlinks(filepath.Join(realRoot, "song.flac"))
+	if err != nil {
+		t.Fatalf("EvalSymlinks real path: %v", err)
+	}
+	if len(store.rows) != 1 {
+		t.Fatalf("recorded %d rows, want 1", len(store.rows))
+	}
+	if _, ok := store.rows[wantKey]; !ok {
+		t.Fatalf("scan wrote key(s) %v; want the canonical key %q present", mapKeys(store.rows), wantKey)
+	}
+
+	// Consumer side: a webhook-created item's SourcePath comes pre-resolved by
+	// pathutil.ResolveWithinRoot (internal/server.confinedPayloadPath) against
+	// the SAME configured (symlink) root.
+	webhookSourcePath, ok := pathutil.ResolveWithinRoot(symlinkRoot, filepath.Join(symlinkRoot, "song.flac"))
+	if !ok {
+		t.Fatal("ResolveWithinRoot rejected the fixture path")
+	}
+	// A scan-enqueued item's SourcePath is the scanner's raw (unresolved)
+	// ScanResult.FilePath -- the configured root's literal spelling, joined
+	// with the walked filename (models.ScanResult is built from dir+file.Name,
+	// not from the canonicalized recordDuration key).
+	scanSourcePath := results[0].FilePath
+
+	for name, consumerPath := range map[string]string{
+		"webhook-resolved source path": webhookSourcePath,
+		"scan-enqueued source path":    scanSourcePath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Mirrors worker.recordDuration's key derivation exactly
+			// (pathutil.CanonicalPath), so this proves the worker capture site
+			// and the scanner capture site land on the identical row.
+			key := pathutil.CanonicalPath(consumerPath)
+			seconds, hit := store.Lookup(context.Background(), key)
+			if !hit {
+				t.Fatalf("consumer path %q (canonicalized to %q) missed the cache; scan wrote key %q", consumerPath, key, wantKey)
+			}
+			if seconds != 210 {
+				t.Errorf("looked up %ds, want 210s", seconds)
+			}
+		})
+	}
+}
+
+func mapKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

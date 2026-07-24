@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -207,11 +208,24 @@ func nullableIntToBool(v sql.NullInt64) *bool {
 	return &b
 }
 
+// validate trims and checks path and name, and rejects a relative path.
+//
+// A relative library root would make audio_durations.file_path (#643)
+// implicitly depend on the process working directory: the scanner and worker
+// both build that cache key from the configured root, so a relative root
+// would let the same file resolve to two different keys across two process
+// launches with different cwds, defeating the whole-scan canonicalization
+// pathutil.CanonicalRoot performs. Rejecting it here, at the single write path
+// every library-add/update route shares, keeps every stored root absolute by
+// construction rather than by convention.
 func validate(path, name string) (string, string, error) {
 	path = strings.TrimSpace(path)
 	name = strings.TrimSpace(name)
 	if path == "" {
 		return "", "", fmt.Errorf("library: path must not be empty")
+	}
+	if !filepath.IsAbs(path) {
+		return "", "", fmt.Errorf("library: path %q must be absolute", path)
 	}
 	if name == "" {
 		return "", "", fmt.Errorf("library: name must not be empty")

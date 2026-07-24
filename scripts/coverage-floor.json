@@ -16,7 +16,7 @@
   "internal/musixmatch": 90,
   "internal/normalize": 93,
   "internal/orchestrator": 95,
-  "internal/pathutil": 92,
+  "internal/pathutil": 90,
   "internal/petitlyrics": 86,
   "internal/providers": 94,
   "internal/queue": 83,

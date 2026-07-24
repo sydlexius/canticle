@@ -84,3 +84,67 @@ func relWithin(root, p string) (string, bool) {
 	}
 	return rel, true
 }
+
+// CanonicalRoot resolves root once, for reuse across a whole library scan: it
+// returns both an absolute (not-yet-symlink-resolved) form and a symlink-
+// resolved canonical form. It never returns an error -- a scan must never fail
+// on this -- so any resolve failure degrades canonRoot to the absolute form,
+// which simply leaves that one root uncanonicalized rather than aborting the
+// caller's real work.
+//
+// Paired with RebaseUnderCanonicalRoot, this lets a caller pay exactly ONE
+// filepath.EvalSymlinks per scan for the whole tree under root, rather than one
+// per file -- the property that makes the audio_durations cache (#441, #643)
+// pay for itself on an array whose disks are kept spun down.
+func CanonicalRoot(root string) (absRoot, canonRoot string) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = filepath.Clean(root)
+	}
+	canon, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		canon = abs
+	}
+	return abs, canon
+}
+
+// RebaseUnderCanonicalRoot rewrites p -- built from a walk rooted at absRoot,
+// e.g. via repeated filepath.Join -- onto canonRoot, the symlink-resolved form
+// CanonicalRoot returned for that same root, without re-resolving symlinks for
+// p itself. This is the per-file half of the CanonicalRoot pair: the root's
+// EvalSymlinks cost is paid once by the caller, and every file underneath is
+// rebased with a pure string operation.
+//
+// p is expected to be rooted at absRoot. Anything else (a caller error, or a
+// path that legitimately does not fall under absRoot) falls back to
+// CanonicalPath -- a full EvalSymlinks for that one path -- so the result is
+// still correct, just no longer cheap.
+func RebaseUnderCanonicalRoot(absRoot, canonRoot, p string) string {
+	rel, err := filepath.Rel(absRoot, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return CanonicalPath(p)
+	}
+	return filepath.Join(canonRoot, rel)
+}
+
+// CanonicalPath resolves path to an absolute, symlink-free form, best-effort: a
+// resolve failure (a nonexistent path, a permission error) degrades to the
+// absolute-but-unresolved form rather than an error, matching the "never fail
+// the caller's real work" contract every audio_durations write path follows.
+//
+// Intended for a caller that processes one file at a time and can afford the
+// EvalSymlinks cost per call -- e.g. the worker's fetch-time duration-cache
+// write, where the file's own header read already paid for the disk access.
+// A caller walking many files under one root should use CanonicalRoot plus
+// RebaseUnderCanonicalRoot instead, to pay that cost once rather than per file.
+func CanonicalPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	canon, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return abs
+	}
+	return canon
+}

@@ -95,6 +95,11 @@ func TestAdd_ValidatesRequiredFields(t *testing.T) {
 		{name: "empty name", path: "/music", lib: ""},
 		{name: "blank path", path: "  ", lib: "Music"},
 		{name: "blank name", path: "/music", lib: "  "},
+		// A relative path is rejected (#643): the audio_durations cache key is
+		// built from the configured library root, so a relative root would make
+		// that key depend on the process working directory.
+		{name: "relative path", path: "music", lib: "Music"},
+		{name: "relative path with dot", path: "./music", lib: "Music"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
