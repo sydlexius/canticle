@@ -142,8 +142,8 @@ func TestScoreCandidate_WeightOrdering(t *testing.T) {
 		},
 		{
 			// Post-#639: scored on raw delta, not a fixed bucket. 216s is 6s away
-			// from the 210s track, past the outer (durationFarTolerance) window, so
-			// it scores below an exact match.
+			// from the 210s track, within the durationFarTolerance window (8s),
+			// so it scores the lower tier (+5), allowing the exact match (+10) to win.
 			name:           "exact duration beats far-tolerance duration",
 			stronger:       apiSong{DurationMS: 210000},
 			weaker:         apiSong{DurationMS: 216000},
@@ -156,7 +156,7 @@ func TestScoreCandidate_WeightOrdering(t *testing.T) {
 			wantStrongerHi: true,
 		},
 		{
-			// Both within the close tolerance (<=2s), so both score the same +10
+			// Both within the close tolerance (<=3s), so both score the same +10
 			// tier -- neither should beat the other.
 			name:           "durations within close tolerance tie",
 			stronger:       apiSong{DurationMS: 210000},
