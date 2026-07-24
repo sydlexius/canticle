@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/testutil"
 )
 
 // minimalID3v2 is a minimal ID3v2.3 tag with TIT2 ("Test Title") and TPE1
@@ -517,5 +519,207 @@ func TestScanLibrary_WindowNeverResurrectsATerminalClass(t *testing.T) {
 					tc.sidecarTime.Format("2006-01"))
 			}
 		})
+	}
+}
+
+// recordingDurationStore captures what the scanner banks, so the test asserts on
+// the recorded tuple rather than on a DB round-trip.
+type recordingDurationStore struct {
+	paths   []string
+	mtimes  []int64
+	sizes   []int64
+	seconds []int
+}
+
+func (r *recordingDurationStore) Record(_ context.Context, path string, mtimeUnixNano, size int64, seconds int) error {
+	r.paths = append(r.paths, path)
+	r.mtimes = append(r.mtimes, mtimeUnixNano)
+	r.sizes = append(r.sizes, size)
+	r.seconds = append(r.seconds, seconds)
+	return nil
+}
+
+// The scanner already computes a duration during enrichment and discards it.
+// Banking it costs no extra disk I/O, and is the primary fill path for the
+// revalidation cache (#441).
+func TestScanRecordsDurationWhenEnriching(t *testing.T) {
+	dir := t.TempDir()
+	// 44100 Hz * 210s = 9,261,000 samples, so the FLAC header yields an exact
+	// 210s duration for audioduration to parse -- no probeFunc override needed.
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	path := filepath.Join(dir, "song.flac")
+
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+
+	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
+	if err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results; want 1", len(results))
+	}
+
+	if len(store.paths) != 1 {
+		t.Fatalf("recorded %d durations, want 1", len(store.paths))
+	}
+	if store.paths[0] != path {
+		t.Fatalf("recorded path %q, want %q", store.paths[0], path)
+	}
+	if store.seconds[0] != 210 {
+		t.Fatalf("recorded %ds, want 210s", store.seconds[0])
+	}
+}
+
+// With enrichment off the scanner never probes the duration, so there is nothing
+// to bank and the store must not be touched.
+func TestScanRecordsNothingWhenEnrichmentDisabled(t *testing.T) {
+	dir := t.TempDir()
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+
+	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: false})
+	if err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results; want 1 (track must still be scanned)", len(results))
+	}
+
+	if len(store.paths) != 0 {
+		t.Fatalf("recorded %d durations with enrichment off, want 0", len(store.paths))
+	}
+}
+
+// TestScanRecordsDurationFromOpenHandleNotPath pins the fix for the defect
+// where recordDuration stamped the cache row with a path-based stat
+// (os.DirEntry.Info()) taken AFTER the header read, rather than a stat of the
+// already-open file handle the duration was actually read from. A path-based
+// stat is vulnerable to a tagger's write-tmp-then-rename swapping the file
+// between the header read and the stat, banking a wrong duration under a new
+// file's mtime/size, where it would validate as fresh forever.
+//
+// A live mid-scan rename race is impractical to force deterministically at
+// the scheduler level, but the discriminating half of it -- "does the stamp
+// come from the open fd or from re-resolving the path" -- is directly
+// testable on Unix: an already-open fd keeps referring to its original inode
+// even after the directory entry at that path is repointed by rename(2). So
+// the probeFunc test seam (invoked immediately before recordDuration, see
+// probeDuration) performs exactly that swap -- renaming a differently-sized
+// replacement file over the scanned path -- between the header read and the
+// stamp. A handle-derived stat (f.Stat(), the fix) is blind to the swap and
+// still reports the ORIGINAL file's mtime/size; a path-derived stat
+// (entry.Info(), the pre-fix bug) lazily re-Lstats the path at call time and
+// picks up the REPLACEMENT file's mtime/size instead. This test asserts the
+// former and, run against the pre-fix code, fails by observing the latter --
+// see the git history for the empirical check.
+func TestScanRecordsDurationFromOpenHandleNotPath(t *testing.T) {
+	dir := t.TempDir()
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	path := filepath.Join(dir, "song.flac")
+
+	wantInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+
+	// The swap happens inside probeFunc, which runs at exactly the point the
+	// production code calls probeDuration -- immediately before recordDuration,
+	// after the header (and open fd) already exist. Writing the replacement to
+	// a temp name and renaming it over path (rather than truncating path in
+	// place) is what makes the fd and the path diverge: rename repoints the
+	// directory entry to a new inode while the already-open fd keeps its old
+	// one, mirroring a tagger's write-tmp-then-rename.
+	sc.probeFunc = func(p string) (int, error) {
+		if p != path {
+			return 210, nil
+		}
+		// A VORBIS_COMMENT block makes the replacement a different size than
+		// the header-only original, so a path re-stat is distinguishable from
+		// the handle stat by size alone.
+		replacement := testutil.GenerateFLACExtended(sampleRate, totalSamples, map[string]string{"TITLE": "swapped"})
+		tmp := path + ".swap"
+		if err := os.WriteFile(tmp, replacement, 0o644); err != nil { //nolint:gosec // test fixture file
+			return 0, fmt.Errorf("write replacement: %w", err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return 0, fmt.Errorf("swap replacement over original: %w", err)
+		}
+		return 210, nil
+	}
+
+	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
+	if err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results; want 1", len(results))
+	}
+	if len(store.paths) != 1 {
+		t.Fatalf("recorded %d durations, want 1", len(store.paths))
+	}
+
+	// Sanity: confirm the swap actually changed what's on disk, else the test
+	// proves nothing regardless of which stat source recordDuration used.
+	replacedInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat replacement: %v", err)
+	}
+	if replacedInfo.Size() == wantInfo.Size() {
+		t.Fatalf("replacement file is the same size (%d) as the original; swap did not change the on-disk file, test cannot discriminate", replacedInfo.Size())
+	}
+
+	if got, want := store.sizes[0], wantInfo.Size(); got != want {
+		t.Errorf("recorded size %d, want %d (size of the ORIGINAL file via the open handle, not the replacement at the same path)", got, want)
+	}
+	if got, want := store.mtimes[0], wantInfo.ModTime().UnixNano(); got != want {
+		t.Errorf("recorded mtime %d, want %d (mtime of the ORIGINAL file via the open handle, not the replacement at the same path)", got, want)
+	}
+}
+
+// TestScanRecordsNothingForZeroDuration directly exercises recordDuration's
+// seconds<=0 guard, which scanDir relies on since it always calls
+// recordDuration regardless of whether probeDuration succeeded (a parse
+// failure degrades to duration 0, not a skipped call). Without this guard a
+// zero/unparsable duration would bank a bogus row that reads as "measured
+// zero-length" rather than "never read", so the guard is load-bearing, not
+// defensive.
+func TestScanRecordsNothingForZeroDuration(t *testing.T) {
+	dir := t.TempDir()
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+	// probeFunc stands in for a parse failure: probeDuration returns 0 with no
+	// error, exactly what audioDuration degrades to on an unparsable header.
+	sc.probeFunc = func(string) (int, error) { return 0, nil }
+
+	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
+	if err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results; want 1", len(results))
+	}
+
+	if len(store.paths) != 0 {
+		t.Fatalf("recorded %d durations for a zero duration, want 0", len(store.paths))
 	}
 }

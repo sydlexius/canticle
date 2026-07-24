@@ -23,6 +23,7 @@ import (
 	"github.com/BurntSushi/toml"
 	arg "github.com/alexflint/go-arg"
 	"github.com/sydlexius/canticle/internal/app"
+	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/config"
@@ -1039,6 +1040,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// and exposed via CacheStats.
 	cacheRepo := cache.New(sqlDB)
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
+	w.SetDurationStore(audiodur.New(sqlDB))
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
 	w.SetCircuitBackoff(time.Duration(cfg.API.CircuitBackoffBase)*time.Second, time.Duration(cfg.API.CircuitOpenDuration)*time.Second)
 	// Dispatch strategy and the parallel-mode synced-upgrade window. Set before the
@@ -2113,7 +2115,10 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		Results:   results,
 		// Persist metadata-read failures so a permanently-malformed file is not
 		// re-read (and re-warned about) on every scheduled/watched scan (#376).
-		Scanner: scanner.NewScanner(scanner.WithMetadataFailureStore(scanfail.New(sqlDB))),
+		Scanner: scanner.NewScanner(
+			scanner.WithMetadataFailureStore(scanfail.New(sqlDB)),
+			scanner.WithDurationStore(audiodur.New(sqlDB)),
+		),
 		Options: opts,
 		OnScanComplete: func(ctx context.Context, lib models.Library, found []models.ScanResult) error {
 			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)

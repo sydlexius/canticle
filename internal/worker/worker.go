@@ -121,6 +121,20 @@ const escalationThreshold = 5
 // identityrepair's IdentityReader.
 type MetadataReader func(path string) (scanner.AudioMetadata, error)
 
+// DurationStore banks the exact audio duration the fetch path already re-read
+// from disk, so the revalidation path (#441) does not have to open the file
+// again. A nil store disables the feature.
+//
+// Declared here rather than reused from internal/scanner's identical interface
+// because the worker is the consumer: it declares the narrow interface it
+// needs rather than depending on a producer package's type for a shape this
+// small. Both are satisfied by *audiodur.Store.
+type DurationStore interface {
+	// Record caches seconds as the duration of path at the given mtime and size.
+	// mtimeNano is ModTime().UnixNano().
+	Record(ctx context.Context, path string, mtimeNano, size int64, seconds int) error
+}
+
 // Worker consumes queued lyrics work one item at a time. The scan_results
 // writeback for successful completions is handled atomically inside
 // queue.DBQueue.Complete, so the worker has no separate ledger dependency.
@@ -139,6 +153,10 @@ type Worker struct {
 	// answers with its default recording, which writes a live or remastered cut's
 	// lyrics onto a studio track. Defaults to scanner.ReadAudioMetadata.
 	readMetadata MetadataReader
+	// durations, when set, banks the duration refreshRecordingIdentity re-read
+	// from disk, so the revalidation path (#441) does not re-open the file. Nil
+	// disables it.
+	durations DurationStore
 	// enrichRecordingDefault mirrors config.Enrichment.Enabled. When false the
 	// operator has opted out of reading ISRC and duration, and a scan leaves them
 	// empty, so the fetch-time refresh is skipped too and serve mode sends exactly
@@ -682,6 +700,12 @@ func (w *Worker) SetMetadataReader(r MetadataReader) {
 	w.readMetadata = r
 }
 
+// SetDurationStore wires a store so the duration re-read at fetch time is banked
+// for the revalidation path (#441) instead of discarded. Nil disables it.
+func (w *Worker) SetDurationStore(s DurationStore) {
+	w.durations = s
+}
+
 // SetDetectorOrdering selects whether the detector lane goes first ("front") or
 // last (any other value, e.g. "demoted") among the dispatch lanes, then
 // rebuilds the orchestrator. A nil audioDetector makes this a no-op at build
@@ -1034,7 +1058,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// before anything reads resolvedTrack, so the cache lookup, the provider query,
 	// and the cache store all see the same values. Any later position would break
 	// the read/write key agreement the comment above promises.
-	resolvedTrack = w.refreshRecordingIdentity(item, resolvedTrack)
+	resolvedTrack = w.refreshRecordingIdentity(ctx, item, resolvedTrack)
 
 	// A configured providers generation that no longer matches the stamp the item
 	// was enqueued under means a cached result (if any) predates the current
@@ -1362,7 +1386,16 @@ func (w *Worker) detectorPathFor(item queue.WorkItem) string {
 // business, not the fetch path's. A read error logs at Warn (loud-skip, mirroring
 // detectorPathFor); a disabled enrichment switch and an absent source path are
 // expected states and log nothing.
-func (w *Worker) refreshRecordingIdentity(item queue.WorkItem, track models.Track) models.Track {
+//
+// ctx is threaded through to the best-effort duration-cache write (#441), which
+// piggybacks on this read rather than reopening the file later. This is the
+// caller's ordinary cancelable context, not the non-cancelable one that
+// stampTimingOutcome/stampCompletionProvenance take: those run after the item's
+// output is already on disk, where losing a bookkeeping write to cancellation
+// would be a real loss. Here the cache write is a pure optimization: if it is
+// skipped, the next pass simply re-reads the header, so there is nothing to
+// protect from cancellation.
+func (w *Worker) refreshRecordingIdentity(ctx context.Context, item queue.WorkItem, track models.Track) models.Track {
 	if !w.enrichRecordingDefault || w.readMetadata == nil {
 		return track
 	}
@@ -1377,6 +1410,9 @@ func (w *Worker) refreshRecordingIdentity(item queue.WorkItem, track models.Trac
 	}
 	if meta.TrackLength > 0 {
 		track.TrackLength = meta.TrackLength
+		// Bank the duration this read already paid for (#441). Best-effort: a
+		// cache write must never fail or defer an item.
+		w.recordDuration(ctx, item.Inputs.SourcePath, meta, meta.TrackLength)
 	}
 	if meta.ISRC != "" {
 		track.ISRC = meta.ISRC
@@ -1385,6 +1421,35 @@ func (w *Worker) refreshRecordingIdentity(item queue.WorkItem, track models.Trac
 		track.AlbumName = meta.AlbumName
 	}
 	return track
+}
+
+// recordDuration banks a fetch-time duration for the revalidation path (#441).
+//
+// The mtime/size stamp comes from meta (the scanner.AudioMetadata the fetch-time
+// read already returned), not from a fresh os.Stat(path). By the time this runs,
+// w.readMetadata has already opened, read, and closed the file (see
+// scanner.ReadAudioMetadata), so a path-based stat here would re-resolve the
+// path rather than describe the file the duration was actually read from -- the
+// same write-tmp-then-rename hazard scanner.recordDuration guards against
+// (internal/scanner/scanner.go). meta.MTimeNano/SizeBytes are stat'd from the
+// still-open handle before it closes, so they always describe the read's own
+// inode. A zero identity (stat on the handle failed) is skipped, matching how a
+// zero duration is skipped: absence is how the table represents "unknown", and
+// storing a guessed identity would let a wrong row validate as fresh forever.
+//
+// Non-fatal at every step, matching the sibling stamp convention here: a
+// bookkeeping write must never fail an item whose real work has succeeded.
+func (w *Worker) recordDuration(ctx context.Context, path string, meta scanner.AudioMetadata, seconds int) {
+	if w.durations == nil || seconds <= 0 || strings.TrimSpace(path) == "" {
+		return
+	}
+	if meta.MTimeNano == 0 && meta.SizeBytes == 0 {
+		slog.Debug("no file identity from fetch-time read; skipping duration cache", "path", path)
+		return
+	}
+	if err := w.durations.Record(ctx, path, meta.MTimeNano, meta.SizeBytes, seconds); err != nil {
+		slog.Debug("duration cache write failed; continuing", "path", path, "error", err)
+	}
 }
 
 // primeDetectorMemo hands the memoizing detector this row's stored scores so the
