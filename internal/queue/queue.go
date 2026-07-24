@@ -9,9 +9,17 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/backoff"
+	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 )
+
+// dequeueMaxAttempts bounds the SQLITE_BUSY retry loop for the worker-loop
+// transitions (Dequeue/Complete/Fail). It mirrors scan's upsertMaxAttempts: a
+// transient WAL lock clears well within a few geometric-backoff attempts, and a
+// genuinely stuck lock still surfaces once exhausted rather than looping forever
+// (#625).
+const dequeueMaxAttempts = 5
 
 const (
 	// StatusPending marks queued work ready to be processed.
@@ -434,6 +442,28 @@ const refillBufferSQL = `UPDATE work_queue
 // (randomize=true, batch_size<=0), or the shuffled lookahead buffer
 // (randomize=true, batch_size>0, the default). See #571.
 func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
+	// Retry the whole claim on SQLITE_BUSY: a concurrent bulk write (a maintenance
+	// UPDATE, a reconcile pass) makes a poll fail with a transient lock, and the
+	// worker is a single serialized loop so every dropped poll is lost throughput
+	// at exactly the moment the DB is busiest. busy_timeout alone does NOT cover
+	// this - SQLITE_BUSY_SNAPSHOT (517), a WAL write-write conflict, fails
+	// immediately regardless of the timeout. Retrying is safe: each path is atomic
+	// (a single claim statement, or dequeueBatched's BeginTx...Commit that rolls
+	// back cleanly on failure), so a retry re-runs from a clean slate. sql.ErrNoRows
+	// is not a SQLITE_BUSY error, so an empty queue returns on the first attempt.
+	// (#625)
+	var item WorkItem
+	err := db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		var derr error
+		item, derr = q.dequeueOnce(ctx)
+		return derr
+	})
+	return item, err
+}
+
+// dequeueOnce performs a single claim attempt across the three configured paths.
+// Wrapped by Dequeue in db.RetryOnBusy.
+func (q *DBQueue) dequeueOnce(ctx context.Context) (WorkItem, error) {
 	now := formatTime(q.now())
 	if q.randomized && q.batchSize > 0 {
 		return q.dequeueBatched(ctx, now)
@@ -520,6 +550,17 @@ func (q *DBQueue) dequeueBatched(ctx context.Context, now string) (WorkItem, err
 // scan_results agree. Crash or partial-write between the updates is impossible:
 // SQLite either commits the whole transaction or rolls back.
 func (q *DBQueue) Complete(ctx context.Context, id int64) error {
+	// Retry on SQLITE_BUSY: a dropped Complete has a larger blast radius than a
+	// dropped poll - the finished item stays 'processing' and is re-dequeued and
+	// re-processed. The whole transaction rolls back on a BUSY before commit, so a
+	// retry re-runs cleanly; requireAffected's "not processing" error is not a
+	// SQLITE_BUSY error, so an already-completed row returns immediately. (#625)
+	return db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		return q.completeOnce(ctx, id)
+	})
+}
+
+func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
 	now := formatTime(q.now())
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -860,6 +901,23 @@ func (q *DBQueue) Cleanup(ctx context.Context, inputs models.Inputs) (int64, err
 
 // Fail records a failed attempt and schedules the item after geometric backoff.
 func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, error) {
+	// Retry on SQLITE_BUSY: a dropped Fail leaves the row wedged in 'processing'
+	// (and the linked scan_results with it), a larger blast radius than a dropped
+	// poll. The transaction rolls back on a BUSY before commit, so a retry re-runs
+	// from a clean read of attempts; sql.ErrNoRows (row not 'processing') is not a
+	// SQLITE_BUSY error and returns immediately. The next_attempt_at recompute on a
+	// retry differs only by the few ms of retry latency, which is immaterial to the
+	// backoff schedule. (#625)
+	var item WorkItem
+	err := db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		var ferr error
+		item, ferr = q.failOnce(ctx, id, cause)
+		return ferr
+	})
+	return item, err
+}
+
+func (q *DBQueue) failOnce(ctx context.Context, id int64, cause error) (WorkItem, error) {
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: begin fail tx: %w", err)
