@@ -1,3 +1,22 @@
+# NOTE ON codecov/patch TIMING -- do not "fix" this by adding after_n_builds.
+#
+# Codecov posts its commit status once `after_n_builds` uploads have arrived, and
+# that key DEFAULTS TO 1. This repo performs AT MOST ONE upload: ci.yml's single
+# `coverage-upload` job ships the merged Go profile and nothing else uploads. So
+# the default is correct and setting after_n_builds explicitly would be a no-op.
+#
+# "At most one", not "exactly one": `coverage-upload` needs the `test` job, which
+# is gated `if: needs.changes.outputs.code == 'true'`. A docs-only or workflow-
+# only PR runs no tests, produces no coverage artifact, and performs ZERO uploads
+# -- so it gets no patch status at all. That is expected; do NOT "fix" a missing
+# status on a docs-only PR.
+#
+# Keep the upload count DETERMINISTIC. If a second uploader is ever added, a
+# fixed `after_n_builds: 2` would hang the status forever on any run where one
+# uploader is conditionally skipped -- worse than firing early. The premature red
+# 0% that this comment guards against (seen in sydlexius/stillwater) was caused by
+# a SECOND racing uploader, never by the threshold. Do not add one.
+
 coverage:
   status:
     project:

@@ -1,0 +1,216 @@
+# Auto-label pull requests from the issues they close.
+#
+# On open/edit/sync, parse "Fixes #N" / "Closes #N" / "Resolves #N" / "Part of
+# #N" references from the PR body, fetch labels from each linked issue, and copy
+# any that exist in the repo's Labels set onto the PR.
+#
+# The "valid label" set is the repo's own Labels list (queried via the API).
+# Manage it through Settings > Labels -- no workflow edit needed to add or rename
+# a label.
+#
+# This is AUTO-LABEL ONLY: it copies labels, it does NOT gate the merge. (The
+# upstream sydlexius/stillwater version also fails a required status check when a
+# PR has no release label; that gate is deliberately omitted here.)
+#
+# Uses pull_request_target so a fork PR cannot redefine the logic. Dependabot PRs
+# are skipped -- they never reference labeled issues.
+
+name: PR Labels
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited, synchronize]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  auto-label:
+    name: Auto-label from linked issues
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      pull-requests: write
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+
+    steps:
+      - name: Auto-label from linked issues
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // Valid labels = the repo's own Labels set (Settings > Labels).
+            const repoLabels = await github.paginate(github.rest.issues.listLabelsForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const validLabels = new Set(repoLabels.map(l => l.name));
+            core.info(`Repo labels (${validLabels.size}): ${[...validLabels].sort().join(', ')}`);
+
+            // Parse issue references from the PR body. `Part of #N` is the house
+            // convention for an epic-child PR (links without auto-closing); it must
+            // be recognized or a PR that references only its epic is silently
+            // skipped.
+            const body = context.payload.pull_request.body || '';
+            const pattern = /\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|part\s+of)\s+#(\d+)/gi;
+            const issueNumbers = [];
+            let match;
+            while ((match = pattern.exec(body)) !== null) {
+              const n = parseInt(match[1], 10);
+              if (!issueNumbers.includes(n)) issueNumbers.push(n);
+            }
+
+            if (issueNumbers.length === 0) {
+              core.info('No issue references found in PR body -- skipping auto-label');
+              return;
+            }
+            core.info(`Linked issues: ${issueNumbers.map(n => '#' + n).join(', ')}`);
+
+            // Collect labels from each linked issue that exist in the repo set.
+            const toApply = new Set();
+            for (const num of issueNumbers) {
+              try {
+                const issue = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                });
+                if (issue.data.pull_request) {
+                  core.info(`#${num} is a pull request, skipping`);
+                  continue;
+                }
+                for (const label of issue.data.labels) {
+                  if (validLabels.has(label.name)) toApply.add(label.name);
+                }
+              } catch (err) {
+                core.warning(`Could not fetch issue #${num}: ${err.message}`);
+              }
+            }
+
+            if (toApply.size === 0) {
+              core.info('No matching labels found on linked issues');
+              return;
+            }
+
+            // ---------------------------------------------------------------
+            // Dedupe mutually-exclusive families, elevating to the most
+            // conservative member present.
+            //
+            // The union above is correct for ADDITIVE labels (ci, bug, docker,
+            // ...): a PR closing several issues really is all of those. It is
+            // WRONG for a mutually-exclusive family: a PR closing three issues of
+            // differing priority would otherwise be tagged priority: high + medium
+            // + low at once. Each family collapses to exactly ONE member, elevated
+            // to the most conservative value present (a PR closing N issues IS the
+            // union of that work, so elevate rather than take the lowest).
+            //
+            // Canticle's only mutually-exclusive family today is `priority:`.
+            // Array ordered MOST-conservative first (index 0 wins).
+            const EXCLUSIVE_FAMILIES = {
+              priority: ['priority: critical', 'priority: high', 'priority: medium', 'priority: low'],
+            };
+
+            // Guard the table against label renames/additions: a repo label that
+            // LOOKS like a family member but is not ranked would fall through as an
+            // additive label and silently re-introduce the union this fixes. Fail
+            // loudly instead.
+            const ranked = new Set(Object.values(EXCLUSIVE_FAMILIES).flat());
+            const unranked = [...validLabels].filter(
+              l => /^(priority):/.test(l) && !ranked.has(l)
+            );
+            if (unranked.length > 0) {
+              core.setFailed(
+                `Label(s) ${unranked.join(', ')} look like members of a mutually-exclusive ` +
+                `family but are not ranked in EXCLUSIVE_FAMILIES in this workflow. ` +
+                `Add them (most-conservative first) so the elevator can order them.`
+              );
+              return;
+            }
+
+            // Resolve each family against the union AND the PR's current labels, so
+            // a PR that is ALREADY mislabeled gets repaired, not just prevented.
+            // Read current labels from the API, not the (possibly stale) event
+            // payload snapshot.
+            const prNow = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            const existing = new Set(prNow.data.labels.map(l => l.name));
+            const toRemove = new Set();
+
+            // THE PR WINS. Linked-issue labels only SEED a family the PR has not
+            // already decided; they never override a decision made on the PR --
+            // otherwise a manual priority set on the PR would be stomped on every
+            // push by a differing priority inherited from a linked issue.
+            for (const [family, order] of Object.entries(EXCLUSIVE_FAMILIES)) {
+              const onPR = order.filter(l => existing.has(l));
+              const fromIssues = order.filter(l => toApply.has(l));
+
+              if (onPR.length > 0) {
+                // The PR has decided this family. Issue labels do not get a vote.
+                for (const l of fromIssues) toApply.delete(l);
+                const winner = onPR[0];                // order is most-conservative first
+                for (const loser of onPR.slice(1)) toRemove.add(loser);
+                if (onPR.length > 1) {
+                  core.info(
+                    `${family}: PR carries ${onPR.length} conflicting members; ` +
+                    `elevated to "${winner}" (removing ${onPR.slice(1).join(', ')})`
+                  );
+                } else if (fromIssues.length > 0 && fromIssues[0] !== winner) {
+                  core.info(
+                    `${family}: PR already set "${winner}"; ` +
+                    `NOT overriding it with "${fromIssues[0]}" from a linked issue`
+                  );
+                }
+                continue;
+              }
+
+              // Undecided on the PR -- seed it from the linked issues.
+              if (fromIssues.length === 0) continue;
+              const winner = fromIssues[0];
+              for (const loser of fromIssues.slice(1)) toApply.delete(loser);
+              if (fromIssues.length > 1) {
+                core.info(
+                  `${family}: seeded from linked issues, elevated to "${winner}" ` +
+                  `(dropped ${fromIssues.slice(1).join(', ')})`
+                );
+              }
+            }
+
+            // Remove losing family members already on the PR. removeLabel fires an
+            // `unlabeled` event, but this workflow does not listen for label events
+            // (see the `on:` types), so it cannot re-trigger itself.
+            for (const loser of toRemove) {
+              core.info(`Removing conflicting label: ${loser}`);
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  name: loser,
+                });
+              } catch (err) {
+                // 404 = already gone (race with a concurrent run). Anything else is
+                // real: surface it rather than leaving a conflicting label on.
+                if (err.status === 404) {
+                  core.info(`  ${loser} was already removed`);
+                } else {
+                  core.warning(`Could not remove ${loser}: ${err.message}`);
+                }
+              }
+            }
+
+            const missing = [...toApply].filter(l => !existing.has(l));
+            if (missing.length === 0) {
+              core.info('No new labels to apply');
+              return;
+            }
+
+            core.info(`Applying labels: ${missing.join(', ')}`);
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: missing,
+            });
