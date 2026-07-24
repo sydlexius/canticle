@@ -75,6 +75,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `db` -- pure-Go SQLite (`modernc.org/sqlite`) open/migrate (goose), WAL, foreign keys, busy-retry, and a read-only open path; migrations in `internal/db/migrations/`.
 - `cache` -- lyrics cache repository (`CacheRepo`) over SQLite.
 - `scanfail` -- `Store` recording files that consistently fail metadata read, so the scanner skips them until mtime/size changes; satisfies `scanner.MetadataFailureStore`.
+- `audiodur` -- exact per-file audio duration cache (`Store`) keyed by path and validated by (mtime, size); filled opportunistically wherever a file is already open, from that read's own handle rather than a path re-stat. A miss is `unknown_duration`, never an error (#441). The consumer that would look the cache up (#442) does not exist yet.
 - `queue` -- the in-memory `InputsQueue` (fetch mode) and the durable SQLite `DBQueue` (serve/worker mode) with priority tiers and randomized within-tier dequeue. Completion stamps (`SetOutcomeType`, `SetCompletionProvenance`, `SetTimingOutcome`) are written before `Complete` while the row is still `processing`; each is non-fatal, since the output is already on disk by then.
 - `library` -- library-root CRUD repository (`Add`/`List`/`Get`/`GetByName`/`Update`/`Remove`).
 - `scan` -- library scanning: `Enqueuer`, the `scan_results` `Repo`, and the periodic scheduler that enqueues missing lyrics.

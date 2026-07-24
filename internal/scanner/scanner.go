@@ -106,11 +106,17 @@ func ReadArtistIdentity(path string) (artist, albumArtist string, err error) {
 // AudioMetadata carries the recording disambiguators a provider query needs from
 // an audio file's tags. The zero values are the documented "absent" sentinels:
 // TrackLength 0 is the unknown-duration sentinel normalize.DurationBucket keys
-// on, and an empty string means the tag is absent.
+// on, and an empty string means the tag is absent. MTimeNano and SizeBytes are
+// the open file handle's own identity (ModTime().UnixNano() and Size(), stat'd
+// before the handle is closed) rather than a re-resolution of the path; zero
+// means the identity could not be determined (a stat failure), matching the
+// same "absent" convention as the other fields.
 type AudioMetadata struct {
 	TrackLength int
 	ISRC        string
 	AlbumName   string
+	MTimeNano   int64
+	SizeBytes   int64
 }
 
 // ReadAudioMetadata opens the audio file at path and returns the recording
@@ -137,7 +143,19 @@ func ReadAudioMetadata(path string) (AudioMetadata, error) {
 		slog.Debug("duration parse failed; using 0", "file", path, "error", derr)
 		dur = 0
 	}
-	return AudioMetadata{TrackLength: dur, ISRC: extractISRC(m), AlbumName: m.Album()}, nil
+	var mtimeNano, sizeBytes int64
+	if info, serr := f.Stat(); serr != nil {
+		slog.Debug("could not stat open handle for identity; using zero sentinel", "file", path, "error", serr)
+	} else {
+		mtimeNano, sizeBytes = info.ModTime().UnixNano(), info.Size()
+	}
+	return AudioMetadata{
+		TrackLength: dur,
+		ISRC:        extractISRC(m),
+		AlbumName:   m.Album(),
+		MTimeNano:   mtimeNano,
+		SizeBytes:   sizeBytes,
+	}, nil
 }
 
 // audioFileTypeForExt returns the audioduration type constant for a lower-case
@@ -175,6 +193,19 @@ type MetadataFailureStore interface {
 	RecordFailure(ctx context.Context, path string, mtimeNano, size int64, readErr error) error
 }
 
+// DurationStore banks the exact audio duration this scan already computed, so
+// the revalidation path (#441) does not have to re-open the file to learn it.
+// A nil store disables the feature entirely.
+//
+// This is deliberately a WRITE-ONLY seam here: the scanner has the file open and
+// has already paid for the header read, so it never needs to consult the cache,
+// only fill it.
+type DurationStore interface {
+	// Record caches seconds as the duration of path at the given mtime and size.
+	// mtimeNano is ModTime().UnixNano().
+	Record(ctx context.Context, path string, mtimeNano, size int64, seconds int) error
+}
+
 // Scanner handles parsing input sources and populating the work queue.
 type Scanner struct {
 	// probeFunc, when set, is used as the duration probe instead of audioduration
@@ -183,6 +214,9 @@ type Scanner struct {
 	// failures, when set, lets the scanner skip files that previously failed
 	// metadata read (and warn only once per file-version). Nil disables it.
 	failures MetadataFailureStore
+	// durations, when set, banks each computed duration for the revalidation
+	// path (#441). Nil disables it.
+	durations DurationStore
 }
 
 // Option configures a Scanner at construction.
@@ -192,6 +226,12 @@ type Option func(*Scanner)
 // consistently fail metadata read until they change on disk (issue #376).
 func WithMetadataFailureStore(s MetadataFailureStore) Option {
 	return func(sc *Scanner) { sc.failures = s }
+}
+
+// WithDurationStore wires a store so each duration the scan computes is banked
+// for the revalidation path (#441) instead of discarded. Nil disables it.
+func WithDurationStore(s DurationStore) Option {
+	return func(sc *Scanner) { sc.durations = s }
 }
 
 // ScanOptions controls library directory traversal and queue eligibility.
@@ -305,6 +345,41 @@ func (sc *Scanner) probeDuration(f *os.File, ext string) (int, error) {
 		return sc.probeFunc(f.Name())
 	}
 	return audioDuration(f, ext)
+}
+
+// recordDuration banks a computed duration for the revalidation path (#441).
+//
+// The mtime/size stamp is taken from the already-open file handle f, not by
+// re-resolving path. f.Stat() describes the fd's own inode -- the exact bytes
+// probeDuration just read the header from in production (the probeFunc test
+// seam instead takes f.Name(), a path, so this guarantee is a production-only
+// property, not one the seam itself upholds) -- so the (duration, mtime, size)
+// tuple always describes one inode by construction. If a tagger's
+// write-tmp-then-rename lands between the header read and this call, a
+// path-based stat would pick up the replacement file's mtime/size while the
+// duration on the row is still the superseded file's, caching a wrong
+// duration as permanently valid. Stat'ing the handle instead means a swap in
+// that window makes the row inert against the new file (a miss, the correct
+// degrade-open direction) rather than a confidently wrong hit that nothing
+// ever invalidates.
+//
+// Non-fatal by construction: a bookkeeping write must never fail a scan whose
+// real work already succeeded, so every failure path logs at Debug and returns.
+// A zero or negative duration is skipped because absence is how audio_durations
+// represents "unknown"; storing a 0 would make "never read" indistinguishable
+// from "measured zero-length".
+func (sc *Scanner) recordDuration(ctx context.Context, path string, f *os.File, seconds int) {
+	if sc.durations == nil || seconds <= 0 {
+		return
+	}
+	info, err := f.Stat()
+	if err != nil {
+		slog.Debug("could not stat for duration cache; skipping", "file", path, "error", err)
+		return
+	}
+	if err := sc.durations.Record(ctx, path, info.ModTime().UnixNano(), info.Size(), seconds); err != nil {
+		slog.Debug("duration cache write failed; continuing", "file", path, "error", err)
+	}
 }
 
 // extractISRC returns the ISRC from audio tag metadata, or "" if absent.
@@ -726,6 +801,12 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 				slog.Debug("duration parse failed; using 0", "file", file.Name(), "error", durErr)
 				dur = 0
 			}
+			// Bank the duration we just paid a header read for (#441). The stamp
+			// comes from the open handle f, not a path re-stat, so no path is
+			// re-resolved -- and on an array whose disks spin down, not
+			// re-opening it later is the whole point. Best-effort: a cache write
+			// must never fail a scan.
+			sc.recordDuration(ctx, filePath, f, dur)
 			isrc = extractISRC(m)
 			recordingMBID = extractRecordingMBID(m)
 		}
