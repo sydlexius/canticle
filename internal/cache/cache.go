@@ -78,6 +78,55 @@ func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBu
 	return lyrics, nil
 }
 
+// Execer is the subset of *sql.DB / *sql.Tx that Invalidate needs, so a caller
+// holding an open transaction can invalidate inside it rather than on its own
+// connection.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// Invalidate deletes every cached entry for (artist, title) across ALL duration
+// buckets and returns the number of rows removed.
+//
+// Deleting every bucket -- not just the caller's -- is deliberate and load-bearing.
+// Lookup falls back to the bucket-0 unknown-duration sentinel row whenever an
+// exact-bucket lookup misses, so removing only one bucket can leave a sibling row
+// that still satisfies the very lookup the caller is trying to defeat. The cache
+// key carries no provenance, so a caller that has repudiated a track's lyrics
+// (purge-provenance, #474) cannot distinguish "the entry I purged" from "some
+// other bucket's copy of the same purged fetch": the honest invalidation is all of
+// them. Over-deleting costs at most one re-fetch; under-deleting silently defeats
+// the caller.
+//
+// Keys are normalized exactly as Store and Lookup normalize them, so the deleted
+// key is the same key a subsequent Lookup would probe. Empty artist/title are not
+// special-cased -- an identity-less row is looked up under ("", "") and so is
+// invalidated under ("", "").
+func Invalidate(ctx context.Context, ex Execer, artist, title string) (int, error) {
+	res, err := ex.ExecContext(ctx,
+		`DELETE FROM lyrics_cache WHERE artist=? AND title=?`,
+		normalize.NormalizeKey(artist),
+		normalize.NormalizeKey(title),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("cache: invalidate: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		// The delete committed; only the count is unavailable. Report success with
+		// an unknown count rather than making the caller treat this as a failure.
+		return 0, nil
+	}
+	return int(n), nil
+}
+
+// Invalidate deletes every cached entry for (artist, title) across all duration
+// buckets on the repository's own connection. See the package-level Invalidate
+// for why every bucket is removed.
+func (r *CacheRepo) Invalidate(ctx context.Context, artist, title string) (int, error) {
+	return Invalidate(ctx, r.db, artist, title)
+}
+
 // CacheStats returns the process-lifetime cache hit and lookup counts. hits is
 // the number of Lookup calls served from cache (either the exact bucket or the
 // bucket-0 fallback); lookups is the total number of Lookup calls. Both are

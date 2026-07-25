@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
@@ -441,5 +442,51 @@ func TestPurgeProvenance_ConfigLoadError(t *testing.T) {
 	code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch"})
 	if code != 1 {
 		t.Fatalf("exit=%d want 1 for invalid config", code)
+	}
+}
+
+// TestPurgeProvenance_SummaryReportsCacheInvalidation: the operator-facing
+// summary must say how many cache entries were invalidated. Without it the
+// summary's "requeued N" reads as a re-fetch guarantee the command could not
+// have made before the invalidation existed.
+func TestPurgeProvenance_SummaryReportsCacheInvalidation(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
+	target := filepath.Join(root, "ArtistA", "one.lrc")
+	writePurgeSidecar(t, target, "musixmatch")
+	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(target), "one.lrc", "done")
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := cache.New(sqlDB).Store(ctx, "Artist", "Title", 0, "[00:01.00]cached\n"); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch", Yes: true}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "1 cache entries invalidated") {
+		t.Errorf("summary must report the cache invalidation; got: %s", buf.String())
+	}
+}
+
+// TestPurgeProvenance_SummaryNotesUnlinkedSidecars: a deleted sidecar with no
+// linked scan_results row gets no requeue and no cache invalidation, so the
+// summary must say so rather than imply the re-fetch guarantee covers it.
+func TestPurgeProvenance_SummaryNotesUnlinkedSidecars(t *testing.T) {
+	ctx, cfgPath, _, root := setupPurgeProvenance(t)
+	writePurgeSidecar(t, filepath.Join(root, "ArtistA", "orphan.lrc"), "musixmatch")
+
+	var buf bytes.Buffer
+	if code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch", Yes: true}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "no linked scan_results row") {
+		t.Errorf("summary must flag the unlinked sidecar; got: %s", buf.String())
 	}
 }

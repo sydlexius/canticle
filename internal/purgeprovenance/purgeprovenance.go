@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
@@ -87,7 +88,25 @@ type Record struct {
 	// WorkItemIDs are the work_queue rows linked to those scan_results rows,
 	// deduplicated.
 	WorkItemIDs []int64
+	// Identities are the deduplicated (artist, title) pairs carried by those
+	// scan_results rows -- the cache keys whose entries the purge invalidates.
+	Identities []trackIdentity
 }
+
+// trackIdentity is one scan_results row's (artist, title) pair: the cache key
+// EnqueuePending later probes for that row. Deliberately unexported -- it exists
+// so the purge can invalidate exactly what the re-scan would look up, not as a
+// public identity abstraction.
+type trackIdentity struct {
+	artist string
+	title  string
+}
+
+// Artist returns the identity's artist as stored on the scan_results row.
+func (t trackIdentity) Artist() string { return t.artist }
+
+// Title returns the identity's title as stored on the scan_results row.
+func (t trackIdentity) Title() string { return t.title }
 
 // Result tallies a purge run.
 type Result struct {
@@ -98,7 +117,12 @@ type Result struct {
 	WorkItemsRequeued int // work_queue rows reset to 'deferred' for re-fetch
 	SkippedSymlink    int // symlinked sidecars never followed or touched
 	SkippedProcessing int // matched sidecars left alone: a linked work_queue row is in-flight
-	Errors            int // per-file failures (read, report, delete, or reset); the run continues past them
+	CacheInvalidated  int // lyrics_cache rows deleted so the requeued track re-fetches
+	// UnlinkedNoCacheKey counts deleted sidecars that no scan_results row claims.
+	// Nothing was requeued for them and no cache key could be derived, so a future
+	// scan that rediscovers the track could still be served from cache.
+	UnlinkedNoCacheKey int
+	Errors             int // per-file failures (read, report, invalidate, delete, or reset); the run continues past them
 }
 
 // Purger locates and purges provenance-matched sidecars against db.
@@ -112,9 +136,13 @@ func New(db *sql.DB) *Purger {
 }
 
 // srInfo is one scan_results row's identity, indexed for expected-sidecar
-// lookup.
+// lookup. artist/title are the row's own metadata columns -- the exact values
+// EnqueuePending later feeds to Cache.Lookup -- carried here so the purge can
+// invalidate that cache entry from the same row it resets (see resetRows).
 type srInfo struct {
-	id int64
+	id     int64
+	artist string
+	title  string
 }
 
 // wqLink is one work_queue row linked to a scan_results row.
@@ -193,10 +221,17 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	srs := idx[key]
 
 	var scanResultIDs, workItemIDs []int64
+	var identities []trackIdentity
+	seenID := make(map[trackIdentity]bool)
 	seenWQ := make(map[int64]bool)
 	processing := false
 	for _, sr := range srs {
 		scanResultIDs = append(scanResultIDs, sr.id)
+		id := trackIdentity{artist: sr.artist, title: sr.title}
+		if !seenID[id] {
+			seenID[id] = true
+			identities = append(identities, id)
+		}
 		for _, link := range wqIdx[sr.id] {
 			if link.status == "processing" {
 				processing = true
@@ -212,7 +247,7 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		return
 	}
 
-	rec := Record{Path: path, ScanResultIDs: scanResultIDs, WorkItemIDs: workItemIDs}
+	rec := Record{Path: path, ScanResultIDs: scanResultIDs, WorkItemIDs: workItemIDs, Identities: identities}
 
 	if opts.DryRun {
 		if opts.Report != nil {
@@ -235,28 +270,46 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		}
 	}
 
+	// Database first, unlink second (#474 follow-up). The command's contract is
+	// "delete this sidecar AND re-fetch it", so the two halves must not be able to
+	// half-apply in the direction that loses the user's file. Deleting first left
+	// the failure mode "file gone, rows never reset / cache never invalidated" --
+	// the file is unrecoverable except from the JSONL backup and nothing ever
+	// rewrites it. Committing the reset+invalidation first inverts that into
+	// "rows requeued, file still on disk", which the next scan resolves by
+	// re-fetching and overwriting the sidecar in place: wasted work, never loss.
+	// Backup-first is unchanged -- the caller's Report has already fsynced the
+	// restorable record above, before either half runs.
+	if len(scanResultIDs) > 0 || len(workItemIDs) > 0 {
+		srReset, wqReset, invalidated, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs, identities)
+		if rerr != nil {
+			res.Errors++
+			slog.Warn("purge-provenance: reset rows failed; leaving sidecar in place", "path", path, "error", rerr)
+			return
+		}
+		res.ScanResultsReset += srReset
+		res.WorkItemsRequeued += wqReset
+		res.CacheInvalidated += invalidated
+	} else {
+		// No scan_results row claims this sidecar, so there is no cache key to
+		// invalidate and nothing to requeue. If a later scan re-discovers the audio
+		// file it will create a fresh row, and a surviving lyrics_cache entry for
+		// that track could satisfy it as a hit -- leaving the sidecar unwritten.
+		// Surfaced rather than silently assumed away.
+		res.UnlinkedNoCacheKey++
+		slog.Warn("purge-provenance: sidecar has no linked scan_results row; cannot invalidate its cache entry", "path", path)
+	}
+
 	if rerr := os.Remove(path); rerr != nil {
 		if !os.IsNotExist(rerr) {
 			res.Errors++
-			slog.Warn("purge-provenance: delete failed; leaving row untouched", "path", path, "error", rerr)
+			slog.Warn("purge-provenance: delete failed; rows already requeued, next scan will rewrite this sidecar", "path", path, "error", rerr)
 			return
 		}
-		// Already gone (removed out-of-band since matching) -- proceed to reset
-		// the coupled rows anyway, since the sidecar is confirmed absent either way.
+		// Already gone (removed out-of-band since matching); the rows are reset
+		// either way, which is what the caller wanted.
 	}
 	res.Deleted++
-
-	if len(scanResultIDs) == 0 && len(workItemIDs) == 0 {
-		return
-	}
-	srReset, wqReset, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs)
-	if rerr != nil {
-		res.Errors++
-		slog.Warn("purge-provenance: reset rows failed (sidecar already deleted)", "path", path, "error", rerr)
-		return
-	}
-	res.ScanResultsReset += srReset
-	res.WorkItemsRequeued += wqReset
 }
 
 // resetRows resets the coupled scan_results and work_queue rows so the track
@@ -271,12 +324,28 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 // in-flight write -- the same residual TOCTOU window prune.deletePruned notes
 // and accepts for the same reason (the alternative is holding a transaction
 // open across the file delete, which this package deliberately does not do).
-func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int64) (srReset, wqReset int, retErr error) {
+func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int64, identities []trackIdentity) (srReset, wqReset, invalidated int, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, 0, fmt.Errorf("purgeprovenance: begin reset tx: %w", err)
+		return 0, 0, 0, fmt.Errorf("purgeprovenance: begin reset tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Cache invalidation rides in the SAME transaction as the row reset because
+	// the two are one indivisible statement of intent: "this track's lyrics are
+	// repudiated, fetch it again." A reset that commits without its invalidation
+	// is precisely the data-loss defect (scan.Enqueuer.EnqueuePending consults
+	// Cache.Lookup BEFORE enqueueing, marks the row done as a cache hit, and the
+	// deleted sidecar is never rewritten), so they commit together or not at all.
+	// cache.Invalidate removes every duration bucket for the key, which is what
+	// makes this proof against Lookup's bucket-0 fallback.
+	for _, id := range identities {
+		n, ierr := cache.Invalidate(ctx, tx, id.artist, id.title)
+		if ierr != nil {
+			return 0, 0, 0, fmt.Errorf("purgeprovenance: invalidate cache: %w", ierr)
+		}
+		invalidated += n
+	}
 
 	now := formatNow()
 	for _, id := range workItemIDs {
@@ -290,7 +359,7 @@ func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int
              WHERE id = ? AND status != 'processing'`,
 			now, id)
 		if err != nil {
-			return 0, 0, fmt.Errorf("purgeprovenance: reset work_queue %d: %w", id, err)
+			return 0, 0, 0, fmt.Errorf("purgeprovenance: reset work_queue %d: %w", id, err)
 		}
 		wqReset += rowsAffected(res)
 	}
@@ -299,14 +368,14 @@ func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int
 			`UPDATE scan_results SET status = 'pending' WHERE id = ? AND status != 'pending'`,
 			id)
 		if err != nil {
-			return 0, 0, fmt.Errorf("purgeprovenance: reset scan_results %d: %w", id, err)
+			return 0, 0, 0, fmt.Errorf("purgeprovenance: reset scan_results %d: %w", id, err)
 		}
 		srReset += rowsAffected(res)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, 0, fmt.Errorf("purgeprovenance: commit reset tx: %w", err)
+		return 0, 0, 0, fmt.Errorf("purgeprovenance: commit reset tx: %w", err)
 	}
-	return srReset, wqReset, nil
+	return srReset, wqReset, invalidated, nil
 }
 
 // buildIndex loads every in-scope scan_results row's expected-sidecar identity
@@ -317,7 +386,7 @@ func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int
 // query per sidecar.
 func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][]srInfo, map[int64][]wqLink, error) {
 	idx := make(map[string][]srInfo)
-	query := `SELECT id, outdir, filename FROM scan_results WHERE filename != ''`
+	query := `SELECT id, outdir, filename, artist, title FROM scan_results WHERE filename != ''`
 	var args []any
 	if libraryID != nil {
 		query += ` AND library_id = ?`
@@ -332,14 +401,14 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var id int64
-			var outdir, filename string
-			if serr := rows.Scan(&id, &outdir, &filename); serr != nil {
+			var outdir, filename, artist, title string
+			if serr := rows.Scan(&id, &outdir, &filename, &artist, &title); serr != nil {
 				err = fmt.Errorf("purgeprovenance: scan scan_results row: %w", serr)
 				return
 			}
 			stem := strings.TrimSuffix(filename, filepath.Ext(filename))
 			key := canonicalDir(outdir) + "\x00" + stem
-			idx[key] = append(idx[key], srInfo{id: id})
+			idx[key] = append(idx[key], srInfo{id: id, artist: artist, title: title})
 			srIDs[id] = true
 		}
 		if rerr := rows.Err(); rerr != nil {

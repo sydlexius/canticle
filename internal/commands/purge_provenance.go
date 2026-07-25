@@ -134,8 +134,14 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 		verb = "deleted"
 		deleted = res.Deleted
 	}
-	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d, requeued %d (%d scan_results reset, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
-		res.Scanned, verb, deleted, res.WorkItemsRequeued, res.ScanResultsReset, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
+	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d, requeued %d (%d scan_results reset, %d cache entries invalidated, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
+		res.Scanned, verb, deleted, res.WorkItemsRequeued, res.ScanResultsReset, res.CacheInvalidated, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
+	if res.UnlinkedNoCacheKey > 0 {
+		// Not an error: nothing was lost, but the re-fetch guarantee does not
+		// extend to these, so say so rather than let the summary imply it does.
+		_, _ = fmt.Fprintf(out, "note: %d deleted sidecar(s) had no linked scan_results row; nothing was requeued for them and no cache entry could be invalidated\n",
+			res.UnlinkedNoCacheKey)
+	}
 	if backupFile != nil {
 		_, _ = fmt.Fprintf(out, "backup of deleted sidecars written to %s\n", backupPath)
 	}
