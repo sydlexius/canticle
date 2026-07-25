@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -845,4 +846,114 @@ func mapKeys(m map[string]int) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func TestReadAudioFactsReadsFullTagSet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "track.mp3")
+	// WriteAudioFileExtended is the existing testutil fixture helper for ID3-tagged audio.
+	if err := testutil.WriteAudioFileExtended(dir, "track.mp3", "Test Artist", "Test Title", "Test Album", "", map[string]string{
+		"TPE2": "Test Album Artist",
+		"TCOM": "Test Composer",
+		"TCON": "Test Genre",
+		"TDRC": "1997",
+		"TRCK": "3/12",
+		"TPOS": "1/2",
+		"TSRC": "US-TEST-97-00123",
+	}, map[string]string{
+		"musicbrainz_recordingid": "test-mbid-uuid",
+	}); err != nil {
+		t.Fatalf("WriteAudioFileExtended: %v", err)
+	}
+
+	got, err := ReadAudioFacts(path)
+	if err != nil {
+		t.Fatalf("ReadAudioFacts: %v", err)
+	}
+
+	if got.Artist != "Test Artist" {
+		t.Errorf("Artist = %q, want %q", got.Artist, "Test Artist")
+	}
+	if got.AlbumArtist != "Test Album Artist" {
+		t.Errorf("AlbumArtist = %q, want %q", got.AlbumArtist, "Test Album Artist")
+	}
+	if got.Title != "Test Title" {
+		t.Errorf("Title = %q, want %q", got.Title, "Test Title")
+	}
+	if got.Album != "Test Album" {
+		t.Errorf("Album = %q, want %q", got.Album, "Test Album")
+	}
+	if got.Composer != "Test Composer" {
+		t.Errorf("Composer = %q, want %q", got.Composer, "Test Composer")
+	}
+	if got.Genre != "Test Genre" {
+		t.Errorf("Genre = %q, want %q", got.Genre, "Test Genre")
+	}
+	if got.Year != 1997 {
+		t.Errorf("Year = %d, want 1997", got.Year)
+	}
+	if got.TrackNo != 3 || got.TrackTotal != 12 {
+		t.Errorf("Track = %d/%d, want 3/12", got.TrackNo, got.TrackTotal)
+	}
+	if got.DiscNo != 1 || got.DiscTotal != 2 {
+		t.Errorf("Disc = %d/%d, want 1/2", got.DiscNo, got.DiscTotal)
+	}
+	if got.Format == "" || got.FileType == "" {
+		t.Errorf("Format/FileType = %q/%q, want both non-empty", got.Format, got.FileType)
+	}
+	// Identity comes from the open handle's own Stat, never a path re-stat.
+	if got.MTimeNano == 0 || got.SizeBytes == 0 {
+		t.Errorf("MTimeNano/SizeBytes = %d/%d, want both non-zero", got.MTimeNano, got.SizeBytes)
+	}
+	if got.MBID != "test-mbid-uuid" {
+		t.Errorf("MBID = %q, want %q", got.MBID, "test-mbid-uuid")
+	}
+	if got.ISRC != "US-TEST-97-00123" {
+		t.Errorf("ISRC = %q, want %q", got.ISRC, "US-TEST-97-00123")
+	}
+}
+
+func TestReadAudioFactsAbsentTagsAreSentinelsNotErrors(t *testing.T) {
+	// A file with only the minimum tags: every other field must come back as its
+	// documented zero-value sentinel, and this must NOT be an error.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "track.mp3")
+	if err := testutil.WriteAudioFile(dir, "track.mp3", "", "Only Title", "", ""); err != nil {
+		t.Fatalf("WriteAudioFile: %v", err)
+	}
+
+	got, err := ReadAudioFacts(path)
+	if err != nil {
+		t.Fatalf("absent tags must not error: %v", err)
+	}
+	if got.Title != "Only Title" {
+		t.Errorf("Title = %q, want %q", got.Title, "Only Title")
+	}
+	if got.Genre != "" || got.Composer != "" {
+		t.Errorf("absent string tags = %q/%q, want empty sentinels", got.Genre, got.Composer)
+	}
+	if got.Year != 0 || got.TrackNo != 0 || got.DiscNo != 0 {
+		t.Errorf("absent numeric tags = %d/%d/%d, want 0 sentinels", got.Year, got.TrackNo, got.DiscNo)
+	}
+}
+
+func TestReadAudioFactsOpenFailureIsAnError(t *testing.T) {
+	_, err := ReadAudioFacts(filepath.Join(t.TempDir(), "does-not-exist.mp3"))
+	if err == nil {
+		t.Fatal("a missing file must return an error, not a zero-value struct")
+	}
+}
+
+func TestReadAudioFactsNeverExposesLyricsOrPicture(t *testing.T) {
+	// Guards the deliberate exclusion: lyric text must never enter the DB
+	// (copyright, and it would give the #538 extracted lane a self-ingestion
+	// route), and cover art would dwarf every other column. A reflective check
+	// so adding such a field later fails loudly rather than silently shipping.
+	tp := reflect.TypeOf(AudioFacts{})
+	for i := 0; i < tp.NumField(); i++ {
+		name := strings.ToLower(tp.Field(i).Name)
+		if strings.Contains(name, "lyric") || strings.Contains(name, "picture") || strings.Contains(name, "artwork") {
+			t.Errorf("AudioFacts must not carry field %q: lyrics and cover art are deliberately excluded", tp.Field(i).Name)
+		}
+	}
 }

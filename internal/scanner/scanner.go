@@ -78,14 +78,14 @@ func openAndReadTags(path string) (tag.Metadata, *os.File, error) {
 // the full-library scan loop. It wraps the same extractISRC/extractRecordingMBID
 // and tag readers scanDir uses, so realign's exact-match tier sees exactly the
 // identity signals a scan would. A missing tag yields an empty string, not an
-// error; only an open/parse failure returns an error.
+// error; only an open/parse failure returns an error. It now projects over
+// ReadAudioFacts so tag access has one implementation.
 func ReadAudioProvenance(path string) (isrc, mbid, artist, title string, err error) {
-	m, f, rerr := openAndReadTags(path)
-	if rerr != nil {
-		return "", "", "", "", rerr
+	facts, err := ReadAudioFacts(path)
+	if err != nil {
+		return "", "", "", "", err
 	}
-	defer func() { _ = f.Close() }()
-	return extractISRC(m), extractRecordingMBID(m), extractArtist(m), m.Title(), nil
+	return facts.ISRC, facts.MBID, facts.Artist, facts.Title, nil
 }
 
 // ReadArtistIdentity opens the audio file at path and returns its corrected
@@ -94,14 +94,14 @@ func ReadAudioProvenance(path string) (isrc, mbid, artist, title string, err err
 // reconcile-identity backfill uses to re-derive a row's identity from disk,
 // where the mangled boundaries the DB already stored cannot be recovered. An
 // open or parse failure returns a non-empty error so the caller can skip the
-// row rather than mistake a read failure for a genuinely empty artist.
+// row rather than mistake a read failure for a genuinely empty artist. It now
+// projects over ReadAudioFacts so tag access has one implementation.
 func ReadArtistIdentity(path string) (artist, albumArtist string, err error) {
-	m, f, rerr := openAndReadTags(path)
-	if rerr != nil {
-		return "", "", rerr
+	facts, err := ReadAudioFacts(path)
+	if err != nil {
+		return "", "", err
 	}
-	defer func() { _ = f.Close() }()
-	return extractArtist(m), extractAlbumArtist(m), nil
+	return facts.Artist, facts.AlbumArtist, nil
 }
 
 // AudioMetadata carries the recording disambiguators a provider query needs from
@@ -129,33 +129,119 @@ type AudioMetadata struct {
 //
 // A missing tag, an unparsable duration, or an unsupported extension is not an
 // error and yields the zero-value sentinel; only an open or parse failure returns
-// an error, matching ReadAudioProvenance and ReadArtistIdentity.
+// an error, matching ReadAudioProvenance and ReadArtistIdentity. It now projects
+// over ReadAudioFacts so tag access has one implementation.
 func ReadAudioMetadata(path string) (AudioMetadata, error) {
+	facts, err := ReadAudioFacts(path)
+	if err != nil {
+		return AudioMetadata{}, err
+	}
+	return AudioMetadata{
+		TrackLength: facts.TrackLength,
+		ISRC:        facts.ISRC,
+		AlbumName:   facts.Album,
+		MTimeNano:   facts.MTimeNano,
+		SizeBytes:   facts.SizeBytes,
+	}, nil
+}
+
+// AudioFacts is everything the tag layer exposes about one audio file, read
+// from a single open handle. It is the one comprehensive reader (#646): the
+// narrower exported readers below are projections over it, so tag access has
+// exactly one implementation and a fourth narrow reader is never needed.
+//
+// The zero values are the documented "absent" sentinels throughout, matching
+// AudioMetadata's existing convention: an empty string means the tag is absent,
+// 0 means a numeric tag is absent, and TrackLength 0 is the unknown-duration
+// sentinel normalize.DurationBucket keys on. MTimeNano and SizeBytes are the
+// open handle's own identity (ModTime().UnixNano() and Size(), stat'd before
+// the handle closes) rather than a re-resolution of the path; zero means a stat
+// failure, the same "absent" convention.
+//
+// DELIBERATELY EXCLUDED: tag.Metadata also exposes Lyrics() and Picture().
+// Lyric text stays out because it would place copyrighted material in the
+// database with no consumer asking for it, and because it would hand the
+// extracted-lyrics lane (#538) a route to ingest its own output -- the
+// self-ingestion loop that design makes impossible by construction. Picture()
+// stays out because an image blob would dwarf every other column. Either is one
+// line to add if a consumer ever justifies it.
+type AudioFacts struct {
+	// File identity, from the open handle's own Stat.
+	MTimeNano int64
+	SizeBytes int64
+
+	// Recording identity -- move-durable, indexed in audio_metadata for #640.
+	MBID string
+	ISRC string
+
+	// Descriptive.
+	Artist      string
+	AlbumArtist string
+	Title       string
+	Album       string
+	Composer    string
+	Genre       string
+	Year        int
+	TrackNo     int
+	TrackTotal  int
+	DiscNo      int
+	DiscTotal   int
+	Format      string
+	FileType    string
+	TrackLength int
+}
+
+// ReadAudioFacts opens the audio file at path and returns every fact the tag
+// layer exposes about it, from one open handle.
+//
+// A missing tag, an unparsable duration, or an unsupported extension is not an
+// error and yields the zero-value sentinel; only an open or parse failure
+// returns an error, matching the narrower readers above.
+func ReadAudioFacts(path string) (AudioFacts, error) {
 	m, f, rerr := openAndReadTags(path)
 	if rerr != nil {
-		return AudioMetadata{}, rerr
+		return AudioFacts{}, rerr
 	}
 	defer func() { _ = f.Close() }()
+
 	// audioduration seeks to 0 internally, so f may sit at any offset after
-	// tag.ReadFrom; no rewind is needed here. A parse failure degrades to the
+	// tag.ReadFrom; no rewind is needed. A parse failure degrades to the
 	// unknown-duration sentinel exactly as scanDir does.
 	dur, derr := audioDuration(f, strings.ToLower(filepath.Ext(path)))
 	if derr != nil {
 		slog.Debug("duration parse failed; using 0", "file", path, "error", derr)
 		dur = 0
 	}
+
 	var mtimeNano, sizeBytes int64
 	if info, serr := f.Stat(); serr != nil {
 		slog.Debug("could not stat open handle for identity; using zero sentinel", "file", path, "error", serr)
 	} else {
 		mtimeNano, sizeBytes = info.ModTime().UnixNano(), info.Size()
 	}
-	return AudioMetadata{
-		TrackLength: dur,
-		ISRC:        extractISRC(m),
-		AlbumName:   m.Album(),
+
+	trackNo, trackTotal := m.Track()
+	discNo, discTotal := m.Disc()
+
+	return AudioFacts{
 		MTimeNano:   mtimeNano,
 		SizeBytes:   sizeBytes,
+		MBID:        extractRecordingMBID(m),
+		ISRC:        extractISRC(m),
+		Artist:      extractArtist(m),
+		AlbumArtist: extractAlbumArtist(m),
+		Title:       m.Title(),
+		Album:       m.Album(),
+		Composer:    m.Composer(),
+		Genre:       m.Genre(),
+		Year:        m.Year(),
+		TrackNo:     trackNo,
+		TrackTotal:  trackTotal,
+		DiscNo:      discNo,
+		DiscTotal:   discTotal,
+		Format:      string(m.Format()),
+		FileType:    string(m.FileType()),
+		TrackLength: dur,
 	}, nil
 }
 

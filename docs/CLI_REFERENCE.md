@@ -253,6 +253,38 @@ Every applied move is recorded (before the rename) as a JSONL line - `{"old_path
 
 **Note:** the exact tier requires ISRC/MBID-tagged audio. Libraries whose files carry no such tags fall back to the heuristic tier (single-candidate-per-directory + name guard).
 
+## Index Metadata
+
+`scan index-metadata` walks a library's audio files and records the complete tag set into the `audio_metadata` table. This populates audio metadata coverage independently of fetch history - a library that has never had lyrics fetched can be indexed to record ISRC, MBID, duration, and other technical metadata from the audio files themselves.
+
+The command is designed to be cheap on repeat runs. A file whose (path, mtime, size) still matches its existing row is skipped without being opened, so re-running over an unchanged library performs almost no I/O and also doubles as a coverage check.
+
+```sh
+# Preview what would be indexed across all libraries (dry run, the default)
+canticle scan index-metadata
+
+# Index a single library (name or numeric id)
+canticle scan index-metadata --library "Main Music"
+
+# Apply the indexing
+canticle scan index-metadata --yes
+
+# Pilot run: index no more than 1000 files before stopping
+canticle scan index-metadata --limit 1000 --yes
+
+# Re-run to verify coverage on unchanged files (prints file count and total coverage)
+canticle scan index-metadata --yes
+```
+
+- **Dry-run by default.** It prints what would be indexed; pass `--yes` to actually write metadata rows.
+- **Cheap by default.** Files are checked against their (path, mtime, size) key first. A match means the file is already indexed and unchanged; it is skipped without opening. A second pass over an unchanged library is therefore nearly free and serves as a coverage spot-check.
+- **No backup.** Unlike the `reconcile-*` commands, `index-metadata` is purely additive and destroys nothing, so there is no JSONL backup to restore.
+- **Scale context.** A full library of approximately 84,000 files requires one header read per file, not a full-file read. The operation is I/O-bound on the filesystem, not the audio metadata parser.
+- `--library <name|id>` scopes the run to a single library; default indexes every configured library root.
+- `--limit <n>` caps the number of files walked (0 = no limit); useful for a pilot run before applying to the full library.
+
+See the Rollout section of issue #646 for operational guidance: capture row counts before starting, dry-run on the smallest library first to verify field coverage and error rates, then live-run and immediately re-run to confirm the skip logic is working.
+
 ## Shell completion
 
 ```sh
