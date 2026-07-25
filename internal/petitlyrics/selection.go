@@ -12,6 +12,37 @@ import (
 // treated as a different song rather than a fuzzy match.
 const titleMatchFloor = 0.80
 
+// durationCloseTolerance and durationFarTolerance are the two tiers of the
+// duration-agreement term (see scoreCandidate), measured directly against the
+// absolute per-second delta between the local track and a candidate rather
+// than through normalize.DurationBucket (see #639: bucket equality is a fixed
+// floor("seconds/5") grid, not a window centered on the local track, so
+// comparing bucket numbers is not monotonic in the actual distance -- a
+// candidate 4s away could out-score one 1s away).
+//
+// These are NOT copied from timing.Tolerance (2.0s): that constant answers a
+// different question (how much a synced lyric may overrun the audio's actual
+// end, calibrated against a 28.7k-track corpus) and #639 explicitly rules out
+// assuming it transfers to provider-vs-file duration agreement.
+//
+// durationCloseTolerance=3s: the width a same-recording duration disagreement
+// should realistically have from tagging/reporting drift alone -- taggers and
+// providers round to the nearest second and some further round-trip through a
+// 1-2s encoder/container estimate, so up to ~3s of drift is ordinary noise,
+// not evidence of a different recording.
+//
+// durationFarTolerance=8s: the outer edge of "still plausibly the same
+// recording, just less certain than a close match". This preserves the shape
+// of the value it replaces -- the old two-tier code's second tier ("one
+// bucket apart") could in the worst case span up to just under 10s (see
+// issue #639) -- rounded down to 8s so there is a clear gap below the kind of
+// gap a genuinely different edit (radio edit vs. album cut, live version)
+// typically introduces, which tends to run well past 10s.
+const (
+	durationCloseTolerance = 3
+	durationFarTolerance   = 8
+)
+
 // selectCandidate picks the best song from an API response.
 //
 // Precedence, strongest signal first:
@@ -21,7 +52,8 @@ const titleMatchFloor = 0.80
 //     two probe tracks, one carried a valid ISRC and one an empty field), so
 //     this decides a minority of lookups and must degrade silently rather than
 //     rejecting candidates that simply lack the field.
-//  2. Duration agreement, using the shared 5-second bucket. Given ISRC
+//  2. Duration agreement, measured on the raw per-second delta (see
+//     durationCloseTolerance/durationFarTolerance below). Given ISRC
 //     sparsity this is the workhorse signal, not a fallback.
 //  3. Title and album textual similarity.
 //
@@ -60,14 +92,17 @@ func scoreCandidate(s apiSong, track models.Track) float64 {
 	}
 
 	// 2. Duration: the provider reports milliseconds, the local track seconds.
+	// Scored on the raw absolute delta rather than normalize.DurationBucket --
+	// see the durationCloseTolerance/durationFarTolerance doc comment for why.
 	if track.TrackLength > 0 && s.DurationMS > 0 {
-		want := normalize.DurationBucket(track.TrackLength)
-		got := normalize.DurationBucket(s.DurationMS / 1000)
-		switch diff := want - got; diff {
-		case 0:
+		delta := track.TrackLength - s.DurationMS/1000
+		if delta < 0 {
+			delta = -delta
+		}
+		switch {
+		case delta <= durationCloseTolerance:
 			score += 10
-		case 1, -1:
-			// One bucket apart is 5s, within normal tagging drift.
+		case delta <= durationFarTolerance:
 			score += 5
 		}
 	}
