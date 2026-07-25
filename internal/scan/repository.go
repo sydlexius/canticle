@@ -58,8 +58,16 @@ const UpsertBatchSize = 500
 // already waits per attempt, so a handful of retries is ample.
 const upsertMaxAttempts = 5
 
-const baseUpsert = `INSERT INTO scan_results (library_id, file_path, artist, title, album, album_artist, artist_key, title_key, outdir, filename, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+// isrc/recording_mbid use COALESCE(NULLIF(excluded.x, ”), x) rather than a
+// plain overwrite: extraction is gated behind the per-library EnrichRecording
+// toggle (internal/scanner.go), so a later rescan with enrichment off (or a
+// file whose tags briefly failed to parse) arrives with an empty value. A
+// plain overwrite would let that pass silently erase an identity a previous
+// enriched scan had already captured -- destroying exactly the move-durable
+// signal #640's prune re-link depends on. An incoming NON-empty value still
+// always wins, so a genuine retag is still picked up.
+const baseUpsert = `INSERT INTO scan_results (library_id, file_path, artist, title, album, album_artist, artist_key, title_key, outdir, filename, status, isrc, recording_mbid)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(library_id, file_path) DO UPDATE SET
                  artist = excluded.artist,
                  title = excluded.title,
@@ -68,7 +76,9 @@ const baseUpsert = `INSERT INTO scan_results (library_id, file_path, artist, tit
                  artist_key = excluded.artist_key,
                  title_key = excluded.title_key,
                  outdir = excluded.outdir,
-                 filename = excluded.filename`
+                 filename = excluded.filename,
+                 isrc = COALESCE(NULLIF(excluded.isrc, ''), isrc),
+                 recording_mbid = COALESCE(NULLIF(excluded.recording_mbid, ''), recording_mbid)`
 
 // Upsert stores scan results for a library, keyed by library_id and file_path.
 // On conflict, status is preserved by default; pass ForceStatus to overwrite.
@@ -168,6 +178,8 @@ func upsertBatch(ctx context.Context, tx *sql.Tx, libraryID int64, results []mod
 			res.Outdir,
 			res.Filename,
 			insertStatus,
+			res.Track.ISRC,
+			res.Track.RecordingMBID,
 		); err != nil {
 			return fmt.Errorf("scan: upsert %s: %w", res.FilePath, err)
 		}
@@ -178,7 +190,7 @@ func upsertBatch(ctx context.Context, tx *sql.Tx, libraryID int64, results []mod
 // ListByLibrary returns persisted scan results for a library in stable ID order.
 func (r *Repo) ListByLibrary(ctx context.Context, libraryID int64) (results []models.ScanResult, retErr error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
+		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at, isrc, recording_mbid
          FROM scan_results
          WHERE library_id = ?
          ORDER BY id ASC`,
@@ -203,7 +215,7 @@ func (r *Repo) ListByLibrary(ctx context.Context, libraryID int64) (results []mo
 // ListPendingByLibrary returns pending scan results for a library in stable ID order.
 func (r *Repo) ListPendingByLibrary(ctx context.Context, libraryID int64) (results []models.ScanResult, retErr error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
+		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at, isrc, recording_mbid
          FROM scan_results
          WHERE library_id = ?
            AND status = ?
@@ -243,6 +255,8 @@ func scanResultRows(rows *sql.Rows) ([]models.ScanResult, error) {
 			&res.Filename,
 			&res.Status,
 			&res.CreatedAt,
+			&res.Track.ISRC,
+			&res.Track.RecordingMBID,
 		); err != nil {
 			return nil, err
 		}
@@ -269,7 +283,7 @@ type Filter struct {
 
 // List returns persisted scan results matching filter in stable ID order.
 func (r *Repo) List(ctx context.Context, filter Filter) (results []models.ScanResult, retErr error) {
-	const baseQuery = `SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
+	const baseQuery = `SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at, isrc, recording_mbid
                        FROM scan_results`
 	const orderClause = ` ORDER BY id ASC`
 	var args []any
@@ -328,7 +342,7 @@ func (r *Repo) FindByTrack(ctx context.Context, artist, title string) (results [
 		return nil, nil
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
+		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at, isrc, recording_mbid
                        FROM scan_results
                        WHERE artist_key = ? AND title_key = ?
                        ORDER BY CASE status WHEN 'done' THEN 1 ELSE 0 END ASC, id ASC`,
@@ -356,7 +370,7 @@ func (r *Repo) FindByTrack(ctx context.Context, artist, title string) (results [
 // through work_queue_scan_results is the only way to surface tracks that are
 // parked behind a miss cooldown rather than actively in flight.
 func (r *Repo) ListDeferred(ctx context.Context, filter Filter) (results []models.ScanResult, retErr error) {
-	query := `SELECT DISTINCT sr.id, sr.library_id, sr.file_path, sr.artist, sr.title, sr.album, sr.album_artist, sr.outdir, sr.filename, sr.status, sr.created_at
+	query := `SELECT DISTINCT sr.id, sr.library_id, sr.file_path, sr.artist, sr.title, sr.album, sr.album_artist, sr.outdir, sr.filename, sr.status, sr.created_at, sr.isrc, sr.recording_mbid
               FROM scan_results sr
               JOIN work_queue_scan_results j ON j.scan_result_id = sr.id
               JOIN work_queue wq ON wq.id = j.work_queue_id

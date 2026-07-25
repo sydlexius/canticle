@@ -72,6 +72,69 @@ func TestRepo_UpsertAndListByLibrary(t *testing.T) {
 	}
 }
 
+// TestRepo_UpsertAndListRoundTripsIdentity verifies scan_results.isrc/
+// recording_mbid (migration 037) survive an upsert and a subsequent
+// read-back, and that a later upsert with EMPTY identity values does not
+// erase identity a previous enriched scan had already captured (#640) -- only
+// an incoming non-empty value overwrites.
+func TestRepo_UpsertAndListRoundTripsIdentity(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	libRepo := library.New(sqlDB)
+	scanRepo := scan.New(sqlDB)
+
+	lib, err := libRepo.Add(ctx, "/music", "Music", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+
+	results := []models.ScanResult{{
+		FilePath: "/music/a.mp3",
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Title", ISRC: "USABC1234567", RecordingMBID: "mbid-abc-123"},
+		Outdir:   "/music",
+		Filename: "a.lrc",
+	}}
+	if err := scanRepo.Upsert(ctx, lib.ID, results, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert initial: %v", err)
+	}
+	got, err := scanRepo.ListByLibrary(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("ListByLibrary: %v", err)
+	}
+	if len(got) != 1 || got[0].Track.ISRC != "USABC1234567" || got[0].Track.RecordingMBID != "mbid-abc-123" {
+		t.Fatalf("round-trip = %+v; want ISRC=USABC1234567 MBID=mbid-abc-123", got)
+	}
+
+	// A later rescan with EnrichRecording off (or a transient tag-read miss)
+	// arrives with empty identity. It must not clobber the previously
+	// captured values.
+	results[0].Track.ISRC = ""
+	results[0].Track.RecordingMBID = ""
+	if err := scanRepo.Upsert(ctx, lib.ID, results, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert with empty identity: %v", err)
+	}
+	got, err = scanRepo.ListByLibrary(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("ListByLibrary after empty upsert: %v", err)
+	}
+	if len(got) != 1 || got[0].Track.ISRC != "USABC1234567" || got[0].Track.RecordingMBID != "mbid-abc-123" {
+		t.Fatalf("after empty-identity upsert = %+v; want identity preserved (ISRC=USABC1234567 MBID=mbid-abc-123)", got)
+	}
+
+	// A genuine retag with a NEW non-empty value still overwrites.
+	results[0].Track.ISRC = "USXYZ7654321"
+	if err := scanRepo.Upsert(ctx, lib.ID, results, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert with new identity: %v", err)
+	}
+	got, err = scanRepo.ListByLibrary(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("ListByLibrary after retag: %v", err)
+	}
+	if len(got) != 1 || got[0].Track.ISRC != "USXYZ7654321" {
+		t.Fatalf("after retag ISRC = %q; want USXYZ7654321", got[0].Track.ISRC)
+	}
+}
+
 func TestRepo_FindByTrackMatchesNormalizedKeys(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
