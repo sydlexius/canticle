@@ -2277,14 +2277,15 @@ func runLibrary(ctx context.Context, out io.Writer, args LibraryCmd) int {
 			return 1
 		}
 		path := lib.Path
-		if args.Update.Path != "" {
+		pathSupplied := args.Update.Path != ""
+		if pathSupplied {
 			path = args.Update.Path
 		}
 		name := lib.Name
 		if args.Update.Name != "" {
 			name = args.Update.Name
 		}
-		lib, err = repo.Update(ctx, args.Update.ID, path, name, models.LibrarySettings{
+		lib, err = repo.Update(ctx, args.Update.ID, path, name, pathSupplied, models.LibrarySettings{
 			EnrichRecording:    args.Update.Enrich,
 			DetectInstrumental: args.Update.DetectInstrumental,
 		})

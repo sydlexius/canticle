@@ -65,8 +65,16 @@
 -- per file, exactly the per-file disk-spin cost this design exists to avoid.
 -- That narrower case is not what #643 was filed against (a symlinked root,
 -- the whole-library layout the maintainer actually runs) and is not covered
--- here; a file symlinked individually below a real root can still produce a
--- key/stamp mismatch.
+-- here. The consequence is worse than a stamp mismatch: the scanner rebases
+-- such a file's path onto the root's already-resolved canonical form without
+-- resolving the file's OWN symlink (RebaseUnderCanonicalRoot is a pure string
+-- join), while the worker's write path fully resolves it (CanonicalPath), so
+-- the two capture sites land on DIFFERENT KEYS for the same underlying file
+-- -- a duplicate row, not merely a stale one. This asymmetry is the accepted
+-- tradeoff, not a bug: a future refinement could special-case just these
+-- entries cheaply, since os.DirEntry.Type() already carries the symlink bit
+-- for free from readdir, so detecting one costs no extra syscall -- only
+-- resolving it (or skipping it) would need one.
 --
 -- EXISTING ROWS: none. This table shipped in this same migration, unreleased,
 -- with zero callers of Lookup, so there is nothing to migrate or discard --

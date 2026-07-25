@@ -53,7 +53,7 @@ func TestAddGetListUpdateRemove(t *testing.T) {
 		t.Fatalf("List got %+v; want [%+v]", list, added)
 	}
 
-	updated, err := repo.Update(ctx, added.ID, "/music/jazz", "Jazz", models.LibrarySettings{})
+	updated, err := repo.Update(ctx, added.ID, "/music/jazz", "Jazz", true, models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -110,6 +110,45 @@ func TestAdd_ValidatesRequiredFields(t *testing.T) {
 	}
 }
 
+// TestUpdate_LegacyRelativePathIsAbsolutizedWhenNotOperatorSupplied pins the
+// #643 hostile-review fix at the repository layer directly: validate must not
+// reject a relative path re-submitted by Update on behalf of the caller (e.g.
+// commands.go defaulting --path to the stored value when omitted), only a
+// relative path the operator actually typed. The row is seeded with a raw
+// INSERT, bypassing Add/validate, the way a legacy row from before this check
+// existed would actually be present.
+func TestUpdate_LegacyRelativePathIsAbsolutizedWhenNotOperatorSupplied(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := library.New(sqlDB)
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO libraries (id, path, name) VALUES (1, 'music', 'Music')`,
+	); err != nil {
+		t.Fatalf("seed legacy relative-path row: %v", err)
+	}
+
+	// pathSupplied=false: the caller is re-submitting the stored path, not one
+	// the operator typed. It must be accepted and absolutized, not rejected.
+	updated, err := repo.Update(ctx, 1, "music", "Music Renamed", false, models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("Update with pathSupplied=false on legacy relative row: %v", err)
+	}
+	if !filepath.IsAbs(updated.Path) {
+		t.Fatalf("Update path = %q; want absolutized", updated.Path)
+	}
+	if updated.Name != "Music Renamed" {
+		t.Fatalf("Update name = %q; want %q", updated.Name, "Music Renamed")
+	}
+
+	// pathSupplied=true on the same relative spelling must still be rejected,
+	// even for this same legacy row: an operator typing a relative path is
+	// never allowed to create/keep a working-directory-dependent key.
+	if _, err := repo.Update(ctx, 1, "music", "Music", true, models.LibrarySettings{}); err == nil {
+		t.Fatal("Update with pathSupplied=true and a relative path returned nil error; want validation error")
+	}
+}
+
 func TestGetByName(t *testing.T) {
 	ctx := context.Background()
 	repo := library.New(openTestDB(t))
@@ -147,7 +186,7 @@ func TestUpdateRemove_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repo := library.New(openTestDB(t))
 
-	_, err := repo.Update(ctx, 123, "/music", "Music", models.LibrarySettings{})
+	_, err := repo.Update(ctx, 123, "/music", "Music", true, models.LibrarySettings{})
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("Update missing got %v; want sql.ErrNoRows", err)
 	}

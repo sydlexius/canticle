@@ -24,7 +24,7 @@ func New(db *sql.DB) *Repo {
 // Add creates a new library root. Path must be unique. A nil settings field is
 // stored as NULL (inherit the global default).
 func (r *Repo) Add(ctx context.Context, path, name string, settings models.LibrarySettings) (models.Library, error) {
-	path, name, err := validate(path, name)
+	path, name, err := validate(path, name, true)
 	if err != nil {
 		return models.Library{}, err
 	}
@@ -139,8 +139,17 @@ func (r *Repo) GetByName(ctx context.Context, name string) (models.Library, erro
 // Update changes the path and name for an existing library root. A nil settings
 // field leaves that column unchanged; a non-nil field writes the explicit value
 // (COALESCE keeps the existing value when the parameter is NULL).
-func (r *Repo) Update(ctx context.Context, id int64, path, name string, settings models.LibrarySettings) (models.Library, error) {
-	path, name, err := validate(path, name)
+//
+// pathSupplied tells validate whether path came from the operator (a rename,
+// via --path) or is the caller re-submitting the currently-stored value
+// because --path was omitted (a settings-only toggle, or a rename of only the
+// name). An operator-supplied relative path is always rejected, matching Add;
+// a re-submitted stored path is only best-effort absolutized, so a
+// pre-existing relative-path row from before this check landed (#643) stays
+// maintainable -- a rename or settings toggle that doesn't touch --path must
+// not require also passing an absolute --path just to satisfy validation.
+func (r *Repo) Update(ctx context.Context, id int64, path, name string, pathSupplied bool, settings models.LibrarySettings) (models.Library, error) {
+	path, name, err := validate(path, name, pathSupplied)
 	if err != nil {
 		return models.Library{}, err
 	}
@@ -208,7 +217,8 @@ func nullableIntToBool(v sql.NullInt64) *bool {
 	return &b
 }
 
-// validate trims and checks path and name, and rejects a relative path.
+// validate trims and checks path and name, and rejects an operator-supplied
+// relative path.
 //
 // A relative library root would make audio_durations.file_path (#643)
 // implicitly depend on the process working directory: the scanner and worker
@@ -216,16 +226,34 @@ func nullableIntToBool(v sql.NullInt64) *bool {
 // would let the same file resolve to two different keys across two process
 // launches with different cwds, defeating the whole-scan canonicalization
 // pathutil.CanonicalRoot performs. Rejecting it here, at the single write path
-// every library-add/update route shares, keeps every stored root absolute by
-// construction rather than by convention.
-func validate(path, name string) (string, string, error) {
+// every library-add/update route shares, keeps every NEWLY-written root
+// absolute by construction rather than by convention.
+//
+// pathSupplied distinguishes an operator typing a path (Add, or Update with
+// --path) from Update re-submitting a path it read back out of the row (a
+// settings-only toggle or a name-only rename with --path omitted). A relative
+// path is always rejected when operator-supplied. When it is not -- a legacy
+// row added before this check existed, since Lookup had no caller and no
+// released build ever validated a stored root -- rejecting it would make that
+// row permanently unmaintainable (any Update, even one that never touches
+// path, would fail validation). Instead it is best-effort absolutized via
+// filepath.Abs so the row moves towards the invariant on its own; if Abs
+// itself fails (only when os.Getwd fails), the original relative value is
+// kept rather than erroring, since erroring here is strictly worse than the
+// pre-existing behavior for a row already outside the invariant.
+func validate(path, name string, pathSupplied bool) (string, string, error) {
 	path = strings.TrimSpace(path)
 	name = strings.TrimSpace(name)
 	if path == "" {
 		return "", "", fmt.Errorf("library: path must not be empty")
 	}
 	if !filepath.IsAbs(path) {
-		return "", "", fmt.Errorf("library: path %q must be absolute", path)
+		if pathSupplied {
+			return "", "", fmt.Errorf("library: path %q must be absolute", path)
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
 	}
 	if name == "" {
 		return "", "", fmt.Errorf("library: name must not be empty")
