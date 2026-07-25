@@ -141,25 +141,26 @@ func TestScoreCandidate_WeightOrdering(t *testing.T) {
 			wantStrongerHi: true,
 		},
 		{
-			// DurationBucket floors to 5s, so 210s and 214s share bucket 42 and
-			// score identically. 216s is bucket 43 -- genuinely one bucket away.
-			name:           "exact duration beats adjacent-bucket duration",
+			// Post-#639: scored on raw delta, not a fixed bucket. 216s is 6s away
+			// from the 210s track, within the durationFarTolerance window (8s),
+			// so it scores the lower tier (+5), allowing the exact match (+10) to win.
+			name:           "exact duration beats far-tolerance duration",
 			stronger:       apiSong{DurationMS: 210000},
 			weaker:         apiSong{DurationMS: 216000},
 			wantStrongerHi: true,
 		},
 		{
-			name:           "adjacent-bucket duration still scores above nothing",
+			name:           "far-tolerance duration still scores above nothing",
 			stronger:       apiSong{DurationMS: 216000},
 			weaker:         apiSong{},
 			wantStrongerHi: true,
 		},
 		{
-			// Same-bucket durations are deliberately indistinguishable: the bucket
-			// IS the tolerance, so a 4s difference must not break a tie.
-			name:           "same-bucket durations tie",
+			// Both within the close tolerance (<=3s), so both score the same +10
+			// tier -- neither should beat the other.
+			name:           "durations within close tolerance tie",
 			stronger:       apiSong{DurationMS: 210000},
-			weaker:         apiSong{DurationMS: 214000},
+			weaker:         apiSong{DurationMS: 212000},
 			wantStrongerHi: false,
 		},
 		{
@@ -185,6 +186,58 @@ func TestScoreCandidate_WeightOrdering(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestScoreCandidate_DurationMonotonic_IssueCase pins the exact repro from
+// #639: against a 210s local track, a candidate 4s away (214s) must not
+// outscore a candidate 1s away (209s). Under the old DurationBucket-based
+// scoring, 209s floors to bucket 41 (one bucket apart, +5) while 214s floors
+// to bucket 42 (same bucket as 210s, +10) -- so the farther candidate won.
+func TestScoreCandidate_DurationMonotonic_IssueCase(t *testing.T) {
+	track := models.Track{TrackLength: 210}
+
+	near := scoreCandidate(apiSong{DurationMS: 209000}, track) // 1s away
+	far := scoreCandidate(apiSong{DurationMS: 214000}, track)  // 4s away
+
+	if near < far {
+		t.Errorf("209s (1s away) scored %v, 214s (4s away) scored %v -- closer candidate must not score lower", near, far)
+	}
+}
+
+// TestScoreCandidate_DurationMonotonicity is the general invariant #639
+// violated: over a range of local durations and deltas, a strictly closer
+// candidate must never score lower than a strictly farther one. This is a
+// property test, not a single example -- the bug was a quantization artifact
+// that only shows up systematically across many local/delta combinations.
+func TestScoreCandidate_DurationMonotonicity(t *testing.T) {
+	for local := 60; local <= 900; local += 15 {
+		track := models.Track{TrackLength: local}
+		for closerDelta := -8; closerDelta <= 8; closerDelta++ {
+			for fartherDelta := -8; fartherDelta <= 8; fartherDelta++ {
+				if abs(fartherDelta) <= abs(closerDelta) {
+					continue // only check pairs where farther is strictly farther
+				}
+				closerSec := local + closerDelta
+				fartherSec := local + fartherDelta
+				if closerSec <= 0 || fartherSec <= 0 {
+					continue
+				}
+				closerScore := scoreCandidate(apiSong{DurationMS: closerSec * 1000}, track)
+				fartherScore := scoreCandidate(apiSong{DurationMS: fartherSec * 1000}, track)
+				if closerScore < fartherScore {
+					t.Fatalf("local=%ds: candidate at delta %d (score %v) scored below candidate at delta %d (score %v) -- not monotonic",
+						local, closerDelta, closerScore, fartherDelta, fartherScore)
+				}
+			}
+		}
+	}
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func TestSelectCandidate_SingleCandidateAlwaysReturned(t *testing.T) {
