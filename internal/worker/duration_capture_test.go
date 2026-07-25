@@ -53,8 +53,15 @@ func TestWorkerRecordsRefreshedDuration(t *testing.T) {
 	if got.TrackLength != 210 {
 		t.Fatalf("refreshed TrackLength = %d, want 210", got.TrackLength)
 	}
-	if len(store.paths) != 1 || store.paths[0] != path {
-		t.Fatalf("recorded paths = %v, want exactly [%q]", store.paths, path)
+	// The recorded key is canonicalized (#643: absolute, symlink-resolved), so
+	// it may differ from the literal t.TempDir() spelling -- e.g. on macOS
+	// /var is itself a symlink to /private/var.
+	wantPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks fixture path: %v", err)
+	}
+	if len(store.paths) != 1 || store.paths[0] != wantPath {
+		t.Fatalf("recorded paths = %v, want exactly [%q]", store.paths, wantPath)
 	}
 	if store.seconds[0] != 210 {
 		t.Fatalf("recorded %ds, want 210s", store.seconds[0])
@@ -194,5 +201,55 @@ func TestWorkerRefreshWithoutDurationStoreIsUnaffected(t *testing.T) {
 	got := w.refreshRecordingIdentity(context.Background(), item, models.Track{ArtistName: "A", TrackName: "T"})
 	if got.TrackLength != 210 {
 		t.Fatalf("refreshed TrackLength = %d, want 210", got.TrackLength)
+	}
+}
+
+// TestWorkerRecordsDurationUnderSymlinkedSourcePath proves the worker capture
+// site's half of #643's key-collapse: a webhook-style item whose SourcePath
+// is spelled through a symlinked library root records under the SAME
+// canonical key as the scanner would write for the identical file. This is
+// the realistic deployment shape the issue was filed against (a container's
+// /music mounted as a symlink to an array's real path).
+func TestWorkerRecordsDurationUnderSymlinkedSourcePath(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real-array-music")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatalf("mkdir real root: %v", err)
+	}
+	symlinkRoot := filepath.Join(base, "music")
+	if err := os.Symlink(realRoot, symlinkRoot); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	realPath := filepath.Join(realRoot, "song.flac")
+	if err := os.WriteFile(realPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	// SourcePath as a webhook item would carry it: through the symlinked root,
+	// mirroring pathutil.ResolveWithinRoot's confined-but-symlink-spelled
+	// output before it resolves, i.e. the raw operator-facing path.
+	symlinkedSourcePath := filepath.Join(symlinkRoot, "song.flac")
+
+	wantKey, err := filepath.EvalSymlinks(realPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks real path: %v", err)
+	}
+
+	store := &recordingWorkerDurationStore{}
+	r := &fakeMetadataReader{meta: scanner.AudioMetadata{TrackLength: 210, MTimeNano: 12345, SizeBytes: 999}}
+	w := New(&fakeQueue{}, &fakeCache{}, refreshFetcher(), &fakeWriter{})
+	w.SetRecordingEnrichmentDefault(true)
+	w.SetMetadataReader(r.read)
+	w.SetDurationStore(store)
+
+	item := queue.WorkItem{ID: 1}
+	item.Inputs.SourcePath = symlinkedSourcePath
+
+	w.refreshRecordingIdentity(context.Background(), item, models.Track{ArtistName: "A", TrackName: "T"})
+
+	if len(store.paths) != 1 {
+		t.Fatalf("recorded %d durations, want 1", len(store.paths))
+	}
+	if store.paths[0] != wantKey {
+		t.Fatalf("recorded key %q for a symlinked SourcePath; want the canonical (symlink-resolved) key %q -- this must match what the scanner records for the same inode", store.paths[0], wantKey)
 	}
 }

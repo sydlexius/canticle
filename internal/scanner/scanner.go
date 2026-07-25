@@ -21,6 +21,7 @@ import (
 	"github.com/lizc2003/audioduration"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -539,14 +540,24 @@ func (sc *Scanner) ScanLibrary(ctx context.Context, root string, opts ScanOption
 	if opts.MaxDepth < 0 {
 		opts.MaxDepth = 0
 	}
+	// Resolve the root's canonical (absolute, symlink-free) spelling exactly
+	// ONCE per scan, not once per file (#643). Every file's audio_durations key
+	// is then rebased onto this canonical root with a pure string join
+	// (RebaseUnderCanonicalRoot), so a symlinked library root (the deployment
+	// shape #643 was filed against, e.g. /music -> /mnt/array/music) still costs
+	// exactly one EvalSymlinks for the whole tree -- preserving the
+	// disks-stay-spun-down property the cache exists for -- while collapsing
+	// the two key spellings a scan-site join and a worker-site
+	// EvalSymlinks-resolved path used to produce for the same inode.
+	absRoot, canonRoot := pathutil.CanonicalRoot(root)
 	var results []models.ScanResult
-	if err := sc.scanDir(ctx, root, opts, 0, &results); err != nil {
+	if err := sc.scanDir(ctx, root, absRoot, canonRoot, opts, 0, &results); err != nil {
 		return nil, err
 	}
 	return results, nil
 }
 
-func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, depth int, results *[]models.ScanResult) error {
+func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, opts ScanOptions, depth int, results *[]models.ScanResult) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -573,7 +584,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		}
 		if file.IsDir() {
 			if depth < opts.MaxDepth {
-				if err := sc.scanDir(ctx, filepath.Join(dir, file.Name()), opts, depth+1, results); err != nil {
+				if err := sc.scanDir(ctx, filepath.Join(dir, file.Name()), absRoot, canonRoot, opts, depth+1, results); err != nil {
 					return err
 				}
 			}
@@ -806,7 +817,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 			// re-resolved -- and on an array whose disks spin down, not
 			// re-opening it later is the whole point. Best-effort: a cache write
 			// must never fail a scan.
-			sc.recordDuration(ctx, filePath, f, dur)
+			sc.recordDuration(ctx, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, filePath), f, dur)
 			isrc = extractISRC(m)
 			recordingMBID = extractRecordingMBID(m)
 		}

@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/orchestrator"
+	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/scanner"
@@ -1437,6 +1438,16 @@ func (w *Worker) refreshRecordingIdentity(ctx context.Context, item queue.WorkIt
 // zero duration is skipped: absence is how the table represents "unknown", and
 // storing a guessed identity would let a wrong row validate as fresh forever.
 //
+// The cache KEY, unlike the stamp, is re-derived here via
+// pathutil.CanonicalPath(path) (absolute, symlink-resolved), so a webhook item
+// whose SourcePath was already EvalSymlinks-resolved by
+// pathutil.ResolveWithinRoot (internal/server) and a scan-enqueued item whose
+// SourcePath is the scanner's rebased-onto-canonical-root key (#643) land on
+// the identical row for the same inode. One EvalSymlinks per fetched item is
+// acceptable here (unlike the scanner's per-scan amortization): the file was
+// just opened for the metadata read this call piggybacks on, so the extra
+// resolve is not the cost this cache exists to avoid.
+//
 // Non-fatal at every step, matching the sibling stamp convention here: a
 // bookkeeping write must never fail an item whose real work has succeeded.
 func (w *Worker) recordDuration(ctx context.Context, path string, meta scanner.AudioMetadata, seconds int) {
@@ -1447,8 +1458,9 @@ func (w *Worker) recordDuration(ctx context.Context, path string, meta scanner.A
 		slog.Debug("no file identity from fetch-time read; skipping duration cache", "path", path)
 		return
 	}
-	if err := w.durations.Record(ctx, path, meta.MTimeNano, meta.SizeBytes, seconds); err != nil {
-		slog.Debug("duration cache write failed; continuing", "path", path, "error", err)
+	key := pathutil.CanonicalPath(path)
+	if err := w.durations.Record(ctx, key, meta.MTimeNano, meta.SizeBytes, seconds); err != nil {
+		slog.Debug("duration cache write failed; continuing", "path", key, "error", err)
 	}
 }
 

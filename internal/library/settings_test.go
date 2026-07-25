@@ -85,7 +85,7 @@ func TestUpdatePreservesAndSetsSettings(t *testing.T) {
 	}
 
 	// Nil settings leave both columns unchanged.
-	preserved, err := repo.Update(ctx, base.ID, "/music/base2", "Base2", models.LibrarySettings{})
+	preserved, err := repo.Update(ctx, base.ID, "/music/base2", "Base2", true, models.LibrarySettings{})
 	if err != nil {
 		t.Fatalf("Update preserve: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestUpdatePreservesAndSetsSettings(t *testing.T) {
 	wantBoolPtr(t, "preserved.DetectInstrumental", preserved.DetectInstrumental, bp(true))
 
 	// A non-nil field is written; the absent field stays unchanged.
-	updated, err := repo.Update(ctx, base.ID, "/music/base2", "Base2", models.LibrarySettings{
+	updated, err := repo.Update(ctx, base.ID, "/music/base2", "Base2", true, models.LibrarySettings{
 		EnrichRecording: bp(false),
 	})
 	if err != nil {

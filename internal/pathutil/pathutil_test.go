@@ -112,3 +112,104 @@ func TestResolveWithinRootRejectsOutsideRoot(t *testing.T) {
 		t.Error("ResolveWithinRoot ok = true for a path outside the root; want rejected")
 	}
 }
+
+func TestCanonicalRootAndRebaseCollapseSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(realRoot, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	symlinkRoot := filepath.Join(base, "link")
+	if err := os.Symlink(realRoot, symlinkRoot); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	file := filepath.Join(realRoot, "sub", "song.flac")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	wantCanon, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	// Walking through the symlinked root, as scanDir would (dir + file.Name()
+	// joins, never resolving the root itself per file).
+	walked := filepath.Join(symlinkRoot, "sub", "song.flac")
+
+	absRoot, canonRoot := CanonicalRoot(symlinkRoot)
+	got := RebaseUnderCanonicalRoot(absRoot, canonRoot, walked)
+	if got != wantCanon {
+		t.Errorf("RebaseUnderCanonicalRoot(%q, %q, %q) = %q; want %q", absRoot, canonRoot, walked, got, wantCanon)
+	}
+
+	// A path outside absRoot falls back to a direct resolve rather than
+	// producing a nonsensical rebased value.
+	otherFile := filepath.Join(base, "other.flac")
+	if err := os.WriteFile(otherFile, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write other file: %v", err)
+	}
+	wantOther, err := filepath.EvalSymlinks(otherFile)
+	if err != nil {
+		t.Fatalf("EvalSymlinks other: %v", err)
+	}
+	if got := RebaseUnderCanonicalRoot(absRoot, canonRoot, otherFile); got != wantOther {
+		t.Errorf("RebaseUnderCanonicalRoot for an out-of-root path = %q; want fallback %q", got, wantOther)
+	}
+}
+
+func TestCanonicalPathResolvesSymlinkedComponent(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	linkDir := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	file := filepath.Join(realDir, "song.flac")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	want, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if got := CanonicalPath(filepath.Join(linkDir, "song.flac")); got != want {
+		t.Errorf("CanonicalPath = %q; want %q", got, want)
+	}
+}
+
+func TestCanonicalRootDegradesOnNonexistentRoot(t *testing.T) {
+	base := t.TempDir()
+	missing := filepath.Join(base, "does-not-exist")
+	absRoot, canonRoot := CanonicalRoot(missing)
+	wantAbs, err := filepath.Abs(missing)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	if absRoot != wantAbs {
+		t.Errorf("absRoot = %q; want %q", absRoot, wantAbs)
+	}
+	// EvalSymlinks fails on a root that does not exist yet (e.g. a scan
+	// starting before the configured mount materializes); canonRoot must
+	// degrade to the absolute form rather than erroring out the caller.
+	if canonRoot != wantAbs {
+		t.Errorf("canonRoot = %q; want degraded fallback %q", canonRoot, wantAbs)
+	}
+}
+
+func TestCanonicalPathDegradesOnNonexistent(t *testing.T) {
+	base := t.TempDir()
+	missing := filepath.Join(base, "does-not-exist.flac")
+	got := CanonicalPath(missing)
+	want, err := filepath.Abs(missing)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	if got != want {
+		t.Errorf("CanonicalPath for a nonexistent path = %q; want the absolute-but-unresolved fallback %q", got, want)
+	}
+}
