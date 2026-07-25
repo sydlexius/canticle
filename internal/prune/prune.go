@@ -3,12 +3,28 @@
 // deleted so a renamed/merged/deleted track cannot leave a permanently-failing
 // or wedged row behind (#453).
 //
-// The filesystem is the sole authority for "gone": a source path is pruned only
-// when os.Stat of that path (Exact granularity) or its directory (Directory
-// granularity) fails. The same primitive backs three callers -- a watcher-
-// reactive prune on Remove/Rename events, a lazy periodic sweep, and the
-// `scan reconcile-paths` CLI -- so the reconciliation rule lives in exactly one
-// place.
+// The filesystem is the sole authority for "gone": a source path is a
+// candidate for removal only when os.Stat of that path (Exact granularity) or
+// its directory (Directory granularity) fails. The same primitive backs three
+// callers -- a watcher-reactive prune on Remove/Rename events, a lazy periodic
+// sweep, and the `scan reconcile-paths` CLI -- so the reconciliation rule
+// lives in exactly one place.
+//
+// A gone row is no longer deleted unconditionally (#640): before deleting,
+// reconcile consults the row's stored MBID/ISRC (populated by the scan loop
+// into scan_results.isrc/recording_mbid, migration 037) against every OTHER
+// still-present file in the library via the shared internal/identity exact
+// tier -- the SAME resolver internal/realign uses to re-attach orphaned lyric
+// sidecars, so a bulk move can never leave the sidecar pointing at one file and
+// the database row pointing at another. A unique match RE-LINKS the row to its
+// new path, preserving every telemetry/timing/provenance column the row
+// carries; identity that is absent or ambiguous is never guessed at -- the row
+// is KEPT and reported, because a wrongly-kept row is inert while a
+// wrongly-deleted one destroys a GPU-class inference result. Only a row whose
+// identity is present but matches nothing anywhere in the library is a genuine
+// delete, and the reactive PrunePath path never performs one at all (relink or
+// retain only), leaving genuine deletion to the periodic sweep and the CLI, by
+// which time a rescan has had time to settle.
 package prune
 
 import (
@@ -22,6 +38,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
 )
@@ -42,6 +59,26 @@ const (
 	Exact
 )
 
+// Policy controls whether reconcile is allowed to perform a genuine delete
+// once a gone row's identity is present but resolves to no candidate anywhere
+// in the library.
+type Policy int
+
+const (
+	// PolicyFull allows every outcome: relink, retain, or genuine delete. Used
+	// by the periodic sweep and the CLI, both of which run well after any
+	// rescan of a moved file's new location would have completed.
+	PolicyFull Policy = iota
+	// PolicyRelinkOrRetain never performs a genuine delete: a gone row with
+	// identity that resolves to nothing is retained-and-reported instead, the
+	// same as an ambiguous or absent identity. Used by the reactive PrunePath,
+	// which fires the instant a filesystem event reports a path gone -- before
+	// a corresponding rescan of the file's new location could plausibly have
+	// populated the present-file candidate pool, so a "no match anywhere"
+	// verdict at that moment cannot be trusted to mean "genuinely deleted".
+	PolicyRelinkOrRetain
+)
+
 // PrunedRow describes one gone source path and the rows removed for it, for
 // summaries and JSONL backups.
 type PrunedRow struct {
@@ -56,12 +93,43 @@ type PrunedRow struct {
 	Inputs []models.Inputs
 }
 
+// RelinkedRow describes one gone source path whose identity resolved uniquely
+// to a present file elsewhere in the library: the linked work_queue row(s) had
+// their source_path/outdir/filename updated to the new location, and the
+// stale scan_results row was removed -- every telemetry/timing/provenance
+// column on the work_queue row is left untouched.
+type RelinkedRow struct {
+	OldPath       string
+	NewPath       string
+	ScanResultIDs []int64
+	WorkItemIDs   []int64
+	// MBID/ISRC are whichever identity values the gone row carried and that
+	// drove the match (both may be set; only one may have been the one an
+	// operator cares to inspect).
+	MBID string
+	ISRC string
+}
+
+// RetainedRow describes one gone source path that was deliberately NOT
+// deleted: its identity was absent, ambiguous (matched more than one present
+// file), or -- under PolicyRelinkOrRetain -- present but as-yet unresolved.
+// Never guessed at; a wrongly-kept row is inert, so the safe default is to
+// keep it and report why.
+type RetainedRow struct {
+	SourcePath string
+	Reason     string
+	MBID       string
+	ISRC       string
+}
+
 // Result reports the totals and per-row detail of a prune (or, in dry-run, what
-// would be pruned).
+// would happen).
 type Result struct {
 	ScanResults int
 	WorkItems   int
 	Pruned      []PrunedRow
+	Relinked    []RelinkedRow
+	Retained    []RetainedRow
 }
 
 // SweepOptions controls a whole-scope reconciliation sweep.
@@ -77,33 +145,75 @@ type SweepOptions struct {
 	// Report, when set, is invoked once per pruned source path before the delete
 	// commits, so a caller can back up or log each row.
 	Report func(PrunedRow) error
+	// ReportRelinked, when set, is invoked once per relinked source path before
+	// the update commits (or, in dry-run, for the row that would be relinked).
+	ReportRelinked func(RelinkedRow) error
+	// ReportRetained, when set, is invoked once per retained source path.
+	// Retaining never mutates the database, so this fires the same way in
+	// dry-run and real runs.
+	ReportRetained func(RetainedRow) error
 }
 
 // Pruner reconciles work_queue and scan_results against the filesystem.
 type Pruner struct {
-	db *sql.DB
+	db           *sql.DB
+	identityKeys identity.Keys
 }
 
-// New returns a Pruner backed by db.
+// New returns a Pruner backed by db, with the default identity-key order
+// (mbid, then isrc) for the exact-match re-link tier. Call SetIdentityKeys to
+// honor an operator's configured config.RealignConfig.IdentityKeys order --
+// the same config realign reads, so the two subsystems can never disagree
+// about key precedence.
 func New(db *sql.DB) *Pruner {
-	return &Pruner{db: db}
+	return &Pruner{db: db, identityKeys: identity.NormalizeKeys([]string{"mbid", "isrc"})}
+}
+
+// SetIdentityKeys overrides the identity-key order the exact-match re-link
+// tier consults, most authoritative first. Pass config.RealignConfig.IdentityKeys.
+// An empty or all-unknown result from identity.NormalizeKeys is ignored (the
+// existing order is kept) so a caller's misconfiguration cannot silently
+// disable re-link matching altogether.
+func (p *Pruner) SetIdentityKeys(keys []string) {
+	if normalized := identity.NormalizeKeys(keys); len(normalized) > 0 {
+		p.identityKeys = normalized
+	}
 }
 
 // PrunePath reconciles the rows whose source path is at or under path, statting
 // each candidate source file individually (Exact granularity). It is the
 // reactive entry point: the caller already learned path vanished from a
 // filesystem event, so this does no rescan -- only per-candidate os.Stat checks
-// plus the DB deletes (disk-cheap, not a directory walk). A removed directory is
+// plus the DB writes (disk-cheap, not a directory walk). A removed directory is
 // handled naturally -- every candidate source under it fails os.Stat.
+//
+// Runs under PolicyRelinkOrRetain: a gone row here is either relinked (its
+// identity resolves uniquely to an already-present file) or retained, never
+// genuinely deleted -- see PolicyRelinkOrRetain's doc for why.
 func (p *Pruner) PrunePath(ctx context.Context, path string) (Result, error) {
-	return p.reconcile(ctx, scope{prefix: path, scoped: true}, nil, Exact, false, nil)
+	return p.reconcile(ctx, scope{prefix: path, scoped: true}, nil, Exact, false, PolicyRelinkOrRetain, reportHooks{})
 }
 
 // Sweep reconciles every candidate source path in scope. Directory granularity
 // is the cheap backstop; Exact is the thorough operator-invoked pass. With
-// DryRun set it reports without mutating.
+// DryRun set it reports without mutating. Runs under PolicyFull: a gone row
+// whose identity is present but resolves to no candidate anywhere in the
+// library is genuinely deleted, since the periodic sweep and the CLI both run
+// well after any rescan of a moved file's new location would have settled.
 func (p *Pruner) Sweep(ctx context.Context, opts SweepOptions) (Result, error) {
-	return p.reconcile(ctx, scope{}, opts.LibraryID, opts.Granularity, opts.DryRun, opts.Report)
+	return p.reconcile(ctx, scope{}, opts.LibraryID, opts.Granularity, opts.DryRun, PolicyFull, reportHooks{
+		Prune:    opts.Report,
+		Relinked: opts.ReportRelinked,
+		Retained: opts.ReportRetained,
+	})
+}
+
+// reportHooks bundles the three optional per-outcome callbacks so internal
+// plumbing has one parameter instead of three.
+type reportHooks struct {
+	Prune    func(PrunedRow) error
+	Relinked func(RelinkedRow) error
+	Retained func(RetainedRow) error
 }
 
 // scope narrows candidate source paths to those at or under prefix. A zero scope
@@ -131,13 +241,25 @@ func (s scope) childRange() (lower, upper string) {
 	return s.prefix + sep, s.prefix + string(filepath.Separator+1)
 }
 
-// candidate is a source path with the row detail needed to prune and back it up.
+// candidate is a source path with the row detail needed to prune, relink, or
+// back it up.
 type candidate struct {
 	scanResultIDs []int64
 	workItems     []workRow
 	// processing is true when any linked work_queue row is still 'processing',
 	// so the whole source is deferred (the worker owns it) to avoid a half-prune.
 	processing bool
+	// libraryID scopes the present-file candidate pool this row's identity is
+	// matched against. Known whenever a scan_results row backs this source;
+	// nil for a link-less work_queue-only candidate (no scan_results row at
+	// all), which falls back to an unscoped, whole-database search.
+	libraryID *int64
+	// mbid/isrc are this row's own stored identity, preferring
+	// scan_results.recording_mbid/isrc (re-read on every scan, so it can never
+	// be stale for a since-deleted file) and falling back to
+	// work_queue.mbid/isrc (migration 033, the provider's resolved identity at
+	// fetch time) only when scan_results carries none.
+	mbid, isrc string
 }
 
 // workRow is a work_queue row's restorable detail.
@@ -148,9 +270,11 @@ type workRow struct {
 
 // reconcile is the shared core behind PrunePath and Sweep. It gathers candidate
 // source paths, uses os.Stat (per granularity) as the sole authority for gone,
-// applies the in-flight guard, and atomically deletes the gone rows across
-// work_queue and scan_results (the junction is cleaned by ON DELETE CASCADE).
-func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Granularity, dryRun bool, report func(PrunedRow) error) (Result, error) {
+// applies the in-flight guard, classifies each gone candidate via the shared
+// identity resolver into prune/relink/retain, and applies the result --
+// deleting genuinely-gone rows, relinking rows whose identity resolved
+// elsewhere, and reporting (never mutating) retained rows.
+func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Granularity, dryRun bool, policy Policy, hooks reportHooks) (Result, error) {
 	bySource, err := p.gatherCandidates(ctx, sc, libraryID)
 	if err != nil {
 		return Result{}, err
@@ -164,9 +288,12 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 	if err != nil {
 		return Result{}, err
 	}
+	idx := newPresentIndex(p.db, roots)
 
 	statCache := make(map[string]bool) // directory -> exists (Directory granularity)
 	var res Result
+	var toPrune []PrunedRow
+	var toRelink []classifiedRelink
 	for _, src := range sortedKeys(bySource) {
 		c := bySource[src]
 		if !underAvailableRoot(src, roots) {
@@ -182,32 +309,75 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 			// pass once the worker finishes or fails the item.
 			continue
 		}
-		row := PrunedRow{SourcePath: src, ScanResultIDs: c.scanResultIDs}
-		for _, w := range c.workItems {
-			row.WorkItemIDs = append(row.WorkItemIDs, w.id)
-			row.Inputs = append(row.Inputs, w.inputs)
+
+		cg, err := p.classify(ctx, idx, policy, src, c)
+		if err != nil {
+			return Result{}, err
 		}
-		res.Pruned = append(res.Pruned, row)
+		switch cg.outcome {
+		case outcomeRetain:
+			res.Retained = append(res.Retained, cg.retained)
+			if hooks.Retained != nil {
+				if err := hooks.Retained(cg.retained); err != nil {
+					return Result{}, fmt.Errorf("prune: report retained %q: %w", src, err)
+				}
+			}
+		case outcomeRelink:
+			toRelink = append(toRelink, cg.classifiedRelink)
+		case outcomePrune:
+			row := PrunedRow{SourcePath: src, ScanResultIDs: c.scanResultIDs}
+			for _, w := range c.workItems {
+				row.WorkItemIDs = append(row.WorkItemIDs, w.id)
+				row.Inputs = append(row.Inputs, w.inputs)
+			}
+			toPrune = append(toPrune, row)
+		}
+	}
+	res.Pruned = toPrune
+	for _, cg := range toRelink {
+		res.Relinked = append(res.Relinked, cg.relinked)
 	}
 
 	if dryRun {
-		// Dry-run reports the intended prune set (gather-time counts), since no
-		// delete runs to measure.
-		for _, row := range res.Pruned {
+		// Dry-run reports the intended outcome (gather-time counts), since no
+		// mutation runs to measure.
+		for _, row := range toPrune {
 			res.ScanResults += len(row.ScanResultIDs)
 			res.WorkItems += len(row.WorkItemIDs)
-			if report != nil {
-				if err := report(row); err != nil {
+			if hooks.Prune != nil {
+				if err := hooks.Prune(row); err != nil {
 					return Result{}, fmt.Errorf("prune: report: %w", err)
+				}
+			}
+		}
+		for _, cg := range toRelink {
+			if hooks.Relinked != nil {
+				if err := hooks.Relinked(cg.relinked); err != nil {
+					return Result{}, fmt.Errorf("prune: report relinked %q: %w", cg.relinked.OldPath, err)
 				}
 			}
 		}
 		return res, nil
 	}
-	if len(res.Pruned) == 0 {
+
+	if len(toRelink) > 0 {
+		applied, retainedByConflict, err := p.applyRelinks(ctx, toRelink, hooks.Relinked, hooks.Retained)
+		if err != nil {
+			return Result{}, err
+		}
+		res.Relinked = applied
+		// A candidate that failed to relink (its target is already owned by a
+		// different work_queue row) is neither pruned nor relinked, but it must
+		// still be accounted for -- appending here, not overwriting, keeps it
+		// alongside any rows classify() already retained directly (absent or
+		// ambiguous identity) so pruned+relinked+retained always equals the
+		// number of gone rows considered.
+		res.Retained = append(res.Retained, retainedByConflict...)
+	}
+	if len(toPrune) == 0 {
 		return res, nil
 	}
-	scanDeleted, workDeleted, err := p.deletePruned(ctx, res.Pruned, report)
+	scanDeleted, workDeleted, err := p.deletePruned(ctx, toPrune, hooks.Prune)
 	if err != nil {
 		return Result{}, err
 	}
@@ -216,6 +386,285 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 	res.ScanResults = scanDeleted
 	res.WorkItems = workDeleted
 	return res, nil
+}
+
+// outcome classifies what reconcile decided for one gone candidate.
+type outcome int
+
+const (
+	outcomePrune outcome = iota
+	outcomeRelink
+	outcomeRetain
+)
+
+// classifiedRelink carries both the reporting-facing RelinkedRow and the
+// internal detail applyRelinks needs to actually perform the update.
+type classifiedRelink struct {
+	src      string
+	c        *candidate
+	relinked RelinkedRow
+	target   presentRowDetail
+}
+
+type classified struct {
+	outcome  outcome
+	retained RetainedRow
+	classifiedRelink
+}
+
+// classify decides one gone candidate's fate: retain (identity absent,
+// ambiguous, or -- under PolicyRelinkOrRetain -- unresolved), relink (identity
+// resolves uniquely to an already-present file), or prune (identity present
+// but matches nothing anywhere in the library, and policy allows a genuine
+// delete).
+func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy, src string, c *candidate) (classified, error) {
+	if c.mbid == "" && c.isrc == "" {
+		return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "identity absent; never deleted on a guess"}}, nil
+	}
+	pool, err := idx.pool(ctx, c.libraryID)
+	if err != nil {
+		return classified{}, err
+	}
+	verdict, ref := identity.ResolveExact(c.mbid, c.isrc, p.identityKeys, pool)
+	switch verdict {
+	case identity.VerdictUnique:
+		detail := idx.detail(c.libraryID, ref)
+		rr := RelinkedRow{OldPath: src, NewPath: ref, ScanResultIDs: c.scanResultIDs, MBID: c.mbid, ISRC: c.isrc}
+		for _, w := range c.workItems {
+			rr.WorkItemIDs = append(rr.WorkItemIDs, w.id)
+		}
+		return classified{outcome: outcomeRelink, classifiedRelink: classifiedRelink{src: src, c: c, relinked: rr, target: detail}}, nil
+	case identity.VerdictConflict:
+		return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "identity matches more than one present file; never guessed", MBID: c.mbid, ISRC: c.isrc}}, nil
+	default: // VerdictNone
+		if policy == PolicyRelinkOrRetain {
+			return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "identity present but not yet found elsewhere; reactive pass defers genuine delete to the periodic sweep", MBID: c.mbid, ISRC: c.isrc}}, nil
+		}
+		return classified{outcome: outcomePrune}, nil
+	}
+}
+
+// applyRelinks performs every relink in one transaction, updating the
+// surviving work_queue row(s)' source_path/outdir/filename to the resolved new
+// location, ensuring the work_queue_scan_results junction points at the
+// present-file scan_results row, and deleting only the stale (gone-path)
+// scan_results row -- never the work_queue row itself, so every
+// telemetry/timing/provenance column already on it survives untouched.
+//
+// A candidate whose present-file target is already junction-linked to a
+// DIFFERENT work_queue row is not silently skipped: it is accounted for as a
+// RetainedRow (see relinkOne), because #640's whole premise is keep-and-report,
+// never decide silently -- a row this package declines to touch must still
+// show up in the reconcile Result and the operator-facing summary/backup, the
+// same as an absent or ambiguous identity would.
+//
+// Both reportRelinked and reportRetained fire once per outcome, after the
+// commit, mirroring deletePruned's backup-first-on-report-time discipline: if
+// any relink in the batch errors, the whole transaction rolls back and NO
+// report fires for anything in this call, applied or retained-by-conflict
+// alike, so a report is never written for a row a rollback left untouched by
+// a different mechanism than it claims.
+func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, reportRelinked func(RelinkedRow) error, reportRetained func(RetainedRow) error) (applied []RelinkedRow, retained []RetainedRow, retErr error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("prune: begin relink tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, cg := range targets {
+		ok, conflictWorkQueueID, err := relinkOne(ctx, tx, cg.c, cg.target)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			// The present-file scan_results row is already owned by a DIFFERENT
+			// work_queue row than this gone candidate's own. Merging two
+			// work_queue rows is internal/identityrepair's job, not prune's, so
+			// this package declines the merge -- but the row still needs an
+			// outcome an operator can see, not a bare drop from every count.
+			retained = append(retained, RetainedRow{
+				SourcePath: cg.relinked.OldPath,
+				Reason:     fmt.Sprintf("present-file candidate already linked to work_queue row %d; merging is identityrepair's job", conflictWorkQueueID),
+				MBID:       cg.relinked.MBID,
+				ISRC:       cg.relinked.ISRC,
+			})
+			continue
+		}
+		applied = append(applied, cg.relinked)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("prune: commit relink tx: %w", err)
+	}
+	if reportRelinked != nil {
+		for _, rr := range applied {
+			if err := reportRelinked(rr); err != nil {
+				return applied, retained, fmt.Errorf("prune: report relinked %q: %w", rr.OldPath, err)
+			}
+		}
+	}
+	if reportRetained != nil {
+		for _, rr := range retained {
+			if err := reportRetained(rr); err != nil {
+				return applied, retained, fmt.Errorf("prune: report retained %q: %w", rr.SourcePath, err)
+			}
+		}
+	}
+	return applied, retained, nil
+}
+
+// relinkOne performs one candidate's relink within tx, returning ok=false
+// (with no mutation) when the present-file scan_results row is already
+// junction-linked to a work_queue row other than this candidate's own -- a
+// genuine identity conflict this package declines to auto-merge. On ok=false,
+// conflictWorkQueueID identifies the row that already owns the target, so the
+// caller can report a reason an operator can act on.
+func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowDetail) (ok bool, conflictWorkQueueID int64, retErr error) {
+	for _, w := range c.workItems {
+		var otherID int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT work_queue_id FROM work_queue_scan_results WHERE scan_result_id = ? AND work_queue_id != ?`,
+			target.scanResultID, w.id).Scan(&otherID)
+		if err == nil {
+			return false, otherID, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, 0, fmt.Errorf("prune: check present scan_result %d ownership: %w", target.scanResultID, err)
+		}
+	}
+	for _, w := range c.workItems {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ? WHERE id = ? AND status != 'processing'`,
+			target.filePath, target.outdir, target.filename, w.id); err != nil {
+			return false, 0, fmt.Errorf("prune: relink work_queue %d: %w", w.id, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
+			w.id, target.scanResultID); err != nil {
+			return false, 0, fmt.Errorf("prune: link work_queue %d to scan_result %d: %w", w.id, target.scanResultID, err)
+		}
+	}
+	for _, id := range c.scanResultIDs {
+		// Same in-flight guard as deletePruned: never delete a scan_results row
+		// still linked to a processing work_queue row.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM scan_results WHERE id = ?
+             AND NOT EXISTS (
+                 SELECT 1 FROM work_queue_scan_results j
+                 JOIN work_queue wq ON wq.id = j.work_queue_id
+                 WHERE j.scan_result_id = ? AND wq.status = 'processing')`,
+			id, id); err != nil {
+			return false, 0, fmt.Errorf("prune: delete stale scan_result %d: %w", id, err)
+		}
+	}
+	return true, 0, nil
+}
+
+// presentRowDetail is the detail applyRelinks needs from the present-file
+// scan_results row an identity match resolved to.
+type presentRowDetail struct {
+	scanResultID int64
+	filePath     string
+	outdir       string
+	filename     string
+}
+
+// presentIndexGlobalKey is the map key presentIndex uses for an unscoped
+// (whole-database) candidate pool, built for a candidate whose owning library
+// is unknown (a link-less work_queue-only row with no scan_results of its own).
+const presentIndexGlobalKey = int64(-1)
+
+// presentIndex lazily builds and memoizes the library-scoped set of currently-
+// present scan_results rows carrying identity -- the candidate pool prune's
+// exact-match tier searches. Building a scope's pool costs one query plus one
+// os.Stat per identity-bearing row in that library, so a caller should build it
+// AT MOST ONCE PER LIBRARY SCOPE ENCOUNTERED during a reconcile pass (memoized
+// here), not once per gone candidate.
+type presentIndex struct {
+	db      *sql.DB
+	roots   []string
+	byScope map[int64][]identity.Candidate
+	details map[int64]map[string]presentRowDetail
+}
+
+func newPresentIndex(db *sql.DB, roots []string) *presentIndex {
+	return &presentIndex{
+		db:      db,
+		roots:   roots,
+		byScope: map[int64][]identity.Candidate{},
+		details: map[int64]map[string]presentRowDetail{},
+	}
+}
+
+// pool returns the present-file identity candidates for libraryID (or the
+// unscoped global pool when libraryID is nil), building and caching it on
+// first use.
+func (idx *presentIndex) pool(ctx context.Context, libraryID *int64) ([]identity.Candidate, error) {
+	key := presentIndexGlobalKey
+	if libraryID != nil {
+		key = *libraryID
+	}
+	if pool, ok := idx.byScope[key]; ok {
+		return pool, nil
+	}
+	// Only rows carrying identity can ever win the exact tier, so filtering at
+	// the SQL level (seekable via migration 037's partial indexes) skips the
+	// os.Stat cost for the majority of a library that has no identity at all.
+	query := `SELECT id, file_path, outdir, filename, isrc, recording_mbid FROM scan_results
+              WHERE file_path != '' AND (isrc != '' OR recording_mbid != '')`
+	var args []any
+	if libraryID != nil {
+		query += ` AND library_id = ?`
+		args = append(args, *libraryID)
+	}
+	var pool []identity.Candidate
+	details := map[string]presentRowDetail{}
+	if err := queryRows(ctx, idx.db, query, args, func(rows *sql.Rows) error {
+		var id int64
+		var path, outdir, filename, isrc, mbid string
+		if err := rows.Scan(&id, &path, &outdir, &filename, &isrc, &mbid); err != nil {
+			return err
+		}
+		// DELIBERATE, BOUNDED I/O COST -- flagged because the issue's proposed
+		// design explicitly wanted zero extra disk access, and this is the one
+		// place that constraint is not fully met. Without this os.Stat, a
+		// scan_results row whose file itself later vanished (a second, distinct
+		// gone event the periodic sweep has not yet reconciled) would offer
+		// itself as a relink target and hand a gone row's identity to another
+		// gone row -- silently trading one dangling reference for another. The
+		// cost is bounded and does not scale with library size: one os.Stat per
+		// IDENTITY-BEARING row (filtered at the SQL level above, migration 037's
+		// partial index; the common case is most rows carry no identity at all)
+		// in a library SCOPE that actually has a gone-with-identity row to
+		// resolve, and the whole pool is memoized here for the rest of the
+		// reconcile pass (built at most once per library scope encountered, never
+		// once per gone candidate). On a spun-down array this still wakes disks
+		// under the stat, so it is a real cost, just a small and bounded one --
+		// nowhere near what reading candidate durations for the heuristic tier
+		// would have cost (Design Choice 1 explicitly ruled that out).
+		if !underAvailableRoot(path, idx.roots) || !pathExists(path) {
+			return nil
+		}
+		pool = append(pool, identity.Candidate{Ref: path, MBID: mbid, ISRC: isrc})
+		details[path] = presentRowDetail{scanResultID: id, filePath: path, outdir: outdir, filename: filename}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("prune: build present-file identity index: %w", err)
+	}
+	idx.byScope[key] = pool
+	idx.details[key] = details
+	return pool, nil
+}
+
+// detail returns the present-row detail for ref within libraryID's scope,
+// populated by a prior call to pool. Callers only invoke this after pool
+// already resolved ref via identity.ResolveExact, so the lookup is expected to
+// always hit.
+func (idx *presentIndex) detail(libraryID *int64, ref string) presentRowDetail {
+	key := presentIndexGlobalKey
+	if libraryID != nil {
+		key = *libraryID
+	}
+	return idx.details[key][ref]
 }
 
 // availableRoots returns the configured library root paths that are currently
@@ -279,7 +728,7 @@ func underAvailableRoot(src string, roots []string) bool {
 func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int64) (map[string]*candidate, error) {
 	bySource := make(map[string]*candidate)
 
-	srQuery := `SELECT id, file_path FROM scan_results WHERE file_path != ''`
+	srQuery := `SELECT id, library_id, file_path, isrc, recording_mbid FROM scan_results WHERE file_path != ''`
 	var srArgs []any
 	if sc.scoped {
 		// Push the path scope into SQL so the reactive PrunePath (fired per
@@ -294,9 +743,9 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		srArgs = append(srArgs, *libraryID)
 	}
 	if err := queryRows(ctx, p.db, srQuery, srArgs, func(rows *sql.Rows) error {
-		var id int64
-		var path string
-		if err := rows.Scan(&id, &path); err != nil {
+		var id, libID int64
+		var path, isrc, mbid string
+		if err := rows.Scan(&id, &libID, &path, &isrc, &mbid); err != nil {
 			return err
 		}
 		if !sc.matches(path) {
@@ -304,17 +753,25 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		}
 		c := ensureCandidate(bySource, path)
 		c.scanResultIDs = append(c.scanResultIDs, id)
+		lib := libID
+		c.libraryID = &lib
+		if isrc != "" {
+			c.isrc = isrc
+		}
+		if mbid != "" {
+			c.mbid = mbid
+		}
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("prune: gather scan_results: %w", err)
 	}
 
-	wqQuery := `SELECT id, artist, title, source_path, output_paths, status FROM work_queue WHERE source_path != ''`
+	wqQuery := `SELECT id, artist, title, source_path, output_paths, status, isrc, mbid FROM work_queue WHERE source_path != ''`
 	var wqArgs []any
 	if libraryID != nil {
 		// Library-scope work_queue through the junction so a scoped sweep only
 		// prunes queue rows belonging to that library.
-		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.source_path, wq.output_paths, wq.status
+		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.source_path, wq.output_paths, wq.status, wq.isrc, wq.mbid
                    FROM work_queue wq
                    JOIN work_queue_scan_results j ON j.work_queue_id = wq.id
                    JOIN scan_results sr ON sr.id = j.scan_result_id
@@ -330,7 +787,8 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 	if err := queryRows(ctx, p.db, wqQuery, wqArgs, func(rows *sql.Rows) error {
 		var id int64
 		var artist, title, source, outputPaths, status string
-		if err := rows.Scan(&id, &artist, &title, &source, &outputPaths, &status); err != nil {
+		var isrc, mbid sql.NullString
+		if err := rows.Scan(&id, &artist, &title, &source, &outputPaths, &status, &isrc, &mbid); err != nil {
 			return err
 		}
 		if !sc.matches(source) {
@@ -355,6 +813,17 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 				OutputPaths: paths,
 			},
 		})
+		// work_queue.isrc/mbid (migration 033, the provider's resolved identity
+		// at fetch time) is only a FALLBACK: scan_results' tag-read identity is
+		// preferred because it can never be stale for a since-deleted file (it
+		// is re-read on every scan), whereas this column is a point-in-time
+		// stamp from whichever provider match won.
+		if c.isrc == "" && isrc.Valid && isrc.String != "" {
+			c.isrc = isrc.String
+		}
+		if c.mbid == "" && mbid.Valid && mbid.String != "" {
+			c.mbid = mbid.String
+		}
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("prune: gather work_queue: %w", err)

@@ -1183,7 +1183,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runSweeper(runCtx, sqlDB, sweepInterval)
+			runSweeper(runCtx, sqlDB, sweepInterval, cfg.Realign.IdentityKeys)
 		}()
 	}
 	// One-shot identity-repair backfill (#466): correct run-together multi-value
@@ -1808,8 +1808,9 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 // also reconciles any rows that predate this feature. Caller guarantees interval
 // > 0. A per-run failure is logged and the loop continues; the sweep is a
 // backstop and must never take down serve.
-func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration) {
+func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, identityKeys []string) {
 	pruner := prune.New(sqlDB)
+	pruner.SetIdentityKeys(identityKeys)
 	sweep := func() {
 		res, err := pruner.Sweep(ctx, prune.SweepOptions{Granularity: prune.Directory})
 		if err != nil {
@@ -1867,6 +1868,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
+	pruner.SetIdentityKeys(cfg.Realign.IdentityKeys)
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
 	}, func(ctx context.Context, path string) error {

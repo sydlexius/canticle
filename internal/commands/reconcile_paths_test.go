@@ -19,7 +19,11 @@ import (
 
 // seedReconcilePathsRow inserts a scan_results row for filePath plus a linked
 // work_queue item (with a real file on disk), so reconcile-paths has a source to
-// stat. Returns nothing; the tests assert via row counts and command output.
+// stat. It stamps a recording_mbid unique to filePath (no match ANYWHERE in
+// the library) so the row still hits the #640 genuine-delete outcome the
+// existing assertions here exercise -- an identity-absent row would instead be
+// retained, not deleted. Returns nothing; the tests assert via row counts and
+// command output.
 func seedReconcilePathsRow(t *testing.T, ctx context.Context, dbPath, filePath string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -34,8 +38,8 @@ func seedReconcilePathsRow(t *testing.T, ctx context.Context, dbPath, filePath s
 	}
 	defer sqlDB.Close() //nolint:errcheck // test cleanup
 	res, err := sqlDB.ExecContext(ctx,
-		`INSERT INTO scan_results (library_id, file_path, artist, title, status) VALUES (1, ?, 'Artist', 'Title', 'processing')`,
-		filePath)
+		`INSERT INTO scan_results (library_id, file_path, artist, title, status, recording_mbid) VALUES (1, ?, 'Artist', 'Title', 'processing', ?)`,
+		filePath, "mbid-nomatch-"+filePath)
 	if err != nil {
 		t.Fatalf("insert scan_result: %v", err)
 	}
@@ -301,7 +305,7 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 	// then cancel once it has reconciled to exit the ticker loop.
 	cctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	go func() { runSweeper(cctx, sqlDB, time.Hour); close(done) }()
+	go func() { runSweeper(cctx, sqlDB, time.Hour, nil); close(done) }()
 
 	count := func() int {
 		var n int
