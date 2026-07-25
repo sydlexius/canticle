@@ -147,6 +147,7 @@ type ScanCmd struct {
 	ReconcileLRC                     *ScanReconcileLRCCmd                     `arg:"subcommand:reconcile-lrc" help:"rewrite existing .lrc sidecars that stack multiple timestamps on one line into the expanded, universally-readable form (issue #470)"`
 	ReconcileMarkerProvenance        *ScanReconcileMarkerProvenanceCmd        `arg:"subcommand:reconcile-marker-provenance" help:"backfill provenance headers onto detector-written instrumental markers (#502)"`
 	ReconcileDetectorStats           *ScanReconcileDetectorStatsCmd           `arg:"subcommand:reconcile-detector-stats" help:"attribute historical audio detections to the detector lane's statistics; reads recorded verdicts only, makes no detector-sidecar requests (issue #537)"`
+	IndexMetadata                    *ScanIndexMetadataCmd                    `arg:"subcommand:index-metadata" help:"walk a library and record the full audio tag set into audio_metadata (issue #646)"`
 }
 
 // ScanReconcileDetectorStatsCmd attributes historical audio detections to the
@@ -194,6 +195,20 @@ type ScanReconcileIdentityCmd struct {
 	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
 	Yes        bool   `arg:"--yes" help:"actually apply corrections (without it, prints what would change)"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of corrected rows (default: <db-dir>/reconcile-identity-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// ScanIndexMetadataCmd walks a library's audio files and records the full tag
+// set into audio_metadata (#646), so library questions are answerable by query
+// and coverage stops depending on fetch history. Dry-run unless --yes.
+//
+// Re-running is cheap: a file whose (path, mtime, size) still matches its row
+// is skipped without being opened, so a second pass over an unchanged library
+// does almost no I/O and doubles as a coverage check.
+type ScanIndexMetadataCmd struct {
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default indexes every library"`
+	Yes        bool   `arg:"--yes" help:"actually write the metadata rows (without it, prints what would be indexed)"`
+	Limit      int    `arg:"--limit" help:"stop after this many files (0 = no limit); for a bounded pilot run" default:"0"`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -1963,6 +1978,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileDetectorStats(ctx, out, sub)
+	case args.IndexMetadata != nil:
+		sub := *args.IndexMetadata
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runIndexMetadata(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}
