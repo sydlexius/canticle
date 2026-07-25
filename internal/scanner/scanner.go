@@ -53,13 +53,17 @@ func IsAudioFile(name string) bool {
 // returned handle is nil, so a caller that checks the error first can never leak
 // it.
 func openAndReadTags(path string) (tag.Metadata, *os.File, error) {
-	// reason: G304 - path is never attacker-supplied at any of the three call
-	// sites, and the invariant differs per caller: ReadAudioProvenance takes a
-	// configured library root + scanned filename confined via pathutil upstream;
+	// reason: G304 - path is never attacker-supplied at any call site, and the
+	// invariant differs per caller: ReadAudioProvenance takes a configured
+	// library root + scanned filename confined via pathutil upstream;
 	// ReadArtistIdentity takes a scan_results file_path written from a configured
 	// library root; ReadAudioMetadata takes a work_queue source_path, likewise
-	// written from a configured library root and confined via pathutil upstream.
-	f, oerr := os.Open(path) //nolint:gosec // reason: see the G304 note above -- all three callers supply a path derived from a configured library root
+	// written from a configured library root and confined via pathutil upstream;
+	// ReadAudioFacts (the comprehensive reader the other three now project over,
+	// #646) is additionally reached from the scan index-metadata walk, whose
+	// paths are rebased onto a canonical library root via
+	// pathutil.RebaseUnderCanonicalRoot and so carry the same invariant.
+	f, oerr := os.Open(path) //nolint:gosec // reason: see the G304 note above -- every caller supplies a path derived from a configured library root
 	if oerr != nil {
 		return nil, nil, fmt.Errorf("open %s: %w", path, oerr)
 	}

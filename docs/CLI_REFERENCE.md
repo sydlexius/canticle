@@ -281,7 +281,7 @@ canticle scan index-metadata --yes
 - **No backup.** Unlike the `reconcile-*` commands, `index-metadata` is purely additive and destroys nothing, so there is no JSONL backup to restore.
 - **Scale context.** A full library of approximately 84,000 files requires one header read per file, not a full-file read. The operation is I/O-bound on the filesystem, not the audio metadata parser.
 - `--library <name|id>` scopes the run to a single library; default indexes every configured library root.
-- `--limit <n>` caps the number of files walked (0 = no limit); useful for a pilot run before applying to the full library.
+- `--limit <n>` caps the number of files newly read and recorded (0 = no limit); already-indexed files are still walked and skipped for free, and do not count against the budget. The cap is shared across every library root in one run, not applied per root. Useful for a pilot run before applying to the full library.
 
 See the Rollout section of issue #646 for operational guidance: capture row counts before starting, dry-run on the smallest library first to verify field coverage and error rates, then live-run and immediately re-run to confirm the skip logic is working.
 
