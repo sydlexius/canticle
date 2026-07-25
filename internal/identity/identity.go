@@ -24,6 +24,8 @@
 package identity
 
 import (
+	"iter"
+	"slices"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/normalize"
@@ -116,16 +118,51 @@ func candidateValue(c Candidate, key string) string {
 // ref) when exactly one candidate matches at the first key that matched
 // anything, and (VerdictConflict, "") when more than one candidate shares that
 // value.
+//
+// This is the slice form, for a caller whose candidate pool is already
+// materialized in memory at no further cost (internal/prune holds its pool as
+// scan_results rows already loaded and stat-checked). A caller for whom
+// producing a candidate is EXPENSIVE -- internal/realign must read ID3 tags off
+// disk to learn a candidate's identity -- must use ResolveExactSeq instead, so
+// no candidate is ever realized unless the ladder actually needs to inspect it.
+// Both forms run the same decision logic: this one is a one-line delegation.
 func ResolveExact(orphanMBID, orphanISRC string, keys Keys, pool []Candidate) (Verdict, string) {
+	return ResolveExactSeq(orphanMBID, orphanISRC, keys, slices.Values(pool))
+}
+
+// ResolveExactSeq is ResolveExact over a lazy candidate sequence, and is the
+// sole implementation of the exact tier's decision logic.
+//
+// The sequence is pulled ONLY from inside the per-key loop, and only once the
+// orphan is known to carry a non-empty value for that key. An orphan with no
+// identity at all therefore never iterates candidates even once, so a caller
+// whose iteration performs I/O (realign reading tags off disk) pays nothing for
+// the case it cannot possibly resolve. This ordering is load-bearing, not an
+// optimization detail: materializing the pool before the key loop reads every
+// candidate file in a directory to answer a question that needed no reads,
+// which is exactly the regression this signature exists to prevent.
+//
+// The sequence is re-iterated once per identity key that the orphan carries a
+// value for (at most len(keys) times, and only until a key produces a match).
+// A caller whose realization is expensive should therefore memoize it; realign
+// does, via its per-plan provenance cache.
+func ResolveExactSeq(orphanMBID, orphanISRC string, keys Keys, candidates iter.Seq[Candidate]) (Verdict, string) {
 	for _, key := range keys {
 		id := strings.TrimSpace(orphanValue(orphanMBID, orphanISRC, key))
 		if id == "" {
 			continue
 		}
 		var matches []string
-		for _, c := range pool {
+		for c := range candidates {
 			if strings.EqualFold(strings.TrimSpace(candidateValue(c, key)), id) {
 				matches = append(matches, c.Ref)
+				// Two matches already settle this key as a conflict, and a
+				// conflict carries no ref, so nothing a third match could add
+				// changes the answer. Stop pulling: for realign that is one
+				// fewer tag read per remaining candidate.
+				if len(matches) > 1 {
+					break
+				}
 			}
 		}
 		switch len(matches) {

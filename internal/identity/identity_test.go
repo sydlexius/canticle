@@ -117,6 +117,18 @@ func TestHeuristicNameGuard_BelowThreshold(t *testing.T) {
 	}
 }
 
+// TestResolveExact_CandidateIdentityIsTrimmed: the CANDIDATE side is trimmed
+// too, not just the orphan's. Tag writers pad values (a fixed-width ID3 frame,
+// a trailing newline), and an untrimmed comparison would silently miss the one
+// correct file and report VerdictNone -- a false "no match" that leaves the
+// sidecar orphaned rather than re-attached.
+func TestResolveExact_CandidateIdentityIsTrimmed(t *testing.T) {
+	pool := []Candidate{{Ref: "a", MBID: "  abc-123\n"}}
+	if v, ref := ResolveExact("abc-123", "", NormalizeKeys([]string{"mbid"}), pool); v != VerdictUnique || ref != "a" {
+		t.Fatalf("padded CANDIDATE MBID = (%v,%q), want (Unique,a)", v, ref)
+	}
+}
+
 // TestHeuristicNameGuard_NoNamesDegradesToPositional: when neither side
 // carries a name, the guard has nothing to disprove and returns true.
 func TestHeuristicNameGuard_NoNamesDegradesToPositional(t *testing.T) {

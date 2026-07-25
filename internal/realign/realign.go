@@ -460,24 +460,38 @@ func walk(root string) (map[string]*dirEntry, []string, error) {
 	return dirs, allAudio, nil
 }
 
-// resolveExact is a thin adapter over the shared identity.ResolveExact tier:
-// it builds identity.Candidate values from realign's pool/getProv (reading
-// provenance from the audio file, since realign has no persisted identity
-// store of its own), then delegates the match to the shared package so
-// sidecar re-attachment can never disagree with prune's row re-linking about
-// where a file went. Returns ("", "none") on no match, (path, "unique") on a
-// single match, and ("", "conflict") when more than one audio shares the same
-// id.
+// resolveExact is a thin adapter over the shared identity exact tier: it hands
+// the shared resolver a LAZY sequence of identity.Candidate values over
+// realign's pool, each realized by getProv (an ID3 tag READ off disk, since
+// realign has no persisted identity store of its own). Delegating the verdict
+// keeps sidecar re-attachment from ever disagreeing with prune's row
+// re-linking about where a file went.
+//
+// The sequence -- not a materialized slice -- is what preserves the
+// pre-extraction access pattern: identity.ResolveExactSeq pulls candidates
+// only from inside its per-key loop and only for a key the orphan actually
+// carries a value for, so an orphan with no [isrc:]/[mbid:] header reads ZERO
+// audio files here (it used to read the entire pool). getProv memoizes per
+// plan() run, so the at-most-once-per-key re-iteration costs no extra reads.
+//
+// Returns ("", "none") on no match, (path, "unique") on a single match, and
+// ("", "conflict") when more than one audio shares the same id.
 func resolveExact(tags lyrics.ProvenanceTags, identityKeys identity.Keys, pool []string, getProv func(string) audioProvenance) (string, string) {
-	candidates := make([]identity.Candidate, 0, len(pool))
-	for _, a := range pool {
-		pv := getProv(a)
-		if pv.err != nil {
-			continue
+	candidates := func(yield func(identity.Candidate) bool) {
+		for _, a := range pool {
+			pv := getProv(a)
+			if pv.err != nil {
+				// Unreadable audio cannot be matched on identity it never
+				// yielded; skip it rather than let a zero-valued provenance
+				// masquerade as an empty-but-present identity.
+				continue
+			}
+			if !yield(identity.Candidate{Ref: a, MBID: pv.mbid, ISRC: pv.isrc, Artist: pv.artist, Title: pv.title}) {
+				return
+			}
 		}
-		candidates = append(candidates, identity.Candidate{Ref: a, MBID: pv.mbid, ISRC: pv.isrc, Artist: pv.artist, Title: pv.title})
 	}
-	verdict, ref := identity.ResolveExact(tags.MBID, tags.ISRC, identityKeys, candidates)
+	verdict, ref := identity.ResolveExactSeq(tags.MBID, tags.ISRC, identityKeys, candidates)
 	switch verdict {
 	case identity.VerdictUnique:
 		return ref, "unique"
