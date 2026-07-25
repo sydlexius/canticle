@@ -148,6 +148,21 @@ type ScanCmd struct {
 	ReconcileMarkerProvenance        *ScanReconcileMarkerProvenanceCmd        `arg:"subcommand:reconcile-marker-provenance" help:"backfill provenance headers onto detector-written instrumental markers (#502)"`
 	ReconcileDetectorStats           *ScanReconcileDetectorStatsCmd           `arg:"subcommand:reconcile-detector-stats" help:"attribute historical audio detections to the detector lane's statistics; reads recorded verdicts only, makes no detector-sidecar requests (issue #537)"`
 	IndexMetadata                    *ScanIndexMetadataCmd                    `arg:"subcommand:index-metadata" help:"walk a library and record the full audio tag set into audio_metadata (issue #646)"`
+	PurgeProvenance                  *ScanPurgeProvenanceCmd                  `arg:"subcommand:purge-provenance" help:"bulk-delete .lrc/.txt sidecars by provenance (--source or --no-source) and requeue for re-fetch (issue #474)"`
+}
+
+// ScanPurgeProvenanceCmd bulk-deletes .lrc/.txt sidecars matching a provenance
+// filter and requeues their coupled work_queue/scan_results rows so the next
+// scan re-fetches. Exactly one of Source or NoSource is required. Dry-run
+// unless --yes. This is the only reconcile-family command that deletes real
+// library files, not just database rows.
+type ScanPurgeProvenanceCmd struct {
+	Source     string `arg:"--source" help:"match sidecars whose [source:] tag equals this value exactly"`
+	NoSource   bool   `arg:"--no-source" help:"match sidecars carrying no [source:] tag (the inherited/foreign cohort); mutually exclusive with --source"`
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default purges every library"`
+	Yes        bool   `arg:"--yes" help:"actually delete sidecars and requeue rows (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of deleted sidecars (default: <db-dir>/purge-provenance-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // ScanReconcileDetectorStatsCmd attributes historical audio detections to the
@@ -1984,6 +1999,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runIndexMetadata(ctx, out, sub)
+	case args.PurgeProvenance != nil:
+		sub := *args.PurgeProvenance
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runPurgeProvenance(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}
