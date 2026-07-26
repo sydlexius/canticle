@@ -40,6 +40,28 @@ make scan                # build the Docker image and scan it for HIGH+ CVEs (ne
 make sync-tool-versions  # assert the golangci-lint and grype pins match across CI and local
 ```
 
+### CI test sharding
+
+CI runs the test suite across parallel `Test Shard` jobs rather than one `go test ./...` (issue #662). The split lives in `scripts/ci-shards.sh`, which is the single source of truth for **both** the shard-name list (consumed by the workflow matrix) and the package map each shard resolves to. Keeping them in one file is deliberate: if a shard were named in the map but missing from the matrix, its packages would be excluded from the dynamic `rest` remainder and run by nobody -- nothing would fail, those packages would just stop being tested.
+
+```sh
+bash scripts/ci-shards.sh matrix          # the matrix JSON the workflow consumes
+bash scripts/ci-shards.sh names           # shard names, one per line
+bash scripts/ci-shards.sh packages <name> # that shard's package list
+bash scripts/ci-shards.sh run <name>      # that shard's -run regex (partitioned shards only)
+bash scripts/ci-shards.sh verify          # assert exactly-once package coverage
+```
+
+`verify` asserts that every package in `go list ./...` lands in exactly one shard, that each named shard's directories exist, and that a partitioned package's buckets are complete and disjoint. It runs in `make gate` and again in the `Go Cache Primer` job, which every shard depends on, so drift fails the pipeline before any test runs. The script needs Bash 4+ (`declare -A`); stock macOS `/bin/bash` is 3.2, so `make gate` skips it locally when only the old shell is present, and CI enforces it.
+
+`rest` is the **dynamic remainder** -- everything no named shard claims -- so a newly added package automatically lands in a shard.
+
+Two packages are heavy enough that a shard of their own would still be the pole (`internal/commands` at 252s, `internal/queue` at 178s of measured CI time), so they are *partitioned by test name*: a round-robin over sorted test names splits each into buckets (`commands-1..3`, `queue-1..2`) selected with `-run`. Before relying on a new partition, confirm each bucket passes alone, shuffled, under `-race`.
+
+To rebalance, edit the `SHARDS` / `BUCKETS` maps at the top of the script and re-run `verify`; the matrix regenerates from them. Base the split on **CI** timings from the job log, not local ones -- the ratio between the two is not stable.
+
+Each shard uploads its own `coverage-<shard>` artifact. The `Coverage Floor` and `Upload Coverage` jobs merge them with `go tool gocovmerge` (pinned via the `go.mod` tool directive) before use. Do **not** replace that with a `cat`: each shard profile repeats the mode line and blocks, and `coverage-floor.sh` sums `nstmts` per matching line, so concatenation inflates the denominator while the covered numerator stays flat -- producing a plausible-looking wrong number rather than an obvious failure.
+
 ### Coverage floor (one-way ratchet)
 
 `make coverage-floor` (`scripts/coverage-floor.sh`) enforces a per-package floor recorded in `scripts/coverage-floor.json`: a PR that drops any `internal/` package below its floor fails the check, even if Codecov's patch coverage passes. It complements patch coverage (which only sees changed lines) by guarding whole-package regressions. The script is pure awk (no `jq`) and reuses the test step's coverage profile via `COVER_OUT` when one is supplied.
