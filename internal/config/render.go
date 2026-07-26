@@ -131,6 +131,8 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("identity_keys = %s%s\n", sliceVal("realign.identity_keys", cfg.Realign.IdentityKeys), ann("realign.identity_keys"))
 	p("min_confidence = %g%s\n", cfg.Realign.MinConfidence, ann("realign.min_confidence"))
 	p("auto_apply_heuristic = %t%s\n", cfg.Realign.AutoApplyHeuristic, ann("realign.auto_apply_heuristic"))
+	p("name_match = %t%s\n", cfg.Realign.NameMatch, ann("realign.name_match"))
+	p("min_margin = %g%s\n", cfg.Realign.MinMargin, ann("realign.min_margin"))
 	p("\n")
 
 	// [guard]
@@ -352,6 +354,8 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			sliceAttr("identity_keys", "realign.identity_keys", cfg.Realign.IdentityKeys),
 			floatAttr("min_confidence", "realign.min_confidence", cfg.Realign.MinConfidence),
 			boolAttr("auto_apply_heuristic", "realign.auto_apply_heuristic", cfg.Realign.AutoApplyHeuristic),
+			boolAttr("name_match", "realign.name_match", cfg.Realign.NameMatch),
+			floatAttr("min_margin", "realign.min_margin", cfg.Realign.MinMargin),
 		),
 		group("guard",
 			sliceAttr("accepted_scripts", "guard.accepted_scripts", cfg.Guard.AcceptedScripts),
