@@ -402,7 +402,7 @@ func TestReadProvenanceTagsAdversarial(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"bom.lrc":     "\xef\xbb\xbf[source:musixmatch]\n[00:01.00]x\n", // BOM -> misparsed
+		"bom.lrc":     "\xef\xbb\xbf[source:musixmatch]\n[00:01.00]x\n", // BOM stripped -> parses fine
 		"crlf.lrc":    "[source:musixmatch]\r\n[00:01.00]x\r\n",         // parses fine
 		"bracket.lrc": "[source:musix]match]\n[00:01.00]x\n",
 		"blanks.lrc":  "\n\n\n[source:musixmatch]\n[00:01.00]x\n", // parses fine
@@ -429,7 +429,7 @@ func TestReadProvenanceTagsAdversarial(t *testing.T) {
 	}
 
 	bySource := preview(Filter{Source: "musixmatch"})
-	for _, name := range []string{"crlf.lrc", "blanks.lrc"} {
+	for _, name := range []string{"crlf.lrc", "blanks.lrc", "bom.lrc"} {
 		if !bySource[name] {
 			t.Errorf("--source musixmatch did not match %s; the header parser regressed", name)
 		}
@@ -441,11 +441,12 @@ func TestReadProvenanceTagsAdversarial(t *testing.T) {
 	}
 
 	noSrc := preview(Filter{NoSource: true})
-	// Known defect, asserted so a parser fix shows up here as a failing
-	// expectation to update rather than passing silently.
-	if !noSrc["bom.lrc"] {
-		t.Errorf("bom.lrc no longer falls into the --no-source cohort; the BOM misparse appears FIXED -- " +
-			"delete this expectation and move bom.lrc to the --source assertions above")
+	// bom.lrc is a genuinely tagged sidecar, so it must NOT fall into the
+	// --no-source cohort. It used to (the BOM misparse discarded every tag),
+	// which meant `purge-provenance --no-source --yes` deleted exactly the
+	// tagged files the operator meant to keep.
+	if noSrc["bom.lrc"] {
+		t.Error("--no-source matched bom.lrc; the UTF-8 BOM misparse has regressed and tagged sidecars are deletable")
 	}
 	if noSrc["crlf.lrc"] || noSrc["blanks.lrc"] {
 		t.Errorf("--no-source matched a validly tagged sidecar: %v", noSrc)
