@@ -13,8 +13,13 @@ on:
     branches: [main]
     tags:
       - 'v*.*.*'
+  # No base-branch filter: a stacked PR targets its parent branch, not main,
+  # and a base filter would silently skip CI on it -- a PR with no checks looks
+  # much like a PR whose checks passed. A glob (e.g. 'feat/**') has the same
+  # failure mode for any branch outside the pattern. This repo is single-trunk,
+  # so every PR reaches main eventually and the filter only ever excludes work
+  # that should have been tested.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
