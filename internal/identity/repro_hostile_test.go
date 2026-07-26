@@ -18,16 +18,23 @@ func TestRepro_FallthroughWhenPrimaryPresentButUnmatched(t *testing.T) {
 // itself, the guard compares a name against a STEM. No existing test pins this.
 func TestRepro_OneSidedNameComparesNameAgainstStem(t *testing.T) {
 	// Orphan has no name, candidate does. Guard must NOT degrade to true.
-	ok, score := HeuristicNameGuard("", "", "zzzzz-unrelated-stem", Candidate{Artist: "The Artist", Title: "The Title"}, "cand-stem", 0.9)
+	ok, score, tagged := HeuristicNameGuard(
+		NameSignal{Stem: "zzzzz-unrelated-stem"},
+		NameSignal{Artist: "The Artist", Title: "The Title", Stem: "cand-stem"}, 0.9)
 	if ok {
 		t.Fatalf("one-sided name with unrelated stem: ok=true score=%v, want false", score)
+	}
+	if !tagged {
+		t.Error("one side carried tags, so tagged must be true (only a both-sides-bare pair degrades)")
 	}
 }
 
 // REPRO 3: threshold boundary. score == minConfidence must PASS (>=).
 func TestRepro_ThresholdBoundaryIsInclusive(t *testing.T) {
-	_, score := HeuristicNameGuard("A", "B", "s", Candidate{Artist: "A", Title: "C"}, "s2", 0.0)
-	ok, _ := HeuristicNameGuard("A", "B", "s", Candidate{Artist: "A", Title: "C"}, "s2", score)
+	orphan := NameSignal{Artist: "A", Title: "B", Stem: "s"}
+	cand := NameSignal{Artist: "A", Title: "C", Stem: "s2"}
+	_, score, _ := HeuristicNameGuard(orphan, cand, 0.0)
+	ok, _, _ := HeuristicNameGuard(orphan, cand, score)
 	if !ok {
 		t.Fatalf("score == minConfidence (%v) must pass the guard (>=), got false", score)
 	}

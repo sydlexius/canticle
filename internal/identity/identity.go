@@ -177,27 +177,83 @@ func ResolveExactSeq(orphanMBID, orphanISRC string, keys Keys, candidates iter.S
 	return VerdictNone, ""
 }
 
-// HeuristicNameGuard scores an orphan's artist/title (or a positional stem,
-// when no name is available on either side) against one candidate's
-// artist/title via Jaro-Winkler, and reports whether the score clears
-// minConfidence. It degrades to true when neither side carries a name at all,
-// so a purely positional pairing (a single orphan matched with a single
-// missing-sidecar file in the same directory) still succeeds -- the guard has
-// nothing to disprove.
-func HeuristicNameGuard(orphanArtist, orphanTitle, orphanStem string, candidate Candidate, candidateStem string, minConfidence float64) (bool, float64) {
-	hasOrphanName := orphanArtist != "" || orphanTitle != ""
-	hasCandidateName := candidate.Artist != "" || candidate.Title != ""
-	if !hasOrphanName && !hasCandidateName {
-		return true, 0
+// NameSignal is one side's name evidence for the heuristic tier: the tag-derived
+// artist and title, plus the filesystem stem that stands in when tags are absent.
+// Both sides of a comparison are described the same way, so a tagged sidecar and
+// an untagged audio file (or the reverse) compare coherently.
+type NameSignal struct {
+	Artist string
+	Title  string
+	Stem   string
+}
+
+// HasName reports whether this side carries TAG-derived name evidence. A bare
+// stem does not count: the stem is a fallback, not evidence that the file was
+// ever identified.
+func (n NameSignal) HasName() bool {
+	return strings.TrimSpace(n.Artist) != "" || strings.TrimSpace(n.Title) != ""
+}
+
+// discriminator returns the single string this side contributes to a
+// name-similarity comparison, most discriminating first: title, else stem, else
+// artist.
+//
+// The ARTIST IS DELIBERATELY EXCLUDED when a title or stem is available (#672).
+// Inside an album directory -- the scope in which realign pairs an orphan with a
+// candidate -- every candidate shares the same artist, so the artist contributes
+// a large constant to EVERY pairwise score and discriminates between none of
+// them. Concatenating artist and title (the pre-#672 behavior) let two unrelated
+// tracks by the same artist score 0.87 against each other, clearing the 0.75
+// floor purely on the shared prefix, while their titles alone scored 0.39. It
+// costs nothing on a true match: two sides naming the same track have identical
+// titles, and identical strings score 1.0 with or without the artist.
+//
+// The stem outranks the artist for the same reason: a stem like
+// "05. Some Title" carries the title, whereas an artist-only tag carries no
+// track-level information at all.
+func (n NameSignal) discriminator() string {
+	if t := strings.TrimSpace(n.Title); t != "" {
+		return t
 	}
-	orphanStr := orphanStem
-	if hasOrphanName {
-		orphanStr = strings.TrimSpace(orphanArtist + " " + orphanTitle)
+	if s := strings.TrimSpace(n.Stem); s != "" {
+		return s
 	}
-	candidateStr := candidateStem
-	if hasCandidateName {
-		candidateStr = strings.TrimSpace(candidate.Artist + " " + candidate.Title)
+	return strings.TrimSpace(n.Artist)
+}
+
+// NameScore is the SINGLE definition of how two sides' names are scored against
+// each other, shared by every name-similarity tier so no two tiers can drift
+// into disagreeing about the same pair.
+//
+// score is the Jaro-Winkler similarity of the two discriminators (see
+// NameSignal.discriminator) and is always computed, including when neither side
+// carries tags -- that case degrades to a stem-vs-stem comparison, which is what
+// an N:M matcher over a folder of untagged renamed tracks needs.
+//
+// tagged reports whether EITHER side carried tag-derived name evidence. It is
+// false only when both sides are bare stems, and exists so a caller that wants
+// to treat "no name evidence anywhere" as a non-verdict (the positional 1:1
+// degradation in HeuristicNameGuard) can tell that case apart from a genuine
+// low score.
+func NameScore(orphan, candidate NameSignal) (score float64, tagged bool) {
+	tagged = orphan.HasName() || candidate.HasName()
+	return normalize.MatchConfidence(orphan.discriminator(), candidate.discriminator()), tagged
+}
+
+// HeuristicNameGuard scores one orphan against one candidate via NameScore and
+// reports whether the score clears minConfidence.
+//
+// When NEITHER side carries a tag-derived name, the guard has nothing to
+// disprove and degrades to (true, 0, false), so a purely positional pairing -- a
+// single untagged orphan matched with the single missing-sidecar file in the
+// same directory, e.g. a plain .txt instrumental marker -- still succeeds. The
+// returned tagged flag lets the caller see that the verdict was a degradation
+// rather than a passing score, so it can decline to apply further score-based
+// rules (a margin test) that a zero score would fail spuriously.
+func HeuristicNameGuard(orphan, candidate NameSignal, minConfidence float64) (ok bool, score float64, tagged bool) {
+	score, tagged = NameScore(orphan, candidate)
+	if !tagged {
+		return true, 0, false
 	}
-	score := normalize.MatchConfidence(orphanStr, candidateStr)
-	return score >= minConfidence, score
+	return score >= minConfidence, score, true
 }

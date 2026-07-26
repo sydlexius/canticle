@@ -1,7 +1,8 @@
 // Package realign re-attaches orphaned lyric sidecars (.lrc/.txt left behind when
 // an audio file was renamed) to their audio via a confidence resolver with these
 // tiers: exact (provenance ISRC/MBID match), heuristic (single-candidate
-// filesystem pairing gated by a name-similarity guard), heuristic-nm (opt-in N:M
+// filesystem pairing gated by a name-similarity guard AND a runner-up margin
+// against the directory's other audio), heuristic-nm (opt-in N:M
 // name-similarity matching when a directory has multiple orphans and multiple
 // sidecar-less audio files, pairing each orphan to its unambiguous best-scoring
 // candidate only), ambiguous (multiple/zero candidates, or an N:M pairing too
@@ -31,7 +32,6 @@ import (
 	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
-	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
@@ -265,10 +265,28 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "destination " + target + " already claimed by another orphan this run (duplicate provenance?)"})
 				continue
 			}
-			ok, score := heuristicNameGuard(orphanTags, stemOf(orphan), getProv(audio), stemOf(audio), r.cfg.MinConfidence)
+			ok, score, tagged := heuristicNameGuard(orphanTags, stemOf(orphan), getProv(audio), stemOf(audio), r.cfg.MinConfidence)
 			if !ok {
 				res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: fmt.Sprintf("name similarity %.2f below min_confidence %.2f", score, r.cfg.MinConfidence)})
 				continue
+			}
+			// Margin rule for the 1:1 tier (#672). Clearing the floor against the
+			// lone gap says nothing if the orphan scores just as well against the
+			// directory's OTHER audio: that is a name signal that cannot tell the
+			// tracks apart, and pairing on it attaches lyrics to the wrong song.
+			// The rival set is every other audio file in the directory, including
+			// ones that already have a sidecar, so this tier reaches the same
+			// verdict as the N:M tier on the same pair no matter how many other
+			// orphans happen to be present.
+			//
+			// Skipped when tagged is false: neither side carried a name, the
+			// pairing is positional, and its score is a placeholder zero that no
+			// margin test could meaningfully consume.
+			if tagged {
+				if rival, has := bestRivalScore(nameSignalForOrphan(orphanTags, stemOf(orphan)), audio, de.audio, getProv); has && score-rival < r.cfg.MinMargin {
+					res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: fmt.Sprintf("name similarity %.2f too close to runner-up %.2f (margin %.2f < min_margin %.2f)", score, rival, score-rival, r.cfg.MinMargin)})
+					continue
+				}
 			}
 			claimed[target] = true
 			mv := Move{Orphan: orphan, Target: target, Method: "heuristic", LibraryID: libraryID, Eligible: !r.cfg.RequireProvenance, Confidence: score}
@@ -560,35 +578,53 @@ func resolveExact(tags lyrics.ProvenanceTags, identityKeys identity.Keys, pool [
 
 // heuristicNameGuard is a thin adapter over the shared
 // identity.HeuristicNameGuard tier, comparing the orphan's [ar:]/[ti:] header
-// (or sidecar stem) against the candidate audio's artist/title via
-// Jaro-Winkler. Degrades to positional matching (returns true) when neither
-// side yields a name, so a plain .txt still realigns.
-func heuristicNameGuard(tags lyrics.ProvenanceTags, orphanStem string, audio audioProvenance, audioStem string, minConf float64) (bool, float64) {
-	candidate := identity.Candidate{Artist: audio.artist, Title: audio.title}
-	return identity.HeuristicNameGuard(tags.Artist, tags.Title, orphanStem, candidate, audioStem, minConf)
+// (or sidecar stem) against the candidate audio's title (or stem) via
+// Jaro-Winkler. Degrades to positional matching (returns ok=true, tagged=false)
+// when neither side yields a name, so a plain .txt still realigns.
+func heuristicNameGuard(tags lyrics.ProvenanceTags, orphanStem string, audio audioProvenance, audioStem string, minConf float64) (ok bool, score float64, tagged bool) {
+	return identity.HeuristicNameGuard(nameSignalForOrphan(tags, orphanStem), nameSignalForAudio(audio, audioStem), minConf)
 }
 
-// nameStringForOrphan returns the string an orphan sidecar contributes to a
-// name-similarity comparison: its [ar:]/[ti:] header when either is present,
-// else its filesystem stem. Mirrors the orphan-side branch of
-// identity.HeuristicNameGuard so resolveNameMatch scores pairs identically to
-// the single-candidate heuristic tier.
-func nameStringForOrphan(tags lyrics.ProvenanceTags, stem string) string {
-	if tags.Artist != "" || tags.Title != "" {
-		return strings.TrimSpace(tags.Artist + " " + tags.Title)
-	}
-	return stem
+// nameSignalForOrphan describes an orphan sidecar's name evidence for the
+// shared scorer: its [ar:]/[ti:] header plus its filesystem stem as the
+// fallback. Building the signal here (rather than pre-flattening it to a
+// string) is what keeps the 1:1 and N:M tiers scoring a pair IDENTICALLY: both
+// hand the same NameSignal pair to identity.NameScore, which owns the whole
+// decision about which fields discriminate.
+func nameSignalForOrphan(tags lyrics.ProvenanceTags, stem string) identity.NameSignal {
+	return identity.NameSignal{Artist: tags.Artist, Title: tags.Title, Stem: stem}
 }
 
-// nameStringForAudio returns the string a candidate audio file contributes to
-// a name-similarity comparison: its embedded artist/title when either is
-// present, else its filesystem stem. Mirrors the candidate-side branch of
-// identity.HeuristicNameGuard.
-func nameStringForAudio(prov audioProvenance, stem string) string {
-	if prov.artist != "" || prov.title != "" {
-		return strings.TrimSpace(prov.artist + " " + prov.title)
+// nameSignalForAudio describes a candidate audio file's name evidence for the
+// shared scorer: its embedded artist/title plus its filesystem stem.
+func nameSignalForAudio(prov audioProvenance, stem string) identity.NameSignal {
+	return identity.NameSignal{Artist: prov.artist, Title: prov.title, Stem: stem}
+}
+
+// bestRivalScore returns the highest name-similarity score the orphan achieves
+// against any audio file in the directory OTHER than the candidate it is about
+// to be paired with, and whether any such rival existed.
+//
+// This is the 1:1 tier's margin input (#672). Its candidate set is the
+// directory's FULL audio list, not just the sidecar-less files: an orphan whose
+// name matches the already-paired track next door just as well as it matches
+// the one lone gap has not identified anything, it has merely been left alone
+// in a room with one exit. Scoring only the gaps would make the verdict depend
+// on how many OTHER orphans a previous apply happened to resolve -- the exact
+// tier-disagreement this rule exists to close.
+func bestRivalScore(orphan identity.NameSignal, target string, dirAudio []string, getProv func(string) audioProvenance) (float64, bool) {
+	best := 0.0
+	found := false
+	for _, a := range dirAudio {
+		if a == target {
+			continue
+		}
+		score, _ := identity.NameScore(orphan, nameSignalForAudio(getProv(a), stemOf(a)))
+		if !found || score > best {
+			best, found = score, true
+		}
 	}
-	return stem
+	return best, found
 }
 
 // nmPairing is one accepted orphan->audio pairing from resolveNameMatch.
@@ -646,10 +682,10 @@ func resolveNameMatch(orphans []string, orphanTags map[string]lyrics.ProvenanceT
 	}
 	var scores []score
 	for _, o := range orphans {
-		oStr := nameStringForOrphan(orphanTags[o], stemOf(o))
+		oSig := nameSignalForOrphan(orphanTags[o], stemOf(o))
 		for _, a := range candidates {
-			aStr := nameStringForAudio(getProv(a), stemOf(a))
-			scores = append(scores, score{orphan: o, audio: a, s: normalize.MatchConfidence(oStr, aStr)})
+			s, _ := identity.NameScore(oSig, nameSignalForAudio(getProv(a), stemOf(a)))
+			scores = append(scores, score{orphan: o, audio: a, s: s})
 		}
 	}
 	// Sort all pairs by descending score so the orphan/candidate combination
