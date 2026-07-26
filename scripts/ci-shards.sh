@@ -286,7 +286,12 @@ verify() {
       union_names+=$(printf '%s\n' "${re//|/$'\n'}")
       union_names+=$'\n'
     done
-    dup=$(printf '%s' "$union_names" | grep -v '^$' | sort | uniq -d)
+    # `|| true`: under `set -e`, grep -v exits 1 on empty input -- which happens
+    # exactly when a bucket regex failed above and `continue`d. Without this the
+    # assignment aborts verify before the remaining bases are checked and before
+    # the accumulated rc is reported, so the guard stays silent in the one case
+    # it exists to catch.
+    dup=$(printf '%s' "$union_names" | grep -v '^$' | sort | uniq -d || true)
     if [ -n "$dup" ]; then
       echo "FAIL: test names in more than one ${base} bucket:" >&2
       printf '%s\n' "$dup" >&2

@@ -73,7 +73,11 @@ jobs:
           # (skipped) job still has a syntactically valid matrix.
           if [ "${{ steps.filter.outputs.code }}" = "true" ]; then
             echo 'matrix={"include":[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"},{"goos":"darwin","goarch":"amd64"},{"goos":"darwin","goarch":"arm64"},{"goos":"windows","goarch":"amd64"}]}' >> "$GITHUB_OUTPUT"
-            echo "test_matrix=$(bash scripts/ci-shards.sh matrix)" >> "$GITHUB_OUTPUT"
+            # Assign before emitting: `echo "x=$(cmd)"` exits 0 even when cmd
+            # fails, writing an empty value that only surfaces later as a
+            # fromJson error in the test job. Assigning fails at the source.
+            test_matrix=$(bash scripts/ci-shards.sh matrix)
+            echo "test_matrix=${test_matrix}" >> "$GITHUB_OUTPUT"
           else
             echo 'matrix={"include":[{"goos":"linux","goarch":"amd64","skip":"true"}]}' >> "$GITHUB_OUTPUT"
             echo 'test_matrix={"shard":["rest"]}' >> "$GITHUB_OUTPUT"
