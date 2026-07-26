@@ -649,7 +649,7 @@ those orphaned sidecars to their audio, changing only the stem and never the
 extension (a synced `.lrc` stays `.lrc`; an instrumental `.txt` marker stays
 `.txt` and is never promoted).
 
-Each orphan is classified into one of four confidence tiers, and only clean
+Each orphan is classified into one of these confidence tiers, and only clean
 matches are ever renamed:
 
 - **exact** - the orphan's `[isrc:]` / `[mbid:]` header uniquely matches one
@@ -660,8 +660,16 @@ matches are ever renamed:
   name guard at `min_confidence`). If neither the sidecar header nor the audio
   tags yield an artist/title, the name check is skipped and the lone pair is
   matched positionally.
-- **ambiguous** - zero or multiple candidates on either side. Reported and
-  skipped, never guessed.
+- **heuristic-nm** - opt-in (`name_match = true`), for a directory with
+  *multiple* orphaned sidecars and *multiple* sidecar-less audio files (a
+  folder of renamed tracks) - the shape the single-candidate heuristic tier
+  above cannot resolve. Every orphan is scored against every remaining
+  candidate; a pairing is accepted only when it clears `min_confidence` and
+  the orphan's best score beats its runner-up by at least `min_margin`. Off
+  by default, so such a directory stays ambiguous until you opt in.
+- **ambiguous** - zero or multiple candidates on either side, or (for
+  `heuristic-nm`) a pairing too close to call. Reported and skipped, never
+  guessed.
 - **conflict** - contradictory signals (multiple exact matches) or a destination
   sidecar that already exists. Reported and skipped, never clobbered.
 
@@ -682,12 +690,15 @@ The applied-move backup (`<db-dir>/realign-backup-<timestamp>.jsonl`, or the
 line; swap `old_path`/`new_path` to undo. The behavior is tuned by the
 [`[realign]` config section](CONFIGURATION.md#realign) - notably
 `require_provenance` (restrict applied moves to the exact tier), `cross_directory`
-(let an exact match move a sidecar between directories), and `min_confidence`
-(the heuristic name-guard floor).
+(let an exact match move a sidecar between directories), `min_confidence`
+(the heuristic name-guard floor), `name_match` (enable the N:M matcher), and
+`min_margin` (its ambiguity-rejection threshold).
 
 The exact tier requires ISRC/MBID-tagged audio; libraries whose files carry no
-such tags fall back to the heuristic tier. To prevent orphaning at the source,
-Lidarr users can install the [rename hook](#lidarr-rename-hook) below.
+such tags fall back to the heuristic tier (or, with `name_match` enabled, the
+N:M matcher for directories the single-candidate heuristic can't resolve). To
+prevent orphaning at the source, Lidarr users can install the
+[rename hook](#lidarr-rename-hook) below.
 
 ## Reports workspace
 
