@@ -984,9 +984,10 @@ func TestClassify_Heuristic_SharedArtistUnrelatedTitleIsAmbiguous(t *testing.T) 
 	write(t, gap, "a")
 	write(t, paired, "b")
 	write(t, filepath.Join(dir, "01 - Harbor Lantern.lrc"), "[00:01.00]x\n")
-	// The orphan is a stale duplicate of track 1's sidecar (a typo in its stem),
+	// The orphan is a stale duplicate of track 1's sidecar (its stem no longer
+	// matches any audio file),
 	// so it belongs to "Harbor Lantern", NOT to the gap.
-	orphan := filepath.Join(dir, "01 - Harbor Lantren.lrc")
+	orphan := filepath.Join(dir, "01 - Harbor Lantern (old copy).lrc")
 	write(t, orphan, "[ar:"+artist+"]\n[ti:Harbor Lantern]\n[00:01.00]x\n")
 
 	r, lib := newRealigner(root, defaultCfg(), nil)
@@ -1080,7 +1081,7 @@ func TestClassify_TierConsistency_SameVerdictWhateverTheOrphanCount(t *testing.T
 		dir := filepath.Join(root, "Album")
 		c := filepath.Join(dir, "02 - Sunken Cartography.flac")
 		write(t, c, "a")
-		orphan = filepath.Join(dir, "01 - Harbor Lantren.lrc")
+		orphan = filepath.Join(dir, "01 - Harbor Lantern (old copy).lrc")
 		write(t, orphan, "[ar:"+artist+"]\n[ti:Harbor Lantern]\n[00:01.00]x\n")
 		prov := map[string]audioProv{c: {artist: artist, title: "Sunken Cartography"}}
 
