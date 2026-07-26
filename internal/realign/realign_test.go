@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
@@ -771,6 +772,39 @@ func TestResolveNameMatch_NeverPairsTwoOrphansToOneCandidate(t *testing.T) {
 	}
 	if len(pairings)+len(unresolved) != len(orphans) {
 		t.Errorf("every orphan must be either paired or reported: pairings=%+v unresolved=%+v", pairings, unresolved)
+	}
+}
+
+// TestResolveNameMatch_ClaimedLoserReasonNamesTheClaim pins the SKIP REASON, not
+// just the skip. An orphan that cleared min_confidence but lost its candidate to a
+// stronger pairing used to fall through to "no candidate cleared min_confidence" --
+// false, and actively misleading: an operator reading it would lower a floor that
+// was never the obstacle. The reason must name the real cause.
+func TestResolveNameMatch_ClaimedLoserReasonNamesTheClaim(t *testing.T) {
+	orphans := []string{"o1.lrc", "o2.lrc"}
+	tags := map[string]lyrics.ProvenanceTags{
+		"o1.lrc": {Artist: "Nova", Title: "Drifter"},
+		"o2.lrc": {Artist: "Nova", Title: "Drifter"}, // identical: both clear the floor on c1
+	}
+	candidates := []string{"c1.flac"} // exactly one candidate, so the loser has nowhere to go
+	getProv := func(string) audioProvenance {
+		return audioProvenance{artist: "Nova", title: "Drifter"}
+	}
+
+	pairings, unresolved := resolveNameMatch(orphans, tags, candidates, getProv, 0.75, 0.05)
+	if len(pairings) != 1 {
+		t.Fatalf("exactly one orphan may claim the lone candidate; got %+v", pairings)
+	}
+	if len(unresolved) != 1 {
+		t.Fatalf("the losing orphan must be reported; got %+v", unresolved)
+	}
+	if strings.Contains(unresolved[0].Reason, "below min_confidence") ||
+		strings.Contains(unresolved[0].Reason, "no candidate cleared min_confidence") {
+		t.Errorf("the loser cleared min_confidence -- reporting a confidence failure sends the "+
+			"operator after the wrong knob; got reason %q", unresolved[0].Reason)
+	}
+	if !strings.Contains(unresolved[0].Reason, "already claimed") {
+		t.Errorf("reason must name the claim as the cause; got %q", unresolved[0].Reason)
 	}
 }
 

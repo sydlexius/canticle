@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -734,7 +735,10 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			// which would reject nearly every N:M pairing as ambiguous) is reset to
 			// the default just as the env-override path does. 0 is valid (accept
 			// any strict best-score winner).
-			if cfg.Realign.MinMargin < 0 || cfg.Realign.MinMargin >= 1 {
+			// math.IsNaN is required, not redundant: a TOML `min_margin = nan`
+			// decodes to NaN, and every comparison against NaN is false, so the
+			// range test alone would accept it and break the [0,1) invariant.
+			if math.IsNaN(cfg.Realign.MinMargin) || cfg.Realign.MinMargin < 0 || cfg.Realign.MinMargin >= 1 {
 				cfg.Realign.MinMargin = d.Realign.MinMargin
 			}
 			// SpreadSamples is intentionally NOT re-defaulted: defaults() seeds 6 and
@@ -1257,7 +1261,10 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	}
 	if v := os.Getenv("MXLRC_REALIGN_MIN_MARGIN"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
-		if err != nil || n < 0 || n >= 1 {
+		// math.IsNaN is required, not redundant: ParseFloat accepts "NaN", and
+		// every comparison against NaN is false, so the range test below would
+		// pass it straight through and break the [0,1) invariant.
+		if err != nil || math.IsNaN(n) || n < 0 || n >= 1 {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_MIN_MARGIN", "value", v, "current", cfg.Realign.MinMargin) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Realign.MinMargin = n

@@ -35,6 +35,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES", "MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE",
 		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH", "MXLRC_INSTRUMENTAL_DETECTOR_ORDERING",
 		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
+		"MXLRC_REALIGN_NAME_MATCH", "MXLRC_REALIGN_MIN_MARGIN",
 		"MXLRC_QUEUE_RANDOMIZE",
 		"MXLRCGO_WATCH_ENABLED", "MXLRCGO_WATCH_DEBOUNCE_MS", "MXLRCGO_WATCH_MAX_DIRS",
 		"MXLRC_LOG_LEVEL", "MXLRC_LOG_FORMAT", "MXLRC_LOG_FILE",
@@ -2231,6 +2232,10 @@ func TestLoad_RealignMinMarginReDefaultsWhenOutOfRange(t *testing.T) {
 		"negative":  "[realign]\nmin_margin = -0.5\n",
 		"one":       "[realign]\nmin_margin = 1.0\n",
 		"too large": "[realign]\nmin_margin = 2.0\n",
+		// NaN satisfies NEITHER `< 0` nor `>= 1` (every comparison against NaN
+		// is false), so a range check written as two comparisons cannot reject
+		// it without an explicit math.IsNaN test.
+		"nan": "[realign]\nmin_margin = nan\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			isolateEnv(t)

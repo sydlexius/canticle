@@ -676,7 +676,18 @@ func resolveNameMatch(orphans []string, orphanTags map[string]lyrics.ProvenanceT
 	unresolvedReason := map[string]string{}
 
 	for _, top := range scores {
-		if resolved[top.orphan] || claimedAudio[top.audio] {
+		if resolved[top.orphan] {
+			continue
+		}
+		if claimedAudio[top.audio] {
+			// This orphan cleared the confidence floor against this candidate
+			// but lost it to a stronger pairing. Record that specifically: the
+			// fallthrough reason ("no candidate cleared min_confidence") would
+			// be false here, and an operator reading it would lower a floor
+			// that was never the obstacle.
+			if _, has := unresolvedReason[top.orphan]; !has && top.s >= minConf {
+				unresolvedReason[top.orphan] = fmt.Sprintf("best candidate (name similarity %.2f) already claimed by a stronger orphan match", top.s)
+			}
 			continue
 		}
 		if top.s < minConf {
