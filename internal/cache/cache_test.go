@@ -286,3 +286,176 @@ func TestCacheStats_ConcurrentLookupsRace(t *testing.T) {
 		t.Errorf("hits = %d, want %d (every concurrent lookup is a hit)", hits, want)
 	}
 }
+
+// TestInvalidate_RemovesEveryDurationBucket is the load-bearing property:
+// Lookup falls back to the bucket-0 sentinel on an exact-bucket miss, so an
+// invalidation that spares any bucket can still be satisfied by a sibling row.
+func TestInvalidate_RemovesEveryDurationBucket(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	for _, bucket := range []int{0, 36, 42} {
+		if err := repo.Store(ctx, "Artist", "Song", bucket, "lyrics"); err != nil {
+			t.Fatalf("Store bucket %d: %v", bucket, err)
+		}
+	}
+	n, err := repo.Invalidate(ctx, "Artist", "Song")
+	if err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("Invalidate removed %d rows, want 3", n)
+	}
+	for _, bucket := range []int{0, 36, 42, 99} {
+		if _, lerr := repo.Lookup(ctx, "Artist", "Song", bucket); !errors.Is(lerr, sql.ErrNoRows) {
+			t.Errorf("Lookup bucket %d after Invalidate: err = %v, want sql.ErrNoRows", bucket, lerr)
+		}
+	}
+}
+
+// TestInvalidate_ScopedToKey verifies invalidation does not spill onto other
+// tracks, which would trigger a library-wide re-fetch wave.
+func TestInvalidate_ScopedToKey(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Song", 0, "target"); err != nil {
+		t.Fatalf("Store target: %v", err)
+	}
+	if err := repo.Store(ctx, "Artist", "Other Song", 0, "keep"); err != nil {
+		t.Fatalf("Store sibling title: %v", err)
+	}
+	if err := repo.Store(ctx, "Other Artist", "Song", 0, "keep"); err != nil {
+		t.Fatalf("Store sibling artist: %v", err)
+	}
+	n, err := repo.Invalidate(ctx, "Artist", "Song")
+	if err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Invalidate removed %d rows, want 1", n)
+	}
+	if _, lerr := repo.Lookup(ctx, "Artist", "Other Song", 0); lerr != nil {
+		t.Errorf("sibling title destroyed: %v", lerr)
+	}
+	if _, lerr := repo.Lookup(ctx, "Other Artist", "Song", 0); lerr != nil {
+		t.Errorf("sibling artist destroyed: %v", lerr)
+	}
+}
+
+// TestInvalidate_NormalizesKeys verifies Invalidate normalizes its key exactly
+// as Store and Lookup do, so a differently-cased caller still clears the entry
+// a later Lookup would find.
+func TestInvalidate_NormalizesKeys(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "The Artist", "Song Title", 0, "lyrics"); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	n, err := repo.Invalidate(ctx, "  THE ARTIST  ", "song title")
+	if err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Invalidate removed %d rows, want 1 (keys must normalize)", n)
+	}
+	if _, lerr := repo.Lookup(ctx, "The Artist", "Song Title", 0); !errors.Is(lerr, sql.ErrNoRows) {
+		t.Errorf("entry survived a normalized invalidate: %v", lerr)
+	}
+}
+
+// TestInvalidate_MissIsNotAnError verifies invalidating an absent key succeeds
+// with a zero count, so a caller purging a track that was never cached is not
+// forced to treat the no-op as a failure.
+func TestInvalidate_MissIsNotAnError(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	n, err := repo.Invalidate(ctx, "Nobody", "Nothing")
+	if err != nil {
+		t.Fatalf("Invalidate on a miss: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Invalidate removed %d rows, want 0", n)
+	}
+}
+
+// TestInvalidate_InsideTransactionRollsBack verifies the Execer seam: an
+// invalidation performed inside a caller's transaction is undone when that
+// transaction rolls back, which is what lets purge-provenance commit the row
+// reset and the invalidation atomically.
+func TestInvalidate_InsideTransactionRollsBack(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := cache.New(sqlDB)
+
+	if err := repo.Store(ctx, "Artist", "Song", 0, "lyrics"); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if _, ierr := cache.Invalidate(ctx, tx, "Artist", "Song"); ierr != nil {
+		t.Fatalf("Invalidate in tx: %v", ierr)
+	}
+	if rerr := tx.Rollback(); rerr != nil {
+		t.Fatalf("Rollback: %v", rerr)
+	}
+	if _, lerr := repo.Lookup(ctx, "Artist", "Song", 0); lerr != nil {
+		t.Errorf("rolled-back invalidation still removed the entry: %v", lerr)
+	}
+}
+
+// TestInvalidate_ReportsExecFailure verifies a failed invalidation surfaces as
+// an error rather than a silent zero-count no-op. A caller that deletes a user's
+// file on the strength of "the cache is now clear" must be told when it is not.
+func TestInvalidate_ReportsExecFailure(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := cache.New(sqlDB)
+
+	if _, err := sqlDB.ExecContext(ctx, `DROP TABLE lyrics_cache`); err != nil {
+		t.Fatalf("drop lyrics_cache: %v", err)
+	}
+	if _, err := repo.Invalidate(ctx, "Artist", "Song"); err == nil {
+		t.Error("Invalidate against a missing table returned nil error")
+	}
+}
+
+// TestStore_ReportsExecFailure verifies a failed Store surfaces as an error.
+// The worker treats a Store failure as non-fatal, so this is the only place the
+// error is actually asserted to exist.
+func TestStore_ReportsExecFailure(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := cache.New(sqlDB)
+
+	if _, err := sqlDB.ExecContext(ctx, `DROP TABLE lyrics_cache`); err != nil {
+		t.Fatalf("drop lyrics_cache: %v", err)
+	}
+	if err := repo.Store(ctx, "Artist", "Song", 0, "lyrics"); err == nil {
+		t.Error("Store against a missing table returned nil error")
+	}
+}
+
+// TestLookup_ReportsExecFailure verifies a Lookup failure that is not
+// sql.ErrNoRows propagates, so a caller cannot mistake a broken database for a
+// clean cache miss and act on it.
+func TestLookup_ReportsExecFailure(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := cache.New(sqlDB)
+
+	if _, err := sqlDB.ExecContext(ctx, `DROP TABLE lyrics_cache`); err != nil {
+		t.Fatalf("drop lyrics_cache: %v", err)
+	}
+	_, err := repo.Lookup(ctx, "Artist", "Song", 0)
+	if err == nil {
+		t.Fatal("Lookup against a missing table returned nil error")
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Error("a broken database must not be reported as a clean cache miss")
+	}
+}
