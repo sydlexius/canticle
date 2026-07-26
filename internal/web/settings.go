@@ -1001,6 +1001,10 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return formatFloat(cfg.Realign.MinConfidence)
 	case "realign.auto_apply_heuristic":
 		return strconv.FormatBool(cfg.Realign.AutoApplyHeuristic)
+	case "realign.name_match":
+		return strconv.FormatBool(cfg.Realign.NameMatch)
+	case "realign.min_margin":
+		return formatFloat(cfg.Realign.MinMargin)
 	// [guard]
 	case "guard.accepted_scripts":
 		return joinSlice(cfg.Guard.AcceptedScripts)
@@ -1170,6 +1174,8 @@ var settingsLabels = map[string]string{
 	"realign.identity_keys":                         "Which IDs to match on (in order)",
 	"realign.min_confidence":                        "Minimum name-match similarity for a guess (0-1)",
 	"realign.auto_apply_heuristic":                  "Auto-apply name-based matches in serve mode (not just exact IDs)",
+	"realign.name_match":                            "Match multiple renamed files in one folder by name",
+	"realign.min_margin":                            "Minimum score gap over the next-best name match (0-1)",
 	"guard.accepted_scripts":                        "Writing systems to accept without asking",
 	"guard.script_guard_threshold":                  "Foreign-script sensitivity (0-1)",
 	"queue.randomize":                               "Process tracks in random order",

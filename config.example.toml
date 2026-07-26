@@ -355,13 +355,17 @@ enabled = true
 
 [realign]
 # Realign re-attaches orphaned .lrc/.txt lyric sidecars (left behind when an
-# audio file is renamed but its sidecar is not) to their audio via a four-tier
+# audio file is renamed but its sidecar is not) to their audio via a
 # confidence resolver: exact (ISRC/MBID provenance match), heuristic (a single
 # orphan + single sidecar-less audio in a directory, gated by a name-similarity
-# guard), ambiguous (multiple/zero candidates - reported and skipped), and
-# conflict (contradictory signals or an existing destination - reported and
-# skipped). It only changes a sidecar's stem, never its extension. Drive it with
-# `canticle realign` (dry-run) / `canticle realign --yes`.
+# guard), heuristic-nm (opt-in N:M name matching for a directory with multiple
+# orphans AND multiple sidecar-less audio files, pairing each orphan to its
+# unambiguous best-scoring candidate - see name_match/min_margin below),
+# ambiguous (multiple/zero candidates, or an N:M pairing too close to call -
+# reported and skipped), and conflict (contradictory signals or an existing
+# destination - reported and skipped). It only changes a sidecar's stem, never
+# its extension. Drive it with `canticle realign` (dry-run) / `canticle realign
+# --yes`.
 
 # Master switch for serve-mode reactive realign: when true, serve mode runs a
 # scoped realign on the filesystem watcher's directory-change events, on Lidarr
@@ -405,6 +409,20 @@ min_confidence = 0.75
 # opt-in. The manual `canticle realign` CLI is unaffected (it applies heuristic
 # matches unless require_provenance is set). Env: MXLRC_REALIGN_AUTO_APPLY_HEURISTIC.
 auto_apply_heuristic = false
+
+# Enable the N:M name-similarity matcher: when a directory has multiple
+# orphaned sidecars and multiple sidecar-less audio files (the single-candidate
+# heuristic tier above cannot resolve this shape), every orphan is scored
+# against every remaining candidate and paired only when the pairing is
+# unambiguous (see min_margin). Default false: such directories are reported
+# ambiguous and skipped, matching pre-#452 behavior. Env: MXLRC_REALIGN_NAME_MATCH.
+name_match = false
+
+# Minimum score separation (0-1) an orphan's best-scoring N:M candidate must
+# hold over its runner-up before the pairing is accepted; a near-tie is
+# reported ambiguous rather than guessed. Default 0.05. Values outside [0,1)
+# reset to the default. Env: MXLRC_REALIGN_MIN_MARGIN.
+min_margin = 0.05
 
 [guard]
 # Optional language/script guard. It rejects fetched lyrics whose body is

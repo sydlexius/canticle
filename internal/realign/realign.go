@@ -1,9 +1,12 @@
 // Package realign re-attaches orphaned lyric sidecars (.lrc/.txt left behind when
-// an audio file was renamed) to their audio via a four-tier confidence resolver:
-// exact (provenance ISRC/MBID match), heuristic (single-candidate filesystem
-// pairing gated by a name-similarity guard), ambiguous (multiple/zero candidates,
-// reported and skipped), and conflict (contradictory signals or an existing
-// destination, reported and skipped).
+// an audio file was renamed) to their audio via a confidence resolver with these
+// tiers: exact (provenance ISRC/MBID match), heuristic (single-candidate
+// filesystem pairing gated by a name-similarity guard), heuristic-nm (opt-in N:M
+// name-similarity matching when a directory has multiple orphans and multiple
+// sidecar-less audio files, pairing each orphan to its unambiguous best-scoring
+// candidate only), ambiguous (multiple/zero candidates, or an N:M pairing too
+// close to call, reported and skipped), and conflict (contradictory signals or an
+// existing destination, reported and skipped).
 //
 // It is the shared core behind both the `realign` CLI command and serve mode's
 // reactive realign (watcher / post-scan / Lidarr webhook). The package computes a
@@ -28,6 +31,7 @@ import (
 	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
@@ -48,7 +52,7 @@ type ProvenanceReader func(path string) (isrc, mbid, artist, title string, err e
 type Move struct {
 	Orphan     string
 	Target     string
-	Method     string // "exact" or "heuristic"
+	Method     string // "exact", "heuristic", or "heuristic-nm"
 	LibraryID  int64
 	Eligible   bool
 	GateReason string  // why an ineligible move is suppressed (require_provenance)
@@ -202,6 +206,13 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 	sort.Strings(missingAudio)
 	dirPair := len(orphans) == 1 && len(missingAudio) == 1
 
+	// deferredOrphans and deferredTags collect orphans that fell through to the
+	// generic "cannot pair without provenance" case (not a 1:1 positional pair)
+	// so the opt-in N:M name matcher gets a shot at them after the per-orphan
+	// loop below, rather than reporting them ambiguous immediately.
+	var deferredOrphans []string
+	deferredTags := map[string]lyrics.ProvenanceTags{}
+
 	for _, orphan := range orphans {
 		res.OrphansSeen++
 		orphanExt := filepath.Ext(orphan)
@@ -234,8 +245,14 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 			res.Moves = append(res.Moves, Move{Orphan: orphan, Target: target, Method: "exact", LibraryID: libraryID, Eligible: true})
 		default: // "none": no provenance match
 			if !dirPair {
-				reason := fmt.Sprintf("%d orphan sidecar(s), %d audio file(s) missing a sidecar; cannot pair without provenance", len(orphans), len(missingAudio))
-				res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: reason})
+				// Defer rather than immediately report ambiguous: when name_match
+				// is enabled, the N:M matcher below gets a chance to pair this
+				// orphan unambiguously against the directory's remaining
+				// candidates. When name_match is off, deferredOrphans is drained
+				// into the same generic ambiguous report after this loop, so
+				// disabled behavior is byte-for-byte unchanged.
+				deferredOrphans = append(deferredOrphans, orphan)
+				deferredTags[orphan] = orphanTags
 				continue
 			}
 			audio := missingAudio[0]
@@ -261,6 +278,45 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 			res.Moves = append(res.Moves, mv)
 		}
 	}
+
+	if len(deferredOrphans) == 0 {
+		return
+	}
+	if !r.cfg.NameMatch {
+		// name_match is off: fall back to the same generic ambiguous report the
+		// pre-N:M code path emitted, unchanged.
+		for _, orphan := range deferredOrphans {
+			reason := fmt.Sprintf("%d orphan sidecar(s), %d audio file(s) missing a sidecar; cannot pair without provenance", len(orphans), len(missingAudio))
+			res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: reason})
+		}
+		return
+	}
+
+	// N:M name matching: score every deferred orphan against every remaining
+	// (unclaimed-by-provenance) candidate audio file in the directory and
+	// greedily accept only unambiguous pairings.
+	pairings, unresolved := resolveNameMatch(deferredOrphans, deferredTags, missingAudio, getProv, r.cfg.MinConfidence, r.cfg.MinMargin)
+	for _, p := range pairings {
+		orphanExt := filepath.Ext(p.Orphan)
+		target := destForAudio(p.Audio, orphanExt)
+		if destinationBlocked(target, p.Orphan) {
+			res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: p.Orphan, Reason: "destination " + target + " already exists"})
+			continue
+		}
+		if claimed[target] {
+			res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: p.Orphan, Reason: "destination " + target + " already claimed by another orphan this run (duplicate provenance?)"})
+			continue
+		}
+		claimed[target] = true
+		mv := Move{Orphan: p.Orphan, Target: target, Method: "heuristic-nm", LibraryID: libraryID, Eligible: !r.cfg.RequireProvenance, Confidence: p.Score}
+		if !mv.Eligible {
+			mv.GateReason = "require_provenance is set; heuristic matches are not applied"
+		}
+		res.Moves = append(res.Moves, mv)
+	}
+	for _, u := range unresolved {
+		res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: u.Orphan, Reason: u.Reason})
+	}
 }
 
 // Apply performs the eligible moves in order, backup-first and clobber-safe, and
@@ -279,7 +335,7 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 	}()
 
 	for _, mv := range moves {
-		if !mv.Eligible || (mv.Method == "heuristic" && !policy.AllowHeuristic) {
+		if !mv.Eligible || (strings.HasPrefix(mv.Method, "heuristic") && !policy.AllowHeuristic) {
 			applied = append(applied, Applied{Move: mv, GatedSkipped: true})
 			continue
 		}
@@ -510,6 +566,176 @@ func resolveExact(tags lyrics.ProvenanceTags, identityKeys identity.Keys, pool [
 func heuristicNameGuard(tags lyrics.ProvenanceTags, orphanStem string, audio audioProvenance, audioStem string, minConf float64) (bool, float64) {
 	candidate := identity.Candidate{Artist: audio.artist, Title: audio.title}
 	return identity.HeuristicNameGuard(tags.Artist, tags.Title, orphanStem, candidate, audioStem, minConf)
+}
+
+// nameStringForOrphan returns the string an orphan sidecar contributes to a
+// name-similarity comparison: its [ar:]/[ti:] header when either is present,
+// else its filesystem stem. Mirrors the orphan-side branch of
+// identity.HeuristicNameGuard so resolveNameMatch scores pairs identically to
+// the single-candidate heuristic tier.
+func nameStringForOrphan(tags lyrics.ProvenanceTags, stem string) string {
+	if tags.Artist != "" || tags.Title != "" {
+		return strings.TrimSpace(tags.Artist + " " + tags.Title)
+	}
+	return stem
+}
+
+// nameStringForAudio returns the string a candidate audio file contributes to
+// a name-similarity comparison: its embedded artist/title when either is
+// present, else its filesystem stem. Mirrors the candidate-side branch of
+// identity.HeuristicNameGuard.
+func nameStringForAudio(prov audioProvenance, stem string) string {
+	if prov.artist != "" || prov.title != "" {
+		return strings.TrimSpace(prov.artist + " " + prov.title)
+	}
+	return stem
+}
+
+// nmPairing is one accepted orphan->audio pairing from resolveNameMatch.
+type nmPairing struct {
+	Orphan string
+	Audio  string
+	Score  float64
+}
+
+// nmUnresolved records why an orphan was not paired by resolveNameMatch.
+type nmUnresolved struct {
+	Orphan string
+	Reason string
+}
+
+// resolveNameMatch is the N:M name-similarity tier: it scores every
+// orphan x candidate pair via normalize.MatchConfidence and greedily accepts
+// pairings in descending score order, skipping any pairing that would be a
+// guess.
+//
+// Acceptance requires ALL of:
+//   - the score clears minConf (the same floor the single-candidate heuristic
+//     tier uses);
+//   - the candidate is not already claimed by a higher-scoring pairing;
+//   - the pairing is the orphan's unambiguous best: its score exceeds its
+//     runner-up over the FULL ORIGINAL candidate set by at least minMargin.
+//
+// Margin semantics when a candidate is already claimed: the runner-up is
+// computed against every candidate in the original matrix, INCLUDING ones
+// already claimed by a higher-scoring orphan. Claiming is a statement about
+// AVAILABILITY; the margin rule measures DISCRIMINABILITY -- whether the name
+// signal can tell the candidates apart at all. Another orphan taking C1 does
+// not make this orphan's signal any sharper, so excluding C1 from the scan
+// would convert a genuine near-tie into a confident pairing and destroy the
+// evidence that the decision was a coin flip. Non-displacement is not
+// non-ambiguity. Greedy accept in descending score order still guarantees no
+// pairing displaces a stronger one; the margin rule is the separate guarantee
+// that an accepted pairing was distinguishable in the first place.
+//
+// Single-candidate matrices (runnerUp stays -1 because the directory offered
+// exactly one candidate) pair on minConf alone. There is no alternative for
+// the name signal to be confused with, so there is nothing for a margin to
+// measure -- the same reasoning under which the strict 1:1 heuristic tier
+// guards on minConf only. Any orphan-side contest for that lone candidate
+// (several orphans clearing minConf against it) is resolved by the claim guard
+// plus descending order, exactly as it is for a contested candidate in a wider
+// matrix; the margin rule was never the mechanism for that case.
+//
+// Returns the accepted pairings and, for every orphan that did not resolve, a
+// reason suitable for a Skip.
+func resolveNameMatch(orphans []string, orphanTags map[string]lyrics.ProvenanceTags, candidates []string, getProv func(string) audioProvenance, minConf, minMargin float64) ([]nmPairing, []nmUnresolved) {
+	type score struct {
+		orphan, audio string
+		s             float64
+	}
+	var scores []score
+	for _, o := range orphans {
+		oStr := nameStringForOrphan(orphanTags[o], stemOf(o))
+		for _, a := range candidates {
+			aStr := nameStringForAudio(getProv(a), stemOf(a))
+			scores = append(scores, score{orphan: o, audio: a, s: normalize.MatchConfidence(oStr, aStr)})
+		}
+	}
+	// Sort all pairs by descending score so the orphan/candidate combination
+	// with the strongest signal in the whole matrix is always considered --
+	// and, if accepted, claims its candidate -- before any weaker pairing that
+	// might contest it. The ordering must be TOTAL: this decides which orphan
+	// wins a contested candidate, and that decision moves files on disk. Exact
+	// ties (identical tags on two sidecars are common) would otherwise resolve
+	// arbitrarily and differently from run to run, so ties break on orphan then
+	// audio path, both of which are unique within the matrix.
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].s != scores[j].s {
+			return scores[i].s > scores[j].s
+		}
+		if scores[i].orphan != scores[j].orphan {
+			return scores[i].orphan < scores[j].orphan
+		}
+		return scores[i].audio < scores[j].audio
+	})
+
+	claimedAudio := map[string]bool{}
+	resolved := map[string]bool{}
+	var pairings []nmPairing
+	unresolvedReason := map[string]string{}
+
+	for _, top := range scores {
+		if resolved[top.orphan] {
+			continue
+		}
+		if claimedAudio[top.audio] {
+			// This orphan cleared the confidence floor against this candidate
+			// but lost it to a stronger pairing. Record that specifically: the
+			// fallthrough reason ("no candidate cleared min_confidence") would
+			// be false here, and an operator reading it would lower a floor
+			// that was never the obstacle.
+			if _, has := unresolvedReason[top.orphan]; !has && top.s >= minConf {
+				unresolvedReason[top.orphan] = fmt.Sprintf("best candidate (name similarity %.2f) already claimed by a stronger orphan match", top.s)
+			}
+			continue
+		}
+		if top.s < minConf {
+			if _, has := unresolvedReason[top.orphan]; !has {
+				unresolvedReason[top.orphan] = fmt.Sprintf("best name similarity %.2f below min_confidence %.2f", top.s, minConf)
+			}
+			continue
+		}
+		// Find this orphan's runner-up over the FULL original candidate set
+		// (top.audio itself excluded). Claimed candidates are deliberately
+		// still counted -- see the margin-semantics note on the doc comment.
+		runnerUp := -1.0
+		for _, s := range scores {
+			if s.orphan != top.orphan || s.audio == top.audio {
+				continue
+			}
+			if s.s > runnerUp {
+				runnerUp = s.s
+			}
+		}
+		// runnerUp < 0 means the matrix held exactly one candidate, so there is
+		// no alternative the name signal could be confused with and nothing for
+		// a margin to measure; minConf alone gates the pairing.
+		if runnerUp >= 0 && top.s-runnerUp < minMargin {
+			if _, has := unresolvedReason[top.orphan]; !has {
+				unresolvedReason[top.orphan] = fmt.Sprintf("name similarity %.2f too close to runner-up %.2f (margin %.2f < min_margin %.2f)", top.s, runnerUp, top.s-runnerUp, minMargin)
+			}
+			continue
+		}
+		pairings = append(pairings, nmPairing{Orphan: top.orphan, Audio: top.audio, Score: top.s})
+		resolved[top.orphan] = true
+		claimedAudio[top.audio] = true
+		delete(unresolvedReason, top.orphan)
+	}
+
+	var unresolved []nmUnresolved
+	for _, o := range orphans {
+		if resolved[o] {
+			continue
+		}
+		reason, has := unresolvedReason[o]
+		if !has {
+			reason = "no candidate cleared min_confidence"
+		}
+		unresolved = append(unresolved, nmUnresolved{Orphan: o, Reason: reason})
+	}
+	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i].Orphan < unresolved[j].Orphan })
+	return pairings, unresolved
 }
 
 // appendBackup writes and fsyncs one JSONL backup record for an applied move, so

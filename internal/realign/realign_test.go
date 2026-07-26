@@ -4,9 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -413,5 +415,539 @@ func TestApply_RefusesClobberAcrossMergedPlans(t *testing.T) {
 	}
 	if string(got) != "FIRST" {
 		t.Errorf("target content = %q; want %q (second move must not clobber the first)", got, "FIRST")
+	}
+}
+
+// audioProv is a tiny per-path provenance fixture for the N:M name-match tests
+// below, letting each test wire artist/title (not just isrc) per audio path.
+type audioProv struct {
+	artist, title string
+}
+
+// withAudioProv overrides r's provenance reader to return artist/title from
+// the given map (isrc/mbid left empty), for tests that need name signals
+// rather than exact-tier identity.
+func withAudioProv(r *Realigner, prov map[string]audioProv) {
+	r.readProv = func(path string) (isrc, mbid, artist, title string, err error) {
+		p := prov[path]
+		return "", "", p.artist, p.title, nil
+	}
+}
+
+// TestClassify_NameMatch_MultiOrphanMultiCandidate: a directory with two
+// orphaned sidecars and two sidecar-less audio files, each pair unambiguously
+// closest by artist/title, resolves via the N:M matcher when name_match is on.
+func TestClassify_NameMatch_MultiOrphanMultiCandidate(t *testing.T) {
+	root := tempRoot(t)
+	audioA := filepath.Join(root, "D", "01-renamed-a.flac")
+	audioB := filepath.Join(root, "D", "02-renamed-b.flac")
+	orphanA := filepath.Join(root, "D", "old-a.lrc")
+	orphanB := filepath.Join(root, "D", "old-b.lrc")
+	write(t, audioA, "a")
+	write(t, audioB, "b")
+	write(t, orphanA, "[ar:Aardvark Band]\n[ti:Alpha Song]\n[00:01.00]x\n")
+	write(t, orphanB, "[ar:Bumblebee Band]\n[ti:Beta Song]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioA: {artist: "Aardvark Band", title: "Alpha Song"},
+		audioB: {artist: "Bumblebee Band", title: "Beta Song"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Skips) != 0 {
+		t.Fatalf("skips = %+v; want none", res.Skips)
+	}
+	if len(res.Moves) != 2 {
+		t.Fatalf("moves = %+v; want 2", res.Moves)
+	}
+	gotTargets := map[string]string{}
+	for _, mv := range res.Moves {
+		if mv.Method != "heuristic-nm" {
+			t.Errorf("move method = %q; want heuristic-nm", mv.Method)
+		}
+		if !mv.Eligible {
+			t.Errorf("move for %s not eligible: %s", mv.Orphan, mv.GateReason)
+		}
+		gotTargets[mv.Orphan] = mv.Target
+	}
+	if got := gotTargets[orphanA]; filepath.Base(got) != "01-renamed-a.lrc" {
+		t.Errorf("orphanA target = %q; want it paired with audioA", got)
+	}
+	if got := gotTargets[orphanB]; filepath.Base(got) != "02-renamed-b.lrc" {
+		t.Errorf("orphanB target = %q; want it paired with audioB", got)
+	}
+}
+
+// TestClassify_NameMatch_NearTieIsAmbiguous: two candidates near-tied for one
+// orphan must be reported ambiguous, never guessed, even though a different
+// orphan resolves cleanly.
+func TestClassify_NameMatch_NearTieIsAmbiguous(t *testing.T) {
+	root := tempRoot(t)
+	audioTie1 := filepath.Join(root, "D", "tie1.flac")
+	audioTie2 := filepath.Join(root, "D", "tie2.flac")
+	audioClear := filepath.Join(root, "D", "clear.flac")
+	orphanTie := filepath.Join(root, "D", "orphan-tie.lrc")
+	orphanClear := filepath.Join(root, "D", "orphan-clear.lrc")
+	write(t, audioTie1, "a")
+	write(t, audioTie2, "b")
+	write(t, audioClear, "c")
+	write(t, orphanTie, "[ar:The Artist]\n[ti:The Song]\n[00:01.00]x\n")
+	write(t, orphanClear, "[ar:Zephyr Ensemble]\n[ti:Zeta Tune]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		// Two near-identical candidates for orphanTie: same score, no margin.
+		audioTie1:  {artist: "The Artist", title: "The Song"},
+		audioTie2:  {artist: "The Artist", title: "The Song"},
+		audioClear: {artist: "Zephyr Ensemble", title: "Zeta Tune"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	var moved, skippedTie bool
+	for _, mv := range res.Moves {
+		if mv.Orphan == orphanClear {
+			moved = true
+		}
+		if mv.Orphan == orphanTie {
+			t.Errorf("orphanTie must not resolve to a Move when tied: %+v", mv)
+		}
+	}
+	if !moved {
+		t.Errorf("orphanClear should resolve despite the unrelated tie: moves=%+v", res.Moves)
+	}
+	for _, s := range res.Skips {
+		if s.Path == orphanTie {
+			skippedTie = true
+			if s.Kind != "ambiguous" {
+				t.Errorf("orphanTie skip kind = %q; want ambiguous", s.Kind)
+			}
+		}
+	}
+	if !skippedTie {
+		t.Errorf("orphanTie should be reported ambiguous: skips=%+v", res.Skips)
+	}
+}
+
+// TestClassify_NameMatch_ContestedTargetResolvesOneSkipsOther: two orphans
+// both best-matching the same candidate resolve to exactly one Move (the
+// stronger pairing); the other is reported ambiguous, never clobbered.
+func TestClassify_NameMatch_ContestedTargetResolvesOneSkipsOther(t *testing.T) {
+	root := tempRoot(t)
+	audioShared := filepath.Join(root, "D", "shared.flac")
+	audioOther := filepath.Join(root, "D", "other.flac")
+	orphanStrong := filepath.Join(root, "D", "orphan-strong.lrc")
+	orphanWeak := filepath.Join(root, "D", "orphan-weak.lrc")
+	write(t, audioShared, "a")
+	write(t, audioOther, "b")
+	// orphanStrong is an exact textual match for audioShared's name.
+	write(t, orphanStrong, "[ar:Exact Match Band]\n[ti:Exact Match Song]\n[00:01.00]x\n")
+	// orphanWeak is a rough, partial match for audioShared's name and a much
+	// worse match for audioOther, so it, too, prefers audioShared -- contested.
+	write(t, orphanWeak, "[ar:Exact Match Ban]\n[ti:Exact Match Son]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioShared: {artist: "Exact Match Band", title: "Exact Match Song"},
+		audioOther:  {artist: "Zzznope Totally Unrelated", title: "Qqqnothing Alike"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	for _, mv := range res.Moves {
+		if mv.Target != filepath.Join(root, "D", "shared.lrc") && mv.Target != filepath.Join(root, "D", "other.lrc") {
+			t.Errorf("unexpected target %q", mv.Target)
+		}
+	}
+	if len(res.Moves) != 1 {
+		t.Fatalf("moves = %+v; want exactly 1 (contested target resolves once)", res.Moves)
+	}
+	if res.Moves[0].Orphan != orphanStrong {
+		t.Errorf("resolved orphan = %q; want the stronger match %q", res.Moves[0].Orphan, orphanStrong)
+	}
+	var sawWeakSkip bool
+	for _, s := range res.Skips {
+		if s.Path == orphanWeak {
+			sawWeakSkip = true
+		}
+	}
+	if !sawWeakSkip {
+		t.Errorf("orphanWeak should be reported (ambiguous or conflict), not silently dropped: skips=%+v", res.Skips)
+	}
+}
+
+// TestClassify_NameMatch_OffByDefaultStaysAmbiguous: with name_match disabled
+// (the default), a directory with multiple orphans and multiple candidates
+// stays generically ambiguous -- the N:M tier is strictly opt-in.
+func TestClassify_NameMatch_OffByDefaultStaysAmbiguous(t *testing.T) {
+	root := tempRoot(t)
+	audioA := filepath.Join(root, "D", "01-renamed-a.flac")
+	audioB := filepath.Join(root, "D", "02-renamed-b.flac")
+	orphanA := filepath.Join(root, "D", "old-a.lrc")
+	orphanB := filepath.Join(root, "D", "old-b.lrc")
+	write(t, audioA, "a")
+	write(t, audioB, "b")
+	write(t, orphanA, "[ar:Aardvark Band]\n[ti:Alpha Song]\n[00:01.00]x\n")
+	write(t, orphanB, "[ar:Bumblebee Band]\n[ti:Beta Song]\n[00:01.00]x\n")
+
+	cfg := defaultCfg() // NameMatch defaults false
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioA: {artist: "Aardvark Band", title: "Alpha Song"},
+		audioB: {artist: "Bumblebee Band", title: "Beta Song"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Moves) != 0 {
+		t.Fatalf("moves = %+v; want none (name_match off)", res.Moves)
+	}
+	if len(res.Skips) != 2 {
+		t.Fatalf("skips = %+v; want 2 ambiguous", res.Skips)
+	}
+	for _, s := range res.Skips {
+		if s.Kind != "ambiguous" {
+			t.Errorf("skip kind = %q; want ambiguous", s.Kind)
+		}
+	}
+}
+
+// TestApply_NameMatchMove_GatedByAllowHeuristic: a heuristic-nm Move is gated
+// the same way a heuristic Move is -- suppressed under
+// Policy{AllowHeuristic: false}, applied under Policy{AllowHeuristic: true}.
+func TestApply_NameMatchMove_GatedByAllowHeuristic(t *testing.T) {
+	root := tempRoot(t)
+	orphan := filepath.Join(root, "D", "orphan.lrc")
+	target := filepath.Join(root, "D", "target.lrc")
+	write(t, orphan, "content")
+
+	r, _ := newRealigner(root, defaultCfg(), nil)
+	mv := Move{Orphan: orphan, Target: target, Method: "heuristic-nm", LibraryID: 1, Eligible: true, Confidence: 0.9}
+
+	applied, err := r.Apply([]Move{mv}, filepath.Join(t.TempDir(), "b1.jsonl"), Policy{AllowHeuristic: false})
+	if err != nil {
+		t.Fatalf("Apply (gated): %v", err)
+	}
+	if len(applied) != 1 || !applied[0].GatedSkipped {
+		t.Fatalf("applied = %+v; want 1 GatedSkipped move under AllowHeuristic=false", applied)
+	}
+	if _, serr := os.Stat(orphan); serr != nil {
+		t.Errorf("orphan should remain when gated: %v", serr)
+	}
+
+	applied, err = r.Apply([]Move{mv}, filepath.Join(t.TempDir(), "b2.jsonl"), Policy{AllowHeuristic: true})
+	if err != nil {
+		t.Fatalf("Apply (allowed): %v", err)
+	}
+	if len(applied) != 1 || applied[0].GatedSkipped || applied[0].Err != nil {
+		t.Fatalf("applied = %+v; want 1 clean move under AllowHeuristic=true", applied)
+	}
+	if _, serr := os.Stat(target); serr != nil {
+		t.Errorf("target should exist after applied move: %v", serr)
+	}
+}
+
+// TestClassify_NameMatch_ClaimedCandidateHidesAmbiguity is a COUNTEREXAMPLE to
+// the "recompute the runner-up against only unclaimed candidates" margin
+// semantics in resolveNameMatch.
+//
+// Matrix (scores from normalize.MatchConfidence, min_confidence 0.75,
+// min_margin 0.05):
+//
+//	                 C1 "Nova Drifter"   C2 "Nova Drifting"
+//	O1 "Nova Drifter"      1.0000              0.9205
+//	O2 "Nova Drift"        0.9667              0.9538
+//
+// Descending processing order is O1-C1 (1.0000), O2-C1 (0.9667),
+// O2-C2 (0.9538), O1-C2 (0.9205).
+//
+//   - O1-C1 is accepted: runner-up 0.9205, margin 0.0795 >= 0.05. C1 is claimed.
+//   - O2-C1 -- which is O2's OWN best pairing -- is silently `continue`d because
+//     C1 is claimed. No ambiguity is recorded.
+//   - O2-C2 is then evaluated. Its only rival, C1, is claimed and therefore
+//     excluded from the runner-up scan, so runnerUp stays -1 and the margin
+//     check is skipped entirely. O2 is confidently paired to C2.
+//
+// But O2 cannot actually tell C1 from C2: 0.9667 vs 0.9538 is a margin of
+// 0.0129, far below min_margin. Against the full original matrix O2 is
+// unambiguously ambiguous and MUST be skipped. The claimed-only runner-up
+// recomputation converts a genuine near-tie into a confident pairing -- exactly
+// the silent misattachment the margin rule exists to prevent. The greedy
+// accept of O1 did not displace a stronger match, but it did DESTROY the
+// evidence that O2's decision was a coin flip.
+func TestClassify_NameMatch_ClaimedCandidateHidesAmbiguity(t *testing.T) {
+	root := tempRoot(t)
+	c1 := filepath.Join(root, "D", "c1.flac")
+	c2 := filepath.Join(root, "D", "c2.flac")
+	o1 := filepath.Join(root, "D", "o1.lrc")
+	o2 := filepath.Join(root, "D", "o2.lrc")
+	write(t, c1, "a")
+	write(t, c2, "b")
+	write(t, o1, "[ar:Nova]\n[ti:Drifter]\n[00:01.00]x\n")
+	write(t, o2, "[ar:Nova]\n[ti:Drift]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		c1: {artist: "Nova", title: "Drifter"},
+		c2: {artist: "Nova", title: "Drifting"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	for _, mv := range res.Moves {
+		if mv.Orphan == o2 {
+			t.Errorf("o2 was paired to %s (confidence %.4f), but its top two candidates "+
+				"score 0.9667 and 0.9538 -- a margin of 0.0129, below min_margin 0.05. "+
+				"It must be reported ambiguous, not guessed.", mv.Target, mv.Confidence)
+		}
+	}
+	var o2Skipped bool
+	for _, s := range res.Skips {
+		if s.Path == o2 {
+			o2Skipped = true
+			if s.Kind != "ambiguous" {
+				t.Errorf("o2 skip kind = %q; want ambiguous", s.Kind)
+			}
+		}
+	}
+	if !o2Skipped {
+		t.Errorf("o2 should be reported ambiguous: moves=%+v skips=%+v", res.Moves, res.Skips)
+	}
+}
+
+// TestResolveNameMatch_NeverPairsTwoOrphansToOneCandidate pins the claimed-candidate
+// guard INSIDE resolveNameMatch directly. The classify-level contested test only
+// goes red when BOTH that guard and classifyDir's outer `claimed` map are removed,
+// so on its own it cannot tell a working inner guard from a broken one backstopped
+// by the outer map. This asserts the double-move property at the source: no two
+// accepted pairings may name the same audio candidate.
+func TestResolveNameMatch_NeverPairsTwoOrphansToOneCandidate(t *testing.T) {
+	orphans := []string{"o1.lrc", "o2.lrc"}
+	tags := map[string]lyrics.ProvenanceTags{
+		"o1.lrc": {Artist: "Nova", Title: "Drifter"},
+		"o2.lrc": {Artist: "Nova", Title: "Drifter"}, // identical: both want the same candidate
+	}
+	candidates := []string{"c1.flac", "c2.flac"}
+	getProv := func(p string) audioProvenance {
+		switch p {
+		case "c1.flac":
+			return audioProvenance{artist: "Nova", title: "Drifter"}
+		default:
+			return audioProvenance{artist: "Zzz Unrelated", title: "Qqq Nothing"}
+		}
+	}
+
+	pairings, unresolved := resolveNameMatch(orphans, tags, candidates, getProv, 0.75, 0.05)
+	seen := map[string]string{}
+	for _, p := range pairings {
+		if prev, dup := seen[p.Audio]; dup {
+			t.Fatalf("candidate %q claimed twice: by %q and %q -- a double move would "+
+				"rename one sidecar onto the other", p.Audio, prev, p.Orphan)
+		}
+		seen[p.Audio] = p.Orphan
+	}
+	if len(pairings)+len(unresolved) != len(orphans) {
+		t.Errorf("every orphan must be either paired or reported: pairings=%+v unresolved=%+v", pairings, unresolved)
+	}
+}
+
+// TestResolveNameMatch_ClaimedLoserReasonNamesTheClaim pins the SKIP REASON, not
+// just the skip. An orphan that cleared min_confidence but lost its candidate to a
+// stronger pairing used to fall through to "no candidate cleared min_confidence" --
+// false, and actively misleading: an operator reading it would lower a floor that
+// was never the obstacle. The reason must name the real cause.
+func TestResolveNameMatch_ClaimedLoserReasonNamesTheClaim(t *testing.T) {
+	orphans := []string{"o1.lrc", "o2.lrc"}
+	tags := map[string]lyrics.ProvenanceTags{
+		"o1.lrc": {Artist: "Nova", Title: "Drifter"},
+		"o2.lrc": {Artist: "Nova", Title: "Drifter"}, // identical: both clear the floor on c1
+	}
+	candidates := []string{"c1.flac"} // exactly one candidate, so the loser has nowhere to go
+	getProv := func(string) audioProvenance {
+		return audioProvenance{artist: "Nova", title: "Drifter"}
+	}
+
+	pairings, unresolved := resolveNameMatch(orphans, tags, candidates, getProv, 0.75, 0.05)
+	if len(pairings) != 1 {
+		t.Fatalf("exactly one orphan may claim the lone candidate; got %+v", pairings)
+	}
+	if len(unresolved) != 1 {
+		t.Fatalf("the losing orphan must be reported; got %+v", unresolved)
+	}
+	if strings.Contains(unresolved[0].Reason, "below min_confidence") ||
+		strings.Contains(unresolved[0].Reason, "no candidate cleared min_confidence") {
+		t.Errorf("the loser cleared min_confidence -- reporting a confidence failure sends the "+
+			"operator after the wrong knob; got reason %q", unresolved[0].Reason)
+	}
+	if !strings.Contains(unresolved[0].Reason, "already claimed") {
+		t.Errorf("reason must name the claim as the cause; got %q", unresolved[0].Reason)
+	}
+}
+
+// TestResolveNameMatch_ProcessesInDescendingScoreOrder pins the whole-matrix
+// descending sort that the margin-semantics argument depends on. Both orphans
+// best-match the same candidate; the STRONGER pairing must win it regardless of
+// insertion order. The orphan filenames are chosen so that insertion order
+// (orphans sorted alphabetically) presents the WEAKER orphan first -- so this goes
+// red if the sort is dropped and pairs are consumed in matrix order.
+func TestResolveNameMatch_ProcessesInDescendingScoreOrder(t *testing.T) {
+	orphans := []string{"a-weak.lrc", "z-strong.lrc"} // alphabetical == insertion order
+	tags := map[string]lyrics.ProvenanceTags{
+		"a-weak.lrc":   {Artist: "Exact Match Ban", Title: "Exact Match Son"},
+		"z-strong.lrc": {Artist: "Exact Match Band", Title: "Exact Match Song"},
+	}
+	candidates := []string{"other.flac", "shared.flac"}
+	getProv := func(p string) audioProvenance {
+		if p == "shared.flac" {
+			return audioProvenance{artist: "Exact Match Band", title: "Exact Match Song"}
+		}
+		return audioProvenance{artist: "Zzznope Totally Unrelated", title: "Qqqnothing Alike"}
+	}
+
+	pairings, _ := resolveNameMatch(orphans, tags, candidates, getProv, 0.75, 0.05)
+	if len(pairings) != 1 {
+		t.Fatalf("pairings = %+v; want exactly 1 (both orphans contest shared.flac)", pairings)
+	}
+	if pairings[0].Orphan != "z-strong.lrc" || pairings[0].Audio != "shared.flac" {
+		t.Errorf("pairing = %+v; want z-strong.lrc -> shared.flac. The weaker orphan won the "+
+			"contested candidate, which means pairs were consumed in matrix/insertion order "+
+			"rather than descending score order.", pairings[0])
+	}
+}
+
+// TestResolveNameMatch_ExactTieResolvesDeterministically pins the TIEBREAK half of
+// the ordering. Descending-by-score alone leaves exactly-equal scores in whatever
+// order the (non-stable) sort happens to leave them, and two sidecars carrying
+// identical [ar:]/[ti:] headers score identically against the same candidate --
+// a routine situation, not a contrived one. Which of them claims the contested
+// candidate then decides which file gets RENAMED, so the ordering must be total,
+// not merely "sorted enough". The specified total order is (score desc, orphan
+// asc, audio asc), so the lexicographically-first orphan wins an exact tie.
+func TestResolveNameMatch_ExactTieResolvesDeterministically(t *testing.T) {
+	identicalTags := lyrics.ProvenanceTags{Artist: "Exact Match Band", Title: "Exact Match Song"}
+	tags := map[string]lyrics.ProvenanceTags{
+		"aaa.lrc": identicalTags,
+		"mmm.lrc": identicalTags,
+		"zzz.lrc": identicalTags,
+	}
+	candidates := []string{"other.flac", "shared.flac"}
+	getProv := func(p string) audioProvenance {
+		if p == "shared.flac" {
+			return audioProvenance{artist: "Exact Match Band", title: "Exact Match Song"}
+		}
+		return audioProvenance{artist: "Zzznope Totally Unrelated", title: "Qqqnothing Alike"}
+	}
+
+	// Feed every permutation of the orphan slice. A fixed input makes Go's sort
+	// deterministic whether or not a tiebreak exists, so repeating one arrangement
+	// proves nothing; only varying the arrangement distinguishes a TOTAL order
+	// from an incidental one. The winner must be the same orphan every time.
+	for _, perm := range [][]string{
+		{"aaa.lrc", "mmm.lrc", "zzz.lrc"},
+		{"aaa.lrc", "zzz.lrc", "mmm.lrc"},
+		{"mmm.lrc", "aaa.lrc", "zzz.lrc"},
+		{"mmm.lrc", "zzz.lrc", "aaa.lrc"},
+		{"zzz.lrc", "aaa.lrc", "mmm.lrc"},
+		{"zzz.lrc", "mmm.lrc", "aaa.lrc"},
+	} {
+		pairings, _ := resolveNameMatch(perm, tags, candidates, getProv, 0.75, 0.05)
+		if len(pairings) != 1 {
+			t.Fatalf("input %v: pairings = %+v; want exactly 1 (all three orphans tie for shared.flac)", perm, pairings)
+		}
+		if pairings[0].Orphan != "aaa.lrc" || pairings[0].Audio != "shared.flac" {
+			t.Fatalf("input %v: pairing = %+v; want aaa.lrc -> shared.flac. Three orphans score "+
+				"IDENTICALLY against shared.flac, so the winner is decided purely by the "+
+				"tiebreak. Varying the input order changed which one won, which means the "+
+				"ordering is not total and a destructive rename turns on slice order.", perm, pairings[0])
+		}
+	}
+}
+
+// TestClassify_NameMatch_NothingClearsThreshold: an orphan whose every candidate
+// scores below min_confidence is reported ambiguous and skipped cleanly -- never
+// paired arbitrarily to the least-bad candidate.
+func TestClassify_NameMatch_NothingClearsThreshold(t *testing.T) {
+	root := tempRoot(t)
+	audioA := filepath.Join(root, "D", "aaa.flac")
+	audioB := filepath.Join(root, "D", "bbb.flac")
+	orphanA := filepath.Join(root, "D", "orphan-1.lrc")
+	orphanB := filepath.Join(root, "D", "orphan-2.lrc")
+	write(t, audioA, "a")
+	write(t, audioB, "b")
+	write(t, orphanA, "[ar:Wholly Unrelated]\n[ti:Nothing Alike]\n[00:01.00]x\n")
+	write(t, orphanB, "[ar:Also Unrelated]\n[ti:Equally Different]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioA: {artist: "Qqqzzz Xylophone", title: "Vvvwww Kryptic"},
+		audioB: {artist: "Mmmnnn Oboe", title: "Pppqqq Glyph"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Moves) != 0 {
+		t.Fatalf("moves = %+v; want none (nothing clears min_confidence)", res.Moves)
+	}
+	if len(res.Skips) != 2 {
+		t.Fatalf("skips = %+v; want 2 (both orphans reported)", res.Skips)
+	}
+	for _, s := range res.Skips {
+		if s.Kind != "ambiguous" {
+			t.Errorf("skip kind = %q; want ambiguous", s.Kind)
+		}
+	}
+}
+
+// TestResolveNameMatch_EmptyInputs: zero orphans and/or zero candidates must not
+// panic and must not invent a pairing.
+func TestResolveNameMatch_EmptyInputs(t *testing.T) {
+	getProv := func(string) audioProvenance { return audioProvenance{} }
+	for _, tc := range []struct {
+		name           string
+		orphans, cands []string
+		wantUnresolved int
+	}{
+		{"zero orphans, zero candidates", nil, nil, 0},
+		{"zero orphans, one candidate", nil, []string{"a.flac"}, 0},
+		{"one orphan, zero candidates", []string{"a.lrc"}, nil, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pairings, unresolved := resolveNameMatch(tc.orphans, nil, tc.cands, getProv, 0.75, 0.05)
+			if len(pairings) != 0 {
+				t.Errorf("pairings = %+v; want none", pairings)
+			}
+			if len(unresolved) != tc.wantUnresolved {
+				t.Errorf("unresolved = %+v; want %d", unresolved, tc.wantUnresolved)
+			}
+		})
 	}
 }

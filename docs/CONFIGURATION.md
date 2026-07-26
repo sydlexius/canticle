@@ -124,6 +124,8 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_REALIGN_IDENTITY_KEYS` | `mbid,isrc` | Ordered provenance identifiers the exact tier matches on (valid: `mbid`, `isrc`). |
 | `MXLRC_REALIGN_MIN_CONFIDENCE` | `0.75` | Jaro-Winkler name-guard floor (0-1) for a heuristic rename. |
 | `MXLRC_REALIGN_AUTO_APPLY_HEURISTIC` | `false` | Whether serve-mode reactive realign may auto-apply heuristic (name-similarity) matches; off = exact-only. |
+| `MXLRC_REALIGN_NAME_MATCH` | `false` | Enable the N:M name-similarity matcher for directories with multiple orphans and multiple sidecar-less audio files. |
+| `MXLRC_REALIGN_MIN_MARGIN` | `0.05` | Minimum score separation (0-1) an N:M candidate's best score must hold over its runner-up to be accepted; a near-tie is reported ambiguous. |
 | `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
 
 ## TOML config keys
@@ -328,9 +330,11 @@ require_provenance = false
 cross_directory = false
 identity_keys = ["mbid", "isrc"]
 min_confidence = 0.75
+name_match = false
+min_margin = 0.05
 ```
 
-Governs the `realign` command, which re-attaches orphaned `.lrc` / `.txt` sidecars to renamed audio via a four-tier confidence resolver (see [Realign](CLI_REFERENCE.md#realign)), and serve mode's reactive realign that runs it automatically. Defaults are conservative: the feature is off, provenance is not required, matches are confined to the orphan's directory, and identity is matched MBID-first then ISRC.
+Governs the `realign` command, which re-attaches orphaned `.lrc` / `.txt` sidecars to renamed audio via a confidence resolver (see [Realign](CLI_REFERENCE.md#realign)), and serve mode's reactive realign that runs it automatically. Defaults are conservative: the feature is off, provenance is not required, matches are confined to the orphan's directory, identity is matched MBID-first then ISRC, and the N:M name matcher is off.
 
 When `enabled`, serve mode runs a scoped realign on three triggers: the filesystem watcher's directory-change events, Lidarr rename/import/upgrade webhooks (complementing `contrib/lidarr-rename-sidecars.sh`; the webhook sweeps both the new and the old/previous directories, so a manual import that strands a sidecar self-heals), and -- when `on_scan` is also set -- after each library scan. Reactive realign always writes a JSONL backup (`<db-dir>/realign-serve-backup.jsonl`), never clobbers an existing sidecar, and auto-applies only exact provenance (ISRC/MBID) matches unless `auto_apply_heuristic` is set. Note that relocating a sidecar to audio in a *different* directory additionally requires `cross_directory` and a provenance tag embedded in the sidecar.
 
@@ -343,8 +347,10 @@ When `enabled`, serve mode runs a scoped realign on three triggers: the filesyst
 | `identity_keys` | `MXLRC_REALIGN_IDENTITY_KEYS` | `["mbid","isrc"]` | Ordered provenance identifiers the exact tier matches on, most authoritative first. Valid values: `mbid`, `isrc`. |
 | `min_confidence` | `MXLRC_REALIGN_MIN_CONFIDENCE` | `0.75` | Jaro-Winkler name-similarity floor (0-1) for a heuristic rename. When neither side yields an artist/title the check is skipped (positional matching). |
 | `auto_apply_heuristic` | `MXLRC_REALIGN_AUTO_APPLY_HEURISTIC` | `false` | Whether serve-mode reactive realign may auto-apply heuristic (name-similarity) matches. Off = unattended realign applies only exact provenance matches; the manual CLI is unaffected. |
+| `name_match` | `MXLRC_REALIGN_NAME_MATCH` | `false` | Enable the opt-in N:M name-similarity matcher for directories with multiple orphaned sidecars and multiple sidecar-less audio files. Each orphan is scored against every remaining candidate and paired only when unambiguous (see `min_margin`); off by default, such directories are reported ambiguous. |
+| `min_margin` | `MXLRC_REALIGN_MIN_MARGIN` | `0.05` | Minimum score separation (0-1) an orphan's best-scoring N:M candidate must hold over its runner-up before the pairing is accepted. Values outside `[0,1)` reset to the default. |
 
-The exact tier requires ISRC/MBID-tagged audio; libraries without those tags fall back to the heuristic tier.
+The exact tier requires ISRC/MBID-tagged audio; libraries without those tags fall back to the heuristic tier (or, with `name_match` enabled, the N:M matcher for directories the single-candidate heuristic can't resolve).
 
 ### ffmpeg resolution
 

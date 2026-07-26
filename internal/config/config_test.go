@@ -35,6 +35,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES", "MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE",
 		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH", "MXLRC_INSTRUMENTAL_DETECTOR_ORDERING",
 		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
+		"MXLRC_REALIGN_NAME_MATCH", "MXLRC_REALIGN_MIN_MARGIN",
 		"MXLRC_QUEUE_RANDOMIZE",
 		"MXLRCGO_WATCH_ENABLED", "MXLRCGO_WATCH_DEBOUNCE_MS", "MXLRCGO_WATCH_MAX_DIRS",
 		"MXLRC_LOG_LEVEL", "MXLRC_LOG_FORMAT", "MXLRC_LOG_FILE",
@@ -2196,5 +2197,59 @@ func TestInstrumentalDetectorOrdering_EnvPaddedMixedCaseNormalized(t *testing.T)
 	}
 	if !applied["instrumental_detector.ordering"] {
 		t.Fatal("applied map missing instrumental_detector.ordering")
+	}
+}
+
+// TestLoad_RealignNameMatchOffByDefault pins the opt-in default for the N:M
+// name-similarity matcher. The tier pairs sidecars by name alone, with no
+// provenance to check the guess against, so a wrong pairing renames a lyric file
+// onto the wrong song silently and undetectably. Nothing else in the suite goes
+// red if this default flips to true: the realign package's own tests all build a
+// config.RealignConfig literal rather than calling defaults(), so they never
+// observe the shipped default at all.
+func TestLoad_RealignNameMatchOffByDefault(t *testing.T) {
+	isolateEnv(t)
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Realign.NameMatch {
+		t.Error("realign name_match = true; want false. The N:M name matcher is opt-in: " +
+			"it pairs on name similarity with no provenance cross-check, so enabling it " +
+			"by default risks silently renaming sidecars onto the wrong audio.")
+	}
+	if cfg.Realign.MinMargin != realignMinMarginDefault {
+		t.Errorf("realign min_margin = %v; want %v", cfg.Realign.MinMargin, realignMinMarginDefault)
+	}
+}
+
+// TestLoad_RealignMinMarginReDefaultsWhenOutOfRange: an out-of-range min_margin
+// from TOML resets to the default. A negative margin would disable the near-tie
+// guard entirely (every top score trivially clears it), which is the one setting
+// that must never be reachable by a typo.
+func TestLoad_RealignMinMarginReDefaultsWhenOutOfRange(t *testing.T) {
+	for name, tomlBody := range map[string]string{
+		"negative":  "[realign]\nmin_margin = -0.5\n",
+		"one":       "[realign]\nmin_margin = 1.0\n",
+		"too large": "[realign]\nmin_margin = 2.0\n",
+		// NaN satisfies NEITHER `< 0` nor `>= 1` (every comparison against NaN
+		// is false), so a range check written as two comparisons cannot reject
+		// it without an explicit math.IsNaN test.
+		"nan": "[realign]\nmin_margin = nan\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateEnv(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tomlBody), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Realign.MinMargin != realignMinMarginDefault {
+				t.Errorf("realign min_margin = %v; want %v (re-defaulted)", cfg.Realign.MinMargin, realignMinMarginDefault)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -455,12 +456,32 @@ type RealignConfig struct {
 	// CLI is unaffected (it keeps applying heuristic matches unless
 	// require_provenance is set). Override: MXLRC_REALIGN_AUTO_APPLY_HEURISTIC.
 	AutoApplyHeuristic bool `toml:"auto_apply_heuristic"`
+	// NameMatch enables the N:M name-similarity matcher: when a directory has
+	// multiple orphaned sidecars AND multiple sidecar-less audio files (a shape
+	// the single-candidate heuristic tier cannot resolve), each orphan is scored
+	// against every remaining candidate and paired only when the pairing is
+	// unambiguous (see MinMargin). Default false; ambiguous directories are
+	// reported and skipped when disabled, matching today's behavior.
+	// Override: MXLRC_REALIGN_NAME_MATCH.
+	NameMatch bool `toml:"name_match"`
+	// MinMargin is the minimum separation (0-1) an orphan's best-scoring
+	// candidate must hold over its runner-up for the N:M name matcher to accept
+	// the pairing; a near-tie is reported ambiguous rather than guessed. Default
+	// 0.05. Values outside [0,1) are reset to the default.
+	// Override: MXLRC_REALIGN_MIN_MARGIN.
+	MinMargin float64 `toml:"min_margin"`
 }
 
 // realignMinConfidenceDefault is the default Jaro-Winkler name-similarity floor
 // for a heuristic-tier realign rename. Conservative: biased toward reporting a
 // borderline pair rather than renaming it.
 const realignMinConfidenceDefault = 0.75
+
+// realignMinMarginDefault is the default minimum score separation the N:M name
+// matcher requires between an orphan's best and second-best candidate before
+// accepting the pairing. Conservative: biased toward reporting a near-tie as
+// ambiguous rather than guessing.
+const realignMinMarginDefault = 0.05
 
 // realignIdentityKeysDefault is the default provenance match order for the exact
 // tier: MusicBrainz recording MBID first (globally unique per recording), then
@@ -595,6 +616,8 @@ func defaults() Config {
 			IdentityKeys:       realignIdentityKeysDefault(),
 			MinConfidence:      realignMinConfidenceDefault,
 			AutoApplyHeuristic: false,
+			NameMatch:          false,
+			MinMargin:          realignMinMarginDefault,
 		},
 		Guard:   GuardConfig{Threshold: guardThresholdDefault},
 		Queue:   QueueConfig{Randomize: true, BatchSize: queueBatchSizeDefault},
@@ -707,6 +730,16 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			// reset it to the default just as the env-override path does.
 			if cfg.Realign.MinConfidence <= 0 || cfg.Realign.MinConfidence > 1 {
 				cfg.Realign.MinConfidence = d.Realign.MinConfidence
+			}
+			// Realign.MinMargin: an out-of-range value from TOML (negative, or >=1
+			// which would reject nearly every N:M pairing as ambiguous) is reset to
+			// the default just as the env-override path does. 0 is valid (accept
+			// any strict best-score winner).
+			// math.IsNaN is required, not redundant: a TOML `min_margin = nan`
+			// decodes to NaN, and every comparison against NaN is false, so the
+			// range test alone would accept it and break the [0,1) invariant.
+			if math.IsNaN(cfg.Realign.MinMargin) || cfg.Realign.MinMargin < 0 || cfg.Realign.MinMargin >= 1 {
+				cfg.Realign.MinMargin = d.Realign.MinMargin
 			}
 			// SpreadSamples is intentionally NOT re-defaulted: defaults() seeds 6 and
 			// the TOML decode preserves it when the key is omitted, so an explicit
@@ -1215,6 +1248,27 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.Realign.MinConfidence = n
 			applied["realign.min_confidence"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_REALIGN_NAME_MATCH"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_NAME_MATCH", "value", v, "current", cfg.Realign.NameMatch) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.NameMatch = enabled
+			applied["realign.name_match"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_REALIGN_MIN_MARGIN"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		// math.IsNaN is required, not redundant: ParseFloat accepts "NaN", and
+		// every comparison against NaN is false, so the range test below would
+		// pass it straight through and break the [0,1) invariant.
+		if err != nil || math.IsNaN(n) || n < 0 || n >= 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_MIN_MARGIN", "value", v, "current", cfg.Realign.MinMargin) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.MinMargin = n
+			applied["realign.min_margin"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL"); v != "" {

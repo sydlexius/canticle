@@ -21,10 +21,11 @@ import (
 )
 
 // RealignCmd re-attaches orphaned lyric sidecars (.lrc/.txt left behind when an
-// audio file was renamed) to their audio via the four-tier confidence resolver in
+// audio file was renamed) to their audio via the confidence resolver in
 // internal/realign: exact (provenance ISRC/MBID match), heuristic (single-candidate
-// filesystem pairing gated by a name-similarity guard), ambiguous, and conflict.
-// Dry-run unless --yes. It only ever changes a sidecar's stem, never its extension,
+// filesystem pairing gated by a name-similarity guard), heuristic-nm (opt-in N:M
+// name-similarity matching), ambiguous, and conflict. Dry-run unless --yes. It
+// only ever changes a sidecar's stem, never its extension,
 // so a synced .lrc or an instrumental .txt marker keeps its type. This command is a
 // thin adapter: the resolver and apply logic live in internal/realign, shared with
 // serve mode's reactive realign (#450).
@@ -135,13 +136,15 @@ func renderRealign(out io.Writer, args RealignCmd, cfg config.Config, realigner 
 		backupPath = filepath.Join(filepath.Dir(cfg.DB.Path), fmt.Sprintf("realign-backup-%s.jsonl", time.Now().UTC().Format("20060102-150405")))
 	}
 
-	var exactPlanned, heuristicPlanned int
+	var exactPlanned, heuristicPlanned, nmPlanned int
 	for _, mv := range res.Moves {
 		switch mv.Method {
 		case "exact":
 			exactPlanned++
 		case "heuristic":
 			heuristicPlanned++
+		case "heuristic-nm":
+			nmPlanned++
 		}
 	}
 
@@ -156,8 +159,8 @@ func renderRealign(out io.Writer, args RealignCmd, cfg config.Config, realigner 
 			}
 			_, _ = fmt.Fprintf(out, "would move [%s]: %s -> %s\n", mv.Method, mv.Orphan, mv.Target)
 		}
-		_, _ = fmt.Fprintf(out, "realign summary: dirs=%d orphans=%d planned=%d (exact=%d heuristic=%d) gated-skipped=%d ambiguous=%d conflict=%d%s\n",
-			res.DirsChecked, res.OrphansSeen, exactPlanned+heuristicPlanned-gatedSkipped, exactPlanned, heuristicPlanned, gatedSkipped, ambiguousN, conflictN, suffixDryRun(args.Yes))
+		_, _ = fmt.Fprintf(out, "realign summary: dirs=%d orphans=%d planned=%d (exact=%d heuristic=%d heuristic-nm=%d) gated-skipped=%d ambiguous=%d conflict=%d%s\n",
+			res.DirsChecked, res.OrphansSeen, exactPlanned+heuristicPlanned+nmPlanned-gatedSkipped, exactPlanned, heuristicPlanned, nmPlanned, gatedSkipped, ambiguousN, conflictN, suffixDryRun(args.Yes))
 		return 0
 	}
 
@@ -167,7 +170,7 @@ func renderRealign(out io.Writer, args RealignCmd, cfg config.Config, realigner 
 		slog.Error("realign: apply failed", "error", aerr)
 		return 1
 	}
-	var exactApplied, heuristicApplied, gatedSkipped, errCount int
+	var exactApplied, heuristicApplied, nmApplied, gatedSkipped, errCount int
 	for _, a := range applied {
 		switch {
 		case a.GatedSkipped:
@@ -182,13 +185,15 @@ func renderRealign(out io.Writer, args RealignCmd, cfg config.Config, realigner 
 				exactApplied++
 			case "heuristic":
 				heuristicApplied++
+			case "heuristic-nm":
+				nmApplied++
 			}
 			_, _ = fmt.Fprintf(out, "moved [%s]: %s -> %s\n", a.Move.Method, a.Move.Orphan, a.Move.Target)
 		}
 	}
-	appliedN := exactApplied + heuristicApplied
-	_, _ = fmt.Fprintf(out, "realign done: dirs=%d orphans=%d applied=%d (exact=%d heuristic=%d) gated-skipped=%d ambiguous=%d conflict=%d errors=%d\n",
-		res.DirsChecked, res.OrphansSeen, appliedN, exactApplied, heuristicApplied, gatedSkipped, ambiguousN, conflictN, errCount)
+	appliedN := exactApplied + heuristicApplied + nmApplied
+	_, _ = fmt.Fprintf(out, "realign done: dirs=%d orphans=%d applied=%d (exact=%d heuristic=%d heuristic-nm=%d) gated-skipped=%d ambiguous=%d conflict=%d errors=%d\n",
+		res.DirsChecked, res.OrphansSeen, appliedN, exactApplied, heuristicApplied, nmApplied, gatedSkipped, ambiguousN, conflictN, errCount)
 	if appliedN > 0 {
 		_, _ = fmt.Fprintf(out, "backup of applied moves written to %s\n", backupPath)
 	}
