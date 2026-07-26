@@ -132,15 +132,15 @@ func openSeeded(t *testing.T) (context.Context, *sql.DB, int64, string) {
 	return ctx, sqlDB, lib.ID, root
 }
 
-// TestPrunePath_WedgedRowDeletedWhenSourceGone: a failed work_queue row wedged
-// against a processing scan_results row whose source file was removed, with NO
-// stored identity, is pruned across both tables and the junction even under
-// the reactive PolicyRelinkOrRetain -- absent identity has nothing to relink or
-// defer, so it stays subject to the same genuine-delete outcome relink-or-
-// retain reserves for identity-present-no-match rows. Wait: per #640 AC2,
-// identity-ABSENT rows must be retained, not deleted -- see the retain variant
-// below, which supersedes the old always-delete assumption this test name
-// predates. This test now asserts the NEW behavior: retained, not deleted.
+// TestPrunePath_RetainsWedgedRowWithNoIdentity: a failed work_queue row wedged
+// against a processing scan_results row, whose source file was removed and
+// which carries NO stored identity, is RETAINED rather than pruned (#640 AC2).
+// Absent identity has nothing to match on, and prune never deletes on a guess:
+// a wrongly-kept row is inert, while a wrongly-deleted one destroys work that
+// cannot be reconstructed. The row is kept and reported with a reason instead.
+//
+// This supersedes the pre-#640 behavior, where an identity-absent gone row was
+// deleted unconditionally.
 func TestPrunePath_RetainsWedgedRowWithNoIdentity(t *testing.T) {
 	ctx, sqlDB, libID, root := openSeeded(t)
 	gone := filepath.Join(root, "ArtistA", "AlbumA", "01. gone.flac")
@@ -452,7 +452,13 @@ func TestSweep_RelinkOnExactMBIDMatch(t *testing.T) {
 		t.Fatalf("work_queue.source_path = %q, want %q", got, newPath)
 	}
 	// Exactly one scan_results row remains (the present one at newPath); the
-	// stale gone-path row was deleted as part of the relink.
+	// stale gone-path row was deleted as part of the relink. The COUNT is
+	// asserted first and separately: QueryRowContext silently takes the first
+	// row, so a path assertion alone would still pass if the stale row survived
+	// and merely sorted second.
+	if sr, _, _ := rowCounts(t, ctx, sqlDB); sr != 1 {
+		t.Fatalf("after relink scan_results=%d, want exactly 1 (the stale gone-path row must be deleted)", sr)
+	}
 	var remainingPath string
 	if err := sqlDB.QueryRowContext(ctx, `SELECT file_path FROM scan_results`).Scan(&remainingPath); err != nil {
 		t.Fatalf("query remaining scan_result: %v", err)

@@ -1802,12 +1802,21 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 	}
 }
 
-// runSweeper runs the periodic path-reconciliation sweep: on each tick it prunes
-// queue/scan rows whose source file has vanished, at Directory granularity (one
-// stat per directory) so the unattended backstop stays disk-cheap. Its first run
-// also reconciles any rows that predate this feature. Caller guarantees interval
-// > 0. A per-run failure is logged and the loop continues; the sweep is a
-// backstop and must never take down serve.
+// runSweeper runs the periodic path-reconciliation sweep: on each tick it
+// reconciles queue/scan rows whose source file has vanished, at Directory
+// granularity (one stat per directory) so the unattended backstop stays
+// disk-cheap. Its first run also reconciles any rows that predate this feature.
+// Caller guarantees interval > 0. A per-run failure is logged and the loop
+// continues; the sweep is a backstop and must never take down serve.
+//
+// All THREE #640 outcomes are logged, not just the delete: this is the only
+// surface an unattended sweep has. A relink silently moved a row to a new path,
+// and a RETAIN is the keep-and-report path -- a row prune deliberately declined
+// to touch because its identity was absent, ambiguous, or its target already
+// owned. Logging only the prune count would leave an operator unable to tell
+// "nothing to do" apart from "a row has been quietly held back on every tick
+// since the move", which is precisely the state a human needs to resolve.
+// Retained rows are logged at Warn (they need a human), relinks at Info.
 func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, identityKeys []string) {
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(identityKeys)
@@ -1821,6 +1830,18 @@ func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, iden
 		}
 		if res.ScanResults > 0 || res.WorkItems > 0 {
 			slog.Info("path-reconciliation sweep pruned rows for vanished sources", "scan_results", res.ScanResults, "work_items", res.WorkItems)
+		}
+		if len(res.Relinked) > 0 {
+			slog.Info("path-reconciliation sweep relinked moved sources", "sources", len(res.Relinked),
+				"first_old_path", res.Relinked[0].OldPath, "first_new_path", res.Relinked[0].NewPath)
+		}
+		if len(res.Retained) > 0 {
+			// One exemplar rather than the whole set: a large reorganization can
+			// retain thousands, and a per-row line would drown the log. The count
+			// tells an operator the scale; the exemplar plus reason tells them what
+			// to go look at. `scan reconcile-paths` enumerates the full set.
+			slog.Warn("path-reconciliation sweep retained sources it declined to act on; run `scan reconcile-paths` to review",
+				"sources", len(res.Retained), "first_source_path", res.Retained[0].SourcePath, "first_reason", res.Retained[0].Reason)
 		}
 	}
 	slog.Info("path-reconciliation sweeper started", "interval", interval)
