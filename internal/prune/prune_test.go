@@ -64,8 +64,10 @@ func seedRowWithIdentity(t *testing.T, ctx context.Context, sqlDB *sql.DB, libra
 // that already exists on disk (as if a rescan had already discovered a moved
 // file at its new location, before the worker enqueued anything for it),
 // carrying the given identity. This is the "present-file candidate" side of a
-// relink match.
-func seedPresentScanResult(t *testing.T, ctx context.Context, sqlDB *sql.DB, libraryID int64, filePath, mbid, isrc string) {
+// relink match. It returns the new scan_results row's id, which the
+// ownership-conflict and in-flight-race tests need in order to wire the
+// junction table by hand.
+func seedPresentScanResult(t *testing.T, ctx context.Context, sqlDB *sql.DB, libraryID int64, filePath, mbid, isrc string) int64 {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -73,12 +75,18 @@ func seedPresentScanResult(t *testing.T, ctx context.Context, sqlDB *sql.DB, lib
 	if err := os.WriteFile(filePath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write present source: %v", err)
 	}
-	if _, err := sqlDB.ExecContext(ctx,
+	res, err := sqlDB.ExecContext(ctx,
 		`INSERT INTO scan_results (library_id, file_path, artist, title, status, outdir, filename, recording_mbid, isrc) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
 		libraryID, filePath, "Artist", "Title", filepath.Dir(filePath), filepath.Base(filePath), mbid, isrc,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("insert present scan_result: %v", err)
 	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("present scan_result id: %v", err)
+	}
+	return id
 }
 
 func rowCounts(t *testing.T, ctx context.Context, sqlDB *sql.DB) (scanResults, workQueue, junction int) {
@@ -584,18 +592,29 @@ func mustWorkQueueID(t *testing.T, ctx context.Context, sqlDB *sql.DB) int64 {
 
 // TestSetIdentityKeys_ISRCFirstHonorsOperatorOrder: SetIdentityKeys overrides
 // the default mbid-first order, matching config.RealignConfig.IdentityKeys so
-// prune and realign can never disagree about key precedence. With isrc first
-// and a row carrying an isrc match plus an unrelated (non-matching) mbid, the
-// isrc-first order still resolves it via the earlier-checked key.
+// prune and realign can never disagree about key precedence.
+//
+// The fixture is built so key PRECEDENCE is the only thing that can decide the
+// answer: the gone row carries BOTH an mbid and an isrc, and TWO distinct
+// present files are in the pool -- one matching only on mbid, the other only on
+// isrc. mbid-first selects the mbid file; isrc-first selects the isrc file. The
+// test asserts the isrc file was chosen, so flipping the implementation's key
+// order makes it fail. (An earlier version of this test gave the present row an
+// empty mbid, which made the mbid key match nothing and the assertion pass
+// under either order -- it proved nothing about precedence.)
 func TestSetIdentityKeys_ISRCFirstHonorsOperatorOrder(t *testing.T) {
 	ctx, sqlDB, libID, root := openSeeded(t)
 	oldPath := filepath.Join(root, "ArtistK", "AlbumOld", "01. track.flac")
-	newPath := filepath.Join(root, "ArtistK", "AlbumNew", "01. track.flac")
-	seedRowWithIdentity(t, ctx, sqlDB, libID, oldPath, "done", "done", "mbid-k-unrelated", "isrc-k-shared")
+	isrcMatch := filepath.Join(root, "ArtistK", "ByISRC", "01. track.flac")
+	mbidMatch := filepath.Join(root, "ArtistK", "ByMBID", "01. track.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, oldPath, "done", "done", "mbid-k-shared", "isrc-k-shared")
 	if err := os.Remove(oldPath); err != nil {
 		t.Fatalf("remove old: %v", err)
 	}
-	seedPresentScanResult(t, ctx, sqlDB, libID, newPath, "", "isrc-k-shared")
+	// Each present candidate matches on EXACTLY ONE key, and on a different one,
+	// so the two key orders resolve to two different files.
+	seedPresentScanResult(t, ctx, sqlDB, libID, isrcMatch, "mbid-k-other", "isrc-k-shared")
+	seedPresentScanResult(t, ctx, sqlDB, libID, mbidMatch, "mbid-k-shared", "isrc-k-other")
 
 	p := New(sqlDB)
 	p.SetIdentityKeys([]string{"isrc", "mbid"})
@@ -603,8 +622,241 @@ func TestSetIdentityKeys_ISRCFirstHonorsOperatorOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
+	if len(res.Relinked) != 1 {
+		t.Fatalf("Relinked = %+v, want exactly one row", res.Relinked)
+	}
+	if res.Relinked[0].NewPath != isrcMatch {
+		t.Fatalf("isrc-first resolved to %q, want the ISRC-matching file %q (mbid-match candidate was %q)",
+			res.Relinked[0].NewPath, isrcMatch, mbidMatch)
+	}
+	// Assert the artifact, not just the report: the surviving work_queue row
+	// actually points at the ISRC-matched file.
+	if got := workQueueSourcePath(t, ctx, sqlDB, mustWorkQueueID(t, ctx, sqlDB)); got != isrcMatch {
+		t.Fatalf("work_queue.source_path = %q, want %q", got, isrcMatch)
+	}
+}
+
+// seedExtraWorkItem inserts a SECOND work_queue row sharing sourcePath with an
+// existing candidate (source_path carries no uniqueness constraint), optionally
+// junction-linking it to linkScanResultID. artist/title must differ from the
+// first row's because idx_work_queue_artist_title_key is unique. It returns the
+// new row's id.
+func seedExtraWorkItem(t *testing.T, ctx context.Context, sqlDB *sql.DB, sourcePath, artist, title, status string, linkScanResultID int64) int64 {
+	t.Helper()
+	res, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, outdir, filename, source_path, output_paths, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)`,
+		artist, title, artist, title, filepath.Dir(sourcePath), filepath.Base(sourcePath), sourcePath, status)
+	if err != nil {
+		t.Fatalf("insert extra work_queue row: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("extra work_queue id: %v", err)
+	}
+	if linkScanResultID != 0 {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
+			id, linkScanResultID); err != nil {
+			t.Fatalf("link extra work_queue row: %v", err)
+		}
+	}
+	return id
+}
+
+func workQueueStatus(t *testing.T, ctx context.Context, sqlDB *sql.DB, id int64) string {
+	t.Helper()
+	var status string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	return status
+}
+
+func scanResultExists(t *testing.T, ctx context.Context, sqlDB *sql.DB, id int64) bool {
+	t.Helper()
+	var n int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT count(*) FROM scan_results WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatalf("count scan_results %d: %v", id, err)
+	}
+	return n > 0
+}
+
+// TestSweep_SiblingWorkItemIsNotAnOwnershipConflict: gatherCandidates
+// aggregates EVERY work_queue row sharing a source_path into ONE candidate, so
+// a candidate can hold more than one work item. When one of those SIBLINGS
+// already junction-owns the present-file target, that is not a foreign
+// ownership conflict -- it is the candidate conflicting with itself. Excluding
+// only the currently-examined row from the ownership probe made the relink
+// report a false conflict and retain the row FOREVER.
+//
+// Preconditions asserted first (the candidate really does hold 2 work items,
+// and the sibling really does own the target), then the effect: no retained
+// row, a relink applied, and both work items moved to the new path with the
+// stale scan_results row gone.
+func TestSweep_SiblingWorkItemIsNotAnOwnershipConflict(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	oldPath := filepath.Join(root, "ArtistM", "AlbumOld", "01. track.flac")
+	newPath := filepath.Join(root, "ArtistM", "AlbumNew", "01. track.flac")
+	staleSRID := seedRowWithIdentity(t, ctx, sqlDB, libID, oldPath, "done", "done", "mbid-m-shared", "")
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+	presentSRID := seedPresentScanResult(t, ctx, sqlDB, libID, newPath, "mbid-m-shared", "")
+	// The sibling: a second work_queue row on the SAME gone source_path that
+	// ALREADY owns the present-file scan_results row (as a prior partial relink
+	// or a rescan-driven enqueue would leave it).
+	siblingID := seedExtraWorkItem(t, ctx, sqlDB, oldPath, "Artist Sibling", "Title Sibling", "done", presentSRID)
+	firstID := mustWorkQueueIDExcept(t, ctx, sqlDB, siblingID)
+
+	// PRECONDITION 1: the candidate aggregation really produces >1 work item.
+	bySource, err := New(sqlDB).gatherCandidates(ctx, scope{}, nil)
+	if err != nil {
+		t.Fatalf("gatherCandidates: %v", err)
+	}
+	c, ok := bySource[oldPath]
+	if !ok {
+		t.Fatalf("no candidate gathered for %s", oldPath)
+	}
+	if len(c.workItems) != 2 {
+		t.Fatalf("candidate holds %d work items, want 2 -- the aggregation this test depends on did not happen", len(c.workItems))
+	}
+	// PRECONDITION 2: the sibling really owns the target scan_result.
+	var owner int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT work_queue_id FROM work_queue_scan_results WHERE scan_result_id = ?`, presentSRID).Scan(&owner); err != nil {
+		t.Fatalf("query target owner: %v", err)
+	}
+	if owner != siblingID {
+		t.Fatalf("target scan_result owned by work_queue %d, want the sibling %d", owner, siblingID)
+	}
+
+	p := New(sqlDB)
+	res, err := p.Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Retained) != 0 {
+		t.Fatalf("false ownership conflict: retained %+v, want none (the owner is this candidate's own sibling)", res.Retained)
+	}
 	if len(res.Relinked) != 1 || res.Relinked[0].NewPath != newPath {
-		t.Fatalf("Relinked = %+v, want one row to %s", res.Relinked, newPath)
+		t.Fatalf("Relinked = %+v, want one row relinked to %s", res.Relinked, newPath)
+	}
+	// The artifact: BOTH work items now point at the new path, and the stale
+	// gone-path scan_results row is gone while the present one survives.
+	for _, id := range []int64{firstID, siblingID} {
+		if got := workQueueSourcePath(t, ctx, sqlDB, id); got != newPath {
+			t.Fatalf("work_queue %d source_path = %q, want %q", id, got, newPath)
+		}
+	}
+	if scanResultExists(t, ctx, sqlDB, staleSRID) {
+		t.Fatalf("stale scan_results %d survived the relink", staleSRID)
+	}
+	if !scanResultExists(t, ctx, sqlDB, presentSRID) {
+		t.Fatalf("present scan_results %d was deleted", presentSRID)
+	}
+}
+
+// mustWorkQueueIDExcept returns the single work_queue row id that is not except.
+func mustWorkQueueIDExcept(t *testing.T, ctx context.Context, sqlDB *sql.DB, except int64) int64 {
+	t.Helper()
+	var id int64
+	if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM work_queue WHERE id != ? LIMIT 1`, except).Scan(&id); err != nil {
+		t.Fatalf("query other work_queue id: %v", err)
+	}
+	return id
+}
+
+// TestSweep_RelinkDeclinedWhenWorkItemRacesIntoProcessing: the relink UPDATE is
+// guarded on `status != 'processing'`. A work item that flips to 'processing'
+// between gatherCandidates and the relink transaction therefore updates ZERO
+// rows. Ignoring that result and pressing on would junction-link and then
+// DELETE the stale scan_results row while the work_queue row still pointed at
+// the vanished path -- silent data loss reported as a successful relink.
+//
+// The race window is between gatherCandidates and applyRelinks, both internal
+// to a single Sweep call with no seam in between, so the test drives the two
+// halves directly: snapshot the candidate with gatherCandidates exactly as
+// reconcile does, flip the row to 'processing', then call applyRelinks with
+// that (now stale) snapshot. That is precisely the state a real worker claim
+// produces, with no sleeps or goroutine scheduling to make it flaky.
+func TestSweep_RelinkDeclinedWhenWorkItemRacesIntoProcessing(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	oldPath := filepath.Join(root, "ArtistN", "AlbumOld", "01. track.flac")
+	newPath := filepath.Join(root, "ArtistN", "AlbumNew", "01. track.flac")
+	staleSRID := seedRowWithIdentity(t, ctx, sqlDB, libID, oldPath, "done", "done", "mbid-n-shared", "")
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+	presentSRID := seedPresentScanResult(t, ctx, sqlDB, libID, newPath, "mbid-n-shared", "")
+
+	p := New(sqlDB)
+	// Snapshot the candidate exactly as reconcile would, BEFORE the race.
+	bySource, err := p.gatherCandidates(ctx, scope{}, nil)
+	if err != nil {
+		t.Fatalf("gatherCandidates: %v", err)
+	}
+	c, ok := bySource[oldPath]
+	if !ok {
+		t.Fatalf("no candidate gathered for %s", oldPath)
+	}
+	if len(c.workItems) != 1 {
+		t.Fatalf("candidate holds %d work items, want 1", len(c.workItems))
+	}
+	wqID := c.workItems[0].id
+
+	// THE RACE: a worker claims the row after gather, before the relink applies.
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, wqID); err != nil {
+		t.Fatalf("simulate race into processing: %v", err)
+	}
+
+	var retainedSeen []RetainedRow
+	var relinkedSeen []RelinkedRow
+	applied, retained, err := p.applyRelinks(ctx, []classifiedRelink{{
+		src:      oldPath,
+		c:        c,
+		relinked: RelinkedRow{OldPath: oldPath, NewPath: newPath, ScanResultIDs: c.scanResultIDs, WorkItemIDs: []int64{wqID}, MBID: "mbid-n-shared"},
+		target:   presentRowDetail{scanResultID: presentSRID, filePath: newPath, outdir: filepath.Dir(newPath), filename: filepath.Base(newPath)},
+	}},
+		func(rr RelinkedRow) error { relinkedSeen = append(relinkedSeen, rr); return nil },
+		func(rr RetainedRow) error { retainedSeen = append(retainedSeen, rr); return nil },
+	)
+	if err != nil {
+		t.Fatalf("applyRelinks: %v", err)
+	}
+
+	// NOT reported as a successful relink.
+	if len(applied) != 0 || len(relinkedSeen) != 0 {
+		t.Fatalf("a zero-row UPDATE was reported as a relink: applied=%+v hook=%+v", applied, relinkedSeen)
+	}
+	// Reported as retained, under the keep-and-report principle.
+	if len(retained) != 1 || len(retainedSeen) != 1 || retained[0].SourcePath != oldPath {
+		t.Fatalf("retained = %+v (hook %+v), want exactly one row for %s", retained, retainedSeen, oldPath)
+	}
+	// THE ARTIFACT that matters: the stale scan_results row SURVIVED. Deleting
+	// it here would strand a work_queue row pointing at a path that no longer
+	// exists, with nothing left to reconstruct it from.
+	if !scanResultExists(t, ctx, sqlDB, staleSRID) {
+		t.Fatalf("stale scan_results %d was deleted despite the relink not applying -- silent data loss", staleSRID)
+	}
+	if !scanResultExists(t, ctx, sqlDB, presentSRID) {
+		t.Fatalf("present scan_results %d disappeared", presentSRID)
+	}
+	// The work_queue row is untouched: still processing, still on the old path.
+	if got := workQueueSourcePath(t, ctx, sqlDB, wqID); got != oldPath {
+		t.Fatalf("work_queue %d source_path = %q, want unchanged %q", wqID, got, oldPath)
+	}
+	if got := workQueueStatus(t, ctx, sqlDB, wqID); got != "processing" {
+		t.Fatalf("work_queue %d status = %q, want processing", wqID, got)
+	}
+	// No junction row to the present-file target was left behind.
+	var links int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM work_queue_scan_results WHERE scan_result_id = ?`, presentSRID).Scan(&links); err != nil {
+		t.Fatalf("count junction rows: %v", err)
+	}
+	if links != 0 {
+		t.Fatalf("junction row(s) to the present target survived a declined relink: %d", links)
 	}
 }
 

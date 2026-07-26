@@ -142,11 +142,16 @@ type SweepOptions struct {
 	Granularity Granularity
 	// DryRun computes and reports the prune set without mutating the database.
 	DryRun bool
-	// Report, when set, is invoked once per pruned source path before the delete
-	// commits, so a caller can back up or log each row.
+	// Report, when set, is invoked once per pruned source path AFTER the delete
+	// commits, so a caller can back up or log each row -- and only for a row the
+	// deletes actually removed, so a backup record never describes a row that a
+	// race into 'processing' skipped or that a rollback left in place. In
+	// dry-run it fires for every row that would be pruned.
 	Report func(PrunedRow) error
-	// ReportRelinked, when set, is invoked once per relinked source path before
-	// the update commits (or, in dry-run, for the row that would be relinked).
+	// ReportRelinked, when set, is invoked once per relinked source path AFTER
+	// the update commits (or, in dry-run, for the row that would be relinked),
+	// mirroring Report's discipline: if the relink transaction rolls back, no
+	// report fires for anything in that batch.
 	ReportRelinked func(RelinkedRow) error
 	// ReportRetained, when set, is invoked once per retained source path.
 	// Retaining never mutates the database, so this fires the same way in
@@ -471,26 +476,44 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	for _, cg := range targets {
-		ok, conflictWorkQueueID, err := relinkOne(ctx, tx, cg.c, cg.target)
+	for i, cg := range targets {
+		// Each candidate runs inside its own savepoint so a decline part-way
+		// through a multi-row candidate (the in-flight guard rejecting the
+		// second of two work items) unwinds that candidate's earlier writes
+		// instead of committing a half-relink. Savepoint names are generated,
+		// never caller-derived, so no identifier can be injected.
+		sp := fmt.Sprintf("prune_relink_%d", i)
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+			return nil, nil, fmt.Errorf("prune: savepoint relink: %w", err)
+		}
+		decision, err := relinkOne(ctx, tx, cg.c, cg.target)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !ok {
-			// The present-file scan_results row is already owned by a DIFFERENT
-			// work_queue row than this gone candidate's own. Merging two
-			// work_queue rows is internal/identityrepair's job, not prune's, so
-			// this package declines the merge -- but the row still needs an
-			// outcome an operator can see, not a bare drop from every count.
+		if decision.reason != "" {
+			// This candidate is declined: either the present-file scan_results
+			// row is already owned by a DIFFERENT work_queue row (merging two
+			// work_queue rows is internal/identityrepair's job, not prune's), or
+			// a work item raced into 'processing' so its relink UPDATE matched
+			// nothing. Either way the row still needs an outcome an operator can
+			// see, not a bare drop from every count -- and its partial writes are
+			// rolled back to the savepoint first, so the reported "retained" is
+			// literally true of the database.
+			if _, err := tx.ExecContext(ctx, "ROLLBACK TO "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+				return nil, nil, fmt.Errorf("prune: rollback relink savepoint: %w", err)
+			}
 			retained = append(retained, RetainedRow{
 				SourcePath: cg.relinked.OldPath,
-				Reason:     fmt.Sprintf("present-file candidate already linked to work_queue row %d; merging is identityrepair's job", conflictWorkQueueID),
+				Reason:     decision.reason,
 				MBID:       cg.relinked.MBID,
 				ISRC:       cg.relinked.ISRC,
 			})
-			continue
+		} else {
+			applied = append(applied, cg.relinked)
 		}
-		applied = append(applied, cg.relinked)
+		if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+			return nil, nil, fmt.Errorf("prune: release relink savepoint: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, fmt.Errorf("prune: commit relink tx: %w", err)
@@ -512,35 +535,68 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	return applied, retained, nil
 }
 
-// relinkOne performs one candidate's relink within tx, returning ok=false
-// (with no mutation) when the present-file scan_results row is already
-// junction-linked to a work_queue row other than this candidate's own -- a
-// genuine identity conflict this package declines to auto-merge. On ok=false,
-// conflictWorkQueueID identifies the row that already owns the target, so the
-// caller can report a reason an operator can act on.
-func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowDetail) (ok bool, conflictWorkQueueID int64, retErr error) {
+// relinkDecision is relinkOne's verdict for one candidate. A zero value means
+// the relink was performed; a non-empty reason means it was declined and the
+// caller must roll the candidate back and report it as retained.
+type relinkDecision struct {
+	reason string
+}
+
+// relinkOne performs one candidate's relink within tx, returning a non-empty
+// decision reason (and leaving the caller to roll back to its savepoint) in
+// either of two keep-and-report cases.
+//
+// FIRST, an ownership conflict: the present-file scan_results row is already
+// junction-linked to a work_queue row other than this candidate's own -- an
+// identity conflict this package declines to auto-merge, because merging two
+// work_queue rows is internal/identityrepair's job.
+//
+// "This candidate's own" means EVERY work_queue row in c.workItems, not just
+// the one being examined. gatherCandidates aggregates every work_queue row
+// sharing a source_path into ONE candidate (source_path carries no uniqueness
+// constraint -- migration 026 only indexes it), so a candidate routinely holds
+// several rows. Excluding only the current row would let a SIBLING of the same
+// candidate that already owns the target read as an ownership conflict, and the
+// row would then be retained forever on a conflict with itself.
+//
+// SECOND, a lost in-flight race: the relink UPDATE is guarded on
+// `status != 'processing'`, so a work item that raced into 'processing' between
+// gatherCandidates and this transaction updates NOTHING. Proceeding past a
+// zero-row UPDATE would junction-link and then DELETE the stale scan_results row
+// while the work_queue row still pointed at the vanished path -- silent data
+// loss reported as a successful relink, exactly the outcome #640 exists to
+// prevent. The candidate is declined whole instead.
+func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowDetail) (relinkDecision, error) {
+	own := make(map[int64]bool, len(c.workItems))
 	for _, w := range c.workItems {
-		var otherID int64
-		err := tx.QueryRowContext(ctx,
-			`SELECT work_queue_id FROM work_queue_scan_results WHERE scan_result_id = ? AND work_queue_id != ?`,
-			target.scanResultID, w.id).Scan(&otherID)
-		if err == nil {
-			return false, otherID, nil
+		own[w.id] = true
+	}
+	if len(own) > 0 {
+		otherID, found, err := foreignOwner(ctx, tx, target.scanResultID, own)
+		if err != nil {
+			return relinkDecision{}, err
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return false, 0, fmt.Errorf("prune: check present scan_result %d ownership: %w", target.scanResultID, err)
+		if found {
+			return relinkDecision{reason: fmt.Sprintf("present-file candidate already linked to work_queue row %d; merging is identityrepair's job", otherID)}, nil
 		}
 	}
 	for _, w := range c.workItems {
-		if _, err := tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ? WHERE id = ? AND status != 'processing'`,
-			target.filePath, target.outdir, target.filename, w.id); err != nil {
-			return false, 0, fmt.Errorf("prune: relink work_queue %d: %w", w.id, err)
+			target.filePath, target.outdir, target.filename, w.id)
+		if err != nil {
+			return relinkDecision{}, fmt.Errorf("prune: relink work_queue %d: %w", w.id, err)
+		}
+		if rowsAffected(res) == 0 {
+			// The row raced into 'processing' (or vanished) after gather. Decline
+			// the whole candidate rather than deleting its scan_results row out
+			// from under a work_queue row still pointing at the gone path.
+			return relinkDecision{reason: fmt.Sprintf("work_queue row %d became in-flight (or vanished) before the relink could apply; kept for a later pass", w.id)}, nil
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
 			w.id, target.scanResultID); err != nil {
-			return false, 0, fmt.Errorf("prune: link work_queue %d to scan_result %d: %w", w.id, target.scanResultID, err)
+			return relinkDecision{}, fmt.Errorf("prune: link work_queue %d to scan_result %d: %w", w.id, target.scanResultID, err)
 		}
 	}
 	for _, id := range c.scanResultIDs {
@@ -553,10 +609,39 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
                  JOIN work_queue wq ON wq.id = j.work_queue_id
                  WHERE j.scan_result_id = ? AND wq.status = 'processing')`,
 			id, id); err != nil {
-			return false, 0, fmt.Errorf("prune: delete stale scan_result %d: %w", id, err)
+			return relinkDecision{}, fmt.Errorf("prune: delete stale scan_result %d: %w", id, err)
 		}
 	}
-	return true, 0, nil
+	return relinkDecision{}, nil
+}
+
+// foreignOwner reports whether scanResultID is junction-linked to any
+// work_queue row NOT in own -- the candidate's own set of aggregated work
+// items. Filtering in Go rather than building a variadic NOT IN keeps the
+// query a single fixed statement; the junction row count per scan_result is
+// tiny (normally one), so the scan is trivial.
+func foreignOwner(ctx context.Context, tx *sql.Tx, scanResultID int64, own map[int64]bool) (int64, bool, error) {
+	var foreignID int64
+	var found bool
+	rows, err := tx.QueryContext(ctx,
+		`SELECT work_queue_id FROM work_queue_scan_results WHERE scan_result_id = ?`, scanResultID)
+	if err != nil {
+		return 0, false, fmt.Errorf("prune: check present scan_result %d ownership: %w", scanResultID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, false, fmt.Errorf("prune: check present scan_result %d ownership: %w", scanResultID, err)
+		}
+		if !own[id] && !found {
+			foreignID, found = id, true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, fmt.Errorf("prune: check present scan_result %d ownership: %w", scanResultID, err)
+	}
+	return foreignID, found, nil
 }
 
 // presentRowDetail is the detail applyRelinks needs from the present-file
