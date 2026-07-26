@@ -233,7 +233,7 @@ The tiers:
 - **exact** - the orphan's `[isrc:]` / `[mbid:]` header uniquely matches one audio file's embedded ISRC/MBID. Matched in `identity_keys` order (default `mbid`, then `isrc`).
 - **heuristic** - exactly one orphaned sidecar and exactly one audio file missing its sidecar in the same directory, and their names match closely enough (a Jaro-Winkler name guard at `min_confidence`) **and** distinguishably: the pair must also beat the orphan's best score against every other audio file in the directory by `min_margin`, so a name that fits the whole album equally well is reported ambiguous rather than guessed.
 - **heuristic-nm** - opt-in (`name_match = true`), for the common case a single-candidate heuristic can't resolve: a directory with *multiple* orphaned sidecars and *multiple* sidecar-less audio files (a folder of renamed tracks). Every orphan is scored against every remaining candidate; a pairing is only accepted when it clears `min_confidence` **and** the orphan's best score beats its runner-up by at least `min_margin`. Anything closer than that is reported ambiguous, never guessed.
-- **ambiguous** - zero or multiple candidates on either side, or (for `heuristic-nm`) a pairing too close to call. Reported and skipped, never guessed.
+- **ambiguous** - zero or multiple candidates on either side, or a pairing too close to call. Both name tiers can report a near-tie: `heuristic` when the pair fails to beat the orphan's best rival in the directory by `min_margin`, `heuristic-nm` when the best score fails to beat its runner-up by the same. Reported and skipped, never guessed.
 - **conflict** - contradictory signals (multiple exact matches, or the destination sidecar already exists). Reported and skipped, never clobbered.
 
 ```sh

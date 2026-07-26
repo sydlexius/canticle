@@ -445,9 +445,13 @@ type RealignConfig struct {
 	// Default ["mbid", "isrc"]. Override: MXLRC_REALIGN_IDENTITY_KEYS (comma-separated).
 	IdentityKeys []string `toml:"identity_keys"`
 	// MinConfidence is the Jaro-Winkler name-similarity floor (0-1) a heuristic
-	// rename must clear: the orphan's [ar:]/[ti:] header (or sidecar stem) vs the
-	// candidate audio's artist/title. Default 0.75. Values outside (0,1] are reset
-	// to the default. Override: MXLRC_REALIGN_MIN_CONFIDENCE.
+	// rename must clear. Each side is scored on its most discriminating field --
+	// the [ti:] header or embedded title, else the filename stem. The ARTIST IS
+	// EXCLUDED whenever either is available (#672): every candidate in an album
+	// directory carries the same artist, so including it added a large constant
+	// to every pairwise score and let unrelated tracks clear this floor.
+	// Default 0.75. Values outside (0,1] are reset to the default.
+	// Override: MXLRC_REALIGN_MIN_CONFIDENCE.
 	MinConfidence float64 `toml:"min_confidence"`
 	// AutoApplyHeuristic governs whether serve mode's reactive realign (watcher /
 	// post-scan / webhook) is allowed to auto-apply heuristic-tier matches. Default

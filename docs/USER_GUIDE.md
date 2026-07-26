@@ -672,9 +672,11 @@ matches are ever renamed:
   candidate; a pairing is accepted only when it clears `min_confidence` and
   the orphan's best score beats its runner-up by at least `min_margin`. Off
   by default, so such a directory stays ambiguous until you opt in.
-- **ambiguous** - zero or multiple candidates on either side, or (for
-  `heuristic-nm`) a pairing too close to call. Reported and skipped, never
-  guessed.
+- **ambiguous** - zero or multiple candidates on either side, or a pairing too
+  close to call. Both name tiers can report a near-tie: `heuristic` when the
+  pair fails to beat the orphan's best rival in the directory by `min_margin`,
+  `heuristic-nm` when the best score fails to beat its runner-up by the same.
+  Reported and skipped, never guessed.
 - **conflict** - contradictory signals (multiple exact matches) or a destination
   sidecar that already exists. Reported and skipped, never clobbered.
 
