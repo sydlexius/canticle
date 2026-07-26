@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/db"
@@ -369,6 +370,79 @@ func TestRun_LibraryScopedIndexExcludesOtherLibraries(t *testing.T) {
 	}
 	if res.ScanResultsReset != 0 || res.WorkItemsRequeued != 0 {
 		t.Fatalf("got scanResultsReset=%d workItemsRequeued=%d, want 0/0 (row belongs to a different library, out of scope)", res.ScanResultsReset, res.WorkItemsRequeued)
+	}
+}
+
+// TestBuildIndex_LibraryScopedLinksUnchanged pins the work_queue link index
+// against the SQL-scoping optimization: pushing the --library predicate into
+// the join must return exactly the rows the previous fetch-everything-then-
+// filter-in-Go version returned. The reference set is computed here with the
+// unscoped query plus the old in-Go filter, so the two are compared directly
+// rather than against a hand-written expectation.
+func TestBuildIndex_LibraryScopedLinksUnchanged(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	otherRoot := filepath.Join(filepath.Dir(root), "other-music")
+	otherLib, err := library.New(sqlDB).Add(ctx, otherRoot, "other", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("library.Add other: %v", err)
+	}
+	dirA := filepath.Join(root, "ArtistA")
+	// Two in-scope tracks and one belonging to the other library, so the scope
+	// has something to actually exclude.
+	inA, _ := seedTrack(t, ctx, sqlDB, libID, dirA, "one.lrc", "done")
+	inB, _ := seedTrack(t, ctx, sqlDB, libID, dirA, "two.lrc", "processing")
+	outC, _ := seedTrack(t, ctx, sqlDB, otherLib.ID, dirA, "three.lrc", "done")
+
+	// Reference: the pre-optimization behavior -- fetch every link row, then
+	// discard those whose scan_results row is out of scope, in Go.
+	inScope := map[int64]bool{}
+	srRows, err := sqlDB.QueryContext(ctx, `SELECT id FROM scan_results WHERE filename != '' AND library_id = ?`, libID)
+	if err != nil {
+		t.Fatalf("reference scan_results query: %v", err)
+	}
+	for srRows.Next() {
+		var id int64
+		if serr := srRows.Scan(&id); serr != nil {
+			t.Fatalf("scan: %v", serr)
+		}
+		inScope[id] = true
+	}
+	_ = srRows.Close()
+	want := map[int64][]wqLink{}
+	rows, err := sqlDB.QueryContext(ctx,
+		`SELECT j.scan_result_id, wq.id, wq.status FROM work_queue_scan_results j JOIN work_queue wq ON wq.id = j.work_queue_id`)
+	if err != nil {
+		t.Fatalf("reference link query: %v", err)
+	}
+	for rows.Next() {
+		var srID, wqID int64
+		var status string
+		if serr := rows.Scan(&srID, &wqID, &status); serr != nil {
+			t.Fatalf("scan: %v", serr)
+		}
+		if !inScope[srID] {
+			continue
+		}
+		want[srID] = append(want[srID], wqLink{id: wqID, status: status})
+	}
+	_ = rows.Close()
+
+	// Preconditions: the reference set is non-empty, covers both in-scope
+	// rows, and genuinely excludes the other library's row -- otherwise the
+	// comparison below passes on two empty maps.
+	if len(want) != 2 || len(want[inA]) == 0 || len(want[inB]) == 0 {
+		t.Fatalf("precondition: reference set must hold both in-scope rows; got %v", want)
+	}
+	if _, present := want[outC]; present {
+		t.Fatalf("precondition: reference set must exclude the other library's row")
+	}
+
+	_, got, err := New(sqlDB).buildIndex(ctx, &libID)
+	if err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SQL-scoped link index differs from the in-Go-filtered reference:\n got  %v\n want %v", got, want)
 	}
 }
 

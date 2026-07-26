@@ -54,7 +54,12 @@ const purgeProvenanceMaxBackupBytes = 4 << 20 // 4 MiB
 // default; --yes applies and writes a JSONL backup of every deleted sidecar,
 // fsynced before its delete.
 func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProvenanceCmd) int {
-	hasSource := strings.TrimSpace(args.Source) != ""
+	// Trim ONCE and use the trimmed value everywhere. Validating the trimmed
+	// form while filtering on the raw one let `--source " musixmatch"` pass the
+	// guard and then match nothing at all, silently reporting an empty purge
+	// set for a filter the operator believed was valid.
+	source := strings.TrimSpace(args.Source)
+	hasSource := source != ""
 	if hasSource == args.NoSource {
 		_, _ = fmt.Fprintln(out, "purge-provenance: exactly one of --source or --no-source is required")
 		return 2
@@ -133,7 +138,7 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 		return appendPurgeProvenanceBackup(backupFile, rec)
 	}
 
-	filter := purgeprovenance.Filter{Source: args.Source, NoSource: args.NoSource}
+	filter := purgeprovenance.Filter{Source: source, NoSource: args.NoSource}
 	res, err := purgeprovenance.New(sqlDB).Run(ctx, purgeprovenance.Options{
 		Roots:     roots,
 		LibraryID: libID,
@@ -152,7 +157,11 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	}
 
 	verb := "would delete"
-	deleted := res.Matched
+	// res.Matched is incremented before the in-flight check, so it includes
+	// sidecars an apply run will SKIP. Subtracting the skipped-in-flight count
+	// makes the preview agree with what apply mode actually deletes -- the
+	// whole point of a dry run.
+	deleted := res.Matched - res.SkippedProcessing
 	if args.Yes {
 		verb = "deleted"
 		deleted = res.Deleted

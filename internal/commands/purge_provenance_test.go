@@ -341,6 +341,84 @@ func TestPurgeProvenance_WalkErrorStillPrintsSummaryAndPurges(t *testing.T) {
 	}
 }
 
+// TestPurgeProvenance_SourceIsTrimmed: the guard trimmed --source but the
+// filter used the raw value, so `--source " musixmatch"` passed validation and
+// then matched nothing. A padded value must select exactly the same set as the
+// unpadded one.
+func TestPurgeProvenance_SourceIsTrimmed(t *testing.T) {
+	run := func(t *testing.T, src string) string {
+		t.Helper()
+		ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
+		target := filepath.Join(root, "ArtistA", "one.lrc")
+		other := filepath.Join(root, "ArtistB", "two.lrc")
+		writePurgeSidecar(t, target, "musixmatch")
+		writePurgeSidecar(t, other, "petitlyrics")
+		seedPurgeTrack(t, ctx, dbPath, filepath.Dir(target), "one.lrc", "done")
+		seedPurgeTrack(t, ctx, dbPath, filepath.Dir(other), "two.lrc", "done")
+		var buf bytes.Buffer
+		if code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: src}); code != 0 {
+			t.Fatalf("exit=%d out=%s", code, buf.String())
+		}
+		return buf.String()
+	}
+
+	exact := run(t, "musixmatch")
+	// Precondition: the unpadded filter really does match something, so an
+	// equality check below cannot pass on two empty sets.
+	if !strings.Contains(exact, "would delete: ") || !strings.Contains(exact, "one.lrc") {
+		t.Fatalf("precondition: --source musixmatch must match one.lrc; got: %s", exact)
+	}
+	padded := run(t, "  musixmatch  ")
+	if !strings.Contains(padded, "one.lrc") {
+		t.Errorf("a padded --source matched nothing; got: %s", padded)
+	}
+	if strings.Contains(padded, "two.lrc") {
+		t.Errorf("a padded --source over-matched; got: %s", padded)
+	}
+}
+
+// TestPurgeProvenance_DryRunCountMatchesApply: the preview must promise exactly
+// what apply performs. res.Matched is incremented before the in-flight check,
+// so a sidecar whose linked work item is 'processing' inflated the dry-run
+// "would delete" count while apply mode correctly skipped it.
+func TestPurgeProvenance_DryRunCountMatchesApply(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
+	free := filepath.Join(root, "ArtistA", "free.lrc")
+	inflight := filepath.Join(root, "ArtistB", "inflight.lrc")
+	writePurgeSidecar(t, free, "musixmatch")
+	writePurgeSidecar(t, inflight, "musixmatch")
+	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(free), "free.lrc", "done")
+	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(inflight), "inflight.lrc", "processing")
+
+	var dry bytes.Buffer
+	if code := runPurgeProvenance(ctx, &dry, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch"}); code != 0 {
+		t.Fatalf("dry-run exit=%d out=%s", code, dry.String())
+	}
+	// Precondition: the fixture really does contain an in-flight match, else
+	// the two counts agree trivially.
+	if !strings.Contains(dry.String(), "1 skipped in-flight") {
+		t.Fatalf("precondition: fixture must produce exactly one in-flight skip; got: %s", dry.String())
+	}
+	if !strings.Contains(dry.String(), "would delete 1,") {
+		t.Errorf("dry run over-counts: it must not promise to delete the in-flight sidecar; got: %s", dry.String())
+	}
+
+	var apply bytes.Buffer
+	if code := runPurgeProvenance(ctx, &apply, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch", Yes: true}); code != 0 {
+		t.Fatalf("apply exit=%d out=%s", code, apply.String())
+	}
+	if !strings.Contains(apply.String(), "deleted 1,") {
+		t.Errorf("apply deleted a different count than the preview promised; got: %s", apply.String())
+	}
+	// Artifact check: only the non-in-flight sidecar is gone.
+	if _, err := os.Stat(free); !os.IsNotExist(err) {
+		t.Errorf("the free sidecar should have been deleted: %v", err)
+	}
+	if _, err := os.Stat(inflight); err != nil {
+		t.Errorf("the in-flight sidecar must survive: %v", err)
+	}
+}
+
 // TestPurgeProvenance_NoSourceCohort: --no-source targets sidecars with no
 // [source:] tag.
 func TestPurgeProvenance_NoSourceCohort(t *testing.T) {

@@ -435,11 +435,23 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 		return nil, nil, err
 	}
 
-	wqIdx := make(map[int64][]wqLink)
-	wqRows, err := p.db.QueryContext(ctx,
-		`SELECT j.scan_result_id, wq.id, wq.status
+	// Push the --library scope into SQL rather than fetching every link row and
+	// discarding the out-of-scope ones in Go. The predicate mirrors the
+	// scan_results query above exactly, so the in-scope set is identical; the
+	// srIDs guard below stays as a belt-and-braces check that also covers a
+	// link row whose scan_results row has no filename.
+	wqQuery := `SELECT j.scan_result_id, wq.id, wq.status
          FROM work_queue_scan_results j
-         JOIN work_queue wq ON wq.id = j.work_queue_id`)
+         JOIN work_queue wq ON wq.id = j.work_queue_id`
+	var wqArgs []any
+	if libraryID != nil {
+		wqQuery += `
+         JOIN scan_results sr ON sr.id = j.scan_result_id
+         WHERE sr.filename != '' AND sr.library_id = ?`
+		wqArgs = append(wqArgs, *libraryID)
+	}
+	wqIdx := make(map[int64][]wqLink)
+	wqRows, err := p.db.QueryContext(ctx, wqQuery, wqArgs...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("purgeprovenance: query work_queue links: %w", err)
 	}
