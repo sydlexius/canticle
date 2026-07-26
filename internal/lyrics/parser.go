@@ -67,11 +67,20 @@ type lrcTag struct {
 	raw   string // original line as-is
 }
 
+// utf8BOM is the UTF-8 byte-order mark (EF BB BF). Editors and some providers
+// prefix it to a text file; left in place it makes the first line read as
+// "<BOM>[source:...]", which parseTagLine rejects, ending the header block
+// before it starts and discarding EVERY tag in the file. That misparse is a
+// data-loss path for provenance-driven deletion (a genuinely tagged sidecar
+// reads as untagged), so it is stripped at the root, here.
+const utf8BOM = "\uFEFF"
+
 // parseLRCHeader reads a file and returns (headerTags, lyricLines, error).
 // headerTags holds parsed tag lines from the leading block; lyricLines holds
 // the rest of the file verbatim. The split point is the first line that is NOT
 // an LRC tag (i.e. does not match [key:value]). Blank lines before the first
-// non-tag line are considered part of the header.
+// non-tag line are considered part of the header. A leading UTF-8 BOM is
+// stripped from the FIRST line only; lyric content is otherwise verbatim.
 func parseLRCHeader(path string) ([]lrcTag, []string, error) {
 	f, err := os.Open(path) //nolint:gosec // path comes from caller-controlled file enumeration
 	if err != nil {
@@ -84,8 +93,13 @@ func parseLRCHeader(path string) ([]lrcTag, []string, error) {
 	inHeader := true
 
 	sc := bufio.NewScanner(f)
+	first := true
 	for sc.Scan() {
 		line := sc.Text()
+		if first {
+			line = strings.TrimPrefix(line, utf8BOM)
+			first = false
+		}
 		if inHeader {
 			if tag, ok := parseTagLine(line); ok {
 				tags = append(tags, tag)
