@@ -415,3 +415,251 @@ func TestApply_RefusesClobberAcrossMergedPlans(t *testing.T) {
 		t.Errorf("target content = %q; want %q (second move must not clobber the first)", got, "FIRST")
 	}
 }
+
+// audioProv is a tiny per-path provenance fixture for the N:M name-match tests
+// below, letting each test wire artist/title (not just isrc) per audio path.
+type audioProv struct {
+	artist, title string
+}
+
+// withAudioProv overrides r's provenance reader to return artist/title from
+// the given map (isrc/mbid left empty), for tests that need name signals
+// rather than exact-tier identity.
+func withAudioProv(r *Realigner, prov map[string]audioProv) {
+	r.readProv = func(path string) (isrc, mbid, artist, title string, err error) {
+		p := prov[path]
+		return "", "", p.artist, p.title, nil
+	}
+}
+
+// TestClassify_NameMatch_MultiOrphanMultiCandidate: a directory with two
+// orphaned sidecars and two sidecar-less audio files, each pair unambiguously
+// closest by artist/title, resolves via the N:M matcher when name_match is on.
+func TestClassify_NameMatch_MultiOrphanMultiCandidate(t *testing.T) {
+	root := tempRoot(t)
+	audioA := filepath.Join(root, "D", "01-renamed-a.flac")
+	audioB := filepath.Join(root, "D", "02-renamed-b.flac")
+	orphanA := filepath.Join(root, "D", "old-a.lrc")
+	orphanB := filepath.Join(root, "D", "old-b.lrc")
+	write(t, audioA, "a")
+	write(t, audioB, "b")
+	write(t, orphanA, "[ar:Aardvark Band]\n[ti:Alpha Song]\n[00:01.00]x\n")
+	write(t, orphanB, "[ar:Bumblebee Band]\n[ti:Beta Song]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioA: {artist: "Aardvark Band", title: "Alpha Song"},
+		audioB: {artist: "Bumblebee Band", title: "Beta Song"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Skips) != 0 {
+		t.Fatalf("skips = %+v; want none", res.Skips)
+	}
+	if len(res.Moves) != 2 {
+		t.Fatalf("moves = %+v; want 2", res.Moves)
+	}
+	gotTargets := map[string]string{}
+	for _, mv := range res.Moves {
+		if mv.Method != "heuristic-nm" {
+			t.Errorf("move method = %q; want heuristic-nm", mv.Method)
+		}
+		if !mv.Eligible {
+			t.Errorf("move for %s not eligible: %s", mv.Orphan, mv.GateReason)
+		}
+		gotTargets[mv.Orphan] = mv.Target
+	}
+	if got := gotTargets[orphanA]; filepath.Base(got) != "01-renamed-a.lrc" {
+		t.Errorf("orphanA target = %q; want it paired with audioA", got)
+	}
+	if got := gotTargets[orphanB]; filepath.Base(got) != "02-renamed-b.lrc" {
+		t.Errorf("orphanB target = %q; want it paired with audioB", got)
+	}
+}
+
+// TestClassify_NameMatch_NearTieIsAmbiguous: two candidates near-tied for one
+// orphan must be reported ambiguous, never guessed, even though a different
+// orphan resolves cleanly.
+func TestClassify_NameMatch_NearTieIsAmbiguous(t *testing.T) {
+	root := tempRoot(t)
+	audioTie1 := filepath.Join(root, "D", "tie1.flac")
+	audioTie2 := filepath.Join(root, "D", "tie2.flac")
+	audioClear := filepath.Join(root, "D", "clear.flac")
+	orphanTie := filepath.Join(root, "D", "orphan-tie.lrc")
+	orphanClear := filepath.Join(root, "D", "orphan-clear.lrc")
+	write(t, audioTie1, "a")
+	write(t, audioTie2, "b")
+	write(t, audioClear, "c")
+	write(t, orphanTie, "[ar:The Artist]\n[ti:The Song]\n[00:01.00]x\n")
+	write(t, orphanClear, "[ar:Zephyr Ensemble]\n[ti:Zeta Tune]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		// Two near-identical candidates for orphanTie: same score, no margin.
+		audioTie1:  {artist: "The Artist", title: "The Song"},
+		audioTie2:  {artist: "The Artist", title: "The Song"},
+		audioClear: {artist: "Zephyr Ensemble", title: "Zeta Tune"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	var moved, skippedTie bool
+	for _, mv := range res.Moves {
+		if mv.Orphan == orphanClear {
+			moved = true
+		}
+		if mv.Orphan == orphanTie {
+			t.Errorf("orphanTie must not resolve to a Move when tied: %+v", mv)
+		}
+	}
+	if !moved {
+		t.Errorf("orphanClear should resolve despite the unrelated tie: moves=%+v", res.Moves)
+	}
+	for _, s := range res.Skips {
+		if s.Path == orphanTie {
+			skippedTie = true
+			if s.Kind != "ambiguous" {
+				t.Errorf("orphanTie skip kind = %q; want ambiguous", s.Kind)
+			}
+		}
+	}
+	if !skippedTie {
+		t.Errorf("orphanTie should be reported ambiguous: skips=%+v", res.Skips)
+	}
+}
+
+// TestClassify_NameMatch_ContestedTargetResolvesOneSkipsOther: two orphans
+// both best-matching the same candidate resolve to exactly one Move (the
+// stronger pairing); the other is reported ambiguous, never clobbered.
+func TestClassify_NameMatch_ContestedTargetResolvesOneSkipsOther(t *testing.T) {
+	root := tempRoot(t)
+	audioShared := filepath.Join(root, "D", "shared.flac")
+	audioOther := filepath.Join(root, "D", "other.flac")
+	orphanStrong := filepath.Join(root, "D", "orphan-strong.lrc")
+	orphanWeak := filepath.Join(root, "D", "orphan-weak.lrc")
+	write(t, audioShared, "a")
+	write(t, audioOther, "b")
+	// orphanStrong is an exact textual match for audioShared's name.
+	write(t, orphanStrong, "[ar:Exact Match Band]\n[ti:Exact Match Song]\n[00:01.00]x\n")
+	// orphanWeak is a rough, partial match for audioShared's name and a much
+	// worse match for audioOther, so it, too, prefers audioShared -- contested.
+	write(t, orphanWeak, "[ar:Exact Match Ban]\n[ti:Exact Match Son]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioShared: {artist: "Exact Match Band", title: "Exact Match Song"},
+		audioOther:  {artist: "Zzznope Totally Unrelated", title: "Qqqnothing Alike"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	for _, mv := range res.Moves {
+		if mv.Target != filepath.Join(root, "D", "shared.lrc") && mv.Target != filepath.Join(root, "D", "other.lrc") {
+			t.Errorf("unexpected target %q", mv.Target)
+		}
+	}
+	if len(res.Moves) != 1 {
+		t.Fatalf("moves = %+v; want exactly 1 (contested target resolves once)", res.Moves)
+	}
+	if res.Moves[0].Orphan != orphanStrong {
+		t.Errorf("resolved orphan = %q; want the stronger match %q", res.Moves[0].Orphan, orphanStrong)
+	}
+	var sawWeakSkip bool
+	for _, s := range res.Skips {
+		if s.Path == orphanWeak {
+			sawWeakSkip = true
+		}
+	}
+	if !sawWeakSkip {
+		t.Errorf("orphanWeak should be reported (ambiguous or conflict), not silently dropped: skips=%+v", res.Skips)
+	}
+}
+
+// TestClassify_NameMatch_OffByDefaultStaysAmbiguous: with name_match disabled
+// (the default), a directory with multiple orphans and multiple candidates
+// stays generically ambiguous -- the N:M tier is strictly opt-in.
+func TestClassify_NameMatch_OffByDefaultStaysAmbiguous(t *testing.T) {
+	root := tempRoot(t)
+	audioA := filepath.Join(root, "D", "01-renamed-a.flac")
+	audioB := filepath.Join(root, "D", "02-renamed-b.flac")
+	orphanA := filepath.Join(root, "D", "old-a.lrc")
+	orphanB := filepath.Join(root, "D", "old-b.lrc")
+	write(t, audioA, "a")
+	write(t, audioB, "b")
+	write(t, orphanA, "[ar:Aardvark Band]\n[ti:Alpha Song]\n[00:01.00]x\n")
+	write(t, orphanB, "[ar:Bumblebee Band]\n[ti:Beta Song]\n[00:01.00]x\n")
+
+	cfg := defaultCfg() // NameMatch defaults false
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioA: {artist: "Aardvark Band", title: "Alpha Song"},
+		audioB: {artist: "Bumblebee Band", title: "Beta Song"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Moves) != 0 {
+		t.Fatalf("moves = %+v; want none (name_match off)", res.Moves)
+	}
+	if len(res.Skips) != 2 {
+		t.Fatalf("skips = %+v; want 2 ambiguous", res.Skips)
+	}
+	for _, s := range res.Skips {
+		if s.Kind != "ambiguous" {
+			t.Errorf("skip kind = %q; want ambiguous", s.Kind)
+		}
+	}
+}
+
+// TestApply_NameMatchMove_GatedByAllowHeuristic: a heuristic-nm Move is gated
+// the same way a heuristic Move is -- suppressed under
+// Policy{AllowHeuristic: false}, applied under Policy{AllowHeuristic: true}.
+func TestApply_NameMatchMove_GatedByAllowHeuristic(t *testing.T) {
+	root := tempRoot(t)
+	orphan := filepath.Join(root, "D", "orphan.lrc")
+	target := filepath.Join(root, "D", "target.lrc")
+	write(t, orphan, "content")
+
+	r, _ := newRealigner(root, defaultCfg(), nil)
+	mv := Move{Orphan: orphan, Target: target, Method: "heuristic-nm", LibraryID: 1, Eligible: true, Confidence: 0.9}
+
+	applied, err := r.Apply([]Move{mv}, filepath.Join(t.TempDir(), "b1.jsonl"), Policy{AllowHeuristic: false})
+	if err != nil {
+		t.Fatalf("Apply (gated): %v", err)
+	}
+	if len(applied) != 1 || !applied[0].GatedSkipped {
+		t.Fatalf("applied = %+v; want 1 GatedSkipped move under AllowHeuristic=false", applied)
+	}
+	if _, serr := os.Stat(orphan); serr != nil {
+		t.Errorf("orphan should remain when gated: %v", serr)
+	}
+
+	applied, err = r.Apply([]Move{mv}, filepath.Join(t.TempDir(), "b2.jsonl"), Policy{AllowHeuristic: true})
+	if err != nil {
+		t.Fatalf("Apply (allowed): %v", err)
+	}
+	if len(applied) != 1 || applied[0].GatedSkipped || applied[0].Err != nil {
+		t.Fatalf("applied = %+v; want 1 clean move under AllowHeuristic=true", applied)
+	}
+	if _, serr := os.Stat(target); serr != nil {
+		t.Errorf("target should exist after applied move: %v", serr)
+	}
+}
