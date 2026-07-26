@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -661,5 +662,210 @@ func TestApply_NameMatchMove_GatedByAllowHeuristic(t *testing.T) {
 	}
 	if _, serr := os.Stat(target); serr != nil {
 		t.Errorf("target should exist after applied move: %v", serr)
+	}
+}
+
+// TestClassify_NameMatch_ClaimedCandidateHidesAmbiguity is a COUNTEREXAMPLE to
+// the "recompute the runner-up against only unclaimed candidates" margin
+// semantics in resolveNameMatch.
+//
+// Matrix (scores from normalize.MatchConfidence, min_confidence 0.75,
+// min_margin 0.05):
+//
+//	                 C1 "Nova Drifter"   C2 "Nova Drifting"
+//	O1 "Nova Drifter"      1.0000              0.9205
+//	O2 "Nova Drift"        0.9667              0.9538
+//
+// Descending processing order is O1-C1 (1.0000), O2-C1 (0.9667),
+// O2-C2 (0.9538), O1-C2 (0.9205).
+//
+//   - O1-C1 is accepted: runner-up 0.9205, margin 0.0795 >= 0.05. C1 is claimed.
+//   - O2-C1 -- which is O2's OWN best pairing -- is silently `continue`d because
+//     C1 is claimed. No ambiguity is recorded.
+//   - O2-C2 is then evaluated. Its only rival, C1, is claimed and therefore
+//     excluded from the runner-up scan, so runnerUp stays -1 and the margin
+//     check is skipped entirely. O2 is confidently paired to C2.
+//
+// But O2 cannot actually tell C1 from C2: 0.9667 vs 0.9538 is a margin of
+// 0.0129, far below min_margin. Against the full original matrix O2 is
+// unambiguously ambiguous and MUST be skipped. The claimed-only runner-up
+// recomputation converts a genuine near-tie into a confident pairing -- exactly
+// the silent misattachment the margin rule exists to prevent. The greedy
+// accept of O1 did not displace a stronger match, but it did DESTROY the
+// evidence that O2's decision was a coin flip.
+func TestClassify_NameMatch_ClaimedCandidateHidesAmbiguity(t *testing.T) {
+	root := tempRoot(t)
+	c1 := filepath.Join(root, "D", "c1.flac")
+	c2 := filepath.Join(root, "D", "c2.flac")
+	o1 := filepath.Join(root, "D", "o1.lrc")
+	o2 := filepath.Join(root, "D", "o2.lrc")
+	write(t, c1, "a")
+	write(t, c2, "b")
+	write(t, o1, "[ar:Nova]\n[ti:Drifter]\n[00:01.00]x\n")
+	write(t, o2, "[ar:Nova]\n[ti:Drift]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		c1: {artist: "Nova", title: "Drifter"},
+		c2: {artist: "Nova", title: "Drifting"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	for _, mv := range res.Moves {
+		if mv.Orphan == o2 {
+			t.Errorf("o2 was paired to %s (confidence %.4f), but its top two candidates "+
+				"score 0.9667 and 0.9538 -- a margin of 0.0129, below min_margin 0.05. "+
+				"It must be reported ambiguous, not guessed.", mv.Target, mv.Confidence)
+		}
+	}
+	var o2Skipped bool
+	for _, s := range res.Skips {
+		if s.Path == o2 {
+			o2Skipped = true
+			if s.Kind != "ambiguous" {
+				t.Errorf("o2 skip kind = %q; want ambiguous", s.Kind)
+			}
+		}
+	}
+	if !o2Skipped {
+		t.Errorf("o2 should be reported ambiguous: moves=%+v skips=%+v", res.Moves, res.Skips)
+	}
+}
+
+// TestResolveNameMatch_NeverPairsTwoOrphansToOneCandidate pins the claimed-candidate
+// guard INSIDE resolveNameMatch directly. The classify-level contested test only
+// goes red when BOTH that guard and classifyDir's outer `claimed` map are removed,
+// so on its own it cannot tell a working inner guard from a broken one backstopped
+// by the outer map. This asserts the double-move property at the source: no two
+// accepted pairings may name the same audio candidate.
+func TestResolveNameMatch_NeverPairsTwoOrphansToOneCandidate(t *testing.T) {
+	orphans := []string{"o1.lrc", "o2.lrc"}
+	tags := map[string]lyrics.ProvenanceTags{
+		"o1.lrc": {Artist: "Nova", Title: "Drifter"},
+		"o2.lrc": {Artist: "Nova", Title: "Drifter"}, // identical: both want the same candidate
+	}
+	candidates := []string{"c1.flac", "c2.flac"}
+	getProv := func(p string) audioProvenance {
+		switch p {
+		case "c1.flac":
+			return audioProvenance{artist: "Nova", title: "Drifter"}
+		default:
+			return audioProvenance{artist: "Zzz Unrelated", title: "Qqq Nothing"}
+		}
+	}
+
+	pairings, unresolved := resolveNameMatch(orphans, tags, candidates, getProv, 0.75, 0.05)
+	seen := map[string]string{}
+	for _, p := range pairings {
+		if prev, dup := seen[p.Audio]; dup {
+			t.Fatalf("candidate %q claimed twice: by %q and %q -- a double move would "+
+				"rename one sidecar onto the other", p.Audio, prev, p.Orphan)
+		}
+		seen[p.Audio] = p.Orphan
+	}
+	if len(pairings)+len(unresolved) != len(orphans) {
+		t.Errorf("every orphan must be either paired or reported: pairings=%+v unresolved=%+v", pairings, unresolved)
+	}
+}
+
+// TestResolveNameMatch_ProcessesInDescendingScoreOrder pins the whole-matrix
+// descending sort that the margin-semantics argument depends on. Both orphans
+// best-match the same candidate; the STRONGER pairing must win it regardless of
+// insertion order. The orphan filenames are chosen so that insertion order
+// (orphans sorted alphabetically) presents the WEAKER orphan first -- so this goes
+// red if the sort is dropped and pairs are consumed in matrix order.
+func TestResolveNameMatch_ProcessesInDescendingScoreOrder(t *testing.T) {
+	orphans := []string{"a-weak.lrc", "z-strong.lrc"} // alphabetical == insertion order
+	tags := map[string]lyrics.ProvenanceTags{
+		"a-weak.lrc":   {Artist: "Exact Match Ban", Title: "Exact Match Son"},
+		"z-strong.lrc": {Artist: "Exact Match Band", Title: "Exact Match Song"},
+	}
+	candidates := []string{"other.flac", "shared.flac"}
+	getProv := func(p string) audioProvenance {
+		if p == "shared.flac" {
+			return audioProvenance{artist: "Exact Match Band", title: "Exact Match Song"}
+		}
+		return audioProvenance{artist: "Zzznope Totally Unrelated", title: "Qqqnothing Alike"}
+	}
+
+	pairings, _ := resolveNameMatch(orphans, tags, candidates, getProv, 0.75, 0.05)
+	if len(pairings) != 1 {
+		t.Fatalf("pairings = %+v; want exactly 1 (both orphans contest shared.flac)", pairings)
+	}
+	if pairings[0].Orphan != "z-strong.lrc" || pairings[0].Audio != "shared.flac" {
+		t.Errorf("pairing = %+v; want z-strong.lrc -> shared.flac. The weaker orphan won the "+
+			"contested candidate, which means pairs were consumed in matrix/insertion order "+
+			"rather than descending score order.", pairings[0])
+	}
+}
+
+// TestClassify_NameMatch_NothingClearsThreshold: an orphan whose every candidate
+// scores below min_confidence is reported ambiguous and skipped cleanly -- never
+// paired arbitrarily to the least-bad candidate.
+func TestClassify_NameMatch_NothingClearsThreshold(t *testing.T) {
+	root := tempRoot(t)
+	audioA := filepath.Join(root, "D", "aaa.flac")
+	audioB := filepath.Join(root, "D", "bbb.flac")
+	orphanA := filepath.Join(root, "D", "orphan-1.lrc")
+	orphanB := filepath.Join(root, "D", "orphan-2.lrc")
+	write(t, audioA, "a")
+	write(t, audioB, "b")
+	write(t, orphanA, "[ar:Wholly Unrelated]\n[ti:Nothing Alike]\n[00:01.00]x\n")
+	write(t, orphanB, "[ar:Also Unrelated]\n[ti:Equally Different]\n[00:01.00]x\n")
+
+	cfg := defaultCfg()
+	cfg.NameMatch = true
+	cfg.MinMargin = 0.05
+	r, lib := newRealigner(root, cfg, nil)
+	withAudioProv(r, map[string]audioProv{
+		audioA: {artist: "Qqqzzz Xylophone", title: "Vvvwww Kryptic"},
+		audioB: {artist: "Mmmnnn Oboe", title: "Pppqqq Glyph"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Moves) != 0 {
+		t.Fatalf("moves = %+v; want none (nothing clears min_confidence)", res.Moves)
+	}
+	if len(res.Skips) != 2 {
+		t.Fatalf("skips = %+v; want 2 (both orphans reported)", res.Skips)
+	}
+	for _, s := range res.Skips {
+		if s.Kind != "ambiguous" {
+			t.Errorf("skip kind = %q; want ambiguous", s.Kind)
+		}
+	}
+}
+
+// TestResolveNameMatch_EmptyInputs: zero orphans and/or zero candidates must not
+// panic and must not invent a pairing.
+func TestResolveNameMatch_EmptyInputs(t *testing.T) {
+	getProv := func(string) audioProvenance { return audioProvenance{} }
+	for _, tc := range []struct {
+		name           string
+		orphans, cands []string
+		wantUnresolved int
+	}{
+		{"zero orphans, zero candidates", nil, nil, 0},
+		{"zero orphans, one candidate", nil, []string{"a.flac"}, 0},
+		{"one orphan, zero candidates", []string{"a.lrc"}, nil, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pairings, unresolved := resolveNameMatch(tc.orphans, nil, tc.cands, getProv, 0.75, 0.05)
+			if len(pairings) != 0 {
+				t.Errorf("pairings = %+v; want none", pairings)
+			}
+			if len(unresolved) != tc.wantUnresolved {
+				t.Errorf("unresolved = %+v; want %d", unresolved, tc.wantUnresolved)
+			}
+		})
 	}
 }
