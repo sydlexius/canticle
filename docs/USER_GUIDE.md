@@ -657,9 +657,14 @@ matches are ever renamed:
   `mbid` then `isrc`).
 - **heuristic** - exactly one orphaned sidecar and exactly one sidecar-less audio
   file in the same directory, whose names match closely enough (a Jaro-Winkler
-  name guard at `min_confidence`). If neither the sidecar header nor the audio
-  tags yield an artist/title, the name check is skipped and the lone pair is
-  matched positionally.
+  name guard at `min_confidence`) and *distinguishably* enough: the pair must
+  also beat the orphan's best score against every other audio file in that
+  directory - including ones that already have a sidecar - by `min_margin`.
+  Only the title is compared, never the artist; inside an album directory every
+  track shares the artist, so including it would let two unrelated songs score
+  as a match. If neither the sidecar header nor the audio tags yield an
+  artist/title, the name check is skipped and the lone pair is matched
+  positionally.
 - **heuristic-nm** - opt-in (`name_match = true`), for a directory with
   *multiple* orphaned sidecars and *multiple* sidecar-less audio files (a
   folder of renamed tracks) - the shape the single-candidate heuristic tier
@@ -692,7 +697,8 @@ line; swap `old_path`/`new_path` to undo. The behavior is tuned by the
 `require_provenance` (restrict applied moves to the exact tier), `cross_directory`
 (let an exact match move a sidecar between directories), `min_confidence`
 (the heuristic name-guard floor), `name_match` (enable the N:M matcher), and
-`min_margin` (its ambiguity-rejection threshold).
+`min_margin` (the ambiguity-rejection threshold, applied to both
+name-similarity tiers).
 
 The exact tier requires ISRC/MBID-tagged audio; libraries whose files carry no
 such tags fall back to the heuristic tier (or, with `name_match` enabled, the

@@ -39,9 +39,14 @@ func write(t *testing.T, path, content string) {
 }
 
 func defaultCfg() config.RealignConfig {
+	// MinMargin carries the production default (config.realignMinMarginDefault),
+	// because since #672 it gates the 1:1 heuristic tier too, not just the opt-in
+	// N:M matcher. Leaving it at the zero value here would make every test in
+	// this file exercise a margin rule that is switched off.
 	return config.RealignConfig{
 		IdentityKeys:  []string{"mbid", "isrc"},
 		MinConfidence: 0.75,
+		MinMargin:     0.05,
 	}
 }
 
@@ -949,5 +954,288 @@ func TestResolveNameMatch_EmptyInputs(t *testing.T) {
 				t.Errorf("unresolved = %+v; want %d", unresolved, tc.wantUnresolved)
 			}
 		})
+	}
+}
+
+// --- #672: the 1:1 heuristic tier must not attach a sidecar to the wrong song ---
+
+// TestClassify_Heuristic_SharedArtistUnrelatedTitleIsAmbiguous is the #672
+// regression, built from the production shape: one album directory, all tracks
+// by the same artist, exactly ONE orphaned sidecar and exactly ONE sidecar-less
+// audio file, and the two are UNRELATED TRACKS.
+//
+// Pre-fix, both sides were flattened to "<artist> <title>" before scoring, so
+// the shared artist prefix carried an otherwise-unrelated pair to 0.87 -- over
+// the 0.75 floor -- and the 1:1 tier, which gated on that floor alone, planned
+// the rename. The sidecar would land on a valid audio file and nothing
+// downstream would ever flag the mismatch.
+//
+// Two independent guards must each prevent the move: the artist is excluded
+// from the comparison (titles alone score ~0.59), and the 1:1 tier now requires
+// a margin over the orphan's best rival in the directory.
+func TestClassify_Heuristic_SharedArtistUnrelatedTitleIsAmbiguous(t *testing.T) {
+	const artist = "Marbled Kestrel Choir"
+	root := tempRoot(t)
+	dir := filepath.Join(root, "Album")
+	// The gap: the one audio file with no sidecar.
+	gap := filepath.Join(dir, "02 - Sunken Cartography.flac")
+	// Already-paired tracks, so the directory is 1 orphan + 1 gap.
+	paired := filepath.Join(dir, "01 - Harbor Lantern.flac")
+	write(t, gap, "a")
+	write(t, paired, "b")
+	write(t, filepath.Join(dir, "01 - Harbor Lantern.lrc"), "[00:01.00]x\n")
+	// The orphan is a stale duplicate of track 1's sidecar (a typo in its stem),
+	// so it belongs to "Harbor Lantern", NOT to the gap.
+	orphan := filepath.Join(dir, "01 - Harbor Lantren.lrc")
+	write(t, orphan, "[ar:"+artist+"]\n[ti:Harbor Lantern]\n[00:01.00]x\n")
+
+	r, lib := newRealigner(root, defaultCfg(), nil)
+	withAudioProv(r, map[string]audioProv{
+		gap:    {artist: artist, title: "Sunken Cartography"},
+		paired: {artist: artist, title: "Harbor Lantern"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	for _, mv := range res.Moves {
+		t.Errorf("planned %s -> %s (confidence %.4f). The orphan is a sidecar for %q; the only "+
+			"gap is the unrelated track %q. Their titles share nothing -- the pair only ever "+
+			"scored over the floor because both sides carried the same artist name.",
+			mv.Orphan, mv.Target, mv.Confidence, "Harbor Lantern", "Sunken Cartography")
+	}
+	if len(res.Skips) != 1 || res.Skips[0].Path != orphan || res.Skips[0].Kind != "ambiguous" {
+		t.Fatalf("skips = %+v; want exactly 1 ambiguous skip for the orphan", res.Skips)
+	}
+}
+
+// TestClassify_Heuristic_MarginAgainstAlreadyPairedAudio pins the 1:1 tier's
+// MARGIN rule specifically, in a case the score change alone does not cover:
+// the orphan's title matches the lone gap WELL (over the floor on titles
+// alone), but it matches an ALREADY-PAIRED track in the same directory just as
+// well. A name signal that cannot tell the two apart has identified nothing.
+//
+// The rival set is deliberately the directory's FULL audio list, not just its
+// gaps -- that is what makes this tier's verdict independent of how many other
+// orphans happen to be present (see the tier-consistency test below).
+func TestClassify_Heuristic_MarginAgainstAlreadyPairedAudio(t *testing.T) {
+	root := tempRoot(t)
+	dir := filepath.Join(root, "Album")
+	gap := filepath.Join(dir, "02 - take two.flac")
+	paired := filepath.Join(dir, "01 - take one.flac")
+	write(t, gap, "a")
+	write(t, paired, "b")
+	write(t, filepath.Join(dir, "01 - take one.lrc"), "[00:01.00]x\n")
+	orphan := filepath.Join(dir, "stray.lrc")
+	write(t, orphan, "[ar:Nova]\n[ti:Wandering Star]\n[00:01.00]x\n")
+
+	r, lib := newRealigner(root, defaultCfg(), nil)
+	withAudioProv(r, map[string]audioProv{
+		// Both candidates are near-identical to the orphan's title, and to each
+		// other: the gap wins by a hair, far under min_margin 0.05.
+		gap:    {artist: "Nova", title: "Wandering Star"},
+		paired: {artist: "Nova", title: "Wandering Stars"},
+	})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Moves) != 0 {
+		t.Errorf("moves = %+v; want none. The orphan scores nearly the same against the lone gap "+
+			"and against the already-paired track next to it, so the name signal cannot "+
+			"distinguish them and the pairing is a guess.", res.Moves)
+	}
+	if len(res.Skips) != 1 || res.Skips[0].Kind != "ambiguous" {
+		t.Fatalf("skips = %+v; want 1 ambiguous", res.Skips)
+	}
+	if !strings.Contains(res.Skips[0].Reason, "min_margin") {
+		t.Errorf("skip reason = %q; want it to name min_margin as the cause", res.Skips[0].Reason)
+	}
+}
+
+// TestClassify_TierConsistency_SameVerdictWhateverTheOrphanCount is the #672
+// tier-agreement property, and the reason the fix could not stop at the score.
+//
+// Observed in production: a directory held 2 orphans + 2 gaps, so the N:M tier
+// adjudicated and correctly REFUSED a pairing ("best candidate (name similarity
+// 0.87) already claimed by a stronger orphan match"). An apply then resolved the
+// OTHER orphan, the directory became 1 orphan + 1 gap, dirPair flipped true, and
+// the 1:1 tier -- which had no margin rule -- proposed the very pairing the N:M
+// tier had just refused. Whether a rename happened turned on how many unrelated
+// orphans shared the directory.
+//
+// Same directory contents, same pair, both tiers: the verdict must be REFUSE in
+// both. Stage A runs the N:M tier (2 orphans, 2 gaps). Stage B removes the
+// second orphan and its gap's competition so the SAME orphan/candidate pair is
+// adjudicated by the 1:1 tier instead.
+func TestClassify_TierConsistency_SameVerdictWhateverTheOrphanCount(t *testing.T) {
+	const artist = "Marbled Kestrel Choir"
+	// The contested pair: orphan O carries track 1's name; candidate C is track 2.
+	// Their titles are unrelated; only the shared artist ever linked them.
+	build := func(t *testing.T, twoOrphans bool) (root, orphan string, r *Realigner, lib models.Library) {
+		t.Helper()
+		root = tempRoot(t)
+		dir := filepath.Join(root, "Album")
+		c := filepath.Join(dir, "02 - Sunken Cartography.flac")
+		write(t, c, "a")
+		orphan = filepath.Join(dir, "01 - Harbor Lantren.lrc")
+		write(t, orphan, "[ar:"+artist+"]\n[ti:Harbor Lantern]\n[00:01.00]x\n")
+		prov := map[string]audioProv{c: {artist: artist, title: "Sunken Cartography"}}
+
+		if twoOrphans {
+			// A second orphan + a second gap: N:M shape.
+			c2 := filepath.Join(dir, "01 - Harbor Lantern.flac")
+			write(t, c2, "b")
+			prov[c2] = audioProv{artist: artist, title: "Harbor Lantern"}
+			o2 := filepath.Join(dir, "01 - Harbor Lantern (copy).lrc")
+			write(t, o2, "[ar:"+artist+"]\n[ti:Harbor Lantern]\n[00:01.00]x\n")
+		} else {
+			// The same second audio file, but already paired, so the directory is
+			// 1 orphan + 1 gap and dirPair is true: the 1:1 shape.
+			c2 := filepath.Join(dir, "01 - Harbor Lantern.flac")
+			write(t, c2, "b")
+			prov[c2] = audioProv{artist: artist, title: "Harbor Lantern"}
+			write(t, filepath.Join(dir, "01 - Harbor Lantern.lrc"), "[00:01.00]x\n")
+		}
+
+		cfg := defaultCfg()
+		cfg.NameMatch = true // so stage A reaches the N:M tier at all
+		r, lib = newRealigner(root, cfg, nil)
+		withAudioProv(r, prov)
+		return root, orphan, r, lib
+	}
+
+	for _, tc := range []struct {
+		name       string
+		twoOrphans bool
+	}{
+		{"N:M tier (2 orphans, 2 gaps)", true},
+		{"1:1 tier (1 orphan, 1 gap)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, orphan, r, lib := build(t, tc.twoOrphans)
+			res, err := r.PlanLibrary(lib)
+			if err != nil {
+				t.Fatalf("PlanLibrary: %v", err)
+			}
+			for _, mv := range res.Moves {
+				if mv.Orphan == orphan {
+					t.Errorf("the contested orphan was paired to %s (confidence %.4f). Its title is "+
+						"unrelated to that candidate's; only the shared artist ever linked them. "+
+						"The other tier refuses this pair, and which tier adjudicates it depends "+
+						"only on how many OTHER orphans share the directory.", mv.Target, mv.Confidence)
+				}
+			}
+			var reported bool
+			for _, s := range res.Skips {
+				if s.Path == orphan {
+					reported = true
+					if s.Kind != "ambiguous" {
+						t.Errorf("skip kind = %q; want ambiguous", s.Kind)
+					}
+				}
+			}
+			if !reported {
+				t.Errorf("the contested orphan must be reported, not silently dropped: moves=%+v skips=%+v", res.Moves, res.Skips)
+			}
+		})
+	}
+}
+
+// TestClassify_Heuristic_TrueMatchesStillPair guards the fix against
+// over-correction, using the two real production pairings applied in the run
+// that surfaced #672: an APOSTROPHE normalization and a TRACK RENUMBER. Both
+// are 1:1 directories whose orphan and gap carry the same title with only
+// punctuation or a numeric prefix differing, and both MUST still pair.
+func TestClassify_Heuristic_TrueMatchesStillPair(t *testing.T) {
+	const artist = "Marbled Kestrel Choir"
+	for _, tc := range []struct {
+		name              string
+		audioName, title  string
+		orphanName        string
+		orphanArt, orphTi string
+	}{
+		{
+			name:      "apostrophe normalization",
+			audioName: "04 - Dont Look Back.flac", title: "Don't Look Back",
+			orphanName: "04 - Don't Look Back.lrc",
+			orphanArt:  artist, orphTi: "Don't Look Back",
+		},
+		{
+			name:      "track renumber",
+			audioName: "07 - Paper Compass.flac", title: "Paper Compass",
+			orphanName: "03 - Paper Compass.lrc",
+			orphanArt:  artist, orphTi: "Paper Compass",
+		},
+		{
+			name:      "untagged sidecar, stem-only both sides",
+			audioName: "09 - Winter Light.flac", title: "",
+			orphanName: "09 - Winter Lite.txt",
+			orphanArt:  "", orphTi: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := tempRoot(t)
+			dir := filepath.Join(root, "Album")
+			audio := filepath.Join(dir, tc.audioName)
+			orphan := filepath.Join(dir, tc.orphanName)
+			write(t, audio, "a")
+			body := "[00:01.00]x\n"
+			if tc.orphTi != "" {
+				body = "[ar:" + tc.orphanArt + "]\n[ti:" + tc.orphTi + "]\n" + body
+			}
+			write(t, orphan, body)
+
+			r, lib := newRealigner(root, defaultCfg(), nil)
+			withAudioProv(r, map[string]audioProv{audio: {artist: artist, title: tc.title}})
+
+			res, err := r.PlanLibrary(lib)
+			if err != nil {
+				t.Fatalf("PlanLibrary: %v", err)
+			}
+			if len(res.Moves) != 1 {
+				t.Fatalf("moves = %+v, skips = %+v; want exactly 1 heuristic move -- this is a REAL "+
+					"production pairing that must not regress", res.Moves, res.Skips)
+			}
+			if got, want := filepath.Base(res.Moves[0].Target), strings.TrimSuffix(tc.audioName, filepath.Ext(tc.audioName))+filepath.Ext(tc.orphanName); got != want {
+				t.Errorf("target = %q; want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestClassify_Heuristic_PositionalDegradationSurvives: when NEITHER side
+// carries a name AND neither stem resembles the other, the guard degrades to a
+// positional pairing (the "a plain .txt still realigns" contract). The #672
+// margin rule must not fire on that degraded verdict: its score is a
+// placeholder zero, and a margin test against a zero score would refuse every
+// positional pairing in any directory with a second audio file.
+func TestClassify_Heuristic_PositionalDegradationSurvives(t *testing.T) {
+	root := tempRoot(t)
+	dir := filepath.Join(root, "Album")
+	gap := filepath.Join(dir, "zzz-renamed.flac")
+	paired := filepath.Join(dir, "other-track.flac")
+	write(t, gap, "a")
+	write(t, paired, "b")
+	write(t, filepath.Join(dir, "other-track.txt"), "instrumental\n")
+	orphan := filepath.Join(dir, "qqq-original.txt")
+	write(t, orphan, "instrumental\n") // no [ar:]/[ti:] header at all
+
+	// readProv returns empty artist/title for every audio file, so neither side
+	// of either comparison carries a name.
+	r, lib := newRealigner(root, defaultCfg(), nil)
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Moves) != 1 || res.Moves[0].Orphan != orphan {
+		t.Fatalf("moves = %+v, skips = %+v; want the positional 1:1 pairing to survive -- a plain "+
+			".txt with no name evidence on either side must still realign", res.Moves, res.Skips)
+	}
+	if res.Moves[0].Target != filepath.Join(dir, "zzz-renamed.txt") {
+		t.Errorf("target = %q; want the lone gap's stem", res.Moves[0].Target)
 	}
 }
