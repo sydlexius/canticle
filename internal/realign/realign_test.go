@@ -805,6 +805,54 @@ func TestResolveNameMatch_ProcessesInDescendingScoreOrder(t *testing.T) {
 	}
 }
 
+// TestResolveNameMatch_ExactTieResolvesDeterministically pins the TIEBREAK half of
+// the ordering. Descending-by-score alone leaves exactly-equal scores in whatever
+// order the (non-stable) sort happens to leave them, and two sidecars carrying
+// identical [ar:]/[ti:] headers score identically against the same candidate --
+// a routine situation, not a contrived one. Which of them claims the contested
+// candidate then decides which file gets RENAMED, so the ordering must be total,
+// not merely "sorted enough". The specified total order is (score desc, orphan
+// asc, audio asc), so the lexicographically-first orphan wins an exact tie.
+func TestResolveNameMatch_ExactTieResolvesDeterministically(t *testing.T) {
+	identicalTags := lyrics.ProvenanceTags{Artist: "Exact Match Band", Title: "Exact Match Song"}
+	tags := map[string]lyrics.ProvenanceTags{
+		"aaa.lrc": identicalTags,
+		"mmm.lrc": identicalTags,
+		"zzz.lrc": identicalTags,
+	}
+	candidates := []string{"other.flac", "shared.flac"}
+	getProv := func(p string) audioProvenance {
+		if p == "shared.flac" {
+			return audioProvenance{artist: "Exact Match Band", title: "Exact Match Song"}
+		}
+		return audioProvenance{artist: "Zzznope Totally Unrelated", title: "Qqqnothing Alike"}
+	}
+
+	// Feed every permutation of the orphan slice. A fixed input makes Go's sort
+	// deterministic whether or not a tiebreak exists, so repeating one arrangement
+	// proves nothing; only varying the arrangement distinguishes a TOTAL order
+	// from an incidental one. The winner must be the same orphan every time.
+	for _, perm := range [][]string{
+		{"aaa.lrc", "mmm.lrc", "zzz.lrc"},
+		{"aaa.lrc", "zzz.lrc", "mmm.lrc"},
+		{"mmm.lrc", "aaa.lrc", "zzz.lrc"},
+		{"mmm.lrc", "zzz.lrc", "aaa.lrc"},
+		{"zzz.lrc", "aaa.lrc", "mmm.lrc"},
+		{"zzz.lrc", "mmm.lrc", "aaa.lrc"},
+	} {
+		pairings, _ := resolveNameMatch(perm, tags, candidates, getProv, 0.75, 0.05)
+		if len(pairings) != 1 {
+			t.Fatalf("input %v: pairings = %+v; want exactly 1 (all three orphans tie for shared.flac)", perm, pairings)
+		}
+		if pairings[0].Orphan != "aaa.lrc" || pairings[0].Audio != "shared.flac" {
+			t.Fatalf("input %v: pairing = %+v; want aaa.lrc -> shared.flac. Three orphans score "+
+				"IDENTICALLY against shared.flac, so the winner is decided purely by the "+
+				"tiebreak. Varying the input order changed which one won, which means the "+
+				"ordering is not total and a destructive rename turns on slice order.", perm, pairings[0])
+		}
+	}
+}
+
 // TestClassify_NameMatch_NothingClearsThreshold: an orphan whose every candidate
 // scores below min_confidence is reported ambiguous and skipped cleanly -- never
 // paired arbitrarily to the least-bad candidate.

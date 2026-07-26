@@ -613,23 +613,29 @@ type nmUnresolved struct {
 //   - the score clears minConf (the same floor the single-candidate heuristic
 //     tier uses);
 //   - the candidate is not already claimed by a higher-scoring pairing;
-//   - the pairing is the orphan's unambiguous best: its top surviving score
-//     exceeds its runner-up (among candidates still unclaimed at evaluation
-//     time -- see below) by at least minMargin.
+//   - the pairing is the orphan's unambiguous best: its score exceeds its
+//     runner-up over the FULL ORIGINAL candidate set by at least minMargin.
 //
 // Margin semantics when a candidate is already claimed: the runner-up is
-// recomputed against only the REMAINING (unclaimed) candidates, not the
-// original full set. This is the more permissive reading -- once a candidate
-// is claimed it can no longer manufacture a false ambiguity for a different
-// orphan -- and it is the defensible one because a claimed candidate is no
-// longer a real alternative the orphan could have been placed against; an
-// orphan is not penalized for having been a good (but second) fit for
-// something another orphan claimed first. It is intentionally the more
-// eager of the two readings, so it is bounded by processing orphans in
-// strictly descending score order (an orphan's absolute best pairing is
-// always evaluated, and hence claimed, before any lower-scoring pairing that
-// might have wanted the same candidate), which keeps a greedy accept from
-// ever displacing a genuinely stronger match.
+// computed against every candidate in the original matrix, INCLUDING ones
+// already claimed by a higher-scoring orphan. Claiming is a statement about
+// AVAILABILITY; the margin rule measures DISCRIMINABILITY -- whether the name
+// signal can tell the candidates apart at all. Another orphan taking C1 does
+// not make this orphan's signal any sharper, so excluding C1 from the scan
+// would convert a genuine near-tie into a confident pairing and destroy the
+// evidence that the decision was a coin flip. Non-displacement is not
+// non-ambiguity. Greedy accept in descending score order still guarantees no
+// pairing displaces a stronger one; the margin rule is the separate guarantee
+// that an accepted pairing was distinguishable in the first place.
+//
+// Single-candidate matrices (runnerUp stays -1 because the directory offered
+// exactly one candidate) pair on minConf alone. There is no alternative for
+// the name signal to be confused with, so there is nothing for a margin to
+// measure -- the same reasoning under which the strict 1:1 heuristic tier
+// guards on minConf only. Any orphan-side contest for that lone candidate
+// (several orphans clearing minConf against it) is resolved by the claim guard
+// plus descending order, exactly as it is for a contested candidate in a wider
+// matrix; the margin rule was never the mechanism for that case.
 //
 // Returns the accepted pairings and, for every orphan that did not resolve, a
 // reason suitable for a Skip.
@@ -649,8 +655,20 @@ func resolveNameMatch(orphans []string, orphanTags map[string]lyrics.ProvenanceT
 	// Sort all pairs by descending score so the orphan/candidate combination
 	// with the strongest signal in the whole matrix is always considered --
 	// and, if accepted, claims its candidate -- before any weaker pairing that
-	// might contest it.
-	sort.Slice(scores, func(i, j int) bool { return scores[i].s > scores[j].s })
+	// might contest it. The ordering must be TOTAL: this decides which orphan
+	// wins a contested candidate, and that decision moves files on disk. Exact
+	// ties (identical tags on two sidecars are common) would otherwise resolve
+	// arbitrarily and differently from run to run, so ties break on orphan then
+	// audio path, both of which are unique within the matrix.
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].s != scores[j].s {
+			return scores[i].s > scores[j].s
+		}
+		if scores[i].orphan != scores[j].orphan {
+			return scores[i].orphan < scores[j].orphan
+		}
+		return scores[i].audio < scores[j].audio
+	})
 
 	claimedAudio := map[string]bool{}
 	resolved := map[string]bool{}
@@ -667,20 +685,21 @@ func resolveNameMatch(orphans []string, orphanTags map[string]lyrics.ProvenanceT
 			}
 			continue
 		}
-		// Find this orphan's runner-up among candidates NOT yet claimed by
-		// another orphan (top.audio itself excluded).
+		// Find this orphan's runner-up over the FULL original candidate set
+		// (top.audio itself excluded). Claimed candidates are deliberately
+		// still counted -- see the margin-semantics note on the doc comment.
 		runnerUp := -1.0
 		for _, s := range scores {
 			if s.orphan != top.orphan || s.audio == top.audio {
-				continue
-			}
-			if claimedAudio[s.audio] {
 				continue
 			}
 			if s.s > runnerUp {
 				runnerUp = s.s
 			}
 		}
+		// runnerUp < 0 means the matrix held exactly one candidate, so there is
+		// no alternative the name signal could be confused with and nothing for
+		// a margin to measure; minConf alone gates the pairing.
 		if runnerUp >= 0 && top.s-runnerUp < minMargin {
 			if _, has := unresolvedReason[top.orphan]; !has {
 				unresolvedReason[top.orphan] = fmt.Sprintf("name similarity %.2f too close to runner-up %.2f (margin %.2f < min_margin %.2f)", top.s, runnerUp, top.s-runnerUp, minMargin)
