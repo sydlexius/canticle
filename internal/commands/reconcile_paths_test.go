@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +21,11 @@ import (
 
 // seedReconcilePathsRow inserts a scan_results row for filePath plus a linked
 // work_queue item (with a real file on disk), so reconcile-paths has a source to
-// stat. Returns nothing; the tests assert via row counts and command output.
+// stat. It stamps a recording_mbid unique to filePath (no match ANYWHERE in
+// the library) so the row still hits the #640 genuine-delete outcome the
+// existing assertions here exercise -- an identity-absent row would instead be
+// retained, not deleted. Returns nothing; the tests assert via row counts and
+// command output.
 func seedReconcilePathsRow(t *testing.T, ctx context.Context, dbPath, filePath string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -34,8 +40,8 @@ func seedReconcilePathsRow(t *testing.T, ctx context.Context, dbPath, filePath s
 	}
 	defer sqlDB.Close() //nolint:errcheck // test cleanup
 	res, err := sqlDB.ExecContext(ctx,
-		`INSERT INTO scan_results (library_id, file_path, artist, title, status) VALUES (1, ?, 'Artist', 'Title', 'processing')`,
-		filePath)
+		`INSERT INTO scan_results (library_id, file_path, artist, title, status, recording_mbid) VALUES (1, ?, 'Artist', 'Title', 'processing', ?)`,
+		filePath, "mbid-nomatch-"+filePath)
 	if err != nil {
 		t.Fatalf("insert scan_result: %v", err)
 	}
@@ -301,7 +307,7 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 	// then cancel once it has reconciled to exit the ticker loop.
 	cctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	go func() { runSweeper(cctx, sqlDB, time.Hour); close(done) }()
+	go func() { runSweeper(cctx, sqlDB, time.Hour, nil); close(done) }()
 
 	count := func() int {
 		var n int
@@ -321,4 +327,125 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// TestRunSweeperLogsRelinkAndRetainOutcomes: the periodic sweep is unattended,
+// so its LOG is the only surface an operator has. A relink silently moved a row
+// to a new path and a retain is the keep-and-report path -- a row the sweep
+// deliberately declined to touch, which will be declined again on every
+// subsequent tick until a human resolves it. Logging only the prune count made
+// both outcomes invisible.
+//
+// One sweep is driven over a fixture that produces BOTH: a gone row whose MBID
+// resolves uniquely to a present file (relink) and a gone row with no identity
+// at all (retain, "never deleted on a guess").
+func TestRunSweeperLogsRelinkAndRetainOutcomes(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupReconcilePaths(t)
+	_ = cfgPath
+
+	// Relink pair: the gone row's directory is removed (Directory granularity),
+	// and a present file elsewhere in the library carries the same MBID.
+	goneMoved := filepath.Join(root, "ArtistR", "AlbumOld", "01. track.flac")
+	movedTo := filepath.Join(root, "ArtistR", "AlbumNew", "01. track.flac")
+	seedReconcilePathsRowWithIdentity(t, ctx, dbPath, goneMoved, "mbid-r-shared")
+	seedReconcilePathsPresentFile(t, ctx, dbPath, movedTo, "mbid-r-shared")
+	// Retain row: identity absent, so it is kept and reported, never deleted.
+	goneNoIdentity := filepath.Join(root, "ArtistS", "01. gone.flac")
+	seedReconcilePathsRowWithIdentity(t, ctx, dbPath, goneNoIdentity, "")
+	// A surviving track keeps the library root non-empty so the availability
+	// guard treats it as mounted.
+	seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistT", "01. kept.flac"))
+
+	for _, dir := range []string{filepath.Dir(goneMoved), filepath.Dir(goneNoIdentity)} {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Fatalf("remove %s: %v", dir, err)
+		}
+	}
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+
+	var logBuf lockedBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { runSweeper(cctx, sqlDB, time.Hour, nil); close(done) }()
+
+	// Wait for the startup sweep to emit both lines, then stop the ticker loop.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s := logBuf.String()
+		if strings.Contains(s, "relinked moved sources") && strings.Contains(s, "retained sources") {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	got := logBuf.String()
+	// The relink line, with the paths an operator needs to verify the move.
+	if !strings.Contains(got, "relinked moved sources") {
+		t.Errorf("sweep did not log the relink outcome; log:\n%s", got)
+	}
+	if !strings.Contains(got, goneMoved) || !strings.Contains(got, movedTo) {
+		t.Errorf("relink log line lacks the old/new paths (want %q -> %q); log:\n%s", goneMoved, movedTo, got)
+	}
+	// The retain line, with the path and a non-empty reason.
+	if !strings.Contains(got, "retained sources it declined to act on") {
+		t.Errorf("sweep did not log the retain outcome -- a held-back row would be invisible; log:\n%s", got)
+	}
+	if !strings.Contains(got, goneNoIdentity) {
+		t.Errorf("retain log line lacks the retained source path %q; log:\n%s", goneNoIdentity, got)
+	}
+	if !strings.Contains(got, "identity absent") {
+		t.Errorf("retain log line lacks the reason; log:\n%s", got)
+	}
+	// A retained row needs a human, so it must not be buried at Info.
+	if !strings.Contains(got, "level=WARN") {
+		t.Errorf("retain outcome was not logged at WARN; log:\n%s", got)
+	}
+	// The artifact behind the log: the retained row really did survive, and the
+	// relinked row's work_queue entry really did move.
+	var kept int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT count(*) FROM scan_results WHERE file_path = ?`, goneNoIdentity).Scan(&kept); err != nil {
+		t.Fatalf("count retained: %v", err)
+	}
+	if kept != 1 {
+		t.Errorf("retained row was deleted: %d rows for %s, want 1", kept, goneNoIdentity)
+	}
+	var moved int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT count(*) FROM work_queue WHERE source_path = ?`, movedTo).Scan(&moved); err != nil {
+		t.Fatalf("count relinked: %v", err)
+	}
+	if moved != 1 {
+		t.Errorf("relinked work_queue row not at the new path: %d rows for %s, want 1", moved, movedTo)
+	}
+}
+
+// lockedBuffer is a concurrency-safe io.Writer for capturing slog output from
+// the sweeper goroutine while the test goroutine polls it. slog handlers do not
+// serialize writes across goroutines, and bytes.Buffer is not safe for
+// concurrent use, so -race would flag a bare buffer here.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
