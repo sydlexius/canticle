@@ -305,6 +305,25 @@ func TestIndexMetadataInterruptStillPrintsSummary(t *testing.T) {
 
 	ctx := newCancelDuringWalkCtx()
 
+	// committed is signaled synchronously, from inside the walk goroutine,
+	// immediately after each row commits -- see indexMetadataRowCommitted.
+	// This replaces a 1ms-sleep polling loop that re-opened the (single-
+	// connection) test DB on every iteration via countAudioMetadataRows,
+	// which raced the walk goroutine's own db.Open for the WAL-mode pragma
+	// and intermittently failed with "database is locked" well inside the
+	// deadline, aborting the test outright rather than just mistiming the
+	// interrupt. The channel also removes the interleaving gap the polling
+	// loop left between "observed a row" and "called arm()", during which
+	// the walk could make arbitrary further progress under load.
+	committed := make(chan struct{}, 1)
+	indexMetadataRowCommitted = func() {
+		select {
+		case committed <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { indexMetadataRowCommitted = nil })
+
 	var out bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
@@ -315,12 +334,10 @@ func TestIndexMetadataInterruptStillPrintsSummary(t *testing.T) {
 	// least one file has actually been committed, so the interrupt genuinely
 	// lands mid-walk with real partial work behind it, not before the walk
 	// even starts.
-	deadline := time.Now().Add(5 * time.Second)
-	for countAudioMetadataRows(t, dbPath) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the first row to be committed")
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the first row to be committed")
 	}
 	ctx.arm()
 

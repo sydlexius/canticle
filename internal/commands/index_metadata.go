@@ -20,6 +20,17 @@ import (
 	"github.com/sydlexius/canticle/internal/scanner"
 )
 
+// indexMetadataRowCommitted, when non-nil, is invoked synchronously
+// immediately after walkIndexMetadata successfully commits a row to
+// audio_metadata (--yes runs only). It is a test-only synchronization seam
+// (default nil = no-op in production, the same pattern as
+// watcher.Watcher.armed) that lets a test observe "a row has just landed in
+// the DB" deterministically -- via a channel send -- instead of polling
+// countAudioMetadataRows on a 1ms sleep loop, which raced the DB's
+// single-connection WAL setup on every db.Open and made the observed timing
+// depend on scheduler luck rather than an actual ordering guarantee.
+var indexMetadataRowCommitted func()
+
 // runIndexMetadata walks a library's audio files and records the full tag set
 // into audio_metadata (#646). Dry-run by default; --yes writes. A file whose
 // (path, mtime, size) still matches its row is skipped without being opened,
@@ -282,6 +293,9 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, root string,
 		if args.Yes {
 			if rerr := store.Record(ctx, canonPath, facts); rerr != nil {
 				return fmt.Errorf("index-metadata: record %q: %w", canonPath, rerr)
+			}
+			if indexMetadataRowCommitted != nil {
+				indexMetadataRowCommitted()
 			}
 		}
 		*indexed++
