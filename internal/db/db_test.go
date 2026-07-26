@@ -910,3 +910,93 @@ func TestMigration034TimingOutcomeUpDown(t *testing.T) {
 		}
 	}
 }
+
+// TestMigration037ScanResultsIdentityUpDown verifies migration 037 adds
+// scan_results.isrc/recording_mbid as nullable-semantics (” = absent)
+// additive columns, that a pre-existing row reads back empty (never a
+// fabricated identity), that non-empty values round-trip, and that the
+// down-migration removes both columns and their partial indexes.
+func TestMigration037ScanResultsIdentityUpDown(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mig037.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	applyOpenPragmas(ctx, t, sqlDB)
+
+	migFS, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("sub migrations fs: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, migFS)
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 36); err != nil {
+		t.Fatalf("UpTo(36): %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO libraries (path, name) VALUES ('/music', 'Music')`,
+	); err != nil {
+		t.Fatalf("seed library: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO scan_results (library_id, file_path, artist, title, status)
+         VALUES (1, '/music/a.flac', 'Artist', 'Title', 'pending')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	if _, err := provider.UpTo(ctx, 37); err != nil {
+		t.Fatalf("UpTo(37): %v", err)
+	}
+
+	// A pre-existing row reads back empty identity, never NULL and never a
+	// fabricated value -- '' is the documented "never enriched" sentinel.
+	var isrc, mbid string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT isrc, recording_mbid FROM scan_results WHERE file_path = '/music/a.flac'`).Scan(&isrc, &mbid); err != nil {
+		t.Fatalf("query identity columns: %v", err)
+	}
+	if isrc != "" || mbid != "" {
+		t.Errorf("pre-existing row identity = (%q, %q); want empty", isrc, mbid)
+	}
+
+	// Non-empty values round-trip.
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE scan_results SET isrc = 'USABC1234567', recording_mbid = 'mbid-abc-123' WHERE file_path = '/music/a.flac'`,
+	); err != nil {
+		t.Fatalf("update identity columns: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT isrc, recording_mbid FROM scan_results WHERE file_path = '/music/a.flac'`).Scan(&isrc, &mbid); err != nil {
+		t.Fatalf("re-query identity columns: %v", err)
+	}
+	if isrc != "USABC1234567" || mbid != "mbid-abc-123" {
+		t.Errorf("identity = (%q, %q); want (USABC1234567, mbid-abc-123)", isrc, mbid)
+	}
+
+	// Down-migration removes both columns and their partial indexes.
+	if _, err := provider.DownTo(ctx, 36); err != nil {
+		t.Fatalf("DownTo(36): %v", err)
+	}
+	for _, col := range []string{"isrc", "recording_mbid"} {
+		var name string
+		err := sqlDB.QueryRowContext(ctx,
+			`SELECT name FROM pragma_table_info('scan_results') WHERE name = ?`, col).Scan(&name)
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("%s column still present after down-migration (err=%v, name=%q); want removed", col, err, name)
+		}
+	}
+	for _, idx := range []string{"idx_scan_results_mbid", "idx_scan_results_isrc"} {
+		var name string
+		err := sqlDB.QueryRowContext(ctx,
+			`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, idx).Scan(&name)
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("index %s still present after down-migration (err=%v); want removed", idx, err)
+		}
+	}
+}

@@ -25,9 +25,9 @@ import (
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
-	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
@@ -144,7 +144,7 @@ func (r *Realigner) plan(scopeRoot, poolRoot string, libraryID int64) (Result, e
 		pool = poolAudio
 	}
 
-	identityKeys := NormalizeIdentityKeys(r.cfg.IdentityKeys)
+	identityKeys := identity.NormalizeKeys(r.cfg.IdentityKeys)
 	provCache := map[string]audioProvenance{}
 	getProv := func(p string) audioProvenance {
 		if v, ok := provCache[p]; ok {
@@ -183,7 +183,7 @@ func (r *Realigner) plan(scopeRoot, poolRoot string, libraryID int64) (Result, e
 
 // classifyDir classifies every orphan in one directory into the four tiers,
 // appending moves/skips to res.
-func (r *Realigner) classifyDir(dir string, de *dirEntry, pool, identityKeys []string, getProv func(string) audioProvenance, claimed map[string]bool, libraryID int64, res *Result) {
+func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identityKeys identity.Keys, getProv func(string) audioProvenance, claimed map[string]bool, libraryID int64, res *Result) {
 	audioStems := stemSet(de.audio)
 	sidecarStems := stemSet(de.sidecars)
 	orphans := make([]string, 0)
@@ -460,58 +460,56 @@ func walk(root string) (map[string]*dirEntry, []string, error) {
 	return dirs, allAudio, nil
 }
 
-// resolveExact finds the unique audio file in pool whose embedded ISRC or MBID
-// matches the orphan's, honoring identityKeys order (most authoritative first).
+// resolveExact is a thin adapter over the shared identity exact tier: it hands
+// the shared resolver a LAZY sequence of identity.Candidate values over
+// realign's pool, each realized by getProv (an ID3 tag READ off disk, since
+// realign has no persisted identity store of its own). Delegating the verdict
+// keeps sidecar re-attachment from ever disagreeing with prune's row
+// re-linking about where a file went.
+//
+// The sequence -- not a materialized slice -- is what preserves the
+// pre-extraction access pattern: identity.ResolveExactSeq pulls candidates
+// only from inside its per-key loop and only for a key the orphan actually
+// carries a value for, so an orphan with no [isrc:]/[mbid:] header reads ZERO
+// audio files here (it used to read the entire pool). getProv memoizes per
+// plan() run, so the at-most-once-per-key re-iteration costs no extra reads.
+//
 // Returns ("", "none") on no match, (path, "unique") on a single match, and
 // ("", "conflict") when more than one audio shares the same id.
-func resolveExact(tags lyrics.ProvenanceTags, identityKeys, pool []string, getProv func(string) audioProvenance) (string, string) {
-	for _, key := range identityKeys {
-		id := strings.TrimSpace(orphanKeyValue(tags, key))
-		if id == "" {
-			continue
-		}
-		var matches []string
+func resolveExact(tags lyrics.ProvenanceTags, identityKeys identity.Keys, pool []string, getProv func(string) audioProvenance) (string, string) {
+	candidates := func(yield func(identity.Candidate) bool) {
 		for _, a := range pool {
 			pv := getProv(a)
 			if pv.err != nil {
+				// Unreadable audio cannot be matched on identity it never
+				// yielded; skip it rather than let a zero-valued provenance
+				// masquerade as an empty-but-present identity.
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(audioKeyValue(pv, key)), id) {
-				matches = append(matches, a)
+			if !yield(identity.Candidate{Ref: a, MBID: pv.mbid, ISRC: pv.isrc, Artist: pv.artist, Title: pv.title}) {
+				return
 			}
 		}
-		switch len(matches) {
-		case 0:
-			continue
-		case 1:
-			return matches[0], "unique"
-		default:
-			return "", "conflict"
-		}
 	}
-	return "", "none"
+	verdict, ref := identity.ResolveExactSeq(tags.MBID, tags.ISRC, identityKeys, candidates)
+	switch verdict {
+	case identity.VerdictUnique:
+		return ref, "unique"
+	case identity.VerdictConflict:
+		return "", "conflict"
+	default:
+		return "", "none"
+	}
 }
 
-// heuristicNameGuard implements the min_confidence name guard for the heuristic
-// tier, comparing the orphan's [ar:]/[ti:] header (or sidecar stem) against the
-// candidate audio's artist/title via Jaro-Winkler. Degrades to positional matching
-// (returns true) when neither side yields a name, so a plain .txt still realigns.
+// heuristicNameGuard is a thin adapter over the shared
+// identity.HeuristicNameGuard tier, comparing the orphan's [ar:]/[ti:] header
+// (or sidecar stem) against the candidate audio's artist/title via
+// Jaro-Winkler. Degrades to positional matching (returns true) when neither
+// side yields a name, so a plain .txt still realigns.
 func heuristicNameGuard(tags lyrics.ProvenanceTags, orphanStem string, audio audioProvenance, audioStem string, minConf float64) (bool, float64) {
-	hasOrphanName := tags.Artist != "" || tags.Title != ""
-	hasAudioName := audio.artist != "" || audio.title != ""
-	if !hasOrphanName && !hasAudioName {
-		return true, 0
-	}
-	orphanStr := orphanStem
-	if hasOrphanName {
-		orphanStr = strings.TrimSpace(tags.Artist + " " + tags.Title)
-	}
-	audioStr := audioStem
-	if hasAudioName {
-		audioStr = strings.TrimSpace(audio.artist + " " + audio.title)
-	}
-	score := normalize.MatchConfidence(orphanStr, audioStr)
-	return score >= minConf, score
+	candidate := identity.Candidate{Artist: audio.artist, Title: audio.title}
+	return identity.HeuristicNameGuard(tags.Artist, tags.Title, orphanStem, candidate, audioStem, minConf)
 }
 
 // appendBackup writes and fsyncs one JSONL backup record for an applied move, so
@@ -580,40 +578,10 @@ func stemSet(paths []string) map[string]bool {
 
 // NormalizeIdentityKeys lowercases, filters to the known identity keys (mbid,
 // isrc), and de-duplicates while preserving order. Exported so the CLI can render
-// the effective key list in its header.
+// the effective key list in its header. Delegates to the shared
+// identity.NormalizeKeys so realign and prune read config.RealignConfig the
+// same way; kept as a []string-returning wrapper so the existing CLI call site
+// (internal/commands/realign.go) needs no signature change.
 func NormalizeIdentityKeys(keys []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		k = strings.ToLower(strings.TrimSpace(k))
-		if k != "mbid" && k != "isrc" {
-			continue
-		}
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		out = append(out, k)
-	}
-	return out
-}
-
-func orphanKeyValue(tags lyrics.ProvenanceTags, key string) string {
-	switch key {
-	case "mbid":
-		return tags.MBID
-	case "isrc":
-		return tags.ISRC
-	}
-	return ""
-}
-
-func audioKeyValue(pv audioProvenance, key string) string {
-	switch key {
-	case "mbid":
-		return pv.mbid
-	case "isrc":
-		return pv.isrc
-	}
-	return ""
+	return []string(identity.NormalizeKeys(keys))
 }
