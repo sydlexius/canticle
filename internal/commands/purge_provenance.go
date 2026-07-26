@@ -19,16 +19,34 @@ import (
 	"github.com/sydlexius/canticle/internal/purgeprovenance"
 )
 
-// purgeProvenanceBackupRecord is one JSONL line capturing a deleted sidecar and
-// the database rows reset for it, so the operation is auditable and
-// hand-restorable (re-scan will re-fetch; the row keys let an operator find
-// what was requeued). Written and fsynced before the sidecar it protects is
-// deleted (backup-first / write-ahead).
+// purgeProvenanceBackupRecord is one JSONL line capturing a deleted sidecar --
+// its full byte content plus the database rows reset for it -- so the operation
+// is auditable and genuinely hand-restorable: writing Content back to Path
+// reconstructs the file exactly. Written and fsynced before the sidecar it
+// protects is deleted (backup-first / write-ahead).
+//
+// The content is not optional garnish. The purge invalidates the lyrics_cache
+// row carrying the same lyrics in the same transaction that resets the queue
+// rows, so after a run this record is the ONLY surviving copy. Without it a
+// hand-edited sidecar, or one whose provider no longer serves the track, is
+// unrecoverable; so is any sidecar no scan_results row claims (nothing is
+// requeued to rewrite it).
 type purgeProvenanceBackupRecord struct {
 	Path          string  `json:"path"`
 	ScanResultIDs []int64 `json:"scan_result_ids,omitempty"`
 	WorkItemIDs   []int64 `json:"work_item_ids,omitempty"`
+	// Content is the sidecar's bytes as they were on disk, base64-encoded by
+	// encoding/json. Captured before the delete; a capture failure aborts that
+	// sidecar's deletion rather than losing it.
+	Content []byte `json:"content"`
 }
+
+// purgeProvenanceMaxBackupBytes caps how large a sidecar the backup will
+// capture. Lyrics files are kilobytes; anything past this is not a sidecar this
+// command should be silently swallowing into a JSONL line. Exceeding it is an
+// error, which (backup-first) leaves the file on disk untouched -- never a
+// truncated record standing in for a deleted file.
+const purgeProvenanceMaxBackupBytes = 4 << 20 // 4 MiB
 
 // runPurgeProvenance bulk-deletes .lrc/.txt sidecars matching a provenance
 // filter (--source or --no-source) and requeues their coupled work_queue /
@@ -151,13 +169,21 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	return 0
 }
 
-// appendPurgeProvenanceBackup writes and fsyncs one JSONL record per deleted
-// sidecar so the backup is durable before the delete it protects.
+// appendPurgeProvenanceBackup reads the sidecar's bytes and writes and fsyncs
+// one JSONL record per deleted sidecar, so the backup is durable -- and
+// complete -- before the delete it protects. Any failure here (read or write)
+// is returned, which aborts that sidecar's deletion: a file is never deleted
+// without a restorable copy of its content.
 func appendPurgeProvenanceBackup(f *os.File, rec purgeprovenance.Record) error {
+	content, err := readPurgeProvenanceSidecar(rec.Path)
+	if err != nil {
+		return err
+	}
 	b, err := json.Marshal(purgeProvenanceBackupRecord{
 		Path:          rec.Path,
 		ScanResultIDs: rec.ScanResultIDs,
 		WorkItemIDs:   rec.WorkItemIDs,
+		Content:       content,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal purge-provenance backup record: %w", err)
@@ -169,4 +195,25 @@ func appendPurgeProvenanceBackup(f *os.File, rec purgeprovenance.Record) error {
 		return fmt.Errorf("sync purge-provenance backup record: %w", err)
 	}
 	return nil
+}
+
+// readPurgeProvenanceSidecar reads a sidecar's bytes for the backup record.
+// Lstat-gated: the purge never follows a symlink, so neither does the backup,
+// and an oversized file is refused outright rather than captured partially.
+func readPurgeProvenanceSidecar(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat sidecar %q for backup: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to back up symlinked sidecar %q", path)
+	}
+	if fi.Size() > purgeProvenanceMaxBackupBytes {
+		return nil, fmt.Errorf("sidecar %q is %d bytes, over the %d-byte backup limit; not deleting it", path, fi.Size(), purgeProvenanceMaxBackupBytes)
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // G304: path is a sidecar enumerated from a configured library root, not untrusted input
+	if err != nil {
+		return nil, fmt.Errorf("read sidecar %q for backup: %w", path, err)
+	}
+	return b, nil
 }

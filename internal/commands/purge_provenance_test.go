@@ -13,6 +13,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/purgeprovenance"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -191,6 +192,111 @@ func TestPurgeProvenance_ApplyDeletesBacksUpAndRequeues(t *testing.T) {
 	}
 	if !strings.Contains(buf2.String(), "deleted 0") {
 		t.Errorf("second run want 'deleted 0'; got: %s", buf2.String())
+	}
+}
+
+// TestPurgeProvenance_BackupRoundTripsFileContent proves the JSONL record is
+// genuinely restorable: after a purge deletes the sidecar AND invalidates the
+// lyrics_cache row that held the same text, the record is the only surviving
+// copy. Reconstructing the file from it must reproduce the original bytes
+// EXACTLY -- byte-for-byte, including the header, CRLF line endings and the
+// absence of a trailing newline.
+func TestPurgeProvenance_BackupRoundTripsFileContent(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
+	target := filepath.Join(root, "ArtistA", "one.lrc")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Deliberately awkward bytes: CRLF, a UTF-8 BOM, non-ASCII text, and no
+	// trailing newline. A record that normalizes any of these is not a backup.
+	original := []byte("\xef\xbb\xbf[source:musixmatch]\r\n[ar:Ärtist]\r\n[00:01.00]línea uno\r\n[00:02.00]last, no newline")
+	if err := os.WriteFile(target, original, 0o600); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(target), "one.lrc", "done")
+
+	// Precondition: the file exists with exactly these bytes before the purge,
+	// so a later equality check cannot pass on an unchanged no-op.
+	if pre, err := os.ReadFile(target); err != nil || !bytes.Equal(pre, original) {
+		t.Fatalf("precondition: sidecar not written as expected (err=%v)", err)
+	}
+
+	var buf bytes.Buffer
+	if code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch", Yes: true}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("precondition: the sidecar must actually be deleted (err=%v)", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(dbPath), "purge-provenance-backup-*.jsonl"))
+	if len(matches) != 1 {
+		t.Fatalf("want exactly one backup file; got %v", matches)
+	}
+	b, err := os.ReadFile(matches[0]) //nolint:gosec // test-controlled path
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	var rec purgeProvenanceBackupRecord
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(b))), &rec); err != nil {
+		t.Fatalf("decode backup: %v", err)
+	}
+	if rec.Path != target {
+		t.Fatalf("backup path = %q, want %q", rec.Path, target)
+	}
+
+	// Restore the file from the record alone and compare to the original.
+	restored := filepath.Join(t.TempDir(), "restored.lrc")
+	if err := os.WriteFile(restored, rec.Content, 0o600); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	got, err := os.ReadFile(restored) //nolint:gosec // test-controlled path
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("restored bytes differ from the original:\n got  %q\n want %q", got, original)
+	}
+}
+
+// TestAppendPurgeProvenanceBackup_ContentCaptureFailureIsAnError: the content
+// read happens inside the backup-first window, so a capture failure must
+// surface as an error. purgeprovenance.processSidecar treats a Report error as
+// "leave this sidecar untouched", so this error IS the guarantee that a file is
+// never deleted without a restorable copy of its bytes.
+func TestAppendPurgeProvenanceBackup_ContentCaptureFailureIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "backup.jsonl")) //nolint:gosec // test-controlled path
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+
+	// Vanished sidecar: the record cannot be completed.
+	if err := appendPurgeProvenanceBackup(f, purgeprovenance.Record{Path: filepath.Join(dir, "gone.lrc")}); err == nil {
+		t.Error("a sidecar whose bytes cannot be read must fail the backup, not be silently recorded empty")
+	}
+
+	// Symlinked sidecar: never followed, here as elsewhere.
+	realFile := filepath.Join(dir, "real.lrc")
+	if err := os.WriteFile(realFile, []byte("[source:x]\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "link.lrc")
+	if err := os.Symlink(realFile, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := appendPurgeProvenanceBackup(f, purgeprovenance.Record{Path: link}); err == nil {
+		t.Error("a symlinked sidecar must fail the backup rather than be followed")
+	}
+
+	// The backup file must still be empty: no partial record was written.
+	b, err := os.ReadFile(filepath.Join(dir, "backup.jsonl")) //nolint:gosec // test-controlled path
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if len(b) != 0 {
+		t.Errorf("a failed capture wrote a record anyway: %q", b)
 	}
 }
 
