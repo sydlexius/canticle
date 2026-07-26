@@ -91,6 +91,66 @@ func rowStatus(t *testing.T, ctx context.Context, sqlDB *sql.DB, table string, i
 	return status
 }
 
+// TestRun_WalkErrorDoesNotAbortTheRun locks Run's documented contract: "Per-file
+// errors are counted and logged but never abort the run." An unreadable
+// subdirectory used to be returned straight out of the WalkDir callback, which
+// abandoned every remaining entry AND every remaining root -- and, because
+// runPurgeProvenance returned early on a non-nil error, discarded the summary
+// naming the files it had already deleted.
+//
+// The assertion is on the ARTIFACT: sidecars beyond the unreadable directory,
+// and in a later root, are actually gone from disk.
+func TestRun_WalkErrorDoesNotAbortTheRun(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a mode-0000 directory is still readable")
+	}
+	ctx, sqlDB, libID, root := openSeeded(t)
+
+	// Root 1: an unreadable subdirectory, plus a matching sidecar in a sibling
+	// directory that sorts AFTER it, so the walk must get past the failure.
+	blocked := filepath.Join(root, "A-blocked")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	afterPath := filepath.Join(root, "B-after", "after.lrc")
+	writeSidecar(t, afterPath, "musixmatch")
+	seedTrack(t, ctx, sqlDB, libID, filepath.Dir(afterPath), "after.lrc", "done")
+
+	// Root 2: a second library root that must still be processed.
+	root2 := filepath.Join(filepath.Dir(root), "music2")
+	lib2Path := filepath.Join(root2, "C", "second.lrc")
+	writeSidecar(t, lib2Path, "musixmatch")
+
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+
+	// Preconditions: both sidecars exist before the run, so the "they are gone"
+	// assertions below cannot pass vacuously.
+	for _, p := range []string{afterPath, lib2Path} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("precondition: %s must exist before the run: %v", p, err)
+		}
+	}
+
+	res, err := New(sqlDB).Run(ctx, Options{
+		Roots: []string{root, root2}, LibraryID: &libID,
+		Filter: Filter{Source: "musixmatch"}, DryRun: false,
+	})
+	if err != nil {
+		t.Fatalf("a per-entry walk error must not abort the run: %v", err)
+	}
+	if res.Errors == 0 {
+		t.Error("the unreadable directory must be COUNTED as an error, not silently swallowed")
+	}
+	for _, p := range []string{afterPath, lib2Path} {
+		if _, serr := os.Stat(p); !os.IsNotExist(serr) {
+			t.Errorf("%s survived: the walk abandoned work after the unreadable directory (err=%v)", p, serr)
+		}
+	}
+}
+
 // TestRun_SourceExactMatch: --source matches only sidecars whose [source:] tag
 // equals the requested value exactly, and leaves other sources untouched.
 func TestRun_SourceExactMatch(t *testing.T) {

@@ -169,8 +169,22 @@ func (p *Purger) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				// A per-entry walk failure (an unreadable subdirectory, a file
+				// that vanished mid-walk) is exactly the "per-file error" this
+				// function's contract says is counted and logged, never fatal.
+				// Returning it aborted the whole run -- including every root
+				// still to come -- and, because runPurgeProvenance returns
+				// early on a non-nil error, discarded the summary describing
+				// what had ALREADY been deleted. Count and continue instead;
+				// returning fs.SkipDir would silently drop the rest of a
+				// directory, so the error is swallowed only for this entry.
+				res.Errors++
+				slog.Warn("purge-provenance: walk entry failed; skipping", "path", path, "error", err)
+				return nil
 			}
+			// Context cancellation is genuinely fatal: it is a shutdown signal,
+			// not a property of one file, and every later entry would fail the
+			// same way. Abort the walk and let it propagate.
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -193,6 +207,8 @@ func (p *Purger) Run(ctx context.Context, opts Options) (Result, error) {
 			return nil
 		})
 		if walkErr != nil {
+			// Only a fatal condition reaches here now (context cancellation);
+			// per-entry failures were counted above and the walk continued.
 			return res, fmt.Errorf("purgeprovenance: walk %s: %w", root, walkErr)
 		}
 	}

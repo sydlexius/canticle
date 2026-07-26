@@ -300,6 +300,47 @@ func TestAppendPurgeProvenanceBackup_ContentCaptureFailureIsAnError(t *testing.T
 	}
 }
 
+// TestPurgeProvenance_WalkErrorStillPrintsSummaryAndPurges: an unreadable
+// subdirectory is a per-entry error, so the run continues past it, the summary
+// is still printed (the operator's only record of what was destroyed), and the
+// exit code is non-zero because errors were counted.
+func TestPurgeProvenance_WalkErrorStillPrintsSummaryAndPurges(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a mode-0000 directory is still readable")
+	}
+	ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
+	blocked := filepath.Join(root, "A-blocked")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "B-after", "after.lrc")
+	writePurgeSidecar(t, target, "musixmatch")
+	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(target), "after.lrc", "done")
+
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("precondition: the sidecar must exist before the run: %v", err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+
+	var buf bytes.Buffer
+	code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch", Yes: true})
+	if code == 0 {
+		t.Errorf("counted errors must yield a non-zero exit; got 0. out=%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "purge-provenance: scanned") {
+		t.Errorf("the summary must print even when the walk hit errors; got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "deleted 1") {
+		t.Errorf("the run must continue past the unreadable directory; got: %s", buf.String())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("the sidecar past the unreadable directory was not purged: %v", err)
+	}
+}
+
 // TestPurgeProvenance_NoSourceCohort: --no-source targets sidecars with no
 // [source:] tag.
 func TestPurgeProvenance_NoSourceCohort(t *testing.T) {

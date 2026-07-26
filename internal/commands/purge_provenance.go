@@ -142,8 +142,13 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 		Report:    report,
 	})
 	if err != nil {
+		// Do NOT return here. A fatal abort (context cancellation) can land
+		// after files have ALREADY been deleted across earlier roots, and
+		// exiting before the summary would leave the operator with no record
+		// of what was destroyed. Log, print the partial summary below, then
+		// exit non-zero.
 		slog.Error("purge-provenance failed", "error", err)
-		return 1
+		_, _ = fmt.Fprintf(out, "purge-provenance: run aborted: %v (partial results follow)\n", err)
 	}
 
 	verb := "would delete"
@@ -163,7 +168,7 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	if backupFile != nil {
 		_, _ = fmt.Fprintf(out, "backup of deleted sidecars written to %s\n", backupPath)
 	}
-	if res.Errors > 0 {
+	if err != nil || res.Errors > 0 {
 		return 1
 	}
 	return 0
