@@ -15,6 +15,7 @@ package detector
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ErrClassifierUnavailable is returned when the classifier HTTP endpoint is
@@ -39,6 +40,24 @@ var ErrCooldownInterrupted = errors.New("detector: cooldown interrupted by conte
 const (
 	minSampleDurationSeconds = 30
 	maxSampleDurationSeconds = 60
+)
+
+// Sidecar model-version probe tuning (#684). The probe is a tiny GET /health,
+// and its result is cached for the process lifetime once known, so these bound
+// only the UNKNOWN case: a sidecar that is still booting or too old to report a
+// version.
+const (
+	// modelVersionProbeTimeout keeps a hung sidecar from stalling the worker. The
+	// probe is advisory -- on timeout the version stays unknown and the detector
+	// re-infers, which is correct, just slower.
+	modelVersionProbeTimeout = 5 * time.Second
+	// modelVersionRetryInterval throttles retries while the version is unknown, so
+	// a persistently old or down sidecar costs one cheap request per interval
+	// rather than one per work item.
+	modelVersionRetryInterval = 1 * time.Minute
+	// maxHealthBodyBytes bounds the health read. The real body is a few hundred
+	// bytes; this only prevents an unbounded read of an unexpected response.
+	maxHealthBodyBytes = 64 << 10
 )
 
 // Detector defaults applied by NewHTTPDetector when the corresponding Config

@@ -312,7 +312,7 @@ a single atomic update:
 | `vocal_peak` | peak sung-vocal score (`Result.VocalConfidence`) |
 | `speech_mean` | summed speech-gate score (`Result.SpeechConfidence`) |
 | `vocal_class` | the configured vocal class that produced `vocal_peak` (empty when none scored) |
-| `detector_version` | the Canticle app version (`internal/version`) at decision time |
+| `detector_version` | the sidecar's loaded model identity (its pinned `YAMNET_SHA256`, read from `GET /health`) |
 
 All five are **nullable**: `NULL` means detection did not run for that row
 (detection disabled, no source path, or a row written before migration 025). They
@@ -324,15 +324,33 @@ re-inference pass:
 SELECT id, source_path, vocal_peak FROM work_queue
 WHERE instrumental_result = 1 AND vocal_peak BETWEEN 0.015 AND 0.05;
 
--- markers written by an older detector build (model/threshold drift)
+-- markers written against a different model (model drift)
 SELECT id, source_path, detector_version FROM work_queue
-WHERE instrumental_result = 1 AND detector_version <> '<current-version>';
+WHERE instrumental_result = 1 AND detector_version <> '<current-model-sha>';
 ```
 
-> The version is the Canticle app version, which captures Go-side gate/threshold
-> drift. If sidecar/model identity is wanted later, derive it from the sidecar's
-> pinned model `YAMNET_SHA256` build arg or image tag rather than a new `/health`
-> field.
+> **Why the MODEL, not the app version (#684).** This column used to hold the
+> Canticle app version, and `detector_version` is what gates verdict reuse: the
+> worker re-infers whenever a stored value differs from the detector's current
+> one. So every Canticle release invalidated every stored verdict library-wide
+> even though the classifier had not changed, and each affected row re-ran a
+> YAMNet inference -- an ffmpeg decode of the audio file. Measured in prod before
+> the fix: 26 distinct values across the queue, only 6.7% of telemetry-bearing
+> rows reusable. The library disks never got an idle window long enough to spin
+> down. Migration 038 re-keys existing rows; the model archive's sha256 has held
+> a single value for the project's whole history, so no stored score changes
+> meaning.
+>
+> An earlier revision of this doc suggested deriving model identity from the
+> build arg or image tag "rather than a new `/health` field". That was the wrong
+> call: neither is visible to a running Canticle process, which must ask the
+> sidecar it is actually talking to -- an operator can point it at any image.
+> `/health` now reports `model_version`, and an older sidecar that omits it
+> yields UNKNOWN, which fails closed to re-inference.
+>
+> Gate/threshold drift is handled separately and needs no version bump:
+> `DecideStored` re-applies the CURRENT thresholds to stored scores, so a
+> recalibration re-decides every row with no re-inference.
 
 ### Reconciling stale markers (`scan reconcile`)
 

@@ -1354,14 +1354,23 @@ func TestDetectLogLineIncludesVocalClassAndVersion(t *testing.T) {
 	}
 }
 
-func TestHTTPDetectorModelVersion(t *testing.T) {
+// ModelVersion keys the verdict cache on the SIDECAR's model, so an unreachable
+// sidecar yields UNKNOWN rather than falling back to the app version.
+//
+// This test previously asserted the opposite (Config.Version came back here).
+// That was the #684 defect: keying on the app version invalidated every stored
+// verdict on every canticle release, so the detector re-ran inference across the
+// whole backlog and the library disks never got an idle window. Unknown fails
+// closed to re-inference, which is correct-but-slow; returning the app version
+// would be confidently wrong.
+func TestHTTPDetectorModelVersionUnknownWhenSidecarUnreachable(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
 	d, err := NewHTTPDetector(Config{ClassifierURL: "http://127.0.0.1:1/classify", FFmpegPath: ffmpegPath, Version: "v1.2.3"})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
-	if got := d.ModelVersion(); got != "v1.2.3" {
-		t.Fatalf("ModelVersion = %q; want v1.2.3", got)
+	if got := d.ModelVersion(); got != "" {
+		t.Fatalf("ModelVersion = %q; want \"\" (unknown). The app version must never key the verdict cache", got)
 	}
 }
 

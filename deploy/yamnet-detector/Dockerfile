@@ -33,14 +33,27 @@ COPY app.py .
 # target is not.
 #
 # To update: download the URL below, `sha256sum` it, and bump YAMNET_SHA256.
-# A model change re-classifies tracks, and the `detector_version` recorded on
-# every verdict is the CANTICLE APP VERSION (internal/version, stamped via
-# detector.Config.Version) -- there is no sidecar-local version constant to
-# bump. So ship a model change AS PART OF A RELEASE, otherwise old and new
-# verdicts share a detector_version and the stale-marker query in
-# docs/instrumental-detection.md cannot tell them apart.
+# Bumping it correctly invalidates every stored verdict, since the weights really
+# did change. Nothing else needs editing -- in particular do NOT update the hash
+# baked into internal/db/migrations/038_detector_version_model_key.sql, which is a
+# historical record of the model in use when that migration was written, not a
+# current-value reference.
+# A model change re-classifies tracks, so the verdict cache must invalidate when
+# -- and ONLY when -- this hash moves. That is what /health now reports as
+# `model_version` (see app.py): the hash IS the model identity, so it cannot
+# drift from the weights it names.
+#
+# This used to be coupled to the CANTICLE APP VERSION instead, which forced the
+# workaround "ship a model change as part of a release" and, worse, invalidated
+# every stored verdict on every unrelated app release (#684). Do not reintroduce
+# that coupling: a model change is now shippable on its own.
 ARG YAMNET_URL=https://tfhub.dev/google/yamnet/1?tf-hub-format=compressed
 ARG YAMNET_SHA256=b80da2a1a56926fb0767205051a200dd7b3beaf3ea1ea126c42a53943996e5e0
+
+# Surfaced to the app so /health can report which weights are loaded. Baked at
+# build time from the same ARG the download is verified against, so the reported
+# version and the model on disk cannot disagree.
+ENV YAMNET_MODEL_SHA256=${YAMNET_SHA256}
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends curl ca-certificates; \
