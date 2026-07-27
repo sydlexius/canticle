@@ -1346,6 +1346,10 @@ func TestDetectLogLineIncludesVocalClassAndVersion(t *testing.T) {
 		t.Fatalf("write audio: %v", err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "model_version": "model-sha-9"})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"mean": map[string]float64{"Music": 0.95, "Singing": 0.001},
 			"max":  map[string]float64{"Music": 1.0, "Singing": 0.008},
@@ -1375,8 +1379,14 @@ func TestDetectLogLineIncludesVocalClassAndVersion(t *testing.T) {
 	if !strings.Contains(logged, "vocal_class=Singing") {
 		t.Errorf("log line missing vocal_class=Singing; got: %s", logged)
 	}
-	if !strings.Contains(logged, "detector_version=v9.9.9") {
-		t.Errorf("log line missing detector_version=v9.9.9; got: %s", logged)
+	// detector_version logs the MODEL version -- the value actually persisted and
+	// compared -- so an operator debugging a cache miss greps the same string the
+	// code uses. The app version is still logged, under its own key (#684).
+	if !strings.Contains(logged, "detector_version=model-sha-9") {
+		t.Errorf("log line missing detector_version=model-sha-9; got: %s", logged)
+	}
+	if !strings.Contains(logged, "app_version=v9.9.9") {
+		t.Errorf("log line missing app_version=v9.9.9; got: %s", logged)
 	}
 }
 

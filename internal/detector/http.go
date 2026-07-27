@@ -255,6 +255,13 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 	// and resolves here -- after a successful classify -- because the sidecar is
 	// provably reachable at this point, which is exactly when the probe succeeds.
 	// Cached after the first success, so this is one extra request per process.
+	//
+	// This runs under d.mu, which serializes inference. That is not a new
+	// exposure: d.mu is already held across sample() (an ffmpeg subprocess) and
+	// classify() (a 3-minute-timeout HTTP call), so a bounded
+	// modelVersionProbeTimeout adds strictly less than what the lock already
+	// covers, at most once per process. resolveModelVersion itself releases its
+	// own lock before the request, so the probe holds no lock while in flight.
 	modelVersion := d.resolveModelVersion(ctx)
 
 	// Music gate: summed mean probability of the instrumental classes.
@@ -332,7 +339,12 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 	// earlier (#403) and must not be duplicated.
 	slog.Info("detector: instrumental decision",
 		"path", audioPath, "music_sum", music, "vocal_peak", vocalPeak, "speech_mean", speechMean,
-		"vocal_class", winningVocalClass, "detector_version", d.version,
+		// detector_version is the value actually PERSISTED and compared, so an
+		// operator debugging a cache miss greps the same string the code uses.
+		// Logging d.version (the app version) here disagreed with what was stored.
+		// app_version stays alongside it: it is still useful for correlating a
+		// decision with a build, it just does not key the cache (#684).
+		"vocal_class", winningVocalClass, "detector_version", modelVersion, "app_version", d.version,
 		"instrumental", instrumental, "min_confidence", d.minConfidence,
 		"vocal_max_confidence", d.vocalMaxConfidence, "speech_max_confidence", d.speechMaxConfidence)
 

@@ -179,8 +179,14 @@ func TestRunReconcileInstrumentalRecalibrate_ApplySettlesVersionMatchedRow(t *te
 		t.Fatalf("mkdir music: %v", err)
 	}
 	cfgPath := filepath.Join(dir, "config.toml")
-	writeRecalibrateCfg(t, cfgPath, dbPath)
-	id := seedVocalGateRejection(t, ctx, dbPath, outdir, version)
+	// A reachable sidecar and a row seeded at the SAME model version, so this
+	// settles because the versions MATCH -- which is what the test is named for.
+	// With no classifier the version resolves to unknown and the row would settle
+	// via the unknown-version guard instead: the test would then pass no matter
+	// what version the row carried, asserting the guard rather than the match.
+	const modelVersion = "current-model-sha"
+	writeRecalibrateCfgWithDetector(t, cfgPath, dbPath, startModelVersionSidecar(t, modelVersion))
+	id := seedVocalGateRejection(t, ctx, dbPath, outdir, modelVersion)
 	markerPath := filepath.Join(outdir, "song.txt")
 
 	var app bytes.Buffer
