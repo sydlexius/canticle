@@ -106,6 +106,25 @@ jobs:
       - name: Generate web UI assets (make generate)
         run: make generate TAILWIND="$RUNNER_TEMP/tailwindcss"
 
+      # Validate the freshly generated CSS (sentinel classes + size band).
+      # Replaces the removed committed-drift "UI Assets" job: nothing is
+      # committed to drift now, but a broken Tailwind run must still fail CI.
+      # Lives here rather than in the Go cache primer (#677): the primer no
+      # longer runs on pull_request, and this gate must run on EVERY code PR.
+      # `lint` already checks out, installs Go and runs `make generate`, so the
+      # gate costs only its own runtime and adds no new serial dependency.
+      - name: Validate generated web UI assets (make ui-validate)
+        run: make ui-validate
+
+      # Assert the test-shard split has not drifted: every package in
+      # `go list ./...` lands in exactly one shard, and each partitioned
+      # package's buckets are complete and disjoint. This guard exists because
+      # the drift failure mode is SILENT -- an unclaimed package is simply never
+      # tested and nothing turns red. Also formerly on the primer (#677); `Lint`
+      # is a required check, so a drifted split still blocks the merge.
+      - name: Verify test-shard split integrity
+        run: bash scripts/ci-shards.sh verify
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -126,8 +145,21 @@ jobs:
   #      cold-compile -race on each run -- N times the compile the unsharded
   #      job paid once, which would eat the entire sharding win.
   #
-  # Shards restore this entry READ-ONLY (actions/cache/restore, no post-job
-  # save), so ten concurrent shards never race to write the same key.
+  # PUSH-ONLY (#677). Measured on run 30227016700, where a no-primer shard
+  # matrix ran CONCURRENTLY with the primer on one commit and one runner pool:
+  # the primer does NOT pay for itself on a pull_request. It is a serial prefix
+  # (shards wait for it) whose own duration swings 44s-138s, while the shards it
+  # unblocks save only ~30-45s each versus warming themselves from restore-keys.
+  # Since shards run concurrently, that per-shard saving is paid once in
+  # wall-clock and never exceeds the prefix it costs.
+  #
+  # It still runs on push-to-main, where it is NOT on anyone's critical path and
+  # publishes a warm, race-instrumented entry that later PRs pick up through
+  # restore-keys. That is the case where a primer genuinely earns its keep.
+  #
+  # Shards no longer `needs` this job; they restore whatever entry exists via
+  # the same key + restore-keys, read-only (no post-job save), so ten concurrent
+  # shards never race to write the same key.
   #
   # This job also owns `make ui-validate` (the generated-CSS correctness gate,
   # formerly on the Test job). It runs exactly once instead of once per shard,
@@ -138,7 +170,8 @@ jobs:
     name: Go Cache Primer
     runs-on: ubuntu-latest
     needs: [changes]
-    if: needs.changes.outputs.code == 'true'
+    # push-only: see the header above. On a PR the shards warm themselves.
+    if: github.event_name == 'push' && needs.changes.outputs.code == 'true'
     permissions:
       contents: read
     steps:
@@ -186,22 +219,6 @@ jobs:
       - name: Generate web UI assets (make generate)
         run: make generate TAILWIND="$RUNNER_TEMP/tailwindcss"
 
-      # Validate the freshly generated CSS (sentinel classes + size band).
-      # Replaces the removed committed-drift "UI Assets" job: nothing is
-      # committed to drift now, but a broken Tailwind run must still fail CI.
-      # Runs here, once, rather than in all ten shards.
-      - name: Validate generated web UI assets (make ui-validate)
-        run: make ui-validate
-
-      # Fail the pipeline BEFORE any shard runs if the split has drifted: assert
-      # every package in `go list ./...` lands in exactly one shard, and that
-      # each partitioned package's buckets are complete and disjoint. This guard
-      # exists because the drift failure mode is silent -- an unclaimed package
-      # is simply never tested and nothing turns red. Every shard `needs` this
-      # job, so a failure here stops the whole Test matrix.
-      - name: Verify test-shard split integrity
-        run: bash scripts/ci-shards.sh verify
-
       - name: Warm Go module cache
         run: go mod download
 
@@ -243,9 +260,15 @@ jobs:
           # never write it, so there are no save races between shards.
           cache: false
 
-      # Key/restore-keys are byte-identical to the primer's save step, so the
-      # per-commit ${{ github.sha }} suffix scores an EXACT hit on the entry the
-      # primer published earlier in this same workflow run.
+      # Key/restore-keys are byte-identical to the primer's save step. The
+      # primer is push-only now (#677), so the two cases differ:
+      #   - re-run of a push commit: the ${{ github.sha }} suffix is an EXACT
+      #     hit on the entry that commit's primer published.
+      #   - pull_request (the common case): the exact key MISSES and the first
+      #     restore-key warms from the last entry built against the same
+      #     go.mod/go.sum -- normally the one push-to-main last published.
+      # Restore-only (no post-job save), so ten concurrent shards never race to
+      # write the same key.
       - name: Restore Go module + build cache (read-only)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -339,127 +362,6 @@ jobs:
           name: coverage-${{ matrix.shard }}
           path: coverage.out
           retention-days: 1
-
-  # ===== TEMPORARY EXPERIMENT (#677) -- DELETE BEFORE MERGE =====
-  # Identical matrix to `test:` above, but WITHOUT the primer dependency:
-  # setup-go's own cache + restore-keys instead. Runs in the SAME workflow
-  # run as the primed shards, so cold-start cost is measured on one commit,
-  # one runner pool, one moment -- not across two runs.
-  test-noprimer:
-    # Per-shard display names render as "Test Shard (commands-1)",
-    # "Test Shard (web)", etc. The bare required check name "Test" is owned by
-    # the always-running `test-gate` job further down, so branch protection
-    # keeps requiring ONE context instead of enumerating every shard.
-    name: NoPrimer Shard
-    runs-on: ubuntu-latest
-    needs: [changes]
-    if: needs.changes.outputs.code == 'true'
-    # Pure correctness gate: no external-network calls, so a third-party outage
-    # (e.g. Codecov) can never fail this required check. Coverage is shipped to
-    # Codecov by the separate, non-required `coverage-upload` job.
-    permissions:
-      contents: read
-    strategy:
-      # One shard's failure must not cancel the others: with fail-fast a flake
-      # in one shard hides real failures in every other shard.
-      fail-fast: false
-      matrix: ${{ fromJson(needs.changes.outputs.test_matrix) }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          # EXPERIMENT (#677): use setup-go's own cache instead of the primer.
-          # The primer job owns the cache SAVE; shards only read that key and
-          # never write it, so there are no save races between shards.
-          cache: true
-
-      # Generated web UI assets are regenerated per shard rather than passed
-      # between jobs as an artifact. Measured on CI (run 30222557570): the
-      # Tailwind install is 1s and `make generate` is 5s, so ~6s -- and because
-      # shards run concurrently that 6s is paid once in wall-clock. An artifact
-      # upload+download round-trip costs about the same per shard AND adds a
-      # cross-job dependency, so regenerating is strictly simpler. Every shard
-      # needs them: internal/web go:embed's the generated CSS and templ output,
-      # so a shard without them fails to build even when it runs no web test.
-      # `make ui-validate` deliberately does NOT run here -- the primer owns it.
-      - name: Install Tailwind standalone CLI (v4.2.0)
-        run: bash scripts/install-tailwind.sh "$RUNNER_TEMP/tailwindcss"
-
-      - name: Generate web UI assets (make generate)
-        run: make generate TAILWIND="$RUNNER_TEMP/tailwindcss"
-
-      # Resolve this shard's package list, and for a partitioned shard its -run
-      # bucket regex. Both come from scripts/ci-shards.sh, which is the SINGLE
-      # SOURCE OF TRUTH for the split: the same script generated the matrix in
-      # the `changes` job above, so the shard names and the package map cannot
-      # drift apart. See that script's header for the measured per-package CI
-      # times the split is balanced against, and for why internal/commands and
-      # internal/queue are partitioned by test name rather than merely given
-      # their own shards.
-      #
-      # `rest` is the DYNAMIC remainder: its package list is derived by
-      # excluding every named shard's packages from `go list ./...`, so a newly
-      # added package automatically lands in a shard and can never be silently
-      # untested.
-      - name: Resolve shard package list
-        id: shard
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-          packages=$(bash scripts/ci-shards.sh packages "$SHARD")
-          run=$(bash scripts/ci-shards.sh run "$SHARD")
-          echo "shard=$SHARD packages=$packages"
-          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
-          # The -run regex can be large; use the heredoc form of GITHUB_OUTPUT.
-          {
-            echo "run<<__RUN_EOF__"
-            echo "${run}"
-            echo "__RUN_EOF__"
-          } >> "$GITHUB_OUTPUT"
-
-      # NOTE: deliberately NO -coverpkg. The unsharded job did not use it
-      # either, so each package is instrumented only in its own test binary.
-      # Two consequences, both wanted:
-      #   1. Per-package coverage keeps meaning "covered by this package's own
-      #      tests", so the coverage-floor numbers and the Codecov baseline are
-      #      byte-for-byte what they were before sharding.
-      #   2. Shard profiles are disjoint by package (the only overlap is the
-      #      partitioned shards of a single package, whose counts gocovmerge
-      #      sums), which makes the merge exact rather than approximate.
-      # Adding -coverpkg=./... would make every shard emit a full-module profile
-      # and would credit a package's coverage from other shards' tests, moving
-      # every floor.
-      - name: Run tests
-        # RUN and PACKAGES go through env, not template interpolation, so a
-        # large regex cannot break shell quoting. PACKAGES stays UNQUOTED at the
-        # use site: it is a space-separated list the shell must word-split into
-        # separate `go test` arguments.
-        env:
-          RUN: ${{ steps.shard.outputs.run }}
-          PACKAGES: ${{ steps.shard.outputs.packages }}
-        run: |
-          if [ -n "$RUN" ]; then
-            # shellcheck disable=SC2086 # deliberate word-splitting of the package list
-            go test -v -race -count=1 -coverprofile=coverage.out -run "$RUN" $PACKAGES
-          else
-            # shellcheck disable=SC2086 # deliberate word-splitting of the package list
-            go test -v -race -count=1 -coverprofile=coverage.out $PACKAGES
-          fi
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          # Unique name per shard so all artifacts survive side by side and the
-          # consumer jobs can download them all with `pattern: coverage-*`.
-          name: noprimer-coverage-${{ matrix.shard }}
-          path: coverage.out
-          retention-days: 1
-
 
   scan:
     name: Image Scan
