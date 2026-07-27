@@ -204,3 +204,48 @@ func TestRunBacksOffGeometricallyAfterFetchFailures(t *testing.T) {
 		}
 	}
 }
+
+// TestRunUsesFileDurationForTheTimingGuard pins the fetch-mode half of the
+// accept-time timing guard's wiring (#439). The writer judges against
+// song.AudioDurationSeconds, and only the caller knows the AUDIO FILE's
+// duration: the fetched song's Track was overwritten wholesale by the provider
+// payload, so its length is the catalog value the lyric was already timed
+// against and comparing to it is near-circular.
+//
+// Here the scanner-derived input says the file is 100s while the provider claims
+// 500s, and the last cue at 400s fits the provider's claim but grossly overruns
+// the file. Feeding the file duration quarantines it (nothing written); feeding
+// the provider's, or feeding nothing, promotes the bad .lrc.
+func TestRunUsesFileDurationForTheTimingGuard(t *testing.T) {
+	t.Parallel()
+
+	outdir := t.TempDir()
+	fetcher := &fakeFetcher{song: models.Song{
+		Track: models.Track{ArtistName: "A", TrackName: "T", TrackLength: 500},
+		Subtitles: models.Synced{Lines: []models.Lines{
+			{Text: "a", Time: models.Time{Total: 10, Seconds: 10}},
+			{Text: "b", Time: models.Time{Total: 400, Minutes: 6, Seconds: 40}},
+		}},
+	}}
+	inputs := queue.NewInputsQueue()
+	inputs.Push(models.Inputs{
+		// The scanner's read of the file's own tags.
+		Track:    models.Track{ArtistName: "A", TrackName: "T", TrackLength: 100},
+		Outdir:   outdir,
+		Filename: "song.lrc",
+	})
+
+	a := NewApp(fetcher, lyrics.NewLRCWriter(), inputs, 0, "multi")
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	entries, err := os.ReadDir(outdir)
+	if err != nil {
+		t.Fatalf("reading outdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected the guard to quarantine a lyric timed to a 500s recording "+
+			"against a 100s file, but %d file(s) were written: %v", len(entries), entries)
+	}
+}
