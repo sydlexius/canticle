@@ -296,7 +296,13 @@ func TestRunScanReconcile_StampsTelemetryOnConfirm(t *testing.T) {
 	// with a zero or shared value, wiring one field from another's source would
 	// satisfy the assertions anyway. Speech stays under the 0.2 gate so the
 	// instrumental verdict still holds.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The stamped detector_version is the SIDECAR MODEL version (#684), so the
+		// stub must answer the version probe; otherwise it stamps empty.
+		if r.URL.Path == "/health" {
+			_, _ = w.Write([]byte(`{"status":"ok","model_version":"model-sha-under-test"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"mean":{"Music":0.95,"Speech":0.03},"max":{"Music":1.0,"Singing":0.01}}`))
 	}))
 	defer srv.Close()
@@ -351,8 +357,12 @@ func TestRunScanReconcile_StampsTelemetryOnConfirm(t *testing.T) {
 	if *speech != 0.03 {
 		t.Errorf("speech_mean = %v; want 0.03 (the live detection's score)", *speech)
 	}
-	if dv == "" {
-		t.Error("detector_version is empty; a stamped row must record which detector confirmed it")
+	// Asserted exactly, not merely non-empty: the stamped value is the key the
+	// verdict cache compares against, so a stamp of the wrong string (the app
+	// version, say) is the #684 defect and must not pass here.
+	if dv != "model-sha-under-test" {
+		t.Errorf("detector_version = %q; want the sidecar model version. A stamped row must record "+
+			"WHICH MODEL confirmed it, since that is what gates verdict reuse", dv)
 	}
 }
 

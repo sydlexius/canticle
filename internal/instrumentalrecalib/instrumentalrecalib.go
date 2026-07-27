@@ -228,7 +228,18 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 			continue
 		}
 
-		versionMatch := row.Tel.DetectorVersion == opts.CurrentVersion
+		// An UNKNOWN current version (empty) is not evidence of a mismatch, so it
+		// must not take the destructive branch. CurrentVersion is resolved from the
+		// sidecar's reported model version (#684) and is empty whenever that cannot
+		// be determined -- an old sidecar, one that is down, or a detector that
+		// could not be constructed. Treating that as "mismatched" would reset every
+		// row in the library, discarding stored telemetry and forcing exactly the
+		// full re-inference #684 exists to eliminate, on a transient probe failure.
+		//
+		// Settling instead is the safe direction: it writes the marker the current
+		// thresholds already say is correct (the row passed the gate above) and
+		// leaves the stored scores intact for a later run to re-judge.
+		versionMatch := opts.CurrentVersion == "" || row.Tel.DetectorVersion == opts.CurrentVersion
 		change := Change{
 			QueueID:    row.ID,
 			Artist:     row.Artist,

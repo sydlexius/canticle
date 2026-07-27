@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,14 +17,46 @@ import (
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
-// writeRecalibrateCfg writes a minimal config with NO classifier configured,
-// proving runReconcileInstrumentalRecalibrate needs no detector sidecar: it
-// re-decides purely from telemetry already stamped on each row.
+// writeRecalibrateCfg writes a minimal config with NO classifier configured.
+// The re-DECISION still needs no sidecar -- it runs purely on telemetry already
+// stamped on each row -- but the current MODEL version is then unknown (#684),
+// and unknown never takes the destructive reset branch. Tests whose subject is
+// the version comparison itself want writeRecalibrateCfgWithDetector.
 func writeRecalibrateCfg(t *testing.T, path, dbPath string) {
 	t.Helper()
 	content := "[db]\npath = \"" + strings.ReplaceAll(dbPath, `\`, `\\`) + "\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("writeRecalibrateCfg: %v", err)
+	}
+}
+
+// startModelVersionSidecar serves just enough of the classifier for the
+// detector's model-version probe (#684) and returns its URL. Used by tests whose
+// subject is the version COMPARISON: without a reachable sidecar the current
+// version resolves to UNKNOWN, and unknown deliberately never takes the
+// destructive reset branch, so such a test would be asserting the guard rather
+// than the behavior it means to pin.
+func startModelVersionSidecar(t *testing.T, modelVersion string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_, _ = w.Write([]byte(`{"status":"ok","model_version":"` + modelVersion + `"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// writeRecalibrateCfgWithDetector is writeRecalibrateCfg plus a reachable
+// classifier, so the current model version is KNOWABLE.
+func writeRecalibrateCfgWithDetector(t *testing.T, path, dbPath, classifierURL string) {
+	t.Helper()
+	content := "[db]\npath = \"" + strings.ReplaceAll(dbPath, `\`, `\\`) + "\"\n" +
+		"\n[instrumental_detector]\nenabled = true\nclassifier_url = \"" + classifierURL + "\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writeRecalibrateCfgWithDetector: %v", err)
 	}
 }
 
@@ -195,7 +229,11 @@ func TestRunReconcileInstrumentalRecalibrate_VersionMismatchResets(t *testing.T)
 		t.Fatalf("mkdir music: %v", err)
 	}
 	cfgPath := filepath.Join(dir, "config.toml")
-	writeRecalibrateCfg(t, cfgPath, dbPath)
+	// A reachable sidecar so the CURRENT model version is knowable: this test's
+	// subject is a genuine version MISMATCH, and with the version unknown the
+	// engine deliberately declines to reset (#684), which would make this test
+	// pass for the wrong reason.
+	writeRecalibrateCfgWithDetector(t, cfgPath, dbPath, startModelVersionSidecar(t, "current-model-sha"))
 	id := seedVocalGateRejection(t, ctx, dbPath, outdir, "0.0.1-stale")
 
 	var app bytes.Buffer

@@ -2,39 +2,69 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"io/fs"
 	"path/filepath"
 	"testing"
+
+	"github.com/pressly/goose/v3"
 )
 
+// openAtVersion opens a fresh database migrated to exactly `version`, returning
+// the handle and the goose provider so the caller can step it forward.
+//
+// This exists so a migration test RUNS THE MIGRATION FILE. An earlier version of
+// this test opened a fully-migrated DB, inserted rows after the fact, and
+// hand-executed its own copy of the UPDATE -- which meant it asserted that SQLite
+// applies a WHERE clause correctly and could not fail if the .sql file were
+// edited or emptied. Verified: replacing 038's body with `SELECT 1;` still passed.
+func openAtVersion(t *testing.T, version int64) (*sql.DB, *goose.Provider) {
+	t.Helper()
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	migFS, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("sub migrations fs: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, migFS)
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	if _, err := provider.UpTo(context.Background(), version); err != nil {
+		t.Fatalf("migrate to %d: %v", version, err)
+	}
+	return sqlDB, provider
+}
+
 // Migration 038 re-keys stored detector verdicts from the app version to the
-// model identity (#684). The two behaviors that matter are that it rewrites rows
-// that HAVE a verdict, and that it leaves rows that never had one alone -- a NULL
-// detector_version means "never detected" and must keep meaning that.
+// model identity (#684). Two behaviors matter, and both are asserted against the
+// REAL migration: it rewrites rows that carry a verdict, and it leaves rows that
+// never had one alone -- a NULL detector_version means "never detected" and must
+// keep meaning that, since writing a version onto a scoreless row would claim a
+// verdict that was never computed.
 func TestMigration038RekeysOnlyRowsWithAVerdict(t *testing.T) {
 	const modelKey = "b80da2a1a56926fb0767205051a200dd7b3beaf3ea1ea126c42a53943996e5e0"
 
 	ctx := context.Background()
-	dbh, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = dbh.Close() }()
+	dbh, provider := openAtVersion(t, 37) // the state a real deployment upgrades FROM
 
-	// Migrations have already run, so insert AFTER and re-apply the same
-	// statement the migration runs. This pins the STATEMENT's semantics, which
-	// is what a future edit would break.
 	insert := `INSERT INTO work_queue (artist_key, title_key, artist, title, source_path, status, detector_version, instrumental_result)
 	           VALUES (?, ?, ?, ?, ?, 'deferred', ?, ?)`
 	rows := []struct {
-		key      string
-		version  any
-		verdict  any
-		wantSame bool // true = must be left untouched
+		key       string
+		version   any
+		verdict   any
+		wantModel bool // true = must be re-keyed to the model key
 	}{
-		{"a1", "1.14.0", 0, false},  // old app version + verdict -> re-keyed
-		{"a2", "1.30.0", 1, false},  // current app version + verdict -> re-keyed
-		{"a3", nil, nil, true},      // never detected -> untouched
-		{"a4", "1.28.0", nil, true}, // version but NO verdict -> untouched
+		{"a1", "1.14.0", 0, true},    // old app version + not-instrumental verdict
+		{"a2", "1.30.0", 1, true},    // current app version + instrumental verdict
+		{"a3", nil, nil, false},      // never detected -> untouched
+		{"a4", "1.28.0", nil, false}, // version but NO verdict -> untouched
 	}
 	for _, r := range rows {
 		if _, err := dbh.ExecContext(ctx, insert, r.key, r.key, r.key, r.key, "/m/"+r.key, r.version, r.verdict); err != nil {
@@ -42,9 +72,9 @@ func TestMigration038RekeysOnlyRowsWithAVerdict(t *testing.T) {
 		}
 	}
 
-	if _, err := dbh.ExecContext(ctx, `UPDATE work_queue SET detector_version = ?
-		WHERE detector_version IS NOT NULL AND instrumental_result IS NOT NULL`, modelKey); err != nil {
-		t.Fatalf("apply migration statement: %v", err)
+	// Run the migration under test -- the actual .sql file, not a copy of it.
+	if _, err := provider.UpTo(ctx, 38); err != nil {
+		t.Fatalf("migrate to 38: %v", err)
 	}
 
 	for _, r := range rows {
@@ -54,12 +84,19 @@ func TestMigration038RekeysOnlyRowsWithAVerdict(t *testing.T) {
 			t.Fatalf("select %s: %v", r.key, err)
 		}
 		switch {
-		case r.wantSame && got != nil && *got == modelKey:
+		case r.wantModel && (got == nil || *got != modelKey):
+			t.Errorf("%s: detector_version = %v; want the model key. A verdict-bearing row must be "+
+				"re-keyed, or it re-infers and the disks stay awake (#684)", r.key, deref(got))
+		case !r.wantModel && got != nil && *got == modelKey:
 			t.Errorf("%s: detector_version was re-keyed to the model key, but this row has no verdict; "+
 				"a row that was never detected must not claim one", r.key)
-		case !r.wantSame && (got == nil || *got != modelKey):
-			t.Errorf("%s: detector_version = %v; want the model key. A verdict-bearing row must be re-keyed, "+
-				"or it re-infers and the disks stay awake (#684)", r.key, got)
 		}
 	}
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return "<NULL>"
+	}
+	return *s
 }

@@ -36,8 +36,12 @@ func TestHTTPDetectorAboveThresholdIsInstrumental(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
 		if r.URL.Path != "/classify" {
-			t.Fatalf("path = %q; want /classify", r.URL.Path)
+			t.Fatalf("path = %q; want /classify or /health", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"mean": map[string]float64{"Music": 0.70, "Musical instrument": 0.25},
@@ -284,6 +288,10 @@ func TestHTTPDetectorPostsAudioToClassifier(t *testing.T) {
 
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
 			t.Fatalf("ParseMultipartForm: %v", err)
 		}
@@ -924,6 +932,12 @@ func TestDetectLateAppearingVocalClassJoinsBaselineThenEnforced(t *testing.T) {
 	}
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Do NOT count /health against the inference sequence this test asserts:
+		// the call number drives which classes appear in the max map.
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
 		n := calls.Add(1)
 		max := map[string]float64{"Music": 1.0, "Singing": 0.004}
 		if n == 2 {
@@ -1281,25 +1295,37 @@ func TestDetectWinningVocalClassEmptyWhenNoMaxMap(t *testing.T) {
 	}
 }
 
-// TestDetectVersionPropagatedToResult verifies that Config.Version is carried
-// through NewHTTPDetector onto every Result returned by Detect.
+// TestDetectVersionPropagatedToResult verifies that the SIDECAR MODEL version is
+// carried onto every Result returned by Detect.
+//
+// This test previously asserted that Config.Version (the APP version) landed
+// here. That was the #684 defect: Result.Version is what the worker persists as
+// work_queue.detector_version, and memoDetector.canReuse compares that stored
+// value against ModelVersion(). Stamping the app version while comparing the
+// model version means the two can never be equal and the verdict cache never
+// hits -- worse than the original bug, which at least reused a verdict until the
+// next release.
 func TestDetectVersionPropagatedToResult(t *testing.T) {
 	audioPath := filepath.Join(t.TempDir(), "song.flac")
 	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
+	const wantVersion = "model-sha-under-test"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "model_version": wantVersion})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"mean": map[string]float64{"Music": 0.95, "Singing": 0.001},
 			"max":  map[string]float64{"Music": 1.0, "Singing": 0.005},
 		})
 	}))
 	defer srv.Close()
-	const wantVersion = "v1.2.3-test"
 	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
 		InstrumentalClasses: []string{"Music"},
 		VocalClasses:        []string{"Singing"}, VocalMaxConfidence: 0.05,
-		Version: wantVersion})
+		Version: "v1.2.3-app-not-this"})
 	if err != nil {
 		t.Fatalf("ctor: %v", err)
 	}
@@ -1308,7 +1334,7 @@ func TestDetectVersionPropagatedToResult(t *testing.T) {
 		t.Fatalf("detect: %v", err)
 	}
 	if res.Version != wantVersion {
-		t.Errorf("Result.Version = %q; want %q", res.Version, wantVersion)
+		t.Errorf("Result.Version = %q; want the MODEL version %q", res.Version, wantVersion)
 	}
 }
 

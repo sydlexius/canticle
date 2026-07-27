@@ -91,10 +91,15 @@ func appendJSONLSynced(f *os.File, rec any) error {
 }
 
 // runReconcileInstrumentalRecalibrate is CLI wiring over
-// internal/instrumentalrecalib: it resolves config/queue (no detector -- the
-// engine re-decides from telemetry already stamped on each row), owns the
-// JSONL backup file and the operator output, and lets the package own the
-// re-decision logic. Dry-run unless --yes.
+// internal/instrumentalrecalib: it resolves config/queue, owns the JSONL backup
+// file and the operator output, and lets the package own the re-decision logic.
+// Dry-run unless --yes.
+//
+// The re-DECISION still runs entirely on telemetry already stamped on each row --
+// no inference, no audio read. The one thing it asks the sidecar is which MODEL
+// it currently serves (#684), a single cheap GET that keys the version
+// comparison; when that is unanswerable the engine treats the version as unknown
+// and declines to reset anything.
 func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, args ScanReconcileInstrumentalRecalibrateCmd) int {
 	env, code := openQueueEnv(ctx, out, args.ConfigPath, args.Library)
 	if env == nil {
@@ -139,14 +144,20 @@ func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, arg
 	}
 
 	res, err := run(ctx, instrumentalrecalib.Options{
-		LibraryID:      env.libraryID,
-		Limit:          args.Limit,
-		AfterID:        args.AfterID,
-		DryRun:         !args.Yes,
-		MinConfidence:  env.cfg.InstrumentalDetector.MinConfidence,
-		VocalMax:       env.cfg.InstrumentalDetector.VocalMaxConfidence,
-		SpeechMax:      env.cfg.InstrumentalDetector.SpeechMaxConfidence,
-		CurrentVersion: version,
+		LibraryID:     env.libraryID,
+		Limit:         args.Limit,
+		AfterID:       args.AfterID,
+		DryRun:        !args.Yes,
+		MinConfidence: env.cfg.InstrumentalDetector.MinConfidence,
+		VocalMax:      env.cfg.InstrumentalDetector.VocalMaxConfidence,
+		SpeechMax:     env.cfg.InstrumentalDetector.SpeechMaxConfidence,
+		// The MODEL version, matching what the worker persists as
+		// work_queue.detector_version (#684). Reading the APP version here would
+		// make every row look version-mismatched after migration 038 and take the
+		// RESET branch, converting a recalibration into a full-library
+		// re-inference. Unknown ("") is handled inside the engine as "change
+		// nothing destructive", never as a mismatch.
+		CurrentVersion: currentDetectorModelVersion(ctx, env.cfg),
 		Preview: func(ch instrumentalrecalib.Change) {
 			previewed++
 			switch ch.Action {

@@ -250,6 +250,13 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 	}
 	d.warnUnknownClassesOnce(resp)
 
+	// Resolve the MODEL version to stamp onto this verdict. Uses the caller's ctx
+	// (not a background one) so a canceled work item cannot leave a probe running,
+	// and resolves here -- after a successful classify -- because the sidecar is
+	// provably reachable at this point, which is exactly when the probe succeeds.
+	// Cached after the first success, so this is one extra request per process.
+	modelVersion := d.resolveModelVersion(ctx)
+
 	// Music gate: summed mean probability of the instrumental classes.
 	var music float64
 	for _, name := range d.instrumentalClasses {
@@ -335,14 +342,58 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 		VocalConfidence:   vocalPeak,
 		SpeechConfidence:  speechMean,
 		WinningVocalClass: winningVocalClass,
-		Version:           d.version,
-		Classes:           resp.Mean,
+		// The MODEL version, not the app version. This value is persisted as
+		// work_queue.detector_version by the worker's stamp paths, and
+		// memoDetector.canReuse compares that stored value against ModelVersion().
+		// The two MUST be the same value or the verdict cache can never hit --
+		// worse than the #684 bug, which at least reused a verdict until the next
+		// release. Resolved (and cached) by the time Detect runs, since the probe
+		// is cheap and this is already a network-bound path.
+		Version: modelVersion,
+		Classes: resp.Mean,
 		// Reusable only when the response was complete: a degraded response
 		// (no/partial max map) forces not-instrumental above via the guards, and
 		// its scores must not be persisted as reusable telemetry (see Result.Reusable
 		// and #582 hostile-review I1).
 		Reusable: maxAvailable && baselineComplete,
 	}, nil
+}
+
+// FetchModelVersion asks the classifier at classifierURL which model it has
+// loaded, without constructing a full detector. It exists for callers that need
+// only the verdict-cache key -- the CLI paths that compare a STORED
+// detector_version against the current one (#684) -- and must not pay for a
+// detector they will never call Detect on.
+//
+// That distinction is load-bearing, not cosmetic: NewHTTPDetector resolves
+// ffmpeg and fails when it is absent, and the resolution path can auto-provision
+// a pinned static build. Routing a pure-HTTP version probe through it would make
+// a read-only CLI command download an ffmpeg, and would make the probe fail on a
+// host where ffmpeg is simply missing -- yielding an UNKNOWN version for a
+// reason that has nothing to do with the sidecar.
+//
+// Returns "" (never an error) when the version cannot be determined: an empty
+// URL, an unreachable or non-200 sidecar, or one too old to report a version.
+// Every consumer treats unknown as "change nothing", so a soft failure here is
+// the correct and safe outcome.
+func FetchModelVersion(ctx context.Context, classifierURL string) string {
+	classifierURL = strings.TrimSpace(classifierURL)
+	if classifierURL == "" {
+		return ""
+	}
+	if err := config.ValidateHTTPURL(classifierURL); err != nil {
+		return ""
+	}
+	d := &HTTPDetector{
+		baseURL:    strings.TrimRight(classifierURL, "/"),
+		httpClient: &http.Client{Timeout: modelVersionProbeTimeout},
+	}
+	v, err := d.fetchModelVersion(ctx)
+	if err != nil {
+		slog.Debug("detector: model version probe failed; treating as unknown", "error", err)
+		return ""
+	}
+	return v
 }
 
 // ModelVersion returns the identity of the MODEL currently loaded in the sidecar
