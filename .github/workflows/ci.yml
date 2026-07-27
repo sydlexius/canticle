@@ -340,6 +340,127 @@ jobs:
           path: coverage.out
           retention-days: 1
 
+  # ===== TEMPORARY EXPERIMENT (#677) -- DELETE BEFORE MERGE =====
+  # Identical matrix to `test:` above, but WITHOUT the primer dependency:
+  # setup-go's own cache + restore-keys instead. Runs in the SAME workflow
+  # run as the primed shards, so cold-start cost is measured on one commit,
+  # one runner pool, one moment -- not across two runs.
+  test-noprimer:
+    # Per-shard display names render as "Test Shard (commands-1)",
+    # "Test Shard (web)", etc. The bare required check name "Test" is owned by
+    # the always-running `test-gate` job further down, so branch protection
+    # keeps requiring ONE context instead of enumerating every shard.
+    name: NoPrimer Shard
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    # Pure correctness gate: no external-network calls, so a third-party outage
+    # (e.g. Codecov) can never fail this required check. Coverage is shipped to
+    # Codecov by the separate, non-required `coverage-upload` job.
+    permissions:
+      contents: read
+    strategy:
+      # One shard's failure must not cancel the others: with fail-fast a flake
+      # in one shard hides real failures in every other shard.
+      fail-fast: false
+      matrix: ${{ fromJson(needs.changes.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # EXPERIMENT (#677): use setup-go's own cache instead of the primer.
+          # The primer job owns the cache SAVE; shards only read that key and
+          # never write it, so there are no save races between shards.
+          cache: true
+
+      # Generated web UI assets are regenerated per shard rather than passed
+      # between jobs as an artifact. Measured on CI (run 30222557570): the
+      # Tailwind install is 1s and `make generate` is 5s, so ~6s -- and because
+      # shards run concurrently that 6s is paid once in wall-clock. An artifact
+      # upload+download round-trip costs about the same per shard AND adds a
+      # cross-job dependency, so regenerating is strictly simpler. Every shard
+      # needs them: internal/web go:embed's the generated CSS and templ output,
+      # so a shard without them fails to build even when it runs no web test.
+      # `make ui-validate` deliberately does NOT run here -- the primer owns it.
+      - name: Install Tailwind standalone CLI (v4.2.0)
+        run: bash scripts/install-tailwind.sh "$RUNNER_TEMP/tailwindcss"
+
+      - name: Generate web UI assets (make generate)
+        run: make generate TAILWIND="$RUNNER_TEMP/tailwindcss"
+
+      # Resolve this shard's package list, and for a partitioned shard its -run
+      # bucket regex. Both come from scripts/ci-shards.sh, which is the SINGLE
+      # SOURCE OF TRUTH for the split: the same script generated the matrix in
+      # the `changes` job above, so the shard names and the package map cannot
+      # drift apart. See that script's header for the measured per-package CI
+      # times the split is balanced against, and for why internal/commands and
+      # internal/queue are partitioned by test name rather than merely given
+      # their own shards.
+      #
+      # `rest` is the DYNAMIC remainder: its package list is derived by
+      # excluding every named shard's packages from `go list ./...`, so a newly
+      # added package automatically lands in a shard and can never be silently
+      # untested.
+      - name: Resolve shard package list
+        id: shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          packages=$(bash scripts/ci-shards.sh packages "$SHARD")
+          run=$(bash scripts/ci-shards.sh run "$SHARD")
+          echo "shard=$SHARD packages=$packages"
+          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          # The -run regex can be large; use the heredoc form of GITHUB_OUTPUT.
+          {
+            echo "run<<__RUN_EOF__"
+            echo "${run}"
+            echo "__RUN_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      # NOTE: deliberately NO -coverpkg. The unsharded job did not use it
+      # either, so each package is instrumented only in its own test binary.
+      # Two consequences, both wanted:
+      #   1. Per-package coverage keeps meaning "covered by this package's own
+      #      tests", so the coverage-floor numbers and the Codecov baseline are
+      #      byte-for-byte what they were before sharding.
+      #   2. Shard profiles are disjoint by package (the only overlap is the
+      #      partitioned shards of a single package, whose counts gocovmerge
+      #      sums), which makes the merge exact rather than approximate.
+      # Adding -coverpkg=./... would make every shard emit a full-module profile
+      # and would credit a package's coverage from other shards' tests, moving
+      # every floor.
+      - name: Run tests
+        # RUN and PACKAGES go through env, not template interpolation, so a
+        # large regex cannot break shell quoting. PACKAGES stays UNQUOTED at the
+        # use site: it is a space-separated list the shell must word-split into
+        # separate `go test` arguments.
+        env:
+          RUN: ${{ steps.shard.outputs.run }}
+          PACKAGES: ${{ steps.shard.outputs.packages }}
+        run: |
+          if [ -n "$RUN" ]; then
+            # shellcheck disable=SC2086 # deliberate word-splitting of the package list
+            go test -v -race -count=1 -coverprofile=coverage.out -run "$RUN" $PACKAGES
+          else
+            # shellcheck disable=SC2086 # deliberate word-splitting of the package list
+            go test -v -race -count=1 -coverprofile=coverage.out $PACKAGES
+          fi
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Unique name per shard so all artifacts survive side by side and the
+          # consumer jobs can download them all with `pattern: coverage-*`.
+          name: noprimer-coverage-${{ matrix.shard }}
+          path: coverage.out
+          retention-days: 1
+
+
   scan:
     name: Image Scan
     runs-on: ubuntu-latest
