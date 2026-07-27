@@ -68,6 +68,7 @@ type Args struct {
 	Queue      *QueueCmd      `arg:"subcommand:queue" help:"inspect or maintain the durable work queue"`
 	Provenance *ProvenanceCmd `arg:"subcommand:provenance" help:"embed or inspect provenance tags in .lrc files"`
 	Realign    *RealignCmd    `arg:"subcommand:realign" help:"re-attach orphaned .lrc/.txt sidecars to renamed audio files"`
+	Revalidate *RevalidateCmd `arg:"subcommand:revalidate" help:"re-check existing .lrc timing against audio duration and remediate the backlog"`
 	Completion *CompletionCmd `arg:"subcommand:completion" help:"output a shell completion script (bash, zsh, or fish)"`
 }
 
@@ -599,6 +600,8 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 		return runProvenance(ctx, out, *args.Provenance)
 	case args.Realign != nil:
 		return runRealign(ctx, out, *args.Realign)
+	case args.Revalidate != nil:
+		return runRevalidate(ctx, out, *args.Revalidate)
 	case args.Completion != nil:
 		return runCompletion(out, *args.Completion)
 	default:

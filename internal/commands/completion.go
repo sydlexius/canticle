@@ -20,7 +20,7 @@ type CompletionCmd struct {
 
 // completionSubcommands are the top-level subcommands offered at the first word.
 var completionSubcommands = []string{
-	"fetch", "serve", "scan", "library", "keys", "secrets", "admin", "config", "queue", "provenance", "realign", "completion",
+	"fetch", "serve", "scan", "library", "keys", "secrets", "admin", "config", "queue", "provenance", "realign", "revalidate", "completion",
 }
 
 // completionCandidates maps a subcommand to the flags and/or nested subcommands
@@ -38,6 +38,7 @@ var completionCandidates = map[string][]string{
 	"queue":      {"list", "failed", "deferred", "retry", "clear", "recheck"},
 	"provenance": {"backfill"},
 	"realign":    {"--library", "--yes", "--backup", "--config"},
+	"revalidate": {"--library", "--apply", "--on-fail", "--purge", "--quarantine-dir", "--tail", "--backup", "--config"},
 	"completion": {"bash", "zsh", "fish"},
 }
 
