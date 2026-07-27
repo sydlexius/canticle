@@ -53,3 +53,5 @@ tool (
 	github.com/a-h/templ/cmd/templ
 	github.com/wadey/gocovmerge
 )
+
+// #677 cold-cache experiment: perturb the go.mod hash to force a cache miss. REVERT.
