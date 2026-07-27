@@ -1,0 +1,267 @@
+# Keep exactly one `priority:` label on an issue.
+#
+# The priority labels (critical > high > medium > low) are mutually exclusive by
+# design, but nothing enforced that, so issues accumulated two at once and the
+# backlog could not be ordered. All three cases found when this was written were
+# introduced by a BOT:
+#
+#   #654  maintainer set `medium`; CodeRabbit added `high` 11 minutes later
+#   #682  CodeRabbit added `medium`, then `low` 85 seconds later
+#   #600  CodeRabbit added `medium`, then `low` 59 seconds later
+#
+# Two of those are a bot contradicting ITSELF within 90 seconds, which is why a
+# human-review reminder is not a sufficient fix: the window is too short and the
+# label list looks settled afterward.
+#
+# RESOLUTION RULE -- deliberately NOT "keep the most recent":
+#
+#   * If every duplicate was applied by a bot, keep the HIGHEST severity and
+#     remove the rest automatically. Highest-wins is the safe direction: it
+#     over-surfaces work rather than burying it, and a human can always lower it.
+#   * If a HUMAN applied any of them, remove nothing and comment instead. #654 is
+#     exactly this case, and "keep the most recent" would have silently discarded
+#     the maintainer's own triage in favor of a bot's opinion 11 minutes later.
+#
+# A missing priority is reported the same way (a comment, no mutation), since
+# guessing a priority is worse than flagging its absence.
+
+name: Issue Priority Guard
+
+on:
+  issues:
+    types: [opened, labeled, unlabeled, reopened]
+
+permissions: {}
+
+concurrency:
+  # Serialize per issue: `labeled` fires once per label, so a two-label edit can
+  # start two runs that both read the pre-edit state and race on the fix.
+  group: issue-priority-guard-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  enforce-single-priority:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Enforce a single priority label
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const SENTINEL = '<!-- issue-priority-guard -->';
+            // Ordered most severe first; index doubles as the severity rank.
+            const RANK = ['priority: critical', 'priority: high', 'priority: medium', 'priority: low'];
+
+            const issueNumber = context.payload.issue.number;
+
+            // Re-fetch rather than trusting the event payload: `labeled` fires once
+            // per label, so the payload can describe a state that is already stale.
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+            });
+
+            if (issue.pull_request) {
+              core.info('Target is a pull request, skipping');
+              return;
+            }
+
+            const priorities = issue.labels
+              .map(l => (typeof l === 'string' ? l : l.name))
+              .filter(name => RANK.includes(name));
+
+            const upsertComment = async (body) => {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+              const existing = comments.find(c => c.body && c.body.includes(SENTINEL));
+              if (existing) {
+                // Skip a no-op edit so the guard does not bump the issue's
+                // updated_at on every unrelated label change.
+                if (existing.body.trim() === body.trim()) {
+                  core.info('Existing comment already current, not updating');
+                  return;
+                }
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  body,
+                });
+              }
+            };
+
+            if (priorities.length === 1) {
+              core.info(`#${issueNumber} has exactly one priority label, nothing to do`);
+              // Clear a stale guard comment. Without this, an issue that once had
+              // 0 or 2+ priorities keeps a comment saying so forever after a human
+              // fixes it -- the guard's own audit trail becomes the thing lying
+              // about the state. Deleted rather than rewritten: "this was resolved"
+              // is not information anyone needs, and an edited-to-empty comment is
+              // just noise in the timeline.
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+              const existing = comments.find(c => c.body && c.body.includes(SENTINEL));
+              if (existing) {
+                try {
+                  await github.rest.issues.deleteComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: existing.id,
+                  });
+                  core.info(`Removed the stale guard comment on #${issueNumber}`);
+                } catch (err) {
+                  if (err.status !== 404) {
+                    core.warning(`Could not remove the stale guard comment on #${issueNumber}: ${err.message}`);
+                  }
+                }
+              }
+              return;
+            }
+
+            if (priorities.length === 0) {
+              core.notice(`#${issueNumber} has no priority label`);
+              await upsertComment([
+                SENTINEL,
+                'This issue has **no priority label**. The backlog is ordered by priority, so an',
+                'unlabeled issue is invisible to that ordering.',
+                '',
+                `Add one of: ${RANK.map(r => '`' + r + '`').join(', ')}.`,
+                '',
+                '_Not applied automatically: guessing a priority is worse than flagging its absence._',
+              ].join('\n'));
+              return;
+            }
+
+            // More than one. Attribute each to the actor who applied it, so a
+            // human's triage is never discarded in favor of a bot's.
+            const events = await github.paginate(github.rest.issues.listEvents, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+
+            const appliedBy = new Map();
+            for (const ev of events) {
+              if (ev.event !== 'labeled' || !ev.label || !priorities.includes(ev.label.name)) continue;
+              // Last `labeled` wins: a label removed and re-added should be
+              // attributed to whoever re-added it.
+              appliedBy.set(ev.label.name, {
+                login: ev.actor ? ev.actor.login : 'unknown',
+                isBot: !!(ev.actor && ev.actor.type === 'Bot'),
+              });
+            }
+
+            const humanApplied = priorities.filter(p => {
+              const who = appliedBy.get(p);
+              // Unknown provenance is treated as HUMAN: the failure mode of
+              // guessing "bot" is silently deleting real triage.
+              return !who || !who.isBot;
+            });
+
+            const sorted = [...priorities].sort((a, b) => RANK.indexOf(a) - RANK.indexOf(b));
+            const attribution = sorted
+              .map(p => {
+                const who = appliedBy.get(p);
+                return `- \`${p}\` - applied by ${who ? '@' + who.login : 'an unknown actor'}${who && who.isBot ? ' (bot)' : ''}`;
+              })
+              .join('\n');
+
+            if (humanApplied.length > 0) {
+              core.warning(`#${issueNumber} has ${priorities.length} priority labels, at least one human-applied; not auto-resolving`);
+              await upsertComment([
+                SENTINEL,
+                `This issue has **${priorities.length} priority labels**, which are mutually exclusive:`,
+                '',
+                attribution,
+                '',
+                'Not resolved automatically, because at least one was applied by a human and',
+                'auto-removal would discard real triage. Please remove all but one.',
+              ].join('\n'));
+              return;
+            }
+
+            // Every duplicate is bot-applied: keep the highest severity.
+            const keep = sorted[0];
+            const remove = sorted.slice(1);
+
+            // Post the audit comment BEFORE mutating labels. cancel-in-progress
+            // can kill this run at any await, and a cancellation between the
+            // removals and the comment would strip labels with no record of why.
+            // If that cancelled run was the last event for the issue, no later run
+            // would ever explain it either: the next run sees one label and takes
+            // the early return above. Comment-first inverts the failure into the
+            // harmless direction -- a comment describing a removal that did not
+            // happen, on an issue that still visibly has both labels, which the
+            // next event reconciles.
+            await upsertComment([
+              SENTINEL,
+              `This issue has **${priorities.length} priority labels**, all applied by bots:`,
+              '',
+              attribution,
+              '',
+              `Keeping \`${keep}\` (highest severity) and removing the rest. Highest-wins`,
+              'over-surfaces rather than buries; adjust manually if that is wrong.',
+            ].join('\n'));
+
+            const removed = [];
+            const failed = [];
+            for (const name of remove) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name,
+                });
+                removed.push(name);
+                core.info(`Removed "${name}" from #${issueNumber}`);
+              } catch (err) {
+                // 404 = already gone (a concurrent run or a human beat us to it),
+                // which is the intended end state, so it counts as removed.
+                if (err.status === 404) {
+                  removed.push(name);
+                  core.info(`"${name}" already removed from #${issueNumber}`);
+                } else {
+                  failed.push(name);
+                  core.warning(`Could not remove "${name}" from #${issueNumber}: ${err.message}`);
+                }
+              }
+            }
+
+            // Correct the comment when reality diverged from the plan. Claiming
+            // "removed the rest" while a removal failed would leave the guard
+            // confidently misreporting label state -- in a guard whose entire
+            // purpose is label state being trustworthy.
+            if (failed.length > 0) {
+              core.warning(`#${issueNumber}: ${failed.length} label removal(s) failed`);
+              await upsertComment([
+                SENTINEL,
+                `This issue has **${priorities.length} priority labels**, all applied by bots:`,
+                '',
+                attribution,
+                '',
+                `Intended to keep \`${keep}\` (highest severity) and remove the rest, but`,
+                `**could not remove** ${failed.map(f => '`' + f + '`').join(', ')} -- so the`,
+                'duplicate is still present and needs removing by hand.',
+                removed.length > 0 ? `\nRemoved: ${removed.map(r => '`' + r + '`').join(', ')}.` : '',
+              ].join('\n'));
+              return;
+            }
+
+            core.notice(`#${issueNumber}: kept "${keep}", removed ${removed.map(r => `"${r}"`).join(', ')}`);
