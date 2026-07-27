@@ -436,7 +436,7 @@ func (d *HTTPDetector) ModelVersion() string {
 // cheap request per interval, not one per work item.
 func (d *HTTPDetector) resolveModelVersion(ctx context.Context) string {
 	d.modelVersionMu.Lock()
-	if d.modelVersionVal != "" || time.Now().Before(d.modelVersionNext) {
+	if time.Now().Before(d.modelVersionNext) {
 		v := d.modelVersionVal
 		d.modelVersionMu.Unlock()
 		return v
@@ -448,15 +448,31 @@ func (d *HTTPDetector) resolveModelVersion(ctx context.Context) string {
 	d.modelVersionMu.Lock()
 	defer d.modelVersionMu.Unlock()
 	if err != nil || v == "" {
-		// Unknown for now. Back off, then try again: the sidecar may still be
-		// booting, or may be an older build that predates the version field.
+		// Probe failed or the sidecar reports no version. Back off and try again:
+		// it may still be booting, or be an older build predating the field.
+		//
+		// KEEP the last known value rather than reverting to unknown. Unknown
+		// fails closed to re-inference, so dropping a good version on one blip
+		// would re-infer the whole backlog -- the #684 symptom, triggered by a
+		// single dropped request.
 		d.modelVersionNext = time.Now().Add(modelVersionRetryInterval)
 		if err != nil {
-			slog.Debug("detector: model version unavailable; verdicts will re-infer until it is known", "error", err)
+			slog.Debug("detector: model version refresh failed; keeping last known",
+				"last_known", d.modelVersionVal, "error", err)
 		}
-		return ""
+		return d.modelVersionVal
+	}
+	// Re-probe on a TTL rather than caching for the process lifetime. An operator
+	// who redeploys the sidecar with new weights would otherwise keep getting the
+	// OLD hash stamped onto verdicts the NEW model produced -- attributing scores
+	// to weights that did not compute them, and making them reusable across a real
+	// model change, which is precisely what this key exists to prevent.
+	if d.modelVersionVal != "" && d.modelVersionVal != v {
+		slog.Info("detector: sidecar model changed; stored verdicts keyed to the previous model will re-infer",
+			"previous", d.modelVersionVal, "current", v)
 	}
 	d.modelVersionVal = v
+	d.modelVersionNext = time.Now().Add(modelVersionTTL)
 	return v
 }
 

@@ -65,6 +65,11 @@ func TestMigration038RekeysOnlyRowsWithAVerdict(t *testing.T) {
 		{"a2", "1.30.0", 1, true},    // current app version + instrumental verdict
 		{"a3", nil, nil, false},      // never detected -> untouched
 		{"a4", "1.28.0", nil, false}, // version but NO verdict -> untouched
+		// Pre-migration-025: instrumental_result existed before the telemetry
+		// columns did, so a real population carries a verdict with a NULL
+		// detector_version. There is no version to re-key, and inventing one would
+		// claim a model produced a score it never saw.
+		{"a5", nil, 1, false},
 	}
 	for _, r := range rows {
 		if _, err := dbh.ExecContext(ctx, insert, r.key, r.key, r.key, r.key, "/m/"+r.key, r.version, r.verdict); err != nil {

@@ -55,6 +55,16 @@ const (
 	// a persistently old or down sidecar costs one cheap request per interval
 	// rather than one per work item.
 	modelVersionRetryInterval = 1 * time.Minute
+	// modelVersionTTL is how long a KNOWN version is trusted before re-probing.
+	// It bounds how long a sidecar model swap can go unnoticed by a long-running
+	// serve process: without it, the first value would be cached for the process
+	// lifetime and an operator who redeployed new weights would have to restart
+	// canticle for verdict keying to be correct again.
+	//
+	// 15 minutes: a model swap is a deliberate, rare operator action, so a short
+	// window buys nothing, while the probe is one tiny GET -- at this TTL it is
+	// ~4 requests/hour, negligible against a worker that decodes audio.
+	modelVersionTTL = 15 * time.Minute
 	// maxHealthBodyBytes bounds the health read. The real body is a few hundred
 	// bytes; this only prevents an unbounded read of an unexpected response.
 	maxHealthBodyBytes = 64 << 10
