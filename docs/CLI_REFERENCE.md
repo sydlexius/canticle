@@ -5,7 +5,7 @@ This page documents every subcommand and flag. For operational guidance (running
 ## Usage
 
 ```text
-Usage: canticle [fetch|serve|scan|library|keys|admin|secrets|config|queue|provenance|realign|completion]
+Usage: canticle [fetch|serve|scan|library|keys|admin|secrets|config|queue|provenance|realign|revalidate|completion]
 
 Commands:
   fetch       fetch lyrics once without HTTP server or DB queue
@@ -19,6 +19,7 @@ Commands:
   queue       inspect or maintain the durable work queue
   provenance  embed or inspect provenance tags in .lrc files
   realign     re-attach orphaned .lrc/.txt sidecars to renamed audio files
+  revalidate  re-check existing .lrc timing against audio duration and remediate the backlog
   completion  output a shell completion script (bash, zsh, or fish)
 
 Global flags:
@@ -253,6 +254,44 @@ canticle realign --yes --backup /data/realign-undo.jsonl
 Every applied move is recorded (before the rename) as a JSONL line - `{"old_path","new_path","library_id","method"}` - in `<db-dir>/realign-backup-<timestamp>.jsonl` (or the `--backup` path); swap `old_path`/`new_path` to undo. Behavior is gated by the [`[realign]` config section](CONFIGURATION.md#realign): `require_provenance = true` restricts applied moves to the exact tier (heuristic and heuristic-nm candidates are reported but skipped), `cross_directory = true` lets an exact match move a sidecar into a different directory within the same library, `min_confidence` sets the heuristic (and heuristic-nm) name-guard floor, `name_match` enables the N:M matcher, and `min_margin` sets the ambiguity-rejection threshold for both name-similarity tiers.
 
 **Note:** the exact tier requires ISRC/MBID-tagged audio. Libraries whose files carry no such tags fall back to the heuristic tier (single-candidate-per-directory + name guard).
+
+## Revalidate
+
+`canticle revalidate` re-checks `.lrc` files that are **already on disk** against the duration of the audio they sit beside, and remediates the ones whose cues run past the end of the track. It is the backlog counterpart to the accept-time timing guard, which only ever sees new fetches.
+
+**Not the same as `realign`.** `realign` is about a sidecar's *location* - it re-attaches an orphan to renamed or moved audio and never looks at timing. `revalidate` is about a sidecar's *content* - the file is beside the right audio, but its timestamps do not fit it. A file can need both; they are independent passes.
+
+The buckets, from the shared timing predicate:
+
+- **ok** - the last text-bearing cue lands within the audio (a 2s tolerance absorbs rounding). Decorative music-note markers are excluded from the comparison, so a lyric that parks a `♪` past the end is not flagged.
+- **MisSynced** - the lyric overruns by more than the tolerance but stays under 1.5x the duration. The words are content-correct, only the timing is wrong, so the default keeps them.
+- **categorical** - the lyric runs at or past 1.5x the duration, i.e. it is almost certainly timed to a different, longer recording. Its words are not trusted either.
+- **unknown-duration** - no exact duration is cached for the audio file. **Always fails open**: counted, reported, never remediated. Run a scan to populate the duration cache.
+- **no-audio** - a `.lrc` with no companion audio file. That is `realign`'s problem, not this command's.
+
+```sh
+# Report the distribution across all libraries (dry run, the default: writes nothing)
+canticle revalidate
+
+# Remediate: MisSynced files keep their words as .txt, categorical files are quarantined
+canticle revalidate --apply
+
+# Scan specific roots instead of the configured libraries
+canticle revalidate /music/albums --apply
+
+# Drop the words of a MisSynced file instead of demoting them
+canticle revalidate --on-fail=delete --apply
+
+# Hard-delete instead of quarantining (NOT reversible)
+canticle revalidate --apply --purge
+
+# Record the per-file offenders locally for your own inspection
+canticle revalidate --tail ./offenders.tsv
+```
+
+**Reversible by default.** A removed `.lrc` is *moved* under `<db-dir>/quarantine` (or `--quarantine-dir`), preserving its path relative to the library root, not deleted - move it back to undo. A demotion writes the plain words to a `.txt` beside the audio **first**, then moves the `.lrc` aside, so a failed write leaves the original untouched; an already-settled `.txt` or `.lrc` is never overwritten. Every applied action is recorded as a JSONL line in `<db-dir>/revalidate-backup-<timestamp>.jsonl` (or `--backup`) before it happens. `--purge` is the opt-in escape hatch and is genuinely irreversible.
+
+**Output is aggregate-only.** Only counts are printed; no path, artist, title, or lyric text ever reaches stdout, so the report is safe to paste into an issue. Per-file detail goes only to the local file you name with `--tail`.
 
 ## Index Metadata
 

@@ -47,16 +47,52 @@ type LibraryLister interface {
 // for tests.
 type ProvenanceReader func(path string) (isrc, mbid, artist, title string, err error)
 
-// Move is a planned sidecar rename with its resolved tier. Eligible is false when
-// config gating (require_provenance) reports but suppresses the move.
+// Action kinds Apply can perform on a sidecar. They share ONE apply path and ONE
+// JSONL backup trail deliberately: a second remediation stack would mean a second
+// place for the backup-first, clobber-safe, fsync'd semantics to drift.
+//
+// KindRename is the realign resolver's own action and is the zero value, so every
+// Move built before these existed keeps its behavior with no field to set.
+const (
+	// KindRename re-attaches an orphaned sidecar to its audio (realign).
+	KindRename = ""
+	// KindDemote writes a plain-words .txt beside the audio and moves the .lrc
+	// aside. Used by revalidate (#442) on a MisSynced lyric: the words are
+	// content-correct, only the timing is wrong.
+	KindDemote = "demote"
+	// KindQuarantine moves a sidecar aside without writing anything in its
+	// place. Used on a Categorical lyric, which is almost certainly timed to a
+	// different recording, so its words are not trustworthy either.
+	KindQuarantine = "quarantine"
+	// KindPurge hard-deletes a sidecar. Intentionally NON-REVERSIBLE: it is the
+	// opt-in escape hatch (--purge), and its backup record is an audit trail,
+	// not a restorable copy. Quarantine is the default for exactly this reason.
+	KindPurge = "purge"
+)
+
+// Move is a planned sidecar action. For the realign resolver it is a rename with
+// its resolved tier; Eligible is false when config gating (require_provenance)
+// reports but suppresses the move. Kind selects the action Apply performs.
 type Move struct {
 	Orphan     string
 	Target     string
-	Method     string // "exact", "heuristic", or "heuristic-nm"
+	Method     string // "exact", "heuristic", "heuristic-nm", or a caller's own label
 	LibraryID  int64
 	Eligible   bool
 	GateReason string  // why an ineligible move is suppressed (require_provenance)
 	Confidence float64 // heuristic name-guard score (0 for exact / positional)
+
+	// Kind is the action to perform; the zero value is KindRename.
+	Kind string
+	// TextPath and TextBody carry the demoted plain-words sidecar for
+	// KindDemote. They are ignored by every other kind.
+	//
+	// TextBody is supplied by the caller rather than derived here because
+	// deciding what counts as lyric text is internal/timing's job, not this
+	// package's -- a copy of that judgment here would be the second
+	// implementation the whole predicate consolidation exists to prevent.
+	TextPath string
+	TextBody string
 }
 
 // Skip is a reported orphan that was not moved (ambiguous or conflict), never
@@ -395,6 +431,15 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 		// merged into one slice -- the plan-time claimed map is per-plan, not
 		// run-wide, and os.Rename would otherwise overwrite an existing sidecar
 		// on POSIX.
+		if mv.Kind != KindRename {
+			if aerr := applyRemediation(mv); aerr != nil {
+				rollbackBackup(mv.Kind+" failed", aerr)
+				applied = append(applied, Applied{Move: mv, Err: aerr})
+				continue
+			}
+			applied = append(applied, Applied{Move: mv})
+			continue
+		}
 		if destinationBlocked(mv.Target, mv.Orphan) {
 			rollbackBackup("destination blocked", nil)
 			applied = append(applied, Applied{Move: mv, Err: fmt.Errorf("destination exists: %s", mv.Target)})
@@ -489,11 +534,20 @@ type audioProvenance struct {
 
 // backupRecord is one JSONL line capturing an applied move so the operation is
 // restorable (swap OldPath/NewPath to undo). Method records the resolver tier.
+//
+// Kind and TextPath extend the same record to the remediation actions rather
+// than adding a second format: undoing a demote means moving NewPath back to
+// OldPath and deleting TextPath, which needs both paths in one line. Kind is
+// omitted for a plain realign rename, so records written before remediation
+// existed parse identically. A KindPurge record documents an intentionally
+// non-reversible delete: it is an audit trail, not a restorable copy.
 type backupRecord struct {
 	OldPath   string `json:"old_path"`
 	NewPath   string `json:"new_path"`
 	LibraryID int64  `json:"library_id"`
 	Method    string `json:"method"`
+	Kind      string `json:"kind,omitempty"`
+	TextPath  string `json:"text_path,omitempty"`
 }
 
 // walk walks root and partitions every regular file into audio files and .lrc/.txt
@@ -774,10 +828,142 @@ func resolveNameMatch(orphans []string, orphanTags map[string]lyrics.ProvenanceT
 	return pairings, unresolved
 }
 
+// applyRemediation performs a non-rename action. Every kind here is ORDERED so
+// nothing is ever destroyed before its replacement exists:
+//
+//   - KindDemote writes TextBody to TextPath FIRST and only then moves the .lrc
+//     aside. A failed .txt write leaves the .lrc exactly where it was, so the
+//     operator loses nothing; the reverse order could lose the lyric entirely.
+//     An existing sidecar at TextPath is never overwritten -- settled content on
+//     disk outranks anything this pass would write, matching the accept-time
+//     guard's settled-sidecar rule.
+//   - KindQuarantine moves the sidecar to Target, which the caller places under
+//     a quarantine root. Reversible: move it back.
+//   - KindPurge unlinks. Not reversible, opt-in only.
+//
+// Symlinks are never followed or moved: a sidecar path that is a symlink is
+// refused outright rather than acted on, so a link planted in a library root
+// cannot redirect a delete or a rename outside it.
+func applyRemediation(mv Move) error {
+	if fi, err := os.Lstat(mv.Orphan); err != nil {
+		return fmt.Errorf("%s: lstat %q: %w", mv.Kind, mv.Orphan, err)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: refusing to act on symlink %q", mv.Kind, mv.Orphan)
+	}
+
+	switch mv.Kind {
+	case KindPurge:
+		if err := os.Remove(mv.Orphan); err != nil {
+			return fmt.Errorf("purge %q: %w", mv.Orphan, err)
+		}
+		lyrics.FsyncDir(filepath.Dir(mv.Orphan))
+		return nil
+	case KindDemote:
+		if mv.TextPath == "" {
+			return fmt.Errorf("demote %q: no text path", mv.Orphan)
+		}
+		created, err := writeDemotedText(mv.TextPath, mv.TextBody)
+		if err != nil {
+			return err
+		}
+		if merr := moveAside(mv); merr != nil {
+			// Roll the .txt back so a failed demote leaves nothing on disk that the
+			// backup record does not describe. The caller truncates its backup line
+			// on error, so without this the file would survive unrecorded -- which
+			// is precisely the backup-first invariant this package claims.
+			//
+			// Only when THIS call created it: writeDemotedText is O_EXCL and reports
+			// an already-settled sidecar as a no-op, and removing a file we did not
+			// write would destroy content that predates this run.
+			if created {
+				if rerr := os.Remove(mv.TextPath); rerr != nil && !os.IsNotExist(rerr) {
+					slog.Warn("demote rollback: could not remove the text file",
+						"path", mv.TextPath, "error", rerr)
+				} else {
+					lyrics.FsyncDir(filepath.Dir(mv.TextPath))
+				}
+			}
+			return merr
+		}
+		return nil
+	case KindQuarantine:
+		return moveAside(mv)
+	default:
+		return fmt.Errorf("unknown remediation kind %q", mv.Kind)
+	}
+}
+
+// writeDemotedText writes body to path unless a sidecar is already settled
+// there, in which case it is a no-op and the existing file wins.
+//
+// The create is EXCLUSIVE (O_CREATE|O_EXCL) rather than a stat followed by a
+// write. That is not just TOCTOU hygiene: a stat-first version has to decide
+// what a stat error that is NOT not-exist means, and the conservative reading
+// ("assume occupied, skip the write") is catastrophic here -- the caller then
+// moves the .lrc aside believing the words were preserved, and they are gone.
+// O_EXCL collapses the question: EEXIST is the settled case and every other
+// error is a genuine failure the caller must not proceed past.
+//
+// The bool reports whether THIS call created the file, which the caller needs to
+// roll the write back safely: on the settled (EEXIST) path the content predates
+// this run, so removing it would destroy a file we did not write.
+func writeDemotedText(path, body string) (created bool, err error) {
+	if body == "" {
+		return false, fmt.Errorf("demote: refusing to write an empty %q", path)
+	}
+	// 0o666 (subject to umask) matches what LRCWriter gives a final sidecar, so a
+	// demoted .txt stays readable to whatever uid reads the library. The other
+	// sidecar writers either use this mode or copy the original file's; 0o600 here
+	// would make this the one path that produces an unreadable sidecar.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666) //nolint:gosec // reason: G304: path is derived from the caller's own audio-file enumeration; G302: mode intentionally matches the other sidecar writers so the file is readable by other uids
+	if err != nil {
+		if os.IsExist(err) {
+			return false, nil // settled content on disk wins
+		}
+		return false, fmt.Errorf("demote: create %q: %w", path, err)
+	}
+	if _, werr := f.WriteString(body); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return false, fmt.Errorf("demote: write %q: %w", path, werr)
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return false, fmt.Errorf("demote: sync %q: %w", path, serr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(path)
+		return false, fmt.Errorf("demote: close %q: %w", path, cerr)
+	}
+	lyrics.FsyncDir(filepath.Dir(path))
+	return true, nil
+}
+
+// moveAside renames the sidecar to mv.Target, creating the destination
+// directory tree and refusing to clobber anything already there.
+func moveAside(mv Move) error {
+	if mv.Target == "" {
+		return fmt.Errorf("%s %q: no target", mv.Kind, mv.Orphan)
+	}
+	if err := os.MkdirAll(filepath.Dir(mv.Target), 0o750); err != nil {
+		return fmt.Errorf("%s: mkdir %q: %w", mv.Kind, filepath.Dir(mv.Target), err)
+	}
+	if destinationBlocked(mv.Target, mv.Orphan) {
+		return fmt.Errorf("%s: destination exists: %s", mv.Kind, mv.Target)
+	}
+	if err := os.Rename(mv.Orphan, mv.Target); err != nil {
+		return fmt.Errorf("%s: rename %q: %w", mv.Kind, mv.Orphan, err)
+	}
+	lyrics.FsyncDir(filepath.Dir(mv.Target))
+	lyrics.FsyncDir(filepath.Dir(mv.Orphan))
+	return nil
+}
+
 // appendBackup writes and fsyncs one JSONL backup record for an applied move, so
 // the backup-first guarantee survives a crash between the record and the rename.
 func appendBackup(f *os.File, mv Move) error {
-	rec := backupRecord{OldPath: mv.Orphan, NewPath: mv.Target, LibraryID: mv.LibraryID, Method: mv.Method}
+	rec := backupRecord{OldPath: mv.Orphan, NewPath: mv.Target, LibraryID: mv.LibraryID, Method: mv.Method, Kind: mv.Kind, TextPath: mv.TextPath}
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("marshal realign backup record: %w", err)
