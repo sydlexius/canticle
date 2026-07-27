@@ -126,10 +126,17 @@ jobs:
           set -euo pipefail
           # --user root: the image drops to appuser (uid 1000), but installing
           # pytest into system site-packages for this throwaway run needs root.
+          #
+          # --require-hashes against a generated lockfile, not a bare `pip install
+          # pytest httpx`: an unpinned install resolves to whatever PyPI serves at
+          # run time, which is an unverified dependency executing in CI (Scorecard
+          # alert #81, issue #636). Version pins alone do NOT clear the check --
+          # hashes are what make the install verifiable.
           docker run --rm --user root \
             -v "$PWD/deploy/yamnet-detector/test_app.py:/app/test_app.py:ro" \
+            -v "$PWD/deploy/yamnet-detector/requirements-test.txt:/app/requirements-test.txt:ro" \
             --entrypoint sh canticle-yamnet:smoke -c \
-            'pip install --no-cache-dir --quiet pytest httpx && pytest test_app.py -q'
+            'pip install --no-cache-dir --quiet --require-hashes -r requirements-test.txt && pytest test_app.py -q'
 
   publish:
     name: Publish to GHCR
