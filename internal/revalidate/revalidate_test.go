@@ -73,7 +73,7 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		b, rerr := os.ReadFile(p) //nolint:gosec // test fixture path
+		b, rerr := os.ReadFile(p)
 		if rerr != nil {
 			return rerr
 		}
@@ -253,7 +253,7 @@ func TestCategoricalQuarantinesRatherThanDeletes(t *testing.T) {
 		t.Errorf("the .lrc is still in the library after quarantine: %v", err)
 	}
 	quarantined := filepath.Join(quarantine, "album", "track.lrc")
-	got, err := os.ReadFile(quarantined) //nolint:gosec // test fixture path
+	got, err := os.ReadFile(quarantined)
 	if err != nil {
 		t.Fatalf("the quarantined copy is missing -- the file was DELETED, not moved aside: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestDemotionKeepsWordsAsTxt(t *testing.T) {
 	applyPlan(t, plan)
 
 	txt := filepath.Join(root, "album", "track.txt")
-	body, err := os.ReadFile(txt) //nolint:gosec // test fixture path
+	body, err := os.ReadFile(txt)
 	if err != nil {
 		t.Fatalf("demoted .txt missing: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestDemoteNeverOverwritesSettledTxt(t *testing.T) {
 	}
 	applyPlan(t, plan)
 
-	got, err := os.ReadFile(txt) //nolint:gosec // test fixture path
+	got, err := os.ReadFile(txt)
 	if err != nil {
 		t.Fatalf("read txt: %v", err)
 	}
@@ -519,7 +519,7 @@ func applyPlan(t *testing.T, plan Plan) []realign.Applied {
 			t.Fatalf("apply %s: %v", a.Move.Kind, a.Err)
 		}
 	}
-	b, rerr := os.ReadFile(backup) //nolint:gosec // test fixture path
+	b, rerr := os.ReadFile(backup)
 	if rerr != nil {
 		t.Fatalf("a mutating apply wrote no backup trail: %v", rerr)
 	}
