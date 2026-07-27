@@ -104,6 +104,32 @@ jobs:
 
             if (priorities.length === 1) {
               core.info(`#${issueNumber} has exactly one priority label, nothing to do`);
+              // Clear a stale guard comment. Without this, an issue that once had
+              // 0 or 2+ priorities keeps a comment saying so forever after a human
+              // fixes it -- the guard's own audit trail becomes the thing lying
+              // about the state. Deleted rather than rewritten: "this was resolved"
+              // is not information anyone needs, and an edited-to-empty comment is
+              // just noise in the timeline.
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+              const existing = comments.find(c => c.body && c.body.includes(SENTINEL));
+              if (existing) {
+                try {
+                  await github.rest.issues.deleteComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: existing.id,
+                  });
+                  core.info(`Removed the stale guard comment on #${issueNumber}`);
+                } catch (err) {
+                  if (err.status !== 404) {
+                    core.warning(`Could not remove the stale guard comment on #${issueNumber}: ${err.message}`);
+                  }
+                }
+              }
               return;
             }
 
@@ -174,6 +200,27 @@ jobs:
             const keep = sorted[0];
             const remove = sorted.slice(1);
 
+            // Post the audit comment BEFORE mutating labels. cancel-in-progress
+            // can kill this run at any await, and a cancellation between the
+            // removals and the comment would strip labels with no record of why.
+            // If that cancelled run was the last event for the issue, no later run
+            // would ever explain it either: the next run sees one label and takes
+            // the early return above. Comment-first inverts the failure into the
+            // harmless direction -- a comment describing a removal that did not
+            // happen, on an issue that still visibly has both labels, which the
+            // next event reconciles.
+            await upsertComment([
+              SENTINEL,
+              `This issue has **${priorities.length} priority labels**, all applied by bots:`,
+              '',
+              attribution,
+              '',
+              `Keeping \`${keep}\` (highest severity) and removing the rest. Highest-wins`,
+              'over-surfaces rather than buries; adjust manually if that is wrong.',
+            ].join('\n'));
+
+            const removed = [];
+            const failed = [];
             for (const name of remove) {
               try {
                 await github.rest.issues.removeLabel({
@@ -182,24 +229,39 @@ jobs:
                   issue_number: issueNumber,
                   name,
                 });
+                removed.push(name);
                 core.info(`Removed "${name}" from #${issueNumber}`);
               } catch (err) {
-                // 404 = already gone (a concurrent run or a human beat us to it).
+                // 404 = already gone (a concurrent run or a human beat us to it),
+                // which is the intended end state, so it counts as removed.
                 if (err.status === 404) {
+                  removed.push(name);
                   core.info(`"${name}" already removed from #${issueNumber}`);
                 } else {
+                  failed.push(name);
                   core.warning(`Could not remove "${name}" from #${issueNumber}: ${err.message}`);
                 }
               }
             }
 
-            core.notice(`#${issueNumber}: kept "${keep}", removed ${remove.map(r => `"${r}"`).join(', ')}`);
-            await upsertComment([
-              SENTINEL,
-              `This issue had **${priorities.length} priority labels**, all applied by bots:`,
-              '',
-              attribution,
-              '',
-              `Kept \`${keep}\` (highest severity) and removed the rest. Highest-wins over-surfaces`,
-              'rather than buries; adjust manually if that is wrong.',
-            ].join('\n'));
+            // Correct the comment when reality diverged from the plan. Claiming
+            // "removed the rest" while a removal failed would leave the guard
+            // confidently misreporting label state -- in a guard whose entire
+            // purpose is label state being trustworthy.
+            if (failed.length > 0) {
+              core.warning(`#${issueNumber}: ${failed.length} label removal(s) failed`);
+              await upsertComment([
+                SENTINEL,
+                `This issue has **${priorities.length} priority labels**, all applied by bots:`,
+                '',
+                attribution,
+                '',
+                `Intended to keep \`${keep}\` (highest severity) and remove the rest, but`,
+                `**could not remove** ${failed.map(f => '`' + f + '`').join(', ')} -- so the`,
+                'duplicate is still present and needs removing by hand.',
+                removed.length > 0 ? `\nRemoved: ${removed.map(r => '`' + r + '`').join(', ')}.` : '',
+              ].join('\n'));
+              return;
+            }
+
+            core.notice(`#${issueNumber}: kept "${keep}", removed ${removed.map(r => `"${r}"`).join(', ')}`);
