@@ -197,7 +197,17 @@ func printRevalidateCounts(out io.Writer, c revalidate.Counts, apply bool) {
 	_, _ = fmt.Fprintf(out, "revalidate: scanned=%d ok=%d MisSynced=%d categorical=%d unknown-duration=%d no-audio=%d errored=%d%s\n",
 		c.Scanned, c.Ok, c.MisSynced, c.Categorical, c.UnknownDuration, c.NoAudio, c.Errored, suffixRevalidateDryRun(apply))
 	if c.UnknownDuration > 0 {
-		_, _ = fmt.Fprintf(out, "revalidate: %d file(s) had no exact audio duration and were left untouched (run a scan to populate the duration cache)\n", c.UnknownDuration)
+		// Name a remedy that actually works for THESE files. Before #684 a scan
+		// short-circuited on any file that already had a sidecar before it ever
+		// probed a duration, so the previous "run a scan" advice provably did
+		// not fill the entries this command needs -- an operator who followed it
+		// got the identical count back.
+		//
+		// Deliberately NOT pinned to a release number: the fix's version is not
+		// known when this string is written, and a hardcoded one silently goes
+		// wrong if the release slips. "Older builds" is both accurate and
+		// stable.
+		_, _ = fmt.Fprintf(out, "revalidate: %d file(s) had no exact audio duration and were left untouched (re-scan the library to populate the duration cache; older builds skipped files that already had a sidecar, which is most of these, so a library last scanned by one needs a fresh pass)\n", c.UnknownDuration)
 	}
 }
 

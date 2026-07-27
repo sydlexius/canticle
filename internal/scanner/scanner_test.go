@@ -526,11 +526,20 @@ func TestScanLibrary_WindowNeverResurrectsATerminalClass(t *testing.T) {
 
 // recordingDurationStore captures what the scanner banks, so the test asserts on
 // the recorded tuple rather than on a DB round-trip.
+//
+// Lookup is backed by what Record actually stored, and keyed on the full
+// (path, mtime, size) tuple exactly like the real table. A stub returning a
+// constant would make the skipped-file probe gate (#684) untestable: the whole
+// property worth asserting is that a SECOND scan finds the row the first one
+// wrote and does not re-probe.
 type recordingDurationStore struct {
 	paths   []string
 	mtimes  []int64
 	sizes   []int64
 	seconds []int
+	// lookupErr, when set, is returned by every Lookup to exercise the
+	// fail-closed branch.
+	lookupErr error
 }
 
 func (r *recordingDurationStore) Record(_ context.Context, path string, mtimeUnixNano, size int64, seconds int) error {
@@ -539,6 +548,18 @@ func (r *recordingDurationStore) Record(_ context.Context, path string, mtimeUni
 	r.sizes = append(r.sizes, size)
 	r.seconds = append(r.seconds, seconds)
 	return nil
+}
+
+func (r *recordingDurationStore) Lookup(_ context.Context, path string, mtimeUnixNano, size int64) (int, bool, error) {
+	if r.lookupErr != nil {
+		return 0, false, r.lookupErr
+	}
+	for i, p := range r.paths {
+		if p == path && r.mtimes[i] == mtimeUnixNano && r.sizes[i] == size {
+			return r.seconds[i], true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 // The scanner already computes a duration during enrichment and discards it.
@@ -580,6 +601,161 @@ func TestScanRecordsDurationWhenEnriching(t *testing.T) {
 	}
 	if store.seconds[0] != 210 {
 		t.Fatalf("recorded %ds, want 210s", store.seconds[0])
+	}
+}
+
+// A file that already has a .lrc is skipped for FETCHING, but its duration must
+// still be banked (#684). This is the coverage gap that starved revalidate: it
+// walks SIDECARS and needs each one's companion audio duration, yet the files it
+// cares about are exactly the ones the fetch path short-circuits before the
+// probe. Measured in prod, a full scan banked 690 new durations and moved
+// revalidate's unknown-duration count by ZERO, because the two populations are
+// near-disjoint by construction.
+func TestScanRecordsDurationForFileWithExistingLRC(t *testing.T) {
+	dir := t.TempDir()
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	// The settled sidecar that makes the scanner skip this file for fetching.
+	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]words\n"), 0o600); err != nil {
+		t.Fatalf("write .lrc: %v", err)
+	}
+	wantPath, err := filepath.EvalSymlinks(filepath.Join(dir, "song.flac"))
+	if err != nil {
+		t.Fatalf("EvalSymlinks fixture path: %v", err)
+	}
+
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+
+	results, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true})
+	if err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	// The track is still correctly SKIPPED for fetching -- this fix must not
+	// re-enqueue settled work, only bank the duration.
+	if len(results) != 0 {
+		t.Fatalf("got %d results; want 0 (a settled .lrc must not be enqueued)", len(results))
+	}
+
+	if len(store.paths) != 1 {
+		t.Fatalf("recorded %d durations, want 1 (a skipped file still needs its duration banked)", len(store.paths))
+	}
+	if store.paths[0] != wantPath {
+		t.Fatalf("recorded path %q, want canonical %q", store.paths[0], wantPath)
+	}
+	if store.seconds[0] != 210 {
+		t.Fatalf("recorded %ds, want 210s", store.seconds[0])
+	}
+}
+
+// The Lookup gate is what keeps the #684 fix from causing the symptom #684
+// exists to remove. bankDurationForSkippedFile runs for EVERY settled file on
+// EVERY scan, so an ungated probe would re-read tens of thousands of headers per
+// pass and keep the library disks permanently awake. A second scan over
+// unchanged files must therefore probe NOTHING.
+func TestScanDoesNotReprobeSkippedFileWithCachedDuration(t *testing.T) {
+	dir := t.TempDir()
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]words\n"), 0o600); err != nil {
+		t.Fatalf("write .lrc: %v", err)
+	}
+
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+
+	// Count probes directly: the gate's whole purpose is preventing the header
+	// READ, so asserting on row count alone would pass even if every scan
+	// re-read the file and rewrote an identical row.
+	probes := 0
+	sc.probeFunc = func(string) (int, error) {
+		probes++
+		return 210, nil
+	}
+
+	opts := ScanOptions{MaxDepth: 1, EnrichRecording: true}
+	if _, err := sc.ScanLibrary(context.Background(), dir, opts); err != nil {
+		t.Fatalf("first ScanLibrary: %v", err)
+	}
+	if probes != 1 {
+		t.Fatalf("first scan probed %d times, want 1", probes)
+	}
+	if len(store.paths) != 1 {
+		t.Fatalf("first scan banked %d durations, want 1", len(store.paths))
+	}
+
+	if _, err := sc.ScanLibrary(context.Background(), dir, opts); err != nil {
+		t.Fatalf("second ScanLibrary: %v", err)
+	}
+	if probes != 1 {
+		t.Fatalf("second scan probed again (total %d, want 1); the cache gate is not holding and the disk never idles", probes)
+	}
+	if len(store.paths) != 1 {
+		t.Fatalf("second scan banked another row (total %d, want 1)", len(store.paths))
+	}
+}
+
+// A lookup error must fail CLOSED toward not reading. Treating an errored lookup
+// as "absent" would re-probe the entire library on every scan whenever the DB is
+// unhappy -- a silent, disk-thrashing degrade.
+func TestScanDoesNotProbeSkippedFileWhenLookupErrors(t *testing.T) {
+	dir := t.TempDir()
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]words\n"), 0o600); err != nil {
+		t.Fatalf("write .lrc: %v", err)
+	}
+
+	store := &recordingDurationStore{lookupErr: errors.New("database is locked")}
+	sc := NewScanner(WithDurationStore(store))
+	probes := 0
+	sc.probeFunc = func(string) (int, error) {
+		probes++
+		return 210, nil
+	}
+
+	if _, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true}); err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if probes != 0 {
+		t.Fatalf("probed %d times despite a lookup error, want 0 (must fail closed toward not reading)", probes)
+	}
+}
+
+// Enrichment off means the scanner probes no headers at all. The skipped-file
+// bank must not become a back door around that switch (#217).
+func TestScanDoesNotBankForSkippedFileWhenEnrichmentDisabled(t *testing.T) {
+	dir := t.TempDir()
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]words\n"), 0o600); err != nil {
+		t.Fatalf("write .lrc: %v", err)
+	}
+
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+	probes := 0
+	sc.probeFunc = func(string) (int, error) {
+		probes++
+		return 210, nil
+	}
+
+	if _, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: false}); err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if probes != 0 {
+		t.Fatalf("probed %d times with enrichment off, want 0", probes)
+	}
+	if len(store.paths) != 0 {
+		t.Fatalf("banked %d durations with enrichment off, want 0", len(store.paths))
 	}
 }
 
@@ -750,9 +926,13 @@ func (s *lookupDurationStore) Record(_ context.Context, path string, _, _ int64,
 	return nil
 }
 
-func (s *lookupDurationStore) Lookup(_ context.Context, path string) (int, bool) {
+// Lookup ignores mtime/size on purpose: file_path is the whole primary key in
+// the real table, and the property this store exists to prove is KEY COLLAPSE
+// (#643) -- that two spellings of one file resolve to a single row. Validating
+// the stamp here would add a second reason for a miss and blur that signal.
+func (s *lookupDurationStore) Lookup(_ context.Context, path string, _, _ int64) (int, bool, error) {
 	seconds, ok := s.rows[path]
-	return seconds, ok
+	return seconds, ok, nil
 }
 
 // TestScanLibrary_SymlinkedRootCollapsesToOneCanonicalKey exercises the #643
@@ -829,7 +1009,11 @@ func TestScanLibrary_SymlinkedRootCollapsesToOneCanonicalKey(t *testing.T) {
 			// (pathutil.CanonicalPath), so this proves the worker capture site
 			// and the scanner capture site land on the identical row.
 			key := pathutil.CanonicalPath(consumerPath)
-			seconds, hit := store.Lookup(context.Background(), key)
+			// mtime/size are ignored by this store by design -- see its Lookup.
+			seconds, hit, err := store.Lookup(context.Background(), key, 0, 0)
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
 			if !hit {
 				t.Fatalf("consumer path %q (canonicalized to %q) missed the cache; scan wrote key %q", consumerPath, key, wantKey)
 			}
