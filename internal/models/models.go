@@ -126,6 +126,22 @@ type Song struct {
 	DetectorVocalPeak  float64 `json:"-"`
 	DetectorSpeechMean float64 `json:"-"`
 	DetectorVocalClass string  `json:"-"`
+	// AudioDurationSeconds is the duration of the AUDIO FILE this song is being
+	// written for, in seconds. Zero means unknown.
+	//
+	// It is deliberately NOT Track.TrackLength. On the fetch path Track is
+	// overwritten wholesale from the provider payload, so its length is the
+	// provider's own catalog value -- the same length the lyric was timed
+	// against, which makes a timing comparison near-circular and biases every
+	// verdict toward "fine". The accept-time timing guard (#439) needs the
+	// ground truth from the file's own tags, so the caller that holds it (the
+	// worker's refreshRecordingIdentity result, or fetch mode's scanner-derived
+	// track) stamps it here before handing the song to the writer.
+	//
+	// Transient: not persisted, not serialized. A cache hit therefore carries
+	// zero here and the caller re-stamps it from the live file, which is correct
+	// -- the duration belongs to the file on disk, not to the cached lyrics.
+	AudioDurationSeconds int `json:"-"`
 }
 
 // LaneAttempt is one provider lane's outcome for a single track: the lane name

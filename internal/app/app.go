@@ -76,6 +76,13 @@ func (a *App) Run(ctx context.Context) error {
 				break
 			}
 			slog.Debug("formatting lyrics")
+			// Hand the writer the AUDIO FILE's duration for the accept-time
+			// timing guard (#439). cur.Track is the scanner's read of the file's
+			// own tags; song.Track was overwritten wholesale by the provider
+			// payload, so its length is the catalog value the lyric was already
+			// timed against and comparing to it would be near-circular. Zero
+			// (song mode, or a file with no duration tag) fails open.
+			song.AudioDurationSeconds = cur.Track.TrackLength
 			if writeErr := a.writer.WriteLRC(song, cur.Filename, cur.Outdir); writeErr != nil {
 				slog.Error("failed to save lyrics", "error", writeErr)
 				a.failed.Push(cur)

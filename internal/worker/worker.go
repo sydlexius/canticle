@@ -807,6 +807,23 @@ func (w *Worker) guardReject(_ queue.WorkItem, song models.Song) (bool, string) 
 // check would mislabel a provider-flagged instrumental as synced. An empty
 // string means nothing writable (the caller leaves outcome_type NULL).
 func outcomeTypeFromSong(song models.Song) string {
+	// The accept-time timing guard (#439) can override the content-type gate's
+	// choice: a MisSynced candidate is written as .txt and a categorical one is
+	// not written at all. Consult the SAME decision the writer made, so
+	// outcome_type records what actually landed on disk rather than what was
+	// planned -- the exact class of drift outcomeTypeFromSong exists to prevent
+	// (#379).
+	switch decision, _, _ := lyrics.DecidePromotion(song); decision {
+	case lyrics.Quarantine:
+		// Nothing was written. Leaving this NULL would be indistinguishable from
+		// a row that was never settled, so the row's timing_outcome column is the
+		// record of WHY; outcome_type stays empty because there is no output to
+		// classify.
+		return ""
+	case lyrics.DemoteToUnsynced:
+		return "unsynced"
+	case lyrics.PromoteAsIs:
+	}
 	switch {
 	case song.Track.Instrumental == 1:
 		return "instrumental"
@@ -892,12 +909,21 @@ func (w *Worker) stampCompletionProvenance(ctxNoCancel context.Context, id int64
 }
 
 // stampTimingOutcome records the row's timing verdict and, for a non-compliant
-// one, emits the structured event (#440). Rejections and demotions eventually
-// move or discard user files, so the reason must be visible rather than silent;
-// this is that surface until the metrics counters land.
+// one, emits the structured event (#440). Rejections and demotions move or
+// discard user files, so the reason must be visible rather than silent; this is
+// that surface until the metrics counters land.
+//
+// SINCE #439 THIS IS THE RECORD OF AN ENFORCED DECISION, not an observation of
+// one that was ignored. It still runs after the write, and deliberately so: the
+// stamp is what makes a demotion or a quarantine explicable afterwards, and the
+// verdict it stores is reached by the same timing.Evaluate call the writer's
+// guard made on the same song and the same duration, so the two cannot disagree.
+// Re-deriving rather than threading the writer's verdict back keeps the Writer
+// interface (three callers plus mocks) unchanged for a value that is a pure
+// function of inputs both sides already hold.
 //
 // Non-fatal like the sibling stamps: a bookkeeping write must never fail an item
-// whose output is already on disk.
+// whose fate is already decided.
 func (w *Worker) stampTimingOutcome(ctxNoCancel context.Context, item queue.WorkItem, song models.Song, durationSeconds int) {
 	rec := timingRecordFromSong(song, durationSeconds, w.now())
 	if rec.Outcome == "" {
@@ -1272,6 +1298,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		}
 	}
 
+	// Hand the writer the AUDIO FILE's duration so the accept-time timing guard
+	// (#439) judges against ground truth. song.Track.TrackLength is the
+	// PROVIDER's catalog length here -- the fetch overwrote Track wholesale --
+	// which is the same length the lyric was timed against, so comparing to it
+	// is near-circular and biases every verdict toward ok. resolvedTrack carries
+	// what refreshRecordingIdentity re-read from the file's own tags.
+	song.AudioDurationSeconds = resolvedTrack.TrackLength
 	for _, p := range outputPaths(item.Inputs) {
 		if err := w.writer.WriteLRC(song, p.Filename, p.Outdir); err != nil {
 			err = fmt.Errorf("worker: write item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, err)
@@ -1298,9 +1331,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// is indistinguishable from one written by the 2022 code.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
 	// Record how the synced timing compared against the audio duration (#440).
-	// OBSERVABILITY ONLY at this point: the .lrc above is already written, and
-	// nothing here changes that. The guard that acts on the verdict is #439.
-	w.stampTimingOutcome(ctxNoCancel, item, song, resolvedTrack.TrackLength)
+	// The guard inside WriteLRC has ALREADY acted on this verdict (#439) -- a
+	// MisSynced result landed as .txt and a categorical one was not written --
+	// so this is the durable record of a decision, not an ignored observation.
+	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++
