@@ -152,6 +152,46 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		return fmt.Errorf("nothing to save for %s - %s", song.Track.ArtistName, song.Track.TrackName)
 	}
 
+	// Accept-time timing guard (#439). A synced result is promoted to .lrc only
+	// once internal/timing agrees its cues fit the audio. This sits between the
+	// content-type gate and the write so BOTH accept paths (fetch mode and the
+	// serve worker) inherit it from the one place that owns promotion, with no
+	// per-caller opt-in and no provider-specific behavior.
+	//
+	// The verdict is DELEGATED, never recomputed here: see DecidePromotion.
+	decision, verdict, _ := DecidePromotion(song)
+	demoted := false
+	switch decision {
+	case Quarantine:
+		// Timed to a different, longer recording. These words are not
+		// trustworthy content for this file, so nothing is written and nothing
+		// already on disk is touched. Not an error: the fetch worked, and the
+		// caller settles the row rather than retrying something a retry cannot
+		// fix.
+		slog.Warn("refusing to write lyrics: timing indicates a different recording",
+			"artist", song.Track.ArtistName, "track", song.Track.TrackName,
+			"outcome", string(verdict), "decision", decision.String())
+		return nil
+	case DemoteToUnsynced:
+		// Content-safe demotion (Investigation-0 on #438): the words are the
+		// right song's, only the timing is wrong. Refuse the .lrc and keep the
+		// words as .txt.
+		body := unsyncedFallbackBody(song)
+		if body == "" {
+			slog.Warn("refusing to write lyrics: timing overruns the audio and no plain words survive demotion",
+				"artist", song.Track.ArtistName, "track", song.Track.TrackName,
+				"outcome", string(verdict))
+			return nil
+		}
+		kind = "unsynced (demoted)"
+		writeContent = func(buf *bufio.Writer) error { return writeText(body, buf) }
+		writeTags = false
+		synced = false
+		demoted = true
+	case PromoteAsIs:
+		// Compliant, not judgeable, or not a synced result at all: unchanged.
+	}
+
 	// Derive the sidecar base name (extension selection + base-name safety) via
 	// the shared helper so reconcile (#405) locates the exact same .txt path.
 	fn, err := SidecarName(song.Track.ArtistName, song.Track.TrackName, filename, synced)
@@ -178,6 +218,31 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		outdir = resolved
 	}
 	fp := filepath.Join(outdir, fn)
+
+	// A demotion must never destroy settled content. Both sidecar forms count as
+	// settled: an existing .txt is the upgrade scenario the issue calls out (the
+	// candidate that would have promoted it did not qualify, so the .txt stays
+	// exactly as it was), and an existing .lrc is a previously-accepted synced
+	// result that a demoted candidate has no standing to replace. Only when
+	// neither exists is this a fresh fetch, where writing the words as .txt is
+	// what keeps them (AC #3). The check is deliberately here, after root
+	// re-confinement resolved outdir, so it stats the same path the write would
+	// use.
+	//
+	// This is how WriteLRC learns fresh-fetch from upgrade: from the disk it is
+	// about to write to, not from a caller-supplied flag. The alternative -- a
+	// parameter on the Writer interface -- would change a signature with three
+	// callers plus their mocks so each could re-derive a fact the writer can see
+	// directly, and any caller that got it wrong would silently truncate a
+	// settled sidecar.
+	if demoted {
+		if settled, ok := settledSidecar(fp); ok {
+			slog.Info("keeping settled lyrics: candidate timing overruns the audio",
+				"path", settled, "artist", song.Track.ArtistName, "track", song.Track.TrackName,
+				"outcome", string(verdict))
+			return nil
+		}
+	}
 
 	var tags []string
 	if writeTags {
@@ -341,13 +406,38 @@ func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool) error 
 }
 
 func writeUnsyncedLRC(song models.Song, buff *bufio.Writer) error {
-	if _, err := buff.WriteString(song.Lyrics.LyricsBody); err != nil {
+	return writeText(song.Lyrics.LyricsBody, buff)
+}
+
+// writeText emits body verbatim. Shared by the ordinary unsynced path and the
+// timing guard's demotion (#439) so a demoted .txt is byte-identical to one the
+// provider's own unsynced result would have produced.
+func writeText(body string, buff *bufio.Writer) error {
+	if _, err := buff.WriteString(body); err != nil {
 		return fmt.Errorf("writing unsynced lyrics: %w", err)
 	}
 	if err := buff.Flush(); err != nil {
 		return fmt.Errorf("flushing unsynced lyrics: %w", err)
 	}
 	return nil
+}
+
+// settledSidecar returns the path of an already-written sidecar for fp's stem
+// (either extension), and whether one exists. Used only by the timing guard's
+// demotion path, which must not overwrite settled content.
+//
+// A stat error other than not-exist is treated as PRESENT: the guard's job here
+// is to avoid destroying a file, so an unreadable path is assumed occupied
+// rather than assumed free.
+func settledSidecar(fp string) (string, bool) {
+	stem := strings.TrimSuffix(fp, filepath.Ext(fp))
+	for _, ext := range []string{".txt", ".lrc"} {
+		candidate := stem + ext
+		if _, err := os.Stat(candidate); err == nil || !os.IsNotExist(err) {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 // writeInstrumental emits a plain instrumental marker (no [00:00.00] timestamp,

@@ -142,6 +142,17 @@ func correctedMaxSeconds(lines []models.Lines) (float64, bool) {
 	return maxTS, found
 }
 
+// IsDecorative reports whether a lyric line carries no actual lyric text: blank,
+// a run of music-note glyphs (including the "♪ Instrumental ♪" marker form), or
+// an [key:value] metadata tag.
+//
+// Exported so a consumer that must AGREE with the verdict on which lines count
+// -- the accept-time guard flattening cues into a demoted .txt (#439) -- shares
+// this one classification instead of keeping a copy that drifts from it.
+func IsDecorative(text string) bool {
+	return isDecorative(text)
+}
+
 // isDecorative reports whether a line carries no actual lyric text: blank, a
 // run of music-note glyphs (including the "♪ Instrumental ♪" marker form), or
 // an [key:value] metadata tag.
