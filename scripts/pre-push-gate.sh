@@ -164,6 +164,19 @@ else
   echo "    actionlint not installed; skipping (CI still lints workflows)"
 fi
 
+# The CI test-shard split (issue #662) fails SILENTLY when it drifts: a package
+# claimed by no shard is simply never tested, and nothing goes red. Assert here
+# that every package in `go list ./...` lands in exactly one shard, and that each
+# partitioned package's buckets are complete and disjoint.
+# Needs Bash 4+ (declare -A); stock macOS /bin/bash is 3.2, so skip rather than
+# fail when only an old shell is available -- CI runs it on ubuntu-latest.
+echo "==> ci-shards (test-shard split integrity)"
+if bash -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null; then
+  bash scripts/ci-shards.sh verify || fail "ci-shards verify"
+else
+  echo "    bash 4+ not available; skipping (CI still verifies the shard split)"
+fi
+
 echo "==> govulncheck"
 if command -v govulncheck >/dev/null 2>&1; then
   govulncheck ./... || fail "govulncheck"
