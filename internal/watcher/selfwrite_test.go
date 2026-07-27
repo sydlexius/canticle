@@ -230,7 +230,11 @@ func TestFullWriteCycleTriggersNoRescan(t *testing.T) {
 	for len(drops) > 0 {
 		seen[filepath.Base(<-drops)] = true
 	}
-	if !seen["song.lrc"] && !seen["song.txt"] {
+	// OR, not AND: each path must be recognized INDEPENDENTLY. With && the
+	// assertion only fires when both are missing, so a fix that recognized the
+	// .lrc but not the opposite-extension .txt Remove would pass here -- which is
+	// exactly the half-fix this test exists to catch.
+	if !seen["song.lrc"] || !seen["song.txt"] {
 		t.Errorf("suppressed only %v; the final .lrc Create and the opposite .txt Remove must be recognized too, not just the .tmp", seen)
 	}
 }
@@ -242,7 +246,20 @@ func TestFullWriteCycleTriggersNoRescan(t *testing.T) {
 func TestExpiredSelfWriteNoLongerSuppresses(t *testing.T) {
 	root := tempRoot(t)
 	reg := selfwrite.New(30 * time.Millisecond)
-	scanned, _ := startWatcher(t, root, reg)
+	scanned, drops := startWatcher(t, root, reg)
+
+	// Prove notify delivery works HERE before the timeout below is allowed to
+	// mean anything. The sibling tests t.Skip on this same 5s timeout because
+	// delivery is best-effort and may be unsupported on a given platform; this
+	// test t.Fatals instead, which is only defensible once delivery is
+	// established. Without the sentinel, an environment with no working watcher
+	// fails this test for a reason that has nothing to do with expiry.
+	sentinel := filepath.Join(root, "sentinel.flac")
+	reg.Record(sentinel)
+	if err := os.WriteFile(sentinel, []byte("x"), 0o644); err != nil {
+		t.Fatalf("sentinel write: %v", err)
+	}
+	waitFor(t, func() bool { return len(drops) > 0 }, "the sentinel event to be suppressed")
 
 	target := filepath.Join(root, "aged.flac")
 	reg.Record(target)
