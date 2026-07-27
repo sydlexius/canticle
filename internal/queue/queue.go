@@ -1611,7 +1611,16 @@ type InstrumentalTelemetry struct {
 	// VocalClass is the name of the vocal class that produced VocalPeak. Empty
 	// when no vocal class scored or when the sidecar returned no max map.
 	VocalClass string
-	// DetectorVersion is the app version string at detection time (internal/version.Version).
+	// DetectorVersion identifies the MODEL that produced these scores (the
+	// sidecar's loaded SavedModel sha, reported by its GET /health). It keys
+	// verdict-cache validity: the worker reuses a stored verdict only while this
+	// still matches the model currently loaded.
+	//
+	// It was the APP version until #684, which meant every canticle release
+	// invalidated every stored verdict even though the classifier had not changed,
+	// re-running inference across the whole backlog. Empty means UNKNOWN (an old
+	// or unreachable sidecar), which every consumer must treat as "do nothing
+	// destructive", never as a mismatch.
 	DetectorVersion string
 }
 
@@ -1886,9 +1895,14 @@ const (
 // when it is borderline (vocal_peak or speech_mean in band), cross-version
 // (detector_version differs from currentVersion), or un-scored (any telemetry
 // column NULL, e.g. a pre-#404 marker written before the telemetry columns
-// existed). currentVersion is the value #404 stamps into detector_version
-// (internal/version.Version). The returned clause uses only literal SQL and
-// placeholders, so it is safe to concatenate.
+// existed). currentVersion is the value stamped into detector_version: the
+// SIDECAR MODEL version since #684, not the app version. The returned clause
+// uses only literal SQL and placeholders, so it is safe to concatenate.
+//
+// NOTE the direction of an UNKNOWN ("") currentVersion here: this predicate
+// WIDENS on a mismatch, so unknown makes every row a candidate. That costs
+// re-inference, never data loss, and the caller is an operator-invoked
+// re-inference pass bounded by --limit.
 func instrumentalNarrowedPredicate(currentVersion string) (clause string, args []any) {
 	clause = ` AND (
             (vocal_peak BETWEEN ? AND ?)
@@ -1914,9 +1928,10 @@ type ListInstrumentalOptions struct {
 	// All returns the entire instrumental_result = 1 population, bypassing the
 	// telemetry-narrowed prefilter. CurrentVersion is then irrelevant.
 	All bool
-	// CurrentVersion is the detector version (internal/version.Version) the
+	// CurrentVersion is the SIDECAR MODEL version (#684, not the app version) the
 	// cross-version prefilter compares stored detector_version against. Required
-	// when All is false.
+	// when All is false. Empty (unknown) widens the candidate set rather than
+	// narrowing it -- see instrumentalNarrowedPredicate.
 	CurrentVersion string
 }
 

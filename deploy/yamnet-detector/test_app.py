@@ -171,3 +171,38 @@ def test_classify_does_not_serialize_concurrent_requests():
         f"concurrent /classify took {elapsed:.2f}s; serialized would be ~{serialized:.2f}s. "
         "Inference is running on the event loop - it must be dispatched to the threadpool."
     )
+
+
+def test_health_reports_model_version_when_baked_in(monkeypatch):
+    """/health must expose the MODEL identity so canticle can key its verdict cache.
+
+    Keying on the app version instead invalidated every stored verdict on every
+    unrelated canticle release, which is what kept the library disks awake (#684).
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(appmod, "YAMNET_MODEL_SHA256", "abc123")
+    appmod._state["classes"] = ["Music", "Speech"]
+
+    body = TestClient(appmod.app).get("/health").json()
+
+    assert body["status"] == "ok"
+    assert body["model_version"] == "abc123"
+
+
+def test_health_omits_model_version_when_unknown(monkeypatch):
+    """An unknown model version is ABSENT, never empty or a placeholder.
+
+    A caller must be able to tell "these are the weights" from "I don't know which
+    weights". Sending an empty string would let a caller treat two different models
+    as the same one and reuse verdicts across a real model change.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(appmod, "YAMNET_MODEL_SHA256", "")
+    appmod._state["classes"] = ["Music", "Speech"]
+
+    body = TestClient(appmod.app).get("/health").json()
+
+    assert body["status"] == "ok"
+    assert "model_version" not in body

@@ -14,6 +14,11 @@
 --                vocal class scored or when the sidecar returned no max map.
 -- detector_version - app version string at detection time (internal/version.Version),
 --                    sourced from the running binary via Config.Version.
+--                    SUPERSEDED BY MIGRATION 038 (#684): this column now holds the
+--                    SIDECAR MODEL identity, not the app version. Keying it to the
+--                    app version invalidated every stored verdict on every release
+--                    and kept the library disks awake. The text above is left as
+--                    written to record what this migration actually did.
 ALTER TABLE work_queue ADD COLUMN music_sum REAL;
 -- +goose StatementEnd
 -- +goose StatementBegin

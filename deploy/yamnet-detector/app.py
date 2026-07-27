@@ -21,6 +21,7 @@ clip's frames:
 import csv
 import io
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -43,6 +44,16 @@ from starlette.concurrency import run_in_threadpool
 # control into code execution. The model ships in the image and the path never
 # varies, so an override buys nothing.
 YAMNET_MODEL_DIR = "/app/yamnet"
+# The sha256 of the SavedModel archive this image was built from, baked in by the
+# Dockerfile from the same ARG the download is checksum-verified against. Canticle
+# keys its verdict cache on this (reported by /health as model_version): a stored
+# score is reusable exactly while the weights that produced it are still loaded.
+#
+# Empty when the image was built without the build arg. That is reported honestly
+# as an absent version rather than a placeholder, because a caller must be able to
+# tell "these are the weights" from "I don't know which weights" -- a placeholder
+# would let stale verdicts be reused across a real model change (#684).
+YAMNET_MODEL_SHA256 = os.environ.get("YAMNET_MODEL_SHA256", "").strip()
 TARGET_SR = 16000  # YAMNet requires 16 kHz mono
 # Cap the in-memory read. Canticle sends at most a ~60s 16 kHz mono WAV (~2 MB);
 # 32 MB is a generous ceiling that rejects oversize/malicious uploads before they
@@ -79,7 +90,15 @@ app = FastAPI(title="Canticle YAMNet instrumental classifier", lifespan=lifespan
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "classes": len(_state.get("classes", []))}
+    # model_version identifies the WEIGHTS, not the image tag or the app release,
+    # so a caller can cache a verdict for exactly as long as it stays valid (#684).
+    # The key is omitted entirely when unknown rather than sent empty, so a caller
+    # cannot mistake "no version" for a real one and reuse verdicts across a model
+    # change; canticle fails closed to re-inference on an absent key.
+    body = {"status": "ok", "classes": len(_state.get("classes", []))}
+    if YAMNET_MODEL_SHA256:
+        body["model_version"] = YAMNET_MODEL_SHA256
+    return body
 
 
 @app.post("/classify")

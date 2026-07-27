@@ -286,13 +286,34 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 
 	if instrumental {
 		src := song.WinningLane
-		if song.DetectorVersion != "" {
+		// EITHER signal marks a detector-written marker. This used to key on
+		// DetectorVersion alone, which meant an unknown model version silently
+		// wrote [source:<lane>] instead of [source:canticle-detector]: IsDetector()
+		// then read false and scanner.instrumentalReopenable treated a provisional
+		// detector verdict as editorially terminal -- reopenable only by a full
+		// --update, never by --upgrade.
+		//
+		// That was structurally unreachable while DetectorVersion was the app
+		// version (a build constant, never empty). Keying it to the sidecar model
+		// (#684) makes empty routine: every process start before /health answers,
+		// and permanently against a sidecar too old to report a version. The
+		// provenance must not degrade just because the version is unknown.
+		//
+		// The version check is KEPT alongside the lane check rather than replaced
+		// by it: callers that build a detector Song directly, without going through
+		// the orchestrator that stamps WinningLane, carry the version and no lane.
+		// Requiring the lane alone would silently relabel those as provider-written
+		// -- the same defect, moved.
+		if song.WinningLane == DetectorLaneName || song.DetectorVersion != "" {
 			src = SourceDetector
 		}
 		tags = append(tags, "[by:canticle]")
 		if src != "" {
 			tags = append(tags, fmt.Sprintf("[source:%s]", src))
 		}
+		// [dv:] is omitted when unknown -- it records WHICH model decided, and an
+		// empty tag would assert a version that was never established. Absent is
+		// honest; the [source:] token above already carries the provenance.
 		if song.DetectorVersion != "" {
 			tags = append(tags, fmt.Sprintf("[dv:%s]", song.DetectorVersion))
 		}

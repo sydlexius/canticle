@@ -2605,13 +2605,45 @@ func TestServeHandlerWiresMetricsReporter(t *testing.T) {
 	}
 }
 
+// detectorScanVersion returns the SIDECAR MODEL version, not the app version
+// (#684). It previously returned the app version, which meant every canticle
+// release reopened every on-disk [dv:] marker and invalidated every stored
+// verdict even though the classifier had not changed.
 func TestDetectorScanVersion(t *testing.T) {
-	enabled := config.Config{InstrumentalDetector: config.InstrumentalDetectorConfig{Enabled: true}}
-	if got := detectorScanVersion(enabled); got != version {
-		t.Errorf("enabled: detectorScanVersion = %q, want current app version %q", got, version)
+	ctx := context.Background()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Errorf("path = %q; want /health (the version probe must not run ffmpeg or classify)", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","model_version":"model-sha-under-test"}`))
+	}))
+	defer srv.Close()
+
+	enabled := config.Config{InstrumentalDetector: config.InstrumentalDetectorConfig{
+		Enabled: true, ClassifierURL: srv.URL,
+	}}
+	if got := detectorScanVersion(ctx, enabled); got != "model-sha-under-test" {
+		t.Errorf("enabled: detectorScanVersion = %q, want the sidecar model version", got)
 	}
-	disabled := config.Config{InstrumentalDetector: config.InstrumentalDetectorConfig{Enabled: false}}
-	if got := detectorScanVersion(disabled); got != "" {
+	if got := detectorScanVersion(ctx, enabled); got == version {
+		t.Errorf("detectorScanVersion returned the APP version %q; that is the #684 defect", version)
+	}
+
+	disabled := config.Config{InstrumentalDetector: config.InstrumentalDetectorConfig{
+		Enabled: false, ClassifierURL: srv.URL,
+	}}
+	if got := detectorScanVersion(ctx, disabled); got != "" {
 		t.Errorf("disabled: detectorScanVersion = %q, want empty (no version-invalidation churn)", got)
+	}
+
+	// An unreachable sidecar must degrade to UNKNOWN, not to a wrong-but-confident
+	// value: reopen.go treats "" as "do not reopen", so a transient probe failure
+	// leaves existing markers alone instead of invalidating the whole library.
+	unreachable := config.Config{InstrumentalDetector: config.InstrumentalDetectorConfig{
+		Enabled: true, ClassifierURL: "http://127.0.0.1:1",
+	}}
+	if got := detectorScanVersion(ctx, unreachable); got != "" {
+		t.Errorf("unreachable sidecar: detectorScanVersion = %q, want empty (unknown)", got)
 	}
 }

@@ -13,6 +13,16 @@ import (
 // writer and the scanner agree on one spelling.
 const SourceDetector = "canticle-detector"
 
+// DetectorLaneName is the models.Song.WinningLane value the audio-detector lane
+// reports. The writer uses it to decide that a marker is detector-written, which
+// must depend on WHICH LANE WON and nothing else -- notably not on whether a
+// model version happens to be known (#684).
+//
+// This must agree with the orchestrator's own lane name; that is enforced by a
+// test in internal/orchestrator rather than left to comments, since a silent
+// disagreement here would mislabel every detector marker as provider-written.
+const DetectorLaneName = "detector"
+
 // InstrumentalProvenance is the provenance read from an instrumental .txt marker.
 // A detector marker carries Source == SourceDetector and a DetectorVersion; a
 // provider marker carries the provider lane name and an empty DetectorVersion.

@@ -54,9 +54,27 @@ type HTTPDetector struct {
 	// under the Detect lock).
 	vocalBaseline []string
 	// version is the app version string passed in via Config.Version at
-	// construction time. It is stamped onto every returned Result so each
-	// persisted telemetry row records which build produced the decision.
+	// construction time. It is recorded for diagnostics only. It is NOT the
+	// verdict-cache key: see modelVersion.
 	version string
+
+	// modelVersion caches the sidecar's reported model identity (the sha256 of
+	// the loaded SavedModel, from GET /health). This, not the app version, keys
+	// verdict-cache validity (#684): a stored score stays reusable exactly while
+	// the weights that produced it are still loaded.
+	//
+	// It is fetched LAZILY rather than in the constructor, because the sidecar is
+	// routinely still booting when canticle starts (#567). A constructor probe
+	// would fail there and leave the version permanently empty, which fails closed
+	// to re-inference forever -- silently reproducing the very bug this fixes.
+	//
+	// Empty means UNKNOWN, never "no version": an unknown version can never equal
+	// a stored one, so every affected row re-infers. That is the safe direction --
+	// a needless re-inference costs one read, whereas reusing a verdict across an
+	// unverified model change writes a wrong marker.
+	modelVersionMu   sync.Mutex
+	modelVersionVal  string
+	modelVersionNext time.Time // earliest next probe attempt; throttles retries while the sidecar boots
 }
 
 // NewHTTPDetector creates a Detector that posts audio samples to the classifier
@@ -232,6 +250,20 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 	}
 	d.warnUnknownClassesOnce(resp)
 
+	// Resolve the MODEL version to stamp onto this verdict. Uses the caller's ctx
+	// (not a background one) so a canceled work item cannot leave a probe running,
+	// and resolves here -- after a successful classify -- because the sidecar is
+	// provably reachable at this point, which is exactly when the probe succeeds.
+	// Cached after the first success, so this is one extra request per process.
+	//
+	// This runs under d.mu, which serializes inference. That is not a new
+	// exposure: d.mu is already held across sample() (an ffmpeg subprocess) and
+	// classify() (a 3-minute-timeout HTTP call), so a bounded
+	// modelVersionProbeTimeout adds strictly less than what the lock already
+	// covers, at most once per process. resolveModelVersion itself releases its
+	// own lock before the request, so the probe holds no lock while in flight.
+	modelVersion := d.resolveModelVersion(ctx)
+
 	// Music gate: summed mean probability of the instrumental classes.
 	var music float64
 	for _, name := range d.instrumentalClasses {
@@ -307,7 +339,12 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 	// earlier (#403) and must not be duplicated.
 	slog.Info("detector: instrumental decision",
 		"path", audioPath, "music_sum", music, "vocal_peak", vocalPeak, "speech_mean", speechMean,
-		"vocal_class", winningVocalClass, "detector_version", d.version,
+		// detector_version is the value actually PERSISTED and compared, so an
+		// operator debugging a cache miss greps the same string the code uses.
+		// Logging d.version (the app version) here disagreed with what was stored.
+		// app_version stays alongside it: it is still useful for correlating a
+		// decision with a build, it just does not key the cache (#684).
+		"vocal_class", winningVocalClass, "detector_version", modelVersion, "app_version", d.version,
 		"instrumental", instrumental, "min_confidence", d.minConfidence,
 		"vocal_max_confidence", d.vocalMaxConfidence, "speech_max_confidence", d.speechMaxConfidence)
 
@@ -317,8 +354,15 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 		VocalConfidence:   vocalPeak,
 		SpeechConfidence:  speechMean,
 		WinningVocalClass: winningVocalClass,
-		Version:           d.version,
-		Classes:           resp.Mean,
+		// The MODEL version, not the app version. This value is persisted as
+		// work_queue.detector_version by the worker's stamp paths, and
+		// memoDetector.canReuse compares that stored value against ModelVersion().
+		// The two MUST be the same value or the verdict cache can never hit --
+		// worse than the #684 bug, which at least reused a verdict until the next
+		// release. Resolved (and cached) by the time Detect runs, since the probe
+		// is cheap and this is already a network-bound path.
+		Version: modelVersion,
+		Classes: resp.Mean,
 		// Reusable only when the response was complete: a degraded response
 		// (no/partial max map) forces not-instrumental above via the guards, and
 		// its scores must not be persisted as reusable telemetry (see Result.Reusable
@@ -327,12 +371,143 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 	}, nil
 }
 
-// ModelVersion returns the detector's configured version string (Config.Version,
-// sourced from the app version at construction). It keys score-cache validity:
-// stored telemetry is reusable only while its recorded detector_version matches
-// this. Empty when the detector was constructed without a version.
+// FetchModelVersion asks the classifier at classifierURL which model it has
+// loaded, without constructing a full detector. It exists for callers that need
+// only the verdict-cache key -- the CLI paths that compare a STORED
+// detector_version against the current one (#684) -- and must not pay for a
+// detector they will never call Detect on.
+//
+// That distinction is load-bearing, not cosmetic: NewHTTPDetector resolves
+// ffmpeg and fails when it is absent, and the resolution path can auto-provision
+// a pinned static build. Routing a pure-HTTP version probe through it would make
+// a read-only CLI command download an ffmpeg, and would make the probe fail on a
+// host where ffmpeg is simply missing -- yielding an UNKNOWN version for a
+// reason that has nothing to do with the sidecar.
+//
+// Returns "" (never an error) when the version cannot be determined: an empty
+// URL, an unreachable or non-200 sidecar, or one too old to report a version.
+// Every consumer treats unknown as "change nothing", so a soft failure here is
+// the correct and safe outcome.
+func FetchModelVersion(ctx context.Context, classifierURL string) string {
+	classifierURL = strings.TrimSpace(classifierURL)
+	if classifierURL == "" {
+		return ""
+	}
+	if err := config.ValidateHTTPURL(classifierURL); err != nil {
+		return ""
+	}
+	d := &HTTPDetector{
+		baseURL:    strings.TrimRight(classifierURL, "/"),
+		httpClient: &http.Client{Timeout: modelVersionProbeTimeout},
+	}
+	v, err := d.fetchModelVersion(ctx)
+	if err != nil {
+		slog.Debug("detector: model version probe failed; treating as unknown", "error", err)
+		return ""
+	}
+	return v
+}
+
+// ModelVersion returns the identity of the MODEL currently loaded in the sidecar
+// (the sha256 of its SavedModel, reported by GET /health). It keys score-cache
+// validity: stored telemetry is reusable only while its recorded detector_version
+// still matches this.
+//
+// It deliberately does NOT return the app version. Doing so keyed the cache on
+// the wrong thing: every canticle release invalidated every stored verdict in the
+// library even though the classifier had not changed, so the detector re-ran
+// inference -- an ffmpeg decode per track -- across the whole backlog after each
+// release, and the library disks never idled (#684). Measured in prod before the
+// fix: 26 distinct detector_version values, with only 6.7% of rows carrying
+// telemetry reusable at the then-current version.
+//
+// Empty means UNKNOWN and always fails closed to re-inference: an old sidecar
+// that does not report a version, or one that is not reachable yet. The result is
+// correct-but-slow, never a verdict reused across an unverified model change.
 func (d *HTTPDetector) ModelVersion() string {
-	return d.version
+	return d.resolveModelVersion(context.Background())
+}
+
+// resolveModelVersion returns the cached sidecar model version, probing GET
+// /health once to learn it. A failed probe is retried on a later call rather than
+// cached as empty, because the usual failure is a sidecar that is still booting
+// (#567) -- caching that would disable the verdict cache for the whole process
+// lifetime. Retries are throttled so a persistently old or down sidecar costs one
+// cheap request per interval, not one per work item.
+func (d *HTTPDetector) resolveModelVersion(ctx context.Context) string {
+	d.modelVersionMu.Lock()
+	if time.Now().Before(d.modelVersionNext) {
+		v := d.modelVersionVal
+		d.modelVersionMu.Unlock()
+		return v
+	}
+	d.modelVersionMu.Unlock()
+
+	v, err := d.fetchModelVersion(ctx)
+
+	d.modelVersionMu.Lock()
+	defer d.modelVersionMu.Unlock()
+	if err != nil || v == "" {
+		// Probe failed or the sidecar reports no version. Back off and try again:
+		// it may still be booting, or be an older build predating the field.
+		//
+		// KEEP the last known value rather than reverting to unknown. Unknown
+		// fails closed to re-inference, so dropping a good version on one blip
+		// would re-infer the whole backlog -- the #684 symptom, triggered by a
+		// single dropped request.
+		d.modelVersionNext = time.Now().Add(modelVersionRetryInterval)
+		if err != nil {
+			slog.Debug("detector: model version refresh failed; keeping last known",
+				"last_known", d.modelVersionVal, "error", err)
+		}
+		return d.modelVersionVal
+	}
+	// Re-probe on a TTL rather than caching for the process lifetime. An operator
+	// who redeploys the sidecar with new weights would otherwise keep getting the
+	// OLD hash stamped onto verdicts the NEW model produced -- attributing scores
+	// to weights that did not compute them, and making them reusable across a real
+	// model change, which is precisely what this key exists to prevent.
+	if d.modelVersionVal != "" && d.modelVersionVal != v {
+		slog.Info("detector: sidecar model changed; stored verdicts keyed to the previous model will re-infer",
+			"previous", d.modelVersionVal, "current", v)
+	}
+	d.modelVersionVal = v
+	d.modelVersionNext = time.Now().Add(modelVersionTTL)
+	return v
+}
+
+// fetchModelVersion performs the GET /health probe. A missing model_version key
+// is reported as an empty string with no error: that is an older sidecar, which
+// is an expected state, not a failure.
+func (d *HTTPDetector) fetchModelVersion(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, modelVersionProbeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.baseURL+"/health", nil)
+	if err != nil {
+		return "", fmt.Errorf("detector: build health request: %w", err)
+	}
+	res, err := d.httpClient.Do(req) //nolint:gosec // reason: baseURL is operator-configured and validated by config.ValidateHTTPURL at construction
+	if err != nil {
+		return "", fmt.Errorf("detector: health request: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("detector: health status %d", res.StatusCode)
+	}
+	// Bound the read: this is a tiny JSON body, and an unbounded read of an
+	// unexpected response would be a memory footgun.
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxHealthBodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("detector: read health response: %w", err)
+	}
+	var h struct {
+		ModelVersion string `json:"model_version"`
+	}
+	if err := json.Unmarshal(body, &h); err != nil {
+		return "", fmt.Errorf("detector: decode health response: %w", err)
+	}
+	return strings.TrimSpace(h.ModelVersion), nil
 }
 
 // DecideStored re-applies the detector's CURRENT three-gate thresholds to already

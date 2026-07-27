@@ -1827,15 +1827,47 @@ func selfWriteTTL(debounce time.Duration) time.Duration {
 // the deaf-to-external-change window at a few seconds under the default.
 const selfWriteDebounceMultiple = 3
 
-// detectorScanVersion returns the app version to stamp into a scan's ScanOptions
-// for detector-marker version invalidation (#502), or "" when the audio detector
-// is disabled -- so a disabled detector never reopens provisional markers on a
-// version bump. It is the same value fed to detector.Config.Version.
-func detectorScanVersion(cfg config.Config) string {
-	if cfg.InstrumentalDetector.Enabled {
-		return version
+// detectorScanVersion returns the version identifying detector output, for
+// detector-marker version invalidation (#502), or "" when the audio detector is
+// disabled -- so a disabled detector never reopens provisional markers on a
+// version bump.
+//
+// This is the SIDECAR MODEL version, matching what the detector stamps onto every
+// Result and what the worker persists as work_queue.detector_version (#684). It
+// used to be the app version, which meant every canticle release invalidated
+// every stored verdict AND reopened every on-disk [dv:] marker even though the
+// classifier had not changed.
+//
+// A "" return also covers an unknown model version (an old sidecar that does not
+// report one, or one not reachable right now). That is the safe direction here:
+// reopen.go treats an empty current version as "do not reopen", so an unknown
+// version leaves existing markers alone rather than invalidating the whole
+// library on a transient probe failure.
+func detectorScanVersion(ctx context.Context, cfg config.Config) string {
+	if !cfg.InstrumentalDetector.Enabled {
+		return ""
 	}
-	return ""
+	return currentDetectorModelVersion(ctx, cfg)
+}
+
+// currentDetectorModelVersion resolves the model version the configured sidecar
+// is currently serving, or "" when it cannot be determined (no classifier
+// configured, construction failed, or the sidecar is unreachable / too old to
+// report one).
+//
+// Every consumer that compares a STORED detector_version against "the current
+// one" must go through here, so they all agree on the same key. They previously
+// each read the app version independently, which is why migration 038 would
+// otherwise desynchronize them: internal/instrumentalrecalib would see every row
+// as version-mismatched and RESET it instead of settling it from cached scores,
+// converting a recalibration into a full-library re-inference -- the exact I/O
+// storm #684 exists to eliminate.
+//
+// This deliberately does NOT construct a detector: that resolves ffmpeg (and can
+// auto-provision a static build), which a pure-HTTP version probe has no business
+// doing. It is one small GET against the configured classifier.
+func currentDetectorModelVersion(ctx context.Context, cfg config.Config) string {
+	return detector.FetchModelVersion(ctx, cfg.InstrumentalDetector.ClassifierURL)
 }
 
 func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd, cacheRepo *cache.CacheRepo) {
@@ -1849,7 +1881,7 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 		MaxDepth:        args.Depth,
 		BFS:             args.BFS,
 		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-		DetectorVersion: detectorScanVersion(cfg),
+		DetectorVersion: detectorScanVersion(ctx, cfg),
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
@@ -1943,7 +1975,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		MaxDepth:        args.Depth,
 		BFS:             args.BFS,
 		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-		DetectorVersion: detectorScanVersion(cfg),
+		DetectorVersion: detectorScanVersion(ctx, cfg),
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
@@ -2121,7 +2153,7 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		MaxDepth:        args.Depth,
 		BFS:             args.BFS,
 		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-		DetectorVersion: detectorScanVersion(cfg),
+		DetectorVersion: detectorScanVersion(ctx, cfg),
 		UnsyncedBefore:  unsyncedBefore,
 	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup)
 	s.EnrichOverride = enrichOverride
@@ -3425,10 +3457,16 @@ func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd)
 		return 1
 	}
 	candidates, err := workQueue.ListInstrumental(ctx, queue.ListInstrumentalOptions{
-		LibraryID:      libraryID,
-		Limit:          args.Limit,
-		All:            args.All,
-		CurrentVersion: version,
+		LibraryID: libraryID,
+		Limit:     args.Limit,
+		All:       args.All,
+		// The MODEL version, matching what the worker persists (#684). This is a
+		// WIDENING predicate -- `detector_version <> ?` pulls a row INTO the
+		// re-inference candidate set -- so reading the app version here would make
+		// every row a candidate after migration 038 and re-infer the whole library.
+		// Unknown ("") widens too, but this command is explicitly a re-inference
+		// pass the operator asked for, and it stays bounded by --limit.
+		CurrentVersion: currentDetectorModelVersion(ctx, cfg),
 	})
 	if err != nil {
 		slog.Error("failed to list instrumental rows", "error", err)
