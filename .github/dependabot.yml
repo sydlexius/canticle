@@ -54,3 +54,34 @@ updates:
       - dependencies
       - docker
     open-pull-requests-limit: 5
+
+  # The YAMNet sidecar's Python deps. This ecosystem was MISSING while gomod,
+  # github-actions, and docker were all covered, so every pinned Python
+  # dependency aged silently and Scorecard's Vulnerabilities alert was the only
+  # thing that noticed -- after the fact, on main.
+  #
+  # It is not a hypothetical gap: pinning pytest==8.3.4 (issue #636) landed a
+  # version carrying PYSEC-2026-1845, and the pin made it permanent where the
+  # previous unpinned install had floated to a patched release. Hash pinning
+  # removes the drift that used to accidentally paper over an aging pin, so the
+  # pins now REQUIRE an update mechanism rather than merely benefiting from one.
+  #
+  # Dependabot regenerates the --require-hashes hashes on a bump, so both the
+  # runtime lock and the test lock stay installable.
+  - package-ecosystem: pip
+    directory: /deploy/yamnet-detector
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+    groups:
+      # The test tools move together and are never load-bearing at runtime, so a
+      # single PR per week beats three that each re-trigger the sidecar build.
+      yamnet-test-deps:
+        patterns:
+          - "pytest*"
+          - "httpx"
