@@ -1,0 +1,112 @@
+# Weekly audit of priority-label hygiene across the open backlog.
+#
+# The companion `issue-priority-guard.yml` is event-driven, so it only ever sees
+# an issue that someone touches. It is blind to an issue that was filed without a
+# priority and then left alone -- which was 30 of 82 open issues when this was
+# written. This job is the sweep that finds those.
+#
+# REPORTS ONLY, never mutates. Choosing a priority is triage, and a guessed one
+# is worse than a visibly missing one: it looks settled, so nobody revisits it.
+#
+# Output goes to the run's job summary rather than an issue comment, so a weekly
+# cron cannot generate weekly notification noise on unrelated issues.
+
+name: Issue Label Audit
+
+on:
+  schedule:
+    # Mondays 16:00 UTC (09:00 US Pacific in summer, 08:00 in winter).
+    - cron: '0 16 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    steps:
+      - name: Audit priority labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const RANK = ['priority: critical', 'priority: high', 'priority: medium', 'priority: low'];
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            const missing = [];
+            const duplicate = [];
+            let total = 0;
+
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              total++;
+              const priorities = issue.labels
+                .map(l => (typeof l === 'string' ? l : l.name))
+                .filter(name => RANK.includes(name));
+              const row = {
+                number: issue.number,
+                title: issue.title,
+                milestone: issue.milestone ? issue.milestone.title : 'no milestone',
+                priorities,
+              };
+              if (priorities.length === 0) missing.push(row);
+              else if (priorities.length > 1) duplicate.push(row);
+            }
+
+            const lines = [
+              '# Priority label audit',
+              '',
+              `Open issues (excluding PRs): **${total}**`,
+              `- with exactly one priority: **${total - missing.length - duplicate.length}**`,
+              `- missing a priority: **${missing.length}**`,
+              `- with multiple priorities: **${duplicate.length}**`,
+              '',
+            ];
+
+            const section = (heading, rows, render) => {
+              lines.push(`## ${heading} (${rows.length})`, '');
+              if (rows.length === 0) {
+                lines.push('_None._', '');
+                return;
+              }
+              // Group by milestone: priority is usually decided per domain, so a
+              // grouped list is directly actionable in a way a flat one is not.
+              const byMilestone = new Map();
+              for (const r of rows) {
+                if (!byMilestone.has(r.milestone)) byMilestone.set(r.milestone, []);
+                byMilestone.get(r.milestone).push(r);
+              }
+              for (const [ms, group] of [...byMilestone.entries()].sort()) {
+                lines.push(`**${ms}**`, '');
+                for (const r of group) lines.push(`- ${render(r)}`);
+                lines.push('');
+              }
+            };
+
+            section('Multiple priority labels', duplicate,
+              r => `#${r.number} - \`${r.priorities.join('` + `')}\` - ${r.title}`);
+            section('Missing a priority label', missing,
+              r => `#${r.number} - ${r.title}`);
+
+            if (duplicate.length > 0) {
+              lines.push(
+                '> Issues with multiple priorities should have been caught by',
+                '> `issue-priority-guard.yml`. Any appearing here were either applied by a human',
+                '> (the guard comments rather than auto-resolving those) or predate the guard.',
+                '',
+              );
+            }
+
+            await core.summary.addRaw(lines.join('\n')).write();
+
+            if (duplicate.length > 0) {
+              core.warning(`${duplicate.length} open issue(s) carry more than one priority label`);
+            }
+            core.info(`Audit complete: ${missing.length} missing, ${duplicate.length} duplicate`);
