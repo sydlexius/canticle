@@ -207,7 +207,14 @@ func printRevalidateCounts(out io.Writer, c revalidate.Counts, apply bool) {
 		// known when this string is written, and a hardcoded one silently goes
 		// wrong if the release slips. "Older builds" is both accurate and
 		// stable.
-		_, _ = fmt.Fprintf(out, "revalidate: %d file(s) had no exact audio duration and were left untouched (re-scan the library to populate the duration cache; older builds skipped files that already had a sidecar, which is most of these, so a library last scanned by one needs a fresh pass)\n", c.UnknownDuration)
+		//
+		// The older-build skip is the LIKELIEST cause, not the only one.
+		// revalidate.durationOf returns unknown for three distinct reasons: no
+		// duration store wired at all, a companion audio file that cannot be
+		// stat'ed, and a cache miss. Only the last is what a re-scan fixes, so
+		// the advice names a remedy AND a next step for when it does not help,
+		// rather than asserting a single cause for every count.
+		_, _ = fmt.Fprintf(out, "revalidate: %d file(s) had no exact audio duration and were left untouched (most likely cause: older builds skipped files that already had a sidecar, so re-scan the library to populate the duration cache; if the count persists after a fresh scan, check that the audio files are readable and that the duration cache is configured)\n", c.UnknownDuration)
 	}
 }
 

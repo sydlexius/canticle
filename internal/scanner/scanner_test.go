@@ -759,6 +759,115 @@ func TestScanDoesNotBankForSkippedFileWhenEnrichmentDisabled(t *testing.T) {
 	}
 }
 
+// The skipped-file bank must degrade quietly on every failure it can hit: it is
+// bookkeeping for a file the scan has ALREADY decided to skip, so nothing here
+// may change the scan's outcome or fail the pass. Each subtest drives one
+// failure branch and asserts the same two things -- no row banked, scan still
+// clean.
+func TestBankDurationForSkippedFileDegradesQuietly(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string, sc *Scanner)
+	}{
+		{
+			// An unsupported extension is not audio, so it is never probed. The
+			// sidecar-exists skip fires on stem match alone, so without this
+			// guard a .cue or .nfo sharing a stem would be opened as audio.
+			name: "unsupported extension",
+			setup: func(t *testing.T, dir string, _ *Scanner) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "song.cue"), []byte("not audio"), 0o600); err != nil {
+					t.Fatalf("write .cue: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]w\n"), 0o600); err != nil {
+					t.Fatalf("write .lrc: %v", err)
+				}
+			},
+		},
+		{
+			// A probe failure (unparsable header) must not bank a row. Absence is
+			// how audio_durations represents "unknown", so a failed probe has to
+			// leave no trace rather than record a zero.
+			name: "probe failure",
+			setup: func(t *testing.T, dir string, sc *Scanner) {
+				t.Helper()
+				const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+				if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]w\n"), 0o600); err != nil {
+					t.Fatalf("write .lrc: %v", err)
+				}
+				sc.probeFunc = func(string) (int, error) { return 0, errors.New("unparsable header") }
+			},
+		},
+		{
+			// A zero-second probe is likewise not a row: recordDuration drops a
+			// non-positive duration so "never read" stays distinguishable from
+			// "measured as zero-length".
+			name: "zero duration",
+			setup: func(t *testing.T, dir string, sc *Scanner) {
+				t.Helper()
+				const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+				if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]w\n"), 0o600); err != nil {
+					t.Fatalf("write .lrc: %v", err)
+				}
+				sc.probeFunc = func(string) (int, error) { return 0, nil }
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := &recordingDurationStore{}
+			sc := NewScanner(WithDurationStore(store))
+			tc.setup(t, dir, sc)
+
+			if _, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true}); err != nil {
+				t.Fatalf("ScanLibrary: %v", err)
+			}
+			if len(store.paths) != 0 {
+				t.Errorf("banked %d duration(s), want 0 -- a failed bank must leave no row", len(store.paths))
+			}
+		})
+	}
+}
+
+// A file that vanishes between the directory read and the bank (a tagger moving
+// it mid-scan) must not fail the scan. The stat error branch is the one that
+// catches it.
+func TestBankDurationForSkippedFileSurvivesAVanishedFile(t *testing.T) {
+	dir := t.TempDir()
+	store := &recordingDurationStore{}
+	sc := NewScanner(WithDurationStore(store))
+
+	const sampleRate, totalSamples uint32 = 44100, 44100 * 210
+	if err := testutil.WriteFLACFile(dir, "song.flac", sampleRate, totalSamples); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]w\n"), 0o600); err != nil {
+		t.Fatalf("write .lrc: %v", err)
+	}
+	// Delete the audio after the directory listing but before the bank stats it.
+	// probeFunc is not reached: the stat fails first.
+	sc.probeFunc = func(string) (int, error) {
+		t.Fatal("probe must not run for a file that no longer exists")
+		return 0, nil
+	}
+	if err := os.Remove(filepath.Join(dir, "song.flac")); err != nil {
+		t.Fatalf("remove audio: %v", err)
+	}
+
+	if _, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true}); err != nil {
+		t.Fatalf("ScanLibrary must not fail when a file vanishes mid-scan: %v", err)
+	}
+	if len(store.paths) != 0 {
+		t.Errorf("banked %d duration(s) for a file that does not exist, want 0", len(store.paths))
+	}
+}
+
 // With enrichment off the scanner never probes the duration, so there is nothing
 // to bank and the store must not be touched.
 func TestScanRecordsNothingWhenEnrichmentDisabled(t *testing.T) {
