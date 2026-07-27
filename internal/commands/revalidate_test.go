@@ -323,6 +323,41 @@ func TestRevalidateUnknownDurationIsCalledOut(t *testing.T) {
 	}
 }
 
+// The skip advice must name an operation that actually fills the cache for
+// THESE files (#684). Before that fix a scan skipped any file that already had
+// a sidecar before it ever probed a duration -- so "run a scan" was advice that
+// provably did not work for the exact files being reported here, and an
+// operator following it saw the identical count again. The fix makes a scan
+// genuinely fill them, but a library scanned by an older build still needs one
+// fresh pass, so the advice has to say so rather than implying the cache is
+// merely cold.
+func TestRevalidateUnknownDurationAdviceNamesAWorkingRemedy(t *testing.T) {
+	cfgPath, root, _ := revalidateFixture(t, "[00:10.00]alpha\n[05:00.00]beta\n")
+	audio := filepath.Join(root, secretishAlbumDir, secretishTrackName+".mp3")
+	if err := os.WriteFile(audio, []byte("changed bytes"), 0o600); err != nil {
+		t.Fatalf("rewrite audio: %v", err)
+	}
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	got := out.String()
+	// The remedy must still be named -- a bare count leaves the operator stuck.
+	if !strings.Contains(got, "scan") {
+		t.Errorf("the message names no remedy at all: %s", got)
+	}
+	// ...and it must flag that a library last scanned by an older build needs a
+	// fresh pass, rather than implying the cache is merely cold.
+	if !strings.Contains(got, "re-scan") || !strings.Contains(got, "older builds") {
+		t.Errorf("the advice does not tell the operator a fresh scan is what fills these: %s", got)
+	}
+	// The advice must not pin a release number: the fix's version is unknown
+	// when the string is written, and a stale one is worse than none.
+	if strings.Contains(got, "1.31") {
+		t.Errorf("the advice hardcodes a release number, which goes wrong if the release slips: %s", got)
+	}
+}
+
 // TestRevalidateBadTailPathIsAnError: an unwritable tail file must fail the run
 // rather than silently discarding the detail the operator asked for.
 func TestRevalidateBadTailPathIsAnError(t *testing.T) {

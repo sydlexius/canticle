@@ -288,13 +288,26 @@ type MetadataFailureStore interface {
 // the revalidation path (#441) does not have to re-open the file to learn it.
 // A nil store disables the feature entirely.
 //
-// This is deliberately a WRITE-ONLY seam here: the scanner has the file open and
-// has already paid for the header read, so it never needs to consult the cache,
-// only fill it.
+// This was originally a WRITE-ONLY seam, on the reasoning that the scanner has
+// the file open and has already paid for the header read, so it never needs to
+// consult the cache, only fill it. That reasoning holds only for files the scan
+// fully ingests, and #684 is precisely where it does not: a file whose sidecar
+// already exists is skipped before it is ever opened, so it is never probed --
+// and those are exactly the files revalidate later needs a duration for.
+//
+// Reading is therefore required, but only to AVOID work: Lookup gates the
+// header read for a skipped file so it happens once per file VERSION rather
+// than once per scan. Without that gate, closing the coverage gap would trade a
+// starved cache for a library disk that never idles, which is the very thing
+// #684 exists to fix.
 type DurationStore interface {
 	// Record caches seconds as the duration of path at the given mtime and size.
 	// mtimeNano is ModTime().UnixNano().
 	Record(ctx context.Context, path string, mtimeNano, size int64, seconds int) error
+	// Lookup reports the cached duration for path when the entry still matches
+	// the given mtime and size. found is false for BOTH an absent and a stale
+	// entry: to a caller they are the same fact, no usable duration.
+	Lookup(ctx context.Context, path string, mtimeNano, size int64) (seconds int, found bool, err error)
 }
 
 // Scanner handles parsing input sources and populating the work queue.
@@ -471,6 +484,74 @@ func (sc *Scanner) recordDuration(ctx context.Context, path string, f *os.File, 
 	if err := sc.durations.Record(ctx, path, info.ModTime().UnixNano(), info.Size(), seconds); err != nil {
 		slog.Debug("duration cache write failed; continuing", "file", path, "error", err)
 	}
+}
+
+// bankDurationForSkippedFile banks the duration of a file the fetch path is
+// about to SKIP, when that duration is not already cached (#684).
+//
+// Why this exists at all: the ordinary fill path in scanDir runs during
+// enrichment, ~200 lines downstream of the sidecar-exists `continue`. Both
+// halves are correct alone -- skipping settled work is right, and banking a
+// duration you already paid for is right -- but composed, they guarantee that a
+// file with a sidecar is NEVER duration-probed. revalidate walks sidecars and
+// needs exactly those files, so its input was starved by construction: measured
+// in prod, a full scan banked 690 durations and moved revalidate's
+// unknown-duration count by zero, because the two populations barely overlap.
+//
+// The Lookup gate is load-bearing, not an optimization. This function runs for
+// every already-settled file in the library on every scan, so probing
+// unconditionally would re-read a header for tens of thousands of files per
+// pass and keep the array awake forever -- trading a starved cache for the
+// exact symptom #684 is filed to eliminate. With the gate, a given file version
+// costs one header read ONCE, ever.
+//
+// Every failure degrades to "no row", never to a wrong row and never to a
+// failed scan: this is bookkeeping for a file the scan has already decided to
+// skip, so nothing here may change the scan's outcome.
+func (sc *Scanner) bankDurationForSkippedFile(ctx context.Context, path, ext string) {
+	// EnrichRecording is checked by the caller: with enrichment off the scanner
+	// probes no headers at all, and this must not become a back door around it.
+	if sc.durations == nil {
+		return
+	}
+	if !slices.Contains(supportedFileTypes, ext) {
+		return
+	}
+
+	// Stat by path (the file is not open yet -- not opening it is the point).
+	// Unlike recordDuration's handle-stat, the (mtime, size) here is read BEFORE
+	// the header rather than after, so a tagger swapping the file mid-call makes
+	// the row inert against the new file (a miss) rather than a wrong hit.
+	info, err := os.Stat(path)
+	if err != nil {
+		slog.Debug("could not stat for duration cache; skipping", "file", path, "error", err)
+		return
+	}
+	mtimeNano, size := info.ModTime().UnixNano(), info.Size()
+
+	if _, found, lerr := sc.durations.Lookup(ctx, path, mtimeNano, size); lerr != nil {
+		// Fail CLOSED toward not reading: a lookup error is not evidence the
+		// entry is missing, and guessing "absent" would re-probe the whole
+		// library on every scan whenever the DB is unhappy.
+		slog.Debug("duration cache lookup failed; not probing", "file", path, "error", lerr)
+		return
+	} else if found {
+		return
+	}
+
+	f, err := os.Open(path) //nolint:gosec // reason: path from directory scan, same provenance as the enrichment open below
+	if err != nil {
+		slog.Debug("could not open to bank duration; skipping", "file", path, "error", err)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	seconds, err := sc.probeDuration(f, ext)
+	if err != nil {
+		slog.Debug("duration probe failed while banking; skipping", "file", path, "error", err)
+		return
+	}
+	sc.recordDuration(ctx, path, f, seconds)
 }
 
 // extractISRC returns the ISRC from audio tag metadata, or "" if absent.
@@ -706,6 +787,15 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// Synced lyrics already present and not asked to update -- skip.
 			// Gated on the Synced class rather than opts.Update directly so this
 			// and the embedded-lyrics hasSynced skip below cannot drift apart.
+			//
+			// Bank the duration BEFORE skipping (#684). This file has a .lrc,
+			// which is exactly what makes revalidate care about it later, and
+			// exactly what stops it ever reaching the enrichment probe below.
+			// Cached-gated, so it costs one header read per file version, not
+			// one per scan.
+			if opts.EnrichRecording {
+				sc.bankDurationForSkippedFile(ctx, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, filepath.Join(dir, file.Name())), ext)
+			}
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
 		case txtExists && !lrcExists && isInstrumentalTxt(filepath.Join(dir, txtFile)):
