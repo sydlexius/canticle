@@ -19,10 +19,27 @@ linters:
     - wastedassign
     - misspell
     - revive
+    - nolintlint
   settings:
     gosec:
       excludes:
         - G104  # Unhandled errors (too noisy for log.Fatal paths)
+    nolintlint:
+      # Every //nolint:foo directive must carry a "// reason:" comment, so a
+      # future reader can judge whether the suppression is still valid. The
+      # friction at the directive site is the point: it turns "I'll just nolint
+      # this" into either a real fix or a written justification.
+      #
+      # This rule already existed in CLAUDE.md but nothing enforced it, so the
+      # tree drifted to 251 of 284 directives non-compliant. A rule that lives
+      # only in prose gets followed when someone remembers; CodeRabbit flagging
+      # a brand-new directive on PR #687 is what surfaced the gap.
+      require-explanation: true
+      # require-specific stays OFF: all 284 existing directives already name
+      # their linter (measured, zero bare //nolint in the tree), so turning it
+      # on would be ceremony against a problem this repo does not have.
+      # allow-unused also stays at its v2 default of false -- an unused
+      # //nolint is itself worth deleting.
     revive:
       rules:
         - name: exported
@@ -40,6 +57,65 @@ linters:
           - gosec
           - errcheck
           - noctx
+
+      # STAGED ADOPTION of nolintlint. Enforcing require-explanation across the
+      # whole tree at once would mean 251 mechanical edits in one PR, which is
+      # unreviewable and would bury any real judgment call among them. So the
+      # linter is enabled repo-wide for NEW and TOUCHED code, and the existing
+      # backlog is excluded by path until it is backfilled.
+      #
+      # Every path below is a DEBT MARKER, not an exemption. Each backfill PR
+      # deletes its own line, so this block shrinks to nothing and is then
+      # removed entirely along with this comment.
+      #
+      # Do NOT add a path here to silence a new finding. A new //nolint should
+      # carry its reason in the first place -- that is the behavior this linter
+      # exists to produce.
+      #
+      # Counts are as measured when this landed (251 total across 19 packages).
+      - path: ^internal/commands/
+        linters: [nolintlint]          # 83
+      - path: ^internal/config/
+        linters: [nolintlint]          # 53
+      - path: ^internal/web/
+        linters: [nolintlint]          # 31
+      - path: ^internal/lyrics/
+        linters: [nolintlint]          # 24
+      - path: ^internal/queue/
+        linters: [nolintlint]          # 17
+      - path: ^internal/testutil/
+        linters: [nolintlint]          # 9
+      - path: ^internal/logging/
+        linters: [nolintlint]          # 6
+      - path: ^internal/lrcbackfill/
+        linters: [nolintlint]          # 5
+      - path: ^internal/(secrets|scanner)/
+        linters: [nolintlint]          # 4 each
+      - path: ^internal/(realign|detector)/
+        linters: [nolintlint]          # 3 each
+      - path: ^internal/(verification|servetls)/
+        linters: [nolintlint]          # 2 each
+      - path: ^internal/(watcher|server|purgeprovenance|prune|app)/
+        linters: [nolintlint]          # 1 each
+
+      # UNUSED-DIRECTIVE carve-outs, distinct from the backfill debt above and
+      # NOT temporary. nolintlint's allow-unused=false flags a //nolint that
+      # currently suppresses nothing, which is usually right -- but these three
+      # G704 directives on httpClient.Do are the documented version-specific
+      # gosec phantom (see CLAUDE.md, "golangci-lint version policy"): CI has
+      # flagged them under some analyzer versions and not others. They read as
+      # unused on v2.12.2, and deleting them would re-break CI the next time
+      # the analyzer shifts. Keep the directives; exempt the sites.
+      #
+      # This is NOT version drift between local and CI -- both are pinned to
+      # v2.12.2 and agree. It is the same analyzer being unstable across its
+      # own releases, which is exactly why the directives are load-bearing.
+      - path: ^internal/(musixmatch/token|petitlyrics/client)\.go$
+        linters: [nolintlint]
+      # cmd/vocalcalib is a calibration tool, not shipped in the release
+      # binary; its three unused directives are not worth a code change.
+      - path: ^cmd/vocalcalib/
+        linters: [nolintlint]
 
 formatters:
   enable:
