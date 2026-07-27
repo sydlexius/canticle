@@ -31,7 +31,7 @@ import (
 // unparsable or plain-text sidecar is a real state, not a failure, and it must
 // reach timing.Evaluate as "no timing evidence" so the caller fails open on it.
 func ReadSyncedLRC(path string) (models.Synced, error) {
-	b, err := os.ReadFile(path) //nolint:gosec // G304: path comes from the caller's own library-root walk, not untrusted input
+	b, err := os.ReadFile(path) //nolint:gosec // reason: G304: path comes from the caller's own library-root walk, not untrusted input
 	if err != nil {
 		return models.Synced{}, fmt.Errorf("read lrc %q: %w", path, err)
 	}
