@@ -8,7 +8,10 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/audiodur"
+	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // revalidateFixture builds a config + database + library root holding one audio
@@ -203,5 +206,144 @@ func TestRevalidateIsReachableAsASubcommand(t *testing.T) {
 		if !strings.Contains(out.String(), flag) {
 			t.Errorf("help does not offer %s: %s", flag, out.String())
 		}
+	}
+}
+
+// addRevalidateLibrary registers root as a library in the fixture database.
+func addRevalidateLibrary(t *testing.T, cfgPath, name, root string) {
+	t.Helper()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	if _, err := library.New(sqlDB).Add(t.Context(), root, name, models.LibrarySettings{}); err != nil {
+		t.Fatalf("add library: %v", err)
+	}
+}
+
+// TestRevalidateDefaultsToEveryConfiguredLibrary: with no positional roots the
+// pass walks what the database knows about.
+func TestRevalidateDefaultsToEveryConfiguredLibrary(t *testing.T) {
+	cfgPath, root, _ := revalidateFixture(t, "[00:10.00]alpha\n[05:00.00]beta\n")
+	addRevalidateLibrary(t, cfgPath, "Main", root)
+
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "scanned=1") {
+		t.Errorf("the configured library was not walked: %s", out.String())
+	}
+}
+
+// TestRevalidateLibraryScopeResolvesByName.
+func TestRevalidateLibraryScopeResolvesByName(t *testing.T) {
+	cfgPath, root, _ := revalidateFixture(t, "[00:10.00]alpha\n[05:00.00]beta\n")
+	addRevalidateLibrary(t, cfgPath, "Main", root)
+
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{ConfigPath: cfgPath, Library: "Main"}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "scanned=1") {
+		t.Errorf("the scoped library was not walked: %s", out.String())
+	}
+}
+
+// TestRevalidateUnknownLibraryIsAnError.
+func TestRevalidateUnknownLibraryIsAnError(t *testing.T) {
+	cfgPath, _, _ := revalidateFixture(t, "[00:10.00]alpha\n")
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{ConfigPath: cfgPath, Library: "nope"}); code != 1 {
+		t.Errorf("exit = %d, want 1: %s", code, out.String())
+	}
+}
+
+// TestRevalidateWithNoLibrariesIsANoOp: nothing configured, nothing to do, and
+// the message says so rather than silently reporting zeros.
+func TestRevalidateWithNoLibrariesIsANoOp(t *testing.T) {
+	cfgPath, _, _ := revalidateFixture(t, "[00:10.00]alpha\n")
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "no roots to scan") {
+		t.Errorf("want an explicit no-roots message: %s", out.String())
+	}
+}
+
+// TestRevalidateApplyWithNothingToRemediate: a clean library reports so and
+// writes no backup file.
+func TestRevalidateApplyWithNothingToRemediate(t *testing.T) {
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[01:00.00]beta\n")
+	backup := filepath.Join(t.TempDir(), "backup.jsonl")
+
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{
+		Roots: []string{root}, ConfigPath: cfgPath, Apply: true,
+		QuarantineDir: t.TempDir(), Backup: backup,
+	}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "nothing to remediate") {
+		t.Errorf("want a nothing-to-do message: %s", out.String())
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Errorf("a no-op apply wrote a backup file")
+	}
+	if _, err := os.Stat(lrc); err != nil {
+		t.Errorf("a compliant .lrc was touched: %v", err)
+	}
+}
+
+// TestRevalidateUnknownDurationIsCalledOut: the operator is told why files were
+// skipped, so a cold duration cache does not look like a clean library.
+func TestRevalidateUnknownDurationIsCalledOut(t *testing.T) {
+	cfgPath, root, _ := revalidateFixture(t, "[00:10.00]alpha\n[05:00.00]beta\n")
+	// Touching the audio invalidates the primed (mtime, size) key, so the
+	// lookup misses exactly as a cold cache would.
+	audio := filepath.Join(root, secretishAlbumDir, secretishTrackName+".mp3")
+	if err := os.WriteFile(audio, []byte("changed bytes"), 0o600); err != nil {
+		t.Fatalf("rewrite audio: %v", err)
+	}
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "unknown-duration=1") {
+		t.Errorf("the unknown-duration count is not reported: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "left untouched") {
+		t.Errorf("the operator is not told the files were skipped: %s", out.String())
+	}
+}
+
+// TestRevalidateBadTailPathIsAnError: an unwritable tail file must fail the run
+// rather than silently discarding the detail the operator asked for.
+func TestRevalidateBadTailPathIsAnError(t *testing.T) {
+	cfgPath, root, _ := revalidateFixture(t, "[00:10.00]alpha\n[05:00.00]beta\n")
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{
+		Roots: []string{root}, ConfigPath: cfgPath,
+		Tail: filepath.Join(t.TempDir(), "missing-dir", "tail.tsv"),
+	}); code != 1 {
+		t.Errorf("exit = %d, want 1: %s", code, out.String())
+	}
+}
+
+// TestRevalidateBadConfigPathIsAnError.
+func TestRevalidateBadConfigPathIsAnError(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "bad.toml")
+	if err := os.WriteFile(bad, []byte("this is not = valid toml ["), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{ConfigPath: bad}); code != 1 {
+		t.Errorf("exit = %d, want 1: %s", code, out.String())
 	}
 }

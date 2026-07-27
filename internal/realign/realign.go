@@ -874,18 +874,39 @@ func applyRemediation(mv Move) error {
 }
 
 // writeDemotedText writes body to path unless a sidecar is already settled
-// there, in which case it is a no-op and the existing file wins. A stat error
-// other than not-exist counts as PRESENT: the job here is to avoid destroying a
-// file, so an unreadable path is assumed occupied rather than assumed free.
+// there, in which case it is a no-op and the existing file wins.
+//
+// The create is EXCLUSIVE (O_CREATE|O_EXCL) rather than a stat followed by a
+// write. That is not just TOCTOU hygiene: a stat-first version has to decide
+// what a stat error that is NOT not-exist means, and the conservative reading
+// ("assume occupied, skip the write") is catastrophic here -- the caller then
+// moves the .lrc aside believing the words were preserved, and they are gone.
+// O_EXCL collapses the question: EEXIST is the settled case and every other
+// error is a genuine failure the caller must not proceed past.
 func writeDemotedText(path, body string) error {
-	if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
-		return nil
-	}
 	if body == "" {
 		return fmt.Errorf("demote: refusing to write an empty %q", path)
 	}
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		return fmt.Errorf("demote: write %q: %w", path, err)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path is derived from the caller's own audio-file enumeration
+	if err != nil {
+		if os.IsExist(err) {
+			return nil // settled content on disk wins
+		}
+		return fmt.Errorf("demote: create %q: %w", path, err)
+	}
+	if _, werr := f.WriteString(body); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("demote: write %q: %w", path, werr)
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("demote: sync %q: %w", path, serr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("demote: close %q: %w", path, cerr)
 	}
 	lyrics.FsyncDir(filepath.Dir(path))
 	return nil
