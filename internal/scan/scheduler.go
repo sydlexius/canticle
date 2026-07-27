@@ -27,8 +27,24 @@ type LibraryScanner interface {
 	ScanLibrary(ctx context.Context, root string, opts scanner.ScanOptions) ([]models.ScanResult, error)
 }
 
-// OnCompleteFunc is called after a library scan has been persisted.
-type OnCompleteFunc func(ctx context.Context, lib models.Library, results []models.ScanResult) error
+// Trigger names what caused a scan. It exists so the completion log line can
+// distinguish a full periodic library pass from a watcher's single-directory
+// rescan; both converge on the same callback, and before #685 both logged the
+// same message, which actively misled a production diagnosis.
+type Trigger string
+
+const (
+	// TriggerScheduler is a full library pass: the periodic scheduler, or a
+	// one-shot scan/CLI run.
+	TriggerScheduler Trigger = "scheduler"
+	// TriggerWatcher is a filesystem-watcher-driven rescan of one subtree.
+	TriggerWatcher Trigger = "watcher"
+)
+
+// OnCompleteFunc is called after a library scan has been persisted. path is the
+// subtree that was scanned (the library root for a full pass) and trigger names
+// what caused the scan.
+type OnCompleteFunc func(ctx context.Context, lib models.Library, results []models.ScanResult, path string, trigger Trigger) error
 
 // Scheduler periodically scans configured libraries and persists results.
 type Scheduler struct {
@@ -81,7 +97,7 @@ func (s *Scheduler) RunOnceFor(ctx context.Context, libs []models.Library) error
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.scanAndPersist(ctx, v, v.Path); err != nil {
+		if err := s.scanAndPersist(ctx, v, v.Path, TriggerScheduler); err != nil {
 			return err
 		}
 	}
@@ -109,12 +125,13 @@ func (s *Scheduler) RunOnceForPath(ctx context.Context, lib models.Library, path
 	if !pathutil.WithinRoot(lib.Path, path) {
 		return fmt.Errorf("scan: path %q is outside library root %q", path, lib.Path)
 	}
-	return s.scanAndPersist(ctx, lib, path)
+	return s.scanAndPersist(ctx, lib, path, TriggerWatcher)
 }
 
 // scanAndPersist scans path, stamps results with lib.ID and a default status,
-// upserts them, and invokes OnScanComplete.
-func (s *Scheduler) scanAndPersist(ctx context.Context, lib models.Library, path string) error {
+// upserts them, and invokes OnScanComplete with the scanned path and the
+// trigger that caused the scan.
+func (s *Scheduler) scanAndPersist(ctx context.Context, lib models.Library, path string, trigger Trigger) error {
 	// Resolve recording enrichment for this library (CLI override > per-library
 	// setting > global default) and stamp it onto a per-scan copy of Options so
 	// the shared template is not mutated across libraries.
@@ -135,7 +152,7 @@ func (s *Scheduler) scanAndPersist(ctx context.Context, lib models.Library, path
 		return fmt.Errorf("scan: persist library %d: %w", lib.ID, err)
 	}
 	if s.OnScanComplete != nil {
-		if err := s.OnScanComplete(ctx, lib, results); err != nil {
+		if err := s.OnScanComplete(ctx, lib, results, path, trigger); err != nil {
 			return fmt.Errorf("scan: complete library %d: %w", lib.ID, err)
 		}
 	}

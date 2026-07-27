@@ -66,13 +66,21 @@ func TestScheduler_RunOncePersistsAndCallsCallback(t *testing.T) {
 			FilePath: "/music/a.mp3",
 			Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
 		}}},
-		OnScanComplete: func(_ context.Context, lib models.Library, results []models.ScanResult) error {
+		OnScanComplete: func(_ context.Context, lib models.Library, results []models.ScanResult, path string, trigger scan.Trigger) error {
 			called = true
 			if lib.ID != 7 {
 				t.Errorf("callback lib ID = %d; want 7", lib.ID)
 			}
 			if len(results) != 1 || results[0].LibraryID != 7 {
 				t.Errorf("callback results = %+v; want library ID 7", results)
+			}
+			// #685: a full library pass reports the scheduler trigger and the
+			// library root, so the log line can be told apart from a watcher rescan.
+			if trigger != scan.TriggerScheduler {
+				t.Errorf("callback trigger = %q; want %q for a full pass", trigger, scan.TriggerScheduler)
+			}
+			if path != "/music" {
+				t.Errorf("callback path = %q; want the library root", path)
 			}
 			return nil
 		},
@@ -113,11 +121,15 @@ func TestScheduler_RunOnceForPathScansGivenSubtree(t *testing.T) {
 		Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
 	}}}
 	var callbackLib models.Library
+	var callbackPath string
+	var callbackTrigger scan.Trigger
 	s := scan.Scheduler{
 		Results: store,
 		Scanner: rec,
-		OnScanComplete: func(_ context.Context, lib models.Library, _ []models.ScanResult) error {
+		OnScanComplete: func(_ context.Context, lib models.Library, _ []models.ScanResult, path string, trigger scan.Trigger) error {
 			callbackLib = lib
+			callbackPath = path
+			callbackTrigger = trigger
 			return nil
 		},
 	}
@@ -137,6 +149,14 @@ func TestScheduler_RunOnceForPathScansGivenSubtree(t *testing.T) {
 	}
 	if callbackLib.ID != 9 {
 		t.Errorf("callback lib ID = %d; want 9", callbackLib.ID)
+	}
+	// #685: the completion callback must be able to tell a watcher-driven
+	// subtree rescan from a full scheduler pass, and name the subtree scanned.
+	if callbackTrigger != scan.TriggerWatcher {
+		t.Errorf("callback trigger = %q; want %q for a RunOnceForPath rescan", callbackTrigger, scan.TriggerWatcher)
+	}
+	if callbackPath != "/music/Artist/Album" {
+		t.Errorf("callback path = %q; want the scanned subtree", callbackPath)
 	}
 }
 
@@ -284,7 +304,7 @@ func TestScheduler_RunOnceReturnsContextErrorBetweenLibraries(t *testing.T) {
 		Scanner: fakeScanner{results: []models.ScanResult{{
 			FilePath: "/music/a.mp3",
 		}}},
-		OnScanComplete: func(context.Context, models.Library, []models.ScanResult) error {
+		OnScanComplete: func(context.Context, models.Library, []models.ScanResult, string, scan.Trigger) error {
 			cancel()
 			return nil
 		},
@@ -404,7 +424,7 @@ func TestScheduler_RunOncePropagatesErrors(t *testing.T) {
 				Scanner: fakeScanner{results: []models.ScanResult{{
 					FilePath: "/music/a.mp3",
 				}}},
-				OnScanComplete: func(context.Context, models.Library, []models.ScanResult) error {
+				OnScanComplete: func(context.Context, models.Library, []models.ScanResult, string, scan.Trigger) error {
 					return callbackErr
 				},
 			},

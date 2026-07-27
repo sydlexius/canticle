@@ -11,6 +11,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/selfwrite"
 	"github.com/sydlexius/canticle/internal/version"
 )
 
@@ -86,6 +87,17 @@ type LRCWriter struct {
 	// docs/multilingual-output-policy.md). When false (the default), only the
 	// original track is written even if a translation track is present.
 	bilingual bool
+	// selfWrites, when non-nil, records every path this writer touches so the
+	// filesystem watcher can drop the events its own writes generate (#685).
+	// Nil (the default, and every non-serve caller) is a no-op.
+	selfWrites *selfwrite.Registry
+}
+
+// SetSelfWriteRegistry attaches the registry the watcher consults to recognize
+// this process's own writes (#685). Not goroutine-safe; call before sharing the
+// writer, alongside SetBilingual.
+func (w *LRCWriter) SetSelfWriteRegistry(r *selfwrite.Registry) {
+	w.selfWrites = r
 }
 
 // SetBilingual enables or disables interleaved bilingual output. When enabled
@@ -286,9 +298,24 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		}
 	}
 
+	// Record every path the atomic-write sequence below will touch BEFORE it
+	// touches any of them (#685). The sequence emits five filesystem events --
+	// Create/Write/Rename on the temp file, Create on fp, Remove on fp's existing
+	// copy, Remove on the opposite-extension sidecar -- and the watcher cannot
+	// otherwise tell them from an external change, so it rescans the directory it
+	// was just written to. Recording fp covers its temp file by derivation
+	// (selfwrite.Suppress), which is what removes the race: os.CreateTemp picks
+	// the random suffix, so the temp file's Create event can reach the watcher
+	// before the name is known here.
+	//
+	// Recorded before the write rather than after, because an event can be
+	// delivered while the write is still in flight. Entries expire on their own,
+	// so recording a path a failed write never produces costs nothing.
+	w.selfWrites.Record(fp, oppositeSidecar(fp))
+
 	// Write to a temp file in the same directory, then rename atomically so a
 	// mid-write failure never leaves a partial .lrc at the final path.
-	tmp, err := os.CreateTemp(outdir, fn+".*.tmp") //nolint:gosec // path is constructed from sanitized song metadata
+	tmp, err := os.CreateTemp(outdir, selfwrite.TempPattern(fn)) //nolint:gosec // path is constructed from sanitized song metadata
 	if err != nil {
 		return fmt.Errorf("creating temp file in %s: %w", outdir, err)
 	}
@@ -336,14 +363,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	fsyncDir(outdir)
 	// Remove the opposite sidecar so format transitions never leave both files on disk.
 	// Writing .lrc removes a stale .txt (upgrade), writing .txt removes a stale .lrc (downgrade).
-	switch filepath.Ext(fp) {
-	case ".lrc":
-		stale := strings.TrimSuffix(fp, ".lrc") + ".txt"
-		if err := os.Remove(stale); err != nil && !os.IsNotExist(err) {
-			slog.Warn("could not remove stale sidecar", "path", stale, "error", err)
-		}
-	case ".txt":
-		stale := strings.TrimSuffix(fp, ".txt") + ".lrc"
+	if stale := oppositeSidecar(fp); stale != "" {
 		if err := os.Remove(stale); err != nil && !os.IsNotExist(err) {
 			slog.Warn("could not remove stale sidecar", "path", stale, "error", err)
 		}
@@ -351,6 +371,23 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	slog.Info("lyrics saved", "path", fp, "kind", kind,
 		"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 	return nil
+}
+
+// oppositeSidecar returns the other-extension sidecar path for fp -- the .txt
+// for a .lrc and the .lrc for a .txt -- or "" when fp is neither. It is the one
+// definition of that pairing, shared by the write path (which removes the
+// opposite sidecar so a format transition never leaves both on disk) and the
+// self-write recording that keeps the resulting Remove event from waking the
+// watcher.
+func oppositeSidecar(fp string) string {
+	switch filepath.Ext(fp) {
+	case ".lrc":
+		return strings.TrimSuffix(fp, ".lrc") + ".txt"
+	case ".txt":
+		return strings.TrimSuffix(fp, ".txt") + ".lrc"
+	default:
+		return ""
+	}
 }
 
 // matchRoot returns the longest configured confinement root that outdir is

@@ -554,7 +554,7 @@ func TestSchedulerBuildsScanEnqueuer(t *testing.T) {
 	if got.OnScanComplete == nil {
 		t.Fatal("scheduler OnScanComplete = nil; want enqueue callback")
 	}
-	if err := got.OnScanComplete(context.Background(), models.Library{ID: lib.ID}, nil); err != nil {
+	if err := got.OnScanComplete(context.Background(), models.Library{ID: lib.ID}, nil, lib.Path, scan.TriggerScheduler); err != nil {
 		t.Fatalf("OnScanComplete: %v", err)
 	}
 	item, err := queue.NewDBQueue(sqlDB).Dequeue(context.Background())
