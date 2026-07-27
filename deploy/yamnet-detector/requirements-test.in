@@ -1,0 +1,14 @@
+# TEST-only tools for the sidecar shape test, installed into a THROWAWAY
+# container in CI (.github/workflows/yamnet.yml) -- never into the shipped image.
+# Runtime deps live in requirements.in and are baked in by the Dockerfile.
+#
+# Deliberately minimal: fastapi, numpy, and soundfile are already present in the
+# image from requirements.txt, and re-pinning them here would let the two lists
+# drift to different resolved versions of the same package inside one container.
+#
+# httpx is not a direct import of test_app.py -- it is what
+# starlette.testclient.TestClient requires, and the async concurrency test uses
+# httpx.ASGITransport directly. Named here because pip cannot install an optional
+# transitive dependency of an already-installed package on its own.
+pytest==8.3.4
+httpx==0.28.1

@@ -6,8 +6,14 @@ runs, and the stubbed _state is what the handler reads.
 
 Runs in CI inside the built image (.github/workflows/yamnet.yml, #498) and
 locally:
-    pip install -r requirements.txt pytest
+    pip install -r requirements.txt
+    pip install --require-hashes -r requirements-test.txt
     pytest test_app.py -q
+
+Two files, two installs: requirements.txt is the runtime lock the image bakes
+in, requirements-test.txt is the hash-pinned test-tool lock CI mounts into a
+throwaway container (#636). They cannot be combined -- pip rejects a
+--require-hashes run if ANY requirement in the invocation lacks a hash.
 """
 
 import io
