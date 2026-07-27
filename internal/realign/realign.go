@@ -862,10 +862,30 @@ func applyRemediation(mv Move) error {
 		if mv.TextPath == "" {
 			return fmt.Errorf("demote %q: no text path", mv.Orphan)
 		}
-		if err := writeDemotedText(mv.TextPath, mv.TextBody); err != nil {
+		created, err := writeDemotedText(mv.TextPath, mv.TextBody)
+		if err != nil {
 			return err
 		}
-		return moveAside(mv)
+		if merr := moveAside(mv); merr != nil {
+			// Roll the .txt back so a failed demote leaves nothing on disk that the
+			// backup record does not describe. The caller truncates its backup line
+			// on error, so without this the file would survive unrecorded -- which
+			// is precisely the backup-first invariant this package claims.
+			//
+			// Only when THIS call created it: writeDemotedText is O_EXCL and reports
+			// an already-settled sidecar as a no-op, and removing a file we did not
+			// write would destroy content that predates this run.
+			if created {
+				if rerr := os.Remove(mv.TextPath); rerr != nil && !os.IsNotExist(rerr) {
+					slog.Warn("demote rollback: could not remove the text file",
+						"path", mv.TextPath, "error", rerr)
+				} else {
+					lyrics.FsyncDir(filepath.Dir(mv.TextPath))
+				}
+			}
+			return merr
+		}
+		return nil
 	case KindQuarantine:
 		return moveAside(mv)
 	default:
@@ -883,33 +903,41 @@ func applyRemediation(mv Move) error {
 // moves the .lrc aside believing the words were preserved, and they are gone.
 // O_EXCL collapses the question: EEXIST is the settled case and every other
 // error is a genuine failure the caller must not proceed past.
-func writeDemotedText(path, body string) error {
+//
+// The bool reports whether THIS call created the file, which the caller needs to
+// roll the write back safely: on the settled (EEXIST) path the content predates
+// this run, so removing it would destroy a file we did not write.
+func writeDemotedText(path, body string) (created bool, err error) {
 	if body == "" {
-		return fmt.Errorf("demote: refusing to write an empty %q", path)
+		return false, fmt.Errorf("demote: refusing to write an empty %q", path)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path is derived from the caller's own audio-file enumeration
+	// 0o666 (subject to umask) matches what LRCWriter gives a final sidecar, so a
+	// demoted .txt stays readable to whatever uid reads the library. The other
+	// sidecar writers either use this mode or copy the original file's; 0o600 here
+	// would make this the one path that produces an unreadable sidecar.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666) //nolint:gosec // reason: G304: path is derived from the caller's own audio-file enumeration; G302: mode intentionally matches the other sidecar writers so the file is readable by other uids
 	if err != nil {
 		if os.IsExist(err) {
-			return nil // settled content on disk wins
+			return false, nil // settled content on disk wins
 		}
-		return fmt.Errorf("demote: create %q: %w", path, err)
+		return false, fmt.Errorf("demote: create %q: %w", path, err)
 	}
 	if _, werr := f.WriteString(body); werr != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
-		return fmt.Errorf("demote: write %q: %w", path, werr)
+		return false, fmt.Errorf("demote: write %q: %w", path, werr)
 	}
 	if serr := f.Sync(); serr != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
-		return fmt.Errorf("demote: sync %q: %w", path, serr)
+		return false, fmt.Errorf("demote: sync %q: %w", path, serr)
 	}
 	if cerr := f.Close(); cerr != nil {
 		_ = os.Remove(path)
-		return fmt.Errorf("demote: close %q: %w", path, cerr)
+		return false, fmt.Errorf("demote: close %q: %w", path, cerr)
 	}
 	lyrics.FsyncDir(filepath.Dir(path))
-	return nil
+	return true, nil
 }
 
 // moveAside renames the sidecar to mv.Target, creating the destination

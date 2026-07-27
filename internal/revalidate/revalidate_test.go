@@ -480,6 +480,33 @@ func TestOptionsValidate(t *testing.T) {
 		{"purge needs no quarantine", Options{Purge: true}, false},
 		{"no quarantine, no purge", Options{}, true},
 		{"unknown on-fail", Options{OnFail: "shred", QuarantineDir: "/tmp/q"}, true},
+		// A quarantine root inside a scanned root re-walks its own output on the
+		// next pass. Rejected up front rather than left to grow quietly.
+		{"quarantine inside a root", Options{
+			Roots:         []string{"/tmp/lib"},
+			QuarantineDir: "/tmp/lib/quarantine",
+		}, true},
+		{"quarantine IS a root", Options{
+			Roots:         []string{"/tmp/lib"},
+			QuarantineDir: "/tmp/lib",
+		}, true},
+		// A sibling whose name merely SHARES A PREFIX with the root is fine --
+		// the check must compare path components, not raw strings.
+		{"quarantine is a prefix-sharing sibling", Options{
+			Roots:         []string{"/tmp/lib"},
+			QuarantineDir: "/tmp/library-quarantine",
+		}, false},
+		{"quarantine outside every root", Options{
+			Roots:         []string{"/tmp/lib"},
+			QuarantineDir: "/tmp/q",
+		}, false},
+		// --purge writes nothing to a quarantine dir, so the containment rule
+		// does not apply and must not fire.
+		{"purge ignores an inside-root quarantine", Options{
+			Purge:         true,
+			Roots:         []string{"/tmp/lib"},
+			QuarantineDir: "/tmp/lib/quarantine",
+		}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -38,7 +38,7 @@ func applyOne(t *testing.T, mv Move) (Applied, string) {
 	if len(applied) != 1 {
 		t.Fatalf("applied %d outcomes, want 1", len(applied))
 	}
-	b, rerr := os.ReadFile(backup) //nolint:gosec // test fixture path
+	b, rerr := os.ReadFile(backup)
 	if rerr != nil {
 		return applied[0], ""
 	}
@@ -48,7 +48,7 @@ func applyOne(t *testing.T, mv Move) (Applied, string) {
 // TestApplyQuarantineMovesRatherThanDeletes: the reversibility rail at the apply
 // layer. The file leaves the library but exists, byte-identical, at the target.
 func TestApplyQuarantineMovesRatherThanDeletes(t *testing.T) {
-	root, lrc := remediateFixture(t)
+	_, lrc := remediateFixture(t)
 	target := filepath.Join(t.TempDir(), "q", "sub", "track.lrc")
 
 	got, backup := applyOne(t, Move{Orphan: lrc, Target: target, Kind: KindQuarantine, Eligible: true})
@@ -58,7 +58,7 @@ func TestApplyQuarantineMovesRatherThanDeletes(t *testing.T) {
 	if _, err := os.Stat(lrc); !os.IsNotExist(err) {
 		t.Errorf("the source survived a quarantine: %v", err)
 	}
-	b, err := os.ReadFile(target) //nolint:gosec // test fixture path
+	b, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatalf("the quarantined file is missing -- it was DELETED, not moved: %v", err)
 	}
@@ -68,7 +68,6 @@ func TestApplyQuarantineMovesRatherThanDeletes(t *testing.T) {
 	if !strings.Contains(backup, `"kind":"quarantine"`) {
 		t.Errorf("backup record does not carry the kind: %s", backup)
 	}
-	_ = root
 }
 
 // TestApplyDemoteWritesTextBeforeMovingTheLrc: ordering matters, so the .txt is
@@ -85,7 +84,7 @@ func TestApplyDemoteWritesTextBeforeMovingTheLrc(t *testing.T) {
 	if got.Err != nil {
 		t.Fatalf("demote: %v", got.Err)
 	}
-	b, err := os.ReadFile(txt) //nolint:gosec // test fixture path
+	b, err := os.ReadFile(txt)
 	if err != nil || string(b) != "alpha\n" {
 		t.Fatalf("demoted .txt = %q, err %v", b, err)
 	}
@@ -147,9 +146,72 @@ func TestApplyDemoteKeepsASettledTxt(t *testing.T) {
 	if got.Err != nil {
 		t.Fatalf("demote: %v", got.Err)
 	}
-	b, _ := os.ReadFile(txt) //nolint:gosec // test fixture path
+	b, _ := os.ReadFile(txt)
 	if string(b) != "settled\n" {
 		t.Errorf("a settled .txt was overwritten: %q", b)
+	}
+}
+
+// TestApplyDemoteRollsBackTheTextWhenTheMoveFails: the backup line is truncated
+// by the caller on error, so a .txt left behind would be a file on disk that no
+// record describes -- exactly the invariant this package's backup-first
+// discipline claims. The move is made to fail by pointing it at a target
+// directory that cannot be written.
+func TestApplyDemoteRollsBackTheTextWhenTheMoveFails(t *testing.T) {
+	_, lrc := remediateFixture(t)
+	txt := strings.TrimSuffix(lrc, ".lrc") + ".txt"
+
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.Mkdir(blocked, 0o500); err != nil { // r-x: no writes
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+
+	got, _ := applyOne(t, Move{
+		Orphan: lrc, Target: filepath.Join(blocked, "q.lrc"), Kind: KindDemote, Eligible: true,
+		TextPath: txt, TextBody: "words\n",
+	})
+	if got.Err == nil {
+		t.Fatal("expected the move into an unwritable dir to fail")
+	}
+	if _, err := os.Stat(txt); !os.IsNotExist(err) {
+		t.Errorf("the demoted .txt survived a failed move, unrecorded: %v", err)
+	}
+	// The .lrc must still be there: a failed demote leaves the world untouched.
+	if _, err := os.Stat(lrc); err != nil {
+		t.Errorf("the .lrc did not survive a failed demote: %v", err)
+	}
+}
+
+// TestApplyDemoteRollbackSparesAPreExistingTxt: rollback must remove only a file
+// THIS call created. writeDemotedText reports an already-settled sidecar as a
+// no-op, and deleting that one would destroy content predating the run.
+func TestApplyDemoteRollbackSparesAPreExistingTxt(t *testing.T) {
+	_, lrc := remediateFixture(t)
+	txt := strings.TrimSuffix(lrc, ".lrc") + ".txt"
+	if err := os.WriteFile(txt, []byte("settled\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.Mkdir(blocked, 0o500); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+
+	got, _ := applyOne(t, Move{
+		Orphan: lrc, Target: filepath.Join(blocked, "q.lrc"), Kind: KindDemote, Eligible: true,
+		TextPath: txt, TextBody: "replacement\n",
+	})
+	if got.Err == nil {
+		t.Fatal("expected the move into an unwritable dir to fail")
+	}
+	b, err := os.ReadFile(txt)
+	if err != nil {
+		t.Fatalf("the pre-existing .txt was deleted by the rollback: %v", err)
+	}
+	if string(b) != "settled\n" {
+		t.Errorf("pre-existing content changed: %q", b)
 	}
 }
 
@@ -216,7 +278,7 @@ func TestApplyRemediationRefusesAnOccupiedTarget(t *testing.T) {
 	if got.Err == nil {
 		t.Fatal("want an error rather than a clobbered destination")
 	}
-	b, _ := os.ReadFile(target) //nolint:gosec // test fixture path
+	b, _ := os.ReadFile(target)
 	if string(b) != "existing\n" {
 		t.Errorf("the destination was clobbered: %q", b)
 	}

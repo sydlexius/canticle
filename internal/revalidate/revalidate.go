@@ -331,5 +331,34 @@ func (o Options) Validate() error {
 	if !o.Purge && strings.TrimSpace(o.QuarantineDir) == "" {
 		return errors.New("revalidate: a quarantine directory is required unless --purge is set")
 	}
+	// A quarantine root INSIDE a scanned root re-walks its own output: the next
+	// pass finds the quarantined sidecars, judges them again, and quarantines
+	// them deeper. Nothing is lost, but the tree grows on every run and the
+	// counts stop meaning anything. QuarantineDir defaults to
+	// <db-dir>/quarantine, so an operator whose DB lives under a library root
+	// hits this without doing anything unusual.
+	//
+	// Rejected here rather than skipped at walk time: a config that quietly
+	// half-works is worse than one that refuses to start, and this is cheap to
+	// state plainly before a single file moves.
+	if !o.Purge {
+		qAbs, qerr := filepath.Abs(o.QuarantineDir)
+		if qerr != nil {
+			return fmt.Errorf("revalidate: resolve quarantine dir %q: %w", o.QuarantineDir, qerr)
+		}
+		for _, root := range o.Roots {
+			rAbs, rerr := filepath.Abs(root)
+			if rerr != nil {
+				return fmt.Errorf("revalidate: resolve root %q: %w", root, rerr)
+			}
+			// Compare lexically on absolute paths. EvalSymlinks is deliberately
+			// NOT used: the quarantine dir need not exist yet, and a resolver
+			// that errors on a missing path would reject a valid config.
+			if qAbs == rAbs || strings.HasPrefix(qAbs, rAbs+string(filepath.Separator)) {
+				return fmt.Errorf("revalidate: quarantine dir %q is inside scanned root %q; "+
+					"a later pass would re-walk and re-quarantine its own output", qAbs, rAbs)
+			}
+		}
+	}
 	return nil
 }

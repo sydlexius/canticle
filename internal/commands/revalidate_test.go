@@ -147,7 +147,7 @@ func TestRevalidateApplyQuarantinesNotDeletes(t *testing.T) {
 	found := false
 	_ = filepath.WalkDir(quarantine, func(p string, d os.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".lrc") {
-			b, rerr := os.ReadFile(p) //nolint:gosec // test fixture path
+			b, rerr := os.ReadFile(p)
 			if rerr == nil && string(b) == body {
 				found = true
 			}
@@ -171,7 +171,7 @@ func TestRevalidateTailFileCarriesTheDetail(t *testing.T) {
 	}); code != 0 {
 		t.Fatalf("exit = %d: %s", code, out.String())
 	}
-	b, err := os.ReadFile(tail) //nolint:gosec // test fixture path
+	b, err := os.ReadFile(tail)
 	if err != nil {
 		t.Fatalf("read tail: %v", err)
 	}

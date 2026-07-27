@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/realign"
 	"github.com/sydlexius/canticle/internal/revalidate"
+	"github.com/sydlexius/canticle/internal/timing"
 )
 
 // RevalidateCmd re-judges .lrc files ALREADY ON DISK against the duration of the
@@ -212,7 +213,7 @@ func writeRevalidateTail(path string, findings []revalidate.Finding) error {
 	}
 	defer func() { _ = f.Close() }()
 	for _, fd := range findings {
-		if fd.Outcome != "mis_synced" && fd.Outcome != "categorical" {
+		if fd.Outcome != timing.MisSynced && fd.Outcome != timing.Categorical {
 			continue
 		}
 		if _, werr := fmt.Fprintf(f, "%s\t%s\tduration=%ds\toverrun=%.2fs\tratio=%.3f\taction=%s\n",
