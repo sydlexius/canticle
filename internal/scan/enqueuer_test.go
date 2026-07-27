@@ -234,7 +234,7 @@ func TestEnqueuer_OnScanCompleteUsesLibraryID(t *testing.T) {
 	work := &fakeWorkQueue{}
 	e := scan.Enqueuer{Results: store, Cache: cache, Queue: work}
 
-	if err := e.OnScanComplete(ctx, models.Library{ID: 9}, nil); err != nil {
+	if err := e.OnScanComplete(ctx, models.Library{ID: 9}, nil, "/music", scan.TriggerScheduler); err != nil {
 		t.Fatalf("OnScanComplete: %v", err)
 	}
 	if store.libraryID != 9 {

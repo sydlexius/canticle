@@ -45,6 +45,7 @@ import (
 	"github.com/sydlexius/canticle/internal/scanfail"
 	"github.com/sydlexius/canticle/internal/scanner"
 	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/selfwrite"
 	"github.com/sydlexius/canticle/internal/server"
 	"github.com/sydlexius/canticle/internal/servetls"
 	"github.com/sydlexius/canticle/internal/trustnet"
@@ -1067,6 +1068,17 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	allowedRoots := webhookAllowedRoots(ctx, sqlDB)
 	writer := newWriter(allowedRoots...)
 	configureWriterBilingual(writer, cfg)
+	// One registry shared by the writer and the watcher, so the watcher can drop
+	// the filesystem events canticle's own sidecar writes generate instead of
+	// rescanning the directory it just wrote to (#685). Both live in this one
+	// process, so an in-memory hand-off is the whole mechanism.
+	//
+	// The TTL is a multiple of the effective debounce: an entry has to outlive
+	// the debounce window the event it suppresses would have armed, and it has to
+	// expire soon after, so a crash or an undelivered event cannot leave a path
+	// permanently deaf to external change.
+	selfWrites := selfwrite.New(selfWriteTTL(watcherConfigFromCentral(cfg).Debounce))
+	configureWriterSelfWrites(writer, selfWrites)
 	// One shared cache repo across the worker, scheduler, and watcher so the
 	// /metrics cache hit/lookup counters (#308) cover every cache read in serve
 	// mode, not just the worker's. Its hit/lookup counters are process-lifetime
@@ -1190,7 +1202,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runWatcher(runCtx, sqlDB, args, watchCfg, cfg, cacheRepo)
+			runWatcher(runCtx, sqlDB, args, watchCfg, cfg, cacheRepo, selfWrites)
 		}()
 	}
 	// Periodic path-reconciliation sweep (#453): deletes queue/scan rows whose
@@ -1787,6 +1799,34 @@ func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 	}
 }
 
+// configureWriterSelfWrites attaches the shared self-write registry to the
+// concrete LRC writer, so the watcher recognizes the paths it touches (#685). A
+// non-LRCWriter (a test double) is left alone, exactly as the bilingual setter
+// above does.
+func configureWriterSelfWrites(w lyrics.Writer, r *selfwrite.Registry) {
+	if lw, ok := w.(*lyrics.LRCWriter); ok {
+		lw.SetSelfWriteRegistry(r)
+	}
+}
+
+// selfWriteTTL derives how long a recorded self-write stays suppressed from the
+// effective watcher debounce. It must exceed the debounce (an entry that
+// expired before the window it was meant to cover suppresses nothing), and it
+// must stay short (a stale entry is a window in which a real external change to
+// that exact path is ignored). A non-positive debounce means the watcher will
+// clamp to its own default, so clamp to the same value here.
+func selfWriteTTL(debounce time.Duration) time.Duration {
+	if debounce <= 0 {
+		debounce = watcher.DefaultDebounce
+	}
+	return selfWriteDebounceMultiple * debounce
+}
+
+// selfWriteDebounceMultiple is the small factor in selfWriteTTL. Three debounce
+// windows covers the observed write-to-event latency with margin while keeping
+// the deaf-to-external-change window at a few seconds under the default.
+const selfWriteDebounceMultiple = 3
+
 // detectorScanVersion returns the app version to stamp into a scan's ScanOptions
 // for detector-marker version invalidation (#502), or "" when the audio detector
 // is disabled -- so a disabled detector never reopens provisional markers on a
@@ -1892,7 +1932,7 @@ func watcherConfigFromCentral(cfg config.Config) watcher.Config {
 	}
 }
 
-func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config, cacheRepo *cache.CacheRepo) {
+func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config, cacheRepo *cache.CacheRepo, selfWrites *selfwrite.Registry) {
 	// The watcher's ScanFunc is a subtree (RunOnceForPath) scan, so realign is
 	// scoped to the changed directory. It is gated by realign.enabled alone (not
 	// on_scan, which governs full periodic/manual scans).
@@ -1916,6 +1956,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		_, err := pruner.PrunePath(ctx, path)
 		return err
 	})
+	wch.SetSelfWriteRegistry(selfWrites)
 	// The watcher is best-effort and explicitly never a replacement for the
 	// periodic scheduler (see README), so a setup or runtime failure must not
 	// take down serve. Surface it at error level so an operator who enabled the
@@ -2188,16 +2229,24 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			scanner.WithDurationStore(audiodur.New(sqlDB)),
 		),
 		Options: opts,
-		OnScanComplete: func(ctx context.Context, lib models.Library, found []models.ScanResult) error {
+		// trigger and path disambiguate the two callers of this one callback
+		// (#685): a full periodic library pass and a watcher's single-directory
+		// rescan logged the same message with the same fields, so found=0 from an
+		// album-folder rescan and found=18476 from a full walk were
+		// indistinguishable in the logs. That ambiguity sent a production
+		// diagnosis down a wrong path.
+		OnScanComplete: func(ctx context.Context, lib models.Library, found []models.ScanResult, path string, trigger scan.Trigger) error {
 			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)
 			if err != nil {
 				// Counts are partial on an aborted enqueue; don't log "complete".
 				slog.Warn("scheduled scan incomplete (enqueue aborted)",
-					"library", lib.Name, "found", len(found), "enqueued", enqueued, "cache_hits", cacheHits, "error", err)
+					"library", lib.Name, "trigger", string(trigger), "path", path,
+					"found", len(found), "enqueued", enqueued, "cache_hits", cacheHits, "error", err)
 				return err
 			}
 			slog.Info("scheduled scan complete",
-				"library", lib.Name, "found", len(found), "enqueued", enqueued, "cache_hits", cacheHits)
+				"library", lib.Name, "trigger", string(trigger), "path", path,
+				"found", len(found), "enqueued", enqueued, "cache_hits", cacheHits)
 			reactiveRealign(ctx, realigner, realignBackupPath, lib, found)
 			return nil
 		},

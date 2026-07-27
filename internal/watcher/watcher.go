@@ -14,6 +14,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/selfwrite"
 )
 
 // LibraryLister lists configured library roots.
@@ -37,11 +38,31 @@ type Watcher struct {
 	scan      ScanFunc
 	prune     PruneFunc
 
+	// selfWrites, when non-nil, records the paths this process itself just wrote.
+	// Events for those paths are dropped in translate so canticle's own sidecar
+	// writes do not schedule a rescan of the directory they landed in (#685). Nil
+	// (the default) disables suppression entirely: every event is external as far
+	// as the watcher is concerned, which is the pre-#685 behavior.
+	selfWrites *selfwrite.Registry
+
 	// armed, when non-nil, is invoked with a path each time its debounce timer is
 	// set or reset in dispatch. It is a test-only synchronization seam (default
 	// nil = no-op in production) that lets tests place a second event mid-window
 	// deterministically -- observing the reset arming -- instead of sleeping.
 	armed func(path string)
+
+	// suppressed, when non-nil, is invoked with the raw event path each time an
+	// event is dropped as self-generated. Test-only seam mirroring armed, so a
+	// test observes suppression directly rather than inferring it from the
+	// absence of a scan after a sleep.
+	suppressed func(path string)
+}
+
+// SetSelfWriteRegistry attaches the registry of paths this process just wrote,
+// enabling self-write event suppression (#685). Pass the same instance given to
+// the lyrics writer. Not goroutine-safe; call before Run.
+func (w *Watcher) SetSelfWriteRegistry(r *selfwrite.Registry) {
+	w.selfWrites = r
 }
 
 // New creates a Watcher. scan is invoked (after debouncing) with the owning
@@ -126,6 +147,25 @@ func (w *Watcher) translate(ctx context.Context, c <-chan notify.EventInfo, libs
 		case <-ctx.Done():
 			return
 		case ei := <-c:
+			// Drop canticle's own sidecar writes before anything else acts on
+			// them (#685). This must precede BOTH maybePrune and the forward into
+			// dispatch: the write sequence emits a Remove for the
+			// opposite-extension sidecar, which would otherwise prune a row the
+			// writer is in the middle of replacing, and the surviving events would
+			// arm a debounce timer that rescans the directory just written to --
+			// the self-sustaining loop that keeps a library disk awake.
+			//
+			// The check is against the RAW event path, not the resolved directory:
+			// recorded entries are files, while dispatch keys on directories, so a
+			// directory-level check would suppress external changes to siblings in
+			// the same album folder.
+			if w.selfWrites.Suppress(ei.Path()) {
+				slog.Debug("watcher: ignoring self-generated event", "event", ei.Event().String(), "path", ei.Path())
+				if w.suppressed != nil {
+					w.suppressed(ei.Path())
+				}
+				continue
+			}
 			lib, dir, ok := eventTarget(libs, ei.Path())
 			if !ok {
 				continue

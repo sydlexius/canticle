@@ -36,6 +36,12 @@ const (
 	defaultMaxDirs    = 100000
 )
 
+// DefaultDebounce is the quiet period New clamps a non-positive Config.Debounce
+// to. Exported so a caller deriving a duration FROM the effective debounce (the
+// self-write suppression TTL in serve mode, #685) computes it against the same
+// value the watcher will actually use, rather than against the unclamped zero.
+const DefaultDebounce = defaultDebounceMS * time.Millisecond
+
 // Config holds watcher tuning resolved from the environment. Debounce and
 // MaxDirs must be positive; New clamps any non-positive value to the package
 // default (a zero Debounce would disable coalescing, and a non-positive MaxDirs

@@ -117,7 +117,7 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 }
 
 // OnScanComplete adapts EnqueuePending to Scheduler.OnScanComplete.
-func (e *Enqueuer) OnScanComplete(ctx context.Context, lib models.Library, _ []models.ScanResult) error {
+func (e *Enqueuer) OnScanComplete(ctx context.Context, lib models.Library, _ []models.ScanResult, _ string, _ Trigger) error {
 	_, _, err := e.EnqueuePending(ctx, lib)
 	return err
 }
