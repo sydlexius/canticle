@@ -1334,7 +1334,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// The guard inside WriteLRC has ALREADY acted on this verdict (#439) -- a
 	// MisSynced result landed as .txt and a categorical one was not written --
 	// so this is the durable record of a decision, not an ignored observation.
-	w.stampTimingOutcome(ctxNoCancel, item, song, song.AudioDurationSeconds)
+	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++

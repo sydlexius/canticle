@@ -102,6 +102,20 @@ func guardDurationSeconds(song models.Song) int {
 	return song.Track.TrackLength
 }
 
+// GuardDurationSeconds is the duration the promotion guard judged this song
+// against, exported so the worker's post-write record is stamped from the SAME
+// value WriteLRC enforced on.
+//
+// Re-deriving a verdict from "the same inputs" is only safe when both sides
+// genuinely share those inputs. They did not: the fallback above is applied
+// here and was not applied at the stamp site, so a song with an unknown file
+// duration but a known catalog length could be demoted on the fallback while
+// the row recorded unknown_duration -- the durable record contradicting the
+// decision it was supposed to document.
+func GuardDurationSeconds(song models.Song) int {
+	return guardDurationSeconds(song)
+}
+
 // unsyncedFallbackBody returns the plain words to persist when a synced result
 // is demoted. The provider's own unsynced body wins when present: it is the
 // authoritative plain text, correctly punctuated and line-broken. Otherwise the

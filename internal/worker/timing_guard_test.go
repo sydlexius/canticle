@@ -132,3 +132,45 @@ func (d *durationCapturingWriter) WriteLRC(song models.Song, _ string, _ string)
 	d.seen = song.AudioDurationSeconds
 	return nil
 }
+
+// TestRunOnce_StampedOutcomeUsesTheGuardFallbackDuration pins that the durable
+// record is evaluated against the SAME duration the guard enforced on, including
+// on the Track.TrackLength fallback path.
+//
+// The regression it guards: guardDurationSeconds falls back to the catalog
+// length when the file duration is unknown, but the stamp site was passed the
+// raw AudioDurationSeconds. A song with no file duration and a known catalog
+// length was therefore quarantined by the guard while the row recorded
+// unknown_duration -- the durable record contradicting the decision it exists to
+// document. Re-deriving from "the same inputs" is only safe when both sides
+// actually share them.
+func TestRunOnce_StampedOutcomeUsesTheGuardFallbackDuration(t *testing.T) {
+	// No metadata reader is set, so AudioDurationSeconds stays 0 and only the
+	// catalog length is available. A 900s cue grossly overruns it.
+	song := models.Song{
+		Track: models.Track{ArtistName: "A", TrackName: "T", TrackLength: 200},
+		Subtitles: models.Synced{Lines: []models.Lines{
+			guardLine(10, "a"), guardLine(900, "b"),
+		}},
+	}
+
+	q := &fakeQueue{items: []queue.WorkItem{queuedItem("/library/track.flac")}}
+	w := New(q, &fakeCache{}, &fakeFetcher{song: song}, &durationCapturingWriter{})
+
+	if err := w.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	rec, ok := q.timingOutcomes[1]
+	if !ok {
+		t.Fatal("no timing outcome stamped")
+	}
+	if rec.Outcome == "unknown_duration" {
+		t.Fatalf("timing_outcome = %q, but the guard judged this song against the "+
+			"catalog-length fallback and refused it; the record must not claim "+
+			"no judgment was possible", rec.Outcome)
+	}
+	if rec.Outcome != "categorical" {
+		t.Errorf("timing_outcome = %q; want categorical (900s cue vs 200s fallback)", rec.Outcome)
+	}
+}
