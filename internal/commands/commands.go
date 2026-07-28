@@ -24,6 +24,7 @@ import (
 	arg "github.com/alexflint/go-arg"
 	"github.com/sydlexius/canticle/internal/app"
 	"github.com/sydlexius/canticle/internal/audiodur"
+	"github.com/sydlexius/canticle/internal/audiometa"
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/config"
@@ -1086,6 +1087,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	cacheRepo := cache.New(sqlDB)
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
 	w.SetDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion))
+	// Answer the fetch-time metadata read from audio_metadata rather than by
+	// opening each item's audio file (#712). Same reader identity as the duration
+	// store: both tables cache output of the same parse, so both must invalidate
+	// together when it changes (#713).
+	w.SetMetadataCache(audiometa.New(sqlDB, scanner.DurationReaderVersion))
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
 	w.SetCircuitBackoff(time.Duration(cfg.API.CircuitBackoffBase)*time.Second, time.Duration(cfg.API.CircuitOpenDuration)*time.Second)
 	// Dispatch strategy and the parallel-mode synced-upgrade window. Set before the

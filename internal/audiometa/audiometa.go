@@ -85,6 +85,61 @@ func (s *Store) Lookup(ctx context.Context, path string, mtimeNano, size int64) 
 	return false, fmt.Errorf("audiometa: lookup %q: %w", path, err)
 }
 
+// Facts returns the cached recording disambiguators for path when the row is
+// current -- same mtime, same size, same reader identity as Lookup requires.
+// found is false for an absent row, a stale one, or one written by a different
+// duration parser, exactly as in Lookup: to a caller they are the same fact,
+// this file needs reading.
+//
+// WHY THIS EXISTS ALONGSIDE Lookup RATHER THAN REPLACING IT (#712). Lookup is a
+// PRESENCE check and that is the right contract for the scanner, which only
+// decides whether to read a file. The worker needs the VALUES: it re-opens every
+// queued item's audio file at fetch time purely to recover duration, ISRC and
+// album, and on the reference library 96.8% of deferred rows already have those
+// values sitting in this table. Widening Lookup's signature would push a
+// values-shaped contract onto the scanner, which does not want it; a second
+// method leaves both callers with exactly the read they need.
+//
+// THE IDENTITY GUARANTEE IS PRESERVED, and that is the load-bearing property.
+// The worker's fetch-time read exists to avoid pasting lyrics onto the wrong
+// track, so serving it from cache is only safe while the cached row provably
+// describes the file on disk NOW. The (mtime_nsec, size_bytes) key is what
+// provides that: a re-encoded, retagged, or replaced file stops matching and the
+// caller falls back to reading the file. This method therefore requires the
+// caller to pass the CURRENT stat values -- it never stats the path itself,
+// because a stat here would describe whatever the path resolves to at this
+// instant rather than the file the caller is actually working on.
+//
+// The returned AudioFacts carries only the fields this table stores; a caller
+// wanting the full tag set still reads the file.
+func (s *Store) Facts(ctx context.Context, path string, mtimeNano, size int64) (scanner.AudioFacts, bool, error) {
+	var f scanner.AudioFacts
+	err := s.db.QueryRowContext(ctx,
+		`SELECT mbid, isrc, artist, album_artist, title, album, composer, genre,
+		        year, track_no, track_total, disc_no, disc_total,
+		        format, file_type, duration_seconds
+		 FROM audio_metadata
+		 WHERE file_path=? AND mtime_nsec=? AND size_bytes=? AND reader_version=? LIMIT 1`,
+		path, mtimeNano, size, s.readerVersion,
+	).Scan(
+		&f.MBID, &f.ISRC, &f.Artist, &f.AlbumArtist, &f.Title, &f.Album,
+		&f.Composer, &f.Genre, &f.Year, &f.TrackNo, &f.TrackTotal,
+		&f.DiscNo, &f.DiscTotal, &f.Format, &f.FileType, &f.TrackLength,
+	)
+	if err == nil {
+		// Echo back the identity the row was matched on rather than re-deriving
+		// it: these are the caller's own stat values, so a consumer that banks
+		// them downstream (the worker's duration cache write) stamps the same
+		// file version this row was validated against.
+		f.MTimeNano, f.SizeBytes = mtimeNano, size
+		return f, true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return scanner.AudioFacts{}, false, nil
+	}
+	return scanner.AudioFacts{}, false, fmt.Errorf("audiometa: facts %q: %w", path, err)
+}
+
 // Record stores facts as the metadata for path, replacing any previous row.
 //
 // path MUST be the canonical form (#643): use

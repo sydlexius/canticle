@@ -447,3 +447,154 @@ func TestCoverageCountsOnlyCurrentReader(t *testing.T) {
 		}
 	}
 }
+
+// --- Facts: the value-returning read (#712) -----------------------------
+//
+// These mirror the Lookup/Record tests deliberately. Facts is a SECOND query
+// with its own WHERE clause and its own column list, so it inherits none of
+// Lookup's coverage -- and review proved that: stripping mtime_nsec, size_bytes
+// AND reader_version from Facts' predicate left every package green. That
+// mutation is the wrong-track-attribution bug this cache exists to avoid, since a
+// retagged or replaced file would serve its pre-change ISRC and duration and the
+// worker would fetch lyrics for the wrong recording.
+
+// Every column round-trips into the right field. Values are DISTINCT per field
+// on purpose: two fields sharing a value would make a Scan-order swap (say
+// Album into Artist) undetectable, and Facts' Scan list is long enough that a
+// transposition is a live risk.
+func TestFactsRoundTripsEveryFieldDistinctly(t *testing.T) {
+	ctx := context.Background()
+	s := newTestDB(t)
+
+	want := scanner.AudioFacts{
+		MTimeNano: 111111, SizeBytes: 222222,
+		MBID: "mbid-value", ISRC: "isrc-value",
+		Artist: "artist-value", AlbumArtist: "album-artist-value",
+		Title: "title-value", Album: "album-value",
+		Composer: "composer-value", Genre: "genre-value",
+		Year: 1991, TrackNo: 3, TrackTotal: 12, DiscNo: 2, DiscTotal: 4,
+		Format: "format-value", FileType: "filetype-value", TrackLength: 333,
+	}
+	if err := s.Record(ctx, "/lib/full.mp3", want); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, found, err := s.Facts(ctx, "/lib/full.mp3", 111111, 222222)
+	if err != nil {
+		t.Fatalf("Facts: %v", err)
+	}
+	if !found {
+		t.Fatal("a current row must be found")
+	}
+	if got != want {
+		t.Errorf("Facts round-trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// A CHANGED FILE MUST MISS. This is the identity guarantee the whole cache
+// rests on: the fetch-time read exists to stop lyrics being pasted onto the
+// wrong track, so a row may serve it only while it still describes the file on
+// disk. Nanosecond mtime precision is load-bearing -- a same-second rewrite to
+// the same byte size must still read as changed.
+func TestFactsMissesWhenFileChanged(t *testing.T) {
+	ctx := context.Background()
+	s := newTestDB(t)
+	if err := s.Record(ctx, "/lib/a.mp3", scanner.AudioFacts{
+		MTimeNano: 1000, SizeBytes: 4096, ISRC: "ORIGINAL", TrackLength: 210,
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		mtime int64
+		size  int64
+	}{
+		{"one-nanosecond mtime change", 1001, 4096},
+		{"size change", 1000, 4097},
+		{"both changed", 2000, 8192},
+	} {
+		got, found, err := s.Facts(ctx, "/lib/a.mp3", tc.mtime, tc.size)
+		if err != nil {
+			t.Fatalf("Facts(%s): %v", tc.name, err)
+		}
+		if found {
+			t.Errorf("%s: a changed file must MISS, else the worker fetches lyrics using a replaced file's identity (got ISRC %q)", tc.name, got.ISRC)
+		}
+		if got != (scanner.AudioFacts{}) {
+			t.Errorf("%s: a miss must yield the zero value, got %+v", tc.name, got)
+		}
+	}
+}
+
+// An absent row is a miss, not an error: to a caller "no row" and "stale row"
+// are the same fact, and the worker falls back to reading the file for both.
+func TestFactsMissesWhenAbsent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestDB(t)
+
+	got, found, err := s.Facts(ctx, "/lib/never-indexed.mp3", 1, 1)
+	if err != nil {
+		t.Fatalf("an absent row must not be an error: %v", err)
+	}
+	if found {
+		t.Error("an unrecorded file must miss")
+	}
+	if got != (scanner.AudioFacts{}) {
+		t.Errorf("a miss must yield the zero value, got %+v", got)
+	}
+}
+
+// A row written by a DIFFERENT duration parser must miss (#713). The bytes are
+// unchanged but TrackLength came from code that is not the code asking, and the
+// worker feeds that duration to the provider query.
+func TestFactsMissesOnReaderVersionChange(t *testing.T) {
+	ctx := context.Background()
+	oldReader, sqlDB := newTestDBWithHandle(t, "parser@v1")
+	newReader := audiometa.New(sqlDB, "parser@v2")
+
+	if err := oldReader.Record(ctx, "/lib/vbr.mp3", scanner.AudioFacts{
+		MTimeNano: 100, SizeBytes: 200, TrackLength: 25, ISRC: "OLD-PARSER",
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	if _, found, err := newReader.Facts(ctx, "/lib/vbr.mp3", 100, 200); err != nil {
+		t.Fatalf("Facts under the new parser: %v", err)
+	} else if found {
+		t.Error("a row derived by a DIFFERENT parser must miss; a VBR reader change moves durations severalfold")
+	}
+
+	// The recording parser still hits: invalidated for the new reader, not
+	// destroyed.
+	if _, found, err := oldReader.Facts(ctx, "/lib/vbr.mp3", 100, 200); err != nil {
+		t.Fatalf("Facts under the recording parser: %v", err)
+	} else if !found {
+		t.Error("the recording parser must still hit its own row")
+	}
+}
+
+// Legacy rows predating the reader_version column hold NULL and must miss for
+// EVERY reader, the empty string included. After migration 042 that is the whole
+// pre-existing population until it is re-indexed, so this is the post-deploy
+// path rather than an edge case.
+func TestFactsMissesOnLegacyNullReaderVersion(t *testing.T) {
+	ctx := context.Background()
+	_, sqlDB := newTestDBWithHandle(t, "parser@v1")
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO audio_metadata (file_path, mtime_nsec, size_bytes, duration_seconds, isrc)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"/lib/legacy.mp3", 100, 200, 210, "LEGACY",
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	for _, readerVersion := range []string{"parser@v1", ""} {
+		if _, found, err := audiometa.New(sqlDB, readerVersion).Facts(ctx, "/lib/legacy.mp3", 100, 200); err != nil {
+			t.Fatalf("Facts as %q: %v", readerVersion, err)
+		} else if found {
+			t.Errorf("a legacy NULL-reader row must miss for reader %q", readerVersion)
+		}
+	}
+}

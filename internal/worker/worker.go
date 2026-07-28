@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -133,6 +134,25 @@ const escalationThreshold = 5
 // identityrepair's IdentityReader.
 type MetadataReader func(path string) (scanner.AudioMetadata, error)
 
+// MetadataCache serves the fetch-time recording disambiguators from
+// audio_metadata instead of re-opening the audio file (#712). A nil cache
+// disables the feature and every item reads from disk, the pre-#712 behavior.
+//
+// WHY THIS IS WORTH A SEAM. The fetch-time read exists to avoid pasting lyrics
+// onto the wrong track, so it cannot simply be removed -- but it re-derives tags
+// the metadata index already holds. Measured on the reference library, 20,303 of
+// 20,964 deferred queue rows (96.8%) already have a current row here, so nearly
+// every item in a queue drain was opening a file to learn what SQLite could have
+// answered. That is one array read per queued row, indefinitely, on disks the
+// rest of the system works to keep spun down.
+//
+// Facts takes the CURRENT (mtimeNano, size) and returns found=false unless the
+// row still matches them, which is what preserves the identity guarantee: a
+// re-encoded or retagged file misses and the caller reads from disk.
+type MetadataCache interface {
+	Facts(ctx context.Context, path string, mtimeNano, size int64) (scanner.AudioFacts, bool, error)
+}
+
 // DurationStore banks the exact audio duration the fetch path already re-read
 // from disk, so the revalidation path (#441) does not have to open the file
 // again. A nil store disables the feature.
@@ -165,6 +185,14 @@ type Worker struct {
 	// answers with its default recording, which writes a live or remastered cut's
 	// lyrics onto a studio track. Defaults to scanner.ReadAudioMetadata.
 	readMetadata MetadataReader
+	// metaCache, when set, answers the fetch-time metadata read from
+	// audio_metadata so the item's audio file is never opened (#712). A miss or
+	// any error falls through to readMetadata. Nil disables it.
+	metaCache MetadataCache
+	// statFile resolves a path's current (mtimeNano, size) so a cached row can be
+	// validated against the file on disk. Injectable purely so tests can drive the
+	// cache path without real files; production uses os.Stat.
+	statFile func(path string) (mtimeNano, size int64, err error)
 	// durations, when set, banks the duration refreshRecordingIdentity re-read
 	// from disk, so the revalidation path (#441) does not re-open the file. Nil
 	// disables it.
@@ -357,6 +385,7 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		// config.Enrichment.Enabled's own default, so a caller that never calls the
 		// setters still gets fetch-mode parity rather than a silently disabled fix.
 		readMetadata:           scanner.ReadAudioMetadata,
+		statFile:               statFileIdentity,
 		enrichRecordingDefault: true,
 		baseBackoff:            backoff.DefaultBase,
 		maxBackoff:             backoff.DefaultMax,
@@ -710,6 +739,27 @@ func (w *Worker) SetMetadataReader(r MetadataReader) {
 		return
 	}
 	w.readMetadata = r
+}
+
+// SetMetadataCache wires the metadata index so the fetch-time read is answered
+// from SQLite rather than by opening the item's audio file (#712). Nil disables
+// it, restoring the read-every-file behavior.
+func (w *Worker) SetMetadataCache(c MetadataCache) {
+	w.metaCache = c
+}
+
+// statFileIdentity returns the file's (ModTime().UnixNano(), Size()) -- the
+// identity audio_metadata rows are keyed on.
+//
+// Nanosecond precision matters for the same reason it does in the table itself:
+// a same-second rewrite to the same byte size must still read as changed, or a
+// retagged file serves its pre-retag identity.
+func statFileIdentity(path string) (mtimeNano, size int64, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	return info.ModTime().UnixNano(), info.Size(), nil
 }
 
 // SetDurationStore wires a store so the duration re-read at fetch time is banked
@@ -1466,7 +1516,7 @@ func (w *Worker) refreshRecordingIdentity(ctx context.Context, item queue.WorkIt
 	if strings.TrimSpace(item.Inputs.SourcePath) == "" {
 		return track
 	}
-	meta, err := w.readMetadata(item.Inputs.SourcePath)
+	meta, err := w.resolveMetadata(ctx, item.Inputs.SourcePath)
 	if err != nil {
 		slog.Warn("fetch-time metadata refresh failed; querying with enqueue-time identity",
 			"id", item.ID, "artist", track.ArtistName, "track", track.TrackName, "error", err)
@@ -1485,6 +1535,72 @@ func (w *Worker) refreshRecordingIdentity(ctx context.Context, item queue.WorkIt
 		track.AlbumName = meta.AlbumName
 	}
 	return track
+}
+
+// resolveMetadata returns the fetch-time recording disambiguators for path,
+// preferring the metadata index over opening the audio file (#712).
+//
+// EVERY FAILURE FALLS THROUGH TO THE FILE READER, never to an error and never to
+// empty facts. The cache is an optimization over a read that must still happen
+// correctly: a miss, a stat failure, a stale row, or a database error all mean
+// the same thing here -- this file needs reading -- so the only outcome that
+// skips the open is a row that provably describes the file on disk now.
+//
+// THE STAT IS THE PRICE OF THE GUARANTEE. Validating a cached row requires the
+// file's current (mtime, size), and work_queue stores neither, so a cache hit
+// costs one os.Stat. That is deliberate rather than incidental: the fetch-time
+// read exists to stop lyrics being pasted onto the wrong track, and serving it
+// from a row that might describe a since-replaced file would trade the bug this
+// path prevents for the I/O it costs. A stat is one syscall against an open plus
+// a tag parse -- and, for a VBR file with no Xing header, a full-file read -- so
+// the trade is heavily favorable while keeping the identity check exact.
+func (w *Worker) resolveMetadata(ctx context.Context, path string) (scanner.AudioMetadata, error) {
+	if w.metaCache == nil || w.statFile == nil {
+		return w.readMetadata(path)
+	}
+
+	mtimeNano, size, serr := w.statFile(path)
+	if serr != nil {
+		// The file may still be readable through the normal path (a stat can fail
+		// for reasons an open does not), and if it is not, readMetadata reports the
+		// real error. Either way this is not the place to decide the item's fate.
+		slog.Debug("metadata cache: stat failed, reading the file", "path", path, "error", serr)
+		return w.readMetadata(path)
+	}
+
+	// THE CACHE KEY MUST BE CANONICAL, exactly as recordDuration's must (#643).
+	// audio_metadata rows are written under
+	// pathutil.RebaseUnderCanonicalRoot (index_metadata.go), i.e. absolute and
+	// symlink-resolved, while item.Inputs.SourcePath arrives in two spellings: a
+	// scan-enqueued item carries the CONFIGURED root's spelling, unresolved, and a
+	// webhook item carries an already-resolved one. Querying the raw path
+	// therefore MISSES EVERY ROW on a symlinked library root -- the shape #643 was
+	// filed against (/music -> /mnt/array/music) -- which would make this cache a
+	// silent no-op that still costs a stat and a query per item. It is a miss and
+	// never a wrong hit (divergent keys cannot collide), so this is a performance
+	// defect rather than a correctness one, but it would have removed the entire
+	// benefit on the deployment that motivated the work.
+	key := pathutil.CanonicalPath(path)
+
+	facts, found, cerr := w.metaCache.Facts(ctx, key, mtimeNano, size)
+	if cerr != nil {
+		slog.Warn("metadata cache lookup failed; reading the file", "path", path, "error", cerr)
+		return w.readMetadata(path)
+	}
+	if !found {
+		return w.readMetadata(path)
+	}
+
+	// A hit still yields the identity stamp, because recordDuration banks the
+	// duration against it. Those are the stat values the row was matched on, so
+	// the banked row describes the same file version the cache validated.
+	return scanner.AudioMetadata{
+		TrackLength: facts.TrackLength,
+		ISRC:        facts.ISRC,
+		AlbumName:   facts.Album,
+		MTimeNano:   mtimeNano,
+		SizeBytes:   size,
+	}, nil
 }
 
 // recordDuration banks a fetch-time duration for the revalidation path (#441).
