@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/realign"
 	"github.com/sydlexius/canticle/internal/revalidate"
+	"github.com/sydlexius/canticle/internal/scanner"
 	"github.com/sydlexius/canticle/internal/timing"
 )
 
@@ -95,7 +96,7 @@ func runRevalidate(ctx context.Context, out io.Writer, args RevalidateCmd) int {
 		return 2
 	}
 
-	durations := audiodur.New(sqlDB)
+	durations := audiodur.New(sqlDB, scanner.DurationReaderVersion)
 	plan, err := revalidate.New(durations.Lookup, opts).Plan(ctx)
 	if err != nil {
 		slog.Error("revalidate: scan failed", "error", err)

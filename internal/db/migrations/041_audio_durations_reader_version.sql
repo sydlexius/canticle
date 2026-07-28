@@ -1,0 +1,79 @@
+-- +goose Up
+-- +goose StatementBegin
+-- Give audio_durations a READER identity (#711), so a parser change invalidates
+-- the cache the same way a file change already does.
+--
+-- THE DEFECT. Migration 035 keys this table on (file_path, mtime_nsec,
+-- size_bytes) and documents that validation makes staleness "structurally
+-- impossible". That is true for the FILE and false for the PARSER: those three
+-- columns describe the bytes on disk, and nothing in the row records which code
+-- turned those bytes into a duration. Swap the duration parser and every cached
+-- row keeps hitting while silently meaning something different -- the file did
+-- not change, the reader did.
+--
+-- WHY IT IS URGENT NOW. canticle is about to move from
+-- github.com/lizc2003/audioduration to the sydlexius fork, whose VBR handling
+-- changes the derived duration for MP3s lacking a Xing/VBRI header by up to 10x
+-- IN EITHER DIRECTION. internal/timing judges a synced lyric against this
+-- duration with a calibrated 2s tolerance, so a wrong duration is not a cosmetic
+-- staleness: internal/revalidate would demote a CORRECT .lrc to .txt, or
+-- quarantine it outright, on the strength of a cached number no longer produced
+-- by the running code. Same defect class as #702, where detector_version was
+-- keyed to the app version instead of the model.
+--
+-- NULLABLE, AND LEGACY ROWS ARE LEFT NULL ON PURPOSE. Lookup compares
+-- reader_version with =, and in SQL NULL = <anything> is NULL, never true, so
+-- every pre-existing row reads as a MISS from the first run of the new code. It
+-- is not deleted and it is not rewritten -- a rewrite would have to CLAIM a
+-- parser identity for a duration whose parser is unrecorded, which is precisely
+-- the false assertion this column exists to prevent.
+--
+-- NO BACKFILL, NO FLAG DAY, NO REMEDIATION. A miss here is already the
+-- fail-open path: audiodur.Lookup returns (0, false), callers pass that 0 to
+-- timing.Evaluate, and it returns UnknownDuration, which every consumer already
+-- handles and which never demotes or quarantines anything. So the entire stale
+-- population simply re-derives lazily, one header read per file, the next time
+-- each file is touched. A cold cache is correct, merely uninformative.
+--
+-- ADDITIVE, so SQLite rewrites no rows: ALTER TABLE ADD COLUMN on a nullable
+-- column with no default is O(1) metadata-only here. Note the deliberate absence
+-- of a CHECK constraint -- NULL is a legitimate value in this column (it is what
+-- "recorded before the reader was identified" looks like), unlike migration
+-- 035's columns where every value was known at insert.
+ALTER TABLE audio_durations ADD COLUMN reader_version TEXT;
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+-- THE ROWS GO FIRST, AND THAT IS THE WHOLE POINT OF THIS DOWN MIGRATION.
+--
+-- An earlier draft of this file kept the durations and claimed a rollback
+-- "degrades safely to the prior reader-blind behavior". THAT WAS FALSE, and it
+-- was verified false: pre-#711 code queries WITHOUT the reader_version
+-- predicate, so it HITS a row this build stamped with a different parser and
+-- reads that parser's number with full confidence -- 187s for a fork-derived
+-- VBR row in the reproduction. It then feeds it to timing.Evaluate and
+-- internal/revalidate demotes or quarantines a CORRECT sidecar. That is exactly
+-- the silent data destruction #711 exists to prevent, merely displaced onto the
+-- rollback path.
+--
+-- So the durations cannot survive a downgrade. Once this build has run against
+-- a different parser, the table holds numbers the OLD binary must not trust,
+-- and the old binary has no way to tell which rows those are -- that
+-- discrimination is precisely the column being dropped. Deleting is safe by
+-- this migration's own argument: an empty table is a cold cache, every consumer
+-- already fails open to UnknownDuration, and each row re-derives on its next
+-- touch at one header read. A CONTAMINATED WARM CACHE HAS NO SUCH FLOOR.
+--
+-- NOTE THE LIMIT OF THIS PROTECTION, because it is not the likeliest rollback.
+-- Reverting the BINARY without running this migration hits the same hazard and
+-- nothing here can stop it: the old code simply ignores a column it does not
+-- know about. A goose-managed downgrade is protected; a bare binary revert is
+-- not. If you revert the binary after running a different duration parser,
+-- clear this table by hand:  DELETE FROM audio_durations;
+DELETE FROM audio_durations;
+
+-- SQLite has supported DROP COLUMN since 3.35 and modernc.org/sqlite is well
+-- past it (verified against 3.53.3, the version this driver currently vendors).
+ALTER TABLE audio_durations DROP COLUMN reader_version;
+-- +goose StatementEnd

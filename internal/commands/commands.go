@@ -1085,7 +1085,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// and exposed via CacheStats.
 	cacheRepo := cache.New(sqlDB)
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
-	w.SetDurationStore(audiodur.New(sqlDB))
+	w.SetDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion))
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
 	w.SetCircuitBackoff(time.Duration(cfg.API.CircuitBackoffBase)*time.Second, time.Duration(cfg.API.CircuitOpenDuration)*time.Second)
 	// Dispatch strategy and the parallel-mode synced-upgrade window. Set before the
@@ -2298,7 +2298,7 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		// re-read (and re-warned about) on every scheduled/watched scan (#376).
 		Scanner: scanner.NewScanner(
 			scanner.WithMetadataFailureStore(scanfail.New(sqlDB)),
-			scanner.WithDurationStore(audiodur.New(sqlDB)),
+			scanner.WithDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion)),
 		),
 		Options: opts,
 		// trigger and path disambiguate the two callers of this one callback

@@ -9,14 +9,40 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 )
 
+// testReaderVersion is the parser identity every single-Store test writes and
+// reads under. Its value is irrelevant; what matters is that it is CONSTANT, so
+// these tests exercise mtime/size validation without reader identity confounding
+// the result.
+const testReaderVersion = "test-reader@v1"
+
 func openTestStore(t *testing.T) *audiodur.Store {
+	t.Helper()
+	return openTestStoreAs(t, testReaderVersion)
+}
+
+// openTestStoreAs returns a Store over a fresh database, reading and writing
+// under readerVersion.
+func openTestStoreAs(t *testing.T, readerVersion string) *audiodur.Store {
 	t.Helper()
 	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	return audiodur.New(sqlDB)
+	return audiodur.New(sqlDB, readerVersion)
+}
+
+// openSharedDB returns two Stores over the SAME database reading under DIFFERENT
+// parser identities -- the shape a reader bump takes in production, where the
+// rows persist and the code changes underneath them.
+func openSharedDB(t *testing.T, versionA, versionB string) (a, b *audiodur.Store) {
+	t.Helper()
+	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return audiodur.New(sqlDB, versionA), audiodur.New(sqlDB, versionB)
 }
 
 func TestLookup_UnknownPathIsAMiss(t *testing.T) {
@@ -119,6 +145,103 @@ func TestRecordUpsertsOnRepeat(t *testing.T) {
 	}
 	if !found || secs != 215 {
 		t.Fatalf("got (%d, %v), want (215, true)", secs, found)
+	}
+}
+
+// THE #711 GUARANTEE. The file is byte-identical -- same path, same mtime, same
+// size -- and the read still misses, because the PARSER changed. Without this,
+// swapping duration parsers serves numbers the running code would not produce,
+// and internal/revalidate demotes or quarantines correct sidecars on the
+// strength of them.
+func TestReaderVersionChangeIsAMiss(t *testing.T) {
+	ctx := context.Background()
+	oldReader, newReader := openSharedDB(t, "parser@v1", "parser@v2")
+
+	if err := oldReader.Record(ctx, "/music/song.mp3", 100, 200, 210); err != nil {
+		t.Fatalf("Record under the old parser: %v", err)
+	}
+
+	// Same file, same stamp, different parser.
+	secs, found, err := newReader.Lookup(ctx, "/music/song.mp3", 100, 200)
+	if err != nil {
+		t.Fatalf("Lookup under the new parser: %v", err)
+	}
+	if found {
+		t.Fatal("a duration derived by a DIFFERENT parser must not hit; a VBR reader change moves durations by up to 10x and revalidate acts on the result")
+	}
+	if secs != 0 {
+		t.Fatalf("a miss must yield 0 seconds (the UnknownDuration fail-open path), got %d", secs)
+	}
+
+	// The old parser still hits: the row was invalidated for the NEW reader, not
+	// deleted. This is what makes the bump lazy rather than destructive.
+	if _, found, err := oldReader.Lookup(ctx, "/music/song.mp3", 100, 200); err != nil {
+		t.Fatalf("Lookup under the old parser: %v", err)
+	} else if !found {
+		t.Fatal("the recording parser must still hit its own row")
+	}
+}
+
+// A re-derivation under the new parser must RE-STAMP the existing row rather
+// than add a second one: file_path is the primary key, so a second row is not
+// merely wasteful, it is impossible -- and the upsert must therefore carry the
+// new identity or the row stays permanently unreadable and re-derives forever.
+func TestRecordRestampsRowOnReaderChange(t *testing.T) {
+	ctx := context.Background()
+	oldReader, newReader := openSharedDB(t, "parser@v1", "parser@v2")
+
+	if err := oldReader.Record(ctx, "/music/song.mp3", 100, 200, 210); err != nil {
+		t.Fatalf("Record under the old parser: %v", err)
+	}
+	// The new parser re-derives the same file and gets a different answer --
+	// the VBR case #711 exists for.
+	if err := newReader.Record(ctx, "/music/song.mp3", 100, 200, 187); err != nil {
+		t.Fatalf("Record under the new parser: %v", err)
+	}
+
+	secs, found, err := newReader.Lookup(ctx, "/music/song.mp3", 100, 200)
+	if err != nil {
+		t.Fatalf("Lookup under the new parser: %v", err)
+	}
+	if !found || secs != 187 {
+		t.Fatalf("got (%d, %v), want (187, true): the re-derived duration must be readable under the new parser", secs, found)
+	}
+
+	// And the row was re-stamped, not duplicated -- the old identity is gone.
+	if _, found, err := oldReader.Lookup(ctx, "/music/song.mp3", 100, 200); err != nil {
+		t.Fatalf("Lookup under the old parser: %v", err)
+	} else if found {
+		t.Fatal("the superseded parser must no longer hit: one row per file, re-stamped in place")
+	}
+}
+
+// Legacy rows -- written before the column existed -- hold NULL and must read as
+// a miss for EVERY reader, including one whose identity is the empty string.
+// This is the whole no-backfill argument: NULL = ? is NULL, never true, so the
+// pre-existing population invalidates itself with no row data migrated.
+func TestLegacyNullReaderVersionIsAMiss(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	// Write the row the way pre-#711 code did: no reader_version at all.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO audio_durations (file_path, mtime_nsec, size_bytes, duration_seconds)
+		 VALUES (?, ?, ?, ?)`,
+		"/music/legacy.mp3", 100, 200, 210,
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	for _, readerVersion := range []string{"parser@v1", ""} {
+		if _, found, err := audiodur.New(sqlDB, readerVersion).Lookup(ctx, "/music/legacy.mp3", 100, 200); err != nil {
+			t.Fatalf("Lookup as %q: %v", readerVersion, err)
+		} else if found {
+			t.Fatalf("a legacy NULL-reader row must miss for reader %q; SQL NULL comparison is what invalidates the pre-existing population", readerVersion)
+		}
 	}
 }
 

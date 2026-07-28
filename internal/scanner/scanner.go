@@ -28,6 +28,41 @@ import (
 // supportedFileTypes lists audio file extensions that can have metadata read.
 var supportedFileTypes = []string{".mp3", ".m4a", ".m4b", ".m4p", ".alac", ".flac", ".ogg", ".dsf"}
 
+// DurationReaderVersion identifies the code that turns a file's header into a
+// duration. internal/audiodur stamps it on every cached row and requires it to
+// match on lookup, so changing the parser invalidates the cache the same way
+// changing the file does (#711).
+//
+// BUMP THIS IN THE SAME COMMIT AS THE PARSER CHANGE, and treat that as part of
+// the change rather than follow-up work. A bump costs one header read per file,
+// lazily, on the fail-open path; forgetting one serves durations the running
+// code would not produce, and internal/revalidate acts on those -- it demotes a
+// correct .lrc to .txt or quarantines it. The failure is silent and destroys
+// user data, so err toward bumping when unsure.
+//
+// It is deliberately a HAND-SET string, not a computed one. The obvious
+// candidates are all wrong: internal/version.Version churns every release while
+// the parser sits still (exactly the #702 defect this mirrors), and a module
+// version alone misses a local change to audioDuration's own dispatch or
+// extension mapping. The value names the parser and its version because the
+// PARSE is what the row's meaning depends on -- the audioduration module today,
+// plus a suffix if canticle-side derivation changes underneath a static module
+// version.
+//
+// TestDurationReaderVersionMatchesGoMod enforces the dependency half of that:
+// the constant must name the module owner and version go.mod declares, so
+// swapping the parser without bumping this fails the build instead of silently
+// serving stale durations. A canticle-side change to audioDuration's dispatch
+// or to audioFileTypeForExt is NOT caught by anything -- there this comment is
+// the only guard.
+//
+// SCOPE LIMIT: only internal/audiodur consults this. audio_metadata
+// (migration 036) caches duration_seconds from this SAME parse and has no
+// reader identity, so it is knowingly reader-blind -- tracked as #713. It has
+// no timing/revalidate consumer today, which is the only reason that is
+// tolerable; do not add one before #713 lands.
+const DurationReaderVersion = "lizc2003/audioduration@v0.8.0"
+
 // IsAudioFile reports whether name (a file name or path) carries a supported
 // audio extension. It is the single exported accessor over supportedFileTypes so
 // consumers outside the scan loop (e.g. the realign command) classify files
