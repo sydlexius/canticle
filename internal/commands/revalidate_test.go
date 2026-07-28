@@ -12,6 +12,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/scanner"
 )
 
 // revalidateFixture builds a config + database + library root holding one audio
@@ -65,7 +66,11 @@ func primeDuration(t *testing.T, dbPath, audio string, seconds int) {
 	if err != nil {
 		t.Fatalf("stat audio: %v", err)
 	}
-	if err := audiodur.New(sqlDB).Record(t.Context(), audio, fi.ModTime().UnixNano(), fi.Size(), seconds); err != nil {
+	// Seeded under the PRODUCTION reader identity on purpose: RevalidateCmd
+	// builds its store with scanner.DurationReaderVersion, so a seed stamped with
+	// anything else would miss and the command under test would silently take the
+	// UnknownDuration fail-open path instead of the one being asserted (#711).
+	if err := audiodur.New(sqlDB, scanner.DurationReaderVersion).Record(t.Context(), audio, fi.ModTime().UnixNano(), fi.Size(), seconds); err != nil {
 		t.Fatalf("record duration: %v", err)
 	}
 }
