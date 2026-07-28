@@ -245,7 +245,27 @@ func TestFullWriteCycleTriggersNoRescan(t *testing.T) {
 // permanently invisible to the watcher.
 func TestExpiredSelfWriteNoLongerSuppresses(t *testing.T) {
 	root := tempRoot(t)
-	reg := selfwrite.New(30 * time.Millisecond)
+	// 750ms, not 30ms. The sentinel step below races the TTL against FSEvents
+	// DELIVERY LATENCY, which is bounded by the OS scheduler rather than by
+	// anything this test controls: measured at ~11-14ms typical but 80ms at p99
+	// under CPU oversubscription. A 30ms TTL is a ~1.5x margin, so under load the
+	// entry expired before its own event arrived, the watcher correctly treated
+	// the event as external, and the test failed on the SETUP step reporting "the
+	// sentinel event to be suppressed" -- a false negative that says nothing about
+	// the expiry behavior it exists to pin. Reproduced at 17/40 under load; 40/40
+	// clean at this value.
+	//
+	// Widening is sufficient here rather than papering over a race, because the
+	// two racing quantities are INDEPENDENT: worst-case delivery is a property of
+	// the scheduler, and the TTL is a free test constant. This is a ~9x margin
+	// against the worst latency observed.
+	//
+	// Note an injected clock does NOT help. selfwrite.Registry already has one
+	// (r.now), and internal/selfwrite covers expiry deterministically with it. The
+	// uncontrolled variable here is kernel event delivery, which no clock
+	// injection reaches, so faking time would leave this race untouched.
+	const ttl = 750 * time.Millisecond
+	reg := selfwrite.New(ttl)
 	scanned, drops := startWatcher(t, root, reg)
 
 	// Prove notify delivery works HERE before the timeout below is allowed to
@@ -263,11 +283,20 @@ func TestExpiredSelfWriteNoLongerSuppresses(t *testing.T) {
 
 	target := filepath.Join(root, "aged.flac")
 	reg.Record(target)
-	// Let the entry age out before the change lands.
-	time.Sleep(60 * time.Millisecond)
-	if reg.Suppress(target) {
-		t.Fatal("entry did not expire; the rest of this test would prove nothing")
+	// Assert the entry is suppressed BEFORE polling for it to stop being
+	// suppressed. Without this the expiry poll is satisfied instantly by a broken
+	// or ineffective Record -- the predicate would already be true, the write
+	// would trigger a scan, and the test would pass while proving nothing about
+	// expiry. Establishing the starting state is what makes the transition
+	// meaningful.
+	if !reg.Suppress(target) {
+		t.Fatal("a just-recorded path is not suppressed; the expiry assertion below would pass vacuously")
 	}
+	// Poll the exact predicate the assertion depends on, rather than sleeping a
+	// constant tuned against the TTL. This proceeds the instant the entry
+	// actually ages out, on any machine and at any TTL, and it cannot drift out
+	// of step with the constant above the way a fixed sleep silently would.
+	waitFor(t, func() bool { return !reg.Suppress(target) }, "the recorded entry to age out")
 
 	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)

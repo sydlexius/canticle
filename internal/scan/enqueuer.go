@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/timing"
 )
 
 // PendingResultStore reads and updates scan results eligible for queuing.
@@ -32,6 +34,60 @@ type WorkQueue interface {
 	Enqueue(ctx context.Context, inputs models.Inputs, priority int) (queue.WorkItem, error)
 }
 
+// TimingVerdict is a track's persisted accept-time timing decision, together
+// with the provider generation that produced it.
+type TimingVerdict struct {
+	// Outcome is the stored work_queue.timing_outcome value (#440).
+	Outcome timing.TimingOutcome
+	// ProvidersVersion is the provider-set generation in effect when the verdict
+	// was reached. It is what makes the suppression expire: see shouldSuppress.
+	ProvidersVersion int
+}
+
+// TimingVerdictStore reads the durable timing verdict recorded for a track.
+//
+// This is the consumer that migration 034's columns never had: the worker has
+// stamped timing_outcome since #440, but nothing read it back, so the pipeline
+// had no memory of having already rejected a track (#679).
+//
+// found is false when no verdict was ever recorded, which is the normal case for
+// a track that has simply not been fetched yet.
+type TimingVerdictStore interface {
+	LookupTiming(ctx context.Context, artist, title string) (TimingVerdict, bool, error)
+}
+
+// TimingVerdictReader is the raw queue-side read, in primitives.
+//
+// *queue.DBQueue satisfies it directly. Keeping the queue package free of a
+// scan-package type preserves the existing dependency direction (scan imports
+// queue, never the reverse); TimingVerdicts bridges the two shapes.
+type TimingVerdictReader interface {
+	LookupTiming(ctx context.Context, artist, title string) (outcome string, providersVersion int, found bool, err error)
+}
+
+// TimingVerdicts adapts a TimingVerdictReader to TimingVerdictStore.
+type TimingVerdicts struct {
+	Reader TimingVerdictReader
+}
+
+// LookupTiming converts the stored outcome string into a typed verdict. The
+// column holds an internal/timing TimingOutcome verbatim (see migration 034), so
+// the conversion is a cast rather than a parse; an unrecognized value simply
+// never matches Categorical and therefore never suppresses.
+func (t TimingVerdicts) LookupTiming(ctx context.Context, artist, title string) (TimingVerdict, bool, error) {
+	if t.Reader == nil {
+		return TimingVerdict{}, false, nil
+	}
+	outcome, version, found, err := t.Reader.LookupTiming(ctx, artist, title)
+	if err != nil || !found {
+		return TimingVerdict{}, false, err
+	}
+	return TimingVerdict{
+		Outcome:          timing.TimingOutcome(outcome),
+		ProvidersVersion: version,
+	}, true, nil
+}
+
 // Enqueuer bridges pending scan results to the durable work queue.
 type Enqueuer struct {
 	Results  PendingResultStore
@@ -46,6 +102,48 @@ type Enqueuer struct {
 	// enqueued item (stamp-on-insert; the worker reads it back later).
 	DetectOverride      *bool
 	GlobalDetectDefault bool
+	// Timing reads the durable timing verdict so a Categorical track is not
+	// re-fetched on every scan (#679). Optional: a nil Timing disables the
+	// suppression entirely and preserves the pre-#679 behavior, so a caller that
+	// does not wire it enqueues exactly as before.
+	Timing TimingVerdictStore
+	// ProvidersVersion is the CURRENT provider-set generation, compared against
+	// the generation stored with a verdict to decide whether the verdict still
+	// speaks for today's provider set. Zero means unknown, which never suppresses.
+	ProvidersVersion int
+}
+
+// shouldSuppress reports whether a track's stored timing verdict means this scan
+// must not re-enqueue it.
+//
+// ONLY Categorical suppresses. That verdict means the lyric was timed to a
+// different, longer recording -- the words themselves are suspect -- so the
+// accept-time guard (#439) deliberately writes NOTHING. With no sidecar on disk,
+// the row is indistinguishable from a track that was never fetched, so it is
+// re-enqueued, re-fetched, re-judged and re-rejected on every scan forever.
+//
+// MisSynced is deliberately NOT suppressed. It writes a .txt, and #439's
+// settled-sidecar check makes a later re-fetch a no-op: wasteful, never
+// destructive. Suppressing it would hide a recoverable track for no gain.
+//
+// THE SUPPRESSION EXPIRES WITH THE PROVIDER GENERATION, and that is a deliberate
+// choice rather than a default. A Categorical verdict is a statement about what
+// the providers served at ONE MOMENT; permanent suppression would mean never
+// finding correctly-timed lyrics that a provider starts serving later. Tying
+// expiry to providers_version reuses the generation counter that already retires
+// stale cache entries, instead of inventing a second, parallel expiry scheme.
+//
+// A zero current generation (unknown) never suppresses: without a trustworthy
+// comparison the safe direction is to re-examine, since the cost is one refetch
+// while the cost of wrongly suppressing is losing the track indefinitely.
+func (e *Enqueuer) shouldSuppress(v TimingVerdict) bool {
+	if v.Outcome != timing.Categorical {
+		return false
+	}
+	if e.ProvidersVersion == 0 {
+		return false
+	}
+	return v.ProvidersVersion == e.ProvidersVersion
 }
 
 // EnqueuePending reads pending scan results for libraryID, skips cache hits,
@@ -77,6 +175,13 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		return 0, 0, fmt.Errorf("scan: list pending for enqueue: %w", err)
 	}
 
+	// Tracks skipped this pass because a Categorical verdict quarantined them.
+	// Logged once at the end rather than returned: a per-track line would be
+	// noise on a library where the count is stable across scans, and the full
+	// operator surface (listing and re-examining quarantined tracks) belongs to
+	// #629 rather than a second mechanism built here.
+	suppressed := 0
+
 	for _, res := range results {
 		if err := ctx.Err(); err != nil {
 			return enqueued, cacheHits, err
@@ -92,6 +197,29 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		case errors.Is(err, sql.ErrNoRows):
 		default:
 			return enqueued, cacheHits, fmt.Errorf("scan: cache lookup %d: %w", res.ID, err)
+		}
+
+		// A Categorical verdict wrote no sidecar, so nothing on disk stops this
+		// track being re-fetched forever. Consult the durable verdict instead
+		// (#679), placed here -- after the cache check, before the row is reserved
+		// -- so a suppressed track stays pending and is re-examined the moment the
+		// provider generation moves, rather than being consumed by this scan.
+		//
+		// FAILS OPEN by construction: a lookup error is logged and ignored, since
+		// suppression is an optimization and a failed read must never silently
+		// drop work. Losing a track looks identical to having fetched it.
+		if e.Timing != nil {
+			verdict, found, terr := e.Timing.LookupTiming(ctx, res.Track.ArtistName, res.Track.TrackName)
+			switch {
+			case terr != nil:
+				slog.Debug("scan: timing verdict lookup failed; enqueueing anyway",
+					"result_id", res.ID, "error", terr)
+			case found && e.shouldSuppress(verdict):
+				slog.Debug("scan: skipping track quarantined by a categorical timing verdict",
+					"result_id", res.ID, "providers_version", verdict.ProvidersVersion)
+				suppressed++
+				continue
+			}
 		}
 
 		if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusProcessing); err != nil {
@@ -112,6 +240,14 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w", res.ID, err)
 		}
 		enqueued++
+	}
+	// Never leave the suppression silent: a track skipped here produces no work
+	// item, no sidecar and no queue row, so without this line an operator has no
+	// way to tell "nothing left to fetch" from "N tracks are quarantined".
+	if suppressed > 0 {
+		slog.Info("scan: skipped tracks quarantined by a categorical timing verdict",
+			"library_id", libraryID, "suppressed", suppressed,
+			"providers_version", e.ProvidersVersion)
 	}
 	return enqueued, cacheHits, nil
 }
