@@ -558,6 +558,15 @@ const detectorSpeechMaxConfidenceDefault = 0.20
 const (
 	detectorBackfillBatchSizeDefault       = 100
 	detectorBackfillIntervalMinutesDefault = 60
+	// detectorBackfillIntervalMinutesMax bounds the value before it becomes a
+	// time.Duration. A Duration is an int64 of NANOSECONDS, so minutes above
+	// math.MaxInt64/time.Minute OVERFLOW and wrap NEGATIVE -- and time.NewTicker
+	// PANICS on a non-positive duration, so a large-but-parseable config value
+	// would crash serve mode at startup. Verified: 153722868 minutes yields
+	// -2562047h46m33s. The cap is deliberately far below that (100 years); no real
+	// deployment spaces cycles that far apart, and anything larger is a typo or an
+	// attempt to disable the sweep, which `enabled = false` does honestly.
+	detectorBackfillIntervalMinutesMax = 100 * 365 * 24 * 60
 )
 
 // queueBatchSizeDefault is the default shuffled-lookahead buffer size (#571).
@@ -806,7 +815,11 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if cfg.InstrumentalDetector.Backfill.BatchSize < 1 {
 				cfg.InstrumentalDetector.Backfill.BatchSize = d.InstrumentalDetector.Backfill.BatchSize
 			}
-			if cfg.InstrumentalDetector.Backfill.IntervalMinutes < 1 {
+			// Out of range in EITHER direction restores the default: < 1 would spin
+			// the ticker, and a value above the cap overflows time.Duration into a
+			// negative, which panics time.NewTicker at serve start.
+			if cfg.InstrumentalDetector.Backfill.IntervalMinutes < 1 ||
+				cfg.InstrumentalDetector.Backfill.IntervalMinutes > detectorBackfillIntervalMinutesMax {
 				cfg.InstrumentalDetector.Backfill.IntervalMinutes = d.InstrumentalDetector.Backfill.IntervalMinutes
 			}
 			if cfg.InstrumentalDetector.Backfill.CooldownSeconds < 0 {
@@ -1385,7 +1398,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
+		if err != nil || n < 1 || n > detectorBackfillIntervalMinutesMax {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "value", v, "current", cfg.InstrumentalDetector.Backfill.IntervalMinutes) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.InstrumentalDetector.Backfill.IntervalMinutes = n

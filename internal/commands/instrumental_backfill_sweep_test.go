@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,6 +12,23 @@ import (
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/instrumentalbackfill"
 )
+
+// stubFFmpeg writes a do-nothing executable and returns its path.
+//
+// newAudioDetector resolves FFmpegPath through exec.LookPath and ERRORS when it
+// cannot find the binary, so a test that hardcodes "ffmpeg" passes only on a
+// machine that happens to have one installed and fails on every CI runner. These
+// tests exercise cooldown separation and bounds resolution, not ffmpeg discovery,
+// so they point at a path that always exists. Mirrors the same stub in
+// commands_test.go.
+func stubFFmpeg(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub ffmpeg: %v", err)
+	}
+	return p
+}
 
 // backfillTestConfig is a Config with a classifier wired, so newBackfillDetector
 // reaches its construction path rather than short-circuiting on an empty URL.
@@ -37,7 +56,7 @@ func TestNewBackfillDetectorUsesItsOwnCooldown(t *testing.T) {
 	cfg := backfillTestConfig(t)
 	cfg.InstrumentalDetector.Backfill.CooldownSeconds = 0 // contiguous burst
 
-	det, err := newBackfillDetector(cfg, "ffmpeg")
+	det, err := newBackfillDetector(cfg, stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newBackfillDetector: %v", err)
 	}
@@ -62,11 +81,11 @@ func TestNewBackfillDetectorUsesItsOwnCooldown(t *testing.T) {
 func TestNewBackfillDetectorIsSeparateFromTheWorkers(t *testing.T) {
 	cfg := backfillTestConfig(t)
 
-	workerDet, err := newAudioDetector(cfg, "ffmpeg")
+	workerDet, err := newAudioDetector(cfg, stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newAudioDetector: %v", err)
 	}
-	backfillDet, err := newBackfillDetector(cfg, "ffmpeg")
+	backfillDet, err := newBackfillDetector(cfg, stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newBackfillDetector: %v", err)
 	}
@@ -90,7 +109,7 @@ func TestNewBackfillDetectorDisabledReturnsNil(t *testing.T) {
 	cfg := backfillTestConfig(t)
 	cfg.InstrumentalDetector.Backfill.Enabled = false
 
-	det, err := newBackfillDetector(cfg, "ffmpeg")
+	det, err := newBackfillDetector(cfg, stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newBackfillDetector: %v", err)
 	}
@@ -106,7 +125,7 @@ func TestNewBackfillDetectorNoClassifierReturnsNil(t *testing.T) {
 	cfg := backfillTestConfig(t)
 	cfg.InstrumentalDetector.ClassifierURL = ""
 
-	det, err := newBackfillDetector(cfg, "ffmpeg")
+	det, err := newBackfillDetector(cfg, stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newBackfillDetector: %v", err)
 	}
@@ -141,7 +160,7 @@ func (f *fakeBackfiller) Run(_ context.Context, opts instrumentalbackfill.Option
 // sweep from starting at all. Both are silent returns, so a regression here
 // would spin a goroutine forever with nothing to do rather than fail loudly.
 func TestResolveBackfillBoundsGuards(t *testing.T) {
-	det, err := newBackfillDetector(backfillTestConfig(t), "ffmpeg")
+	det, err := newBackfillDetector(backfillTestConfig(t), stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newBackfillDetector: %v", err)
 	}
@@ -166,7 +185,7 @@ func TestResolveBackfillBoundsGuards(t *testing.T) {
 // classifies nothing and a zero interval PANICS time.NewTicker, which would take
 // down serve mode -- these floors are the reason it does not.
 func TestResolveBackfillBoundsFloors(t *testing.T) {
-	det, err := newBackfillDetector(backfillTestConfig(t), "ffmpeg")
+	det, err := newBackfillDetector(backfillTestConfig(t), stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newBackfillDetector: %v", err)
 	}
@@ -187,11 +206,55 @@ func TestResolveBackfillBoundsFloors(t *testing.T) {
 	}
 }
 
+// TestResolveBackfillBoundsCapsIntervalOverflow: a time.Duration is an int64 of
+// NANOSECONDS, so a minutes value above math.MaxInt64/time.Minute wraps NEGATIVE
+// when multiplied -- and time.NewTicker PANICS on a non-positive duration. A
+// large-but-parseable config value would therefore crash serve mode at startup
+// rather than merely misbehave. The config layer rejects it too; this is the
+// defensive floor for a Config built in code that never ran config.Load.
+func TestResolveBackfillBoundsCapsIntervalOverflow(t *testing.T) {
+	det, err := newBackfillDetector(backfillTestConfig(t), stubFFmpeg(t))
+	if err != nil {
+		t.Fatalf("newBackfillDetector: %v", err)
+	}
+	for _, minutes := range []int{maxBackfillIntervalMinutes + 1, 153722868, 999999999999} {
+		cfg := backfillTestConfig(t)
+		cfg.InstrumentalDetector.Backfill.IntervalMinutes = minutes
+
+		bounds, ok := resolveBackfillBounds(cfg, det)
+		if !ok {
+			t.Fatalf("minutes=%d: bounds rejected the whole config; want the interval reset", minutes)
+		}
+		if bounds.interval <= 0 {
+			t.Errorf("minutes=%d: interval = %v; a non-positive duration PANICS time.NewTicker and takes serve mode down",
+				minutes, bounds.interval)
+		}
+		if bounds.interval != time.Duration(defaultBackfillIntervalMinutes)*time.Minute {
+			t.Errorf("minutes=%d: interval = %v; want the %d-minute default restored",
+				minutes, bounds.interval, defaultBackfillIntervalMinutes)
+		}
+	}
+}
+
+// TestRunBackfillCycleWarnsOnRowErrors: a cycle where every row failed returns a
+// NIL error with both verdict counts at zero, so logging keyed on verdicts alone
+// would make a permanently-failing sweep look exactly like a converged one --
+// silent forever. This asserts the cycle still completes and reports, which is
+// what keeps that state visible.
+func TestRunBackfillCycleWarnsOnRowErrors(t *testing.T) {
+	bf := &fakeBackfiller{res: instrumentalbackfill.Result{Errors: 7}}
+	runBackfillCycle(context.Background(), bf, backfillSweepBounds{batch: 10}, true)
+
+	if len(bf.calls) != 1 {
+		t.Fatalf("Run called %d times; want 1", len(bf.calls))
+	}
+}
+
 // TestResolveBackfillBoundsHonorsZeroCooldown: 0 is the documented default and a
 // meaningful value (a contiguous burst), so it must NOT be floored the way batch
 // and interval are. Flooring it would silently pace every install.
 func TestResolveBackfillBoundsHonorsZeroCooldown(t *testing.T) {
-	det, err := newBackfillDetector(backfillTestConfig(t), "ffmpeg")
+	det, err := newBackfillDetector(backfillTestConfig(t), stubFFmpeg(t))
 	if err != nil {
 		t.Fatalf("newBackfillDetector: %v", err)
 	}

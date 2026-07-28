@@ -20,6 +20,8 @@ import (
 const (
 	defaultBackfillBatchSize       = 100
 	defaultBackfillIntervalMinutes = 60
+	// maxBackfillIntervalMinutes mirrors config's cap; see the overflow note there.
+	maxBackfillIntervalMinutes = 100 * 365 * 24 * 60
 )
 
 // runInstrumentalBackfillSweep periodically classifies work_queue rows the audio
@@ -90,8 +92,13 @@ func resolveBackfillBounds(cfg config.Config, det detector.Detector) (backfillSw
 	if b.batch < 1 {
 		b.batch = defaultBackfillBatchSize
 	}
+	// Bounded in BOTH directions. Below 1 spins the ticker; above the cap the
+	// minutes-to-Duration multiply OVERFLOWS int64 nanoseconds and wraps NEGATIVE,
+	// which makes time.NewTicker PANIC and takes serve mode down at startup. The
+	// config layer already rejects both, so this only catches a Config built in
+	// code that never ran config.Load.
 	minutes := bfCfg.IntervalMinutes
-	if minutes < 1 {
+	if minutes < 1 || minutes > maxBackfillIntervalMinutes {
 		minutes = defaultBackfillIntervalMinutes
 	}
 	b.interval = time.Duration(minutes) * time.Minute
@@ -127,7 +134,17 @@ func runBackfillCycle(ctx context.Context, bf backfiller, bounds backfillSweepBo
 		return
 	}
 	// Silent when there is nothing to do: on a converged install this runs hourly
-	// forever and must not print a line each time.
+	// forever and must not print a line each time. But res.Errors is checked
+	// SEPARATELY from the verdict counts: a cycle where every row failed returns a
+	// nil error with both verdicts at zero, so keying the log on verdicts alone
+	// would make a permanently-failing sweep indistinguishable from a converged
+	// one -- silent forever, which is the worst of the two states to hide.
+	if res.Errors > 0 {
+		slog.Warn("instrumental backfill sweep finished with row errors",
+			"errors", res.Errors, "instrumental", res.Instrumental,
+			"not_instrumental", res.NotInstrumental, "batch_size", bounds.batch)
+		return
+	}
 	if res.Instrumental > 0 || res.NotInstrumental > 0 {
 		slog.Info("instrumental backfill sweep classified never-scored rows",
 			"instrumental", res.Instrumental, "not_instrumental", res.NotInstrumental,

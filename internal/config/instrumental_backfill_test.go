@@ -54,6 +54,12 @@ func TestBackfillEnvOverrides(t *testing.T) {
 			{"interval zero", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "0"},
 			{"interval negative", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "-1"},
 			{"interval non-numeric", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "hourly"},
+			// OVERFLOW: a Duration is int64 NANOSECONDS, so minutes above
+			// math.MaxInt64/time.Minute wrap NEGATIVE, and time.NewTicker PANICS on a
+			// non-positive duration -- a parseable config value that crashes serve
+			// mode at startup. Verified: 153722868 minutes -> -2562047h46m33s.
+			{"interval overflows Duration", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "153722868"},
+			{"interval absurdly large", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "999999999999"},
 			{"cooldown negative", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS", "-1"},
 			{"cooldown non-numeric", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS", "slow"},
 			{"enabled non-boolean", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_ENABLED", "yesplease"},
