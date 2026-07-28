@@ -2958,10 +2958,18 @@ func requireAffected(res sql.Result, op string) error {
 // completion, so leaving the lane behind means a deferred row keeps asserting
 // that the detector completed it -- attribution for a completion that no longer
 // exists. Measured on a live install as 43 such rows before this line existed.
-// Clearing is safe precisely BECAUSE of the guard above: only a row this method
-// actually reverts is touched, so a musixmatch-completed row that is later
-// re-deferred for an --upgrade keeps its lane, which is correct history. A
-// broader "clear the lane on any non-done row" would destroy that.
+//
+// The lane predicate below is what makes that clear SAFE, and it is deliberately
+// structural rather than left to the caller. `status='done' AND
+// instrumental_result=1` does NOT establish detector ownership: a PROVIDER-
+// completed row carrying instrumental_result=1 satisfies both, and wiping its
+// lane would destroy correct history (a musixmatch-completed row later re-deferred
+// for an --upgrade must keep its attribution). Today the only caller,
+// instrumentalrecalib.Reverse, pre-filters via ListVocalGateConfirmations +
+// detectorOwnedMarker -- but that is the CALLER's invariant, and a method that
+// clears provenance should not depend on every future caller re-deriving it. The
+// lane check enforces it here: a NULL lane is accepted because a detector settle
+// predating the attribution fix legitimately has none.
 func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, error) {
 	res, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue
@@ -2975,8 +2983,9 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
              last_error = 'instrumental verdict reversed by a tightened vocal gate'
          WHERE id = ?
            AND status = 'done'
-           AND instrumental_result = 1`,
-		PriorityScan, formatTime(q.now()), id,
+           AND instrumental_result = 1
+           AND (provider_lane IS NULL OR provider_lane = ?)`,
+		PriorityScan, formatTime(q.now()), id, detectorbackfill.LaneName,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: unsettle instrumental: %w", err)

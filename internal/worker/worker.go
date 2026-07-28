@@ -1708,14 +1708,24 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	//
 	// The marker stays on disk either way: the detector's verdict was real, and a
 	// later pass rewrites it idempotently.
-	if outcome != queue.Settled {
+	switch outcome {
+	case queue.Settled:
+	case queue.SettleAlreadyInstrumental, queue.SettleRowGone:
+		// The row is NOT in 'processing' any more -- a peer settled it, or it was
+		// pruned -- so there is nothing to strand and nothing to release. Releasing
+		// anyway would be guaranteed to fail (Release is itself guarded on
+		// 'processing' and reports ErrNoRows when it matches nothing) and would emit
+		// a "may be stuck" error for a row that demonstrably is not stuck. Both are
+		// benign races, so they are recorded at Info.
+		slog.Info("worker instrumental detection: settle did not apply; the row is no longer ours",
+			"id", item.ID, "outcome", outcome)
+	default:
 		slog.Warn("worker instrumental detection: settle did not apply; releasing the row so it is not stranded in processing",
 			"id", item.ID, "outcome", outcome)
 		if relErr := w.queue.Release(ctxNoCancel, item.ID); relErr != nil {
-			// Release is itself guarded on 'processing', so a failure here means the
-			// row already moved (someone else owns it) or the DB is unhealthy. Neither
-			// is recoverable from this call site, and the settle already did not apply,
-			// so surface it rather than pretending the item completed.
+			// Here the row was expected to still be ours, so a failed release IS the
+			// stranding case: it means the row moved under us or the DB is unhealthy,
+			// and neither is recoverable from this call site.
 			slog.Error("worker instrumental detection: could not release an unsettled row; it may be stuck in processing",
 				"id", item.ID, "error", relErr)
 		}

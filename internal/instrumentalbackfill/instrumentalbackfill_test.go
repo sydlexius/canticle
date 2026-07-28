@@ -733,6 +733,14 @@ func TestRun_PeerSettledRowKeepsItsMarker(t *testing.T) {
 	if res.MarkersWritten != 1 {
 		t.Errorf("MarkersWritten = %d; want 1 (the marker stands, it is simply the peer's)", res.MarkersWritten)
 	}
+	// The peer recorded its OWN attempt when it settled, so recording one here
+	// would attribute the same track to the detector twice. The engine skips it
+	// deliberately (only queue.Settled records); this pins that, since a double
+	// count is invisible in the report -- it just makes the rate quietly wrong.
+	if _, ok := store.laneAttempts[1]; ok {
+		t.Error("recorded a lane attempt for a PEER-settled row; the peer already recorded its own, " +
+			"so this double-attributes the track and skews the per-track hit rate")
+	}
 }
 
 // A settle ERROR is ambiguous -- the failure may have come from Commit itself, so

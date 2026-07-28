@@ -4494,6 +4494,121 @@ func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
 	}
 }
 
+// TestDBQueue_SettleInstrumentalOwnedByWorkerSettlesProcessingRow exercises the
+// OwnedByWorker half of the ownership mapping against REAL SQLite.
+//
+// Every other settle in this file passes OwnedByBackfill, so
+// `OwnedByWorker -> StatusProcessing` was only ever exercised through the worker
+// package's fake. A fake agreeing with a wrong mapping is exactly how the
+// ownership bug in this branch survived its first mutation check, so the mapping
+// is pinned here against the real `WHERE status = ?` guard: the row is left in
+// 'processing' by Dequeue (never deferred) and must settle from there.
+func TestDBQueue_SettleInstrumentalOwnedByWorkerSettlesProcessingRow(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Dequeue leaves the row 'processing' -- the state the worker holds it in, and
+	// deliberately NOT deferred.
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+
+	outcome, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
+		MusicSum: 0.95, VocalPeak: 0.01, VocalClass: "Singing", DetectorVersion: "v1",
+	}, OwnedByWorker)
+	if err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+	if outcome != Settled {
+		t.Fatalf("outcome = %v; want Settled. OwnedByWorker must guard on 'processing' -- "+
+			"guarding on 'deferred' matches no row and settles nothing while still returning nil", outcome)
+	}
+
+	var status, outcomeType string
+	var result int
+	var lane *string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, instrumental_result, COALESCE(outcome_type,''), provider_lane FROM work_queue WHERE id = ?`,
+		item.ID).Scan(&status, &result, &outcomeType, &lane); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" || result != 1 || outcomeType != "instrumental" {
+		t.Errorf("row = (%q, %d, %q); want (done, 1, instrumental) -- all committed in the one transaction",
+			status, result, outcomeType)
+	}
+	if lane == nil || *lane != detectorbackfill.LaneName {
+		t.Errorf("provider_lane = %v; want %q stamped inside the same settle", lane, detectorbackfill.LaneName)
+	}
+}
+
+// TestDBQueue_UnsettleInstrumentalLeavesProviderOwnedRowsAlone pins the lane
+// guard structurally.
+//
+// `status='done' AND instrumental_result=1` does NOT establish detector
+// ownership: a PROVIDER-completed row carrying a positive instrumental verdict
+// satisfies both, and reverting it would destroy correct history AND wipe a
+// legitimate provider attribution. The only caller pre-filters for detector
+// ownership, but that is the caller's invariant -- this asserts the method
+// defends provenance on its own.
+func TestDBQueue_UnsettleInstrumentalLeavesProviderOwnedRowsAlone(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{DetectorVersion: "v1"}, OwnedByBackfill); err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+	// Re-attribute to a provider: the row now looks exactly like one a provider
+	// completed and flagged instrumental.
+	if err := q.SetProviderLane(ctx, item.ID, "musixmatch"); err != nil {
+		t.Fatalf("SetProviderLane: %v", err)
+	}
+
+	reverted, err := q.UnsettleInstrumental(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("UnsettleInstrumental: %v", err)
+	}
+	if reverted {
+		t.Error("reverted a PROVIDER-attributed row; the vocal-gate reversal applies only to detector settles, " +
+			"and reverting here would both reopen a provider's completion and wipe its attribution")
+	}
+	var lane *string
+	var status string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT provider_lane, status FROM work_queue WHERE id = ?`, item.ID).Scan(&lane, &status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if lane == nil || *lane != "musixmatch" {
+		t.Errorf("provider_lane = %v; want musixmatch preserved", lane)
+	}
+	if status != "done" {
+		t.Errorf("status = %q; want done (the row must not be reopened)", status)
+	}
+}
+
 // TestDBQueue_UnsettleInstrumentalLeavesNonInstrumentalRowsAlone pins the
 // guard: only a row the DETECTOR settled instrumental is reversible. A row
 // settled with real lyrics must never be dragged back into the queue.
