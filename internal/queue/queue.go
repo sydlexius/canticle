@@ -1740,6 +1740,44 @@ func (q *DBQueue) SetTimingOutcome(ctx context.Context, id int64, rec TimingReco
 	return nil
 }
 
+// LookupTiming returns the timing verdict recorded for a track, keyed the same
+// way work_queue itself is keyed -- normalized (artist_key, title_key), which is
+// uniquely indexed, so this reads at most one row.
+//
+// This is the READ side migration 034's columns never had. The worker has
+// stamped timing_outcome since #440, but nothing consumed it, so the pipeline
+// had no memory of having already rejected a track and a Categorical verdict
+// (which writes no sidecar) was re-enqueued and re-fetched on every scan (#679).
+//
+// found is false when the row exists but has no verdict, exactly as when no row
+// exists at all: to a caller both mean "no verdict on record", and collapsing
+// them keeps the caller from having to distinguish two states it treats alike.
+// providers_version is returned alongside so the caller can decide whether the
+// verdict still speaks for the current provider set.
+func (q *DBQueue) LookupTiming(ctx context.Context, artist, title string) (outcome string, providersVersion int, found bool, err error) {
+	var (
+		storedOutcome sql.NullString
+		storedVersion sql.NullInt64
+	)
+	row := q.db.QueryRowContext(ctx,
+		`SELECT timing_outcome, providers_version
+         FROM work_queue
+         WHERE artist_key = ? AND title_key = ?`,
+		normalize.NormalizeKey(artist),
+		normalize.NormalizeKey(title),
+	)
+	switch err := row.Scan(&storedOutcome, &storedVersion); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", 0, false, nil
+	case err != nil:
+		return "", 0, false, fmt.Errorf("queue: lookup timing verdict: %w", err)
+	}
+	if !storedOutcome.Valid || storedOutcome.String == "" {
+		return "", 0, false, nil
+	}
+	return storedOutcome.String, int(storedVersion.Int64), true, nil
+}
+
 // CompletionProvenance carries the identifiers and writer version a work_queue
 // row was settled with (#620). Every field is optional: an empty string or zero
 // time leaves the corresponding column NULL, which means "not recorded" and

@@ -1191,7 +1191,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		}()
 		go func() {
 			defer wg.Done()
-			runScheduler(runCtx, sqlDB, cfg, args, cacheRepo)
+			runScheduler(runCtx, sqlDB, cfg, args, cacheRepo, gen)
 		}()
 	}
 	// Build the watcher config from the central config (TOML + env, env > file)
@@ -1202,7 +1202,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runWatcher(runCtx, sqlDB, args, watchCfg, cfg, cacheRepo, selfWrites)
+			runWatcher(runCtx, sqlDB, args, watchCfg, cfg, cacheRepo, selfWrites, gen)
 		}()
 	}
 	// Periodic path-reconciliation sweep (#453): deletes queue/scan rows whose
@@ -1870,7 +1870,7 @@ func currentDetectorModelVersion(ctx context.Context, cfg config.Config) string 
 	return detector.FetchModelVersion(ctx, cfg.InstrumentalDetector.ClassifierURL)
 }
 
-func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd, cacheRepo *cache.CacheRepo) {
+func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd, cacheRepo *cache.CacheRepo, providersVersion int) {
 	// serve has no per-run detect override; resolve per library against the global
 	// default (and the per-library setting) at enqueue time.
 	// Periodic scans realign only when realign.enabled AND realign.on_scan.
@@ -1882,7 +1882,7 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 		BFS:             args.BFS,
 		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 		DetectorVersion: detectorScanVersion(ctx, cfg),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion)
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
@@ -1964,7 +1964,7 @@ func watcherConfigFromCentral(cfg config.Config) watcher.Config {
 	}
 }
 
-func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config, cacheRepo *cache.CacheRepo, selfWrites *selfwrite.Registry) {
+func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config, cacheRepo *cache.CacheRepo, selfWrites *selfwrite.Registry, providersVersion int) {
 	// The watcher's ScanFunc is a subtree (RunOnceForPath) scan, so realign is
 	// scoped to the changed directory. It is gated by realign.enabled alone (not
 	// on_scan, which governs full periodic/manual scans).
@@ -1976,7 +1976,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		BFS:             args.BFS,
 		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 		DetectorVersion: detectorScanVersion(ctx, cfg),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(cfg.Realign.IdentityKeys)
@@ -2155,7 +2155,10 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 		DetectorVersion: detectorScanVersion(ctx, cfg),
 		UnsyncedBefore:  unsyncedBefore,
-	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup)
+		// providersVersion 0: a one-shot `scan` constructs no provider set, so it
+		// has no generation to compare a stored verdict against. Zero never
+		// suppresses, so the CLI keeps its pre-#679 behavior exactly.
+	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup, 0)
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	if len(args.Libraries) > 0 {
@@ -2238,18 +2241,26 @@ func resolveDetectOverride(detect, noDetect bool) (*bool, error) {
 // already-cached tracks at enqueue time; pass the worker's shared repo in serve
 // mode so the /metrics hit-rate covers scheduler lookups too (#308),
 // or nil for a one-shot scan (a fresh, uncounted repo is created).
-func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo, realigner *realign.Realigner, realignBackupPath string) scan.Scheduler {
+func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo, realigner *realign.Realigner, realignBackupPath string, providersVersion int) scan.Scheduler {
 	results := scan.New(sqlDB)
 	if cacheRepo == nil {
 		cacheRepo = cache.New(sqlDB)
 	}
+	workQueue := queue.NewDBQueue(sqlDB)
 	enq := scan.Enqueuer{
 		Results:             results,
 		Cache:               cacheRepo,
-		Queue:               queue.NewDBQueue(sqlDB),
+		Queue:               workQueue,
 		Priority:            queue.PriorityScan,
 		DetectOverride:      detectOverride,
 		GlobalDetectDefault: globalDetectDefault,
+		// Consult the durable timing verdict so a Categorical track -- which
+		// writes no sidecar and is therefore indistinguishable on disk from one
+		// never fetched -- is not re-enqueued and re-fetched on every scan (#679).
+		// providersVersion 0 (a one-shot CLI scan, which has no provider set
+		// constructed) never suppresses, matching pre-#679 behavior exactly.
+		Timing:           scan.TimingVerdicts{Reader: workQueue},
+		ProvidersVersion: providersVersion,
 	}
 	return scan.Scheduler{
 		Libraries: library.New(sqlDB),

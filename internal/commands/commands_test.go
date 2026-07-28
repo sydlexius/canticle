@@ -550,7 +550,7 @@ func TestSchedulerBuildsScanEnqueuer(t *testing.T) {
 		t.Fatalf("Upsert scan result: %v", err)
 	}
 
-	got := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 7}, nil, false, nil, nil, "")
+	got := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 7}, nil, false, nil, nil, "", 0)
 	if got.OnScanComplete == nil {
 		t.Fatal("scheduler OnScanComplete = nil; want enqueue callback")
 	}
