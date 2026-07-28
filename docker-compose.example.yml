@@ -64,10 +64,27 @@ services:
           # scan and starve everything else on it. Cap it.
           #
           # 4 CPUs is a deliberately conservative default that keeps the sidecar
-          # a good neighbor on a modest host. Inference is the dominant cost in
-          # the detector path (measured at ~40-67s per track), so this limit
-          # trades detector throughput for isolation: raise it on a host with
-          # cores to spare, lower it on a busy one.
+          # a good neighbor on a modest host.
+          #
+          # THIS IS AN ISOLATION KNOB, NOT A THROUGHPUT KNOB. An earlier version
+          # of this comment claimed inference is "the dominant cost in the
+          # detector path (measured at ~40-67s per track)" and told you to size
+          # this against it. That number is wrong by roughly 300x -- it almost
+          # certainly timed the whole detector path (ffmpeg reading audio off the
+          # array, plus a cold model load) rather than the classify call. Measured
+          # against a running sidecar, canticle 1.30.1:
+          #
+          #   /classify, 30s sample (typical)     0.07-0.11s
+          #   /classify, 60s sample (the longest) 0.13-0.24s
+          #   ffmpeg spread-sample extraction     ~0.10s
+          #
+          # So inference is a fifth of a second, and raising this limit buys
+          # almost no throughput. What it does buy is a bound on how much of the
+          # host TensorFlow grabs during a burst, which matters more now that the
+          # serve-mode backfill sweep runs detection flat-out in short cycles.
+          # Raise it on a host with cores to spare, lower it on a busy one -- but
+          # size the DETECTOR's throughput with the knobs in
+          # [instrumental_detector.backfill] instead (see docs/DEPLOYMENT.md).
           cpus: "4"
           # The SavedModel plus the TF runtime sit around 1.5GB resident.
           memory: 4G

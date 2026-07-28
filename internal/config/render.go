@@ -117,6 +117,17 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("cooldown_seconds = %d%s\n", cfg.InstrumentalDetector.CooldownSeconds, ann("instrumental_detector.cooldown_seconds"))
 	p("\n")
 
+	// [instrumental_detector.backfill]
+	// A sub-table, so it must be emitted AFTER every scalar key of its parent:
+	// TOML binds a bare key to the most recent table header, so a scalar written
+	// below this point would silently land in the sub-table instead.
+	p("[instrumental_detector.backfill]\n")
+	p("enabled = %t%s\n", cfg.InstrumentalDetector.Backfill.Enabled, ann("instrumental_detector.backfill.enabled"))
+	p("batch_size = %d%s\n", cfg.InstrumentalDetector.Backfill.BatchSize, ann("instrumental_detector.backfill.batch_size"))
+	p("interval_minutes = %d%s\n", cfg.InstrumentalDetector.Backfill.IntervalMinutes, ann("instrumental_detector.backfill.interval_minutes"))
+	p("cooldown_seconds = %d%s\n", cfg.InstrumentalDetector.Backfill.CooldownSeconds, ann("instrumental_detector.backfill.cooldown_seconds"))
+	p("\n")
+
 	// [enrichment]
 	p("[enrichment]\n")
 	p("enabled = %t%s\n", cfg.Enrichment.Enabled, ann("enrichment.enabled"))
