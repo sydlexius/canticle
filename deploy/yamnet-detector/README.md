@@ -27,7 +27,31 @@ with `tf.saved_model.load` -- `tensorflow-hub` is deliberately not a dependency
   in the max (see issue #384). `np.max` is free on the same forward pass as
   `np.mean`.
 
-- `GET /health` returns `{"status": "ok", "classes": <N>}`.
+- `GET /health` returns `{"status": "ok", "classes": <N>, "model_version": "<sha256>"}`.
+  `model_version` is the sha256 of the baked SavedModel archive and is omitted
+  entirely when unknown (an image built without the build arg) rather than sent
+  empty -- a caller must be able to tell "these are the weights" from "I don't
+  know which weights". Canticle keys its instrumental-verdict cache on it, so a
+  stored verdict is reused exactly while the weights that produced it are loaded
+  (#684).
+
+## Which image am I running?
+
+The image is tagged with **canticle's** version, so the tag records when it was
+built rather than what changed in it. The model identity is published as OCI
+labels, readable from the registry without pulling ~1.56GB:
+
+```sh
+docker buildx imagetools inspect ghcr.io/sydlexius/canticle-yamnet:latest \
+  --format '{{json .Image.Config.Labels}}'
+```
+
+`net.sydlexius.canticle.yamnet.model.sha256` is the authoritative answer to "did
+this tag actually change?" -- compare it across two tags. If it matches, the
+classifier is identical no matter what the version numbers say. `model.source`
+and `model.class-count` complete the identity. CI verifies both labels against
+what the running container reports on `/health`, so a label cannot drift from the
+weights it names (#682).
 
 ## Deployment contract: pull the published image
 

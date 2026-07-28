@@ -21,6 +21,43 @@ pre_checks = [
 # This governs GROUPING only. The surrounding structure -- the `### Highlights`
 # prose for a minor release, and the Docker-pull / full-changelog footer -- is not
 # expressible here; follow the previous release (`gh release view <prev-tag>`).
+#
+# ---------------------------------------------------------------------------
+# THE DETECTOR SIDECAR MUST BE ADDRESSED IN EVERY RELEASE (#682)
+# ---------------------------------------------------------------------------
+# Every release publishes a `canticle-yamnet` image tagged with CANTICLE's
+# version, whether or not the sidecar changed. So the tag records WHEN it was
+# built, not WHAT changed in it, and two functionally identical tags look exactly
+# like two different ones. State which it is, explicitly:
+#
+#   - Sidecar UNCHANGED -> say so, in the upgrade notes:
+#       "No detector-sidecar changes in this release; `X.Y.Z` is identical in
+#        substance to `X.Y.(Z-1)`."
+#     That one sentence is the entire point: it is what lets an operator skip a
+#     ~1.56GB pull.
+#
+#   - Sidecar CHANGED -> say what changed, and whether the BAKED MODEL moved.
+#     A model change is the case that actually matters: the three-gate detector
+#     thresholds are calibrated against a specific model, and a swap invalidates
+#     stored verdicts (they re-infer -- correct, but a real I/O cost). Never ship
+#     a model change silently.
+#
+# Check it mechanically rather than from memory:
+#   git diff --stat <prev-tag>..HEAD -- deploy/yamnet-detector/
+#   git diff <prev-tag>..HEAD -- deploy/yamnet-detector/Dockerfile | grep YAMNET_SHA256
+# An empty first result means UNCHANGED; a hit on the second means THE MODEL MOVED.
+#
+# The published image also carries the model identity as OCI labels, so a reader
+# can verify any claim here without pulling:
+#   docker buildx imagetools inspect ghcr.io/sydlexius/canticle-yamnet:X.Y.Z \
+#     --format '{{json .Image.Config.Labels}}'
+#
+# WORD CHOICE: "sidecar" is ambiguous in this project and has already misled a
+# reader. It means BOTH the lyric sidecar files (.lrc/.txt written next to audio)
+# and the detector container. v1.29.0's notes contained seven hits for "sidecar",
+# every one about lyric files, in a release that published a detector image that
+# had not changed. Always qualify: "lyric sidecar" or "detector sidecar", never
+# bare "sidecar". Same for "detector", which also names telemetry rows in the DB.
 [release_notes]
 default_group = "Maintenance"
 
