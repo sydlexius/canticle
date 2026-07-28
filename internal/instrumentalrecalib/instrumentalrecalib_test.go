@@ -69,14 +69,14 @@ func (f *fakeStore) ListVocalGateRejections(ctx context.Context, opts queue.List
 	return f.DBQueue.ListVocalGateRejections(ctx, opts)
 }
 
-func (f *fakeStore) SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error) {
+func (f *fakeStore) SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error) {
 	if f.settleErr != nil {
 		return queue.SettleFailed, f.settleErr
 	}
 	if f.settleOutcome != nil {
 		return *f.settleOutcome, nil
 	}
-	return f.DBQueue.SettleInstrumental(ctx, id, tel)
+	return f.DBQueue.SettleInstrumental(ctx, id, tel, owner)
 }
 
 func (f *fakeStore) ResetInstrumentalToUnclassified(ctx context.Context, id int64) (bool, error) {
@@ -776,7 +776,7 @@ func seedConfirmation(t *testing.T, q *queue.DBQueue, sourcePath string, tel que
 	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 		t.Fatalf("defer: %v", err)
 	}
-	if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+	if _, err := q.SettleInstrumental(ctx, item.ID, tel, queue.OwnedByBackfill); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	name, err := lyrics.SidecarName("Artist", "Title", filepath.Base(sourcePath), false)
@@ -921,7 +921,7 @@ func TestReverse_ReversesLegacyBareMarker(t *testing.T) {
 		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 			return 0, err
 		}
-		if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+		if _, err := q.SettleInstrumental(ctx, item.ID, tel, queue.OwnedByBackfill); err != nil {
 			return 0, err
 		}
 		return item.ID, nil

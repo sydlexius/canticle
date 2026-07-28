@@ -38,7 +38,7 @@ import (
 type Store interface {
 	CountUnclassified(ctx context.Context, libraryID *int64, globalDetectDefault bool) (int, error)
 	ListUnclassified(ctx context.Context, opts queue.ListUnclassifiedOptions) ([]queue.WorkItem, error)
-	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error)
+	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error)
 	StampUnclassifiedMiss(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (bool, error)
 }
 
@@ -314,7 +314,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 
 		// One guarded transaction: verdict, telemetry, outcome, and completion all
 		// land together or not at all.
-		outcome, err := b.store.SettleInstrumental(ctx, item.ID, tel)
+		outcome, err := b.store.SettleInstrumental(ctx, item.ID, tel, queue.OwnedByBackfill)
 		if err != nil {
 			// AMBIGUOUS: the error may have come from Commit itself, so the settle may
 			// or may not have landed. Deleting the marker could destroy a committed

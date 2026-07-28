@@ -4023,7 +4023,7 @@ func TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker(t *testing.T) {
 		t.Fatalf("dequeue: %v", err)
 	}
 
-	outcome, err := q.SettleInstrumental(ctx, item.ID, tel)
+	outcome, err := q.SettleInstrumental(ctx, item.ID, tel, OwnedByBackfill)
 	if err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
@@ -4086,7 +4086,7 @@ func TestDBQueue_SettleInstrumentalCompletesDeferredRowAtomically(t *testing.T) 
 		t.Fatalf("defer: %v", err)
 	}
 
-	outcome, err := q.SettleInstrumental(ctx, item.ID, tel)
+	outcome, err := q.SettleInstrumental(ctx, item.ID, tel, OwnedByBackfill)
 	if err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
@@ -4144,7 +4144,7 @@ func TestDBQueue_SettleInstrumentalAttributesDetectorLane(t *testing.T) {
 
 	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
 		MusicSum: 0.95, VocalPeak: 0.01, VocalClass: "Singing", DetectorVersion: "v1",
-	}); err != nil {
+	}, OwnedByBackfill); err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
 
@@ -4244,7 +4244,7 @@ func TestDBQueue_UnclassifiedQueriesPropagateDBFailure(t *testing.T) {
 	if _, err := q.CountUnclassified(ctx, nil, true); err == nil {
 		t.Error("CountUnclassified returned nil error on a closed database")
 	}
-	if _, err := q.SettleInstrumental(ctx, 1, InstrumentalTelemetry{}); err == nil {
+	if _, err := q.SettleInstrumental(ctx, 1, InstrumentalTelemetry{}, OwnedByBackfill); err == nil {
 		t.Error("SettleInstrumental returned nil error on a closed database")
 	}
 }
@@ -4285,11 +4285,11 @@ func TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker(t *testing.T) {
 		q := NewDBQueue(openQueueTestDB(t))
 		id := mkDeferred(t, q, "peer")
 		// The peer wins the race.
-		if out, err := q.SettleInstrumental(ctx, id, tel); err != nil || out != Settled {
+		if out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill); err != nil || out != Settled {
 			t.Fatalf("peer settle = (%v, %v); want (Settled, nil)", out, err)
 		}
 		// We lose it, and must be told WHY -- our marker is identical and valid.
-		out, err := q.SettleInstrumental(ctx, id, tel)
+		out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill)
 		if err != nil {
 			t.Fatalf("second settle: %v", err)
 		}
@@ -4304,7 +4304,7 @@ func TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker(t *testing.T) {
 		if _, err := q.Dequeue(ctx); err != nil { // a worker takes it back
 			t.Fatalf("dequeue: %v", err)
 		}
-		out, err := q.SettleInstrumental(ctx, id, tel)
+		out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill)
 		if err != nil {
 			t.Fatalf("settle: %v", err)
 		}
@@ -4319,7 +4319,7 @@ func TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker(t *testing.T) {
 		if _, err := q.db.ExecContext(ctx, `DELETE FROM work_queue WHERE id = ?`, id); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
-		out, err := q.SettleInstrumental(ctx, id, tel)
+		out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill)
 		if err != nil {
 			t.Fatalf("settle: %v", err)
 		}
@@ -4451,7 +4451,7 @@ func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
 	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 		t.Fatalf("defer: %v", err)
 	}
-	if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+	if _, err := q.SettleInstrumental(ctx, item.ID, tel, OwnedByBackfill); err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
 
@@ -4541,7 +4541,7 @@ func TestDBQueue_ListVocalGateConfirmationsReturnsSettledRowsWithTelemetry(t *te
 	}
 	if _, err := q.SettleInstrumental(ctx, settled.ID, InstrumentalTelemetry{
 		MusicSum: 0.95, VocalPeak: 0.02, VocalClass: "Singing", DetectorVersion: "v1",
-	}); err != nil {
+	}, OwnedByBackfill); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 
@@ -4605,7 +4605,7 @@ func TestDBQueue_UnsettleInstrumentalRequeuesAtScanPriority(t *testing.T) {
 	}
 	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
 		MusicSum: 0.95, VocalPeak: 0.02, VocalClass: "Singing", DetectorVersion: "v1",
-	}); err != nil {
+	}, OwnedByBackfill); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	if _, err := q.UnsettleInstrumental(ctx, item.ID); err != nil {
@@ -4649,7 +4649,7 @@ func TestDBQueue_ListVocalGateConfirmationsRespectsLimit(t *testing.T) {
 		}
 		if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
 			MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1",
-		}); err != nil {
+		}, OwnedByBackfill); err != nil {
 			t.Fatalf("settle %d: %v", i, err)
 		}
 	}

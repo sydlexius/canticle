@@ -46,7 +46,7 @@ type Resetter interface {
 type Store interface {
 	Resetter
 	ListVocalGateRejections(ctx context.Context, opts queue.ListVocalGateRejectionsOptions) ([]queue.StampedRejection, error)
-	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error)
+	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error)
 	// The tightening direction (Reverse): enumerate confirmed instrumentals and
 	// revert the ones a lowered threshold now rejects.
 	ListVocalGateConfirmations(ctx context.Context, opts queue.ListVocalGateConfirmationsOptions) ([]queue.StampedRejection, error)
@@ -302,7 +302,7 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 			continue
 		}
 
-		outcome, err := r.store.SettleInstrumental(ctx, row.ID, row.Tel)
+		outcome, err := r.store.SettleInstrumental(ctx, row.ID, row.Tel, queue.OwnedByBackfill)
 		if err != nil {
 			// AMBIGUOUS: the error may have come from Commit itself, so the settle
 			// may or may not have landed. Keep the marker and report the error --

@@ -626,40 +626,78 @@ const (
 	SettleRowGone
 )
 
-// SettleInstrumental records an instrumental verdict on a DEFERRED row and
-// completes it, in ONE transaction: telemetry, instrumental_result=1,
-// outcome_type='instrumental', status='done', and the scan_results writeback all
-// commit together or not at all.
+// RowOwnership says which status a settle is allowed to act on, and is the ONLY
+// thing that differs between the two callers of the settle transaction.
 //
-// It is a single guarded statement rather than the worker's
-// stamp-then-stamp-then-complete sequence because the backfill does NOT own its
-// rows. The worker holds its row in 'processing' for the whole write, so nothing
-// can race it. The backfill leaves rows 'deferred' while the (slow) detector runs,
-// and Dequeue selects status IN ('pending','failed','deferred') -- so a serve-mode
-// worker can and will claim one mid-classification. Guarding only the final step
-// would let the earlier stamps land on a row the worker already owns, leaving it
-// stamped instrumental while the worker goes on to complete it with real lyrics.
+// It is a named type rather than a raw status string so a caller cannot pass an
+// arbitrary status, and rather than a bool so neither call site reads as an
+// unexplained `true`. The zero value is deliberately OwnedByBackfill, the safer
+// of the two: it settles only a row nothing else holds, so a caller that forgets
+// to set it under-settles (a visible no-op the SettleOutcome reports) instead of
+// writing over a row a worker owns.
+type RowOwnership int
+
+const (
+	// OwnedByBackfill settles a row the caller does NOT own, guarding on
+	// 'deferred'. The backfill leaves rows deferred while the (slow) detector
+	// runs, and Dequeue selects status IN ('pending','failed','deferred') -- so a
+	// serve-mode worker can and will claim one mid-classification, and the guard
+	// is what stops this write from landing on a row that is no longer ours.
+	OwnedByBackfill RowOwnership = iota
+	// OwnedByWorker settles a row the caller already holds in 'processing'.
+	// Dequeue moved it out of the racing statuses, so nothing else can claim it;
+	// the guard proves the caller still owns it rather than protecting against a
+	// peer.
+	OwnedByWorker
+)
+
+// status returns the work_queue status this ownership is allowed to settle.
+func (o RowOwnership) status() string {
+	if o == OwnedByWorker {
+		return StatusProcessing
+	}
+	return StatusDeferred
+}
+
+// SettleInstrumental records an instrumental verdict and completes the row in ONE
+// transaction: telemetry, instrumental_result=1, outcome_type='instrumental',
+// provider_lane, status='done', and the scan_results writeback all commit
+// together or not at all.
+//
+// THIS IS THE SINGLE SETTLE PATH for both producers of a detector-sourced
+// instrumental -- the serve-mode worker and the offline backfills
+// (instrumentalbackfill, instrumentalrecalib). It previously existed twice: the
+// worker ran its own stamp-lane / stamp-result / stamp-outcome / Complete
+// sequence of four separate non-atomic writes, while the backfills used this
+// transaction. The two drifted, and the drift was the bug -- see the lane note
+// below. Collapsing them means a detector settle cannot be half-written by
+// either producer, and a change to what "settled" means has exactly one place to
+// be made.
+//
+// OWNERSHIP IS THE ONLY REAL DIFFERENCE between the callers, so it is the only
+// parameter: the worker holds its row in 'processing' for the whole write, the
+// backfill leaves it 'deferred'. Guarding on the wrong one silently matches zero
+// rows, which is why it is a typed parameter rather than a status string.
 //
 // provider_lane IS STAMPED HERE, in the same statement, not by a follow-up call.
-// The worker's detector path attributes its settles via SetProviderLane, but this
-// seam is the ONLY completion path the backfill callers have, and neither of them
-// stamped a lane -- so every row they settled landed with provider_lane NULL and
-// rendered as a blank lane in the reports UI while the worker's rows, identical in
-// every other respect, rendered as "Instrumental Detector". Attribution belongs in
-// the settle transaction rather than beside it: a separate advisory UPDATE could
-// fail (or be skipped by a future caller) and leave a settled row unattributed,
-// which is the exact defect this replaces. Both callers of this method are
-// detector-driven (instrumentalbackfill, instrumentalrecalib), so the lane is not
-// caller-dependent and does not need to be a parameter.
+// Every row the backfills settled once landed with provider_lane NULL and
+// rendered as a blank lane in the reports UI, because this transaction stamped
+// the outcome type but no lane and the backfills have no other completion path.
+// The worker did stamp a lane, but ADVISORILY -- a failed SetProviderLane logged
+// at Warn and let the row complete unattributed anyway, so it could produce the
+// same blank cell whenever that write happened to fail. Attribution belongs
+// inside the settle rather than beside it: one place, and it either commits with
+// the verdict or not at all. Both producers are detector-driven, so the lane is
+// not caller-dependent and is not a parameter.
 //
 // The outcome is stateful, not a bool, because zero affected rows only proves the
-// row is no longer deferred -- it does NOT prove a worker claimed it. A PEER
-// BACKFILL may have settled it first, and the two demand opposite actions: a
-// worker claim means this run's marker is orphaned and must be removed, while a
+// row did not match the expected status -- it does NOT prove a worker claimed it.
+// A PEER BACKFILL may have settled it first, and the two demand opposite actions:
+// a worker claim means this run's marker is orphaned and must be removed, while a
 // peer settle means the marker on disk is CORRECT and deleting it would destroy a
 // valid result. So on a no-op the row is re-read inside the same transaction and
 // classified.
-func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel InstrumentalTelemetry) (outcome SettleOutcome, retErr error) {
+func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel InstrumentalTelemetry, owner RowOwnership) (outcome SettleOutcome, retErr error) {
 	now := formatTime(q.now())
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -681,10 +719,10 @@ func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel Instrume
              completed_at = ?,
              last_error = ''
          WHERE id = ?
-           AND status = 'deferred'`,
+           AND status = ?`,
 		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion,
 		detectorbackfill.LaneName,
-		now, id,
+		now, id, owner.status(),
 	)
 	if err != nil {
 		return SettleFailed, fmt.Errorf("queue: settle instrumental: %w", err)

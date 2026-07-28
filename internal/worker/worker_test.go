@@ -122,6 +122,10 @@ type fakeQueue struct {
 	setProviderLaneErr error
 	instrumentalStamps []instrumentalStamp
 	instrumentalErr    error
+	// settledLanes records ids settled through the shared settle transaction, so a
+	// test can distinguish a transactional settle from the old stamp-then-complete
+	// sequence.
+	settledLanes []int64
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -237,6 +241,58 @@ func (q *fakeQueue) SetProviderLane(_ context.Context, _ int64, _ string) error 
 		return q.setProviderLaneErr
 	}
 	return nil
+}
+
+// SettleInstrumental fakes the shared settle transaction.
+//
+// It deliberately reproduces the REAL method's two defining behaviors rather than
+// just returning Settled, because a fake that always succeeds would agree with a
+// caller that passed the wrong ownership and validate nothing:
+//
+//  1. The OWNERSHIP GUARD. The real UPDATE matches only a row in the owner's
+//     expected status, so this checks the item is actually in `processing` and
+//     reports SettleClaimed when it is not. A worker that regressed to
+//     OwnedByBackfill would settle nothing in production; this makes that show up
+//     as a failing test instead of a silent no-op.
+//  2. ATOMICITY. The real transaction stamps the verdict, telemetry, outcome type
+//     and lane AND completes the row together, so on success this records all of
+//     them, writing through the same fields the pre-existing assertions read
+//     (instrumentalStamps, outcomeTypes, completed). On the guarded no-op it
+//     records NONE of them -- a partial write is exactly what the real
+//     transaction cannot produce.
+func (q *fakeQueue) SettleInstrumental(_ context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error) {
+	if q.instrumentalErr != nil {
+		return queue.SettleFailed, q.instrumentalErr
+	}
+	// Model the guard SYMMETRICALLY, the way `WHERE status = ?` behaves: a row in
+	// `processing` matches ONLY OwnedByWorker, and a row not in `processing`
+	// matches only OwnedByBackfill. An earlier version of this fake checked the
+	// OwnedByWorker case alone and let OwnedByBackfill through unconditionally,
+	// which made it agree with a worker that passed the wrong ownership -- the
+	// whole worker suite stayed green under that mutation. A fake that validates
+	// one direction of a two-directional guard validates nothing.
+	var held bool
+	for _, item := range q.processing {
+		if item.ID == id {
+			held = true
+			break
+		}
+	}
+	if held != (owner == queue.OwnedByWorker) {
+		return queue.SettleClaimed, nil
+	}
+	q.instrumentalStamps = append(q.instrumentalStamps, instrumentalStamp{ID: id, Result: 1, Tel: tel})
+	if q.outcomeTypes == nil {
+		q.outcomeTypes = make(map[int64]string)
+	}
+	q.outcomeTypes[id] = "instrumental"
+	q.settledLanes = append(q.settledLanes, id)
+	if q.onComplete != nil {
+		q.onComplete(id)
+	}
+	q.completed = append(q.completed, id)
+	q.removeFromProcessing(id)
+	return queue.Settled, nil
 }
 
 func (q *fakeQueue) removeFromProcessing(id int64) {
@@ -2009,6 +2065,57 @@ func (d *fakeDetector) Detect(_ context.Context, audioPath string) (detector.Res
 // TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes verifies that when
 // the audio detector returns instrumental=true on a benign miss, the worker
 // writes an instrumental marker, stores it in the cache, and completes the item.
+// TestRunOnceDetectorInstrumentalSettlesAsRowOwner pins the ownership argument
+// the worker passes to the shared settle transaction.
+//
+// The worker holds its row in 'processing' from Dequeue until completion, so it
+// must settle as OwnedByWorker. Passing OwnedByBackfill would guard the UPDATE on
+// status='deferred', match ZERO rows, and settle nothing -- while still returning
+// a nil error, because a guarded no-op is a legitimate outcome of that method
+// rather than a failure. The row would stay in 'processing' forever and be
+// re-dequeued, and every surface downstream (outcome type, lane, completion)
+// would silently go unwritten.
+//
+// It is asserted explicitly because nothing else catches it: verified by mutation
+// that flipping the worker to OwnedByBackfill leaves the ENTIRE rest of the worker
+// suite green.
+func TestRunOnceDetectorInstrumentalSettlesAsRowOwner(t *testing.T) {
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 260,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Composer", TrackName: "Nocturne"},
+			Outdir:     "out",
+			Filename:   "nocturne.lrc",
+			SourcePath: "/music/nocturne.flac",
+		},
+	}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.EnableAudioDetector(&fakeDetector{instrumental: true, version: "9.9.9"})
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// The fake enforces the guard the real UPDATE enforces: it settles only a row
+	// it is actually holding in `processing`, so a wrong ownership argument shows
+	// up here as an unsettled row rather than as a silent production no-op.
+	if len(q.settledLanes) != 1 || q.settledLanes[0] != 260 {
+		t.Fatalf("settledLanes = %v; want [260]. The worker owns its row in 'processing', "+
+			"so it must settle as OwnedByWorker; OwnedByBackfill guards on 'deferred', "+
+			"matches no row, and settles nothing while still returning nil", q.settledLanes)
+	}
+	// And the settle must be the thing that completed it: the transaction stamps
+	// the verdict, the outcome type and the completion together, so a row that
+	// settled is a row that is done.
+	if len(q.completed) != 1 || q.completed[0] != 260 {
+		t.Fatalf("completed = %v; want [260] from the settle transaction", q.completed)
+	}
+	if got := q.outcomeTypes[260]; got != "instrumental" {
+		t.Errorf("outcome_type = %q; want %q, stamped inside the same settle", got, "instrumental")
+	}
+}
+
 func TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes(t *testing.T) {
 	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
 	audioPath := "/music/interlude.flac"

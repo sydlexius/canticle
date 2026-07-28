@@ -56,7 +56,18 @@ type Queue interface {
 	// SetProviderLane stamps the winning provider lane name onto a work_queue row
 	// for per-track provenance. Call at completion time before Complete so the row
 	// permanently records which provider served it. An empty lane is a no-op.
+	//
+	// NOT used for a detector-sourced instrumental settle: that goes through
+	// SettleInstrumental, which stamps the lane inside the settle transaction. This
+	// remains the path for a PROVIDER hit, where the lane is one of several and the
+	// completion is the ordinary multi-step one.
 	SetProviderLane(ctx context.Context, id int64, lane string) error
+	// SettleInstrumental records a detector-sourced instrumental verdict and
+	// completes the row in ONE transaction (telemetry, instrumental_result=1,
+	// outcome_type, provider_lane, status, scan_results writeback). It is shared
+	// with the offline backfills so a detector settle has exactly one definition;
+	// OwnedByWorker guards on 'processing', the status Dequeue left the row in.
+	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error)
 	// SetCompletionProvenance stamps the identifiers and writer version the row was
 	// settled with, so an outcome that writes no tag block -- an unsynced .txt above
 	// all -- still records what produced it (#620). Call before Complete while the
@@ -745,17 +756,32 @@ func (w *Worker) SetProviderRecorder(r ProviderRecorder) {
 // stamps the lane name onto the work_queue row for per-track provenance. Both
 // operations are non-fatal: errors are logged at Warn and do not affect the
 // processing outcome.
+//
+// The detector path calls recordHitCounter instead: its lane is stamped inside
+// the settle transaction, so stamping it here too would write the same value
+// twice, once transactionally and once advisorily.
 func (w *Worker) recordHit(ctx context.Context, id int64, lane string) {
 	if lane == "" {
 		return
 	}
-	if w.providerRecorder != nil {
-		if err := w.providerRecorder.RecordProviderHit(ctx, lane); err != nil {
-			slog.Warn("worker: record provider hit failed", "lane", lane, "error", err)
-		}
-	}
+	w.recordHitCounter(ctx, lane)
 	if err := w.queue.SetProviderLane(ctx, id, lane); err != nil {
 		slog.Warn("worker: stamp provider lane failed", "id", id, "lane", lane, "error", err)
+	}
+}
+
+// recordHitCounter increments the provider-outcome hit counter WITHOUT stamping
+// the lane onto the row. It is the detector path's half of recordHit: that path
+// still owes the counter (a detector settle is a real dispatch that consulted
+// every lane, and omitting it would undercount provider_outcomes by exactly the
+// tracks the detector resolves, #282) but its per-track attribution is written
+// transactionally by SettleInstrumental.
+func (w *Worker) recordHitCounter(ctx context.Context, lane string) {
+	if lane == "" || w.providerRecorder == nil {
+		return
+	}
+	if err := w.providerRecorder.RecordProviderHit(ctx, lane); err != nil {
+		slog.Warn("worker: record provider hit failed", "lane", lane, "error", err)
 	}
 }
 
@@ -1243,9 +1269,12 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// would undercount provider_outcomes and leave lane_attempts with no row
 		// for this track at all - skewing both the attempt-weighted counter and
 		// the per-track hit-rate reports (#282) by exactly the tracks the
-		// detector resolves. recordHit attributes the hit to the detector lane,
-		// matching song.WinningLane.
-		w.recordHit(context.WithoutCancel(ctx), item.ID, song.WinningLane)
+		// detector resolves.
+		//
+		// recordHitCounter, not recordHit: the per-track lane attribution is
+		// stamped inside the settle transaction, so the counter is all that is
+		// owed here.
+		w.recordHitCounter(context.WithoutCancel(ctx), song.WinningLane)
 		w.recordLaneAttempts(context.WithoutCancel(ctx), item.ID, song.LaneAttempts)
 		return w.completeDetectorInstrumental(ctx, item, song)
 	}
@@ -1559,11 +1588,24 @@ func (w *Worker) stampDetectorMissTelemetry(ctxNoCancel context.Context, id int6
 	}
 }
 
-// stampDetectorInstrumental records a detector-sourced instrumental settle from
-// the orchestrator result. It replaces the old inline hand-built song path,
-// reading telemetry off the Song the detector lane produced. ctxNoCancel mirrors
-// the prior stamp code so a canceled work context cannot drop the write.
-func (w *Worker) stampDetectorInstrumental(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) error {
+// settleDetectorInstrumental records a detector-sourced instrumental settle from
+// the orchestrator result and completes the row, through the SAME transaction the
+// offline backfills use. ctxNoCancel mirrors the prior stamp code so a canceled
+// work context cannot drop the write.
+//
+// This was four separate non-atomic writes (SetProviderLane via recordHit, then
+// SetInstrumentalResult, SetOutcomeType, and Complete), duplicating what
+// queue.SettleInstrumental already did in one transaction for the backfills. The
+// duplication had drifted: the lane stamp here was advisory, so a failed
+// SetProviderLane logged a warning and let the row complete unattributed, which
+// is one of the two ways a settled row ended up rendering with a blank lane in
+// the reports UI. Sharing the transaction removes both the drift and every
+// partially-written intermediate state.
+//
+// OwnedByWorker because Dequeue left this row in 'processing' and the worker
+// holds it for the whole write; the backfills pass OwnedByBackfill for a row they
+// do not own. That guard is the ONLY behavioral difference between the two.
+func (w *Worker) settleDetectorInstrumental(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) (queue.SettleOutcome, error) {
 	tel := queue.InstrumentalTelemetry{
 		MusicSum:        song.DetectorMusicSum,
 		VocalPeak:       song.DetectorVocalPeak,
@@ -1571,13 +1613,11 @@ func (w *Worker) stampDetectorInstrumental(ctxNoCancel context.Context, item que
 		VocalClass:      song.DetectorVocalClass,
 		DetectorVersion: song.DetectorVersion,
 	}
-	if err := w.queue.SetInstrumentalResult(ctxNoCancel, item.ID, 1, tel); err != nil {
-		return fmt.Errorf("stamp instrumental result: %w", err)
+	outcome, err := w.queue.SettleInstrumental(ctxNoCancel, item.ID, tel, queue.OwnedByWorker)
+	if err != nil {
+		return outcome, fmt.Errorf("settle instrumental: %w", err)
 	}
-	if err := w.queue.SetOutcomeType(ctxNoCancel, item.ID, "instrumental"); err != nil {
-		return fmt.Errorf("stamp outcome_type: %w", err)
-	}
-	return nil
+	return outcome, nil
 }
 
 // completeDetectorInstrumental finalizes a fresh detector-lane instrumental
@@ -1616,30 +1656,12 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// existing rows. Re-running the detector on a later track is far cheaper
 	// than a permanently unreplayable cache row.
 	//
-	// Stamp instrumental_result=1 + telemetry + outcome type only AFTER the
-	// marker write succeeded (a failed WriteLRC above requeues and returns before
-	// here), so a transient write error never leaves a row tagged instrumental
-	// with stale telemetry. Still before Complete, so /metrics reflects it
-	// durably.
-	//
-	// The stamp is REQUIRED, not best-effort: completing the row without it
-	// would retire the work item while leaving no record that the detector was
-	// what settled it, so the verdict is neither auditable nor reproducible and
-	// no later pass would revisit it. On failure, defer and retry instead - the
-	// marker file is already written, and WriteLRC is idempotent, so the retry
-	// re-runs the write harmlessly and gets another chance to stamp.
-	if stampErr := w.stampDetectorInstrumental(ctxNoCancel, item, song); stampErr != nil {
-		slog.Warn("worker instrumental detection: stamp failed; deferring for retry", "id", item.ID, "error", stampErr)
-		if derr := w.requeueDeferred(ctx, item, stampErr); derr != nil {
-			return derr
-		}
-		w.consecutiveFailures = 0
-		return nil
-	}
-	// Provenance is advisory and stamped OUTSIDE stampDetectorInstrumental, whose
-	// stamps are deliberately required: a failed provenance write must not defer a
-	// settle whose marker is already on disk and whose verdict is already
-	// recorded.
+	// Provenance is stamped BEFORE the settle, not after. It is advisory (a failed
+	// provenance write must not defer a settle whose marker is already on disk),
+	// but the settle now COMPLETES the row in the same transaction, so anything
+	// that must land on a row still in 'processing' has to be written first. The
+	// old ordering stamped it between the required stamps and Complete; that gap
+	// no longer exists.
 	//
 	// This path records the WRITER VERSION ONLY. A detector settle resolves no
 	// identifiers (there is no provider result), and it never carries a fetch
@@ -1650,13 +1672,34 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// to tell them apart. The detector's own timing lives in completed_at and the
 	// detector telemetry, so nothing is lost by not inventing one here.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
-	if completeErr := w.queue.Complete(ctxNoCancel, item.ID); completeErr != nil {
-		cause := fmt.Errorf("worker: complete instrumental item %d: %w", item.ID, completeErr)
-		w.consecutiveFailures++
-		if _, failErr := w.queue.Fail(ctxNoCancel, item.ID, cause); failErr != nil {
-			return fmt.Errorf("worker: complete instrumental item %d and mark failed: %w", item.ID, errors.Join(cause, failErr))
+	// Settle only AFTER the marker write succeeded (a failed WriteLRC above
+	// requeues and returns before here), so a transient write error never leaves a
+	// row tagged instrumental with stale telemetry.
+	//
+	// The settle is REQUIRED, not best-effort: completing the row without it would
+	// retire the work item while leaving no record that the detector was what
+	// settled it, so the verdict would be neither auditable nor reproducible and
+	// no later pass would revisit it. On failure, defer and retry -- the marker
+	// file is already written and WriteLRC is idempotent, so the retry re-runs the
+	// write harmlessly and gets another chance.
+	outcome, settleErr := w.settleDetectorInstrumental(ctxNoCancel, item, song)
+	if settleErr != nil {
+		slog.Warn("worker instrumental detection: settle failed; deferring for retry", "id", item.ID, "error", settleErr)
+		if derr := w.requeueDeferred(ctx, item, settleErr); derr != nil {
+			return derr
 		}
-		return fmt.Errorf("worker: complete instrumental item %d (marked failed): %w", item.ID, cause)
+		w.consecutiveFailures = 0
+		return nil
+	}
+	// A worker-owned settle should always match: Dequeue put this row in
+	// 'processing' and nothing else can move it while the worker holds it. Anything
+	// else means an invariant broke (a concurrent writer, or a row pruned
+	// mid-flight), so it is logged rather than silently treated as success. The
+	// marker on disk stays either way -- the detector's verdict was real, and the
+	// backfill will revisit an unsettled row later.
+	if outcome != queue.Settled {
+		slog.Warn("worker instrumental detection: settle did not apply; marker is on disk but the row was not completed",
+			"id", item.ID, "outcome", outcome)
 	}
 	w.consecutiveFailures = 0
 	return nil
