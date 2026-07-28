@@ -44,73 +44,113 @@ const (
 // block it. Rows judged not-instrumental stay deferred for a provider to retry;
 // only a confirmed instrumental settles and writes a marker.
 func runInstrumentalBackfillSweep(ctx context.Context, sqlDB *sql.DB, cfg config.Config, det detector.Detector) {
+	bounds, ok := resolveBackfillBounds(cfg, det)
+	if !ok {
+		return
+	}
+	bf := instrumentalbackfill.New(queue.NewDBQueue(sqlDB), det, lyrics.NewLRCWriter())
+	runBackfillSweepLoop(ctx, bf, bounds, cfg.InstrumentalDetector.Enabled)
+}
+
+// backfillSweepBounds is the resolved, validated shape of the sweep's config.
+type backfillSweepBounds struct {
+	batch    int
+	interval time.Duration
+	cooldown int
+}
+
+// resolveBackfillBounds validates the sweep's config and reports whether the
+// sweep should run at all. Split out so the guards and the defensive floors are
+// reachable without starting a goroutine that blocks on a ticker.
+//
+// The floors are defensive only: config.Load already applies the documented
+// defaults, so they catch a Config built in code (a test, or a future caller)
+// that leaves the fields zero. Without them a zero batch would classify nothing
+// and a zero interval would panic time.NewTicker. Cooldown is deliberately NOT
+// floored -- 0 is its documented default and a meaningful value.
+func resolveBackfillBounds(cfg config.Config, det detector.Detector) (backfillSweepBounds, bool) {
 	bfCfg := cfg.InstrumentalDetector.Backfill
 	if !bfCfg.Enabled {
 		slog.Debug("instrumental backfill sweep disabled by config")
-		return
+		return backfillSweepBounds{}, false
 	}
-	// A nil detector means no classifier is configured. Returning rather than
-	// looping keeps a detector-less deployment from spinning a goroutine that can
-	// never do anything.
+	// A nil detector means no classifier is configured. Refusing to start keeps a
+	// detector-less deployment from spinning a goroutine that can never do
+	// anything. The typed-nil case matters too: a (*detector.HTTPDetector)(nil)
+	// stored in the interface is non-nil to `== nil`, so callers must hand us an
+	// untyped nil -- newBackfillDetector does.
 	if det == nil {
 		slog.Debug("instrumental backfill sweep: no detector configured; not starting")
-		return
+		return backfillSweepBounds{}, false
 	}
-
-	// Defensive floors only: config.Load already applies the documented defaults,
-	// so these catch a Config built in code (a test, or a future caller) that
-	// leaves the fields zero. Without them a zero batch would classify nothing and
-	// a zero interval would spin the ticker. CooldownSeconds is deliberately NOT
-	// floored -- 0 is its documented default and a meaningful value.
-	batch := bfCfg.BatchSize
-	if batch < 1 {
-		batch = defaultBackfillBatchSize
+	b := backfillSweepBounds{
+		batch:    bfCfg.BatchSize,
+		cooldown: bfCfg.CooldownSeconds,
+	}
+	if b.batch < 1 {
+		b.batch = defaultBackfillBatchSize
 	}
 	minutes := bfCfg.IntervalMinutes
 	if minutes < 1 {
 		minutes = defaultBackfillIntervalMinutes
 	}
-	interval := time.Duration(minutes) * time.Minute
+	b.interval = time.Duration(minutes) * time.Minute
+	return b, true
+}
 
-	bf := instrumentalbackfill.New(queue.NewDBQueue(sqlDB), det, lyrics.NewLRCWriter())
+// backfiller is the one-call seam the sweep loop needs. Satisfied by
+// *instrumentalbackfill.Backfiller; narrowed so the loop is testable without a
+// database, a detector sidecar, or real audio.
+type backfiller interface {
+	Run(ctx context.Context, opts instrumentalbackfill.Options) (instrumentalbackfill.Result, error)
+}
 
-	sweep := func() {
-		res, err := bf.Run(ctx, instrumentalbackfill.Options{
-			Limit:               batch,
-			GlobalDetectDefault: cfg.InstrumentalDetector.Enabled,
-			// No Report: the CLI writes a JSONL backup because an operator invoked a
-			// bulk mutation and may want to reverse it. This sweep is incremental and
-			// continuous, so a backup file would grow without bound and describe a
-			// change nobody asked for. The mutations are individually recoverable --
-			// a marker is provisional (reopened by --upgrade and by a model-version
-			// change) and a not-instrumental stamp only fills the verdict cache.
-		})
-		if err != nil {
-			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				slog.Warn("instrumental backfill sweep failed; will retry next interval", "error", err)
-			}
-			return
+// runBackfillCycle classifies one bounded batch. A failure is logged and
+// swallowed: the sweep is a background convenience, so a transient error must
+// wait for the next interval rather than kill the goroutine.
+func runBackfillCycle(ctx context.Context, bf backfiller, bounds backfillSweepBounds, detectDefault bool) {
+	res, err := bf.Run(ctx, instrumentalbackfill.Options{
+		Limit:               bounds.batch,
+		GlobalDetectDefault: detectDefault,
+		// No Report: the CLI writes a JSONL backup because an operator invoked a
+		// bulk mutation and may want to reverse it. This sweep is incremental and
+		// continuous, so a backup file would grow without bound and describe a
+		// change nobody asked for. The mutations are individually recoverable --
+		// a marker is provisional (reopened by --upgrade and by a model-version
+		// change) and a not-instrumental stamp only fills the verdict cache.
+	})
+	if err != nil {
+		// A canceled context is a clean shutdown, not a failure worth warning about.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("instrumental backfill sweep failed; will retry next interval", "error", err)
 		}
-		// Silent when there is nothing to do: on a converged install this runs
-		// hourly forever and must not print a line each time.
-		if res.Instrumental > 0 || res.NotInstrumental > 0 {
-			slog.Info("instrumental backfill sweep classified never-scored rows",
-				"instrumental", res.Instrumental, "not_instrumental", res.NotInstrumental,
-				"errors", res.Errors, "batch_size", batch)
-		}
+		return
 	}
+	// Silent when there is nothing to do: on a converged install this runs hourly
+	// forever and must not print a line each time.
+	if res.Instrumental > 0 || res.NotInstrumental > 0 {
+		slog.Info("instrumental backfill sweep classified never-scored rows",
+			"instrumental", res.Instrumental, "not_instrumental", res.NotInstrumental,
+			"errors", res.Errors, "batch_size", bounds.batch)
+	}
+}
 
-	slog.Info("instrumental backfill sweeper started", "interval", interval, "batch_size", batch,
-		"cooldown_seconds", bfCfg.CooldownSeconds)
-	sweep() // classify at startup so a fresh backlog begins draining immediately
-	ticker := time.NewTicker(interval)
+// runBackfillSweepLoop runs a cycle at startup and then once per interval until
+// ctx is canceled.
+func runBackfillSweepLoop(ctx context.Context, bf backfiller, bounds backfillSweepBounds, detectDefault bool) {
+	slog.Info("instrumental backfill sweeper started",
+		"interval", bounds.interval, "batch_size", bounds.batch, "cooldown_seconds", bounds.cooldown)
+	// Classify at startup so a fresh backlog begins draining immediately rather
+	// than waiting out the first interval.
+	runBackfillCycle(ctx, bf, bounds, detectDefault)
+	ticker := time.NewTicker(bounds.interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sweep()
+			runBackfillCycle(ctx, bf, bounds, detectDefault)
 		}
 	}
 }
