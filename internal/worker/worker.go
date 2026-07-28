@@ -1694,12 +1694,31 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// A worker-owned settle should always match: Dequeue put this row in
 	// 'processing' and nothing else can move it while the worker holds it. Anything
 	// else means an invariant broke (a concurrent writer, or a row pruned
-	// mid-flight), so it is logged rather than silently treated as success. The
-	// marker on disk stays either way -- the detector's verdict was real, and the
-	// backfill will revisit an unsettled row later.
+	// mid-flight).
+	//
+	// RELEASING IS REQUIRED, NOT COSMETIC. Logging alone would STRAND the row: the
+	// settle folded Complete into itself, so a non-Settled outcome leaves the row
+	// in 'processing', and nothing ever reclaims that status -- Dequeue selects
+	// only ('pending','failed','deferred') and ListUnclassified requires
+	// 'deferred'. The row would be invisible to BOTH the worker and the backfill
+	// forever, with its marker on disk and no verdict recorded. The pre-unification
+	// code could not produce this: Complete errored on a non-'processing' row and
+	// the caller then failed it, which moved it somewhere re-dequeueable. Release
+	// restores prev_status so the row is retryable, keeping that property.
+	//
+	// The marker stays on disk either way: the detector's verdict was real, and a
+	// later pass rewrites it idempotently.
 	if outcome != queue.Settled {
-		slog.Warn("worker instrumental detection: settle did not apply; marker is on disk but the row was not completed",
+		slog.Warn("worker instrumental detection: settle did not apply; releasing the row so it is not stranded in processing",
 			"id", item.ID, "outcome", outcome)
+		if relErr := w.queue.Release(ctxNoCancel, item.ID); relErr != nil {
+			// Release is itself guarded on 'processing', so a failure here means the
+			// row already moved (someone else owns it) or the DB is unhealthy. Neither
+			// is recoverable from this call site, and the settle already did not apply,
+			// so surface it rather than pretending the item completed.
+			slog.Error("worker instrumental detection: could not release an unsettled row; it may be stuck in processing",
+				"id", item.ID, "error", relErr)
+		}
 	}
 	w.consecutiveFailures = 0
 	return nil

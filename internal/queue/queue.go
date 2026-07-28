@@ -697,7 +697,25 @@ func (o RowOwnership) status() string {
 // peer settle means the marker on disk is CORRECT and deleting it would destroy a
 // valid result. So on a no-op the row is re-read inside the same transaction and
 // classified.
-func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel InstrumentalTelemetry, owner RowOwnership) (outcome SettleOutcome, retErr error) {
+// It retries on SQLITE_BUSY for the reason Complete does, and this became load-
+// bearing when the worker's completion moved into this method: a WAL write-write
+// conflict is not covered by busy_timeout, and a dropped completion has a larger
+// blast radius than a dropped poll -- the finished item stays 'processing' and is
+// re-processed. The whole transaction rolls back before commit, so a retry re-runs
+// cleanly, and a guarded no-op returns its SettleOutcome immediately rather than
+// retrying (it is not a busy error). Without this the unification would silently
+// un-do #625 for every detector settle.
+func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel InstrumentalTelemetry, owner RowOwnership) (SettleOutcome, error) {
+	var outcome SettleOutcome
+	err := db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		var err error
+		outcome, err = q.settleInstrumentalOnce(ctx, id, tel, owner)
+		return err
+	})
+	return outcome, err
+}
+
+func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel InstrumentalTelemetry, owner RowOwnership) (outcome SettleOutcome, retErr error) {
 	now := formatTime(q.now())
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {

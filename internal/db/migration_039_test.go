@@ -20,31 +20,40 @@ func TestMigration039AttributesOnlyDetectorEvidencedRows(t *testing.T) {
 	ctx := context.Background()
 	dbh, provider := openAtVersion(t, 38) // the state a real deployment upgrades FROM
 
-	insert := `INSERT INTO work_queue (artist_key, title_key, artist, title, source_path, status, outcome_type, detector_version, provider_lane)
-	           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	insert := `INSERT INTO work_queue (artist_key, title_key, artist, title, source_path, status, outcome_type, detector_version, instrumental_result, provider_lane)
+	           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	rows := []struct {
 		key      string
 		status   string
 		outcome  any
 		version  any
+		verdict  any
 		lane     any
 		wantLane string
 	}{
 		// The defect's population: settled by the backfill, detector evidence
 		// present, never attributed.
-		{"b1", "done", "instrumental", "v1", nil, "detector"},
+		{"b1", "done", "instrumental", "v1", 1, nil, "detector"},
 		// No detector evidence. Must stay NULL rather than gain a fabricated lane.
-		{"b2", "done", "instrumental", nil, nil, "<NULL>"},
+		{"b2", "done", "instrumental", nil, nil, nil, "<NULL>"},
 		// Already attributed elsewhere: recorded history outranks reconstruction,
 		// so the migration must not overwrite it.
-		{"b3", "done", "instrumental", "v1", "musixmatch", "musixmatch"},
+		{"b3", "done", "instrumental", "v1", 1, "musixmatch", "musixmatch"},
 		// Detector ran and said NOT instrumental: the row stays deferred and was
 		// never completed by any lane, so claiming one would assert a completion
 		// that never happened.
-		{"b4", "deferred", nil, "v1", nil, "<NULL>"},
+		{"b4", "deferred", nil, "v1", 0, nil, "<NULL>"},
+		// THE TRAP. The detector judged this NOT instrumental (result=0) and stamped
+		// its telemetry, leaving the row deferred; a PROVIDER then found it and
+		// flagged it instrumental, setting outcome_type while provider_lane stayed
+		// NULL (that stamp is advisory on the provider path and can fail). So the row
+		// carries detector_version from a verdict that said the opposite, and gating
+		// on detector_version alone credits the detector with a provider's find.
+		// Measured on a live install as 26 real rows.
+		{"b5", "done", "instrumental", "v1", 0, nil, "<NULL>"},
 	}
 	for _, r := range rows {
-		if _, err := dbh.ExecContext(ctx, insert, r.key, r.key, r.key, r.key, "/m/"+r.key, r.status, r.outcome, r.version, r.lane); err != nil {
+		if _, err := dbh.ExecContext(ctx, insert, r.key, r.key, r.key, r.key, "/m/"+r.key, r.status, r.outcome, r.version, r.verdict, r.lane); err != nil {
 			t.Fatalf("insert %s: %v", r.key, err)
 		}
 	}

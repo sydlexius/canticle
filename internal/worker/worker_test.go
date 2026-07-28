@@ -126,6 +126,15 @@ type fakeQueue struct {
 	// test can distinguish a transactional settle from the old stamp-then-complete
 	// sequence.
 	settledLanes []int64
+	// onSettleAttempt fires at the top of SettleInstrumental, before the ownership
+	// guard is evaluated, so a test can stage the mid-flight race the guard exists
+	// to catch (a peer moving the row out of `processing` between Dequeue and the
+	// settle). Staging it any earlier would not reproduce the real interleaving.
+	onSettleAttempt func(id int64)
+	// providerLaneStamps records ids passed to SetProviderLane, so a test can
+	// assert the detector path does NOT stamp the lane advisorily (it is written
+	// inside the settle transaction) while the provider path still does.
+	providerLaneStamps []int64
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -236,10 +245,15 @@ func (q *fakeQueue) SetTimingOutcome(_ context.Context, id int64, rec queue.Timi
 	return nil
 }
 
-func (q *fakeQueue) SetProviderLane(_ context.Context, _ int64, _ string) error {
+func (q *fakeQueue) SetProviderLane(_ context.Context, id int64, _ string) error {
 	if q.setProviderLaneErr != nil {
 		return q.setProviderLaneErr
 	}
+	// Recorded so a test can assert this was NOT called on the detector path,
+	// whose lane is stamped inside the settle transaction instead. Without this
+	// the recordHit/recordHitCounter split is unpinned in the only direction that
+	// matters -- re-introducing the double write leaves every other test green.
+	q.providerLaneStamps = append(q.providerLaneStamps, id)
 	return nil
 }
 
@@ -261,6 +275,9 @@ func (q *fakeQueue) SetProviderLane(_ context.Context, _ int64, _ string) error 
 //     records NONE of them -- a partial write is exactly what the real
 //     transaction cannot produce.
 func (q *fakeQueue) SettleInstrumental(_ context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error) {
+	if q.onSettleAttempt != nil {
+		q.onSettleAttempt(id)
+	}
 	if q.instrumentalErr != nil {
 		return queue.SettleFailed, q.instrumentalErr
 	}
@@ -2113,6 +2130,59 @@ func TestRunOnceDetectorInstrumentalSettlesAsRowOwner(t *testing.T) {
 	}
 	if got := q.outcomeTypes[260]; got != "instrumental" {
 		t.Errorf("outcome_type = %q; want %q, stamped inside the same settle", got, "instrumental")
+	}
+	// The lane is stamped INSIDE the settle, so the advisory SetProviderLane must
+	// not also fire here. That is the entire point of splitting recordHit into
+	// recordHitCounter for this path: re-introducing the double write is otherwise
+	// invisible, since both writes carry the same value.
+	if len(q.providerLaneStamps) != 0 {
+		t.Errorf("SetProviderLane called for %v; the detector path stamps its lane transactionally, "+
+			"so an advisory stamp here is a redundant second write of the same value", q.providerLaneStamps)
+	}
+}
+
+// TestRunOnceDetectorInstrumentalReleasesRowWhenSettleDoesNotApply: an unsettled
+// row must be released, never left in 'processing'.
+//
+// Folding Complete into the settle transaction created this failure mode. When
+// the settle matches no row it returns a non-Settled outcome with a NIL error, so
+// nothing looks wrong -- but the row is still 'processing', and NOTHING reclaims
+// that status: Dequeue selects only ('pending','failed','deferred') and the
+// backfill's ListUnclassified requires 'deferred'. The row would be invisible to
+// both forever, marker on disk, verdict unrecorded.
+//
+// The pre-unification code could not produce this (Complete errored on a
+// non-'processing' row, and the caller then failed it), so this is the one place
+// the refactor could regress silently, and a log line alone would not fix it.
+func TestRunOnceDetectorInstrumentalReleasesRowWhenSettleDoesNotApply(t *testing.T) {
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 270,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Composer", TrackName: "Etude"},
+			Outdir:     "out",
+			Filename:   "etude.lrc",
+			SourcePath: "/music/etude.flac",
+		},
+	}}}
+	// Stage the race: the row is gone from `processing` by the time the settle
+	// runs, so the guarded UPDATE matches nothing and reports SettleClaimed with a
+	// nil error -- exactly the shape that stranded the row.
+	q.onSettleAttempt = func(id int64) { q.removeFromProcessing(id) }
+
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.EnableAudioDetector(&fakeDetector{instrumental: true, version: "9.9.9"})
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(q.settledLanes) != 0 {
+		t.Fatalf("settledLanes = %v; want none -- this test stages a settle that does NOT apply", q.settledLanes)
+	}
+	if len(q.released) != 1 || q.released[0] != 270 {
+		t.Fatalf("released = %v; want [270]. An unsettled row left in 'processing' is reclaimed by nothing -- "+
+			"Dequeue skips it and the backfill skips it -- so it is stranded with its marker on disk forever", q.released)
 	}
 }
 

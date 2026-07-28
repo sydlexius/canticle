@@ -882,6 +882,54 @@ func TestReverse_RevertsRowThatNowFailsTheVocalGate(t *testing.T) {
 	}
 }
 
+// TestReverse_UpdatesDetectorLaneAttemptOnRevert is the reverse direction's
+// counterpart to TestRun_UpdatesDetectorLaneAttemptOnFlip.
+//
+// It is asserted separately because the two directions are separate call sites
+// and the forward test does not cover this one: verified by mutation that making
+// Reverse's recordAttempt a no-op leaves the whole package green. Reverse is also
+// the direction that DEFLATES the rate (a recorded hit becomes a miss), so a gap
+// here reports the detector as better than it is -- the same failure mode as a
+// hits-only fill, arrived at from the other side.
+func TestReverse_UpdatesDetectorLaneAttemptOnRevert(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+	src := filepath.Join(t.TempDir(), "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	id, _ := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	// The attempt the original detection pass recorded: a hit.
+	if err := q.RecordLaneAttempts(ctx, id, []models.LaneAttempt{
+		{Lane: detectorbackfill.LaneName, Hit: true, Local: true},
+	}); err != nil {
+		t.Fatalf("seed lane attempt: %v", err)
+	}
+
+	res, err := New(q, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 1 {
+		t.Fatalf("res = %+v; want 1 reversed", res)
+	}
+
+	var hit, n int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(hit), -1), COUNT(*) FROM lane_attempts WHERE queue_id = ? AND lane = ?`,
+		id, detectorbackfill.LaneName).Scan(&hit, &n); err != nil {
+		t.Fatalf("read lane attempt: %v", err)
+	}
+	if hit != 0 {
+		t.Errorf("lane attempt hit = %d; want 0. The revert un-did the instrumental verdict, so an attempt still "+
+			"reporting a hit overstates the detector's rate", hit)
+	}
+	if n != 1 {
+		t.Errorf("lane attempt rows = %d; want exactly 1 -- the revert must UPDATE the original attempt, not add one", n)
+	}
+}
+
 // TestReverse_LeavesRowThatStillPassesTheGate pins that a still-correct
 // instrumental is not disturbed.
 func TestReverse_LeavesRowThatStillPassesTheGate(t *testing.T) {

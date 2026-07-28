@@ -29,16 +29,29 @@
 -- reconstruction (the same rule migration 029 states). That also makes this
 -- statement idempotent independently of goose -- re-running it is a no-op.
 --
--- outcome_type IS STILL REQUIRED alongside detector_version. detector_version is
--- also set on rows the detector judged NOT instrumental (instrumental_result=0),
--- which stay deferred and were never completed by any lane; provider_lane means
--- "which lane completed this row", so stamping a still-deferred row would assert
--- a completion that never happened.
+-- instrumental_result = 1 IS REQUIRED, AND detector_version ALONE IS NOT ENOUGH.
+-- This is the subtle one, and gating on detector_version by itself gets it WRONG.
+-- The worker ALSO writes detector_version on a NOT-instrumental verdict
+-- (stampDetectorMissTelemetry, internal/worker/worker.go: SetInstrumentalResult
+-- with result=0), leaving the row deferred. A provider can then find that track
+-- and flag it instrumental, which sets outcome_type='instrumental' while
+-- provider_lane stays NULL -- SetProviderLane is advisory on that path and can
+-- fail, which is one of the defects this very migration series exists to repair.
+-- Such a row carries detector telemetry from a verdict that said NOT
+-- instrumental, so attributing it to the detector credits the detector with a
+-- provider's find. Measured on a live install: 26 rows matched exactly that
+-- shape. instrumental_result = 1 is the only column that says the DETECTOR is
+-- what concluded instrumental, which is why migrations 028 and 029 both key on
+-- it rather than on detector_version.
+--
+-- outcome_type is still required alongside it: provider_lane means "which lane
+-- COMPLETED this row", so a row carrying a positive verdict but not yet completed
+-- would assert a completion that never happened.
 UPDATE work_queue
 SET provider_lane = 'detector'
 WHERE provider_lane IS NULL
   AND outcome_type = 'instrumental'
-  AND detector_version IS NOT NULL;
+  AND instrumental_result = 1;
 -- +goose StatementEnd
 
 -- +goose Down
