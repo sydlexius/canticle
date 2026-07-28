@@ -83,4 +83,42 @@ func TestMigration039AttributesOnlyDetectorEvidencedRows(t *testing.T) {
 			t.Errorf("%s: provider_lane = %q; want %q", r.key, deref(got), r.wantLane)
 		}
 	}
+
+	// The clear is the one destructive statement here -- it overwrites a real
+	// stored value, and Down cannot reconstruct which rows held 'detector'. So the
+	// pre-mutation value must be recoverable, and the backup must cover EXACTLY the
+	// rows that changed: a backup whose predicate drifts from the UPDATE's is worse
+	// than none, because it reads as a safety net that is not there.
+	var backedUp int
+	var oldValue string
+	if err := dbh.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MAX(old_value), '') FROM provenance_repair_backup
+		  WHERE migration = '039' AND table_name = 'work_queue' AND column_name = 'provider_lane'`,
+	).Scan(&backedUp, &oldValue); err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if backedUp != 1 {
+		t.Errorf("backed-up rows = %d; want exactly 1 (only b6's lane is cleared)", backedUp)
+	}
+	if oldValue != "detector" {
+		t.Errorf("backed-up old_value = %q; want %q -- the PRE-mutation value, or the record cannot restore", oldValue, "detector")
+	}
+	// Restoring from the backup must reproduce the original value exactly.
+	if _, err := dbh.ExecContext(ctx, `
+		UPDATE work_queue SET provider_lane = (
+			SELECT old_value FROM provenance_repair_backup b
+			 WHERE b.migration = '039' AND b.table_name = 'work_queue'
+			   AND b.column_name = 'provider_lane' AND b.row_id = work_queue.id)
+		WHERE id IN (SELECT row_id FROM provenance_repair_backup
+		              WHERE migration = '039' AND table_name = 'work_queue')`); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	var restored *string
+	if err := dbh.QueryRowContext(ctx,
+		`SELECT provider_lane FROM work_queue WHERE artist_key = 'b6'`).Scan(&restored); err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if deref(restored) != "detector" {
+		t.Errorf("restored provider_lane = %q; want %q -- the backup is not actually restorable", deref(restored), "detector")
+	}
 }

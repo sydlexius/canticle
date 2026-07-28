@@ -72,6 +72,50 @@ WHERE provider_lane IS NULL
 -- broader predicate -- "clear the lane on any row that is not done" -- would
 -- destroy legitimate history, because a row a PROVIDER completed and that was
 -- later re-deferred for an --upgrade re-fetch correctly keeps its lane.
+-- BACKUP FIRST. The clear below is the one genuinely DESTRUCTIVE statement in
+-- this migration -- the fill above only writes into NULLs, but this overwrites a
+-- real stored value, and Down cannot recover it (it has no way to know which rows
+-- held 'detector' beforehand).
+--
+-- A goose SQL migration cannot write and fsync a JSONL file, so the restorable
+-- record is a TABLE written inside the migration's own transaction. That is
+-- strictly stronger than the JSONL trail the CLI paths use: the backup and the
+-- mutation commit or roll back together, so there is no window where the change
+-- exists without its record, and no file to be orphaned or lost.
+--
+-- Restore is a direct join:
+--   UPDATE work_queue SET provider_lane = (
+--     SELECT old_value FROM provenance_repair_backup b
+--      WHERE b.table_name = 'work_queue' AND b.column_name = 'provider_lane'
+--        AND b.row_id = work_queue.id AND b.migration = '039')
+--   WHERE id IN (SELECT row_id FROM provenance_repair_backup
+--                 WHERE migration = '039' AND table_name = 'work_queue');
+CREATE TABLE IF NOT EXISTS provenance_repair_backup (
+    migration    TEXT    NOT NULL,
+    table_name   TEXT    NOT NULL,
+    row_id       INTEGER NOT NULL,
+    column_name  TEXT    NOT NULL,
+    old_value    TEXT,
+    backed_up_at TEXT    NOT NULL,
+    UNIQUE(migration, table_name, row_id, column_name)
+);
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+-- The predicate MUST match the UPDATE's exactly, or the backup covers a different
+-- set than the change. ON CONFLICT DO NOTHING keeps a re-run idempotent and, more
+-- importantly, preserves the FIRST recorded value: a second application must never
+-- overwrite the original with the already-cleared one.
+INSERT INTO provenance_repair_backup (migration, table_name, row_id, column_name, old_value, backed_up_at)
+SELECT '039', 'work_queue', id, 'provider_lane', provider_lane, datetime('now')
+FROM work_queue
+WHERE provider_lane = 'detector'
+  AND instrumental_result = 0
+  AND outcome_type IS NULL
+ON CONFLICT(migration, table_name, row_id, column_name) DO NOTHING;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
 UPDATE work_queue
 SET provider_lane = NULL
 WHERE provider_lane = 'detector'

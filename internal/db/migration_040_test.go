@@ -92,6 +92,26 @@ func TestMigration040FillsGapsWithoutOverwritingRecordedAttempts(t *testing.T) {
 			t.Errorf("%s: hit = %v; want %d", r.key, deref2(hit), r.wantHit)
 		}
 	}
+
+	// The repair OVERWRITES a recorded hit value, which Down cannot recover, so the
+	// pre-mutation value must be restorable and the backup must cover exactly the
+	// overwritten rows -- c5 only. c3 is deliberately absent: it is never touched,
+	// so backing it up would misrepresent what this migration changed.
+	var backedUp, restoredRow int
+	var oldValue string
+	if err := dbh.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MAX(row_id), -1), COALESCE(MAX(old_value), '')
+		   FROM provenance_repair_backup
+		  WHERE migration = '040' AND table_name = 'lane_attempts' AND column_name = 'hit'`,
+	).Scan(&backedUp, &restoredRow, &oldValue); err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if backedUp != 1 || restoredRow != 905 {
+		t.Errorf("backup = %d row(s), row_id %d; want exactly 1 for queue_id 905 (only c5 is overwritten)", backedUp, restoredRow)
+	}
+	if oldValue != "0" {
+		t.Errorf("backed-up old_value = %q; want %q -- the PRE-mutation hit, or the record cannot restore", oldValue, "0")
+	}
 }
 
 func intPtr(i int) *int { return &i }

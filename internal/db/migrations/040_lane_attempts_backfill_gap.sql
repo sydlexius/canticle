@@ -88,6 +88,52 @@ ON CONFLICT(queue_id, lane) DO NOTHING;
 --
 -- A symmetric "make the attempt match the row" UPDATE was written first and
 -- rejected for precisely that reason: it silently reverted the protected case.
+-- BACKUP FIRST, for the same reason as 039's clear: the INSERT above only fills
+-- gaps, but this OVERWRITES a recorded hit value, and Down cannot recover it.
+-- The backup table is created by 039 (which always runs first); CREATE TABLE IF
+-- NOT EXISTS is repeated here so this file is not silently dependent on that
+-- ordering. Both the backup and the mutation are in this migration's own
+-- transaction, so neither can exist without the other.
+--
+-- Restore is a direct join:
+--   UPDATE lane_attempts SET hit = (
+--     SELECT CAST(old_value AS INTEGER) FROM provenance_repair_backup b
+--      WHERE b.table_name = 'lane_attempts' AND b.column_name = 'hit'
+--        AND b.row_id = lane_attempts.queue_id AND b.migration = '040')
+--   WHERE lane = 'detector' AND queue_id IN (
+--     SELECT row_id FROM provenance_repair_backup WHERE migration = '040');
+--
+-- row_id is queue_id: lane_attempts has no surrogate key, and UNIQUE(queue_id,
+-- lane) plus the lane = 'detector' filter identifies exactly one row.
+CREATE TABLE IF NOT EXISTS provenance_repair_backup (
+    migration    TEXT    NOT NULL,
+    table_name   TEXT    NOT NULL,
+    row_id       INTEGER NOT NULL,
+    column_name  TEXT    NOT NULL,
+    old_value    TEXT,
+    backed_up_at TEXT    NOT NULL,
+    UNIQUE(migration, table_name, row_id, column_name)
+);
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+-- Predicate identical to the UPDATE's, so the backup covers exactly the rows that
+-- change. DO NOTHING preserves the FIRST recorded value on a re-run.
+INSERT INTO provenance_repair_backup (migration, table_name, row_id, column_name, old_value, backed_up_at)
+SELECT '040', 'lane_attempts', la.queue_id, 'hit', CAST(la.hit AS TEXT), datetime('now')
+FROM lane_attempts la
+WHERE la.lane = 'detector'
+  AND la.hit = 0
+  AND EXISTS (
+        SELECT 1
+        FROM work_queue wq
+        WHERE wq.id = la.queue_id
+          AND wq.instrumental_result = 1
+    )
+ON CONFLICT(migration, table_name, row_id, column_name) DO NOTHING;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
 UPDATE lane_attempts
 SET hit = 1
 WHERE lane = 'detector'
