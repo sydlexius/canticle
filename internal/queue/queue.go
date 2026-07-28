@@ -2953,11 +2953,21 @@ func requireAffected(res sql.Result, op string) error {
 // Guarded on status = 'done' AND instrumental_result = 1, so a row settled with
 // real lyrics, a row a worker has claimed, or one already reversed is left
 // alone rather than reopened. Returns whether the row was reverted.
+//
+// provider_lane IS CLEARED with the verdict. A reversal un-does the detector's
+// completion, so leaving the lane behind means a deferred row keeps asserting
+// that the detector completed it -- attribution for a completion that no longer
+// exists. Measured on a live install as 43 such rows before this line existed.
+// Clearing is safe precisely BECAUSE of the guard above: only a row this method
+// actually reverts is touched, so a musixmatch-completed row that is later
+// re-deferred for an --upgrade keeps its lane, which is correct history. A
+// broader "clear the lane on any non-done row" would destroy that.
 func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, error) {
 	res, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue
          SET instrumental_result = 0,
              outcome_type = NULL,
+             provider_lane = NULL,
              status = 'deferred',
              completed_at = NULL,
              priority = ?,

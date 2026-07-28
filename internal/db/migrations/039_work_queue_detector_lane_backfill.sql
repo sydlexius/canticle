@@ -15,14 +15,14 @@
 -- and 029 are migrations rather than a CLI pass: it must correct every upgrading
 -- deployment, not one box an operator remembers to run a command on.
 --
--- GATED ON detector_version, NOT ON outcome_type ALONE. A blanket
--- "outcome_type='instrumental' AND provider_lane IS NULL" would be wrong: on the
--- deployment this was diagnosed against, a minority of such rows carry NO
--- detector_version at all, meaning nothing recorded that the detector produced
+-- NEVER GATED ON outcome_type ALONE. A blanket "outcome_type='instrumental' AND
+-- provider_lane IS NULL" would be wrong: a minority of such rows carry no
+-- detector evidence at all, meaning nothing recorded that the detector produced
 -- them. Attributing those to the detector lane would FABRICATE provenance --
 -- inventing evidence is worse than the blank cell this fixes, because a blank
 -- cell is visibly missing while a wrong lane is silently believed. Rows without
--- detector evidence are left NULL on purpose.
+-- detector evidence are left NULL on purpose. (See the instrumental_result note
+-- below for why detector_version is NOT the right evidence column either.)
 --
 -- ONLY WHERE provider_lane IS NULL. An already-attributed row is left untouched,
 -- including one attributed to a provider lane: recorded history outranks
@@ -52,6 +52,31 @@ SET provider_lane = 'detector'
 WHERE provider_lane IS NULL
   AND outcome_type = 'instrumental'
   AND instrumental_result = 1;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+-- The INVERSE repair, for the same column: clear a detector attribution that a
+-- REVERSAL left behind.
+--
+-- queue.UnsettleInstrumental un-does a detector settle when a tightened vocal
+-- gate overturns it -- clearing instrumental_result, outcome_type, and the
+-- completion -- but it did not clear provider_lane. The reverted row therefore
+-- kept asserting that the detector COMPLETED it, attribution for a completion
+-- that no longer exists. Measured on a live install: 43 rows. The accompanying
+-- change adds provider_lane = NULL to that statement; this repairs the rows it
+-- already produced, so the code fix and its data repair ship together.
+--
+-- SCOPED TIGHTLY, ON PURPOSE. All three conditions are required because they
+-- jointly describe a REVERTED detector row and nothing else: the lane says
+-- detector, the verdict was overturned to 0, and the outcome type was cleared. A
+-- broader predicate -- "clear the lane on any row that is not done" -- would
+-- destroy legitimate history, because a row a PROVIDER completed and that was
+-- later re-deferred for an --upgrade re-fetch correctly keeps its lane.
+UPDATE work_queue
+SET provider_lane = NULL
+WHERE provider_lane = 'detector'
+  AND instrumental_result = 0
+  AND outcome_type IS NULL;
 -- +goose StatementEnd
 
 -- +goose Down

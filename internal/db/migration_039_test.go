@@ -51,6 +51,16 @@ func TestMigration039AttributesOnlyDetectorEvidencedRows(t *testing.T) {
 		// on detector_version alone credits the detector with a provider's find.
 		// Measured on a live install as 26 real rows.
 		{"b5", "done", "instrumental", "v1", 0, nil, "<NULL>"},
+		// The INVERSE repair: a detector settle that a tightened vocal gate later
+		// REVERSED. UnsettleInstrumental cleared the verdict, the outcome type and
+		// the completion but left provider_lane behind, so the row asserted a
+		// completion that no longer exists. Measured on a live install as 43 rows.
+		{"b6", "deferred", nil, "v1", 0, "detector", "<NULL>"},
+		// The scoping guard for that repair: a row a PROVIDER completed and that was
+		// re-deferred for an --upgrade re-fetch keeps its lane. That is correct
+		// history, and a broader "clear the lane on any non-done row" would destroy
+		// it.
+		{"b7", "deferred", nil, nil, nil, "musixmatch", "musixmatch"},
 	}
 	for _, r := range rows {
 		if _, err := dbh.ExecContext(ctx, insert, r.key, r.key, r.key, r.key, "/m/"+r.key, r.status, r.outcome, r.version, r.verdict, r.lane); err != nil {

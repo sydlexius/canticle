@@ -4466,9 +4466,10 @@ func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
 	var status, outcomeType string
 	var result int
 	var vocalPeak float64
+	var lane *string
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT status, instrumental_result, COALESCE(outcome_type,''), vocal_peak FROM work_queue WHERE id = ?`, item.ID,
-	).Scan(&status, &result, &outcomeType, &vocalPeak); err != nil {
+		`SELECT status, instrumental_result, COALESCE(outcome_type,''), vocal_peak, provider_lane FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &result, &outcomeType, &vocalPeak, &lane); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
 	if status != "deferred" {
@@ -4482,6 +4483,14 @@ func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
 	}
 	if vocalPeak != 0.02 {
 		t.Errorf("vocal_peak = %v; want 0.02 preserved as the re-decision evidence", vocalPeak)
+	}
+	// The reversal un-does the detector's COMPLETION, so the lane attributing that
+	// completion must go with it. Leaving it behind makes a deferred row assert
+	// that the detector completed it -- attribution for something that no longer
+	// happened. Measured on a live install as 43 such rows before this was fixed.
+	if lane != nil {
+		t.Errorf("provider_lane = %q; want NULL. A reverted row is no longer completed by any lane, "+
+			"so keeping the attribution asserts a completion that was just un-done", *lane)
 	}
 }
 

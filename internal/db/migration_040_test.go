@@ -35,12 +35,22 @@ func TestMigration040FillsGapsWithoutOverwritingRecordedAttempts(t *testing.T) {
 		{901, "c1", 1, nil, 1},
 		// A miss must be filled as hit=0, not skipped: the tile is a RATE.
 		{902, "c2", 0, nil, 0},
-		// Already recorded live (or corrected by a recalibration flip). The stored
-		// verdict disagrees with the recorded attempt on purpose: the RECORDED value
-		// must survive, or the migration would silently revert a correction.
+		// Already recorded live, and corrected by a recalibration flip: the attempt
+		// says hit while the row says 0. The RECORDED value must survive, or the
+		// migration silently reverts that correction. This is the AMBIGUOUS
+		// direction the repair below deliberately does not touch -- a first draft
+		// used a symmetric "make the attempt match the row" UPDATE and broke exactly
+		// this case, which is why the statement is one-directional.
 		{903, "c3", 0, intPtr(1), 1},
 		// Never detected -- no verdict, so nothing to attribute.
 		{904, "c4", nil, nil, -1},
+		// The UNAMBIGUOUS direction: the attempt says miss, the row says
+		// instrumental. Settling requires instrumental_result=1 AND a completion, so
+		// the row is the later, stronger evidence and the attempt is stale. Both
+		// real rows measured on a live install are this shape. The gap-fill cannot
+		// reach it -- the row already has an attempt, so DO NOTHING skips it -- which
+		// is why the repair statement exists at all.
+		{905, "c5", 1, intPtr(0), 1},
 	}
 	for _, r := range rows {
 		if _, err := dbh.ExecContext(ctx, insert, r.id, r.key, r.key, r.key, r.key, "/m/"+r.key, "deferred", r.verdict); err != nil {

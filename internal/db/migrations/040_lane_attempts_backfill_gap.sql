@@ -27,11 +27,15 @@
 -- detection never ran for them -- so there is nothing to attribute and they are
 -- excluded.
 --
--- RECORDED HISTORY OUTRANKS RECONSTRUCTION. DO NOTHING, never DO UPDATE: an
--- attempt observed at the time it happened is always better evidence than one
--- inferred later from a stored verdict. That also protects the recalibration
+-- RECORDED HISTORY OUTRANKS RECONSTRUCTION. DO NOTHING, not DO UPDATE, in THIS
+-- statement: an attempt observed at the time it happened is better evidence than
+-- one inferred later from a stored verdict. That also protects the recalibration
 -- correction the code fix introduces -- a flip that already updated its attempt
 -- must not be overwritten by a reconstruction keyed on the same row.
+--
+-- The second statement below DOES update, but only for the one case this rule
+-- does not cover: an attempt its own row now CONTRADICTS, in the single direction
+-- where the row is unambiguously the later evidence. See its comment.
 --
 -- attempted_at IS A PROXY, NOT AN OBSERVATION, exactly as in 029: the true
 -- detection time was never recorded, so work_queue.updated_at stands in as an
@@ -47,6 +51,53 @@ SELECT id,
 FROM work_queue
 WHERE instrumental_result IN (0, 1)
 ON CONFLICT(queue_id, lane) DO NOTHING;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+-- Correct attempts that CONTRADICT the verdict now stored on their row.
+--
+-- The gap-fill above cannot reach these: they already HAVE an attempt row, so
+-- ON CONFLICT DO NOTHING deliberately leaves them alone. They exist because a
+-- re-decision (instrumentalrecalib) or a later settle overturned a verdict while
+-- the recorded attempt kept the ORIGINAL outcome -- the drift the accompanying
+-- code change stops from recurring. Measured on a live install: 2 rows, both
+-- reporting a miss for a row since settled instrumental.
+--
+-- WHY THIS IS AN UPDATE WHERE THE FILL IS DO NOTHING, WHICH LOOKS CONTRADICTORY.
+-- "Recorded history outranks reconstruction" governs an attempt whose row STILL
+-- AGREES with it -- there, the observation is better evidence than anything
+-- inferred later. It does not license keeping an attempt its own row now
+-- CONTRADICTS: that is not history, it is a stale record of a verdict that was
+-- explicitly overturned, and the report reads the rate as if it were current.
+--
+-- ONE DIRECTION ONLY: hit 0 -> 1, never 1 -> 0. This is deliberate and it is the
+-- whole reason the statement is safe. Both directions of disagreement are
+-- describable, but only ONE of them is unambiguous:
+--
+--   attempt=0, row=1  ->  the row was SETTLED instrumental after the attempt was
+--                         recorded. Settling requires instrumental_result=1 and a
+--                         completion, so the row is the later, stronger evidence.
+--                         All 2 real rows measured on a live install are this
+--                         shape.
+--   attempt=1, row=0  ->  AMBIGUOUS, and deliberately NOT touched. It is equally
+--                         consistent with a stale attempt AND with a recalib
+--                         reversal that already corrected the attempt while the
+--                         row moved on. Rewriting it could destroy exactly the
+--                         correction the accompanying code change introduces, so
+--                         this statement leaves it to the code path that owns it.
+--
+-- A symmetric "make the attempt match the row" UPDATE was written first and
+-- rejected for precisely that reason: it silently reverted the protected case.
+UPDATE lane_attempts
+SET hit = 1
+WHERE lane = 'detector'
+  AND hit = 0
+  AND EXISTS (
+        SELECT 1
+        FROM work_queue wq
+        WHERE wq.id = lane_attempts.queue_id
+          AND wq.instrumental_result = 1
+    );
 -- +goose StatementEnd
 
 -- +goose Down
