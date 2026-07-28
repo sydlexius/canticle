@@ -283,10 +283,19 @@ func TestExpiredSelfWriteNoLongerSuppresses(t *testing.T) {
 
 	target := filepath.Join(root, "aged.flac")
 	reg.Record(target)
-	// Poll the exact predicate the assertion below depends on, rather than
-	// sleeping a constant tuned against the TTL. This proceeds the instant the
-	// entry actually ages out, on any machine and at any TTL, and it cannot drift
-	// out of step with the constant above the way a fixed sleep silently would.
+	// Assert the entry is suppressed BEFORE polling for it to stop being
+	// suppressed. Without this the expiry poll is satisfied instantly by a broken
+	// or ineffective Record -- the predicate would already be true, the write
+	// would trigger a scan, and the test would pass while proving nothing about
+	// expiry. Establishing the starting state is what makes the transition
+	// meaningful.
+	if !reg.Suppress(target) {
+		t.Fatal("a just-recorded path is not suppressed; the expiry assertion below would pass vacuously")
+	}
+	// Poll the exact predicate the assertion depends on, rather than sleeping a
+	// constant tuned against the TTL. This proceeds the instant the entry
+	// actually ages out, on any machine and at any TTL, and it cannot drift out
+	// of step with the constant above the way a fixed sleep silently would.
 	waitFor(t, func() bool { return !reg.Suppress(target) }, "the recorded entry to age out")
 
 	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {

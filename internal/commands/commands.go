@@ -2247,6 +2247,14 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		cacheRepo = cache.New(sqlDB)
 	}
 	workQueue := queue.NewDBQueue(sqlDB)
+	// The generation must be set on the queue that WRITES rows, not only handed
+	// to the enqueuer that reads them back. Enqueue stamps q.providersVersion
+	// onto every new row, so without this the scheduler's queue writes generation
+	// 0 while shouldSuppress compares against the live generation -- the two can
+	// never match and the #679 suppression is a silent no-op in exactly the mode
+	// (serve) that has a generation at all. A one-shot CLI scan passes 0 here,
+	// which is the pre-existing default and changes nothing.
+	workQueue.SetProvidersVersion(providersVersion)
 	enq := scan.Enqueuer{
 		Results:             results,
 		Cache:               cacheRepo,

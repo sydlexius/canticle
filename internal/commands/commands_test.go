@@ -2647,3 +2647,56 @@ func TestDetectorScanVersion(t *testing.T) {
 		t.Errorf("unreachable sidecar: detectorScanVersion = %q, want empty (unknown)", got)
 	}
 }
+
+// The scheduler's work queue must be stamped with the provider generation.
+//
+// Enqueue writes q.providersVersion onto every new row, and the #679
+// suppression compares that STORED value against the live generation. If the
+// queue scheduler() builds is left at the default 0 while the enqueuer is handed
+// a real generation, the two can never match: every row is written as
+// generation 0, read back as 0, compared against N, and the suppression is a
+// silent no-op in serve mode -- the only mode that has a generation at all.
+//
+// CodeRabbit caught this on #707; nothing in the suite did, because every
+// suppression test constructed the Enqueuer directly and never exercised
+// scheduler()'s wiring. This drives OnScanComplete -- the real callback, over
+// the real queue -- rather than a queue the test built itself, which would
+// verify the fixture instead of the code.
+func TestSchedulerStampsProvidersVersionOnItsQueue(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	lib, err := library.New(sqlDB).Add(ctx, "/music", "Music", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	if err := scan.New(sqlDB).Upsert(ctx, lib.ID, []models.ScanResult{{
+		FilePath: "/music/a.mp3",
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:   "/music",
+		Filename: "a.lrc",
+		Status:   scan.StatusPending,
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("Upsert scan result: %v", err)
+	}
+
+	const gen = 42
+	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", gen)
+	if err := s.OnScanComplete(ctx, models.Library{ID: lib.ID}, nil, lib.Path, scan.TriggerScheduler); err != nil {
+		t.Fatalf("OnScanComplete: %v", err)
+	}
+
+	var stored int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT providers_version FROM work_queue`).Scan(&stored); err != nil {
+		t.Fatalf("read providers_version: %v", err)
+	}
+	if stored != gen {
+		t.Fatalf("providers_version = %d; want %d -- a row stamped 0 can never match the live generation, "+
+			"so the #679 suppression would silently never fire", stored, gen)
+	}
+}
