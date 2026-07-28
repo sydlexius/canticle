@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -39,6 +40,11 @@ type fakeStore struct {
 	settled     []int64
 	stampCalls  int
 	settleCalls int
+	// laneAttempts is the LAST attempt recorded per queue id, mirroring the real
+	// table's UNIQUE(queue_id, lane) upsert.
+	laneAttempts     map[int64]models.LaneAttempt
+	laneAttemptCalls int
+	laneAttemptErr   error
 	// t reports a wrong-ownership call. The fake asserts the argument rather than
 	// ignoring it, because ownership is the one parameter that silently no-ops in
 	// production when it is wrong.
@@ -103,6 +109,25 @@ func (s *fakeStore) StampUnclassifiedMiss(_ context.Context, id int64, _ queue.I
 	}
 	s.stamped[id] = 0
 	return true, nil
+}
+
+// RecordLaneAttempts records the attempts the backfill reports, keyed by queue
+// id, so a test can assert BOTH that an attempt was recorded and which verdict
+// it carried. It models the real UNIQUE(queue_id, lane) upsert by overwriting
+// rather than appending: a fake that appended would hide a double-record bug the
+// real schema silently collapses.
+func (s *fakeStore) RecordLaneAttempts(_ context.Context, queueID int64, attempts []models.LaneAttempt) error {
+	s.laneAttemptCalls++
+	if s.laneAttemptErr != nil {
+		return s.laneAttemptErr
+	}
+	if s.laneAttempts == nil {
+		s.laneAttempts = map[int64]models.LaneAttempt{}
+	}
+	for _, a := range attempts {
+		s.laneAttempts[queueID] = a
+	}
+	return nil
 }
 
 type fakeDetector struct {
@@ -335,6 +360,87 @@ func TestRun_NotInstrumentalStampsZeroAndDoesNotWrite(t *testing.T) {
 	}
 	if got, ok := store.stamped[1]; !ok || got != 0 {
 		t.Errorf("stamped = %v (present=%v); want 0 so it is distinguishable from never-detected", got, ok)
+	}
+}
+
+// TestRun_RecordsDetectorLaneAttemptForBothVerdicts pins the per-track hit-rate
+// reporting the backfill owes.
+//
+// The backfill reaches its verdict through a different path than the worker and
+// recorded NO lane_attempts at all, so the report's detector tile counted only
+// worker-side detections. On a live install that tile sat frozen at a fixed
+// numerator AND denominator while a backfill classified thousands of tracks --
+// not merely undercounting, but looking broken.
+//
+// BOTH verdicts are asserted because the tile renders a hit RATE: recording only
+// the instrumental settles would drive the detector toward a meaningless 100%,
+// the same trap migration 029 calls out for the historical backfill. A test that
+// checked only the positive path would pass against exactly that bug.
+func TestRun_RecordsDetectorLaneAttemptForBothVerdicts(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		instrumental bool
+	}{
+		{"instrumental settle records a hit", true},
+		{"not-instrumental stamp records a miss", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore(t, item(1, "/music/a.flac"))
+			res, err := New(store, fakeDetector{res: detector.Result{Instrumental: tc.instrumental, Version: "v1"}}, &fakeWriter{}).Run(
+				context.Background(), Options{GlobalDetectDefault: true})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if res.Errors != 0 {
+				t.Fatalf("res = %+v; want no errors", res)
+			}
+			got, ok := store.laneAttempts[1]
+			if !ok {
+				t.Fatal("no lane attempt recorded; the detector tile cannot see this row's classification and stays frozen while the backfill runs")
+			}
+			if got.Hit != tc.instrumental {
+				t.Errorf("attempt Hit = %v; want %v. The tile renders a hit RATE, so a wrong or missing verdict skews it", got.Hit, tc.instrumental)
+			}
+			if got.Lane != detectorbackfill.LaneName {
+				t.Errorf("attempt Lane = %q; want %q so it aggregates with the worker's detector attempts", got.Lane, detectorbackfill.LaneName)
+			}
+			if !got.Local {
+				t.Error("attempt Local = false; the detector resolves a track with no outbound provider request")
+			}
+		})
+	}
+}
+
+// TestRun_RecordsNoLaneAttemptWhenTheRowWasClaimed: a row a worker claimed
+// mid-classification was not settled by this run, so crediting the detector with
+// an attempt on it would report work that never landed.
+func TestRun_RecordsNoLaneAttemptWhenTheRowWasClaimed(t *testing.T) {
+	store := newFakeStore(t, item(1, "/music/a.flac"))
+	store.settleOutcome = queue.SettleClaimed
+
+	if _, err := New(store, fakeDetector{res: detector.Result{Instrumental: true, Version: "v1"}}, &fakeWriter{}).Run(
+		context.Background(), Options{GlobalDetectDefault: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, ok := store.laneAttempts[1]; ok {
+		t.Error("recorded a lane attempt for a row a worker claimed; the settle never applied, so the detector did not resolve this track")
+	}
+}
+
+// TestRun_LaneAttemptFailureDoesNotFailTheRow: the verdict is already durably
+// recorded by the time the attempt is reported, so losing the report must not
+// turn a successful settle into an error.
+func TestRun_LaneAttemptFailureDoesNotFailTheRow(t *testing.T) {
+	store := newFakeStore(t, item(1, "/music/a.flac"))
+	store.laneAttemptErr = errors.New("db is busy")
+
+	res, err := New(store, fakeDetector{res: detector.Result{Instrumental: true, Version: "v1"}}, &fakeWriter{}).Run(
+		context.Background(), Options{GlobalDetectDefault: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.RowsSettled != 1 || res.Errors != 0 {
+		t.Errorf("res = %+v; want settled=1 errors=0: a reporting failure must not fail a row whose settle committed", res)
 	}
 }
 

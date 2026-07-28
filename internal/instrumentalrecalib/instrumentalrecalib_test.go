@@ -10,6 +10,7 @@ import (
 	"time"
 
 	dbpkg "github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -189,6 +190,60 @@ func TestRun_SettlesPassingVersionMatchedRow(t *testing.T) {
 		if row.ID == id {
 			t.Fatalf("expected settled row %d to no longer be a vocal-gate rejection", id)
 		}
+	}
+}
+
+// TestRun_UpdatesDetectorLaneAttemptOnFlip: a re-decision that overturns a
+// verdict must correct the recorded attempt, not leave the old one standing.
+//
+// Every row here already carries an attempt from the ORIGINAL detection pass --
+// that pass is what produced the stored telemetry this package re-decides. When
+// a loosened threshold flips a rejection to instrumental, an untouched attempt
+// keeps reporting hit=0 for a row now settled instrumental, so the per-track
+// hit-rate report (#282) describes a verdict that no longer exists. Measured on
+// a live install as a real (if small) population of such contradictory rows.
+//
+// Asserted against the REAL lane_attempts table, not a fake: the correctness of
+// this depends on the UNIQUE(queue_id, lane) upsert actually UPDATING the
+// existing row rather than inserting a second one, which only the real schema
+// can demonstrate.
+func TestRun_UpdatesDetectorLaneAttemptOnFlip(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+
+	id := seedRejection(t, q, "/music/harp.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	// The attempt the original detection pass recorded: a miss.
+	if err := q.RecordLaneAttempts(ctx, id, []models.LaneAttempt{
+		{Lane: detectorbackfill.LaneName, Hit: false, Local: true},
+	}); err != nil {
+		t.Fatalf("seed lane attempt: %v", err)
+	}
+
+	res, err := New(q, &fakeWriter{}).Run(ctx, Options{
+		MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Settled != 1 {
+		t.Fatalf("res = %+v; want 1 settled", res)
+	}
+
+	var hit, n int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(hit), -1), COUNT(*) FROM lane_attempts WHERE queue_id = ? AND lane = ?`,
+		id, detectorbackfill.LaneName).Scan(&hit, &n); err != nil {
+		t.Fatalf("read lane attempt: %v", err)
+	}
+	if hit != 1 {
+		t.Errorf("lane attempt hit = %d; want 1. The flip settled the row instrumental, so an attempt still "+
+			"reporting a miss contradicts the verdict the report reads", hit)
+	}
+	if n != 1 {
+		t.Errorf("lane attempt rows = %d; want exactly 1 -- the flip must UPDATE the original pass's attempt "+
+			"via UNIQUE(queue_id, lane), not add a second one that double-counts the track", n)
 	}
 }
 
