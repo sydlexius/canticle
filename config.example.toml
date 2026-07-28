@@ -340,6 +340,27 @@ min_similarity = 0.35
 # falls back to a single window. Env: MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH.
 # ffprobe_path = ""
 
+# Serve-mode sweep that classifies tracks the detector has never scored. On by
+# default; the `scan reconcile-instrumental` CLI works either way. See
+# docs/instrumental-detection.md for the measured costs and tuning recipes.
+[instrumental_detector.backfill]
+
+# Env: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_ENABLED.
+# enabled = true
+
+# Tracks per cycle. Env: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_BATCH_SIZE.
+# batch_size = 100
+
+# Minutes between cycles; the gap is what lets the library disks sleep.
+# Env: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES.
+# interval_minutes = 60
+
+# Gap between the sweep's own inference calls, separate from the detector's
+# cooldown above. Governs how long a cycle takes; to make the sweep quieter prefer
+# a lower batch_size or longer interval_minutes.
+# Env: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS.
+# cooldown_seconds = 0
+
 [enrichment]
 # Recording enrichment reads the ISRC, MusicBrainz recording ID, and duration
 # from each file's audio tags and feeds them to the matcher to disambiguate

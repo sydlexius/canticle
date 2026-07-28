@@ -428,6 +428,19 @@ func (d *HTTPDetector) ModelVersion() string {
 	return d.resolveModelVersion(context.Background())
 }
 
+// CooldownSeconds reports the configured gap between inference calls.
+//
+// Exported because the cooldown is otherwise INVISIBLE from outside the package,
+// and it is load-bearing across a package boundary: Detect holds d.mu across the
+// cooldown sleep, so a caller that shares one detector with another serializes
+// against it for the full gap. The serve-mode backfill sweep therefore builds its
+// OWN detector with its own cooldown (#708), and this accessor is what lets that
+// separation be asserted rather than assumed. Read-only; the value is fixed at
+// construction.
+func (d *HTTPDetector) CooldownSeconds() int {
+	return int(d.cooldown / time.Second)
+}
+
 // resolveModelVersion returns the cached sidecar model version, probing GET
 // /health once to learn it. A failed probe is retried on a later call rather than
 // cached as empty, because the usual failure is a sidecar that is still booting

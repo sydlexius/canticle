@@ -1226,6 +1226,27 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		defer wg.Done()
 		runIdentityBackfill(runCtx, sqlDB)
 	}()
+	// Periodic instrumental-backfill sweep (#708): classify rows the detector has
+	// never scored. The capability shipped as `scan reconcile-instrumental` (#499)
+	// but is CLI-only, so an install where nobody runs it drifts forever -- which
+	// is how a 7,757-row backlog accumulated on a live install. Enabled by default:
+	// the work is bounded, local, and makes no provider request.
+	//
+	// It gets its OWN detector rather than sharing the worker's. HTTPDetector.Detect
+	// sleeps out its cooldown while holding the detector's mutex, so a shared
+	// instance would park the worker's detection behind a whole sweep cycle.
+	if backfillDetector, bfErr := newBackfillDetector(cfg, ffmpegPath); bfErr != nil {
+		// Non-fatal: the worker's own detection is already wired and unaffected, and
+		// the CLI backfill still works. Log and carry on rather than failing serve
+		// over a background convenience.
+		slog.Error("instrumental backfill sweep: could not build its detector; sweep disabled for this run", "error", bfErr)
+	} else if backfillDetector != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runInstrumentalBackfillSweep(runCtx, sqlDB, cfg, backfillDetector)
+		}()
+	}
 	// Background session sweeper: periodically delete expired/revoked sessions,
 	// mirroring the worker/scheduler goroutine + context-cancel pattern. Only
 	// runs when the authenticated UI is mounted (there are no sessions otherwise).

@@ -258,6 +258,73 @@ If you do tune:
   missing a late vocal entry; more windows dilutes each one's audio share within
   the fixed `sample_duration_seconds`.
 
+### The background backfill sweep
+
+Detection is otherwise reachable only as a side effect of a provider miss, which
+is paced to the provider's rate limit. A track the detector has never scored
+therefore waits on a throttle it does not use, and an install where nobody runs
+`scan reconcile-instrumental` drifts forever - on one real library that produced a
+backlog of over 7,000 never-scored tracks.
+
+Serve mode runs a bounded periodic sweep to fix that. It is **on by default**: the
+work is local, bounded, and makes no provider request.
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `backfill.enabled` | `true` | Master switch for the sweep. The CLI works either way. |
+| `backfill.batch_size` | `100` | Tracks classified per cycle. |
+| `backfill.interval_minutes` | `60` | Gap between cycles. |
+| `backfill.cooldown_seconds` | `0` | Gap between the sweep's own detector calls. |
+
+All four are under `[instrumental_detector.backfill]` with
+`MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_*` environment equivalents.
+
+The sweep uses **its own detector instance**, so its cooldown is independent of
+`instrumental_detector.cooldown_seconds`. That separation is deliberate rather
+than cosmetic: a detector holds an internal lock across its cooldown sleep, so a
+shared instance would park the worker's interactive detection behind a whole
+sweep cycle.
+
+### Taming it on a low-wattage or shared host
+
+Size against the **real** per-track cost, which is not inference. Measured on a
+live install (canticle 1.30.1):
+
+| Stage | Cost per track |
+|-------|----------------|
+| ffmpeg sample extraction (6 windows) | ~0.10s |
+| Classifier inference (30s sample) | 0.07-0.11s |
+| Classifier inference (60s sample, the longest sent) | 0.13-0.24s |
+
+So a track costs roughly **0.2 seconds of real work**, and a default 100-track
+cycle is about a 20-second burst once an hour.
+
+**Bound the sweep between cycles, not within one.** A disk spindown timer measures
+the longest *contiguous* quiet window, not the average rate, so a short burst
+followed by a long silence is what lets an array sleep. Dribbling the same 100
+tracks out across the hour keeps the disks awake far longer to do exactly the same
+work - strictly worse for idle time and for power.
+
+Recipes:
+
+- **Quieter** - lower `batch_size` (fewer tracks per burst) or raise
+  `interval_minutes` (longer silence between bursts). Prefer these two.
+- **Drain a large backlog faster** - raise `batch_size`, or run the CLI directly
+  with a large `--limit` (`canticle scan reconcile-instrumental --yes --limit 5000`).
+- **Spread a cycle out** - raise `backfill.cooldown_seconds`. This is the knob
+  that actually governs how long a cycle *takes*, but it works against the
+  spindown goal; reach for it only when the burst competes with something else on
+  the host.
+- **Cut the per-track cost** - lower `spread_samples`, which multiplies the ffmpeg
+  work per track. This changes detection accuracy, so treat it as a last resort.
+- **Off entirely** - `backfill.enabled = false`. The `scan reconcile-instrumental`
+  CLI still works, so an operator can drain on their own schedule.
+
+The `cpus:` limit on the sidecar container is an **isolation** knob, not a
+throughput one - it bounds how much of the host TensorFlow grabs during a burst,
+but it governs only ~0.2s of a multi-second per-track cost. Do not size detector
+throughput with it.
+
 ## Operations and troubleshooting
 
 The decision is logged. Look for the detector decision line, which reports the

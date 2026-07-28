@@ -401,6 +401,31 @@ type InstrumentalDetectorConfig struct {
 	// default) so it is consulted only on a provider miss (today's behavior).
 	// Override: MXLRC_INSTRUMENTAL_DETECTOR_ORDERING.
 	Ordering string `toml:"ordering"`
+	// Backfill configures the serve-mode sweep that classifies rows the detector
+	// has never scored.
+	Backfill InstrumentalBackfillConfig `toml:"backfill"`
+}
+
+// InstrumentalBackfillConfig configures the serve-mode backfill sweep (#708).
+// The sweep and the reasoning behind these bounds live in
+// internal/commands/instrumental_backfill_sweep.go.
+type InstrumentalBackfillConfig struct {
+	// Enabled turns the sweep on. Default true; the CLI is unaffected either way.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_ENABLED.
+	Enabled bool `toml:"enabled"`
+	// BatchSize caps rows per cycle. Values < 1 reset to the default 100.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_BATCH_SIZE.
+	BatchSize int `toml:"batch_size"`
+	// IntervalMinutes spaces the cycles. Values < 1 reset to the default 60.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES.
+	IntervalMinutes int `toml:"interval_minutes"`
+	// CooldownSeconds is the gap between the sweep's OWN inference calls, separate
+	// from InstrumentalDetectorConfig.CooldownSeconds. Default 0; negatives reset
+	// to 0. It governs how long a cycle takes -- raising it works against the
+	// disk-idle goal, so prefer BatchSize/IntervalMinutes to make the sweep
+	// quieter.
+	// Override: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS.
+	CooldownSeconds int `toml:"cooldown_seconds"`
 }
 
 // EnrichmentConfig holds the global default for recording enrichment (reading
@@ -528,6 +553,13 @@ const detectorVocalMaxConfidenceDefault = 0.015
 // detector package's defaultSpeechMaxConfidence by convention.
 const detectorSpeechMaxConfidenceDefault = 0.20
 
+// Backfill sweep defaults (#708): ~2,400 rows/day, drained in short hourly
+// bursts. See internal/commands/instrumental_backfill_sweep.go for why.
+const (
+	detectorBackfillBatchSizeDefault       = 100
+	detectorBackfillIntervalMinutesDefault = 60
+)
+
 // queueBatchSizeDefault is the default shuffled-lookahead buffer size (#571).
 const queueBatchSizeDefault = 10
 
@@ -610,6 +642,11 @@ func defaults() Config {
 			SpreadSamples:         6,
 			CooldownSeconds:       5,
 			Ordering:              detectorOrderingDemoted,
+			Backfill: InstrumentalBackfillConfig{
+				Enabled:         true,
+				BatchSize:       detectorBackfillBatchSizeDefault,
+				IntervalMinutes: detectorBackfillIntervalMinutesDefault,
+			},
 		},
 		Enrichment: EnrichmentConfig{Enabled: true},
 		Realign: RealignConfig{
@@ -760,6 +797,20 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			// hidden.
 			if cfg.InstrumentalDetector.Ordering != detectorOrderingFront && cfg.InstrumentalDetector.Ordering != detectorOrderingDemoted {
 				cfg.InstrumentalDetector.Ordering = d.InstrumentalDetector.Ordering
+			}
+			// Backfill sweep bounds. BatchSize/IntervalMinutes < 1 would make the
+			// sweep either classify nothing or spin its ticker, so both restore the
+			// default rather than being honored. CooldownSeconds=0 IS a valid user
+			// value (no gap -- the documented default), mirroring the detector's own
+			// cooldown handling above, so only negatives are clamped.
+			if cfg.InstrumentalDetector.Backfill.BatchSize < 1 {
+				cfg.InstrumentalDetector.Backfill.BatchSize = d.InstrumentalDetector.Backfill.BatchSize
+			}
+			if cfg.InstrumentalDetector.Backfill.IntervalMinutes < 1 {
+				cfg.InstrumentalDetector.Backfill.IntervalMinutes = d.InstrumentalDetector.Backfill.IntervalMinutes
+			}
+			if cfg.InstrumentalDetector.Backfill.CooldownSeconds < 0 {
+				cfg.InstrumentalDetector.Backfill.CooldownSeconds = 0
 			}
 			// CircuitOpenDuration: 0 means "not set in file"; restore the
 			// default so users copying config.example.toml don't disable
@@ -1312,6 +1363,44 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.InstrumentalDetector.CooldownSeconds = n
 			applied["instrumental_detector.cooldown_seconds"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_ENABLED", "value", v, "current", cfg.InstrumentalDetector.Backfill.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.Backfill.Enabled = b
+			applied["instrumental_detector.backfill.enabled"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_BATCH_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_BATCH_SIZE", "value", v, "current", cfg.InstrumentalDetector.Backfill.BatchSize) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.Backfill.BatchSize = n
+			applied["instrumental_detector.backfill.batch_size"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "value", v, "current", cfg.InstrumentalDetector.Backfill.IntervalMinutes) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.Backfill.IntervalMinutes = n
+			applied["instrumental_detector.backfill.interval_minutes"] = true
+		}
+	}
+	// n == 0 is accepted here (no cooldown -- the documented default), mirroring
+	// the detector's own cooldown override above; only negatives are rejected.
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS", "value", v, "current", cfg.InstrumentalDetector.Backfill.CooldownSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalDetector.Backfill.CooldownSeconds = n
+			applied["instrumental_detector.backfill.cooldown_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES"); v != "" {
