@@ -10,6 +10,7 @@ import (
 	"time"
 
 	dbpkg "github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -69,14 +70,14 @@ func (f *fakeStore) ListVocalGateRejections(ctx context.Context, opts queue.List
 	return f.DBQueue.ListVocalGateRejections(ctx, opts)
 }
 
-func (f *fakeStore) SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error) {
+func (f *fakeStore) SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error) {
 	if f.settleErr != nil {
 		return queue.SettleFailed, f.settleErr
 	}
 	if f.settleOutcome != nil {
 		return *f.settleOutcome, nil
 	}
-	return f.DBQueue.SettleInstrumental(ctx, id, tel)
+	return f.DBQueue.SettleInstrumental(ctx, id, tel, owner)
 }
 
 func (f *fakeStore) ResetInstrumentalToUnclassified(ctx context.Context, id int64) (bool, error) {
@@ -189,6 +190,60 @@ func TestRun_SettlesPassingVersionMatchedRow(t *testing.T) {
 		if row.ID == id {
 			t.Fatalf("expected settled row %d to no longer be a vocal-gate rejection", id)
 		}
+	}
+}
+
+// TestRun_UpdatesDetectorLaneAttemptOnFlip: a re-decision that overturns a
+// verdict must correct the recorded attempt, not leave the old one standing.
+//
+// Every row here already carries an attempt from the ORIGINAL detection pass --
+// that pass is what produced the stored telemetry this package re-decides. When
+// a loosened threshold flips a rejection to instrumental, an untouched attempt
+// keeps reporting hit=0 for a row now settled instrumental, so the per-track
+// hit-rate report (#282) describes a verdict that no longer exists. Measured on
+// a live install as a real (if small) population of such contradictory rows.
+//
+// Asserted against the REAL lane_attempts table, not a fake: the correctness of
+// this depends on the UNIQUE(queue_id, lane) upsert actually UPDATING the
+// existing row rather than inserting a second one, which only the real schema
+// can demonstrate.
+func TestRun_UpdatesDetectorLaneAttemptOnFlip(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+
+	id := seedRejection(t, q, "/music/harp.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+	// The attempt the original detection pass recorded: a miss.
+	if err := q.RecordLaneAttempts(ctx, id, []models.LaneAttempt{
+		{Lane: detectorbackfill.LaneName, Hit: false, Local: true},
+	}); err != nil {
+		t.Fatalf("seed lane attempt: %v", err)
+	}
+
+	res, err := New(q, &fakeWriter{}).Run(ctx, Options{
+		MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Settled != 1 {
+		t.Fatalf("res = %+v; want 1 settled", res)
+	}
+
+	var hit, n int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(hit), -1), COUNT(*) FROM lane_attempts WHERE queue_id = ? AND lane = ?`,
+		id, detectorbackfill.LaneName).Scan(&hit, &n); err != nil {
+		t.Fatalf("read lane attempt: %v", err)
+	}
+	if hit != 1 {
+		t.Errorf("lane attempt hit = %d; want 1. The flip settled the row instrumental, so an attempt still "+
+			"reporting a miss contradicts the verdict the report reads", hit)
+	}
+	if n != 1 {
+		t.Errorf("lane attempt rows = %d; want exactly 1 -- the flip must UPDATE the original pass's attempt "+
+			"via UNIQUE(queue_id, lane), not add a second one that double-counts the track", n)
 	}
 }
 
@@ -776,7 +831,7 @@ func seedConfirmation(t *testing.T, q *queue.DBQueue, sourcePath string, tel que
 	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 		t.Fatalf("defer: %v", err)
 	}
-	if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+	if _, err := q.SettleInstrumental(ctx, item.ID, tel, queue.OwnedByBackfill); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	name, err := lyrics.SidecarName("Artist", "Title", filepath.Base(sourcePath), false)
@@ -824,6 +879,54 @@ func TestReverse_RevertsRowThatNowFailsTheVocalGate(t *testing.T) {
 	}
 	if status != "deferred" || result != 0 {
 		t.Errorf("status/result = %q/%d; want deferred/0", status, result)
+	}
+}
+
+// TestReverse_UpdatesDetectorLaneAttemptOnRevert is the reverse direction's
+// counterpart to TestRun_UpdatesDetectorLaneAttemptOnFlip.
+//
+// It is asserted separately because the two directions are separate call sites
+// and the forward test does not cover this one: verified by mutation that making
+// Reverse's recordAttempt a no-op leaves the whole package green. Reverse is also
+// the direction that DEFLATES the rate (a recorded hit becomes a miss), so a gap
+// here reports the detector as better than it is -- the same failure mode as a
+// hits-only fill, arrived at from the other side.
+func TestReverse_UpdatesDetectorLaneAttemptOnRevert(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := openTestQueueWithDB(t)
+	src := filepath.Join(t.TempDir(), "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	id, _ := seedConfirmation(t, q, src, tel, lyrics.SourceDetector)
+
+	// The attempt the original detection pass recorded: a hit.
+	if err := q.RecordLaneAttempts(ctx, id, []models.LaneAttempt{
+		{Lane: detectorbackfill.LaneName, Hit: true, Local: true},
+	}); err != nil {
+		t.Fatalf("seed lane attempt: %v", err)
+	}
+
+	res, err := New(q, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 1 {
+		t.Fatalf("res = %+v; want 1 reversed", res)
+	}
+
+	var hit, n int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(hit), -1), COUNT(*) FROM lane_attempts WHERE queue_id = ? AND lane = ?`,
+		id, detectorbackfill.LaneName).Scan(&hit, &n); err != nil {
+		t.Fatalf("read lane attempt: %v", err)
+	}
+	if hit != 0 {
+		t.Errorf("lane attempt hit = %d; want 0. The revert un-did the instrumental verdict, so an attempt still "+
+			"reporting a hit overstates the detector's rate", hit)
+	}
+	if n != 1 {
+		t.Errorf("lane attempt rows = %d; want exactly 1 -- the revert must UPDATE the original attempt, not add one", n)
 	}
 }
 
@@ -921,7 +1024,7 @@ func TestReverse_ReversesLegacyBareMarker(t *testing.T) {
 		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 			return 0, err
 		}
-		if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+		if _, err := q.SettleInstrumental(ctx, item.ID, tel, queue.OwnedByBackfill); err != nil {
 			return 0, err
 		}
 		return item.ID, nil

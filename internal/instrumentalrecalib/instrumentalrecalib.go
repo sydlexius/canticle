@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -46,11 +47,16 @@ type Resetter interface {
 type Store interface {
 	Resetter
 	ListVocalGateRejections(ctx context.Context, opts queue.ListVocalGateRejectionsOptions) ([]queue.StampedRejection, error)
-	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error)
+	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error)
 	// The tightening direction (Reverse): enumerate confirmed instrumentals and
 	// revert the ones a lowered threshold now rejects.
 	ListVocalGateConfirmations(ctx context.Context, opts queue.ListVocalGateConfirmationsOptions) ([]queue.StampedRejection, error)
 	UnsettleInstrumental(ctx context.Context, id int64) (bool, error)
+	// RecordLaneAttempts updates the detector's recorded attempt when a
+	// re-decision flips the verdict, so the per-track hit-rate report (#282) does
+	// not keep reporting the outcome this run just overturned. Idempotent per
+	// (queue_id, lane), so it UPDATES the existing attempt rather than adding one.
+	RecordLaneAttempts(ctx context.Context, queueID int64, attempts []models.LaneAttempt) error
 }
 
 // Writer writes the instrumental marker sidecar. Satisfied by lyrics.Writer.
@@ -302,7 +308,7 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 			continue
 		}
 
-		outcome, err := r.store.SettleInstrumental(ctx, row.ID, row.Tel)
+		outcome, err := r.store.SettleInstrumental(ctx, row.ID, row.Tel, queue.OwnedByBackfill)
 		if err != nil {
 			// AMBIGUOUS: the error may have come from Commit itself, so the settle
 			// may or may not have landed. Keep the marker and report the error --
@@ -318,6 +324,14 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 		switch outcome {
 		case queue.Settled:
 			res.Settled++
+			// The stored attempt still says hit=0, from the ORIGINAL detection pass
+			// whose verdict this run just overturned. Leaving it would keep the
+			// per-track hit-rate report (#282) reporting a miss for a row now settled
+			// instrumental -- the same verdict/report drift measured on a live
+			// install. This UPDATES that attempt rather than adding one
+			// (UNIQUE(queue_id, lane)); no new detection happened, the re-decision is
+			// pure arithmetic over the stored telemetry.
+			r.recordAttempt(ctx, row.ID, true)
 			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeApplied})
 		case queue.SettleAlreadyInstrumental:
 			// A PEER settled this row first with the same verdict; the marker on
@@ -400,6 +414,30 @@ func (r *Recalibrator) reportOutcome(opts Options, o Outcome) {
 	if err := opts.Outcome(o); err != nil {
 		slog.Warn("instrumentalrecalib: could not record change outcome to the backup trail",
 			"id", o.QueueID, "status", o.Status, "error", err)
+	}
+}
+
+// recordAttempt updates the detector's recorded lane attempt after a
+// re-decision flips a row's verdict, so the per-track hit-rate report (#282)
+// reflects the verdict that now stands rather than the one this run overturned.
+//
+// It UPDATES rather than adds: UNIQUE(queue_id, lane) makes the write an upsert,
+// and every row here already carries an attempt from the original detection pass
+// (that pass is what produced the stored telemetry this package re-decides). No
+// new detection happened -- the re-decision is pure arithmetic over those stored
+// scores -- so this corrects an existing record instead of claiming a new one.
+//
+// Best-effort: the verdict is already durably recorded on the row, so a failed
+// report write must not fail a flip that succeeded.
+func (r *Recalibrator) recordAttempt(ctx context.Context, queueID int64, instrumental bool) {
+	if err := r.store.RecordLaneAttempts(ctx, queueID, []models.LaneAttempt{{
+		Lane: detectorbackfill.LaneName,
+		Hit:  instrumental,
+		// The detector resolves a track with no outbound provider request.
+		Local: true,
+	}}); err != nil {
+		slog.Warn("instrumentalrecalib: could not update the detector lane attempt; the per-track hit-rate report will keep showing the overturned verdict",
+			"id", queueID, "error", err)
 	}
 }
 
@@ -530,6 +568,12 @@ func (r *Recalibrator) Reverse(ctx context.Context, opts Options) (Result, error
 			continue
 		}
 		res.Reversed++
+		// Mirror of the forward direction: the stored attempt says hit=1 from the
+		// original pass, and this run just reverted that verdict. Recorded right
+		// after the revert applied, before the marker cleanup below, because the DB
+		// verdict is what the report reads -- a marker that fails to unlink is
+		// self-healing residue and must not hold back the correction.
+		r.recordAttempt(ctx, row.ID, false)
 
 		if marker == "" {
 			continue

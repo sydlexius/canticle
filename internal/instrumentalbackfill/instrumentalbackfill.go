@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -38,8 +39,12 @@ import (
 type Store interface {
 	CountUnclassified(ctx context.Context, libraryID *int64, globalDetectDefault bool) (int, error)
 	ListUnclassified(ctx context.Context, opts queue.ListUnclassifiedOptions) ([]queue.WorkItem, error)
-	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error)
+	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error)
 	StampUnclassifiedMiss(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (bool, error)
+	// RecordLaneAttempts persists the per-track detector attempt that produced the
+	// verdict, so the backfill's work appears in the per-track hit-rate report
+	// (#282) the same way the worker's does. Idempotent per (queue_id, lane).
+	RecordLaneAttempts(ctx context.Context, queueID int64, attempts []models.LaneAttempt) error
 }
 
 // Detector classifies a track from its audio. Satisfied by detector.Detector.
@@ -274,6 +279,10 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 				continue
 			}
 			res.RowsStamped++
+			// Recorded only after the stamp APPLIED: a row a worker claimed mid-flight
+			// was not classified by this run, so attributing an attempt to it would
+			// credit the detector with work it did not land.
+			b.recordAttempt(ctx, item.ID, false)
 			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeApplied})
 			continue
 		}
@@ -314,7 +323,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 
 		// One guarded transaction: verdict, telemetry, outcome, and completion all
 		// land together or not at all.
-		outcome, err := b.store.SettleInstrumental(ctx, item.ID, tel)
+		outcome, err := b.store.SettleInstrumental(ctx, item.ID, tel, queue.OwnedByBackfill)
 		if err != nil {
 			// AMBIGUOUS: the error may have come from Commit itself, so the settle may
 			// or may not have landed. Deleting the marker could destroy a committed
@@ -331,6 +340,11 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 		switch outcome {
 		case queue.Settled:
 			res.RowsSettled++
+			// Only on Settled. SettleAlreadyInstrumental means a PEER settled the row
+			// and recorded its own attempt, so recording one here would attribute the
+			// same track to the detector twice -- harmless for the (idempotent) row
+			// itself, but it is the peer's classification, not this run's.
+			b.recordAttempt(ctx, item.ID, true)
 			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeApplied})
 		case queue.SettleAlreadyInstrumental:
 			// A PEER BACKFILL settled this row first with the same verdict. The marker
@@ -374,6 +388,39 @@ func (b *Backfiller) reportOutcome(opts Options, o Outcome) {
 	if err := opts.Outcome(o); err != nil {
 		slog.Warn("instrumentalbackfill: could not record change outcome to the backup trail",
 			"id", o.QueueID, "status", o.Status, "error", err)
+	}
+}
+
+// recordAttempt persists the detector attempt that produced a verdict, so the
+// backfill's classifications appear in the per-track hit-rate report (#282).
+//
+// WHY THIS EXISTS. lane_attempts is written by the worker via recordLaneAttempts
+// on every dispatch, but the backfill reaches its verdict through an entirely
+// different path and recorded nothing at all. The report's detector tile
+// therefore counted ONLY worker-side detections and sat frozen while a backfill
+// classified thousands of tracks -- the numerator and denominator both stalled,
+// so the tile did not merely undercount, it looked broken.
+//
+// BOTH VERDICTS, NOT HITS-ONLY. hit=1 for instrumental, hit=0 for
+// not-instrumental. The tile renders a hit RATE, so recording only the positives
+// would drive the detector toward a meaningless 100%. This is the same rule
+// migration 029 states for the historical backfill, and it is easy to get wrong
+// in the opposite direction here because only the positive path feels like a
+// "result".
+//
+// BEST-EFFORT. A failure is logged and swallowed: the verdict is already durably
+// recorded on the row, and losing a reporting attempt must not fail a row whose
+// mutation succeeded. Idempotent per (queue_id, lane), so a later re-run
+// upserts rather than double-counting.
+func (b *Backfiller) recordAttempt(ctx context.Context, queueID int64, instrumental bool) {
+	if err := b.store.RecordLaneAttempts(ctx, queueID, []models.LaneAttempt{{
+		Lane: detectorbackfill.LaneName,
+		Hit:  instrumental,
+		// The detector resolves a track with no outbound provider request.
+		Local: true,
+	}}); err != nil {
+		slog.Warn("instrumentalbackfill: could not record the detector lane attempt; the per-track hit-rate report will undercount this row",
+			"id", queueID, "error", err)
 	}
 }
 

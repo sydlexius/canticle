@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -4022,7 +4023,7 @@ func TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker(t *testing.T) {
 		t.Fatalf("dequeue: %v", err)
 	}
 
-	outcome, err := q.SettleInstrumental(ctx, item.ID, tel)
+	outcome, err := q.SettleInstrumental(ctx, item.ID, tel, OwnedByBackfill)
 	if err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
@@ -4085,7 +4086,7 @@ func TestDBQueue_SettleInstrumentalCompletesDeferredRowAtomically(t *testing.T) 
 		t.Fatalf("defer: %v", err)
 	}
 
-	outcome, err := q.SettleInstrumental(ctx, item.ID, tel)
+	outcome, err := q.SettleInstrumental(ctx, item.ID, tel, OwnedByBackfill)
 	if err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
@@ -4107,6 +4108,60 @@ func TestDBQueue_SettleInstrumentalCompletesDeferredRowAtomically(t *testing.T) 
 	}
 	if vocalClass != "Singing" {
 		t.Errorf("vocal_class = %q; want the telemetry written in the same transaction", vocalClass)
+	}
+}
+
+// TestDBQueue_SettleInstrumentalAttributesDetectorLane: a settle must stamp
+// provider_lane, not just the outcome type.
+//
+// This is the regression for the blank-lane column in the reports UI (#708). The
+// backfill callers reach completion ONLY through SettleInstrumental, so a settle
+// that stamped outcome_type without provider_lane left every backfilled row
+// unattributed, rendering as an empty lane beside worker-settled rows that showed
+// "Instrumental Detector". The assertion reads the column straight out of SQLite
+// rather than trusting the returned outcome, because the bug was precisely that a
+// fully successful settle still left the column NULL -- an assertion on the return
+// value would have passed throughout.
+func TestDBQueue_SettleInstrumentalAttributesDetectorLane(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
+		MusicSum: 0.95, VocalPeak: 0.01, VocalClass: "Singing", DetectorVersion: "v1",
+	}, OwnedByBackfill); err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+
+	// Scanned as a pointer so a NULL is distinguishable from the empty string:
+	// the pre-fix behavior was NULL, and scanning into a bare string would make
+	// the two indistinguishable and the failure message misleading.
+	var lane *string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT provider_lane FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&lane); err != nil {
+		t.Fatalf("read provider_lane: %v", err)
+	}
+	if lane == nil {
+		t.Fatal("provider_lane is NULL after a settle; the row renders with a blank lane in the reports UI")
+	}
+	if *lane != detectorbackfill.LaneName {
+		t.Errorf("provider_lane = %q; want %q", *lane, detectorbackfill.LaneName)
 	}
 }
 
@@ -4189,7 +4244,7 @@ func TestDBQueue_UnclassifiedQueriesPropagateDBFailure(t *testing.T) {
 	if _, err := q.CountUnclassified(ctx, nil, true); err == nil {
 		t.Error("CountUnclassified returned nil error on a closed database")
 	}
-	if _, err := q.SettleInstrumental(ctx, 1, InstrumentalTelemetry{}); err == nil {
+	if _, err := q.SettleInstrumental(ctx, 1, InstrumentalTelemetry{}, OwnedByBackfill); err == nil {
 		t.Error("SettleInstrumental returned nil error on a closed database")
 	}
 }
@@ -4230,11 +4285,11 @@ func TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker(t *testing.T) {
 		q := NewDBQueue(openQueueTestDB(t))
 		id := mkDeferred(t, q, "peer")
 		// The peer wins the race.
-		if out, err := q.SettleInstrumental(ctx, id, tel); err != nil || out != Settled {
+		if out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill); err != nil || out != Settled {
 			t.Fatalf("peer settle = (%v, %v); want (Settled, nil)", out, err)
 		}
 		// We lose it, and must be told WHY -- our marker is identical and valid.
-		out, err := q.SettleInstrumental(ctx, id, tel)
+		out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill)
 		if err != nil {
 			t.Fatalf("second settle: %v", err)
 		}
@@ -4249,7 +4304,7 @@ func TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker(t *testing.T) {
 		if _, err := q.Dequeue(ctx); err != nil { // a worker takes it back
 			t.Fatalf("dequeue: %v", err)
 		}
-		out, err := q.SettleInstrumental(ctx, id, tel)
+		out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill)
 		if err != nil {
 			t.Fatalf("settle: %v", err)
 		}
@@ -4264,7 +4319,7 @@ func TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker(t *testing.T) {
 		if _, err := q.db.ExecContext(ctx, `DELETE FROM work_queue WHERE id = ?`, id); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
-		out, err := q.SettleInstrumental(ctx, id, tel)
+		out, err := q.SettleInstrumental(ctx, id, tel, OwnedByBackfill)
 		if err != nil {
 			t.Fatalf("settle: %v", err)
 		}
@@ -4396,7 +4451,7 @@ func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
 	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 		t.Fatalf("defer: %v", err)
 	}
-	if _, err := q.SettleInstrumental(ctx, item.ID, tel); err != nil {
+	if _, err := q.SettleInstrumental(ctx, item.ID, tel, OwnedByBackfill); err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
 
@@ -4411,9 +4466,10 @@ func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
 	var status, outcomeType string
 	var result int
 	var vocalPeak float64
+	var lane *string
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT status, instrumental_result, COALESCE(outcome_type,''), vocal_peak FROM work_queue WHERE id = ?`, item.ID,
-	).Scan(&status, &result, &outcomeType, &vocalPeak); err != nil {
+		`SELECT status, instrumental_result, COALESCE(outcome_type,''), vocal_peak, provider_lane FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &result, &outcomeType, &vocalPeak, &lane); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
 	if status != "deferred" {
@@ -4427,6 +4483,129 @@ func TestDBQueue_UnsettleInstrumentalRevertsSettledRow(t *testing.T) {
 	}
 	if vocalPeak != 0.02 {
 		t.Errorf("vocal_peak = %v; want 0.02 preserved as the re-decision evidence", vocalPeak)
+	}
+	// The reversal un-does the detector's COMPLETION, so the lane attributing that
+	// completion must go with it. Leaving it behind makes a deferred row assert
+	// that the detector completed it -- attribution for something that no longer
+	// happened. Measured on a live install as 43 such rows before this was fixed.
+	if lane != nil {
+		t.Errorf("provider_lane = %q; want NULL. A reverted row is no longer completed by any lane, "+
+			"so keeping the attribution asserts a completion that was just un-done", *lane)
+	}
+}
+
+// TestDBQueue_SettleInstrumentalOwnedByWorkerSettlesProcessingRow exercises the
+// OwnedByWorker half of the ownership mapping against REAL SQLite.
+//
+// Every other settle in this file passes OwnedByBackfill, so
+// `OwnedByWorker -> StatusProcessing` was only ever exercised through the worker
+// package's fake. A fake agreeing with a wrong mapping is exactly how the
+// ownership bug in this branch survived its first mutation check, so the mapping
+// is pinned here against the real `WHERE status = ?` guard: the row is left in
+// 'processing' by Dequeue (never deferred) and must settle from there.
+func TestDBQueue_SettleInstrumentalOwnedByWorkerSettlesProcessingRow(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Dequeue leaves the row 'processing' -- the state the worker holds it in, and
+	// deliberately NOT deferred.
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+
+	outcome, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
+		MusicSum: 0.95, VocalPeak: 0.01, VocalClass: "Singing", DetectorVersion: "v1",
+	}, OwnedByWorker)
+	if err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+	if outcome != Settled {
+		t.Fatalf("outcome = %v; want Settled. OwnedByWorker must guard on 'processing' -- "+
+			"guarding on 'deferred' matches no row and settles nothing while still returning nil", outcome)
+	}
+
+	var status, outcomeType string
+	var result int
+	var lane *string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, instrumental_result, COALESCE(outcome_type,''), provider_lane FROM work_queue WHERE id = ?`,
+		item.ID).Scan(&status, &result, &outcomeType, &lane); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" || result != 1 || outcomeType != "instrumental" {
+		t.Errorf("row = (%q, %d, %q); want (done, 1, instrumental) -- all committed in the one transaction",
+			status, result, outcomeType)
+	}
+	if lane == nil || *lane != detectorbackfill.LaneName {
+		t.Errorf("provider_lane = %v; want %q stamped inside the same settle", lane, detectorbackfill.LaneName)
+	}
+}
+
+// TestDBQueue_UnsettleInstrumentalLeavesProviderOwnedRowsAlone pins the lane
+// guard structurally.
+//
+// `status='done' AND instrumental_result=1` does NOT establish detector
+// ownership: a PROVIDER-completed row carrying a positive instrumental verdict
+// satisfies both, and reverting it would destroy correct history AND wipe a
+// legitimate provider attribution. The only caller pre-filters for detector
+// ownership, but that is the caller's invariant -- this asserts the method
+// defends provenance on its own.
+func TestDBQueue_UnsettleInstrumentalLeavesProviderOwnedRowsAlone(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{DetectorVersion: "v1"}, OwnedByBackfill); err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+	// Re-attribute to a provider: the row now looks exactly like one a provider
+	// completed and flagged instrumental.
+	if err := q.SetProviderLane(ctx, item.ID, "musixmatch"); err != nil {
+		t.Fatalf("SetProviderLane: %v", err)
+	}
+
+	reverted, err := q.UnsettleInstrumental(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("UnsettleInstrumental: %v", err)
+	}
+	if reverted {
+		t.Error("reverted a PROVIDER-attributed row; the vocal-gate reversal applies only to detector settles, " +
+			"and reverting here would both reopen a provider's completion and wipe its attribution")
+	}
+	var lane *string
+	var status string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT provider_lane, status FROM work_queue WHERE id = ?`, item.ID).Scan(&lane, &status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if lane == nil || *lane != "musixmatch" {
+		t.Errorf("provider_lane = %v; want musixmatch preserved", lane)
+	}
+	if status != "done" {
+		t.Errorf("status = %q; want done (the row must not be reopened)", status)
 	}
 }
 
@@ -4486,7 +4665,7 @@ func TestDBQueue_ListVocalGateConfirmationsReturnsSettledRowsWithTelemetry(t *te
 	}
 	if _, err := q.SettleInstrumental(ctx, settled.ID, InstrumentalTelemetry{
 		MusicSum: 0.95, VocalPeak: 0.02, VocalClass: "Singing", DetectorVersion: "v1",
-	}); err != nil {
+	}, OwnedByBackfill); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 
@@ -4550,7 +4729,7 @@ func TestDBQueue_UnsettleInstrumentalRequeuesAtScanPriority(t *testing.T) {
 	}
 	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
 		MusicSum: 0.95, VocalPeak: 0.02, VocalClass: "Singing", DetectorVersion: "v1",
-	}); err != nil {
+	}, OwnedByBackfill); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	if _, err := q.UnsettleInstrumental(ctx, item.ID); err != nil {
@@ -4594,7 +4773,7 @@ func TestDBQueue_ListVocalGateConfirmationsRespectsLimit(t *testing.T) {
 		}
 		if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
 			MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1",
-		}); err != nil {
+		}, OwnedByBackfill); err != nil {
 			t.Fatalf("settle %d: %v", i, err)
 		}
 	}

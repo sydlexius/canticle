@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -39,14 +40,25 @@ type fakeStore struct {
 	settled     []int64
 	stampCalls  int
 	settleCalls int
+	// laneAttempts is the LAST attempt recorded per queue id, mirroring the real
+	// table's UNIQUE(queue_id, lane) upsert.
+	laneAttempts     map[int64]models.LaneAttempt
+	laneAttemptCalls int
+	laneAttemptErr   error
+	// t reports a wrong-ownership call. The fake asserts the argument rather than
+	// ignoring it, because ownership is the one parameter that silently no-ops in
+	// production when it is wrong.
+	t *testing.T
 }
 
-func newFakeStore(items ...queue.WorkItem) *fakeStore {
+func newFakeStore(t *testing.T, items ...queue.WorkItem) *fakeStore {
+	t.Helper()
 	return &fakeStore{
 		items:         items,
 		total:         len(items),
 		stamped:       map[int64]int{},
 		settleOutcome: queue.Settled,
+		t:             t,
 	}
 }
 
@@ -66,7 +78,12 @@ func (s *fakeStore) ListUnclassified(_ context.Context, opts queue.ListUnclassif
 	return items, nil
 }
 
-func (s *fakeStore) SettleInstrumental(_ context.Context, id int64, _ queue.InstrumentalTelemetry) (queue.SettleOutcome, error) {
+func (s *fakeStore) SettleInstrumental(_ context.Context, id int64, _ queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error) {
+	// The backfill does not own its rows; passing OwnedByWorker would guard on the
+	// wrong status and settle nothing in production, so assert it here.
+	if owner != queue.OwnedByBackfill {
+		s.t.Errorf("SettleInstrumental owner = %v; want OwnedByBackfill", owner)
+	}
 	s.settleCalls++
 	if s.order != nil {
 		*s.order = append(*s.order, "settle")
@@ -92,6 +109,25 @@ func (s *fakeStore) StampUnclassifiedMiss(_ context.Context, id int64, _ queue.I
 	}
 	s.stamped[id] = 0
 	return true, nil
+}
+
+// RecordLaneAttempts records the attempts the backfill reports, keyed by queue
+// id, so a test can assert BOTH that an attempt was recorded and which verdict
+// it carried. It models the real UNIQUE(queue_id, lane) upsert by overwriting
+// rather than appending: a fake that appended would hide a double-record bug the
+// real schema silently collapses.
+func (s *fakeStore) RecordLaneAttempts(_ context.Context, queueID int64, attempts []models.LaneAttempt) error {
+	s.laneAttemptCalls++
+	if s.laneAttemptErr != nil {
+		return s.laneAttemptErr
+	}
+	if s.laneAttempts == nil {
+		s.laneAttempts = map[int64]models.LaneAttempt{}
+	}
+	for _, a := range attempts {
+		s.laneAttempts[queueID] = a
+	}
+	return nil
 }
 
 type fakeDetector struct {
@@ -151,7 +187,7 @@ func instrumentalVerdict() detector.Result {
 
 func TestRun_SettlesInstrumentalRowBackupFirst(t *testing.T) {
 	var order []string
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	store.order = &order
 	w := &fakeWriter{order: &order}
 
@@ -191,7 +227,7 @@ func TestRun_SettlesInstrumentalRowBackupFirst(t *testing.T) {
 // just intent (#515).
 func TestRun_OutcomeReportsAppliedAfterSettle(t *testing.T) {
 	var order []string
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	store.order = &order
 	w := &fakeWriter{order: &order}
 
@@ -227,7 +263,7 @@ func TestRun_OutcomeReportsAppliedAfterSettle(t *testing.T) {
 // fires skipped (nothing landed), and TestRun_OutcomeReportsAmbiguous the
 // ambiguous-settle failed case (#515).
 func TestRun_OutcomeReportsSkippedOnClaim(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	store.stampClaimed = true // negative verdict, but a worker claimed the row
 
 	var outcomes []Outcome
@@ -244,7 +280,7 @@ func TestRun_OutcomeReportsSkippedOnClaim(t *testing.T) {
 }
 
 func TestRun_OutcomeReportsAmbiguousOnSettleError(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	store.settleErr = errors.New("commit failed")
 
 	var outcomes []Outcome
@@ -263,7 +299,7 @@ func TestRun_OutcomeReportsAmbiguousOnSettleError(t *testing.T) {
 // A Report failure must abort that row's mutation entirely: the whole point of
 // backup-first is that a change never exists without its restorable record.
 func TestRun_ReportFailureAbortsRowMutation(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	w := &fakeWriter{}
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, w).Run(context.Background(), Options{
@@ -287,7 +323,7 @@ func TestRun_ReportFailureAbortsRowMutation(t *testing.T) {
 // A failed marker write must leave the row unstamped: a row claiming
 // instrumental with nothing on disk is worse than an unexamined row.
 func TestRun_MarkerWriteFailureLeavesRowUnstamped(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	w := &fakeWriter{err: errors.New("read-only filesystem")}
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, w).Run(context.Background(), Options{
@@ -308,7 +344,7 @@ func TestRun_MarkerWriteFailureLeavesRowUnstamped(t *testing.T) {
 }
 
 func TestRun_NotInstrumentalStampsZeroAndDoesNotWrite(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	w := &fakeWriter{}
 
 	res, err := New(store, fakeDetector{res: detector.Result{Instrumental: false, Version: "v1"}}, w).Run(
@@ -327,8 +363,89 @@ func TestRun_NotInstrumentalStampsZeroAndDoesNotWrite(t *testing.T) {
 	}
 }
 
+// TestRun_RecordsDetectorLaneAttemptForBothVerdicts pins the per-track hit-rate
+// reporting the backfill owes.
+//
+// The backfill reaches its verdict through a different path than the worker and
+// recorded NO lane_attempts at all, so the report's detector tile counted only
+// worker-side detections. On a live install that tile sat frozen at a fixed
+// numerator AND denominator while a backfill classified thousands of tracks --
+// not merely undercounting, but looking broken.
+//
+// BOTH verdicts are asserted because the tile renders a hit RATE: recording only
+// the instrumental settles would drive the detector toward a meaningless 100%,
+// the same trap migration 029 calls out for the historical backfill. A test that
+// checked only the positive path would pass against exactly that bug.
+func TestRun_RecordsDetectorLaneAttemptForBothVerdicts(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		instrumental bool
+	}{
+		{"instrumental settle records a hit", true},
+		{"not-instrumental stamp records a miss", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore(t, item(1, "/music/a.flac"))
+			res, err := New(store, fakeDetector{res: detector.Result{Instrumental: tc.instrumental, Version: "v1"}}, &fakeWriter{}).Run(
+				context.Background(), Options{GlobalDetectDefault: true})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if res.Errors != 0 {
+				t.Fatalf("res = %+v; want no errors", res)
+			}
+			got, ok := store.laneAttempts[1]
+			if !ok {
+				t.Fatal("no lane attempt recorded; the detector tile cannot see this row's classification and stays frozen while the backfill runs")
+			}
+			if got.Hit != tc.instrumental {
+				t.Errorf("attempt Hit = %v; want %v. The tile renders a hit RATE, so a wrong or missing verdict skews it", got.Hit, tc.instrumental)
+			}
+			if got.Lane != detectorbackfill.LaneName {
+				t.Errorf("attempt Lane = %q; want %q so it aggregates with the worker's detector attempts", got.Lane, detectorbackfill.LaneName)
+			}
+			if !got.Local {
+				t.Error("attempt Local = false; the detector resolves a track with no outbound provider request")
+			}
+		})
+	}
+}
+
+// TestRun_RecordsNoLaneAttemptWhenTheRowWasClaimed: a row a worker claimed
+// mid-classification was not settled by this run, so crediting the detector with
+// an attempt on it would report work that never landed.
+func TestRun_RecordsNoLaneAttemptWhenTheRowWasClaimed(t *testing.T) {
+	store := newFakeStore(t, item(1, "/music/a.flac"))
+	store.settleOutcome = queue.SettleClaimed
+
+	if _, err := New(store, fakeDetector{res: detector.Result{Instrumental: true, Version: "v1"}}, &fakeWriter{}).Run(
+		context.Background(), Options{GlobalDetectDefault: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, ok := store.laneAttempts[1]; ok {
+		t.Error("recorded a lane attempt for a row a worker claimed; the settle never applied, so the detector did not resolve this track")
+	}
+}
+
+// TestRun_LaneAttemptFailureDoesNotFailTheRow: the verdict is already durably
+// recorded by the time the attempt is reported, so losing the report must not
+// turn a successful settle into an error.
+func TestRun_LaneAttemptFailureDoesNotFailTheRow(t *testing.T) {
+	store := newFakeStore(t, item(1, "/music/a.flac"))
+	store.laneAttemptErr = errors.New("db is busy")
+
+	res, err := New(store, fakeDetector{res: detector.Result{Instrumental: true, Version: "v1"}}, &fakeWriter{}).Run(
+		context.Background(), Options{GlobalDetectDefault: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.RowsSettled != 1 || res.Errors != 0 {
+		t.Errorf("res = %+v; want settled=1 errors=0: a reporting failure must not fail a row whose settle committed", res)
+	}
+}
+
 func TestRun_DryRunPreviewsAndMutatesNothing(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	w := &fakeWriter{}
 	var previewed []int64
 
@@ -356,7 +473,7 @@ func TestRun_HonorsPerItemOptOutOverGlobalDefault(t *testing.T) {
 	optOut := false
 	it := item(1, "/music/a.flac")
 	it.DetectInstrumental = &optOut
-	store := newFakeStore(it)
+	store := newFakeStore(t, it)
 	w := &fakeWriter{}
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, w).Run(context.Background(), Options{
@@ -379,7 +496,7 @@ func TestRun_PerItemOptInOverridesGlobalOff(t *testing.T) {
 	optIn := true
 	it := item(1, "/music/a.flac")
 	it.DetectInstrumental = &optIn
-	store := newFakeStore(it)
+	store := newFakeStore(t, it)
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, &fakeWriter{}).Run(context.Background(), Options{
 		GlobalDetectDefault: false,
@@ -393,7 +510,7 @@ func TestRun_PerItemOptInOverridesGlobalOff(t *testing.T) {
 }
 
 func TestRun_DetectorFailureIsNonFatalAndLeavesRowAlone(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"), item(2, "/music/b.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"), item(2, "/music/b.flac"))
 	w := &fakeWriter{}
 
 	res, err := New(store, fakeDetector{err: errors.New("sidecar down")}, w).Run(context.Background(), Options{
@@ -411,7 +528,7 @@ func TestRun_DetectorFailureIsNonFatalAndLeavesRowAlone(t *testing.T) {
 }
 
 func TestRun_SkipsRowWithNoSourcePath(t *testing.T) {
-	store := newFakeStore(item(1, "   "))
+	store := newFakeStore(t, item(1, "   "))
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, &fakeWriter{}).Run(
 		context.Background(), Options{GlobalDetectDefault: true})
 	if err != nil {
@@ -426,7 +543,7 @@ func TestRun_SkipsRowWithNoSourcePath(t *testing.T) {
 // set, so a capped run can say what it left behind rather than reading as full
 // coverage.
 func TestRun_LimitCapsCandidatesButTotalReportsBacklog(t *testing.T) {
-	store := newFakeStore(item(1, "/a.flac"), item(2, "/b.flac"), item(3, "/c.flac"))
+	store := newFakeStore(t, item(1, "/a.flac"), item(2, "/b.flac"), item(3, "/c.flac"))
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, &fakeWriter{}).Run(
 		context.Background(), Options{GlobalDetectDefault: true, Limit: 1})
 	if err != nil {
@@ -445,7 +562,7 @@ func TestRun_LimitCapsCandidatesButTotalReportsBacklog(t *testing.T) {
 
 // The miss path's stamp failure must be counted, not swallowed.
 func TestRun_MissStampFailureIsCounted(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	store.stampErr = errors.New("db locked")
 
 	res, err := New(store, fakeDetector{res: detector.Result{Instrumental: false, Version: "v1"}}, &fakeWriter{}).Run(
@@ -459,7 +576,7 @@ func TestRun_MissStampFailureIsCounted(t *testing.T) {
 }
 
 func TestRun_SettleFailureCountsErrorAndDoesNotClaimSuccess(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	store.settleErr = errors.New("row owned by a worker")
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, &fakeWriter{}).Run(
@@ -473,7 +590,7 @@ func TestRun_SettleFailureCountsErrorAndDoesNotClaimSuccess(t *testing.T) {
 }
 
 func TestRun_CountFailureAborts(t *testing.T) {
-	store := newFakeStore()
+	store := newFakeStore(t)
 	store.countErr = errors.New("db gone")
 	if _, err := New(store, fakeDetector{}, &fakeWriter{}).Run(context.Background(), Options{}); err == nil {
 		t.Fatal("Run must abort when the backlog cannot be enumerated")
@@ -481,7 +598,7 @@ func TestRun_CountFailureAborts(t *testing.T) {
 }
 
 func TestRun_ListFailureAborts(t *testing.T) {
-	store := newFakeStore()
+	store := newFakeStore(t)
 	store.listErr = errors.New("db gone")
 	if _, err := New(store, fakeDetector{}, &fakeWriter{}).Run(context.Background(), Options{}); err == nil {
 		t.Fatal("Run must abort when candidates cannot be listed")
@@ -489,7 +606,7 @@ func TestRun_ListFailureAborts(t *testing.T) {
 }
 
 func TestRun_CancelledContextStopsWithoutMutating(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -547,7 +664,7 @@ func TestRun_WorkerClaimedRowLeavesNoOrphanMarker(t *testing.T) {
 		Filename:   "song.lrc",
 		SourcePath: "/music/a.flac",
 	}}
-	store := newFakeStore(it)
+	store := newFakeStore(t, it)
 	store.settleOutcome = queue.SettleClaimed // a worker took the row mid-classification
 
 	// A real writer, so a real file lands on disk and must really be removed.
@@ -586,7 +703,7 @@ func TestRun_PeerSettledRowKeepsItsMarker(t *testing.T) {
 		Filename:   "song.lrc",
 		SourcePath: "/music/a.flac",
 	}}
-	store := newFakeStore(it)
+	store := newFakeStore(t, it)
 	store.settleOutcome = queue.SettleAlreadyInstrumental // a peer got there first
 
 	var outcomes []Outcome
@@ -616,6 +733,14 @@ func TestRun_PeerSettledRowKeepsItsMarker(t *testing.T) {
 	if res.MarkersWritten != 1 {
 		t.Errorf("MarkersWritten = %d; want 1 (the marker stands, it is simply the peer's)", res.MarkersWritten)
 	}
+	// The peer recorded its OWN attempt when it settled, so recording one here
+	// would attribute the same track to the detector twice. The engine skips it
+	// deliberately (only queue.Settled records); this pins that, since a double
+	// count is invisible in the report -- it just makes the rate quietly wrong.
+	if _, ok := store.laneAttempts[1]; ok {
+		t.Error("recorded a lane attempt for a PEER-settled row; the peer already recorded its own, " +
+			"so this double-attributes the track and skews the per-track hit rate")
+	}
 }
 
 // A settle ERROR is ambiguous -- the failure may have come from Commit itself, so
@@ -630,7 +755,7 @@ func TestRun_AmbiguousSettleErrorKeepsMarker(t *testing.T) {
 		Filename:   "song.lrc",
 		SourcePath: "/music/a.flac",
 	}}
-	store := newFakeStore(it)
+	store := newFakeStore(t, it)
 	store.settleErr = errors.New("commit failed: outcome unknown")
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, lyrics.NewLRCWriter()).Run(
@@ -659,7 +784,7 @@ func TestRun_VerdictCountsSurviveAWorkerClaim(t *testing.T) {
 		Filename:   "song.lrc",
 		SourcePath: "/music/a.flac",
 	}}
-	store := newFakeStore(it)
+	store := newFakeStore(t, it)
 	store.settleOutcome = queue.SettleClaimed
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, lyrics.NewLRCWriter()).Run(
@@ -681,7 +806,7 @@ func TestRun_VerdictCountsSurviveAWorkerClaim(t *testing.T) {
 // A negative verdict is a mutation too -- it stamps instrumental_result=0, which
 // retires the row from every future backfill. It must be backed up first.
 func TestRun_NegativeVerdictIsBackedUpBeforeStamping(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 	var order []string
 	store.order = &order
 
@@ -709,7 +834,7 @@ func TestRun_NegativeVerdictIsBackedUpBeforeStamping(t *testing.T) {
 
 // A Report failure on the negative path must abort the stamp: no record, no change.
 func TestRun_NegativeVerdictReportFailureAbortsStamp(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
+	store := newFakeStore(t, item(1, "/music/a.flac"))
 
 	res, err := New(store, fakeDetector{res: detector.Result{Instrumental: false, Version: "v1"}}, &fakeWriter{}).Run(
 		context.Background(), Options{
