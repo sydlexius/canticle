@@ -1,0 +1,82 @@
+-- +goose Up
+-- +goose StatementBegin
+-- Give audio_metadata a READER identity for its duration_seconds column (#713),
+-- closing the gap #711 deliberately left open next door.
+--
+-- WHY THIS WAS DEFERRED, AND WHY IT IS NOT DEFERRABLE ANY LONGER. #711 gave
+-- audio_durations a reader_version because a stale duration there flows into
+-- internal/timing and makes internal/revalidate demote or quarantine a CORRECT
+-- sidecar. audio_metadata.duration_seconds is filled from THE SAME PARSE
+-- (internal/commands/index_metadata.go -> scanner.ReadAudioFacts ->
+-- audioDuration) and was keyed on (file_path, mtime_nsec, size_bytes) with no
+-- reader identity at all. It was left alone because nothing reads that column
+-- for a timing decision, which made it LATENT rather than live.
+--
+-- The parser swap in this same change is what ends that reprieve. Measured
+-- old vs new on VBR MP3s carrying no Xing/LAME header:
+--
+--     CBR + Xing        old 60.03s   new 60.03s   ratio 1.00
+--     VBR + Xing        old 60.03s   new 60.03s   ratio 1.00
+--     VBR, no Xing      old 25.05s   new 60.03s   ratio 2.40   (true 54.49s)
+--     VBR, no Xing, V0  old 37.56s   new 60.03s   ratio 1.60   (true 56.32s)
+--
+-- The old reader assumed the first frame's bitrate held for the whole file, so
+-- such a track read at LESS THAN HALF its true length. Without this column the
+-- table would now silently hold a mix of pre- and post-swap durations, with
+-- nothing recording which is which, while presenting as the library's
+-- authoritative metadata index. The first consumer to read it for timing would
+-- inherit a data-destruction bug already baked in and invisible.
+--
+-- SAME MECHANISM AS 041, DELIBERATELY. Nullable, legacy rows left NULL, and
+-- Lookup compares with = -- in SQL NULL = <anything> is NULL, never true, so
+-- every pre-existing row reads as a MISS from the first run of the new code
+-- with no backfill and no flag day. Rows are not rewritten: doing so would have
+-- to CLAIM a parser identity for a duration whose parser is unrecorded, the
+-- exact false assertion the column exists to prevent.
+--
+-- A MISS IS CHEAP HERE. audiometa.Lookup is a PRESENCE check gating a metadata
+-- re-read, and a miss simply re-reads the file's tags -- one bounded read, the
+-- same cost the row's original write paid. It never remediates anything.
+--
+-- ADDITIVE, so SQLite rewrites no rows: ALTER TABLE ADD COLUMN on a nullable
+-- column with no default is metadata-only. No CHECK constraint, because NULL is
+-- a legitimate value here -- it is what "recorded before the reader was
+-- identified" looks like.
+ALTER TABLE audio_metadata ADD COLUMN reader_version TEXT;
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+-- DELETE, EXACTLY AS 041 DOES. The hazard is 041's: a pre-#713 binary queries
+-- WITHOUT the reader_version predicate, so it would HIT a row this build
+-- stamped under a different parser and trust that parser's duration.
+--
+-- TWO REJECTED ALTERNATIVES, both tried, because the trap here is not obvious:
+--
+-- 1. `SET duration_seconds = 0`, on the reasoning that 0 is already this
+--    column's "unknown" sentinel. True, and IRRELEVANT: Lookup is a PRESENCE
+--    check keyed on (file_path, mtime_nsec, size_bytes), columns the zeroing
+--    never touches. The row still HITS, index_metadata takes its "current,
+--    skip" branch, the file is never re-read, and the bogus 0 becomes
+--    PERMANENT -- on 100% of rows rather than the subset a parser swap
+--    actually affected. Verified by running it: HIT=true, duration_seconds=0.
+--    STRICTLY WORSE THAN DOING NOTHING.
+--
+-- 2. `SET mtime_nsec = -1` to poison the KEY instead, so the row misses while
+--    the tag columns survive. This works mechanically (there is no CHECK on
+--    mtime_nsec, and a real file's ModTime().UnixNano() is never negative),
+--    but it buys nothing worth its cost: a magic sentinel a later reader must
+--    decode, a SECOND invalidation mechanism beside 041's, and an unstated
+--    dependency on the sign of a stat field.
+--
+-- WHAT MAKES DELETE RIGHT: audio_metadata is a CACHE, and the audio files are
+-- the source of truth. The tag columns -- artist, title, mbid, isrc -- are
+-- DERIVED, not authored here, so deleting a row destroys nothing durable; the
+-- next index-metadata run re-reads them from the files that still carry them.
+-- The earlier "deleting would discard correct data" worry treated regenerable
+-- cache data as precious. One mechanism, shared with 041, and absence cannot
+-- satisfy a presence check.
+DELETE FROM audio_metadata;
+
+ALTER TABLE audio_metadata DROP COLUMN reader_version;
+-- +goose StatementEnd

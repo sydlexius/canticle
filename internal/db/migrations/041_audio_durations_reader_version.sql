@@ -32,8 +32,29 @@
 -- fail-open path: audiodur.Lookup returns (0, false), callers pass that 0 to
 -- timing.Evaluate, and it returns UnknownDuration, which every consumer already
 -- handles and which never demotes or quarantines anything. So the entire stale
--- population simply re-derives lazily, one header read per file, the next time
+-- population simply re-derives lazily, one BOUNDED read per file, the next time
 -- each file is touched. A cold cache is correct, merely uninformative.
+--
+-- WHAT "BOUNDED" COSTS, measured against audioduration v0.9.1 over a SEEDED
+-- RANDOM sample of this library (1,200 of 10,894 MP3s, 300 of 57,992 FLACs):
+--   - FLAC:  exactly 42 bytes (STREAMINFO), every file, any size.
+--   - MP3 on the cheap path: 64-112 KB depending on BITRATE, flat in file size
+--     (the probe windows scale with frame length, not with length of file).
+--   - MP3 that is VBR with no Xing header: frame-counted END TO END.
+-- 89 of 1,200 MP3s (7.4%) were walked, so the pass read 8.8% of sampled MP3
+-- bytes and 4.1% of sampled bytes overall -- one noisier scan cycle, not a full
+-- re-read of the library.
+--
+-- SAMPLE RANDOMLY IF YOU RE-MEASURE. An earlier figure here (25 of 400, 5.59%)
+-- came from `find | head -400`, which is directory-traversal order, not a
+-- sample: the first 400 files of this library contain ZERO walked files while
+-- offsets 1000+ run 7-8%. Positional slices of a library ordered by
+-- artist/album correlate with encoder era, so they measure a corner and read as
+-- a population.
+--
+-- v0.9.0 instead read EVERY header-less MP3 in full, including CBR streams where
+-- size division was already exact, which is why canticle never shipped against
+-- it. Quote the parser version beside any of these figures.
 --
 -- ADDITIVE, so SQLite rewrites no rows: ALTER TABLE ADD COLUMN on a nullable
 -- column with no default is O(1) metadata-only here. Note the deliberate absence
@@ -63,7 +84,8 @@ ALTER TABLE audio_durations ADD COLUMN reader_version TEXT;
 -- discrimination is precisely the column being dropped. Deleting is safe by
 -- this migration's own argument: an empty table is a cold cache, every consumer
 -- already fails open to UnknownDuration, and each row re-derives on its next
--- touch at one header read. A CONTAMINATED WARM CACHE HAS NO SUCH FLOOR.
+-- touch at the bounded cost quantified above. A CONTAMINATED WARM CACHE HAS NO
+-- SUCH FLOOR.
 --
 -- NOTE THE LIMIT OF THIS PROTECTION, because it is not the likeliest rollback.
 -- Reverting the BINARY without running this migration hits the same hazard and

@@ -2,6 +2,7 @@ package audiometa_test
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -10,14 +11,30 @@ import (
 	"github.com/sydlexius/canticle/internal/scanner"
 )
 
+// testReaderVersion is the duration-parser identity the single-Store tests write
+// and read under. Its value is irrelevant; what matters is that it is CONSTANT,
+// so those tests exercise mtime/size validation without reader identity
+// confounding the result.
+const testReaderVersion = "test-reader@v1"
+
 func newTestDB(t *testing.T) *audiometa.Store {
+	t.Helper()
+	sqlDB, _ := newTestDBWithHandle(t, testReaderVersion)
+	return sqlDB
+}
+
+// newTestDBWithHandle returns a Store reading under readerVersion plus the
+// underlying handle, so a test can open a SECOND Store over the SAME database
+// under a different identity -- the shape a parser swap takes in production,
+// where the rows persist and the code changes underneath them.
+func newTestDBWithHandle(t *testing.T, readerVersion string) (*audiometa.Store, *sql.DB) {
 	t.Helper()
 	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	return audiometa.New(sqlDB)
+	return audiometa.New(sqlDB, readerVersion), sqlDB
 }
 
 func TestRecordThenLookupHitsWhenUnchanged(t *testing.T) {
@@ -266,5 +283,167 @@ func TestCoverageScopesByPathPrefix(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("Coverage(%q) = %d, want 1", rootB, n)
+	}
+}
+
+// THE #713 GUARANTEE. The file is byte-identical -- same path, same mtime, same
+// size -- and the row is still stale, because the DURATION PARSER changed.
+// audio_metadata.duration_seconds comes from the same parse as audio_durations
+// (#711), so a swap that invalidated only that table would leave this one
+// silently holding a mix of pre- and post-swap durations.
+//
+// Measured on the swap this test was written for: a VBR MP3 with no Xing header
+// read 25.05s under the old parser and 60.03s under the new one, a 2.4x error
+// in the direction that makes a correct lyric look wildly out of sync.
+func TestReaderVersionChangeIsAMiss(t *testing.T) {
+	ctx := context.Background()
+	oldReader, sqlDB := newTestDBWithHandle(t, "parser@v1")
+	newReader := audiometa.New(sqlDB, "parser@v2")
+
+	facts := scanner.AudioFacts{
+		MTimeNano: 100, SizeBytes: 200,
+		Artist: "A", Title: "T", TrackLength: 25,
+	}
+	if err := oldReader.Record(ctx, "/music/vbr.mp3", facts); err != nil {
+		t.Fatalf("Record under the old parser: %v", err)
+	}
+
+	found, err := newReader.Lookup(ctx, "/music/vbr.mp3", 100, 200)
+	if err != nil {
+		t.Fatalf("Lookup under the new parser: %v", err)
+	}
+	if found {
+		t.Fatal("a row whose duration came from a DIFFERENT parser must read as a miss, so the file is re-read rather than trusted")
+	}
+
+	// The recording parser still hits: the row is invalidated for the NEW
+	// reader, not destroyed. That is what makes the swap lazy rather than
+	// a flag day.
+	if found, err := oldReader.Lookup(ctx, "/music/vbr.mp3", 100, 200); err != nil {
+		t.Fatalf("Lookup under the old parser: %v", err)
+	} else if !found {
+		t.Fatal("the recording parser must still hit its own row")
+	}
+}
+
+// A re-read under the new parser must RE-STAMP the row rather than leave it
+// unreadable. file_path is the conflict target, so without carrying
+// reader_version into the upsert the row would miss forever and every scan
+// would re-read the file -- a permanent I/O leak on an array kept spun down.
+func TestRecordRestampsRowOnReaderChange(t *testing.T) {
+	ctx := context.Background()
+	oldReader, sqlDB := newTestDBWithHandle(t, "parser@v1")
+	newReader := audiometa.New(sqlDB, "parser@v2")
+
+	base := scanner.AudioFacts{MTimeNano: 100, SizeBytes: 200, Artist: "A", Title: "T"}
+
+	stale := base
+	stale.TrackLength = 25 // what the old parser derived
+	if err := oldReader.Record(ctx, "/music/vbr.mp3", stale); err != nil {
+		t.Fatalf("Record under the old parser: %v", err)
+	}
+
+	fresh := base
+	fresh.TrackLength = 60 // what the new parser derives from the same bytes
+	if err := newReader.Record(ctx, "/music/vbr.mp3", fresh); err != nil {
+		t.Fatalf("Record under the new parser: %v", err)
+	}
+
+	if found, err := newReader.Lookup(ctx, "/music/vbr.mp3", 100, 200); err != nil {
+		t.Fatalf("Lookup under the new parser: %v", err)
+	} else if !found {
+		t.Fatal("the re-read row must be readable under the new parser, else it re-reads forever")
+	}
+
+	// One row per file, re-stamped in place -- the old identity is gone.
+	if found, err := oldReader.Lookup(ctx, "/music/vbr.mp3", 100, 200); err != nil {
+		t.Fatalf("Lookup under the old parser: %v", err)
+	} else if found {
+		t.Fatal("the superseded parser must no longer hit")
+	}
+
+	// And the stored duration is the NEW parser's, not the stale one.
+	var secs int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT duration_seconds FROM audio_metadata WHERE file_path=?`,
+		"/music/vbr.mp3").Scan(&secs); err != nil {
+		t.Fatalf("read back duration: %v", err)
+	}
+	if secs != 60 {
+		t.Fatalf("duration_seconds = %d, want 60: the re-read must overwrite the stale parser's value", secs)
+	}
+}
+
+// Legacy rows -- written before the column existed -- hold NULL and must read as
+// a miss for EVERY reader, the empty string included. This is the no-backfill
+// argument: NULL = ? is NULL rather than true, so the pre-existing population
+// invalidates itself with no row data migrated.
+func TestLegacyNullReaderVersionIsAMiss(t *testing.T) {
+	ctx := context.Background()
+	_, sqlDB := newTestDBWithHandle(t, "parser@v1")
+
+	// Write the row the way pre-#713 code did: no reader_version at all.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO audio_metadata (file_path, mtime_nsec, size_bytes, duration_seconds)
+		 VALUES (?, ?, ?, ?)`,
+		"/music/legacy.mp3", 100, 200, 25,
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	for _, readerVersion := range []string{"parser@v1", ""} {
+		found, err := audiometa.New(sqlDB, readerVersion).Lookup(ctx, "/music/legacy.mp3", 100, 200)
+		if err != nil {
+			t.Fatalf("Lookup as %q: %v", readerVersion, err)
+		}
+		if found {
+			t.Fatalf("a legacy NULL-reader row must miss for reader %q; the SQL NULL comparison is what invalidates the pre-existing population", readerVersion)
+		}
+	}
+}
+
+// Coverage must count only rows THIS reader would use. Without the
+// reader_version predicate the first run after a parser swap reports FULL
+// coverage immediately before re-reading the entire library -- exactly backwards
+// as an operator signal, and the only signal that a swap is in flight (#713).
+//
+// This test exists because the predicate shipped UNTESTED: removing it from
+// both Coverage branches left the whole suite green.
+func TestCoverageCountsOnlyCurrentReader(t *testing.T) {
+	ctx := context.Background()
+	oldReader, sqlDB := newTestDBWithHandle(t, "parser@v1")
+	newReader := audiometa.New(sqlDB, "parser@v2")
+
+	for _, p := range []string{"/lib/a.mp3", "/lib/b.mp3", "/lib/c.mp3"} {
+		if err := oldReader.Record(ctx, p, scanner.AudioFacts{
+			MTimeNano: 100, SizeBytes: 200, Title: "T", TrackLength: 60,
+		}); err != nil {
+			t.Fatalf("Record %s: %v", p, err)
+		}
+	}
+
+	// Sanity: the recording reader sees them, so a zero below is the predicate
+	// working rather than an empty table.
+	if n, err := oldReader.Coverage(ctx, ""); err != nil {
+		t.Fatalf("Coverage under the recording reader: %v", err)
+	} else if n != 3 {
+		t.Fatalf("recording reader Coverage = %d, want 3", n)
+	}
+
+	// BOTH branches: the unprefixed count and the path-scoped one.
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"no prefix", ""},
+		{"path prefix", "/lib/"},
+	} {
+		got, err := newReader.Coverage(ctx, tc.prefix)
+		if err != nil {
+			t.Fatalf("Coverage(%s): %v", tc.name, err)
+		}
+		if got != 0 {
+			t.Errorf("Coverage(%s) = %d under a DIFFERENT reader, want 0: rows a swap will re-read must not read as covered", tc.name, got)
+		}
 	}
 }
