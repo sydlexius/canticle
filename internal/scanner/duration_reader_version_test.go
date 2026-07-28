@@ -16,6 +16,10 @@ import (
 // the swap, not to presume which side of it we are on.
 var audiodurationRequire = regexp.MustCompile(`(?m)^\s*(\S*audioduration)\s+(v\S+)`)
 
+// replaceLine matches a `replace` directive whose TARGET is an audioduration
+// module, in either the single-line or the block form.
+var replaceLine = regexp.MustCompile(`(?m)^\s*(replace\s+)?\S*audioduration\S*\s+(\S+\s+)?=>`)
+
 // THE ONE FAILURE THIS TEST EXISTS TO CAUSE. scanner.DurationReaderVersion is
 // hand-set, and internal/audiodur invalidates its duration cache by comparing
 // it. Forgetting to bump it while changing the parser is SILENT and destroys
@@ -39,6 +43,20 @@ func TestDurationReaderVersionMatchesGoMod(t *testing.T) {
 	goMod, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
 	if err != nil {
 		t.Fatalf("read go.mod: %v", err)
+	}
+
+	// A `replace` directive silently redirects the module the require line names,
+	// so checking only `require` leaves a hole: `go mod edit -replace` can point
+	// audioduration at a DIFFERENT parser (an older version, or back to the
+	// upstream fork) while this test stays green and the cache keeps serving
+	// durations that parser never produced. That is exactly the silent
+	// data-destruction path #711 exists to close, so any replace targeting this
+	// module fails here rather than being reasoned about.
+	if replaceLine.Match(goMod) {
+		t.Fatalf("go.mod contains a `replace` directive for audioduration.\n" +
+			"A replace redirects the parser without changing the require line this test reads, " +
+			"so the reader identity can no longer be trusted to describe the code that actually runs (#711). " +
+			"Remove the replace, or extend this test to resolve it and bump DurationReaderVersion to match.")
 	}
 
 	m := audiodurationRequire.FindSubmatch(goMod)

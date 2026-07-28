@@ -81,7 +81,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 		return 0
 	}
 
-	store := audiometa.New(sqlDB)
+	store := audiometa.New(sqlDB, scanner.DurationReaderVersion)
 
 	// A --library run scopes the printed coverage number to that library's
 	// canonical root, per #646's AC ("how many files in library N have

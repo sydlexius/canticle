@@ -18,7 +18,7 @@ import (
 
 	"github.com/dhowden/tag"
 	"github.com/dhowden/tag/mbz"
-	"github.com/lizc2003/audioduration"
+	"github.com/sydlexius/audioduration"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
@@ -34,8 +34,9 @@ var supportedFileTypes = []string{".mp3", ".m4a", ".m4b", ".m4p", ".alac", ".fla
 // changing the file does (#711).
 //
 // BUMP THIS IN THE SAME COMMIT AS THE PARSER CHANGE, and treat that as part of
-// the change rather than follow-up work. A bump costs one header read per file,
-// lazily, on the fail-open path; forgetting one serves durations the running
+// the change rather than follow-up work. A bump costs one bounded read per file
+// (see bankDurationForSkippedFile for what that means per format), lazily, on
+// the fail-open path; forgetting one serves durations the running
 // code would not produce, and internal/revalidate acts on those -- it demotes a
 // correct .lrc to .txt or quarantines it. The failure is silent and destroys
 // user data, so err toward bumping when unsure.
@@ -56,12 +57,14 @@ var supportedFileTypes = []string{".mp3", ".m4a", ".m4b", ".m4p", ".alac", ".fla
 // or to audioFileTypeForExt is NOT caught by anything -- there this comment is
 // the only guard.
 //
-// SCOPE LIMIT: only internal/audiodur consults this. audio_metadata
-// (migration 036) caches duration_seconds from this SAME parse and has no
-// reader identity, so it is knowingly reader-blind -- tracked as #713. It has
-// no timing/revalidate consumer today, which is the only reason that is
-// tolerable; do not add one before #713 lands.
-const DurationReaderVersion = "lizc2003/audioduration@v0.8.0"
+// TWO CONSUMERS, and every cache of this parse must be one of them. Both
+// internal/audiodur (audio_durations, migration 041) and internal/audiometa
+// (audio_metadata.duration_seconds, migration 042) stamp and match on this
+// value. They are separate tables filled from the SAME parse, so a cache that
+// did NOT consult this would silently hold a mix of pre- and post-swap
+// durations with nothing recording which -- the #713 defect. If a third cache
+// of a derived duration ever appears, it consults this too.
+const DurationReaderVersion = "sydlexius/audioduration@v0.9.1"
 
 // IsAudioFile reports whether name (a file name or path) carries a supported
 // audio extension. It is the single exported accessor over supportedFileTypes so
@@ -538,7 +541,33 @@ func (sc *Scanner) recordDuration(ctx context.Context, path string, f *os.File, 
 // unconditionally would re-read a header for tens of thousands of files per
 // pass and keep the array awake forever -- trading a starved cache for the
 // exact symptom #684 is filed to eliminate. With the gate, a given file version
-// costs one header read ONCE, ever.
+// is read ONCE, ever.
+//
+// WHAT THAT ONE READ COSTS, measured against audioduration v0.9.1 over a SEEDED
+// RANDOM sample of this library (1,200 of 10,894 MP3s, 300 of 57,992 FLACs). It
+// is NOT uniformly a header read, and an earlier version of this comment said so:
+//   - FLAC: exactly 42 bytes (STREAMINFO), every file, any size.
+//   - MP3 on the cheap path: 64-112 KB depending on BITRATE. Flat in FILE SIZE
+//     -- the probe windows scale with frame length -- so a 20 MB file costs the
+//     same as a 1 MB one at equal bitrate.
+//   - MP3 that is VBR with NO Xing header: frame-counted END TO END, because
+//     nothing else yields a correct duration for it. Such a file reads slightly
+//     MORE than its own size, since the trailer peel re-reads the tail first.
+//
+// 89 of 1,200 sampled MP3s (7.4%) were walked: 8.8% of sampled MP3 bytes, 4.1%
+// of sampled bytes overall. The tail case is bounded by the FILE, not by a
+// header, which is precisely why the Lookup gate above must stay: paying it once
+// per file version is fine, once per scan is not.
+//
+// RE-MEASURE ON ANY PARSER BUMP, AND SAMPLE RANDOMLY. An earlier figure here
+// (25 of 400, 5.59%) came from `find | head -400` -- directory-traversal order,
+// not a sample. The first 400 files of this library contain ZERO walked files
+// while offsets 1000+ run 7-8%, because a library ordered by artist/album
+// correlates with encoder era. That flawed measurement also invented a phantom
+// "the parser grew stricter between its branch and its tag" explanation for what
+// was pure sampling artifact: those two trees are byte-identical.
+// v0.9.0 was genuinely worse -- it walked EVERY header-less MP3 in full,
+// including CBR streams where size division was already exact.
 //
 // Every failure degrades to "no row", never to a wrong row and never to a
 // failed scan: this is bookkeeping for a file the scan has already decided to
@@ -826,7 +855,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// Bank the duration BEFORE skipping (#684). This file has a .lrc,
 			// which is exactly what makes revalidate care about it later, and
 			// exactly what stops it ever reaching the enrichment probe below.
-			// Cached-gated, so it costs one header read per file version, not
+			// Cache-gated, so it costs one bounded read per file VERSION, not
 			// one per scan.
 			if opts.EnrichRecording {
 				sc.bankDurationForSkippedFile(ctx, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, filepath.Join(dir, file.Name())), ext)
