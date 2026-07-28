@@ -172,9 +172,29 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}-yamnet
-          # latest=false: a version-pinned sidecar should not have `latest` drift
-          # under it on each release (deployments pin X.Y.Z to match Canticle).
-          flavor: latest=false
+          # `latest` IS published (metadata-action's default latest=auto: applied
+          # only to a non-prerelease semver tag, never to a main push, since those
+          # emit only the type=raw tags below).
+          #
+          # This previously set latest=false, reasoning that a version-pinned
+          # sidecar should not have `latest` drifting under it. That rationale was
+          # circular -- deployments pinned X.Y.Z because no `latest` existed to
+          # track, and the pin was then read back as evidence that pinning was the
+          # intent.
+          #
+          # The real hazard it guarded against was a silent model swap: new weights
+          # arriving under a running deployment would re-classify tracks with
+          # nothing recording that the classifier had changed. #684 removed that.
+          # The loaded model's identity is now the verdict-cache key, read from the
+          # sidecar's GET /health: a swap is detected within the cache TTL, logged
+          # at INFO with both hashes, and correctly invalidates exactly the verdicts
+          # that the previous model produced so they re-infer against the new one.
+          # An unknown or too-old sidecar fails closed to re-inference and never to
+          # a wrong verdict.
+          #
+          # So drift is now observable and self-correcting rather than silent, and
+          # an operator who wants a frozen classifier can still pin X.Y.Z -- by
+          # choice, not for want of an alternative.
           tags: |
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=nightly,enable=${{ github.ref == 'refs/heads/main' }}
