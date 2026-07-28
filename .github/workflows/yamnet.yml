@@ -104,6 +104,37 @@ jobs:
           test "$status" = "ok" || { echo "expected status=ok, got $status" >&2; exit 1; }
           test "$classes" = "521" || { echo "expected classes=521, got $classes" >&2; exit 1; }
           echo "smoke test passed: status=$status classes=$classes"
+
+          # The provenance labels (#682) exist so an operator can answer "did this
+          # tag actually change?" from the registry alone, without pulling 1.56GB.
+          # That is only worth anything if the labels are TRUE, so verify them
+          # against the image that just started rather than trusting the values
+          # baked into the Dockerfile.
+          #
+          # The class-count label is the drift-prone one: it is a literal in the
+          # Dockerfile while the real count comes from the SavedModel's own asset
+          # map at load time. Checking it against /health closes that loop -- a
+          # model swap that changes the map now fails here instead of shipping a
+          # label that quietly lies.
+          label_classes=$(docker image inspect canticle-yamnet:smoke \
+            --format '{{index .Config.Labels "net.sydlexius.canticle.yamnet.model.class-count"}}')
+          test "$label_classes" = "$classes" || {
+            echo "class-count label ($label_classes) disagrees with /health ($classes)" >&2
+            echo "the model changed but the label did not -- update the Dockerfile label" >&2
+            exit 1
+          }
+
+          # The model sha label must match what the service reports, or the label
+          # names weights other than the ones loaded.
+          label_sha=$(docker image inspect canticle-yamnet:smoke \
+            --format '{{index .Config.Labels "net.sydlexius.canticle.yamnet.model.sha256"}}')
+          health_sha=$(jq -r '.model_version // ""' /tmp/health.json)
+          test -n "$label_sha" || { echo "model.sha256 label is empty" >&2; exit 1; }
+          test "$label_sha" = "$health_sha" || {
+            echo "model.sha256 label ($label_sha) disagrees with /health ($health_sha)" >&2
+            exit 1
+          }
+          echo "provenance labels verified against the running image: classes=$label_classes sha=${label_sha:0:12}..."
         # Always dump logs on failure so a broken start is diagnosable in CI.
       - name: Sidecar logs on failure
         if: failure()

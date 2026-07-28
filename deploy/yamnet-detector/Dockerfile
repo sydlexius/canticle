@@ -54,6 +54,33 @@ ARG YAMNET_SHA256=b80da2a1a56926fb0767205051a200dd7b3beaf3ea1ea126c42a53943996e5
 # build time from the same ARG the download is verified against, so the reported
 # version and the model on disk cannot disagree.
 ENV YAMNET_MODEL_SHA256=${YAMNET_SHA256}
+
+# Image provenance, readable WITHOUT pulling the image (#682):
+#   docker buildx imagetools inspect ghcr.io/sydlexius/canticle-yamnet:latest \
+#     --format '{{json .Image.Config.Labels}}'
+#
+# The problem this solves: the image is tagged with CANTICLE's version, so its
+# tag says when it was built, not what changed in it. Two tags can be
+# byte-identical in substance with nothing to tell an operator that, and -- the
+# case that actually matters -- a tag whose MODEL changed looks exactly the same.
+# The detector's three-gate thresholds are calibrated against a specific model,
+# so a silent model swap is precisely what must not be silent.
+#
+# model.sha256 is the same ARG the download is checksum-verified against and the
+# same value /health reports, so the label, the running service, and the bytes on
+# disk cannot disagree. Comparing this label across two tags answers "did this
+# actually change?" without pulling 1.56GB.
+#
+# class-count is the second half of the model's identity: app.py loads the class
+# map from the SavedModel's own assets and the CI smoke test asserts 521, so a
+# drifted model that kept the same hash (impossible) or a repacked one with a
+# different map would show up here.
+LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
+      org.opencontainers.image.description="YAMNet AudioSet classifier sidecar for canticle instrumental detection" \
+      org.opencontainers.image.licenses="GPL-3.0" \
+      net.sydlexius.canticle.yamnet.model.sha256="${YAMNET_SHA256}" \
+      net.sydlexius.canticle.yamnet.model.source="${YAMNET_URL}" \
+      net.sydlexius.canticle.yamnet.model.class-count="521"
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends curl ca-certificates; \
