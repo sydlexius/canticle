@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -4107,6 +4108,60 @@ func TestDBQueue_SettleInstrumentalCompletesDeferredRowAtomically(t *testing.T) 
 	}
 	if vocalClass != "Singing" {
 		t.Errorf("vocal_class = %q; want the telemetry written in the same transaction", vocalClass)
+	}
+}
+
+// TestDBQueue_SettleInstrumentalAttributesDetectorLane: a settle must stamp
+// provider_lane, not just the outcome type.
+//
+// This is the regression for the blank-lane column in the reports UI (#708). The
+// backfill callers reach completion ONLY through SettleInstrumental, so a settle
+// that stamped outcome_type without provider_lane left every backfilled row
+// unattributed, rendering as an empty lane beside worker-settled rows that showed
+// "Instrumental Detector". The assertion reads the column straight out of SQLite
+// rather than trusting the returned outcome, because the bug was precisely that a
+// fully successful settle still left the column NULL -- an assertion on the return
+// value would have passed throughout.
+func TestDBQueue_SettleInstrumentalAttributesDetectorLane(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	if _, err := q.SettleInstrumental(ctx, item.ID, InstrumentalTelemetry{
+		MusicSum: 0.95, VocalPeak: 0.01, VocalClass: "Singing", DetectorVersion: "v1",
+	}); err != nil {
+		t.Fatalf("SettleInstrumental: %v", err)
+	}
+
+	// Scanned as a pointer so a NULL is distinguishable from the empty string:
+	// the pre-fix behavior was NULL, and scanning into a bare string would make
+	// the two indistinguishable and the failure message misleading.
+	var lane *string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT provider_lane FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&lane); err != nil {
+		t.Fatalf("read provider_lane: %v", err)
+	}
+	if lane == nil {
+		t.Fatal("provider_lane is NULL after a settle; the row renders with a blank lane in the reports UI")
+	}
+	if *lane != detectorbackfill.LaneName {
+		t.Errorf("provider_lane = %q; want %q", *lane, detectorbackfill.LaneName)
 	}
 }
 

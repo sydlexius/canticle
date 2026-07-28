@@ -10,6 +10,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/backoff"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 )
@@ -639,6 +640,18 @@ const (
 // would let the earlier stamps land on a row the worker already owns, leaving it
 // stamped instrumental while the worker goes on to complete it with real lyrics.
 //
+// provider_lane IS STAMPED HERE, in the same statement, not by a follow-up call.
+// The worker's detector path attributes its settles via SetProviderLane, but this
+// seam is the ONLY completion path the backfill callers have, and neither of them
+// stamped a lane -- so every row they settled landed with provider_lane NULL and
+// rendered as a blank lane in the reports UI while the worker's rows, identical in
+// every other respect, rendered as "Instrumental Detector". Attribution belongs in
+// the settle transaction rather than beside it: a separate advisory UPDATE could
+// fail (or be skipped by a future caller) and leave a settled row unattributed,
+// which is the exact defect this replaces. Both callers of this method are
+// detector-driven (instrumentalbackfill, instrumentalrecalib), so the lane is not
+// caller-dependent and does not need to be a parameter.
+//
 // The outcome is stateful, not a bool, because zero affected rows only proves the
 // row is no longer deferred -- it does NOT prove a worker claimed it. A PEER
 // BACKFILL may have settled it first, and the two demand opposite actions: a
@@ -663,12 +676,14 @@ func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel Instrume
              vocal_class = ?,
              detector_version = ?,
              outcome_type = 'instrumental',
+             provider_lane = ?,
              status = 'done',
              completed_at = ?,
              last_error = ''
          WHERE id = ?
            AND status = 'deferred'`,
 		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion,
+		detectorbackfill.LaneName,
 		now, id,
 	)
 	if err != nil {
