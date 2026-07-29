@@ -105,11 +105,51 @@ everything else running on it. `docker-compose.example.yml` therefore ships a
 (the SavedModel plus the TF runtime sit around 1.5GB resident).
 
 Treat 4 as a floor for good-neighbor behavior, not a performance target.
-Inference is the dominant cost in the detector path, so this limit trades
-detector throughput for isolation: raise it on a host with cores to spare, lower
-it on a busy one. Nothing breaks either way -- a slower sidecar just means a
-longer per-track detection, and Canticle's own detector cooldown and circuit
-breaker already bound how hard it is driven.
+
+**THIS IS AN ISOLATION KNOB, NOT A THROUGHPUT KNOB.** An earlier version of this
+section said inference was "the dominant cost in the detector path" and told you
+to size this against it. That is wrong, and a companion claim of ~40-67s per
+track is off by roughly 300x -- it almost certainly timed the whole detector path
+(ffmpeg reading audio off the array, plus a cold model load) rather than the
+classify call. Measured against a running sidecar, canticle 1.30.1:
+
+| operation | cost |
+|---|---|
+| `/classify`, 30s sample (typical) | 0.07-0.11s |
+| `/classify`, 60s sample (the longest sent) | 0.13-0.24s |
+| ffmpeg spread-sample extraction | ~0.10s |
+
+Inference is a fifth of a second, so raising this limit buys almost no
+throughput. What it buys is a bound on how much of the host TensorFlow may seize
+while it runs. Raise it on a host with cores to spare, lower it on a busy one;
+nothing breaks either way.
+
+The real per-track cost is **reading audio off the array**, which is what the
+throughput and wattage knobs below actually govern.
+
+### Taming detection (low-wattage recipe)
+
+Detection is deliberately bursty: work that once dripped across days at the
+provider's pace now runs in bounded cycles, because a contiguous burst is what
+lets the library disks idle afterward. That is better for spindown and strictly
+worse for peak draw while a cycle runs, so the bound is worth setting
+deliberately. Size against disk reads, not inference.
+
+| knob | where | what it governs |
+|---|---|---|
+| `instrumental_detector.backfill.batch_size` | canticle config | rows per sweep cycle -- the main wattage/throughput lever (default 100) |
+| `instrumental_detector.backfill.interval_minutes` | canticle config | spacing between cycles; longer gaps mean longer contiguous idle windows (default 60) |
+| `instrumental_detector.backfill.enabled` | canticle config | turns the automatic sweep off entirely (default true) |
+| `instrumental_detector.spread_samples` | canticle config | windows sampled per track; multiplies the ffmpeg work, so it multiplies disk reads |
+| `--limit` | `scan reconcile-instrumental` | drains a backlog in bounded manual chunks instead of one sustained run |
+| `cpus:` | yamnet compose service | isolation only -- caps TF's forward pass, not throughput |
+
+The defaults (100 rows every 60 minutes) drain roughly 2,400 rows/day without a
+sustained burst, so an untended install converges on its own. For a quieter host,
+lower `batch_size` or lengthen `interval_minutes` before touching `cpus:` --
+those two govern disk reads, which is the cost that matters. Disabling the sweep
+leaves the CLI path fully functional, so an operator can still drain a backlog on
+their own schedule with `scan reconcile-instrumental --limit N`.
 
 The deployed copy lives on the Unraid host at
 `/mnt/vms/dockerappdata/yamnet-detector/`; Canticle reaches it at
