@@ -833,3 +833,85 @@ func TestIndexMetadataDurationBankFailureIsNonFatal(t *testing.T) {
 		t.Errorf("audio_metadata rows = %d, want 1: a duration-bank failure must not cost the file its index entry", n)
 	}
 }
+
+// TestIndexMetadataBanksDurationOnCacheHitWithoutReading is the #724 regression.
+//
+// #720 attached the duration bank to the READ path, but walkIndexMetadata
+// consults audio_metadata and returns early on a hit BEFORE ReadAudioFacts is
+// called -- so a file already indexed by an older build could never gain a
+// duration row. Measured on prod: 12,990 rows had a metadata row and no
+// duration row, and the sweep banked exactly zero of them, twice.
+//
+// The state under test is the one that exists in production and that no other
+// test in this file constructs: audio_metadata CURRENT, audio_durations ABSENT.
+// Every other test starts from an empty DB, so the walk always reaches the read
+// and this path is never entered.
+//
+// It must also bank WITHOUT opening the audio file, which is the whole point --
+// the duration is already in the metadata row. The audio file is deleted after
+// indexing, so any attempt to read it would fail loudly rather than silently
+// passing for the wrong reason.
+func TestIndexMetadataBanksDurationOnCacheHitWithoutReading(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	ctx := context.Background()
+
+	const sampleRate, totalSamples = 44100, 44100 // exactly 1 second
+	flacPath := filepath.Join(root, "known.flac")
+	if err := os.WriteFile(flacPath, testutil.GenerateFLAC(sampleRate, totalSamples), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	// Pass 1: populate audio_metadata normally.
+	var first bytes.Buffer
+	if code := runIndexMetadata(ctx, &first, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("first pass exit = %d: %s", code, first.String())
+	}
+	if n := countAudioMetadataRows(t, dbPath); n != 1 {
+		t.Fatalf("setup: audio_metadata rows = %d, want 1", n)
+	}
+
+	// Now forge the production state: delete the duration row that pass 1 wrote,
+	// leaving the metadata row current. This is what an upgrade from a build that
+	// indexed metadata but never banked durations looks like on disk.
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "DELETE FROM audio_durations"); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("clear audio_durations: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close after clear: %v", err)
+	}
+	if n := countAudioDurationRows(t, dbPath); n != 0 {
+		t.Fatalf("setup: audio_durations rows = %d, want 0", n)
+	}
+
+	// Pass 2 must bank the duration from the metadata row WITHOUT reading the
+	// file. Make the audio UNREADABLE rather than deleting it: the walk must
+	// still find and stat it (a deleted file is never visited at all, so the
+	// skip path under test would not be reached and the test would pass or fail
+	// for the wrong reason), but any attempt to OPEN it fails loudly.
+	if err := os.Chmod(flacPath, 0o000); err != nil {
+		t.Fatalf("chmod audio fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(flacPath, 0o600) }) // so t.TempDir cleanup can remove it
+
+	var second bytes.Buffer
+	if code := runIndexMetadata(ctx, &second, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("second pass exit = %d: %s", code, second.String())
+	}
+
+	if n := countAudioDurationRows(t, dbPath); n != 1 {
+		t.Fatalf("audio_durations rows = %d, want 1: a file already in audio_metadata must still gain its duration row, sourced from that row rather than from a re-read", n)
+	}
+	absRoot, canonRoot := pathutil.CanonicalRoot(root)
+	got, found := bankedDuration(t, dbPath, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, flacPath))
+	if !found {
+		t.Fatalf("no audio_durations row for the indexed file")
+	}
+	if want := totalSamples / sampleRate; got != want {
+		t.Errorf("banked duration = %ds, want %ds: the value must come from the metadata row, not a guess", got, want)
+	}
+}
