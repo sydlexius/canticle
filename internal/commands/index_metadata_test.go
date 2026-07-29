@@ -915,3 +915,50 @@ func TestIndexMetadataBanksDurationOnCacheHitWithoutReading(t *testing.T) {
 		t.Errorf("banked duration = %ds, want %ds: the value must come from the metadata row, not a guess", got, want)
 	}
 }
+
+// TestIndexMetadataCacheHitDurationBankFailureIsNonFatal covers the degraded
+// branch of the #724 skip-path bank: the metadata row is current (so the walk
+// takes the cache-hit path) but banking the duration fails. That must warn and
+// continue, exactly as the read path does -- audio_metadata is this command's
+// product, audio_durations an opportunistic byproduct, so a byproduct failure
+// must never fail a run whose real work already succeeded.
+func TestIndexMetadataCacheHitDurationBankFailureIsNonFatal(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(root, "known.flac"),
+		testutil.GenerateFLAC(44100, 44100), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	// Pass 1 populates audio_metadata, so pass 2 takes the cache-hit path.
+	var first bytes.Buffer
+	if code := runIndexMetadata(ctx, &first, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("first pass exit = %d: %s", code, first.String())
+	}
+
+	// Break ONLY the duration store, leaving audio_metadata intact: the Lookup
+	// still hits, the walk still takes the skip path, and Record then fails on a
+	// missing relation.
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "DROP TABLE audio_durations"); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("drop audio_durations: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close after drop: %v", err)
+	}
+
+	var second bytes.Buffer
+	if code := runIndexMetadata(ctx, &second, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("a cache-hit duration-bank failure must not fail the run; exit = %d: %s", code, second.String())
+	}
+	// The file must still be reported as skipped -- the failed bank must not
+	// change how the walk classifies it.
+	if !strings.Contains(second.String(), "1 skipped") {
+		t.Errorf("the unchanged file must still count as skipped; got: %s", second.String())
+	}
+}
