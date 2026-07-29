@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/audiometa"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
@@ -83,6 +84,25 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 
 	store := audiometa.New(sqlDB, scanner.DurationReaderVersion)
 
+	// Bank the duration from the SAME read that fills audio_metadata (#717).
+	//
+	// This walk already opens every file and already holds facts.TrackLength
+	// alongside the (mtime, size) audiodur keys on -- it simply threw the
+	// duration away, so audio_durations stayed sparse while audio_metadata went
+	// complete. Measured on the reference library: 0 scan_results rows missing a
+	// metadata row, but 12,990 missing a duration row. Every one of those is a
+	// file this sweep had open, read, and could have settled.
+	//
+	// The consequence is a repeat OPEN, which is what makes it worth fixing:
+	// a spin-up event costs the same whether it reads one byte or a gigabyte, so
+	// the count of touches is the metric, not their size. A duration miss sends
+	// a later caller back to the disk for a file this command already read.
+	//
+	// Both stores share scanner.DurationReaderVersion, so a parser change
+	// invalidates the two together and they can never disagree about which
+	// reader produced them.
+	durations := audiodur.New(sqlDB, scanner.DurationReaderVersion)
+
 	// A --library run scopes the printed coverage number to that library's
 	// canonical root, per #646's AC ("how many files in library N have
 	// complete metadata"); a whole-library-set run keeps the global total.
@@ -119,7 +139,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 			walkErrors++
 			continue
 		}
-		if err := walkIndexMetadata(ctx, store, root, args, &walked, &indexed, &skipped, &unreadable, &walkErrors, &workDone, &durationFailures, &limitReached); err != nil {
+		if err := walkIndexMetadata(ctx, store, durations, root, args, &walked, &indexed, &skipped, &unreadable, &walkErrors, &workDone, &durationFailures, &limitReached); err != nil {
 			if errors.Is(err, context.Canceled) {
 				slog.Info("index-metadata: interrupted", "walked", walked, "indexed", indexed)
 				interrupted = true
@@ -201,7 +221,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 // configured roots, not a per-root allowance: a local counter here would
 // reset to zero at the start of every root, letting a run over N roots read
 // up to Limit*N files (finding: --limit is per-root, not per-run).
-func walkIndexMetadata(ctx context.Context, store *audiometa.Store, root string, args ScanIndexMetadataCmd,
+func walkIndexMetadata(ctx context.Context, store *audiometa.Store, durations *audiodur.Store, root string, args ScanIndexMetadataCmd,
 	walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures *int, limitReached *bool,
 ) error {
 	absRoot, canonRoot := pathutil.CanonicalRoot(root)
@@ -311,6 +331,21 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, root string,
 		if args.Yes {
 			if rerr := store.Record(ctx, canonPath, facts); rerr != nil {
 				return fmt.Errorf("index-metadata: record %q: %w", canonPath, rerr)
+			}
+			// Bank the duration from the read just performed (#717). Keyed on the
+			// identity the OPEN HANDLE reported (facts.MTimeNano/SizeBytes), not a
+			// fresh os.Stat: re-statting would both cost another syscall and open a
+			// TOCTOU window where a file rewritten mid-walk gets its new stat
+			// stamped onto the old read's duration.
+			//
+			// NON-FATAL, unlike the metadata Record above. audio_metadata is this
+			// command's product and a failure there means the run did not do its
+			// job; audio_durations is an opportunistic byproduct, so failing the
+			// whole sweep over it would trade a complete index for a partial one.
+			// Record itself no-ops on a non-positive duration, so a file with an
+			// unparsable duration (counted above) simply banks nothing.
+			if derr := durations.Record(ctx, canonPath, facts.MTimeNano, facts.SizeBytes, facts.TrackLength); derr != nil {
+				slog.Warn("index-metadata: could not bank duration; metadata row still recorded", "file", canonPath, "error", derr)
 			}
 			if indexMetadataRowCommitted != nil {
 				indexMetadataRowCommitted()

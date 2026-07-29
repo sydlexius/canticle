@@ -3,6 +3,8 @@ package commands
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/testutil"
 )
 
@@ -662,5 +665,171 @@ func TestIndexMetadataNoDurationNoteWhenClean(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "duration parse failure") {
 		t.Errorf("a clean run must not mention duration failures; got: %s", out.String())
+	}
+}
+
+// countAudioDurationRows counts audio_durations rows, the table index-metadata
+// began banking into in #717.
+func countAudioDurationRows(t *testing.T, dbPath string) int {
+	t.Helper()
+	return countRows(t, context.Background(), dbPath, "audio_durations")
+}
+
+// bankedDuration returns the duration_seconds stored for path, and whether a row
+// exists at all. Absence and a stored value are different facts here: audiodur
+// represents "unknown" by having no row, so a test asserting the no-op path must
+// be able to tell "no row" from "a row saying 0".
+func bankedDuration(t *testing.T, dbPath, filePath string) (seconds int, found bool) {
+	t.Helper()
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	err = sqlDB.QueryRowContext(ctx,
+		"SELECT duration_seconds FROM audio_durations WHERE file_path = ?", filePath).Scan(&seconds)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false
+	}
+	if err != nil {
+		t.Fatalf("query audio_durations: %v", err)
+	}
+	return seconds, true
+}
+
+// TestIndexMetadataBanksDurationFromTheSameRead is the #717 regression: the walk
+// already opens every file and already holds facts.TrackLength, so a run must
+// leave audio_durations populated too. Before the fix audio_metadata went
+// complete while audio_durations stayed sparse (measured: 12,990 scan_results
+// rows with a metadata row but no duration row), and every one of those sent a
+// later caller back to the disk for a file this command had already read.
+func TestIndexMetadataBanksDurationFromTheSameRead(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+
+	// A header-only FLAC with an exact, known duration: 44100 samples at 44100 Hz
+	// is 1 second. WriteAudioFile's frameless ID3 cannot be used here -- it has NO
+	// parsable duration, which is the negative case asserted separately below.
+	const sampleRate, totalSamples = 44100, 44100
+	flacPath := filepath.Join(root, "known.flac")
+	if err := os.WriteFile(flacPath, testutil.GenerateFLAC(sampleRate, totalSamples), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	if code := runIndexMetadata(context.Background(), &out, ScanIndexMetadataCmd{
+		ConfigPath: cfgPath,
+		Yes:        true,
+	}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; output: %s", code, out.String())
+	}
+
+	// The metadata row is the command's existing product; the duration row is the
+	// behavior #717 added. Assert both, so a regression that quietly stops banking
+	// durations cannot pass by leaving the metadata index intact.
+	if n := countAudioMetadataRows(t, dbPath); n != 1 {
+		t.Errorf("audio_metadata rows = %d, want 1", n)
+	}
+	if n := countAudioDurationRows(t, dbPath); n != 1 {
+		t.Fatalf("audio_durations rows = %d, want 1: the duration must be banked from the read the walk already performed", n)
+	}
+
+	// The banked value must be the real duration, not merely a row: a cache that
+	// stores the wrong number is worse than one that stores nothing, because a
+	// later caller trusts it instead of reading the file.
+	// Query under the SAME canonical spelling walkIndexMetadata records with, not
+	// the raw temp path: on macOS /var is a symlink to /private/var, so a raw-path
+	// lookup misses every row and the assertion would pass or fail on which
+	// directory the OS handed the test.
+	absRoot, canonRoot := pathutil.CanonicalRoot(root)
+	got, found := bankedDuration(t, dbPath, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, flacPath))
+	if !found {
+		t.Fatalf("no audio_durations row for %s", flacPath)
+	}
+	if want := totalSamples / sampleRate; got != want {
+		t.Errorf("banked duration = %ds, want %ds", got, want)
+	}
+}
+
+// TestIndexMetadataUnparsableDurationBanksNoRow pins the no-op half of the
+// contract. audiodur.Record ignores a non-positive duration because absence is
+// how the table spells "unknown" -- storing a 0 would make "never read" and
+// "measured as zero-length" indistinguishable, and a later caller would treat
+// the 0 as settled rather than reading the file.
+func TestIndexMetadataUnparsableDurationBanksNoRow(t *testing.T) {
+	// The frameless ID3 file WriteAudioFile produces: tags read fine, duration
+	// does not parse. Exactly the shape TestIndexMetadataDurationParseFailureIsCounted
+	// relies on.
+	cfgPath, dbPath, _ := setupIndexMetadata(t, "noduration.mp3")
+
+	var out bytes.Buffer
+	if code := runIndexMetadata(context.Background(), &out, ScanIndexMetadataCmd{
+		ConfigPath: cfgPath,
+		Yes:        true,
+	}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; output: %s", code, out.String())
+	}
+
+	// The metadata row is still written -- an unparsable duration must not cost
+	// the file its index entry.
+	if n := countAudioMetadataRows(t, dbPath); n != 1 {
+		t.Errorf("audio_metadata rows = %d, want 1: an unparsable duration must not skip the metadata row", n)
+	}
+	if n := countAudioDurationRows(t, dbPath); n != 0 {
+		t.Errorf("audio_durations rows = %d, want 0: an unparsable duration must bank nothing, not a 0", n)
+	}
+}
+
+// TestIndexMetadataDurationBankFailureIsNonFatal pins the asymmetry between the
+// two writes this command performs. audio_metadata is its PRODUCT: a failure
+// there means the run did not do its job, so it aborts. audio_durations is an
+// opportunistic byproduct banked from the same read, so a failure there must be
+// logged and stepped over -- failing the whole sweep would trade a complete
+// index for a partial one, which is the opposite of what #717 is for.
+//
+// Without this test the degraded path is unexecuted: every other test in this
+// file exercises the branch where Record succeeds, so nothing proves the run
+// survives a duration-store failure OR that the metadata row still lands when
+// it does.
+func TestIndexMetadataDurationBankFailureIsNonFatal(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+
+	// A file with a REAL duration, so the code reaches durations.Record rather
+	// than short-circuiting on the non-positive no-op path.
+	const sampleRate, totalSamples = 44100, 44100
+	if err := os.WriteFile(filepath.Join(root, "known.flac"),
+		testutil.GenerateFLAC(sampleRate, totalSamples), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	// Break ONLY the duration store, by dropping the table the migrations just
+	// created. This is the narrowest available fault injection: audiodur.Record
+	// fails on a missing relation while every other store keeps working, so the
+	// test isolates the branch under examination instead of breaking the DB
+	// wholesale and asserting on a failure that could have come from anywhere.
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "DROP TABLE audio_durations"); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("drop audio_durations: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close after drop: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := runIndexMetadata(ctx, &out, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true})
+
+	// The contract, both halves:
+	//   1. the run still succeeds -- a byproduct failure is not the run's failure
+	if code != 0 {
+		t.Fatalf("a duration-bank failure must not fail the run; exit = %d: %s", code, out.String())
+	}
+	//   2. the metadata row -- the thing this command exists to write -- is still there
+	if n := countAudioMetadataRows(t, dbPath); n != 1 {
+		t.Errorf("audio_metadata rows = %d, want 1: a duration-bank failure must not cost the file its index entry", n)
 	}
 }
