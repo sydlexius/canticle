@@ -833,3 +833,204 @@ func TestIndexMetadataDurationBankFailureIsNonFatal(t *testing.T) {
 		t.Errorf("audio_metadata rows = %d, want 1: a duration-bank failure must not cost the file its index entry", n)
 	}
 }
+
+// TestIndexMetadataBanksDurationOnCacheHitWithoutReading is the #724 regression.
+//
+// #720 attached the duration bank to the READ path, but walkIndexMetadata
+// consults audio_metadata and returns early on a hit BEFORE ReadAudioFacts is
+// called -- so a file already indexed by an older build could never gain a
+// duration row. Measured on prod: 12,990 rows had a metadata row and no
+// duration row, and the sweep banked exactly zero of them, twice.
+//
+// The state under test is the one that exists in production and that no other
+// test in this file constructs: audio_metadata CURRENT, audio_durations ABSENT.
+// Every other test starts from an empty DB, so the walk always reaches the read
+// and this path is never entered.
+//
+// It must also bank WITHOUT opening the audio file, which is the whole point --
+// the duration is already in the metadata row. The audio file is deleted after
+// indexing, so any attempt to read it would fail loudly rather than silently
+// passing for the wrong reason.
+func TestIndexMetadataBanksDurationOnCacheHitWithoutReading(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	ctx := context.Background()
+
+	const sampleRate, totalSamples = 44100, 44100 // exactly 1 second
+	flacPath := filepath.Join(root, "known.flac")
+	if err := os.WriteFile(flacPath, testutil.GenerateFLAC(sampleRate, totalSamples), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	// Pass 1: populate audio_metadata normally.
+	var first bytes.Buffer
+	if code := runIndexMetadata(ctx, &first, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("first pass exit = %d: %s", code, first.String())
+	}
+	if n := countAudioMetadataRows(t, dbPath); n != 1 {
+		t.Fatalf("setup: audio_metadata rows = %d, want 1", n)
+	}
+
+	// Now forge the production state: delete the duration row that pass 1 wrote,
+	// leaving the metadata row current. This is what an upgrade from a build that
+	// indexed metadata but never banked durations looks like on disk.
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "DELETE FROM audio_durations"); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("clear audio_durations: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close after clear: %v", err)
+	}
+	if n := countAudioDurationRows(t, dbPath); n != 0 {
+		t.Fatalf("setup: audio_durations rows = %d, want 0", n)
+	}
+
+	// Pass 2 must bank the duration from the metadata row WITHOUT reading the
+	// file. Corrupt the CONTENTS rather than the permissions: a 0o000 fixture is
+	// still readable by a root test process (CI images often run as root), so a
+	// permissions-based guard would let a re-read regression pass silently.
+	// Same-size garbage keeps the (mtime, size) identity the cache hit is keyed
+	// on -- restored below -- while making any parse deterministically fail.
+	//
+	// The file must still EXIST: deleting it means WalkDir never visits it, so
+	// the skip path under test is never reached and the test would pass for the
+	// wrong reason. That is not hypothetical; it was the first version of this
+	// test.
+	origInfo, err := os.Stat(flacPath)
+	if err != nil {
+		t.Fatalf("stat fixture before corrupting: %v", err)
+	}
+	if err := os.WriteFile(flacPath, bytes.Repeat([]byte{0x00}, int(origInfo.Size())), 0o600); err != nil {
+		t.Fatalf("corrupt audio fixture: %v", err)
+	}
+	if err := os.Chtimes(flacPath, origInfo.ModTime(), origInfo.ModTime()); err != nil {
+		t.Fatalf("restore fixture mtime: %v", err)
+	}
+	// Verify the identity the cache hit depends on actually survived, so a
+	// failure below means "the duration was not banked" rather than "the fixture
+	// drifted and the lookup missed".
+	newInfo, err := os.Stat(flacPath)
+	if err != nil {
+		t.Fatalf("stat fixture after corrupting: %v", err)
+	}
+	if newInfo.Size() != origInfo.Size() || !newInfo.ModTime().Equal(origInfo.ModTime()) {
+		t.Fatalf("fixture identity drifted: size %d->%d, mtime %v->%v",
+			origInfo.Size(), newInfo.Size(), origInfo.ModTime(), newInfo.ModTime())
+	}
+
+	var second bytes.Buffer
+	if code := runIndexMetadata(ctx, &second, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("second pass exit = %d: %s", code, second.String())
+	}
+
+	if n := countAudioDurationRows(t, dbPath); n != 1 {
+		t.Fatalf("audio_durations rows = %d, want 1: a file already in audio_metadata must still gain its duration row, sourced from that row rather than from a re-read", n)
+	}
+	absRoot, canonRoot := pathutil.CanonicalRoot(root)
+	got, found := bankedDuration(t, dbPath, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, flacPath))
+	if !found {
+		t.Fatalf("no audio_durations row for the indexed file")
+	}
+	if want := totalSamples / sampleRate; got != want {
+		t.Errorf("banked duration = %ds, want %ds: the value must come from the metadata row, not a guess", got, want)
+	}
+}
+
+// TestIndexMetadataCacheHitDurationBankFailureIsNonFatal covers the degraded
+// branch of the #724 skip-path bank: the metadata row is current (so the walk
+// takes the cache-hit path) but banking the duration fails. That must warn and
+// continue, exactly as the read path does -- audio_metadata is this command's
+// product, audio_durations an opportunistic byproduct, so a byproduct failure
+// must never fail a run whose real work already succeeded.
+func TestIndexMetadataCacheHitDurationBankFailureIsNonFatal(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(root, "known.flac"),
+		testutil.GenerateFLAC(44100, 44100), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	// Pass 1 populates audio_metadata, so pass 2 takes the cache-hit path.
+	var first bytes.Buffer
+	if code := runIndexMetadata(ctx, &first, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("first pass exit = %d: %s", code, first.String())
+	}
+
+	// Break ONLY the duration store, leaving audio_metadata intact: the Lookup
+	// still hits, the walk still takes the skip path, and Record then fails on a
+	// missing relation.
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "DROP TABLE audio_durations"); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("drop audio_durations: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close after drop: %v", err)
+	}
+
+	var second bytes.Buffer
+	if code := runIndexMetadata(ctx, &second, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("a cache-hit duration-bank failure must not fail the run; exit = %d: %s", code, second.String())
+	}
+	// The file must still be reported as skipped -- the failed bank must not
+	// change how the walk classifies it.
+	if !strings.Contains(second.String(), "1 skipped") {
+		t.Errorf("the unchanged file must still count as skipped; got: %s", second.String())
+	}
+}
+
+// TestIndexMetadataDryRunWritesNoDurationOnCacheHit pins the dry-run contract on
+// the #724 skip path. TestIndexMetadataDryRunWritesNothing asserts only that
+// audio_metadata stays empty, so it could never have caught a write to the OTHER
+// table -- which is exactly the gap the cache-hit bank opened: the skip path ran
+// before any args.Yes check, so a dry run over an already-indexed library
+// mutated audio_durations.
+//
+// Dry-run must write NOTHING. A command whose preview mutates the database is
+// worse than one with no preview at all, because the operator has been told it
+// is safe.
+func TestIndexMetadataDryRunWritesNoDurationOnCacheHit(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(root, "known.flac"),
+		testutil.GenerateFLAC(44100, 44100), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	// Pass 1 (--yes) populates audio_metadata so pass 2 takes the cache-hit path.
+	var first bytes.Buffer
+	if code := runIndexMetadata(ctx, &first, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("first pass exit = %d: %s", code, first.String())
+	}
+
+	// Clear the duration rows pass 1 wrote, leaving the metadata rows current.
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "DELETE FROM audio_durations"); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("clear audio_durations: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close after clear: %v", err)
+	}
+
+	// Pass 2 WITHOUT --yes: the walk takes the skip path and must write nothing.
+	var second bytes.Buffer
+	if code := runIndexMetadata(ctx, &second, ScanIndexMetadataCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("dry run exit = %d: %s", code, second.String())
+	}
+
+	if n := countAudioDurationRows(t, dbPath); n != 0 {
+		t.Errorf("dry run wrote %d audio_durations row(s), want 0: a preview must never mutate the database", n)
+	}
+}

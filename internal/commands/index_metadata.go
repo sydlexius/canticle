@@ -299,6 +299,42 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, durations *a
 		}
 		if hit {
 			*skipped++
+			// Bank the duration from the METADATA ROW, not from a re-read (#724).
+			//
+			// #720 attached the duration write to the read path below, but this
+			// skip returns first, so a file already in audio_metadata could never
+			// gain a duration row: measured on prod, 12,990 rows had a current
+			// metadata row and no duration row, and the sweep banked exactly zero
+			// of them however many times it ran. The skip is correct and
+			// load-bearing -- it is what makes a re-run over an unchanged library
+			// nearly free on spun-down disks -- so the fix belongs HERE, not in
+			// weakening it.
+			//
+			// NO FILE IS OPENED. Facts re-queries the row the Lookup above just
+			// validated against this same (mtime, size), so the duration is
+			// already stored and costs one indexed SELECT rather than a spin-up.
+			// That makes this strictly cheaper than the read path it complements.
+			//
+			// Non-fatal for the same reason as the read path: audio_metadata is
+			// this command's product, audio_durations an opportunistic byproduct.
+			// Record itself no-ops on a non-positive duration, so a row whose
+			// duration never parsed banks nothing rather than a misleading 0 --
+			// absence is how that table spells "unknown".
+			facts, ok, ferr := store.Facts(ctx, canonPath, mtimeNano, size)
+			switch {
+			case ferr != nil:
+				slog.Warn("index-metadata: could not read cached facts to bank duration", "file", canonPath, "error", ferr)
+			// GATED ON args.Yes, like every other write in this command. Without
+			// it a DRY RUN mutated audio_durations on any already-indexed
+			// library: the skip path returns before the args.Yes check that
+			// guards the read-path write, so "preview" silently wrote rows. A
+			// preview that mutates is worse than no preview, because the operator
+			// has been told it is safe.
+			case ok && args.Yes:
+				if derr := durations.Record(ctx, canonPath, mtimeNano, size, facts.TrackLength); derr != nil {
+					slog.Warn("index-metadata: could not bank duration from the metadata row", "file", canonPath, "error", derr)
+				}
+			}
 			return nil
 		}
 
