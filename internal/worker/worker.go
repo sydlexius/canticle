@@ -757,7 +757,7 @@ func (w *Worker) SetMetadataCache(c MetadataCache) {
 func statFileIdentity(path string) (mtimeNano, size int64, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("worker: stat %q: %w", path, err)
 	}
 	return info.ModTime().UnixNano(), info.Size(), nil
 }

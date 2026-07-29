@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/scanner"
@@ -237,5 +238,27 @@ func TestSetMetadataCacheTakesEffect(t *testing.T) {
 	w.SetMetadataCache(cache)
 	if w.metaCache == nil {
 		t.Fatal("SetMetadataCache did not take effect")
+	}
+}
+
+// The stat error must carry context. resolveMetadata logs it at Debug on the
+// cache path, and a bare os.Stat error ("stat /path: no such file") is
+// indistinguishable in a log from every other file error in the process -- so a
+// cache-path stat failure could not be attributed to the cache path at all.
+// Also the repo convention: wrap errors with fmt.Errorf("context: %w", err).
+func TestStatFileIdentityWrapsItsError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.mp3")
+
+	_, _, err := statFileIdentity(missing)
+	if err == nil {
+		t.Fatal("statting a missing file must return an error")
+	}
+	if !strings.Contains(err.Error(), "worker: stat") {
+		t.Errorf("error %q lacks the wrapping context; a bare os.Stat error is unattributable in a log", err)
+	}
+	// The wrap must PRESERVE the cause, not replace it: callers and errors.Is
+	// need the underlying os.ErrNotExist.
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("wrapping dropped the cause; errors.Is(err, os.ErrNotExist) must still hold, got %q", err)
 	}
 }
