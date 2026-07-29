@@ -324,7 +324,13 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, durations *a
 			switch {
 			case ferr != nil:
 				slog.Warn("index-metadata: could not read cached facts to bank duration", "file", canonPath, "error", ferr)
-			case ok:
+			// GATED ON args.Yes, like every other write in this command. Without
+			// it a DRY RUN mutated audio_durations on any already-indexed
+			// library: the skip path returns before the args.Yes check that
+			// guards the read-path write, so "preview" silently wrote rows. A
+			// preview that mutates is worse than no preview, because the operator
+			// has been told it is safe.
+			case ok && args.Yes:
 				if derr := durations.Record(ctx, canonPath, mtimeNano, size, facts.TrackLength); derr != nil {
 					slog.Warn("index-metadata: could not bank duration from the metadata row", "file", canonPath, "error", derr)
 				}
