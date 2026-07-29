@@ -590,7 +590,12 @@ func TestRunScanCmd_DispatchesIndexMetadata(t *testing.T) {
 // the tag block is valid and only the audio frames are unparsable, which is
 // the case that used to be invisible.
 func TestIndexMetadataDurationParseFailureIsCounted(t *testing.T) {
-	cfgPath, _, root := setupIndexMetadata(t, "good.mp3")
+	// NO extra .mp3 fixture: testutil.WriteAudioFile writes a frameless ID3
+	// block, so a second .mp3 would be a SECOND duration failure and the exact
+	// counts below could not be asserted. That is not hypothetical -- the first
+	// draft of this test used "good.mp3" and reported 2 failures while claiming
+	// to test 1.
+	cfgPath, _, root := setupIndexMetadata(t)
 
 	// A valid ID3 tag block followed by bytes that are not decodable frames:
 	// tag.ReadFrom succeeds, the duration parser runs and fails.
@@ -619,13 +624,15 @@ func TestIndexMetadataDurationParseFailureIsCounted(t *testing.T) {
 		t.Fatalf("a duration parse failure must not fail the run; exit = %d: %s", code, got)
 	}
 	// The whole point: it must be COUNTED, and countable separately.
-	if !strings.Contains(got, "duration parse failure") {
-		t.Errorf("summary must report duration parse failures; got: %s", got)
+	if !strings.Contains(got, "1 duration parse failure(s)") {
+		t.Errorf("summary must report EXACTLY 1 duration parse failure; got: %s", got)
 	}
 	// And it must NOT be conflated with the unreadable bucket -- the file's
 	// tags read fine, so counting it there would hide it among genuinely
 	// unopenable files.
-	if strings.Contains(got, "1 unreadable") {
+	// Positive assertion, not a negative one: `!Contains("1 unreadable")` would
+	// also pass on "2 unreadable", so it accepted wrong answers.
+	if !strings.Contains(got, "0 unreadable") {
 		t.Errorf("a duration failure must not be counted as unreadable; got: %s", got)
 	}
 }
