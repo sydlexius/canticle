@@ -779,3 +779,57 @@ func TestIndexMetadataUnparsableDurationBanksNoRow(t *testing.T) {
 		t.Errorf("audio_durations rows = %d, want 0: an unparsable duration must bank nothing, not a 0", n)
 	}
 }
+
+// TestIndexMetadataDurationBankFailureIsNonFatal pins the asymmetry between the
+// two writes this command performs. audio_metadata is its PRODUCT: a failure
+// there means the run did not do its job, so it aborts. audio_durations is an
+// opportunistic byproduct banked from the same read, so a failure there must be
+// logged and stepped over -- failing the whole sweep would trade a complete
+// index for a partial one, which is the opposite of what #717 is for.
+//
+// Without this test the degraded path is unexecuted: every other test in this
+// file exercises the branch where Record succeeds, so nothing proves the run
+// survives a duration-store failure OR that the metadata row still lands when
+// it does.
+func TestIndexMetadataDurationBankFailureIsNonFatal(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+
+	// A file with a REAL duration, so the code reaches durations.Record rather
+	// than short-circuiting on the non-positive no-op path.
+	const sampleRate, totalSamples = 44100, 44100
+	if err := os.WriteFile(filepath.Join(root, "known.flac"),
+		testutil.GenerateFLAC(sampleRate, totalSamples), 0o600); err != nil {
+		t.Fatalf("write flac fixture: %v", err)
+	}
+
+	// Break ONLY the duration store, by dropping the table the migrations just
+	// created. This is the narrowest available fault injection: audiodur.Record
+	// fails on a missing relation while every other store keeps working, so the
+	// test isolates the branch under examination instead of breaking the DB
+	// wholesale and asserting on a failure that could have come from anywhere.
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "DROP TABLE audio_durations"); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("drop audio_durations: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close after drop: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := runIndexMetadata(ctx, &out, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true})
+
+	// The contract, both halves:
+	//   1. the run still succeeds -- a byproduct failure is not the run's failure
+	if code != 0 {
+		t.Fatalf("a duration-bank failure must not fail the run; exit = %d: %s", code, out.String())
+	}
+	//   2. the metadata row -- the thing this command exists to write -- is still there
+	if n := countAudioMetadataRows(t, dbPath); n != 1 {
+		t.Errorf("audio_metadata rows = %d, want 1: a duration-bank failure must not cost the file its index entry", n)
+	}
+}
