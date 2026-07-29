@@ -99,7 +99,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	// (finding: --limit is per-root, not per-run). Threading it as a *int
 	// alongside the other counters makes the budget carry over correctly from
 	// one root to the next, exactly like walked/indexed/skipped/unreadable.
-	var walked, indexed, skipped, unreadable, walkErrors, workDone int
+	var walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures int
 	limitReached := false
 	interrupted := false
 	for _, root := range roots {
@@ -119,7 +119,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 			walkErrors++
 			continue
 		}
-		if err := walkIndexMetadata(ctx, store, root, args, &walked, &indexed, &skipped, &unreadable, &walkErrors, &workDone, &limitReached); err != nil {
+		if err := walkIndexMetadata(ctx, store, root, args, &walked, &indexed, &skipped, &unreadable, &walkErrors, &workDone, &durationFailures, &limitReached); err != nil {
 			if errors.Is(err, context.Canceled) {
 				slog.Info("index-metadata: interrupted", "walked", walked, "indexed", indexed)
 				interrupted = true
@@ -149,8 +149,15 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	if args.Yes {
 		verb = "indexed"
 	}
-	_, _ = fmt.Fprintf(out, "index-metadata: walked %d file(s); %s %d (%d skipped unchanged, %d unreadable, %d walk error(s)); coverage now %d row(s)%s\n",
-		walked, verb, indexed, skipped, unreadable, walkErrors, coverage, suffixDryRun(args.Yes))
+	// Duration-parse failures are appended only when non-zero, so the healthy
+	// case reads exactly as before and a non-zero count is conspicuous rather
+	// than a column of noise an operator learns to skip (#651).
+	durationNote := ""
+	if durationFailures > 0 {
+		durationNote = fmt.Sprintf("; %d duration parse failure(s)", durationFailures)
+	}
+	_, _ = fmt.Fprintf(out, "index-metadata: walked %d file(s); %s %d (%d skipped unchanged, %d unreadable, %d walk error(s))%s; coverage now %d row(s)%s\n",
+		walked, verb, indexed, skipped, unreadable, walkErrors, durationNote, coverage, suffixDryRun(args.Yes))
 	// An operator-initiated Ctrl-C after partial, already-committed work is
 	// not a failure: the work done so far is real and the summary above
 	// reports it accurately, so exit 0 rather than 1. A genuine error path
@@ -195,7 +202,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 // reset to zero at the start of every root, letting a run over N roots read
 // up to Limit*N files (finding: --limit is per-root, not per-run).
 func walkIndexMetadata(ctx context.Context, store *audiometa.Store, root string, args ScanIndexMetadataCmd,
-	walked, indexed, skipped, unreadable, walkErrors, workDone *int, limitReached *bool,
+	walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures *int, limitReached *bool,
 ) error {
 	absRoot, canonRoot := pathutil.CanonicalRoot(root)
 	return filepath.WalkDir(absRoot, func(p string, d os.DirEntry, walkErr error) error {
@@ -288,6 +295,17 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, root string,
 			*unreadable++
 			*workDone++
 			return nil
+		}
+
+		// A file whose TAGS read fine but whose DURATION could not be parsed is
+		// neither unreadable nor a walk error -- the row is written, only the
+		// duration is missing (#651). Counted separately so it cannot hide in
+		// either bucket: this is the exact class of failure that let a
+		// third-party parser defect sit unnoticed until someone inspected an
+		// index run by hand. The row is still recorded; the count only makes the
+		// gap visible.
+		if facts.DurationErr != nil {
+			*durationFailures++
 		}
 
 		if args.Yes {
