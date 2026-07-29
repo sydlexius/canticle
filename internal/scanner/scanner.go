@@ -231,6 +231,22 @@ type AudioFacts struct {
 	Format      string
 	FileType    string
 	TrackLength int
+
+	// DurationErr is non-nil when the duration parser RAN AND FAILED on a
+	// supported extension, leaving TrackLength at the 0 sentinel (#651).
+	//
+	// It exists because that failure previously had nowhere to go: it was logged
+	// at Debug and discarded, so a caller could not tell an unparsable file from
+	// one that legitimately has no duration. Two library files recorded duration
+	// 0 for months on a third-party parser defect and surfaced only when someone
+	// inspected an index run by hand -- there was no mechanism that would ever
+	// have raised it.
+	//
+	// NOT SET for an extension with no parser at all (ErrNoDurationParser): that
+	// is expected and uninteresting, and counting it here would bury the real
+	// signal. Reading this is optional -- TrackLength is still 0 either way, so a
+	// caller that ignores it behaves exactly as before.
+	DurationErr error
 }
 
 // ReadAudioFacts opens the audio file at path and returns every fact the tag
@@ -250,9 +266,20 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 	// tag.ReadFrom; no rewind is needed. A parse failure degrades to the
 	// unknown-duration sentinel exactly as scanDir does.
 	dur, derr := audioDuration(f, strings.ToLower(filepath.Ext(path)))
+	var durationErr error
 	if derr != nil {
-		slog.Debug("duration parse failed; using 0", "file", path, "error", derr)
 		dur = 0
+		if errors.Is(derr, ErrNoDurationParser) {
+			// Expected: this scanner has no parser for the extension. Not a
+			// defect, so it stays at Debug and is not reported upward.
+			slog.Debug("no duration parser for extension; using 0", "file", path, "error", derr)
+		} else {
+			// The parser RAN and FAILED on a file it should handle. Warn rather
+			// than Debug: this is the class of failure that hid a third-party
+			// parser defect for months (#651), and Debug is off in production.
+			slog.Warn("duration parse failed; recording unknown duration", "file", path, "error", derr)
+			durationErr = derr
+		}
 	}
 
 	var mtimeNano, sizeBytes int64
@@ -284,6 +311,7 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 		Format:      string(m.Format()),
 		FileType:    string(m.FileType()),
 		TrackLength: dur,
+		DurationErr: durationErr,
 	}, nil
 }
 
@@ -465,13 +493,25 @@ func NewScanner(opts ...Option) *Scanner {
 	return sc
 }
 
+// ErrNoDurationParser reports that an extension has no duration parser at all,
+// as distinct from a parser that ran and FAILED.
+//
+// The two are different facts and #651 turns on the difference: a file this
+// scanner was never able to time is expected and uninteresting, while a
+// supported file whose parse failed is a defect -- in the parser, or in the
+// file -- that previously left no trace anywhere. Counting them together would
+// bury the second in the first.
+var ErrNoDurationParser = errors.New("no duration parser for extension")
+
 // audioDuration reads the header of r to determine duration in seconds.
 // Returns 0 and a wrapped error for unknown extension or parse failure;
 // callers treat 0 as the "unknown duration" sentinel (duration_bucket=0).
+// An unknown extension is wrapped with ErrNoDurationParser so callers can tell
+// it apart from a parser that ran and failed (#651).
 func audioDuration(r io.ReadSeeker, ext string) (int, error) {
 	ft, ok := audioFileTypeForExt(ext)
 	if !ok {
-		return 0, fmt.Errorf("no duration parser for %s", ext)
+		return 0, fmt.Errorf("%w: %s", ErrNoDurationParser, ext)
 	}
 	secs, err := audioduration.Duration(r, ft)
 	if err != nil {
@@ -1053,8 +1093,14 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			var durErr error
 			dur, durErr = sc.probeDuration(f, ext)
 			if durErr != nil {
-				slog.Debug("duration parse failed; using 0", "file", file.Name(), "error", durErr)
 				dur = 0
+				if errors.Is(durErr, ErrNoDurationParser) {
+					slog.Debug("no duration parser for extension; using 0", "file", file.Name(), "error", durErr)
+				} else {
+					// See ReadAudioFacts: a parser that RAN and FAILED is a defect
+					// worth surfacing, and Debug is off in production (#651).
+					slog.Warn("duration parse failed; using unknown duration", "file", file.Name(), "error", durErr)
+				}
 			}
 			// Bank the duration we just paid a header read for (#441). The stamp
 			// comes from the open handle f, not a path re-stat, so no path is

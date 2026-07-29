@@ -576,3 +576,91 @@ func TestRunScanCmd_DispatchesIndexMetadata(t *testing.T) {
 		t.Errorf("dispatched run indexed %d rows, want 1", n)
 	}
 }
+
+// A file whose TAGS read fine but whose DURATION cannot be parsed is neither
+// unreadable nor a walk error: the row is written, only the duration is
+// missing. Before #651 that left no trace anywhere -- the failure was logged at
+// Debug (off in production) and discarded -- which is how a third-party parser
+// defect sat unnoticed on two library files until someone inspected an index
+// run by hand.
+//
+// This is deliberately NOT the garbage-content case that
+// TestIndexMetadataUnreadableFileIsCountedNotFatal covers: garbage fails the
+// TAG read and is counted unreadable, never reaching the duration parser. Here
+// the tag block is valid and only the audio frames are unparsable, which is
+// the case that used to be invisible.
+func TestIndexMetadataDurationParseFailureIsCounted(t *testing.T) {
+	// NO extra .mp3 fixture: testutil.WriteAudioFile writes a frameless ID3
+	// block, so a second .mp3 would be a SECOND duration failure and the exact
+	// counts below could not be asserted. That is not hypothetical -- the first
+	// draft of this test used "good.mp3" and reported 2 failures while claiming
+	// to test 1.
+	cfgPath, _, root := setupIndexMetadata(t)
+
+	// A valid ID3 tag block followed by bytes that are not decodable frames:
+	// tag.ReadFrom succeeds, the duration parser runs and fails.
+	if err := testutil.WriteAudioFile(root, "noduration.mp3", "Artist", "Title", "Album", ""); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	p := filepath.Join(root, "noduration.mp3")
+	raw, err := os.ReadFile(p) //nolint:gosec // test fixture path
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	// Keep the ID3 header, corrupt everything after it.
+	if len(raw) > 128 {
+		copy(raw[128:], bytes.Repeat([]byte{0x00}, len(raw)-128))
+	}
+	if err := os.WriteFile(p, raw, 0o644); err != nil { //nolint:gosec // test fixture file
+		t.Fatalf("rewrite fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := runIndexMetadata(context.Background(), &out, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true})
+	got := out.String()
+
+	// Fail-safe is preserved: a parse failure must never abort or fail the run.
+	if code != 0 {
+		t.Fatalf("a duration parse failure must not fail the run; exit = %d: %s", code, got)
+	}
+	// The whole point: it must be COUNTED, and countable separately.
+	if !strings.Contains(got, "1 duration parse failure(s)") {
+		t.Errorf("summary must report EXACTLY 1 duration parse failure; got: %s", got)
+	}
+	// And it must NOT be conflated with the unreadable bucket -- the file's
+	// tags read fine, so counting it there would hide it among genuinely
+	// unopenable files.
+	// Positive assertion, not a negative one: `!Contains("1 unreadable")` would
+	// also pass on "2 unreadable", so it accepted wrong answers.
+	if !strings.Contains(got, "0 unreadable") {
+		t.Errorf("a duration failure must not be counted as unreadable; got: %s", got)
+	}
+}
+
+// The healthy case must read exactly as before: no duration-failure text at
+// all, so a non-zero count stays conspicuous instead of becoming a column
+// operators learn to skip.
+//
+// FIXTURES MUST BE .flac HERE, and that is itself a finding worth recording.
+// testutil.WriteAudioFile writes an ID3v2 tag block with NO MPEG AUDIO FRAMES,
+// so every .mp3 fixture in this suite has a genuinely unparsable duration --
+// the first draft of this test used .mp3 and correctly reported "2 duration
+// parse failure(s)" on files it called clean. testutil.GenerateFLAC emits a
+// real STREAMINFO block carrying sample rate and total samples, so a .flac
+// fixture has a parseable duration and exercises the actually-clean path.
+func TestIndexMetadataNoDurationNoteWhenClean(t *testing.T) {
+	cfgPath, _, root := setupIndexMetadata(t)
+	for _, name := range []string{"a.flac", "b.flac"} {
+		if err := os.WriteFile(filepath.Join(root, name), testutil.GenerateFLAC(44100, 44100*30), 0o644); err != nil { //nolint:gosec // test fixture file
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	var out bytes.Buffer
+	if code := runIndexMetadata(context.Background(), &out, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("clean run failed: %d: %s", code, out.String())
+	}
+	if strings.Contains(out.String(), "duration parse failure") {
+		t.Errorf("a clean run must not mention duration failures; got: %s", out.String())
+	}
+}
