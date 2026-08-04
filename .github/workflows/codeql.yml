@@ -57,3 +57,25 @@ jobs:
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           category: /language:go
+        env:
+          # Load the local model pack in .github/codeql/extensions, which
+          # declares pathutil.ResolveWithinRoot as a path-injection barrier.
+          # See that pack's models/pathutil.model.yml for the full rationale.
+          #
+          # This pair of CLI flags is the ONLY route for a model pack that
+          # lives in the repo rather than a registry:
+          #   --additional-packs   adds the directory to the pack SEARCH PATH
+          #   --extension-packs    activates the pack BY NAME from that path
+          # The `packs:` config key cannot express it -- it validates entries
+          # against ^[a-z0-9-]+/[a-z0-9-]+$ (codeql-action db-config.ts:273),
+          # which a filesystem path cannot match; local paths are a `queries:`
+          # feature. codeql-action itself uses exactly these two flags to load
+          # its own generated pr-diff-range pack (analyze.ts:421-422).
+          #
+          # This ADDS a data extension. It does not touch the query suite:
+          # disable-default-queries is not set and no `queries:`/`packs:` key
+          # exists, so the default suite still runs in full.
+          CODEQL_ACTION_EXTRA_OPTIONS: >-
+            {"database":{"run-queries":[
+            "--additional-packs=${{ github.workspace }}/.github/codeql/extensions",
+            "--extension-packs=sydlexius/canticle-go-models"]}}

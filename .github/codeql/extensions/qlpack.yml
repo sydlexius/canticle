@@ -1,0 +1,11 @@
+# Local CodeQL model pack. Activated from .github/workflows/codeql.yml via
+# --additional-packs (search path) + --extension-packs (this name); see that
+# workflow's CODEQL_ACTION_EXTRA_OPTIONS for why that is the only viable route.
+# The pack name here MUST match the --extension-packs value.
+name: sydlexius/canticle-go-models
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/go-all: '*'
+dataExtensions:
+  - models/**/*.yml

@@ -1,0 +1,60 @@
+extensions:
+  # pathutil.ResolveWithinRoot is this repo's path-confinement barrier. It takes
+  # an untrusted candidate path plus an operator-configured library root and
+  # returns (resolvedPath, ok). On ok=true the returned path is guaranteed to
+  # resolve inside that root; on ok=false it returns "" so every caller fails
+  # closed.
+  #
+  # Why the alert appeared (github/codeql#22143, fixed by #22150, shipped in Go
+  # lib 7.2.2 / CLI 2.26.2): path/filepath.Rel had been modeled as a
+  # path-injection barrier for over six years, and that model was WRONG -- Rel
+  # happily returns a path containing "..". Removing it was a false-NEGATIVE fix
+  # upstream, and the changelog notes it "may lead to more results". relWithin
+  # is built on filepath.Rel, so this repo had been receiving a free and
+  # unearned barrier. Alert #22 is CodeQL withdrawing a bogus sanitizer, not
+  # CodeQL getting worse; the same commit scanned clean under 2.26.1.
+  #
+  # Why a model rather than an inline guard: the query's SANITIZER GUARDS are a
+  # fixed, syntactically-matched set -- !strings.Contains(x, ".."),
+  # strings.HasPrefix, filepath.IsLocal, a regexp check -- wired through
+  # DataFlow::BarrierGuard<sanitizerGuard/3>, which needs a checks(Expr, boolean)
+  # predicate on the guard class itself. A bool-returning helper cannot
+  # participate no matter how sound it is, and here the real check sits three
+  # call frames from the sink (confinedPayloadPath -> ResolveWithinRoot ->
+  # relWithin). Out-of-line barriers ARE supported, but only through this
+  # mechanism: TaintedPathCustomizations.qll declares
+  # `class ExternalSanitizer extends Sanitizer { barrierNode(this, "path-injection") }`,
+  # and a barrierModel row is how a node gets into that relation. Hence a pack.
+  #
+  # Rewriting the guard into a shape the query pattern-matches would mean
+  # REPLACING a stronger check with a weaker one to satisfy a scanner, so the
+  # barrier is declared here instead. The security logic is unchanged; only
+  # CodeQL's knowledge of it is.
+  #
+  # Soundness of the claim (internal/pathutil/pathutil.go:48-72), in order:
+  #   1. filepath.Rel against the cleaned root, rejecting ".." traversal
+  #      (relWithin, pathutil.go:77-86);
+  #   2. the candidate is REBUILT as EvalSymlinks(root) + the traversal-checked
+  #      relative component, so the result is anchored to the operator-declared
+  #      root rather than to raw caller input;
+  #   3. EvalSymlinks on that join, so an in-root symlink pointing outside is
+  #      resolved rather than trusted;
+  #   4. relWithin again against the RESOLVED root, so the value returned is the
+  #      exact value confinement was proven for (check path == use path).
+  # Any error, an empty input, or no configured root yields ok=false.
+  #
+  # Scope of the barrier: this covers path-injection only. It is deliberately
+  # NOT claimed as a barrier for other kinds -- the function makes no claim
+  # about the path's contents, only its location.
+  #
+  # Known residual, NOT covered by this model: a write-time TOCTOU symlink swap
+  # between this check and a later open. That is closed separately in the
+  # writing layer -- lyrics.LRCWriter re-resolves and re-confines the output dir
+  # immediately before writing (#102).
+  - addsTo:
+      pack: codeql/go-all
+      extensible: barrierModel
+    data:
+      # package; type; subtypes; name; signature; ext; output; kind; provenance
+      # ReturnValue[0] is the resolved path; the bool at [1] carries no taint.
+      - ["github.com/sydlexius/canticle/internal/pathutil", "", false, "ResolveWithinRoot", "", "", "ReturnValue[0]", "path-injection", "manual"]
