@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/queue"
@@ -71,6 +72,32 @@ func TestFailStillFailsOnRequestTimeout(t *testing.T) {
 	}
 }
 
+// A failed Release must surface, not be swallowed. If the release errors the
+// item is still 'processing' in the database, so silently returning nil would
+// leave it wedged there with nothing reporting why -- the worker that owns it is
+// shutting down and will not come back to it.
+func TestFailSurfacesAReleaseFailureOnShutdown(t *testing.T) {
+	q := &fakeQueue{releaseErr: errors.New("database is locked")}
+	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	item := queue.WorkItem{ID: 11}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := w.fail(ctx, item, fmt.Errorf("worker: find lyrics: %w", context.Canceled))
+	if err == nil {
+		t.Fatal("a failed release returned nil; the item is left 'processing' with nothing reporting it")
+	}
+	if !strings.Contains(err.Error(), "release item 11") {
+		t.Errorf("error does not identify the item or the operation: %v", err)
+	}
+	// It must not silently fall through to the failure path either -- that would
+	// record a hard failure for what was only a shutdown.
+	if len(q.failed) != 0 {
+		t.Errorf("failed = %v, want empty: a release error must not become a recorded failure", q.failed)
+	}
+}
+
 // An ordinary provider error under a live context is untouched by this change.
 // The regression that matters most is the one where every failure starts being
 // released, silently emptying the failed bucket.
@@ -88,6 +115,35 @@ func TestFailStillFailsOnOrdinaryError(t *testing.T) {
 	}
 	if len(q.released) != 0 {
 		t.Errorf("released = %v, want empty", q.released)
+	}
+}
+
+// A failed Fail must surface too, carrying BOTH the original cause and the
+// bookkeeping error. Losing the original would leave an operator with "the
+// database was busy" and no trace of what the item actually did wrong.
+//
+// This branch predates the shutdown-release change, but it sits in the same
+// function and was never exercised; covering it here is cheaper than arguing it
+// out of scope.
+func TestFailSurfacesABookkeepingFailure(t *testing.T) {
+	q := &fakeQueue{failErr: errors.New("database is locked")}
+	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	item := queue.WorkItem{ID: 12}
+
+	cause := errors.New("musixmatch: unexpected matcher status_code 500")
+	err := w.fail(context.Background(), item, cause)
+	if err == nil {
+		t.Fatal("a failed Fail returned nil; the item is left 'processing' with nothing reporting it")
+	}
+	if !strings.Contains(err.Error(), "status_code 500") {
+		t.Errorf("the original cause was lost, leaving only the bookkeeping error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "database is locked") {
+		t.Errorf("the bookkeeping error was lost: %v", err)
+	}
+	// The counter still moved: the item DID fail, even though recording it did not.
+	if w.consecutiveFailures != 1 {
+		t.Errorf("consecutiveFailures = %d, want 1", w.consecutiveFailures)
 	}
 }
 
