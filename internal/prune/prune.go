@@ -25,6 +25,17 @@
 // delete, and the reactive PrunePath path never performs one at all (relink or
 // retain only), leaving genuine deletion to the periodic sweep and the CLI, by
 // which time a rescan has had time to settle.
+//
+// A retained row is additionally RETIRED when it is provably unactionable --
+// gone AND carrying no identity, so no future sweep could ever relink it (#732).
+// Retiring deletes nothing and preserves every telemetry column; it only settles
+// the work_queue row so the worker stops re-fetching lyrics it can never write.
+// Before this, such a row stayed dequeue-eligible forever and each sweep
+// re-classified it identically, a fixed point that never converged. Retirement
+// is a mutation, so it obeys the same discipline as a genuine delete: never in a
+// dry run, never on an in-flight row, and only under PolicyFull -- the reactive
+// pass defers it to the periodic sweep, by which time a rescan of a moved file's
+// new location has had time to re-create the row with identity.
 package prune
 
 import (
@@ -37,11 +48,17 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
 )
+
+// timeFormat is the timestamp layout every stored column uses. Declared locally
+// rather than shared, matching internal/queue and internal/reports, which each
+// carry their own copy of the same constant.
+const timeFormat = time.RFC3339
 
 // Granularity selects how a candidate source path is tested for existence.
 type Granularity int
@@ -120,7 +137,22 @@ type RetainedRow struct {
 	Reason     string
 	MBID       string
 	ISRC       string
+	// Retired reports that this row was taken out of the dequeue-eligible set as
+	// well as retained. It is still a RetainedRow -- nothing was deleted and the
+	// operator-facing accounting is unchanged -- but the worker will no longer
+	// attempt it. See retireUnresolvable for when this is set.
+	Retired bool
 }
+
+// unresolvableGoneError is the last_error value written when a row is retired as
+// permanently unactionable: its source file is gone AND it carries no identity,
+// so no relink can ever resolve it. Defined once so the SQL bind, the tests, and
+// any log or inspection of the sentinel cannot drift -- the same discipline as
+// queue.missLimitReachedError, whose retire-to-'done' pattern this mirrors.
+//
+// The text is written for someone reading it six months from now with no context:
+// it states the mechanism, not a verdict.
+const unresolvableGoneError = "source file is gone and the row carries no ISRC or MBID, so it can never be relinked; retired as unactionable"
 
 // Result reports the totals and per-row detail of a prune (or, in dry-run, what
 // would happen).
@@ -254,6 +286,11 @@ type candidate struct {
 	// processing is true when any linked work_queue row is still 'processing',
 	// so the whole source is deferred (the worker owns it) to avoid a half-prune.
 	processing bool
+	// settled is true when every linked work_queue row has reached 'done' -- it is
+	// no longer work, so there is nothing to retire. Distinct from processing: a
+	// settled row is still a valid relink and prune target, it just must not be
+	// re-retired and re-reported on every sweep.
+	settled bool
 	// libraryID scopes the present-file candidate pool this row's identity is
 	// matched against. Known whenever a scan_results row backs this source;
 	// nil for a link-less work_queue-only candidate (no scan_results row at
@@ -320,7 +357,27 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 			return Result{}, err
 		}
 		switch cg.outcome {
+		case outcomeSettled:
+			// Nothing to do and nothing to say: this candidate is already in its
+			// terminal state. Deliberately absent from every Result slice, so a
+			// repeat sweep over a settled library reports an empty result rather
+			// than re-listing rows no action will ever touch again.
+			continue
 		case outcomeRetain:
+			// Retire before reporting, so a report never describes a retirement that
+			// did not commit -- the same backup-first discipline deletePruned follows.
+			// A dry run retires nothing: the CLI's dry-run default is load-bearing, and
+			// a preview that mutates is worse than no preview.
+			if cg.retained.Retired && !dryRun {
+				retired, err := p.retireUnresolvable(ctx, cg.c)
+				if err != nil {
+					return Result{}, fmt.Errorf("prune: retire %q: %w", src, err)
+				}
+				// An in-flight row is skipped by the UPDATE's status guard. Report it as
+				// the plain retain it actually was, rather than claiming a retirement the
+				// database declined to make.
+				cg.retained.Retired = retired
+			}
 			res.Retained = append(res.Retained, cg.retained)
 			if hooks.Retained != nil {
 				if err := hooks.Retained(cg.retained); err != nil {
@@ -400,6 +457,11 @@ const (
 	outcomePrune outcome = iota
 	outcomeRelink
 	outcomeRetain
+	// outcomeSettled is a candidate there is nothing left to do about: gone,
+	// unresolvable, and already out of the dequeue-eligible set. It is reported
+	// nowhere and mutates nothing, which is what lets a sweep CONVERGE -- see the
+	// settled field on candidate.
+	outcomeSettled
 )
 
 // classifiedRelink carries both the reporting-facing RelinkedRow and the
@@ -424,7 +486,38 @@ type classified struct {
 // delete).
 func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy, src string, c *candidate) (classified, error) {
 	if c.mbid == "" && c.isrc == "" {
-		return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "identity absent; never deleted on a guess"}}, nil
+		// Already retired by an earlier sweep (or never queued at all): gone,
+		// unresolvable, and no longer work. Re-reporting it every sweep is exactly
+		// the churn #732 exists to stop, so it drops out of the candidate set here.
+		if c.settled && len(c.workItems) > 0 {
+			return classified{outcome: outcomeSettled}, nil
+		}
+		// Gone, and carrying no identity: no relink can ever resolve this row, at any
+		// future sweep, because there is nothing to resolve it BY. Keeping it is still
+		// right -- deleting on a guess is what #640 exists to prevent -- but leaving it
+		// dequeue-eligible made the worker re-fetch lyrics it could never write, every
+		// backoff period, forever (#732).
+		//
+		// So: retain AND retire. Nothing is deleted, every telemetry column survives,
+		// and the row simply stops being work. Retirement is a mutation, so it follows
+		// the same policy discipline as a genuine delete -- the reactive pass defers it
+		// to the periodic sweep, by which time a rescan of a moved file's new location
+		// has had time to settle and re-create the row with identity.
+		return classified{
+			outcome: outcomeRetain,
+			retained: RetainedRow{
+				SourcePath: src,
+				Reason:     "identity absent; never deleted on a guess",
+				// Only a row that is still WORK can be retired. A settled row either was
+				// never queued or has already been retired by a previous sweep; either
+				// way there is nothing to take out of the dequeue-eligible set.
+				Retired: policy == PolicyFull && !c.settled && len(c.workItems) > 0,
+			},
+			// Carry the candidate so the retire step can reach its work_queue rows.
+			// The embedded classifiedRelink is otherwise only populated on the relink
+			// path, and a nil c here made retireUnresolvable a silent no-op.
+			classifiedRelink: classifiedRelink{src: src, c: c},
+		}, nil
 	}
 	pool, err := idx.pool(ctx, c.libraryID)
 	if err != nil {
@@ -884,6 +977,16 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 			c.processing = true
 			return nil
 		}
+		if status == "done" {
+			// A settled row is not work, so it is not a retirement candidate. Tracking
+			// this is what makes retirement CONVERGE: without it, a row retired to
+			// 'done' is still gathered from scan_results on the next sweep, re-reported
+			// as retained, and re-retired -- relocating the non-converging fixed point
+			// (#732) instead of removing it. Recorded rather than returned early,
+			// because a 'done' row still belongs to the candidate for the relink and
+			// prune paths, which act on settled rows too.
+			c.settled = true
+		}
 		var paths []models.OutputPath
 		if outputPaths != "" {
 			if err := json.Unmarshal([]byte(outputPaths), &paths); err != nil {
@@ -930,6 +1033,51 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 // forever while still deleting its scan_results row. It returns the actual rows
 // deleted (via RowsAffected) so the caller's totals reflect what happened, not
 // just what was intended.
+// retireUnresolvable takes a permanently-unactionable row out of the
+// dequeue-eligible set without deleting anything (#732). It reports whether any
+// row was actually retired.
+//
+// WHY 'done' AND NOT A NEW STATUS. work_queue.status carries a CHECK constraint,
+// so a genuinely new value means recreating the table -- a migration far out of
+// proportion to the fix. queue.RetireMiss already established the cheaper
+// pattern for exactly this shape: settle to 'done' and record WHY in last_error.
+// A distinct terminal state is the subject of #477, which will want to convert
+// both this and RetireMiss together rather than have one of them arrive early
+// and differently.
+//
+// THE STATUS GUARD IS THE IN-FLIGHT GUARD. `status NOT IN ('processing','done')`
+// does two jobs: it never retires a row the worker currently owns, and it makes
+// the whole operation idempotent, since an already-retired row is 'done' and no
+// longer matches. That idempotence is the point of the fix -- without it this
+// would relocate the non-converging fixed point rather than remove it.
+//
+// completed_at is stamped because the row IS settled; leaving it null would make
+// a retired row look perpetually in-flight to every report that reads it.
+func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, error) {
+	if c == nil || len(c.workItems) == 0 {
+		return false, nil
+	}
+	now := time.Now().UTC().Format(timeFormat)
+	retired := false
+	for _, w := range c.workItems {
+		res, err := p.db.ExecContext(ctx,
+			`UPDATE work_queue
+             SET status = 'done',
+                 completed_at = ?,
+                 last_error = ?
+             WHERE id = ?
+               AND status NOT IN ('processing', 'done')`,
+			now, unresolvableGoneError, w.id)
+		if err != nil {
+			return false, fmt.Errorf("retire work item %d: %w", w.id, err)
+		}
+		if rowsAffected(res) > 0 {
+			retired = true
+		}
+	}
+	return retired, nil
+}
+
 func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report func(PrunedRow) error) (scanDeleted, workDeleted int, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
