@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/ffmpeg"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 )
@@ -127,7 +128,10 @@ func (v *HTTPVerifier) sample(ctx context.Context, audioPath string) (_ string, 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", fmt.Errorf("verification: sample audio: %w", ctxErr)
 		}
-		return "", fmt.Errorf("verification: sample audio with ffmpeg: %w: %s", err, strings.TrimSpace(string(output)))
+		// Bounded for the same reason as the detector's sampler: this string is
+		// persisted to work_queue.last_error and rendered into a report, and a
+		// corrupt input makes ffmpeg's stderr grow without limit (#731).
+		return "", fmt.Errorf("verification: sample audio with ffmpeg: %w: %s", err, ffmpeg.BoundOutput(string(output)))
 	}
 	return samplePath, nil
 }

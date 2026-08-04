@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/ffmpeg"
 )
 
 // HTTPDetector calls an external AudioSet classifier over HTTP. It serializes
@@ -637,7 +638,12 @@ func (d *HTTPDetector) sample(ctx context.Context, audioPath string) (_ string, 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", fmt.Errorf("detector: sample audio: %w", ctxErr)
 		}
-		return "", fmt.Errorf("detector: sample audio with ffmpeg: %w: %s", err, strings.TrimSpace(string(output)))
+		// BoundOutput, not TrimSpace alone: a corrupt file makes ffmpeg emit one
+		// error-level line per bad frame until its decode-error-rate ceiling aborts
+		// the run, and this error string is persisted to work_queue.last_error and
+		// then rendered into the Failure Analysis report. Unbounded, that reached
+		// 519 KB in one row on a live install (#731).
+		return "", fmt.Errorf("detector: sample audio with ffmpeg: %w: %s", err, ffmpeg.BoundOutput(string(output)))
 	}
 	return samplePath, nil
 }
@@ -828,7 +834,11 @@ func (d *HTTPDetector) probeDurationSeconds(ctx context.Context, audioPath strin
 	}
 	dur, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
 	if err != nil {
-		return 0, fmt.Errorf("detector: parse ffprobe duration %q: %w", strings.TrimSpace(string(out)), err)
+		// A well-behaved ffprobe prints one short number here, so this bound is a
+		// backstop rather than a fix for an observed case: nothing in the contract
+		// guarantees the output is small, and this string reaches last_error by the
+		// same route as the sampler's (#731).
+		return 0, fmt.Errorf("detector: parse ffprobe duration %q: %w", ffmpeg.BoundOutput(string(out)), err)
 	}
 	return dur, nil
 }
