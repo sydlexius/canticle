@@ -638,12 +638,20 @@ func (d *HTTPDetector) sample(ctx context.Context, audioPath string) (_ string, 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", fmt.Errorf("detector: sample audio: %w", ctxErr)
 		}
+		// NAME THE FILE. Without the path this reports that something is corrupt
+		// without saying what, leaving an operator to find it by hand across a
+		// library of tens of thousands. ffmpeg's own stderr sometimes carries the
+		// path, but that is exactly the text the bound elides, so the path must
+		// live in the WRAPPING CONTEXT where it is never truncated away.
+		//
 		// BoundOutput, not TrimSpace alone: a corrupt file makes ffmpeg emit one
 		// error-level line per bad frame until its decode-error-rate ceiling aborts
 		// the run, and this error string is persisted to work_queue.last_error and
 		// then rendered into the Failure Analysis report. Unbounded, that reached
 		// 519 KB in one row on a live install (#731).
-		return "", fmt.Errorf("detector: sample audio with ffmpeg: %w: %s", err, ffmpeg.BoundOutput(string(output)))
+		slog.Warn("detector: ffmpeg could not sample this audio file; it may be corrupt",
+			"path", audioPath, "error", err)
+		return "", fmt.Errorf("detector: sample audio with ffmpeg %q: %w: %s", audioPath, err, ffmpeg.BoundOutput(string(output)))
 	}
 	return samplePath, nil
 }

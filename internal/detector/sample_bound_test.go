@@ -80,4 +80,10 @@ func TestDetectorSampleErrorIsBounded(t *testing.T) {
 	if !strings.Contains(msg, "LASTLINE") {
 		t.Error("bounded error dropped the terminating line, which carries the actual cause")
 	}
+	// The path is the only thing that tells an operator WHICH file to go fix, and
+	// it must survive in the wrapping context rather than inside the bounded
+	// output, where the elision could remove it.
+	if !strings.Contains(msg, audioPath) {
+		t.Errorf("error does not name the offending file; want %q in:\n%s", audioPath, msg)
+	}
 }
