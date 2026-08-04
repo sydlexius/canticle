@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/ffmpeg"
 )
 
 // HTTPDetector calls an external AudioSet classifier over HTTP. It serializes
@@ -637,7 +639,25 @@ func (d *HTTPDetector) sample(ctx context.Context, audioPath string) (_ string, 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", fmt.Errorf("detector: sample audio: %w", ctxErr)
 		}
-		return "", fmt.Errorf("detector: sample audio with ffmpeg: %w: %s", err, strings.TrimSpace(string(output)))
+		// NAME THE FILE -- IN THE LOG, DELIBERATELY NOT IN THE ERROR. Without the
+		// path an operator is told something is corrupt but not what, and must
+		// find it by hand across a library of tens of thousands. The log is the
+		// right home for it and the error is NOT: this error becomes
+		// work_queue.last_error, which CountFailuresByReason groups verbatim into
+		// the mxlrcgo_queue_failures{reason=...} Prometheus label
+		// (internal/server/metrics.go). A library path is private metadata, and
+		// /metrics is scraped by an external Prometheus that retains label values
+		// outside this host -- a wider surface than the local DB and self-hosted
+		// UI. last_error has leaked to a report surface before (#431).
+		//
+		// BoundOutput, not TrimSpace alone: a corrupt file makes ffmpeg emit one
+		// error-level line per bad frame until its decode-error-rate ceiling aborts
+		// the run, and this error string is persisted to work_queue.last_error and
+		// then rendered into the Failure Analysis report. Unbounded, that reached
+		// 531,138 bytes in one row on a live install (#731).
+		slog.Warn("detector: ffmpeg could not sample this audio file; it may be corrupt",
+			"path", audioPath, "error", err)
+		return "", fmt.Errorf("detector: sample audio with ffmpeg: %w: %s", err, ffmpeg.BoundOutput(string(output)))
 	}
 	return samplePath, nil
 }
@@ -826,9 +846,26 @@ func (d *HTTPDetector) probeDurationSeconds(ctx context.Context, audioPath strin
 	if err != nil {
 		return 0, fmt.Errorf("detector: ffprobe duration: %w", err)
 	}
-	dur, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	trimmed := strings.TrimSpace(string(out))
+	dur, err := strconv.ParseFloat(trimmed, 64)
 	if err != nil {
-		return 0, fmt.Errorf("detector: parse ffprobe duration %q: %w", strings.TrimSpace(string(out)), err)
+		// BOUND THE OPERAND AND DROP THE WRAPPED ERROR. strconv.ParseFloat returns
+		// a *strconv.NumError that carries its OWN copy of the full input string,
+		// so a `%w` here re-embeds the very bytes the bound just removed --
+		// measured at 264,180 bytes escaping through the wrap while the operand
+		// beside it was correctly capped. Reporting err.(*NumError).Err (the bare
+		// cause, e.g. ErrSyntax) keeps the diagnosis without the payload.
+		//
+		// A well-behaved ffprobe prints one short number, so this is a backstop
+		// rather than a fix for an observed case -- but nothing in the contract
+		// guarantees the output is small, and it reaches last_error by the same
+		// route as the sampler's (#731).
+		cause := err
+		var numErr *strconv.NumError
+		if errors.As(err, &numErr) {
+			cause = numErr.Err
+		}
+		return 0, fmt.Errorf("detector: parse ffprobe duration %q: %w", ffmpeg.BoundOutput(trimmed), cause)
 	}
 	return dur, nil
 }
