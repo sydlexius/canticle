@@ -13,12 +13,23 @@ import (
 // the dequeue-eligible set.
 func statusOf(t *testing.T, ctx context.Context, sqlDB *sql.DB, sourcePath string) (status, lastError string) {
 	t.Helper()
+	status, lastError, _ = rowStateOf(t, ctx, sqlDB, sourcePath)
+	return status, lastError
+}
+
+// rowStateOf also returns completed_at, so a test can assert the row was settled
+// rather than merely re-statused -- and so a dry-run test can catch a write that
+// touches ONLY the timestamp. Read as NullString because an unsettled row has
+// none.
+func rowStateOf(t *testing.T, ctx context.Context, sqlDB *sql.DB, sourcePath string) (status, lastError string, completedAt sql.NullString) {
+	t.Helper()
 	err := sqlDB.QueryRowContext(ctx,
-		`SELECT status, last_error FROM work_queue WHERE source_path = ?`, sourcePath).Scan(&status, &lastError)
+		`SELECT status, last_error, completed_at FROM work_queue WHERE source_path = ?`,
+		sourcePath).Scan(&status, &lastError, &completedAt)
 	if err != nil {
 		t.Fatalf("read work_queue row for %q: %v", sourcePath, err)
 	}
-	return status, lastError
+	return status, lastError, completedAt
 }
 
 // A row whose file is gone and whose identity is absent is RETAINED by design
@@ -52,13 +63,23 @@ func TestSweep_RetiresUnresolvableGoneRow(t *testing.T) {
 	if len(res.Retained) != 1 {
 		t.Fatalf("Retained = %d, want 1 (a retired row is still a retained row)", len(res.Retained))
 	}
-	// ...but it is no longer dequeue-eligible.
-	status, lastErr := statusOf(t, ctx, sqlDB, gone)
-	if status == "failed" || status == "pending" || status == "deferred" {
-		t.Errorf("row is still dequeue-eligible (status=%q); the worker will keep attempting a file that does not exist", status)
+	if !res.Retained[0].Retired {
+		t.Error("Retained[0].Retired = false; a committed retirement must be reported as one")
+	}
+
+	// Assert the EXACT terminal state, not merely "not one of the eligible three".
+	// A negative assertion would pass for any typo'd or unintended status value.
+	status, lastErr, completedAt := rowStateOf(t, ctx, sqlDB, gone)
+	if status != "done" {
+		t.Errorf("status = %q, want done (the retirement terminal state)", status)
 	}
 	if lastErr != unresolvableGoneError {
 		t.Errorf("last_error = %q, want %q so the reason is legible six months from now", lastErr, unresolvableGoneError)
+	}
+	// completed_at must be stamped: the row IS settled, and leaving it null makes a
+	// retired row read as perpetually in-flight to every report that joins on it.
+	if !completedAt.Valid || completedAt.String == "" {
+		t.Errorf("completed_at = %v, want a populated timestamp on a settled row", completedAt)
 	}
 }
 
@@ -132,17 +153,40 @@ func TestSweep_DryRunDoesNotRetire(t *testing.T) {
 		t.Fatalf("remove source: %v", err)
 	}
 
+	// Capture the full pre-sweep state, so a write that touches ONLY completed_at
+	// is still caught. Asserting status alone let exactly that class of bug ship
+	// once before (#725: a dry run that mutated a column no test was reading).
+	beforeStatus, beforeErr, beforeCompleted := rowStateOf(t, ctx, sqlDB, gone)
+
 	p := New(sqlDB)
-	if _, err := p.Sweep(ctx, SweepOptions{Granularity: Exact, DryRun: true}); err != nil {
+	res, err := p.Sweep(ctx, SweepOptions{Granularity: Exact, DryRun: true})
+	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 
-	status, lastErr := statusOf(t, ctx, sqlDB, gone)
-	if status != "failed" {
-		t.Errorf("dry run mutated status to %q; it must write nothing", status)
+	afterStatus, afterErr, afterCompleted := rowStateOf(t, ctx, sqlDB, gone)
+	if afterStatus != beforeStatus {
+		t.Errorf("dry run mutated status: %q -> %q; it must write nothing", beforeStatus, afterStatus)
 	}
-	if lastErr == unresolvableGoneError {
-		t.Error("dry run wrote the retirement marker; it must write nothing")
+	if afterErr != beforeErr {
+		t.Errorf("dry run mutated last_error: %q -> %q; it must write nothing", beforeErr, afterErr)
+	}
+	if afterCompleted != beforeCompleted {
+		t.Errorf("dry run mutated completed_at: %v -> %v; it must write nothing", beforeCompleted, afterCompleted)
+	}
+
+	// The REPORT must be honest too, not just the database. Retired means
+	// committed, so it stays false here; WouldRetire carries the plan, which is
+	// what makes a dry run a truthful preview rather than a claim about writes
+	// that never happened.
+	if len(res.Retained) != 1 {
+		t.Fatalf("Retained = %d, want 1 (a dry run still reports what it would do)", len(res.Retained))
+	}
+	if res.Retained[0].Retired {
+		t.Error("dry run reported Retired=true; that field means COMMITTED, and nothing was committed")
+	}
+	if !res.Retained[0].WouldRetire {
+		t.Error("dry run reported WouldRetire=false; the preview must still name the intended action")
 	}
 }
 
@@ -211,6 +255,55 @@ func TestRetireUnresolvable_SkipsRowThatRacedIntoProcessing(t *testing.T) {
 	}
 	if lastErr == unresolvableGoneError {
 		t.Error("wrote the retirement marker onto an in-flight row")
+	}
+}
+
+// settled must mean EVERY linked work item is done, not "at least one is".
+// Nothing constrains source_path to a single work_queue row, so a source can
+// carry a mix -- and deriving settled from any one 'done' row silently drops the
+// whole candidate, leaving its still-eligible sibling unretired AND unreported.
+// The row would go on being fetched forever with nothing in the sweep output
+// naming it, which is worse than the bug this PR fixes: invisible rather than
+// merely permanent.
+//
+// Latent rather than live (zero such rows on the reference install today), but
+// nothing prevents the state and the doc comment already claimed the stronger
+// property. Found by CodeRabbit on #735.
+func TestSweep_MixedWorkItemsAreNotTreatedAsSettled(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	gone := filepath.Join(root, "ArtistMixed", "01. mixed.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, gone, "done", "done", "", "")
+
+	// A second work_queue row on the SAME source, still dequeue-eligible.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist_key, title_key, artist, title, source_path, outdir, filename, status)
+		 VALUES ('mixed', 'mixed', 'Artist', 'Title', ?, ?, ?, 'failed')`,
+		gone, filepath.Dir(gone), filepath.Base(gone)); err != nil {
+		t.Fatalf("insert second work_queue row: %v", err)
+	}
+	if err := os.Remove(gone); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	p := New(sqlDB)
+	res, err := p.Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if len(res.Retained) == 0 {
+		t.Fatal("the candidate was dropped as settled while a dequeue-eligible row remained; " +
+			"it is now invisible to the sweep AND still being worked")
+	}
+
+	var eligible int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM work_queue WHERE source_path = ? AND status IN ('pending','failed','deferred')`,
+		gone).Scan(&eligible); err != nil {
+		t.Fatalf("count eligible: %v", err)
+	}
+	if eligible != 0 {
+		t.Errorf("%d work_queue row(s) for a vanished source are still dequeue-eligible after the sweep", eligible)
 	}
 }
 
