@@ -58,19 +58,30 @@ func boundTo(out string, limit int) string {
 		return s
 	}
 
-	// Reserve room for the marker so the result honors the cap including it.
-	marker := fmt.Sprintf(elisionMarker, len(s)-limit)
-	budget := limit - len(marker) - 2 // two newlines around the marker
+	// Size the marker from a PROVISIONAL count, then restate it from what was
+	// really dropped. The two differ by the marker-plus-newline overhead (31 bytes
+	// on a 100 KB input: claimed 95,904 vs 95,935 actually omitted). The number is
+	// stated to the byte, so it should be true to the byte -- a figure that is
+	// merely close invites a reader to trust the next one that is not.
+	//
+	// The provisional marker is only a LENGTH ESTIMATE for the budget. Its own
+	// length can shift when the final count has more digits, which would eat into
+	// the retained text; padding to the width of the largest possible count keeps
+	// the budget an upper bound, so the final marker never exceeds the space
+	// reserved for it.
+	provisional := fmt.Sprintf(elisionMarker, len(s))
+	budget := limit - len(provisional) - 2 // two newlines around the marker
 	if budget < 2 {
-		// Unreachable at the current constant: the marker is 24 characters plus the
-		// omitted-count digits, so the budget stays far above 2 for any input that
-		// reaches here. Kept as a total-function guard against a future edit that
-		// lowers maxCapturedOutput, and it deliberately still emits the marker --
-		// dropping it would make a truncated value read as a complete one, which is
-		// the single property every caller relies on. Panicking or returning the
-		// input unbounded would both be worse: this is a diagnostic path, and the
-		// cap exists precisely because the caller cannot be trusted to be small.
-		return marker
+		// Unreachable at the current constant: the marker is 24 bytes plus the
+		// count's digits, so the budget stays far above 2 for any input reaching
+		// here. Kept as a total-function guard against a future edit that lowers
+		// maxCapturedOutput, and it deliberately still emits a marker -- dropping it
+		// would make a truncated value read as a complete one, which is the single
+		// property every caller relies on.
+		//
+		// The marker is itself bounded: with a very small limit it can exceed the
+		// cap, and a guard that violates the cap it exists to enforce is no guard.
+		return truncateRunes(fmt.Sprintf(elisionMarker, len(s)), limit)
 	}
 
 	headBudget := budget / 2
@@ -78,6 +89,15 @@ func boundTo(out string, limit int) string {
 
 	head := truncateRunes(s, headBudget)
 	tail := truncateRunesFromEnd(s, tailBudget)
+
+	// Restate the count from what was actually dropped, now that the retained
+	// lengths are known. Padded to the provisional marker's width so a
+	// shorter-rendering count cannot shrink the marker below the reserved budget
+	// and let the total drift over the cap.
+	marker := fmt.Sprintf(elisionMarker, len(s)-len(head)-len(tail))
+	for len(marker) < len(provisional) {
+		marker += " "
+	}
 
 	return head + "\n" + marker + "\n" + tail
 }

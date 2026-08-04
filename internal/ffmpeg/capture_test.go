@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -106,6 +107,43 @@ func TestBoundOutputDoesNotSplitARune(t *testing.T) {
 	got := BoundOutput(strings.Repeat("é", maxCapturedOutput))
 	if strings.ContainsRune(got, '�') {
 		t.Fatal("bounding split a multi-byte rune, producing U+FFFD")
+	}
+}
+
+// The marker states a byte count to the byte, so it has to be true to the byte.
+// An earlier version reported "bytes over the cap" rather than bytes actually
+// dropped, overstating retention by the marker-plus-newline overhead (claimed
+// 95,904 against 95,935 really omitted on a 100 KB input). Small, but a figure
+// that is merely close invites a reader to trust the next one that is not.
+func TestBoundOutputOmittedCountIsExact(t *testing.T) {
+	for _, size := range []int{5000, 100000, 600000} {
+		s := strings.Repeat("x", size)
+		got := BoundOutput(s)
+
+		open := strings.Index(got, "... [")
+		markerTail := strings.Index(got, " bytes omitted] ...")
+		if open < 0 || markerTail < 0 {
+			t.Fatalf("size %d: no elision marker in output", size)
+		}
+		var claimed int
+		if _, err := fmt.Sscanf(got[open:], "... [%d bytes omitted]", &claimed); err != nil {
+			t.Fatalf("size %d: could not parse the claimed count: %v", size, err)
+		}
+
+		// Retained text is everything outside the marker line.
+		headLen := open - 1 // less the newline before the marker
+		markerEnd := markerTail + len(" bytes omitted] ...")
+		tailLen := len(got) - markerEnd - 1 // less the newline after it
+		// Trailing pad keeps the marker at the reserved width; it is not retained text.
+		tailLen -= strings.Count(got[markerEnd:], " ")
+
+		if actual := size - headLen - tailLen; claimed != actual {
+			t.Errorf("size %d: marker claims %d bytes omitted, but %d were dropped (off by %d)",
+				size, claimed, actual, actual-claimed)
+		}
+		if len(got) > 4096 {
+			t.Errorf("size %d: restating the count pushed the result over the cap: %d bytes", size, len(got))
+		}
 	}
 }
 

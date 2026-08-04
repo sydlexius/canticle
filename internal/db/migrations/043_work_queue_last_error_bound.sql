@@ -62,9 +62,22 @@
 -- is a no-op independently of goose. An ordinary last_error is left
 -- byte-identical.
 --
--- LOSSY BY DESIGN, AND THAT IS THE POINT. The omitted BYTE count is written into
--- the marker so the elision is self-describing and a reader can never mistake a
--- bounded value for a complete one.
+-- LOSSY BY DESIGN, AND THAT IS THE POINT. A marker is written into the middle so
+-- the elision is self-describing and a reader can never mistake a bounded value
+-- for a complete one.
+--
+-- THE NUMBER IN THAT MARKER IS "BYTES OVER THE CAP", NOT BYTES DROPPED, and it
+-- is deliberately the weaker of the two claims. The count actually omitted is
+-- larger: the marker and its two newlines occupy part of the budget, and the
+-- worst-case-rune character budget above retains less than the byte cap would
+-- allow -- on ASCII, roughly 3,000 bytes less. Computing the exact figure in SQL
+-- would mean measuring the retained head and tail after the fact, which the
+-- single-statement form cannot do without a second pass.
+--
+-- The Go helper DOES restate its count exactly (ffmpeg.BoundOutput), so the two
+-- differ here on purpose. A reader who needs an exact number should not infer one
+-- from this marker: it is a lower bound on what was removed, and is written as a
+-- floor rather than a measurement.
 --
 -- THIS IS NOT REDACTION. It bounds SIZE only. Secrets are kept out of these
 -- strings at their construction sites (#431); a size cap is as likely to
