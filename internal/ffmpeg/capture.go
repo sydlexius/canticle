@@ -44,20 +44,33 @@ const elisionMarker = "... [%d bytes omitted] ..."
 // sites (#431), and a cap would in any case be as likely to preserve a secret
 // as to cut it.
 func BoundOutput(out string) string {
+	return boundTo(out, maxCapturedOutput)
+}
+
+// boundTo is BoundOutput with the cap injected. The cap is a parameter purely so
+// the small-cap guard below is REACHABLE from a test: with the constant inlined,
+// that branch was dead code carrying the elision-marker invariant with no way to
+// exercise it, and dead code that asserts an invariant is exactly the code that
+// rots. Callers outside this file use BoundOutput; the policy lives here.
+func boundTo(out string, limit int) string {
 	s := strings.TrimSpace(out)
-	if len(s) <= maxCapturedOutput {
+	if len(s) <= limit {
 		return s
 	}
 
 	// Reserve room for the marker so the result honors the cap including it.
-	marker := fmt.Sprintf(elisionMarker, len(s)-maxCapturedOutput)
-	budget := maxCapturedOutput - len(marker) - 2 // two newlines around the marker
+	marker := fmt.Sprintf(elisionMarker, len(s)-limit)
+	budget := limit - len(marker) - 2 // two newlines around the marker
 	if budget < 2 {
-		// A cap this small cannot carry the marker plus meaningful text. Degrade to
-		// a plain head so the function stays total rather than returning nonsense;
-		// unreachable at the current constant, and guarded so a future edit that
-		// lowers it fails safe instead of slicing out of range.
-		return truncateRunes(s, maxCapturedOutput)
+		// Unreachable at the current constant: the marker is 24 characters plus the
+		// omitted-count digits, so the budget stays far above 2 for any input that
+		// reaches here. Kept as a total-function guard against a future edit that
+		// lowers maxCapturedOutput, and it deliberately still emits the marker --
+		// dropping it would make a truncated value read as a complete one, which is
+		// the single property every caller relies on. Panicking or returning the
+		// input unbounded would both be worse: this is a diagnostic path, and the
+		// cap exists precisely because the caller cannot be trusted to be small.
+		return marker
 	}
 
 	headBudget := budget / 2

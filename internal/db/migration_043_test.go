@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sydlexius/canticle/internal/ffmpeg"
 )
@@ -85,50 +86,81 @@ func TestMigration043BoundsOnlyOversizedLastErrors(t *testing.T) {
 	}
 }
 
-// The migration reimplements ffmpeg.BoundOutput's policy in SQL because SQLite
-// cannot call into Go. That makes the two independently editable and therefore
-// able to drift: raising the Go cap while leaving the migration at 4096 would
-// leave the database enforcing a stricter rule than the code, silently.
+// The migration reimplements BoundOutput's policy in SQL because SQLite cannot
+// call into Go, so the two are independently editable and can drift.
 //
-// This pins them together. It asserts the CEILING rather than exact equality --
-// the SQL marker's length varies slightly with the magnitude of the omitted
-// count, and SQLite counts characters where Go counts bytes, so the SQL result
-// can land marginally under. Under is the safe direction for a size bound; over
-// is the regression worth failing on.
+// BOTH SIDES ARE PINNED TO A HARD LITERAL, not to each other. An earlier version
+// of this test asserted only `len(sql) > len(go)`, which is one-sided and
+// therefore vacuous in the direction that actually happens: raising
+// maxCapturedOutput makes the Go result BIGGER, so the comparison is satisfied
+// MORE easily and the test passes under the exact drift its comment claimed to
+// catch (verified -- setting the constant to 1048576 left this green). A test
+// that passes under the drift it names is worse than none: it is a false
+// assurance a future editor will trust.
+//
+// The literal 4096 is the contract both implementations must satisfy. The two
+// are NOT required to produce identical output -- the SQL cut is deliberately
+// more conservative, since it must assume worst-case 4-byte runes to stay
+// byte-bounded without splitting one. What must hold for both is: at or under
+// the byte cap, and both diagnostic ends retained.
 func TestMigration043BoundMatchesBoundOutput(t *testing.T) {
 	ctx := context.Background()
 	dbh, provider := openAtVersion(t, 42)
 
-	oversized := "HEAD marker\n" + strings.Repeat("noise\n", 50000) + "TAIL marker"
-
-	if _, err := dbh.ExecContext(ctx,
-		`INSERT INTO work_queue (id, artist_key, title_key, artist, title, source_path, status, last_error, updated_at)
-		 VALUES (811, 'p1', 'p1', 'a', 't', '/x.mp3', 'deferred', ?, '2026-08-04T00:00:00Z')`,
-		oversized); err != nil {
-		t.Fatalf("insert: %v", err)
+	// ASCII and multi-byte. The multi-byte case is the one that caught the real
+	// defect: a character-counting migration bounded 12,000 bytes to "4,096"
+	// characters that were 8,162 bytes, and let a 3,000-character/12,000-byte
+	// value through untouched because length() never saw it as oversized.
+	cases := []struct {
+		id        int64
+		key       string
+		oversized string
+	}{
+		{811, "p1", "HEAD marker\n" + strings.Repeat("noise\n", 50000) + "TAIL marker"},
+		{812, "p2", "HEAD marker\n" + strings.Repeat("é", 200000) + "\nTAIL marker"},
+		{813, "p3", "HEAD marker\n" + strings.Repeat("😀", 100000) + "\nTAIL marker"},
+		// Under the character threshold but far OVER the byte threshold: the exact
+		// shape that evaded the first draft's WHERE clause entirely.
+		{814, "p4", "HEAD marker\n" + strings.Repeat("😀", 3000) + "\nTAIL marker"},
+	}
+	for _, c := range cases {
+		if _, err := dbh.ExecContext(ctx,
+			`INSERT INTO work_queue (id, artist_key, title_key, artist, title, source_path, status, last_error, updated_at)
+			 VALUES (?, ?, ?, 'a', 't', '/x.mp3', 'deferred', ?, '2026-08-04T00:00:00Z')`,
+			c.id, c.key, c.key, c.oversized); err != nil {
+			t.Fatalf("insert %d: %v", c.id, err)
+		}
 	}
 	if _, err := provider.UpTo(ctx, 43); err != nil {
 		t.Fatalf("migrate to 43: %v", err)
 	}
 
-	var sqlBounded string
-	if err := dbh.QueryRowContext(ctx, `SELECT last_error FROM work_queue WHERE id = 811`).Scan(&sqlBounded); err != nil {
-		t.Fatalf("select: %v", err)
-	}
-	goBounded := ffmpeg.BoundOutput(oversized)
-
-	if len(sqlBounded) > len(goBounded) {
-		t.Errorf("the migration's bound is LOOSER than ffmpeg.BoundOutput -- the two have drifted:\n"+
-			"  SQL kept %d bytes, Go kept %d bytes", len(sqlBounded), len(goBounded))
-	}
-	// Both must preserve the same ends, or they disagree about WHICH bytes matter
-	// rather than merely how many.
-	for _, want := range []string{"HEAD marker", "TAIL marker"} {
-		if !strings.Contains(sqlBounded, want) {
-			t.Errorf("SQL bound dropped %q, which ffmpeg.BoundOutput retains", want)
+	for _, c := range cases {
+		var sqlBounded string
+		if err := dbh.QueryRowContext(ctx,
+			`SELECT last_error FROM work_queue WHERE id = ?`, c.id).Scan(&sqlBounded); err != nil {
+			t.Fatalf("select %d: %v", c.id, err)
 		}
-		if !strings.Contains(goBounded, want) {
-			t.Errorf("ffmpeg.BoundOutput dropped %q, which the SQL bound retains", want)
+		goBounded := ffmpeg.BoundOutput(c.oversized)
+
+		if len(sqlBounded) > 4096 {
+			t.Errorf("id %d: the migration left %d BYTES, over the 4096 cap", c.id, len(sqlBounded))
+		}
+		if len(goBounded) > 4096 {
+			t.Errorf("id %d: ffmpeg.BoundOutput left %d BYTES, over the 4096 cap", c.id, len(goBounded))
+		}
+		if !utf8.ValidString(sqlBounded) {
+			t.Errorf("id %d: the migration produced invalid UTF-8", c.id)
+		}
+		// Both must preserve the same ends, or they disagree about WHICH bytes
+		// matter rather than merely how many.
+		for _, want := range []string{"HEAD marker", "TAIL marker"} {
+			if !strings.Contains(sqlBounded, want) {
+				t.Errorf("id %d: SQL bound dropped %q", c.id, want)
+			}
+			if !strings.Contains(goBounded, want) {
+				t.Errorf("id %d: ffmpeg.BoundOutput dropped %q", c.id, want)
+			}
 		}
 	}
 }

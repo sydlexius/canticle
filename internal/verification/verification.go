@@ -129,14 +129,15 @@ func (v *HTTPVerifier) sample(ctx context.Context, audioPath string) (_ string, 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", fmt.Errorf("verification: sample audio: %w", ctxErr)
 		}
-		// Named and bounded for the same reasons as the detector's sampler: the
-		// path identifies the offending file (and must sit in the wrapping context,
-		// since the bound may elide it from ffmpeg's own output), while the bound
-		// keeps a corrupt input's unbounded stderr out of work_queue.last_error and
-		// the Failure Analysis report (#731).
+		// Logged and bounded for the same reasons as the detector's sampler: the
+		// path names the offending file for an operator but stays OUT of the
+		// error, which becomes work_queue.last_error and from there a verbatim
+		// Prometheus label on an externally-scraped surface; the bound keeps a
+		// corrupt input's unbounded stderr out of that column and the Failure
+		// Analysis report (#731).
 		slog.Warn("verification: ffmpeg could not sample this audio file; it may be corrupt",
 			"path", audioPath, "error", err)
-		return "", fmt.Errorf("verification: sample audio with ffmpeg %q: %w: %s", audioPath, err, ffmpeg.BoundOutput(string(output)))
+		return "", fmt.Errorf("verification: sample audio with ffmpeg: %w: %s", err, ffmpeg.BoundOutput(string(output)))
 	}
 	return samplePath, nil
 }
