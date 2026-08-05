@@ -155,6 +155,49 @@ else
 fi
 
 echo "==> golangci-lint"
+# A REMOVED WORKTREE POISONS THE SHARED LINT CACHE (#669). golangci-lint's cache
+# is USER-GLOBAL (~/Library/Caches/golangci-lint on macOS), not per-worktree, so
+# deleting one worktree leaves entries keyed to paths that no longer exist. The
+# next gate in a SIBLING worktree then reports dozens of findings against files
+# it cannot even open -- 107 on one occurrence measured 2026-08-05, every one
+# naming a path inside the removed directory and none in the working tree.
+#
+# The cost is entirely in wasted time and misdirection: the findings are not
+# real, but they fail the gate, and the natural response is to go looking for a
+# bug in code that is fine. This blocked three gate runs in a single session --
+# including a release tag push -- and none of them had changed a line of Go.
+#
+# So the gate detects the condition itself rather than relying on whoever removed
+# the worktree to remember. The roster lives under the COMMON git dir, which every
+# worktree of this clone shares, so a removal recorded by one gate run is visible
+# to the next run in any sibling.
+#
+# It cleans only on a DISAPPEARANCE. Adding a worktree is harmless (nothing is
+# stale), and cleaning unconditionally would throw away a warm cache on every run
+# -- the lint step is one of the slowest in the gate, so that trade matters.
+if command -v golangci-lint >/dev/null 2>&1; then
+  WT_ROSTER="$(git rev-parse --git-common-dir)/golangci-worktree-roster"
+  # STRIP THE PREFIX, do not field-split. `awk '{print $2}'` truncates a path at
+  # the first space, and a worktree under a directory with a space in its name is
+  # entirely ordinary. A truncated path never matches the live list, so it reads
+  # as "removed" on EVERY run and would clean the cache every time -- silently
+  # discarding the warm-cache trade this whole block exists to preserve.
+  #
+  # LC_ALL=C throughout: comm requires both inputs in the SAME collation, and the
+  # roster outlives the run that wrote it. A locale change between runs would
+  # otherwise make comm reject a roster it had itself produced.
+  WT_NOW="$(git worktree list --porcelain | sed -n 's/^worktree //p' | LC_ALL=C sort)"
+  if [ -f "$WT_ROSTER" ]; then
+    # A path in the recorded roster that is absent from the live list was removed.
+    # comm -23 prints lines unique to the first (recorded) side.
+    if WT_GONE="$(LC_ALL=C comm -23 "$WT_ROSTER" <(printf '%s\n' "$WT_NOW"))" && [ -n "$WT_GONE" ]; then
+      echo "    worktree removed since the last gate run; cleaning the shared lint cache:"
+      printf '%s\n' "$WT_GONE" | sed 's/^/      - /'
+      golangci-lint cache clean || echo "    WARNING: cache clean failed; phantom findings may follow" >&2
+    fi
+  fi
+  printf '%s\n' "$WT_NOW" > "$WT_ROSTER"
+fi
 golangci-lint run ./... || fail "lint"
 
 echo "==> actionlint (workflow lint)"
