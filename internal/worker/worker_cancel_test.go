@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/queue"
 )
@@ -144,6 +145,44 @@ func TestFailSurfacesABookkeepingFailure(t *testing.T) {
 	// The counter still moved: the item DID fail, even though recording it did not.
 	if w.consecutiveFailures != 1 {
 		t.Errorf("consecutiveFailures = %d, want 1", w.consecutiveFailures)
+	}
+}
+
+// An EXPIRED-BY-DEADLINE parent is a timeout, not a shutdown, even when the
+// cause happens to wrap context.Canceled -- a lane can surface a canceled inner
+// request while the worker's own context died of a deadline.
+//
+// The original guard used `ctx.Err() != nil`, which admits DeadlineExceeded and
+// so released the item and skipped failure accounting entirely. Verified against
+// a real expired WithTimeout parent before fixing: the loose form takes the
+// release branch, the strict `errors.Is(ctx.Err(), context.Canceled)` does not.
+//
+// No caller wraps the worker context in a WithTimeout today, so this is latent
+// -- but it is one line to be exactly right, and a silently-swallowed timeout is
+// the kind of bug nobody reports. Found by CodeRabbit on #736.
+func TestFailStillFailsWhenParentExpiredByDeadline(t *testing.T) {
+	q := &fakeQueue{}
+	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	item := queue.WorkItem{ID: 13}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond) // let the deadline actually pass
+
+	// The cause wraps Canceled (an inner request was canceled) while the parent
+	// died of a DEADLINE. That combination is what separates the two guards.
+	if err := w.fail(ctx, item, fmt.Errorf("lane musixmatch: %w", context.Canceled)); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+
+	if len(q.failed) != 1 || q.failed[0] != item.ID {
+		t.Errorf("failed = %v, want [%d]: a deadline is a timeout, not a shutdown", q.failed, item.ID)
+	}
+	if len(q.released) != 0 {
+		t.Errorf("released = %v, want empty: releasing here would swallow the timeout unrecorded", q.released)
+	}
+	if w.consecutiveFailures != 1 {
+		t.Errorf("consecutiveFailures = %d, want 1 (a timeout still counts against the pipeline)", w.consecutiveFailures)
 	}
 }
 

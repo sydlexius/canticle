@@ -1939,7 +1939,14 @@ func (w *Worker) releaseAfterThrottle(ctx context.Context, item queue.WorkItem) 
 //     as one. Keying on the error alone would swallow every provider timeout --
 //     a far worse bug than the cosmetic one this fixes.
 func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) error {
-	if ctx.Err() != nil && errors.Is(cause, context.Canceled) {
+	// errors.Is(ctx.Err(), context.Canceled), NOT ctx.Err() != nil. The looser
+	// form admits a parent that expired by DEADLINE, which is a timeout rather
+	// than a shutdown: a caller that ever wraps the worker context in a
+	// WithTimeout would see its timed-out items released instead of failed, and
+	// the timeout would go unrecorded. Verified against a real expired
+	// WithTimeout parent -- the loose form takes this branch, the strict one does
+	// not.
+	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(cause, context.Canceled) {
 		// Not a failure: do not touch consecutiveFailures or the last-failure fields,
 		// or a few restarts would put the next run into a backoff it never earned.
 		// WithoutCancel because the release must land despite the canceled parent --
