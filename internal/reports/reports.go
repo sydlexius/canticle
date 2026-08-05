@@ -10,7 +10,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
+
+	"github.com/sydlexius/canticle/internal/failsig"
 )
 
 // timeFormat matches the layout work_queue.completed_at is stored in
@@ -341,18 +344,62 @@ func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []FailureGroup
+	// Merge in Go on the NORMALIZED key, keeping the SQL GROUP BY on the raw one.
+	//
+	// The database has already collapsed tens of thousands of rows into a couple
+	// of dozen raw groups, so this loop re-merges those few rather than pulling
+	// every failed row across the wire to normalize it here (#478). SQLite has no
+	// regex, so the normalization itself cannot move into the query.
+	merged := map[FailureGroup]int64{}
+	var order []FailureGroup
 	for rows.Next() {
 		var g FailureGroup
 		if err := rows.Scan(&g.Status, &g.Reason, &g.Count); err != nil {
 			return nil, fmt.Errorf("reports: scan failure group: %w", err)
 		}
-		out = append(out, g)
+		count := g.Count
+		g.Count = 0 // the key is (status, normalized reason); the count is the value
+		g.Reason = normalizedReason(g.Reason)
+		if _, seen := merged[g]; !seen {
+			order = append(order, g)
+		}
+		merged[g] += count
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reports: failure analysis rows: %w", err)
 	}
+
+	out := make([]FailureGroup, 0, len(order))
+	for _, k := range order {
+		k.Count = merged[k]
+		out = append(out, k)
+	}
+	// Re-sort: merging changes the counts the SQL ordered by, so a group that
+	// absorbed several others can outrank one the database listed above it.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if out[i].Status != out[j].Status {
+			return out[i].Status < out[j].Status
+		}
+		return out[i].Reason < out[j].Reason
+	})
 	return out, nil
+}
+
+// normalizedReason applies the shared signature normalization while preserving
+// the 'unknown' sentinel the SQL COALESCE produces for an empty last_error.
+// Normalize maps empty to empty, so routing the sentinel through it unchanged
+// keeps one bucket rather than splitting into 'unknown' and ”.
+func normalizedReason(reason string) string {
+	if reason == "unknown" {
+		return reason
+	}
+	if n := failsig.Normalize(reason); n != "" {
+		return n
+	}
+	return reason
 }
 
 // UpNextItem is one buffered work_queue row the worker will claim next, in the

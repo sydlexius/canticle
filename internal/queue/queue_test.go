@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -4897,5 +4898,59 @@ func TestDBQueue_SetTimingOutcome(t *testing.T) {
 	// A missing id is a benign no-op (no error), matching the sibling stamps.
 	if err := q.SetTimingOutcome(ctx, 999999, TimingRecord{Outcome: "ok", Measured: true, EvaluatedAt: when}); err != nil {
 		t.Errorf("SetTimingOutcome on missing id: want nil error, got %v", err)
+	}
+}
+
+// The /metrics failure label is the reason this normalization is not cosmetic:
+// internal/server/metrics.go emits the reason VERBATIM as
+// mxlrcgo_queue_failures{reason="..."}, which an external Prometheus scrapes and
+// retains off-host. A raw signature puts absolute library paths on that surface
+// (#478), the same exposure class as #431 and #731 reached by a third route.
+//
+// This proves the normalization is WIRED here, not merely available: without it
+// the failsig unit tests stay green while the label keeps leaking.
+func TestDBQueue_CountFailuresByReasonNormalizesSignatures(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	now := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	enqAndFail := func(title, reason string) {
+		t.Helper()
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: title}}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue %s: %v", title, err)
+		}
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue %s: %v", title, err)
+		}
+		if _, err := q.Fail(ctx, item.ID, errors.New(reason)); err != nil {
+			t.Fatalf("Fail %s: %v", title, err)
+		}
+	}
+
+	// Three write failures, one root cause, differing only by item id and path.
+	enqAndFail("one", `worker: write item 101 output /lib/Artist A/Album/01. One.lrc: refusing to write: output dir "/lib/Artist A/Album" does not exist`)
+	enqAndFail("two", `worker: write item 202 output /lib/Artist B/Other/05. Two.lrc: refusing to write: output dir "/lib/Artist B/Other" does not exist`)
+	enqAndFail("three", `worker: write item 303 output /lib/Artist C/Third/09. Three.lrc: refusing to write: output dir "/lib/Artist C/Third" does not exist`)
+
+	counts, err := q.CountFailuresByReason(ctx)
+	if err != nil {
+		t.Fatalf("CountFailuresByReason: %v", err)
+	}
+	if len(counts) != 1 {
+		t.Fatalf("got %d label series, want 1 (one root cause): %v", len(counts), counts)
+	}
+	for reason, n := range counts {
+		if n != 3 {
+			t.Errorf("count = %d, want 3: merged series must SUM, not overwrite", n)
+		}
+		if strings.Contains(reason, "/lib/") {
+			t.Errorf("the metrics label still carries a library path: %q", reason)
+		}
+		if strings.Contains(reason, "101") || strings.Contains(reason, "202") {
+			t.Errorf("the metrics label still carries an item id: %q", reason)
+		}
 	}
 }

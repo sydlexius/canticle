@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -709,5 +710,78 @@ func TestQueueEligibilityEmpty(t *testing.T) {
 	}
 	if got.Eligible != 0 || got.Cooldown != 0 {
 		t.Errorf("empty queue = %+v, want {0 0}", got)
+	}
+}
+
+// The unit tests cover failsig.Normalize in isolation; this proves it is WIRED
+// into the report. Without it, moving or dropping the call would leave every
+// failsig test green while the report went back to showing one "category" per
+// failing file (#478).
+func TestFailureAnalysisNormalizesVariableSignatures(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	// Three write failures with ONE root cause, differing only by item id and
+	// path -- the exact shape measured on a production install.
+	for i, e := range []string{
+		`worker: write item 101 output /lib/Artist A/Album/01. One.lrc: refusing to write: output dir "/lib/Artist A/Album" does not exist`,
+		`worker: write item 202 output /lib/Artist B/Other/05. Two.lrc: refusing to write: output dir "/lib/Artist B/Other" does not exist`,
+		`worker: write item 303 output /lib/Artist C/Third/09. Three.lrc: refusing to write: output dir "/lib/Artist C/Third" does not exist`,
+	} {
+		insertWorkItem(t, sqlDB, workItem{artist: "A", title: "w" + string(rune('a'+i)), status: "failed", lastError: e})
+	}
+
+	got, err := repo.FailureAnalysis(ctx)
+	if err != nil {
+		t.Fatalf("FailureAnalysis: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d groups, want 1 (one root cause): %+v", len(got), got)
+	}
+	if got[0].Count != 3 {
+		t.Errorf("Count = %d, want 3: the merged group must SUM its members, not overwrite them", got[0].Count)
+	}
+	// The library path is private metadata and must not survive into the report.
+	if strings.Contains(got[0].Reason, "/lib/") {
+		t.Errorf("the reported signature still carries a library path: %q", got[0].Reason)
+	}
+	if strings.Contains(got[0].Reason, "101") {
+		t.Errorf("the reported signature still carries an item id: %q", got[0].Reason)
+	}
+}
+
+// Merging changes the counts the SQL ordered by, so the result must be re-sorted:
+// a group that absorbed several others can outrank one the database listed above
+// it. Without the re-sort the most significant failure category can appear below
+// a rarer one.
+func TestFailureAnalysisOrdersByMergedCount(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	// Two rows sharing one raw signature: the DB returns this as a single group
+	// of 2, which outranks each individual write failure before merging.
+	for i := 0; i < 2; i++ {
+		insertWorkItem(t, sqlDB, workItem{artist: "A", title: "t" + string(rune('a'+i)), status: "failed", lastError: "musixmatch: unexpected matcher status_code 500"})
+	}
+	// Three rows that only become one group of 3 AFTER normalization.
+	for i, e := range []string{
+		`worker: write item 11 output /lib/A/x/1.lrc: refusing to write: output dir "/lib/A/x" does not exist`,
+		`worker: write item 22 output /lib/B/y/2.lrc: refusing to write: output dir "/lib/B/y" does not exist`,
+		`worker: write item 33 output /lib/C/z/3.lrc: refusing to write: output dir "/lib/C/z" does not exist`,
+	} {
+		insertWorkItem(t, sqlDB, workItem{artist: "A", title: "w" + string(rune('a'+i)), status: "failed", lastError: e})
+	}
+
+	got, err := repo.FailureAnalysis(ctx)
+	if err != nil {
+		t.Fatalf("FailureAnalysis: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d groups, want 2: %+v", len(got), got)
+	}
+	if got[0].Count != 3 {
+		t.Errorf("first group Count = %d, want 3: the merged group must sort above the smaller one", got[0].Count)
 	}
 }
