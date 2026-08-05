@@ -391,7 +391,7 @@ func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 // normalizedReason applies the shared signature normalization while preserving
 // the 'unknown' sentinel the SQL COALESCE produces for an empty last_error.
 // Normalize maps empty to empty, so routing the sentinel through it unchanged
-// keeps one bucket rather than splitting into 'unknown' and ”.
+// keeps one bucket rather than splitting into 'unknown' and an empty string.
 func normalizedReason(reason string) string {
 	if reason == "unknown" {
 		return reason
@@ -399,7 +399,11 @@ func normalizedReason(reason string) string {
 	if n := failsig.Normalize(reason); n != "" {
 		return n
 	}
-	return reason
+	// Normalization reduced the value to nothing, which means the raw text was
+	// whitespace-only. NULLIF(last_error, '') does not catch that -- it only maps
+	// the EMPTY string -- so returning `reason` here would mint a blank group
+	// alongside 'unknown' instead of joining it. Both mean "no cause recorded".
+	return "unknown"
 }
 
 // UpNextItem is one buffered work_queue row the worker will claim next, in the

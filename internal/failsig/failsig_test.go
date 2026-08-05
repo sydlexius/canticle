@@ -145,3 +145,70 @@ func TestNormalizeHandlesMultiLine(t *testing.T) {
 		t.Errorf("normalized signature retains a container IP:\n%s", got)
 	}
 }
+
+// An IPv6 endpoint is private endpoint metadata exactly as an IPv4 one is, and
+// the first draft handled only IPv4 -- so a v6 address reached the Prometheus
+// label untouched. Found by CodeRabbit on #737.
+func TestNormalizeCollapsesIPv6(t *testing.T) {
+	for _, tc := range []struct{ name, in string }{
+		{"bracketed with port", `dial tcp [2001:db8::1]:8080: connect: refused`},
+		{"bare compressed", `lookup host on 2001:db8::1: timeout`},
+		{"short compressed", `dial fe80::1 refused`},
+		{"full uncompressed", `dial 2001:0db8:85a3:0000:0000:8a2e:0370:7334 refused`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Normalize(tc.in)
+			for _, leak := range []string{"2001", "db8", "fe80", "8a2e"} {
+				if strings.Contains(got, leak) {
+					t.Errorf("IPv6 fragment %q survived normalization: %s", leak, got)
+				}
+			}
+		})
+	}
+}
+
+// A CLOCK TIME is hex-group-shaped, so a loose IPv6 rule eats it -- and
+// collapsing "12:30:45" to <ip> would merge distinct timings into one group.
+// This is the false positive that a first-draft IPv6 pattern actually produced,
+// which is why the shipped rule requires either a literal "::" or all eight
+// groups.
+func TestNormalizeDoesNotEatClockTimes(t *testing.T) {
+	for _, in := range []string{
+		"ffmpeg: duration 12:30:45 exceeded",
+		"stalled after 1:02:03 total",
+	} {
+		if got := Normalize(in); got != in {
+			t.Errorf("a clock time was normalized as an address:\n got %q\nwant %q", got, in)
+		}
+	}
+}
+
+// A HEX STATUS CODE is not an allocator address. 0xC0000005 (access violation)
+// and 0xC0000409 (stack buffer overrun) are different failures; collapsing them
+// is the over-normalization this package exists to avoid. The shipped rule is
+// anchored to "@ " -- the one syntax where a hex token is provably an address.
+func TestNormalizeKeepsDistinctHexStatusCodes(t *testing.T) {
+	a := Normalize("worker: ffmpeg: exit status 0xC0000005")
+	b := Normalize("worker: ffmpeg: exit status 0xC0000409")
+	if a == b {
+		t.Errorf("two distinct hex status codes collapsed into one group: %s", a)
+	}
+	if !strings.Contains(a, "0xC0000005") {
+		t.Errorf("the status code was normalized away; it is the actionable signal: %s", a)
+	}
+}
+
+// THE ROOT CAUSE MUST SURVIVE AN UNQUOTED PATH. An earlier path rule terminated
+// on end-of-line, so it swallowed everything after the path: two different
+// failures on the same file became one meaningless group. Erasing the cause is
+// strictly worse than leaking the path.
+func TestNormalizeKeepsTheCauseAfterAnUnquotedPath(t *testing.T) {
+	a := Normalize("read /mnt/a permission denied")
+	b := Normalize("read /mnt/a checksum mismatch")
+	if a == b {
+		t.Errorf("two distinct root causes collapsed: %s", a)
+	}
+	if !strings.Contains(a, "permission denied") {
+		t.Errorf("the diagnostic suffix was erased: %s", a)
+	}
+}

@@ -785,3 +785,30 @@ func TestFailureAnalysisOrdersByMergedCount(t *testing.T) {
 		t.Errorf("first group Count = %d, want 3: the merged group must sort above the smaller one", got[0].Count)
 	}
 }
+
+// A whitespace-only last_error must join the 'unknown' group, not mint a blank
+// one beside it. NULLIF(last_error, ”) only maps the EMPTY string, so " \t"
+// survives the SQL and reached the report as its own group. Found by CodeRabbit
+// on #737.
+func TestFailureAnalysisWhitespaceOnlyJoinsUnknown(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "empty", status: "failed", lastError: ""})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "ws", status: "failed", lastError: " \t"})
+
+	got, err := repo.FailureAnalysis(ctx)
+	if err != nil {
+		t.Fatalf("FailureAnalysis: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d groups, want 1 (both mean 'no cause recorded'): %+v", len(got), got)
+	}
+	if got[0].Reason != "unknown" {
+		t.Errorf("Reason = %q, want unknown", got[0].Reason)
+	}
+	if got[0].Count != 2 {
+		t.Errorf("Count = %d, want 2", got[0].Count)
+	}
+}

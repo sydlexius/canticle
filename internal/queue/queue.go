@@ -1575,7 +1575,11 @@ func normalizedReason(reason string) string {
 	if n := failsig.Normalize(reason); n != "" {
 		return n
 	}
-	return reason
+	// Normalization reduced the value to nothing, which means the raw text was
+	// whitespace-only. NULLIF(last_error, '') does not catch that -- it only maps
+	// the EMPTY string -- so returning `reason` here would mint a blank group
+	// alongside 'unknown' instead of joining it. Both mean "no cause recorded".
+	return "unknown"
 }
 
 // CountByStatus returns the number of work_queue rows grouped by status.

@@ -47,17 +47,35 @@ var replacements = []struct {
 	// the bare-path rule so the quotes are consumed with it rather than left as
 	// an empty pair.
 	{regexp.MustCompile(`"(?:/[^"\n]*)"`), `"<path>"`},
-	// An ephemeral host:port inside a dial/read address, e.g. 127.0.0.1:56723.
+	// A bracketed IPv6 endpoint, e.g. [2001:db8::1]:8080. First, because the
+	// brackets must be consumed with the address rather than left stranded.
+	{regexp.MustCompile(`\[[0-9a-fA-F:]+\]:\d+`), `<addr>`},
+	// A bare IPv6 address, in two alternatives -- the "::"-compressed form first
+	// so it wins on a compressed address, then the full uncompressed 8-group form.
+	//
+	// DELIBERATELY NARROW, because a loose colon-group pattern eats CLOCK TIMES:
+	// "12:30:45" and "1:02:03" are hex-group-shaped, and collapsing them to <ip>
+	// would merge distinct timings. Requiring either a literal "::" or all eight
+	// groups excludes a 3-field time by construction. A first draft that merely
+	// required 2+ groups both ate clock times AND stranded a digit
+	// ("2001:db8::1" -> "<ip>1"), which is why this is probed rather than assumed.
+	{regexp.MustCompile(`\b(?:[0-9a-fA-F]{1,4}:){1,7}:(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*)?|\b[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){7}\b`), `<ip>`},
+	// An ephemeral IPv4 host:port inside a dial/read address, e.g. 127.0.0.1:56723.
 	// Before the bare-IP rule, which would otherwise leave the port stranded.
 	{regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}:\d+`), `<addr>`},
 	// A bare IPv4 address, e.g. a container IP that changes on every restart.
 	{regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`), `<ip>`},
-	// A hex memory address, e.g. ffmpeg's "[mp3float @ 0x14e1cf868a80]". The
-	// allocator hands out a different address every run, so two occurrences of
-	// ONE ffmpeg failure never grouped together -- verified against the real
-	// signature before adding this. Same class as the ports and IPs above:
-	// variable per run, carrying no diagnostic value.
-	{regexp.MustCompile(`\b0x[0-9a-fA-F]+\b`), `<addr>`},
+	// A hex memory address in ALLOCATOR SYNTAX ONLY, e.g. ffmpeg's
+	// "[mp3float @ 0x14e1cf868a80]". The allocator hands out a different address
+	// every run, so two occurrences of ONE ffmpeg failure never grouped together.
+	//
+	// ANCHORED TO "@ ", DELIBERATELY. A bare \b0x[0-9a-fA-F]+\b also matches a hex
+	// STATUS code -- "exit status 0xC0000005" (access violation) and
+	// "exit status 0xC0000409" (stack buffer overrun) are different failures that
+	// collapsed into one group. That is the over-normalization this package is
+	// supposed to prevent, so the rule is narrowed to the one syntax where a hex
+	// token is provably an address rather than a code.
+	{regexp.MustCompile(`@ 0x[0-9a-fA-F]+`), `@ <addr>`},
 	// A work_queue row id, e.g. "write item 77508 output". Anchored to the word
 	// "item" so an ordinary number elsewhere in a message is not eaten -- notably
 	// NOT a status code, which is the actionable signal and must survive.
@@ -72,10 +90,24 @@ var replacements = []struct {
 	// not collapse AND the leaked text is only partly removed. Measured on the
 	// real signatures: three write failures still produced three groups.
 	//
-	// These messages delimit a path with ": " (colon-SPACE) or end-of-line, so
-	// that is the terminator. RE2 has no lookahead, so the delimiter is captured
-	// and restored rather than peeked at.
-	{regexp.MustCompile(`/[^"\n]*?(: |\n|$)`), `<path>${1}`},
+	// IT MUST ALSO NOT RUN TO END-OF-LINE. An earlier version terminated on
+	// ": " OR end-of-line, and the end-of-line branch swallowed the diagnostic
+	// suffix: "read /mnt/a permission denied" and "read /mnt/a checksum mismatch"
+	// both became "read <path>", merging two distinct root causes. Erasing the
+	// cause is strictly worse than leaking the path, because the report then
+	// shows one group that means nothing.
+	//
+	// So the ONLY terminator is ": " (colon-SPACE), the delimiter these messages
+	// actually use, plus a newline. A path that ends a line without a delimiter is
+	// left alone rather than guessed at -- see pathToEOL below, which handles the
+	// one shape where end-of-line is provably safe. RE2 has no lookahead, so the
+	// delimiter is captured and restored rather than peeked at.
+	{regexp.MustCompile(`/[^"\n]*?(: |\n)`), `<path>${1}`},
+	// A path that ends the line, but ONLY when the line has no further text after
+	// it -- i.e. the path IS the tail. Anchored to a quote or a known
+	// path-introducing token so an unquoted path followed by prose (the case
+	// above) is never consumed.
+	{regexp.MustCompile(`(output |file |path )/[^"\n]*$`), `${1}<path>`},
 }
 
 // Normalize returns a stable grouping key for one last_error value.
