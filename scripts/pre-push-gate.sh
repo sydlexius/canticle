@@ -177,11 +177,20 @@ echo "==> golangci-lint"
 # -- the lint step is one of the slowest in the gate, so that trade matters.
 if command -v golangci-lint >/dev/null 2>&1; then
   WT_ROSTER="$(git rev-parse --git-common-dir)/golangci-worktree-roster"
-  WT_NOW="$(git worktree list --porcelain | awk '/^worktree /{print $2}' | sort)"
+  # STRIP THE PREFIX, do not field-split. `awk '{print $2}'` truncates a path at
+  # the first space, and a worktree under a directory with a space in its name is
+  # entirely ordinary. A truncated path never matches the live list, so it reads
+  # as "removed" on EVERY run and would clean the cache every time -- silently
+  # discarding the warm-cache trade this whole block exists to preserve.
+  #
+  # LC_ALL=C throughout: comm requires both inputs in the SAME collation, and the
+  # roster outlives the run that wrote it. A locale change between runs would
+  # otherwise make comm reject a roster it had itself produced.
+  WT_NOW="$(git worktree list --porcelain | sed -n 's/^worktree //p' | LC_ALL=C sort)"
   if [ -f "$WT_ROSTER" ]; then
     # A path in the recorded roster that is absent from the live list was removed.
     # comm -23 prints lines unique to the first (recorded) side.
-    if WT_GONE="$(comm -23 "$WT_ROSTER" <(printf '%s\n' "$WT_NOW"))" && [ -n "$WT_GONE" ]; then
+    if WT_GONE="$(LC_ALL=C comm -23 "$WT_ROSTER" <(printf '%s\n' "$WT_NOW"))" && [ -n "$WT_GONE" ]; then
       echo "    worktree removed since the last gate run; cleaning the shared lint cache:"
       printf '%s\n' "$WT_GONE" | sed 's/^/      - /'
       golangci-lint cache clean || echo "    WARNING: cache clean failed; phantom findings may follow" >&2
