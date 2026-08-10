@@ -57,8 +57,19 @@ BASE="https://github.com/tailwindlabs/tailwindcss/releases/download/v${VERSION}"
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
+# Retry transient network failures. Every build path (CI shards, Dockerfile,
+# GoReleaser hooks) funnels through this one download, so a single dropped
+# connection to the GitHub release CDN fails a whole run. Observed in CI as
+# "curl: (35) Recv failure: Connection reset by peer" on an otherwise green PR.
+#
+# --retry-all-errors is required, not decorative: plain --retry covers timeouts,
+# 408/429, and 5xx, but a mid-transfer connection reset is none of those, so
+# without it the exact failure being fixed here would not be retried. A genuine
+# 404 still fails (after burning the retries) because -f keeps HTTP errors fatal.
+CURL_RETRY=(--retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 15)
+
 echo "==> downloading ${ASSET} (v${VERSION})"
-curl -fsSL -o "$workdir/$ASSET" "$BASE/$ASSET"
+curl -fsSL "${CURL_RETRY[@]}" -o "$workdir/$ASSET" "$BASE/$ASSET"
 
 echo "==> verifying sha256"
 # Resolve a SHA-256 tool. Linux ships `sha256sum`; macOS (a first-class dev
@@ -77,7 +88,7 @@ fi
 # look like "<hash>  ./tailwindcss-linux-x64"; match the asset at end-of-line with
 # an optional leading "./" so an upstream switch to a bare "filename" form does
 # not silently break verification. ASSET is a controlled value (no regex metachars).
-expected="$(curl -fsSL "$BASE/sha256sums.txt" \
+expected="$(curl -fsSL "${CURL_RETRY[@]}" "$BASE/sha256sums.txt" \
   | grep -E "[[:space:]]\.?/?${ASSET}\$" \
   | awk '{print $1}' | head -n1)"
 if [ -z "$expected" ]; then
