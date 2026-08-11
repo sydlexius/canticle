@@ -78,11 +78,71 @@ type Client struct {
 	clientAppID string
 
 	// pacer fields -- zero value means no pacing (minInterval == 0).
+	//
+	// mu also guards the zero-result outage counter below. One mutex covers both
+	// because the client is shared across worker goroutines and the two pieces of
+	// state are touched on the same request path; a second lock would buy nothing
+	// but a lock-ordering hazard.
 	mu          sync.Mutex
 	minInterval time.Duration
 	lastRequest time.Time
 	now         func() time.Time
 	sleep       func(ctx context.Context, d time.Duration) bool
+
+	// consecutiveZero counts back-to-back zero-result responses (#607). Reset by
+	// any response carrying at least one song.
+	consecutiveZero int
+	// zeroReported latches the transition so the outage is logged ONCE rather
+	// than on every request past the threshold. Cleared on recovery.
+	zeroReported bool
+}
+
+// recordZeroResult counts a zero-song response and reports whether the run has
+// reached the escalation threshold. Called for a response that parsed cleanly and
+// simply carried no songs -- never for a transport or status failure, which say
+// nothing about whether the application id still works.
+// The log emission is deliberately OUTSIDE the critical section. slog handlers
+// can block on I/O and take locks of their own, and this mutex also paces every
+// outbound request, so logging under it would serialize concurrent lookups on
+// the handler -- worst at exactly the moment an outage transition fires. The
+// pacer at pace() already follows this shape; match it.
+func (c *Client) recordZeroResult() bool {
+	c.mu.Lock()
+	c.consecutiveZero++
+	count := c.consecutiveZero
+	reached := count >= ZeroResultThreshold
+	// Latch INSIDE the lock so exactly one goroutine can win the transition and
+	// emit the warning, even though the emission happens after the unlock.
+	transitioned := reached && !c.zeroReported
+	if transitioned {
+		c.zeroReported = true
+	}
+	c.mu.Unlock()
+
+	if transitioned {
+		slog.Warn("petitlyrics: provider has returned no results for a sustained run of lookups; the application id may have been revoked",
+			"consecutive", count, "threshold", ZeroResultThreshold)
+	}
+	return reached
+}
+
+// recordNonZeroResult clears the outage counter. Any response carrying at least
+// one song proves the application id is still accepted, whatever the client then
+// makes of the payload.
+// The recovery log is emitted after the unlock, for the same reason as the
+// warning in recordZeroResult.
+func (c *Client) recordNonZeroResult() {
+	c.mu.Lock()
+	recovered := c.zeroReported
+	after := c.consecutiveZero
+	c.zeroReported = false
+	c.consecutiveZero = 0
+	c.mu.Unlock()
+
+	if recovered {
+		slog.Info("petitlyrics: provider returned results again; the sustained zero-result run has ended",
+			"after", after)
+	}
 }
 
 // NewClient creates a new Petit Lyrics client.
@@ -416,7 +476,19 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 		return nil, fmt.Errorf("petitlyrics: decode XML response: %w", err)
 	}
 	if len(parsed.Songs) == 0 {
+		// A clean HTTP 200 carrying no songs. Individually this is an ordinary
+		// miss; sustained, it is the fingerprint of a revoked application id,
+		// since the service keeps answering normally rather than returning 401
+		// (#607).
+		if c.recordZeroResult() {
+			return nil, ErrProviderUnavailable
+		}
 		return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
 	}
+	// At least one song came back, which proves the application id is still
+	// accepted. Reset regardless of what the client then makes of the payload: a
+	// candidate that loses selection, or a tier this client cannot decode, is a
+	// per-track outcome and says nothing about credential health.
+	c.recordNonZeroResult()
 	return parsed.Songs, nil
 }
