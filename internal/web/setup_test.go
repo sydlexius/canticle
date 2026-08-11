@@ -215,7 +215,7 @@ func TestSetupGating(t *testing.T) {
 
 	// The window is self-closing: once an admin exists the endpoint reverts to
 	// its pre-#461 posture, and an untrusted client must not even learn it is
-	// there. This subtest depends on the one above having created the admin.
+	// there. The admin precondition is established below rather than inherited.
 	t.Run("closes permanently once an admin exists", func(t *testing.T) {
 		// Establish the precondition here rather than inheriting it from the
 		// subtest above. Depending on that ordering made this subtest SKIP (and
@@ -516,6 +516,79 @@ func TestSetupHashSlotsRefuseWhenSaturated(t *testing.T) {
 	// The refusal must happen BEFORE any admin is created.
 	if has, _ := f.svc.HasUsers(context.Background()); has {
 		t.Error("a refused submission still created an admin")
+	}
+}
+
+// TestWarnOpenSetupThrottles pins that the open-window warning is rate limited
+// and that the suppressed count is not silently lost.
+//
+// One log line per unauthenticated request lets a client looping on /setup fill
+// a file-backed log; a daemon that dies on a full disk restarts with the window
+// STILL OPEN, which is the same denial-of-onboarding shape the hashSlots cap
+// exists to prevent. Throttling may lose the volume but must never hide that a
+// burst happened, hence the carried count.
+func TestWarnOpenSetupThrottles(t *testing.T) {
+	f := newTestOnboarding(t, trustnet.LoopbackOnly())
+	onb := f.onb
+
+	untrusted := func() *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
+		req.RemoteAddr = "198.51.100.7:1"
+		return req
+	}
+
+	// First untrusted call always logs and stamps the clock.
+	onb.warnOpenSetup(untrusted())
+	onb.warnMu.Lock()
+	first, suppressed := onb.warnLast, onb.warnSuppressed
+	onb.warnMu.Unlock()
+	if first.IsZero() {
+		t.Fatal("first untrusted warn did not stamp warnLast; nothing was logged")
+	}
+	if suppressed != 0 {
+		t.Errorf("suppressed after first warn = %d, want 0", suppressed)
+	}
+
+	// A burst inside the interval must be counted, not emitted: warnLast must not
+	// move, and every dropped line must be accounted for.
+	const burst = 50
+	for i := 0; i < burst; i++ {
+		onb.warnOpenSetup(untrusted())
+	}
+	onb.warnMu.Lock()
+	afterBurst, counted := onb.warnLast, onb.warnSuppressed
+	onb.warnMu.Unlock()
+	if !afterBurst.Equal(first) {
+		t.Error("a burst inside the throttle interval emitted another line")
+	}
+	if counted != burst {
+		t.Errorf("suppressed count = %d, want %d (dropped lines must be accounted for)", counted, burst)
+	}
+
+	// Once the interval has elapsed the next call logs again and clears the count.
+	onb.warnMu.Lock()
+	onb.warnLast = time.Now().Add(-2 * warnOpenSetupInterval)
+	onb.warnMu.Unlock()
+	onb.warnOpenSetup(untrusted())
+	onb.warnMu.Lock()
+	afterElapse, cleared := onb.warnLast, onb.warnSuppressed
+	onb.warnMu.Unlock()
+	if !afterElapse.After(afterBurst) {
+		t.Error("no warning emitted after the throttle interval elapsed")
+	}
+	if cleared != 0 {
+		t.Errorf("suppressed count after emitting = %d, want 0 (it should be carried then reset)", cleared)
+	}
+
+	// A trusted client is never logged and must not disturb the throttle state.
+	trusted := httptest.NewRequest(http.MethodGet, "/setup", nil)
+	trusted.RemoteAddr = loopbackPeer
+	onb.warnOpenSetup(trusted)
+	onb.warnMu.Lock()
+	afterTrusted := onb.warnLast
+	onb.warnMu.Unlock()
+	if !afterTrusted.Equal(afterElapse) {
+		t.Error("a trusted request moved the warning throttle state")
 	}
 }
 

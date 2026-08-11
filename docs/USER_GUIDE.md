@@ -239,7 +239,7 @@ The browser UI is **off by default**. The serve listener only mounts the web rou
 
 **Enable it (headless).** Set `MXLRC_WEB_UI_ENABLED=true` in the container environment (the Unraid template ships this variable, and `docker-compose.example.yml` sets it). The equivalent config-file setting is `web_ui_enabled = true` under `[server]` in `config.toml`; the env var overrides the file when both are present. With the UI off, neither the pages nor the `/login` or `/setup` routes exist.
 
-**Bootstrap the first admin (headless).** Since #461 the setup page (`/setup`) is reachable to any client that can reach the port until the first admin exists, so a remote Unraid box **can** complete first-run setup through the browser without granting a trusted-network bypass. Env-bootstrap remains the better choice on an exposed network: it creates the admin before the listener ever serves `/setup`, closing the window entirely rather than leaving it open until someone visits the page.
+**Bootstrap the first admin (headless).** The setup page (`/setup`) is reachable to any client that can reach the port until the first admin exists, so a remote Unraid box **can** complete first-run setup through the browser without granting a trusted-network bypass. Env-bootstrap remains the better choice on an exposed network: it creates the admin before the listener ever serves `/setup`, closing the window entirely rather than leaving it open until someone visits the page.
 
 ```sh
 -e MXLRC_WEBAUTH_ADMIN_USER=admin

@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/secrets"
 	"github.com/sydlexius/canticle/internal/trustnet"
@@ -70,6 +72,16 @@ type Onboarding struct {
 	// are refused with 503 + Retry-After rather than queued, so an attacker
 	// cannot pin memory by parking goroutines in a wait.
 	hashSlots chan struct{}
+	// warnMu guards the open-window warning throttle below. A plain mutex rather
+	// than atomics because the three fields must move together: deciding a line
+	// is due, stamping the time, and reading-then-clearing the suppressed count
+	// have to be one step, or a burst can double-log or lose a count.
+	warnMu sync.Mutex
+	// warnLast is when the last open-window warning was emitted (zero = never).
+	warnLast time.Time
+	// warnSuppressed counts warnings dropped since warnLast; it rides along on
+	// the next emitted line so throttling never hides that a burst happened.
+	warnSuppressed int
 }
 
 // NewOnboarding builds the onboarding flow. service performs first-run detection
@@ -205,18 +217,47 @@ func (o *Onboarding) refuseOnAdminCheckError(w http.ResponseWriter, r *http.Requ
 	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 }
 
+// warnOpenSetupInterval is the minimum gap between open-window warnings. The
+// first untrusted request always logs; the rest are counted and folded into the
+// next line, so a client looping on /setup costs one line per interval instead
+// of one per request.
+const warnOpenSetupInterval = time.Minute
+
 // warnOpenSetup logs that the unauthenticated setup window was exercised by a
 // client the trust policy would NOT have admitted. The window is bounded and
 // self-closing, but it is still a period in which whoever reaches the port first
 // claims the admin account, so an operator who left the port exposed should be
 // able to see that in the log rather than infer it. A trusted client is not
 // logged: that is the ordinary, expected path and would be pure noise.
+//
+// THROTTLED, because this is the same shape of defect the hashSlots cap exists
+// to prevent: unbounded per-request work an unauthenticated client can drive
+// during the open window. One log line per request lets a loop fill a
+// file-backed log, and a daemon that dies on a full disk restarts with the
+// window STILL OPEN -- a denial of onboarding, not a transient outage. The
+// suppressed count rides along on the next line, so throttling loses the volume
+// but never hides the fact that it happened.
 func (o *Onboarding) warnOpenSetup(r *http.Request) {
 	if o.policy.Trusted(r) {
 		return
 	}
+
+	now := time.Now()
+	o.warnMu.Lock()
+	suppressed := o.warnSuppressed
+	due := o.warnLast.IsZero() || now.Sub(o.warnLast) >= warnOpenSetupInterval
+	if !due {
+		o.warnSuppressed++
+		o.warnMu.Unlock()
+		return
+	}
+	o.warnLast = now
+	o.warnSuppressed = 0
+	o.warnMu.Unlock()
+
 	slog.Warn("serving first-run setup to an untrusted client because no admin account exists yet",
 		"remote", o.policy.ClientIP(r),
+		"suppressed_since_last", suppressed,
 		"hint", "create the admin account now; the setup page closes permanently once it exists")
 }
 
