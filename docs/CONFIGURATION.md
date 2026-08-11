@@ -205,7 +205,15 @@ An invalid CIDR in either list is a fatal startup error.
 
 #### Web UI access
 
-The first time the UI is enabled there is no admin yet, so every UI page redirects to `/setup`. The onboarding form creates the admin account and can optionally store the Musixmatch token and webhook API key in the encrypted secret store. `/setup` is reachable only from loopback or a configured trusted-network CIDR, so a fresh daemon on a LAN port does not let the first stranger claim the admin account; once an admin exists, `/setup` is closed. The webhook API and health endpoints are unaffected before onboarding - an existing deployment with a webhook key and no admin keeps processing the queue and serving webhooks; only the browsable UI is gated.
+The first time the UI is enabled there is no admin yet, so every UI page redirects to `/setup`. The onboarding form creates the admin account and can optionally store the Musixmatch token and webhook API key in the encrypted secret store.
+
+**`/setup` is reachable to any client that can reach the port until the first admin exists** (#461). Once one does, the page closes permanently: a trusted client is redirected to `/login`, and an untrusted one gets a 404 that does not reveal the endpoint. The window is therefore self-closing and cannot reopen -- admin creation is a first-writer-wins atomic insert, so exactly one claim can succeed.
+
+This is a deliberate trade. Gating `/setup` on the trusted-network list previously meant that bootstrapping required adding your browser's network to that list, and a trusted CIDR bypasses the session check on **every** UI route, permanently -- so you had to grant an indefinite, network-wide authentication bypass just to create your first account, and it stayed on unless you remembered to remove it. Keying the setup page on admin-existence instead bounds the exposure to the pre-onboarding period. Canticle logs a warning each time it serves the form to a client the trust policy would not have admitted.
+
+**Close the window immediately on an exposed network** by bootstrapping the admin at startup with `MXLRC_WEBAUTH_ADMIN_USER` / `MXLRC_WEBAUTH_ADMIN_PASSWORD` (below), which creates the account before the listener ever serves `/setup`. Otherwise, create your admin account promptly on first start.
+
+The webhook API and health endpoints are unaffected before onboarding - an existing deployment with a webhook key and no admin keeps processing the queue and serving webhooks; only the browsable UI is gated.
 
 For headless/Docker deployments, set both `MXLRC_WEBAUTH_ADMIN_USER` and `MXLRC_WEBAUTH_ADMIN_PASSWORD` to bootstrap the admin at startup instead of using the form. This is idempotent (an existing admin is never overwritten), the password (minimum 8 characters) is never logged, and a too-short password is a fatal startup error. Treat them as bootstrap-only: sign in and rotate the password after first run, then drop the variables.
 

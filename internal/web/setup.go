@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/secrets"
 	"github.com/sydlexius/canticle/internal/trustnet"
@@ -38,10 +40,10 @@ type SecretSetter interface {
 }
 
 // Onboarding implements the first-run setup flow (issue #204, lane 4): the
-// /setup GET/POST endpoints, the access gate that limits setup to loopback or a
-// configured trusted network, the first-run redirect of the UI routes to
-// /setup, and the env-independent admin-credential + runtime-secret writes. It
-// is safe for concurrent use.
+// /setup GET/POST endpoints, the admin-existence gate that opens setup until the
+// first account exists and closes it permanently afterwards (#461), the
+// first-run redirect of the UI routes to /setup, and the env-independent
+// admin-credential + runtime-secret writes. It is safe for concurrent use.
 type Onboarding struct {
 	service OnboardingService
 	secrets SecretSetter // may be nil (no secret fields)
@@ -53,13 +55,45 @@ type Onboarding struct {
 	// reports true it can never revert. Caching it lets the per-request gates skip
 	// the DB query for the entire post-onboarding lifetime of the process.
 	adminExists atomic.Bool
+	// hashSlots bounds how many setup submissions may be inside Argon2id at once.
+	//
+	// Password hashing is deliberately expensive in MEMORY (64 MiB, 4 threads --
+	// see webauth/password.go), and since #461 an unauthenticated client can
+	// reach it during the open window. Unbounded, a few dozen concurrent POSTs
+	// allocate GiB and can OOM the daemon on a memory-capped container, which
+	// is worse than it sounds: a crashed daemon restarts with the window STILL
+	// OPEN, so it is a denial of onboarding rather than a transient outage.
+	//
+	// A per-IP rate limiter (the /login shape) is the wrong instrument here: the
+	// quantity to bound is concurrent memory, and per-IP accounting does not
+	// bound it when requests arrive from many addresses -- or, on Docker bridge
+	// networking, when every LAN client presents as the same gateway address.
+	// A global semaphore bounds the measured quantity directly. Excess requests
+	// are refused with 503 + Retry-After rather than queued, so an attacker
+	// cannot pin memory by parking goroutines in a wait.
+	hashSlots chan struct{}
+	// warnMu guards the open-window warning throttle below. A plain mutex rather
+	// than atomics because the three fields must move together: deciding a line
+	// is due, stamping the time, and reading-then-clearing the suppressed count
+	// have to be one step, or a burst can double-log or lose a count.
+	warnMu sync.Mutex
+	// warnLast is when the last open-window warning was emitted (zero = never).
+	warnLast time.Time
+	// warnSuppressed counts warnings dropped since warnLast; it rides along on
+	// the next emitted line so throttling never hides that a burst happened.
+	warnSuppressed int
 }
 
 // NewOnboarding builds the onboarding flow. service performs first-run detection
 // and admin creation; secretStore (optional, may be nil) persists the runtime
-// secrets; auth issues the session cookie after a successful setup; policy gates
-// who may reach /setup (a nil policy defaults to loopback-only, the safe
-// default); version labels the page.
+// secrets; auth issues the session cookie after a successful setup; version
+// labels the page.
+//
+// policy no longer decides who may REACH /setup -- admin-existence does (#461).
+// It now serves three narrower purposes: choosing between 404 and a /login
+// redirect once setup has closed, deciding whether serving the open form is
+// worth a WARN, and resolving the client IP for that log. A nil policy defaults
+// to loopback-only, which is the safe default for all three.
 func NewOnboarding(service OnboardingService, secretStore SecretSetter, auth *Auth, policy *trustnet.Policy, version string) *Onboarding {
 	if service == nil {
 		panic("web: NewOnboarding: service must not be nil")
@@ -71,13 +105,21 @@ func NewOnboarding(service OnboardingService, secretStore SecretSetter, auth *Au
 		policy = trustnet.LoopbackOnly()
 	}
 	return &Onboarding{
-		service: service,
-		secrets: secretStore,
-		auth:    auth,
-		policy:  policy,
-		version: version,
+		service:   service,
+		secrets:   secretStore,
+		auth:      auth,
+		policy:    policy,
+		version:   version,
+		hashSlots: make(chan struct{}, maxConcurrentSetupHashes),
 	}
 }
+
+// maxConcurrentSetupHashes bounds concurrent Argon2id hashing on /setup. At
+// 64 MiB per hash this caps the route's transient footprint at ~256 MiB, which
+// a container small enough to OOM on that is also small enough that refusing
+// the surplus is the better failure. Onboarding is a once-per-deployment action
+// by exactly one operator, so real traffic never approaches the limit.
+const maxConcurrentSetupHashes = 4
 
 // hasAdmin reports whether an admin account exists, caching a true result for
 // the life of the process. The first-run state is monotonic (no admin-deletion
@@ -117,51 +159,145 @@ func (o *Onboarding) FirstRunGate(next http.Handler) http.Handler {
 	})
 }
 
-// handleSetupForm renders the onboarding form (GET /setup). It is reachable only
-// from a trusted source; a non-trusted client gets 404 (the page's existence is
-// not revealed off-network). Once an admin exists the page is closed and the
-// client is sent to /login (one-shot: re-running setup is not how a password is
-// changed).
+// handleSetupForm renders the onboarding form (GET /setup).
+//
+// Reachability is decided by whether an admin EXISTS, not by the trusted-CIDR
+// policy (#461). Before the first admin is created the page is served to any
+// client that can reach the port; afterwards a non-trusted client gets 404 (the
+// page's existence is not revealed off-network) and a trusted one is sent to
+// /login, since re-running setup is not how a password is changed.
+//
+// The old order gated on trust FIRST, which made bootstrapping require handing
+// out a permanent, blanket auth bypass: RequireSession short-circuits on
+// policy.Trusted (auth.go), so any CIDR added to reach /setup also granted
+// unauthenticated access to every UI route, forever. Deciding on admin-existence
+// instead bounds the exposure to the pre-onboarding window, which closes
+// permanently the moment setup succeeds and cannot reopen (see hasAdmin's
+// monotonic latch, and webauth.Setup's atomic INSERT ... WHERE NOT EXISTS, which
+// makes the claim first-writer-wins).
 func (o *Onboarding) handleSetupForm(w http.ResponseWriter, r *http.Request) {
-	if !o.policy.Trusted(r) {
-		http.NotFound(w, r)
-		return
-	}
 	has, err := o.hasAdmin(r.Context())
 	if err != nil {
-		slog.Error("onboarding: first-run check failed", "error", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		o.refuseOnAdminCheckError(w, r, err)
 		return
 	}
 	if has {
+		// Setup is closed. Preserve the pre-#461 disclosure posture exactly:
+		// untrusted clients must not learn the endpoint exists.
+		if !o.policy.Trusted(r) {
+			http.NotFound(w, r)
+			return
+		}
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	o.warnOpenSetup(r)
 	o.renderSetup(w, r, http.StatusOK, o.version, "", "")
 }
 
-// handleSetup processes the onboarding submission (POST /setup). It re-applies
-// the trusted-source gate, validates the credentials, creates the admin (the
-// race against a concurrent setup is closed atomically by webauth.Setup's
-// conditional insert), optionally writes the runtime secrets, then logs the new
-// admin in and redirects to the UI.
-func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
-	if !enforceSameOrigin(w, r) {
-		return
-	}
+// refuseOnAdminCheckError answers a request whose admin-existence check failed.
+//
+// It fails CLOSED in both senses. An untrusted client gets the same 404 it would
+// see if an admin existed: before #461 the trust gate ran first, so a DB fault
+// could not reveal the endpoint off-network, and a 500 here would reintroduce
+// that disclosure at exactly the moment an attacker probing for 500s learns the
+// most. A trusted client gets the real 500, because an operator debugging their
+// own daemon needs to see the fault rather than a fictional 404.
+//
+// Nothing is served either way: hasAdmin reports (false, err) on failure, so the
+// error value is indistinguishable from "no admin exists". Treating an unknown
+// answer as "setup is closed" is the safe direction -- the alternative would
+// reopen the onboarding window on any transient DB error.
+func (o *Onboarding) refuseOnAdminCheckError(w http.ResponseWriter, r *http.Request, err error) {
+	slog.Error("onboarding: first-run check failed", "error", err)
 	if !o.policy.Trusted(r) {
 		http.NotFound(w, r)
 		return
 	}
-	// CSRF validation after the trust gate: untrusted peers are already refused
-	// above; for trusted peers the double-submit token prevents login-CSRF.
-	if !enforceCSRFToken(w, r) {
+	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+}
+
+// warnOpenSetupInterval is the minimum gap between open-window warnings. The
+// first untrusted request always logs; the rest are counted and folded into the
+// next line, so a client looping on /setup costs one line per interval instead
+// of one per request.
+const warnOpenSetupInterval = time.Minute
+
+// warnOpenSetup logs that the unauthenticated setup window was exercised by a
+// client the trust policy would NOT have admitted. The window is bounded and
+// self-closing, but it is still a period in which whoever reaches the port first
+// claims the admin account, so an operator who left the port exposed should be
+// able to see that in the log rather than infer it. A trusted client is not
+// logged: that is the ordinary, expected path and would be pure noise.
+//
+// THROTTLED, because this is the same shape of defect the hashSlots cap exists
+// to prevent: unbounded per-request work an unauthenticated client can drive
+// during the open window. One log line per request lets a loop fill a
+// file-backed log, and a daemon that dies on a full disk restarts with the
+// window STILL OPEN -- a denial of onboarding, not a transient outage. The
+// suppressed count rides along on the next line, so throttling loses the volume
+// but never hides the fact that it happened.
+func (o *Onboarding) warnOpenSetup(r *http.Request) {
+	if o.policy.Trusted(r) {
 		return
 	}
+
+	now := time.Now()
+	o.warnMu.Lock()
+	suppressed := o.warnSuppressed
+	due := o.warnLast.IsZero() || now.Sub(o.warnLast) >= warnOpenSetupInterval
+	if !due {
+		o.warnSuppressed++
+		o.warnMu.Unlock()
+		return
+	}
+	o.warnLast = now
+	o.warnSuppressed = 0
+	o.warnMu.Unlock()
+
+	slog.Warn("serving first-run setup to an untrusted client because no admin account exists yet",
+		"remote", o.policy.ClientIP(r),
+		"suppressed_since_last", suppressed,
+		"hint", "create the admin account now; the setup page closes permanently once it exists")
+}
+
+// handleSetup processes the onboarding submission (POST /setup). It mirrors
+// handleSetupForm's gate (admin-existence decides reachability, not the
+// trusted-CIDR policy -- see that function and #461), validates the credentials,
+// creates the admin (the race against a concurrent setup is closed atomically by
+// webauth.Setup's conditional insert), optionally writes the runtime secrets,
+// then logs the new admin in and redirects to the UI.
+func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
+	// The closed-setup refusal runs FIRST, ahead of the same-origin and CSRF
+	// checks, because both of those answer 403 and a 403 where the mux otherwise
+	// 404s is an endpoint-existence oracle: an attacker probing /setup post-admin
+	// would learn it is there without ever holding a valid token. GET already
+	// 404s for this client, so refusing here reveals nothing new, and the check
+	// is a latched in-memory read once an admin exists.
 	has, err := o.hasAdmin(r.Context())
 	if err != nil {
-		slog.Error("onboarding: first-run check failed", "error", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		o.refuseOnAdminCheckError(w, r, err)
+		return
+	}
+	if has && !o.policy.Trusted(r) {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Same-origin is the real defense against a hostile page in the operator's
+	// browser driving this route during the open window: it rejects the request
+	// on Sec-Fetch-Site/Origin/Referer, which a cross-site caller cannot forge.
+	if !enforceSameOrigin(w, r) {
+		return
+	}
+	// The double-submit token is defense in depth, NOT the anti-CSRF primitive.
+	// It compares two client-supplied values with no server-side binding, so a
+	// direct attacker simply mints both halves; what makes it useful against a
+	// cross-site caller is SameSite=Lax withholding the cookie, which is a
+	// property of the cookie rather than of the comparison. Keep it (it costs
+	// nothing and closes same-site-but-untrusted script paths), but do not treat
+	// it as the reason this route is safe -- enforceSameOrigin above is.
+	if !enforceCSRFToken(w, r) {
 		return
 	}
 	if has {
@@ -170,6 +306,7 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	o.warnOpenSetup(r)
 
 	if err := r.ParseForm(); err != nil {
 		o.renderSetup(w, r, http.StatusBadRequest, o.version, "Invalid form submission.", "")
@@ -189,6 +326,21 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	if password != confirm {
 		o.renderSetup(w, r, http.StatusBadRequest, o.version, "Passwords do not match.", username)
+		return
+	}
+
+	// Acquire a hashing slot AFTER the cheap validation above, so a malformed or
+	// too-short submission never occupies one. Refuse rather than queue: parking
+	// goroutines here would let an attacker hold memory and defeat the cap.
+	select {
+	case o.hashSlots <- struct{}{}:
+		defer func() { <-o.hashSlots }()
+	default:
+		slog.Warn("onboarding: refusing setup submission; hashing capacity is saturated",
+			"remote", o.policy.ClientIP(r), "limit", maxConcurrentSetupHashes)
+		w.Header().Set("Retry-After", "2")
+		o.renderSetup(w, r, http.StatusServiceUnavailable, o.version,
+			"The server is busy. Please try again in a moment.", username)
 		return
 	}
 
