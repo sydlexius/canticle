@@ -73,10 +73,15 @@ func xmlRootPrefix(raw []byte) []byte {
 // classifyPayload reports which tier a decoded payload actually is, derived from
 // the bytes rather than from the response's lyricsType field.
 //
-// This is deliberate. The API's availableLyricsType is not a capability set (it
-// reported the same value regardless of the tier requested), and lyricsType
-// echoes the request. The payload itself is the only trustworthy discriminator,
-// and the three shapes are cleanly separable:
+// This is deliberate, but NOT for the reason an earlier version of this comment
+// gave. It claimed availableLyricsType was not a capability set, concluded from
+// two probe tracks; that claim is RETRACTED. Measured over 107 hits the field
+// predicts the returned tier with no exceptions.
+//
+// Classifying from the payload is still correct: it is the difference between
+// trusting a field and validating what actually arrived, and it keeps the
+// decoder honest if the API's own accounting ever drifts. The three shapes are
+// cleanly separable:
 //
 //	tierWordSync -- XML with a <wsy> root
 //	tierLineSync -- binary: not valid UTF-8, and carries NUL bytes
