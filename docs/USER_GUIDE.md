@@ -239,7 +239,7 @@ The browser UI is **off by default**. The serve listener only mounts the web rou
 
 **Enable it (headless).** Set `MXLRC_WEB_UI_ENABLED=true` in the container environment (the Unraid template ships this variable, and `docker-compose.example.yml` sets it). The equivalent config-file setting is `web_ui_enabled = true` under `[server]` in `config.toml`; the env var overrides the file when both are present. With the UI off, neither the pages nor the `/login` or `/setup` routes exist.
 
-**Bootstrap the first admin (headless).** The setup page (`/setup`) is reachable **only from loopback or a configured trusted CIDR**, so a remote Unraid box cannot complete first-run setup through the browser. For headless deployments, create the first admin from the environment instead:
+**Bootstrap the first admin (headless).** Since #461 the setup page (`/setup`) is reachable to any client that can reach the port until the first admin exists, so a remote Unraid box **can** complete first-run setup through the browser without granting a trusted-network bypass. Env-bootstrap remains the better choice on an exposed network: it creates the admin before the listener ever serves `/setup`, closing the window entirely rather than leaving it open until someone visits the page.
 
 ```sh
 -e MXLRC_WEBAUTH_ADMIN_USER=admin
@@ -598,7 +598,7 @@ The scripts call a hidden `__complete` handler; library-name completion never cr
 
 ## Security considerations
 
-**Web UI and admin bootstrap.** The browser UI is off by default; enabling it and bootstrapping the first admin on a headless Docker/Unraid host is covered in [Web UI enablement](#web-ui-enablement) under the Unraid section. The short version: enable with `MXLRC_WEB_UI_ENABLED=true`, bootstrap with `MXLRC_WEBAUTH_ADMIN_USER` / `MXLRC_WEBAUTH_ADMIN_PASSWORD` (8-char minimum, idempotent), then rotate the password and remove those env vars after first login. The interactive `/setup` page is restricted to loopback or a trusted CIDR, so env-bootstrap is the headless path.
+**Web UI and admin bootstrap.** The browser UI is off by default; enabling it and bootstrapping the first admin on a headless Docker/Unraid host is covered in [Web UI enablement](#web-ui-enablement) under the Unraid section. The short version: enable with `MXLRC_WEB_UI_ENABLED=true`, bootstrap with `MXLRC_WEBAUTH_ADMIN_USER` / `MXLRC_WEBAUTH_ADMIN_PASSWORD` (8-char minimum, idempotent), then rotate the password and remove those env vars after first login. The interactive `/setup` page also works headlessly now (it is open until the first admin exists), but env-bootstrap closes that window before the listener ever serves the page, so it remains the safer headless path.
 
 **Session cookie and TLS.** The browser session cookie (`mxlrc_session`) has its `Secure` flag set automatically when the connection is TLS - either a direct TLS listener or a trusted reverse proxy that sets `X-Forwarded-Proto: https`. On a plain-HTTP deployment the `Secure` flag is off and the cookie is sent in cleartext, which exposes it to network interception. If the web UI is reachable from outside your local machine, run it behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik) or enable the built-in TLS listener (`[server.tls]` in `config.toml`). See `README.md` for TLS configuration options.
 

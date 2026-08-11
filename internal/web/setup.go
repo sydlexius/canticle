@@ -117,16 +117,23 @@ func (o *Onboarding) FirstRunGate(next http.Handler) http.Handler {
 	})
 }
 
-// handleSetupForm renders the onboarding form (GET /setup). It is reachable only
-// from a trusted source; a non-trusted client gets 404 (the page's existence is
-// not revealed off-network). Once an admin exists the page is closed and the
-// client is sent to /login (one-shot: re-running setup is not how a password is
-// changed).
+// handleSetupForm renders the onboarding form (GET /setup).
+//
+// Reachability is decided by whether an admin EXISTS, not by the trusted-CIDR
+// policy (#461). Before the first admin is created the page is served to any
+// client that can reach the port; afterwards a non-trusted client gets 404 (the
+// page's existence is not revealed off-network) and a trusted one is sent to
+// /login, since re-running setup is not how a password is changed.
+//
+// The old order gated on trust FIRST, which made bootstrapping require handing
+// out a permanent, blanket auth bypass: RequireSession short-circuits on
+// policy.Trusted (auth.go), so any CIDR added to reach /setup also granted
+// unauthenticated access to every UI route, forever. Deciding on admin-existence
+// instead bounds the exposure to the pre-onboarding window, which closes
+// permanently the moment setup succeeds and cannot reopen (see hasAdmin's
+// monotonic latch, and webauth.Setup's atomic INSERT ... WHERE NOT EXISTS, which
+// makes the claim first-writer-wins).
 func (o *Onboarding) handleSetupForm(w http.ResponseWriter, r *http.Request) {
-	if !o.policy.Trusted(r) {
-		http.NotFound(w, r)
-		return
-	}
 	has, err := o.hasAdmin(r.Context())
 	if err != nil {
 		slog.Error("onboarding: first-run check failed", "error", err)
@@ -134,27 +141,49 @@ func (o *Onboarding) handleSetupForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if has {
+		// Setup is closed. Preserve the pre-#461 disclosure posture exactly:
+		// untrusted clients must not learn the endpoint exists.
+		if !o.policy.Trusted(r) {
+			http.NotFound(w, r)
+			return
+		}
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	o.warnOpenSetup(r)
 	o.renderSetup(w, r, http.StatusOK, o.version, "", "")
 }
 
-// handleSetup processes the onboarding submission (POST /setup). It re-applies
-// the trusted-source gate, validates the credentials, creates the admin (the
-// race against a concurrent setup is closed atomically by webauth.Setup's
-// conditional insert), optionally writes the runtime secrets, then logs the new
-// admin in and redirects to the UI.
+// warnOpenSetup logs that the unauthenticated setup window was exercised by a
+// client the trust policy would NOT have admitted. The window is bounded and
+// self-closing, but it is still a period in which whoever reaches the port first
+// claims the admin account, so an operator who left the port exposed should be
+// able to see that in the log rather than infer it. A trusted client is not
+// logged: that is the ordinary, expected path and would be pure noise.
+func (o *Onboarding) warnOpenSetup(r *http.Request) {
+	if o.policy.Trusted(r) {
+		return
+	}
+	slog.Warn("serving first-run setup to an untrusted client because no admin account exists yet",
+		"remote", o.policy.ClientIP(r),
+		"hint", "create the admin account now; the setup page closes permanently once it exists")
+}
+
+// handleSetup processes the onboarding submission (POST /setup). It mirrors
+// handleSetupForm's gate (admin-existence decides reachability, not the
+// trusted-CIDR policy -- see that function and #461), validates the credentials,
+// creates the admin (the race against a concurrent setup is closed atomically by
+// webauth.Setup's conditional insert), optionally writes the runtime secrets,
+// then logs the new admin in and redirects to the UI.
 func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if !enforceSameOrigin(w, r) {
 		return
 	}
-	if !o.policy.Trusted(r) {
-		http.NotFound(w, r)
-		return
-	}
-	// CSRF validation after the trust gate: untrusted peers are already refused
-	// above; for trusted peers the double-submit token prevents login-CSRF.
+	// CSRF stays ahead of every side effect. It no longer sits behind a trust
+	// gate, so it is now the FIRST check an untrusted client meets on this
+	// route: the double-submit token is what stops a hostile page in the
+	// operator's browser from silently claiming the admin account during the
+	// pre-onboarding window.
 	if !enforceCSRFToken(w, r) {
 		return
 	}
@@ -162,6 +191,13 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("onboarding: first-run check failed", "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	if !has {
+		o.warnOpenSetup(r)
+	} else if !o.policy.Trusted(r) {
+		// Setup is closed; keep the endpoint unrevealed to untrusted clients.
+		http.NotFound(w, r)
 		return
 	}
 	if has {
