@@ -247,9 +247,13 @@ type apiResponse struct {
 	Songs   []apiSong `xml:"songs>song"`
 }
 
-// apiSong is one <song> element. Only the fields this client uses are mapped;
-// the response carries additional metadata (writer, composer, jancode, jasracID,
-// cdc, upload/release dates) that is intentionally ignored.
+// apiSong is one <song> element. Only the fields this client uses are mapped.
+//
+// The response carries MORE than the fields listed here. A verified inventory
+// lives in docs/superpowers/specs/2026-07-21-petitlyrics-api-rewrite-design.md;
+// among the deliberately unmapped are writer, composer, jancode, jasracID, cdc,
+// artistId, availableLyricsType, prefferedLyricsType, uploadDate, releaseDate.
+// Do not treat that list as exhaustive either: it reflects observed responses.
 type apiSong struct {
 	LyricsID   string `xml:"lyricsId"`
 	Title      string `xml:"title"`
@@ -259,6 +263,11 @@ type apiSong struct {
 	DurationMS int    `xml:"duration"`
 	LyricsType int    `xml:"lyricsType"`
 	LyricsData string `xml:"lyricsData"`
+	// IsOfficial and Copyright are decoded for MEASUREMENT ONLY (#615, #600).
+	// Nothing in the fetch path consumes them yet: whether isOfficial can carry
+	// a per-result trust signal is exactly what the survey probe is measuring.
+	IsOfficial string `xml:"isOfficial"`
+	Copyright  string `xml:"copyright"`
 }
 
 // FindLyrics looks up lyrics for the given track in a single request.
