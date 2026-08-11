@@ -62,11 +62,24 @@ trap 'rm -rf "$workdir"' EXIT
 # connection to the GitHub release CDN fails a whole run. Observed in CI as
 # "curl: (35) Recv failure: Connection reset by peer" on an otherwise green PR.
 #
-# --retry-all-errors is required, not decorative: plain --retry covers timeouts,
-# 408/429, and 5xx, but a mid-transfer connection reset is none of those, so
-# without it the exact failure being fixed here would not be retried. A genuine
-# 404 still fails (after burning the retries) because -f keeps HTTP errors fatal.
-CURL_RETRY=(--retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 15)
+# --retry-all-errors is what makes this work rather than merely look like it does:
+# plain --retry covers timeouts, 408/429, and 5xx, but a mid-transfer connection
+# reset is none of those, so without it the exact failure being fixed here would
+# not be retried. A genuine 404 still fails (after burning the retries) because
+# -f keeps HTTP errors fatal.
+#
+# It was added in curl 7.71.0 (2020), which every path this project builds on
+# clears -- Alpine 3.24 ships 8.21, ubuntu-latest ships 8.x, a current macOS
+# ships 8.7. But older LTS hosts do not (Ubuntu 20.04: 7.68, RHEL 7: 7.29), and
+# an unknown option is a HARD curl failure, which would break `make ui` on a
+# machine where it used to work. So probe once and degrade to plain --retry:
+# still better than no retry, and never worse than before this script retried.
+CURL_RETRY=(--retry 3 --retry-delay 2 --connect-timeout 15)
+if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+  CURL_RETRY+=(--retry-all-errors)
+else
+  echo "install-tailwind: curl lacks --retry-all-errors (needs 7.71.0+); a dropped connection will not be retried" >&2
+fi
 
 echo "==> downloading ${ASSET} (v${VERSION})"
 curl -fsSL "${CURL_RETRY[@]}" -o "$workdir/$ASSET" "$BASE/$ASSET"
