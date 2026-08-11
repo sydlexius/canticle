@@ -259,9 +259,10 @@ func surveySample(ctx context.Context, c *Client, track models.Track, captureDir
 	}
 
 	obs := sampleObservation{
-		Tier:       classifyPayload(raw),
-		IsOfficial: candidate.IsOfficial,
-		Copyright:  candidate.Copyright,
+		Tier:          classifyPayload(raw),
+		AvailableTier: candidate.AvailableTier,
+		IsOfficial:    candidate.IsOfficial,
+		Copyright:     candidate.Copyright,
 	}
 
 	switch obs.Tier {

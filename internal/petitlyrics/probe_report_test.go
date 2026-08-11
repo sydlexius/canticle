@@ -12,9 +12,12 @@ import (
 // what it is given, so the privacy guarantee is structural rather than a
 // redaction pass that could fail open.
 type sampleObservation struct {
-	Tier          int     // classifyPayload result, 0 when the lookup failed
-	AvailableTier int     // availableLyricsType as reported, 0 when absent
-	CueCount      int     // number of cues decoded, 0 when none
+	Tier          int // classifyPayload result, 0 when the lookup failed
+	AvailableTier int // availableLyricsType as reported, 0 when absent
+	CueCount      int // number of cues decoded, 0 when none
+	// IsOfficial is PRINTED VERBATIM by render(), unlike Copyright which is only
+	// counted. If the value ever turns out to be free-form text rather than a
+	// short enumerated token, it must be bucketed before it reaches the report.
 	IsOfficial    string  // raw isOfficial value, empty when absent
 	Copyright     string  // raw copyright value, empty when absent
 	DistinctRatio float64 // tier-3 only: fraction of lines with distinct word starts
@@ -29,6 +32,7 @@ type surveyReport struct {
 	officialCounts map[string]int
 	officialByTier map[int]map[string]int
 	copyrightSeen  int
+	cueCounts      []int
 	distinctRatios []float64
 	errCounts      map[string]int
 }
@@ -74,6 +78,12 @@ func (r *surveyReport) add(obs sampleObservation) {
 	if obs.Copyright != "" {
 		r.copyrightSeen++
 	}
+	// A cue count is aggregate-safe (a number, never a line of text) and sizes the
+	// future writer work. Zero means nothing was decoded, so it carries no
+	// distribution information and is left out.
+	if obs.CueCount > 0 {
+		r.cueCounts = append(r.cueCounts, obs.CueCount)
+	}
 	if obs.Tier == tierWordSync {
 		r.distinctRatios = append(r.distinctRatios, obs.DistinctRatio)
 	}
@@ -118,6 +128,14 @@ func (r *surveyReport) render() string {
 	}
 
 	fmt.Fprintf(&b, "\ncopyright populated: %d\n", r.copyrightSeen)
+
+	fmt.Fprintf(&b, "\ncue counts (n=%d):\n", len(r.cueCounts))
+	if len(r.cueCounts) > 0 {
+		sorted := append([]int(nil), r.cueCounts...)
+		sort.Ints(sorted)
+		fmt.Fprintf(&b, "  min %d  median %d  max %d\n",
+			sorted[0], sorted[len(sorted)/2], sorted[len(sorted)-1])
+	}
 
 	fmt.Fprintf(&b, "\nword-sync distinct-start ratios (n=%d):\n", len(r.distinctRatios))
 	if len(r.distinctRatios) > 0 {
@@ -175,5 +193,73 @@ func TestSurveyReport_EmitsNoIdentifyingContent(t *testing.T) {
 	}
 	if !strings.Contains(out, "copyright populated: 1") {
 		t.Errorf("report did not count the populated copyright field:\n%s", out)
+	}
+}
+
+// TestSurveyReport_AvailableTierAgreement pins that the availableLyricsType
+// statistic is REAL rather than a permanent 0/0. The field is decoded on apiSong
+// and stamped by surveySample purely so this line can be computed; a reader who
+// sees 0/0 would read it as "absent on every sample", the opposite of the
+// established finding.
+func TestSurveyReport_AvailableTierAgreement(t *testing.T) {
+	r := newSurveyReport()
+	// Agrees with the payload-derived tier.
+	r.add(sampleObservation{Tier: tierWordSync, AvailableTier: tierWordSync})
+	r.add(sampleObservation{Tier: tierUnsynced, AvailableTier: tierUnsynced})
+	// Seen but disagrees, so it counts in the denominator only.
+	r.add(sampleObservation{Tier: tierLineSync, AvailableTier: tierWordSync})
+	// Absent, so it counts in neither.
+	r.add(sampleObservation{Tier: tierLineSync})
+
+	if r.availTierSeen != 3 {
+		t.Errorf("availTierSeen = %d, want 3 (an absent field is not a sample)", r.availTierSeen)
+	}
+	if r.availTierAgree != 2 {
+		t.Errorf("availTierAgree = %d, want 2", r.availTierAgree)
+	}
+	if got := r.render(); !strings.Contains(got, "availableLyricsType agreement: 2/3") {
+		t.Errorf("report did not render the agreement statistic:\n%s", got)
+	}
+
+	// The empty case must still render, and must not claim agreement.
+	empty := newSurveyReport().render()
+	if !strings.Contains(empty, "availableLyricsType agreement: 0/0") {
+		t.Errorf("empty report did not render the agreement line:\n%s", empty)
+	}
+}
+
+// TestSurveyReport_CueCountDistribution pins the cue-count aggregation, which
+// exists to size the future writer work. A count is aggregate-safe; the empty
+// case is covered because render() indexes the sorted slice.
+func TestSurveyReport_CueCountDistribution(t *testing.T) {
+	r := newSurveyReport()
+	r.add(sampleObservation{Tier: tierWordSync, CueCount: 30})
+	r.add(sampleObservation{Tier: tierWordSync, CueCount: 10})
+	r.add(sampleObservation{Tier: tierWordSync, CueCount: 50})
+	// Zero carries no distribution information and must be left out.
+	r.add(sampleObservation{Tier: tierUnsynced, CueCount: 0})
+	// An errored sample never reaches the success-path accumulators.
+	r.add(sampleObservation{Err: "wsy-decode", Tier: tierWordSync, CueCount: 99})
+
+	if len(r.cueCounts) != 3 {
+		t.Fatalf("cueCounts = %v, want 3 entries (zero and errored samples excluded)", r.cueCounts)
+	}
+	out := r.render()
+	if !strings.Contains(out, "cue counts (n=3)") {
+		t.Errorf("report did not render the cue-count sample size:\n%s", out)
+	}
+	if !strings.Contains(out, "min 10  median 30  max 50") {
+		t.Errorf("report did not render the cue-count distribution:\n%s", out)
+	}
+
+	// No samples with cues: render() must not index an empty slice.
+	emptyReport := newSurveyReport()
+	emptyReport.add(sampleObservation{Tier: tierUnsynced})
+	empty := emptyReport.render()
+	if !strings.Contains(empty, "cue counts (n=0)") {
+		t.Errorf("empty report did not render the cue-count header:\n%s", empty)
+	}
+	if strings.Contains(empty, "min ") {
+		t.Errorf("empty report rendered a distribution line with no data:\n%s", empty)
 	}
 }
