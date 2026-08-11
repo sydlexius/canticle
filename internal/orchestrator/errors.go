@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/petitlyrics"
 )
 
 // ErrLaneUnavailable is the sentinel a lane returns when its breaker is open and
@@ -99,10 +100,29 @@ func ClassifyOutcome(err error) OutcomeClass {
 		return OutcomeUnavailable
 	case errors.Is(err, musixmatch.ErrTokenRenewalRequired),
 		errors.Is(err, musixmatch.ErrUnauthorized),
-		errors.Is(err, musixmatch.ErrRateLimited):
+		errors.Is(err, musixmatch.ErrRateLimited),
+		// petitlyrics equivalents (#607). ErrProviderUnavailable is listed here
+		// and must stay AHEAD of the benign-miss case below, because it wraps
+		// ErrNotFound: tested after it, a credential outage would classify as an
+		// ordinary miss and the worker would record a stable miss against every
+		// track it touched during the outage.
+		//
+		// ErrForbidden is deliberately ABSENT. A 403 is a refused request SHAPE,
+		// not a credential or throttle condition, and no amount of waiting or
+		// rotation fixes it; bucketing it here would repeat the #495
+		// misdiagnosis. It falls to OutcomeTransport, which is correct.
+		errors.Is(err, petitlyrics.ErrProviderUnavailable),
+		errors.Is(err, petitlyrics.ErrUnauthorized),
+		errors.Is(err, petitlyrics.ErrRateLimited):
 		return OutcomeAuthRateLimit
 	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse),
-		errors.Is(err, ErrLaneBenignMiss):
+		errors.Is(err, ErrLaneBenignMiss),
+		// A petitlyrics miss is the same OUTCOME as a musixmatch miss. Without
+		// these the two provider lanes disagreed about what a miss is, and the
+		// worker (worker.go:1187) released the item on a different path depending
+		// on which lane produced it.
+		errors.Is(err, petitlyrics.ErrNotFound),
+		errors.Is(err, petitlyrics.ErrUnsupportedTier):
 		return OutcomeBenignMiss
 	case errors.Is(err, ErrLaneNotReady):
 		return OutcomeLaneNotReady

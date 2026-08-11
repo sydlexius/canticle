@@ -87,6 +87,28 @@ func providerClassifier(l *Lane, err error) error {
 	// failure fell through to the transport branch below and left the breaker
 	// untouched. The lane could not trip on any condition.
 	switch {
+	// ORDER IS LOAD-BEARING: ErrProviderUnavailable WRAPS ErrNotFound (so that
+	// existing callers bucketing a miss as benign keep working), which means it
+	// also satisfies the benign-miss case further down. Tested after it, a
+	// sustained outage would RESET the ramp instead of opening the lane -- the
+	// exact silent degradation #607 exists to end.
+	case errors.Is(err, petitlyrics.ErrProviderUnavailable):
+		// Deliberate decision (#607 asks for this to be chosen, not inherited):
+		// the sentinel TRIPS the breaker. A sustained run of zero-result
+		// responses almost certainly means the hardcoded application id was
+		// revoked, and continuing to fire paced requests at a provider that
+		// answers nothing is pure waste against a shared egress. The breaker's
+		// backoff re-probes periodically, so a transient cause still recovers
+		// with no operator action.
+		//
+		// It does NOT ratchet the pacer: a dead credential is not a throttle, and
+		// slowing a lane that is not being rate limited would persist after the
+		// credential is restored.
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider returned no results for a sustained run of lookups; the application id may have been revoked",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		return err
+
 	case errors.Is(err, petitlyrics.ErrUnauthorized):
 		res := l.breaker.Trip()
 		slog.Warn("lane circuit opened: provider rejected the client application id; the lane is down until it is restored",
