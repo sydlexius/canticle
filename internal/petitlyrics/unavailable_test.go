@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -76,10 +78,18 @@ func TestZeroResults_CrossingThresholdSurfacesSentinel(t *testing.T) {
 func TestZeroResults_SuccessMidRunResets(t *testing.T) {
 	// Serve empties until told otherwise, then one real hit, then empties again.
 	// The counter must restart from zero after the hit.
-	hit := false
+	//
+	// hit is an atomic.Bool, not a plain bool: newTestClient serves on an
+	// httptest goroutine, so the handler READS this flag while the test WRITES
+	// it. The writes happen between sequential FindLyrics calls, so in practice
+	// the handler has finished before each write and -race does not currently
+	// flag it -- but nothing GUARANTEES that ordering (a kept-alive connection or
+	// a handler still unwinding would break it), so the safety is made explicit
+	// rather than left to timing.
+	var hit atomic.Bool
 	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
-		if hit {
+		if hit.Load() {
 			body, err := os.ReadFile(filepath.Join("testdata", "type1_unsynced.xml"))
 			if err != nil {
 				t.Errorf("read fixture: %v", err)
@@ -95,11 +105,11 @@ func TestZeroResults_SuccessMidRunResets(t *testing.T) {
 		_, _ = c.FindLyrics(context.Background(), models.Track{TrackName: "t", ArtistName: "a"})
 	}
 
-	hit = true
+	hit.Store(true)
 	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "t", ArtistName: "a"}); err != nil {
 		t.Fatalf("the reset lookup should have succeeded: %v", err)
 	}
-	hit = false
+	hit.Store(false)
 
 	// One more empty. If the reset worked this is count 1, nowhere near the
 	// threshold; if it did not, this is the crossing.
@@ -109,5 +119,52 @@ func TestZeroResults_SuccessMidRunResets(t *testing.T) {
 			"The signal is CONSECUTIVE: a provider that answered once is not down, " +
 			"and a cumulative counter would eventually escalate on any long-lived " +
 			"client no matter how healthy.")
+	}
+}
+
+// TestZeroResultLatchIsExactlyOnceUnderConcurrency defends the invariant that the
+// logging fix depends on. The transition warning is emitted AFTER the mutex is
+// released (so a blocking slog handler cannot serialize outbound requests), which
+// means the "have I already reported this?" latch has to be claimed INSIDE the
+// lock. Claim it outside and every goroutine crossing the threshold together
+// would each emit the warning -- turning a one-line outage signal into a flood,
+// which is exactly what the once-on-transition requirement exists to prevent.
+func TestZeroResultLatchIsExactlyOnceUnderConcurrency(t *testing.T) {
+	c := NewClient()
+	total := ZeroResultThreshold * 2
+
+	var wg sync.WaitGroup
+	reached := make([]bool, total)
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			reached[idx] = c.recordZeroResult()
+		}(i)
+	}
+	wg.Wait()
+
+	c.mu.Lock()
+	got, latched := c.consecutiveZero, c.zeroReported
+	c.mu.Unlock()
+
+	if got != total {
+		t.Errorf("consecutiveZero = %d; want %d. A lost increment means the counter "+
+			"is racy and the threshold could be reached late or never.", got, total)
+	}
+	if !latched {
+		t.Error("zeroReported was not latched after crossing the threshold; the " +
+			"recovery log would then never fire either")
+	}
+
+	n := 0
+	for _, r := range reached {
+		if r {
+			n++
+		}
+	}
+	if n != ZeroResultThreshold+1 {
+		t.Errorf("%d calls reported reached; want %d (every call at or past the "+
+			"threshold reports, and none before it)", n, ZeroResultThreshold+1)
 	}
 }

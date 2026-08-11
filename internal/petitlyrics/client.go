@@ -101,33 +101,48 @@ type Client struct {
 // reached the escalation threshold. Called for a response that parsed cleanly and
 // simply carried no songs -- never for a transport or status failure, which say
 // nothing about whether the application id still works.
+// The log emission is deliberately OUTSIDE the critical section. slog handlers
+// can block on I/O and take locks of their own, and this mutex also paces every
+// outbound request, so logging under it would serialize concurrent lookups on
+// the handler -- worst at exactly the moment an outage transition fires. The
+// pacer at pace() already follows this shape; match it.
 func (c *Client) recordZeroResult() bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.consecutiveZero++
-	if c.consecutiveZero < ZeroResultThreshold {
-		return false
-	}
-	if !c.zeroReported {
+	count := c.consecutiveZero
+	reached := count >= ZeroResultThreshold
+	// Latch INSIDE the lock so exactly one goroutine can win the transition and
+	// emit the warning, even though the emission happens after the unlock.
+	transitioned := reached && !c.zeroReported
+	if transitioned {
 		c.zeroReported = true
-		slog.Warn("petitlyrics: provider has returned no results for a sustained run of lookups; the application id may have been revoked",
-			"consecutive", c.consecutiveZero, "threshold", ZeroResultThreshold)
 	}
-	return true
+	c.mu.Unlock()
+
+	if transitioned {
+		slog.Warn("petitlyrics: provider has returned no results for a sustained run of lookups; the application id may have been revoked",
+			"consecutive", count, "threshold", ZeroResultThreshold)
+	}
+	return reached
 }
 
 // recordNonZeroResult clears the outage counter. Any response carrying at least
 // one song proves the application id is still accepted, whatever the client then
 // makes of the payload.
+// The recovery log is emitted after the unlock, for the same reason as the
+// warning in recordZeroResult.
 func (c *Client) recordNonZeroResult() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.zeroReported {
-		slog.Info("petitlyrics: provider returned results again; the sustained zero-result run has ended",
-			"after", c.consecutiveZero)
-		c.zeroReported = false
-	}
+	recovered := c.zeroReported
+	after := c.consecutiveZero
+	c.zeroReported = false
 	c.consecutiveZero = 0
+	c.mu.Unlock()
+
+	if recovered {
+		slog.Info("petitlyrics: provider returned results again; the sustained zero-result run has ended",
+			"after", after)
+	}
 }
 
 // NewClient creates a new Petit Lyrics client.
