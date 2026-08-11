@@ -85,9 +85,19 @@ const (
 
 // ClassifyOutcome maps a lane error to its OutcomeClass. A nil error is a
 // success. The auth/rate-limit check folds in the Musixmatch throttle sentinels
-// the worker historically tripped the circuit on; classification is per-provider
-// today (only Musixmatch lanes exist) and lives here so the breaker stays
-// provider-agnostic. ErrTruncatedResponse is deliberately NOT in the
+// the worker historically tripped the circuit on, plus the petitlyrics
+// equivalents (#607). Classification is per-provider and lives here so the
+// breaker stays provider-agnostic.
+//
+// Both providers' sentinels must be enumerated. Before #607 only Musixmatch was,
+// so a routine petitlyrics miss fell to the default OutcomeTransport, which
+// OUTRANKS a benign miss in precedence -- meaning an ordinary double-miss (both
+// lanes found nothing, the common case for a saturated queue) surfaced as the
+// petitlyrics transport error and the worker recorded a queue FAILURE against
+// the row, consuming an attempt and ramping its backoff toward retirement. A
+// provider added here without its sentinels does the same thing again.
+//
+// ErrTruncatedResponse is deliberately NOT in the
 // auth/rate-limit bucket: it is a deterministic per-request condition (an
 // empty body), not a transient throttle, so it must classify as a benign miss
 // and take the bounded-retry path rather than the no-cost throttle release

@@ -59,10 +59,22 @@ var ErrProviderUnavailable = fmt.Errorf(
 // Sizing: this lane runs as a fallback, so it only ever sees tracks the primary
 // provider already missed, and its measured coverage on that population is low
 // (roughly 1 in 4). A run of 8 consecutive misses is therefore entirely ordinary
-// -- at a 25% hit rate it happens about 10% of the time -- while 20 in a row is
-// under 0.4%, improbable enough to be worth a warning without being so rare that
-// a real outage goes unreported for hours. At the client's 30s pacing floor, 20
-// lookups is about 10 minutes to detection.
+// -- at a 25% hit rate any given 8-lookup window is all-misses about 10% of the
+// time -- while a given 20-lookup window is under 0.4%. At the client's 30s
+// pacing floor, 20 lookups is about 10 minutes to detection.
+//
+// Read that per-WINDOW figure correctly: it is not the false-positive rate over
+// a long run. Some run of 20 is expected roughly every 1,250 lookups at that hit
+// rate, or about half a day of sustained fallback traffic, so a large library
+// scan should expect to trip this occasionally without any provider fault.
+//
+// That is tolerable because recovery is HIT-DRIVEN, not count-driven: the first
+// non-zero response clears the counter and the latch outright. But note the
+// counter keeps climbing past the threshold, so every further zero-result
+// re-trips the breaker and ramps its geometric backoff toward the 30-minute cap.
+// A long genuine dry spell therefore escalates to a real lane pause, which is
+// the correct behavior for an actual outage and merely conservative for a dry
+// spell -- the lane is returning nothing either way.
 //
 // The counter is CONSECUTIVE, never cumulative: any single non-zero response
 // clears it. A cumulative count would eventually escalate on any long-lived
