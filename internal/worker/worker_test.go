@@ -3720,3 +3720,50 @@ func TestRunOnceDetectorMemoDegradedResponseNotStamped(t *testing.T) {
 		t.Fatalf("deferred = %v; want the item deferred as a normal miss", q.deferred)
 	}
 }
+
+// TestSongCacheRoundTripDropsWordTimings pins a constraint the Enhanced-LRC (A2)
+// writer (#480) has to design around: models.Song.WordTimings is tagged json:"-"
+// and the worker caches songs as JSON, so a cache HIT returns a song with no word
+// timings and orchestrator.QualityOf classifies it as merely line-synced.
+//
+// On a saturated queue most traffic is cache hits, so an A2 writer that assumes
+// word timings are present would emit word-synced output only on a fresh fetch.
+//
+// This test PASSES on current code. It exists so that making WordTimings
+// serializable becomes a deliberate decision rather than an accident: if someone
+// removes the json:"-" tag, this fails and forces the conversation.
+func TestSongCacheRoundTripDropsWordTimings(t *testing.T) {
+	song := models.Song{
+		Track: models.Track{ArtistName: "Test Artist", TrackName: "Test Track"},
+		Subtitles: models.Synced{Lines: []models.Lines{
+			{Text: "first cue", Time: models.Time{Total: 1.0}},
+			{Text: "second cue", Time: models.Time{Total: 2.0}},
+		}},
+		WordTimings: []models.WordTiming{
+			{Line: 0, Text: "first", StartMS: 1000, EndMS: 1400},
+			{Line: 0, Text: "cue", StartMS: 1400, EndMS: 1900},
+			{Line: 1, Text: "second", StartMS: 2000, EndMS: 2500},
+			{Line: 1, Text: "cue", StartMS: 2500, EndMS: 2900},
+		},
+	}
+
+	encoded, err := encodeSong(song)
+	if err != nil {
+		t.Fatalf("encodeSong: %v", err)
+	}
+
+	got := decodeSong(encoded, song.Track)
+
+	if len(got.WordTimings) != 0 {
+		t.Errorf("WordTimings survived the cache round trip: got %d, want 0. "+
+			"If this is intentional, the A2 writer constraint documented on "+
+			"models.Song.WordTimings needs revisiting.", len(got.WordTimings))
+	}
+
+	// The cues MUST survive, otherwise this test would pass for the wrong reason
+	// (a round trip that drops everything proves nothing about WordTimings).
+	if len(got.Subtitles.Lines) != len(song.Subtitles.Lines) {
+		t.Fatalf("line cues did not survive the round trip: got %d, want %d",
+			len(got.Subtitles.Lines), len(song.Subtitles.Lines))
+	}
+}
