@@ -53,6 +53,23 @@ type Onboarding struct {
 	// reports true it can never revert. Caching it lets the per-request gates skip
 	// the DB query for the entire post-onboarding lifetime of the process.
 	adminExists atomic.Bool
+	// hashSlots bounds how many setup submissions may be inside Argon2id at once.
+	//
+	// Password hashing is deliberately expensive in MEMORY (64 MiB, 4 threads --
+	// see webauth/password.go), and since #461 an unauthenticated client can
+	// reach it during the open window. Unbounded, a few dozen concurrent POSTs
+	// allocate GiB and can OOM the daemon on a memory-capped container, which
+	// is worse than it sounds: a crashed daemon restarts with the window STILL
+	// OPEN, so it is a denial of onboarding rather than a transient outage.
+	//
+	// A per-IP rate limiter (the /login shape) is the wrong instrument here: the
+	// quantity to bound is concurrent memory, and per-IP accounting does not
+	// bound it when requests arrive from many addresses -- or, on Docker bridge
+	// networking, when every LAN client presents as the same gateway address.
+	// A global semaphore bounds the measured quantity directly. Excess requests
+	// are refused with 503 + Retry-After rather than queued, so an attacker
+	// cannot pin memory by parking goroutines in a wait.
+	hashSlots chan struct{}
 }
 
 // NewOnboarding builds the onboarding flow. service performs first-run detection
@@ -71,13 +88,21 @@ func NewOnboarding(service OnboardingService, secretStore SecretSetter, auth *Au
 		policy = trustnet.LoopbackOnly()
 	}
 	return &Onboarding{
-		service: service,
-		secrets: secretStore,
-		auth:    auth,
-		policy:  policy,
-		version: version,
+		service:   service,
+		secrets:   secretStore,
+		auth:      auth,
+		policy:    policy,
+		version:   version,
+		hashSlots: make(chan struct{}, maxConcurrentSetupHashes),
 	}
 }
+
+// maxConcurrentSetupHashes bounds concurrent Argon2id hashing on /setup. At
+// 64 MiB per hash this caps the route's transient footprint at ~256 MiB, which
+// a container small enough to OOM on that is also small enough that refusing
+// the surplus is the better failure. Onboarding is a once-per-deployment action
+// by exactly one operator, so real traffic never approaches the limit.
+const maxConcurrentSetupHashes = 4
 
 // hasAdmin reports whether an admin account exists, caching a true result for
 // the life of the process. The first-run state is monotonic (no admin-deletion
@@ -136,8 +161,7 @@ func (o *Onboarding) FirstRunGate(next http.Handler) http.Handler {
 func (o *Onboarding) handleSetupForm(w http.ResponseWriter, r *http.Request) {
 	has, err := o.hasAdmin(r.Context())
 	if err != nil {
-		slog.Error("onboarding: first-run check failed", "error", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		o.refuseOnAdminCheckError(w, r, err)
 		return
 	}
 	if has {
@@ -152,6 +176,28 @@ func (o *Onboarding) handleSetupForm(w http.ResponseWriter, r *http.Request) {
 	}
 	o.warnOpenSetup(r)
 	o.renderSetup(w, r, http.StatusOK, o.version, "", "")
+}
+
+// refuseOnAdminCheckError answers a request whose admin-existence check failed.
+//
+// It fails CLOSED in both senses. An untrusted client gets the same 404 it would
+// see if an admin existed: before #461 the trust gate ran first, so a DB fault
+// could not reveal the endpoint off-network, and a 500 here would reintroduce
+// that disclosure at exactly the moment an attacker probing for 500s learns the
+// most. A trusted client gets the real 500, because an operator debugging their
+// own daemon needs to see the fault rather than a fictional 404.
+//
+// Nothing is served either way: hasAdmin reports (false, err) on failure, so the
+// error value is indistinguishable from "no admin exists". Treating an unknown
+// answer as "setup is closed" is the safe direction -- the alternative would
+// reopen the onboarding window on any transient DB error.
+func (o *Onboarding) refuseOnAdminCheckError(w http.ResponseWriter, r *http.Request, err error) {
+	slog.Error("onboarding: first-run check failed", "error", err)
+	if !o.policy.Trusted(r) {
+		http.NotFound(w, r)
+		return
+	}
+	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 }
 
 // warnOpenSetup logs that the unauthenticated setup window was exercised by a
@@ -176,28 +222,36 @@ func (o *Onboarding) warnOpenSetup(r *http.Request) {
 // webauth.Setup's conditional insert), optionally writes the runtime secrets,
 // then logs the new admin in and redirects to the UI.
 func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
+	// The closed-setup refusal runs FIRST, ahead of the same-origin and CSRF
+	// checks, because both of those answer 403 and a 403 where the mux otherwise
+	// 404s is an endpoint-existence oracle: an attacker probing /setup post-admin
+	// would learn it is there without ever holding a valid token. GET already
+	// 404s for this client, so refusing here reveals nothing new, and the check
+	// is a latched in-memory read once an admin exists.
+	has, err := o.hasAdmin(r.Context())
+	if err != nil {
+		o.refuseOnAdminCheckError(w, r, err)
+		return
+	}
+	if has && !o.policy.Trusted(r) {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Same-origin is the real defense against a hostile page in the operator's
+	// browser driving this route during the open window: it rejects the request
+	// on Sec-Fetch-Site/Origin/Referer, which a cross-site caller cannot forge.
 	if !enforceSameOrigin(w, r) {
 		return
 	}
-	// CSRF stays ahead of every side effect. It no longer sits behind a trust
-	// gate, so it is now the FIRST check an untrusted client meets on this
-	// route: the double-submit token is what stops a hostile page in the
-	// operator's browser from silently claiming the admin account during the
-	// pre-onboarding window.
+	// The double-submit token is defense in depth, NOT the anti-CSRF primitive.
+	// It compares two client-supplied values with no server-side binding, so a
+	// direct attacker simply mints both halves; what makes it useful against a
+	// cross-site caller is SameSite=Lax withholding the cookie, which is a
+	// property of the cookie rather than of the comparison. Keep it (it costs
+	// nothing and closes same-site-but-untrusted script paths), but do not treat
+	// it as the reason this route is safe -- enforceSameOrigin above is.
 	if !enforceCSRFToken(w, r) {
-		return
-	}
-	has, err := o.hasAdmin(r.Context())
-	if err != nil {
-		slog.Error("onboarding: first-run check failed", "error", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-	if !has {
-		o.warnOpenSetup(r)
-	} else if !o.policy.Trusted(r) {
-		// Setup is closed; keep the endpoint unrevealed to untrusted clients.
-		http.NotFound(w, r)
 		return
 	}
 	if has {
@@ -206,6 +260,7 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	o.warnOpenSetup(r)
 
 	if err := r.ParseForm(); err != nil {
 		o.renderSetup(w, r, http.StatusBadRequest, o.version, "Invalid form submission.", "")
@@ -225,6 +280,21 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	if password != confirm {
 		o.renderSetup(w, r, http.StatusBadRequest, o.version, "Passwords do not match.", username)
+		return
+	}
+
+	// Acquire a hashing slot AFTER the cheap validation above, so a malformed or
+	// too-short submission never occupies one. Refuse rather than queue: parking
+	// goroutines here would let an attacker hold memory and defeat the cap.
+	select {
+	case o.hashSlots <- struct{}{}:
+		defer func() { <-o.hashSlots }()
+	default:
+		slog.Warn("onboarding: refusing setup submission; hashing capacity is saturated",
+			"remote", o.policy.ClientIP(r), "limit", maxConcurrentSetupHashes)
+		w.Header().Set("Retry-After", "2")
+		o.renderSetup(w, r, http.StatusServiceUnavailable, o.version,
+			"The server is busy. Please try again in a moment.", username)
 		return
 	}
 
