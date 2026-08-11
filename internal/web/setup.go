@@ -38,10 +38,10 @@ type SecretSetter interface {
 }
 
 // Onboarding implements the first-run setup flow (issue #204, lane 4): the
-// /setup GET/POST endpoints, the access gate that limits setup to loopback or a
-// configured trusted network, the first-run redirect of the UI routes to
-// /setup, and the env-independent admin-credential + runtime-secret writes. It
-// is safe for concurrent use.
+// /setup GET/POST endpoints, the admin-existence gate that opens setup until the
+// first account exists and closes it permanently afterwards (#461), the
+// first-run redirect of the UI routes to /setup, and the env-independent
+// admin-credential + runtime-secret writes. It is safe for concurrent use.
 type Onboarding struct {
 	service OnboardingService
 	secrets SecretSetter // may be nil (no secret fields)
@@ -74,9 +74,14 @@ type Onboarding struct {
 
 // NewOnboarding builds the onboarding flow. service performs first-run detection
 // and admin creation; secretStore (optional, may be nil) persists the runtime
-// secrets; auth issues the session cookie after a successful setup; policy gates
-// who may reach /setup (a nil policy defaults to loopback-only, the safe
-// default); version labels the page.
+// secrets; auth issues the session cookie after a successful setup; version
+// labels the page.
+//
+// policy no longer decides who may REACH /setup -- admin-existence does (#461).
+// It now serves three narrower purposes: choosing between 404 and a /login
+// redirect once setup has closed, deciding whether serving the open form is
+// worth a WARN, and resolving the client IP for that log. A nil policy defaults
+// to loopback-only, which is the safe default for all three.
 func NewOnboarding(service OnboardingService, secretStore SecretSetter, auth *Auth, policy *trustnet.Policy, version string) *Onboarding {
 	if service == nil {
 		panic("web: NewOnboarding: service must not be nil")
