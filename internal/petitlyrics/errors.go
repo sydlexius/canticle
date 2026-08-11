@@ -1,6 +1,9 @@
 package petitlyrics
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sentinel errors returned by the Petit Lyrics client. Callers should use
 // errors.Is to test for these classes rather than string-matching the message.
@@ -31,3 +34,49 @@ var (
 	// rather than failing the track outright.
 	ErrUnsupportedTier = errors.New("petitlyrics: unsupported lyrics tier")
 )
+
+// ErrProviderUnavailable indicates a sustained run of zero-result responses:
+// the request shape is valid and the API keeps answering HTTP 200 with
+// well-formed XML, but every response carries no songs at all (#607).
+//
+// This exists because a revoked clientAppId does NOT produce a 401. The service
+// keeps replying normally with an empty song list, which is byte-identical to a
+// genuine miss -- so a total lane outage would otherwise present as "the
+// provider suddenly has none of my tracks", indefinitely, with the lane looking
+// healthy the whole time.
+//
+// It WRAPS ErrNotFound deliberately. Every existing caller that buckets a miss
+// as benign keeps working unchanged; only code that explicitly tests for this
+// sentinel sees the escalation. That mirrors how musixmatch.ErrTokenRenewalRequired
+// also satisfies errors.Is(_, ErrUnauthorized).
+var ErrProviderUnavailable = fmt.Errorf(
+	"petitlyrics: provider returned no results for %d consecutive lookups (application id revoked?): %w",
+	ZeroResultThreshold, ErrNotFound)
+
+// ZeroResultThreshold is how many CONSECUTIVE zero-result lookups escalate to
+// ErrProviderUnavailable.
+//
+// Sizing: this lane runs as a fallback, so it only ever sees tracks the primary
+// provider already missed, and its measured coverage on that population is low
+// (roughly 1 in 4). A run of 8 consecutive misses is therefore entirely ordinary
+// -- at a 25% hit rate any given 8-lookup window is all-misses about 10% of the
+// time -- while a given 20-lookup window is under 0.4%. At the client's 30s
+// pacing floor, 20 lookups is about 10 minutes to detection.
+//
+// Read that per-WINDOW figure correctly: it is not the false-positive rate over
+// a long run. Some run of 20 is expected roughly every 1,250 lookups at that hit
+// rate, or about half a day of sustained fallback traffic, so a large library
+// scan should expect to trip this occasionally without any provider fault.
+//
+// That is tolerable because recovery is HIT-DRIVEN, not count-driven: the first
+// non-zero response clears the counter and the latch outright. But note the
+// counter keeps climbing past the threshold, so every further zero-result
+// re-trips the breaker and ramps its geometric backoff toward the 30-minute cap.
+// A long genuine dry spell therefore escalates to a real lane pause, which is
+// the correct behavior for an actual outage and merely conservative for a dry
+// spell -- the lane is returning nothing either way.
+//
+// The counter is CONSECUTIVE, never cumulative: any single non-zero response
+// clears it. A cumulative count would eventually escalate on any long-lived
+// client no matter how healthy the provider is.
+const ZeroResultThreshold = 20
