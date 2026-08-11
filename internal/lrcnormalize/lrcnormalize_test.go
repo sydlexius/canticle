@@ -237,3 +237,94 @@ func TestParseBody_SingleTimestamp(t *testing.T) {
 		t.Errorf("total: want 15.05, got %v", c.Time.Total)
 	}
 }
+
+// TestParseBody_PreservesA2WordMarkers is issue #480's stated acceptance
+// criterion: an Enhanced-LRC (A2) round trip must prove the inline <mm:ss.xx>
+// word markers survive expansion.
+//
+// Why this matters independently of any media player: canticle reads its own
+// sidecars back off disk through ParseBody (the revalidate path, #442). If the
+// A2 writer emits word markers and this normalizer then mangles them on read,
+// that is a defect regardless of whether any player renders them.
+//
+// The mechanism the test pins is tsRe: it is anchored (^) and requires square
+// brackets, so an angle-bracket marker cannot match on either count, and
+// expandLine stops consuming once non-timestamp text begins. The word markup is
+// therefore carried as literal cue TEXT.
+//
+// The body below is byte-identical to what the A2 sample generator emits
+// (internal/lyrics/a2sample_test.go), so the two cannot drift apart. All content
+// is synthesized placeholder words.
+func TestParseBody_PreservesA2WordMarkers(t *testing.T) {
+	const a2Body = "[ar:Canticle Test Signal]\n" +
+		"[ti:Enhanced LRC Probe]\n" +
+		"\n" +
+		"[00:01.00]<00:01.00>one <00:01.80>two <00:02.60>three <00:03.40>four\n" +
+		"[00:05.00]<00:05.00>five <00:05.80>six <00:06.60>seven <00:07.40>eight\n"
+
+	doc := ParseBody(a2Body)
+
+	if len(doc.Cues) != 2 {
+		t.Fatalf("want 2 cues (one per A2 line, NOT one per word marker), got %d: %+v",
+			len(doc.Cues), doc.Cues)
+	}
+
+	// The leading line-level stamp is consumed as the cue's timestamp.
+	if doc.Cues[0].Time.Total != 1 {
+		t.Errorf("cue 0 timestamp: want 1s, got %v", doc.Cues[0].Time.Total)
+	}
+	if doc.Cues[1].Time.Total != 5 {
+		t.Errorf("cue 1 timestamp: want 5s, got %v", doc.Cues[1].Time.Total)
+	}
+
+	// Every word marker survives verbatim in the cue text.
+	wantCue0 := "<00:01.00>one <00:01.80>two <00:02.60>three <00:03.40>four"
+	if doc.Cues[0].Text != wantCue0 {
+		t.Errorf("A2 word markers did not survive the round trip:\n want %q\n got  %q",
+			wantCue0, doc.Cues[0].Text)
+	}
+	wantCue1 := "<00:05.00>five <00:05.80>six <00:06.60>seven <00:07.40>eight"
+	if doc.Cues[1].Text != wantCue1 {
+		t.Errorf("A2 word markers did not survive the round trip:\n want %q\n got  %q",
+			wantCue1, doc.Cues[1].Text)
+	}
+
+	// Header tags are still classified as tags, not swallowed by the A2 lines.
+	if len(doc.Tags) != 2 {
+		t.Errorf("want 2 header tags alongside A2 cues, got %d: %+v", len(doc.Tags), doc.Tags)
+	}
+}
+
+// TestExpand_IdempotentOnA2Cues pins the second half of #480's criterion: the
+// backfill path (Expand over already-parsed cues) must not split an A2 cue.
+//
+// This is the failure that would actually bite. Expand splits a cue whose TEXT
+// carries an embedded timestamp, and a naive stamp matcher would see twelve
+// "timestamps" in one A2 line and shatter it into twelve cues, each carrying the
+// wrong text. The petitlyrics client already guards against a split shifting its
+// word-timing indices (client.go:326); this proves the split does not happen.
+func TestExpand_IdempotentOnA2Cues(t *testing.T) {
+	in := models.Synced{Lines: []models.Lines{
+		{Text: "<00:01.00>one <00:01.80>two <00:02.60>three <00:03.40>four",
+			Time: models.Time{Total: 1, Seconds: 1}},
+		{Text: "<00:05.00>five <00:05.80>six <00:06.60>seven <00:07.40>eight",
+			Time: models.Time{Total: 5, Seconds: 5}},
+	}}
+
+	out := Expand(in)
+
+	if len(out.Lines) != len(in.Lines) {
+		t.Fatalf("Expand split an A2 cue: want %d cues, got %d. A split shifts every "+
+			"later word-timing index, which is exactly what the petitlyrics client's "+
+			"length guard exists to detect.\n%+v", len(in.Lines), len(out.Lines), out.Lines)
+	}
+	for i := range out.Lines {
+		if out.Lines[i].Text != in.Lines[i].Text {
+			t.Errorf("cue %d text mutated:\n want %q\n got  %q", i, in.Lines[i].Text, out.Lines[i].Text)
+		}
+		if out.Lines[i].Time.Total != in.Lines[i].Time.Total {
+			t.Errorf("cue %d timestamp mutated: want %v, got %v",
+				i, in.Lines[i].Time.Total, out.Lines[i].Time.Total)
+		}
+	}
+}
