@@ -223,6 +223,14 @@ func surveySample(ctx context.Context, c *Client, track models.Track, captureDir
 	songs, err := c.request(ctx, track, tierWordSync)
 	if err != nil {
 		switch {
+		// MUST precede the ErrNotFound case: ErrProviderUnavailable WRAPS
+		// ErrNotFound, so it satisfies errors.Is for both. Tested after the miss
+		// case it would be read as an ordinary miss and the sweep would CONTINUE
+		// -- the exact contamination the abort semantics exist to prevent, in the
+		// one place whose job is to notice it.
+		case errors.Is(err, ErrProviderUnavailable):
+			return sampleObservation{Err: "ErrProviderUnavailable"}, fmt.Errorf(
+				"sustained zero-result run at sample %d (application id revoked?): %w", idx, err)
 		case errors.Is(err, ErrUnauthorized):
 			// The clientAppID is a hardcoded constant shared by every canticle
 			// install (#607). If it is revoked mid-sweep every later lookup
