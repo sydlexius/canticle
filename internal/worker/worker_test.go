@@ -3766,4 +3766,14 @@ func TestSongCacheRoundTripDropsWordTimings(t *testing.T) {
 		t.Fatalf("line cues did not survive the round trip: got %d, want %d",
 			len(got.Subtitles.Lines), len(song.Subtitles.Lines))
 	}
+	// Count alone is too weak a guard: a round trip that preserved the number of
+	// cues while corrupting their text or timestamps would still satisfy it, and
+	// this test would report the WordTimings constraint as intact while the
+	// persisted subtitle data had silently changed underneath it.
+	for i, want := range song.Subtitles.Lines {
+		if gotLine := got.Subtitles.Lines[i]; gotLine != want {
+			t.Errorf("subtitle line %d changed across the cache round trip: got %#v, want %#v",
+				i, gotLine, want)
+		}
+	}
 }
