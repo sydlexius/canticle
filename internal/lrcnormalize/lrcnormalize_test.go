@@ -252,9 +252,20 @@ func TestParseBody_SingleTimestamp(t *testing.T) {
 // expandLine stops consuming once non-timestamp text begins. The word markup is
 // therefore carried as literal cue TEXT.
 //
-// The body below is byte-identical to what the A2 sample generator emits
-// (internal/lyrics/a2sample_test.go), so the two cannot drift apart. All content
-// is synthesized placeholder words.
+// The body below is a MINIMIZED A2 document, not a copy of the sample
+// generator's output: it carries the same cue-line shape (a leading [mm:ss.xx]
+// followed by inline <mm:ss.xx> word markers) but omits the [al]/[by] tags, the
+// third cue, and the trailing spaces that internal/lyrics/a2sample_test.go
+// emits. An earlier version of this comment claimed the two were byte-identical.
+// They are not, and the claim would have sent a reader trying to keep them in
+// sync.
+//
+// They are deliberately NOT shared. The parser behavior pinned here is
+// permanent, while that generator is throwaway scaffolding marked for deletion,
+// and coupling this test to it would tie a lasting guarantee to code with a
+// stated expiry. What matters is the SHAPE, and both carry it.
+//
+// All content is synthesized placeholder words.
 func TestParseBody_PreservesA2WordMarkers(t *testing.T) {
 	const a2Body = "[ar:Canticle Test Signal]\n" +
 		"[ti:Enhanced LRC Probe]\n" +

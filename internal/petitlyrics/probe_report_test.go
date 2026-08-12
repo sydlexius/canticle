@@ -15,9 +15,12 @@ type sampleObservation struct {
 	Tier          int // classifyPayload result, 0 when the lookup failed
 	AvailableTier int // availableLyricsType as reported, 0 when absent
 	CueCount      int // number of cues decoded, 0 when none
-	// IsOfficial is PRINTED VERBATIM by render(), unlike Copyright which is only
-	// counted. If the value ever turns out to be free-form text rather than a
-	// short enumerated token, it must be bucketed before it reaches the report.
+	// IsOfficial is PRINTED by render(), unlike Copyright which is only counted.
+	// It passes through boundedToken first, so a short enumerated token (the
+	// observed "0"/"1") prints verbatim while anything longer is replaced by a
+	// length-only placeholder. That keeps the measurement intact -- printing the
+	// real values is how the inverted isOfficial correlation was found -- without
+	// leaving a provider-controlled string able to reach a shared surface.
 	IsOfficial    string  // raw isOfficial value, empty when absent
 	Copyright     string  // raw copyright value, empty when absent
 	DistinctRatio float64 // tier-3 only: fraction of lines with distinct word starts
@@ -69,11 +72,11 @@ func (r *surveyReport) add(obs sampleObservation) {
 		}
 	}
 	if obs.IsOfficial != "" {
-		r.officialCounts[obs.IsOfficial]++
+		r.officialCounts[boundedToken(obs.IsOfficial)]++
 		if r.officialByTier[obs.Tier] == nil {
 			r.officialByTier[obs.Tier] = map[string]int{}
 		}
-		r.officialByTier[obs.Tier][obs.IsOfficial]++
+		r.officialByTier[obs.Tier][boundedToken(obs.IsOfficial)]++
 	}
 	if obs.Copyright != "" {
 		r.copyrightSeen++
@@ -186,14 +189,30 @@ func TestSurveyReport_EmitsNoIdentifyingContent(t *testing.T) {
 		DistinctRatio: 1.0,
 	})
 	r.add(sampleObservation{Err: "ErrNotFound"})
+	// The canary MUST also travel through IsOfficial, because that is the one
+	// free-form field render() prints VERBATIM (Copyright is only counted). An
+	// earlier version of this test fed the canary through Copyright alone and set
+	// IsOfficial to a benign "1" -- so it asserted over the path that cannot leak
+	// while leaving the path that can entirely unexercised.
+	r.add(sampleObservation{
+		Tier:       tierUnsynced,
+		IsOfficial: canary + "-OFFICIAL",
+	})
 
 	out := r.render()
 
 	if strings.Contains(out, canary) {
 		t.Errorf("report leaked a free-form field value into its output:\n%s", out)
 	}
-	if !strings.Contains(out, "samples: 2") {
-		t.Errorf("report did not count both samples:\n%s", out)
+	if !strings.Contains(out, "samples: 3") {
+		t.Errorf("report did not count every sample:\n%s", out)
+	}
+	// The bound must not have swallowed the ordinary enumerated token: the whole
+	// point of bounding rather than bucketing is that the real values still print,
+	// since printing them is how the sweep found the isOfficial correlation.
+	if !strings.Contains(out, `"1": 1`) {
+		t.Errorf("a short enumerated token was not printed verbatim; bounding must "+
+			"not degrade the measurement:\n%s", out)
 	}
 	if !strings.Contains(out, "ErrNotFound: 1") {
 		t.Errorf("report did not record the error class:\n%s", out)
@@ -269,4 +288,33 @@ func TestSurveyReport_CueCountDistribution(t *testing.T) {
 	if strings.Contains(empty, "min ") {
 		t.Errorf("empty report rendered a distribution line with no data:\n%s", empty)
 	}
+}
+
+// maxTokenLen bounds a provider value that render() prints VERBATIM. The two
+// values observed across a 100-track live sweep were "0" and "1", so anything
+// past a handful of characters is not the enumerated flag this report is
+// measuring.
+const maxTokenLen = 8
+
+// boundedToken passes through a short enumerated token and replaces anything
+// longer with a length-only placeholder.
+//
+// This closes the one path by which the report could leak. sampleObservation
+// carries no title/artist/album field, so the privacy guarantee is otherwise
+// structural -- but IsOfficial is a provider-controlled string that render()
+// prints verbatim, and "provider-controlled" plus "printed verbatim" is a leak
+// waiting for the provider to change shape.
+//
+// It BOUNDS rather than buckets. Bucketing (mapping every value to
+// official/not-official) was the reviewer's suggestion and would have destroyed
+// the measurement: printing the raw values is exactly how the sweep found that
+// isOfficial discriminates INVERTED (every word-synced result carried "0", every
+// unsynced one "1"), which is the finding that redirected #480 and #615. A
+// length bound keeps that visible while making an unexpected long value
+// unprintable.
+func boundedToken(v string) string {
+	if len(v) <= maxTokenLen {
+		return v
+	}
+	return fmt.Sprintf("<non-token value, %d bytes>", len(v))
 }

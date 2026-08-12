@@ -176,16 +176,33 @@ func findRepoRoot(start string) (string, error) {
 	}
 }
 
-// resolveSymlinks returns the fully-resolved path when it exists, and the input
-// unchanged when it does not. Resolving matters for containment: on macOS a
-// scratchpad under /tmp resolves to /private/tmp, and comparing an unresolved
-// path against a resolved root can make two names for the same directory look
-// like different places.
+// resolveSymlinks returns path with every symlinked component resolved,
+// including when the path does not exist yet.
+//
+// Resolving matters for containment: on macOS a scratchpad under /tmp resolves
+// to /private/tmp, and comparing an unresolved path against a resolved root
+// makes two names for the same directory look like different places.
+//
+// The recursion is load-bearing, not tidiness. filepath.EvalSymlinks fails when
+// ANY component is missing, and an earlier version returned the path unchanged
+// on that failure -- which made the containment guard FAIL OPEN on the common
+// first-run path, before the operator has created PLPROBE_DIR. Measured: with a
+// repo at /tmp/repo (a symlinked component on macOS), findRepoRoot returns the
+// resolved /private/tmp/repo while an uncreated /tmp/repo/captures stayed
+// unresolved, so filepath.Rel returned "../link/not-created-yet" and the guard
+// read a directory INSIDE the working tree as outside it. Resolving the nearest
+// existing ancestor and re-attaching the missing tail keeps both sides in the
+// same namespace whether or not the leaf exists.
 func resolveSymlinks(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
 	}
-	return path
+	parent := filepath.Dir(path)
+	if parent == path {
+		// Reached the filesystem root without resolving; nothing left to try.
+		return path
+	}
+	return filepath.Join(resolveSymlinks(parent), filepath.Base(path))
 }
 
 // ensureOutsideRepo rejects a probe directory that is the repo root or anything
@@ -467,7 +484,12 @@ func TestFindRepoRoot_LocatesByMarkerNotName(t *testing.T) {
 	}
 
 	// A synthetic tree with no marker must fail rather than walking to /.
-	bare := t.TempDir()
+	//
+	// bare is resolved because findRepoRoot returns a RESOLVED path. Comparing a
+	// resolved result against an unresolved prefix means HasPrefix can never
+	// match on a symlinked TMPDIR (the macOS default), so the assertion below
+	// would pass without testing anything.
+	bare := resolveSymlinks(t.TempDir())
 	deep := filepath.Join(bare, "a", "b")
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -574,5 +596,49 @@ func TestReadTrackList(t *testing.T) {
 
 	if _, err := readTrackList(filepath.Join(dir, "absent.tsv")); err == nil {
 		t.Error("a missing track list must be an error, not an empty sweep")
+	}
+}
+
+// TestEnsureOutsideRepo_RejectsUncreatedDirInsideRepo pins the fail-open case
+// that shipped in the first version of this guard.
+//
+// The guard's whole job is keeping raw captures of a private library out of the
+// working tree. It compared a RESOLVED repo root against a probe dir that
+// resolveSymlinks left UNRESOLVED whenever any component was missing -- which is
+// the normal first run, before the operator has created PLPROBE_DIR. With a
+// symlinked component in the path (on macOS /tmp is a symlink to /private/tmp),
+// the two sides landed in different namespaces, filepath.Rel returned a
+// ".."-prefixed result, and the guard read a directory INSIDE the repo as
+// outside it.
+//
+// The test constructs exactly that shape: a symlink pointing at a repo root, and
+// a NOT-YET-CREATED child under the symlinked name.
+func TestEnsureOutsideRepo_RejectsUncreatedDirInsideRepo(t *testing.T) {
+	realRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(realRoot, 0o700); err != nil {
+		t.Fatalf("mkdir real root: %v", err)
+	}
+	linkRoot := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// The guard is handed the RESOLVED root, exactly as TestSurveyProbe does via
+	// findRepoRoot.
+	resolvedRoot := resolveSymlinks(linkRoot)
+
+	// A capture dir inside the repo, reached through the symlinked name, that
+	// does not exist yet.
+	uncreated := filepath.Join(linkRoot, "captures")
+	if _, err := os.Stat(uncreated); err == nil {
+		t.Fatal("precondition: the capture dir must NOT exist for this case")
+	}
+
+	got, err := ensureOutsideRepo(uncreated, resolvedRoot)
+	if err == nil {
+		t.Errorf("guard ACCEPTED %q, which is inside the repo at %q (resolved to %q). "+
+			"Raw captures of a private library would land in the working tree, one "+
+			"`git add -A` from a public surface -- the exact outcome this guard exists "+
+			"to prevent, on the common first-run path.", uncreated, resolvedRoot, got)
 	}
 }

@@ -189,12 +189,32 @@ func TestSurveySampleAbortsOnProviderUnavailable(t *testing.T) {
 
 	var lastErr error
 	var lastObs sampleObservation
+	abortAt := -1
 	for i := 0; i <= ZeroResultThreshold; i++ {
 		lastObs, lastErr = surveySample(context.Background(), c,
 			models.Track{TrackName: "t", ArtistName: "a"}, t.TempDir(), i)
 		if lastErr != nil {
+			abortAt = i
 			break
 		}
+		// The OTHER direction of the case order, and the one that makes this test
+		// non-vacuous: every lookup below the threshold is an ordinary miss and
+		// must NOT abort. Without this, a surveySample that aborted on EVERY
+		// ErrNotFound would break at i == 0 and still satisfy every assertion
+		// below -- passing while the probe stopped on the first track the
+		// provider merely lacks.
+		if lastObs.Err != "ErrNotFound" {
+			t.Fatalf("sample %d: Err = %q; want %q below the threshold", i, lastObs.Err, "ErrNotFound")
+		}
+	}
+
+	// The counter reaches the threshold on the Nth call, which is index N-1.
+	wantAbortAt := ZeroResultThreshold - 1
+	if abortAt != wantAbortAt {
+		t.Errorf("aborted at sample %d; want %d (the %dth lookup, zero-indexed). "+
+			"Aborting early means an ordinary miss is being read as an outage; "+
+			"aborting late, or never, means the outage is being read as a miss.",
+			abortAt, wantAbortAt, ZeroResultThreshold)
 	}
 
 	if lastErr == nil {
