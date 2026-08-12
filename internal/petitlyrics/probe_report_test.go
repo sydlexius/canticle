@@ -106,7 +106,14 @@ func (r *surveyReport) render() string {
 		fmt.Fprintf(&b, "  %s: %d\n", k, r.errCounts[k])
 	}
 
-	fmt.Fprintf(&b, "\navailableLyricsType agreement: %d/%d\n", r.availTierAgree, r.availTierSeen)
+	// The denominator here is deliberately SMALLER than the tier-distribution
+	// total, and saying so in the output stops a reader treating the gap as a
+	// discrepancy. A sample that classified a tier but then failed to decode
+	// counts toward the tier counts (see add()) yet never reaches these
+	// accumulators, so it is present above and absent here.
+	fmt.Fprintf(&b, "\navailableLyricsType agreement: %d/%d"+
+		" (denominator counts only samples that decoded fully; see tier distribution for the full count)\n",
+		r.availTierAgree, r.availTierSeen)
 
 	fmt.Fprintf(&b, "\nisOfficial values:\n")
 	if len(r.officialCounts) == 0 {
