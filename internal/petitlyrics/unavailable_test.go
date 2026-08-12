@@ -168,3 +168,65 @@ func TestZeroResultLatchIsExactlyOnceUnderConcurrency(t *testing.T) {
 			"threshold reports, and none before it)", n, ZeroResultThreshold+1)
 	}
 }
+
+// TestSurveySampleAbortsOnProviderUnavailable pins the case ORDER in the probe's
+// own error switch.
+//
+// ErrProviderUnavailable wraps ErrNotFound, so it satisfies errors.Is for both.
+// The probe returns a non-nil error to mean "abort the whole run" and a nil error
+// with Err set to mean "this one sample failed, keep going". If the wrapper is
+// tested after the miss case, a credential outage reads as an ordinary miss and
+// the sweep CONTINUES -- producing a coverage number that says "the provider has
+// little for this library" when the truth is "the credential died at sample N".
+//
+// That is the contamination the abort semantics exist to prevent, and this switch
+// is the one place whose job is to notice it. The bug was live after #607's
+// sentinel merged in: the probe predated the sentinel and never learned about it.
+func TestSurveySampleAbortsOnProviderUnavailable(t *testing.T) {
+	// Serve empties until the client's own counter escalates. The threshold+1st
+	// lookup is the first to come back as ErrProviderUnavailable.
+	c, _ := newTestClient(t, serveEmpty())
+
+	var lastErr error
+	var lastObs sampleObservation
+	abortAt := -1
+	for i := 0; i <= ZeroResultThreshold; i++ {
+		lastObs, lastErr = surveySample(context.Background(), c,
+			models.Track{TrackName: "t", ArtistName: "a"}, t.TempDir(), i)
+		if lastErr != nil {
+			abortAt = i
+			break
+		}
+		// The OTHER direction of the case order, and the one that makes this test
+		// non-vacuous: every lookup below the threshold is an ordinary miss and
+		// must NOT abort. Without this, a surveySample that aborted on EVERY
+		// ErrNotFound would break at i == 0 and still satisfy every assertion
+		// below -- passing while the probe stopped on the first track the
+		// provider merely lacks.
+		if lastObs.Err != "ErrNotFound" {
+			t.Fatalf("sample %d: Err = %q; want %q below the threshold", i, lastObs.Err, "ErrNotFound")
+		}
+	}
+
+	// The counter reaches the threshold on the Nth call, which is index N-1.
+	wantAbortAt := ZeroResultThreshold - 1
+	if abortAt != wantAbortAt {
+		t.Errorf("aborted at sample %d; want %d (the %dth lookup, zero-indexed). "+
+			"Aborting early means an ordinary miss is being read as an outage; "+
+			"aborting late, or never, means the outage is being read as a miss.",
+			abortAt, wantAbortAt, ZeroResultThreshold)
+	}
+
+	if lastErr == nil {
+		t.Fatal("the sweep did not abort on a sustained zero-result run. A revoked " +
+			"application id would be recorded as a run of ordinary misses and the " +
+			"coverage number would be silently wrong.")
+	}
+	if !errors.Is(lastErr, ErrProviderUnavailable) {
+		t.Errorf("abort error = %v; want it to carry ErrProviderUnavailable", lastErr)
+	}
+	if lastObs.Err != "ErrProviderUnavailable" {
+		t.Errorf("observation class = %q; want %q so the report names the real cause "+
+			"rather than burying it as a miss", lastObs.Err, "ErrProviderUnavailable")
+	}
+}

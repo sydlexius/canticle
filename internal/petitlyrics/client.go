@@ -307,9 +307,13 @@ type apiResponse struct {
 	Songs   []apiSong `xml:"songs>song"`
 }
 
-// apiSong is one <song> element. Only the fields this client uses are mapped;
-// the response carries additional metadata (writer, composer, jancode, jasracID,
-// cdc, upload/release dates) that is intentionally ignored.
+// apiSong is one <song> element. Only the fields this client uses are mapped.
+//
+// The response carries MORE than the fields listed here. A verified inventory
+// lives in docs/superpowers/specs/2026-07-21-petitlyrics-api-rewrite-design.md;
+// among the deliberately unmapped are writer, composer, jancode, jasracID, cdc,
+// artistId, prefferedLyricsType, uploadDate, releaseDate.
+// Do not treat that list as exhaustive either: it reflects observed responses.
 type apiSong struct {
 	LyricsID   string `xml:"lyricsId"`
 	Title      string `xml:"title"`
@@ -319,6 +323,16 @@ type apiSong struct {
 	DurationMS int    `xml:"duration"`
 	LyricsType int    `xml:"lyricsType"`
 	LyricsData string `xml:"lyricsData"`
+	// IsOfficial, Copyright, and AvailableTier are decoded for MEASUREMENT ONLY
+	// (#615, #600). Nothing in the fetch path consumes them: whether isOfficial
+	// can carry a per-result trust signal is exactly what the survey probe is
+	// measuring, and availableLyricsType is decoded so the probe can report how
+	// often it agrees with the tier the payload bytes actually carry. Neither
+	// selection nor classification may consult AvailableTier: the payload stays
+	// the authoritative discriminator (see classifyPayload and selectCandidate).
+	IsOfficial    string `xml:"isOfficial"`
+	Copyright     string `xml:"copyright"`
+	AvailableTier int    `xml:"availableLyricsType"`
 }
 
 // FindLyrics looks up lyrics for the given track in a single request.
