@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -35,11 +36,30 @@ import (
 // It shipped exactly once (petitlyrics, fixed in #607). The guard below makes
 // the NEXT provider fail at test time instead of silently on prod.
 
-// providerPackages are the lyric-provider packages whose exported error
-// sentinels must be accounted for by ClassifyOutcome.
-var providerPackages = []string{
-	"../musixmatch",
-	"../petitlyrics",
+// providerPackages returns the lyric-provider package directories whose
+// exported error sentinels must be accounted for by ClassifyOutcome.
+//
+// The paths are derived from THIS FILE's location via runtime.Caller rather
+// than written relative to the working directory. `go test` happens to run each
+// package in its own source directory, so a bare "../musixmatch" works today --
+// but that is a property of the harness, not a guarantee: a compiled test binary
+// run from elsewhere, or any harness that sets a different cwd, would resolve
+// those paths somewhere else. This guard's whole value is failing when a
+// sentinel goes unclassified, and a scan that cannot find the source files
+// fails for the wrong reason.
+//
+// Returns a fresh slice per call so no test can mutate what another test reads.
+func providerPackages(t *testing.T) []string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not resolve this test file's path; the AST scan cannot locate the provider packages")
+	}
+	internalDir := filepath.Dir(filepath.Dir(thisFile)) // .../internal
+	return []string{
+		filepath.Join(internalDir, "musixmatch"),
+		filepath.Join(internalDir, "petitlyrics"),
+	}
 }
 
 // classifiedSentinels maps every exported provider sentinel to its value, so
@@ -54,38 +74,49 @@ var providerPackages = []string{
 // authoritative name set; anything it finds that is missing HERE fails the
 // test, so a newly added sentinel cannot slip through by being forgotten in
 // two places at once.
-var classifiedSentinels = map[string]error{
-	"musixmatch.ErrUnauthorized":         musixmatch.ErrUnauthorized,
-	"musixmatch.ErrRateLimited":          musixmatch.ErrRateLimited,
-	"musixmatch.ErrNotFound":             musixmatch.ErrNotFound,
-	"musixmatch.ErrNoLyrics":             musixmatch.ErrNoLyrics,
-	"musixmatch.ErrTruncatedResponse":    musixmatch.ErrTruncatedResponse,
-	"musixmatch.ErrTokenRenewalRequired": musixmatch.ErrTokenRenewalRequired,
-	"musixmatch.ErrTokenMintRefused":     musixmatch.ErrTokenMintRefused,
-	"petitlyrics.ErrUnauthorized":        petitlyrics.ErrUnauthorized,
-	"petitlyrics.ErrRateLimited":         petitlyrics.ErrRateLimited,
-	"petitlyrics.ErrForbidden":           petitlyrics.ErrForbidden,
-	"petitlyrics.ErrNotFound":            petitlyrics.ErrNotFound,
-	"petitlyrics.ErrUnsupportedTier":     petitlyrics.ErrUnsupportedTier,
-	"petitlyrics.ErrProviderUnavailable": petitlyrics.ErrProviderUnavailable,
+//
+// Built fresh per call rather than held in a package variable, so one test
+// cannot mutate the set another test reads.
+func classifiedSentinels() map[string]error {
+	return map[string]error{
+		"musixmatch.ErrUnauthorized":         musixmatch.ErrUnauthorized,
+		"musixmatch.ErrRateLimited":          musixmatch.ErrRateLimited,
+		"musixmatch.ErrNotFound":             musixmatch.ErrNotFound,
+		"musixmatch.ErrNoLyrics":             musixmatch.ErrNoLyrics,
+		"musixmatch.ErrTruncatedResponse":    musixmatch.ErrTruncatedResponse,
+		"musixmatch.ErrTokenRenewalRequired": musixmatch.ErrTokenRenewalRequired,
+		"musixmatch.ErrTokenMintRefused":     musixmatch.ErrTokenMintRefused,
+		"petitlyrics.ErrUnauthorized":        petitlyrics.ErrUnauthorized,
+		"petitlyrics.ErrRateLimited":         petitlyrics.ErrRateLimited,
+		"petitlyrics.ErrForbidden":           petitlyrics.ErrForbidden,
+		"petitlyrics.ErrNotFound":            petitlyrics.ErrNotFound,
+		"petitlyrics.ErrUnsupportedTier":     petitlyrics.ErrUnsupportedTier,
+		"petitlyrics.ErrProviderUnavailable": petitlyrics.ErrProviderUnavailable,
+	}
 }
 
 // transportExemptions are sentinels that are CORRECT to classify as
 // OutcomeTransport, each with the reason it is not the #748 defect. An
 // exemption must be a deliberate decision recorded somewhere in the tree, never
 // a way to quiet this test.
-var transportExemptions = map[string]string{
-	// A 403 is a refused request SHAPE, not a credential or throttle condition,
-	// and no amount of waiting or rotation fixes it. Bucketing it with the
-	// auth/throttle signals would repeat the #495 misdiagnosis, where a
-	// User-Agent denylist rejection read as a phantom rate limit. Transport is
-	// the correct class; internal/orchestrator/errors.go says so explicitly.
-	"petitlyrics.ErrForbidden": "a refused request shape, deliberately not an auth/throttle signal (#495)",
-	// Bootstrap-path only: returned by the token mint in internal/musixmatch/
-	// token.go and handled in internal/commands/token_bootstrap.go. It is never
-	// produced by a lyric lookup, so it cannot reach a lane and therefore cannot
-	// reach ClassifyOutcome at all.
-	"musixmatch.ErrTokenMintRefused": "token-bootstrap path only; never returned by a lookup, so it never reaches a lane",
+//
+// Built fresh per call, for the same reason as classifiedSentinels: an
+// exemption list a test could mutate is an exemption list that can be widened
+// by accident.
+func transportExemptions() map[string]string {
+	return map[string]string{
+		// A 403 is a refused request SHAPE, not a credential or throttle condition,
+		// and no amount of waiting or rotation fixes it. Bucketing it with the
+		// auth/throttle signals would repeat the #495 misdiagnosis, where a
+		// User-Agent denylist rejection read as a phantom rate limit. Transport is
+		// the correct class; internal/orchestrator/errors.go says so explicitly.
+		"petitlyrics.ErrForbidden": "a refused request shape, deliberately not an auth/throttle signal (#495)",
+		// Bootstrap-path only: returned by the token mint in internal/musixmatch/
+		// token.go and handled in internal/commands/token_bootstrap.go. It is never
+		// produced by a lyric lookup, so it cannot reach a lane and therefore cannot
+		// reach ClassifyOutcome at all.
+		"musixmatch.ErrTokenMintRefused": "token-bootstrap path only; never returned by a lookup, so it never reaches a lane",
+	}
 }
 
 // TestEveryProviderSentinelIsClassified is the #748 guard: every exported error
@@ -96,9 +127,11 @@ var transportExemptions = map[string]string{
 // failure alone (an explicit acceptance criterion of #748).
 func TestEveryProviderSentinelIsClassified(t *testing.T) {
 	found := exportedSentinelsFromSource(t)
+	classified := classifiedSentinels()
+	exemptions := transportExemptions()
 
 	for _, name := range found {
-		sentinel, ok := classifiedSentinels[name]
+		sentinel, ok := classified[name]
 		if !ok {
 			t.Errorf("provider sentinel %s is not covered by this test.\n"+
 				"Add it to classifiedSentinels, then make sure ClassifyOutcome handles it.\n"+
@@ -113,7 +146,7 @@ func TestEveryProviderSentinelIsClassified(t *testing.T) {
 		if got != OutcomeTransport {
 			continue
 		}
-		if reason, exempt := transportExemptions[name]; exempt {
+		if reason, exempt := exemptions[name]; exempt {
 			t.Logf("%s classifies as transport by design: %s", name, reason)
 			continue
 		}
@@ -134,12 +167,12 @@ func TestSentinelExemptionsAreLive(t *testing.T) {
 	for _, name := range exportedSentinelsFromSource(t) {
 		live[name] = true
 	}
-	for name := range transportExemptions {
+	for name := range transportExemptions() {
 		if !live[name] {
 			t.Errorf("transportExemptions names %s, which no provider package declares; remove the stale entry", name)
 		}
 	}
-	for name := range classifiedSentinels {
+	for name := range classifiedSentinels() {
 		if !live[name] {
 			t.Errorf("classifiedSentinels names %s, which no provider package declares; remove the stale entry", name)
 		}
@@ -160,7 +193,7 @@ func exportedSentinelsFromSource(t *testing.T) []string {
 	t.Helper()
 
 	var out []string
-	for _, dir := range providerPackages {
+	for _, dir := range providerPackages(t) {
 		pkgName := filepath.Base(dir)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -191,7 +224,15 @@ func exportedSentinelsFromSource(t *testing.T) []string {
 						continue
 					}
 					for i, ident := range vs.Names {
-						if !ident.IsExported() || !strings.HasPrefix(ident.Name, "Err") {
+						// Exported-ness is the only NAME condition. An earlier
+						// version also required an "Err" prefix, which was a hole:
+						// an exported `NoLyrics = errors.New(...)` would have been
+						// skipped on its name alone and could restore the very
+						// unclassified-transport fallback this guard exists to
+						// prevent. declaresAnError below is the real filter -- it
+						// checks the TYPE and INITIALIZER, which is what actually
+						// makes something a sentinel.
+						if !ident.IsExported() {
 							continue
 						}
 						if !declaresAnError(vs, i) {
