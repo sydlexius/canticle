@@ -26,11 +26,14 @@
 # control: if this script reports every disk quiet while disks.ini shows drives
 # spun up, distrust the script, not the disks.
 #
-# WHY THERE IS NO OVERNIGHT DAEMON. netdata already records per-container disk I/O at
+# WHY THERE IS NO OVERNIGHT DAEMON. netdata already records per-DEVICE disk I/O at
 # 1s resolution with roughly two weeks of retention, so ANY past window is queryable
 # after the fact. Polling on a schedule would add load to the very host being
 # measured, and would record nothing netdata does not already have. Run this in the
 # morning against last night; do not run it continuously.
+#
+# (It records per-container charts too, and this script deliberately does NOT use
+# them -- see the per-device note above. Retention is the point here, not the chart.)
 #
 # WRITES ARE DELIBERATELY IGNORED. On a cache-backed array, writes land on NVMe and
 # are flushed later by the mover, so they do not spin the library disks. Only reads
@@ -141,6 +144,12 @@ if [ -n "$worst_quiet" ]; then
     printf '    -> every data disk MEETS the 15-minute idle bar\n'
   else
     printf '    -> at least one data disk is below the 15-minute idle bar\n'
+    printf '       NOT automatically a canticle regression. This bar is a HOST\n'
+    printf '       property: every tenant sharing the array counts against it, and\n'
+    printf '       #684 was CLOSED on exactly that split -- canticle read at a small\n'
+    printf '       fraction of the busiest neighbor, so the canticle-attributable\n'
+    printf '       criterion was met while the host-wide bar stayed out of reach.\n'
+    printf '       Attribute per-container before blaming this service.\n'
   fi
 fi
 printf '\n'
