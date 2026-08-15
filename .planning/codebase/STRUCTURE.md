@@ -40,7 +40,7 @@ mxlrc-go/
 │   └── dependabot.yml
 ├── .planning/                  # Planning documents
 │   └── codebase/               # Codebase analysis docs
-├── go.mod                      # Module: github.com/doxazo-net/canticle, Go 1.26.5
+├── go.mod                      # Module: github.com/sydlexius/canticle, Go 1.26.6
 ├── go.sum
 ├── Makefile
 ├── README.md
@@ -107,7 +107,7 @@ mxlrc-go/
 - `cmd/mxlrcgo-svc/main.go`: CLI entry point. `func main()` — token resolution, wires all dependencies, calls `App.Run(ctx)`.
 
 **Configuration:**
-- `go.mod`: Module path `github.com/doxazo-net/canticle`, Go 1.25
+- `go.mod`: Module path `github.com/sydlexius/canticle`, Go 1.26.6
 - `.golangci.yml`: Linter rules (errcheck, govet, staticcheck, gosec, revive, etc.)
 - `.goreleaser.yml`: Cross-platform build matrix — binary name `mxlrcgo-svc`, build path `./cmd/mxlrcgo-svc`
 - `Makefile`: Build/test/lint/format commands
