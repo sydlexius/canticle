@@ -11,6 +11,7 @@ import (
 	"github.com/sydlexius/canticle/internal/backoff"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
+	"github.com/sydlexius/canticle/internal/failsig"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 )
@@ -1524,6 +1525,10 @@ func (q *DBQueue) CountDone(ctx context.Context) (int64, error) {
 // not errors. Used by the GET /metrics endpoint.
 func (q *DBQueue) CountFailuresByReason(ctx context.Context) (map[string]int64, error) {
 	rows, err := q.db.QueryContext(ctx,
+		// Grouped raw in SQL, then re-merged on the NORMALIZED key below. The
+		// database collapses the row count to a couple of dozen groups first, so
+		// this never pulls every failed row across just to normalize it; SQLite has
+		// no regex, so the normalization cannot live in the query (#478).
 		`SELECT COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*)
          FROM work_queue
          WHERE status = 'failed'
@@ -1540,12 +1545,41 @@ func (q *DBQueue) CountFailuresByReason(ctx context.Context) (map[string]int64, 
 		if err := rows.Scan(&reason, &n); err != nil {
 			return nil, fmt.Errorf("queue: scan failure reason count: %w", err)
 		}
-		counts[reason] = n
+		// += so several raw reasons that normalize to one key accumulate rather
+		// than overwrite. That is the whole point: five write failures differing
+		// only by item id and path are ONE failure category, and their counts must
+		// add up.
+		counts[normalizedReason(reason)] += n
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("queue: count failures by reason rows: %w", err)
 	}
 	return counts, nil
+}
+
+// normalizedReason collapses a raw last_error into a stable failure signature
+// for the metrics label, preserving the 'unknown' sentinel the SQL COALESCE
+// produces for an empty error.
+//
+// This label is the reason the normalization is not merely cosmetic:
+// internal/server/metrics.go emits it VERBATIM as
+// mxlrcgo_queue_failures{reason="..."}, which an external Prometheus scrapes and
+// retains off-host. A raw signature carries absolute library paths onto that
+// surface -- private metadata, and the same exposure class as #431 and #731 by a
+// third route. It also earned a distinct time series per failing file, so
+// normalizing drops cardinality as well.
+func normalizedReason(reason string) string {
+	if reason == "unknown" {
+		return reason
+	}
+	if n := failsig.Normalize(reason); n != "" {
+		return n
+	}
+	// Normalization reduced the value to nothing, which means the raw text was
+	// whitespace-only. NULLIF(last_error, '') does not catch that -- it only maps
+	// the EMPTY string -- so returning `reason` here would mint a blank group
+	// alongside 'unknown' instead of joining it. Both mean "no cause recorded".
+	return "unknown"
 }
 
 // CountByStatus returns the number of work_queue rows grouped by status.

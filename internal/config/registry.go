@@ -116,6 +116,7 @@ var fields = []FieldSpec{
 	{Path: "providers.mode", Section: "providers", Type: TypeString, EnvVars: []string{"MXLRC_PROVIDERS_MODE"}, Criticality: Safe, Editable: true, Description: "How to use multiple sources: ordered (try in turn) or parallel (race them)."},
 	{Path: "providers.race_wait_seconds", Section: "providers", Type: TypeInt, EnvVars: []string{"MXLRC_PROVIDERS_RACE_WAIT_SECONDS"}, Criticality: Safe, Editable: true, Description: "Grace seconds the race winner waits for a richer result."},
 	{Path: "providers.fallback_order", Section: "providers", Type: TypeStringSlice, EnvVars: []string{"MXLRC_PROVIDERS_FALLBACK_ORDER"}, Criticality: Caution, Editable: true, Description: "Provider order tried in fallback mode."},
+	{Path: "providers.petitlyrics_cooldown_seconds", Section: "providers", Type: TypeInt, EnvVars: []string{"MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS"}, Criticality: Safe, Editable: true, Description: "Minimum seconds between Petit Lyrics requests. 0 uses the Musixmatch cooldown; values below the provider's own floor are raised to it."},
 
 	// [verification]
 	{Path: "verification.enabled", Section: "verification", Type: TypeBool, EnvVars: []string{"MXLRC_VERIFICATION_ENABLED"}, Criticality: Safe, Editable: true, Description: "Verify fetched lyrics against the audio."},

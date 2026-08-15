@@ -35,9 +35,15 @@ func payloadFromFixture(t *testing.T, name string) []byte {
 }
 
 // TestClassifyPayload pins the payload-shape discriminator. This is the check
-// that must not regress: the API's lyricsType field echoes the request and
-// availableLyricsType is not a capability set, so the bytes are the only
-// trustworthy signal for which tier actually came back.
+// that must not regress, but NOT for the reason an earlier version of this
+// comment gave. It claimed availableLyricsType is not a capability set,
+// concluded from two probe tracks; that claim is RETRACTED. Measured over 107
+// hits the field predicts the returned tier with no exceptions.
+//
+// The conclusion still holds: lyricsType merely echoes the request, and the
+// payload bytes are what actually arrived, so validating them is the difference
+// between trusting a field and checking the goods. That stays true however well
+// availableLyricsType predicts, so nothing here argues for consulting it.
 func TestClassifyPayload(t *testing.T) {
 	tests := []struct {
 		name    string

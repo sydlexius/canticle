@@ -28,6 +28,7 @@ type onboardingFixture struct {
 	mux   *http.ServeMux
 	svc   *webauth.Service
 	store *secrets.SQLStore
+	onb   *Onboarding
 }
 
 // newTestOnboarding builds the fixture with NO admin yet (first-run state). The
@@ -47,7 +48,7 @@ func newTestOnboarding(t *testing.T, policy *trustnet.Policy) onboardingFixture 
 
 	mux := http.NewServeMux()
 	NewUI(config.Config{}, "vtest", WithAuth(auth), WithOnboarding(onb)).Register(mux)
-	return onboardingFixture{mux: mux, svc: svc, store: store}
+	return onboardingFixture{mux: mux, svc: svc, store: store, onb: onb}
 }
 
 // testCSRFSetupToken is the fixed CSRF value used by postSetup. Must be exactly
@@ -133,8 +134,11 @@ func TestSetupRendersTokenHelpLink(t *testing.T) {
 	}
 }
 
-// TestSetupGating covers who may reach /setup: loopback (and configured CIDRs)
-// may; everyone else gets 404; a spoofed X-Forwarded-For cannot forge trust.
+// TestSetupGating covers who may reach /setup. Since #461 that is decided by
+// admin-EXISTENCE, not by the trusted-CIDR policy: while no admin exists any
+// client is served, and once one exists the endpoint closes permanently
+// (untrusted -> 404 on both GET and POST, trusted -> redirect to /login). A
+// spoofed X-Forwarded-For still cannot forge trust.
 func TestSetupGating(t *testing.T) {
 	// Allowlist a CIDR but trust NO proxies, so XFF is always ignored.
 	policy, err := trustnet.NewPolicy([]string{"192.0.2.0/24"}, nil)
@@ -166,36 +170,81 @@ func TestSetupGating(t *testing.T) {
 		}
 	})
 
-	t.Run("untrusted refused with 404", func(t *testing.T) {
+	// #461: before an admin exists, reachability is decided by admin-EXISTENCE,
+	// not by the trusted-CIDR policy. Requiring trust here is what forced an
+	// operator to grant a permanent, blanket auth bypass just to bootstrap
+	// (RequireSession short-circuits on the same policy), so an untrusted client
+	// is served the form during the pre-onboarding window.
+	t.Run("untrusted served while no admin exists", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
+		req.RemoteAddr = "198.51.100.7:1"
+		rec := httptest.NewRecorder()
+		f.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /setup from untrusted (no admin yet) = %d, want 200", rec.Code)
+		}
+	})
+
+	// The XFF case is no longer about forging TRUST for /setup (untrusted is
+	// served anyway pre-admin). It still pins that a spoofed header cannot make
+	// the policy report a forged source, which is what the WARN log and the
+	// post-admin 404 both key on.
+	t.Run("spoofed XFF does not forge a trusted source", func(t *testing.T) {
+		policy, err := trustnet.NewPolicy([]string{"192.0.2.0/24"}, nil)
+		if err != nil {
+			t.Fatalf("trustnet.NewPolicy: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
+		req.RemoteAddr = "198.51.100.8:1"               // untrusted peer
+		req.Header.Set("X-Forwarded-For", "192.0.2.40") // forged trusted source
+		if policy.Trusted(req) {
+			t.Fatal("spoofed X-Forwarded-For was accepted as a trusted source")
+		}
+	})
+
+	t.Run("POST from untrusted creates the admin while none exists", func(t *testing.T) {
+		form := url.Values{"username": {"x"}, "password": {"correct-horse"}, "confirm": {"correct-horse"}}
+		rec := postSetup(t, f.mux, "198.51.100.9:1", form)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("POST /setup from untrusted (no admin yet) = %d, want 303", rec.Code)
+		}
+		if has, _ := f.svc.HasUsers(context.Background()); !has {
+			t.Error("untrusted POST during the first-run window did not create an admin")
+		}
+	})
+
+	// The window is self-closing: once an admin exists the endpoint reverts to
+	// its pre-#461 posture, and an untrusted client must not even learn it is
+	// there. The admin precondition is established below rather than inherited.
+	t.Run("closes permanently once an admin exists", func(t *testing.T) {
+		// Establish the precondition here rather than inheriting it from the
+		// subtest above. Depending on that ordering made this subtest SKIP (and
+		// the parent still report PASS) whenever it ran alone -- e.g. under
+		// `-run 'TestSetupGating/closes'` -- which silently disabled the single
+		// most security-critical assertion in #461. Setup is idempotent-by-
+		// conflict, so tolerate the admin already existing.
+		if has, err := f.svc.HasUsers(context.Background()); err != nil {
+			t.Fatalf("HasUsers: %v", err)
+		} else if !has {
+			if _, err := f.svc.Setup(context.Background(), "seeded-admin", "correct-horse"); err != nil {
+				t.Fatalf("seeding the admin: %v", err)
+			}
+		}
+		if has, err := f.svc.HasUsers(context.Background()); err != nil || !has {
+			t.Fatalf("precondition not met: HasUsers = (%v, %v), want (true, nil)", has, err)
+		}
+
 		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
 		req.RemoteAddr = "198.51.100.7:1"
 		rec := httptest.NewRecorder()
 		f.mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
-			t.Fatalf("GET /setup from untrusted = %d, want 404", rec.Code)
+			t.Fatalf("GET /setup from untrusted (admin exists) = %d, want 404", rec.Code)
 		}
-	})
 
-	t.Run("spoofed XFF cannot forge trust", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
-		req.RemoteAddr = "198.51.100.8:1"               // untrusted peer
-		req.Header.Set("X-Forwarded-For", "192.0.2.40") // forged trusted source
-		rec := httptest.NewRecorder()
-		f.mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("GET /setup with spoofed XFF = %d, want 404 (header ignored)", rec.Code)
-		}
-	})
-
-	t.Run("POST from untrusted refused with 404", func(t *testing.T) {
-		form := url.Values{"username": {"x"}, "password": {"correct-horse"}, "confirm": {"correct-horse"}}
-		rec := postSetup(t, f.mux, "198.51.100.9:1", form)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("POST /setup from untrusted = %d, want 404", rec.Code)
-		}
-		// And it must not have created an admin.
-		if has, _ := f.svc.HasUsers(context.Background()); has {
-			t.Error("untrusted POST created an admin")
+		form := url.Values{"username": {"y"}, "password": {"correct-horse"}, "confirm": {"correct-horse"}}
+		if rec := postSetup(t, f.mux, "198.51.100.9:1", form); rec.Code != http.StatusNotFound {
+			t.Fatalf("POST /setup from untrusted (admin exists) = %d, want 404", rec.Code)
 		}
 	})
 }
@@ -359,6 +408,188 @@ func TestSetupClosedAfterAdminExists(t *testing.T) {
 			t.Error("intruder admin was created by a second setup")
 		}
 	})
+}
+
+// TestSetupClosedPOSTDoesNotDiscloseEndpoint pins that a closed /setup answers an
+// untrusted POST with 404 and NOT 403.
+//
+// The same-origin and CSRF checks both answer 403, so ordering them ahead of the
+// closed-setup refusal turned the route into an endpoint-existence oracle: an
+// attacker with no valid token got 403 from /setup and 404 from any unrouted
+// path, which reveals /setup is there. GET already 404s for this client, so the
+// two verbs must agree.
+func TestSetupClosedPOSTDoesNotDiscloseEndpoint(t *testing.T) {
+	policy, err := trustnet.NewPolicy([]string{"192.0.2.0/24"}, nil)
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+	f := newTestOnboarding(t, policy)
+	if _, err := f.svc.Setup(context.Background(), "admin", "correct-horse"); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	// No CSRF cookie/field and no Origin: exactly the probing attacker.
+	req := httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader("username=x&password=yyyyyyyy&confirm=yyyyyyyy"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "198.51.100.7:1"
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("untrusted POST /setup (admin exists) = %d, want 404 (403 leaks the endpoint)", rec.Code)
+	}
+
+	// Control: an unrouted path must answer the same way, or 404 carries signal.
+	ctl := httptest.NewRequest(http.MethodPost, "/setup-does-not-exist", nil)
+	ctl.RemoteAddr = "198.51.100.7:1"
+	ctlRec := httptest.NewRecorder()
+	f.mux.ServeHTTP(ctlRec, ctl)
+	if ctlRec.Code != rec.Code {
+		t.Errorf("unrouted POST = %d but /setup = %d; the difference is an existence oracle", ctlRec.Code, rec.Code)
+	}
+}
+
+// TestSetupAdminCheckErrorFailsClosedToUntrusted pins that a DB failure during
+// the admin-existence check does not reveal /setup to an untrusted client.
+//
+// hasAdmin reports (false, err), so an unknown answer must be treated as "setup
+// is closed". Answering 500 here would both disclose the endpoint off-network
+// and do so at the moment an attacker probing for faults learns the most; a
+// trusted operator still gets the real 500 so they can debug their daemon.
+func TestSetupAdminCheckErrorFailsClosedToUntrusted(t *testing.T) {
+	onb := newFakeOnboarding(t, fakeOnboardingService{hasUsersErr: errFake("db down")}, nil)
+	policy, err := trustnet.NewPolicy([]string{"192.0.2.0/24"}, nil)
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+	onb.policy = policy
+
+	t.Run("untrusted gets 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
+		req.RemoteAddr = "198.51.100.7:1"
+		rec := httptest.NewRecorder()
+		onb.handleSetupForm(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("untrusted GET /setup on DB error = %d, want 404", rec.Code)
+		}
+	})
+
+	t.Run("trusted gets the real 500", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
+		req.RemoteAddr = "192.0.2.40:1"
+		rec := httptest.NewRecorder()
+		onb.handleSetupForm(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("trusted GET /setup on DB error = %d, want 500", rec.Code)
+		}
+	})
+}
+
+// TestSetupHashSlotsRefuseWhenSaturated pins that setup submissions are refused
+// with 503 rather than queued once the Argon2id concurrency cap is full.
+//
+// Unbounded hashing is a memory amplifier an unauthenticated client can drive
+// during the open window (64 MiB per hash), and a daemon OOM-killed mid-window
+// restarts with the window still open. Refusing beats queuing: parked
+// goroutines would hold memory and defeat the cap.
+func TestSetupHashSlotsRefuseWhenSaturated(t *testing.T) {
+	f := newTestOnboarding(t, trustnet.LoopbackOnly())
+
+	// Saturate every slot, so the request under test cannot acquire one.
+	onb := f.onb
+	for i := 0; i < maxConcurrentSetupHashes; i++ {
+		onb.hashSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < maxConcurrentSetupHashes; i++ {
+			<-onb.hashSlots
+		}
+	})
+
+	form := url.Values{"username": {"x"}, "password": {"correct-horse"}, "confirm": {"correct-horse"}}
+	rec := postSetup(t, f.mux, loopbackPeer, form)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /setup with all hash slots busy = %d, want 503", rec.Code)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Error("503 response carries no Retry-After header")
+	}
+	// The refusal must happen BEFORE any admin is created.
+	if has, _ := f.svc.HasUsers(context.Background()); has {
+		t.Error("a refused submission still created an admin")
+	}
+}
+
+// TestWarnOpenSetupThrottles pins that the open-window warning is rate limited
+// and that the suppressed count is not silently lost.
+//
+// One log line per unauthenticated request lets a client looping on /setup fill
+// a file-backed log; a daemon that dies on a full disk restarts with the window
+// STILL OPEN, which is the same denial-of-onboarding shape the hashSlots cap
+// exists to prevent. Throttling may lose the volume but must never hide that a
+// burst happened, hence the carried count.
+func TestWarnOpenSetupThrottles(t *testing.T) {
+	f := newTestOnboarding(t, trustnet.LoopbackOnly())
+	onb := f.onb
+
+	untrusted := func() *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/setup", nil)
+		req.RemoteAddr = "198.51.100.7:1"
+		return req
+	}
+
+	// First untrusted call always logs and stamps the clock.
+	onb.warnOpenSetup(untrusted())
+	onb.warnMu.Lock()
+	first, suppressed := onb.warnLast, onb.warnSuppressed
+	onb.warnMu.Unlock()
+	if first.IsZero() {
+		t.Fatal("first untrusted warn did not stamp warnLast; nothing was logged")
+	}
+	if suppressed != 0 {
+		t.Errorf("suppressed after first warn = %d, want 0", suppressed)
+	}
+
+	// A burst inside the interval must be counted, not emitted: warnLast must not
+	// move, and every dropped line must be accounted for.
+	const burst = 50
+	for i := 0; i < burst; i++ {
+		onb.warnOpenSetup(untrusted())
+	}
+	onb.warnMu.Lock()
+	afterBurst, counted := onb.warnLast, onb.warnSuppressed
+	onb.warnMu.Unlock()
+	if !afterBurst.Equal(first) {
+		t.Error("a burst inside the throttle interval emitted another line")
+	}
+	if counted != burst {
+		t.Errorf("suppressed count = %d, want %d (dropped lines must be accounted for)", counted, burst)
+	}
+
+	// Once the interval has elapsed the next call logs again and clears the count.
+	onb.warnMu.Lock()
+	onb.warnLast = time.Now().Add(-2 * warnOpenSetupInterval)
+	onb.warnMu.Unlock()
+	onb.warnOpenSetup(untrusted())
+	onb.warnMu.Lock()
+	afterElapse, cleared := onb.warnLast, onb.warnSuppressed
+	onb.warnMu.Unlock()
+	if !afterElapse.After(afterBurst) {
+		t.Error("no warning emitted after the throttle interval elapsed")
+	}
+	if cleared != 0 {
+		t.Errorf("suppressed count after emitting = %d, want 0 (it should be carried then reset)", cleared)
+	}
+
+	// A trusted client is never logged and must not disturb the throttle state.
+	trusted := httptest.NewRequest(http.MethodGet, "/setup", nil)
+	trusted.RemoteAddr = loopbackPeer
+	onb.warnOpenSetup(trusted)
+	onb.warnMu.Lock()
+	afterTrusted := onb.warnLast
+	onb.warnMu.Unlock()
+	if !afterTrusted.Equal(afterElapse) {
+		t.Error("a trusted request moved the warning throttle state")
+	}
 }
 
 // --- error-branch coverage via a fake service ---
@@ -653,12 +884,23 @@ func TestNewOnboardingDefaultsNilPolicyToLoopback(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /setup loopback (nil policy) = %d, want 200", rec.Code)
 	}
-	// A non-loopback peer is refused.
-	req2 := httptest.NewRequest(http.MethodGet, "/setup", nil)
-	req2.RemoteAddr = "192.0.2.50:1"
-	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusNotFound {
-		t.Fatalf("GET /setup non-loopback (nil policy) = %d, want 404", rec2.Code)
+
+	// The nil-policy default is asserted on the POLICY, not through /setup
+	// reachability. Since #461 the setup route is gated on admin-existence, so a
+	// non-loopback peer is served here regardless of the policy -- reusing the
+	// route to probe the default would now pass for the wrong reason (or fail
+	// while the default is perfectly correct). Ask the policy directly.
+	nonLoopback := httptest.NewRequest(http.MethodGet, "/setup", nil)
+	nonLoopback.RemoteAddr = "192.0.2.50:1"
+	if onb.policy == nil {
+		t.Fatal("NewOnboarding left a nil policy; want the loopback-only default")
+	}
+	if onb.policy.Trusted(nonLoopback) {
+		t.Error("nil policy trusted a non-loopback peer; want loopback-only")
+	}
+	loopback := httptest.NewRequest(http.MethodGet, "/setup", nil)
+	loopback.RemoteAddr = loopbackPeer
+	if !onb.policy.Trusted(loopback) {
+		t.Error("nil policy did not trust loopback; want loopback-only")
 	}
 }

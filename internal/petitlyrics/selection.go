@@ -57,9 +57,11 @@ const (
 //     sparsity this is the workhorse signal, not a fallback.
 //  3. Title and album textual similarity.
 //
-// Deliberately NOT used: availableLyricsType. It is not a capability set --
-// both probe tracks reported the same value regardless of the tier requested --
-// so tier preference is derived from the decoded payload instead.
+// Deliberately NOT used: availableLyricsType. Not because it is unreliable (an
+// earlier comment said so from a two-track sample; that is RETRACTED, and over
+// 107 hits it predicts the returned tier exactly), but because selection ranks
+// CANDIDATES for identity match, and the tier a candidate offers is not evidence
+// that it is the right recording.
 //
 // An empty candidate list returns ErrNotFound.
 func selectCandidate(songs []apiSong, track models.Track) (apiSong, error) {

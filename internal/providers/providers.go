@@ -42,6 +42,18 @@ func (p namedProvider) Name() string {
 	return p.name
 }
 
+// Unwrap returns the wrapped fetcher, following the errors.Unwrap convention.
+// It exists so a caller that CONSTRUCTED a provider can verify what it built --
+// notably that per-provider pacing configuration actually reached the concrete
+// client rather than being accepted and silently ignored (#535). Without it the
+// wrapper is opaque, and a construction-site regression is invisible to tests.
+//
+// It is a read-only accessor: the fetcher is already reachable behind this
+// interface, so exposing it grants no capability a caller did not have.
+func (p namedProvider) Unwrap() Fetcher {
+	return p.fetcher
+}
+
 func (p namedProvider) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
 	return p.fetcher.FindLyrics(ctx, track)
 }

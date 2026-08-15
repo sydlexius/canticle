@@ -1916,7 +1916,47 @@ func (w *Worker) releaseAfterThrottle(ctx context.Context, item queue.WorkItem) 
 	return nil
 }
 
+// fail records a work item's hard failure -- EXCEPT when the "failure" is this
+// process shutting down, in which case the item is released back to the queue
+// instead (#733).
+//
+// A shutdown cancellation is not the item's verdict. Worker.run already treats
+// it correctly at the loop level, but the item in flight when the signal arrived
+// was still driven through this path, stamping 'context canceled' onto the row
+// and parking it in the failed bucket -- indistinguishable on the Failure
+// Analysis report from a genuine hard error, and accruing one such row per
+// unlucky restart. Releasing restores the row's prior status and clears the
+// error, so the next run picks it up with no residue and no attempt consumed.
+//
+// THE DISCRIMINATOR IS BOTH HALVES, AND THAT IS THE WHOLE CARE HERE. The parent
+// context must be canceled AND the cause must be that cancellation:
+//
+//   - ctx.Err() alone is not enough: an item that genuinely failed microseconds
+//     before the signal arrived would have its real error discarded and be
+//     silently released, losing a defect the operator needed to see.
+//   - The error value alone is not enough either: a per-request
+//     context.DeadlineExceeded is a REAL provider failure and must keep counting
+//     as one. Keying on the error alone would swallow every provider timeout --
+//     a far worse bug than the cosmetic one this fixes.
 func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) error {
+	// errors.Is(ctx.Err(), context.Canceled), NOT ctx.Err() != nil. The looser
+	// form admits a parent that expired by DEADLINE, which is a timeout rather
+	// than a shutdown: a caller that ever wraps the worker context in a
+	// WithTimeout would see its timed-out items released instead of failed, and
+	// the timeout would go unrecorded. Verified against a real expired
+	// WithTimeout parent -- the loose form takes this branch, the strict one does
+	// not.
+	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(cause, context.Canceled) {
+		// Not a failure: do not touch consecutiveFailures or the last-failure fields,
+		// or a few restarts would put the next run into a backoff it never earned.
+		// WithoutCancel because the release must land despite the canceled parent --
+		// the same reason every other queue effect on this path uses it.
+		if err := w.queue.Release(context.WithoutCancel(ctx), item.ID); err != nil {
+			return fmt.Errorf("worker: release item %d after shutdown: %w", item.ID, err)
+		}
+		slog.Info("worker: released in-flight item on shutdown", "id", item.ID)
+		return nil
+	}
 	w.consecutiveFailures++
 	w.lastFailID = item.ID
 	w.lastFailArtist = item.Inputs.Track.ArtistName

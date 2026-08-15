@@ -9,6 +9,7 @@ import (
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/petitlyrics"
 	"github.com/sydlexius/canticle/internal/providers"
 )
 
@@ -70,6 +71,80 @@ func providerClassifier(l *Lane, err error) error {
 		if errors.Is(err, musixmatch.ErrRateLimited) ||
 			(errors.Is(err, musixmatch.ErrUnauthorized) && l.breaker.EverSucceeded()) {
 			l.notifyThrottle()
+		}
+		return err
+	}
+
+	// Petit Lyrics fault sentinels. These are handled separately from the
+	// musixmatch block above rather than folded into it, because the two
+	// providers do not share a throttle model: musixmatch distinguishes a
+	// never-succeeded 401 (a bad token) from a post-success 401 (an egress
+	// throttle) and ratchets the adaptive pacer only in the latter case, while
+	// petitlyrics has no token at all -- its 401 means the hardcoded clientAppId
+	// was rejected, which is never a throttle and must never ratchet the pacer.
+	//
+	// Before #607 none of these were classified here, so every petitlyrics
+	// failure fell through to the transport branch below and left the breaker
+	// untouched. The lane could not trip on any condition.
+	switch {
+	// ORDER IS LOAD-BEARING: ErrProviderUnavailable WRAPS ErrNotFound (so that
+	// existing callers bucketing a miss as benign keep working), which means it
+	// also satisfies the benign-miss case further down. Tested after it, a
+	// sustained outage would RESET the ramp instead of opening the lane -- the
+	// exact silent degradation #607 exists to end.
+	case errors.Is(err, petitlyrics.ErrProviderUnavailable):
+		// Deliberate decision (#607 asks for this to be chosen, not inherited):
+		// the sentinel TRIPS the breaker. A sustained run of zero-result
+		// responses almost certainly means the hardcoded application id was
+		// revoked, and continuing to fire paced requests at a provider that
+		// answers nothing is pure waste against a shared egress. The breaker's
+		// backoff re-probes periodically, so a transient cause still recovers
+		// with no operator action.
+		//
+		// It does NOT ratchet the pacer: a dead credential is not a throttle, and
+		// slowing a lane that is not being rate limited would persist after the
+		// credential is restored.
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider returned no results for a sustained run of lookups; the application id may have been revoked",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		return err
+
+	case errors.Is(err, petitlyrics.ErrUnauthorized):
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider rejected the client application id; the lane is down until it is restored",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		return err
+
+	case errors.Is(err, petitlyrics.ErrForbidden):
+		// A refused request SHAPE, not throttling (internal/petitlyrics/errors.go
+		// keeps 403 distinct from 429 for exactly this reason -- see #495, where a
+		// User-Agent denylist rejection read as a phantom rate limit and sent the
+		// investigation after the wrong cause). Retrying an unchanged request
+		// cannot succeed, so open the lane rather than spend requests on it.
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider refused the request shape (not throttling); a client change is required",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		return err
+
+	case errors.Is(err, petitlyrics.ErrRateLimited):
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider throttling",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		// An explicit 429 is an unambiguous throttle signal, so it ratchets the
+		// pacer -- unlike the 401 above.
+		l.notifyThrottle()
+		return err
+
+	case errors.Is(err, petitlyrics.ErrNotFound), errors.Is(err, petitlyrics.ErrUnsupportedTier):
+		// Both are healthy round trips. ErrNotFound is a clean miss;
+		// ErrUnsupportedTier means the response arrived fine and its payload was
+		// an undecodable tier (lyricsType 2, the encrypted LSY blob). Neither says
+		// anything about lane health, so both reset the ramp.
+		//
+		// EverSucceeded is deliberately NOT set, matching the musixmatch branch: a
+		// miss is a successful round trip but not a genuine lyric match.
+		if l.breaker.RecordBenignMiss() {
+			slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
 		}
 		return err
 	}
