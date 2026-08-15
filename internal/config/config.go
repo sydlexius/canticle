@@ -1159,7 +1159,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS", "value", v, "current", cfg.Providers.PetitLyricsCooldownSeconds) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS", "value", v, "current", cfg.Providers.PetitLyricsCooldownSeconds) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Providers.PetitLyricsCooldownSeconds = n
 			applied["providers.petitlyrics_cooldown_seconds"] = true
