@@ -234,6 +234,16 @@ race_wait_seconds = 2
 # Override: MXLRC_PROVIDERS_FALLBACK_ORDER (comma-separated). Default [].
 fallback_order = []
 
+# Minimum gap between Petit Lyrics requests, in whole seconds. The two providers
+# share neither a rate-limit budget nor a throttle profile, so this paces the
+# Petit Lyrics lane independently of api.cooldown (which governs Musixmatch).
+# 0 (the default) falls back to api.cooldown, which is how this lane behaved
+# before the key existed - so leaving it at 0 changes nothing.
+# The Petit Lyrics client enforces its own 10-second floor on any positive value:
+# this key can RAISE the effective interval but never lower it past that floor.
+# Override: MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS. Default 0.
+petitlyrics_cooldown_seconds = 0
+
 # Cache invalidation across provider-set changes: the active provider set
 # (primary + fallback_order) is hashed into a generation stamped onto each
 # queued item. When the set changes (a provider added or removed), items

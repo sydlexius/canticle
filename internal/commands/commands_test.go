@@ -21,6 +21,7 @@ import (
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/petitlyrics"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/scan"
@@ -468,6 +469,113 @@ func TestNormalizeWorkerInterval(t *testing.T) {
 	}
 }
 
+// TestPetitLyricsIntervalPrecedence pins the resolution order for the
+// petitlyrics pacing interval (#535): providers.petitlyrics_cooldown_seconds
+// when set, otherwise api.cooldown as the historical fallback. Before this key
+// existed the lane inherited api.cooldown unconditionally, so the fallback arm
+// is what keeps an existing deployment's behavior unchanged.
+func TestPetitLyricsIntervalPrecedence(t *testing.T) {
+	// Unset (zero) falls back to api.cooldown, preserving pre-#535 behavior.
+	cfg := config.Config{API: config.APIConfig{Cooldown: 45}}
+	if got := petitLyricsInterval(cfg); got != 45*time.Second {
+		t.Fatalf("petitLyricsInterval unset = %s; want 45s (api.cooldown fallback)", got)
+	}
+
+	// Set takes precedence over api.cooldown.
+	cfg.Providers.PetitLyricsCooldownSeconds = 90
+	if got := petitLyricsInterval(cfg); got != 90*time.Second {
+		t.Fatalf("petitLyricsInterval set = %s; want 90s (own key wins)", got)
+	}
+
+	// A negative value is not a disable request: pacing this lane off is not
+	// offered, so it falls back rather than yielding a negative interval that
+	// WithMinInterval would silently read as "no pacing".
+	cfg.Providers.PetitLyricsCooldownSeconds = -1
+	if got := petitLyricsInterval(cfg); got != 45*time.Second {
+		t.Fatalf("petitLyricsInterval negative = %s; want 45s (falls back)", got)
+	}
+}
+
+// TestPetitLyricsIntervalNeverGoesUnpaced is the overflow guard (#535 review,
+// finding C1). time.Duration is int64 NANOSECONDS, so `seconds * time.Second`
+// wraps NEGATIVE above 9223372036 -- and WithMinInterval only clamps values it
+// sees as > 0, so a wrapped negative sails past the 10s policy floor into
+// pace(), which returns immediately on minInterval <= 0. The lane would run
+// COMPLETELY UNPACED, which is the opposite of what a large cooldown asks for.
+//
+// No validator catches this: every input surface (TOML, env, CLI, web) bounds
+// the value below at 0 and not at all above. So the resolver is the last line,
+// and it must never hand a non-positive duration to a positive config.
+func TestPetitLyricsIntervalNeverGoesUnpaced(t *testing.T) {
+	// The exact measured wrap threshold, plus the absurd value a fat-finger or a
+	// units mix-up (nanoseconds pasted into a seconds field) actually produces.
+	for _, seconds := range []int{9223372036, 9223372037, 1 << 40, 999999999999999999} {
+		cfg := config.Config{
+			API:       config.APIConfig{Cooldown: 15},
+			Providers: config.ProvidersConfig{PetitLyricsCooldownSeconds: seconds},
+		}
+		got := petitLyricsInterval(cfg)
+		if got <= 0 {
+			t.Errorf("petitLyricsInterval(%d) = %s; a positive cooldown must NEVER resolve to a non-positive duration (that disables pacing entirely)", seconds, got)
+		}
+		if got > maxPacingInterval {
+			t.Errorf("petitLyricsInterval(%d) = %s; want it clamped to at most %s", seconds, got, maxPacingInterval)
+		}
+	}
+
+	// The same overflow is reachable through the api.cooldown FALLBACK arm, so
+	// the clamp has to cover both inputs, not just the new key. This arm is
+	// pre-existing (the bug is inherited, not introduced), but it flows through
+	// this one resolver, so guarding here fixes it for this lane.
+	cfg := config.Config{API: config.APIConfig{Cooldown: 999999999999999999}}
+	if got := petitLyricsInterval(cfg); got <= 0 {
+		t.Errorf("petitLyricsInterval via api.cooldown overflow = %s; want a positive clamped duration", got)
+	}
+
+	// A sane value must pass through untouched -- a clamp that mangles ordinary
+	// input would be worse than the bug.
+	sane := config.Config{Providers: config.ProvidersConfig{PetitLyricsCooldownSeconds: 90}}
+	if got := petitLyricsInterval(sane); got != 90*time.Second {
+		t.Errorf("petitLyricsInterval(90) = %s; want 90s (the clamp must not touch sane values)", got)
+	}
+}
+
+// TestBuildProviderAppliesPetitLyricsInterval pins the ONE line issue #535 is
+// actually about: that the resolved interval reaches the client rather than
+// being accepted and ignored (the issue's acceptance criterion #2).
+//
+// Without this, reverting buildProvider to the pre-change
+// `WithMinInterval(cfg.API.Cooldown)` leaves the entire suite green -- verified
+// by mutation. Every other test here covers the resolver and the config
+// plumbing AROUND the call site, not the call site itself.
+func TestBuildProviderAppliesPetitLyricsInterval(t *testing.T) {
+	cfg := config.Config{
+		// Deliberately DIFFERENT values: if the wiring regresses to api.cooldown
+		// the observed interval is 15s, not 90s, so the assertion discriminates.
+		API:       config.APIConfig{Cooldown: 15},
+		Providers: config.ProvidersConfig{PetitLyricsCooldownSeconds: 90},
+	}
+
+	p := buildProvider(providers.PetitLyrics, cfg, "", nil)
+	if p == nil {
+		t.Fatal("buildProvider returned nil for the petitlyrics provider")
+	}
+
+	inner, ok := p.(interface{ Unwrap() providers.Fetcher })
+	if !ok {
+		t.Fatal("provider wrapper does not expose Unwrap; cannot verify the interval reached the client")
+	}
+	client, ok := inner.Unwrap().(*petitlyrics.Client)
+	if !ok {
+		t.Fatalf("unwrapped fetcher is %T; want *petitlyrics.Client", inner.Unwrap())
+	}
+
+	if got := client.MinInterval(); got != 90*time.Second {
+		t.Errorf("client MinInterval = %s; want 90s from providers.petitlyrics_cooldown_seconds.\n"+
+			"15s means buildProvider is still using api.cooldown and the key is accepted but ignored (#535 AC2).", got)
+	}
+}
+
 func TestServeWorkerIntervalUsesConfigUnlessFlagProvided(t *testing.T) {
 	cfg := config.Config{
 		API: config.APIConfig{Cooldown: 45},
@@ -817,6 +925,79 @@ func TestConfigProvidersModeAndRaceWaitGetSetRoundTrip(t *testing.T) {
 	// Only a non-integer is rejected.
 	if err := setConfigValue(&cfg, "providers.race_wait_seconds", "abc"); err == nil {
 		t.Fatal("setConfigValue accepted a non-integer providers.race_wait_seconds")
+	}
+}
+
+// TestConfigPetitLyricsCooldownGetSetRoundTrip covers the config get/set arms
+// for providers.petitlyrics_cooldown_seconds (#535). The key is Editable in the
+// registry, so a missing CLI arm would be exactly the registry/CLI drift #670
+// tracks.
+func TestConfigPetitLyricsCooldownGetSetRoundTrip(t *testing.T) {
+	cfg := config.Config{
+		Providers: config.ProvidersConfig{PetitLyricsCooldownSeconds: 60},
+	}
+
+	got, ok := configValue(cfg, "providers.petitlyrics_cooldown_seconds")
+	if !ok {
+		t.Fatal("configValue(providers.petitlyrics_cooldown_seconds) ok = false; want true")
+	}
+	if got != "60" {
+		t.Fatalf("configValue = %q; want %q", got, "60")
+	}
+	if !slices.Contains(configKeys(), "providers.petitlyrics_cooldown_seconds") {
+		t.Fatal("configKeys missing providers.petitlyrics_cooldown_seconds")
+	}
+
+	if err := setConfigValue(&cfg, "providers.petitlyrics_cooldown_seconds", "90"); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	if cfg.Providers.PetitLyricsCooldownSeconds != 90 {
+		t.Fatalf("petitlyrics_cooldown_seconds = %d; want 90", cfg.Providers.PetitLyricsCooldownSeconds)
+	}
+
+	// 0 is the documented "use api.cooldown" sentinel, so it must be accepted.
+	if err := setConfigValue(&cfg, "providers.petitlyrics_cooldown_seconds", "0"); err != nil {
+		t.Fatalf("setConfigValue 0: %v (0 is the api.cooldown-fallback sentinel)", err)
+	}
+	if cfg.Providers.PetitLyricsCooldownSeconds != 0 {
+		t.Fatalf("petitlyrics_cooldown_seconds = %d; want 0", cfg.Providers.PetitLyricsCooldownSeconds)
+	}
+
+	// A negative carries no meaning here (0 already means fall back), so unlike
+	// race_wait_seconds it is rejected rather than stored.
+	if err := setConfigValue(&cfg, "providers.petitlyrics_cooldown_seconds", "-1"); err == nil {
+		t.Fatal("setConfigValue accepted a negative providers.petitlyrics_cooldown_seconds")
+	}
+	if err := setConfigValue(&cfg, "providers.petitlyrics_cooldown_seconds", "abc"); err == nil {
+		t.Fatal("setConfigValue accepted a non-integer providers.petitlyrics_cooldown_seconds")
+	}
+}
+
+// TestPetitLyricsCooldownValidatorMatchesCLI pins the CLI arm and the web save
+// path to the SAME non-negative rule (#535). The web path validates through
+// config.ValidateAndSet (registry-driven, TypeInt -> ValidateNonNegativeInt)
+// while the CLI arm hand-rolls its bound, so the two could silently diverge and
+// let a value in through one surface that the other rejects.
+func TestPetitLyricsCooldownValidatorMatchesCLI(t *testing.T) {
+	const path = "providers.petitlyrics_cooldown_seconds"
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"90", true},
+		{"0", true},
+		{"-1", false},
+		{"abc", false},
+	} {
+		webErr := config.ValidateAndSet(path, tc.value)
+		cliErr := setConfigValue(&config.Config{}, path, tc.value)
+		if (webErr == nil) != tc.valid {
+			t.Errorf("ValidateAndSet(%q) err = %v; want valid=%v", tc.value, webErr, tc.valid)
+		}
+		if (webErr == nil) != (cliErr == nil) {
+			t.Errorf("value %q: web accepts=%v but CLI accepts=%v; the two surfaces disagree",
+				tc.value, webErr == nil, cliErr == nil)
+		}
 	}
 }
 

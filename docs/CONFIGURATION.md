@@ -258,9 +258,10 @@ disabled = []
 # mode = "ordered"          # "ordered" (default) or "parallel"
 # race_wait_seconds = 2     # parallel-mode synced-upgrade window
 # fallback_order = []       # providers consulted after the primary, in order
+# petitlyrics_cooldown_seconds = 0   # 0 uses api.cooldown
 ```
 
-Provider selection and multi-provider dispatch. Musixmatch is the default primary provider (env: `MXLRC_PROVIDER_PRIMARY`, `MXLRC_PROVIDERS_DISABLED`, `MXLRC_PROVIDERS_MODE`, `MXLRC_PROVIDERS_RACE_WAIT_SECONDS`, `MXLRC_PROVIDERS_FALLBACK_ORDER`). See [Multi-provider orchestration](multi-provider-orchestration.md) for the full dispatch model.
+Provider selection and multi-provider dispatch. Musixmatch is the default primary provider (env: `MXLRC_PROVIDER_PRIMARY`, `MXLRC_PROVIDERS_DISABLED`, `MXLRC_PROVIDERS_MODE`, `MXLRC_PROVIDERS_RACE_WAIT_SECONDS`, `MXLRC_PROVIDERS_FALLBACK_ORDER`, `MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS`). See [Multi-provider orchestration](multi-provider-orchestration.md) for the full dispatch model.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
@@ -269,6 +270,7 @@ Provider selection and multi-provider dispatch. Musixmatch is the default primar
 | `mode` | `ordered` | Dispatch strategy. `ordered` queries lanes in priority order (primary, then each `fallback_order` entry) and returns the first suitable result. `parallel` dispatches every lane concurrently and races them. Any other value is rejected at load. |
 | `race_wait_seconds` | `2` | Parallel-mode only: after a suitable unsynced result arrives, wait up to this many seconds for a synced result (a strict quality upgrade) to preempt it. Non-positive values are reset to the default. Ignored in `ordered` mode. |
 | `fallback_order` | `[]` | Provider names consulted, in order, after the primary when it returns no suitable result. Each name must be a known provider; unknown names are rejected at load. Empty means no fallback (only the primary lane runs). |
+| `petitlyrics_cooldown_seconds` | `0` | Minimum seconds between Petit Lyrics requests. `0` falls back to `api.cooldown`, which is the behavior this lane had before the key existed. The two providers share neither a rate-limit budget nor a throttle profile, so this lets you pace them independently. The Petit Lyrics client enforces its own floor (10s) on any positive value, so this key can raise the interval but never lower it past that floor. |
 
 `parallel` mode makes more upstream calls (every lane is queried per dispatch), so it is not advised against rate-limited providers unless latency matters more than call volume.
 

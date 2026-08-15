@@ -112,6 +112,25 @@ func TestSettingsCommonPathsValid(t *testing.T) {
 	}
 }
 
+// TestRawConfigValuePetitLyricsCooldown covers the rawConfigValue arm for
+// providers.petitlyrics_cooldown_seconds (#535). rawConfigValue ends in a bare
+// `return ""` with no default guard, so a registry field with no arm renders as
+// an empty control on the settings page rather than failing anywhere -- a
+// silent failure that no existing test would catch.
+func TestRawConfigValuePetitLyricsCooldown(t *testing.T) {
+	cfg := config.Config{
+		Providers: config.ProvidersConfig{PetitLyricsCooldownSeconds: 45},
+	}
+	if got := rawConfigValue(cfg, "providers.petitlyrics_cooldown_seconds"); got != "45" {
+		t.Fatalf("rawConfigValue = %q; want %q (a missing arm renders blank in the UI)", got, "45")
+	}
+	// 0 is the api.cooldown-fallback sentinel and must render as "0", not blank:
+	// blank is indistinguishable from the no-arm failure above.
+	if got := rawConfigValue(config.Config{}, "providers.petitlyrics_cooldown_seconds"); got != "0" {
+		t.Fatalf("rawConfigValue zero = %q; want %q", got, "0")
+	}
+}
+
 // TestSettingsLabelsCoverRegistry confirms every registry field has a curated
 // plain-language label (no field falls back to the humanized path segment), so a
 // newly added field gets an explicit label.

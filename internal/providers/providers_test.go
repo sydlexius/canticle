@@ -96,6 +96,29 @@ func TestNamedProviderForwardsAdaptivePacer(t *testing.T) {
 	}
 }
 
+// TestNamedProviderUnwrapReturnsInnerFetcher covers the Unwrap accessor (#535).
+// It exists so a caller that CONSTRUCTED a provider can verify what it built --
+// notably that per-provider pacing configuration actually reached the concrete
+// client instead of being accepted and silently ignored. Without a working
+// Unwrap the wrapper is opaque and that regression is untestable, so the
+// accessor is load-bearing rather than incidental.
+func TestNamedProviderUnwrapReturnsInnerFetcher(t *testing.T) {
+	inner := fakeFetcher{}
+	p := New(Musixmatch, inner)
+
+	u, ok := p.(interface{ Unwrap() Fetcher })
+	if !ok {
+		t.Fatal("namedProvider does not expose Unwrap; a constructed provider cannot be verified")
+	}
+	got, ok := u.Unwrap().(fakeFetcher)
+	if !ok {
+		t.Fatalf("Unwrap returned %T; want the fakeFetcher that was wrapped", u.Unwrap())
+	}
+	if got != inner {
+		t.Error("Unwrap returned a different fetcher than the one passed to New")
+	}
+}
+
 func TestNamedProviderAdaptiveNoopForPlainFetcher(t *testing.T) {
 	// A fetcher without AdaptivePacer: the wrapper's methods must be safe no-ops.
 	p := New(Musixmatch, fakeFetcher{})
