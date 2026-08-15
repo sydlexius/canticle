@@ -54,6 +54,31 @@ BUCKET="${2:-60}"                # seconds per sample
 NETDATA="${NETDATA_URL:-http://localhost:19999}"
 DISKS_INI="${DISKS_INI:-/var/local/emhttp/disks.ini}"
 
+# Validate BEFORE any arithmetic. Both values reach a `$(( ))`, where bash fails
+# in two ways that tell an operator nothing about what they typed:
+#   BUCKET=0   -> "division by 0"
+#   BUCKET=abc -> "abc: unbound variable", because under `set -u` a non-numeric
+#                 string in arithmetic context is read as a VARIABLE NAME
+# The second is the actively misleading one -- it names a variable the operator
+# never wrote. Fail with the usage instead.
+usage() {
+  echo "usage: $(basename "$0") [seconds_back] [bucket_seconds]" >&2
+  echo "  seconds_back    window to report, in whole seconds (default 43200 = 12h)" >&2
+  echo "  bucket_seconds  sample size, in whole seconds (default 60); must be > 0" >&2
+  echo "                  a smaller bucket tightens resolution -- see the NOTE at the end" >&2
+}
+
+if ! [[ "$SECONDS_BACK" =~ ^[0-9]+$ ]] || [ "$SECONDS_BACK" -lt 1 ]; then
+  echo "ERROR: seconds_back must be a positive whole number of seconds; got '${SECONDS_BACK}'." >&2
+  usage
+  exit 2
+fi
+if ! [[ "$BUCKET" =~ ^[0-9]+$ ]] || [ "$BUCKET" -lt 1 ]; then
+  echo "ERROR: bucket_seconds must be a positive whole number of seconds; got '${BUCKET}'." >&2
+  usage
+  exit 2
+fi
+
 points=$(( SECONDS_BACK / BUCKET ))
 [ "$points" -lt 1 ] && points=1
 
