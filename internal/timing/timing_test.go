@@ -583,3 +583,61 @@ func TestEvaluate_DegenerateCarriesNoMagnitude(t *testing.T) {
 		t.Errorf("degenerate magnitude carries data: %+v", mag)
 	}
 }
+
+// TestStripWordMarkers covers the A2-marker stripper (#480 prerequisite).
+func TestStripWordMarkers(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"<05:00.00>♪", "♪"},
+		{"<00:01.50>alpha <00:02.00>beta", "alpha beta"},
+		{"plain line", "plain line"},
+		{"", ""},
+		// A malformed or partial marker is NOT a marker: leave it alone rather
+		// than guessing, so text that merely looks marker-ish is never eaten.
+		{"<not a stamp>alpha", "<not a stamp>alpha"},
+		{"a < b > c", "a < b > c"},
+		// An hour-length track's stamp still has the mm:ss.xx shape.
+		{"<70:00.00>alpha", "alpha"},
+	} {
+		if got := StripWordMarkers(tc.in); got != tc.want {
+			t.Errorf("StripWordMarkers(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestIsDecorative_MarkedNoteStillDecorative is the C1 fix.
+//
+// A decorative cue that gained an A2 word marker (`<05:00.00>♪`) was no longer
+// recognized as decorative, so its timestamp entered correctedMaxSeconds and a
+// perfectly-synced file re-read from disk flipped from Ok to MisSynced --
+// exactly the ~33% false-demotion class this package exists to prevent,
+// reintroduced by the writer. revalidate would then demote a correct file.
+func TestIsDecorative_MarkedNoteStillDecorative(t *testing.T) {
+	for _, s := range []string{"♪", "<05:00.00>♪", "<00:00.00>♪ ♪"} {
+		if !IsDecorative(s) {
+			t.Errorf("IsDecorative(%q) = false; a marked decorative cue is still decorative", s)
+		}
+	}
+	// A marked REAL lyric must stay text-bearing, or the fix would silently
+	// filter every marked line out of the verdict.
+	if IsDecorative("<00:01.50>alpha") {
+		t.Error("IsDecorative marked a real lyric as decorative")
+	}
+}
+
+// TestEvaluate_MarkedTrailingMarkerDoesNotOverrun is the same fix at the
+// Evaluate level: the verdict must not depend on whether markers were written.
+func TestEvaluate_MarkedTrailingMarkerDoesNotOverrun(t *testing.T) {
+	plain := song(line(1, "alpha"), line(300, "♪"))
+	marked := song(
+		models.Lines{Text: "<00:01.00>alpha", Time: models.Time{Total: 1}},
+		models.Lines{Text: "<05:00.00>♪", Time: models.Time{Total: 300}},
+	)
+	po, _ := Evaluate(plain, 240)
+	mo, _ := Evaluate(marked, 240)
+	if po != mo {
+		t.Errorf("verdict depends on markers: plain=%q marked=%q; want identical", po, mo)
+	}
+	if mo != Ok {
+		t.Errorf("marked file verdict = %q; want ok", mo)
+	}
+}
