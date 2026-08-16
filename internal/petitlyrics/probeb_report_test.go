@@ -5,7 +5,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 
+	"github.com/sydlexius/canticle/internal/langguard"
 	"github.com/sydlexius/canticle/internal/normalize"
 )
 
@@ -131,13 +133,35 @@ func scoreAgreement(trusted, candidate string) float64 {
 	return 2 * float64(overlap) / float64(lenA+lenB)
 }
 
-// tokenCounts splits s into whitespace-delimited tokens after running each
-// through normalize.NormalizeKey (NFKD fold, strip combining marks, NFC,
-// lowercase), and returns a frequency map. Normalizing per-token rather than
-// the whole body first keeps punctuation-adjacent words comparable (e.g. a
-// trailing comma is part of the pre-split token either way, so both sides are
-// affected identically).
+// tokenCounts reduces s to a frequency map of comparable units.
+//
+// TWO TOKENIZERS, chosen per text, because one does not fit both scripts. This
+// is the correction CodeRabbit caught on PR #772: the original whitespace-only
+// split made each Japanese LINE a single token, so two texts differing only by
+// where the line breaks fall scored 0.000 rather than 1.000. Measured, with a
+// Latin control at 1.000 on the same experiment -- so the defect was specific to
+// scripts with no whitespace word boundaries.
+//
+// That is not a corner case here. petitlyrics is a Japanese provider, and CJK
+// material is a large part of what this lane serves, so Probe B would have been
+// measuring line-wrapping differences instead of isOfficial agreement on exactly
+// the population it exists to say something about.
+//
+//   - Whitespace-delimited text (Latin and friends): word tokens, as before.
+//     Words are the meaningful unit and keep the score interpretable.
+//   - Scripts without whitespace word boundaries (Han, Kana, Hangul): character
+//     BIGRAMS over the whitespace-stripped body. Bigrams are segmentation-
+//     invariant -- re-wrapping a line cannot change which adjacent character
+//     pairs exist -- without needing a morphological analyzer, which would be a
+//     large dependency for a throwaway measurement harness.
+//
+// Each unit is normalized through normalize.NormalizeKey (NFKD fold, strip
+// combining marks, NFC, lowercase) so case and diacritic differences do not read
+// as disagreement.
 func tokenCounts(s string) map[string]int {
+	if usesCharacterSegmentation(s) {
+		return bigramCounts(s)
+	}
 	counts := map[string]int{}
 	for tok := range strings.FieldsSeq(s) {
 		key := normalize.NormalizeKey(tok)
@@ -145,6 +169,68 @@ func tokenCounts(s string) map[string]int {
 			continue
 		}
 		counts[key]++
+	}
+	return counts
+}
+
+// usesCharacterSegmentation reports whether s is predominantly written in a
+// script that does not delimit words with whitespace.
+//
+// Threshold rather than "any": a CJK lyric commonly carries a Latin title line
+// or a romanized credit, and a single Latin word must not flip the whole body to
+// word tokens. Judged over LETTERS only -- ScriptOf returns "" for punctuation,
+// digits and whitespace, which are not evidence either way.
+func usesCharacterSegmentation(s string) bool {
+	var letters, charSeg int
+	for _, r := range s {
+		switch langguard.ScriptOf(r) {
+		case "":
+			continue
+		case langguard.Han, langguard.Kana, langguard.Hangul:
+			charSeg++
+		}
+		letters++
+	}
+	if letters == 0 {
+		return false
+	}
+	return float64(charSeg)/float64(letters) >= charSegmentationThreshold
+}
+
+// charSegmentationThreshold is the share of letters that must belong to a
+// character-segmented script before the bigram tokenizer is used. Half is
+// deliberately permissive: a mixed body is better served by bigrams (which still
+// capture Latin runs, just more finely) than by word tokens (which collapse an
+// entire CJK line into one unmatched unit).
+const charSegmentationThreshold = 0.5
+
+// bigramCounts returns a frequency map of adjacent character pairs over the
+// whitespace-stripped, normalized body.
+//
+// Whitespace is removed BEFORE pairing, which is what makes the result
+// segmentation-invariant: the same characters in the same order yield the same
+// bigrams no matter where lines break. A single-character body has no pairs, so
+// it falls back to that one character, which keeps a one-word line comparable
+// rather than scoring 0 against everything.
+func bigramCounts(s string) map[string]int {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	runes := []rune(normalize.NormalizeKey(b.String()))
+	counts := map[string]int{}
+	if len(runes) == 0 {
+		return counts
+	}
+	if len(runes) == 1 {
+		counts[string(runes)]++
+		return counts
+	}
+	for i := 0; i+1 < len(runes); i++ {
+		counts[string(runes[i:i+2])]++
 	}
 	return counts
 }
@@ -434,10 +520,105 @@ func TestScoreAgreement(t *testing.T) {
 		t.Errorf("scoreAgreement partial overlap = %v, want 0.5", partial)
 	}
 
-	// Case and diacritic folding: NormalizeKey must make these agree.
+	// Case folding: NormalizeKey must make these agree.
 	folded := scoreAgreement("LOREM IPSUM", "lorem ipsum")
 	if folded != 1.0 {
 		t.Errorf("scoreAgreement case-folding = %v, want 1.0", folded)
+	}
+
+	// DIACRITIC folding, which the case above does not exercise despite its
+	// original label -- caught in review on PR #772. NormalizeKey runs an NFKD
+	// fold and strips combining marks, so an accented and unaccented spelling of
+	// the same word must agree. Without this, removing that normalization step
+	// passes the whole suite.
+	diacritic := scoreAgreement("café", "cafe")
+	if diacritic != 1.0 {
+		t.Errorf("scoreAgreement diacritic folding = %v, want 1.0", diacritic)
+	}
+
+	// TOKEN MULTIPLICITY. Every other overlap case uses distinct tokens, so a
+	// regression turning the multiset overlap into a set overlap would pass them
+	// all.
+	//
+	// The shared token must REPEAT ON BOTH SIDES to discriminate, which is easy
+	// to get wrong: an earlier version of this case used "lorem lorem" vs
+	// "lorem ipsum", where min(2,1) and count-the-type-once both equal 1, so the
+	// mutation scored identically and the test passed it. Verified by actually
+	// applying the mutation rather than by reasoning about it.
+	//
+	// Here the multiset overlap is min(2,2)=2 over lengths 2 and 2, giving
+	// exactly 1.0; counting the shared type once gives 2*1/4 = 0.5. Both are
+	// exact binary floats, so the comparison needs no tolerance.
+	multiplicity := scoreAgreement("lorem lorem", "lorem lorem")
+	if multiplicity != 1.0 {
+		t.Errorf("scoreAgreement token multiplicity = %v, want 1.0 "+
+			"(a set-based overlap would give 0.5)", multiplicity)
+	}
+}
+
+// TestScoreAgreement_SegmentationInvariance is the regression test for the
+// scoring defect CodeRabbit caught on PR #772.
+//
+// Whitespace tokenization made each Japanese LINE a single token, so two texts
+// differing only by where the line breaks fall scored 0.000 instead of 1.000.
+// petitlyrics is a Japanese provider, so Probe B would have measured line
+// wrapping rather than isOfficial agreement on much of what this lane serves.
+//
+// The Latin cases are the CONTROL, and they are what make the CJK results
+// meaningful: they prove the word tokenizer is still in use where whitespace
+// genuinely delimits words, so the fix is script-aware rather than a blanket
+// change that scores everything as agreeing.
+//
+// All fixtures are placeholder text -- kana syllabary and lorem ipsum -- never
+// real lyric content.
+func TestScoreAgreement_SegmentationInvariance(t *testing.T) {
+	cases := []struct {
+		name               string
+		trusted, candidate string
+		want               float64
+	}{
+		// THE REGRESSION: identical characters, different line breaks.
+		{"kana rewrapped", "あいう\nえお", "あいうえお", 1.0},
+		{"kana rewrapped, more breaks", "あ\nいう\nえお", "あいうえお", 1.0},
+		// Genuine disagreement must still score 0, or the fix would be
+		// "everything agrees", which measures nothing.
+		{"kana disjoint", "あいうえお", "かきくけこ", 0.0},
+		// CONTROL: whitespace-delimited text keeps word tokenization.
+		{"latin rewrapped", "lorem ipsum\ndolor", "lorem ipsum dolor", 1.0},
+		{"latin disjoint", "lorem ipsum", "consectetur adipiscing", 0.0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scoreAgreement(tc.trusted, tc.candidate); got != tc.want {
+				t.Errorf("scoreAgreement = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUsesCharacterSegmentation pins the tokenizer-selection rule, including the
+// mixed-script case the threshold exists for: a CJK lyric commonly carries a
+// Latin title or romanized credit, and a few Latin words must not flip the whole
+// body back to word tokens.
+func TestUsesCharacterSegmentation(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"pure latin", "lorem ipsum dolor", false},
+		{"pure kana", "あいうえお", true},
+		{"kana with a latin credit line", "あいうえお\nlorem", true},
+		{"latin with one kana word", "lorem ipsum dolor sit amet あ", false},
+		{"empty", "", false},
+		{"punctuation and digits only", "12:34 -- !!", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := usesCharacterSegmentation(tc.in); got != tc.want {
+				t.Errorf("usesCharacterSegmentation(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -451,5 +632,98 @@ func TestScoreAgreement_MutationGuard(t *testing.T) {
 	// overlap = 3 (lorem, ipsum, dolor); lenA=6, lenB=6; dice = 2*3/12 = 0.5
 	if got != 0.5 {
 		t.Errorf("scoreAgreement = %v, want 0.5", got)
+	}
+}
+
+// TestQuotaByBand is the regression test for the sampling bias CodeRabbit caught
+// on PR #772.
+//
+// Rows are per-TRACK, so a global shuffle lets an artist with more completed
+// tracks contribute proportionally more of them -- and the top band is DEFINED by
+// having more tracks, so it crowds out the bottom. The bottom band is exactly the
+// population this probe must speak about, since the question is whether
+// isOfficial discriminates WITHIN a band rather than merely tracking popularity.
+func TestQuotaByBand(t *testing.T) {
+	// A deliberately lopsided pool: the top band has far more rows than the
+	// bottom, which is what a real library looks like and what biases a global
+	// shuffle.
+	var all []probeBRow
+	bands := map[string]int{}
+	add := func(artist string, band, count int) {
+		bands[artist] = band
+		for i := 0; i < count; i++ {
+			all = append(all, probeBRow{artistKey: artist})
+		}
+	}
+	add("bottom", 0, 5)
+	add("middle", 1, 20)
+	add("top", 2, 100)
+
+	got := quotaByBand(all, bands, 12)
+	if len(got) != 12 {
+		t.Fatalf("sampled %d rows, want 12", len(got))
+	}
+
+	counts := map[int]int{}
+	for _, r := range got {
+		counts[bands[r.artistKey]]++
+	}
+	// Even quota: 12 across 3 bands is 4 each, and every band has at least 4
+	// available.
+	for b := range bandCount {
+		if counts[b] != 4 {
+			t.Errorf("band %d got %d rows, want 4 (an even quota); counts=%v", b, counts[b], counts)
+		}
+	}
+}
+
+// TestQuotaByBandRedistributesShortage covers the case a naive fixed quota gets
+// wrong: a band with fewer rows than its share must not leave the sample short,
+// and must not silently drop the request either.
+func TestQuotaByBandRedistributesShortage(t *testing.T) {
+	var all []probeBRow
+	bands := map[string]int{}
+	add := func(artist string, band, count int) {
+		bands[artist] = band
+		for i := 0; i < count; i++ {
+			all = append(all, probeBRow{artistKey: artist})
+		}
+	}
+	// The bottom band can supply only 2 of its 5-row share.
+	add("bottom", 0, 2)
+	add("middle", 1, 50)
+	add("top", 2, 50)
+
+	got := quotaByBand(all, bands, 15)
+	if len(got) != 15 {
+		t.Fatalf("sampled %d rows, want 15 -- a short band must be redistributed, not left as a gap", len(got))
+	}
+	counts := map[int]int{}
+	for _, r := range got {
+		counts[bands[r.artistKey]]++
+	}
+	if counts[0] != 2 {
+		t.Errorf("bottom band got %d rows, want all 2 it had; counts=%v", counts[0], counts)
+	}
+	if counts[1]+counts[2] != 13 {
+		t.Errorf("the remaining bands got %d rows, want 13; counts=%v", counts[1]+counts[2], counts)
+	}
+}
+
+// TestQuotaByBandSmallPool asserts the degenerate cases return everything rather
+// than erroring or looping: a pool at or below the requested size needs no
+// quota at all.
+func TestQuotaByBandSmallPool(t *testing.T) {
+	bands := map[string]int{"a": 0, "b": 2}
+	all := []probeBRow{{artistKey: "a"}, {artistKey: "b"}}
+
+	if got := quotaByBand(all, bands, 10); len(got) != 2 {
+		t.Errorf("pool smaller than n returned %d rows, want all 2", len(got))
+	}
+	if got := quotaByBand(nil, bands, 10); got != nil {
+		t.Errorf("empty pool returned %v, want nil", got)
+	}
+	if got := quotaByBand(all, bands, 0); got != nil {
+		t.Errorf("n=0 returned %v, want nil", got)
 	}
 }

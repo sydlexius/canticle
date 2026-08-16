@@ -103,7 +103,7 @@ func TestProbeBSurvey(t *testing.T) {
 	}
 	bands := bandTracksByArtist(counts)
 
-	rows, err := sampleDoneRows(ctx, sqlDB, sampleSize)
+	rows, err := sampleDoneRows(ctx, sqlDB, sampleSize, bands)
 	if err != nil {
 		t.Fatalf("sample scan_results rows: %v", err)
 	}
@@ -228,7 +228,7 @@ func artistTrackCounts(ctx context.Context, sqlDB *sql.DB) (map[string]int, erro
 // library's own record that one was written, without this probe having to
 // re-derive that by re-deriving SidecarName and re-checking every candidate
 // extension.
-func sampleDoneRows(ctx context.Context, sqlDB *sql.DB, n int) ([]probeBRow, error) {
+func sampleDoneRows(ctx context.Context, sqlDB *sql.DB, n int, bands map[string]int) ([]probeBRow, error) {
 	rows, err := sqlDB.QueryContext(ctx,
 		`SELECT artist_key, artist, title, album, outdir, filename
            FROM scan_results
@@ -255,30 +255,104 @@ func sampleDoneRows(ctx context.Context, sqlDB *sql.DB, n int) ([]probeBRow, err
 	// reproducibility here -- this is a one-shot manual probe, not a
 	// reproducibility-critical test -- so math/rand's default source is fine.
 	rand.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
-	if len(all) > n {
-		all = all[:n]
+	return quotaByBand(all, bands, n), nil
+}
+
+// quotaByBand takes an equal quota from each popularity band, redistributing any
+// shortage to the bands that still have rows.
+//
+// A GLOBAL shuffle is biased for this measurement, which CodeRabbit caught on PR
+// #772: rows are per-TRACK, so an artist with more completed tracks contributes
+// proportionally more of them, and the top band -- which is defined by having
+// more tracks -- crowds out the bottom. The bottom band is exactly the population
+// this probe needs to speak about, since the whole question is whether isOfficial
+// discriminates WITHIN a band rather than merely tracking popularity.
+//
+// A shortage is redistributed rather than left as a gap: if one band has fewer
+// eligible rows than its quota, the remainder goes to the bands that can fill it,
+// so a small band costs coverage only in that band. The report prints per-band
+// counts either way, so a thin cell stays visible rather than being papered over
+// by the redistribution.
+func quotaByBand(all []probeBRow, bands map[string]int, n int) []probeBRow {
+	if n <= 0 || len(all) == 0 {
+		return nil
 	}
-	return all, nil
+	if len(all) <= n {
+		return all
+	}
+
+	byBand := make([][]probeBRow, bandCount)
+	for _, r := range all {
+		b := bands[r.artistKey]
+		if b < 0 || b >= bandCount {
+			b = 0
+		}
+		byBand[b] = append(byBand[b], r)
+	}
+
+	// Round-robin across bands rather than computing quotas arithmetically. It
+	// redistributes a shortage for free -- an exhausted band is simply skipped --
+	// and avoids an off-by-one when n does not divide evenly by bandCount.
+	out := make([]probeBRow, 0, n)
+	idx := make([]int, bandCount)
+	for len(out) < n {
+		progressed := false
+		for b := range byBand {
+			if idx[b] >= len(byBand[b]) {
+				continue
+			}
+			out = append(out, byBand[b][idx[b]])
+			idx[b]++
+			progressed = true
+			if len(out) == n {
+				break
+			}
+		}
+		if !progressed {
+			break // every band exhausted
+		}
+	}
+	return out
 }
 
 // sidecarPath returns the on-disk path of the trusted sidecar for row, trying
 // the .lrc spelling first and falling back to .txt -- the same pair
 // oppositeSidecar in internal/lyrics treats as mutually exclusive on write.
 // Returns "" when neither exists.
-func sidecarPath(row probeBRow) string {
+// It DISTINGUISHES "absent" from "unreadable", which both reviewers caught on
+// PR #772 and which matters more here than it looks. Treating every os.Stat
+// error as absence means a permission or I/O fault on the .lrc silently falls
+// through to the .txt -- scoring a DIFFERENT file than intended -- or reports
+// "no sidecar" for a file that is present but unreadable. Either way the run
+// completes, the report looks healthy, and the number is quietly wrong. A
+// broken sidecar environment must be visible as its own error class, not
+// absorbed into the miss bucket.
+//
+// The second return is an error class for the observation: "" when the path is
+// usable, "no-sidecar" when neither file exists, "sidecar-stat" when one exists
+// but could not be examined.
+func sidecarPath(row probeBRow) (string, string) {
 	base := strings.TrimSuffix(row.filename, filepath.Ext(row.filename))
 	if base == "" {
-		return ""
+		return "", "no-sidecar"
 	}
 	lrcPath := filepath.Join(row.outdir, base+".lrc")
-	if _, err := os.Stat(lrcPath); err == nil {
-		return lrcPath
+	switch _, err := os.Stat(lrcPath); {
+	case err == nil:
+		return lrcPath, ""
+	case !errors.Is(err, os.ErrNotExist):
+		// Present-but-unexaminable. Do NOT fall through to the .txt: that would
+		// score a different artifact than the one the row actually settled with.
+		return "", "sidecar-stat"
 	}
 	txtPath := filepath.Join(row.outdir, base+".txt")
-	if _, err := os.Stat(txtPath); err == nil {
-		return txtPath
+	switch _, err := os.Stat(txtPath); {
+	case err == nil:
+		return txtPath, ""
+	case !errors.Is(err, os.ErrNotExist):
+		return "", "sidecar-stat"
 	}
-	return ""
+	return "", "no-sidecar"
 }
 
 // readTrustedText reads the sidecar at path and returns its plain-text
@@ -290,7 +364,7 @@ func readTrustedText(path string) (string, error) {
 	if filepath.Ext(path) == ".lrc" {
 		synced, err := lyrics.ReadSyncedLRC(path)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("probeb: read synced sidecar: %w", err)
 		}
 		return lyrics.PlainBody(synced), nil
 	}
@@ -302,7 +376,7 @@ func readTrustedText(path string) (string, error) {
 	// no untrusted caller.
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("probeb: read plain sidecar: %w", err)
 	}
 	return string(b), nil
 }
@@ -336,12 +410,14 @@ func candidateText(raw []byte) (string, bool) {
 func probeBSample(ctx context.Context, c *Client, row probeBRow, bands map[string]int) (probeBObservation, error) {
 	band := bands[row.artistKey]
 
-	path := sidecarPath(row)
-	if path == "" {
-		// No sidecar on disk despite status='done': the file may have been
-		// moved or removed since the scan. Not a network call worth spending
-		// on a sample with no ground truth to score against.
-		return probeBObservation{Err: "no-sidecar"}, nil
+	path, pathErr := sidecarPath(row)
+	if pathErr != "" {
+		// No usable sidecar despite status='done'. Either it was moved or
+		// removed since the scan (no-sidecar), or it exists and could not be
+		// examined (sidecar-stat) -- kept distinct so a broken filesystem is
+		// not silently counted as missing data. Either way there is no ground
+		// truth to score against, so spend no network call on it.
+		return probeBObservation{Err: pathErr}, nil
 	}
 	trusted, err := readTrustedText(path)
 	if err != nil {
@@ -401,4 +477,69 @@ func probeBSample(ctx context.Context, c *Client, row probeBRow, bands map[strin
 		Score:      score,
 		Scored:     true,
 	}, nil
+}
+
+// TestSampleDoneRowsUsesBandQuota guards the CALL SITE, not just the helper.
+//
+// TestQuotaByBand exercises quotaByBand directly, so it stays green even if
+// sampleDoneRows stops calling it -- verified by mutation: reverting the call
+// site to the old global-shuffle truncation passed the whole suite. That is the
+// same shape of gap that shipped a defect on #770 (the seam was tested, the
+// wiring was not), so it gets its own test here.
+//
+// It runs against real SQLite rather than a fake, matching the repo's
+// integration-test convention.
+func TestSampleDoneRowsUsesBandQuota(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "probeb.db"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+
+	// scan_results.library_id carries a foreign key, so the parent row has to
+	// exist before any child insert.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO libraries (id, name, path) VALUES (1, 'test', '/m')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+
+	// A lopsided library: the top-band artist has many more completed tracks,
+	// which is precisely what biases a global shuffle.
+	insert := func(artistKey string, n int) {
+		t.Helper()
+		for i := range n {
+			if _, err := sqlDB.ExecContext(ctx,
+				`INSERT INTO scan_results (library_id, file_path, artist, title, artist_key, title_key, status, outdir, filename)
+				 VALUES (1, ?, ?, ?, ?, ?, 'done', '/out', ?)`,
+				fmt.Sprintf("/m/%s-%d.flac", artistKey, i), artistKey, fmt.Sprintf("t%d", i),
+				artistKey, fmt.Sprintf("t%d", i), fmt.Sprintf("%s-%d.lrc", artistKey, i),
+			); err != nil {
+				t.Fatalf("insert %s row %d: %v", artistKey, i, err)
+			}
+		}
+	}
+	insert("bottom", 4)
+	insert("top", 60)
+
+	bands := map[string]int{"bottom": 0, "top": 2}
+
+	rows, err := sampleDoneRows(ctx, sqlDB, 8, bands)
+	if err != nil {
+		t.Fatalf("sampleDoneRows: %v", err)
+	}
+	if len(rows) != 8 {
+		t.Fatalf("sampled %d rows, want 8", len(rows))
+	}
+
+	counts := map[int]int{}
+	for _, r := range rows {
+		counts[bands[r.artistKey]]++
+	}
+	// Under a global shuffle the bottom band (4 of 64 rows, ~6%) would contribute
+	// roughly 0-1 of 8. Under the quota it contributes all 4 it has.
+	if counts[0] != 4 {
+		t.Errorf("bottom band got %d rows, want all 4 it had -- sampleDoneRows is not "+
+			"applying the band quota; counts=%v", counts[0], counts)
+	}
 }
