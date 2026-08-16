@@ -231,7 +231,12 @@ func writeRevalidateTail(path string, findings []revalidate.Finding) error {
 	}
 	defer func() { _ = f.Close() }()
 	for _, fd := range findings {
-		if fd.Outcome != timing.MisSynced && fd.Outcome != timing.Categorical {
+		// The REMEDIABLE verdicts, enumerated by hand. A verdict the sweep will
+		// act on but the tail never prints is the worst combination here:
+		// revalidate is dry-run by default, and this file is the only per-file
+		// view an operator gets, so an omission reads as "nothing will happen to
+		// that file". Degenerate joins the list for that reason (#673).
+		if fd.Outcome != timing.MisSynced && fd.Outcome != timing.Categorical && fd.Outcome != timing.Degenerate {
 			continue
 		}
 		if _, werr := fmt.Fprintf(f, "%s\t%s\tduration=%ds\toverrun=%.2fs\tratio=%.3f\taction=%s\n",

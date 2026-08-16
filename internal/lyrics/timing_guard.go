@@ -75,6 +75,18 @@ func DecidePromotion(song models.Song) (PromotionDecision, timing.TimingOutcome,
 	switch outcome {
 	case timing.MisSynced:
 		return DemoteToUnsynced, outcome, mag
+	case timing.Degenerate:
+		// Every cue shares one timestamp, so the file is not synced at all
+		// (#673). Demote rather than quarantine: only the TIMING is fabricated
+		// -- the words are typically correct, and are exactly what a .txt is
+		// for. Quarantining would discard usable text over a defect that
+		// costs nothing to downgrade.
+		//
+		// This arm is why the outcome exists. Without it the default below
+		// fails open and a degenerate lyric is PROMOTED as synced, which is
+		// the pre-#673 behavior: timing.Evaluate returned Ok for this shape,
+		// so nothing rejected it anywhere on the path.
+		return DemoteToUnsynced, outcome, mag
 	case timing.Categorical:
 		return Quarantine, outcome, mag
 	case timing.Ok, timing.UnknownDuration:

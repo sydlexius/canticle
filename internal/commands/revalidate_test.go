@@ -12,7 +12,10 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/realign"
+	"github.com/sydlexius/canticle/internal/revalidate"
 	"github.com/sydlexius/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/timing"
 )
 
 // revalidateFixture builds a config + database + library root holding one audio
@@ -385,5 +388,42 @@ func TestRevalidateBadConfigPathIsAnError(t *testing.T) {
 	var out bytes.Buffer
 	if code := runRevalidate(t.Context(), &out, RevalidateCmd{ConfigPath: bad}); code != 1 {
 		t.Errorf("exit = %d, want 1: %s", code, out.String())
+	}
+}
+
+// TestRevalidateTailIncludesDegenerate covers the #673 report filter. The tail
+// enumerates outcomes by hand, so a new remediable verdict is silently DROPPED
+// from the operator's only per-file view unless it is added here.
+//
+// That matters more than a missing line: the tail is where an operator confirms
+// what a dry run would touch, and revalidate is dry-run by default. A file the
+// sweep will demote but never mentions is exactly the surprise the dry run
+// exists to prevent.
+func TestRevalidateTailIncludesDegenerate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tail.tsv")
+	findings := []revalidate.Finding{
+		{Path: "/lib/a.lrc", Outcome: timing.Degenerate, Duration: 240, Action: realign.KindDemote},
+		{Path: "/lib/b.lrc", Outcome: timing.MisSynced, Duration: 100, Action: realign.KindDemote},
+		{Path: "/lib/c.lrc", Outcome: timing.Ok, Duration: 100},
+	}
+
+	if err := writeRevalidateTail(path, findings); err != nil {
+		t.Fatalf("writeRevalidateTail: %v", err)
+	}
+	body, err := os.ReadFile(path) //nolint:gosec // test path from t.TempDir
+	if err != nil {
+		t.Fatalf("read tail: %v", err)
+	}
+	got := string(body)
+
+	if !strings.Contains(got, string(timing.Degenerate)) {
+		t.Errorf("tail omits the degenerate finding; got %q", got)
+	}
+	if !strings.Contains(got, "/lib/a.lrc") {
+		t.Errorf("tail omits the degenerate file path; got %q", got)
+	}
+	// The existing filter must be unchanged: Ok is not remediable and stays out.
+	if strings.Contains(got, "/lib/c.lrc") {
+		t.Errorf("tail includes a compliant file; got %q", got)
 	}
 }

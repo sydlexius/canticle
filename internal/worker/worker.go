@@ -1014,10 +1014,18 @@ func (w *Worker) stampTimingOutcome(ctxNoCancel context.Context, item queue.Work
 		// unknown-duration case is a routine fail-open, not an anomaly.
 		return
 	}
+	// The message must match the defect. A degenerate lyric does NOT overrun --
+	// every cue shares one timestamp, so overrun_seconds and ratio are both 0 --
+	// and the overrun wording beside those zeros would send an operator after
+	// the wrong cause (#673).
+	msg := "worker: synced lyric timing overruns the audio"
+	if rec.Outcome == string(timing.Degenerate) {
+		msg = "worker: lyric is not really synced; every cue shares one timestamp"
+	}
 	// Artist and track name identify the row for an operator reading their own
 	// logs, matching every sibling warn here. They stay in the log line only and
 	// are never routed to a metric label or any shared surface.
-	slog.Warn("worker: synced lyric timing overruns the audio",
+	slog.Warn(msg,
 		"id", item.ID,
 		"outcome", rec.Outcome,
 		"overrun_seconds", rec.Magnitude,

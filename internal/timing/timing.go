@@ -39,6 +39,18 @@ const (
 	// UnknownDuration means the audio duration was not known, so no judgment
 	// is possible. Always fail open: never reject on this.
 	UnknownDuration TimingOutcome = "unknown_duration"
+	// Degenerate means every text-bearing cue carries the SAME timestamp, so the
+	// file is not synced at all: each line would render simultaneously at that
+	// instant (in the observed population, all at 00:00.00). The words are
+	// typically correct -- only the timing is fabricated -- so callers demote to
+	// unsynced text rather than discarding, matching MisSynced's treatment.
+	//
+	// This is ORTHOGONAL to the overrun axis rather than a point on it, which is
+	// why it needs its own outcome. Evaluate judges by the MAXIMUM timestamp, so
+	// an all-zero file has max 0, an overrun of -duration and a ratio of 0 --
+	// maximally compliant by that measure. Measured on the #673 production shape:
+	// 65 cues at 00:00.00 against 240s audio returned Ok with ratio 0.00.
+	Degenerate TimingOutcome = "degenerate"
 )
 
 const (
@@ -88,6 +100,23 @@ func Evaluate(song models.Song, durationSeconds int) (TimingOutcome, Magnitude) 
 		return UnknownDuration, Magnitude{}
 	}
 
+	// Degeneracy is decided BEFORE the overrun arms below, and that boundary is
+	// load-bearing. A file whose cues all share one timestamp carries no honest
+	// timing, so its overrun and ratio are computed from a fabricated number: an
+	// all-zero file measures a -duration overrun and a 0.00 ratio, i.e. maximally
+	// compliant. Consulted only after those arms decide, the whole observed
+	// population would return Ok first and the degenerate verdict would be
+	// unreachable for exactly what it exists to catch; and a degenerate file that
+	// also overruns would name the symptom instead of the cause. Verified by
+	// mutation -- deferring it past the switch reddens the categorical case.
+	//
+	// Its position relative to correctedMaxSeconds below is NOT load-bearing
+	// (both orders give the same verdict); it sits first only to skip work that
+	// would be discarded.
+	if isDegenerate(song.Subtitles.Lines) {
+		return Degenerate, Magnitude{}
+	}
+
 	maxTS, ok := correctedMaxSeconds(song.Subtitles.Lines)
 	if !ok {
 		// Empty subtitles, nothing but decorative lines, or no cue with a usable
@@ -125,6 +154,62 @@ func Evaluate(song models.Song, durationSeconds int) (TimingOutcome, Magnitude) 
 // sticky in a running maximum, since every `s > NaN` comparison is false. A
 // single NaN on an early cue would otherwise swallow a genuinely categorical
 // overrun on a later one, making the verdict depend on cue order.
+// isDegenerate reports whether every text-bearing cue carries the SAME
+// timestamp -- a file that is not synced at all, since each line would render
+// simultaneously at that instant (#673).
+//
+// The rule is deliberately narrow: MORE THAN ONE text-bearing cue, and exactly
+// one distinct timestamp among them. Both halves matter.
+//
+//   - A single cue has one distinct timestamp by definition, so without the
+//     multi-cue requirement every legitimately short entry would be flagged.
+//   - "Distinct timestamps" is the whole signal. On the production population
+//     (#673) five files carried 10-70 cues at exactly one timestamp, while two
+//     genuinely-synced files in the same directory measured 67/67 and 63/63
+//     distinct. The discriminator is unambiguous, so it needs no threshold.
+//
+// NEAR-degenerate cases -- every cue inside a sub-second window, say -- are
+// deliberately NOT covered. The observed population is exactly-equal timestamps,
+// and inventing a tolerance here would risk demoting a real lyric whose opening
+// lines are genuinely close together, trading a confirmed defect for a
+// speculative one.
+//
+// Decorative lines are filtered on the SAME contract as correctedMaxSeconds,
+// via the shared isDecorative. That is not tidiness: counted, a single trailing
+// note-glyph marker at a different stamp would supply a second distinct
+// timestamp and mask a fully degenerate lyric. The two functions must agree on
+// which lines carry timing, or one can be fooled by input the other rejects.
+//
+// Non-finite timestamps are skipped per line, matching correctedMaxSeconds: a
+// NaN from a hostile or broken provider payload is not a real second distinct
+// value, and counting it would make a degenerate file read as synced.
+func isDegenerate(lines []models.Lines) bool {
+	var first float64
+	found, distinct := false, false
+	count := 0
+
+	for _, l := range lines {
+		if isDecorative(l.Text) {
+			continue
+		}
+		s := seconds(l.Time)
+		if math.IsNaN(s) || math.IsInf(s, 0) {
+			continue
+		}
+		count++
+		if !found {
+			first, found = s, true
+			continue
+		}
+		if s != first {
+			distinct = true
+			break
+		}
+	}
+
+	return count > 1 && !distinct
+}
+
 func correctedMaxSeconds(lines []models.Lines) (float64, bool) {
 	maxTS, found := 0.0, false
 	for _, l := range lines {

@@ -288,3 +288,45 @@ func TestEnqueuePendingUnknownGenerationNeverSuppresses(t *testing.T) {
 		t.Fatalf("enqueued=%d; want 1 -- an unknown generation must not suppress", enqueued)
 	}
 }
+
+// Degenerate must NOT suppress, and the reason is the same one that spares
+// MisSynced rather than a new judgment (#673).
+//
+// Suppression exists for one shape: a verdict that writes NOTHING, leaving the
+// row indistinguishable from a track never fetched, so every scan re-fetches
+// and re-rejects it forever. Only Categorical does that.
+//
+// Degenerate demotes to a .txt exactly as MisSynced does, so #439's
+// settled-sidecar check already makes a later re-fetch a no-op: wasteful at
+// worst, never destructive. Suppressing it would hide a track that a future
+// provider generation could serve correctly, buying nothing.
+//
+// The current code reaches this outcome because shouldSuppress compares against
+// Categorical alone. This test exists so that stays a DECISION rather than an
+// accident: widening that comparison to "any non-Ok verdict" would silently
+// bury these rows.
+func TestEnqueuePendingDoesNotSuppressDegenerate(t *testing.T) {
+	ctx := context.Background()
+	store := &fakePendingStore{results: []models.ScanResult{{
+		ID:       1,
+		FilePath: "/music/degenerate.flac",
+		Track:    models.Track{ArtistName: "A", TrackName: "Degenerate"},
+	}}}
+	verdicts := &fakeTimingVerdicts{verdicts: map[string]scan.TimingVerdict{
+		"A\x00Degenerate": {Outcome: timing.Degenerate, ProvidersVersion: 3},
+	}}
+	work := &fakeWorkQueue{}
+
+	e := scan.Enqueuer{
+		Results: store, Cache: fakeLyricsCache{}, Queue: work,
+		Timing: verdicts, ProvidersVersion: 3,
+	}
+
+	enqueued, _, err := e.EnqueuePending(ctx, models.Library{ID: 7})
+	if err != nil {
+		t.Fatalf("EnqueuePending: %v", err)
+	}
+	if enqueued != 1 {
+		t.Fatalf("enqueued=%d; want 1 -- a degenerate row demotes to .txt and stays recoverable, so it must not be suppressed", enqueued)
+	}
+}
