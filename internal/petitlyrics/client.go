@@ -124,42 +124,67 @@ type Client struct {
 // reached the escalation threshold. Called for a response that parsed cleanly and
 // simply carried no songs -- never for a transport or status failure, which say
 // nothing about whether the application id still works.
-// The log emission is deliberately OUTSIDE the critical section. slog handlers
-// can block on I/O and take locks of their own, and this mutex also paces every
-// outbound request, so logging under it would serialize concurrent lookups on
-// the handler -- worst at exactly the moment an outage transition fires. The
-// pacer at pace() already follows this shape; match it.
+//
+// It DOES NOT LOG. Reaching the threshold is only SUSPICION under #767, not a
+// finding: the probe in confirmOutage is what decides. An earlier revision warned
+// here, which meant a perfectly healthy credential still logged "the application
+// id may have been revoked" on every long run of obscure material -- the #767
+// false positive surviving in the log path after being removed from the error
+// path. Only reportConfirmedOutage logs, and only on evidence.
 func (c *Client) recordZeroResult() bool {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.consecutiveZero++
-	count := c.consecutiveZero
-	reached := count >= ZeroResultThreshold
-	// Latch INSIDE the lock so exactly one goroutine can win the transition and
-	// emit the warning, even though the emission happens after the unlock.
-	transitioned := reached && !c.zeroReported
-	if transitioned {
-		c.zeroReported = true
-	}
-	c.mu.Unlock()
-
-	if transitioned {
-		slog.Warn("petitlyrics: provider has returned no results for a sustained run of lookups; the application id may have been revoked",
-			"consecutive", count, "threshold", ZeroResultThreshold)
-	}
-	return reached
+	return c.consecutiveZero >= ZeroResultThreshold
 }
 
-// recordNonZeroResult clears the outage counter. Any response carrying at least
-// one song proves the application id is still accepted, whatever the client then
-// makes of the payload.
-// The recovery log is emitted after the unlock, for the same reason as the
-// warning in recordZeroResult.
-func (c *Client) recordNonZeroResult() {
+// reportConfirmedOutage latches and logs an outage the caller has CONFIRMED,
+// either by a failed liveness probe or by the no-control count fallback.
+//
+// The latch makes this log once per outage rather than on every request past the
+// threshold, and the emission sits outside the critical section: slog handlers
+// can block on I/O and take locks of their own, and this mutex also paces every
+// outbound request, so logging under it would serialize concurrent lookups at
+// exactly the moment an outage fires. pace() follows the same shape.
+func (c *Client) reportConfirmedOutage(probed bool) {
+	c.mu.Lock()
+	count := c.consecutiveZero
+	first := !c.zeroReported
+	c.zeroReported = true
+	c.mu.Unlock()
+
+	if first {
+		slog.Warn("petitlyrics: provider returned no results for a sustained run and a liveness check did not clear it; the application id may have been revoked",
+			"consecutive", count, "threshold", ZeroResultThreshold, "liveness_probed", probed)
+	}
+}
+
+// recordSuccess clears the outage run and records the track as the control for a
+// later liveness probe, IN ONE mutex-held transition (#767).
+//
+// Atomicity is load-bearing, not tidiness. These were two separate locked calls,
+// and CodeRabbit caught the race: between them a concurrent burst of misses could
+// reach the threshold, observe hasKnownGood == false, take the no-control path,
+// and report ErrProviderUnavailable on a credential that had JUST returned songs.
+// The failure mode was the exact false outage this change exists to prevent.
+//
+// A track with no artist or title is not stored as a control -- it would be
+// unfetchable as a probe -- but it still clears the run, because songs came back.
+//
+// The recovery log is emitted after the unlock, for the same reason as above. The
+// control track itself is NEVER logged: it is library metadata.
+func (c *Client) recordSuccess(track models.Track) {
+	usable := track.TrackName != "" && track.ArtistName != ""
+
 	c.mu.Lock()
 	recovered := c.zeroReported
 	after := c.consecutiveZero
 	c.zeroReported = false
 	c.consecutiveZero = 0
+	if usable {
+		c.knownGood = track
+		c.hasKnownGood = true
+	}
 	c.mu.Unlock()
 
 	if recovered {
@@ -573,23 +598,10 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 	// At least one song came back, which proves the application id is still
 	// accepted. Reset regardless of what the client then makes of the payload: a
 	// candidate that loses selection, or a tier this client cannot decode, is a
-	// per-track outcome and says nothing about credential health.
-	c.recordNonZeroResult()
-	c.rememberKnownGood(track)
+	// per-track outcome and says nothing about credential health. The same
+	// transition records the control track, atomically -- see recordSuccess.
+	c.recordSuccess(track)
 	return songs, nil
-}
-
-// rememberKnownGood records a track this credential just fetched successfully, so
-// a later liveness probe has a control the provider has demonstrably served
-// (#767). Held in memory only and never logged -- it is library metadata.
-func (c *Client) rememberKnownGood(track models.Track) {
-	if track.TrackName == "" || track.ArtistName == "" {
-		return
-	}
-	c.mu.Lock()
-	c.knownGood = track
-	c.hasKnownGood = true
-	c.mu.Unlock()
 }
 
 // confirmOutage decides whether a threshold-length miss run is a real provider
@@ -631,6 +643,7 @@ func (c *Client) confirmOutage(ctx context.Context) bool {
 		// Never had a hit on this credential, so there is nothing to test against
 		// and no way to do better than the count. This is the cold-start revoked
 		// credential #607 exists to catch.
+		c.reportConfirmedOutage(false)
 		return true
 	}
 	if busy {
@@ -652,6 +665,14 @@ func (c *Client) confirmOutage(ctx context.Context) bool {
 		// A transport or status failure says nothing about the credential; it is
 		// the ordinary network-flake case, and statusError already classifies a
 		// real 401/429.
+		//
+		// BACK THE COUNTER OFF rather than leaving it at the threshold. Otherwise
+		// recordZeroResult keeps returning true and EVERY subsequent miss launches
+		// another probe -- a retry storm of real paced requests during exactly the
+		// transient failure that caused it. Halving costs one more threshold's
+		// worth of misses before the next attempt, which is the right trade
+		// against hammering a provider that is already struggling.
+		c.backOffProbe()
 		slog.Debug("petitlyrics: liveness probe failed in transport; not treating as an outage", "error", err)
 		return false
 	}
@@ -659,11 +680,30 @@ func (c *Client) confirmOutage(ctx context.Context) bool {
 		// The credential works. The miss run was about the MATERIAL, which is the
 		// normal condition for a fallback lane. Clear it so the next run gets a
 		// fresh threshold rather than escalating on the very next miss.
-		c.recordNonZeroResult()
+		//
+		// The control is re-recorded here deliberately: it just proved itself
+		// again, and passing it keeps the reset and the store atomic.
+		c.recordSuccess(control)
 		slog.Debug("petitlyrics: liveness probe succeeded; sustained miss run is material, not a credential outage")
 		return false
 	}
+	// The provider served this track before and does not now. That is evidence.
+	c.reportConfirmedOutage(true)
 	return true
+}
+
+// backOffProbe halves the miss run after a probe that could not reach the API, so
+// the next attempt is a threshold away instead of on the very next miss (#767
+// review).
+//
+// Halving rather than zeroing: the misses were real, and discarding them entirely
+// would let a genuine outage hide behind repeated probe failures -- a credential
+// revoked at the same moment the network degrades would need two full runs to be
+// noticed. Halving keeps the evidence while spacing the retries.
+func (c *Client) backOffProbe() {
+	c.mu.Lock()
+	c.consecutiveZero /= 2
+	c.mu.Unlock()
 }
 
 // rawRequest performs the single form POST and decodes the XML envelope, without

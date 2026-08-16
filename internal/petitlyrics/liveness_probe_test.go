@@ -207,9 +207,77 @@ func TestConcurrentMissesProbeOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The exact count depends on scheduling, but it must be far below the number
-	// of concurrent missers -- the guard exists to collapse them.
-	if got := probes.Load() - seeded; got > 2 {
-		t.Errorf("probe count = %d for 8 concurrent misses; the in-flight guard should collapse them", got)
+	// EXACTLY one, and the exactness is provable rather than a hope about
+	// scheduling. The run sits at ZeroResultThreshold-1, so whichever goroutine
+	// increments first reaches the threshold and wins probeInFlight; every other
+	// goroutine either sees busy (returns false, no probe) or arrives after the
+	// successful probe reset the counter to 0, where 7 remaining misses cannot
+	// reach the threshold again.
+	//
+	// The earlier `got > 2` was wrong in the direction that matters: it also
+	// passed on ZERO probes, which is the guard blocking the probe entirely --
+	// precisely the failure this test exists to catch. Caught in review.
+	if got := probes.Load() - seeded; got != 1 {
+		t.Errorf("probe count = %d for 8 concurrent misses; want exactly 1 "+
+			"(0 means the in-flight guard suppressed the probe entirely, >1 means it failed to collapse them)", got)
+	}
+}
+
+// TestProbeTransportFailureDoesNotStorm covers the retry storm Copilot caught in
+// review on PR #771.
+//
+// When the probe cannot reach the API, the run is genuinely unadjudicated -- but
+// leaving the counter at the threshold means recordZeroResult keeps returning
+// true, so EVERY subsequent miss launches another probe. That is a burst of real
+// paced requests aimed at a provider that is already failing to answer.
+//
+// Backing the counter off spaces the retries out by roughly another threshold.
+func TestProbeTransportFailureDoesNotStorm(t *testing.T) {
+	hit := serveFixture(t, "type1_unsynced.xml")
+	var probes atomic.Int32
+	var breakProbe atomic.Bool
+
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err == nil && r.FormValue("key_title") == "Known" {
+			probes.Add(1)
+			if breakProbe.Load() {
+				// Not a valid XML envelope: the probe fails in decode, which is
+				// the transport-ish failure class that says nothing about the
+				// credential.
+				w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+				_, _ = w.Write([]byte("}{ not xml"))
+				return
+			}
+			hit(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		_, _ = w.Write([]byte(emptyResponse))
+	})
+
+	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Known", ArtistName: "Good"}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	breakProbe.Store(true)
+	seeded := probes.Load()
+
+	// Drive a full threshold run plus a long tail of further misses. With no
+	// backoff every one of those tail misses probes again.
+	for i := 0; i < ZeroResultThreshold*2; i++ {
+		_, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Obscure", ArtistName: "Artist"})
+		if errors.Is(err, ErrProviderUnavailable) {
+			t.Fatalf("miss %d escalated on a FAILED probe; a probe that could not reach "+
+				"the API is not evidence of a dead credential", i+1)
+		}
+	}
+
+	// Without the backoff this is ~21 probes (one per miss past the threshold).
+	// With it, the counter halves each time, so attempts are spaced out.
+	if got := probes.Load() - seeded; got > 4 {
+		t.Errorf("probe count = %d over %d misses after a failing probe; the backoff "+
+			"should space retries out rather than probing on every miss", got, ZeroResultThreshold*2)
+	}
+	if got := probes.Load() - seeded; got == 0 {
+		t.Error("no probe was attempted at all; the backoff must delay retries, not disable them")
 	}
 }
