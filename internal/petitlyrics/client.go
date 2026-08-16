@@ -352,6 +352,45 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	return c.lookup(ctx, track, tierWordSync)
 }
 
+// lookupUnsyncedText fetches the plain lyric text for a track at tier 1.
+//
+// It exists for the line-sync path: an LSY payload carries timings but no
+// usable words, so a tier-2 result is a JOIN of two responses. Routed through
+// c.request so the second call is paced like any other, and so a credential or
+// throttle failure surfaces as the same typed sentinel rather than a bespoke
+// error this lane's classifier would not recognize.
+//
+// A tier-1 request that answers with a non-text payload is refused rather than
+// passed to the zipper: pairing timings with bytes that are not the words is a
+// route to confident-looking wrong output, which is the failure this whole path
+// is written to avoid.
+func (c *Client) lookupUnsyncedText(ctx context.Context, track models.Track) (string, error) {
+	songs, err := c.request(ctx, track, tierUnsynced)
+	if err != nil {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup: %w", err)
+	}
+	candidate, err := selectCandidate(songs, track)
+	if err != nil {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup, no candidate matched: %w", err)
+	}
+	if candidate.LyricsData == "" {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup returned no payload: %w", ErrNotFound)
+	}
+	raw, err := base64.StdEncoding.DecodeString(candidate.LyricsData)
+	if err != nil {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup, base64 decode: %w", err)
+	}
+	if got := classifyPayload(raw); got != tierUnsynced {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup returned tier %d, want plain text: %w",
+			got, ErrNotFound)
+	}
+	text := decodeUnsynced(raw)
+	if strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup returned empty text: %w", ErrNotFound)
+	}
+	return text, nil
+}
+
 // lookup performs one API request at the given tier and decodes the result.
 func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (models.Song, error) {
 	songs, err := c.request(ctx, track, tier)
@@ -409,7 +448,27 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 		return song, nil
 
 	case tierLineSync:
-		return models.Song{}, fmt.Errorf("petitlyrics: lyricsType 2 (encrypted LSY): %w", ErrUnsupportedTier)
+		// Tier 2 carries timings ONLY, so a line-synced result costs a second
+		// request for the words. That request goes through c.request, which
+		// paces itself, rather than issuing a raw POST that would bypass the
+		// configured floor (#535).
+		timings, err := decodeLineSyncTimings(raw)
+		if err != nil {
+			return models.Song{}, err
+		}
+		text, err := c.lookupUnsyncedText(ctx, track)
+		if err != nil {
+			return models.Song{}, err
+		}
+		cues, err := zipLineSync(timings, text)
+		if err != nil {
+			return models.Song{}, err
+		}
+		// Same normalizer as every other write path (#470), so this lane holds
+		// the one-cue-per-line model too. No word timings exist at this tier, so
+		// unlike the word-sync branch there is no index-stability concern.
+		song.Subtitles = lrcnormalize.Expand(models.Synced{Lines: cues})
+		return song, nil
 
 	default:
 		text := decodeUnsynced(raw)

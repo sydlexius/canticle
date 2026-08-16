@@ -321,19 +321,78 @@ func TestFindLyrics_MissCostsOneRequest(t *testing.T) {
 	}
 }
 
-// TestFindLyrics_LineSyncIsUnsupported pins the deliberate gap: the line-sync
-// payload is an encrypted binary blob, so it must surface as a typed tier miss
-// rather than being mistaken for lyrics.
-func TestFindLyrics_LineSyncIsUnsupported(t *testing.T) {
-	c, _ := newTestClient(t, serveFixture(t, "type2_linesync.xml"))
-	_, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"})
-	if err == nil {
-		t.Fatal("an encrypted line-sync payload must not be reported as success")
+// TestFindLyrics_LineSyncJoinsTwoResponses pins the two-request flow that tier 2
+// requires. The LSY blob carries timings but no usable words, so a line-synced
+// result is a JOIN: the timings come from the tier-2 payload and the text from a
+// SECOND request at tier 1.
+//
+// This replaces TestFindLyrics_LineSyncIsUnsupported, which asserted the
+// deliberate gap this change closes.
+//
+// Both requests must go through the client (hence its pacer), which is why the
+// request count and the per-request lyricsType are asserted rather than just the
+// decoded output.
+func TestFindLyrics_LineSyncJoinsTwoResponses(t *testing.T) {
+	timings := []int{100, 250, 400}
+	blob := buildLSY(t, 0xdc18, true, timings)
+
+	// Filler stands in for lyric text: three lines to match three timings.
+	text := "alpha\nbeta\ngamma\n"
+
+	c, fs := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		if r.PostForm.Get("lyricsType") == "1" {
+			_, _ = w.Write(tierEnvelope(t, []byte(text)))
+			return
+		}
+		_, _ = w.Write(tierEnvelope(t, blob))
+	})
+
+	song, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"})
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
 	}
-	// The single request returns the track's actual tier, so a line-sync-only
-	// track surfaces the typed tier error directly -- no retry involved.
-	if !errors.Is(err, ErrUnsupportedTier) {
-		t.Errorf("want ErrUnsupportedTier, got %v", err)
+
+	if n := len(song.Subtitles.Lines); n != len(timings) {
+		t.Fatalf("got %d cues, want %d", n, len(timings))
+	}
+	if got := song.Subtitles.Lines[0].Text; got != "alpha" {
+		t.Errorf("first cue text = %q, want the tier-1 text", got)
+	}
+	// 400 cs = 4.0 s. A wrong scale here is the silent-drift failure mode.
+	if got := song.Subtitles.Lines[2].Time.Total; got < 3.99 || got > 4.01 {
+		t.Errorf("last cue = %v s, want ~4.0 s (centiseconds wrongly scaled?)", got)
+	}
+
+	reqs := fs.snapshot()
+	if len(reqs) != 2 {
+		t.Fatalf("a line-sync result must cost exactly 2 requests, got %d", len(reqs))
+	}
+	if reqs[1].form["lyricsType"] != "1" {
+		t.Errorf("the second request must ask for tier 1 text, got lyricsType=%q", reqs[1].form["lyricsType"])
+	}
+}
+
+// TestFindLyrics_LineSyncRefusesAMismatchedJoin pins the guard against the worst
+// output this lane can produce. If the tier-1 text does not have exactly as many
+// lines as there are timings, every later cue would be attributed to the wrong
+// moment -- an .lrc that looks correct and drifts. It must fail instead.
+func TestFindLyrics_LineSyncRefusesAMismatchedJoin(t *testing.T) {
+	blob := buildLSY(t, 0xdc18, true, []int{100, 250, 400})
+
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		if r.PostForm.Get("lyricsType") == "1" {
+			_, _ = w.Write(tierEnvelope(t, []byte("alpha\nbeta\n"))) // 2 lines, 3 timings
+			return
+		}
+		_, _ = w.Write(tierEnvelope(t, blob))
+	})
+
+	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"}); err == nil {
+		t.Fatal("a timing/text count mismatch must fail, never emit misaligned cues")
 	}
 }
 
