@@ -597,6 +597,13 @@ func TestStripWordMarkers(t *testing.T) {
 		{"a < b > c", "a < b > c"},
 		// An hour-length track's stamp still has the mm:ss.xx shape.
 		{"<70:00.00>alpha", "alpha"},
+		// Seconds are 00-59. A value past that is not a valid mm:ss.xx stamp, so
+		// it falls under the same preserve-malformed rule as "<not a stamp>":
+		// stripping it would delete user-visible text, and PlainBody persists
+		// exactly this text into a .txt.
+		{"<00:59.99>alpha", "alpha"},
+		{"<00:60.00>alpha", "<00:60.00>alpha"},
+		{"<00:99.99>alpha", "<00:99.99>alpha"},
 	} {
 		if got := StripWordMarkers(tc.in); got != tc.want {
 			t.Errorf("StripWordMarkers(%q) = %q; want %q", tc.in, got, tc.want)

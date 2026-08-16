@@ -233,8 +233,11 @@ func correctedMaxSeconds(lines []models.Lines) (float64, bool) {
 // Deliberately anchored to the STAMP SHAPE rather than to any `<...>` run: a
 // lyric line may legitimately contain angle brackets, and eating those would be
 // silent text loss. Minutes are 1+ digits because a track past an hour renders
-// `70:00.00` rather than wrapping.
-var wordMarkerRe = regexp.MustCompile(`<\d{1,}:\d{2}\.\d{2}>`)
+// `70:00.00` rather than wrapping, but SECONDS are bounded to 00-59: `<00:60.00>`
+// is not a valid mm:ss.xx stamp, so it falls under the same preserve-malformed
+// rule as any other marker-ish text. That distinction is load-bearing because
+// PlainBody persists this text verbatim into a user-visible .txt.
+var wordMarkerRe = regexp.MustCompile(`<\d+:[0-5]\d\.\d{2}>`)
 
 // StripWordMarkers removes Enhanced-LRC (A2) inline word markers from a cue,
 // leaving the words. Text carrying no marker is returned unchanged.
