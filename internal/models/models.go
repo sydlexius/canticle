@@ -101,11 +101,17 @@ type Song struct {
 	// an empty slice, so they fall back to line-synced output exactly as they do
 	// today. Nothing rewrites them; they gain markers on their next real fetch.
 	//
-	// Field names are deliberately left bare rather than given json tags:
-	// measured over a 400-word track, snake_case tags with omitempty came out 3%
-	// LARGER (26,228 vs 25,495 bytes), since the tag names exceed the Go
-	// identifiers and omitempty rarely fires on non-zero timings.
-	WordTimings []WordTiming
+	// Field names are deliberately left bare rather than RENAMED by json tags:
+	// measured over a 400-word track, snake_case tags came out 3% LARGER (26,228
+	// vs 25,495 bytes), since the tag names exceed the Go identifiers.
+	//
+	// omitempty IS applied, and it is not the same question. Only petitlyrics'
+	// word-synced tier produces timings, so the overwhelming majority of cached
+	// songs carry none -- and a bare field emits `"WordTimings":null` on every
+	// one of those rows, ~20 wasted bytes each across the whole library, on a
+	// blob rewritten at every settle. The tag keeps the short key AND drops the
+	// field when it is empty.
+	WordTimings []WordTiming `json:",omitempty"`
 	// WinningLane is the provider lane name that returned this song. It is set by
 	// the orchestrator for both suitable results and best-available fallbacks.
 	// Empty on cache hits and zero-value songs. Used by the worker write-path to

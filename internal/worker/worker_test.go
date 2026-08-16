@@ -3721,17 +3721,23 @@ func TestRunOnceDetectorMemoDegradedResponseNotStamped(t *testing.T) {
 	}
 }
 
-// TestSongCacheRoundTripDropsWordTimings pins a constraint the Enhanced-LRC (A2)
-// writer (#480) has to design around: models.Song.WordTimings is tagged json:"-"
-// and the worker caches songs as JSON, so a cache HIT returns a song with no word
-// timings and orchestrator.QualityOf classifies it as merely line-synced.
+// TestSongCacheRoundTripPreservesWordTimings pins that word timings survive the
+// cache, which the Enhanced-LRC (A2) writer (#480) depends on.
 //
-// On a saturated queue most traffic is cache hits, so an A2 writer that assumes
-// word timings are present would emit word-synced output only on a fresh fetch.
+// This test is INVERTED from its original form. It previously pinned the
+// OPPOSITE -- that the timings were DROPPED -- because models.Song.WordTimings
+// was tagged json:"-" and nothing consumed them. Its old message asked for that
+// constraint to be revisited if the drop ever became intentional; the A2 writer
+// is that moment, so the field is now persisted and this guards the new
+// contract.
 //
-// This test PASSES on current code. It exists so that making WordTimings
-// serializable becomes a deliberate decision rather than an accident: if someone
-// removes the json:"-" tag, this fails and forces the conversation.
+// Why it matters: on a saturated queue most traffic is cache hits, so without
+// persistence the SAME track emits word markers on a miss and a plain .lrc on a
+// hit -- identical input, different output, decided by cache state.
+//
+// The cue assertions below are the original ones, deliberately kept: a round
+// trip that dropped everything would satisfy the word-timing check alone, so
+// they stop this passing for the wrong reason.
 func TestSongCacheRoundTripPreservesWordTimings(t *testing.T) {
 	song := models.Song{
 		Track: models.Track{ArtistName: "Test Artist", TrackName: "Test Track"},

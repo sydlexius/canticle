@@ -464,8 +464,14 @@ func (w *LRCWriter) matchRoot(outdir string) (string, bool) {
 func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSync bool) error {
 	interleave := bilingual && len(song.TranslationSubtitles.Lines) > 0
 	translations := song.TranslationSubtitles.Lines
-	byLine := map[int][]models.WordTiming{}
-	if wordSync {
+	// Left nil unless word sync is on. This is the default write path for every
+	// synced lyric in the library, and wordSync is opt-in, so allocating a map
+	// the common case never reads is pure waste. A nil map is safe to read --
+	// byLine[i] yields nil, which a2Words treats as "no timings" and refuses --
+	// so the lookup below needs no guard of its own.
+	var byLine map[int][]models.WordTiming
+	if wordSync && len(song.WordTimings) > 0 {
+		byLine = make(map[int][]models.WordTiming, len(song.Subtitles.Lines))
 		for _, t := range song.WordTimings {
 			byLine[t.Line] = append(byLine[t.Line], t)
 		}

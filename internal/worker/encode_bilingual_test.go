@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -69,5 +70,40 @@ func TestDecodeSong_OldCacheLacksWordTimings(t *testing.T) {
 	}
 	if len(got.WordTimings) != 0 {
 		t.Errorf("old cache must decode to empty WordTimings; got %+v", got.WordTimings)
+	}
+}
+
+// TestEncodeSong_OmitsEmptyWordTimings covers the cache-size half of the #480
+// review. WordTimings is persisted now, but the overwhelming majority of cached
+// songs carry none -- only petitlyrics' word-synced tier produces them -- so a
+// bare field emits `"WordTimings":null` on every one of those rows.
+//
+// That is ~20 wasted bytes per row across the whole library for a field the row
+// does not have, and the cache is written on every settle. omitempty removes it
+// while keeping the bare Go field name, which is what makes the persisted key
+// small in the first place.
+func TestEncodeSong_OmitsEmptyWordTimings(t *testing.T) {
+	plain := models.Song{
+		Track:     models.Track{ArtistName: "Artist", TrackName: "Track"},
+		Subtitles: models.Synced{Lines: []models.Lines{{Text: "alpha"}}},
+	}
+	encoded, err := encodeSong(plain)
+	if err != nil {
+		t.Fatalf("encodeSong: %v", err)
+	}
+	if strings.Contains(encoded, "WordTimings") {
+		t.Errorf("a song with no word timings still emits the key: %s", encoded)
+	}
+
+	// The control that keeps this from being satisfied by dropping the field
+	// entirely: a song that HAS timings must still carry them.
+	withTimings := plain
+	withTimings.WordTimings = []models.WordTiming{{Line: 0, Text: "alpha", StartMS: 1000, EndMS: 1500}}
+	encoded2, err := encodeSong(withTimings)
+	if err != nil {
+		t.Fatalf("encodeSong: %v", err)
+	}
+	if !strings.Contains(encoded2, "WordTimings") {
+		t.Errorf("a song WITH word timings lost the key: %s", encoded2)
 	}
 }
