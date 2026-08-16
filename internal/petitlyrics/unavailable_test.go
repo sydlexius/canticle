@@ -129,6 +129,12 @@ func TestZeroResults_SuccessMidRunResets(t *testing.T) {
 // lock. Claim it outside and every goroutine crossing the threshold together
 // would each emit the warning -- turning a one-line outage signal into a flood,
 // which is exactly what the once-on-transition requirement exists to prevent.
+//
+// THE LATCH MOVED IN #767, AND SO DID HALF THIS TEST. Reaching the threshold is
+// now only SUSPICION -- the liveness probe decides -- so recordZeroResult no
+// longer latches or logs; reportConfirmedOutage does, on evidence. The invariant
+// is unchanged and still asserted here, just against the function that now owns
+// it. The counting half still exercises recordZeroResult.
 func TestZeroResultLatchIsExactlyOnceUnderConcurrency(t *testing.T) {
 	c := NewClient()
 	total := ZeroResultThreshold * 2
@@ -145,15 +151,38 @@ func TestZeroResultLatchIsExactlyOnceUnderConcurrency(t *testing.T) {
 	wg.Wait()
 
 	c.mu.Lock()
-	got, latched := c.consecutiveZero, c.zeroReported
+	got, latchedEarly := c.consecutiveZero, c.zeroReported
 	c.mu.Unlock()
 
 	if got != total {
 		t.Errorf("consecutiveZero = %d; want %d. A lost increment means the counter "+
 			"is racy and the threshold could be reached late or never.", got, total)
 	}
+	// Counting alone must NOT latch: that is the #767 correction. A latch here
+	// would mean a healthy credential had already been recorded as an outage
+	// before the probe ever ran.
+	if latchedEarly {
+		t.Error("zeroReported was latched by counting alone; reaching the threshold " +
+			"is only suspicion until the liveness probe confirms it (#767)")
+	}
+
+	// Now the confirmation path, concurrently: the latch must be claimed exactly
+	// once no matter how many goroutines confirm together.
+	var wg2 sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			c.reportConfirmedOutage(true)
+		}()
+	}
+	wg2.Wait()
+
+	c.mu.Lock()
+	latched := c.zeroReported
+	c.mu.Unlock()
 	if !latched {
-		t.Error("zeroReported was not latched after crossing the threshold; the " +
+		t.Error("zeroReported was not latched after a confirmed outage; the " +
 			"recovery log would then never fire either")
 	}
 
