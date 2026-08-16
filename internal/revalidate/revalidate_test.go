@@ -555,3 +555,82 @@ func applyPlan(t *testing.T, plan Plan) []realign.Applied {
 	}
 	return applied
 }
+
+// TestDegenerateOnDiskIsDemoted covers the #673 repair path: a degenerate .lrc
+// ALREADY on disk (every cue at one timestamp) is found by this sweep and
+// demoted to .txt, keeping the words.
+//
+// The existing corpus is the reason this arm exists. The accept-time guard stops
+// new ones, but five such files were found on a production library before the
+// predicate existed, and nothing else walks .lrc files re-judging them. Before
+// this arm the outcome fell to classify's default, which counts an unrecognized
+// verdict as Errored and deliberately never remediates -- so the population
+// would have stayed exactly as it was, silently.
+func TestDegenerateOnDiskIsDemoted(t *testing.T) {
+	// Every cue at 00:00.00 -- the production shape. Well inside trackSeconds,
+	// so the overrun predicate reports Ok and cannot be what catches it.
+	root, lrc := lib(t, "[00:00.00]alpha\n[00:00.00]beta\n[00:00.00]gamma\n")
+	rv, quarantine := newRevalidator(t, root, fixedDuration(), nil)
+
+	plan, err := rv.Plan(t.Context())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Counts.Degenerate != 1 {
+		t.Fatalf("Degenerate = %d, want 1 (counts=%+v)", plan.Counts.Degenerate, plan.Counts)
+	}
+	// It must NOT be miscounted as an error: an error is "we could not judge
+	// this", which would hide a file the sweep actually understands.
+	if plan.Counts.Errored != 0 {
+		t.Errorf("Errored = %d, want 0 -- a degenerate file is judged, not unreadable", plan.Counts.Errored)
+	}
+	if len(plan.Moves) != 1 {
+		t.Fatalf("moves = %d, want 1", len(plan.Moves))
+	}
+	if got := plan.Moves[0].Kind; got != realign.KindDemote {
+		t.Fatalf("kind = %q, want %q -- the words are correct, only the timing is fake", got, realign.KindDemote)
+	}
+
+	applyPlan(t, plan)
+
+	body, err := os.ReadFile(filepath.Join(root, "album", "track.txt"))
+	if err != nil {
+		t.Fatalf("demoted .txt missing: %v", err)
+	}
+	if got, want := string(body), "alpha\nbeta\ngamma\n"; got != want {
+		t.Errorf("demoted body = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(lrc); !os.IsNotExist(err) {
+		t.Errorf("the degenerate .lrc should have been moved aside: %v", err)
+	}
+	// Recoverable: this pass is backup-first like every other remediation here.
+	if _, err := os.Stat(filepath.Join(quarantine, "album", "track.lrc")); err != nil {
+		t.Errorf("the demoted .lrc is not recoverable from quarantine: %v", err)
+	}
+}
+
+// TestGenuinelySyncedIsNotDemotedAsDegenerate is the control this arm needs, and
+// an explicit #673 acceptance criterion: a real synced file must be untouched.
+// Without it the test above would also pass on a predicate that demoted
+// everything.
+func TestGenuinelySyncedIsNotDemotedAsDegenerate(t *testing.T) {
+	root, lrc := lib(t, "[00:10.00]alpha\n[00:25.00]beta\n[00:40.00]gamma\n")
+	rv, _ := newRevalidator(t, root, fixedDuration(), nil)
+
+	plan, err := rv.Plan(t.Context())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Counts.Degenerate != 0 {
+		t.Errorf("Degenerate = %d, want 0 -- distinct timestamps are a real sync", plan.Counts.Degenerate)
+	}
+	if plan.Counts.Ok != 1 {
+		t.Errorf("Ok = %d, want 1 (counts=%+v)", plan.Counts.Ok, plan.Counts)
+	}
+	if len(plan.Moves) != 0 {
+		t.Fatalf("moves = %d, want 0 -- a synced file must never be remediated", len(plan.Moves))
+	}
+	if _, err := os.Stat(lrc); err != nil {
+		t.Errorf("the synced .lrc must be left alone: %v", err)
+	}
+}

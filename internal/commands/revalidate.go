@@ -195,8 +195,8 @@ func applyRevalidate(out io.Writer, cfg config.Config, args RevalidateCmd, plan 
 // printRevalidateCounts emits the aggregate distribution. Counts only: no path,
 // no artist, no title, no lyric text.
 func printRevalidateCounts(out io.Writer, c revalidate.Counts, apply bool) {
-	_, _ = fmt.Fprintf(out, "revalidate: scanned=%d ok=%d MisSynced=%d categorical=%d unknown-duration=%d no-audio=%d errored=%d%s\n",
-		c.Scanned, c.Ok, c.MisSynced, c.Categorical, c.UnknownDuration, c.NoAudio, c.Errored, suffixRevalidateDryRun(apply))
+	_, _ = fmt.Fprintf(out, "revalidate: scanned=%d ok=%d MisSynced=%d categorical=%d degenerate=%d unknown-duration=%d no-audio=%d errored=%d%s\n",
+		c.Scanned, c.Ok, c.MisSynced, c.Categorical, c.Degenerate, c.UnknownDuration, c.NoAudio, c.Errored, suffixRevalidateDryRun(apply))
 	if c.UnknownDuration > 0 {
 		// Name a remedy that actually works for THESE files. Before #684 a scan
 		// short-circuited on any file that already had a sidecar before it ever
@@ -231,7 +231,12 @@ func writeRevalidateTail(path string, findings []revalidate.Finding) error {
 	}
 	defer func() { _ = f.Close() }()
 	for _, fd := range findings {
-		if fd.Outcome != timing.MisSynced && fd.Outcome != timing.Categorical {
+		// The REMEDIABLE verdicts, enumerated by hand. A verdict the sweep will
+		// act on but the tail never prints is the worst combination here:
+		// revalidate is dry-run by default, and this file is the only per-file
+		// view an operator gets, so an omission reads as "nothing will happen to
+		// that file". Degenerate joins the list for that reason (#673).
+		if fd.Outcome != timing.MisSynced && fd.Outcome != timing.Categorical && fd.Outcome != timing.Degenerate {
 			continue
 		}
 		if _, werr := fmt.Fprintf(f, "%s\t%s\tduration=%ds\toverrun=%.2fs\tratio=%.3f\taction=%s\n",

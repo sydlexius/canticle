@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/timing"
 )
 
 // guardSong builds a synced song with the given audio duration and cues.
@@ -305,5 +306,74 @@ func TestDecidePromotion(t *testing.T) {
 				t.Errorf("DecidePromotion() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestWriteLRC_TimingGuard_DegenerateWritesTxt covers #673 at accept time: an
+// .lrc whose cues all share one timestamp is not synced, so it must never be
+// written as one. The words are typically correct -- only the timing is
+// fabricated -- so this demotes to .txt exactly as MisSynced does, rather than
+// discarding.
+//
+// The pre-fix behavior was a silent PROMOTION: timing.Evaluate returned Ok for
+// this shape (an all-zero file has max 0, so it never overruns), and
+// DecidePromotion's default arm fails open by design. A new outcome that nobody
+// maps therefore ships as "write the bad file", which is the failure mode this
+// test pins.
+func TestWriteLRC_TimingGuard_DegenerateWritesTxt(t *testing.T) {
+	dir := t.TempDir()
+	// The #673 production shape: many cues, one distinct timestamp.
+	song := guardSong(240,
+		cue(0, "first line"),
+		cue(0, "second line"),
+		cue(0, "third line"),
+	)
+
+	w := NewLRCWriter()
+	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+
+	mustNotExist(t, filepath.Join(dir, "song.lrc"))
+	txt := filepath.Join(dir, "song.txt")
+	mustExist(t, txt)
+
+	data, err := os.ReadFile(txt) //nolint:gosec // reason: test path from t.TempDir
+	if err != nil {
+		t.Fatalf("reading demoted .txt: %v", err)
+	}
+	body := string(data)
+	// The words survive the demotion -- that is the whole point of demoting
+	// rather than quarantining.
+	for _, want := range []string{"first line", "second line", "third line"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("demoted .txt is missing %q; got %q", want, body)
+		}
+	}
+	// And the fake timing does not.
+	if strings.Contains(body, "[00:") {
+		t.Errorf("demoted .txt must not carry LRC timestamps; got %q", body)
+	}
+}
+
+// TestDecidePromotion_DegenerateDemotes pins the decision directly, without the
+// filesystem. The writer test above proves the end-to-end effect; this proves
+// the mapping itself, so a regression is attributable to the arm rather than to
+// any write-path change.
+func TestDecidePromotion_DegenerateDemotes(t *testing.T) {
+	song := guardSong(240, cue(0, "a"), cue(0, "b"))
+
+	decision, outcome, mag := DecidePromotion(song)
+
+	if decision != DemoteToUnsynced {
+		t.Errorf("decision = %v; want %v -- a degenerate lyric must never be promoted as synced", decision, DemoteToUnsynced)
+	}
+	if outcome != timing.Degenerate {
+		t.Errorf("outcome = %q; want %q", outcome, timing.Degenerate)
+	}
+	// The magnitude derives from a timestamp the file does not honestly carry,
+	// so it must not be persisted as if it were measured.
+	if mag.Measured {
+		t.Error("degenerate decision reports Measured=true; the numbers are fabricated and would land in the metrics columns")
 	}
 }

@@ -220,3 +220,49 @@ func TestStampTimingOutcome_LogsOnlyNonCompliant(t *testing.T) {
 		})
 	}
 }
+
+// TestStampTimingOutcome_DegenerateLogsAccurately covers the worker half of
+// #673. A degenerate result IS worth a warn -- it is non-compliant and
+// actionable -- but the existing sibling warn says the lyric "overruns the
+// audio", which is FALSE for this shape: a degenerate file has no honest timing
+// to overrun, and its overrun/ratio fields are zero.
+//
+// So this pins two things at once: that the event is not silently swallowed,
+// and that what it says about the file is true. A warn whose text contradicts
+// its own numeric fields is how an operator gets sent after the wrong cause.
+func TestStampTimingOutcome_DegenerateLogsAccurately(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	q := &fakeQueue{}
+	w := &Worker{queue: q, now: func() time.Time { return testNow }}
+	// Two cues at the same stamp, well inside a 100s track: the overrun
+	// predicate reports nothing, so only the degeneracy check can catch it.
+	song := syncedSong(tLine(0, "a"), tLine(0, "b"))
+
+	w.stampTimingOutcome(t.Context(), queue.WorkItem{ID: 11,
+		Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}}, song, 100)
+
+	// The verdict is persisted like any other.
+	rec, ok := q.timingOutcomes[11]
+	if !ok {
+		t.Fatal("no timing outcome stamped for a degenerate result")
+	}
+	if rec.Outcome != string(timing.Degenerate) {
+		t.Errorf("Outcome = %q, want %q", rec.Outcome, timing.Degenerate)
+	}
+
+	log := buf.String()
+	if log == "" {
+		t.Fatal("a degenerate result logged nothing; it is non-compliant and actionable")
+	}
+	// The claim must match the defect.
+	if strings.Contains(log, "overruns the audio") {
+		t.Errorf("degenerate warn claims an overrun, which this file does not have: %q", log)
+	}
+	if !strings.Contains(log, "outcome=degenerate") {
+		t.Errorf("degenerate warn is missing outcome=degenerate: %q", log)
+	}
+}

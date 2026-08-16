@@ -467,3 +467,119 @@ func TestThresholdsMatchCalibration(t *testing.T) {
 		t.Errorf("CategoricalRatio = %v, want 1.5", CategoricalRatio)
 	}
 }
+
+// TestEvaluate_DegenerateAllCuesShareOneTimestamp covers #673: an .lrc whose
+// cues all carry the SAME timestamp is not synced -- every line would render
+// simultaneously at playback start -- yet the overrun predicate cannot see it.
+//
+// The blind spot is structural, not an oversight. Evaluate compares the MAXIMUM
+// timestamp against the duration, so an all-zero file has max 0, an overrun of
+// -duration, and a ratio of 0: maximally "compliant" by that axis. Degeneracy is
+// ORTHOGONAL to overrun, which is why it needs its own arm rather than a
+// threshold tweak. Measured before the fix: 65 cues at 00:00.00 against 240s
+// audio returned Ok with ratio 0.00.
+func TestEvaluate_DegenerateAllCuesShareOneTimestamp(t *testing.T) {
+	tests := []struct {
+		name     string
+		song     models.Song
+		duration int
+		want     TimingOutcome
+	}{
+		{
+			// The production shape from #673: many cues, one distinct timestamp.
+			name:     "many cues all at zero is degenerate",
+			song:     song(line(0, "a"), line(0, "b"), line(0, "c"), line(0, "d")),
+			duration: 240,
+			want:     Degenerate,
+		},
+		{
+			// Degeneracy is about the timestamps being IDENTICAL, not about them
+			// being zero. A non-zero shared stamp is the same defect.
+			name:     "many cues all at the same non-zero stamp is degenerate",
+			song:     song(line(12, "a"), line(12, "b"), line(12, "c")),
+			duration: 240,
+			want:     Degenerate,
+		},
+		{
+			// A single cue has exactly one timestamp by definition. Calling that
+			// degenerate would flag every legitimately short entry, so the rule
+			// requires MORE THAN ONE text-bearing cue.
+			name:     "single cue is not degenerate",
+			song:     song(line(0, "a")),
+			duration: 240,
+			want:     Ok,
+		},
+		{
+			// Two cues is the smallest set where "all identical" is a real claim.
+			name:     "two identical cues is degenerate",
+			song:     song(line(5, "a"), line(5, "b")),
+			duration: 240,
+			want:     Degenerate,
+		},
+		{
+			name:     "two distinct cues is not degenerate",
+			song:     song(line(5, "a"), line(9, "b")),
+			duration: 240,
+			want:     Ok,
+		},
+		{
+			// Decorative lines are filtered before the distinctness test, exactly
+			// as they are for the max. Otherwise a single note-glyph marker at a
+			// different stamp would mask a fully degenerate lyric.
+			name:     "decorative line at another stamp does not rescue a degenerate lyric",
+			song:     song(line(0, "a"), line(0, "b"), line(30, "♪")),
+			duration: 240,
+			want:     Degenerate,
+		},
+		{
+			// The mirror case: real cues are distinct, so the file is fine even
+			// though a decorative line shares a stamp with one of them.
+			name:     "decorative line sharing a stamp does not make a synced lyric degenerate",
+			song:     song(line(10, "a"), line(40, "b"), line(40, "♪")),
+			duration: 240,
+			want:     Ok,
+		},
+		{
+			// Degeneracy is checked BEFORE the overrun comparison: a fake
+			// timestamp makes overrun and ratio meaningless, so a degenerate file
+			// that also overruns must report the cause, not the symptom.
+			name:     "degenerate wins over a categorical overrun",
+			song:     song(line(600, "a"), line(600, "b")),
+			duration: 100,
+			want:     Degenerate,
+		},
+		{
+			// Unknown duration still fails open first -- never reject on it.
+			name:     "degenerate with unknown duration stays UnknownDuration",
+			song:     song(line(0, "a"), line(0, "b")),
+			duration: 0,
+			want:     UnknownDuration,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := Evaluate(tt.song, tt.duration)
+			if got != tt.want {
+				t.Errorf("Evaluate = %q; want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEvaluate_DegenerateCarriesNoMagnitude pins that a degenerate verdict
+// reports Measured=false. The overrun and ratio are computed from a timestamp
+// the file does not honestly carry, so persisting them would put fabricated
+// numbers in the metrics columns -- worse than a NULL, because they look real.
+func TestEvaluate_DegenerateCarriesNoMagnitude(t *testing.T) {
+	outcome, mag := Evaluate(song(line(0, "a"), line(0, "b")), 240)
+	if outcome != Degenerate {
+		t.Fatalf("outcome = %q; want %q", outcome, Degenerate)
+	}
+	if mag.Measured {
+		t.Error("degenerate magnitude reports Measured=true; the numbers derive from a fake timestamp and must not be persisted")
+	}
+	if mag.OverrunSeconds != 0 || mag.Ratio != 0 {
+		t.Errorf("degenerate magnitude carries data: %+v", mag)
+	}
+}

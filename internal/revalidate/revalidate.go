@@ -94,6 +94,7 @@ type Counts struct {
 	Ok              int
 	MisSynced       int
 	Categorical     int
+	Degenerate      int // every cue at one timestamp: not synced at all (#673)
 	UnknownDuration int // no exact duration: failed open, never remediated
 	NoAudio         int // a .lrc with no companion audio: realign's problem, not this one
 	Errored         int // unreadable file or duration-store failure
@@ -199,6 +200,24 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 		plan.Counts.UnknownDuration++
 	case timing.MisSynced:
 		plan.Counts.MisSynced++
+		mv, mok := r.demotionMove(root, path, audio)
+		if mok {
+			f.Action = mv.Kind
+			plan.Moves = append(plan.Moves, mv)
+		}
+	case timing.Degenerate:
+		// Every cue shares one timestamp, so the file is not synced (#673).
+		// Demote exactly as MisSynced does -- same move, same backup trail --
+		// because the defect is identical in kind: the words are fine, the
+		// timing is not. Reusing demotionMove is what keeps this arm honest;
+		// a bespoke path here would drift from the settled-.txt and
+		// all-decorative rules that path already enforces.
+		//
+		// Note the overrun predicate CANNOT reach these files: an all-zero
+		// lyric has max 0, so it never overruns and classifies Ok. Before this
+		// arm the verdict fell to default and was counted Errored, which never
+		// remediates -- so the existing corpus would have stayed untouched.
+		plan.Counts.Degenerate++
 		mv, mok := r.demotionMove(root, path, audio)
 		if mok {
 			f.Action = mv.Kind
