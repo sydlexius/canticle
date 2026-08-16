@@ -306,10 +306,70 @@ func surveySample(ctx context.Context, c *Client, track models.Track, captureDir
 		path := filepath.Join(captureDir, fmt.Sprintf("lsy-%04d.bin", idx))
 		if writeErr := os.WriteFile(path, raw, 0o600); writeErr != nil {
 			obs.Err = "lsy-write"
+			return obs, nil
 		}
+		capturePairedText(ctx, c, track, captureDir, idx, &obs)
 	}
 
 	return obs, nil
+}
+
+// capturePairedText fetches the tier-1 text for a track that just yielded a
+// tier-2 blob, and writes it beside that blob under the SAME index.
+//
+// Why this exists: the first #602 corpus was four ORPHAN blobs. The track list
+// was deleted (correctly -- it is private library metadata), so nothing tied a
+// payload to the words it encodes, and the decode could not be checked against
+// ground truth. Structure analysis got as far as the container framing and the
+// XOR key's high byte, then stalled on exactly the two questions an unpaired
+// blob cannot answer: the key's low byte (XOR-ing it by 0x40 maps printable
+// ASCII onto other printable ASCII, so statistics alone cannot choose) and where
+// the timestamp sits inside each line slot.
+//
+// The pairing is the index, never the filename: lsy-NNNN.bin and txt-NNNN.txt.
+// A filename must never carry a track title.
+//
+// A failure here is NON-FATAL and deliberately so. The tier-2 blob is already on
+// disk and is the scarcer artifact; losing its companion degrades the sample to
+// what the previous corpus was, which is worth strictly more than aborting a
+// paced multi-hour sweep. The obs records which happened so the report can count
+// paired vs unpaired rather than silently overstating the corpus.
+func capturePairedText(ctx context.Context, c *Client, track models.Track, captureDir string, idx int, obs *sampleObservation) {
+	// Routed through c.request, so it goes through the SAME pacer as every other
+	// lookup -- a second request per tier-2 hit must not bypass the floor (#535).
+	songs, err := c.request(ctx, track, tierUnsynced)
+	if err != nil {
+		obs.PairErr = "request"
+		return
+	}
+	candidate, err := selectCandidate(songs, track)
+	if err != nil {
+		obs.PairErr = "no-candidate"
+		return
+	}
+	if candidate.LyricsData == "" {
+		obs.PairErr = "empty-payload"
+		return
+	}
+	text, err := base64.StdEncoding.DecodeString(candidate.LyricsData)
+	if err != nil {
+		obs.PairErr = "base64"
+		return
+	}
+	// Guard against pairing a blob with the wrong tier's bytes: a tier-1 request
+	// that comes back binary is not the text lane, and silently zipping it to the
+	// blob would manufacture exactly the confident-looking wrong ground truth this
+	// pairing exists to prevent.
+	if got := classifyPayload(text); got != tierUnsynced {
+		obs.PairErr = fmt.Sprintf("tier-%d", got)
+		return
+	}
+	path := filepath.Join(captureDir, fmt.Sprintf("txt-%04d.txt", idx))
+	if writeErr := os.WriteFile(path, text, 0o600); writeErr != nil {
+		obs.PairErr = "write"
+		return
+	}
+	obs.Paired = true
 }
 
 // distinctStartRatio reports the fraction of lines whose words do NOT all share
@@ -439,6 +499,135 @@ func TestEnsureOutsideRepo_RejectsEveryPathUnderTheRepo(t *testing.T) {
 				t.Errorf("returned path is not absolute: %q", got)
 			}
 		})
+	}
+}
+
+// tierEnvelope builds a minimal API envelope carrying one song whose payload is
+// the given bytes. Synthetic only -- no provider content is vendored here.
+func tierEnvelope(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	return []byte(`<?xml version="1.0" encoding="UTF-8"?><response><songs><song>` +
+		`<lyricsId>1</lyricsId><title>Lorem Ipsum</title><artist>Dolor Sit</artist>` +
+		`<lyricsType>1</lyricsType><lyricsData>` +
+		base64.StdEncoding.EncodeToString(payload) +
+		`</lyricsData></song></songs></response>`)
+}
+
+// TestCapturePairedText_WritesCompanionAtTheSameIndex pins the property the
+// first #602 corpus lacked: a tier-2 blob and the tier-1 text it encodes,
+// recoverable as a pair. Without the shared index the two are orphans, which is
+// precisely the state that stalled the decode at the key's low byte.
+func TestCapturePairedText_WritesCompanionAtTheSameIndex(t *testing.T) {
+	// A tier-1 payload is valid UTF-8 with no NUL bytes, per classifyPayload.
+	text := []byte("lorem ipsum dolor\nsit amet consectetur\n")
+	c, fs := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		_, _ = w.Write(tierEnvelope(t, text))
+	})
+
+	dir := t.TempDir()
+	var obs sampleObservation
+	capturePairedText(context.Background(), c, models.Track{TrackName: "Lorem Ipsum"}, dir, 87, &obs)
+
+	if !obs.Paired {
+		t.Fatalf("Paired = false, PairErr = %q, want a successful pairing", obs.PairErr)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "txt-0087.txt"))
+	if err != nil {
+		t.Fatalf("companion not written at the blob's index: %v", err)
+	}
+	if string(got) != string(text) {
+		t.Errorf("companion bytes differ from the payload:\ngot  %q\nwant %q", got, text)
+	}
+
+	// The companion must be fetched at tier 1, and through the client (hence the
+	// pacer), not by a bypassing raw request.
+	reqs := fs.snapshot()
+	if len(reqs) != 1 {
+		t.Fatalf("want exactly 1 request for the companion, got %d", len(reqs))
+	}
+	if reqs[0].form["lyricsType"] != "1" {
+		t.Errorf("companion must be requested at tier 1, got lyricsType=%q", reqs[0].form["lyricsType"])
+	}
+}
+
+// TestCapturePairedText_RefusesANonTextCompanion is the load-bearing half. A
+// tier-1 request that answers with binary is not the text lane, and writing it
+// as ground truth would manufacture a confidently wrong pairing -- the failure
+// class that makes a wrong decoder look correct.
+func TestCapturePairedText_RefusesANonTextCompanion(t *testing.T) {
+	// Binary: carries a NUL, so classifyPayload reports line-sync, not text.
+	binary := []byte{'M', 'H', 'D', 'R', 0x00, 0x01, 0xff, 0xfe}
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		_, _ = w.Write(tierEnvelope(t, binary))
+	})
+
+	dir := t.TempDir()
+	var obs sampleObservation
+	capturePairedText(context.Background(), c, models.Track{TrackName: "Lorem Ipsum"}, dir, 13, &obs)
+
+	if obs.Paired {
+		t.Error("a binary companion was accepted as tier-1 ground truth")
+	}
+	if obs.PairErr == "" {
+		t.Error("a refused companion must record why")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("a refused companion must write nothing, found %d file(s)", len(entries))
+	}
+}
+
+// TestSurveyReport_CountsPairedSeparatelyFromTotal pins that the report cannot
+// present an unpaired corpus as an adequate one.
+func TestSurveyReport_CountsPairedSeparatelyFromTotal(t *testing.T) {
+	r := newSurveyReport()
+	r.add(sampleObservation{Tier: tierLineSync, Paired: true})
+	r.add(sampleObservation{Tier: tierLineSync, PairErr: "request"})
+	r.add(sampleObservation{Tier: tierLineSync, PairErr: "request"})
+
+	out := r.render()
+	if !strings.Contains(out, "line-sync corpus: 1 paired / 3 total") {
+		t.Errorf("report does not separate paired from total:\n%s", out)
+	}
+	if !strings.Contains(out, "unpaired (request): 2") {
+		t.Errorf("report does not attribute the unpaired blobs:\n%s", out)
+	}
+}
+
+// TestSurveyReport_CountsAFailedWriteAsUnpaired pins the accounting hole both
+// review bots found: a tier-2 sample that classified its payload and THEN failed
+// (obs.Err "lsy-write") takes add()'s early return, which increments the tier
+// count -- the number render() prints as the corpus TOTAL -- without ever
+// reaching the paired/unpaired block.
+//
+// The result was a report reading "0 paired / 1 total" with no unpaired line, so
+// the gap between the two numbers had no stated cause. That is the specific
+// failure this whole paired/total split exists to prevent: a corpus figure a
+// reader cannot reconcile. Every counted blob must now land in exactly one of
+// paired or unpaired.
+func TestSurveyReport_CountsAFailedWriteAsUnpaired(t *testing.T) {
+	r := newSurveyReport()
+	r.add(sampleObservation{Tier: tierLineSync, Paired: true})
+	r.add(sampleObservation{Tier: tierLineSync, Err: "lsy-write"})
+
+	out := r.render()
+	if !strings.Contains(out, "line-sync corpus: 1 paired / 2 total") {
+		t.Errorf("a failed tier-2 write is missing from the corpus total:\n%s", out)
+	}
+	if !strings.Contains(out, "unpaired (lsy-write): 1") {
+		t.Errorf("a failed tier-2 write is counted in the total but not attributed:\n%s", out)
+	}
+
+	// The invariant, stated independently of the strings above: paired plus
+	// unpaired must equal the printed total, or the breakdown cannot explain it.
+	unpaired := 0
+	for _, n := range r.lsyUnpaired {
+		unpaired += n
+	}
+	if got := r.lsyPaired + unpaired; got != r.tierCounts[tierLineSync] {
+		t.Errorf("paired(%d)+unpaired(%d)=%d does not reconcile with total %d",
+			r.lsyPaired, unpaired, got, r.tierCounts[tierLineSync])
 	}
 }
 

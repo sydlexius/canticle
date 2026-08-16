@@ -25,6 +25,14 @@ type sampleObservation struct {
 	Copyright     string  // raw copyright value, empty when absent
 	DistinctRatio float64 // tier-3 only: fraction of lines with distinct word starts
 	Err           string  // sentinel error class name, empty on success
+	// Paired and PairErr are tier-2 only, and record whether the companion
+	// tier-1 text was captured beside the blob (#602). An UNPAIRED blob is not
+	// useless -- the first corpus was four of them -- but it cannot supply the
+	// ground truth needed to pin the XOR key's low byte or the timestamp offset,
+	// so the report counts the two separately rather than reporting a corpus size
+	// that overstates how much of it is actually usable.
+	Paired  bool
+	PairErr string // why the companion fetch failed, empty when it succeeded
 }
 
 type surveyReport struct {
@@ -36,6 +44,8 @@ type surveyReport struct {
 	officialByTier map[int]map[string]int
 	copyrightSeen  int
 	cueCounts      []int
+	lsyPaired      int
+	lsyUnpaired    map[string]int
 	distinctRatios []float64
 	errCounts      map[string]int
 }
@@ -46,6 +56,7 @@ func newSurveyReport() *surveyReport {
 		officialCounts: map[string]int{},
 		officialByTier: map[int]map[string]int{},
 		errCounts:      map[string]int{},
+		lsyUnpaired:    map[string]int{},
 	}
 }
 
@@ -61,6 +72,16 @@ func (r *surveyReport) add(obs sampleObservation) {
 		// decode.
 		if obs.Tier != 0 {
 			r.tierCounts[obs.Tier]++
+		}
+		// A tier-2 sample counted just above is part of the corpus TOTAL, so it
+		// must also land in the paired/unpaired breakdown or the two numbers
+		// cannot be reconciled ("0 paired / 1 total" with no reason given). It
+		// reached here by failing AFTER classifying its payload -- lsy-write --
+		// so it is definitionally unpaired, and obs.Err is the reason. Recorded
+		// BEFORE the early return, which is the whole bug: the return skips the
+		// breakdown at the bottom of this function.
+		if obs.Tier == tierLineSync {
+			r.lsyUnpaired[boundedSentinel(obs.Err)]++
 		}
 		return
 	}
@@ -89,6 +110,21 @@ func (r *surveyReport) add(obs sampleObservation) {
 	}
 	if obs.Tier == tierWordSync {
 		r.distinctRatios = append(r.distinctRatios, obs.DistinctRatio)
+	}
+	// The #602 corpus is sized by PAIRED blobs, not by blobs. An unpaired one
+	// cannot supply ground truth, so counting only the total would report a
+	// corpus that looks adequate while leaving the key's low byte and the
+	// timestamp offset exactly as unresolvable as before.
+	if obs.Tier == tierLineSync {
+		if obs.Paired {
+			r.lsyPaired++
+		} else {
+			reason := obs.PairErr
+			if reason == "" {
+				reason = "unknown"
+			}
+			r.lsyUnpaired[boundedSentinel(reason)]++
+		}
 	}
 }
 
@@ -145,6 +181,12 @@ func (r *surveyReport) render() string {
 		sort.Ints(sorted)
 		fmt.Fprintf(&b, "  min %d  median %d  max %d\n",
 			sorted[0], sorted[len(sorted)/2], sorted[len(sorted)-1])
+	}
+
+	fmt.Fprintf(&b, "\nline-sync corpus: %d paired / %d total\n",
+		r.lsyPaired, r.tierCounts[tierLineSync])
+	for _, k := range sortedKeys(r.lsyUnpaired) {
+		fmt.Fprintf(&b, "  unpaired (%s): %d\n", k, r.lsyUnpaired[k])
 	}
 
 	fmt.Fprintf(&b, "\nword-sync distinct-start ratios (n=%d):\n", len(r.distinctRatios))
@@ -295,6 +337,27 @@ func TestSurveyReport_CueCountDistribution(t *testing.T) {
 // past a handful of characters is not the enumerated flag this report is
 // measuring.
 const maxTokenLen = 8
+
+// maxSentinelLen bounds an INTERNAL error sentinel -- a literal written in this
+// package, never provider data. It is separate from maxTokenLen on purpose: that
+// bound is 8 because a provider-controlled flag past a handful of characters is
+// not the enumerated value being measured, whereas these sentinels are our own
+// and several legitimately exceed 8 ("no-candidate", "empty-payload",
+// "ErrProviderUnavailable"). Bounding them with maxTokenLen redacted the very
+// attribution the unpaired breakdown exists to print. The bound is kept -- one
+// sentinel is computed (fmt.Sprintf("tier-%d", ...)) and future code could put
+// something unexpected here -- but sized so an ordinary sentinel survives it.
+const maxSentinelLen = 32
+
+// boundedSentinel bounds an internal sentinel for display. Same shape as
+// boundedToken, different threat model: this one guards against a surprising
+// value, not against provider-controlled content reaching a shared surface.
+func boundedSentinel(v string) string {
+	if len(v) <= maxSentinelLen {
+		return v
+	}
+	return fmt.Sprintf("<non-sentinel value, %d bytes>", len(v))
+}
 
 // boundedToken passes through a short enumerated token and replaces anything
 // longer with a length-only placeholder.
