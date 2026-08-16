@@ -432,6 +432,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Album:       o.Album,
 				Result:      string(o.Result),
 				Lane:        laneLabel(o.ProviderLane),
+				LaneMark:    laneMark(o.ProviderLane),
 				CompletedAt: formatReportTime(o.CompletedAt, serverLoc),
 			})
 		}
@@ -443,10 +444,11 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 		v.ProviderRows = make([]templates.ProviderRow, 0, len(rows))
 		for _, p := range rows {
 			v.ProviderRows = append(v.ProviderRows, templates.ProviderRow{
-				Lane:    laneLabel(p.Lane),
-				Hits:    strconv.FormatInt(p.Hits, 10),
-				Misses:  strconv.FormatInt(p.Misses, 10),
-				HitRate: fmt.Sprintf("%.1f%%", p.HitRate*100),
+				Lane:     laneLabel(p.Lane),
+				LaneMark: laneMark(p.Lane),
+				Hits:     strconv.FormatInt(p.Hits, 10),
+				Misses:   strconv.FormatInt(p.Misses, 10),
+				HitRate:  fmt.Sprintf("%.1f%%", p.HitRate*100),
 			})
 		}
 	case "instrumental-inventory":

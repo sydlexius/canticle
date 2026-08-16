@@ -47,11 +47,14 @@ type QueueSummaryRow struct {
 
 // RecentOutcomeRow is one recently-completed track with its derived result.
 type RecentOutcomeRow struct {
-	Artist      string
-	Title       string
-	Album       string
-	Result      string
-	Lane        string
+	Artist string
+	Title  string
+	Album  string
+	Result string
+	Lane   string
+	// LaneMark is the mark token for Lane, empty when the lane has no mark (#601).
+	// Empty renders the name alone rather than a gap.
+	LaneMark    string
 	CompletedAt string
 	// CompletedAtISO is the RFC3339 UTC value for the HTML <time datetime=> attribute.
 	// Empty when CompletedAt is the zero sentinel "-".
@@ -63,10 +66,12 @@ type RecentOutcomeRow struct {
 
 // ProviderRow is one provider lane's hit/miss tally and true per-track hit-rate.
 type ProviderRow struct {
-	Lane    string
-	Hits    string
-	Misses  string
-	HitRate string
+	Lane string
+	// LaneMark is the mark token for Lane, empty when the lane has no mark (#601).
+	LaneMark string
+	Hits     string
+	Misses   string
+	HitRate  string
 }
 
 // InstrumentalRow is one audio-detected instrumental track joined to its file.

@@ -417,3 +417,51 @@ func TestBuildReportViewUnimplementedKey(t *testing.T) {
 		t.Fatal("buildReportView with unknown key = nil error, want fail-fast error")
 	}
 }
+
+// TestReportFragmentRendersLaneMarks asserts the mark reaches the RENDERED
+// PAGE, not merely the view struct. The Go-level tests in lanemark_test.go
+// prove laneMark returns a token and that the token reaches a StatTile; none of
+// them would fail if the template dropped @laneCell, which is the change most
+// likely to happen by accident during a later layout edit.
+//
+// Both provenances are asserted in one fragment because they render through
+// different branches: the authored glyph is inline SVG markup, the vendored
+// provider mark is an <img> to an embedded path.
+func TestReportFragmentRendersLaneMarks(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertDone(t, sqlDB, "s1", "musixmatch", `[{"outdir":"/out","filename":"s1.lrc"}]`, "2026-06-17T10:00:00Z")
+	insertDone(t, sqlDB, "s2", "detector", `[{"outdir":"/out","filename":"s2.txt"}]`, "2026-06-17T11:00:00Z")
+	insertDone(t, sqlDB, "s3", "petitlyrics", `[{"outdir":"/out","filename":"s3.lrc"}]`, "2026-06-17T12:00:00Z")
+	mux := newReportsUIServer(t, sqlDB)
+
+	body := getFragment(t, mux, "recent-outcomes").Body.String()
+
+	// The vendored provider mark renders as an img pointing at the embedded
+	// asset. TestLaneMarkAssetsAreEmbedded proves that path resolves.
+	if !strings.Contains(body, `src="/static/img/lanes/musixmatch.svg"`) {
+		t.Errorf("musixmatch row missing its vendored mark; body:\n%s", body)
+	}
+	// The authored glyph renders as inline SVG carrying the mark class.
+	if !strings.Contains(body, `class="mx-lane-mark"`) {
+		t.Error("detector row missing the authored inline glyph")
+	}
+	// Every lane still renders its NAME. The mark supplements the text, it never
+	// replaces it -- an icon-only cell would strand both the unmarked lane and
+	// every screen-reader user.
+	for _, want := range []string{"musixmatch", "Instrumental Detector", "petitlyrics"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered fragment missing lane name %q", want)
+		}
+	}
+	// ACCESSIBILITY: no mark contributes to the accessibility tree, so a lane is
+	// announced exactly once per row (from its adjacent text) rather than twice.
+	if strings.Contains(body, `alt="Musixmatch"`) || strings.Contains(body, `aria-label="Instrumental Detector"`) {
+		t.Error("a lane mark is exposed to assistive tech; the adjacent text is the accessible name")
+	}
+	// petitlyrics has no mark: exactly two marks render across three rows. This
+	// is the degrade path asserted positively, so a future default-mark or
+	// placeholder-box change fails here rather than shipping a fake mark.
+	if n := strings.Count(body, "mx-lane-mark"); n != 2 {
+		t.Errorf("expected exactly 2 lane marks across 3 rows (petitlyrics has none), got %d", n)
+	}
+}

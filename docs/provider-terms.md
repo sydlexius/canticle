@@ -55,6 +55,21 @@ because a revoked one fails silently rather than with a 401), which implies a
 registration relationship whose terms may be separate from the public site terms above
 and were not located.
 
+### Lane mark: NONE, deliberately (#601)
+
+petitlyrics publishes no brand kit and no SVG mark. Its site serves only a raster
+site-header logo (`/images/logo/logo.png`, 233x120 PNG), and no third-party usage terms
+for it were located.
+
+**No mark is vendored, and the lane renders as text.** General icon sites do host
+petitlyrics logos, but those are unauthorized redraws -- vendoring one would put an
+asset of unknown provenance into the binary and ship it to every user. #601's degrade
+path (name alone, no placeholder, no gap) covers this case exactly, which is what makes
+declining the correct action rather than a missing feature.
+
+To revisit: a mark could be sourced by asking SyncPower directly for a usable asset and
+its usage terms. Do not resolve it by picking one off an icon site.
+
 ---
 
 ## Musixmatch
@@ -90,6 +105,35 @@ credit would be satisfying.
 Read <https://www.musixmatch.com/apiterms/> from an environment that can reach it, and
 record: whether a copyright notice is required, its prescribed wording and placement,
 whether the tracking script is mandatory, and whether the terms address non-API endpoints.
+
+### Lane mark: VENDORED (#601)
+
+| | |
+|---|---|
+| **File** | `web/static/img/lanes/musixmatch.svg` |
+| **Source** | <https://s.mxmcdn.net/site/images/mxm_icon.svg> (Musixmatch's own CDN, referenced by musixmatch.com) |
+| **Retrieved** | 2026-08-16 |
+| **Modified** | No. Used byte-for-byte as served. |
+
+Taken from the provider's first-party CDN rather than from an icon site, per #601's
+requirement to prefer the official asset. Note that Musixmatch **does** publish a brand
+resources page at <https://about.musixmatch.com/brand-resources>, including a "For
+Brands" badge set intended for third-party use with a suggested link to musixmatch.com.
+Those assets sit behind Google Drive folders that need a browser to enumerate, so they
+could not be retrieved here; the CDN mark above is the same company's own asset and is
+the correct interim source.
+
+**Worth checking when the brand kit is reachable:** the "For Brands" set may be the
+intended asset for exactly this use, and the suggested musixmatch.com linkback may be a
+condition attached to it. Neither the CDN file nor the brand page states explicit
+third-party usage terms, so this is recorded as unverified rather than cleared.
+
+**Rendering constraint this creates.** The mark is a single fixed fill (`#131313`) on a
+`#0b1120` UI background -- near-black on near-black, unreadable as-is. It is NOT
+recolored, because the guidelines that require an official asset generally forbid
+altering it. The `.mx-lane-chip` treatment reconciles this instead by placing the mark on
+a light plate, so it renders on the background it was drawn for. Do not "fix" this with a
+CSS filter or by editing the file.
 
 ---
 

@@ -589,6 +589,53 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* A lane's mark paired with its name (#601). inline-flex rather than a grid or a
+   fixed leading column: a lane with no mark yet must collapse to the name alone
+   with no reserved gutter, so an unsourced provider reads as deliberate text
+   rather than as a missing image. The gap only exists when a mark does. */
+.mx-lane-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Sized in em, not rem, so the mark tracks whatever type size its context uses:
+   the same glyph sits in a 0.8125rem table cell and a larger dashboard tile
+   label, and a rem value would render it oversized in one of them. Sits just
+   under the cap height so it reads as a peer of the text rather than as a
+   button. */
+.mx-lane-mark {
+  width: 0.95em;
+  height: 0.95em;
+  flex: none;
+  color: var(--mx-content-text-secondary);
+}
+
+/* A vendored provider mark, as opposed to an authored currentColor glyph.
+   These are supplied as fixed-color brand assets and MUST NOT be recolored --
+   the same guidelines that require the official file generally forbid altering
+   it, so `filter: invert()` and friends are not available here.
+
+   That is a problem on this UI: the Musixmatch mark is #131313 on a #0b1120
+   content background, which is near-black on near-black. The chip is what
+   reconciles them -- a light plate the mark sits on, so the asset renders
+   as-drawn on the background it was drawn for. It also gives the full-color
+   brand marks and the monochrome authored glyph a shared footprint, which is
+   what keeps a row of mixed-provenance marks looking deliberate rather than
+   improvised.
+
+   Sized slightly larger than .mx-lane-mark with padding, so the mark's own
+   optical size inside the chip matches the bare glyph beside it. */
+.mx-lane-chip {
+  width: 1.35em;
+  height: 1.35em;
+  flex: none;
+  padding: 0.2em;
+  border-radius: var(--mx-radius-sm);
+  background-color: #f8fafc;
+  box-sizing: border-box;
+}
+
 .mx-row-total td {
   font-weight: 700;
   color: #f1f5f9; /* slate-100 */
