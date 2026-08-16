@@ -67,3 +67,47 @@ func TestMusixmatchInactiveBannerAbsentWhenActive(t *testing.T) {
 		t.Fatal("Spicetify FAQ link must not render when musixmatchInactive=false")
 	}
 }
+
+// TestMusixmatchCreditRendersWhenActive guards a COMPLIANCE obligation, not a
+// visual preference: API Terms clause 2.1.5 requires crediting Musixmatch with a
+// link to its Site each time the Data is used (docs/provider-terms.md).
+//
+// It is a regression guard by construction -- the credit was added and this test
+// written alongside it, so it has never failed against unfixed code. Labeled as
+// such rather than presented as proof the credit is correct. What it defends is
+// the credit silently disappearing in a later layout edit, which is exactly how a
+// compliance surface rots: nothing breaks, no test fails, and the obligation
+// quietly stops being met.
+func TestMusixmatchCreditRendersWhenActive(t *testing.T) {
+	body := renderShell(t, false)
+
+	if !strings.Contains(body, "mx-provider-credit") {
+		t.Fatal("provider credit missing when Musixmatch is active; clause 2.1.5 requires it")
+	}
+	// The LINK is the required element, not the image. A credit that names
+	// Musixmatch without linking to the Site does not satisfy 2.1.5.
+	if !strings.Contains(body, `href="https://www.musixmatch.com"`) {
+		t.Error("credit must link to the Musixmatch Site (clause 2.1.5)")
+	}
+	if !strings.Contains(body, "powered by Musixmatch") {
+		t.Error("credit must name Musixmatch in its text")
+	}
+	// Rendered OUTSIDE #mx-main so an htmx report-rail swap cannot blow it away.
+	// A credit that survives only until the first navigation is not an
+	// each-time-you-use-the-Data credit.
+	mainIdx := strings.Index(body, `id="mx-main"`)
+	creditIdx := strings.Index(body, "mx-provider-credit")
+	if mainIdx >= 0 && creditIdx >= 0 && creditIdx < mainIdx {
+		t.Error("credit renders before #mx-main; it must sit after it, outside the htmx swap target")
+	}
+}
+
+// TestMusixmatchCreditHiddenWhenInactive asserts the credit is absent with no
+// usable token. Crediting Musixmatch for results another provider served would
+// be a misattribution, so the obligation and its absence are both load-bearing.
+func TestMusixmatchCreditHiddenWhenInactive(t *testing.T) {
+	body := renderShell(t, true)
+	if strings.Contains(body, "mx-provider-credit") {
+		t.Error("provider credit must not render when Musixmatch is inactive; no Musixmatch Data is in use")
+	}
+}

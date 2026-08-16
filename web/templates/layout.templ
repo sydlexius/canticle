@@ -63,6 +63,14 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 					<div id="mx-main">
 						{ children... }
 					</div>
+					// Provider credit sits OUTSIDE #mx-main for the same reason as the
+					// banner above: the report rail swaps that element's innerHTML, and a
+					// credit inside it would disappear on the first htmx swap. A credit
+					// that vanishes when the user navigates does not satisfy an
+					// each-time-you-use-the-Data obligation.
+					if !musixmatchInactive {
+						@musixmatchCredit()
+					}
 				</main>
 			</div>
 		</body>
@@ -81,6 +89,42 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 // two remedies named here are the actionable ones; walking a user through
 // extracting a credential out of another application's traffic is not guidance
 // canticle ships.
+// musixmatchCredit renders the Musixmatch attribution required by clause 2.1.5
+// of the API Terms of Service: credit Musixmatch and link to its Site each time
+// the Data is used. See docs/provider-terms.md for the full clause list and the
+// date they were read.
+//
+// WHY IT RENDERS ON EVERY PAGE rather than only where lyrics appear: the
+// obligation attaches to USING the Data, and canticle's whole purpose is
+// fetching and writing it -- every page of the serve UI is a view onto a library
+// built from it. Rendering it site-wide is both simpler to reason about and
+// strictly safer than auditing which views happen to surface a lyric today.
+//
+// It is HIDDEN when Musixmatch is inactive (no usable token), because in that
+// state no Musixmatch Data is being used and a credit would misattribute
+// results that came from another provider.
+//
+// WHAT THIS IS NOT: clause 2.1.5 names a specific "powered by Musixmatch" button
+// published at musixmatch.com/resources. That URL redirects to the brand-resources
+// page, whose only badge set ("For Brands" -> With Claim) ships PNG only -- no SVG
+// and no literal "powered by" wordmark was reachable. This therefore implements the
+// SUBSTANCE of the clause (the credit text, the mark, and the link to the Site)
+// using the official For Brands mark already vendored for the lane marks. If the
+// exact prescribed button is later obtained, swap it in here; the link target and
+// placement are already correct.
+//
+// The mark carries no alt text because the adjacent credit text is the accessible
+// name -- the same reasoning as the lane marks (#601). The link is the required
+// element, not the image.
+templ musixmatchCredit() {
+	<footer class="mx-provider-credit">
+		<a class="mx-provider-credit-link" href="https://www.musixmatch.com" target="_blank" rel="noopener noreferrer">
+			<img class="mx-provider-credit-mark" src="/static/img/lanes/musixmatch.svg" alt="" aria-hidden="true" width="16" height="16"/>
+			<span>Lyrics powered by Musixmatch</span>
+		</a>
+	</footer>
+}
+
 templ musixmatchBanner() {
 	<div class="mx-banner" role="status">
 		<svg class="mx-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

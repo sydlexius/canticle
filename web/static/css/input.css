@@ -611,6 +611,42 @@ body {
   color: var(--mx-content-text-secondary);
 }
 
+/* Musixmatch attribution required by API Terms clause 2.1.5 (see
+   docs/provider-terms.md). Sits at the end of the content column on every page.
+
+   Deliberately quiet but NOT hidden: a required credit that is invisible does not
+   discharge the obligation, so it uses the secondary text color rather than
+   anything dimmer, and it is never display:none on any breakpoint. If a future
+   layout change would push it out of view, the credit is what has to survive. */
+.mx-provider-credit {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--mx-surface-border);
+}
+
+.mx-provider-credit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--mx-content-text-secondary);
+  font-size: 0.78rem;
+  text-decoration: none;
+}
+
+.mx-provider-credit-link:hover {
+  color: var(--mx-content-text);
+  text-decoration: underline;
+}
+
+/* Same no-plate, no-recolor treatment as .mx-lane-chip: the For Brands asset is a
+   solid tile carrying its own background, and the brand terms forbid altering it. */
+.mx-provider-credit-mark {
+  width: 1.05em;
+  height: 1.05em;
+  flex: none;
+  border-radius: 0.22em;
+}
+
 /* A vendored provider mark, as opposed to an authored currentColor glyph.
    These are fixed-color brand assets and MUST NOT be recolored -- the same
    guidelines that require the official file generally forbid altering it, so
