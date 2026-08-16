@@ -69,6 +69,15 @@ type Queue interface {
 	// with the offline backfills so a detector settle has exactly one definition;
 	// OwnedByWorker guards on 'processing', the status Dequeue left the row in.
 	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error)
+	// SettleGuardRejected records that the language/script guard refused the
+	// fetched lyric and completes the row in ONE transaction (outcome_type,
+	// status, scan_results writeback), guarding on 'processing' (#655).
+	//
+	// Atomic rather than a stamp-then-Complete pair: a dropped stamp followed by a
+	// successful Complete would leave the row `done` with a NULL outcome_type,
+	// which IS the defect #655 exists to fix. A settle that can lose its own label
+	// is not a fix.
+	SettleGuardRejected(ctx context.Context, id int64) (queue.SettleOutcome, error)
 	// SetCompletionProvenance stamps the identifiers and writer version the row was
 	// settled with, so an outcome that writes no tag block -- an unsynced .txt above
 	// all -- still records what produced it (#620). Call before Complete while the
@@ -875,6 +884,45 @@ func (w *Worker) guardReject(_ queue.WorkItem, song models.Song) (bool, string) 
 	return !ok, reason
 }
 
+// work_queue.outcome_type values, as written by THIS package.
+//
+// SCOPE, stated precisely because it is easy to overclaim: these name the values
+// the worker's Go code stamps. They do NOT cover every producer of the column --
+// internal/queue's detector settle writes 'instrumental' as a SQL literal
+// (queue.go), and internal/reports classifies with literals inside its raw query
+// (reports.go). Both live inside SQL strings, where a Go constant cannot be
+// substituted without building the statement by concatenation, which is a worse
+// trade than the duplication.
+//
+// So this is the documented set, not a single point of definition. Adding a
+// value means touching all three sites; the ResultClass block in internal/reports
+// is the other end and cross-references this one.
+//
+// The column is deliberately NOT constrained by a CHECK: a new value must be
+// writable by a build that ships before the migration adding it, and a rejected
+// UPDATE would cost the row its label rather than degrade to "unclassified".
+const (
+	// outcomeTypeSynced -- a .lrc synced-lyrics file was written.
+	outcomeTypeSynced = "synced"
+	// outcomeTypeUnsynced -- a .txt plain-lyrics file was written.
+	outcomeTypeUnsynced = "unsynced"
+	// outcomeTypeInstrumental -- a .txt instrumental marker was written.
+	outcomeTypeInstrumental = "instrumental"
+	// outcomeTypeRejected -- the language/script guard refused the fetched lyric,
+	// so the row settled terminally with NOTHING on disk (#655).
+	//
+	// This is the value that did not exist, and its absence is the whole defect:
+	// the guard path completed the row leaving outcome_type NULL, which reports
+	// render as "unknown" -- the same rendering as a legacy row predating the
+	// column. One NULL meant two unrelated things, so an operator could not tell
+	// a policy rejection from missing history, and 3,182 prod rows sat that way.
+	//
+	// It is NOT an artifact class. A report counting it as coverage would be
+	// wrong: nothing was written, and nothing will be, because the rejection is
+	// deliberately terminal (re-fetching yields the same wrong-script lyric).
+	outcomeTypeRejected = "rejected"
+)
+
 // outcomeTypeFromSong derives the completion outcome ("synced" | "unsynced" |
 // "instrumental") from what WriteLRC will actually write for this song. The
 // ordering mirrors WriteLRC exactly and is load-bearing: the instrumental flag
@@ -897,16 +945,16 @@ func outcomeTypeFromSong(song models.Song) string {
 		// classify.
 		return ""
 	case lyrics.DemoteToUnsynced:
-		return "unsynced"
+		return outcomeTypeUnsynced
 	case lyrics.PromoteAsIs:
 	}
 	switch {
 	case song.Track.Instrumental == 1:
-		return "instrumental"
+		return outcomeTypeInstrumental
 	case len(song.Subtitles.Lines) > 0:
-		return "synced"
+		return outcomeTypeSynced
 	case song.Lyrics.LyricsBody != "":
-		return "unsynced"
+		return outcomeTypeUnsynced
 	default:
 		return ""
 	}
@@ -1369,8 +1417,42 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// just finalize the policy rejection: neither cached nor written, and
 			// not retried.
 			slog.Warn("worker guard rejected lyrics", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", reason)
-			if err := w.queue.Complete(context.WithoutCancel(ctx), item.ID); err != nil {
-				return w.fail(ctx, item, fmt.Errorf("worker: complete guard-rejected item %d: %w", item.ID, err))
+			ctxNoCancel := context.WithoutCancel(ctx)
+			// Record WHY this row settled with nothing on disk, before Complete
+			// while the row is still 'processing' (#655).
+			//
+			// Without this the row lands `done` with a NULL outcome_type, which
+			// reports render as "unknown" -- indistinguishable from a legacy row
+			// predating the column. That ambiguity is what #655 was filed about:
+			// 3,182 rows carried it on prod, the UI could say nothing about them,
+			// and NULL had quietly come to mean two different things.
+			//
+			// Recorded as its own value rather than reusing "unsynced": nothing was
+			// written here, so classifying it as an artifact would be a lie that
+			// reports would then count as coverage.
+			//
+			// ATOMIC, not a stamp-then-Complete pair. An earlier revision stamped
+			// the outcome best-effort and completed regardless, which reproduced
+			// the defect: a dropped stamp plus a successful Complete leaves the row
+			// `done` with a NULL outcome_type. On failure the row is NOT completed
+			// -- it fails and retries, and the guard will reject it again
+			// deterministically, so a retry costs one provider round-trip and
+			// cannot loop forever on a row that would otherwise settle unlabeled.
+			outcome, settleErr := w.queue.SettleGuardRejected(ctxNoCancel, item.ID)
+			if settleErr != nil {
+				return w.fail(ctx, item, fmt.Errorf("worker: settle guard-rejected item %d: %w", item.ID, settleErr))
+			}
+			if outcome != queue.Settled {
+				// The worker holds this row in 'processing' and nothing else can
+				// move it, so a non-Settled outcome means an invariant broke (a
+				// concurrent writer, or the row pruned mid-flight). Release rather
+				// than fail: failing would re-queue a row that may no longer exist.
+				slog.Warn("worker guard rejection did not settle; releasing", "id", item.ID, "outcome", outcome)
+				if relErr := w.queue.Release(ctxNoCancel, item.ID); relErr != nil {
+					return fmt.Errorf("worker: release unsettled guard-rejected item %d: %w", item.ID, relErr)
+				}
+				w.consecutiveFailures = 0
+				return nil
 			}
 			// Reset the failure backoff only after the terminal Complete durably
 			// succeeds (mirroring the benign-miss and normal-success paths): a

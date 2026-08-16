@@ -18,8 +18,8 @@ package templates
 // selected, the placeholder pane shows); when a report is selected via a non-htmx
 // navigation the handler passes the rendered ReportView so the full page lands on
 // that report. reports is the sidebar report-nav model.
-templ ReportsPage(version string, reports []RailItem, view *ReportView, musixmatchInactive bool) {
-	@Layout("Reports", "/reports", version, reports, "", musixmatchInactive) {
+templ ReportsPage(version string, reports []RailItem, view *ReportView, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout("Reports", "/reports", version, reports, "", musixmatchInactive, musixmatchServing) {
 		@reportPane(view)
 	}
 }
@@ -152,7 +152,7 @@ templ tableRecentOutcomes(rows []RecentOutcomeRow) {
 							<td>{ r.Title }</td>
 							<td>{ r.Album }</td>
 							<td class="mx-cell-mono">{ r.Result }</td>
-							<td class="mx-cell-mono">{ r.Lane }</td>
+							<td class="mx-cell-mono">@laneCell(r.Lane, r.LaneMark)</td>
 							<td class="mx-cell-mono">{ r.CompletedAt }</td>
 						</tr>
 					}
@@ -179,7 +179,7 @@ templ tableProviders(rows []ProviderRow) {
 				<tbody>
 					for _, r := range rows {
 						<tr>
-							<td>{ r.Lane }</td>
+							<td>@laneCell(r.Lane, r.LaneMark)</td>
 							<td class="mx-cell-mono">{ r.Hits }</td>
 							<td class="mx-cell-mono">{ r.Misses }</td>
 							<td class="mx-cell-mono">{ r.HitRate }</td>

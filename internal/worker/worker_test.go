@@ -122,6 +122,13 @@ type fakeQueue struct {
 	setProviderLaneErr error
 	instrumentalStamps []instrumentalStamp
 	instrumentalErr    error
+	// guardRejectErr injects a failure into SettleGuardRejected so a test can
+	// assert the row is NOT completed when the settle fails -- the regression #655
+	// is about (a lost label must not leave the row settled and unlabeled).
+	guardRejectErr error
+	// guardRejectOutcome overrides the returned SettleOutcome (default Settled),
+	// so the non-Settled branch can be exercised without contriving a race.
+	guardRejectOutcome *queue.SettleOutcome
 	// settledLanes records ids settled through the shared settle transaction, so a
 	// test can distinguish a transactional settle from the old stamp-then-complete
 	// sequence.
@@ -303,6 +310,45 @@ func (q *fakeQueue) SettleInstrumental(_ context.Context, id int64, tel queue.In
 		q.outcomeTypes = make(map[int64]string)
 	}
 	q.outcomeTypes[id] = "instrumental"
+	q.settledLanes = append(q.settledLanes, id)
+	if q.onComplete != nil {
+		q.onComplete(id)
+	}
+	q.completed = append(q.completed, id)
+	q.removeFromProcessing(id)
+	return queue.Settled, nil
+}
+
+// SettleGuardRejected models the real transaction's ATOMICITY, which is the
+// property under test (#655): on failure it records nothing at all -- no outcome
+// type, no completion -- because the real statement either commits both or
+// neither. A fake that stamped the outcome and skipped only the completion would
+// agree with the buggy stamp-then-Complete code this replaced.
+//
+// It also honors the `WHERE status = 'processing'` guard: a row the fake is not
+// holding cannot be settled, matching the SQL rather than assuming the caller
+// passed a valid id.
+func (q *fakeQueue) SettleGuardRejected(_ context.Context, id int64) (queue.SettleOutcome, error) {
+	if q.guardRejectErr != nil {
+		return queue.SettleFailed, q.guardRejectErr
+	}
+	if q.guardRejectOutcome != nil {
+		return *q.guardRejectOutcome, nil
+	}
+	var held bool
+	for _, item := range q.processing {
+		if item.ID == id {
+			held = true
+			break
+		}
+	}
+	if !held {
+		return queue.SettleClaimed, nil
+	}
+	if q.outcomeTypes == nil {
+		q.outcomeTypes = make(map[int64]string)
+	}
+	q.outcomeTypes[id] = outcomeTypeRejected
 	q.settledLanes = append(q.settledLanes, id)
 	if q.onComplete != nil {
 		q.onComplete(id)

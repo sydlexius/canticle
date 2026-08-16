@@ -95,48 +95,96 @@ type Client struct {
 	// zeroReported latches the transition so the outage is logged ONCE rather
 	// than on every request past the threshold. Cleared on recovery.
 	zeroReported bool
+
+	// knownGood is the most recent track this credential successfully fetched at
+	// least one song for, and it is what makes the outage decision EVIDENCE-BASED
+	// rather than a guess (#767).
+	//
+	// A consecutive-miss count cannot distinguish "the provider has nothing for
+	// THIS material" from "the provider has nothing for ANYTHING", and those need
+	// opposite responses. A fallback lane sees exactly the obscure material the
+	// primary already failed on, so a long miss run is its NORMAL operating
+	// condition: measured at a 91% miss rate, a run of 20 had probability 0.742 of
+	// occurring by chance. The threshold was firing on the population it was meant
+	// to serve.
+	//
+	// Re-fetching a track the provider demonstrably had turns that into a real
+	// test: a hit proves the credential works and the misses were material, a miss
+	// proves the credential stopped working. Self-calibrating, because the control
+	// comes from this provider's own past behavior rather than a hardcoded canary
+	// that could itself be retired from the catalog.
+	knownGood    models.Track
+	hasKnownGood bool
+	// probeInFlight stops a burst of concurrent misses from each launching their
+	// own liveness probe. One probe answers the question for all of them.
+	probeInFlight bool
 }
 
 // recordZeroResult counts a zero-song response and reports whether the run has
 // reached the escalation threshold. Called for a response that parsed cleanly and
 // simply carried no songs -- never for a transport or status failure, which say
 // nothing about whether the application id still works.
-// The log emission is deliberately OUTSIDE the critical section. slog handlers
-// can block on I/O and take locks of their own, and this mutex also paces every
-// outbound request, so logging under it would serialize concurrent lookups on
-// the handler -- worst at exactly the moment an outage transition fires. The
-// pacer at pace() already follows this shape; match it.
+//
+// It DOES NOT LOG. Reaching the threshold is only SUSPICION under #767, not a
+// finding: the probe in confirmOutage is what decides. An earlier revision warned
+// here, which meant a perfectly healthy credential still logged "the application
+// id may have been revoked" on every long run of obscure material -- the #767
+// false positive surviving in the log path after being removed from the error
+// path. Only reportConfirmedOutage logs, and only on evidence.
 func (c *Client) recordZeroResult() bool {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.consecutiveZero++
-	count := c.consecutiveZero
-	reached := count >= ZeroResultThreshold
-	// Latch INSIDE the lock so exactly one goroutine can win the transition and
-	// emit the warning, even though the emission happens after the unlock.
-	transitioned := reached && !c.zeroReported
-	if transitioned {
-		c.zeroReported = true
-	}
-	c.mu.Unlock()
-
-	if transitioned {
-		slog.Warn("petitlyrics: provider has returned no results for a sustained run of lookups; the application id may have been revoked",
-			"consecutive", count, "threshold", ZeroResultThreshold)
-	}
-	return reached
+	return c.consecutiveZero >= ZeroResultThreshold
 }
 
-// recordNonZeroResult clears the outage counter. Any response carrying at least
-// one song proves the application id is still accepted, whatever the client then
-// makes of the payload.
-// The recovery log is emitted after the unlock, for the same reason as the
-// warning in recordZeroResult.
-func (c *Client) recordNonZeroResult() {
+// reportConfirmedOutage latches and logs an outage the caller has CONFIRMED,
+// either by a failed liveness probe or by the no-control count fallback.
+//
+// The latch makes this log once per outage rather than on every request past the
+// threshold, and the emission sits outside the critical section: slog handlers
+// can block on I/O and take locks of their own, and this mutex also paces every
+// outbound request, so logging under it would serialize concurrent lookups at
+// exactly the moment an outage fires. pace() follows the same shape.
+func (c *Client) reportConfirmedOutage(probed bool) {
+	c.mu.Lock()
+	count := c.consecutiveZero
+	first := !c.zeroReported
+	c.zeroReported = true
+	c.mu.Unlock()
+
+	if first {
+		slog.Warn("petitlyrics: provider returned no results for a sustained run and a liveness check did not clear it; the application id may have been revoked",
+			"consecutive", count, "threshold", ZeroResultThreshold, "liveness_probed", probed)
+	}
+}
+
+// recordSuccess clears the outage run and records the track as the control for a
+// later liveness probe, IN ONE mutex-held transition (#767).
+//
+// Atomicity is load-bearing, not tidiness. These were two separate locked calls,
+// and CodeRabbit caught the race: between them a concurrent burst of misses could
+// reach the threshold, observe hasKnownGood == false, take the no-control path,
+// and report ErrProviderUnavailable on a credential that had JUST returned songs.
+// The failure mode was the exact false outage this change exists to prevent.
+//
+// A track with no artist or title is not stored as a control -- it would be
+// unfetchable as a probe -- but it still clears the run, because songs came back.
+//
+// The recovery log is emitted after the unlock, for the same reason as above. The
+// control track itself is NEVER logged: it is library metadata.
+func (c *Client) recordSuccess(track models.Track) {
+	usable := track.TrackName != "" && track.ArtistName != ""
+
 	c.mu.Lock()
 	recovered := c.zeroReported
 	after := c.consecutiveZero
 	c.zeroReported = false
 	c.consecutiveZero = 0
+	if usable {
+		c.knownGood = track
+		c.hasKnownGood = true
+	}
 	c.mu.Unlock()
 
 	if recovered {
@@ -352,6 +400,55 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	return c.lookup(ctx, track, tierWordSync)
 }
 
+// lookupUnsyncedText fetches the plain lyric text for a track at tier 1.
+//
+// It exists for the line-sync path: an LSY payload carries timings but no
+// usable words, so a tier-2 result is a JOIN of two responses. Routed through
+// c.request so the second call is paced like any other, and so a credential or
+// throttle failure surfaces as the same typed sentinel rather than a bespoke
+// error this lane's classifier would not recognize.
+//
+// A tier-1 request that answers with a non-text payload is refused rather than
+// passed to the zipper: pairing timings with bytes that are not the words is a
+// route to confident-looking wrong output, which is the failure this whole path
+// is written to avoid.
+//
+// PINNED TO lyricsID, and that is the load-bearing part. An earlier version
+// re-ran selectCandidate against the tier-1 response, which scores on ISRC,
+// duration, and title text and never consults the lyrics id. The second request
+// could therefore settle on a DIFFERENT recording than the one that supplied
+// the timings -- a live cut, a remaster, a cover. When that other recording
+// happens to carry the same line count, zipLineSync sees a well-formed pair and
+// emits an .lrc whose every cue belongs to a different performance. Nothing
+// downstream can detect it. Selecting the exact id the tier-2 payload came from
+// makes the two responses provably the same song, and its absence a typed miss.
+func (c *Client) lookupUnsyncedText(ctx context.Context, track models.Track, lyricsID string) (string, error) {
+	songs, err := c.request(ctx, track, tierUnsynced)
+	if err != nil {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup: %w", err)
+	}
+	candidate, err := selectByLyricsID(songs, lyricsID)
+	if err != nil {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup, no candidate matched: %w", err)
+	}
+	if candidate.LyricsData == "" {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup returned no payload: %w", ErrNotFound)
+	}
+	raw, err := base64.StdEncoding.DecodeString(candidate.LyricsData)
+	if err != nil {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup, base64 decode: %w", err)
+	}
+	if got := classifyPayload(raw); got != tierUnsynced {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup returned tier %d, want plain text: %w",
+			got, ErrNotFound)
+	}
+	text := decodeUnsynced(raw)
+	if strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup returned empty text: %w", ErrNotFound)
+	}
+	return text, nil
+}
+
 // lookup performs one API request at the given tier and decodes the result.
 func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (models.Song, error) {
 	songs, err := c.request(ctx, track, tier)
@@ -409,7 +506,27 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 		return song, nil
 
 	case tierLineSync:
-		return models.Song{}, fmt.Errorf("petitlyrics: lyricsType 2 (encrypted LSY): %w", ErrUnsupportedTier)
+		// Tier 2 carries timings ONLY, so a line-synced result costs a second
+		// request for the words. That request goes through c.request, which
+		// paces itself, rather than issuing a raw POST that would bypass the
+		// configured floor (#535).
+		timings, err := decodeLineSyncTimings(raw)
+		if err != nil {
+			return models.Song{}, err
+		}
+		text, err := c.lookupUnsyncedText(ctx, track, candidate.LyricsID)
+		if err != nil {
+			return models.Song{}, err
+		}
+		cues, err := zipLineSync(timings, text)
+		if err != nil {
+			return models.Song{}, err
+		}
+		// Same normalizer as every other write path (#470), so this lane holds
+		// the one-cue-per-line model too. No word timings exist at this tier, so
+		// unlike the word-sync branch there is no index-stability concern.
+		song.Subtitles = lrcnormalize.Expand(models.Synced{Lines: cues})
+		return song, nil
 
 	default:
 		text := decodeUnsynced(raw)
@@ -449,8 +566,150 @@ func trackFromCandidate(s apiSong, local models.Track) models.Track {
 	return t
 }
 
-// request performs the single form POST and decodes the XML envelope.
+// request performs the single form POST, decodes the XML envelope, and maintains
+// the zero-result outage state (#607/#767).
+//
+// It wraps rawRequest so the liveness probe can reach the API WITHOUT feeding the
+// counter it exists to adjudicate: a probe that counted its own result would
+// either clear the suspicion it was sent to test, or deepen it, depending on
+// ordering. The probe calls rawRequest directly.
 func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]apiSong, error) {
+	songs, err := c.rawRequest(ctx, track, tier)
+	if err != nil {
+		return nil, err
+	}
+	if len(songs) == 0 {
+		// A clean HTTP 200 carrying no songs. Individually this is an ordinary
+		// miss; sustained, it MIGHT be a revoked application id, since the service
+		// keeps answering normally rather than returning 401 (#607).
+		//
+		// "Might" is the whole correction in #767. A miss run is also what an
+		// obscure-material population looks like, so the count alone cannot decide.
+		// When the run reaches the threshold, ASK the provider a question it can
+		// only answer one way.
+		if !c.recordZeroResult() {
+			return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+		}
+		if c.confirmOutage(ctx) {
+			return nil, ErrProviderUnavailable
+		}
+		return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+	}
+	// At least one song came back, which proves the application id is still
+	// accepted. Reset regardless of what the client then makes of the payload: a
+	// candidate that loses selection, or a tier this client cannot decode, is a
+	// per-track outcome and says nothing about credential health. The same
+	// transition records the control track, atomically -- see recordSuccess.
+	c.recordSuccess(track)
+	return songs, nil
+}
+
+// confirmOutage decides whether a threshold-length miss run is a real provider
+// outage, by re-fetching a track this credential previously succeeded on (#767).
+//
+// Returns true on POSITIVE evidence of an outage: the control track, which the
+// provider served before, now returns nothing. A hit means the credential works
+// and the misses were about the material, so the counter resets and the caller
+// reports an ordinary miss.
+//
+// WITH NO CONTROL IT FALLS BACK TO THE COUNT, which preserves #607. That case is
+// not a detail -- it is the ORIGINAL bug: a credential revoked before this
+// process ever saw a hit (a restart with a dead clientAppId) never earns a
+// control, so a probe-only design would leave that outage undetected FOREVER,
+// strictly worse than counting. An earlier draft of this function returned false
+// there and its comment claimed the next probe would catch it; there is no next
+// probe when no control can ever be recorded.
+//
+// The two cases separate cleanly, which is what makes this sound rather than a
+// compromise:
+//
+//   - A false positive (#767) happens on a lane that IS serving hits -- 6
+//     successful fetches preceded the run that misfired -- so a control exists
+//     and the probe adjudicates it.
+//   - A cold-start outage (#607) has no hits by definition, so no control exists
+//     and the count is the only signal available.
+//
+// A probe already in flight returns false: another goroutine is asking the same
+// question, and two probes cannot be more informative than one.
+func (c *Client) confirmOutage(ctx context.Context) bool {
+	c.mu.Lock()
+	control, have, busy := c.knownGood, c.hasKnownGood, c.probeInFlight
+	if have && !busy {
+		c.probeInFlight = true
+	}
+	c.mu.Unlock()
+
+	if !have {
+		// Never had a hit on this credential, so there is nothing to test against
+		// and no way to do better than the count. This is the cold-start revoked
+		// credential #607 exists to catch.
+		c.reportConfirmedOutage(false)
+		return true
+	}
+	if busy {
+		// Another goroutine is already probing. Do not claim an outage on no
+		// evidence; the in-flight probe will decide for the run.
+		return false
+	}
+	defer func() {
+		c.mu.Lock()
+		c.probeInFlight = false
+		c.mu.Unlock()
+	}()
+
+	// Deliberately rawRequest: the probe must not feed the counter it adjudicates.
+	// Tier 1 because every song with lyrics has it -- a tier-2/3 probe could miss
+	// on a healthy credential simply because that track has no higher tier.
+	songs, err := c.rawRequest(ctx, control, tierUnsynced)
+	if err != nil {
+		// A transport or status failure says nothing about the credential; it is
+		// the ordinary network-flake case, and statusError already classifies a
+		// real 401/429.
+		//
+		// BACK THE COUNTER OFF rather than leaving it at the threshold. Otherwise
+		// recordZeroResult keeps returning true and EVERY subsequent miss launches
+		// another probe -- a retry storm of real paced requests during exactly the
+		// transient failure that caused it. Halving costs one more threshold's
+		// worth of misses before the next attempt, which is the right trade
+		// against hammering a provider that is already struggling.
+		c.backOffProbe()
+		slog.Debug("petitlyrics: liveness probe failed in transport; not treating as an outage", "error", err)
+		return false
+	}
+	if len(songs) > 0 {
+		// The credential works. The miss run was about the MATERIAL, which is the
+		// normal condition for a fallback lane. Clear it so the next run gets a
+		// fresh threshold rather than escalating on the very next miss.
+		//
+		// The control is re-recorded here deliberately: it just proved itself
+		// again, and passing it keeps the reset and the store atomic.
+		c.recordSuccess(control)
+		slog.Debug("petitlyrics: liveness probe succeeded; sustained miss run is material, not a credential outage")
+		return false
+	}
+	// The provider served this track before and does not now. That is evidence.
+	c.reportConfirmedOutage(true)
+	return true
+}
+
+// backOffProbe halves the miss run after a probe that could not reach the API, so
+// the next attempt is a threshold away instead of on the very next miss (#767
+// review).
+//
+// Halving rather than zeroing: the misses were real, and discarding them entirely
+// would let a genuine outage hide behind repeated probe failures -- a credential
+// revoked at the same moment the network degrades would need two full runs to be
+// noticed. Halving keeps the evidence while spacing the retries.
+func (c *Client) backOffProbe() {
+	c.mu.Lock()
+	c.consecutiveZero /= 2
+	c.mu.Unlock()
+}
+
+// rawRequest performs the single form POST and decodes the XML envelope, without
+// touching the outage counter. Callers that represent real lookup traffic should
+// use request instead.
+func (c *Client) rawRequest(ctx context.Context, track models.Track, tier int) ([]apiSong, error) {
 	form := url.Values{
 		"clientAppId":  {c.clientAppID},
 		"terminalType": {terminalType},
@@ -489,20 +748,8 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 	if err := xml.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("petitlyrics: decode XML response: %w", err)
 	}
-	if len(parsed.Songs) == 0 {
-		// A clean HTTP 200 carrying no songs. Individually this is an ordinary
-		// miss; sustained, it is the fingerprint of a revoked application id,
-		// since the service keeps answering normally rather than returning 401
-		// (#607).
-		if c.recordZeroResult() {
-			return nil, ErrProviderUnavailable
-		}
-		return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
-	}
-	// At least one song came back, which proves the application id is still
-	// accepted. Reset regardless of what the client then makes of the payload: a
-	// candidate that loses selection, or a tier this client cannot decode, is a
-	// per-track outcome and says nothing about credential health.
-	c.recordNonZeroResult()
+	// Zero-song handling and the outage counter live in request, the wrapper, so
+	// the liveness probe can call this without adjudicating itself (#767). An
+	// empty slice is returned as-is; the caller decides what it means.
 	return parsed.Songs, nil
 }

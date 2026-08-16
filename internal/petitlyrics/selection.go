@@ -1,6 +1,7 @@
 package petitlyrics
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -78,6 +79,31 @@ func selectCandidate(songs []apiSong, track models.Track) (apiSong, error) {
 		}
 	}
 	return songs[best], nil
+}
+
+// selectByLyricsID picks the candidate whose lyrics id matches exactly, with no
+// scoring and no fallback.
+//
+// This is deliberately NOT selectCandidate. Scoring answers "which of these is
+// most likely the right recording", which is the correct question for a first
+// lookup and the WRONG one for a continuation: the line-sync path already knows
+// exactly which record it wants, because the tier-2 payload came from it. Any
+// heuristic here could substitute a different recording, and a substitution that
+// happens to share a line count produces cues from the wrong performance with
+// nothing downstream able to notice.
+//
+// An absent id is a typed miss rather than a best-effort pick. Refusing costs
+// one lyric; guessing corrupts one silently.
+func selectByLyricsID(songs []apiSong, lyricsID string) (apiSong, error) {
+	if lyricsID == "" {
+		return apiSong{}, fmt.Errorf("petitlyrics: no lyrics id to pin the text lookup to: %w", ErrNotFound)
+	}
+	for _, s := range songs {
+		if s.LyricsID == lyricsID {
+			return s, nil
+		}
+	}
+	return apiSong{}, fmt.Errorf("petitlyrics: lyrics id %q absent from the text response: %w", lyricsID, ErrNotFound)
 }
 
 // scoreCandidate ranks one candidate against the local track. Higher is better.

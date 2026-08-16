@@ -4954,3 +4954,122 @@ func TestDBQueue_CountFailuresByReasonNormalizesSignatures(t *testing.T) {
 		}
 	}
 }
+
+// TestDBQueue_SettleGuardRejectedAtomically covers the transaction the worker's
+// fake cannot reach (#655/#770).
+//
+// The worker suite proves the SEAM is called; only a real-SQLite test proves the
+// STATEMENT is right. That gap is the same shape as the original defect: the
+// guard path was exercised end-to-end by nothing, so nobody saw it complete a row
+// without a label.
+func TestDBQueue_SettleGuardRejectedAtomically(t *testing.T) {
+	ctx := context.Background()
+
+	newProcessingRow := func(t *testing.T) (*DBQueue, int64) {
+		t.Helper()
+		q := NewDBQueue(openQueueTestDB(t))
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+			Outdir:     "out",
+			Filename:   "a.lrc",
+			SourcePath: "/music/a.flac",
+		}, 1)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		// A worker claims it: status becomes 'processing', which is what the
+		// settle guards on.
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		return q, item.ID
+	}
+
+	t.Run("happy path: label and completion land together", func(t *testing.T) {
+		q, id := newProcessingRow(t)
+
+		outcome, err := q.SettleGuardRejected(ctx, id)
+		if err != nil {
+			t.Fatalf("SettleGuardRejected: %v", err)
+		}
+		if outcome != Settled {
+			t.Fatalf("outcome = %v; want Settled", outcome)
+		}
+
+		var status string
+		var outcomeType *string
+		var lastError string
+		var completedAt *string
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT status, outcome_type, last_error, completed_at FROM work_queue WHERE id = ?`, id,
+		).Scan(&status, &outcomeType, &lastError, &completedAt); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if status != StatusDone {
+			t.Errorf("status = %q; want %q", status, StatusDone)
+		}
+		// THE POINT OF #655: the row must never be done-and-unlabeled.
+		if outcomeType == nil {
+			t.Fatal("outcome_type is NULL on a settled guard rejection; that is the #655 defect")
+		}
+		if *outcomeType != "rejected" {
+			t.Errorf("outcome_type = %q; want %q", *outcomeType, "rejected")
+		}
+		// A policy rejection is not an error: a stale last_error would make the
+		// row read as failed in the failure-analysis report.
+		if lastError != "" {
+			t.Errorf("last_error = %q; want empty (a guard rejection is policy, not failure)", lastError)
+		}
+		if completedAt == nil {
+			t.Error("completed_at is NULL on a settled row")
+		}
+	})
+
+	t.Run("guard: a row not in processing is refused, and nothing is written", func(t *testing.T) {
+		q := NewDBQueue(openQueueTestDB(t))
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+			Outdir:   "out",
+			Filename: "a.lrc",
+		}, 1)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		// Deliberately NOT dequeued: the row is still 'pending'.
+
+		outcome, err := q.SettleGuardRejected(ctx, item.ID)
+		if err != nil {
+			t.Fatalf("SettleGuardRejected: %v", err)
+		}
+		if outcome == Settled {
+			t.Fatal("a row the caller does not hold was settled; the processing guard did not apply")
+		}
+
+		var status string
+		var outcomeType *string
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT status, outcome_type FROM work_queue WHERE id = ?`, item.ID,
+		).Scan(&status, &outcomeType); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if status != StatusPending {
+			t.Errorf("status = %q; want %q untouched", status, StatusPending)
+		}
+		// ATOMICITY, asserted from the other side: a refused settle writes NOTHING,
+		// not a label without a completion.
+		if outcomeType != nil {
+			t.Errorf("outcome_type = %q; a refused settle must write nothing at all", *outcomeType)
+		}
+	})
+
+	t.Run("missing row reports rather than erroring", func(t *testing.T) {
+		q := NewDBQueue(openQueueTestDB(t))
+		outcome, err := q.SettleGuardRejected(ctx, 424242)
+		if err != nil {
+			t.Fatalf("SettleGuardRejected on a missing row: %v; want a reported outcome", err)
+		}
+		if outcome == Settled {
+			t.Error("a nonexistent row reported Settled")
+		}
+	})
+}

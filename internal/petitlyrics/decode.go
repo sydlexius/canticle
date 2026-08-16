@@ -2,6 +2,7 @@ package petitlyrics
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/xml"
 	"fmt"
 	"sort"
@@ -14,7 +15,7 @@ import (
 // Lyrics tiers advertised by the API's lyricsType parameter and field.
 const (
 	tierUnsynced = 1 // base64 plain UTF-8 text
-	tierLineSync = 2 // base64 encrypted LSY binary; not yet decodable
+	tierLineSync = 2 // base64 obfuscated LSY binary; timings only, words come from tier 1
 	tierWordSync = 3 // base64 <wsy> XML with per-word timings
 )
 
@@ -94,6 +95,176 @@ func classifyPayload(raw []byte) int {
 		return tierLineSync
 	}
 	return tierUnsynced
+}
+
+// LSY container offsets. The tier-2 payload is a two-chunk binary: an
+// MHDROBJT header followed by an MLRCOBJT payload. Verified against real
+// captures -- every offset below held on all of them, and the size identity
+// lsyPayloadStart + 2*lineCount + lineLength*lineCount == len(payload) was
+// exact, which is what makes a truncated or wrongly parsed blob detectable rather
+// than silently producing plausible garbage.
+const (
+	lsyKeySwitchFlagOff = 0x19 // u8: nonzero means the key is permuted once
+	lsyProtectionIDOff  = 0x1a // u16 LE: the raw key before permutation
+	lsyLineCountOff     = 0x38 // u32 LE: number of timed lines
+	lsyLineLengthOff    = 0x42 // u16 LE: bytes per text slot (64 observed)
+	lsyPayloadStart     = 0xcc // start of the u16 LE timestamp array
+	lsyMinHeaderLen     = lsyPayloadStart
+
+	// lsyMaxLines bounds a declared line count before it is used to size a
+	// slice, so a corrupt or hostile u32 cannot drive a huge allocation. No
+	// observed payload came close; a lyric with more lines than this is not a
+	// lyric.
+	lsyMaxLines = 10000
+
+	// lsyWrapCS is the u16 rollover in centiseconds. A timestamp is stored in
+	// 16 bits, so a track longer than ~10.9 minutes wraps and the decoder has
+	// to unwrap it.
+	lsyWrapCS = 65536
+)
+
+// deriveLSYKey reproduces the provider's key schedule: the protection id is
+// used directly, or -- when the switch flag at 0x19 is set -- permuted once by
+// a fixed mask/shift schedule that swaps adjacent bit PAIRS within each nibble
+// while leaving the outermost pair of each byte in place.
+//
+// This is a ONE-TIME permutation of a single per-payload key, not a per-line
+// rotation. Both the timestamps and the payload's text region use the result.
+//
+// Verified: on four real captures the flag was set and this reproduced, exactly,
+// the key independently recovered from each payload's text by frequency
+// analysis. That agreement between two unrelated derivations is the evidence
+// this schedule is right -- the issue that specified it flagged the bit
+// manipulation as suspect on read, and it is not.
+func deriveLSYKey(protectionID uint16, switchFlag bool) uint16 {
+	if !switchFlag {
+		return protectionID
+	}
+	// Computed in uint16 rather than widening to uint32 and converting back.
+	// Every left-shifted term is masked first, so none can carry past bit 15
+	// (0x000c<<2 == 0x0030, 0x00c0<<2 == 0x0300, 0x0c00<<2 == 0x3000): the
+	// arithmetic is exact at this width, and staying here means there is no
+	// narrowing conversion to justify or suppress.
+	k := protectionID
+	return (k & 0x0003) |
+		(k&0x000c)<<2 |
+		(k&0x0030)>>2 |
+		(k&0x00c0)<<2 |
+		(k&0x0300)>>2 |
+		(k&0x0c00)<<2 |
+		(k&0x3000)>>2 |
+		(k & 0xc000)
+}
+
+// decodeLineSyncTimings extracts the per-line cue times, in centiseconds, from
+// an LSY (tier 2) payload.
+//
+// It returns ONLY the timings: the tier-2 blob does not carry usable lyric
+// text. Its text region decodes to a partially-legible mix that never resolves
+// cleanly under the payload key, so the words come from a separate
+// lyricsType=1 request and are zipped against these timings by the caller.
+// Attempting to recover text from this blob was measured and abandoned; do not
+// retry it without new evidence.
+//
+// Timestamps are stored as u16 centiseconds and therefore ROLL OVER at ~10.9
+// minutes. A decrease from one line to the next is read as a rollover and
+// unwrapped. Note that the public reference implementation gets this wrong: its
+// wrap counter is derived from the already-offset accumulator, so it can never
+// increment and a long track decodes with every post-rollover cue ~10.9 minutes
+// early. Unwrapping on the raw sequence is the fix.
+func decodeLineSyncTimings(raw []byte) ([]int, error) {
+	if len(raw) < lsyMinHeaderLen {
+		return nil, fmt.Errorf("petitlyrics: line-sync payload is %d bytes, need at least %d: %w",
+			len(raw), lsyMinHeaderLen, ErrNotFound)
+	}
+
+	lineCount := int(binary.LittleEndian.Uint32(raw[lsyLineCountOff:]))
+	if lineCount <= 0 {
+		return nil, fmt.Errorf("petitlyrics: line-sync payload declares %d lines: %w", lineCount, ErrNotFound)
+	}
+	if lineCount > lsyMaxLines {
+		return nil, fmt.Errorf("petitlyrics: line-sync payload declares %d lines, over the %d cap: %w",
+			lineCount, lsyMaxLines, ErrNotFound)
+	}
+
+	// The timestamp array must be fully present. Checked BEFORE indexing so a
+	// truncated payload is a typed miss rather than a panic.
+	end := lsyPayloadStart + 2*lineCount
+	if len(raw) < end {
+		return nil, fmt.Errorf("petitlyrics: line-sync payload is %d bytes, need %d for %d timestamps: %w",
+			len(raw), end, lineCount, ErrNotFound)
+	}
+
+	// Cross-check the declared geometry against the actual length. The payload
+	// is a timestamp array followed by lineCount fixed-width text slots, so
+	// this identity holds exactly on a well-formed blob (verified on every real
+	// capture). A mismatch means the shape is not what this decoder parses --
+	// treat it as a miss rather than trusting timestamps read from it. Advisory
+	// only when lineLength is absent: some field being zero is not proof of
+	// corruption, but a nonzero one that disagrees is.
+	if lineLength := int(binary.LittleEndian.Uint16(raw[lsyLineLengthOff:])); lineLength > 0 {
+		want := lsyPayloadStart + 2*lineCount + lineLength*lineCount
+		if len(raw) != want {
+			return nil, fmt.Errorf(
+				"petitlyrics: line-sync payload is %d bytes, geometry says %d (%d lines x %d-byte slots): %w",
+				len(raw), want, lineCount, lineLength, ErrNotFound)
+		}
+	}
+
+	key := deriveLSYKey(
+		binary.LittleEndian.Uint16(raw[lsyProtectionIDOff:]),
+		raw[lsyKeySwitchFlagOff] != 0,
+	)
+
+	out := make([]int, 0, lineCount)
+	var wraps, prev int
+	for i := range lineCount {
+		cs := int(binary.LittleEndian.Uint16(raw[lsyPayloadStart+2*i:]) ^ key)
+		if i > 0 && cs < prev {
+			wraps++
+		}
+		prev = cs
+		out = append(out, cs+wraps*lsyWrapCS)
+	}
+	return out, nil
+}
+
+// zipLineSync pairs decoded cue times with the lyric text fetched separately at
+// tier 1.
+//
+// A count mismatch is a hard error, never a truncation to the shorter side.
+// Zipping mismatched sequences yields an .lrc whose every later line is
+// attributed to the wrong moment -- output that looks correct and is silently
+// wrong, which is worse than no output at all.
+//
+// Trailing blank lines are dropped first: a text payload conventionally ends
+// with a newline, and that alone must not fail an otherwise-aligned pair.
+// Interior blanks are NOT dropped, because a blank between verses may or may
+// not be a timed line, and guessing is exactly how misalignment gets in.
+func zipLineSync(timings []int, text string) ([]models.Lines, error) {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	if len(lines) != len(timings) {
+		return nil, fmt.Errorf(
+			"petitlyrics: line-sync timing/text mismatch: %d timestamps, %d text lines: %w",
+			len(timings), len(lines), ErrNotFound)
+	}
+
+	// Ranging over timings and indexing lines (rather than the reverse) keeps the
+	// bound visible: lines was just proven to be the same length, and reslicing it
+	// to that length states the relationship for a reader and an analyzer alike.
+	lines = lines[:len(timings)]
+	cues := make([]models.Lines, 0, len(timings))
+	for i, cs := range timings {
+		cues = append(cues, models.Lines{
+			Text: strings.TrimSpace(lines[i]),
+			Time: msToTime(cs * 10),
+		})
+	}
+	return cues, nil
 }
 
 // decodeUnsynced returns plain lyric text from an unsynced payload.

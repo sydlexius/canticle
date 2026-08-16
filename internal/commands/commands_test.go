@@ -2985,3 +2985,105 @@ func TestSetConfigValueBoolErrorsWrapTheCause(t *testing.T) {
 		}
 	}
 }
+
+// TestMusixmatchIsServing covers the predicate gating the Musixmatch attribution
+// credit (#600, API Terms clause 2.1.5).
+//
+// This is a GENUINE regression test, not a guard: the PetitLyrics case below
+// fails against the original implementation, which gated the credit on
+// !musixmatchInactive and therefore credited Musixmatch for another provider's
+// results. Caught by CodeRabbit on PR #769.
+//
+// The predicate was extracted from runServe specifically so this table could
+// exist. Inline, it needed a full serve to exercise, which is why nothing caught
+// the defect before review.
+func TestMusixmatchIsServing(t *testing.T) {
+	musixmatch := providers.New(providers.Musixmatch, fakeFetcher{})
+	petitlyrics := providers.New(providers.PetitLyrics, fakeFetcher{})
+
+	tests := []struct {
+		name           string
+		fetcher        providers.LyricsProvider
+		lyricsDisabled bool
+		want           bool
+	}{
+		{"musixmatch serving: credit is required", musixmatch, false, true},
+		{
+			// THE REGRESSION CASE. A healthy PetitLyrics-primary deployment: the
+			// provider selected cleanly, so the old !musixmatchInactive gate read
+			// true and credited Musixmatch for PetitLyrics results.
+			"petitlyrics primary: no Musixmatch Data is used, so no credit",
+			petitlyrics, false, false,
+		},
+		{
+			// The degraded no-token path returns a NO-OP fetcher wrapped in a
+			// providers.Musixmatch identity, so the name alone says "musixmatch"
+			// while nothing is fetched. lyricsDisabled is what excludes it.
+			"musixmatch identity but lyrics disabled: nothing is served, so no credit",
+			musixmatch, true, false,
+		},
+		{"petitlyrics and disabled: no credit", petitlyrics, true, false},
+		{"nil fetcher: no credit rather than a panic", nil, false, false},
+		{"nil fetcher and disabled: no credit", nil, true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := musixmatchIsServing(tt.fetcher, tt.lyricsDisabled); got != tt.want {
+				t.Errorf("musixmatchIsServing() = %v; want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMusixmatchIsServingMatchesResolveServeProvider ties the predicate to the
+// function that actually produces its inputs, so the pair cannot drift.
+//
+// The unit table above uses hand-built providers; this asserts the real
+// resolveServeProvider outputs flow through to the right answer. Without it, a
+// change to the degrade path could keep every case above passing while the live
+// wiring credited the wrong provider.
+func TestMusixmatchIsServingMatchesResolveServeProvider(t *testing.T) {
+	t.Run("healthy musixmatch: serving", func(t *testing.T) {
+		primary := providers.New(providers.Musixmatch, fakeFetcher{})
+		fetcher, _, disabled, err := resolveServeProvider(primary, nil)
+		if err != nil {
+			t.Fatalf("resolveServeProvider: %v", err)
+		}
+		if !musixmatchIsServing(fetcher, disabled) {
+			t.Error("a healthy Musixmatch primary must be credited")
+		}
+	})
+
+	t.Run("healthy petitlyrics: not serving", func(t *testing.T) {
+		primary := providers.New(providers.PetitLyrics, fakeFetcher{})
+		fetcher, inactive, disabled, err := resolveServeProvider(primary, nil)
+		if err != nil {
+			t.Fatalf("resolveServeProvider: %v", err)
+		}
+		// The flags are NOT complements, which is the whole defect: inactive is
+		// false here (selection succeeded) while Musixmatch serves nothing.
+		if inactive {
+			t.Fatal("precondition: a clean PetitLyrics selection must not be musixmatchInactive")
+		}
+		if musixmatchIsServing(fetcher, disabled) {
+			t.Error("PetitLyrics results must not be credited to Musixmatch")
+		}
+	})
+
+	t.Run("no token: not serving despite the musixmatch identity", func(t *testing.T) {
+		fetcher, inactive, disabled, err := resolveServeProvider(nil, errNoMusixmatchToken)
+		if err != nil {
+			t.Fatalf("resolveServeProvider: %v", err)
+		}
+		if !inactive || !disabled {
+			t.Fatal("precondition: the no-token path must be both inactive and disabled")
+		}
+		if fetcher.Name() != providers.Musixmatch {
+			t.Fatalf("precondition: the no-op fetcher carries the musixmatch identity, got %q", fetcher.Name())
+		}
+		if musixmatchIsServing(fetcher, disabled) {
+			t.Error("a no-op fetcher wearing the musixmatch name must not be credited")
+		}
+	})
+}

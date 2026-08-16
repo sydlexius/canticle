@@ -10,8 +10,8 @@ package templates
 // (every render is triggered by a page load or explicit browser refresh).
 
 // DashboardPage is the full-page dashboard shell.
-templ DashboardPage(version string, reports []RailItem, view DashboardView, musixmatchInactive bool) {
-	@Layout("Dashboard", "/dashboard", version, reports, "/static/css/dashboard.css", musixmatchInactive) {
+templ DashboardPage(version string, reports []RailItem, view DashboardView, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout("Dashboard", "/dashboard", version, reports, "/static/css/dashboard.css", musixmatchInactive, musixmatchServing) {
 		@dashboardContent(view)
 	}
 }
@@ -129,7 +129,7 @@ templ dashProviderTiles(tiles []StatTile) {
 			}
 			for _, t := range tiles {
 				<div class="mx-dash-tile" role="listitem">
-					<span class="mx-dash-tile-label">{ t.Label }</span>
+					<span class="mx-dash-tile-label">@laneCell(t.Label, t.LabelMark)</span>
 					<span class="mx-dash-tile-value">{ t.Value }</span>
 					if t.Sub != "" {
 						<span class="mx-dash-tile-sub">{ t.Sub }</span>
@@ -209,7 +209,7 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 								<td>{ row.Artist }</td>
 								<td>{ row.Title }</td>
 								<td>{ row.Result }</td>
-								<td>{ row.Lane }</td>
+								<td>@laneCell(row.Lane, row.LaneMark)</td>
 								<td class="mx-table-mono">
 									if row.CompletedAtISO != "" {
 										if row.CompletedAtTZApplied {

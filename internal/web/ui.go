@@ -98,6 +98,22 @@ type UI struct {
 	// is disabled and linking to Settings to add a token. False (the default)
 	// renders nothing.
 	musixmatchInactive bool
+
+	// musixmatchServing is set when Musixmatch is the provider actually serving
+	// lyrics, gating the attribution credit required by API Terms clause 2.1.5
+	// (#600).
+	//
+	// SEPARATE from musixmatchInactive on purpose; the two are not complements.
+	// musixmatchInactive answers "is Musixmatch primary but tokenless", which is
+	// false for a healthy PetitLyrics-primary deployment -- one that serves no
+	// Musixmatch Data at all. Gating the credit on !musixmatchInactive would
+	// therefore credit Musixmatch for PetitLyrics results.
+	//
+	// Defaults to FALSE, so the credit renders only when a caller affirmatively
+	// says Musixmatch is serving. That direction is deliberate: a missing credit
+	// is a bug to fix, while a credit on the wrong provider is a misattribution
+	// published to users.
+	musixmatchServing bool
 }
 
 // KeyManager is the subset of *auth.Service the webhook key management page
@@ -171,6 +187,17 @@ func WithMusixmatchInactive(inactive bool) UIOption {
 // the post-construction equivalent of WithMusixmatchInactive used by the server
 // layer (WithWebUIAuth builds the UI first).
 func (u *UI) AttachMusixmatchInactive(inactive bool) { u.musixmatchInactive = inactive }
+
+// WithMusixmatchServing marks Musixmatch as the provider actually serving
+// lyrics, so the shell renders the attribution credit required by API Terms
+// clause 2.1.5 (#600). Default (false) renders no credit.
+func WithMusixmatchServing(serving bool) UIOption {
+	return func(u *UI) { u.musixmatchServing = serving }
+}
+
+// AttachMusixmatchServing sets the credit flag on an already-constructed UI, the
+// post-construction equivalent of WithMusixmatchServing used by the server layer.
+func (u *UI) AttachMusixmatchServing(serving bool) { u.musixmatchServing = serving }
 
 // WithConfigPath sets the resolved config file path the settings save handlers
 // write through. Without it the settings page stays read-only (no write path).
@@ -325,7 +352,7 @@ func (u *UI) handleRoot(w http.ResponseWriter, r *http.Request) {
 // operator to pick a report, keeping execution strictly user-initiated.
 func (u *UI) handleReports(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	render(w, r, templates.ReportsPage(u.version, u.buildRail(""), nil, u.musixmatchInactive))
+	render(w, r, templates.ReportsPage(u.version, u.buildRail(""), nil, u.musixmatchInactive, u.musixmatchServing))
 }
 
 // handleReportFragment runs one canned report on demand and returns its results.
@@ -364,7 +391,7 @@ func (u *UI) handleReportFragment(w http.ResponseWriter, r *http.Request) {
 		render(w, r, templates.ReportFragment(rail, view))
 		return
 	}
-	render(w, r, templates.ReportsPage(u.version, rail, &view, u.musixmatchInactive))
+	render(w, r, templates.ReportsPage(u.version, rail, &view, u.musixmatchInactive, u.musixmatchServing))
 }
 
 // reportPath builds the sidebar link target for a report key, encoding the key
@@ -432,6 +459,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Album:       o.Album,
 				Result:      string(o.Result),
 				Lane:        laneLabel(o.ProviderLane),
+				LaneMark:    laneMark(o.ProviderLane),
 				CompletedAt: formatReportTime(o.CompletedAt, serverLoc),
 			})
 		}
@@ -443,10 +471,11 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 		v.ProviderRows = make([]templates.ProviderRow, 0, len(rows))
 		for _, p := range rows {
 			v.ProviderRows = append(v.ProviderRows, templates.ProviderRow{
-				Lane:    laneLabel(p.Lane),
-				Hits:    strconv.FormatInt(p.Hits, 10),
-				Misses:  strconv.FormatInt(p.Misses, 10),
-				HitRate: fmt.Sprintf("%.1f%%", p.HitRate*100),
+				Lane:     laneLabel(p.Lane),
+				LaneMark: laneMark(p.Lane),
+				Hits:     strconv.FormatInt(p.Hits, 10),
+				Misses:   strconv.FormatInt(p.Misses, 10),
+				HitRate:  fmt.Sprintf("%.1f%%", p.HitRate*100),
 			})
 		}
 	case "instrumental-inventory":
