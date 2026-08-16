@@ -25,6 +25,14 @@ type sampleObservation struct {
 	Copyright     string  // raw copyright value, empty when absent
 	DistinctRatio float64 // tier-3 only: fraction of lines with distinct word starts
 	Err           string  // sentinel error class name, empty on success
+	// Paired and PairErr are tier-2 only, and record whether the companion
+	// tier-1 text was captured beside the blob (#602). An UNPAIRED blob is not
+	// useless -- the first corpus was four of them -- but it cannot supply the
+	// ground truth needed to pin the XOR key's low byte or the timestamp offset,
+	// so the report counts the two separately rather than reporting a corpus size
+	// that overstates how much of it is actually usable.
+	Paired  bool
+	PairErr string // why the companion fetch failed, empty when it succeeded
 }
 
 type surveyReport struct {
@@ -36,6 +44,8 @@ type surveyReport struct {
 	officialByTier map[int]map[string]int
 	copyrightSeen  int
 	cueCounts      []int
+	lsyPaired      int
+	lsyUnpaired    map[string]int
 	distinctRatios []float64
 	errCounts      map[string]int
 }
@@ -46,6 +56,7 @@ func newSurveyReport() *surveyReport {
 		officialCounts: map[string]int{},
 		officialByTier: map[int]map[string]int{},
 		errCounts:      map[string]int{},
+		lsyUnpaired:    map[string]int{},
 	}
 }
 
@@ -89,6 +100,21 @@ func (r *surveyReport) add(obs sampleObservation) {
 	}
 	if obs.Tier == tierWordSync {
 		r.distinctRatios = append(r.distinctRatios, obs.DistinctRatio)
+	}
+	// The #602 corpus is sized by PAIRED blobs, not by blobs. An unpaired one
+	// cannot supply ground truth, so counting only the total would report a
+	// corpus that looks adequate while leaving the key's low byte and the
+	// timestamp offset exactly as unresolvable as before.
+	if obs.Tier == tierLineSync {
+		if obs.Paired {
+			r.lsyPaired++
+		} else {
+			reason := obs.PairErr
+			if reason == "" {
+				reason = "unknown"
+			}
+			r.lsyUnpaired[boundedToken(reason)]++
+		}
 	}
 }
 
@@ -145,6 +171,12 @@ func (r *surveyReport) render() string {
 		sort.Ints(sorted)
 		fmt.Fprintf(&b, "  min %d  median %d  max %d\n",
 			sorted[0], sorted[len(sorted)/2], sorted[len(sorted)-1])
+	}
+
+	fmt.Fprintf(&b, "\nline-sync corpus: %d paired / %d total\n",
+		r.lsyPaired, r.tierCounts[tierLineSync])
+	for _, k := range sortedKeys(r.lsyUnpaired) {
+		fmt.Fprintf(&b, "  unpaired (%s): %d\n", k, r.lsyUnpaired[k])
 	}
 
 	fmt.Fprintf(&b, "\nword-sync distinct-start ratios (n=%d):\n", len(r.distinctRatios))
