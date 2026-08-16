@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,5 +213,44 @@ func TestGuardRejectUnsettledRowIsReleased(t *testing.T) {
 	}
 	if len(q.failed) != 0 {
 		t.Errorf("failed = %v; an unsettled row must be released, not failed (it may no longer exist)", q.failed)
+	}
+}
+
+// TestGuardRejectReleaseFailureIsReported covers the error branch of the release
+// path: the settle did not take AND the release also failed.
+//
+// It matters because the row is then stuck in 'processing', which nothing
+// reclaims -- Dequeue selects only ('pending','failed','deferred'). Swallowing
+// this would strand the row invisibly, so the error must propagate to the run
+// loop rather than being logged and dropped.
+func TestGuardRejectReleaseFailureIsReported(t *testing.T) {
+	claimed := queue.SettleClaimed
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID:     1,
+			Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "One"}, Outdir: "o", Filename: "a.lrc"},
+		}},
+		guardRejectOutcome: &claimed,
+		releaseErr:         errors.New("database is locked"),
+	}
+	fetcher := &seqFetcher{results: []seqResult{{
+		song: models.Song{
+			Track:     models.Track{ArtistName: "A", TrackName: "One"},
+			Subtitles: models.Synced{Lines: []models.Lines{{Text: "x"}}},
+		},
+	}}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	w.EnableGuard(rejectAllGuard{reason: "script not in allowlist"})
+	w.sleep = func(context.Context, time.Duration) {}
+
+	err := w.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run returned nil; a row left in 'processing' by a failed release must surface, not be swallowed")
+	}
+	if !strings.Contains(err.Error(), "release unsettled guard-rejected item") {
+		t.Errorf("err = %v; want it to name the unreleased guard-rejected row", err)
+	}
+	if len(q.completed) != 0 {
+		t.Errorf("completed = %v; nothing settled, so nothing may be recorded done", q.completed)
 	}
 }
