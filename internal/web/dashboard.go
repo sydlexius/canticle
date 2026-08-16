@@ -102,8 +102,12 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	// (queue.batch_size > cap) must still report its real size (#572 CR).
 	view.UpNextHeader = fmt.Sprintf("%d buffered of %s eligible",
 		elig.Buffered, groupThousands(elig.Eligible))
-	view.UpNextEmpty = fmt.Sprintf("Nothing buffered. %s eligible, %s waiting on cooldown.",
-		groupThousands(elig.Eligible), groupThousands(elig.Cooldown))
+	// "retry backoff", never "cooldown": this count is governed by
+	// api.miss_backoff_base_hours, while every config key spelled "cooldown" is
+	// request PACING. The old wording pointed an operator at a knob that cannot
+	// move this number; the lever is `queue recheck --deferred`.
+	view.UpNextEmpty = fmt.Sprintf("Nothing buffered. %s eligible, %s waiting on retry backoff.",
+		groupThousands(elig.Eligible), groupThousands(elig.RetryBackoff))
 
 	return view, nil
 }

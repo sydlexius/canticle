@@ -698,13 +698,13 @@ func TestQueueEligibility(t *testing.T) {
 	if got.Eligible != 3 {
 		t.Errorf("Eligible = %d, want 3", got.Eligible)
 	}
-	if got.Cooldown != 2 {
-		t.Errorf("Cooldown = %d, want 2", got.Cooldown)
+	if got.RetryBackoff != 2 {
+		t.Errorf("RetryBackoff = %d, want 2", got.RetryBackoff)
 	}
-	// Buffered = the two eligible rows with a batch_seq; the buffered cooldown
-	// row is excluded because it is not eligible now.
+	// Buffered = the two eligible rows with a batch_seq; the buffered
+	// retry-backoff row is excluded because it is not eligible now.
 	if got.Buffered != 2 {
-		t.Errorf("Buffered = %d, want 2 (buffered cooldown row must not count)", got.Buffered)
+		t.Errorf("Buffered = %d, want 2 (buffered retry-backoff row must not count)", got.Buffered)
 	}
 }
 
@@ -718,7 +718,7 @@ func TestQueueEligibilityEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueueEligibility: %v", err)
 	}
-	if got.Eligible != 0 || got.Cooldown != 0 {
+	if got.Eligible != 0 || got.RetryBackoff != 0 {
 		t.Errorf("empty queue = %+v, want {0 0}", got)
 	}
 }
