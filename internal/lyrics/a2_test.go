@@ -1,6 +1,8 @@
 package lyrics
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -150,4 +152,114 @@ func TestA2Stamp_Formats(t *testing.T) {
 			t.Errorf("a2Stamp(%d) = %q; want %q", tc.ms, got, tc.want)
 		}
 	}
+}
+
+// TestWriteLRC_WordSyncDisabledByDefault pins the default: without opting in,
+// output is byte-identical to the pre-#480 line-synced file. Word markers are a
+// display feature whose player support is not universal, so an existing library
+// must not change shape because a provider happened to serve richer data.
+func TestWriteLRC_WordSyncDisabledByDefault(t *testing.T) {
+	dir := t.TempDir()
+	song := a2Song()
+
+	w := NewLRCWriter()
+	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+
+	body := readFileString(t, filepath.Join(dir, "song.lrc"))
+	if strings.Contains(body, "<00:") {
+		t.Errorf("word markers emitted without opting in:\n%s", body)
+	}
+	if !strings.Contains(body, "[00:01.50]alpha beta") {
+		t.Errorf("plain synced cue missing:\n%s", body)
+	}
+}
+
+// TestWriteLRC_WordSyncEmitsMarkersWhenEnabled is the opt-in path: the leading
+// line-level cue stays for players that ignore markers, and each word gains an
+// inline marker.
+func TestWriteLRC_WordSyncEmitsMarkersWhenEnabled(t *testing.T) {
+	dir := t.TempDir()
+
+	w := NewLRCWriter()
+	w.SetWordSync(true)
+	if err := w.WriteLRC(a2Song(), "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+
+	body := readFileString(t, filepath.Join(dir, "song.lrc"))
+	// Backward compatibility: the line-level cue is still the first thing on the
+	// line, so a player with no A2 support reads it exactly as before.
+	if !strings.Contains(body, "[00:01.50]<00:01.50>alpha <00:02.00>beta") {
+		t.Errorf("expected a leading line cue followed by word markers:\n%s", body)
+	}
+}
+
+// TestWriteLRC_WordSyncFallsBackPerLine covers the partially-timed track, which
+// the measured corpus contains: one line reconstructs cleanly and gains markers,
+// the other does not and must still write its plain cue with its words intact.
+//
+// Degrading LINE BY LINE rather than all-or-nothing is the point -- a single bad
+// line should not cost the whole file its word sync, nor should it cost that
+// line its words.
+func TestWriteLRC_WordSyncFallsBackPerLine(t *testing.T) {
+	dir := t.TempDir()
+	song := models.Song{
+		Track: models.Track{ArtistName: "A", TrackName: "T"},
+		Subtitles: models.Synced{Lines: []models.Lines{
+			{Text: "alpha beta", Time: models.Time{Total: 1.5, Seconds: 1, Hundredths: 50}},
+			{Text: "gamma delta", Time: models.Time{Total: 3, Seconds: 3}},
+		}},
+		AudioDurationSeconds: 240,
+		WordTimings: []models.WordTiming{
+			{Line: 0, Text: "alpha ", StartMS: 1500, EndMS: 2000},
+			{Line: 0, Text: "beta", StartMS: 2000, EndMS: 2500},
+			// Line 1's timings do not reconstruct its cue: "gamma delta" vs
+			// "gamma epsilon". The line keeps its words and loses only markers.
+			{Line: 1, Text: "gamma ", StartMS: 3000, EndMS: 3400},
+			{Line: 1, Text: "epsilon", StartMS: 3400, EndMS: 3800},
+		},
+	}
+
+	w := NewLRCWriter()
+	w.SetWordSync(true)
+	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+
+	body := readFileString(t, filepath.Join(dir, "song.lrc"))
+	if !strings.Contains(body, "[00:01.50]<00:01.50>alpha <00:02.00>beta") {
+		t.Errorf("the well-formed line lost its markers:\n%s", body)
+	}
+	if !strings.Contains(body, "[00:03.00]gamma delta") {
+		t.Errorf("the fallback line must keep its own words, unmarked:\n%s", body)
+	}
+	if strings.Contains(body, "epsilon") {
+		t.Errorf("a word absent from the cue leaked into the file:\n%s", body)
+	}
+}
+
+// a2Song is a two-word, one-line synced song with matching word timings.
+func a2Song() models.Song {
+	return models.Song{
+		Track: models.Track{ArtistName: "A", TrackName: "T"},
+		Subtitles: models.Synced{Lines: []models.Lines{
+			{Text: "alpha beta", Time: models.Time{Total: 1.5, Seconds: 1, Hundredths: 50}},
+		}},
+		AudioDurationSeconds: 240,
+		WordTimings: []models.WordTiming{
+			{Line: 0, Text: "alpha ", StartMS: 1500, EndMS: 2000},
+			{Line: 0, Text: "beta", StartMS: 2000, EndMS: 2500},
+		},
+	}
+}
+
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // reason: test path from t.TempDir
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
 }
