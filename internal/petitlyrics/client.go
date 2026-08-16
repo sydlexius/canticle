@@ -95,6 +95,29 @@ type Client struct {
 	// zeroReported latches the transition so the outage is logged ONCE rather
 	// than on every request past the threshold. Cleared on recovery.
 	zeroReported bool
+
+	// knownGood is the most recent track this credential successfully fetched at
+	// least one song for, and it is what makes the outage decision EVIDENCE-BASED
+	// rather than a guess (#767).
+	//
+	// A consecutive-miss count cannot distinguish "the provider has nothing for
+	// THIS material" from "the provider has nothing for ANYTHING", and those need
+	// opposite responses. A fallback lane sees exactly the obscure material the
+	// primary already failed on, so a long miss run is its NORMAL operating
+	// condition: measured at a 91% miss rate, a run of 20 had probability 0.742 of
+	// occurring by chance. The threshold was firing on the population it was meant
+	// to serve.
+	//
+	// Re-fetching a track the provider demonstrably had turns that into a real
+	// test: a hit proves the credential works and the misses were material, a miss
+	// proves the credential stopped working. Self-calibrating, because the control
+	// comes from this provider's own past behavior rather than a hardcoded canary
+	// that could itself be retired from the catalog.
+	knownGood    models.Track
+	hasKnownGood bool
+	// probeInFlight stops a burst of concurrent misses from each launching their
+	// own liveness probe. One probe answers the question for all of them.
+	probeInFlight bool
 }
 
 // recordZeroResult counts a zero-song response and reports whether the run has
@@ -518,8 +541,135 @@ func trackFromCandidate(s apiSong, local models.Track) models.Track {
 	return t
 }
 
-// request performs the single form POST and decodes the XML envelope.
+// request performs the single form POST, decodes the XML envelope, and maintains
+// the zero-result outage state (#607/#767).
+//
+// It wraps rawRequest so the liveness probe can reach the API WITHOUT feeding the
+// counter it exists to adjudicate: a probe that counted its own result would
+// either clear the suspicion it was sent to test, or deepen it, depending on
+// ordering. The probe calls rawRequest directly.
 func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]apiSong, error) {
+	songs, err := c.rawRequest(ctx, track, tier)
+	if err != nil {
+		return nil, err
+	}
+	if len(songs) == 0 {
+		// A clean HTTP 200 carrying no songs. Individually this is an ordinary
+		// miss; sustained, it MIGHT be a revoked application id, since the service
+		// keeps answering normally rather than returning 401 (#607).
+		//
+		// "Might" is the whole correction in #767. A miss run is also what an
+		// obscure-material population looks like, so the count alone cannot decide.
+		// When the run reaches the threshold, ASK the provider a question it can
+		// only answer one way.
+		if !c.recordZeroResult() {
+			return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+		}
+		if c.confirmOutage(ctx) {
+			return nil, ErrProviderUnavailable
+		}
+		return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+	}
+	// At least one song came back, which proves the application id is still
+	// accepted. Reset regardless of what the client then makes of the payload: a
+	// candidate that loses selection, or a tier this client cannot decode, is a
+	// per-track outcome and says nothing about credential health.
+	c.recordNonZeroResult()
+	c.rememberKnownGood(track)
+	return songs, nil
+}
+
+// rememberKnownGood records a track this credential just fetched successfully, so
+// a later liveness probe has a control the provider has demonstrably served
+// (#767). Held in memory only and never logged -- it is library metadata.
+func (c *Client) rememberKnownGood(track models.Track) {
+	if track.TrackName == "" || track.ArtistName == "" {
+		return
+	}
+	c.mu.Lock()
+	c.knownGood = track
+	c.hasKnownGood = true
+	c.mu.Unlock()
+}
+
+// confirmOutage decides whether a threshold-length miss run is a real provider
+// outage, by re-fetching a track this credential previously succeeded on (#767).
+//
+// Returns true on POSITIVE evidence of an outage: the control track, which the
+// provider served before, now returns nothing. A hit means the credential works
+// and the misses were about the material, so the counter resets and the caller
+// reports an ordinary miss.
+//
+// WITH NO CONTROL IT FALLS BACK TO THE COUNT, which preserves #607. That case is
+// not a detail -- it is the ORIGINAL bug: a credential revoked before this
+// process ever saw a hit (a restart with a dead clientAppId) never earns a
+// control, so a probe-only design would leave that outage undetected FOREVER,
+// strictly worse than counting. An earlier draft of this function returned false
+// there and its comment claimed the next probe would catch it; there is no next
+// probe when no control can ever be recorded.
+//
+// The two cases separate cleanly, which is what makes this sound rather than a
+// compromise:
+//
+//   - A false positive (#767) happens on a lane that IS serving hits -- 6
+//     successful fetches preceded the run that misfired -- so a control exists
+//     and the probe adjudicates it.
+//   - A cold-start outage (#607) has no hits by definition, so no control exists
+//     and the count is the only signal available.
+//
+// A probe already in flight returns false: another goroutine is asking the same
+// question, and two probes cannot be more informative than one.
+func (c *Client) confirmOutage(ctx context.Context) bool {
+	c.mu.Lock()
+	control, have, busy := c.knownGood, c.hasKnownGood, c.probeInFlight
+	if have && !busy {
+		c.probeInFlight = true
+	}
+	c.mu.Unlock()
+
+	if !have {
+		// Never had a hit on this credential, so there is nothing to test against
+		// and no way to do better than the count. This is the cold-start revoked
+		// credential #607 exists to catch.
+		return true
+	}
+	if busy {
+		// Another goroutine is already probing. Do not claim an outage on no
+		// evidence; the in-flight probe will decide for the run.
+		return false
+	}
+	defer func() {
+		c.mu.Lock()
+		c.probeInFlight = false
+		c.mu.Unlock()
+	}()
+
+	// Deliberately rawRequest: the probe must not feed the counter it adjudicates.
+	// Tier 1 because every song with lyrics has it -- a tier-2/3 probe could miss
+	// on a healthy credential simply because that track has no higher tier.
+	songs, err := c.rawRequest(ctx, control, tierUnsynced)
+	if err != nil {
+		// A transport or status failure says nothing about the credential; it is
+		// the ordinary network-flake case, and statusError already classifies a
+		// real 401/429.
+		slog.Debug("petitlyrics: liveness probe failed in transport; not treating as an outage", "error", err)
+		return false
+	}
+	if len(songs) > 0 {
+		// The credential works. The miss run was about the MATERIAL, which is the
+		// normal condition for a fallback lane. Clear it so the next run gets a
+		// fresh threshold rather than escalating on the very next miss.
+		c.recordNonZeroResult()
+		slog.Debug("petitlyrics: liveness probe succeeded; sustained miss run is material, not a credential outage")
+		return false
+	}
+	return true
+}
+
+// rawRequest performs the single form POST and decodes the XML envelope, without
+// touching the outage counter. Callers that represent real lookup traffic should
+// use request instead.
+func (c *Client) rawRequest(ctx context.Context, track models.Track, tier int) ([]apiSong, error) {
 	form := url.Values{
 		"clientAppId":  {c.clientAppID},
 		"terminalType": {terminalType},
@@ -558,20 +708,8 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 	if err := xml.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("petitlyrics: decode XML response: %w", err)
 	}
-	if len(parsed.Songs) == 0 {
-		// A clean HTTP 200 carrying no songs. Individually this is an ordinary
-		// miss; sustained, it is the fingerprint of a revoked application id,
-		// since the service keeps answering normally rather than returning 401
-		// (#607).
-		if c.recordZeroResult() {
-			return nil, ErrProviderUnavailable
-		}
-		return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
-	}
-	// At least one song came back, which proves the application id is still
-	// accepted. Reset regardless of what the client then makes of the payload: a
-	// candidate that loses selection, or a tier this client cannot decode, is a
-	// per-track outcome and says nothing about credential health.
-	c.recordNonZeroResult()
+	// Zero-song handling and the outage counter live in request, the wrapper, so
+	// the liveness probe can call this without adjudicating itself (#767). An
+	// empty slice is returned as-is; the caller decides what it means.
 	return parsed.Songs, nil
 }
