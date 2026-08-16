@@ -111,29 +111,44 @@ whether the tracking script is mandatory, and whether the terms address non-API 
 | | |
 |---|---|
 | **File** | `web/static/img/lanes/musixmatch.svg` |
-| **Source** | <https://s.mxmcdn.net/site/images/mxm_icon.svg> (Musixmatch's own CDN, referenced by musixmatch.com) |
+| **Asset** | `Musixmatch-Icon-White-BG.svg`, from the **Musixmatch For Brands** set |
+| **Source** | <https://about.musixmatch.com/brand-resources> -> "For Brands" -> Icon -> SVG |
 | **Retrieved** | 2026-08-16 |
-| **Modified** | No. Used byte-for-byte as served. |
+| **Modified** | Adobe metadata stripped. Artwork untouched -- see below. |
 
-Taken from the provider's first-party CDN rather than from an icon site, per #601's
-requirement to prefer the official asset. Note that Musixmatch **does** publish a brand
-resources page at <https://about.musixmatch.com/brand-resources>, including a "For
-Brands" badge set intended for third-party use with a suggested link to musixmatch.com.
-Those assets sit behind Google Drive folders that need a browser to enumerate, so they
-could not be retrieved here; the CDN mark above is the same company's own asset and is
-the correct interim source.
+This is the provider's own brand kit, and the "For Brands" set is the one the page
+describes as designed for third-party use ("these badges are designed to work with almost
+any design"). That makes it the correct asset for a lane mark, rather than the site-header
+icon on the Musixmatch CDN.
 
-**Worth checking when the brand kit is reachable:** the "For Brands" set may be the
-intended asset for exactly this use, and the suggested musixmatch.com linkback may be a
-condition attached to it. Neither the CDN file nor the brand page states explicit
-third-party usage terms, so this is recorded as unverified rather than cleared.
+**The page suggests linking the badge to musixmatch.com.** It is phrased as a suggestion,
+not a requirement, and canticle's lane mark is currently not a link. Recorded so the
+decision is visible: if the API terms (unread, see above) turn a suggestion into a
+condition, the mark should become a link rather than be removed.
 
-**Rendering constraint this creates.** The mark is a single fixed fill (`#131313`) on a
-`#0b1120` UI background -- near-black on near-black, unreadable as-is. It is NOT
-recolored, because the guidelines that require an official asset generally forbid
-altering it. The `.mx-lane-chip` treatment reconciles this instead by placing the mark on
-a light plate, so it renders on the background it was drawn for. Do not "fix" this with a
-CSS filter or by editing the file.
+### What "modified" means here, precisely
+
+The asset as served is **396,427 bytes**, of which **394,960** are a single
+`<metadata>` blob of Adobe Illustrator private data. The artwork is one `<rect>` and one
+`<path>`. Embedding 396 KB into the binary to draw a 16px mark is not defensible, so the
+metadata element, the generator comment, and the now-unused `xmlns:i` declaration were
+removed. The result is **1,313 bytes**.
+
+Nothing about the drawing was touched, and that is verified rather than assumed:
+
+- the `<rect>`, the `<path>`, and the `viewBox` are **byte-identical** before and after
+- both files were rendered at 256x256 in chromium and the resulting bitmaps hash
+  identically (`ec1cc496...`), so the strip is provably lossless at the pixel level
+
+If this asset is ever refreshed, redo both checks. Markup equality alone would not have
+licensed the claim.
+
+### Rendering note
+
+The For Brands icon is a solid tile carrying its own background (`#fc532e` with the mark
+in `#fff`), which is exactly why it works on any surface -- including this UI's dark
+`#0b1120`. Do not add a background plate behind it, do not pad it, and do not recolor it;
+the asset already solves the contrast problem the earlier site-header icon had.
 
 ---
 
