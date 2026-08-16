@@ -87,10 +87,28 @@ type LRCWriter struct {
 	// docs/multilingual-output-policy.md). When false (the default), only the
 	// original track is written even if a translation track is present.
 	bilingual bool
+	// wordSync enables opt-in Enhanced-LRC (A2) inline word markers on synced
+	// output (#480). When false (the default), a word-synced result writes the
+	// same line-level .lrc it always did, so an existing library never changes
+	// shape because a provider served richer data.
+	wordSync bool
 	// selfWrites, when non-nil, records every path this writer touches so the
 	// filesystem watcher can drop the events its own writes generate (#685).
 	// Nil (the default, and every non-serve caller) is a no-op.
 	selfWrites *selfwrite.Registry
+}
+
+// SetWordSync enables or disables Enhanced-LRC (A2) word markers on synced
+// output. When enabled AND a Song carries WordTimings that pass a2Words' checks,
+// each cue keeps its leading line-level [mm:ss.xx] and gains inline <mm:ss.xx>
+// markers per word.
+//
+// Default false. Player support for A2 is not universal and the failure mode is
+// three-way -- render, silently strip, or show the markers as literal text --
+// so this stays opt-in rather than something a library inherits silently. Not
+// goroutine-safe; call before sharing the writer, alongside SetBilingual.
+func (w *LRCWriter) SetWordSync(enabled bool) {
+	w.wordSync = enabled
 }
 
 // SetSelfWriteRegistry attaches the registry the watcher consults to recognize
@@ -154,7 +172,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		instrumental = true
 	case len(song.Subtitles.Lines) > 0:
 		kind = "synced"
-		writeContent = func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual) }
+		writeContent = func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual, w.wordSync) }
 		writeTags = true
 		synced = true
 	case song.Lyrics.LyricsBody != "":
@@ -431,14 +449,46 @@ func (w *LRCWriter) matchRoot(outdir string) (string, bool) {
 // docs/multilingual-output-policy.md). Mismatched line counts are handled
 // gracefully: an original line with no translation counterpart is emitted
 // alone, and surplus translation lines (beyond the original count) are dropped.
-func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool) error {
+//
+// When wordSync is true AND a cue's word timings pass a2Words' fidelity and
+// distinctness checks, that cue's text is replaced by inline <mm:ss.xx> word
+// markers (#480). The leading line-level [mm:ss.xx] is kept either way, so a
+// player without A2 support reads the file exactly as before. The decision is
+// PER LINE: a cue whose timings do not reconstruct it writes its plain text, so
+// a partially-timed track degrades line by line rather than losing word sync
+// wholesale or, worse, losing words.
+//
+// A translation line never gains markers even when its original does: the word
+// timings describe the ORIGINAL track's words, and mapping them onto translated
+// text would attach one language's timing to another's words.
+func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSync bool) error {
 	interleave := bilingual && len(song.TranslationSubtitles.Lines) > 0
 	translations := song.TranslationSubtitles.Lines
+	// Left nil unless word sync is on. This is the default write path for every
+	// synced lyric in the library, and wordSync is opt-in, so allocating a map
+	// the common case never reads is pure waste. A nil map is safe to read --
+	// byLine[i] yields nil, which a2Words treats as "no timings" and refuses --
+	// so the lookup below needs no guard of its own.
+	var byLine map[int][]models.WordTiming
+	if wordSync && len(song.WordTimings) > 0 {
+		byLine = make(map[int][]models.WordTiming, len(song.Subtitles.Lines))
+		for _, t := range song.WordTimings {
+			byLine[t.Line] = append(byLine[t.Line], t)
+		}
+	}
 
 	for i, line := range song.Subtitles.Lines {
 		text := line.Text
 		if text == "" {
 			text = "\u266a"
+		}
+		// Word markers replace the cue TEXT only; the line-level stamp below is
+		// emitted either way. a2Words returns false whenever the markers would be
+		// dishonest or lossy, and that fallback keeps `text` as-is.
+		if wordSync {
+			if marked, ok := a2Words(line.Text, byLine[i]); ok {
+				text = marked
+			}
 		}
 		fLine := fmt.Sprintf("[%02d:%02d.%02d]%s", line.Time.Minutes, line.Time.Seconds, line.Time.Hundredths, text)
 		if _, err := buff.WriteString(fLine + "\n"); err != nil {
