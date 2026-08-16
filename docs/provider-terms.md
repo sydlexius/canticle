@@ -7,8 +7,11 @@ as a condition of use, and what else their terms impose. Tracked by #600.
 even when the answer is "not required", with the date it was checked and a link to the
 document that says so. Terms change; a finding is only as good as its date.
 
-**Status: INCOMPLETE.** The petitlyrics half is recorded below. The Musixmatch half is
-not established -- see the gap note. Do not read this file as a compliance sign-off.
+**Status: BOTH PROVIDERS READ, OBLIGATIONS OUTSTANDING.** Musixmatch's terms require a
+prescribed credit and linkback that canticle does **not** currently satisfy (#600).
+petitlyrics imposes no attribution requirement but does constrain use. Do not read this
+file as a compliance sign-off -- it is a record of what the terms say, not a claim that
+canticle complies with them.
 
 ---
 
@@ -74,37 +77,64 @@ its usage terms. Do not resolve it by picking one off an icon site.
 
 ## Musixmatch
 
-**Checked:** 2026-08-16 -- **NOT ESTABLISHED**
+**Checked:** 2026-08-16
+**Source:** <https://www.musixmatch.com/apiterms/>, which redirects to
+<https://about.musixmatch.com/apiterms> (Musixmatch API Terms of Service)
 
-### The gap
+An earlier revision of this file recorded these terms as unreachable and therefore
+UNKNOWN. That was a tooling limitation, not a property of the terms: the page is served
+from `about.musixmatch.com`, which the first attempts never tried. Surfaced by CodeRabbit
+on PR #766.
 
-Both `developer.musixmatch.com` and `www.musixmatch.com` are unreachable from this
-environment, so the API terms at <https://www.musixmatch.com/apiterms/> could not be
-read directly. Nothing here should be inferred from that failure.
+### Attribution IS required, with prescribed wording and placement
 
-Secondary sources indicate the documented developer API requires displaying a
-**copyright notice and a tracking script** returned alongside the lyrics body. That is
-second-hand and is recorded as a lead to verify, **not as a finding**.
+| Clause | Obligation |
+|---|---|
+| **2.1.5** | Credit Musixmatch and link to the Site **each time** you use Musixmatch Data, by linking one of the "powered by Musixmatch" buttons published at <https://www.musixmatch.com/resources> |
+| **2.1.6** | Comply with the Musixmatch Brand Guidelines (<https://brand.musixmatch.com>) |
+| **2.1.11** | Allow Musixmatch to track your access to the API and the Data |
+| **3.2** | Musixmatch trade marks, logos and graphics may be used **only** to inform third parties that the Data originates from Musixmatch |
 
-### Why the published API terms may not be the governing document anyway
+Three further terms constrain the deployment rather than the mark, and are recorded
+because they are easy to trip over:
 
-canticle does not use the documented developer API. It calls
+- **1.1** grants a non-exclusive, non-sublicensable license for **non-commercial** use only.
+- **2.1.4** requires **prior written approval** before making web pages containing
+  Musixmatch Data publicly accessible. canticle's serve-mode UI displays lyrics; an
+  operator exposing it publicly is squarely in scope.
+- **2.2.4** prohibits scraping or harvesting other than by accessing the API with the
+  User Authentication Key.
+
+### Does this apply to the desktop endpoint? Assume yes.
+
+canticle does not call the documented developer API. It calls
 `apic-desktop.musixmatch.com/ws/1.1/macro.subtitles.get`
-(`internal/musixmatch/client.go:21`) with a token minted from
-`.../ws/1.1/token.get` (`token.go:17`) -- the endpoint the Musixmatch desktop
-application uses internally.
+(`internal/musixmatch/client.go:21`) with a token minted from `.../ws/1.1/token.get`
+(`token.go:17`) -- the endpoint the Musixmatch desktop application uses internally.
 
-That distinction is material to #600 and was not visible from the issue body. The
-published API terms govern the published API. What governs this endpoint is a separate
-question, and the honest answer today is that it is unknown. It is worth resolving
-before designing any credit surface, because the answer determines *which document* the
-credit would be satisfying.
+An earlier revision leaned on that distinction to argue the published terms "govern an
+API canticle does not use". **That argument does not survive reading the definitions.**
+Clause 8.1 defines `API` functionally -- "the Musixmatch application programming
+interface that supports requests for Musixmatch Data made of it by computer programs" --
+and `Musixmatch Data` as any data or content made available by Musixmatch, explicitly
+including time-synced lyrics. Neither definition is scoped to a documented product,
+a particular hostname, or a registration tier. The desktop endpoint satisfies both.
 
-### To resolve
+So the terms are the governing document unless Musixmatch says otherwise in writing.
+Written confirmation would still be worth having, but its absence is not a reason to
+treat the obligations as inapplicable -- that reads the ambiguity in our own favor,
+which is the wrong default for a compliance question.
 
-Read <https://www.musixmatch.com/apiterms/> from an environment that can reach it, and
-record: whether a copyright notice is required, its prescribed wording and placement,
-whether the tracking script is mandatory, and whether the terms address non-API endpoints.
+### What is NOT satisfied today
+
+The lane mark added in #601 is a **static, non-linking `<img>`**. Clause 2.1.5 asks for
+a linked "powered by Musixmatch" button from the published resources page; clause 3.2
+permits the logo only to indicate data origin. A silent logo in a lane column arguably
+indicates origin, but it is not the prescribed asset and carries no link.
+
+Nothing here is a reason to delay a UI change: **the obligation attaches to using the
+Data, which canticle already does today**, and it existed before the mark and would
+survive its removal. Tracked in #600.
 
 ### Lane mark: VENDORED (#601)
 
@@ -121,10 +151,18 @@ describes as designed for third-party use ("these badges are designed to work wi
 any design"). That makes it the correct asset for a lane mark, rather than the site-header
 icon on the Musixmatch CDN.
 
-**The page suggests linking the badge to musixmatch.com.** It is phrased as a suggestion,
-not a requirement, and canticle's lane mark is currently not a link. Recorded so the
-decision is visible: if the API terms (unread, see above) turn a suggestion into a
-condition, the mark should become a link rather than be removed.
+**The brand page suggests linking the badge to musixmatch.com, and the API Terms turn
+that suggestion into a requirement** (clause 2.1.5 -- see above). canticle's lane mark is
+currently a static, non-linking `<img>`, so it does not satisfy 2.1.5 and is not one of
+the prescribed "powered by Musixmatch" buttons.
+
+An earlier revision of this section called the linkback "a suggestion, not a
+requirement", on the strength of the brand page alone while the Terms were unread. That
+was wrong, and it is left visible here rather than quietly corrected: the brand page is
+not the governing document.
+
+The remedy is to add the prescribed credit surface, not to remove the mark -- the
+obligation attaches to using the Data, which canticle already does. Tracked in #600.
 
 ### What "modified" means here, precisely
 

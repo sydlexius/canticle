@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -418,6 +419,20 @@ func TestBuildReportViewUnimplementedKey(t *testing.T) {
 	}
 }
 
+// findLaneMarks returns each rendered lane-mark element's opening tag, so the
+// accessibility contract can be asserted per mark rather than by string-matching
+// the whole body.
+//
+// A regexp rather than an HTML parse: the assertion only needs the opening tag's
+// attributes, both mark branches emit a single self-contained element, and the
+// tests already assert the exact mark count -- so a missed match surfaces there
+// rather than passing silently. Pulling in a parser to read two attributes off a
+// tag this test itself generated would cost more than it defends.
+func findLaneMarks(body string) []string {
+	re := regexp.MustCompile(`<(?:img|svg)[^>]*\bclass="[^"]*mx-lane-mark[^"]*"[^>]*>`)
+	return re.FindAllString(body, -1)
+}
+
 // TestReportFragmentRendersLaneMarks asserts the mark reaches the RENDERED
 // PAGE, not merely the view struct. The Go-level tests in lanemark_test.go
 // prove laneMark returns a token and that the token reaches a StatTile; none of
@@ -455,8 +470,28 @@ func TestReportFragmentRendersLaneMarks(t *testing.T) {
 	}
 	// ACCESSIBILITY: no mark contributes to the accessibility tree, so a lane is
 	// announced exactly once per row (from its adjacent text) rather than twice.
-	if strings.Contains(body, `alt="Musixmatch"`) || strings.Contains(body, `aria-label="Instrumental Detector"`) {
-		t.Error("a lane mark is exposed to assistive tech; the adjacent text is the accessible name")
+	//
+	// Asserted as the POSITIVE contract on every rendered mark, not as a denylist
+	// of two exact attribute values: `alt="Musixmatch"` and
+	// `aria-label="Instrumental Detector"` were the only strings an earlier
+	// version rejected, so `alt="Musixmatch lane"` -- the same defect, different
+	// wording -- passed it. Each mark must carry aria-hidden="true", and the
+	// <img> branch must additionally carry an EMPTY alt (a non-empty alt names
+	// the image even when it is aria-hidden).
+	for _, m := range findLaneMarks(body) {
+		if !strings.Contains(m, `aria-hidden="true"`) {
+			t.Errorf("lane mark is missing aria-hidden=\"true\": %s", m)
+		}
+		if strings.HasPrefix(m, "<img") && !strings.Contains(m, `alt=""`) {
+			t.Errorf("provider mark must carry an empty alt; the adjacent text is the accessible name: %s", m)
+		}
+		// aria-label / title on a mark would restore the double announcement that
+		// aria-hidden exists to prevent.
+		for _, banned := range []string{"aria-label=", "title="} {
+			if strings.Contains(m, banned) {
+				t.Errorf("lane mark carries %s, which re-exposes it to assistive tech: %s", banned, m)
+			}
+		}
 	}
 	// petitlyrics has no mark: exactly two marks render across three rows. This
 	// is the degrade path asserted positively, so a future default-mark or

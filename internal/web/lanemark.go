@@ -20,9 +20,14 @@ const (
 	markNone = ""
 	// markInstrumentalDetector is the muted-microphone glyph authored in-repo.
 	markInstrumentalDetector = "instrumental-detector"
-	// markMusixmatch is the vendored official Musixmatch mark. Sourced from the
-	// provider's own CDN and used unmodified; see docs/provider-terms.md for the
-	// source URL and the date it was retrieved.
+	// markMusixmatch is the vendored official Musixmatch mark, taken from the
+	// provider's own brand kit (the "For Brands" set).
+	//
+	// The ARTWORK is unchanged; the file is not. An Adobe metadata blob was
+	// stripped, taking it from 396 KB to 1.3 KB -- verified lossless by byte-
+	// comparing the rect, path and viewBox and by rendering both files to
+	// pixel-identical bitmaps. See docs/provider-terms.md for the source, the
+	// retrieval date, and the outstanding usage-terms question (#600).
 	markMusixmatch = "musixmatch"
 )
 

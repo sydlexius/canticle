@@ -36,13 +36,20 @@ templ laneMark(token string) {
 // providerMark renders a vendored third-party brand asset.
 //
 // Distinct from the authored glyph above in three ways that all follow from
-// provenance rather than from taste: it is an <img> to a vendored file rather
-// than inline markup (the asset is used unmodified, byte-for-byte as supplied,
-// which is what the brand terms require), it carries the chip treatment (a
-// fixed-color mark cannot be recolored to suit the theme, so the background is
-// adapted to the mark instead), and its path is passed in so every asset
-// location sits in the laneMark switch above -- a rebrand or takedown is a
-// one-line change there, not a hunt through templates.
+// provenance rather than from taste:
+//
+//  1. It is an <img> to a vendored file rather than inline markup. The ARTWORK
+//     is unmodified -- the brand terms allow no redrawing or recoloring -- but
+//     the FILE is not byte-for-byte as supplied: an Adobe metadata blob was
+//     stripped (396 KB -> 1.3 KB), verified lossless both by byte-comparing the
+//     geometry and by rendering to pixel-identical bitmaps. See
+//     docs/provider-terms.md.
+//  2. It carries the chip treatment, which sizes and rounds the mark. It adds
+//     no background: the official "For Brands" asset is a solid tile carrying
+//     its own, which is what lets it sit on any surface unaltered.
+//  3. Its path is passed in, so every asset location sits in the laneMark
+//     switch above -- a rebrand or takedown is a one-line change there, not a
+//     hunt through templates.
 //
 // aria-hidden with an empty alt for the same reason as the authored glyph: the
 // lane name renders as adjacent text and is the accessible name. A non-empty
