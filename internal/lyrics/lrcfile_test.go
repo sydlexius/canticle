@@ -162,3 +162,28 @@ func TestPlainBody_AllDecorativeIsEmpty(t *testing.T) {
 		t.Errorf("PlainBody = %q, want empty", got)
 	}
 }
+
+// TestPlainBody_StripsWordMarkers is the C2 fix (#480 prerequisite).
+//
+// PlainBody flattens cues read back OFF DISK, so once canticle writes A2 word
+// markers those cues carry them. Without stripping, a demotion persists
+// timestamp garbage into the user's plain-lyrics .txt -- and that is not
+// recoverable from the .txt afterwards.
+//
+// This is independent of what triggers the demotion: any A2 file that demotes
+// for any legitimate reason (a genuine overrun) hits it. Only the disk-read
+// path is affected -- the accept-time demotion flattens song.Subtitles, which
+// is unmarked -- and the disk-read path is the one that runs over the whole
+// library.
+func TestPlainBody_StripsWordMarkers(t *testing.T) {
+	got := PlainBody(models.Synced{Lines: []models.Lines{
+		{Text: "<00:01.50>alpha <00:02.00>beta"},
+		{Text: "<05:00.00>♪"}, // decorative even when marked: dropped
+		{Text: "<00:03.00>gamma"},
+	}})
+
+	want := "alpha beta\ngamma\n"
+	if got != want {
+		t.Errorf("PlainBody = %q; want %q -- a demoted .txt must carry words, never timestamps", got, want)
+	}
+}

@@ -8,6 +8,7 @@ package timing
 
 import (
 	"math"
+	"regexp"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -227,6 +228,34 @@ func correctedMaxSeconds(lines []models.Lines) (float64, bool) {
 	return maxTS, found
 }
 
+// wordMarkerRe matches one Enhanced-LRC (A2) inline word marker, `<mm:ss.xx>`.
+//
+// Deliberately anchored to the STAMP SHAPE rather than to any `<...>` run: a
+// lyric line may legitimately contain angle brackets, and eating those would be
+// silent text loss. Minutes are 1+ digits because a track past an hour renders
+// `70:00.00` rather than wrapping, but SECONDS are bounded to 00-59: `<00:60.00>`
+// is not a valid mm:ss.xx stamp, so it falls under the same preserve-malformed
+// rule as any other marker-ish text. That distinction is load-bearing because
+// PlainBody persists this text verbatim into a user-visible .txt.
+var wordMarkerRe = regexp.MustCompile(`<\d+:[0-5]\d\.\d{2}>`)
+
+// StripWordMarkers removes Enhanced-LRC (A2) inline word markers from a cue,
+// leaving the words. Text carrying no marker is returned unchanged.
+//
+// It exists because canticle now WRITES those markers (#480) and re-reads its
+// own sidecars on the revalidate path. Without stripping, a decorative cue that
+// gained a marker (`<05:00.00>♪`) stopped being recognized as decorative, its
+// timestamp entered the corrected max, and a perfectly-synced file flipped from
+// Ok to MisSynced on re-read -- so the backlog pass would demote a file
+// canticle had just written correctly. The verdict must not depend on whether
+// markers are enabled.
+func StripWordMarkers(text string) string {
+	if !strings.Contains(text, "<") {
+		return text
+	}
+	return wordMarkerRe.ReplaceAllString(text, "")
+}
+
 // IsDecorative reports whether a lyric line carries no actual lyric text: blank,
 // a run of music-note glyphs (including the "♪ Instrumental ♪" marker form), or
 // an [key:value] metadata tag.
@@ -242,7 +271,9 @@ func IsDecorative(text string) bool {
 // run of music-note glyphs (including the "♪ Instrumental ♪" marker form), or
 // an [key:value] metadata tag.
 func isDecorative(text string) bool {
-	t := strings.TrimSpace(text)
+	// Strip A2 word markers first: a marked decorative cue is still decorative,
+	// and classifying by the marked text would defeat the whole filter (#480).
+	t := strings.TrimSpace(StripWordMarkers(text))
 	if t == "" {
 		return true
 	}

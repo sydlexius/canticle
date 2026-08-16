@@ -68,7 +68,13 @@ func EvaluateLRCFile(path string, durationSeconds int) (timing.TimingOutcome, ti
 func PlainBody(synced models.Synced) string {
 	var b strings.Builder
 	for _, l := range synced.Lines {
-		text := strings.TrimSpace(l.Text)
+		// Strip A2 word markers before anything else. These cues may have been
+		// read back off disk from a file canticle itself wrote with word sync
+		// enabled (#480), and a .txt is by definition the plain words -- persisting
+		// `<00:01.50>alpha` there writes timestamp garbage into the user's
+		// lyrics, unrecoverably. IsDecorative strips them too, so a marked
+		// decorative cue is still dropped.
+		text := strings.TrimSpace(timing.StripWordMarkers(l.Text))
 		if timing.IsDecorative(text) {
 			continue
 		}
