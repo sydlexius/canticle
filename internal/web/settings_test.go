@@ -739,3 +739,19 @@ func TestSettingsRawFileReadErrorRendered(t *testing.T) {
 		t.Errorf("RawFileTOML = %q, want empty on read error", view.RawFileTOML)
 	}
 }
+
+// TestRawConfigValueWordSync covers the settings-UI arm for output.word_sync
+// (#480). rawConfigValue ends in a bare `return ""`, so a registry field with no
+// case arm renders as an EMPTY control rather than failing anywhere -- a silent
+// failure no other test catches. The same gap was found on
+// providers.petitlyrics_cooldown_seconds in #535.
+func TestRawConfigValueWordSync(t *testing.T) {
+	if got := rawConfigValue(config.Config{Output: config.OutputConfig{WordSync: true}}, "output.word_sync"); got != "true" {
+		t.Errorf("rawConfigValue(word_sync=true) = %q; want %q (a missing arm renders blank)", got, "true")
+	}
+	// The default must render as "false", not blank: blank is indistinguishable
+	// from the no-arm failure above.
+	if got := rawConfigValue(config.Config{}, "output.word_sync"); got != "false" {
+		t.Errorf("rawConfigValue(default) = %q; want %q", got, "false")
+	}
+}

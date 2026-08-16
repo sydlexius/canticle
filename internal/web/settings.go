@@ -96,6 +96,7 @@ var commonPaths = []string{
 	"api.cooldown",
 	"output.embedded_lyrics",
 	"output.bilingual_output",
+	"output.word_sync",
 	"providers.disabled",
 	"providers.primary",
 	"providers.mode",
@@ -395,6 +396,7 @@ func settingsInputType(spec config.FieldSpec) string {
 // choices (on-label, off-label), so the page never renders a bare true/false.
 var boolLabels = map[string][2]string{
 	"output.bilingual_output":       {"Save original and translation together", "Save one language only"},
+	"output.word_sync":              {"Highlight each word as it is sung", "Highlight whole lines only"},
 	"verification.enabled":          {"Verify lyrics against the audio", "Don't verify"},
 	"instrumental_detector.enabled": {"Detect instrumental tracks", "Don't detect"},
 	"enrichment.enabled":            {"Look up extra track info first", "Skip the lookup"},
@@ -915,6 +917,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return cfg.Output.EmbeddedLyrics
 	case "output.bilingual_output":
 		return strconv.FormatBool(cfg.Output.BilingualOutput)
+	case "output.word_sync":
+		return strconv.FormatBool(cfg.Output.WordSync)
 	// [db]
 	case "db.path":
 		return cfg.DB.Path
@@ -1129,6 +1133,7 @@ var settingsLabels = map[string]string{
 	"output.dir":                    "Where to save lyrics",
 	"output.embedded_lyrics":        "What to do with lyrics already in the file",
 	"output.bilingual_output":       "Save the original and the translation together",
+	"output.word_sync":              "Highlight each word as it is sung (karaoke style)",
 	"providers.primary":             "Main lyrics source",
 	"providers.mode":                "How to use multiple sources",
 	"server.addr":                   "Web page address",

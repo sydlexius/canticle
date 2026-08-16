@@ -155,13 +155,20 @@ Request cooldown, the worker circuit-breaker window, and miss re-check backoff (
 dir = "lyrics"
 # embedded_lyrics = "off"
 # bilingual_output = false
+# word_sync = false
 ```
 
-Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`; CLI: `--embedded-lyrics`).
+Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`, `MXLRC_WORD_SYNC`; CLI: `--embedded-lyrics`).
 
 `embedded_lyrics` controls how lyrics already embedded in the audio file's tags are handled. `off` (default) ignores them and always fetches from providers. `respect` skips fetching for files that already carry embedded lyrics. `extract` writes the embedded lyrics to a sidecar (never overwriting an existing one) and then skips fetching: a Vorbis `SYNCEDLYRICS` comment carrying timestamped LRC text is written as a synced `.lrc` and takes precedence over unsynced lyrics, which are written as `.txt`. ID3 `SYLT` and MP4 synced-lyric atoms are intentionally not handled.
 
 `bilingual_output` (default `false`): when `true` and a provider returns a non-empty translation track, the original and translation lines are interleaved under shared timestamps in a single `.lrc`. See `docs/multilingual-output-policy.md`.
+
+`word_sync` (default `false`): when `true` and a provider serves word-level timings -- today only Petit Lyrics' word-synced tier -- each cue keeps its normal `[MM:SS.cc]` stamp and gains a `<MM:SS.cc>` marker before each word (Enhanced LRC, "A2"). This is the karaoke-style per-word highlighting some players support.
+
+**Leave this off unless you know your player handles A2.** Support is not universal and there are three outcomes, only one of which is obviously wrong: the player highlights each word (the intent), silently ignores the markers (harmless), or renders them as literal text mixed into the lyrics (visibly broken). Music Assistant does not support A2; Symfonium ships marker stripping. Verify against one album before enabling library-wide.
+
+Word markers are emitted per line and only when they are trustworthy. A line whose timings do not reconstruct its text, whose words all share one timestamp, or whose text would break the line format falls back to a normal line-level cue -- so a partially-timed track degrades line by line rather than losing its words. Enabling this does not rewrite existing sidecars; a track gains markers on its next fetch.
 
 ### `[db]`
 

@@ -2255,3 +2255,24 @@ func TestLoad_RealignMinMarginReDefaultsWhenOutOfRange(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyEnvOverrides_WordSyncInvalidValueKeepsCurrent covers the reject
+// branch of MXLRC_WORD_SYNC. An unparsable value must leave the configured
+// value alone and record no provenance -- silently flipping a display feature
+// on (or off) because someone typed "yes" would be worse than ignoring it.
+func TestApplyEnvOverrides_WordSyncInvalidValueKeepsCurrent(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_WORD_SYNC", "not-a-bool")
+
+	cfg := defaults()
+	cfg.Output.WordSync = true // a deliberate prior setting the env must not clobber
+	applied := map[string]bool{}
+	applyEnvOverrides(&cfg, applied)
+
+	if !cfg.Output.WordSync {
+		t.Error("an invalid MXLRC_WORD_SYNC overwrote the configured value; it must be ignored")
+	}
+	if applied["output.word_sync"] {
+		t.Error("a rejected env value recorded provenance; callers would annotate it as (env)")
+	}
+}

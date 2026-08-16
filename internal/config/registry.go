@@ -88,6 +88,7 @@ var fields = []FieldSpec{
 	{Path: "output.dir", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_OUTPUT_DIR"}, Criticality: Safe, Editable: true, Description: "Default directory for .lrc output files."},
 	{Path: "output.embedded_lyrics", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_EMBEDDED_LYRICS"}, Criticality: Safe, Editable: true, Description: "How to handle embedded lyrics: off, respect, or extract."},
 	{Path: "output.bilingual_output", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_BILINGUAL_OUTPUT"}, Criticality: Safe, Editable: true, Description: "Interleave original and translation lines in one .lrc."},
+	{Path: "output.word_sync", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_WORD_SYNC"}, Criticality: Safe, Editable: true, Description: "Write per-word karaoke timings (Enhanced LRC). Not all players support them; some show the timing codes as text."},
 
 	// [db]
 	{Path: "db.path", Section: "db", Type: TypeString, EnvVars: []string{"MXLRC_DB_PATH"}, Criticality: Caution, Editable: true, Description: "SQLite database file path."},

@@ -2881,3 +2881,107 @@ func TestSchedulerStampsProvidersVersionOnItsQueue(t *testing.T) {
 			"so the #679 suppression would silently never fire", stored, gen)
 	}
 }
+
+// TestWordSyncValidatorMatchesCLI pins the CLI arm and the registry-driven web
+// save path to the SAME rule for output.word_sync (#480). The web path validates
+// through config.ValidateAndSet (TypeBool -> ValidateBool) while the CLI arm
+// hand-rolls its parse, so the two could silently diverge and accept a value
+// through one surface that the other rejects.
+func TestWordSyncValidatorMatchesCLI(t *testing.T) {
+	const path = "output.word_sync"
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"true", true},
+		{"false", true},
+		{"yes", false},
+		{"", false},
+	} {
+		webErr := config.ValidateAndSet(path, tc.value)
+		cliErr := setConfigValue(&config.Config{}, path, tc.value)
+		if (webErr == nil) != tc.valid {
+			t.Errorf("ValidateAndSet(%q) err = %v; want valid=%v", tc.value, webErr, tc.valid)
+		}
+		if (webErr == nil) != (cliErr == nil) {
+			t.Errorf("value %q: web accepts=%v but CLI accepts=%v; the two surfaces disagree",
+				tc.value, webErr == nil, cliErr == nil)
+		}
+	}
+}
+
+// TestConfigureWriterWordSync covers the config-to-writer seam: the type
+// assertion body that actually calls SetWordSync. Without this, the helper is
+// called by both serve and fetch wiring but its effect is never observed, so a
+// helper that silently did nothing would still look exercised.
+func TestConfigureWriterWordSync(t *testing.T) {
+	w := lyrics.NewLRCWriter()
+	configureWriterWordSync(w, config.Config{Output: config.OutputConfig{WordSync: true}})
+
+	dir := t.TempDir()
+	song := models.Song{
+		Track: models.Track{ArtistName: "A", TrackName: "T"},
+		Subtitles: models.Synced{Lines: []models.Lines{
+			{Text: "alpha beta", Time: models.Time{Total: 1.5, Seconds: 1, Hundredths: 50}},
+		}},
+		AudioDurationSeconds: 240,
+		WordTimings: []models.WordTiming{
+			{Line: 0, Text: "alpha ", StartMS: 1500, EndMS: 2000},
+			{Line: 0, Text: "beta", StartMS: 2000, EndMS: 2500},
+		},
+	}
+	if err := w.WriteLRC(song, "s.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "s.lrc")) //nolint:gosec // reason: test path from t.TempDir
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// Observed through the OUTPUT, not by reading the flag back: the point is
+	// that config reaches the file, not that a setter stored a bool.
+	if !strings.Contains(string(body), "<00:01.50>alpha") {
+		t.Errorf("word sync did not reach the writer; got %q", body)
+	}
+}
+
+// TestConfigValueWordSync covers the CLI `config get` arm. configKeys lists the
+// key, so an operator can ask for it; a missing configValue arm would answer
+// with a bare empty string rather than the setting.
+func TestConfigValueWordSync(t *testing.T) {
+	got, ok := configValue(config.Config{Output: config.OutputConfig{WordSync: true}}, "output.word_sync")
+	if !ok {
+		t.Fatal("configValue(output.word_sync) ok = false; the key is listed in configKeys")
+	}
+	if got != "true" {
+		t.Errorf("configValue = %q; want %q", got, "true")
+	}
+	if !slices.Contains(configKeys(), "output.word_sync") {
+		t.Error("configKeys is missing output.word_sync")
+	}
+}
+
+// TestSetConfigValueBoolErrorsWrapTheCause pins that a bad boolean preserves
+// strconv's own error (#760 review). Without %w the caller sees only "must be a
+// boolean" and loses which value failed and why -- CLAUDE.md requires wrapping
+// for exactly that reason.
+//
+// Covers all three bool arms in this switch, not just the new one: they share
+// the shape, and fixing one while leaving its neighbors would make the file
+// inconsistent in the other direction.
+func TestSetConfigValueBoolErrorsWrapTheCause(t *testing.T) {
+	for _, key := range []string{"output.word_sync", "output.bilingual_output", "verification.enabled"} {
+		cfg := config.Config{}
+		err := setConfigValue(&cfg, key, "not-a-bool")
+		if err == nil {
+			t.Errorf("%s: setConfigValue accepted a non-boolean", key)
+			continue
+		}
+		var numErr *strconv.NumError
+		if !errors.As(err, &numErr) {
+			t.Errorf("%s: error does not wrap the strconv cause: %v", key, err)
+		}
+		if !strings.Contains(err.Error(), key) {
+			t.Errorf("%s: error does not name the key: %v", key, err)
+		}
+	}
+}

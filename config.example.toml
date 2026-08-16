@@ -84,6 +84,24 @@ dir = "lyrics"
 # translation track is present), only the original track is written.
 # bilingual_output = false
 
+# Enhanced-LRC (A2) word markers, a.k.a. karaoke-style per-word timing.
+# Default false. When true AND a provider serves word-level timings (today only
+# Petit Lyrics' word-synced tier), each cue keeps its normal [MM:SS.cc] stamp and
+# gains a <MM:SS.cc> marker before each word.
+#
+# LEAVE THIS OFF UNLESS YOU KNOW YOUR PLAYER SUPPORTS A2. Support is not
+# universal and there are three outcomes, only one of which is obviously wrong:
+# the player highlights each word (what you want), silently ignores the markers
+# (harmless), or displays them as literal text like "<00:12.34>" mixed into the
+# lyrics (visibly broken). Music Assistant does not support A2; Symfonium ships
+# marker stripping. Verify with one album before enabling library-wide.
+#
+# Lines whose word timings are missing, incomplete, or all identical fall back to
+# a normal line-level cue, so a partially-timed track degrades line by line
+# rather than losing its words.
+# Override: MXLRC_WORD_SYNC. Default false.
+# word_sync = false
+
 [db]
 # Path to SQLite database file.
 # Default: ~/.local/share/mxlrcgo-svc/mxlrcgo.db

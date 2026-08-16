@@ -832,6 +832,7 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 
 	writer := newWriter()
 	configureWriterBilingual(writer, cfg)
+	configureWriterWordSync(writer, cfg)
 	application := newApp(fetcher, writer, inputs, cooldown, mode)
 	if err := application.Run(ctx); err != nil {
 		slog.Error("application error", "error", err)
@@ -1070,6 +1071,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	allowedRoots := webhookAllowedRoots(ctx, sqlDB)
 	writer := newWriter(allowedRoots...)
 	configureWriterBilingual(writer, cfg)
+	configureWriterWordSync(writer, cfg)
 	// One registry shared by the writer and the watcher, so the watcher can drop
 	// the filesystem events canticle's own sidecar writes generate instead of
 	// rescanning the directory it just wrote to (#685). Both live in this one
@@ -1879,6 +1881,15 @@ func configureWorkerProviderRecorder(w *worker.Worker, r worker.ProviderRecorder
 func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 	if lw, ok := w.(*lyrics.LRCWriter); ok {
 		lw.SetBilingual(cfg.Output.BilingualOutput)
+	}
+}
+
+// configureWriterWordSync enables Enhanced-LRC (A2) word markers on an LRC
+// writer when configured (#480). Same type-assertion shape as the bilingual
+// setter above: a test double that is not *lyrics.LRCWriter is left alone.
+func configureWriterWordSync(w lyrics.Writer, cfg config.Config) {
+	if lw, ok := w.(*lyrics.LRCWriter); ok {
+		lw.SetWordSync(cfg.Output.WordSync)
 	}
 }
 
@@ -2822,6 +2833,7 @@ func configKeys() []string {
 		"output.dir",
 		"output.embedded_lyrics",
 		"output.bilingual_output",
+		"output.word_sync",
 		"db.path",
 		"server.addr",
 		"server.webhook_api_keys",
@@ -2865,6 +2877,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return cfg.Output.EmbeddedLyrics, true
 	case "output.bilingual_output":
 		return strconv.FormatBool(cfg.Output.BilingualOutput), true
+	case "output.word_sync":
+		return strconv.FormatBool(cfg.Output.WordSync), true
 	case "db.path":
 		return cfg.DB.Path, true
 	case "server.addr":
@@ -2956,9 +2970,15 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	case "output.bilingual_output":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("output.bilingual_output must be a boolean")
+			return fmt.Errorf("output.bilingual_output must be a boolean: %w", err)
 		}
 		cfg.Output.BilingualOutput = v
+	case "output.word_sync":
+		v, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("output.word_sync must be a boolean: %w", err)
+		}
+		cfg.Output.WordSync = v
 	case "db.path":
 		cfg.DB.Path = value
 	case "server.addr":
@@ -3014,7 +3034,7 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	case "verification.enabled":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("verification.enabled must be a boolean")
+			return fmt.Errorf("verification.enabled must be a boolean: %w", err)
 		}
 		cfg.Verification.Enabled = v
 	case "verification.whisper_url":
