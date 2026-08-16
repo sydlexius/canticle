@@ -1,0 +1,96 @@
+package templates
+
+// laneMark renders the mark for a lane beside its display name (#601).
+//
+// An unknown or empty token renders NOTHING -- no placeholder box, no reserved
+// gap, no broken image. A lane whose mark is not yet sourced is shown as its
+// name alone and looks deliberate rather than missing, which is what lets the
+// provider marks land later without this being a half-rendered state now.
+//
+// ACCESSIBILITY: the glyph is aria-hidden and the lane NAME always renders as
+// adjacent text, so the accessible name comes from the text and the mark
+// contributes nothing to the accessibility tree.
+//
+// That is deliberate and is the strictest reading of the issue's requirement
+// that no row announce a verdict via its lane icon. Labeling the SVG
+// "Instrumental Detector" would satisfy the letter of it, but the name is
+// already right there in the adjacent cell, so a screen reader would announce
+// the lane twice per row. Hiding the decoration and letting the text carry the
+// name gives the correct announcement exactly once.
+//
+// The trade-off this encodes, from the issue: the muted-microphone glyph names
+// the detector's VERDICT, while the lane decides "not instrumental" roughly 72%
+// of the time. A sighted user reads the glyph as lane identity from its
+// repetition and its position beside the name; a screen-reader user never meets
+// the drawing at all. Neither is told "no vocals" on a row where the detector
+// found vocals.
+templ laneMark(token string) {
+	switch token {
+		case "instrumental-detector":
+			@iconInstrumentalDetector()
+		case "musixmatch":
+			@providerMark("/static/img/lanes/musixmatch.svg")
+	}
+}
+
+// providerMark renders a vendored third-party brand asset.
+//
+// Distinct from the authored glyph above in three ways that all follow from
+// provenance rather than from taste:
+//
+//  1. It is an <img> to a vendored file rather than inline markup. The ARTWORK
+//     is unmodified -- the brand terms allow no redrawing or recoloring -- but
+//     the FILE is not byte-for-byte as supplied: an Adobe metadata blob was
+//     stripped (396 KB -> 1.3 KB), verified lossless both by byte-comparing the
+//     geometry and by rendering to pixel-identical bitmaps. See
+//     docs/provider-terms.md.
+//  2. It carries the chip treatment, which sizes and rounds the mark. It adds
+//     no background: the official "For Brands" asset is a solid tile carrying
+//     its own, which is what lets it sit on any surface unaltered.
+//  3. Its path is passed in, so every asset location sits in the laneMark
+//     switch above -- a rebrand or takedown is a one-line change there, not a
+//     hunt through templates.
+//
+// aria-hidden with an empty alt for the same reason as the authored glyph: the
+// lane name renders as adjacent text and is the accessible name. A non-empty
+// alt here would announce the lane twice on every row.
+//
+// Dimensions are set as attributes so the row does not reflow while the asset
+// loads; the CSS sizes it in em to track the surrounding type.
+templ providerMark(src string) {
+	<img class="mx-lane-mark mx-lane-chip" src={ src } alt="" aria-hidden="true" width="16" height="16"/>
+}
+
+// iconInstrumentalDetector: a muted microphone, authored in-repo because the
+// detector is the one lane with no company behind it and no brand kit to source
+// from. Exact geometry from #601, chosen over three other drafts for legibility
+// at 16px and for borrowing the convention instrumental releases already use.
+//
+// Integer coordinates so it stays sharp at 16px, and currentColor so it themes
+// for free in both light and dark rather than needing a second asset.
+//
+// If this is ever reported as confusing, the issue records the first swap to
+// reach for: `note-scan` (a musical note inside viewfinder corners), which
+// describes the lane's activity rather than its verdict and was truer on every
+// row, but measurably denser at 16px. Reach for that, not a redraw.
+templ iconInstrumentalDetector() {
+	<svg class="mx-lane-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+		<rect x="9" y="3" width="6" height="10" rx="3"></rect>
+		<path d="M6 11v1a6 6 0 0 0 12 0v-1"></path>
+		<path d="M12 18v3"></path>
+		<path d="M4 4 20 20"></path>
+	</svg>
+}
+
+// laneCell renders a lane's mark and name together as one unit.
+//
+// A single component rather than the two-line pair repeated at each of the four
+// call sites: the mark/name pairing, its spacing, and the no-mark degrade are
+// one decision, and duplicating them is how three surfaces drift into looking
+// slightly different from the fourth.
+templ laneCell(name, mark string) {
+	<span class="mx-lane-cell">
+		@laneMark(mark)
+		<span>{ name }</span>
+	</span>
+}

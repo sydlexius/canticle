@@ -30,4 +30,5 @@ New here? Start with the [Getting Started](GETTING_STARTED.md) guide - it picks 
 ## Legal
 
 - [Privacy Policy](privacy-policy.md) - what data leaves your machine during a lyrics lookup and what does not.
+- [Provider Terms](provider-terms.md) - per-provider record of attribution requirements and usage conditions, with the date each was checked.
 - [Code Signing Policy](code-signing-policy.md) - SignPath attribution, team roles, and release approval process.

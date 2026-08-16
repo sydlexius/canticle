@@ -589,6 +589,50 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* A lane's mark paired with its name (#601). inline-flex rather than a grid or a
+   fixed leading column: a lane with no mark yet must collapse to the name alone
+   with no reserved gutter, so an unsourced provider reads as deliberate text
+   rather than as a missing image. The gap only exists when a mark does. */
+.mx-lane-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Sized in em, not rem, so the mark tracks whatever type size its context uses:
+   the same glyph sits in a 0.8125rem table cell and a larger dashboard tile
+   label, and a rem value would render it oversized in one of them. Sits just
+   under the cap height so it reads as a peer of the text rather than as a
+   button. */
+.mx-lane-mark {
+  width: 0.95em;
+  height: 0.95em;
+  flex: none;
+  color: var(--mx-content-text-secondary);
+}
+
+/* A vendored provider mark, as opposed to an authored currentColor glyph.
+   These are fixed-color brand assets and MUST NOT be recolored -- the same
+   guidelines that require the official file generally forbid altering it, so
+   `filter: invert()` and friends are not available here.
+
+   The official "For Brands" asset is drawn to solve that itself: it is a solid
+   tile carrying its own background, designed to sit on any surface. So this
+   rule adds no plate and no padding -- doing either would either double the
+   background or crop the artwork. It only rounds the corners so the tile
+   matches the UI's radius scale, and gives it the same footprint as the
+   authored glyph so a row of mixed-provenance marks reads as one system.
+
+   Sized slightly larger than a bare glyph because a filled tile carries less
+   optical weight per pixel than a stroke icon at the same box size. */
+.mx-lane-chip {
+  width: 1.2em;
+  height: 1.2em;
+  flex: none;
+  border-radius: 0.25em;
+  overflow: hidden;
+}
+
 .mx-row-total td {
   font-weight: 700;
   color: #f1f5f9; /* slate-100 */

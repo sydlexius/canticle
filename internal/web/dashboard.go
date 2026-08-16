@@ -237,12 +237,13 @@ func buildProviderTiles(pe []reports.ProviderEffectiveness) []templates.StatTile
 		attempts := p.Hits + p.Misses
 		sub, barPct, barLabel := hitRateBarFields(p.HitRate)
 		tiles = append(tiles, templates.StatTile{
-			Label:    laneLabel(p.Lane),
-			Value:    fmt.Sprintf("%d/%d", p.Hits, attempts),
-			Sub:      sub,
-			ShowBar:  true,
-			BarPct:   barPct,
-			BarLabel: barLabel,
+			Label:     laneLabel(p.Lane),
+			LabelMark: laneMark(p.Lane),
+			Value:     fmt.Sprintf("%d/%d", p.Hits, attempts),
+			Sub:       sub,
+			ShowBar:   true,
+			BarPct:    barPct,
+			BarLabel:  barLabel,
 		})
 	}
 	return tiles
@@ -260,6 +261,7 @@ func buildRecentRows(recent []reports.RecentOutcome, serverLoc *time.Location) [
 			Album:                o.Album,
 			Result:               string(o.Result),
 			Lane:                 laneLabel(o.ProviderLane),
+			LaneMark:             laneMark(o.ProviderLane),
 			CompletedAt:          display,
 			CompletedAtISO:       iso,
 			CompletedAtTZApplied: tzApplied,

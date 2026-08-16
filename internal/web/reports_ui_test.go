@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -415,5 +416,87 @@ func TestBuildReportViewUnimplementedKey(t *testing.T) {
 	ui := NewUI(config.Config{}, "v-test", WithReports(reports.New(sqlDB)))
 	if _, err := ui.buildReportView(context.Background(), reportDef{key: "no-such-report"}); err == nil {
 		t.Fatal("buildReportView with unknown key = nil error, want fail-fast error")
+	}
+}
+
+// findLaneMarks returns each rendered lane-mark element's opening tag, so the
+// accessibility contract can be asserted per mark rather than by string-matching
+// the whole body.
+//
+// A regexp rather than an HTML parse: the assertion only needs the opening tag's
+// attributes, both mark branches emit a single self-contained element, and the
+// tests already assert the exact mark count -- so a missed match surfaces there
+// rather than passing silently. Pulling in a parser to read two attributes off a
+// tag this test itself generated would cost more than it defends.
+func findLaneMarks(body string) []string {
+	re := regexp.MustCompile(`<(?:img|svg)[^>]*\bclass="[^"]*mx-lane-mark[^"]*"[^>]*>`)
+	return re.FindAllString(body, -1)
+}
+
+// TestReportFragmentRendersLaneMarks asserts the mark reaches the RENDERED
+// PAGE, not merely the view struct. The Go-level tests in lanemark_test.go
+// prove laneMark returns a token and that the token reaches a StatTile; none of
+// them would fail if the template dropped @laneCell, which is the change most
+// likely to happen by accident during a later layout edit.
+//
+// Both provenances are asserted in one fragment because they render through
+// different branches: the authored glyph is inline SVG markup, the vendored
+// provider mark is an <img> to an embedded path.
+func TestReportFragmentRendersLaneMarks(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertDone(t, sqlDB, "s1", "musixmatch", `[{"outdir":"/out","filename":"s1.lrc"}]`, "2026-06-17T10:00:00Z")
+	insertDone(t, sqlDB, "s2", "detector", `[{"outdir":"/out","filename":"s2.txt"}]`, "2026-06-17T11:00:00Z")
+	insertDone(t, sqlDB, "s3", "petitlyrics", `[{"outdir":"/out","filename":"s3.lrc"}]`, "2026-06-17T12:00:00Z")
+	mux := newReportsUIServer(t, sqlDB)
+
+	body := getFragment(t, mux, "recent-outcomes").Body.String()
+
+	// The vendored provider mark renders as an img pointing at the embedded
+	// asset. TestLaneMarkAssetsAreEmbedded proves that path resolves.
+	if !strings.Contains(body, `src="/static/img/lanes/musixmatch.svg"`) {
+		t.Errorf("musixmatch row missing its vendored mark; body:\n%s", body)
+	}
+	// The authored glyph renders as inline SVG carrying the mark class.
+	if !strings.Contains(body, `class="mx-lane-mark"`) {
+		t.Error("detector row missing the authored inline glyph")
+	}
+	// Every lane still renders its NAME. The mark supplements the text, it never
+	// replaces it -- an icon-only cell would strand both the unmarked lane and
+	// every screen-reader user.
+	for _, want := range []string{"musixmatch", "Instrumental Detector", "petitlyrics"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered fragment missing lane name %q", want)
+		}
+	}
+	// ACCESSIBILITY: no mark contributes to the accessibility tree, so a lane is
+	// announced exactly once per row (from its adjacent text) rather than twice.
+	//
+	// Asserted as the POSITIVE contract on every rendered mark, not as a denylist
+	// of two exact attribute values: `alt="Musixmatch"` and
+	// `aria-label="Instrumental Detector"` were the only strings an earlier
+	// version rejected, so `alt="Musixmatch lane"` -- the same defect, different
+	// wording -- passed it. Each mark must carry aria-hidden="true", and the
+	// <img> branch must additionally carry an EMPTY alt (a non-empty alt names
+	// the image even when it is aria-hidden).
+	for _, m := range findLaneMarks(body) {
+		if !strings.Contains(m, `aria-hidden="true"`) {
+			t.Errorf("lane mark is missing aria-hidden=\"true\": %s", m)
+		}
+		if strings.HasPrefix(m, "<img") && !strings.Contains(m, `alt=""`) {
+			t.Errorf("provider mark must carry an empty alt; the adjacent text is the accessible name: %s", m)
+		}
+		// aria-label / title on a mark would restore the double announcement that
+		// aria-hidden exists to prevent.
+		for _, banned := range []string{"aria-label=", "title="} {
+			if strings.Contains(m, banned) {
+				t.Errorf("lane mark carries %s, which re-exposes it to assistive tech: %s", banned, m)
+			}
+		}
+	}
+	// petitlyrics has no mark: exactly two marks render across three rows. This
+	// is the degrade path asserted positively, so a future default-mark or
+	// placeholder-box change fails here rather than shipping a fake mark.
+	if n := strings.Count(body, "mx-lane-mark"); n != 2 {
+		t.Errorf("expected exactly 2 lane marks across 3 rows (petitlyrics has none), got %d", n)
 	}
 }
