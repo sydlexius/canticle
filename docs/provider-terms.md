@@ -8,7 +8,7 @@ even when the answer is "not required", with the date it was checked and a link 
 document that says so. Terms change; a finding is only as good as its date.
 
 **Status: BOTH PROVIDERS READ. CREDIT IMPLEMENTED, SOME OBLIGATIONS OUTSTANDING.**
-Musixmatch's required credit and linkback now render on every serve-UI page, using the
+Musixmatch's required credit and linkback now render across the authenticated serve UI, using the
 official brand mark rather than the exact prescribed button (which is not published in a
 usable format -- see below). Clauses 2.1.11, 2.1.4 and 1.1 remain unaddressed.
 petitlyrics imposes no attribution requirement but does constrain use.
@@ -130,11 +130,18 @@ which is the wrong default for a compliance question.
 
 ### Credit surface: IMPLEMENTED, with one gap
 
-A credit footer renders on every serve-UI page (`musixmatchCredit` in
-`web/templates/layout.templ`): the official For Brands mark, the text "Lyrics powered by
-Musixmatch", and a link to <https://www.musixmatch.com>. It sits OUTSIDE `#mx-main` so an
-htmx report-rail swap cannot remove it -- a credit that survives only until the first
-navigation would not be an each-time-you-use-the-Data credit.
+A credit footer renders on every page of the authenticated serve UI -- Dashboard,
+Reports, Settings and Keys, i.e. every page built on the shared `Layout`
+(`musixmatchCredit` in `web/templates/layout.templ`): the official For Brands mark, the
+text "Lyrics powered by Musixmatch", and a link to <https://www.musixmatch.com>. It sits
+OUTSIDE `#mx-main` so an htmx report-rail swap cannot remove it -- a credit that survives
+only until the first navigation would not be an each-time-you-use-the-Data credit.
+
+**The login and setup pages carry no credit, deliberately.** They build their own shell
+rather than using `Layout`, and they display no Musixmatch Data -- they are auth forms.
+The obligation attaches to USING the Data, so a credit there would assert an attribution
+on a page where nothing is attributable. Recorded because "every page" is the intuitive
+reading of the requirement and the exception is easy to mistake for an oversight.
 
 It is **hidden when Musixmatch is inactive** (no usable token). Crediting Musixmatch for
 results another provider served would be a misattribution, so the absence is load-bearing

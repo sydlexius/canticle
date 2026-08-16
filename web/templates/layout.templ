@@ -94,11 +94,19 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 // the Data is used. See docs/provider-terms.md for the full clause list and the
 // date they were read.
 //
-// WHY IT RENDERS ON EVERY PAGE rather than only where lyrics appear: the
+// WHY IT RENDERS ON EVERY Layout PAGE rather than only where lyrics appear: the
 // obligation attaches to USING the Data, and canticle's whole purpose is
-// fetching and writing it -- every page of the serve UI is a view onto a library
-// built from it. Rendering it site-wide is both simpler to reason about and
-// strictly safer than auditing which views happen to surface a lyric today.
+// fetching and writing it -- every page of the authenticated UI (Dashboard,
+// Reports, Settings, Keys) is a view onto a library built from it. Rendering it
+// across the shell is both simpler to reason about and strictly safer than
+// auditing which views happen to surface a lyric today.
+//
+// The login and setup pages build their OWN shell rather than using Layout, so
+// they carry no credit. That is correct, not an oversight: they are auth forms
+// displaying no Musixmatch Data, and a credit there would assert an attribution
+// on a page where nothing is attributable. If either ever grows a lyric preview,
+// it needs this credit -- which is the reason to state the exception rather than
+// leave a future reader to infer it from the absence.
 //
 // It is HIDDEN when Musixmatch is inactive (no usable token), because in that
 // state no Musixmatch Data is being used and a credit would misattribute
