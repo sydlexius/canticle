@@ -16,7 +16,17 @@ package templates
 // musixmatchInactive renders the lyrics-disabled notice banner (#385) at the top
 // of the main content column on every shell page. It is true only when serve
 // started without a usable Musixmatch token; false renders nothing.
-templ Layout(title string, active string, version string, reports []RailItem, pageCSS string, musixmatchInactive bool) {
+// NOTE ON THE TWO TRAILING BOOLS. musixmatchInactive and musixmatchServing are
+// adjacent positional parameters of the same type, which is a swap hazard. They
+// are NOT complements and must not be collapsed into one: inactive means
+// "Musixmatch is primary but tokenless" (#385, banner), serving means
+// "Musixmatch is the provider actually returning lyrics" (#600, credit). A
+// PetitLyrics-primary deployment is false for BOTH.
+//
+// A swap is caught by test: it would render the banner on a healthy instance and
+// the credit on a tokenless one, which the banner and credit tests assert
+// against independently.
+templ Layout(title string, active string, version string, reports []RailItem, pageCSS string, musixmatchInactive bool, musixmatchServing bool) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -68,7 +78,7 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 					// credit inside it would disappear on the first htmx swap. A credit
 					// that vanishes when the user navigates does not satisfy an
 					// each-time-you-use-the-Data obligation.
-					if !musixmatchInactive {
+					if musixmatchServing {
 						@musixmatchCredit()
 					}
 				</main>
@@ -108,9 +118,17 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 // it needs this credit -- which is the reason to state the exception rather than
 // leave a future reader to infer it from the absence.
 //
-// It is HIDDEN when Musixmatch is inactive (no usable token), because in that
-// state no Musixmatch Data is being used and a credit would misattribute
-// results that came from another provider.
+// It renders only when musixmatchServing says Musixmatch is the provider
+// actually returning lyrics.
+//
+// An earlier revision gated it on !musixmatchInactive, which was WRONG and was
+// caught in review. Those flags are not complements: musixmatchInactive means
+// "Musixmatch is primary but has no token" (#385), so a healthy
+// PetitLyrics-primary deployment reports false for it while serving no
+// Musixmatch Data at all -- and the credit would have labeled PetitLyrics
+// results "Lyrics powered by Musixmatch". A credit on the wrong provider is a
+// misattribution published to users, which is worse than no credit, so the flag
+// now defaults to false and must be affirmatively set.
 //
 // WHAT THIS IS NOT: clause 2.1.5 names a specific "powered by Musixmatch" button
 // published at musixmatch.com/resources. That URL redirects to the brand-resources

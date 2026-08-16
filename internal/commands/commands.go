@@ -1032,6 +1032,22 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		slog.Error("failed to configure lyrics provider", "error", err)
 		return 1
 	}
+	// Whether Musixmatch is the provider ACTUALLY serving lyrics, which gates the
+	// attribution credit required by API Terms clause 2.1.5 (#600).
+	//
+	// Derived from the resolved fetcher's own identity rather than from
+	// musixmatchInactive, because those two answer different questions and are not
+	// complements: musixmatchInactive is false for a healthy PetitLyrics-primary
+	// deployment, which serves no Musixmatch Data at all. Crediting Musixmatch
+	// there would be a misattribution shown to users.
+	//
+	// The lyricsDisabled conjunct matters because the degraded path returns a
+	// no-op fetcher WRAPPED IN a providers.Musixmatch identity (see
+	// resolveServeProvider), so the name alone reports "musixmatch" while nothing
+	// is being fetched. Requiring lyrics to be enabled excludes that case.
+	musixmatchServing := !lyricsDisabled &&
+		fetcher != nil &&
+		providers.NormalizeName(fetcher.Name()) == providers.Musixmatch
 	// Resolve ffmpeg once for both the verifier and the instrumental detector.
 	// Resolution auto-provisions a checksum-pinned static build when ffmpeg is
 	// neither configured nor on PATH; it is skipped entirely unless verification
@@ -1312,6 +1328,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// Surface the tokenless-Musixmatch banner on every authenticated shell
 			// page when serve started without a usable Musixmatch token (#385).
 			server.WithMusixmatchInactive(musixmatchInactive),
+			// Render the Musixmatch attribution credit required by API Terms
+			// clause 2.1.5, but only when Musixmatch is the provider actually
+			// serving lyrics (#600).
+			server.WithMusixmatchServing(musixmatchServing),
 		)
 	}
 	srv := &http.Server{

@@ -94,6 +94,7 @@ type Handler struct {
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
 	musixmatchInactive bool
+	musixmatchServing  bool
 	trusted            *trustnet.Policy
 	mux                *http.ServeMux
 
@@ -250,6 +251,21 @@ func WithMusixmatchInactive(inactive bool) Option {
 	return func(h *Handler) { h.musixmatchInactive = inactive }
 }
 
+// WithMusixmatchServing reports whether Musixmatch is the provider actually
+// serving lyrics, gating the attribution credit required by API Terms clause
+// 2.1.5 (#600).
+//
+// This is DELIBERATELY a separate signal from WithMusixmatchInactive, which
+// answers a different question (#385: "Musixmatch is primary but has no token",
+// so show the banner). The two diverge exactly where it matters: a PetitLyrics
+// primary selects cleanly, so musixmatchInactive is false, yet Musixmatch serves
+// nothing. Deriving the credit from !inactive would label PetitLyrics results
+// "Lyrics powered by Musixmatch" -- a misattribution, and the opposite of what a
+// credit is for.
+func WithMusixmatchServing(serving bool) Option {
+	return func(h *Handler) { h.musixmatchServing = serving }
+}
+
 // WithWebUIIf conditionally mounts the web UI. When enabled is false it
 // returns a no-op option so callers do not need an inline if-branch.
 func WithWebUIIf(enabled bool, cfg config.Config, version string) Option {
@@ -292,6 +308,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 			h.webui.AttachKeyManager(h.keyManager)
 		}
 		h.webui.AttachMusixmatchInactive(h.musixmatchInactive)
+		h.webui.AttachMusixmatchServing(h.musixmatchServing)
 		h.webui.Register(h.mux)
 	}
 	return h
