@@ -89,12 +89,23 @@ type Song struct {
 	// timed and the worst 51%. Consumers that need genuine per-word detail must
 	// inspect the timings rather than assume every line has them.
 	//
-	// Transient: not persisted, not serialized. Note the consequence for caching
-	// -- the worker stores songs as JSON, so a cache HIT returns a song with no
-	// timings and QualityOf classifies it as merely line-synced. Harmless while
-	// nothing consumes them; a constraint on the Enhanced-LRC writer (#480),
-	// which will only see word data on a cache miss.
-	WordTimings []WordTiming `json:"-"`
+	// PERSISTED as of #480. It was previously json:"-", which meant a cache HIT
+	// returned a song with no timings and QualityOf classified it as merely
+	// line-synced. That was harmless while nothing consumed the timings, and
+	// fd770be flagged it as a constraint on the Enhanced-LRC writer; once that
+	// writer exists it becomes a real defect, because the SAME track would emit
+	// word markers on a cache miss and a plain .lrc on a hit -- identical input,
+	// different output, decided by cache state.
+	//
+	// Cache rows written before that change simply omit the field and decode to
+	// an empty slice, so they fall back to line-synced output exactly as they do
+	// today. Nothing rewrites them; they gain markers on their next real fetch.
+	//
+	// Field names are deliberately left bare rather than given json tags:
+	// measured over a 400-word track, snake_case tags with omitempty came out 3%
+	// LARGER (26,228 vs 25,495 bytes), since the tag names exceed the Go
+	// identifiers and omitempty rarely fires on non-zero timings.
+	WordTimings []WordTiming
 	// WinningLane is the provider lane name that returned this song. It is set by
 	// the orchestrator for both suitable results and best-available fallbacks.
 	// Empty on cache hits and zero-value songs. Used by the worker write-path to

@@ -3732,7 +3732,7 @@ func TestRunOnceDetectorMemoDegradedResponseNotStamped(t *testing.T) {
 // This test PASSES on current code. It exists so that making WordTimings
 // serializable becomes a deliberate decision rather than an accident: if someone
 // removes the json:"-" tag, this fails and forces the conversation.
-func TestSongCacheRoundTripDropsWordTimings(t *testing.T) {
+func TestSongCacheRoundTripPreservesWordTimings(t *testing.T) {
 	song := models.Song{
 		Track: models.Track{ArtistName: "Test Artist", TrackName: "Test Track"},
 		Subtitles: models.Synced{Lines: []models.Lines{
@@ -3754,10 +3754,28 @@ func TestSongCacheRoundTripDropsWordTimings(t *testing.T) {
 
 	got := decodeSong(encoded, song.Track)
 
-	if len(got.WordTimings) != 0 {
-		t.Errorf("WordTimings survived the cache round trip: got %d, want 0. "+
-			"If this is intentional, the A2 writer constraint documented on "+
-			"models.Song.WordTimings needs revisiting.", len(got.WordTimings))
+	// INVERTED for #480. This test previously pinned the OPPOSITE -- that the
+	// timings were dropped -- because models.Song.WordTimings was json:"-" and
+	// nothing consumed them. Its failure message asked for the constraint to be
+	// revisited if the drop ever became intentional; the A2 writer is that
+	// moment, so the field is now persisted and this guards the new contract.
+	//
+	// Why it matters: without persistence the SAME track emits word markers on a
+	// cache miss and a plain .lrc on a hit. Identical input, different output,
+	// decided by cache state.
+	if len(got.WordTimings) != len(song.WordTimings) {
+		t.Fatalf("WordTimings did not survive the cache round trip: got %d, want %d",
+			len(got.WordTimings), len(song.WordTimings))
+	}
+	// Count alone is too weak, for the same reason it is too weak for the cues
+	// below: a marker is only as good as its timestamp, and Line is what binds it
+	// to a cue, so a round trip that preserved the count while zeroing a field
+	// would satisfy a length check while producing wrong output.
+	for i, want := range song.WordTimings {
+		if gotWT := got.WordTimings[i]; gotWT != want {
+			t.Errorf("word timing %d changed across the cache round trip: got %#v, want %#v",
+				i, gotWT, want)
+		}
 	}
 
 	// The cues MUST survive, otherwise this test would pass for the wrong reason

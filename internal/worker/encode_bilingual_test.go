@@ -53,3 +53,21 @@ func TestDecodeSong_OldCacheLacksTranslationFields(t *testing.T) {
 		t.Errorf("old cache must decode to empty RomanizationSubtitles; got %+v", got.RomanizationSubtitles)
 	}
 }
+
+// TestDecodeSong_OldCacheLacksWordTimings pins backward compatibility. Every
+// cache row written before this change omits the field, and those rows are not
+// rewritten -- they simply decode with no timings and fall back to line-synced
+// output, exactly as they behave today. A decode error here would break every
+// existing entry.
+func TestDecodeSong_OldCacheLacksWordTimings(t *testing.T) {
+	old := `{"Track":{"artist_name":"Artist","track_name":"Track"},"Subtitles":{"Lines":[{"text":"alpha beta"}]}}`
+
+	got := decodeSong(old, models.Track{})
+
+	if len(got.Subtitles.Lines) != 1 || got.Subtitles.Lines[0].Text != "alpha beta" {
+		t.Fatalf("old cache Subtitles did not decode: %+v", got.Subtitles)
+	}
+	if len(got.WordTimings) != 0 {
+		t.Errorf("old cache must decode to empty WordTimings; got %+v", got.WordTimings)
+	}
+}
