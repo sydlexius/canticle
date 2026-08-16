@@ -263,3 +263,59 @@ func readFileString(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
+// TestA2Words_RefusesLineBreakingWordText covers real data loss: a word
+// containing a newline splits the physical LRC line, and everything after the
+// split is silently dropped when the file is parsed back.
+//
+// Verified against the real parser before fixing -- writing
+// "[00:01.00]<00:01.00>a\nb <00:02.00>c" and re-reading yields ONE cue whose
+// text is "<00:01.00>a"; the rest is gone.
+//
+// The fidelity guard cannot catch this: the cue text carries the same newline,
+// so the concatenation still matches. It needs its own check, and the precedent
+// is sanitizeTagValue, which strips \r and \n for exactly this reason -- a
+// crafted value must not break out of the line format it is embedded in.
+//
+// Refusing (rather than stripping the newline) is deliberate: a word whose text
+// contains a line break is not a word canticle can honestly mark up, and the
+// plain cue still carries every character.
+func TestA2Words_RefusesLineBreakingWordText(t *testing.T) {
+	for _, bad := range []string{"a\nb", "a\rb", "a\r\nb"} {
+		if got, ok := a2Words(bad+" c", []models.WordTiming{
+			wt(bad, 1000, 1500),
+			wt(" c", 2000, 2500),
+		}); ok {
+			t.Errorf("a2Words accepted a word containing a line break (%q): %q", bad, got)
+		}
+	}
+	// A control: ordinary text with no control characters still renders.
+	if _, ok := a2Words("alpha beta", []models.WordTiming{
+		wt("alpha ", 1000, 1500), wt("beta", 2000, 2500),
+	}); !ok {
+		t.Error("a2Words refused ordinary text; the line-break guard is too broad")
+	}
+}
+
+// TestA2Words_RefusesEmptyCue covers the empty-cue substitution bypass.
+//
+// writeSyncedLRC substitutes a music-note glyph for an empty cue, then calls
+// a2Words with the ORIGINAL (empty) text and overwrites the result on success --
+// discarding the substitution. Whitespace-only or empty word strings strip to ""
+// and therefore "reconstruct" an empty cue, so the fidelity guard passed and the
+// line rendered as markers plus whitespace instead of the intended glyph.
+func TestA2Words_RefusesEmptyCue(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cue   string
+		words []models.WordTiming
+	}{
+		{"empty cue, whitespace words", "", []models.WordTiming{wt(" ", 1000, 1500), wt("  ", 2000, 2500)}},
+		{"empty cue, empty words", "", []models.WordTiming{wt("", 1000, 1500), wt("", 2000, 2500)}},
+		{"whitespace-only cue", "   ", []models.WordTiming{wt(" ", 1000, 1500), wt("  ", 2000, 2500)}},
+	} {
+		if got, ok := a2Words(tc.cue, tc.words); ok {
+			t.Errorf("%s: a2Words accepted a cue with no words: %q", tc.name, got)
+		}
+	}
+}

@@ -45,6 +45,29 @@ func a2Words(lineText string, timings []models.WordTiming) (string, bool) {
 	// than being permuted into a different reading.
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].StartMS < ordered[j].StartMS })
 
+	// An empty (or whitespace-only) cue has no words to mark up. Refusing here
+	// also preserves writeSyncedLRC's music-note substitution for such a cue:
+	// that caller passes the ORIGINAL text and overwrites its substitution on
+	// success, so accepting would replace the intended glyph with markers plus
+	// whitespace. Whitespace-only word strings strip to "" and would otherwise
+	// "reconstruct" the empty cue, sailing past the fidelity check below.
+	if stripSpace(lineText) == "" {
+		return "", false
+	}
+	// A word carrying a line break would split the physical LRC line, and
+	// everything after the split is silently LOST when the file is parsed back
+	// (measured: the re-read yields one cue holding only the text before the
+	// break). The fidelity check cannot see this -- the cue text carries the same
+	// break, so the concatenation still matches -- so it needs its own guard.
+	// sanitizeTagValue strips \r and \n from provenance values for exactly this
+	// reason: embedded text must not break out of the format enclosing it.
+	//
+	// Refused rather than stripped: a word whose text spans a line break is not
+	// one canticle can honestly mark up, and the plain cue still carries every
+	// character.
+	if containsLineBreak(ordered) {
+		return "", false
+	}
 	if !wordsReconstructLine(lineText, ordered) {
 		return "", false
 	}
@@ -73,6 +96,17 @@ func wordsReconstructLine(lineText string, timings []models.WordTiming) bool {
 		joined.WriteString(t.Text)
 	}
 	return stripSpace(joined.String()) == stripSpace(lineText)
+}
+
+// containsLineBreak reports whether any word's text carries a CR or LF, which
+// would break the single-line LRC cue it is rendered into.
+func containsLineBreak(timings []models.WordTiming) bool {
+	for _, t := range timings {
+		if strings.ContainsAny(t.Text, "\r\n") {
+			return true
+		}
+	}
+	return false
 }
 
 // stripSpace removes every Unicode space so two spellings of the same content
