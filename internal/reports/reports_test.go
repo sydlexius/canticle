@@ -43,7 +43,7 @@ type workItem struct {
 	// (priority 0, batch_seq NULL, next_attempt_at 1970 = eligible, created_at now).
 	priority      int    // 0 => default (PriorityScan); negative => miss tier
 	batchSeq      int    // 0 => NULL (unbuffered); >0 => buffered at this seq
-	nextAttemptAt string // "" => default (eligible); else RFC3339 (future => cooldown)
+	nextAttemptAt string // "" => default (eligible); else RFC3339 (future => retry backoff)
 	createdAt     string // "" => default (now); else RFC3339
 }
 
@@ -601,8 +601,9 @@ func mustParse(t *testing.T, s string) time.Time {
 }
 
 // TestUpNext verifies the buffered list is returned in batch_seq order and that
-// only eligible buffered rows appear (non-buffered, done, and future-cooldown
-// rows are excluded), matching the batched-claim predicate. Synthetic fixtures.
+// only eligible buffered rows appear (non-buffered, done, and rows still in
+// retry backoff are excluded), matching the batched-claim predicate. Synthetic
+// fixtures.
 func TestUpNext(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
@@ -618,8 +619,9 @@ func TestUpNext(t *testing.T) {
 	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist U", title: "Unbuffered", status: "pending"})
 	// Excluded: buffered but already done (fails the status predicate).
 	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist D", title: "Done", status: "done", batchSeq: 4})
-	// Excluded: buffered and pending but on cooldown (next_attempt_at in future).
-	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist C", title: "Cooldown", status: "deferred", batchSeq: 5, nextAttemptAt: "3000-01-01T00:00:00Z"})
+	// Excluded: buffered and pending but still in retry backoff (next_attempt_at
+	// in the future).
+	insertWorkItem(t, sqlDB, workItem{artist: "Test Artist C", title: "Backoff", status: "deferred", batchSeq: 5, nextAttemptAt: "3000-01-01T00:00:00Z"})
 
 	got, err := repo.UpNext(ctx, 10)
 	if err != nil {
@@ -671,7 +673,7 @@ func TestUpNextLimit(t *testing.T) {
 	}
 }
 
-// TestQueueEligibility checks the eligible/cooldown split and the exclusion of
+// TestQueueEligibility checks the eligible/retry-backoff split and the exclusion of
 // done/processing rows, all sharing one now so the two counts cannot skew.
 func TestQueueEligibility(t *testing.T) {
 	ctx := context.Background()
@@ -683,10 +685,10 @@ func TestQueueEligibility(t *testing.T) {
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-pending", status: "pending", batchSeq: 1})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-failed", status: "failed", batchSeq: 2})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-deferred", status: "deferred"})
-	// Cooldown: same statuses but next_attempt_at in the future. One carries a
-	// batch_seq, which must NOT count as Buffered (it is not eligible now).
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "cool-deferred", status: "deferred", nextAttemptAt: "3000-01-01T00:00:00Z", batchSeq: 3})
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "cool-failed", status: "failed", nextAttemptAt: "3000-01-01T00:00:00Z"})
+	// Retry backoff: same statuses but next_attempt_at in the future. One carries
+	// a batch_seq, which must NOT count as Buffered (it is not eligible now).
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "backoff-deferred", status: "deferred", nextAttemptAt: "3000-01-01T00:00:00Z", batchSeq: 3})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "backoff-failed", status: "failed", nextAttemptAt: "3000-01-01T00:00:00Z"})
 	// Excluded from both: done and processing are not part of the backlog.
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "done", status: "done"})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "proc", status: "processing"})
@@ -698,13 +700,13 @@ func TestQueueEligibility(t *testing.T) {
 	if got.Eligible != 3 {
 		t.Errorf("Eligible = %d, want 3", got.Eligible)
 	}
-	if got.Cooldown != 2 {
-		t.Errorf("Cooldown = %d, want 2", got.Cooldown)
+	if got.RetryBackoff != 2 {
+		t.Errorf("RetryBackoff = %d, want 2", got.RetryBackoff)
 	}
-	// Buffered = the two eligible rows with a batch_seq; the buffered cooldown
-	// row is excluded because it is not eligible now.
+	// Buffered = the two eligible rows with a batch_seq; the buffered
+	// retry-backoff row is excluded because it is not eligible now.
 	if got.Buffered != 2 {
-		t.Errorf("Buffered = %d, want 2 (buffered cooldown row must not count)", got.Buffered)
+		t.Errorf("Buffered = %d, want 2 (buffered retry-backoff row must not count)", got.Buffered)
 	}
 }
 
@@ -718,8 +720,11 @@ func TestQueueEligibilityEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueueEligibility: %v", err)
 	}
-	if got.Eligible != 0 || got.Cooldown != 0 {
-		t.Errorf("empty queue = %+v, want {0 0}", got)
+	// All THREE fields, not two: each is a separate SUM over zero rows, so each
+	// is a separate chance for the NULL to escape sql.NullInt64. Asserting only
+	// two left the third untested for exactly the condition this test names.
+	if got.Eligible != 0 || got.RetryBackoff != 0 || got.Buffered != 0 {
+		t.Errorf("empty queue = %+v, want all-zero", got)
 	}
 }
 

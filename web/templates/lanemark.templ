@@ -69,12 +69,22 @@ templ providerMark(src string) {
 // Integer coordinates so it stays sharp at 16px, and currentColor so it themes
 // for free in both light and dark rather than needing a second asset.
 //
+// width/height are set as attributes for the same reason providerMark sets them,
+// and the reason is sharper for an inline SVG than for an <img>. An inline SVG
+// has NO intrinsic pixel size, only an aspect ratio, and the base reset applies
+// `max-width:100%` to img/video but NOT to svg -- so a bare <svg> sized only by
+// CSS falls back to the replaced-element default (300x150, letterboxed by the
+// 1:1 viewBox to ~150px square) on any render where .mx-lane-mark is not in
+// effect at paint time. That is a real observed failure, not a hypothetical.
+// The attributes make 16px the floor; .mx-lane-mark still wins the cascade and
+// renders the intended 0.95em, so the styled result is byte-identical.
+//
 // If this is ever reported as confusing, the issue records the first swap to
 // reach for: `note-scan` (a musical note inside viewfinder corners), which
 // describes the lane's activity rather than its verdict and was truer on every
 // row, but measurably denser at 16px. Reach for that, not a redraw.
 templ iconInstrumentalDetector() {
-	<svg class="mx-lane-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+	<svg class="mx-lane-mark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 		<rect x="9" y="3" width="6" height="10" rx="3"></rect>
 		<path d="M6 11v1a6 6 0 0 0 12 0v-1"></path>
 		<path d="M12 18v3"></path>

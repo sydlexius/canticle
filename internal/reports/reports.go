@@ -507,16 +507,25 @@ func (r *Repo) UpNext(ctx context.Context, limit int) ([]UpNextItem, error) {
 }
 
 // QueueEligibility partitions the not-yet-done backlog by readiness: Eligible
-// rows are claimable now, Cooldown rows are waiting out a backoff/retry delay,
-// and Buffered is the eligible subset already stamped into the lookahead buffer.
+// rows are claimable now, RetryBackoff rows are waiting out a retry delay, and
+// Buffered is the eligible subset already stamped into the lookahead buffer.
 type QueueEligibility struct {
 	// Eligible counts rows the worker can claim now (status pending/failed/
 	// deferred, next_attempt_at <= now). This is the "of M eligible" header total.
 	Eligible int64
-	// Cooldown counts rows in the same statuses whose next_attempt_at is still in
-	// the future -- deferred/backoff rows not yet actionable. The empty state uses
-	// it to distinguish "nothing queued" from "everything waiting on cooldown".
-	Cooldown int64
+	// RetryBackoff counts rows in the same statuses whose next_attempt_at is still
+	// in the future -- rows not yet actionable because a retry delay has not
+	// elapsed. The empty state uses it to distinguish "nothing queued" from
+	// "everything waiting out a retry delay".
+	//
+	// NAMED FOR THE MECHANISM, NOT THE OLD LABEL. This count is governed by
+	// api.miss_backoff_base_hours, and is unrelated to every config key spelled
+	// "cooldown" (api.cooldown, providers.petitlyrics_cooldown_seconds,
+	// instrumental_detector.cooldown_seconds, and its backfill twin) -- all four
+	// of those are REQUEST PACING, the gap between outbound calls. Calling this
+	// "cooldown" sent an operator hunting for a pacing knob to shorten a retry
+	// delay, which no pacing key can do; the lever is `queue recheck --deferred`.
+	RetryBackoff int64
 	// Buffered counts the eligible rows currently stamped into the lookahead
 	// buffer (batch_seq IS NOT NULL) -- the TRUE size of the buffer, independent
 	// of any display cap on UpNext. The header uses this so a capped UpNext page
@@ -524,7 +533,7 @@ type QueueEligibility struct {
 	Buffered int64
 }
 
-// QueueEligibility returns the eligible, cooldown, and buffered counts for the
+// QueueEligibility returns the eligible, retry-backoff, and buffered counts for the
 // Up-next panel header and empty state, in one query so all three share a single
 // now and cannot skew against each other.
 //
@@ -535,7 +544,7 @@ type QueueEligibility struct {
 // total is scanned through sql.NullInt64 and defaults to 0.
 func (r *Repo) QueueEligibility(ctx context.Context) (QueueEligibility, error) {
 	now := time.Now().UTC().Format(timeFormat)
-	var eligible, cooldown, buffered sql.NullInt64
+	var eligible, retryBackoff, buffered sql.NullInt64
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT
              SUM(CASE WHEN next_attempt_at <= ? THEN 1 ELSE 0 END),
@@ -544,12 +553,12 @@ func (r *Repo) QueueEligibility(ctx context.Context) (QueueEligibility, error) {
          FROM work_queue
          WHERE status IN ('pending', 'failed', 'deferred')`,
 		now, now, now,
-	).Scan(&eligible, &cooldown, &buffered); err != nil {
+	).Scan(&eligible, &retryBackoff, &buffered); err != nil {
 		return QueueEligibility{}, fmt.Errorf("reports: queue eligibility: %w", err)
 	}
 	return QueueEligibility{
-		Eligible: eligible.Int64,
-		Cooldown: cooldown.Int64,
-		Buffered: buffered.Int64,
+		Eligible:     eligible.Int64,
+		RetryBackoff: retryBackoff.Int64,
+		Buffered:     buffered.Int64,
 	}, nil
 }
