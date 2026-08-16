@@ -1045,9 +1045,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// no-op fetcher WRAPPED IN a providers.Musixmatch identity (see
 	// resolveServeProvider), so the name alone reports "musixmatch" while nothing
 	// is being fetched. Requiring lyrics to be enabled excludes that case.
-	musixmatchServing := !lyricsDisabled &&
-		fetcher != nil &&
-		providers.NormalizeName(fetcher.Name()) == providers.Musixmatch
+	musixmatchServing := musixmatchIsServing(fetcher, lyricsDisabled)
 	// Resolve ffmpeg once for both the verifier and the instrumental detector.
 	// Resolution auto-provisions a checksum-pinned static build when ffmpeg is
 	// neither configured nor on PATH; it is skipped entirely unless verification
@@ -1732,6 +1730,38 @@ func resolveServeProvider(primary providers.LyricsProvider, selErr error) (fetch
 	}
 	slog.Warn("no lyrics provider configured: Musixmatch is the primary provider and needs an API token. Serving the web UI so you can add one in Settings (or switch to a tokenless provider like PetitLyrics), then restart.")
 	return providers.New(providers.Musixmatch, noopFetcher{}), true, true, nil
+}
+
+// musixmatchIsServing reports whether Musixmatch is the provider actually
+// returning lyrics, which gates the attribution credit required by API Terms
+// clause 2.1.5 (#600).
+//
+// Extracted from runServe rather than left inline, and that is the point: the
+// inline version was UNTESTABLE without standing up a full serve, which is
+// exactly how the defect this replaces shipped. The credit was gated on
+// !musixmatchInactive, which is FALSE for a healthy PetitLyrics-primary
+// deployment -- so the UI credited Musixmatch for another provider's results,
+// and no test could see it. A pure predicate over (fetcher, lyricsDisabled) can
+// be exercised directly for every provider shape.
+//
+// Both conjuncts are load-bearing:
+//
+//   - lyricsDisabled excludes the degraded no-token path, where
+//     resolveServeProvider returns a NO-OP fetcher wrapped in a
+//     providers.Musixmatch identity. The name alone reports "musixmatch" there
+//     while nothing is fetched, so name-matching by itself would credit an
+//     instance that serves no lyrics at all.
+//   - the name check excludes every non-Musixmatch primary, which is the case
+//     the original bug got wrong.
+//
+// A nil fetcher reports false. Defaulting to "not serving" is deliberate: a
+// missing credit is a bug to fix, while a credit naming the wrong provider is a
+// misattribution published to users.
+func musixmatchIsServing(fetcher providers.LyricsProvider, lyricsDisabled bool) bool {
+	if lyricsDisabled || fetcher == nil {
+		return false
+	}
+	return providers.NormalizeName(fetcher.Name()) == providers.Musixmatch
 }
 
 func selectedProvider(cfg config.Config, token string, newFetcher func(string) musixmatch.Fetcher) (providers.LyricsProvider, error) {
