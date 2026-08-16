@@ -15,7 +15,12 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # mbedtls3 floor pinned to remediate the 3.6.6-r0 CVE batch (16 low-severity
 # Alpine CVEs, fixed in 3.6.7-r0); raise/drop when the base index ships it by
 # default.
-RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" su-exec tzdata && \
+# libssh floor pinned to remediate CVE-2026-59843 (MEDIUM, fixed in 0.12.2-r0):
+# a zero max-packet-size in SSH_MSG_CHANNEL_OPEN spins later channel writes. It
+# arrives TRANSITIVELY via ffmpeg, so it needs naming explicitly -- `apk upgrade`
+# alone left 0.12.1-r0 in place because the pinned base digest predates the fix.
+# Raise/drop when the base index ships it by default.
+RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" su-exec tzdata && \
     apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
