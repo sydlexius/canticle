@@ -69,6 +69,15 @@ type Queue interface {
 	// with the offline backfills so a detector settle has exactly one definition;
 	// OwnedByWorker guards on 'processing', the status Dequeue left the row in.
 	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error)
+	// SettleGuardRejected records that the language/script guard refused the
+	// fetched lyric and completes the row in ONE transaction (outcome_type,
+	// status, scan_results writeback), guarding on 'processing' (#655).
+	//
+	// Atomic rather than a stamp-then-Complete pair: a dropped stamp followed by a
+	// successful Complete would leave the row `done` with a NULL outcome_type,
+	// which IS the defect #655 exists to fix. A settle that can lose its own label
+	// is not a fix.
+	SettleGuardRejected(ctx context.Context, id int64) (queue.SettleOutcome, error)
 	// SetCompletionProvenance stamps the identifiers and writer version the row was
 	// settled with, so an outcome that writes no tag block -- an unsynced .txt above
 	// all -- still records what produced it (#620). Call before Complete while the
@@ -1418,17 +1427,32 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// 3,182 rows carried it on prod, the UI could say nothing about them,
 			// and NULL had quietly come to mean two different things.
 			//
-			// Stamped as its own value rather than reusing "unsynced": nothing was
+			// Recorded as its own value rather than reusing "unsynced": nothing was
 			// written here, so classifying it as an artifact would be a lie that
 			// reports would then count as coverage.
-			if stampErr := w.queue.SetOutcomeType(ctxNoCancel, item.ID, outcomeTypeRejected); stampErr != nil {
-				// Non-fatal, matching every other pre-Complete stamp: the policy
-				// decision is already correct and losing its label must not strand
-				// a row that is otherwise finished. The warning is the audit trail.
-				slog.Warn("worker: stamp guard-rejected outcome failed; continuing", "id", item.ID, "error", stampErr)
+			//
+			// ATOMIC, not a stamp-then-Complete pair. An earlier revision stamped
+			// the outcome best-effort and completed regardless, which reproduced
+			// the defect: a dropped stamp plus a successful Complete leaves the row
+			// `done` with a NULL outcome_type. On failure the row is NOT completed
+			// -- it fails and retries, and the guard will reject it again
+			// deterministically, so a retry costs one provider round-trip and
+			// cannot loop forever on a row that would otherwise settle unlabeled.
+			outcome, settleErr := w.queue.SettleGuardRejected(ctxNoCancel, item.ID)
+			if settleErr != nil {
+				return w.fail(ctx, item, fmt.Errorf("worker: settle guard-rejected item %d: %w", item.ID, settleErr))
 			}
-			if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
-				return w.fail(ctx, item, fmt.Errorf("worker: complete guard-rejected item %d: %w", item.ID, err))
+			if outcome != queue.Settled {
+				// The worker holds this row in 'processing' and nothing else can
+				// move it, so a non-Settled outcome means an invariant broke (a
+				// concurrent writer, or the row pruned mid-flight). Release rather
+				// than fail: failing would re-queue a row that may no longer exist.
+				slog.Warn("worker guard rejection did not settle; releasing", "id", item.ID, "outcome", outcome)
+				if relErr := w.queue.Release(ctxNoCancel, item.ID); relErr != nil {
+					return fmt.Errorf("worker: release unsettled guard-rejected item %d: %w", item.ID, relErr)
+				}
+				w.consecutiveFailures = 0
+				return nil
 			}
 			// Reset the failure backoff only after the terminal Complete durably
 			// succeeds (mirroring the benign-miss and normal-success paths): a

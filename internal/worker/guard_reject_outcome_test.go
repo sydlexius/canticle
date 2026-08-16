@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -119,4 +121,96 @@ func TestGuardRejectedRowRecordsItsOutcome(t *testing.T) {
 			t.Errorf("outcome_type = %q; want %q with no guard wired", got, outcomeTypeSynced)
 		}
 	})
+}
+
+// TestGuardRejectFailedSettleDoesNotComplete is the regression test for the
+// defect BOTH reviewers caught on PR #770.
+//
+// The first cut of the #655 fix stamped the outcome with a best-effort
+// SetOutcomeType and then called Complete unconditionally. A dropped stamp plus
+// a successful Complete leaves the row `done` with a NULL outcome_type -- which
+// is exactly the bug #655 exists to fix. A label that can be silently lost is
+// not a fix for a missing label.
+//
+// The settle is now one transaction, so this asserts the property that makes it
+// correct: when persistence fails, the row must NOT be completed. It is a
+// genuine regression test -- under the old stamp-then-Complete code the row was
+// completed regardless, so this reds.
+func TestGuardRejectFailedSettleDoesNotComplete(t *testing.T) {
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID:     1,
+			Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "One"}, Outdir: "o", Filename: "a.lrc"},
+		}},
+		guardRejectErr: errors.New("database is locked"),
+	}
+	fetcher := &seqFetcher{results: []seqResult{{
+		song: models.Song{
+			Track:     models.Track{ArtistName: "A", TrackName: "One"},
+			Subtitles: models.Synced{Lines: []models.Lines{{Text: "x"}}},
+		},
+	}}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	w.EnableGuard(rejectAllGuard{reason: "script not in allowlist"})
+	// Stub the backoff. w.fail puts the loop into a real 1-minute sleep, which
+	// this test would otherwise serve in full -- 60s in the gate for a property
+	// that is decided the moment the settle returns.
+	w.sleep = func(context.Context, time.Duration) {}
+	if err := w.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// THE REGRESSION. The row must not settle when its label could not be stored.
+	if len(q.completed) != 0 {
+		t.Errorf("row was completed despite a failed settle; it can now be `done` with a NULL outcome_type (#655/#770)")
+	}
+	if _, ok := q.outcomeTypes[1]; ok {
+		t.Error("an outcome was recorded despite the settle failing; the fake must model the transaction as all-or-nothing")
+	}
+	// It must instead take the retriable failure path, so the row is re-attempted
+	// rather than stranded in 'processing' forever.
+	if len(q.failed) != 1 {
+		t.Errorf("failed = %v; want the row failed for retry after an unsettleable rejection", q.failed)
+	}
+}
+
+// TestGuardRejectUnsettledRowIsReleased covers the non-error, non-Settled branch:
+// the settle succeeded as a call but matched no row (pruned mid-flight, or a
+// concurrent writer moved it).
+//
+// Releasing rather than failing is the point. Failing would re-queue a row that
+// may no longer exist; releasing returns it to a dequeueable state without
+// asserting an outcome that was never written. The prior code had no such branch
+// at all -- Complete's error was the only signal, and a no-op UPDATE is not an
+// error.
+func TestGuardRejectUnsettledRowIsReleased(t *testing.T) {
+	claimed := queue.SettleClaimed
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID:     1,
+			Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "One"}, Outdir: "o", Filename: "a.lrc"},
+		}},
+		guardRejectOutcome: &claimed,
+	}
+	fetcher := &seqFetcher{results: []seqResult{{
+		song: models.Song{
+			Track:     models.Track{ArtistName: "A", TrackName: "One"},
+			Subtitles: models.Synced{Lines: []models.Lines{{Text: "x"}}},
+		},
+	}}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	w.EnableGuard(rejectAllGuard{reason: "script not in allowlist"})
+	if err := w.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(q.completed) != 0 {
+		t.Errorf("completed = %v; a row that did not settle must not be recorded as done", q.completed)
+	}
+	if len(q.released) != 1 || q.released[0] != 1 {
+		t.Errorf("released = %v; want the unsettled row released for re-dequeue", q.released)
+	}
+	if len(q.failed) != 0 {
+		t.Errorf("failed = %v; an unsettled row must be released, not failed (it may no longer exist)", q.failed)
+	}
 }

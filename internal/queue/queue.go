@@ -769,6 +769,83 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
 	return Settled, nil
 }
 
+// SettleGuardRejected records that the language/script guard refused a fetched
+// lyric and completes the row in ONE transaction: outcome_type='rejected',
+// status='done', and the scan_results writeback all commit together, or none do.
+//
+// ATOMICITY IS THE POINT, not tidiness (#655). The first cut of this fix stamped
+// the outcome with a separate best-effort SetOutcomeType call and completed the
+// row regardless of whether that stamp succeeded -- which reproduced the very
+// defect being fixed: a failed stamp plus a successful Complete leaves the row
+// `done` with a NULL outcome_type, indistinguishable from a legacy row. Both
+// reviewers caught it independently on PR #770. A label that can be dropped
+// silently is not a fix for a missing label.
+//
+// It mirrors SettleInstrumental deliberately -- same transaction shape, same
+// guarded UPDATE, same SettleOutcome vocabulary -- because "record a terminal
+// verdict and complete the row" is one operation with two verdicts, and having
+// the two paths diverge is how one of them drifts.
+//
+// The guard is 'processing': only a worker holding the row reaches a guard
+// rejection, so unlike SettleInstrumental there is no backfill caller and no
+// RowOwnership parameter to get wrong.
+func (q *DBQueue) SettleGuardRejected(ctx context.Context, id int64) (SettleOutcome, error) {
+	var outcome SettleOutcome
+	err := db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		var err error
+		outcome, err = q.settleGuardRejectedOnce(ctx, id)
+		return err
+	})
+	return outcome, err
+}
+
+func (q *DBQueue) settleGuardRejectedOnce(ctx context.Context, id int64) (outcome SettleOutcome, retErr error) {
+	now := formatTime(q.now())
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SettleFailed, fmt.Errorf("queue: begin settle guard-rejected tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// last_error is cleared deliberately: a guard rejection is a POLICY outcome,
+	// not an error. Leaving a stale error from an earlier attempt would make the
+	// row read as failed in the failure-analysis report.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE work_queue
+         SET outcome_type = 'rejected',
+             status = 'done',
+             completed_at = ?,
+             last_error = ''
+         WHERE id = ?
+           AND status = ?`,
+		now, id, StatusProcessing,
+	)
+	if err != nil {
+		return SettleFailed, fmt.Errorf("queue: settle guard-rejected: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return SettleFailed, fmt.Errorf("queue: settle guard-rejected rows affected: %w", err)
+	}
+	if n == 0 {
+		return q.classifyNoSettle(ctx, tx, id)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE scan_results
+         SET status = 'done'
+         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+           AND status != 'done'`,
+		id,
+	); err != nil {
+		return SettleFailed, fmt.Errorf("queue: settle guard-rejected scan_results writeback: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return SettleFailed, fmt.Errorf("queue: commit settle guard-rejected tx: %w", err)
+	}
+	return Settled, nil
+}
+
 // classifyNoSettle explains why the guarded settle UPDATE matched nothing. It
 // reads inside the caller's transaction, so the answer is consistent with the
 // UPDATE that just ran rather than a later, separately-racing read.

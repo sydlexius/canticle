@@ -130,7 +130,10 @@ type RecentOutcome struct {
 	// ProviderLane is the winning provider lane recorded at completion; empty
 	// when NULL (not recorded, or a miss with no winning provider).
 	ProviderLane string
-	// Result is the classification derived from last_error / output_paths.
+	// Result is the classification derived from last_error / outcome_type.
+	// NOT output_paths: that column holds the enqueue-time .lrc plan and is never
+	// updated at completion, which is what made every completed row read as
+	// synced before #379.
 	Result ResultClass
 }
 

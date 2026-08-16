@@ -223,6 +223,15 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 		lastError: "miss limit reached", outputPaths: pathsJSON("ignored.lrc"),
 		completedAt: "2026-06-11T10:00:00Z",
 	})
+	// A guard-rejected row (#655): the language/script guard refused the fetched
+	// lyric, so the row settled terminally with NOTHING on disk. It must classify
+	// as its own class rather than falling through to 'unknown', which is what
+	// made it indistinguishable from the Legacy row below.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Rejected", title: "R", status: "done",
+		outputPaths: pathsJSON("song.lrc"), completedAt: "2026-06-14T10:00:00Z",
+		providerLane: "musixmatch", outcomeType: "rejected",
+	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Legacy", title: "L", status: "done",
 		outputPaths: "", completedAt: nil, // NULL completed_at, NULL outcome_type
@@ -234,8 +243,8 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecentOutcomes: %v", err)
 	}
-	if len(got) != 5 {
-		t.Fatalf("got %d outcomes, want 5 (done only): %+v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("got %d outcomes, want 6 (done only): %+v", len(got), got)
 	}
 
 	// Order: newest completed first, NULL completed_at last.
@@ -243,6 +252,7 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 		artist string
 		result reports.ResultClass
 	}{
+		{"Rejected", reports.ResultRejected},
 		{"Instrumental", reports.ResultInstrumental},
 		{"Unsynced", reports.ResultUnsynced},
 		{"Miss", reports.ResultMiss},
@@ -259,7 +269,7 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	}
 
 	// Field carry-through on the synced row.
-	synced := got[3]
+	synced := got[4]
 	if synced.Album != "Al1" || synced.ProviderLane != "musixmatch" {
 		t.Errorf("synced row fields = album %q lane %q, want Al1/musixmatch", synced.Album, synced.ProviderLane)
 	}
@@ -267,8 +277,8 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 		t.Errorf("synced CompletedAt = %v, want 2026-06-10T10:00:00Z", synced.CompletedAt)
 	}
 	// NULL completed_at -> zero time.
-	if !got[4].CompletedAt.IsZero() {
-		t.Errorf("legacy CompletedAt = %v, want zero", got[4].CompletedAt)
+	if !got[5].CompletedAt.IsZero() {
+		t.Errorf("legacy CompletedAt = %v, want zero", got[5].CompletedAt)
 	}
 }
 
