@@ -98,8 +98,24 @@ const (
 	// ResultMiss means the item exhausted its miss budget with no lyrics found
 	// (status='done', last_error='miss limit reached', no output written).
 	ResultMiss ResultClass = "miss"
+	// ResultRejected means the language/script guard refused the fetched lyric,
+	// so the row settled terminally with NOTHING written (outcome_type='rejected',
+	// #655).
+	//
+	// It is a settled state, NOT an artifact: no file exists and none will, since
+	// re-fetching yields the same wrong-script result. Counting it as coverage
+	// would overstate what the library actually has.
+	ResultRejected ResultClass = "rejected"
 	// ResultUnknown means the row could not be classified: a legacy row that
 	// predates the outcome_type column (NULL outcome_type) and is not a miss.
+	//
+	// NARROWER THAN IT USED TO BE, and the change is the point of #655. Guard
+	// rejections also left outcome_type NULL, so this class silently covered two
+	// unrelated things -- missing history and a deliberate policy decision -- and
+	// an operator had no way to tell them apart. Rows settled by a build carrying
+	// ResultRejected now say so; rows predating it stay here and remain genuinely
+	// unclassifiable, since nothing on disk or in the row records why they
+	// settled.
 	ResultUnknown ResultClass = "unknown"
 )
 
@@ -114,7 +130,10 @@ type RecentOutcome struct {
 	// ProviderLane is the winning provider lane recorded at completion; empty
 	// when NULL (not recorded, or a miss with no winning provider).
 	ProviderLane string
-	// Result is the classification derived from last_error / output_paths.
+	// Result is the classification derived from last_error / outcome_type.
+	// NOT output_paths: that column holds the enqueue-time .lrc plan and is never
+	// updated at completion, which is what made every completed row read as
+	// synced before #379.
 	Result ResultClass
 }
 
@@ -124,10 +143,16 @@ type RecentOutcome struct {
 // Source: work_queue rows where status='done'. The result classification is
 // computed in SQL from the recorded outcome_type (stamped at completion, #379),
 // NOT the output_paths filename: last_error='miss limit reached' -> miss;
-// otherwise outcome_type 'synced'/'unsynced'/'instrumental' map to the matching
-// ResultClass; a NULL outcome_type (a legacy row predating the column) -> unknown.
+// otherwise outcome_type 'synced'/'unsynced'/'instrumental'/'rejected' map to
+// the matching ResultClass; a NULL outcome_type -> unknown.
 // output_paths is no longer consulted -- it holds the stale enqueue-time .lrc
 // plan, which is what made every completed row read as synced before this fix.
+//
+// This comment previously said a NULL outcome_type meant "a legacy row predating
+// the column". That was FALSE, and its being false is #655: the guard-rejection
+// path also produced NULLs, continuously, so the class silently covered a
+// deliberate policy decision as well as missing history. Rows settled by a build
+// carrying 'rejected' now say so; NULL is once again only what the word implies.
 func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -139,6 +164,7 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
                 WHEN outcome_type = 'synced' THEN 'synced'
                 WHEN outcome_type = 'unsynced' THEN 'unsynced'
                 WHEN outcome_type = 'instrumental' THEN 'instrumental'
+                WHEN outcome_type = 'rejected' THEN 'rejected'
                 ELSE 'unknown'
             END AS result
          FROM work_queue
