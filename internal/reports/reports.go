@@ -135,6 +135,31 @@ type RecentOutcome struct {
 	// updated at completion, which is what made every completed row read as
 	// synced before #379.
 	Result ResultClass
+	// Detail is the recorded reason WITHIN the Result class (work_queue
+	// outcome_detail, #773) -- today the script guard's own verdict on a
+	// 'rejected' row, e.g. "foreign-script share 1.00 exceeds 0.05".
+	//
+	// It ALSO explains a NULL-outcome_type row the timing guard QUARANTINED
+	// ('categorical'), which renders as Result='unknown'. That reason
+	// is READ FROM timing_outcome rather than copied into outcome_detail: the
+	// column already records it, and writing it twice would create two sources of
+	// truth that can disagree. So Detail is a DISPLAY-LEVEL coalesce -- the stored
+	// detail when there is one, else the timing verdict -- not a second store.
+	//
+	// This matters because 'unknown' has always been documented as "a legacy row
+	// predating outcome_type", and that is now only half true: a timing-quarantined
+	// row settles as unknown TODAY, with the reason sitting one column over,
+	// unread. Those rows are the reason this coalesce exists.
+	//
+	// Empty means no reason was recorded, which is the honest state for three
+	// distinct populations: outcomes that need no detail beyond their class (a
+	// plain synced write), rejections settled before #773 shipped, whose reason
+	// went to a log line and is unrecoverable, and genuinely legacy NULL rows.
+	// None is rendered as a verdict.
+	//
+	// Carries no lyric text, artist, title, or path -- only ratios and a fixed
+	// phrase -- so it is safe to render without redaction.
+	Detail string
 }
 
 // RecentOutcomes returns the most recently completed (status='done') tracks,
@@ -159,6 +184,19 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 	}
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT artist, title, album, completed_at, provider_lane,
+            COALESCE(
+                NULLIF(outcome_detail, ''),
+                -- outcome_type IS NULL is DEFENSIVE, not load-bearing: Categorical
+                -- always quarantines (nothing written), so such a row is already
+                -- NULL and no reachable state has both set. It states the intent --
+                -- explain the rows that render 'unknown' -- and would stop a future
+                -- writer that began stamping an outcome on a quarantined row from
+                -- silently relabeling a successful outcome. Removing it fails no
+                -- test, by construction rather than by omission.
+                CASE WHEN outcome_type IS NULL AND timing_outcome = 'categorical'
+                     THEN 'timing refused: categorical'
+                END
+            ) AS detail,
             CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
                 WHEN outcome_type = 'synced' THEN 'synced'
@@ -184,9 +222,10 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 			o            RecentOutcome
 			completedAt  sql.NullString
 			providerLane sql.NullString
+			detail       sql.NullString
 			result       string
 		)
-		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &result); err != nil {
+		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &detail, &result); err != nil {
 			return nil, fmt.Errorf("reports: scan recent outcome: %w", err)
 		}
 		if completedAt.Valid && completedAt.String != "" {
@@ -197,6 +236,7 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 			o.CompletedAt = t
 		}
 		o.ProviderLane = providerLane.String
+		o.Detail = detail.String
 		o.Result = ResultClass(result)
 		out = append(out, o)
 	}

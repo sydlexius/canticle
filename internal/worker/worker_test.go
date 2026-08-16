@@ -129,6 +129,11 @@ type fakeQueue struct {
 	// guardRejectOutcome overrides the returned SettleOutcome (default Settled),
 	// so the non-Settled branch can be exercised without contriving a race.
 	guardRejectOutcome *queue.SettleOutcome
+	// guardRejectReason records the reason the worker PASSED (#773), so a test can
+	// assert the CALL SITE forwards the guard's verdict rather than only that the
+	// seam stores what it is given. That distinction is load-bearing: a seam-tested
+	// but wiring-untested fix is exactly how #770's defect shipped.
+	guardRejectReason string
 	// settledLanes records ids settled through the shared settle transaction, so a
 	// test can distinguish a transactional settle from the old stamp-then-complete
 	// sequence.
@@ -328,7 +333,8 @@ func (q *fakeQueue) SettleInstrumental(_ context.Context, id int64, tel queue.In
 // It also honors the `WHERE status = 'processing'` guard: a row the fake is not
 // holding cannot be settled, matching the SQL rather than assuming the caller
 // passed a valid id.
-func (q *fakeQueue) SettleGuardRejected(_ context.Context, id int64) (queue.SettleOutcome, error) {
+func (q *fakeQueue) SettleGuardRejected(_ context.Context, id int64, reason string) (queue.SettleOutcome, error) {
+	q.guardRejectReason = reason
 	if q.guardRejectErr != nil {
 		return queue.SettleFailed, q.guardRejectErr
 	}
@@ -569,6 +575,15 @@ func TestRunOnceGuardRejectsTerminallyWithoutCacheOrWrite(t *testing.T) {
 	}
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; want 0 (guard rejection must not trip backoff)", w.consecutiveFailures)
+	}
+	// WIRING, not the seam (#773). The queue test proves SettleGuardRejected
+	// STORES what it is handed; only this proves the worker HANDS IT the guard's
+	// actual verdict rather than an empty string. That distinction is exactly how
+	// #770's defect shipped -- the helper was tested directly, so reverting the
+	// call site left the suite green.
+	if q.guardRejectReason != guard.reason {
+		t.Errorf("forwarded reason = %q; want %q (the guard's verdict must reach the row)",
+			q.guardRejectReason, guard.reason)
 	}
 }
 

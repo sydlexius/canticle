@@ -51,6 +51,11 @@ type RecentOutcomeRow struct {
 	Title  string
 	Album  string
 	Result string
+	// Detail is the recorded reason within Result (#773) -- today the script
+	// guard's verdict on a 'rejected' row. Empty renders an em dash rather than a
+	// blank cell, so "no reason recorded" reads as deliberate rather than as a
+	// rendering fault. Carries no lyric text, title, or path.
+	Detail string
 	Lane   string
 	// LaneMark is the mark token for Lane, empty when the lane has no mark (#601).
 	// Empty renders the name alone rather than a gap.

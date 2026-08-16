@@ -77,7 +77,10 @@ type Queue interface {
 	// successful Complete would leave the row `done` with a NULL outcome_type,
 	// which IS the defect #655 exists to fix. A settle that can lose its own label
 	// is not a fix.
-	SettleGuardRejected(ctx context.Context, id int64) (queue.SettleOutcome, error)
+	// reason carries the guard's own verdict string, stored so the row records WHY
+	// it settled with nothing written (#773) rather than only that it was
+	// rejected. Empty means "no reason recorded" and stores NULL.
+	SettleGuardRejected(ctx context.Context, id int64, reason string) (queue.SettleOutcome, error)
 	// SetCompletionProvenance stamps the identifiers and writer version the row was
 	// settled with, so an outcome that writes no tag block -- an unsynced .txt above
 	// all -- still records what produced it (#620). Call before Complete while the
@@ -1438,7 +1441,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// -- it fails and retries, and the guard will reject it again
 			// deterministically, so a retry costs one provider round-trip and
 			// cannot loop forever on a row that would otherwise settle unlabeled.
-			outcome, settleErr := w.queue.SettleGuardRejected(ctxNoCancel, item.ID)
+			outcome, settleErr := w.queue.SettleGuardRejected(ctxNoCancel, item.ID, reason)
 			if settleErr != nil {
 				return w.fail(ctx, item, fmt.Errorf("worker: settle guard-rejected item %d: %w", item.ID, settleErr))
 			}

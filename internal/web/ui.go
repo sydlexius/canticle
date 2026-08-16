@@ -458,6 +458,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Title:       o.Title,
 				Album:       o.Album,
 				Result:      string(o.Result),
+				Detail:      detailOrDash(o.Detail),
 				Lane:        laneLabel(o.ProviderLane),
 				LaneMark:    laneMark(o.ProviderLane),
 				CompletedAt: formatReportTime(o.CompletedAt, serverLoc),
@@ -529,6 +530,20 @@ func formatReportTime(t time.Time, loc *time.Location) string {
 		return t.In(loc).Format(reportTimeFormat)
 	}
 	return t.UTC().Format(reportTimeFormat)
+}
+
+// detailOrDash renders a recorded outcome reason, or a hyphen when none was
+// recorded (#773), matching formatReportTime's treatment of a NULL timestamp so
+// an absent value reads as deliberate rather than as a rendering fault.
+//
+// An empty detail is the normal case, not an anomaly: most outcomes need no
+// reason beyond their class, and rejections settled before #773 shipped have
+// none to recover. Neither should look like a blank verdict.
+func detailOrDash(detail string) string {
+	if detail == "" {
+		return "-"
+	}
+	return detail
 }
 
 // detectRequestedLabel maps the per-item detect_instrumental request flag to a

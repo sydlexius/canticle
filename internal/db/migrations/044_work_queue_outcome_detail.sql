@@ -1,0 +1,52 @@
+-- +goose Up
+-- +goose StatementBegin
+-- outcome_detail records WHY a row settled the way outcome_type says it did
+-- (issue #773). outcome_type names the CATEGORY; this names the reason within
+-- it. Today exactly one writer fills it: SettleGuardRejected, which stores the
+-- script guard's own verdict string (e.g. "foreign-script share 1.00 exceeds
+-- 0.05"). NULL everywhere else, and NULL is a legitimate value -- most outcomes
+-- need no detail beyond their type.
+--
+-- WHY A NEW COLUMN RATHER THAN last_error. A guard rejection is a POLICY
+-- outcome, not an error, and SettleGuardRejected deliberately CLEARS last_error
+-- so the row does not read as failed in the failure-analysis report. Writing the
+-- reason there would fight that clear and re-file a policy decision as a
+-- failure. It would also surface nowhere: FailureAnalysis selects
+-- status IN ('failed','deferred'), and a guard rejection settles as 'done'.
+--
+-- This is the same gap #655 closed one level up. #655 made a rejected row say
+-- WHICH category it landed in, ending the ambiguity where NULL outcome_type
+-- meant both "legacy row" and "deliberate policy decision". The reason itself
+-- was still discarded at every layer below the log line, so 'rejected' became a
+-- bucket with no detail and the web UI could say nothing about why a track
+-- produced no lyrics.
+--
+-- UNBOUNDED GROWTH IS NOT A RISK HERE, which is worth stating because #731 had
+-- to clean up exactly that in last_error (one row held 531,138 bytes of ffmpeg
+-- stderr). The only writer formats two floats into a fixed template, so the
+-- length is bounded by construction rather than by a cap that a future caller
+-- could forget to apply. A future writer storing unbounded external output must
+-- bound it at the capture site, as migration 043's accompanying fix did.
+--
+-- PRIVACY: the stored string carries no lyric text, artist, title, or path --
+-- only two ratios and a fixed phrase -- so it is safe to render in the UI and to
+-- include in a report without a redaction pass.
+ALTER TABLE work_queue ADD COLUMN outcome_detail TEXT;
+-- +goose StatementEnd
+-- +goose StatementBegin
+-- NO BACKFILL, deliberately. Rows already settled as 'rejected' never stored
+-- their reason anywhere -- it went to a log line that has long since rotated --
+-- so it is unrecoverable, and any value written here would be invented rather
+-- than recovered. Pre-existing rejections keep a NULL detail and read as
+-- "reason not recorded"; rows settled by a build carrying this column say why.
+--
+-- That is the same honest split #655 chose for legacy NULL outcome_type: a row
+-- that genuinely cannot be classified stays unclassified rather than being
+-- assigned a plausible-looking guess.
+SELECT 1;
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+ALTER TABLE work_queue DROP COLUMN outcome_detail;
+-- +goose StatementEnd

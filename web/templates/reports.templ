@@ -141,6 +141,7 @@ templ tableRecentOutcomes(rows []RecentOutcomeRow) {
 						<th scope="col">Title</th>
 						<th scope="col">Album</th>
 						<th scope="col">Result</th>
+						<th scope="col">Detail</th>
 						<th scope="col">Source</th>
 						<th scope="col">Completed</th>
 					</tr>
@@ -152,6 +153,7 @@ templ tableRecentOutcomes(rows []RecentOutcomeRow) {
 							<td>{ r.Title }</td>
 							<td>{ r.Album }</td>
 							<td class="mx-cell-mono">{ r.Result }</td>
+							<td class="mx-cell-mono">{ r.Detail }</td>
 							<td class="mx-cell-mono">@laneCell(r.Lane, r.LaneMark)</td>
 							<td class="mx-cell-mono">{ r.CompletedAt }</td>
 						</tr>
