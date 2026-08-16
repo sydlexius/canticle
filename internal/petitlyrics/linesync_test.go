@@ -1,10 +1,15 @@
 package petitlyrics
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // buildLSY constructs a synthetic tier-2 payload with the container geometry of
@@ -193,7 +198,7 @@ func TestZipLineSync_RefusesAMismatch(t *testing.T) {
 	}
 }
 
-func TestZipLineSync_PairsInOrderAndTolregatesTrailingNewline(t *testing.T) {
+func TestZipLineSync_PairsInOrderAndToleratesTrailingNewline(t *testing.T) {
 	// A trailing newline is conventional and must not fail an aligned pair.
 	cues, err := zipLineSync([]int{0, 150, 1234}, "alpha\nbeta\ngamma\n")
 	if err != nil {
@@ -226,4 +231,117 @@ func isNonDecreasing(v []int) bool {
 		}
 	}
 	return true
+}
+
+// TestZipLineSync_KeepsInteriorBlankLines pins a behavior zipLineSync documents
+// but nothing previously tested. An interior blank is a timed line as far as
+// this lane is concerned; dropping one would shift every later cue onto the
+// wrong moment.
+//
+// The count-mismatch guard cannot catch that regression: dropping an interior
+// blank removes one line AND one pairing together, so the counts still agree
+// and the zip succeeds while the alignment is wrong. That is exactly the silent
+// drift this lane is written to prevent, which is why it needs its own test.
+func TestZipLineSync_KeepsInteriorBlankLines(t *testing.T) {
+	cues, err := zipLineSync([]int{0, 100, 200}, "alpha\n\ngamma\n")
+	if err != nil {
+		t.Fatalf("zipLineSync: %v", err)
+	}
+	if len(cues) != 3 {
+		t.Fatalf("got %d cues, want 3 (interior blank dropped?)", len(cues))
+	}
+	if cues[1].Text != "" {
+		t.Errorf("interior blank cue text = %q, want empty", cues[1].Text)
+	}
+	if cues[2].Text != "gamma" {
+		t.Errorf("cue[2] = %q, want \"gamma\" -- a dropped interior blank shifts every later cue", cues[2].Text)
+	}
+	if got := cues[2].Time.Total; got < 1.99 || got > 2.01 {
+		t.Errorf("cue[2] time = %v s, want ~2.0 s", got)
+	}
+}
+
+// songXML builds one <song> element with an explicit lyrics id. Synthetic
+// filler only -- no provider content.
+func songXML(lyricsID, title string, payload []byte) string {
+	return `<song><lyricsId>` + lyricsID + `</lyricsId><title>` + title +
+		`</title><lyricsType>1</lyricsType><lyricsData>` +
+		base64.StdEncoding.EncodeToString(payload) + `</lyricsData></song>`
+}
+
+// TestLineSync_TextLookupPinsTheLyricsID is the regression test for the defect
+// CodeRabbit caught on this PR.
+//
+// The tier-1 continuation used to re-run selectCandidate, which scores on ISRC,
+// duration, and title text and never consults the lyrics id. So the second
+// request could settle on a DIFFERENT recording than the one that supplied the
+// timings. When that other recording carries the SAME LINE COUNT, zipLineSync
+// sees a well-formed pair and emits an .lrc whose every cue belongs to another
+// performance -- undetectable downstream.
+//
+// The fixture is built to reproduce exactly that: the decoy is listed FIRST and
+// is given the title that scores best against the requested track, so a
+// scoring selector prefers it, and it carries the same number of lines so the
+// count guard cannot save us. Only pinning the id yields the right text.
+func TestLineSync_TextLookupPinsTheLyricsID(t *testing.T) {
+	const wantID, decoyID = "222", "111"
+	blob := buildLSY(t, 0xdc18, true, []int{100, 250, 400})
+
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		if r.PostForm.Get("lyricsType") == "1" {
+			// Decoy first, and titled to out-score the real one.
+			_, _ = w.Write([]byte(`<response><songs>` +
+				songXML(decoyID, "Lorem Ipsum", []byte("wrong1\nwrong2\nwrong3\n")) +
+				songXML(wantID, "Lorem Ipsum (Live)", []byte("right1\nright2\nright3\n")) +
+				`</songs></response>`))
+			return
+		}
+		// The tier-2 response identifies which record the timings came from.
+		_, _ = w.Write([]byte(`<response><songs>` +
+			`<song><lyricsId>` + wantID + `</lyricsId><title>Lorem Ipsum (Live)</title>` +
+			`<lyricsType>2</lyricsType><lyricsData>` +
+			base64.StdEncoding.EncodeToString(blob) +
+			`</lyricsData></song></songs></response>`))
+	})
+
+	song, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"})
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if len(song.Subtitles.Lines) != 3 {
+		t.Fatalf("got %d cues, want 3", len(song.Subtitles.Lines))
+	}
+	if got := song.Subtitles.Lines[0].Text; got != "right1" {
+		t.Errorf("cue[0] = %q, want %q -- the text lookup did not pin the tier-2 lyrics id", got, "right1")
+	}
+}
+
+// TestLineSync_RefusesWhenTheLyricsIDIsAbsent pins the other half: if the
+// tier-1 response does not carry the id the timings came from, there is no
+// provably-matching text, so the lane must refuse rather than fall back to a
+// scored guess.
+func TestLineSync_RefusesWhenTheLyricsIDIsAbsent(t *testing.T) {
+	blob := buildLSY(t, 0xdc18, true, []int{100, 250, 400})
+
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		if r.PostForm.Get("lyricsType") == "1" {
+			_, _ = w.Write([]byte(`<response><songs>` +
+				songXML("999", "Lorem Ipsum", []byte("a\nb\nc\n")) +
+				`</songs></response>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<response><songs>` +
+			`<song><lyricsId>222</lyricsId><title>Lorem Ipsum</title>` +
+			`<lyricsType>2</lyricsType><lyricsData>` +
+			base64.StdEncoding.EncodeToString(blob) +
+			`</lyricsData></song></songs></response>`))
+	})
+
+	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"}); err == nil {
+		t.Fatal("a missing lyrics id must refuse, not fall back to a scored candidate")
+	}
 }

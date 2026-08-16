@@ -364,12 +364,22 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 // passed to the zipper: pairing timings with bytes that are not the words is a
 // route to confident-looking wrong output, which is the failure this whole path
 // is written to avoid.
-func (c *Client) lookupUnsyncedText(ctx context.Context, track models.Track) (string, error) {
+//
+// PINNED TO lyricsID, and that is the load-bearing part. An earlier version
+// re-ran selectCandidate against the tier-1 response, which scores on ISRC,
+// duration, and title text and never consults the lyrics id. The second request
+// could therefore settle on a DIFFERENT recording than the one that supplied
+// the timings -- a live cut, a remaster, a cover. When that other recording
+// happens to carry the same line count, zipLineSync sees a well-formed pair and
+// emits an .lrc whose every cue belongs to a different performance. Nothing
+// downstream can detect it. Selecting the exact id the tier-2 payload came from
+// makes the two responses provably the same song, and its absence a typed miss.
+func (c *Client) lookupUnsyncedText(ctx context.Context, track models.Track, lyricsID string) (string, error) {
 	songs, err := c.request(ctx, track, tierUnsynced)
 	if err != nil {
 		return "", fmt.Errorf("petitlyrics: line-sync text lookup: %w", err)
 	}
-	candidate, err := selectCandidate(songs, track)
+	candidate, err := selectByLyricsID(songs, lyricsID)
 	if err != nil {
 		return "", fmt.Errorf("petitlyrics: line-sync text lookup, no candidate matched: %w", err)
 	}
@@ -456,7 +466,7 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 		if err != nil {
 			return models.Song{}, err
 		}
-		text, err := c.lookupUnsyncedText(ctx, track)
+		text, err := c.lookupUnsyncedText(ctx, track, candidate.LyricsID)
 		if err != nil {
 			return models.Song{}, err
 		}
