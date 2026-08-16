@@ -410,7 +410,7 @@ func TestRevalidateTailIncludesDegenerate(t *testing.T) {
 	if err := writeRevalidateTail(path, findings); err != nil {
 		t.Fatalf("writeRevalidateTail: %v", err)
 	}
-	body, err := os.ReadFile(path) //nolint:gosec // test path from t.TempDir
+	body, err := os.ReadFile(path) //nolint:gosec // reason: test path from t.TempDir
 	if err != nil {
 		t.Fatalf("read tail: %v", err)
 	}
@@ -425,5 +425,34 @@ func TestRevalidateTailIncludesDegenerate(t *testing.T) {
 	// The existing filter must be unchanged: Ok is not remediable and stays out.
 	if strings.Contains(got, "/lib/c.lrc") {
 		t.Errorf("tail includes a compliant file; got %q", got)
+	}
+}
+
+// TestPrintRevalidateCountsIncludesDegenerate covers the aggregate summary
+// (#673 review). The tail file is opt-in via --tail, so this one line is what
+// a plain `revalidate` run actually shows an operator -- and revalidate is
+// dry-run by default, which means a planned demotion that never appears in the
+// summary is invisible at exactly the moment it matters.
+//
+// Nothing pinned this line before, which is why the omission survived: the
+// counts printer enumerates fields by hand, so a new Counts field is silently
+// absent rather than a compile error.
+func TestPrintRevalidateCountsIncludesDegenerate(t *testing.T) {
+	var buf bytes.Buffer
+	printRevalidateCounts(&buf, revalidate.Counts{
+		Scanned: 9, Ok: 4, MisSynced: 1, Categorical: 1, Degenerate: 2,
+		UnknownDuration: 1, NoAudio: 0, Errored: 0,
+	}, false)
+
+	got := buf.String()
+	if !strings.Contains(got, "degenerate=2") {
+		t.Errorf("summary omits the degenerate count; got %q", got)
+	}
+	// The pre-existing fields must survive the edit: a reordered or dropped
+	// counter would be a regression this test should also catch.
+	for _, want := range []string{"scanned=9", "ok=4", "MisSynced=1", "categorical=1", "unknown-duration=1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary lost %q; got %q", want, got)
+		}
 	}
 }

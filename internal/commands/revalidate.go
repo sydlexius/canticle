@@ -195,8 +195,8 @@ func applyRevalidate(out io.Writer, cfg config.Config, args RevalidateCmd, plan 
 // printRevalidateCounts emits the aggregate distribution. Counts only: no path,
 // no artist, no title, no lyric text.
 func printRevalidateCounts(out io.Writer, c revalidate.Counts, apply bool) {
-	_, _ = fmt.Fprintf(out, "revalidate: scanned=%d ok=%d MisSynced=%d categorical=%d unknown-duration=%d no-audio=%d errored=%d%s\n",
-		c.Scanned, c.Ok, c.MisSynced, c.Categorical, c.UnknownDuration, c.NoAudio, c.Errored, suffixRevalidateDryRun(apply))
+	_, _ = fmt.Fprintf(out, "revalidate: scanned=%d ok=%d MisSynced=%d categorical=%d degenerate=%d unknown-duration=%d no-audio=%d errored=%d%s\n",
+		c.Scanned, c.Ok, c.MisSynced, c.Categorical, c.Degenerate, c.UnknownDuration, c.NoAudio, c.Errored, suffixRevalidateDryRun(apply))
 	if c.UnknownDuration > 0 {
 		// Name a remedy that actually works for THESE files. Before #684 a scan
 		// short-circuited on any file that already had a sidecar before it ever

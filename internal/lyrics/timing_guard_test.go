@@ -338,7 +338,7 @@ func TestWriteLRC_TimingGuard_DegenerateWritesTxt(t *testing.T) {
 	txt := filepath.Join(dir, "song.txt")
 	mustExist(t, txt)
 
-	data, err := os.ReadFile(txt) //nolint:gosec // test path from t.TempDir
+	data, err := os.ReadFile(txt) //nolint:gosec // reason: test path from t.TempDir
 	if err != nil {
 		t.Fatalf("reading demoted .txt: %v", err)
 	}
