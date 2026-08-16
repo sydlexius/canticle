@@ -73,6 +73,16 @@ func (r *surveyReport) add(obs sampleObservation) {
 		if obs.Tier != 0 {
 			r.tierCounts[obs.Tier]++
 		}
+		// A tier-2 sample counted just above is part of the corpus TOTAL, so it
+		// must also land in the paired/unpaired breakdown or the two numbers
+		// cannot be reconciled ("0 paired / 1 total" with no reason given). It
+		// reached here by failing AFTER classifying its payload -- lsy-write --
+		// so it is definitionally unpaired, and obs.Err is the reason. Recorded
+		// BEFORE the early return, which is the whole bug: the return skips the
+		// breakdown at the bottom of this function.
+		if obs.Tier == tierLineSync {
+			r.lsyUnpaired[boundedSentinel(obs.Err)]++
+		}
 		return
 	}
 	r.tierCounts[obs.Tier]++
@@ -113,7 +123,7 @@ func (r *surveyReport) add(obs sampleObservation) {
 			if reason == "" {
 				reason = "unknown"
 			}
-			r.lsyUnpaired[boundedToken(reason)]++
+			r.lsyUnpaired[boundedSentinel(reason)]++
 		}
 	}
 }
@@ -327,6 +337,27 @@ func TestSurveyReport_CueCountDistribution(t *testing.T) {
 // past a handful of characters is not the enumerated flag this report is
 // measuring.
 const maxTokenLen = 8
+
+// maxSentinelLen bounds an INTERNAL error sentinel -- a literal written in this
+// package, never provider data. It is separate from maxTokenLen on purpose: that
+// bound is 8 because a provider-controlled flag past a handful of characters is
+// not the enumerated value being measured, whereas these sentinels are our own
+// and several legitimately exceed 8 ("no-candidate", "empty-payload",
+// "ErrProviderUnavailable"). Bounding them with maxTokenLen redacted the very
+// attribution the unpaired breakdown exists to print. The bound is kept -- one
+// sentinel is computed (fmt.Sprintf("tier-%d", ...)) and future code could put
+// something unexpected here -- but sized so an ordinary sentinel survives it.
+const maxSentinelLen = 32
+
+// boundedSentinel bounds an internal sentinel for display. Same shape as
+// boundedToken, different threat model: this one guards against a surprising
+// value, not against provider-controlled content reaching a shared surface.
+func boundedSentinel(v string) string {
+	if len(v) <= maxSentinelLen {
+		return v
+	}
+	return fmt.Sprintf("<non-sentinel value, %d bytes>", len(v))
+}
 
 // boundedToken passes through a short enumerated token and replaces anything
 // longer with a length-only placeholder.

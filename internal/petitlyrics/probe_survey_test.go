@@ -595,6 +595,42 @@ func TestSurveyReport_CountsPairedSeparatelyFromTotal(t *testing.T) {
 	}
 }
 
+// TestSurveyReport_CountsAFailedWriteAsUnpaired pins the accounting hole both
+// review bots found: a tier-2 sample that classified its payload and THEN failed
+// (obs.Err "lsy-write") takes add()'s early return, which increments the tier
+// count -- the number render() prints as the corpus TOTAL -- without ever
+// reaching the paired/unpaired block.
+//
+// The result was a report reading "0 paired / 1 total" with no unpaired line, so
+// the gap between the two numbers had no stated cause. That is the specific
+// failure this whole paired/total split exists to prevent: a corpus figure a
+// reader cannot reconcile. Every counted blob must now land in exactly one of
+// paired or unpaired.
+func TestSurveyReport_CountsAFailedWriteAsUnpaired(t *testing.T) {
+	r := newSurveyReport()
+	r.add(sampleObservation{Tier: tierLineSync, Paired: true})
+	r.add(sampleObservation{Tier: tierLineSync, Err: "lsy-write"})
+
+	out := r.render()
+	if !strings.Contains(out, "line-sync corpus: 1 paired / 2 total") {
+		t.Errorf("a failed tier-2 write is missing from the corpus total:\n%s", out)
+	}
+	if !strings.Contains(out, "unpaired (lsy-write): 1") {
+		t.Errorf("a failed tier-2 write is counted in the total but not attributed:\n%s", out)
+	}
+
+	// The invariant, stated independently of the strings above: paired plus
+	// unpaired must equal the printed total, or the breakdown cannot explain it.
+	unpaired := 0
+	for _, n := range r.lsyUnpaired {
+		unpaired += n
+	}
+	if got := r.lsyPaired + unpaired; got != r.tierCounts[tierLineSync] {
+		t.Errorf("paired(%d)+unpaired(%d)=%d does not reconcile with total %d",
+			r.lsyPaired, unpaired, got, r.tierCounts[tierLineSync])
+	}
+}
+
 // TestEnsureOutsideRepo_ResolvesRelativeAndSymlinkedPaths pins that containment
 // is decided on the RESOLVED path. A relative path or a symlink into the tree
 // would otherwise walk straight past a check done on the raw string.
