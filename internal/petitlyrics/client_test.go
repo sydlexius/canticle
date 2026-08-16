@@ -391,8 +391,19 @@ func TestFindLyrics_LineSyncRefusesAMismatchedJoin(t *testing.T) {
 		_, _ = w.Write(tierEnvelope(t, blob))
 	})
 
-	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"}); err == nil {
+	_, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Lorem Ipsum"})
+	if err == nil {
 		t.Fatal("a timing/text count mismatch must fail, never emit misaligned cues")
+	}
+	// Assert the SENTINEL, not merely a non-nil error. Several unrelated stages
+	// in this path also return an error (the tier check in lookupUnsyncedText, a
+	// base64 failure), so a bare nil-check would still pass if the count guard
+	// stopped working and something else failed instead. The orchestrator
+	// classifies on the sentinel, so what matters is that it survives the whole
+	// client path to the caller -- not just the unit path TestZipLineSync_
+	// RefusesAMismatch already covers.
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("want ErrNotFound for a count mismatch, got %v", err)
 	}
 }
 
