@@ -7,11 +7,14 @@ as a condition of use, and what else their terms impose. Tracked by #600.
 even when the answer is "not required", with the date it was checked and a link to the
 document that says so. Terms change; a finding is only as good as its date.
 
-**Status: BOTH PROVIDERS READ, OBLIGATIONS OUTSTANDING.** Musixmatch's terms require a
-prescribed credit and linkback that canticle does **not** currently satisfy (#600).
-petitlyrics imposes no attribution requirement but does constrain use. Do not read this
-file as a compliance sign-off -- it is a record of what the terms say, not a claim that
-canticle complies with them.
+**Status: BOTH PROVIDERS READ. CREDIT IMPLEMENTED, SOME OBLIGATIONS OUTSTANDING.**
+Musixmatch's required credit and linkback now render across the authenticated serve UI, using the
+official brand mark rather than the exact prescribed button (which is not published in a
+usable format -- see below). Clauses 2.1.11, 2.1.4 and 1.1 remain unaddressed.
+petitlyrics imposes no attribution requirement but does constrain use.
+
+Do not read this file as a compliance sign-off -- it is a record of what the terms say and
+what canticle does about them, reviewed by an agent rather than by counsel.
 
 ---
 
@@ -125,16 +128,49 @@ Written confirmation would still be worth having, but its absence is not a reaso
 treat the obligations as inapplicable -- that reads the ambiguity in our own favor,
 which is the wrong default for a compliance question.
 
-### What is NOT satisfied today
+### Credit surface: IMPLEMENTED, with one gap
 
-The lane mark added in #601 is a **static, non-linking `<img>`**. Clause 2.1.5 asks for
-a linked "powered by Musixmatch" button from the published resources page; clause 3.2
-permits the logo only to indicate data origin. A silent logo in a lane column arguably
-indicates origin, but it is not the prescribed asset and carries no link.
+A credit footer renders on every page of the authenticated serve UI -- Dashboard,
+Reports, Settings and Keys, i.e. every page built on the shared `Layout`
+(`musixmatchCredit` in `web/templates/layout.templ`): the official For Brands mark, the
+text "Lyrics powered by Musixmatch", and a link to <https://www.musixmatch.com>. It sits
+OUTSIDE `#mx-main` so an htmx report-rail swap cannot remove it -- a credit that survives
+only until the first navigation would not be an each-time-you-use-the-Data credit.
 
-Nothing here is a reason to delay a UI change: **the obligation attaches to using the
-Data, which canticle already does today**, and it existed before the mark and would
-survive its removal. Tracked in #600.
+**The login and setup pages carry no credit, deliberately.** They build their own shell
+rather than using `Layout`, and they display no Musixmatch Data -- they are auth forms.
+The obligation attaches to USING the Data, so a credit there would assert an attribution
+on a page where nothing is attributable. Recorded because "every page" is the intuitive
+reading of the requirement and the exception is easy to mistake for an oversight.
+
+It is **hidden when Musixmatch is inactive** (no usable token). Crediting Musixmatch for
+results another provider served would be a misattribution, so the absence is load-bearing
+too, and is asserted by its own test.
+
+Verified on the rendered page rather than from the stylesheet: computed color
+`rgb(148,163,184)` on `rgb(11,17,32)` gives a **7.34:1** contrast ratio (clears WCAG AA).
+A required credit that is present in the DOM but visually unreadable would not discharge
+the obligation, which is why this is measured rather than assumed.
+
+**The remaining gap.** Clause 2.1.5 names a specific "powered by Musixmatch" button
+published at <https://www.musixmatch.com/resources>. That URL **redirects** to the
+brand-resources page, and the only badge set there ("For Brands" -> With Claim) ships
+**PNG only** -- no SVG, and no literal "powered by" wordmark asset was reachable. So this
+implements the clause's SUBSTANCE (credit + mark + link to the Site) using the official
+For Brands mark, not the exact prescribed button.
+
+To close it fully: obtain the prescribed badge from Musixmatch and swap the `<img>` in
+`musixmatchCredit`. The link target, the placement, and the tests are already correct, so
+it is an asset swap rather than a redesign.
+
+### Still outstanding
+
+- **2.1.11** (permit Musixmatch to track API access) is not implemented. Whether the
+  desktop endpoint already satisfies this by construction is unexamined.
+- **2.1.4** (prior written approval before exposing pages carrying the Data publicly)
+  binds the OPERATOR, not the software. Worth surfacing in user-facing docs so an
+  operator publishing their instance knows it applies to them.
+- **1.1** limits use to non-commercial.
 
 ### Lane mark: VENDORED (#601)
 

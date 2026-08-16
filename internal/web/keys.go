@@ -32,7 +32,7 @@ func (u *UI) handleWebhookKeys(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	view := u.buildWebhookKeysView(r.Context())
 	u.attachKeysCSRF(w, r, &view)
-	render(w, r, templates.WebhookKeysPage(u.version, view, u.buildRail(""), u.musixmatchInactive))
+	render(w, r, templates.WebhookKeysPage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
 }
 
 // handleCreateWebhookKey creates a new managed key and returns the panel fragment
