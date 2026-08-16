@@ -2970,13 +2970,13 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	case "output.bilingual_output":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("output.bilingual_output must be a boolean")
+			return fmt.Errorf("output.bilingual_output must be a boolean: %w", err)
 		}
 		cfg.Output.BilingualOutput = v
 	case "output.word_sync":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("output.word_sync must be a boolean")
+			return fmt.Errorf("output.word_sync must be a boolean: %w", err)
 		}
 		cfg.Output.WordSync = v
 	case "db.path":
@@ -3034,7 +3034,7 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	case "verification.enabled":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("verification.enabled must be a boolean")
+			return fmt.Errorf("verification.enabled must be a boolean: %w", err)
 		}
 		cfg.Verification.Enabled = v
 	case "verification.whisper_url":

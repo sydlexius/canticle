@@ -2959,3 +2959,29 @@ func TestConfigValueWordSync(t *testing.T) {
 		t.Error("configKeys is missing output.word_sync")
 	}
 }
+
+// TestSetConfigValueBoolErrorsWrapTheCause pins that a bad boolean preserves
+// strconv's own error (#760 review). Without %w the caller sees only "must be a
+// boolean" and loses which value failed and why -- CLAUDE.md requires wrapping
+// for exactly that reason.
+//
+// Covers all three bool arms in this switch, not just the new one: they share
+// the shape, and fixing one while leaving its neighbors would make the file
+// inconsistent in the other direction.
+func TestSetConfigValueBoolErrorsWrapTheCause(t *testing.T) {
+	for _, key := range []string{"output.word_sync", "output.bilingual_output", "verification.enabled"} {
+		cfg := config.Config{}
+		err := setConfigValue(&cfg, key, "not-a-bool")
+		if err == nil {
+			t.Errorf("%s: setConfigValue accepted a non-boolean", key)
+			continue
+		}
+		var numErr *strconv.NumError
+		if !errors.As(err, &numErr) {
+			t.Errorf("%s: error does not wrap the strconv cause: %v", key, err)
+		}
+		if !strings.Contains(err.Error(), key) {
+			t.Errorf("%s: error does not name the key: %v", key, err)
+		}
+	}
+}
