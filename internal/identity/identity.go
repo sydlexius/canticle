@@ -58,6 +58,11 @@ type Candidate struct {
 	ISRC   string
 	Artist string
 	Title  string
+	// Stem is the filename-derived name evidence, used only as a fallback when
+	// neither Artist nor Title is present. It is SEPARATE from Ref because Ref is
+	// an opaque round-trip handle -- realign's Ref is a full path, and scoring a
+	// path against a stem silently depresses every similarity score.
+	Stem string
 }
 
 // Keys is the ordered set of identity fields the exact tier consults, most
@@ -256,4 +261,122 @@ func HeuristicNameGuard(orphan, candidate NameSignal, minConfidence float64) (ok
 		return true, 0, false
 	}
 	return score >= minConfidence, score, true
+}
+
+// HeuristicResult is ResolveHeuristic's verdict plus the scores behind it, so a
+// caller can report WHY it declined without recomputing anything. RunnerUp is
+// meaningful only when HasRival; a lone target with nothing to confuse it has no
+// runner-up rather than one scoring zero.
+type HeuristicResult struct {
+	Verdict  Verdict
+	Ref      string
+	Score    float64
+	RunnerUp float64
+	HasRival bool
+}
+
+// ResolveHeuristic resolves an orphan against a candidate pool by NAME
+// SIMILARITY, as the tier below ResolveExact: it is consulted when the orphan
+// carries no MBID or ISRC for the exact tier to match on.
+//
+// Promoted here from internal/realign (#740) so prune can reach it. Prune
+// previously treated "no MBID and no ISRC" as proof that no relink could ever
+// resolve a row and retired it as permanently unactionable -- but that premise
+// was false precisely because this tier exists, and it was unreachable from
+// prune because it lived in another package. Unresolved is not unresolvable, and
+// only the latter justifies a terminal decision.
+//
+// The semantics are realign's, preserved rather than redesigned:
+//
+//   - Best candidate wins, but ONLY if it beats the runner-up by minMargin. A
+//     near-tie is VerdictConflict, never a coin flip: a score its runner-up
+//     nearly matches is a name signal that cannot tell the tracks apart, and
+//     pairing on it attaches a sidecar to the WRONG song (#672).
+//   - Below minConfidence is VerdictNone -- nothing matched, as distinct from
+//     "several things matched equally well".
+//   - The UNTAGGED degradation from HeuristicNameGuard is honored: when neither
+//     side carries a tag-derived name the score is a placeholder zero, so the
+//     margin test would reject every such pair spuriously. A LONE untagged
+//     candidate is therefore a positional pairing and resolves (this is what
+//     lets a plain instrumental-marker sidecar re-attach); two or more untagged
+//     candidates is a conflict, because position identifies nothing among them.
+//
+// TARGETS AND RIVALS ARE SEPARATE SETS, and conflating them is a correctness
+// bug rather than a simplification. Targets are what the orphan may be attached
+// TO; rivals are everything the name signal must distinguish it FROM. They are
+// usually different:
+//
+//   - prune passes the same slice for both -- every present file is both a
+//     possible destination and a possible confusion.
+//   - realign passes only the SIDECAR-LESS audio as targets, but every audio
+//     file in the directory as rivals. A file that already has a sidecar is not
+//     a legal destination, yet it still has to be out-scored: an orphan that
+//     matches it better than the gap is evidence the name cannot tell the tracks
+//     apart. Scoring against targets alone would silently attach the sidecar to
+//     the wrong song, which is the #672 defect.
+//
+// The returned score is the winning similarity, or the best observed score on a
+// non-unique verdict, so a caller can report WHY it declined.
+func ResolveHeuristic(orphan NameSignal, targets, rivals []Candidate, minConfidence, minMargin float64) HeuristicResult {
+	if len(targets) == 0 {
+		return HeuristicResult{Verdict: VerdictNone}
+	}
+
+	score := func(c Candidate) (float64, bool) {
+		return NameScore(orphan, NameSignal{Artist: c.Artist, Title: c.Title, Stem: c.Stem})
+	}
+
+	bestRef, best, seen := "", 0.0, false
+	anyTagged := false
+	for _, c := range targets {
+		s, tagged := score(c)
+		anyTagged = anyTagged || tagged
+		if !seen || s > best {
+			bestRef, best, seen = c.Ref, s, true
+		}
+	}
+
+	// The runner-up is the best score among everything that is NOT the chosen
+	// target -- drawn from rivals, so a sidecar-bearing file still counts as
+	// confusable even though it can never be the destination.
+	runnerUp, hasRival := 0.0, false
+	for _, c := range rivals {
+		if c.Ref == bestRef {
+			continue
+		}
+		s, tagged := score(c)
+		anyTagged = anyTagged || tagged
+		if !hasRival || s > runnerUp {
+			runnerUp, hasRival = s, true
+		}
+	}
+
+	// Positional degradation: no side anywhere carried a tag-derived name, so
+	// every score is a placeholder zero and comparing them is meaningless.
+	//
+	// Keyed on the TARGET COUNT alone, deliberately NOT on the absence of rivals.
+	// realign's 1:1 tier pairs a lone untagged orphan with the lone gap even when
+	// the directory holds other audio -- an instrumental .txt with no name
+	// evidence on either side still has to re-attach. Requiring no rivals broke
+	// exactly that case, and realign's own suite caught it.
+	//
+	// A second TARGET is different: with no name evidence and two legal
+	// destinations, position identifies nothing and picking one is a guess.
+	if !anyTagged {
+		if len(targets) == 1 {
+			return HeuristicResult{Verdict: VerdictUnique, Ref: targets[0].Ref}
+		}
+		return HeuristicResult{Verdict: VerdictConflict, HasRival: hasRival}
+	}
+
+	if best < minConfidence {
+		return HeuristicResult{Verdict: VerdictNone, Score: best, RunnerUp: runnerUp, HasRival: hasRival}
+	}
+	// A runner-up within minMargin of the winner means the signal cannot
+	// discriminate. Only meaningful when a rival actually exists; a lone target
+	// with nothing else in the directory has no runner-up to be too close to.
+	if hasRival && best-runnerUp < minMargin {
+		return HeuristicResult{Verdict: VerdictConflict, Score: best, RunnerUp: runnerUp, HasRival: true}
+	}
+	return HeuristicResult{Verdict: VerdictUnique, Ref: bestRef, Score: best, RunnerUp: runnerUp, HasRival: hasRival}
 }

@@ -301,29 +301,34 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "destination " + target + " already claimed by another orphan this run (duplicate provenance?)"})
 				continue
 			}
-			ok, score, tagged := heuristicNameGuard(orphanTags, stemOf(orphan), getProv(audio), stemOf(audio), r.cfg.MinConfidence)
-			if !ok {
-				res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: fmt.Sprintf("name similarity %.2f below min_confidence %.2f", score, r.cfg.MinConfidence)})
-				continue
-			}
-			// Margin rule for the 1:1 tier (#672). Clearing the floor against the
-			// lone gap says nothing if the orphan scores just as well against the
-			// directory's OTHER audio: that is a name signal that cannot tell the
-			// tracks apart, and pairing on it attaches lyrics to the wrong song.
-			// The rival set is every other audio file in the directory, including
-			// ones that already have a sidecar, so this tier reaches the same
-			// verdict as the N:M tier on the same pair no matter how many other
-			// orphans happen to be present.
+			// The shared 1:1 resolver (#740). It owns the confidence floor, the
+			// margin rule (#672) and the untagged-positional degradation, so prune
+			// consults the SAME ladder rather than growing a second matcher.
 			//
-			// Skipped when tagged is false: neither side carried a name, the
-			// pairing is positional, and its score is a placeholder zero that no
-			// margin test could meaningfully consume.
-			if tagged {
-				if rival, has := bestRivalScore(nameSignalForOrphan(orphanTags, stemOf(orphan)), audio, de.audio, getProv); has && score-rival < r.cfg.MinMargin {
-					res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: fmt.Sprintf("name similarity %.2f too close to runner-up %.2f (margin %.2f < min_margin %.2f)", score, rival, score-rival, r.cfg.MinMargin)})
-					continue
-				}
+			// TARGETS vs RIVALS is the load-bearing distinction here: the only legal
+			// destination is the lone sidecar-less gap, but the rival set is every
+			// audio file in the directory INCLUDING ones that already have a
+			// sidecar. An orphan that matches the already-paired track next door
+			// just as well as it matches the gap carries a name signal that cannot
+			// tell the tracks apart, and pairing on it attaches lyrics to the wrong
+			// song. Passing only the target would leave nothing to be too close to,
+			// so the margin rule would never fire.
+			hres := identity.ResolveHeuristic(
+				nameSignalForOrphan(orphanTags, stemOf(orphan)),
+				[]identity.Candidate{candidateForAudio(audio, getProv)},
+				candidatesForAudio(de.audio, getProv),
+				r.cfg.MinConfidence, r.cfg.MinMargin,
+			)
+			switch hres.Verdict {
+			case identity.VerdictNone:
+				res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: fmt.Sprintf("name similarity %.2f below min_confidence %.2f", hres.Score, r.cfg.MinConfidence)})
+				continue
+			case identity.VerdictConflict:
+				res.Skips = append(res.Skips, Skip{Kind: "ambiguous", Path: orphan, Reason: fmt.Sprintf("name similarity %.2f too close to runner-up %.2f (margin %.2f < min_margin %.2f)", hres.Score, hres.RunnerUp, hres.Score-hres.RunnerUp, r.cfg.MinMargin)})
+				continue
+			case identity.VerdictUnique:
 			}
+			score := hres.Score
 			claimed[target] = true
 			mv := Move{Orphan: orphan, Target: target, Method: "heuristic", LibraryID: libraryID, Eligible: !r.cfg.RequireProvenance, Confidence: score}
 			if !mv.Eligible {
@@ -630,15 +635,6 @@ func resolveExact(tags lyrics.ProvenanceTags, identityKeys identity.Keys, pool [
 	}
 }
 
-// heuristicNameGuard is a thin adapter over the shared
-// identity.HeuristicNameGuard tier, comparing the orphan's [ar:]/[ti:] header
-// (or sidecar stem) against the candidate audio's title (or stem) via
-// Jaro-Winkler. Degrades to positional matching (returns ok=true, tagged=false)
-// when neither side yields a name, so a plain .txt still realigns.
-func heuristicNameGuard(tags lyrics.ProvenanceTags, orphanStem string, audio audioProvenance, audioStem string, minConf float64) (ok bool, score float64, tagged bool) {
-	return identity.HeuristicNameGuard(nameSignalForOrphan(tags, orphanStem), nameSignalForAudio(audio, audioStem), minConf)
-}
-
 // nameSignalForOrphan describes an orphan sidecar's name evidence for the
 // shared scorer: its [ar:]/[ti:] header plus its filesystem stem as the
 // fallback. Building the signal here (rather than pre-flattening it to a
@@ -655,30 +651,29 @@ func nameSignalForAudio(prov audioProvenance, stem string) identity.NameSignal {
 	return identity.NameSignal{Artist: prov.artist, Title: prov.title, Stem: stem}
 }
 
-// bestRivalScore returns the highest name-similarity score the orphan achieves
-// against any audio file in the directory OTHER than the candidate it is about
-// to be paired with, and whether any such rival existed.
+// candidateForAudio describes one audio file to the shared resolver (#740).
 //
-// This is the 1:1 tier's margin input (#672). Its candidate set is the
-// directory's FULL audio list, not just the sidecar-less files: an orphan whose
-// name matches the already-paired track next door just as well as it matches
-// the one lone gap has not identified anything, it has merely been left alone
-// in a room with one exit. Scoring only the gaps would make the verdict depend
-// on how many OTHER orphans a previous apply happened to resolve -- the exact
-// tier-disagreement this rule exists to close.
-func bestRivalScore(orphan identity.NameSignal, target string, dirAudio []string, getProv func(string) audioProvenance) (float64, bool) {
-	best := 0.0
-	found := false
-	for _, a := range dirAudio {
-		if a == target {
-			continue
-		}
-		score, _ := identity.NameScore(orphan, nameSignalForAudio(getProv(a), stemOf(a)))
-		if !found || score > best {
-			best, found = score, true
-		}
+// Ref is the PATH, which is what the caller round-trips back out of a Unique
+// verdict; identity.NameSignal's Stem fallback is derived from it inside the
+// resolver, so the stem is not duplicated here.
+func candidateForAudio(path string, getProv func(string) audioProvenance) identity.Candidate {
+	prov := getProv(path)
+	// Stem, not Ref, carries the filename evidence: Ref is the full path the
+	// caller round-trips back out of a Unique verdict, and scoring a path against
+	// a stem depresses every similarity score.
+	return identity.Candidate{Ref: path, Artist: prov.artist, Title: prov.title, Stem: stemOf(path)}
+}
+
+// candidatesForAudio maps a directory's audio list into the resolver's rival
+// set. Every file is included, INCLUDING ones that already carry a sidecar: a
+// rival is something the name must distinguish the orphan from, not something
+// the orphan may be attached to (#672).
+func candidatesForAudio(paths []string, getProv func(string) audioProvenance) []identity.Candidate {
+	out := make([]identity.Candidate, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, candidateForAudio(p, getProv))
 	}
-	return best, found
+	return out
 }
 
 // nmPairing is one accepted orphan->audio pairing from resolveNameMatch.
