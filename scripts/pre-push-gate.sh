@@ -95,10 +95,52 @@ echo "==> patch coverage (Codecov parity, conservative lower bound)"
 # result; when absent it is SKIPPED, not failed. This gate is a dev-only
 # convenience -- CI enforces patch coverage via Codecov directly
 # (.github/workflows/ci.yml), so nothing is lost when the estimator is missing.
-HELPER="$HOME/.claude/scripts/patch-coverage.sh"
+# Overridable so the exit-code branches below can be exercised against a stub,
+# following the TAILWIND_BIN convention above. Unset -> the real estimator.
+HELPER="${PATCH_COVERAGE_HELPER:-$HOME/.claude/scripts/patch-coverage.sh}"
 if [ -x "$HELPER" ]; then
-  COVER_OUT="$COVER_OUT" \
-    bash "$HELPER" || fail "patch coverage below codecov.yml threshold (note: this gate is a conservative lower bound; Codecov typically reads a few points higher)"
+  # BRANCH ON THE EXIT CODE, never a bare `||` (#768). The estimator defines four
+  # codes whose remedies DIFFER, and two of them are OPPOSITE: exit 1 means write
+  # tests, exit 3 means commit what you already wrote. A bare `||` collapsed all of
+  # them into "below threshold", which is false for 2 and 3 and sends the reader to
+  # do work that cannot help. Observed three times in one session, costing a cycle
+  # each: the message is confident, plausible, and wrong.
+  #
+  # `rc=0; ... || rc=$?` rather than calling it bare: `set -e` is on, so an
+  # unguarded non-zero exit would kill the script before anything could read the
+  # code. The estimator prints its own detailed diagnosis to stderr on every path,
+  # so the job here is to stop MISLABELING it and name the right remedy -- not to
+  # restate what it already said.
+  rc=0
+  COVER_OUT="$COVER_OUT" bash "$HELPER" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      fail "patch coverage below codecov.yml threshold -- add tests for the uncovered lines.\n      (this gate is a conservative lower bound; Codecov typically reads a few points higher)"
+      ;;
+    2)
+      # Setup/config fault, NOT a coverage verdict: a missing profile, an
+      # unreadable codecov.yml, a malformed threshold. Nothing was measured.
+      fail "patch-coverage could not run (exit 2: setup/config). Read its stderr above -- no coverage figure was produced, so this is not a threshold failure."
+      ;;
+    3)
+      # REFUSED: the validity precondition failed, so the diff scope (committed
+      # HEAD) and the profile (working tree) would describe different versions of
+      # the same file. Deliberately NOT folded into 2 -- 2 legitimately routes to
+      # "this repo has no coverage tooling", and a refusal swallowed there is the
+      # silent skip the estimator's guard exists to end.
+      #
+      # TWO causes with DIFFERENT remedies; the estimator's stderr says which:
+      #   - uncommitted Go changes -> commit them, then re-run
+      #   - `git status` unreadable -> a repo-access fault; the tree state is
+      #     UNDETERMINED, committing fixes nothing, and PATCH_COVERAGE_ALLOW_DIRTY
+      #     does not apply (that branch exits before the override is consulted)
+      fail "patch-coverage REFUSED to measure (exit 3) -- no figure was produced, so this is NOT a threshold failure.\n      Read its stderr above for which precondition failed: commit your changes, or repair git access."
+      ;;
+    *)
+      fail "patch-coverage exited $rc, which this gate does not recognize. Read its stderr above; do not assume a coverage verdict."
+      ;;
+  esac
 else
   echo "    estimator not found at $HELPER"
   echo "    skipping local patch-coverage; Codecov enforces it in CI."
