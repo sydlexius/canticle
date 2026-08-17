@@ -1309,13 +1309,37 @@ func (q *DBQueue) RecheckDeferred(ctx context.Context, libraryID *int64) (int64,
 }
 
 // CountRecheckDeferred returns the number of 'deferred' rows that
-// RecheckDeferred would revive, without writing. Intended for dry-run output.
+// RecheckDeferred would actually CHANGE, without writing. Intended for dry-run
+// output.
+//
+// THE PREDICATE MUST MATCH THE APPLY'S EFFECT, not merely its WHERE clause
+// (#774). RecheckDeferred writes next_attempt_at and deliberately leaves status
+// alone, so counting on status alone described a set that a successful revive
+// could not shrink: re-running the dry run reported the identical number, which
+// is misleading at exactly the moment an operator re-runs it to confirm the apply
+// worked. Measured on a live instance: 18,651 revived, then 18,651 "would
+// revive". Adding the next_attempt_at bound makes the count a genuine preview --
+// it counts rows still waiting out a retry delay, which is what reviving them
+// changes.
+//
+// Note this deliberately does NOT match RecheckDeferred's own WHERE clause, which
+// stays broader: re-stamping an already-eligible row is harmless and idempotent,
+// so the apply has no reason to exclude it, while the COUNT must report only rows
+// whose state the apply would move. The two agree on the population that matters
+// and differ only on rows for which the write is a no-op.
+//
+// The 'now' here is q.now(), the same clock the apply stamps with, so a frozen
+// test clock keeps both sides consistent.
+//
+// The retired twin needs no equivalent: RecheckRetired's count and apply share
+// status='done' AND last_error=<sentinel>, and the apply MOVES status, so that
+// count already shrinks on a successful revive.
 func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (int64, error) {
 	libClause, libArgs := recheckLibraryClause(libraryID)
-	args := append([]any(nil), libArgs...)
+	args := append([]any{formatTime(q.now())}, libArgs...)
 	var count int64
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE status = 'deferred'`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		`SELECT COUNT(*) FROM work_queue WHERE status = 'deferred' AND next_attempt_at > ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
 		args...,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("queue: count recheck deferred: %w", err)

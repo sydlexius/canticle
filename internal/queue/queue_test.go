@@ -2573,6 +2573,24 @@ func TestDBQueue_CountRecheckDeferred(t *testing.T) {
 	if n != count {
 		t.Fatalf("RecheckDeferred = %d; CountRecheckDeferred = %d; must agree", n, count)
 	}
+
+	// THE POINT OF #774: the count must be a PREVIEW of the apply, which means it
+	// has to MOVE once the apply succeeds. Asserting agreement BEFORE the apply
+	// (above) cannot catch this -- both sides read the same rows at that moment.
+	//
+	// Before the fix the count read only `status`, while the apply wrote
+	// `next_attempt_at` and deliberately left `status` alone, so a successful
+	// revive changed nothing the count could see. Re-running the dry run reported
+	// the identical number, which is misleading at exactly the moment an operator
+	// re-runs it to confirm the apply worked. Measured on a live instance: 18,651
+	// revived, then 18,651 "would revive".
+	after, err := q.CountRecheckDeferred(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountRecheckDeferred after apply: %v", err)
+	}
+	if after != 0 {
+		t.Errorf("count after a successful revive = %d; want 0 (the dry run must reflect the apply)", after)
+	}
 }
 
 // TestDBQueue_RecheckRetired verifies that RecheckRetired revives
