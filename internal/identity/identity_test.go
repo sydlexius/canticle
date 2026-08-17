@@ -200,3 +200,113 @@ func TestHeuristicNameGuard_NoNamesDegradesToPositional(t *testing.T) {
 		t.Fatalf("HeuristicNameGuard with no names = (%v, %v, tagged=%v), want (true, 0, false)", ok, score, tagged)
 	}
 }
+
+// TestResolveHeuristic covers the shared 1:1 name-similarity resolver (#740).
+//
+// It exists because prune retires identity-less rows without ever consulting a
+// heuristic tier, while realign has had one all along -- so the margin rule had
+// to move somewhere both can reach. The semantics below are realign's, preserved
+// exactly; this is a promotion, not a redesign.
+func TestResolveHeuristic(t *testing.T) {
+	const minConf, minMargin = 0.75, 0.15
+
+	t.Run("a clear unique winner resolves", func(t *testing.T) {
+		orphan := NameSignal{Title: "Autumn Leaves"}
+		pool := []Candidate{
+			{Ref: "a.flac", Title: "Autumn Leaves"},
+			{Ref: "b.flac", Title: "Winter Solstice Overture"},
+		}
+		res := ResolveHeuristic(orphan, pool, pool, minConf, minMargin)
+		v, ref, score := res.Verdict, res.Ref, res.Score
+		if v != VerdictUnique {
+			t.Fatalf("verdict = %v; want Unique (score %.2f)", v, score)
+		}
+		if ref != "a.flac" {
+			t.Errorf("ref = %q; want a.flac", ref)
+		}
+	})
+
+	// THE #672 RULE, which is the whole reason a margin exists: a best score that
+	// its runner-up nearly matches is a name signal that cannot tell the tracks
+	// apart. Pairing on it attaches a sidecar to the WRONG song, so it must be a
+	// conflict rather than a coin flip.
+	t.Run("a near-tie is a conflict, not a winner", func(t *testing.T) {
+		orphan := NameSignal{Title: "Take Five"}
+		pool := []Candidate{
+			{Ref: "a.flac", Title: "Take Five"},
+			{Ref: "b.flac", Title: "Take Five"},
+		}
+		res := ResolveHeuristic(orphan, pool, pool, minConf, minMargin)
+		v, ref := res.Verdict, res.Ref
+		if v != VerdictConflict {
+			t.Fatalf("verdict = %v; want Conflict on a tie", v)
+		}
+		if ref != "" {
+			t.Errorf("ref = %q; a conflict must resolve to nothing", ref)
+		}
+	})
+
+	t.Run("nothing clears the confidence floor", func(t *testing.T) {
+		orphan := NameSignal{Title: "Something Entirely Unrelated"}
+		pool := []Candidate{{Ref: "a.flac", Title: "Qqq Zzz"}}
+		if v := ResolveHeuristic(orphan, pool, pool, minConf, minMargin).Verdict; v != VerdictNone {
+			t.Fatalf("verdict = %v; want None below the floor", v)
+		}
+	})
+
+	t.Run("an empty pool resolves to nothing", func(t *testing.T) {
+		if v := ResolveHeuristic(NameSignal{Title: "X"}, nil, nil, minConf, minMargin).Verdict; v != VerdictNone {
+			t.Fatalf("verdict = %v; want None on an empty pool", v)
+		}
+	})
+
+	// THE DEGRADATION CASE, inherited from HeuristicNameGuard. When NEITHER side
+	// carries a tag-derived name the score is a placeholder zero, so the margin
+	// test would reject every such pair spuriously. A lone untagged candidate is
+	// a positional pairing and must still resolve -- this is what lets a plain
+	// instrumental-marker sidecar re-attach.
+	t.Run("an untagged lone candidate resolves positionally", func(t *testing.T) {
+		orphan := NameSignal{Stem: "01 track"}
+		pool := []Candidate{{Ref: "a.flac"}}
+		res := ResolveHeuristic(orphan, pool, pool, minConf, minMargin)
+		v, ref := res.Verdict, res.Ref
+		if v != VerdictUnique || ref != "a.flac" {
+			t.Fatalf("verdict = %v ref = %q; want Unique/a.flac (positional degradation)", v, ref)
+		}
+	})
+
+	// ...but the degradation must not become a license to guess. With no names on
+	// EITHER side and two candidates, position no longer identifies anything.
+	// TARGETS vs RIVALS -- the case realign needs and prune does not. The only
+	// legal destination is the sidecar-less gap, but a file that ALREADY has a
+	// sidecar must still be out-scored: if the orphan matches it just as well,
+	// the name cannot tell the two tracks apart and pairing on the gap would
+	// attach the sidecar to the wrong song (#672).
+	//
+	// Scoring against targets alone cannot see this: with one target there is no
+	// runner-up, so the margin rule never fires and the pair resolves.
+	t.Run("a rival outside the target set still blocks a near-tie", func(t *testing.T) {
+		orphan := NameSignal{Title: "Take Five"}
+		targets := []Candidate{{Ref: "gap.flac", Title: "Take Five"}}
+		rivals := []Candidate{
+			{Ref: "gap.flac", Title: "Take Five"},
+			{Ref: "has-sidecar.flac", Title: "Take Five"},
+		}
+		if v := ResolveHeuristic(orphan, targets, rivals, minConf, minMargin).Verdict; v != VerdictConflict {
+			t.Fatalf("verdict = %v; want Conflict (a sidecar-bearing rival ties the lone gap)", v)
+		}
+		// Control: with the rival gone the SAME target resolves, proving the
+		// conflict came from the rival and not from the target itself.
+		if res := ResolveHeuristic(orphan, targets, targets, minConf, minMargin); res.Verdict != VerdictUnique || res.Ref != "gap.flac" {
+			t.Fatalf("control: verdict = %v ref = %q; want Unique/gap.flac", res.Verdict, res.Ref)
+		}
+	})
+
+	t.Run("untagged with multiple candidates is a conflict", func(t *testing.T) {
+		orphan := NameSignal{Stem: "01 track"}
+		pool := []Candidate{{Ref: "a.flac"}, {Ref: "b.flac"}}
+		if v := ResolveHeuristic(orphan, pool, pool, minConf, minMargin).Verdict; v != VerdictConflict {
+			t.Fatalf("verdict = %v; want Conflict (position cannot pick between two)", v)
+		}
+	})
+}
