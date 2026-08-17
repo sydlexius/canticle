@@ -307,7 +307,7 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 	// then cancel once it has reconciled to exit the ticker loop.
 	cctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	go func() { runSweeper(cctx, sqlDB, time.Hour, nil); close(done) }()
+	go func() { runSweeper(cctx, sqlDB, time.Hour, config.RealignConfig{}); close(done) }()
 
 	count := func() int {
 		var n int
@@ -375,7 +375,7 @@ func TestRunSweeperLogsRelinkAndRetainOutcomes(t *testing.T) {
 
 	cctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	go func() { runSweeper(cctx, sqlDB, time.Hour, nil); close(done) }()
+	go func() { runSweeper(cctx, sqlDB, time.Hour, config.RealignConfig{}); close(done) }()
 
 	// Wait for the startup sweep to emit both lines, then stop the ticker loop.
 	deadline := time.Now().Add(2 * time.Second)
