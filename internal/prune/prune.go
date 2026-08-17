@@ -48,7 +48,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/models"
@@ -200,10 +203,29 @@ type SweepOptions struct {
 	ReportRetained func(RetainedRow) error
 }
 
+// Heuristic-tier defaults, mirroring internal/config's realign defaults
+// (realignMinConfidenceDefault / realignMinMarginDefault, both unexported
+// there). Duplicated as literals rather than imported to keep prune free of a
+// config dependency, matching how identityKeys defaults here and is then
+// overridden by the caller from the same config -- see SetNameMatchThresholds.
+// A caller that wires config always wins; these only cover a caller that does
+// not, and they must stay conservative rather than permissive.
+const (
+	defaultMinConfidence = 0.75
+	defaultMinMargin     = 0.05
+)
+
 // Pruner reconciles work_queue and scan_results against the filesystem.
 type Pruner struct {
 	db           *sql.DB
 	identityKeys identity.Keys
+	// minConfidence/minMargin gate the heuristic relink tier (#740), read from
+	// the SAME config realign uses so the two subsystems cannot disagree about
+	// what counts as a confident name match. Defaulted here to realign's own
+	// documented defaults so a caller that never sets them still gets the
+	// conservative behavior rather than a zero threshold that accepts anything.
+	minConfidence float64
+	minMargin     float64
 }
 
 // New returns a Pruner backed by db, with the default identity-key order
@@ -212,7 +234,26 @@ type Pruner struct {
 // the same config realign reads, so the two subsystems can never disagree
 // about key precedence.
 func New(db *sql.DB) *Pruner {
-	return &Pruner{db: db, identityKeys: identity.NormalizeKeys([]string{"mbid", "isrc"})}
+	return &Pruner{
+		db:            db,
+		identityKeys:  identity.NormalizeKeys([]string{"mbid", "isrc"}),
+		minConfidence: defaultMinConfidence,
+		minMargin:     defaultMinMargin,
+	}
+}
+
+// SetNameMatchThresholds overrides the heuristic tier's confidence floor and
+// runner-up margin (#740). Callers pass config.RealignConfig's values so prune
+// and realign judge a name match identically; a zero or negative value is
+// ignored rather than accepted, since a zero threshold would make every pair a
+// confident match.
+func (p *Pruner) SetNameMatchThresholds(minConfidence, minMargin float64) {
+	if minConfidence > 0 {
+		p.minConfidence = minConfidence
+	}
+	if minMargin > 0 {
+		p.minMargin = minMargin
+	}
 }
 
 // SetIdentityKeys overrides the identity-key order the exact-match re-link
@@ -324,6 +365,231 @@ type candidate struct {
 type workRow struct {
 	id     int64
 	inputs models.Inputs
+	// lastError is the row's stored last_error, carried so the settled
+	// short-circuit can recognize a row THIS FEATURE retired (the
+	// unresolvableGoneError sentinel) as distinct from a genuinely completed one.
+	// See classify's retired-row reconsideration.
+	lastError string
+}
+
+// retiredAsUnresolvable reports whether EVERY linked work item carries the
+// retirement sentinel this package writes -- i.e. the candidate is settled
+// because prune retired it as unrelinkable, not because its work completed.
+//
+// Requires ALL items, not any: a candidate holding one genuinely-completed item
+// alongside a retired one is not ours to reconsider, and resurrecting the
+// completed one would re-queue work that already succeeded. Erring toward
+// leaving a row settled is the safe direction -- it costs a missed recovery,
+// while the opposite costs duplicated work.
+func (c *candidate) retiredAsUnresolvable() bool {
+	if len(c.workItems) == 0 {
+		return false
+	}
+	for _, w := range c.workItems {
+		if w.lastError != unresolvableGoneError {
+			return false
+		}
+	}
+	return true
+}
+
+// taggedTitle returns the first non-empty TAG-derived track title among this
+// candidate's linked work items, or "" when none carries one.
+//
+// Deliberately the TITLE ALONE and never the filename stem: the stem is a
+// fallback for SCORING two sides that both lack tags, and prune must not relink
+// on it (see the caller's Gate 4). Deliberately not the artist either -- an
+// artist matches every track on an album and identifies no single song.
+//
+// A disagreement among several work items resolves to the first non-empty title
+// in id order, which is deterministic. In practice a candidate's items all
+// describe the same source file, so a disagreement means the tags changed
+// between enqueues; taking one and requiring an EXACT match against a present
+// file is safe either way, since a stale title simply matches nothing.
+func (c *candidate) taggedTitle() string {
+	for _, w := range c.workItems {
+		if t := strings.TrimSpace(w.inputs.Track.TrackName); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// nameSignal describes this candidate's name evidence for the resolver, built
+// from the title the CALLER already resolved (via taggedTitle) rather than
+// re-derived here.
+//
+// Taking the title as a parameter is what keeps the filter and the score talking
+// about the same string. An earlier version re-scanned the work items on an
+// artist-OR-title predicate, so a candidate whose first item carried an artist
+// but no title produced an empty Title -- identity.NameSignal.discriminator then
+// fell back to the filename STEM and scored it against a pool that had been
+// filtered on the real title. The result was a row that failed to relink even
+// though its title matched exactly, reported with a reason that was false.
+//
+// The artist is deliberately absent: discriminator ignores it whenever a title
+// is present (#672), and Gate 4 guarantees a title is present on every call.
+func (c *candidate) nameSignal(src, title string) identity.NameSignal {
+	return identity.NameSignal{Title: title, Stem: stemOf(src)}
+}
+
+// titleKey is prune's OWN title predicate, and it deliberately does NOT reuse
+// normalize.NormalizeKey.
+//
+// NormalizeKey is a CACHE key: it NFKD-decomposes and then strips every combining
+// mark (Unicode category Mn), which is right for its own callers -- folding
+// accent variants together makes a cache hit more likely, and a wrong cache hit
+// costs one re-fetch. That lossiness is catastrophic here, because a wrong relink
+// is permanent. Japanese dakuten and handakuten ARE combining marks (U+3099 /
+// U+309A after decomposition), so NormalizeKey DELETES them, collapsing
+// voiced and unvoiced kana into one key -- different words, not variants.
+// Measured: four of four tested kana pairs collided under NormalizeKey, and an
+// end-to-end sweep relinked a queue row onto a different song through that
+// collision. This repo ships a Japanese-catalog provider, so the affected
+// population is real rather than theoretical.
+//
+// NFKC instead of NFKD-plus-strip keeps the compatibility folds that are safe and
+// wanted (fullwidth to ASCII, a Roman-numeral glyph to letters, a ligature to its
+// letters) while leaving marks attached, since a composed form keeps voiced kana
+// as single code points. Case and surrounding whitespace still fold; a phoneme
+// never does.
+func titleKey(s string) string {
+	return strings.ToLower(strings.TrimSpace(norm.NFKC.String(strings.ToValidUTF8(s, ""))))
+}
+
+// tryNameRelink is the name tier (#740): it decides whether a gone,
+// identity-less row can be re-attached to a present file that carries the SAME
+// TITLE, and returns the relink classification when it can.
+//
+// Returns (false, reason, _, nil) when the tier declines, where reason explains
+// which gate stopped it so the retain is legible. Returns (false, "", _, err)
+// only on a genuine I/O failure, which the caller MUST propagate rather than
+// treat as a no-match -- see the caller's comment.
+//
+// EVERY GATE BELOW IS A SAFETY PRECONDITION, not a tidiness check. This tier
+// rewrites which audio file a queue row points at, on name evidence alone, and a
+// wrong answer is silent and permanent. Each gate closes a demonstrated defect.
+func (p *Pruner) tryNameRelink(ctx context.Context, idx *presentIndex, policy Policy, src string, c *candidate) (bool, string, classified, error) {
+	// GATE 1 -- PERIODIC SWEEP ONLY. The reactive pass (PrunePath, fired from the
+	// watcher's delete event) runs BEFORE a rescan has indexed the moved file's
+	// new location, so the true target is typically absent from the pool and the
+	// best-scoring present file is a different song. The pre-existing code already
+	// defers RETIREMENT to the periodic sweep for exactly this reason; a relink is
+	// at least as consequential, so it earns the same discipline. By the periodic
+	// sweep the rescan has settled and the real target is present.
+	if policy != PolicyFull {
+		return false, "identity absent; deferred to the periodic sweep, which sees a settled index", classified{}, nil
+	}
+	// GATE 2 -- MUST BE REAL WORK. A candidate with no linked work_queue row has
+	// nothing to repoint: relinkOne's ownership check is skipped when the owned
+	// set is empty, its update loop never executes (so the in-flight guard never
+	// runs), and control reaches the DELETE, destroying a scan_results row on a
+	// name guess while nothing was moved. Retiring is also meaningless here. The
+	// row is left exactly as it is.
+	if len(c.workItems) == 0 {
+		return false, "identity absent, and no queue row to re-attach; left untouched", classified{}, nil
+	}
+	// GATE 3 -- LIBRARY-SCOPED ONLY. A nil libraryID makes poolHeuristic omit its
+	// library_id filter and score across EVERY library in the database, where a
+	// same-title file is a duplicate copy rather than a move. A matching MBID may
+	// justify crossing that boundary; a matching name never does.
+	if c.libraryID == nil {
+		return false, "identity absent, and the row is not library-scoped; never matched across libraries by name", classified{}, nil
+	}
+	// GATE 4 -- THE ORPHAN MUST CARRY A REAL TITLE TAG. Without one there is no
+	// evidence to match on: identity.NameSignal treats a bare filename stem as
+	// untagged, and ResolveHeuristic's untagged degradation then pairs
+	// POSITIONALLY on a lone target. That degradation is correct for realign,
+	// whose targets are the single sidecar-less gap in ONE DIRECTORY, and wrong
+	// here, where targets are the whole library -- it was demonstrated relinking
+	// onto a completely unrelated file. Requiring a title makes the degradation
+	// unreachable from prune.
+	title := c.taggedTitle()
+	if title == "" {
+		return false, "identity absent, and no title tag to match on; never relinked on a filename alone", classified{}, nil
+	}
+	wantTitle := titleKey(title)
+	if wantTitle == "" {
+		return false, "identity absent, and its title normalizes to nothing; never relinked on an empty key", classified{}, nil
+	}
+
+	hpool, err := idx.poolHeuristic(ctx, c.libraryID)
+	if err != nil {
+		return false, "", classified{}, err
+	}
+
+	// GATE 5 -- EXACT NORMALIZED TITLE. The filter, and the reason a near-miss
+	// can no longer win: a title that merely RESEMBLES another is excluded here,
+	// before any scoring happens.
+	//
+	// The orphan's OWN row is dropped in the same pass. poolHeuristic performs no
+	// per-row stat, so the gone source is still in the pool with the very
+	// artist/title being scored; left in, it matches itself and either wins (then
+	// fails the stat below) or ties the true match into a Conflict, so the tier
+	// would relink essentially nothing.
+	pool := make([]identity.Candidate, 0, 4)
+	for _, hc := range hpool {
+		if hc.Ref == src {
+			continue
+		}
+		if titleKey(hc.Title) == wantTitle {
+			pool = append(pool, hc)
+		}
+	}
+	if len(pool) == 0 {
+		return false, "identity absent, and no present file shares this title; never deleted on a guess", classified{}, nil
+	}
+
+	// Every survivor has an identical normalized title, so all score 1.0: a lone
+	// survivor resolves Unique, and two or more fall inside the runner-up margin
+	// and resolve Conflict. Passing one slice as both targets and rivals is right
+	// here -- every same-title present file is both a possible destination and a
+	// possible confusion.
+	hres := identity.ResolveHeuristic(c.nameSignal(src, title), pool, pool, p.minConfidence, p.minMargin)
+	switch hres.Verdict {
+	case identity.VerdictUnique:
+		// Resolved -- fall through to the stat and detail checks below.
+	case identity.VerdictConflict:
+		return false, "identity absent, and several present files share this title; never picked one on a guess", classified{}, nil
+	default:
+		// VerdictNone: the pool was non-empty (checked above) but nothing cleared
+		// the guard. Reported distinctly rather than folded into the conflict
+		// message, which would tell an operator there were several candidates when
+		// there was one.
+		return false, "identity absent, and the sole same-title file did not clear the name guard; never relinked on a weak signal", classified{}, nil
+	}
+	// Stat ONLY the winner. The pool deliberately skips the per-row os.Stat that
+	// pool() performs -- statting a whole library scope would multiply disk
+	// wakeups on a spun-down array -- so this is where that safety is bought back,
+	// for one stat rather than tens of thousands. A winner that has itself
+	// vanished is no target: it would trade one dangling reference for another.
+	if !pathExists(hres.Ref) {
+		return false, "identity absent, and the only same-title file has itself vanished; never relinked onto a dead path", classified{}, nil
+	}
+	// A detail MISS must decline, never proceed with the zero value: a zero detail
+	// carries scanResultID 0 and empty output columns, which would junction the
+	// row to a nonexistent scan_result and blank its outdir/filename.
+	detail, ok := idx.detailWide(c.libraryID, hres.Ref)
+	if !ok || detail.scanResultID == 0 {
+		return false, "identity absent, and the matched file's row could not be resolved; left untouched", classified{}, nil
+	}
+	rr := RelinkedRow{OldPath: src, NewPath: hres.Ref, ScanResultIDs: c.scanResultIDs}
+	for _, w := range c.workItems {
+		rr.WorkItemIDs = append(rr.WorkItemIDs, w.id)
+	}
+	return true, "", classified{
+		outcome: outcomeRelink,
+		classifiedRelink: classifiedRelink{
+			src: src, c: c, relinked: rr, target: detail,
+			// Past Gate 1 the policy is known to be PolicyFull, and Gate 2 already
+			// established there is at least one work item, so this mirrors the
+			// retain path's own condition. It only takes effect if the relink is
+			// DECLINED at apply time; a successful relink leaves the row eligible,
+			// which is the whole point of relinking it.
+			retireIfDeclined: !c.settled,
+			alreadySettled:   c.settled,
+		},
+	}, nil
 }
 
 // reconcile is the shared core behind PrunePath and Sweep. It gathers candidate
@@ -494,6 +760,31 @@ type classifiedRelink struct {
 	c        *candidate
 	relinked RelinkedRow
 	target   presentRowDetail
+	// alreadySettled marks a candidate that was ALREADY retired and is only being
+	// reconsidered on the chance its target has since been indexed. If such a
+	// relink is DECLINED at apply time, the row is exactly as settled as it was
+	// before, so it drops out silently rather than being reported: reporting it
+	// would re-list it on every sweep forever, which is the churn #732 removed.
+	// Nothing is mutated on that path -- the row is already 'done'.
+	alreadySettled bool
+	// retireIfDeclined carries the retirement plan ACROSS the relink path, and
+	// exists because a planned relink can still be declined at apply time (the
+	// target turns out to be owned by a different work_queue row, or a work item
+	// raced into 'processing').
+	//
+	// Without it such a row settles nowhere: classify returned outcomeRelink, so
+	// the retire branch in reconcile never ran, and applyRelinks turned the
+	// decline into a plain RetainedRow. The row then stays 'failed' and
+	// dequeue-eligible while pointing at a vanished path -- forever, since every
+	// later sweep reaches the identical decline. That is exactly the
+	// non-converging worker loop #732 removed, and it is the MOST LIKELY
+	// post-reorg state: the rescan that creates the target's scan_results row
+	// (which the name tier needs) also enqueues and junction-links it.
+	//
+	// Named differently from classified.shouldRetire deliberately: classified
+	// EMBEDS this struct, and a same-named field would silently shadow rather
+	// than conflict.
+	retireIfDeclined bool
 }
 
 type classified struct {
@@ -514,10 +805,27 @@ type classified struct {
 // delete).
 func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy, src string, c *candidate) (classified, error) {
 	if c.mbid == "" && c.isrc == "" {
-		// Already retired by an earlier sweep (or never queued at all): gone,
-		// unresolvable, and no longer work. Re-reporting it every sweep is exactly
-		// the churn #732 exists to stop, so it drops out of the candidate set here.
-		if c.settled && len(c.workItems) > 0 {
+		// Already settled: gone and no longer work. Re-reporting it every sweep is
+		// exactly the churn #732 exists to stop, so it normally drops out of the
+		// candidate set here.
+		//
+		// EXCEPT when it was retired by THIS feature's own sentinel, which is a
+		// race the tier would otherwise lose permanently. The tier can only match
+		// once a rescan has indexed the moved file, and the periodic sweep is
+		// scheduled independently -- so a sweep that runs first finds no same-title
+		// file and retires the row. Without this carve-out the row is settled
+		// forever after, and the tier never gets to see the target that appeared
+		// moments later. The fix's entire premise is that retiring these rows is
+		// wrong precisely because a name match can still resolve them, so letting
+		// the first sweep lock the tier out would make the whole feature a coin
+		// flip against the scan scheduler.
+		//
+		// Gated on the sentinel, never on 'done' generally: a row that genuinely
+		// completed its work must never be resurrected. retireUnresolvable is the
+		// only writer of this exact string, so it identifies our own retirements
+		// and nothing else -- including retirements by SHIPPED builds, which this
+		// therefore also recovers.
+		if c.settled && len(c.workItems) > 0 && !c.retiredAsUnresolvable() {
 			return classified{outcome: outcomeSettled}, nil
 		}
 		// Gone, and carrying no identity: no relink can ever resolve this row, at any
@@ -531,11 +839,75 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		// the same policy discipline as a genuine delete -- the reactive pass defers it
 		// to the periodic sweep, by which time a rescan of a moved file's new location
 		// has had time to settle and re-create the row with identity.
+		// THE NAME TIER, consulted BEFORE any terminal decision (#740).
+		//
+		// "No MBID and no ISRC" rules out the EXACT tier only. It says nothing
+		// about a name-based tier, and retiring here without asking one made that
+		// route structurally unreachable for exactly the population it would
+		// serve. A library reorg (an artist-folder rename) therefore discarded
+		// queue state for files still on disk, terminally: measured on one
+		// deployment, 49 rows retired in ~2s, 48 of their audio files still
+		// present, and none of the 48 carried a work_queue or scan_results row
+		// afterward. Unresolved is not unresolvable, and only the latter justifies
+		// retirement.
+		//
+		// WHY THIS TIER IS EXACT-TITLE AND NOT FUZZY, which is the whole safety
+		// argument. An earlier revision scored Jaro-Winkler similarity against a
+		// confidence floor and a runner-up margin, mirroring realign. Adversarial
+		// review demonstrated that this relinks a row onto a DIFFERENT SONG, and
+		// that the margin rule structurally cannot prevent it:
+		//
+		//   - The margin rule only detects ambiguity INSIDE the pool. It cannot
+		//     detect the TRUE TARGET BEING ABSENT, which is the normal case in a
+		//     reactive pass -- the rescan has not yet indexed the file's new
+		//     location, so the nearest thing present is a different song. Its
+		//     rivals score ~0.5, so the margin is wide and the verdict is Unique.
+		//   - Measured similarities: a title against its plural scored 0.983,
+		//     against a spaced variant 0.983, against a "(Live)" variant 0.922 --
+		//     all far above any workable floor. Live/remix/alternate-take variants
+		//     are the COMMON library shape, so no threshold separates them.
+		//
+		// A wrong relink is silent, permanent, and strictly worse than the retain
+		// it replaces (a retain is inert and reported). So the predicate is
+		// EXACT NORMALIZED TITLE EQUALITY: same song or no answer. That still
+		// resolves #740, whose scenario is a PATH change with the tags intact.
+		//
+		// The similarity resolver is still what adjudicates the filtered set --
+		// every survivor has an identical normalized title and therefore scores
+		// 1.0, so a lone survivor is Unique and two or more trip the margin rule
+		// as a Conflict. That is exactly the wanted semantics, and it keeps one
+		// shared definition of a name verdict rather than a second private one.
+		reason := "identity absent, and no present file shares this title; never deleted on a guess"
+		if ok, why, cls, err := p.tryNameRelink(ctx, idx, policy, src, c); err != nil {
+			// NEVER swallow this error. The exact tier below propagates its pool
+			// failure, and doing otherwise here converted a transient DB fault into
+			// a PERMANENT retirement -- the precise damage #740 exists to undo,
+			// reachable from an I/O blip -- while reporting a "no match" reason that
+			// was never actually established.
+			return classified{}, err
+		} else if ok {
+			return cls, nil
+		} else if why != "" {
+			reason = why
+		}
+		// An ALREADY-RETIRED row that the tier just declined drops back out
+		// silently. It was only reconsidered on the chance that its target had
+		// since been indexed; with no match it is exactly as settled as before, and
+		// reporting it on every sweep would reinstate the per-sweep churn #732
+		// removed -- for a population that is, by construction, every row this
+		// feature has ever retired. Nothing is mutated: it is already 'done'.
+		if c.settled && c.retiredAsUnresolvable() {
+			return classified{outcome: outcomeSettled}, nil
+		}
 		return classified{
 			outcome: outcomeRetain,
 			retained: RetainedRow{
 				SourcePath: src,
-				Reason:     "identity absent; never deleted on a guess",
+				// The reason distinguishes WHY the tier declined -- not eligible,
+				// no same-title file, several, or a winner that had itself vanished.
+				// One flat string for all four left an operator unable to tell a
+				// genuine no-match from a suppressed condition.
+				Reason: reason,
 			},
 			// Only a row that is still WORK can be retired. A settled candidate has
 			// every linked item in 'done' already -- either never queued, or retired by
@@ -598,6 +970,16 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Retirements owed by DECLINED relinks, applied after the transaction commits
+	// (retireUnresolvable runs against p.db and would deadlock against tx on
+	// SQLite). idx points at the RetainedRow this retirement belongs to, so the
+	// committed result can be stamped onto the right row rather than guessed at.
+	type retireePlan struct {
+		c   *candidate
+		idx int
+	}
+	var toRetire []retireePlan
+
 	for i, cg := range targets {
 		// Each candidate runs inside its own savepoint so a decline part-way
 		// through a multi-row candidate (the in-flight guard rejecting the
@@ -624,12 +1006,35 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 			if _, err := tx.ExecContext(ctx, "ROLLBACK TO "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
 				return nil, nil, fmt.Errorf("prune: rollback relink savepoint: %w", err)
 			}
-			retained = append(retained, RetainedRow{
+			// An already-retired row whose reconsidered relink was declined drops
+			// out silently: it is exactly as settled as before, nothing was
+			// mutated, and reporting it would re-list it on every future sweep.
+			if cg.alreadySettled {
+				if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+					return nil, nil, fmt.Errorf("prune: release relink savepoint: %w", err)
+				}
+				continue
+			}
+			row := RetainedRow{
 				SourcePath: cg.relinked.OldPath,
 				Reason:     decision.reason,
 				MBID:       cg.relinked.MBID,
 				ISRC:       cg.relinked.ISRC,
-			})
+			}
+			// A declined relink still has to SETTLE, or the row stays
+			// dequeue-eligible pointing at a vanished path and every later sweep
+			// reaches the identical decline (#732's non-converging loop). The plan
+			// was computed by the tier; carrying it here is what makes the retire
+			// branch reachable from the relink path at all.
+			//
+			// Deferred until after the commit rather than run inside tx:
+			// retireUnresolvable executes against p.db, so calling it here would
+			// deadlock against this transaction on SQLite. Collected now, applied
+			// below.
+			if cg.retireIfDeclined {
+				toRetire = append(toRetire, retireePlan{c: cg.c, idx: len(retained)})
+			}
+			retained = append(retained, row)
 		} else {
 			applied = append(applied, cg.relinked)
 		}
@@ -639,6 +1044,20 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, fmt.Errorf("prune: commit relink tx: %w", err)
+	}
+	// Settle every declined relink, now that tx is committed and the row's
+	// pre-decline writes are rolled back. Stamped onto the RetainedRow BEFORE it
+	// is reported, so a hook never sees a row whose Retired flag is about to
+	// change. Retired reflects what the UPDATE actually affected -- a row that
+	// raced into 'processing' or 'done' is left alone by the status guard and
+	// correctly reports false.
+	for _, plan := range toRetire {
+		retired, err := p.retireUnresolvable(ctx, plan.c)
+		if err != nil {
+			return nil, nil, fmt.Errorf("prune: retire declined relink %q: %w", retained[plan.idx].SourcePath, err)
+		}
+		retained[plan.idx].WouldRetire = true
+		retained[plan.idx].Retired = retired
 	}
 	if reportRelinked != nil {
 		for _, rr := range applied {
@@ -702,10 +1121,31 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 			return relinkDecision{reason: fmt.Sprintf("present-file candidate already linked to work_queue row %d; merging is identityrepair's job", otherID)}, nil
 		}
 	}
+	// A row this package RETIRED is relinking back out of its terminal state, so
+	// the retirement stamps have to come off with it: leaving status='done' would
+	// repoint the row at a file the worker will never pick up, which is the same
+	// undone-work the retirement caused. Restored to 'failed' rather than
+	// 'pending' because that is the state it held before being retired, and the
+	// worker's backoff reads it; completed_at and last_error are cleared so the
+	// row does not read as settled to any report that joins on them.
+	//
+	// Applied ONLY to our own sentinel-retired rows (see retiredAsUnresolvable),
+	// so a genuinely completed row is never resurrected by a relink.
+	resurrect := c.retiredAsUnresolvable()
 	for _, w := range c.workItems {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ? WHERE id = ? AND status != 'processing'`,
-			target.filePath, target.outdir, target.filename, w.id)
+		var res sql.Result
+		var err error
+		if resurrect {
+			res, err = tx.ExecContext(ctx,
+				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?,
+                     status = 'failed', completed_at = NULL, last_error = ''
+                 WHERE id = ? AND status != 'processing'`,
+				target.filePath, target.outdir, target.filename, w.id)
+		} else {
+			res, err = tx.ExecContext(ctx,
+				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ? WHERE id = ? AND status != 'processing'`,
+				target.filePath, target.outdir, target.filename, w.id)
+		}
 		if err != nil {
 			return relinkDecision{}, fmt.Errorf("prune: relink work_queue %d: %w", w.id, err)
 		}
@@ -791,14 +1231,22 @@ type presentIndex struct {
 	roots   []string
 	byScope map[int64][]identity.Candidate
 	details map[int64]map[string]presentRowDetail
+	// byScopeWide caches the HEURISTIC pool: every present file in the scope,
+	// including the identity-less majority the exact tier can never match. Kept
+	// separate from byScope so the exact tier keeps its narrow, seekable pool and
+	// pays none of this cost (#740).
+	byScopeWide map[int64][]identity.Candidate
+	detailsWide map[int64]map[string]presentRowDetail
 }
 
 func newPresentIndex(db *sql.DB, roots []string) *presentIndex {
 	return &presentIndex{
-		db:      db,
-		roots:   roots,
-		byScope: map[int64][]identity.Candidate{},
-		details: map[int64]map[string]presentRowDetail{},
+		db:          db,
+		roots:       roots,
+		byScope:     map[int64][]identity.Candidate{},
+		details:     map[int64]map[string]presentRowDetail{},
+		byScopeWide: map[int64][]identity.Candidate{},
+		detailsWide: map[int64]map[string]presentRowDetail{},
 	}
 }
 
@@ -860,6 +1308,98 @@ func (idx *presentIndex) pool(ctx context.Context, libraryID *int64) ([]identity
 	idx.byScope[key] = pool
 	idx.details[key] = details
 	return pool, nil
+}
+
+// poolHeuristic returns EVERY present file in the scope as a name-scored
+// candidate, for the heuristic tier (#740). Built and cached separately from
+// pool(), and LAZILY -- a sweep with no identity-less gone candidate never calls
+// it and pays nothing.
+//
+// WHY A SECOND POOL RATHER THAN WIDENING THE FIRST. pool() filters to
+// identity-bearing rows because only those can win the exact tier, and that
+// filter is what keeps its os.Stat cost bounded. The heuristic tier needs the
+// OPPOSITE population: an identity-less orphan is most likely to match an
+// identity-less present file -- a file whose tags lack MBID/ISRC is exactly why
+// its row had no identity to begin with. Measured on one deployment: 15,025
+// present files carry identity and 51,409 do not, so consulting the narrow pool
+// would have scored against a set that structurally cannot contain the answer.
+// The fix would have looked correct, passed its tests, and relinked nothing.
+//
+// NO PER-ROW os.Stat, and that is the load-bearing difference. pool() stats
+// every candidate so a gone row cannot be relinked onto another gone file. Doing
+// that here would stat the WHOLE library scope: 54,936 files on the largest
+// library measured, against 11,404 today -- a 4.8x increase in disk wakeups on a
+// spun-down array, for a pool that is mostly irrelevant to any single orphan.
+// Instead the caller stats ONLY THE WINNER after scoring, which buys the same
+// safety for one stat rather than tens of thousands. Scoring itself is pure
+// in-memory string work over a single indexed query.
+//
+// underAvailableRoot is still applied per row: it is an in-memory prefix check
+// against the configured roots, costs no I/O, and keeps a row from an unmounted
+// library out of the candidate set.
+func (idx *presentIndex) poolHeuristic(ctx context.Context, libraryID *int64) ([]identity.Candidate, error) {
+	key := presentIndexGlobalKey
+	if libraryID != nil {
+		key = *libraryID
+	}
+	if pool, ok := idx.byScopeWide[key]; ok {
+		return pool, nil
+	}
+	query := `SELECT id, file_path, outdir, filename, artist, title FROM scan_results
+              WHERE file_path != ''`
+	var args []any
+	if libraryID != nil {
+		query += ` AND library_id = ?`
+		args = append(args, *libraryID)
+	}
+	var pool []identity.Candidate
+	details := map[string]presentRowDetail{}
+	if err := queryRows(ctx, idx.db, query, args, func(rows *sql.Rows) error {
+		var id int64
+		var path, outdir, filename, artist, title string
+		if err := rows.Scan(&id, &path, &outdir, &filename, &artist, &title); err != nil {
+			return err
+		}
+		if !underAvailableRoot(path, idx.roots) {
+			return nil
+		}
+		// Stem carries the filename-derived name evidence; Ref stays the opaque
+		// path handle the caller round-trips back out of a Unique verdict.
+		pool = append(pool, identity.Candidate{Ref: path, Artist: artist, Title: title, Stem: stemOf(path)})
+		details[path] = presentRowDetail{scanResultID: id, filePath: path, outdir: outdir, filename: filename}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("prune: build present-file heuristic index: %w", err)
+	}
+	idx.byScopeWide[key] = pool
+	idx.detailsWide[key] = details
+	return pool, nil
+}
+
+// detailWide returns the present-row detail for ref within the name pool's
+// scope, and whether it was found.
+//
+// The ok flag is load-bearing rather than idiomatic garnish. A bare map index
+// returns a ZERO presentRowDetail on a miss -- scanResultID 0 and empty
+// outdir/filename -- which relinkOne would then write: junctioning the work item
+// to a nonexistent scan_result and blanking the row's output columns. Today
+// every ref comes from this same map, so a miss should be unreachable; returning
+// the flag means an unreachable case that becomes reachable DECLINES rather than
+// silently corrupts.
+func (idx *presentIndex) detailWide(libraryID *int64, ref string) (presentRowDetail, bool) {
+	key := presentIndexGlobalKey
+	if libraryID != nil {
+		key = *libraryID
+	}
+	d, ok := idx.detailsWide[key][ref]
+	return d, ok
+}
+
+// stemOf is the filename stem used as name evidence when a row carries no
+// artist/title tags.
+func stemOf(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // detail returns the present-row detail for ref within libraryID's scope,
@@ -973,12 +1513,12 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		return nil, fmt.Errorf("prune: gather scan_results: %w", err)
 	}
 
-	wqQuery := `SELECT id, artist, title, source_path, output_paths, status, isrc, mbid FROM work_queue WHERE source_path != ''`
+	wqQuery := `SELECT id, artist, title, source_path, output_paths, status, isrc, mbid, last_error FROM work_queue WHERE source_path != ''`
 	var wqArgs []any
 	if libraryID != nil {
 		// Library-scope work_queue through the junction so a scoped sweep only
 		// prunes queue rows belonging to that library.
-		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.source_path, wq.output_paths, wq.status, wq.isrc, wq.mbid
+		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.source_path, wq.output_paths, wq.status, wq.isrc, wq.mbid, wq.last_error
                    FROM work_queue wq
                    JOIN work_queue_scan_results j ON j.work_queue_id = wq.id
                    JOIN scan_results sr ON sr.id = j.scan_result_id
@@ -994,8 +1534,8 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 	if err := queryRows(ctx, p.db, wqQuery, wqArgs, func(rows *sql.Rows) error {
 		var id int64
 		var artist, title, source, outputPaths, status string
-		var isrc, mbid sql.NullString
-		if err := rows.Scan(&id, &artist, &title, &source, &outputPaths, &status, &isrc, &mbid); err != nil {
+		var isrc, mbid, lastError sql.NullString
+		if err := rows.Scan(&id, &artist, &title, &source, &outputPaths, &status, &isrc, &mbid, &lastError); err != nil {
 			return err
 		}
 		if !sc.matches(source) {
@@ -1031,6 +1571,7 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 				SourcePath:  source,
 				OutputPaths: paths,
 			},
+			lastError: lastError.String,
 		})
 		// work_queue.isrc/mbid (migration 033, the provider's resolved identity
 		// at fetch time) is only a FALLBACK: scan_results' tag-read identity is

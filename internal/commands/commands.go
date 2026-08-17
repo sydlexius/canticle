@@ -1236,7 +1236,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runSweeper(runCtx, sqlDB, sweepInterval, cfg.Realign.IdentityKeys)
+			runSweeper(runCtx, sqlDB, sweepInterval, cfg.Realign)
 		}()
 	}
 	// One-shot identity-repair backfill (#466): correct run-together multi-value
@@ -2051,9 +2051,14 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 // "nothing to do" apart from "a row has been quietly held back on every tick
 // since the move", which is precisely the state a human needs to resolve.
 // Retained rows are logged at Warn (they need a human), relinks at Info.
-func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, identityKeys []string) {
+// The realign config arrives whole rather than as loose thresholds: prune reads
+// the SAME keys and name-match thresholds realign does (#740), so passing the
+// one struct keeps a future knob from having to widen this signature again, and
+// makes it impossible to wire the keys while forgetting the thresholds.
+func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg config.RealignConfig) {
 	pruner := prune.New(sqlDB)
-	pruner.SetIdentityKeys(identityKeys)
+	pruner.SetIdentityKeys(rcfg.IdentityKeys)
+	pruner.SetNameMatchThresholds(rcfg.MinConfidence, rcfg.MinMargin)
 	sweep := func() {
 		res, err := pruner.Sweep(ctx, prune.SweepOptions{Granularity: prune.Directory})
 		if err != nil {
@@ -2124,6 +2129,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(cfg.Realign.IdentityKeys)
+	pruner.SetNameMatchThresholds(cfg.Realign.MinConfidence, cfg.Realign.MinMargin)
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
 	}, func(ctx context.Context, path string) error {

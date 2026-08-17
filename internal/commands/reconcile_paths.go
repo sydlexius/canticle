@@ -162,6 +162,7 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(cfg.Realign.IdentityKeys)
+	pruner.SetNameMatchThresholds(cfg.Realign.MinConfidence, cfg.Realign.MinMargin)
 	res, err := pruner.Sweep(ctx, prune.SweepOptions{
 		LibraryID:      libID,
 		Granularity:    prune.Exact,
