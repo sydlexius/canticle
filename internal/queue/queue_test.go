@@ -4988,7 +4988,7 @@ func TestDBQueue_SettleGuardRejectedAtomically(t *testing.T) {
 	t.Run("happy path: label and completion land together", func(t *testing.T) {
 		q, id := newProcessingRow(t)
 
-		outcome, err := q.SettleGuardRejected(ctx, id)
+		outcome, err := q.SettleGuardRejected(ctx, id, "")
 		if err != nil {
 			t.Fatalf("SettleGuardRejected: %v", err)
 		}
@@ -5037,7 +5037,7 @@ func TestDBQueue_SettleGuardRejectedAtomically(t *testing.T) {
 		}
 		// Deliberately NOT dequeued: the row is still 'pending'.
 
-		outcome, err := q.SettleGuardRejected(ctx, item.ID)
+		outcome, err := q.SettleGuardRejected(ctx, item.ID, "")
 		if err != nil {
 			t.Fatalf("SettleGuardRejected: %v", err)
 		}
@@ -5064,12 +5064,101 @@ func TestDBQueue_SettleGuardRejectedAtomically(t *testing.T) {
 
 	t.Run("missing row reports rather than erroring", func(t *testing.T) {
 		q := NewDBQueue(openQueueTestDB(t))
-		outcome, err := q.SettleGuardRejected(ctx, 424242)
+		outcome, err := q.SettleGuardRejected(ctx, 424242, "")
 		if err != nil {
 			t.Fatalf("SettleGuardRejected on a missing row: %v; want a reported outcome", err)
 		}
 		if outcome == Settled {
 			t.Error("a nonexistent row reported Settled")
+		}
+	})
+
+	// THE POINT OF #773: the row must record WHY, not only that it was rejected.
+	//
+	// The guard already computes a precise verdict -- mechanism, measurement and
+	// threshold -- and before this every layer below the log line discarded it, so
+	// 'rejected' was a bucket with no detail and the UI could say nothing about
+	// why a track produced no lyrics.
+	t.Run("the rejection reason is persisted alongside the label", func(t *testing.T) {
+		q, id := newProcessingRow(t)
+
+		const reason = "foreign-script share 1.00 exceeds 0.05"
+		outcome, err := q.SettleGuardRejected(ctx, id, reason)
+		if err != nil {
+			t.Fatalf("SettleGuardRejected: %v", err)
+		}
+		if outcome != Settled {
+			t.Fatalf("outcome = %v; want Settled", outcome)
+		}
+
+		var outcomeType, outcomeDetail *string
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT outcome_type, outcome_detail FROM work_queue WHERE id = ?`, id,
+		).Scan(&outcomeType, &outcomeDetail); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if outcomeDetail == nil {
+			t.Fatal("outcome_detail is NULL on a settled guard rejection; that is the #773 defect")
+		}
+		if *outcomeDetail != reason {
+			t.Errorf("outcome_detail = %q; want %q", *outcomeDetail, reason)
+		}
+		// The detail must accompany the label, never replace it: a detail on an
+		// unlabeled row would be the #655 defect wearing a new column.
+		if outcomeType == nil || *outcomeType != "rejected" {
+			t.Errorf("outcome_type = %v; want %q alongside the detail", outcomeType, "rejected")
+		}
+	})
+
+	// An empty reason stores NULL rather than an empty string, so "no reason
+	// recorded" has ONE representation in the column. Two spellings of absent
+	// would force every reader to test for both, and a reader that checked only
+	// one would silently render a blank detail as if it were a real verdict.
+	t.Run("an empty reason stores NULL, not an empty string", func(t *testing.T) {
+		q, id := newProcessingRow(t)
+
+		if _, err := q.SettleGuardRejected(ctx, id, ""); err != nil {
+			t.Fatalf("SettleGuardRejected: %v", err)
+		}
+
+		var outcomeDetail *string
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT outcome_detail FROM work_queue WHERE id = ?`, id,
+		).Scan(&outcomeDetail); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if outcomeDetail != nil {
+			t.Errorf("outcome_detail = %q; want NULL when no reason was supplied", *outcomeDetail)
+		}
+	})
+
+	// A refused settle writes NOTHING -- asserted for the detail specifically,
+	// because it is a second column that could leak past the processing guard
+	// independently of outcome_type.
+	t.Run("a refused settle writes no detail either", func(t *testing.T) {
+		q := NewDBQueue(openQueueTestDB(t))
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:    models.Track{ArtistName: "Artist", TrackName: "Title"},
+			Outdir:   "out",
+			Filename: "a.lrc",
+		}, 1)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		// Deliberately NOT dequeued: the row is still 'pending'.
+
+		if _, err := q.SettleGuardRejected(ctx, item.ID, "foreign-script share 1.00 exceeds 0.05"); err != nil {
+			t.Fatalf("SettleGuardRejected: %v", err)
+		}
+
+		var outcomeDetail *string
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT outcome_detail FROM work_queue WHERE id = ?`, item.ID,
+		).Scan(&outcomeDetail); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if outcomeDetail != nil {
+			t.Errorf("outcome_detail = %q; a refused settle must write nothing at all", *outcomeDetail)
 		}
 	})
 }

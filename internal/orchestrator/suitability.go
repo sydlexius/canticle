@@ -1,6 +1,10 @@
 package orchestrator
 
-import "github.com/sydlexius/canticle/internal/models"
+import (
+	"log/slog"
+
+	"github.com/sydlexius/canticle/internal/models"
+)
 
 // Quality ranks a lyric result by usefulness. A higher value is strictly
 // better: synced > unsynced > instrumental > none. The orchestrator uses it to
@@ -81,7 +85,21 @@ func IsSuitable(song models.Song, guard ScriptGuard) bool {
 		return false
 	}
 	if guard != nil && guard.Enabled() {
-		if ok, _ := guard.Accept(song); !ok {
+		// The reason is BOUND and logged, never discarded (#773). This site cannot
+		// persist it -- IsSuitable is a pure predicate scoring a candidate before
+		// any row is settled, so there is no row to write to, and the lane that
+		// ultimately settles records its own verdict via SettleGuardRejected.
+		//
+		// It is still worth emitting: previously this branch returned a bare false,
+		// so a candidate dropped HERE left no trace anywhere at any log level. That
+		// is the silent-failure shape -- a guard that computes a precise reason and
+		// then says nothing. Debug rather than Warn because rejecting one candidate
+		// is routine fall-through (the orchestrator advances to the next lane), not
+		// an incident; the terminal rejection is what warrants Warn, and the worker
+		// already logs that one.
+		if ok, reason := guard.Accept(song); !ok {
+			slog.Debug("lane candidate rejected by script guard; advancing",
+				"reason", reason, "quality", QualityOf(song))
 			return false
 		}
 	}

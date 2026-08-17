@@ -37,7 +37,13 @@ type workItem struct {
 	providerLane       any // string or nil
 	instrumentalResult any // int or nil
 	detectInstrumental any // int or nil
-	outcomeType        any // string ("synced"|"unsynced"|"instrumental") or nil
+	outcomeType        any // string ("synced"|"unsynced"|"instrumental"|"rejected") or nil
+	// outcomeDetail is the recorded reason within outcomeType (#773); nil => NULL.
+	outcomeDetail any // string or nil
+	// timingOutcome is the timing guard's verdict (#440); nil => NULL. A
+	// 'categorical'/'degenerate' value on a NULL outcomeType is the row that
+	// renders Result='unknown' with its reason one column over.
+	timingOutcome any // string or nil
 	// Buffered-panel columns (#572). These are applied as a post-insert UPDATE
 	// only when non-zero/non-empty, so existing callers keep the schema defaults
 	// (priority 0, batch_seq NULL, next_attempt_at 1970 = eligible, created_at now).
@@ -55,10 +61,12 @@ func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
 	res, err := sqlDB.ExecContext(context.Background(),
 		`INSERT INTO work_queue
             (artist, title, artist_key, title_key, album, status, last_error, output_paths,
-             completed_at, provider_lane, instrumental_result, detect_instrumental, outcome_type)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             completed_at, provider_lane, instrumental_result, detect_instrumental, outcome_type,
+             outcome_detail, timing_outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.artist, w.title, w.artist, w.title, w.album, w.status, w.lastError, w.outputPaths,
-		w.completedAt, w.providerLane, w.instrumentalResult, w.detectInstrumental, w.outcomeType)
+		w.completedAt, w.providerLane, w.instrumentalResult, w.detectInstrumental, w.outcomeType,
+		w.outcomeDetail, w.timingOutcome)
 	if err != nil {
 		t.Fatalf("insert work_queue: %v", err)
 	}
@@ -189,6 +197,91 @@ func TestQueueSummaryEmpty(t *testing.T) {
 	}
 	if (got != reports.QueueSummary{}) {
 		t.Errorf("QueueSummary on empty DB = %+v, want zero value", got)
+	}
+}
+
+// TestRecentOutcomesDetail covers the Detail column (#773): where the reason for
+// an outcome comes from, and which rows legitimately have none.
+//
+// Detail is a DISPLAY-LEVEL COALESCE over two stores, which is the part worth
+// testing: the stored outcome_detail when the row has one, else the timing
+// guard's verdict read from timing_outcome. The alternative -- copying the timing
+// verdict into outcome_detail at write time -- would put the same fact in two
+// columns that can drift apart.
+func TestRecentOutcomesDetail(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	// A guard rejection: the reason is STORED, and is what Detail must show.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "guard-rejected", status: "done",
+		completedAt: "2026-08-16T05:00:00Z", outcomeType: "rejected",
+		outcomeDetail: "foreign-script share 1.00 exceeds 0.05",
+	})
+	// A timing quarantine: outcome_type is NULL by design (nothing was written),
+	// so it renders Result='unknown' -- but the reason sits in timing_outcome and
+	// Detail must surface it. These rows are why the coalesce exists: 'unknown'
+	// is documented as "a legacy row predating outcome_type", which stopped being
+	// the whole truth once the timing guard began quarantining rows.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "timing-quarantined", status: "done",
+		completedAt: "2026-08-16T04:00:00Z", timingOutcome: "categorical",
+	})
+	// A plain success needs no detail beyond its class.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "plain-synced", status: "done",
+		completedAt: "2026-08-16T03:00:00Z", outcomeType: "synced", timingOutcome: "ok",
+	})
+	// DEGENERATE IS NOT A REFUSAL, and this row is why the CASE names 'categorical'
+	// alone. DecidePromotion maps Degenerate to DemoteToUnsynced (#673): the words
+	// ARE written, as .txt, so the row carries outcome_type='unsynced' and never
+	// reaches 'unknown'. Labeling it "timing refused" would be false -- it was
+	// demoted, not refused -- and timing_outcome already records the nuance for a
+	// reader who wants it. An earlier cut of this query listed both verdicts; a
+	// mutation that removed the NULL-outcome_type guard did not fail any test,
+	// which is what surfaced the mistake.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "degenerate-demoted", status: "done",
+		completedAt: "2026-08-16T02:30:00Z", outcomeType: "unsynced", timingOutcome: "degenerate",
+	})
+	// A genuinely legacy row: no outcome, no timing verdict, no recoverable
+	// reason. It must stay blank rather than borrow one.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "legacy-unknown", status: "done",
+		completedAt: "2026-08-16T02:00:00Z",
+	})
+
+	got, err := repo.RecentOutcomes(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentOutcomes: %v", err)
+	}
+	byTitle := make(map[string]reports.RecentOutcome, len(got))
+	for _, o := range got {
+		byTitle[o.Title] = o
+	}
+
+	for _, tc := range []struct {
+		title      string
+		wantResult reports.ResultClass
+		wantDetail string
+	}{
+		{"guard-rejected", reports.ResultRejected, "foreign-script share 1.00 exceeds 0.05"},
+		{"timing-quarantined", reports.ResultUnknown, "timing refused: categorical"},
+		{"plain-synced", reports.ResultSynced, ""},
+		{"degenerate-demoted", reports.ResultUnsynced, ""},
+		{"legacy-unknown", reports.ResultUnknown, ""},
+	} {
+		o, ok := byTitle[tc.title]
+		if !ok {
+			t.Fatalf("row %q missing from results", tc.title)
+		}
+		if o.Result != tc.wantResult {
+			t.Errorf("%s: Result = %q; want %q", tc.title, o.Result, tc.wantResult)
+		}
+		if o.Detail != tc.wantDetail {
+			t.Errorf("%s: Detail = %q; want %q", tc.title, o.Detail, tc.wantDetail)
+		}
 	}
 }
 

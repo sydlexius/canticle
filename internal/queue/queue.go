@@ -789,17 +789,17 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
 // The guard is 'processing': only a worker holding the row reaches a guard
 // rejection, so unlike SettleInstrumental there is no backfill caller and no
 // RowOwnership parameter to get wrong.
-func (q *DBQueue) SettleGuardRejected(ctx context.Context, id int64) (SettleOutcome, error) {
+func (q *DBQueue) SettleGuardRejected(ctx context.Context, id int64, reason string) (SettleOutcome, error) {
 	var outcome SettleOutcome
 	err := db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
 		var err error
-		outcome, err = q.settleGuardRejectedOnce(ctx, id)
+		outcome, err = q.settleGuardRejectedOnce(ctx, id, reason)
 		return err
 	})
 	return outcome, err
 }
 
-func (q *DBQueue) settleGuardRejectedOnce(ctx context.Context, id int64) (outcome SettleOutcome, retErr error) {
+func (q *DBQueue) settleGuardRejectedOnce(ctx context.Context, id int64, reason string) (outcome SettleOutcome, retErr error) {
 	now := formatTime(q.now())
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -810,15 +810,31 @@ func (q *DBQueue) settleGuardRejectedOnce(ctx context.Context, id int64) (outcom
 	// last_error is cleared deliberately: a guard rejection is a POLICY outcome,
 	// not an error. Leaving a stale error from an earlier attempt would make the
 	// row read as failed in the failure-analysis report.
+	//
+	// outcome_detail carries the reason IN THE SAME STATEMENT as the label (#773),
+	// for the same reason the label rides with the completion: a detail written
+	// separately and best-effort could be dropped while the row still settled,
+	// which is the #655 defect one level down -- a row that says it was rejected
+	// but not why. One UPDATE means the row can never hold one without the other.
+	//
+	// An empty reason stores NULL rather than '': "no reason recorded" gets ONE
+	// representation, so a reader cannot render a blank string as if it were a
+	// real verdict. Pre-#773 rows are NULL for the same reason and read the same
+	// way.
+	var detail any
+	if reason != "" {
+		detail = reason
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue
          SET outcome_type = 'rejected',
+             outcome_detail = ?,
              status = 'done',
              completed_at = ?,
              last_error = ''
          WHERE id = ?
            AND status = ?`,
-		now, id, StatusProcessing,
+		detail, now, id, StatusProcessing,
 	)
 	if err != nil {
 		return SettleFailed, fmt.Errorf("queue: settle guard-rejected: %w", err)
