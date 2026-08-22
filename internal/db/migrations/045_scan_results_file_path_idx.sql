@@ -1,0 +1,42 @@
+-- +goose Up
+-- +goose StatementBegin
+-- Index scan_results.file_path on its own (#786).
+--
+-- WHY THE EXISTING UNIQUE INDEX IS NOT ENOUGH. 003 created
+-- idx_scan_results_library_file ON scan_results(library_id, file_path). SQLite
+-- can only seek a composite index by a LEFTMOST prefix, so a lookup keyed on
+-- file_path ALONE cannot seek it. Measured with EXPLAIN QUERY PLAN before this
+-- migration:
+--
+--   file_path = ?                 -> SCAN  ... USING COVERING INDEX idx_scan_results_library_file
+--   library_id = ? AND file_path = ? -> SEARCH ... (library_id=? AND file_path=?)
+--
+-- SCAN, not SEARCH: the whole index is walked. It is a COVERING scan, so the
+-- table itself is never touched and the constant is small -- which is exactly
+-- what makes this easy to miss in a small test database and expensive in a real
+-- library.
+--
+-- WHY IT MATTERS HERE SPECIFICALLY. Repo.Indexed runs this lookup ONCE PER
+-- SETTLED FILE PER SCAN, and in a settled library nearly every file is settled.
+-- An index scan per file over a table with one row per file is quadratic in the
+-- library size, paid on every scheduled walk. With this index each lookup is a
+-- seek instead.
+--
+-- WHY NOT SCOPE THE QUERY BY library_id AND REUSE 003's INDEX. The scanner does
+-- not know the library id: scanner.ScanLibrary takes a ROOT PATH, and
+-- scan.Scheduler stamps LibraryID onto the results afterward. Scoping would
+-- also answer the wrong question -- "does this library own the path" rather
+-- than "have I ever indexed it" -- and re-emit a path held by another library
+-- on every scan.
+--
+-- Not partial and not unique: every row has a non-empty file_path (it is the
+-- scan's primary handle), and uniqueness belongs to 003's composite, since the
+-- same path legitimately appears under two libraries with overlapping roots.
+CREATE INDEX IF NOT EXISTS idx_scan_results_file_path
+    ON scan_results(file_path);
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+DROP INDEX IF EXISTS idx_scan_results_file_path;
+-- +goose StatementEnd

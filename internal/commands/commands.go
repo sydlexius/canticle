@@ -2428,6 +2428,12 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		Scanner: scanner.NewScanner(
 			scanner.WithMetadataFailureStore(scanfail.New(sqlDB)),
 			scanner.WithDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion)),
+			// Index a settled file the scan has never seen (#786). Serve mode only:
+			// this is what lets a MOVED file (which carries its sidecar along, so it
+			// arrives already settled and is skipped before it is ever indexed) enter
+			// scan_results at its new path, which in turn is the pool prune's
+			// heuristic relink tier scores against.
+			scanner.WithIndexStore(results),
 		),
 		Options: opts,
 		// trigger and path disambiguate the two callers of this one callback
