@@ -288,7 +288,7 @@ sweep cycle.
 ### Taming it on a low-wattage or shared host
 
 Size against the **real** per-track cost, which is not inference. Measured on a
-live install (canticle 1.30.1):
+live install (Canticle 1.30.1):
 
 | Stage | Cost per track |
 |-------|----------------|

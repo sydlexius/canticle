@@ -41,6 +41,17 @@ if git grep -nIE "$CONFLICT_RE" -- ':!.githooks/*' >/dev/null 2>&1; then
   fail "resolve conflict markers before pushing"
 fi
 
+echo "==> product name in user-facing prose"
+# The logotype is "Canticle"; the lowercase form is an IDENTIFIER (module path,
+# image ref, binary, URL), not a name. typos cannot enforce this -- it matches
+# word-for-word with no context, so a `canticle -> Canticle` rule there would
+# flag every ghcr.io/sydlexius/canticle in the tree. The helper masks code
+# spans, URLs, link targets and HTML tags first, so every hit it reports is
+# real prose.
+if [ -x scripts/check-product-name.sh ]; then
+  bash scripts/check-product-name.sh || fail "capitalize the product name in user-facing prose"
+fi
+
 echo "==> gofmt"
 unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
 [ -n "$unformatted" ] && fail "gofmt needed:\n$unformatted"

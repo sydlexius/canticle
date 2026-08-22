@@ -12,7 +12,7 @@ Serve mode obtains a Musixmatch token on its own; the one-shot `fetch` CLI needs
 
 ## Get a Musixmatch token
 
-In **serve mode**, a Musixmatch API token is optional. On first run canticle requests one automatically and stores it in its encrypted secret store, then reuses that stored token on every later start. For most installs there is nothing to do here.
+In **serve mode**, a Musixmatch API token is optional. On first run Canticle requests one automatically and stores it in its encrypted secret store, then reuses that stored token on every later start. For most installs there is nothing to do here.
 
 The one-shot `fetch` CLI keeps no state and has no secret store, so it cannot save a token for reuse. It still needs one supplied explicitly, via `--token`, `MUSIXMATCH_TOKEN`, or a config file.
 
@@ -166,7 +166,7 @@ See the [User Guide](USER_GUIDE.md#inspection-commands) for the full inspection 
 
 ## Troubleshooting
 
-- **`401` is usually throttling, not a dead token.** A bare `401` most often means the request was throttled, not that the credential expired. This is measured, not assumed: a token that was working began returning `401` after a few closely spaced requests, then worked normally again later. So the first thing to try is slowing down (raise `MXLRC_API_COOLDOWN`), not re-provisioning. A genuinely finished credential is reported differently, and canticle handles that case itself by obtaining a replacement and retrying. If `401`s persist across a long quiet period, then re-check the [precedence](#get-a-musixmatch-token): a `--token` flag or a stale environment variable can silently override the token you think you are using.
+- **`401` is usually throttling, not a dead token.** A bare `401` most often means the request was throttled, not that the credential expired. This is measured, not assumed: a token that was working began returning `401` after a few closely spaced requests, then worked normally again later. So the first thing to try is slowing down (raise `MXLRC_API_COOLDOWN`), not re-provisioning. A genuinely finished credential is reported differently, and Canticle handles that case itself by obtaining a replacement and retrying. If `401`s persist across a long quiet period, then re-check the [precedence](#get-a-musixmatch-token): a `--token` flag or a stale environment variable can silently override the token you think you are using.
 - **Rate limiting / circuit breaker.** When Musixmatch signals throttling, the worker opens a circuit breaker and pauses dequeuing globally to back off. If you hit this often, raise the request cooldown with `MXLRC_API_COOLDOWN` (seconds between requests). See [Configuration](CONFIGURATION.md#environment-variables) for the cooldown and circuit-breaker variables.
 - **Benign miss / `deferred`.** A track Musixmatch has no lyrics for yet lands in `queue deferred`, not `queue failed`. This is not a failure; the row waits out a cooldown and re-checks itself later.
 - **Unraid `/mnt/user` watcher caveat.** The optional filesystem watcher relies on inotify events, which Unraid `/mnt/user` (FUSE/shfs) mounts often do not deliver into the container. Keep the periodic scan as the source of truth there; do not set the scan interval to `0`. Note the watcher switch is `MXLRCGO_WATCH_ENABLED` (the `MXLRCGO_` prefix, not `MXLRC_`).
