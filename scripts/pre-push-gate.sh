@@ -48,8 +48,13 @@ echo "==> product name in user-facing prose"
 # flag every ghcr.io/sydlexius/canticle in the tree. The helper masks code
 # spans, URLs, link targets and HTML tags first, so every hit it reports is
 # real prose.
+#
+# --ref HEAD reads each file's blob at the current commit via `git show`,
+# never the worktree copy: this gate runs pre-push, where HEAD is what
+# actually ships, so a worktree edit made after the commit (staged or not)
+# must not be able to paper over prose that is already committed.
 if [ -x scripts/check-product-name.sh ]; then
-  bash scripts/check-product-name.sh || fail "capitalize the product name in user-facing prose"
+  bash scripts/check-product-name.sh --ref HEAD || fail "capitalize the product name in user-facing prose"
 fi
 
 echo "==> gofmt"

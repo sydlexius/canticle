@@ -82,6 +82,13 @@ fi
 # An ARRAY, not a space-separated string: a path containing a space would
 # word-split into two bogus arguments, and quoting the string would pass every
 # path as ONE argument. The array is correct under both.
+#
+# --staged tells the helper to read each path's STAGED blob via `git show
+# :<path>`, never the worktree file. Without it, a commit could sail through
+# on lowercase prose that was staged and then "fixed" in the worktree without
+# `git add -p` re-staging the fix -- the hook would report PASS while the
+# actual commit content stays wrong, because a plain open() reads whatever is
+# sitting on disk right now, not what `git commit` is about to record.
 PRODNAME_FILES=()
 while IFS= read -r -d '' f; do
     PRODNAME_FILES+=("$f")
@@ -89,7 +96,7 @@ done < <(git diff --cached --name-only -z --diff-filter=ACM -- 'README.md' 'docs
 if [ ${#PRODNAME_FILES[@]} -gt 0 ]; then
     if [ ! -x scripts/check-product-name.sh ]; then
         warn "product name (helper missing, skipping)"
-    elif ! PRODNAME_OUTPUT=$(bash scripts/check-product-name.sh "${PRODNAME_FILES[@]}" 2>&1); then
+    elif ! PRODNAME_OUTPUT=$(bash scripts/check-product-name.sh --staged "${PRODNAME_FILES[@]}" 2>&1); then
         echo -e "${RED}${BOLD}FAIL${RESET} product name:"
         echo "$PRODNAME_OUTPUT"
         exit 1
