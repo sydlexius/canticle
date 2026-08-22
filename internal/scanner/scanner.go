@@ -376,6 +376,28 @@ type DurationStore interface {
 	Lookup(ctx context.Context, path string, mtimeNano, size int64) (seconds int, found bool, err error)
 }
 
+// IndexStore reports whether a file path is already present in the scan index.
+//
+// It exists so the scan can tell "settled, and already known" apart from
+// "settled, and never indexed" (#786). A file that MOVES carries its sidecar
+// with it, so it arrives at its new path already settled and is skipped by the
+// sidecar-exists branch BEFORE it is ever indexed -- which makes it invisible
+// to every consumer that reads scan_results, prune's heuristic relink pool
+// among them. That pool is therefore structurally empty of exactly the files
+// the relink tier exists to find.
+//
+// The query is DB-to-DB and touches no audio file, which is what makes closing
+// the gap affordable: in steady state essentially every present file already
+// has a row, so the gate answers "known" and nothing is read. The cost is paid
+// only for files genuinely missing from the index -- the moved ones.
+type IndexStore interface {
+	// Indexed reports whether path already has a scan-index row. It is keyed on
+	// the path ALONE, deliberately: a move changes the path, which is the very
+	// signal being detected, while an in-place edit (new mtime or size) is a
+	// different concern that the fetch path already handles.
+	Indexed(ctx context.Context, path string) (bool, error)
+}
+
 // Scanner handles parsing input sources and populating the work queue.
 type Scanner struct {
 	// probeFunc, when set, is used as the duration probe instead of audioduration
@@ -387,6 +409,13 @@ type Scanner struct {
 	// durations, when set, banks each computed duration for the revalidation
 	// path (#441). Nil disables it.
 	durations DurationStore
+	// index, when set, lets the scan index a settled file that is not yet known
+	// to the scan index (#786). Nil disables it, so a caller that wires no store
+	// behaves exactly as before -- the fetch CLI, which builds its own Scanner
+	// with no options and has no database to index into. Both DB-backed callers
+	// wire it: serve mode and the one-shot `scan` CLI share one constructor and
+	// one persistence path, so both index settled files.
+	index IndexStore
 }
 
 // Option configures a Scanner at construction.
@@ -402,6 +431,12 @@ func WithMetadataFailureStore(s MetadataFailureStore) Option {
 // for the revalidation path (#441) instead of discarded. Nil disables it.
 func WithDurationStore(s DurationStore) Option {
 	return func(sc *Scanner) { sc.durations = s }
+}
+
+// WithIndexStore wires a store so the scan can index a settled file that has
+// never been indexed -- the relocated-file case (#786). Nil disables it.
+func WithIndexStore(s IndexStore) Option {
+	return func(sc *Scanner) { sc.index = s }
 }
 
 // ScanOptions controls library directory traversal and queue eligibility.
@@ -612,6 +647,136 @@ func (sc *Scanner) recordDuration(ctx context.Context, path string, f *os.File, 
 // Every failure degrades to "no row", never to a wrong row and never to a
 // failed scan: this is bookkeeping for a file the scan has already decided to
 // skip, so nothing here may change the scan's outcome.
+// indexSettledFile emits a scan-index row for a file the fetch path is about to
+// SKIP, when that file is not already in the index (#786).
+//
+// Why this exists: a file that MOVES carries its sidecar with it, so it arrives
+// at its new path already settled and is skipped by the sidecar-exists branches
+// below BEFORE anything indexes it. Both halves are correct alone -- skipping
+// settled work is right, and indexing during a fetch pass is right -- but
+// composed, they guarantee a relocated file is NEVER indexed at its new path.
+// prune's heuristic relink tier scores against a pool built from that index, so
+// its pool is structurally empty of exactly the files it exists to re-attach,
+// and the row is retired as unactionable instead. Measured in prod: a cohort
+// retired weeks earlier was still absent from the index, while scanning was
+// demonstrably healthy throughout.
+//
+// THE STATUS IS LOAD-BEARING. Rows are emitted "done", never "pending":
+// EnqueuePending drains exactly the pending rows, so indexing a settled file as
+// pending would queue a fetch for lyrics already on disk. This path may record
+// what exists; it may never change what the scan DOES.
+//
+// THE GATE IS DB-TO-DB, which is what makes this affordable. Unlike #684's
+// duration gate -- which still pays one bounded header read per file version --
+// the question here is only "does a row exist for this path", so a file already
+// known costs no file I/O at all. In steady state essentially every present
+// file already has a row, so the tag read below is paid only for files
+// genuinely missing from the index: the moved ones, which is the population
+// being repaired. An unconditional read would re-tag the whole library every
+// scan and keep the array awake, the very symptom #684 exists to eliminate.
+//
+// Every failure degrades to "no row", never to a wrong row and never to a
+// failed scan: this is bookkeeping for a file the scan has already decided to
+// skip, so nothing here may change the scan's outcome.
+func (sc *Scanner) indexSettledFile(ctx context.Context, dir, filePath, stem string, results *[]models.ScanResult) {
+	if sc.index == nil {
+		return
+	}
+
+	// AUDIO ONLY, and checked BEFORE the lookup. The settled switch that calls
+	// this runs ~80 lines ahead of scanDir's own supportedFileTypes check, so a
+	// NON-AUDIO file sharing a stem with a sidecar (cover.jpg beside cover.lrc)
+	// arrives here. It can never yield a usable row, so reading it is pure
+	// waste -- and because no row is ever written, the lookup keeps answering
+	// "not indexed" and the waste repeats on EVERY scheduled walk instead of
+	// self-limiting. That is the opposite of the once-per-file-version bound
+	// this function's affordability rests on.
+	if !slices.Contains(supportedFileTypes, strings.ToLower(filepath.Ext(filePath))) {
+		return
+	}
+
+	indexed, err := sc.index.Indexed(ctx, filePath)
+	if err != nil {
+		// Fail CLOSED toward not emitting: a lookup error is not evidence the row
+		// is absent, and guessing "absent" would re-index the whole library on
+		// every scan whenever the DB is unhappy.
+		slog.Debug("scan-index lookup failed; not indexing", "file", filePath, "error", err)
+		return
+	}
+	if indexed {
+		return
+	}
+
+	// REUSE THE METADATA-FAILURE SKIP LIST (#376), for the same reason the main
+	// fetch path does: a file whose tags failed to parse reads identically until
+	// its mtime or size changes, and a file that cannot be parsed can never be
+	// indexed -- so without this the unreadable file is re-opened on every scan
+	// and re-warns each time. The identity is stat'ed by path because the file
+	// is not open yet; not opening it is the entire point.
+	var mtimeNano, size int64
+	haveIdentity := false
+	if sc.failures != nil {
+		if info, ierr := os.Stat(filePath); ierr == nil {
+			mtimeNano, size, haveIdentity = info.ModTime().UnixNano(), info.Size(), true
+			skip, serr := sc.failures.ShouldSkip(ctx, filePath, mtimeNano, size)
+			if serr != nil {
+				// Mirrors the main path: a lookup error is not evidence the file is
+				// fine, but it is also not a reason to abandon the read -- log and
+				// proceed rather than silently skipping a file that may be indexable.
+				slog.Debug("metadata-failure lookup failed; reading anyway", "file", filePath, "error", serr)
+			} else if skip {
+				return
+			}
+		}
+	}
+
+	// Not indexed: this is the relocated-file case, so read the tags. Without
+	// them the row is useless to prune -- its name tier filters candidates on an
+	// exact normalized TITLE, and an empty title can never match a non-empty
+	// one, so indexing the path alone would be a no-op repair.
+	m, f, err := openAndReadTags(filePath)
+	if err != nil {
+		slog.Debug("could not read tags to index settled file; skipping", "file", filePath, "error", err)
+		// Remember the failure so the next scan skips this file until it changes
+		// on disk, exactly as the main path does. Best-effort: a store error must
+		// never fail a scan.
+		if sc.failures != nil && haveIdentity {
+			if rerr := sc.failures.RecordFailure(ctx, filePath, mtimeNano, size, err); rerr != nil {
+				slog.Debug("failed to record metadata-read failure", "file", filePath, "error", rerr)
+			}
+		}
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	// ISRC/MBID are extracted UNCONDITIONALLY here, where the main path gates
+	// them behind EnrichRecording. Deliberate, and not a cost: that gate guards
+	// the DURATION PROBE it is bundled with, while the tags themselves are
+	// already parsed and in memory by this point, so extracting identity is a
+	// field read. Storing it is strictly better -- prune's EXACT tier keys on
+	// ISRC/MBID, so an identity-bearing row can be re-attached by the cheap tier
+	// instead of falling through to the name heuristic this issue is about.
+	//
+	// TrackLength is left zero: no duration is probed here (that would be a real
+	// read), and nothing consumes it on this path -- the row is 'done', so
+	// EnqueuePending never drains it and its DurationBucket is never computed.
+	*results = append(*results, models.ScanResult{
+		FilePath: filePath,
+		Track: models.Track{
+			ArtistName:    extractArtist(m),
+			TrackName:     m.Title(),
+			AlbumName:     m.Album(),
+			AlbumArtist:   extractAlbumArtist(m),
+			ISRC:          extractISRC(m),
+			RecordingMBID: extractRecordingMBID(m),
+		},
+		Outdir:   dir,
+		Filename: stem + ".lrc",
+		Status:   "done",
+	})
+	slog.Debug("indexed a settled file missing from the scan index", "file", filePath)
+}
+
 func (sc *Scanner) bankDurationForSkippedFile(ctx context.Context, path, ext string) {
 	// EnrichRecording is checked by the caller: with enrichment off the scanner
 	// probes no headers at all, and this must not become a back door around it.
@@ -900,6 +1065,9 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			if opts.EnrichRecording {
 				sc.bankDurationForSkippedFile(ctx, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, filepath.Join(dir, file.Name())), ext)
 			}
+			// Index it if the scan index has never seen this path (#786). Gated
+			// DB-to-DB, so a file already known costs nothing.
+			sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
 		case txtExists && !lrcExists && isInstrumentalTxt(filepath.Join(dir, txtFile)):
@@ -912,6 +1080,11 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 				slog.Warn("could not read instrumental provenance; treating marker as terminal", "file", file.Name(), "error", provErr)
 			}
 			if !instrumentalReopenable(prov, reopen, opts.DetectorVersion) {
+				// Index it if the scan index has never seen this path (#786). In
+				// serve mode this is the FIRST branch a lone .txt matches, so
+				// leaving it unwired would keep every moved instrumental track
+				// invisible to the index.
+				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 				slog.Debug("skipping file, instrumental marker (terminal)", "file", file.Name())
 				continue
 			}
@@ -919,6 +1092,10 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// checked HERE, inside the branch that granted the reopen, so a marker
 			// this switch already decided to reconsider cannot escape the window.
 			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+				// Still a settled file being skipped, so still index it (#786).
+				// Otherwise a dated repair run leaves precisely the out-of-cohort
+				// files invisible to prune's pool.
+				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 				slog.Debug("skipping file, instrumental marker outside repair window", "file", file.Name())
 				continue
 			}
@@ -937,10 +1114,16 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// makes the invariant structural -- the window can only ever subtract
 			// from a reopen this branch already granted.
 			if !reopen.Unsynced {
+				// Index it if the scan index has never seen this path (#786). The
+				// original #740 cohort was settled .txt on disk, so this branch
+				// matters as much as the .lrc one above.
+				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 				slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
 				continue
 			}
 			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+				// Still a settled file being skipped, so still index it (#786).
+				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 				slog.Debug("skipping file, unsynced sidecar outside repair window", "file", file.Name())
 				continue
 			}

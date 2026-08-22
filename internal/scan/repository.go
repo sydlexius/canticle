@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -451,6 +452,38 @@ func (r *Repo) CountByLibrary(ctx context.Context, libraryID int64) (int64, erro
 		return 0, fmt.Errorf("scan: count by library: %w", err)
 	}
 	return n, nil
+}
+
+// Indexed reports whether path already has a scan_results row (#786).
+//
+// This is the read side of the relocated-file repair. It lets the scanner tell
+// a file it merely SKIPPED (settled, already known) apart from one it has never
+// seen -- the shape a moved file has, since a directory move carries the
+// sidecar along and the file arrives at its new path already settled.
+//
+// DELIBERATELY NOT LIBRARY-SCOPED. The scanner's question is "have I ever
+// indexed this path", not "does this library own it". Scoping the lookup would
+// re-emit a path held by another library on every scan.
+//
+// The empty path short-circuits to false: file_path is NOT NULL but carries no
+// non-empty CHECK, so a caller passing "" gets a definite answer rather than
+// matching a malformed row.
+func (r *Repo) Indexed(ctx context.Context, path string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+	var exists int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT 1 FROM scan_results WHERE file_path = ? LIMIT 1`,
+		path,
+	).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("scan: lookup indexed path: %w", err)
+	}
+	return true, nil
 }
 
 // SetStatus updates scan result status for each id.

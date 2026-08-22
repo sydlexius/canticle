@@ -2428,6 +2428,22 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		Scanner: scanner.NewScanner(
 			scanner.WithMetadataFailureStore(scanfail.New(sqlDB)),
 			scanner.WithDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion)),
+			// Index a settled file the scan has never seen (#786). This is what lets
+			// a MOVED file (which carries its sidecar along, so it arrives already
+			// settled and is skipped before it is ever indexed) enter scan_results at
+			// its new path, which in turn is the pool prune's heuristic relink tier
+			// scores against.
+			//
+			// SCOPE: this constructor is shared by serve mode (runScheduler) AND the
+			// one-shot `scan` CLI (runScan), so BOTH index settled files. That is
+			// deliberate rather than incidental: `scan` persists through the same
+			// RunOnce -> scanAndPersist -> Upsert path, and a relocated file is
+			// exactly as invisible to prune when the operator reaches for the CLI as
+			// when the scheduler runs. Narrowing this to serve mode would leave the
+			// on-demand path unable to repair what the periodic one can. The fetch
+			// CLI is genuinely unaffected: it builds its own Scanner with no options
+			// and has no database to index into.
+			scanner.WithIndexStore(results),
 		),
 		Options: opts,
 		// trigger and path disambiguate the two callers of this one callback
