@@ -78,7 +78,7 @@ The `--upgrade` flag re-fetches tracks that previously produced a `.txt` (unsync
 
 `scan --unsynced-before <cutoff>` narrows a single run's `.txt` re-fetch to sidecars last modified before a cutoff. It exists for a one-time repair: when an identifiable batch of sidecars was written by an older, buggier version, a plain `--upgrade` would re-fetch the entire unsynced population, including files that are already correct.
 
-**It pairs with `--upgrade`, and is refused with `--update`.** The cutoff applies only to `.txt` sidecars. `--update` also reopens settled `.lrc` files, and those would be re-fetched regardless of the cutoff - so the pairing would present as a scoped repair while sweeping every synced track in the library, rewriting exactly the files a repair is trying not to disturb. Rather than warn about that, canticle rejects the combination outright.
+**It pairs with `--upgrade`, and is refused with `--update`.** The cutoff applies only to `.txt` sidecars. `--update` also reopens settled `.lrc` files, and those would be re-fetched regardless of the cutoff - so the pairing would present as a scoped repair while sweeping every synced track in the library, rewriting exactly the files a repair is trying not to disturb. Rather than warn about that, Canticle rejects the combination outright.
 
 ```sh
 # Re-fetch only sidecars written before 2026-04-01
@@ -103,7 +103,7 @@ Behavior worth knowing before you rely on it:
 - **An unreadable sidecar is skipped**, not swept in: a bulk repair should touch only files positively identified as belonging to it.
 - **`scan` only.** Serve mode's scheduler never applies a cutoff, so ongoing upgrades are unaffected.
 
-Choosing a cutoff is an evidence question, not a guess. Sidecar mtime is a filesystem attribute, and a copy or restore can rewrite it, so confirm it still reflects write time before trusting it: canticle never writes audio files, so if the sidecars in a suspected cohort carry timestamps that their sibling audio files do not share, no bulk filesystem event produced them. A genuine write cohort also spreads across time at roughly the provider's pace, where a bulk copy compresses into seconds.
+Choosing a cutoff is an evidence question, not a guess. Sidecar mtime is a filesystem attribute, and a copy or restore can rewrite it, so confirm it still reflects write time before trusting it: Canticle never writes audio files, so if the sidecars in a suspected cohort carry timestamps that their sibling audio files do not share, no bulk filesystem event produced them. A genuine write cohort also spreads across time at roughly the provider's pace, where a bulk copy compresses into seconds.
 
 In directory mode, when audio tags carry ISRC, MusicBrainz recording ID, or duration, those values are read and passed to Musixmatch to improve match precision - for example, distinguishing two recordings of the same title.
 
@@ -199,7 +199,7 @@ Synced `.lrc` files written by `canticle` carry provenance tags in the header bl
 |---|---|---|
 | `[source:]` | provider lane name | e.g. `musixmatch`, `petitlyrics` |
 | `[fetched:]` | ISO 8601 fetch timestamp | UTC; absent on cache hits |
-| `[ve:]` | generating canticle version | e.g. `v1.2.0`; `dev` on local builds |
+| `[ve:]` | generating Canticle version | e.g. `v1.2.0`; `dev` on local builds |
 | `[isrc:]` | ISRC recording identifier | when available from the audio file or API response |
 | `[mbid:]` | MusicBrainz recording ID | when available from the audio file |
 

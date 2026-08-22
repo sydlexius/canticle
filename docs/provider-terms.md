@@ -1,6 +1,6 @@
 # Provider terms and attribution requirements
 
-Per-provider record of whether the lyrics sources canticle consumes require attribution
+Per-provider record of whether the lyrics sources Canticle consumes require attribution
 as a condition of use, and what else their terms impose. Tracked by #600.
 
 **This file exists so the question is not re-derived from memory.** Record the finding
@@ -14,7 +14,7 @@ usable format -- see below). Clauses 2.1.11, 2.1.4 and 1.1 remain unaddressed.
 petitlyrics imposes no attribution requirement but does constrain use.
 
 Do not read this file as a compliance sign-off -- it is a record of what the terms say and
-what canticle does about them, reviewed by an agent rather than by counsel.
+what Canticle does about them, reviewed by an agent rather than by counsel.
 
 ---
 
@@ -41,7 +41,7 @@ publication, transmission, distribution, public display, modification, derivativ
 and sale of lyric data. They separately prohibit transferring or providing lyrics to
 third parties, and circumventing protection mechanisms.
 
-Three of those touch what canticle actually does and should be assessed deliberately
+Three of those touch what Canticle actually does and should be assessed deliberately
 rather than assumed benign:
 
 - **Writing `.lrc` / `.txt` sidecars** is a reproduction to durable storage. A
@@ -52,11 +52,11 @@ rather than assumed benign:
   this file. Recording it because it is exactly the kind of thing that is cheap to note
   now and expensive to discover later.
 - **Non-commercial** is a condition on the deployment, not on the software. It does not
-  constrain canticle as a project, but it does constrain how an operator may use it.
+  constrain Canticle as a project, but it does constrain how an operator may use it.
 
 ### Endpoint
 
-canticle uses the synced-lyrics API. A `clientAppId` is required (see #607, which exists
+Canticle uses the synced-lyrics API. A `clientAppId` is required (see #607, which exists
 because a revoked one fails silently rather than with a 401), which implies a
 registration relationship whose terms may be separate from the public site terms above
 and were not located.
@@ -103,20 +103,20 @@ because they are easy to trip over:
 
 - **1.1** grants a non-exclusive, non-sublicensable license for **non-commercial** use only.
 - **2.1.4** requires **prior written approval** before making web pages containing
-  Musixmatch Data publicly accessible. canticle's serve-mode UI displays lyrics; an
+  Musixmatch Data publicly accessible. Canticle's serve-mode UI displays lyrics; an
   operator exposing it publicly is squarely in scope.
 - **2.2.4** prohibits scraping or harvesting other than by accessing the API with the
   User Authentication Key.
 
 ### Does this apply to the desktop endpoint? Assume yes.
 
-canticle does not call the documented developer API. It calls
+Canticle does not call the documented developer API. It calls
 `apic-desktop.musixmatch.com/ws/1.1/macro.subtitles.get`
 (`internal/musixmatch/client.go:21`) with a token minted from `.../ws/1.1/token.get`
 (`token.go:17`) -- the endpoint the Musixmatch desktop application uses internally.
 
 An earlier revision leaned on that distinction to argue the published terms "govern an
-API canticle does not use". **That argument does not survive reading the definitions.**
+API Canticle does not use". **That argument does not survive reading the definitions.**
 Clause 8.1 defines `API` functionally -- "the Musixmatch application programming
 interface that supports requests for Musixmatch Data made of it by computer programs" --
 and `Musixmatch Data` as any data or content made available by Musixmatch, explicitly
@@ -188,7 +188,7 @@ any design"). That makes it the correct asset for a lane mark, rather than the s
 icon on the Musixmatch CDN.
 
 **The brand page suggests linking the badge to musixmatch.com, and the API Terms turn
-that suggestion into a requirement** (clause 2.1.5 -- see above). canticle's lane mark is
+that suggestion into a requirement** (clause 2.1.5 -- see above). Canticle's lane mark is
 currently a static, non-linking `<img>`, so it does not satisfy 2.1.5 and is not one of
 the prescribed "powered by Musixmatch" buttons.
 
@@ -198,7 +198,7 @@ was wrong, and it is left visible here rather than quietly corrected: the brand 
 not the governing document.
 
 The remedy is to add the prescribed credit surface, not to remove the mark -- the
-obligation attaches to using the Data, which canticle already does. Tracked in #600.
+obligation attaches to using the Data, which Canticle already does. Tracked in #600.
 
 ### What "modified" means here, precisely
 

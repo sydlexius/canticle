@@ -22,7 +22,7 @@ A Musixmatch API token is required for the one-shot `fetch` CLI, and optional in
    MUSIXMATCH_TOKEN=YOUR_TOKEN
    ```
 
-In serve mode a token is optional: when none is configured, canticle obtains one automatically on first run and persists it in the encrypted secret store, reusing it on later starts. A token you configure here always takes precedence and is never overwritten by that automatic path. The one-shot `fetch` CLI is stateless and has no secret store, so it cannot persist a token and still requires one.
+In serve mode a token is optional: when none is configured, Canticle obtains one automatically on first run and persists it in the encrypted secret store, reusing it on later starts. A token you configure here always takes precedence and is never overwritten by that automatic path. The one-shot `fetch` CLI is stateless and has no secret store, so it cannot persist a token and still requires one.
 
 ## General precedence
 
