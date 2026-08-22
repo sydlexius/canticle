@@ -282,3 +282,86 @@ func TestScanLibrary_SettledOutsideRepairWindowIsStillIndexed(t *testing.T) {
 		}
 	})
 }
+
+// countingFailureStore records how often each seam was consulted, so a test can
+// assert that the index path REUSES the metadata-failure skip list rather than
+// bypassing it. It flips itself to "skip" once a failure is recorded, exactly
+// as the real store behaves for an unchanged file.
+type countingFailureStore struct {
+	shouldSkipCalls int
+	recordCalls     int
+	skip            bool
+}
+
+func (c *countingFailureStore) ShouldSkip(_ context.Context, _ string, _, _ int64) (bool, error) {
+	c.shouldSkipCalls++
+	return c.skip, nil
+}
+
+func (c *countingFailureStore) RecordFailure(_ context.Context, _ string, _, _ int64, _ error) error {
+	c.recordCalls++
+	c.skip = true
+	return nil
+}
+
+// A NON-AUDIO file that happens to share a stem with a sidecar (cover.jpg next
+// to cover.lrc) reaches the settled switch, because that switch runs BEFORE the
+// supportedFileTypes check. It can never produce a usable row, so opening it to
+// read tags is pure waste repeated on every scheduled walk -- and the index
+// lookup answers "not indexed" forever, so it never self-limits.
+func TestScanLibrary_NonAudioSettledFileIsNeverTagRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cover.jpg"), []byte("\xff\xd8\xff not audio"), 0o600); err != nil {
+		t.Fatalf("write non-audio: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cover.lrc"), []byte("[00:01.00]x"), 0o600); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	store := newRecordingIndexStore()
+	sc := NewScanner(WithIndexStore(store))
+
+	res, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1})
+	if err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("got %d results; want 0 (a non-audio file can never be indexed)", len(res))
+	}
+	// The lookup is the tell: reaching it means the tag read was attempted too.
+	if store.lookups != 0 {
+		t.Errorf("index store consulted %d time(s) for a non-audio file; want 0 -- the extension guard must precede the lookup", store.lookups)
+	}
+}
+
+// An audio file whose tags cannot be read can never produce a row either, so
+// without consulting the metadata-failure skip list the scan re-opens and
+// re-parses it on every pass. The main fetch path already guards this (#376);
+// the index path must reuse the same store rather than bypass it.
+func TestScanLibrary_UnreadableSettledFileUsesTheFailureStore(t *testing.T) {
+	dir := t.TempDir()
+	// A .flac extension whose CONTENT is not FLAC: openAndReadTags fails.
+	if err := os.WriteFile(filepath.Join(dir, "broken.flac"), []byte("not a real flac"), 0o600); err != nil {
+		t.Fatalf("write broken audio: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.lrc"), []byte("[00:01.00]x"), 0o600); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	store := newRecordingIndexStore()
+	fails := &countingFailureStore{}
+	sc := NewScanner(WithIndexStore(store), WithMetadataFailureStore(fails))
+
+	for i := range 2 {
+		if _, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1}); err != nil {
+			t.Fatalf("ScanLibrary pass %d: %v", i, err)
+		}
+	}
+
+	if fails.shouldSkipCalls == 0 {
+		t.Error("the metadata-failure store was never consulted; the index path bypasses the #376 skip list")
+	}
+	if fails.recordCalls == 0 {
+		t.Error("a failed tag read was never recorded, so the next scan re-reads the same unreadable file")
+	}
+}

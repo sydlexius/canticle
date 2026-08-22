@@ -410,8 +410,11 @@ type Scanner struct {
 	// path (#441). Nil disables it.
 	durations DurationStore
 	// index, when set, lets the scan index a settled file that is not yet known
-	// to the scan index (#786). Nil disables it, leaving the non-serve callers
-	// (the fetch CLI) behaving exactly as before.
+	// to the scan index (#786). Nil disables it, so a caller that wires no store
+	// behaves exactly as before -- the fetch CLI, which builds its own Scanner
+	// with no options and has no database to index into. Both DB-backed callers
+	// wire it: serve mode and the one-shot `scan` CLI share one constructor and
+	// one persistence path, so both index settled files.
 	index IndexStore
 }
 
@@ -680,6 +683,18 @@ func (sc *Scanner) indexSettledFile(ctx context.Context, dir, filePath, stem str
 		return
 	}
 
+	// AUDIO ONLY, and checked BEFORE the lookup. The settled switch that calls
+	// this runs ~80 lines ahead of scanDir's own supportedFileTypes check, so a
+	// NON-AUDIO file sharing a stem with a sidecar (cover.jpg beside cover.lrc)
+	// arrives here. It can never yield a usable row, so reading it is pure
+	// waste -- and because no row is ever written, the lookup keeps answering
+	// "not indexed" and the waste repeats on EVERY scheduled walk instead of
+	// self-limiting. That is the opposite of the once-per-file-version bound
+	// this function's affordability rests on.
+	if !slices.Contains(supportedFileTypes, strings.ToLower(filepath.Ext(filePath))) {
+		return
+	}
+
 	indexed, err := sc.index.Indexed(ctx, filePath)
 	if err != nil {
 		// Fail CLOSED toward not emitting: a lookup error is not evidence the row
@@ -692,6 +707,29 @@ func (sc *Scanner) indexSettledFile(ctx context.Context, dir, filePath, stem str
 		return
 	}
 
+	// REUSE THE METADATA-FAILURE SKIP LIST (#376), for the same reason the main
+	// fetch path does: a file whose tags failed to parse reads identically until
+	// its mtime or size changes, and a file that cannot be parsed can never be
+	// indexed -- so without this the unreadable file is re-opened on every scan
+	// and re-warns each time. The identity is stat'ed by path because the file
+	// is not open yet; not opening it is the entire point.
+	var mtimeNano, size int64
+	haveIdentity := false
+	if sc.failures != nil {
+		if info, ierr := os.Stat(filePath); ierr == nil {
+			mtimeNano, size, haveIdentity = info.ModTime().UnixNano(), info.Size(), true
+			skip, serr := sc.failures.ShouldSkip(ctx, filePath, mtimeNano, size)
+			if serr != nil {
+				// Mirrors the main path: a lookup error is not evidence the file is
+				// fine, but it is also not a reason to abandon the read -- log and
+				// proceed rather than silently skipping a file that may be indexable.
+				slog.Debug("metadata-failure lookup failed; reading anyway", "file", filePath, "error", serr)
+			} else if skip {
+				return
+			}
+		}
+	}
+
 	// Not indexed: this is the relocated-file case, so read the tags. Without
 	// them the row is useless to prune -- its name tier filters candidates on an
 	// exact normalized TITLE, and an empty title can never match a non-empty
@@ -699,6 +737,14 @@ func (sc *Scanner) indexSettledFile(ctx context.Context, dir, filePath, stem str
 	m, f, err := openAndReadTags(filePath)
 	if err != nil {
 		slog.Debug("could not read tags to index settled file; skipping", "file", filePath, "error", err)
+		// Remember the failure so the next scan skips this file until it changes
+		// on disk, exactly as the main path does. Best-effort: a store error must
+		// never fail a scan.
+		if sc.failures != nil && haveIdentity {
+			if rerr := sc.failures.RecordFailure(ctx, filePath, mtimeNano, size, err); rerr != nil {
+				slog.Debug("failed to record metadata-read failure", "file", filePath, "error", rerr)
+			}
+		}
 		return
 	}
 	defer func() { _ = f.Close() }()
