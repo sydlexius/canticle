@@ -657,7 +657,7 @@ func (d *HTTPDetector) sample(ctx context.Context, audioPath string) (_ string, 
 		// 531,138 bytes in one row on a live install (#731).
 		slog.Warn("detector: ffmpeg could not sample this audio file; it may be corrupt",
 			"path", audioPath, "error", err)
-		return "", fmt.Errorf("detector: sample audio with ffmpeg: %w: %s", err, ffmpeg.BoundOutput(string(output)))
+		return "", ffmpeg.SampleError("detector", err, string(output))
 	}
 	return samplePath, nil
 }
