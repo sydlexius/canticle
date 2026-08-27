@@ -65,12 +65,18 @@
 -- is not known to occur (the lane always has a cause), and it is guarded rather
 -- than assumed away because the cost of being wrong is silent data loss.
 --
--- RE-RUNNABLE BY CONSTRUCTION, not by goose's bookkeeping. A stripped row starts
+-- RE-RUNNABLE FOR EVERY VALUE THIS CODE EVER PRODUCED. A stripped row starts
 -- with "detector: ", which does not match the anchored predicate, so applying
--- this statement a second time is a no-op. That property is asserted directly in
--- internal/db/migration_046_test.go rather than assumed: if the predicate ever
--- matched its own output, a re-run would silently eat another 51 characters off
--- the cause.
+-- this statement a second time is a no-op. Asserted directly in
+-- internal/db/migration_046_test.go rather than assumed.
+--
+-- The precise claim is "idempotent over the producible population", NOT
+-- "idempotent over all inputs" -- a DOUBLY-wrapped value would lose one wrapper
+-- per application, and two applications would eat both. That input cannot occur:
+-- the lane wrapped exactly once, at a single call site. The distinction is
+-- recorded because the weaker, true claim is the one a future editor should
+-- reason from -- if a second wrapping site were ever added, this statement would
+-- need a loop or an anchor that cannot re-match.
 --
 -- LOSSLESS FOR THE CAUSE. Unlike 043, which discards text, this removes only a
 -- fixed prefix that carried no information. Nothing an operator could act on is

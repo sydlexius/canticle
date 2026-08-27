@@ -50,6 +50,12 @@ func (e *laneOutage) Error() string {
 // Unwrap returns both the sentinel and the cause so errors.Is finds either.
 // This is the multi-error Unwrap form (Go 1.20+), the same shape errors.Join
 // produces -- so every existing errors.Is call site behaves identically.
+//
+// ONE DELIBERATE DIFFERENCE FROM A PLAIN %w WRAP: the SINGULAR errors.Unwrap()
+// returns nil for a multi-error, as it did for the errors.Join value this
+// replaced. Verified: no caller in this repo uses the singular form on a lane
+// error. A future caller that needs the cause should use errors.Is/errors.As,
+// which traverse both branches.
 func (e *laneOutage) Unwrap() []error {
 	if e.cause == nil {
 		return []error{ErrLaneOutage}
