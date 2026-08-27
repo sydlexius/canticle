@@ -145,7 +145,7 @@ func TestMigration046IsIdempotent(t *testing.T) {
 	}
 
 	// Re-run the statement itself, bypassing goose's applied-version record.
-	if _, err := dbh.ExecContext(ctx, migration046Statement); err != nil {
+	if _, err := dbh.ExecContext(ctx, migration046UpStatement(t)); err != nil {
 		t.Fatalf("re-run: %v", err)
 	}
 	var afterSecond string
@@ -157,66 +157,68 @@ func TestMigration046IsIdempotent(t *testing.T) {
 	}
 }
 
-// THE COPY MUST NOT DRIFT FROM THE FILE, AND THAT HAS TO BE ASSERTED.
+// migration046UpStatement returns the Up statement of migration 046, READ FROM
+// THE EMBEDDED MIGRATION FILE at run time.
 //
-// migration046Statement below is a hand-copy of the .sql file's UPDATE. Nothing
-// about the idempotence test forces the two to agree: replacing the whole const
-// body with `SELECT 1;` leaves the entire package GREEN, because a no-op
-// statement trivially leaves the value unchanged and the idempotence test's only
-// claim is "unchanged". So the copy could rot into meaninglessness silently, and
-// the test would keep reporting that re-running the migration is safe while
-// exercising nothing.
+// WHY NOT A HAND-COPY, WHICH IS WHAT THIS REPLACED. The idempotence test above
+// needs to apply the statement a SECOND time, after goose has already recorded
+// 046 as applied and will not re-run it. The first version of this file
+// satisfied that by pasting the UPDATE into a const -- and nothing forced the
+// paste to match the file. Gutting the const to `SELECT 1;` left the whole
+// package green, because a no-op statement trivially leaves the value
+// unchanged, which is the idempotence test's only claim.
 //
-// Verified: with the const gutted, `go test -count=1 -run TestMigration046`
-// still passes. (-count=1 matters -- a cached result reads as a pass and hides
-// the mutation.)
+// A guard test was then added to compare the copy against the file. It worked,
+// but it could only constrain the SPAN IT COPIED: strings.Contains is satisfied
+// by a SUPERSET, so a second UPDATE appended to the Up block -- precisely the
+// "if a second wrapping site were ever added" case the migration's own comment
+// anticipates -- passed the guard silently.
 //
-// This closes that hole by reading the REAL file out of the embedded FS and
-// requiring it to contain the copy verbatim. Drift in either direction fails
-// here rather than downgrading the idempotence test to a tautology.
-func TestMigration046StatementMatchesTheFile(t *testing.T) {
+// Extracting at run time removes the failure mode instead of policing it. There
+// is no second copy to drift, no marker list to keep in sync, and an appended
+// statement is executed by this test exactly as goose would execute it. The
+// reason the test needed the statement was to OBTAIN it, never to RETYPE it.
+func migration046UpStatement(t *testing.T) string {
+	t.Helper()
 	b, err := migrations.ReadFile("migrations/046_work_queue_collapse_lane_wrapper.sql")
 	if err != nil {
 		t.Fatalf("read migration file: %v", err)
 	}
-	// CONTAINMENT ALONE IS NOT ENOUGH, and the naive version of this test was
-	// wrong in exactly the way it existed to prevent. `strings.Contains(file,
-	// "SELECT 1;")` is TRUE -- the migration's Down block is `SELECT 1;` -- so
-	// gutting the const to that value passed this guard while leaving the
-	// idempotence test a tautology. Verified before this was tightened.
-	//
-	// So the copy must ALSO be recognizable as the statement it claims to be.
-	// These markers are the load-bearing parts: without any one of them the
-	// const cannot be the UPDATE, whatever else it contains.
-	for _, marker := range []string{
-		"UPDATE work_queue",
-		"SET last_error = substr(",
-		"detector request failed: orchestrator: lane outage",
-		"WHERE substr(last_error, 1,",
-		"AND length(last_error) >",
-	} {
-		if !strings.Contains(migration046Statement, marker) {
-			t.Errorf("migration046Statement is missing %q; it is no longer the migration's UPDATE, "+
-				"so the idempotence test that applies it proves nothing", marker)
-		}
-	}
-	if !strings.Contains(string(b), strings.TrimSpace(migration046Statement)) {
-		t.Errorf("migration046Statement no longer appears verbatim in the .sql file.\n"+
-			"The idempotence test applies the COPY, so a drifted copy means that test proves nothing "+
-			"about the real migration.\ncopy:\n%s", strings.TrimSpace(migration046Statement))
-	}
-}
+	body := string(b)
 
-// migration046Statement mirrors the UPDATE in
-// migrations/046_work_queue_collapse_lane_wrapper.sql for the idempotence check
-// above. It is a COPY, and a copy cannot prove the file's own behavior -- which
-// is why every other assertion in this file runs the real migration through
-// openAtVersion. This one needs to apply the statement a SECOND time, after
-// goose already recorded 046 as applied, and goose will not re-run it. The test
-// directly above keeps this copy honest.
-const migration046Statement = `
-UPDATE work_queue
-SET last_error = substr(last_error, length('detector request failed: orchestrator: lane outage' || char(10)) + 1)
-WHERE substr(last_error, 1, length('detector request failed: orchestrator: lane outage' || char(10)))
-        = 'detector request failed: orchestrator: lane outage' || char(10)
-  AND length(last_error) > length('detector request failed: orchestrator: lane outage' || char(10));`
+	// Bound the Up block explicitly rather than scanning for the first SQL-ish
+	// line: the Down block is also a valid statement, and silently applying it
+	// would make the idempotence test assert nothing.
+	up := strings.Index(body, "-- +goose Up")
+	down := strings.Index(body, "-- +goose Down")
+	if up < 0 || down < 0 || down < up {
+		t.Fatalf("migration file does not have the expected goose Up/Down structure")
+	}
+	block := body[up:down]
+
+	begin := strings.Index(block, "-- +goose StatementBegin")
+	end := strings.Index(block, "-- +goose StatementEnd")
+	if begin < 0 || end < 0 || end < begin {
+		t.Fatalf("Up block does not have the expected StatementBegin/StatementEnd markers")
+	}
+	stmt := block[begin+len("-- +goose StatementBegin") : end]
+
+	// Strip the leading comment lines. The file is mostly rationale, and a
+	// comment carried into the exec is harmless but makes a failure unreadable.
+	var kept []string
+	for _, line := range strings.Split(stmt, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	out := strings.TrimSpace(strings.Join(kept, "\n"))
+
+	// A statement that does not look like the migration means the extraction
+	// broke, not that the migration changed -- fail loudly rather than applying
+	// something unintended and reporting a green idempotence result.
+	if !strings.HasPrefix(out, "UPDATE work_queue") {
+		t.Fatalf("extracted statement does not start with UPDATE work_queue:\n%s", out)
+	}
+	return out
+}

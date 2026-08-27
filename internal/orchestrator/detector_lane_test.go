@@ -306,6 +306,56 @@ func TestDetectorLane_OutageTripsBreaker(t *testing.T) {
 	}
 }
 
+// THE LANE ITSELF MUST PRODUCE THE COLLAPSED FORM (#790).
+//
+// THIS IS THE TEST THAT ACTUALLY GUARDS THE FIX, and its absence was the
+// branch's worst defect. The constructor tests below exercise newLaneOutage
+// DIRECTLY; they say nothing about whether the lane calls it. Reverting
+// detector_lane.go's single delivery line back to
+//
+//	fmt.Errorf("detector request failed: %w", errors.Join(ErrLaneOutage, err))
+//
+// left the ENTIRE REPOSITORY green (verified by mutation) -- because every
+// pre-existing lane test asserts only errors.Is(err, ErrLaneOutage), which was
+// true under the OLD form too: errors.Join unwrapped to the sentinel exactly as
+// the new type does. The sentinel-matching assertions can therefore never
+// distinguish the fix from the bug, and nothing asserted on the rendered string,
+// which is the entire subject of the issue.
+//
+// So this test drives the REAL lane (not the constructor) and asserts on what it
+// RENDERS. It is the only thing on the branch that fails if the fix is reverted.
+func TestDetectorLane_RenderedOutageHasNoWrapperChain(t *testing.T) {
+	d := &stubDetector{err: errors.New("detector: audio file is missing")}
+	br := circuit.New(time.Minute, time.Hour)
+	lane := NewDetectorLane(d, br, nil)
+
+	_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
+	if err == nil {
+		t.Fatal("lane returned no error; want an outage")
+	}
+
+	// The classification contract is unchanged -- asserted here too so this test
+	// fails loudly if a future edit trades rendering for matchability.
+	if !errors.Is(err, ErrLaneOutage) {
+		t.Errorf("lane error must still match ErrLaneOutage: %v", err)
+	}
+	if got := ClassifyOutcome(err); got != OutcomeLaneOutage {
+		t.Errorf("ClassifyOutcome = %v, want OutcomeLaneOutage", got)
+	}
+
+	// And the rendering -- the part no other test covers.
+	got := err.Error()
+	if got != "detector: audio file is missing" {
+		t.Errorf("lane rendered %q; want exactly the cause, with no wrapper prose", got)
+	}
+	if strings.Contains(got, "detector request failed") {
+		t.Errorf("lane rendered %q; the wrapper prefix is what #790 removes", got)
+	}
+	if strings.Contains(got, "orchestrator:") {
+		t.Errorf("lane rendered %q; the sentinel's text must never reach an operator-facing string", got)
+	}
+}
+
 // THE WRAPPER CHAIN MUST NOT PRECEDE THE ACTIONABLE FACT (#790). The stored
 // reason used to open with roughly 80 characters of pure wrapper --
 // "detector request failed: " then the ErrLaneOutage sentinel's own
