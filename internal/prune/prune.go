@@ -1124,23 +1124,34 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	// A row this package RETIRED is relinking back out of its terminal state, so
 	// the retirement stamps have to come off with it: leaving status='done' would
 	// repoint the row at a file the worker will never pick up, which is the same
-	// undone-work the retirement caused. Restored to 'failed' rather than
-	// 'pending' because that is the state it held before being retired, and the
-	// worker's backoff reads it; completed_at and last_error are cleared so the
+	// undone-work the retirement caused.
+	//
+	// Restored to 'pending', NOT 'failed'. A relink is not a fetch outcome -- the
+	// row has never been attempted at its new path, so nothing failed, and
+	// resurrecting it as 'failed' smuggled a claim about RETRY POSTURE through a
+	// column that also drives REPORTING (#789): reports.RecentOutcomes and
+	// FailureAnalysis both read status/outcome_type to describe what the FETCHER
+	// did, and 'failed' told them a fetch had failed when none had ever run.
+	// attempts and next_attempt_at are reset explicitly (attempts=0, next_attempt_at
+	// = now) rather than carried over from the retirement -- that IS the retry
+	// posture the old comment wanted to preserve, and it belongs in those columns,
+	// not smuggled through status. completed_at and last_error are cleared so the
 	// row does not read as settled to any report that joins on them.
 	//
 	// Applied ONLY to our own sentinel-retired rows (see retiredAsUnresolvable),
 	// so a genuinely completed row is never resurrected by a relink.
 	resurrect := c.retiredAsUnresolvable()
+	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {
 		var res sql.Result
 		var err error
 		if resurrect {
 			res, err = tx.ExecContext(ctx,
 				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?,
-                     status = 'failed', completed_at = NULL, last_error = ''
+                     status = 'pending', attempts = 0, next_attempt_at = ?,
+                     completed_at = NULL, last_error = ''
                  WHERE id = ? AND status != 'processing'`,
-				target.filePath, target.outdir, target.filename, w.id)
+				target.filePath, target.outdir, target.filename, resurrectNow, w.id)
 		} else {
 			res, err = tx.ExecContext(ctx,
 				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ? WHERE id = ? AND status != 'processing'`,

@@ -398,11 +398,41 @@ type FailureGroup struct {
 // deferred miss and a hard failure carrying the same last_error text are
 // reported separately. An empty last_error normalizes to 'unknown' (via
 // COALESCE over NULLIF), matching internal/queue.CountFailuresByReason.
+//
+// THE #789 GUARD. This report answers "what did the FETCHER do", and a row can
+// land in 'failed'/'deferred' without the fetcher ever touching it: a
+// maintenance writer (prune's relink resurrect was the first instance, #789)
+// can settle a row into a fetch-outcome status directly. Such a row is excluded
+// here rather than being left to fall through the reason COALESCE into a
+// 'failed: unknown' / 'deferred: unknown' entry that reads as a real, unexplained
+// failure.
+//
+// The exclusion is keyed on the column each real writer is guaranteed to touch,
+// not on last_error alone (an EMPTY last_error is a legitimate outcome of a
+// genuine Fail/Defer call whose cause carries no message, and the pre-existing
+// EmptyReasonNormalized/WhitespaceOnlyJoinsUnknown tests intentionally exercise
+// that case) --
+//   - queue.Fail ALWAYS increments attempts to >=1 before writing 'failed'
+//     (failOnce: nextAttempts := attempts + 1). A 'failed' row with attempts=0
+//     was never failed by a real fetch attempt -- migration 012 already treated
+//     this exact shape as a reclassification signal for the same reason.
+//   - queue.Defer ALWAYS increments miss_count to >=1 before writing 'deferred'.
+//     A 'deferred' row with miss_count=0 was never deferred by a real miss.
+//
+// Both conditions ALSO require an empty last_error before excluding: a
+// maintenance writer that settles a row without an error message is the shape
+// being guarded against, but a row that DOES carry an error string is left
+// visible even at attempts=0/miss_count=0 -- excluding it would risk hiding a
+// genuine failure recorded through a path this comment cannot anticipate. This
+// mirrors #655's principle for RecentOutcomes: exclude the non-fetch case
+// rather than mint the catch-all a prettier label.
 func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT status, COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*) AS n
          FROM work_queue
          WHERE status IN ('failed', 'deferred')
+           AND NOT (status = 'failed' AND attempts = 0 AND last_error = '')
+           AND NOT (status = 'deferred' AND miss_count = 0 AND last_error = '')
          GROUP BY status, reason
          ORDER BY n DESC, status, reason`)
 	if err != nil {

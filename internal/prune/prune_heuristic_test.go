@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -620,6 +621,65 @@ func TestSweep_ReconsidersItsOwnRetirementOnceTheTargetAppears(t *testing.T) {
 	}
 	if completedAt.Valid && completedAt.String != "" {
 		t.Errorf("completed_at = %v, want cleared on a resurrected row", completedAt)
+	}
+}
+
+// A RESURRECTED ROW MUST LAND EXACTLY ON 'pending', NOT 'failed' (#789). A
+// relink is not a fetch outcome: the row has never been attempted at its new
+// path, so nothing failed, and resurrecting it to 'failed' misclassifies it in
+// reports.RecentOutcomes/FailureAnalysis, which read status/outcome_type to
+// describe what the FETCHER did. The prior test above only asserts status !=
+// "done"; this test pins the exact value, because "not done" is satisfied by
+// both the correct fix (pending) and the prior behavior (failed) -- it cannot
+// tell them apart. attempts and next_attempt_at must also be reset: the retry
+// posture is preserved there, explicitly, rather than smuggled through status.
+func TestSweep_ResurrectionLandsOnPendingNotFailed(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	gone := filepath.Join(root, "Old Artist", "Album", "01. Winterlight.flac")
+	moved := filepath.Join(root, "New Artist", "Album", "01. Winterlight.flac")
+
+	seedNamedGoneRow(t, ctx, sqlDB, libID, gone)
+	if err := os.Remove(gone); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	// SWEEP 1 retires the row (no target indexed yet).
+	res1 := sweepExact(t, ctx, sqlDB)
+	if len(res1.Retained) != 1 || !res1.Retained[0].Retired {
+		t.Fatalf("first sweep: Retained=%d Retired=%v, want 1/true", len(res1.Retained),
+			len(res1.Retained) == 1 && res1.Retained[0].Retired)
+	}
+
+	// The rescan lands, then SWEEP 2 relinks and resurrects.
+	seedNamedPresent(t, ctx, sqlDB, libID, moved, "New Artist", goneTitle)
+	res2 := sweepExact(t, ctx, sqlDB)
+	if len(res2.Relinked) != 1 {
+		t.Fatalf("second sweep: Relinked = %d, want 1", len(res2.Relinked))
+	}
+
+	var status string
+	var attempts int
+	var nextAttemptAt string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, attempts, next_attempt_at FROM work_queue WHERE source_path = ?`, moved,
+	).Scan(&status, &attempts, &nextAttemptAt); err != nil {
+		t.Fatalf("read resurrected row: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want exactly %q -- a relink is not a fetch outcome, "+
+			"so the row must not read as a failure to any report", status, "pending")
+	}
+	if attempts != 0 {
+		t.Errorf("attempts = %d, want 0: the retry budget must not carry over from the retirement", attempts)
+	}
+	// next_attempt_at must be current (immediately dequeue-eligible), not the
+	// far-future backoff a real Fail() would have set.
+	parsed, err := time.Parse(time.RFC3339, nextAttemptAt)
+	if err != nil {
+		t.Fatalf("parse next_attempt_at %q: %v", nextAttemptAt, err)
+	}
+	if time.Since(parsed) > time.Minute || time.Since(parsed) < -time.Minute {
+		t.Errorf("next_attempt_at = %v, want ~now (immediately eligible)", parsed)
 	}
 }
 
