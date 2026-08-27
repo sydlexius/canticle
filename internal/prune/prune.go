@@ -1140,6 +1140,16 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	//
 	// Applied ONLY to our own sentinel-retired rows (see retiredAsUnresolvable),
 	// so a genuinely completed row is never resurrected by a relink.
+	//
+	// priority is deliberately NOT reset here. A row retired while 'deferred'
+	// carries priority=-100 from that miss, and resurrecting it to 'pending'
+	// without touching priority reproduces the pending+(-100)+miss_count>0 shape
+	// migration 030 (internal/db/migrations/030_work_queue_prev_status.sql)
+	// describes and repairs -- but that migration's own reasoning is that the
+	// shape is dequeue-inert (pending and deferred at priority -100 match the
+	// same dequeue predicate at the same priority), only invisible to
+	// RecheckDeferred/`queue deferred`, so leaving it alone here is consistent
+	// with that conclusion rather than a gap in this fix.
 	resurrect := c.retiredAsUnresolvable()
 	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {

@@ -399,19 +399,16 @@ type FailureGroup struct {
 // reported separately. An empty last_error normalizes to 'unknown' (via
 // COALESCE over NULLIF), matching internal/queue.CountFailuresByReason.
 //
-// THE #789 GUARD. This report answers "what did the FETCHER do", and a row can
-// land in 'failed'/'deferred' without the fetcher ever touching it: a
-// maintenance writer (prune's relink resurrect was the first instance, #789)
-// can settle a row into a fetch-outcome status directly. Such a row is excluded
-// here rather than being left to fall through the reason COALESCE into a
-// 'failed: unknown' / 'deferred: unknown' entry that reads as a real, unexplained
-// failure.
-//
-// The exclusion is keyed on the column each real writer is guaranteed to touch,
-// not on last_error alone (an EMPTY last_error is a legitimate outcome of a
-// genuine Fail/Defer call whose cause carries no message, and the pre-existing
-// EmptyReasonNormalized/WhitespaceOnlyJoinsUnknown tests intentionally exercise
-// that case) --
+// THE #789 GUARD. This report answers "what did the FETCHER do". Before this
+// fix, prune's relink resurrect settled a row directly into status='failed'
+// with attempts left at 0 and an empty last_error -- a fetch-outcome status the
+// fetcher had never actually produced. The guard excludes exactly that shape:
+// 'failed' with attempts=0, or 'deferred' with miss_count=0, each also
+// requiring an empty last_error (an EMPTY last_error is a legitimate outcome of
+// a genuine Fail/Defer call whose cause carries no message, and the
+// pre-existing EmptyReasonNormalized/WhitespaceOnlyJoinsUnknown tests
+// intentionally exercise that case, so the guard only fires when BOTH the
+// counter and the error text are absent) --
 //   - queue.Fail ALWAYS increments attempts to >=1 before writing 'failed'
 //     (failOnce: nextAttempts := attempts + 1). A 'failed' row with attempts=0
 //     was never failed by a real fetch attempt -- migration 012 already treated
@@ -419,13 +416,29 @@ type FailureGroup struct {
 //   - queue.Defer ALWAYS increments miss_count to >=1 before writing 'deferred'.
 //     A 'deferred' row with miss_count=0 was never deferred by a real miss.
 //
-// Both conditions ALSO require an empty last_error before excluding: a
-// maintenance writer that settles a row without an error message is the shape
-// being guarded against, but a row that DOES carry an error string is left
-// visible even at attempts=0/miss_count=0 -- excluding it would risk hiding a
-// genuine failure recorded through a path this comment cannot anticipate. This
-// mirrors #655's principle for RecentOutcomes: exclude the non-fetch case
-// rather than mint the catch-all a prettier label.
+// prune's own fix (above, in internal/prune/prune.go) now lands the resurrected
+// row on 'pending' rather than 'failed', so it no longer needs this guard at
+// all -- the guard exists for the NEXT writer that reproduces the old shape,
+// not for prune's current behavior.
+//
+// NOT COVERED, and not claimed to be: this guard is keyed on attempts/miss_count
+// being exactly 0, which only prune's old defect guaranteed by construction (a
+// freshly-resurrected row had never been attempted). It is not a durable
+// backstop for every writer that settles 'failed'/'deferred' outside a fetch --
+// three existing ones leave the relevant counter untouched rather than at 0, so
+// their rows are excluded only when that counter happens to already be 0, not by
+// design:
+//   - queue.RecheckRetired (internal/queue/queue.go:1424) only revives rows
+//     retired via the missLimitReachedError sentinel, whose miss_count is
+//     therefore always >=1 already -- this guard can never exclude its output.
+//   - queue.ResetInstrumental (internal/queue/queue.go:2618) writes 'deferred'
+//     with an empty last_error but never touches miss_count.
+//   - purgeprovenance.resetRows (internal/purgeprovenance/purgeprovenance.go:369)
+//     writes 'deferred' with an empty last_error and resets attempts, not miss_count.
+//
+// This mirrors #655's principle for RecentOutcomes: exclude the non-fetch case
+// rather than mint the catch-all a prettier label, but only for the shape this
+// guard actually recognizes.
 func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT status, COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*) AS n

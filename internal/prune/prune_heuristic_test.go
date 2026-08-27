@@ -633,12 +633,37 @@ func TestSweep_ReconsidersItsOwnRetirementOnceTheTargetAppears(t *testing.T) {
 // both the correct fix (pending) and the prior behavior (failed) -- it cannot
 // tell them apart. attempts and next_attempt_at must also be reset: the retry
 // posture is preserved there, explicitly, rather than smuggled through status.
+//
+// THE FIXTURE MUST MODEL A ROW DEEP IN BACKOFF, OR THE RESET IS UNOBSERVABLE.
+// seedGoneRowTagged never touches attempts/next_attempt_at, so a freshly
+// enqueued row already carries attempts=0 and a next_attempt_at within a
+// minute of "now" -- exactly the values relinkOne writes. Asserting those
+// values post-relink then passes whether or not relinkOne resets anything,
+// which is vacuous: deleting either the `attempts = 0` or the
+// `next_attempt_at = ?` write from relinkOne still passes this test as it was
+// originally written. So after seeding, the row is driven to attempts=6 and a
+// next_attempt_at 72h in the future here -- the shape of a row that has missed
+// six geometric-backoff retries -- before it is retired and relinked. Only
+// against that starting shape does a passing assertion mean the reset
+// happened.
 func TestSweep_ResurrectionLandsOnPendingNotFailed(t *testing.T) {
 	ctx, sqlDB, libID, root := openSeeded(t)
 	gone := filepath.Join(root, "Old Artist", "Album", "01. Winterlight.flac")
 	moved := filepath.Join(root, "New Artist", "Album", "01. Winterlight.flac")
 
 	seedNamedGoneRow(t, ctx, sqlDB, libID, gone)
+
+	// Drive the row into the shape a real geometric-backoff retry sequence
+	// leaves behind: several failed attempts and a next_attempt_at far in the
+	// future. This is what makes the post-relink reset assertions load-bearing
+	// rather than vacuous (see the doc comment above).
+	farFuture := time.Now().UTC().Add(72 * time.Hour).Format(time.RFC3339)
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET attempts = 6, next_attempt_at = ? WHERE source_path = ?`,
+		farFuture, gone); err != nil {
+		t.Fatalf("seed backoff state: %v", err)
+	}
+
 	if err := os.Remove(gone); err != nil {
 		t.Fatalf("remove source: %v", err)
 	}
@@ -670,16 +695,33 @@ func TestSweep_ResurrectionLandsOnPendingNotFailed(t *testing.T) {
 			"so the row must not read as a failure to any report", status, "pending")
 	}
 	if attempts != 0 {
-		t.Errorf("attempts = %d, want 0: the retry budget must not carry over from the retirement", attempts)
+		t.Errorf("attempts = %d, want 0: the retry budget (seeded at 6) must not carry over from the retirement", attempts)
 	}
 	// next_attempt_at must be current (immediately dequeue-eligible), not the
-	// far-future backoff a real Fail() would have set.
+	// far-future backoff seeded above.
 	parsed, err := time.Parse(time.RFC3339, nextAttemptAt)
 	if err != nil {
 		t.Fatalf("parse next_attempt_at %q: %v", nextAttemptAt, err)
 	}
 	if time.Since(parsed) > time.Minute || time.Since(parsed) < -time.Minute {
-		t.Errorf("next_attempt_at = %v, want ~now (immediately eligible)", parsed)
+		t.Errorf("next_attempt_at = %v, want ~now (immediately eligible), not the seeded 72h-future backoff", parsed)
+	}
+
+	// PROVE ELIGIBILITY THROUGH THE REAL DEQUEUE PATH, not by re-parsing the
+	// timestamp above: a test that re-implements the eligibility comparison
+	// (e.g. "is next_attempt_at <= now") can agree with a wrong implementation.
+	// Driving queue.Dequeue exercises the actual predicate the worker uses
+	// (dequeueDeterministicSQL / dequeueRandomizedSQL: status IN ('pending',
+	// 'failed', 'deferred') AND next_attempt_at <= now).
+	q := queue.NewDBQueue(sqlDB)
+	q.SetRandomized(false)
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v -- the resurrected row was not eligible through the real dequeue predicate", err)
+	}
+	if item.Inputs.SourcePath != moved {
+		t.Errorf("Dequeue returned source_path %q, want %q -- some other row was claimed instead "+
+			"of the resurrected one", item.Inputs.SourcePath, moved)
 	}
 }
 
