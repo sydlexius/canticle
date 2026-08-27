@@ -399,6 +399,15 @@ type FailureGroup struct {
 // reported separately. An empty last_error normalizes to 'unknown' (via
 // COALESCE over NULLIF), matching internal/queue.CountFailuresByReason.
 //
+// That normalization still matches, but the ROW SCOPE deliberately no longer
+// does: CountFailuresByReason (queue.go:1643, feeding GET /metrics) carries no
+// equivalent of the #789 guard below, so for as long as a legacy row of the
+// guarded shape survives, the two disagree about it -- this report hides it and
+// /metrics still counts it. Not worth widening the guard for: those rows drain
+// to 'done' and leave the set on their own, and /metrics is an externally
+// scraped counter where a retroactive change to history is worse than a
+// transient overcount.
+//
 // THE #789 GUARD. This report answers "what did the FETCHER do". Before this
 // fix, prune's relink resurrect settled a row directly into status='failed'
 // with attempts left at 0 and an empty last_error -- a fetch-outcome status the
@@ -428,9 +437,18 @@ type FailureGroup struct {
 // three existing ones leave the relevant counter untouched rather than at 0, so
 // their rows are excluded only when that counter happens to already be 0, not by
 // design:
-//   - queue.RecheckRetired (internal/queue/queue.go:1424) only revives rows
-//     retired via the missLimitReachedError sentinel, whose miss_count is
-//     therefore always >=1 already -- this guard can never exclude its output.
+//   - queue.RecheckRetired (internal/queue/queue.go:1424) revives rows retired
+//     via the missLimitReachedError sentinel. Its revived rows are USUALLY
+//     visible here (miss_count >= 1), but not always: queue.RetireMiss
+//     (queue.go:1229) writes only status/completed_at/last_error and never
+//     touches miss_count, and the worker retires when MissCount+1 >=
+//     maxMissAttempts (worker.go:2078), so a deployment with
+//     max_miss_attempts=1 (legal -- config.go:1694 clamps only from below)
+//     retires on the FIRST miss without ever calling Defer, leaving
+//     miss_count=0. Such a revived row DOES match the deferred clause and is
+//     excluded. That exclusion is defensible on its own terms -- a revived row
+//     has no fetch failure left to report -- but it is a consequence of the
+//     miss cap, not something this guard was designed around.
 //   - queue.ResetInstrumental (internal/queue/queue.go:2618) writes 'deferred'
 //     with an empty last_error but never touches miss_count.
 //   - purgeprovenance.resetRows (internal/purgeprovenance/purgeprovenance.go:369)
