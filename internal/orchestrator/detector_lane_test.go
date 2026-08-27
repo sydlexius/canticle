@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,5 +303,57 @@ func TestDetectorLane_OutageTripsBreaker(t *testing.T) {
 	}
 	if br.Trips() == 0 {
 		t.Fatal("a detector outage must trip the breaker")
+	}
+}
+
+// THE WRAPPER CHAIN MUST NOT PRECEDE THE ACTIONABLE FACT (#790). The stored
+// reason used to open with roughly 80 characters of pure wrapper --
+// "detector request failed: " then the ErrLaneOutage sentinel's own
+// "orchestrator: lane outage" -- before anything an operator can act on
+// appeared. Each layer named a subsystem; none named the problem.
+//
+// The sentinel still has to be MATCHABLE (detectorClassifier and
+// ClassifyOutcome both key on it via errors.Is), so it cannot simply be
+// dropped. What changes is that its TEXT no longer renders: the lane returns an
+// error whose message is the cause's own, while still unwrapping to both the
+// sentinel and the cause.
+func TestDetectorLane_OutageErrorLeadsWithTheCause(t *testing.T) {
+	cause := fmt.Errorf("detector: audio file is missing")
+	err := newLaneOutage(cause)
+
+	// Still matchable both ways -- this is the load-bearing half.
+	if !errors.Is(err, ErrLaneOutage) {
+		t.Errorf("errors.Is(err, ErrLaneOutage) = false; the classifier keys on this sentinel")
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("errors.Is(err, cause) = false; callers and logs need the underlying failure")
+	}
+	// And it classifies as it always did.
+	if got := ClassifyOutcome(err); got != OutcomeLaneOutage {
+		t.Errorf("ClassifyOutcome = %v, want OutcomeLaneOutage", got)
+	}
+
+	got := err.Error()
+	if got != "detector: audio file is missing" {
+		t.Errorf("rendered %q; want exactly the cause, with no wrapper prose", got)
+	}
+	if strings.Contains(got, "orchestrator:") {
+		t.Errorf("rendered %q; the sentinel's text must not reach an operator-facing string", got)
+	}
+	if strings.Contains(got, "detector request failed") {
+		t.Errorf("rendered %q; the wrapper prefix must be gone", got)
+	}
+}
+
+// A nil cause must not panic or render an empty reason. Defensive: the lane
+// only builds this with a non-nil cause today, but an empty last_error is
+// indistinguishable from "no error recorded" downstream.
+func TestNewLaneOutageWithNilCause(t *testing.T) {
+	err := newLaneOutage(nil)
+	if !errors.Is(err, ErrLaneOutage) {
+		t.Errorf("a nil-cause outage must still match the sentinel")
+	}
+	if err.Error() == "" {
+		t.Errorf("a nil-cause outage rendered empty; an empty reason reads as 'no error recorded'")
 	}
 }

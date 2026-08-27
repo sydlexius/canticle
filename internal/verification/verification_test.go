@@ -3,7 +3,9 @@ package verification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/ffmpeg"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -252,13 +255,25 @@ func TestHTTPVerifierTranscriptionURL(t *testing.T) {
 // -- byte-identical to the pre-refactor longhand construction (#796). A
 // content change to this string is #790's job, not this one's.
 func TestHTTPVerifierSampleErrorMessageIsPinned(t *testing.T) {
+	// THE FILE MUST EXIST. This test exercises the ffmpeg SAMPLING-FAILURE path,
+	// which #790 now reaches only for a file that is actually present: sample()
+	// stats first and returns the missing-audio error for an absent path. The
+	// fixture previously passed a hardcoded "/some/audio.flac" that existed
+	// nowhere, which worked while ffmpeg was the first thing to touch the path
+	// and stopped working the moment a stat preceded it. Writing a real file
+	// keeps the assertion aimed at the failure it names, and matches the
+	// detector's equivalent test, which has always written one.
+	audioPath := filepath.Join(t.TempDir(), "audio.flac")
+	if err := os.WriteFile(audioPath, []byte("fake audio"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
 	ffmpegPath := fakeFFmpeg(t, `echo 'boom output' >&2; exit 3`)
 	v, err := NewHTTPVerifier("http://whisper:9000", 30, 0.5, ffmpegPath)
 	if err != nil {
 		t.Fatalf("NewHTTPVerifier: %v", err)
 	}
 
-	_, err = v.sample(context.Background(), "/some/audio.flac")
+	_, err = v.sample(context.Background(), audioPath)
 	if err == nil {
 		t.Fatal("sample succeeded; want an ffmpeg failure")
 	}
@@ -267,7 +282,7 @@ func TestHTTPVerifierSampleErrorMessageIsPinned(t *testing.T) {
 	if err.Error() != want {
 		t.Fatalf("sample() error =\n got %q\nwant %q", err.Error(), want)
 	}
-	if strings.Contains(err.Error(), "/some/audio.flac") {
+	if strings.Contains(err.Error(), audioPath) {
 		t.Errorf("error leaks the audio path; want it kept out per #431: %q", err.Error())
 	}
 }
@@ -280,4 +295,64 @@ func fakeFFmpeg(t *testing.T, body string) string {
 		t.Fatalf("write fake ffmpeg: %v", err)
 	}
 	return path
+}
+
+// A MISSING AUDIO FILE MUST NOT REPORT AS AN FFMPEG SAMPLING FAILURE (#790).
+// The detector carries the same discriminator for the same reason; verification
+// is fixed alongside it deliberately rather than left as the one sidecar that
+// still misreports a moved file, since both call the same shared helper and the
+// sentinel lives in internal/ffmpeg precisely because both need it.
+//
+// The ffmpeg stub here SUCCEEDS, so the only thing that can produce an error is
+// the stat check under test: if that check is removed, ffmpeg runs cleanly and
+// these assertions fail.
+func TestVerificationMissingAudioIsNotAnFFmpegFailure(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "moved-away.flac")
+	ffmpegPath := fakeFFmpeg(t, `exit 0`)
+
+	v, err := NewHTTPVerifier("http://whisper:9000", 45, 0.5, ffmpegPath)
+	if err != nil {
+		t.Fatalf("NewHTTPVerifier: %v", err)
+	}
+
+	_, err = v.sample(context.Background(), missing)
+	if err == nil {
+		t.Fatal("sample succeeded on a missing audio file; want a missing-audio error")
+	}
+	if !errors.Is(err, ffmpeg.ErrAudioMissing) {
+		t.Errorf("sample() error = %v; want it to match ffmpeg.ErrAudioMissing", err)
+	}
+	if strings.Contains(err.Error(), "sample audio with ffmpeg") {
+		t.Errorf("sample() error = %q; a missing file must not report as an ffmpeg sampling failure", err.Error())
+	}
+	if strings.Contains(err.Error(), missing) {
+		t.Errorf("error leaks the audio path; want it kept out per #431: %q", err.Error())
+	}
+}
+
+// The narrowing to fs.ErrNotExist, mirrored from the detector. See that test for
+// why ENOTDIR is the right fixture and why a chmod one would be wrong.
+func TestVerificationNonExistErrorIsNotReportedAsMissing(t *testing.T) {
+	regular := filepath.Join(t.TempDir(), "regular.mp3")
+	if err := os.WriteFile(regular, []byte("fake audio"), 0600); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+	nested := filepath.Join(regular, "child.flac")
+
+	if _, statErr := os.Stat(nested); statErr == nil || errors.Is(statErr, fs.ErrNotExist) {
+		t.Skipf("fixture did not produce a non-ENOENT stat error on this platform: %v", statErr)
+	}
+
+	v, err := NewHTTPVerifier("http://whisper:9000", 45, 0.5, fakeFFmpeg(t, `echo 'boom' >&2; exit 7`))
+	if err != nil {
+		t.Fatalf("NewHTTPVerifier: %v", err)
+	}
+
+	_, err = v.sample(context.Background(), nested)
+	if err == nil {
+		t.Fatal("sample succeeded; want the ordinary sampling failure")
+	}
+	if errors.Is(err, ffmpeg.ErrAudioMissing) {
+		t.Errorf("sample() error = %v; a non-ENOENT stat error must NOT be reported as a missing file", err)
+	}
 }

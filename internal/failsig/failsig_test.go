@@ -133,9 +133,17 @@ func TestNormalizeEmptyIsStable(t *testing.T) {
 	}
 }
 
-// A multi-line error (the detector lane wraps its cause on a second line) keeps
-// its shape: the first line is the category, and later lines are where the
-// variable text lives.
+// A multi-line error keeps its shape: the first line is the category, and later
+// lines are where the variable text lives.
+//
+// THE INPUT BELOW IS A LEGACY SHAPE AND IS DELIBERATELY KEPT. The detector lane
+// no longer emits the "detector request failed: orchestrator: lane outage"
+// wrapper chain (#790 collapsed it), but rows carrying it are still in every
+// database that hit the condition -- a deferred row keeps its reason until it
+// succeeds, and a row whose file is permanently gone never will. Normalize runs
+// over exactly those stored values, so dropping this case would stop testing
+// the population the function actually sees. The new shape is covered
+// separately below.
 func TestNormalizeHandlesMultiLine(t *testing.T) {
 	got := Normalize("detector request failed: orchestrator: lane outage\ndetector: classifier unavailable: Post \"http://yamnet:8080/classify\": dial tcp 172.22.0.2:8080: connect: connection refused")
 	if !strings.Contains(got, "detector request failed") {
@@ -143,6 +151,41 @@ func TestNormalizeHandlesMultiLine(t *testing.T) {
 	}
 	if strings.Contains(got, "172.22.0.2") {
 		t.Errorf("normalized signature retains a container IP:\n%s", got)
+	}
+}
+
+// The POST-#790 shape: the wrapper chain is gone, so the leading category is now
+// the cause's own subsystem prefix. The variable tail (an exit code, an ffmpeg
+// diagnostic) must still normalize away, exactly as it did under the old shape,
+// or the collapse would have traded a verbose grouping key for an unstable one.
+func TestNormalizeHandlesCollapsedDetectorError(t *testing.T) {
+	// The variable token here is an ffmpeg ALLOCATOR address, which is the form
+	// the package actually collapses. A bare "0x..." is deliberately NOT
+	// normalized -- see the "@ 0x" rule in failsig.go, which is anchored
+	// precisely so a hex STATUS code ("exit status 0xC0000005") survives as the
+	// distinct failure it is. Asserting otherwise here would contradict that
+	// decision rather than test it.
+	got := Normalize("detector: sample audio with ffmpeg: exit status 69\n[mp3float @ 0x14e1cf868a80] Header missing")
+	if !strings.Contains(got, "detector") {
+		t.Errorf("the leading category was lost:\n%s", got)
+	}
+	if strings.Contains(got, "0x14e1cf868a80") {
+		t.Errorf("normalized signature retains an allocator address:\n%s", got)
+	}
+	if !strings.Contains(got, "exit status 69") {
+		t.Errorf("the actionable exit status was lost:\n%s", got)
+	}
+}
+
+// A missing-audio reason is already short and fully static, so it must survive
+// normalization as a single stable group rather than being split or emptied.
+func TestNormalizeKeepsMissingAudioStable(t *testing.T) {
+	got := Normalize("detector: audio file is missing")
+	if got == "" {
+		t.Fatal("a missing-audio reason normalized to empty; it would join the 'unknown' bucket")
+	}
+	if !strings.Contains(got, "audio file is missing") {
+		t.Errorf("the actionable text was lost:\n%s", got)
 	}
 }
 

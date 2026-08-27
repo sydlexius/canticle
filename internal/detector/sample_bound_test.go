@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sydlexius/canticle/internal/ffmpeg"
 )
 
 // floodingFFmpeg writes a large volume of stderr and exits nonzero, reproducing
@@ -220,5 +224,132 @@ func TestProbeDurationBoundsUnparsableOutput(t *testing.T) {
 	}
 	if len(err.Error()) > 8192 {
 		t.Errorf("ffprobe parse error carries unbounded output: %d bytes", len(err.Error()))
+	}
+}
+
+// A MISSING AUDIO FILE MUST NOT REPORT AS A DETECTOR FAILURE (#790). Two
+// production rows carried the same "detector request failed" prose for
+// unrelated root causes: one where the source audio had MOVED, one where a
+// corrupt file could not be decoded. The first names the wrong subsystem
+// entirely and sends an operator to read the detector sidecar's logs for what
+// is actually a stale path.
+//
+// The check is STRUCTURAL (os.Stat before ffmpeg is invoked at all), so this
+// test deliberately wires an ffmpeg stub that would SUCCEED if it ran. If the
+// stat check is removed or moved below the invocation, the stub returns cleanly
+// and the assertions below fail -- which is what makes them load-bearing rather
+// than a restatement of ffmpeg's own behavior.
+func TestDetectorMissingAudioIsNotAnFFmpegFailure(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "moved-away.flac")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		t.Errorf("classifier was called at %q; the missing file should have short-circuited first", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	d, err := NewHTTPDetector(Config{
+		ClassifierURL:         srv.URL,
+		SampleDurationSeconds: 30,
+		MinConfidence:         0.90,
+		InstrumentalClasses:   []string{"Music"},
+		VocalClasses:          []string{"Singing"},
+		VocalMaxConfidence:    0.05,
+		FFmpegPath:            succeedingFFmpeg(t),
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector: %v", err)
+	}
+
+	_, err = d.Detect(context.Background(), missing)
+	if err == nil {
+		t.Fatal("Detect succeeded on a missing audio file; want a missing-audio error")
+	}
+	if !errors.Is(err, ffmpeg.ErrAudioMissing) {
+		t.Errorf("Detect() error = %v; want it to match ffmpeg.ErrAudioMissing so callers can discriminate", err)
+	}
+	// It must NOT read as an ffmpeg sampling failure -- that is the specific
+	// misdiagnosis #790 exists to remove.
+	if strings.Contains(err.Error(), "sample audio with ffmpeg") {
+		t.Errorf("Detect() error = %q; a missing file must not report as an ffmpeg sampling failure", err.Error())
+	}
+	if strings.Contains(err.Error(), missing) {
+		t.Errorf("error leaks the audio path; want it kept out per #431: %q", err.Error())
+	}
+}
+
+// succeedingFFmpeg exits 0 without writing output. It exists so the
+// missing-file test above cannot pass merely because ffmpeg would have failed
+// anyway: with this stub, the ONLY thing that can produce an error is the stat
+// check under test.
+func succeedingFFmpeg(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatalf("write succeeding ffmpeg: %v", err)
+	}
+	return path
+}
+
+// A NON-ENOENT STAT ERROR IS NOT "MISSING" (#790). The stat check above narrows
+// deliberately to fs.ErrNotExist: only a genuinely absent file gets the
+// missing-audio verdict. Any other stat failure -- a permission problem, an I/O
+// fault, a path component that is not a directory -- must fall through to the
+// ordinary sampling path rather than be reported as a moved file.
+//
+// This is a REGRESSION GUARD WITH TEETH, not ceremony: broadening the condition
+// to `statErr != nil` (dropping the errors.Is narrowing) passes every other test
+// in this package. That mutation was verified to survive before this test was
+// written, which is the only reason it earns its place.
+//
+// ENOTDIR is the portable way to produce a non-ENOENT stat error: stat'ing a
+// path NESTED UNDER A REGULAR FILE fails with "not a directory", which
+// errors.Is(fs.ErrNotExist) does NOT match. A chmod-based permission fixture
+// would be wrong here -- a root test process (common in CI images) can stat
+// through 0o000 and the test would silently pass for the wrong reason.
+func TestDetectorNonExistErrorIsNotReportedAsMissing(t *testing.T) {
+	regular := filepath.Join(t.TempDir(), "regular.mp3")
+	if err := os.WriteFile(regular, []byte("fake audio"), 0600); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+	// Nested UNDER a regular file: stat yields ENOTDIR, not ENOENT.
+	nested := filepath.Join(regular, "child.flac")
+
+	if _, statErr := os.Stat(nested); statErr == nil || errors.Is(statErr, fs.ErrNotExist) {
+		t.Skipf("fixture did not produce a non-ENOENT stat error on this platform: %v", statErr)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		t.Errorf("classifier was called at %q; sampling should have failed first", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	d, err := NewHTTPDetector(Config{
+		ClassifierURL:         srv.URL,
+		SampleDurationSeconds: 30,
+		MinConfidence:         0.90,
+		InstrumentalClasses:   []string{"Music"},
+		VocalClasses:          []string{"Singing"},
+		VocalMaxConfidence:    0.05,
+		FFmpegPath:            smallFailingFFmpeg(t),
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector: %v", err)
+	}
+
+	_, err = d.Detect(context.Background(), nested)
+	if err == nil {
+		t.Fatal("Detect succeeded; want the ordinary sampling failure")
+	}
+	if errors.Is(err, ffmpeg.ErrAudioMissing) {
+		t.Errorf("Detect() error = %v; a non-ENOENT stat error must NOT be reported as a missing file -- "+
+			"that misdiagnoses a permission or I/O fault as a moved path", err)
 	}
 }
