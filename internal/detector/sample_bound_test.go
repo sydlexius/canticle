@@ -137,6 +137,68 @@ func TestDetectorSampleLogsThePath(t *testing.T) {
 	}
 }
 
+// smallFailingFFmpeg writes a short, fixed stderr message and exits nonzero,
+// so its output is well under the bounding cap and the rendered error is
+// exactly reproducible byte-for-byte.
+func smallFailingFFmpeg(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\necho 'boom output' >&2\nexit 7\n"
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	return path
+}
+
+// TestDetectorSampleErrorMessageIsPinned is a thin wiring assertion: the full
+// suite proving the message shape (format, %w wrapping, BoundOutput
+// application) lives in internal/ffmpeg against the shared SampleError helper
+// directly. This test exists only to prove the detector call site is
+// actually wired to that helper and renders the same text it always has --
+// byte-identical to the pre-refactor longhand construction (#796). A content
+// change to this string is #790's job, not this one's.
+func TestDetectorSampleErrorMessageIsPinned(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "corrupt.mp3")
+	if err := os.WriteFile(audioPath, []byte("fake audio"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		t.Errorf("classifier was called at %q; sampling should have failed first", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	d, err := NewHTTPDetector(Config{
+		ClassifierURL:         srv.URL,
+		SampleDurationSeconds: 30,
+		MinConfidence:         0.90,
+		InstrumentalClasses:   []string{"Music"},
+		VocalClasses:          []string{"Singing"},
+		VocalMaxConfidence:    0.05,
+		FFmpegPath:            smallFailingFFmpeg(t),
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector: %v", err)
+	}
+
+	_, err = d.Detect(context.Background(), audioPath)
+	if err == nil {
+		t.Fatal("Detect succeeded; want a sampling failure")
+	}
+
+	want := "detector: sample audio with ffmpeg: exit status 7: boom output"
+	if err.Error() != want {
+		t.Fatalf("Detect() error =\n got %q\nwant %q", err.Error(), want)
+	}
+	if strings.Contains(err.Error(), audioPath) {
+		t.Errorf("error leaks the audio path; want it kept out per #431: %q", err.Error())
+	}
+}
+
 // The ffprobe parse-failure branch interpolates captured output too, so it
 // carries the same unbounded-capture risk as the sampler. A well-behaved ffprobe
 // prints one short number, so this is a backstop rather than a fix for an
