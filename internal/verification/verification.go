@@ -137,7 +137,7 @@ func (v *HTTPVerifier) sample(ctx context.Context, audioPath string) (_ string, 
 		// Analysis report (#731).
 		slog.Warn("verification: ffmpeg could not sample this audio file; it may be corrupt",
 			"path", audioPath, "error", err)
-		return "", fmt.Errorf("verification: sample audio with ffmpeg: %w: %s", err, ffmpeg.BoundOutput(string(output)))
+		return "", ffmpeg.SampleError("verification", err, string(output))
 	}
 	return samplePath, nil
 }

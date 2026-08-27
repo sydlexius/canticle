@@ -244,6 +244,34 @@ func TestHTTPVerifierTranscriptionURL(t *testing.T) {
 	}
 }
 
+// TestHTTPVerifierSampleErrorMessageIsPinned is a thin wiring assertion: the
+// full suite proving the message shape (format, %w wrapping, BoundOutput
+// application) lives in internal/ffmpeg against the shared SampleError
+// helper directly. This test exists only to prove the verification call site
+// is actually wired to that helper and renders the same text it always has
+// -- byte-identical to the pre-refactor longhand construction (#796). A
+// content change to this string is #790's job, not this one's.
+func TestHTTPVerifierSampleErrorMessageIsPinned(t *testing.T) {
+	ffmpegPath := fakeFFmpeg(t, `echo 'boom output' >&2; exit 3`)
+	v, err := NewHTTPVerifier("http://whisper:9000", 30, 0.5, ffmpegPath)
+	if err != nil {
+		t.Fatalf("NewHTTPVerifier: %v", err)
+	}
+
+	_, err = v.sample(context.Background(), "/some/audio.flac")
+	if err == nil {
+		t.Fatal("sample succeeded; want an ffmpeg failure")
+	}
+
+	want := "verification: sample audio with ffmpeg: exit status 3: boom output"
+	if err.Error() != want {
+		t.Fatalf("sample() error =\n got %q\nwant %q", err.Error(), want)
+	}
+	if strings.Contains(err.Error(), "/some/audio.flac") {
+		t.Errorf("error leaks the audio path; want it kept out per #431: %q", err.Error())
+	}
+}
+
 func fakeFFmpeg(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffmpeg")
