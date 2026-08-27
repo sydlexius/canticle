@@ -20,7 +20,12 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # arrives TRANSITIVELY via ffmpeg, so it needs naming explicitly -- `apk upgrade`
 # alone left 0.12.1-r0 in place because the pinned base digest predates the fix.
 # Raise/drop when the base index ships it by default.
-RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" su-exec tzdata && \
+# openssl floor pinned to remediate the 3.5.7-r0 batch: 7 HIGH (CVSS 7.5) plus a
+# MEDIUM and two LOW, all fixed in 3.5.8-r0 per the Alpine 3.24 secdb. It supplies
+# libcrypto3/libssl3, which is what the scanner names. Pinned on `openssl` (the
+# ORIGIN package apk resolves the floor against) rather than on either subpackage.
+# Raise/drop when the base index ships it by default.
+RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.8-r0" su-exec tzdata && \
     apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
