@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -598,6 +599,28 @@ func (d *HTTPDetector) missingBaselineClasses(resp classifyResponse) []string {
 }
 
 func (d *HTTPDetector) sample(ctx context.Context, audioPath string) (_ string, retErr error) {
+	// DISCRIMINATE "THE FILE IS GONE" FROM "THE FILE WILL NOT DECODE" BEFORE
+	// INVOKING ffmpeg (#790). These are different problems with different
+	// remedies -- a stale/moved path versus a corrupt file -- and they reached
+	// the operator as the same "detector request failed" prose, which named the
+	// detector for what is actually a path problem.
+	//
+	// The check is here, at the TOP, deliberately: it precedes both the temp-file
+	// creation (no scratch file to clean up on a path we know will fail) and
+	// spreadExpr, whose ffprobe call on a missing file logs a misleading
+	// "duration probe failed; single-window fallback" warning before the real
+	// failure ever surfaces.
+	//
+	// os.Stat is the authority for this question, matching internal/prune. Only
+	// fs.ErrNotExist takes this branch: any other stat error (a permission
+	// problem, an I/O fault) is NOT "missing" and must fall through to the
+	// ordinary path rather than be misreported as a moved file.
+	if _, statErr := os.Stat(audioPath); statErr != nil && errors.Is(statErr, fs.ErrNotExist) {
+		slog.Warn("detector: audio file is missing; skipping sample",
+			"path", audioPath)
+		return "", ffmpeg.MissingAudioError("detector", audioPath)
+	}
+
 	f, err := os.CreateTemp("", "canticle-detect-*.wav")
 	if err != nil {
 		return "", fmt.Errorf("detector: create sample file: %w", err)

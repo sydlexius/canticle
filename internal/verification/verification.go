@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -108,6 +110,22 @@ func (v *HTTPVerifier) Verify(ctx context.Context, audioPath string, song models
 }
 
 func (v *HTTPVerifier) sample(ctx context.Context, audioPath string) (_ string, retErr error) {
+	// Discriminate "the file is gone" from "the file will not decode" before
+	// invoking ffmpeg, mirroring the detector's sampler (#790). A moved or stale
+	// path is a different problem with a different remedy than a corrupt file,
+	// and reporting both as an ffmpeg sampling failure sends an operator to the
+	// wrong subsystem.
+	//
+	// Checked at the TOP, before the temp file is created, so a path already
+	// known to fail leaves no scratch file behind. Only fs.ErrNotExist takes this
+	// branch: any other stat error (permissions, an I/O fault) is NOT "missing"
+	// and falls through to the ordinary path rather than being misreported.
+	if _, statErr := os.Stat(audioPath); statErr != nil && errors.Is(statErr, fs.ErrNotExist) {
+		slog.Warn("verification: audio file is missing; skipping sample",
+			"path", audioPath)
+		return "", ffmpeg.MissingAudioError("verification", audioPath)
+	}
+
 	f, err := os.CreateTemp("", "canticle-verify-*.wav")
 	if err != nil {
 		return "", fmt.Errorf("verification: create sample file: %w", err)

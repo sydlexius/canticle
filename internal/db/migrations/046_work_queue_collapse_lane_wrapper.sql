@@ -1,0 +1,107 @@
+-- +goose Up
+-- +goose StatementBegin
+-- Strip the detector lane's wrapper chain from work_queue.last_error values
+-- already stored (#790).
+--
+-- WHY A MIGRATION AND NOT ONLY THE CODE FIX. The accompanying change collapses
+-- the chain at the source, so no NEW value carries it. It does nothing for
+-- values already in the database, and those persist indefinitely: a 'deferred'
+-- row keeps its last_error until it eventually succeeds, and a row whose source
+-- file has permanently moved never will. Shipping the code fix alone would leave
+-- the actual symptom -- a misleading reason on the Failure Analysis screen -- in
+-- place on exactly the deployments that hit the bug. Migration 043 is the
+-- precedent for this shape, and for the same reason.
+--
+-- THE EXACT STORED SHAPE. The pre-fix lane built its error as
+--
+--     fmt.Errorf("detector request failed: %w", errors.Join(ErrLaneOutage, cause))
+--
+-- and errors.Join renders its members NEWLINE-SEPARATED, so the persisted value
+-- opens with exactly:
+--
+--     detector request failed: orchestrator: lane outage\n
+--
+-- That is 51 characters naming two subsystems and no problem, ahead of a cause
+-- that already carries its own "detector: " prefix. It is not merely verbose: a
+-- row whose audio file had MOVED read as "detector request failed", pointing an
+-- operator at the detector sidecar for what is a path problem.
+--
+-- CHARACTERS ARE CORRECT HERE, AND THIS IS THE INVERSE OF 043's TRAP. Migration
+-- 043 had to measure BYTES (via length(CAST(... AS BLOB))) because it enforced a
+-- byte budget that Go also enforces, and SQLite's length()/substr() count
+-- CHARACTERS -- a mismatch that was wrong in both directions on non-ASCII input.
+-- No byte budget exists here. This migration matches a FIXED ASCII PREFIX and
+-- removes exactly it, so character offsets and byte offsets coincide over the
+-- matched span by construction. The cause that follows is never measured, only
+-- carried through, so its encoding is irrelevant. Expressing the offset as a
+-- length() of the literal rather than a hardcoded 51 keeps the two halves of the
+-- statement from drifting if the literal is ever edited.
+--
+-- ANCHORED TO THE START, DELIBERATELY. The predicate compares a leading substr
+-- rather than using LIKE or instr, so an occurrence of this text anywhere else
+-- in a message cannot trigger a rewrite. A row that merely QUOTES the old
+-- wrapper (a nested worker wrap, a copied diagnostic) is not this bug and is
+-- left alone.
+--
+-- ONLY THE detector-lane OUTAGE SHAPE IS TOUCHED. Three neighbors are
+-- deliberately excluded, each for its own reason:
+--
+--   * The NOT-READY sentinel ("detector not ready: orchestrator: lane not ready
+--     (starting up)") is a different lane outcome. The worker RELEASES that item
+--     without recording a failure, so its text does not reach last_error in the
+--     first place; matching it would be matching a shape that does not occur.
+--   * VERIFICATION failures ("worker: verify lyrics: verification: sample audio
+--     with ffmpeg: ...") never pass through the orchestrator's lane machinery --
+--     the worker calls the verifier directly -- so they carry no lane wrapper to
+--     strip.
+--   * Ordinary provider misses carry no wrapper at all.
+--
+-- THE WRAPPER-ONLY ROW IS LEFT ALONE, which is the subtle case. A value
+-- consisting of the wrapper and NOTHING else would strip to the empty string,
+-- and reports.FailureAnalysis normalizes an empty last_error to 'unknown' (via
+-- COALESCE over NULLIF) -- so the row would become indistinguishable from one
+-- that never recorded an error, turning a legible-but-verbose reason into no
+-- reason at all. The length() guard in the WHERE clause excludes it. Such a row
+-- is not known to occur (the lane always has a cause), and it is guarded rather
+-- than assumed away because the cost of being wrong is silent data loss.
+--
+-- RE-RUNNABLE FOR EVERY VALUE THIS CODE EVER PRODUCED. A stripped row starts
+-- with "detector: ", which does not match the anchored predicate, so applying
+-- this statement a second time is a no-op. Asserted directly in
+-- internal/db/migration_046_test.go rather than assumed.
+--
+-- The precise claim is "idempotent over the producible population", NOT
+-- "idempotent over all inputs" -- a DOUBLY-wrapped value would lose one wrapper
+-- per application, and two applications would eat both. That input cannot occur:
+-- the lane wrapped exactly once, at a single call site. The distinction is
+-- recorded because the weaker, true claim is the one a future editor should
+-- reason from -- if a second wrapping site were ever added, this statement would
+-- need a loop or an anchor that cannot re-match.
+--
+-- LOSSLESS FOR THE CAUSE. Unlike 043, which discards text, this removes only a
+-- fixed prefix that carried no information. Nothing an operator could act on is
+-- dropped, which is why the Down below can be an honest no-op rather than a
+-- lossy one.
+--
+-- Side effect: the update_work_queue_updated_at trigger (migration 012) fires on
+-- each touched row, so updated_at is rewritten to the deploy timestamp for the
+-- rows corrected here. Cosmetic, and noted so the bump is not mistaken for real
+-- churn -- the same effect migrations 032 and 043 documented.
+UPDATE work_queue
+SET last_error = substr(last_error, length('detector request failed: orchestrator: lane outage' || char(10)) + 1)
+WHERE substr(last_error, 1, length('detector request failed: orchestrator: lane outage' || char(10)))
+        = 'detector request failed: orchestrator: lane outage' || char(10)
+  AND length(last_error) > length('detector request failed: orchestrator: lane outage' || char(10));
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+-- Deliberate no-op. The Up removes a fixed, information-free prefix; restoring it
+-- would reintroduce exactly the misleading text this migration exists to remove,
+-- and nothing downstream reads it (the sentinel is matched by errors.Is in Go,
+-- never by this stored text). A row that has been stripped is strictly better
+-- than one that has not, in both directions of a version rollback: the collapsed
+-- form is what the new code emits anyway, and the old code never parsed the
+-- prefix it wrote. (Matches migrations 028, 032 and 043.)
+SELECT 1;
+-- +goose StatementEnd

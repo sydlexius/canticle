@@ -92,7 +92,17 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker, pacer provid
 					notReadyStreak.Add(1)
 					return models.Song{}, fmt.Errorf("detector not ready: %w", errors.Join(ErrLaneNotReady, err))
 				}
-				return models.Song{}, fmt.Errorf("detector request failed: %w", errors.Join(ErrLaneOutage, err))
+				// newLaneOutage rather than the fmt.Errorf/errors.Join pair used
+				// above (#790): this error is persisted verbatim to
+				// work_queue.last_error and rendered into the Failure Analysis
+				// report, where the old form opened with ~80 characters of wrapper
+				// ("detector request failed: " plus the sentinel's own
+				// "orchestrator: lane outage") before the actionable cause. The
+				// sentinel stays matchable via errors.Is -- only its TEXT stops
+				// rendering. The not-ready branch above keeps the joined form
+				// deliberately: it releases the item without recording a failure,
+				// so its text never reaches last_error.
+				return models.Song{}, newLaneOutage(err)
 			}
 			everReached.Store(true)
 			notReadyStreak.Store(0)

@@ -90,3 +90,47 @@ func TestSampleErrorTemplateDocumentedLiteral(t *testing.T) {
 		t.Fatalf("SampleError = %q; want %q", got, want)
 	}
 }
+
+// THE MISSING-FILE CASE MUST BE STRUCTURALLY DISCRIMINABLE, not parsed out of
+// ffmpeg's diagnostics (#790). Two production rows carried the same
+// "detector request failed: lane outage" prose for entirely different root
+// causes: one where the source audio had MOVED (a path problem, nothing to do
+// with the detector) and one where a corrupt MP3 could not be decoded. They
+// have different remedies, so they must not render identically.
+//
+// REJECTED ALTERNATIVES, recorded so they are not re-attempted: matching
+// ffmpeg's exit code (254 was observed on one build and is not a documented
+// stable API) or its English diagnostic text (locale-dependent). os.Stat is the
+// authority for "the file is gone" -- which is what internal/prune already
+// relies on for exactly this question.
+func TestMissingAudioErrorIsMatchableAndNamesTheProblem(t *testing.T) {
+	err := MissingAudioError("detector", "/library/Artist/Album/01. Track.flac")
+
+	if !errors.Is(err, ErrAudioMissing) {
+		t.Fatalf("MissingAudioError must match ErrAudioMissing via errors.Is; got %v", err)
+	}
+	got := err.Error()
+	if !strings.Contains(got, "audio file is missing") {
+		t.Errorf("rendered %q, want it to name the problem in plain words", got)
+	}
+	// THE PATH MUST NOT RENDER. Same contract as SampleError: this string is
+	// persisted to work_queue.last_error and can reach the Failure Analysis
+	// report and the /metrics reason label, and a library path is private
+	// metadata (#431). The caller logs the path; the error never carries it.
+	if strings.Contains(got, "/library/") || strings.Contains(got, "01. Track") {
+		t.Errorf("rendered %q leaks the audio path; it must never appear in the error", got)
+	}
+	if !strings.HasPrefix(got, "detector: ") {
+		t.Errorf("rendered %q, want the subsystem prefix retained", got)
+	}
+}
+
+// The rendered form must stay SHORT. The whole point of #790 is that an
+// operator reads this in a report cell; a value that needs scrolling has
+// reproduced the defect in a new place.
+func TestMissingAudioErrorIsShort(t *testing.T) {
+	got := MissingAudioError("detector", "/some/very/long/library/path/that/goes/on.flac").Error()
+	if len(got) > 80 {
+		t.Errorf("rendered %d bytes (%q); the missing-file reason must stay short enough to read in a report cell", len(got), got)
+	}
+}
