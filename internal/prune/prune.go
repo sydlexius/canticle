@@ -1150,6 +1150,19 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	// same dequeue predicate at the same priority), only invisible to
 	// RecheckDeferred/`queue deferred`, so leaving it alone here is consistent
 	// with that conclusion rather than a gap in this fix.
+	//
+	// outcome_type, outcome_detail and timing_outcome ARE cleared, for the same
+	// reason status is: they describe a fetch, and no fetch has happened at the
+	// new path. reports.CountInstrumental counts outcome_type = 'instrumental'
+	// with NO status filter, so a stale stamp would keep a row counted as a
+	// settled instrumental while it sits in 'pending' waiting to be re-fetched.
+	// prune's own retire UPDATE excludes rows already in 'done', so a completed
+	// fetch's outcome cannot arrive here by that route -- but purgeprovenance.
+	// resetRows and queue.RecheckRetired both move a settled row OUT of 'done'
+	// without clearing these columns, and such a row is then eligible for the
+	// retirement above. The two sibling unsettle paths, queue.ResetInstrumental
+	// and queue.UnsettleInstrumental, already NULL outcome_type for exactly this
+	// reason; this matches them.
 	resurrect := c.retiredAsUnresolvable()
 	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {
@@ -1159,7 +1172,8 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 			res, err = tx.ExecContext(ctx,
 				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?,
                      status = 'pending', attempts = 0, next_attempt_at = ?,
-                     completed_at = NULL, last_error = ''
+                     completed_at = NULL, last_error = '',
+                     outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL
                  WHERE id = ? AND status != 'processing'`,
 				target.filePath, target.outdir, target.filename, resurrectNow, w.id)
 		} else {

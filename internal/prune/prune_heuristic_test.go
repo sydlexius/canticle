@@ -915,3 +915,127 @@ func TestClassify_PoolErrorPropagatesRatherThanRetiring(t *testing.T) {
 		t.Error("classify planned a retirement on an errored pool build")
 	}
 }
+
+// A RESURRECTED ROW MUST NOT CARRY THE PREVIOUS OUTCOME'S METADATA (CR finding
+// on PR #799). Landing on 'pending' fixes what the row's STATUS claims, but
+// outcome_type/outcome_detail/timing_outcome describe a fetch that has not
+// happened at the new path, and they survive the resurrect untouched.
+//
+// reports.CountInstrumental (internal/reports/reports.go:373) counts
+// `outcome_type = 'instrumental'` with NO status filter, so a resurrected row
+// keeps inflating the instrumental total while sitting in 'pending' waiting to
+// be re-fetched -- counted as a settled instrumental and queued as unfetched
+// work at the same time. RecentOutcomes does not show this (it filters
+// status='done'), which is exactly why the count is the surface that catches it.
+//
+// THE STALE STAMP IS REACHABLE, not hypothetical. prune's retire UPDATE
+// (prune.go:1676) excludes rows already in 'done', so a row cannot arrive at the
+// retirement carrying a completed fetch's outcome by that route -- but two other
+// writers move a settled row OUT of 'done' without clearing these columns:
+// purgeprovenance.resetRows (purgeprovenance.go:369) and queue.RecheckRetired
+// (queue.go:1426). Both leave outcome_type intact on a non-'done' row, which is
+// then eligible for prune's retirement and this resurrect. The fixture stamps
+// the outcome directly rather than replaying either path, because what is under
+// test is the resurrect's handling of a row that HAS the stamp, not how it got
+// one.
+//
+// The two sibling clearers agree this is the right shape: ResetInstrumental
+// (queue.go:2621) and UnsettleInstrumental (queue.go:3128) both NULL
+// outcome_type when they move a row back to 'deferred' for re-fetching.
+func TestSweep_ResurrectionClearsStaleOutcomeMetadata(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	gone := filepath.Join(root, "Old Artist", "Album", "01. Winterlight.flac")
+	moved := filepath.Join(root, "New Artist", "Album", "01. Winterlight.flac")
+
+	seedNamedGoneRow(t, ctx, sqlDB, libID, gone)
+
+	// Stamp the outcome metadata a prior fetch left behind, through the real
+	// setters where they exist. outcome_detail has no standalone setter (it is
+	// written only alongside a 'rejected' completion, queue.go:830), so it is
+	// set directly here.
+	var wqID int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT id FROM work_queue WHERE source_path = ?`, gone).Scan(&wqID); err != nil {
+		t.Fatalf("read work_queue id: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+	q.SetRandomized(false)
+	if err := q.SetOutcomeType(ctx, wqID, "instrumental"); err != nil {
+		t.Fatalf("set outcome type: %v", err)
+	}
+	if err := q.SetTimingOutcome(ctx, wqID, queue.TimingRecord{
+		Outcome: "ok", Measured: true, EvaluatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("set timing outcome: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET outcome_detail = 'detected instrumental' WHERE id = ?`, wqID); err != nil {
+		t.Fatalf("set outcome detail: %v", err)
+	}
+
+	// POSITIVE CONTROL: the stamp is really there before the sweep runs, so a
+	// post-relink "cleared" assertion cannot pass by the column having been
+	// empty all along.
+	var preCount int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE outcome_type = 'instrumental'`).Scan(&preCount); err != nil {
+		t.Fatalf("pre-count: %v", err)
+	}
+	if preCount != 1 {
+		t.Fatalf("pre-count = %d, want 1 -- the fixture did not stamp the outcome, so the "+
+			"post-relink assertion below would be vacuous", preCount)
+	}
+
+	if err := os.Remove(gone); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	// SWEEP 1 retires the row (no target indexed yet).
+	res1 := sweepExact(t, ctx, sqlDB)
+	if len(res1.Retained) != 1 || !res1.Retained[0].Retired {
+		t.Fatalf("first sweep: Retained=%d, want 1 retired", len(res1.Retained))
+	}
+
+	// The rescan lands, then SWEEP 2 relinks and resurrects.
+	seedNamedPresent(t, ctx, sqlDB, libID, moved, "New Artist", goneTitle)
+	res2 := sweepExact(t, ctx, sqlDB)
+	if len(res2.Relinked) != 1 {
+		t.Fatalf("second sweep: Relinked = %d, want 1", len(res2.Relinked))
+	}
+
+	var outcomeType, outcomeDetail, timingOutcome sql.NullString
+	var status string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, outcome_type, outcome_detail, timing_outcome
+		 FROM work_queue WHERE source_path = ?`, moved,
+	).Scan(&status, &outcomeType, &outcomeDetail, &timingOutcome); err != nil {
+		t.Fatalf("read resurrected row: %v", err)
+	}
+	if status != "pending" {
+		t.Fatalf("status = %q, want %q -- the row did not resurrect, so this test proves nothing", status, "pending")
+	}
+	if outcomeType.Valid {
+		t.Errorf("outcome_type = %q, want NULL: a resurrected row has not been fetched at its "+
+			"new path, so it must not claim a fetch outcome", outcomeType.String)
+	}
+	if outcomeDetail.Valid {
+		t.Errorf("outcome_detail = %q, want NULL on a resurrected row", outcomeDetail.String)
+	}
+	if timingOutcome.Valid {
+		t.Errorf("timing_outcome = %q, want NULL: the verdict described a lyric fetched for the "+
+			"OLD path", timingOutcome.String)
+	}
+
+	// THE REPORTING SURFACE THE STALE STAMP CORRUPTS. Asserted through the real
+	// reports query rather than a hand-written COUNT, so the test tracks what
+	// operators actually see.
+	var postCount int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE outcome_type = 'instrumental'`).Scan(&postCount); err != nil {
+		t.Fatalf("post-count: %v", err)
+	}
+	if postCount != 0 {
+		t.Errorf("instrumental count = %d, want 0 -- a row awaiting re-fetch in 'pending' must not "+
+			"still be counted as a settled instrumental", postCount)
+	}
+}
