@@ -1124,23 +1124,58 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	// A row this package RETIRED is relinking back out of its terminal state, so
 	// the retirement stamps have to come off with it: leaving status='done' would
 	// repoint the row at a file the worker will never pick up, which is the same
-	// undone-work the retirement caused. Restored to 'failed' rather than
-	// 'pending' because that is the state it held before being retired, and the
-	// worker's backoff reads it; completed_at and last_error are cleared so the
+	// undone-work the retirement caused.
+	//
+	// Restored to 'pending', NOT 'failed'. A relink is not a fetch outcome -- the
+	// row has never been attempted at its new path, so nothing failed, and
+	// resurrecting it as 'failed' smuggled a claim about RETRY POSTURE through a
+	// column that also drives REPORTING (#789): reports.RecentOutcomes and
+	// FailureAnalysis both read status/outcome_type to describe what the FETCHER
+	// did, and 'failed' told them a fetch had failed when none had ever run.
+	// attempts and next_attempt_at are reset explicitly (attempts=0, next_attempt_at
+	// = now) rather than carried over from the retirement -- that IS the retry
+	// posture the old comment wanted to preserve, and it belongs in those columns,
+	// not smuggled through status. completed_at and last_error are cleared so the
 	// row does not read as settled to any report that joins on them.
 	//
 	// Applied ONLY to our own sentinel-retired rows (see retiredAsUnresolvable),
 	// so a genuinely completed row is never resurrected by a relink.
+	//
+	// priority is deliberately NOT reset here. A row retired while 'deferred'
+	// carries priority=-100 from that miss, and resurrecting it to 'pending'
+	// without touching priority reproduces the pending+(-100)+miss_count>0 shape
+	// migration 030 (internal/db/migrations/030_work_queue_prev_status.sql)
+	// describes and repairs -- but that migration's own reasoning is that the
+	// shape is dequeue-inert (pending and deferred at priority -100 match the
+	// same dequeue predicate at the same priority), only invisible to
+	// RecheckDeferred/`queue deferred`, so leaving it alone here is consistent
+	// with that conclusion rather than a gap in this fix.
+	//
+	// outcome_type, outcome_detail and timing_outcome ARE cleared, for the same
+	// reason status is: they describe a fetch, and no fetch has happened at the
+	// new path. reports.CountInstrumental counts outcome_type = 'instrumental'
+	// with NO status filter, so a stale stamp would keep a row counted as a
+	// settled instrumental while it sits in 'pending' waiting to be re-fetched.
+	// prune's own retire UPDATE excludes rows already in 'done', so a completed
+	// fetch's outcome cannot arrive here by that route -- but purgeprovenance.
+	// resetRows and queue.RecheckRetired both move a settled row OUT of 'done'
+	// without clearing these columns, and such a row is then eligible for the
+	// retirement above. The two sibling unsettle paths, queue.ResetInstrumental
+	// and queue.UnsettleInstrumental, already NULL outcome_type for exactly this
+	// reason; this matches them.
 	resurrect := c.retiredAsUnresolvable()
+	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {
 		var res sql.Result
 		var err error
 		if resurrect {
 			res, err = tx.ExecContext(ctx,
 				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?,
-                     status = 'failed', completed_at = NULL, last_error = ''
+                     status = 'pending', attempts = 0, next_attempt_at = ?,
+                     completed_at = NULL, last_error = '',
+                     outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL
                  WHERE id = ? AND status != 'processing'`,
-				target.filePath, target.outdir, target.filename, w.id)
+				target.filePath, target.outdir, target.filename, resurrectNow, w.id)
 		} else {
 			res, err = tx.ExecContext(ctx,
 				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ? WHERE id = ? AND status != 'processing'`,

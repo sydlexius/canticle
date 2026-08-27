@@ -51,6 +51,13 @@ type workItem struct {
 	batchSeq      int    // 0 => NULL (unbuffered); >0 => buffered at this seq
 	nextAttemptAt string // "" => default (eligible); else RFC3339 (future => retry backoff)
 	createdAt     string // "" => default (now); else RFC3339
+	// attempts/missCount model the columns a genuine queue.Fail/queue.Defer call
+	// always increments before writing 'failed'/'deferred' (#789's FailureAnalysis
+	// guard reads them to tell a real fetch outcome apart from a maintenance
+	// writer that settles a row into the same status without ever fetching).
+	// 0 => schema default; only applied when non-zero, same convention as priority.
+	attempts  int
+	missCount int
 }
 
 func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
@@ -78,6 +85,8 @@ func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
 	setWorkItemColumn(t, sqlDB, id, "batch_seq", w.batchSeq != 0, w.batchSeq)
 	setWorkItemColumn(t, sqlDB, id, "next_attempt_at", w.nextAttemptAt != "", w.nextAttemptAt)
 	setWorkItemColumn(t, sqlDB, id, "created_at", w.createdAt != "", w.createdAt)
+	setWorkItemColumn(t, sqlDB, id, "attempts", w.attempts != 0, w.attempts)
+	setWorkItemColumn(t, sqlDB, id, "miss_count", w.missCount != 0, w.missCount)
 	return id
 }
 
@@ -562,9 +571,12 @@ func TestFailureAnalysisEmptyReasonNormalized(t *testing.T) {
 	repo := reports.New(sqlDB)
 
 	// A failed and a deferred row, each with an empty last_error: both must land
-	// under reason 'unknown', kept distinct by status.
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "ferr", status: "failed", lastError: ""})
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "derr", status: "deferred", lastError: ""})
+	// under reason 'unknown', kept distinct by status. attempts/missCount are set
+	// to model a GENUINE fetch outcome (queue.Fail/queue.Defer always increment
+	// them before writing these statuses) -- without them the #789 guard would
+	// exclude these rows as non-fetch writes, which is not what this test covers.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "ferr", status: "failed", lastError: "", attempts: 1})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "derr", status: "deferred", lastError: "", missCount: 1})
 
 	got, err := repo.FailureAnalysis(ctx)
 	if err != nil {
@@ -903,8 +915,11 @@ func TestFailureAnalysisWhitespaceOnlyJoinsUnknown(t *testing.T) {
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "empty", status: "failed", lastError: ""})
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "ws", status: "failed", lastError: " \t"})
+	// attempts:1 models a genuine fetch failure so the #789 guard does not
+	// exclude these rows -- this test is about whitespace normalization, not
+	// about the non-fetch-write exclusion.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "empty", status: "failed", lastError: "", attempts: 1})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "ws", status: "failed", lastError: " \t", attempts: 1})
 
 	got, err := repo.FailureAnalysis(ctx)
 	if err != nil {
@@ -918,5 +933,87 @@ func TestFailureAnalysisWhitespaceOnlyJoinsUnknown(t *testing.T) {
 	}
 	if got[0].Count != 2 {
 		t.Errorf("Count = %d, want 2", got[0].Count)
+	}
+}
+
+// THE #789 GUARD: a row a MAINTENANCE writer settled into 'failed'/'deferred'
+// without ever attempting a fetch (prune's relink resurrect was the first
+// instance -- fixed to land on 'pending' instead, but the guard exists so the
+// NEXT such writer cannot reproduce "failed: unknown"/"deferred: unknown" the
+// same way retirement once did to Recent Outcomes) must not appear in Failure
+// Analysis at all.
+//
+// Carries a POSITIVE CONTROL in the same test: a genuine fetch failure/miss
+// (attempts/miss_count > 0, matching what queue.Fail/queue.Defer always stamp)
+// with the SAME empty last_error must still appear. Without the control, a
+// broken guard that excludes every empty-last_error row (not just the
+// non-fetch-write ones) would pass a negative-only test trivially.
+func TestFailureAnalysisExcludesNonFetchWrites(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	// NEGATIVE: a maintenance writer's shape -- 'failed'/'deferred' with
+	// attempts=0/miss_count=0 and no error message. Must be excluded.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "maint-failed", status: "failed", lastError: ""})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "maint-deferred", status: "deferred", lastError: ""})
+
+	// POSITIVE CONTROL: a genuine fetch failure and a genuine benign miss,
+	// carrying the SAME empty last_error but the attempts/miss_count a real
+	// queue.Fail/queue.Defer call always stamps. Must still appear.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "real-failed", status: "failed", lastError: "", attempts: 1})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "real-deferred", status: "deferred", lastError: "", missCount: 1})
+
+	got, err := repo.FailureAnalysis(ctx)
+	if err != nil {
+		t.Fatalf("FailureAnalysis: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d groups, want 2 (one failed/unknown, one deferred/unknown -- "+
+			"the maintenance-writer rows excluded, the genuine ones counted): %+v", len(got), got)
+	}
+	var failedCount, deferredCount int64
+	for _, g := range got {
+		if g.Reason != "unknown" {
+			t.Errorf("group %+v Reason = %q, want unknown", g, g.Reason)
+		}
+		switch g.Status {
+		case "failed":
+			failedCount = g.Count
+		case "deferred":
+			deferredCount = g.Count
+		default:
+			t.Errorf("unexpected status %q in %+v", g.Status, g)
+		}
+	}
+	if failedCount != 1 {
+		t.Errorf("failed count = %d, want 1 (only the genuine failure; the maintenance-write excluded)", failedCount)
+	}
+	if deferredCount != 1 {
+		t.Errorf("deferred count = %d, want 1 (only the genuine miss; the maintenance-write excluded)", deferredCount)
+	}
+}
+
+// A row carrying an actual error message is NEVER excluded by the #789 guard,
+// even at attempts=0/miss_count=0 -- the guard only fires on the (status,
+// zero-counter, empty-last_error) triple together, so a maintenance writer that
+// DOES record a reason stays visible rather than being silently dropped.
+func TestFailureAnalysisKeepsZeroAttemptsRowWithAnErrorMessage(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "zero-attempts-with-error", status: "failed", lastError: "some recorded reason"})
+
+	got, err := repo.FailureAnalysis(ctx)
+	if err != nil {
+		t.Fatalf("FailureAnalysis: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d groups, want 1: a row carrying an error message must not be excluded "+
+			"just because attempts=0: %+v", len(got), got)
+	}
+	if got[0].Reason != "some recorded reason" {
+		t.Errorf("Reason = %q, want %q", got[0].Reason, "some recorded reason")
 	}
 }

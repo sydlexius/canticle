@@ -398,11 +398,72 @@ type FailureGroup struct {
 // deferred miss and a hard failure carrying the same last_error text are
 // reported separately. An empty last_error normalizes to 'unknown' (via
 // COALESCE over NULLIF), matching internal/queue.CountFailuresByReason.
+//
+// That normalization still matches, but the ROW SCOPE deliberately no longer
+// does: CountFailuresByReason (queue.go:1643, feeding GET /metrics) carries no
+// equivalent of the #789 guard below, so for as long as a legacy row of the
+// guarded shape survives, the two disagree about it -- this report hides it and
+// /metrics still counts it. Not worth widening the guard for: those rows drain
+// to 'done' and leave the set on their own, and /metrics is an externally
+// scraped counter where a retroactive change to history is worse than a
+// transient overcount.
+//
+// THE #789 GUARD. This report answers "what did the FETCHER do". Before this
+// fix, prune's relink resurrect settled a row directly into status='failed'
+// with attempts left at 0 and an empty last_error -- a fetch-outcome status the
+// fetcher had never actually produced. The guard excludes exactly that shape:
+// 'failed' with attempts=0, or 'deferred' with miss_count=0, each also
+// requiring an empty last_error (an EMPTY last_error is a legitimate outcome of
+// a genuine Fail/Defer call whose cause carries no message, and the
+// pre-existing EmptyReasonNormalized/WhitespaceOnlyJoinsUnknown tests
+// intentionally exercise that case, so the guard only fires when BOTH the
+// counter and the error text are absent) --
+//   - queue.Fail ALWAYS increments attempts to >=1 before writing 'failed'
+//     (failOnce: nextAttempts := attempts + 1). A 'failed' row with attempts=0
+//     was never failed by a real fetch attempt -- migration 012 already treated
+//     this exact shape as a reclassification signal for the same reason.
+//   - queue.Defer ALWAYS increments miss_count to >=1 before writing 'deferred'.
+//     A 'deferred' row with miss_count=0 was never deferred by a real miss.
+//
+// prune's own fix (above, in internal/prune/prune.go) now lands the resurrected
+// row on 'pending' rather than 'failed', so it no longer needs this guard at
+// all -- the guard exists for the NEXT writer that reproduces the old shape,
+// not for prune's current behavior.
+//
+// NOT COVERED, and not claimed to be: this guard is keyed on attempts/miss_count
+// being exactly 0, which only prune's old defect guaranteed by construction (a
+// freshly-resurrected row had never been attempted). It is not a durable
+// backstop for every writer that settles 'failed'/'deferred' outside a fetch --
+// three existing ones leave the relevant counter untouched rather than at 0, so
+// their rows are excluded only when that counter happens to already be 0, not by
+// design:
+//   - queue.RecheckRetired (internal/queue/queue.go:1424) revives rows retired
+//     via the missLimitReachedError sentinel. Its revived rows are USUALLY
+//     visible here (miss_count >= 1), but not always: queue.RetireMiss
+//     (queue.go:1229) writes only status/completed_at/last_error and never
+//     touches miss_count, and the worker retires when MissCount+1 >=
+//     maxMissAttempts (worker.go:2078), so a deployment with
+//     max_miss_attempts=1 (legal -- config.go:1694 clamps only from below)
+//     retires on the FIRST miss without ever calling Defer, leaving
+//     miss_count=0. Such a revived row DOES match the deferred clause and is
+//     excluded. That exclusion is defensible on its own terms -- a revived row
+//     has no fetch failure left to report -- but it is a consequence of the
+//     miss cap, not something this guard was designed around.
+//   - queue.ResetInstrumental (internal/queue/queue.go:2618) writes 'deferred'
+//     with an empty last_error but never touches miss_count.
+//   - purgeprovenance.resetRows (internal/purgeprovenance/purgeprovenance.go:369)
+//     writes 'deferred' with an empty last_error and resets attempts, not miss_count.
+//
+// This mirrors #655's principle for RecentOutcomes: exclude the non-fetch case
+// rather than mint the catch-all a prettier label, but only for the shape this
+// guard actually recognizes.
 func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT status, COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*) AS n
          FROM work_queue
          WHERE status IN ('failed', 'deferred')
+           AND NOT (status = 'failed' AND attempts = 0 AND last_error = '')
+           AND NOT (status = 'deferred' AND miss_count = 0 AND last_error = '')
          GROUP BY status, reason
          ORDER BY n DESC, status, reason`)
 	if err != nil {
