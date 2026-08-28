@@ -33,16 +33,18 @@ func remoteMetricsRequest(remoteAddr, xff string) *http.Request {
 }
 
 type fakeMetrics struct {
-	statusCounts      map[string]int64
-	failureCounts     map[string]int64
-	providerHits      map[string]int64
-	providerMisses    map[string]int64
-	instrumentalCount int64
-	statusErr         error
-	failureErr        error
-	hitsErr           error
-	missesErr         error
-	instrumentalErr   error
+	statusCounts        map[string]int64
+	failureCounts       map[string]int64
+	providerHits        map[string]int64
+	providerMisses      map[string]int64
+	instrumentalCount   int64
+	timingOutcomeCounts map[string]int64
+	statusErr           error
+	failureErr          error
+	hitsErr             error
+	missesErr           error
+	instrumentalErr     error
+	timingOutcomeErr    error
 }
 
 func (f *fakeMetrics) CountByStatus(_ context.Context) (map[string]int64, error) {
@@ -63,6 +65,10 @@ func (f *fakeMetrics) ProviderMisses(_ context.Context) (map[string]int64, error
 
 func (f *fakeMetrics) CountInstrumental(_ context.Context) (int64, error) {
 	return f.instrumentalCount, f.instrumentalErr
+}
+
+func (f *fakeMetrics) CountByTimingOutcome(_ context.Context) (map[string]int64, error) {
+	return f.timingOutcomeCounts, f.timingOutcomeErr
 }
 
 // TestMetricsTrustedNetworkGate verifies that GET /metrics is gated by the
@@ -445,6 +451,173 @@ func TestMetricsInstrumentalQueryErrorReturns500(t *testing.T) {
 	h.ServeHTTP(rec, metricsRequest())
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 on instrumental query error", rec.Code)
+	}
+}
+
+func TestMetricsTimingOutcomeQueryErrorReturns500(t *testing.T) {
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithMetricsReporter(&fakeMetrics{
+			statusCounts:     map[string]int64{},
+			failureCounts:    map[string]int64{},
+			providerHits:     map[string]int64{},
+			providerMisses:   map[string]int64{},
+			timingOutcomeErr: errors.New("db error"),
+		}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500 on timing outcome query error", rec.Code)
+	}
+}
+
+// TestMetricsTimingOutcomeFamily covers the #629 gauge family end to end: HELP
+// and TYPE gauge lines are present, every sample carries the closed
+// timing_outcome vocabulary verbatim, and output is sorted for determinism.
+func TestMetricsTimingOutcomeFamily(t *testing.T) {
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithMetricsReporter(&fakeMetrics{
+			statusCounts:   map[string]int64{},
+			failureCounts:  map[string]int64{},
+			providerHits:   map[string]int64{},
+			providerMisses: map[string]int64{},
+			timingOutcomeCounts: map[string]int64{
+				"ok":               41,
+				"mis_synced":       3,
+				"categorical":      1,
+				"unknown_duration": 7,
+			},
+		}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "# HELP mxlrcgo_timing_outcome") {
+		t.Errorf("missing HELP line for mxlrcgo_timing_outcome\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, "# TYPE mxlrcgo_timing_outcome gauge") {
+		t.Errorf("missing TYPE gauge line for mxlrcgo_timing_outcome (must be gauge, not counter)\nbody:\n%s", body)
+	}
+	for _, sample := range []string{
+		`mxlrcgo_timing_outcome{outcome="ok"} 41`,
+		`mxlrcgo_timing_outcome{outcome="mis_synced"} 3`,
+		`mxlrcgo_timing_outcome{outcome="categorical"} 1`,
+		`mxlrcgo_timing_outcome{outcome="unknown_duration"} 7`,
+	} {
+		if !strings.Contains(body, sample) {
+			t.Errorf("missing sample %q\nbody:\n%s", sample, body)
+		}
+	}
+
+	// Sorted lexicographically, matching every other grouped-count family.
+	catIdx := strings.Index(body, `outcome="categorical"`)
+	demotedIdx := strings.Index(body, `outcome="mis_synced"`)
+	okIdx := strings.Index(body, `outcome="ok"`)
+	unkIdx := strings.Index(body, `outcome="unknown_duration"`)
+	if catIdx < 0 || demotedIdx < 0 || okIdx < 0 || unkIdx < 0 {
+		t.Fatalf("missing sample lines\nbody:\n%s", body)
+	}
+	if catIdx >= demotedIdx || demotedIdx >= okIdx || okIdx >= unkIdx {
+		t.Errorf("samples not in sorted order (categorical=%d mis_synced=%d ok=%d unknown_duration=%d)\nbody:\n%s",
+			catIdx, demotedIdx, okIdx, unkIdx, body)
+	}
+}
+
+// TestMetricsTimingOutcomeLabelIsEscaped pins that writeTimingMetrics escapes
+// its label value. Nothing else does: TestMetricsTimingOutcomeFamily above feeds
+// only the closed TimingOutcome vocabulary, whose values are all bare
+// lowercase-and-underscore, so promEscape could be DELETED from the timing
+// family and every assertion there would still pass. This test is the one that
+// reddens.
+//
+// Why it matters even though the vocabulary is closed: the closure is a
+// CONVENTION, not a constraint. Migration 034 adds no CHECK, so the column
+// enforces nothing, and CountByTimingOutcome does GROUP BY timing_outcome --
+// it emits whatever the column holds. Today the single writer
+// (worker.stampTimingOutcome -> SetTimingOutcome) only ever passes a
+// timing.TimingOutcome constant, so this is not a live vulnerability; it is a
+// guard on the seam that would become one if a future writer, a migration, or a
+// hand-run UPDATE ever put free text there. /metrics is EXTERNALLY SCRAPED, and
+// an unescaped value could forge an entire sample line.
+//
+// Asserts on PHYSICAL LINES, split on the real 0x0A byte, never on substring
+// containment: a forged line is precisely a payload that produced a NEW line, so
+// a strings.Contains check on the whole body reports success for both the
+// escaped and the injected rendering and proves nothing.
+func TestMetricsTimingOutcomeLabelIsEscaped(t *testing.T) {
+	const forged = `x"} 999
+mxlrcgo_forged_metric{evil="yes"} 1`
+
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithMetricsReporter(&fakeMetrics{
+			statusCounts:   map[string]int64{},
+			failureCounts:  map[string]int64{},
+			providerHits:   map[string]int64{},
+			providerMisses: map[string]int64{},
+			timingOutcomeCounts: map[string]int64{
+				forged:       5,
+				`back\slash`: 2,
+			},
+		}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, "mxlrcgo_forged_metric") {
+			t.Errorf("label injection: the payload forged its own exposition line %q", line)
+		}
+		// Every emitted timing sample must be ONE line carrying ONE label.
+		if strings.HasPrefix(line, "mxlrcgo_timing_outcome") {
+			if n := strings.Count(line, `outcome="`); n != 1 {
+				t.Errorf("sample line has %d outcome labels, want exactly 1: %q", n, line)
+			}
+			if !strings.HasSuffix(line, " 5") && !strings.HasSuffix(line, " 2") {
+				t.Errorf("sample line does not end in its own count: %q", line)
+			}
+		}
+	}
+
+	// The newline and the backslash must survive as ESCAPES, not as raw bytes.
+	body := rec.Body.String()
+	if !strings.Contains(body, `\n`) {
+		t.Errorf("the payload's newline was not escaped to \\n\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `back\\slash`) {
+		t.Errorf("the payload's backslash was not doubled\nbody:\n%s", body)
+	}
+}
+
+// TestMetricsTimingOutcomeEmptyProducesHelpAndTypeLines matches the empty-map
+// contract of the other grouped families: HELP/TYPE lines always appear, with
+// no sample lines when there is nothing to report.
+func TestMetricsTimingOutcomeEmptyProducesHelpAndTypeLines(t *testing.T) {
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithMetricsReporter(&fakeMetrics{
+			statusCounts:        map[string]int64{},
+			failureCounts:       map[string]int64{},
+			providerHits:        map[string]int64{},
+			providerMisses:      map[string]int64{},
+			timingOutcomeCounts: map[string]int64{},
+		}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "# HELP mxlrcgo_timing_outcome") {
+		t.Errorf("missing HELP for mxlrcgo_timing_outcome\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, "# TYPE mxlrcgo_timing_outcome gauge") {
+		t.Errorf("missing TYPE for mxlrcgo_timing_outcome\nbody:\n%s", body)
+	}
+	if strings.Contains(body, `mxlrcgo_timing_outcome{outcome=`) {
+		t.Errorf("unexpected sample line with empty counts\nbody:\n%s", body)
 	}
 }
 

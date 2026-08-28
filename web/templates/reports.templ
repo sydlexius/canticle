@@ -91,6 +91,8 @@ templ reportView(v ReportView) {
 			@tableInstrumentals(v.InstrumentalRows)
 		case "failure-analysis":
 			@tableFailures(v.FailureRows)
+		case "review-queue":
+			@tableReviewQueue(v.ReviewQueueRows)
 	}
 }
 
@@ -243,6 +245,41 @@ templ tableFailures(rows []FailureRow) {
 							<td class="mx-cell-mono">{ r.Status }</td>
 							<td>{ r.Reason }</td>
 							<td class="mx-cell-mono">{ r.Count }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	}
+}
+
+templ tableReviewQueue(rows []ReviewQueueRow) {
+	if len(rows) == 0 {
+		@reportEmpty("No tracks awaiting a timing review.")
+	} else {
+		<div class="mx-table-wrap">
+			<table class="mx-table">
+				<thead>
+					<tr>
+						<th scope="col">Artist</th>
+						<th scope="col">Title</th>
+						<th scope="col">Album</th>
+						<th scope="col">Outcome</th>
+						<th scope="col">Overrun (s)</th>
+						<th scope="col">Ratio</th>
+						<th scope="col">Evaluated</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, r := range rows {
+						<tr>
+							<td>{ r.Artist }</td>
+							<td>{ r.Title }</td>
+							<td>{ r.Album }</td>
+							<td class="mx-cell-mono">{ r.Outcome }</td>
+							<td class="mx-cell-mono">{ r.OverrunSeconds }</td>
+							<td class="mx-cell-mono">{ r.Ratio }</td>
+							<td class="mx-cell-mono">{ r.EvaluatedAt }</td>
 						</tr>
 					}
 				</tbody>
