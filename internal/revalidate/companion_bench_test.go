@@ -38,13 +38,17 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sydlexius/canticle/internal/scanner"
 )
 
-var benchAudioExts = []string{".mp3", ".m4a", ".m4b", ".m4p", ".alac", ".flac", ".ogg", ".dsf"}
-
 // uncachedReadDirCompanion reproduces the ORIGINAL #691 bug: one os.ReadDir
-// per sidecar, the baseline both candidate fixes are measured against.
-func uncachedReadDirCompanion(lrcPath string) (string, bool) {
+// per sidecar, the baseline both candidate fixes are measured against. exts
+// is the audio-extension list to match against, sourced by the caller from
+// scanner.SupportedAudioExtensions() rather than a hand-duplicated benchmark
+// constant, so this benchmark's extension gating cannot drift from the
+// production contract it is measuring against (CodeRabbit finding on #801).
+func uncachedReadDirCompanion(lrcPath string, exts []string) (string, bool) {
 	dir := filepath.Dir(lrcPath)
 	stem := strings.TrimSuffix(lrcPath, filepath.Ext(lrcPath))
 	entries, err := os.ReadDir(dir)
@@ -57,7 +61,7 @@ func uncachedReadDirCompanion(lrcPath string) (string, bool) {
 		}
 		p := filepath.Join(dir, e.Name())
 		matched := false
-		for _, ext := range benchAudioExts {
+		for _, ext := range exts {
 			if strings.EqualFold(filepath.Ext(e.Name()), ext) {
 				matched = true
 				break
@@ -83,7 +87,7 @@ func uncachedReadDirCompanion(lrcPath string) (string, bool) {
 // the stem probe by comparing it to a strawman rather than to the alternative
 // #691 actually proposed. Both are kept so the benchmark shows the difference
 // between the option and a careless implementation of it.
-func indexedReadDirCompanion(cache map[string]map[string]string, lrcPath string) (string, bool) {
+func indexedReadDirCompanion(cache map[string]map[string]string, lrcPath string, exts []string) (string, bool) {
 	dir := filepath.Dir(lrcPath)
 	stem := strings.TrimSuffix(lrcPath, filepath.Ext(lrcPath))
 	index, ok := cache[dir]
@@ -99,7 +103,7 @@ func indexedReadDirCompanion(cache map[string]map[string]string, lrcPath string)
 			}
 			name := e.Name()
 			matched := false
-			for _, ext := range benchAudioExts {
+			for _, ext := range exts {
 				if strings.EqualFold(filepath.Ext(name), ext) {
 					matched = true
 					break
@@ -121,7 +125,7 @@ func indexedReadDirCompanion(cache map[string]map[string]string, lrcPath string)
 // but rescanned linearly for every sidecar, so the repeated syscall goes away
 // while the per-sidecar linear scan does not. Kept as a labeled worst case, NOT
 // as the comparator any conclusion rests on -- see indexedReadDirCompanion.
-func cachedReadDirCompanion(cache map[string][]os.DirEntry, lrcPath string) (string, bool) {
+func cachedReadDirCompanion(cache map[string][]os.DirEntry, lrcPath string, exts []string) (string, bool) {
 	dir := filepath.Dir(lrcPath)
 	stem := strings.TrimSuffix(lrcPath, filepath.Ext(lrcPath))
 	entries, ok := cache[dir]
@@ -139,7 +143,7 @@ func cachedReadDirCompanion(cache map[string][]os.DirEntry, lrcPath string) (str
 		}
 		p := filepath.Join(dir, e.Name())
 		matched := false
-		for _, ext := range benchAudioExts {
+		for _, ext := range exts {
 			if strings.EqualFold(filepath.Ext(e.Name()), ext) {
 				matched = true
 				break
@@ -175,6 +179,13 @@ func buildFlatLibrary(b *testing.B, n int) (dir string, lrcPaths []string) {
 }
 
 func BenchmarkCompanionAudio(b *testing.B) {
+	// Sourced from scanner.SupportedAudioExtensions() rather than a
+	// hand-duplicated benchmark constant (CodeRabbit finding on #801): the
+	// three non-shipped comparators below are otherwise free to silently
+	// drift from the extension contract companionAudio actually enforces,
+	// which would make their measurement dishonest without changing any
+	// assertion that would catch it.
+	exts := scanner.SupportedAudioExtensions()
 	for _, n := range []int{10, 100, 1000, 5000} {
 		_, lrcPaths := buildFlatLibrary(b, n)
 
@@ -182,8 +193,9 @@ func BenchmarkCompanionAudio(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				cache := newDirListingCache()
 				for _, p := range lrcPaths {
-					if _, ok := companionAudio(p); !ok {
+					if _, ok := companionAudio(p, cache); !ok {
 						b.Fatal("expected a match")
 					}
 				}
@@ -196,7 +208,7 @@ func BenchmarkCompanionAudio(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				cache := make(map[string]map[string]string)
 				for _, p := range lrcPaths {
-					if _, ok := indexedReadDirCompanion(cache, p); !ok {
+					if _, ok := indexedReadDirCompanion(cache, p, exts); !ok {
 						b.Fatal("expected a match")
 					}
 				}
@@ -209,7 +221,7 @@ func BenchmarkCompanionAudio(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				cache := make(map[string][]os.DirEntry)
 				for _, p := range lrcPaths {
-					if _, ok := cachedReadDirCompanion(cache, p); !ok {
+					if _, ok := cachedReadDirCompanion(cache, p, exts); !ok {
 						b.Fatal("expected a match")
 					}
 				}
@@ -221,7 +233,7 @@ func BenchmarkCompanionAudio(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				for _, p := range lrcPaths {
-					if _, ok := uncachedReadDirCompanion(p); !ok {
+					if _, ok := uncachedReadDirCompanion(p, exts); !ok {
 						b.Fatal("expected a match")
 					}
 				}

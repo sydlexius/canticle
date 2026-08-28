@@ -129,8 +129,13 @@ func New(lookup DurationLookup, opts Options) *Revalidator {
 // reads of the .lrc files themselves.
 func (r *Revalidator) Plan(ctx context.Context) (Plan, error) {
 	var plan Plan
+	// One cache for the whole Plan call, not one per root and not one per
+	// directory read separately -- a directory read once here is never read
+	// again anywhere in this run, however many orphaned or unusually-cased
+	// sidecars it holds. See dirListingCache's doc comment.
+	cache := newDirListingCache()
 	for _, root := range r.opts.Roots {
-		if err := r.walkRoot(ctx, root, &plan); err != nil {
+		if err := r.walkRoot(ctx, root, &plan, cache); err != nil {
 			return plan, err
 		}
 	}
@@ -138,7 +143,7 @@ func (r *Revalidator) Plan(ctx context.Context) (Plan, error) {
 }
 
 // walkRoot walks one root, honoring ctx cancellation between entries.
-func (r *Revalidator) walkRoot(ctx context.Context, root string, plan *Plan) error {
+func (r *Revalidator) walkRoot(ctx context.Context, root string, plan *Plan, cache *dirListingCache) error {
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
@@ -158,7 +163,7 @@ func (r *Revalidator) walkRoot(ctx context.Context, root string, plan *Plan) err
 		if fi, lerr := os.Lstat(path); lerr != nil || fi.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
-		r.classify(ctx, root, path, plan)
+		r.classify(ctx, root, path, plan, cache)
 		return nil
 	})
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -168,8 +173,8 @@ func (r *Revalidator) walkRoot(ctx context.Context, root string, plan *Plan) err
 }
 
 // classify judges one .lrc and appends its finding (and any move) to plan.
-func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Plan) {
-	audio, ok := companionAudio(path)
+func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Plan, cache *dirListingCache) {
+	audio, ok := companionAudio(path, cache)
 	if !ok {
 		plan.Counts.NoAudio++
 		plan.Findings = append(plan.Findings, Finding{Path: path, Outcome: "no_audio"})
@@ -370,30 +375,128 @@ func (r *Revalidator) durationOf(ctx context.Context, audio string) (int, error)
 // reaches the listing. Only an orphan pays a directory read, exactly what it
 // paid before this change, so this is a strict improvement over pre-#691 at
 // every input rather than a trade.
-func companionAudio(lrcPath string) (string, bool) {
+//
+// SELECTION ORDER (CodeRabbit finding on #801). os.ReadDir sorts its entries
+// by filename, so the pre-#691 loop -- which returned the first stem match it
+// walked -- always resolved a directory holding MORE THAN ONE stem-matching
+// companion (song.mp3 AND song.flac beside the same song.lrc, a real if
+// unusual library shape) to the lexicographically-FIRST filename. A probe that
+// returns on its first hit instead resolves in scanner.SupportedAudioExtensions
+// order (.mp3 before .flac), which is a silent behavior change: which
+// companion wins is not cosmetic, its duration is what timing.Evaluate judges
+// the sidecar against, so a changed winner can move or delete a CORRECT .lrc
+// under the wrong verdict. Measured: a directory holding song.flac and
+// song.mp3 returned song.mp3 under the first-hit probe and song.flac under
+// the old listing.
+//
+// The fix below still issues no directory read on a hit -- the O(1)-ish win
+// #691 exists for -- but no longer stops at the first match. It collects every
+// candidate that stats as a real file across every extension and BOTH case
+// forms, then picks the one whose FILENAME (not full path; all candidates
+// necessarily share lrcPath's directory) sorts first, exactly reproducing
+// os.ReadDir's own sort key. Go's string comparison is byte-wise, matching
+// ReadDir/fs.ReadDir's sort.Slice on Name(), so this reproduces the pre-#691
+// winner exactly, including the lower/upper interaction: on a case-sensitive
+// filesystem "MP3" (ASCII 'M'=0x4D) sorts before "mp3" ('m'=0x6D), so
+// song.MP3 would have beaten song.mp3 under the old listing too -- verified
+// directly with os.ReadDir on a case-sensitive mount, not assumed.
+//
+// Both the lower- and upper-case spelling of every extension are stat'd, and
+// EVERY one that resolves to a real file is a candidate for the compare --
+// not just the first hit per extension -- because on a case-sensitive
+// filesystem song.mp3 and song.MP3 can be two DIFFERENT files, and the old
+// ReadDir loop would have compared both of their names too. But on a
+// case-INSENSITIVE filesystem (the macOS dev box; never the case-sensitive
+// Linux target #691 is written for) os.Stat resolves BOTH "song.flac" and
+// "song.FLAC" successfully against the SAME on-disk song.flac -- an alias,
+// not a second companion -- so naively keeping both would spuriously compare
+// the uppercase spelling as if it were a distinct, real file (caught by
+// TestCompanionAudioExactStemOnly reddening on macOS during development). Each
+// pair's two os.Stat results are compared with os.SameFile before being kept
+// as (up to) two candidates, so a case-insensitive alias collapses to one
+// candidate under its actually-probed name and a genuine case-sensitive
+// pair is kept as two.
+func companionAudio(lrcPath string, cache *dirListingCache) (string, bool) {
 	stem := strings.TrimSuffix(lrcPath, filepath.Ext(lrcPath))
-	for _, ext := range scanner.SupportedAudioExtensions() {
-		for _, candidate := range [2]string{stem + ext, stem + strings.ToUpper(ext)} {
-			fi, err := os.Stat(candidate)
-			if err != nil {
-				continue
-			}
-			if fi.IsDir() {
-				continue
-			}
-			return candidate, true
+	best := ""
+	found := false
+	consider := func(candidate string, fi os.FileInfo) {
+		if fi.IsDir() {
+			return
+		}
+		if !found || filepath.Base(candidate) < filepath.Base(best) {
+			best = candidate
+			found = true
 		}
 	}
-	return companionAudioByListing(lrcPath, stem)
+	for _, ext := range scanner.SupportedAudioExtensions() {
+		lower := stem + ext
+		upper := stem + strings.ToUpper(ext)
+		lowerFI, lowerErr := os.Stat(lower)
+		upperFI, upperErr := os.Stat(upper)
+		if lowerErr == nil {
+			consider(lower, lowerFI)
+		}
+		if upperErr == nil && (lowerErr != nil || !os.SameFile(lowerFI, upperFI)) {
+			consider(upper, upperFI)
+		}
+	}
+	if found {
+		return best, true
+	}
+	return companionAudioByListing(lrcPath, stem, cache)
+}
+
+// dirListingCache remembers each directory's os.ReadDir result for the
+// lifetime of ONE Plan run (CodeRabbit finding on #801). Without it, a
+// directory holding N orphaned sidecars -- or N companions with an unusual
+// extension casing the probe's lower/upper pair does not cover -- reaches
+// companionAudioByListing N times, each doing its own full ReadDir of the
+// SAME directory: partly re-introducing the exact O(N)-per-directory cost
+// #691 removed from the probe's hit path. This is not package-global state:
+// it is created fresh by Plan for that one call and threaded down as a
+// parameter, so two concurrent or sequential Plan runs never share a cache
+// and test isolation is untouched. A failed ReadDir is deliberately NOT
+// cached, so a transient error does not permanently blind the rest of the
+// run to a directory that might read successfully on a later sidecar.
+type dirListingCache struct {
+	entries map[string][]os.DirEntry
+	reads   int // count of REAL os.ReadDir calls made; test-observable via Reads()
+}
+
+func newDirListingCache() *dirListingCache {
+	return &dirListingCache{entries: make(map[string][]os.DirEntry)}
+}
+
+// Reads reports how many real os.ReadDir calls this cache has made, for
+// tests to assert the fallback reads a directory once per run rather than
+// once per orphan.
+func (c *dirListingCache) Reads() int {
+	return c.reads
+}
+
+func (c *dirListingCache) list(dir string) ([]os.DirEntry, error) {
+	if entries, ok := c.entries[dir]; ok {
+		return entries, nil
+	}
+	entries, err := os.ReadDir(dir)
+	c.reads++
+	if err != nil {
+		return nil, err
+	}
+	c.entries[dir] = entries
+	return entries, nil
 }
 
 // companionAudioByListing is the pre-#691 lookup, kept as companionAudio's
 // miss-path fallback so an unusually-cased extension still resolves through
 // scanner.IsAudioFile. See companionAudio's comment for why this is reached
-// only on a probe miss.
-func companionAudioByListing(lrcPath, stem string) (string, bool) {
+// only on a probe miss. The listing goes through cache so a directory
+// holding several orphans (or unusually-cased companions) in one Plan run
+// pays for one ReadDir, not one per sidecar that reaches this fallback.
+func companionAudioByListing(lrcPath, stem string, cache *dirListingCache) (string, bool) {
 	dir := filepath.Dir(lrcPath)
-	entries, err := os.ReadDir(dir)
+	entries, err := cache.list(dir)
 	if err != nil {
 		return "", false
 	}
