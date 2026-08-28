@@ -1718,7 +1718,7 @@ func (q *DBQueue) CountByTimingOutcome(ctx context.Context) (map[string]int64, e
 	if err != nil {
 		return nil, fmt.Errorf("queue: count by timing outcome: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // read-only query; close error is not actionable
+	defer rows.Close() //nolint:errcheck // reason: read-only query; close error is not actionable
 	counts := make(map[string]int64)
 	for rows.Next() {
 		var outcome string
