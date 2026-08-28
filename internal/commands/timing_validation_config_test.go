@@ -19,8 +19,15 @@ import (
 func TestConfigTimingValidationGetSetRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		TimingValidation: config.TimingValidationConfig{
+			// EVERY FIELD CARRIES A DISTINCT VALUE, and that is the point rather
+			// than an aesthetic choice. When two fields share a value, an arm that
+			// returns the WRONG field is indistinguishable from one that returns
+			// the right field, so the whole wrong-mapping defect class becomes
+			// untestable. These two bools previously both read `true`: mutating
+			// the `enabled` arm to return RevalidateExisting passed cleanly.
+			// Mutation-verified: with the two differing, that mutation reddens.
 			Enabled:            true,
-			RevalidateExisting: true,
+			RevalidateExisting: false,
 			RevalidateBatch:    250,
 			OnMisSynced:        config.TimingActionQuarantine,
 			OnCategorical:      config.TimingActionPurge,
@@ -28,7 +35,7 @@ func TestConfigTimingValidationGetSetRoundTrip(t *testing.T) {
 	}
 	gets := map[string]string{
 		"timing_validation.enabled":             "true",
-		"timing_validation.revalidate_existing": "true",
+		"timing_validation.revalidate_existing": "false",
 		"timing_validation.revalidate_batch":    "250",
 		"timing_validation.on_mis_synced":       "quarantine",
 		"timing_validation.on_categorical":      "purge",
@@ -44,6 +51,39 @@ func TestConfigTimingValidationGetSetRoundTrip(t *testing.T) {
 		}
 		if !slices.Contains(configKeys(), key) {
 			t.Errorf("configKeys missing %q", key)
+		}
+	}
+
+	// A SECOND config, because one is not enough to prove a getter READS its
+	// field. Against a single fixture, an arm returning a hardcoded constant
+	// equal to the expectation is indistinguishable from one reading the field
+	// -- mutating the batch arm to `return "250", true` passed cleanly with only
+	// the fixture above. Two configs whose values differ leaves a constant
+	// nowhere to hide. Mutation-verified.
+	other := config.Config{
+		TimingValidation: config.TimingValidationConfig{
+			Enabled:            false,
+			RevalidateExisting: true,
+			RevalidateBatch:    7,
+			OnMisSynced:        config.TimingActionOff,
+			OnCategorical:      config.TimingActionQuarantine,
+		},
+	}
+	otherGets := map[string]string{
+		"timing_validation.enabled":             "false",
+		"timing_validation.revalidate_existing": "true",
+		"timing_validation.revalidate_batch":    "7",
+		"timing_validation.on_mis_synced":       "off",
+		"timing_validation.on_categorical":      "quarantine",
+	}
+	for key, want := range otherGets {
+		got, ok := configValue(other, key)
+		if !ok {
+			t.Errorf("configValue(%q) ok = false; want true", key)
+			continue
+		}
+		if got != want {
+			t.Errorf("configValue(%q) = %q; want %q (second config: the arm must READ the field, not return a constant)", key, got, want)
 		}
 	}
 }
