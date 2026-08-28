@@ -1,0 +1,285 @@
+package revalidate
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/sydlexius/canticle/internal/timing"
+)
+
+// overrunBody (action_test.go) is the shared MisSynced fixture: its last cue
+// runs past trackSeconds + Tolerance.
+
+// candidateFor builds the Candidate a sweep would derive for a sidecar sitting
+// under root, exactly as the sweep derives it: from the AUDIO path.
+func candidateFor(id int64, root, lrc string) Candidate {
+	return Candidate{
+		ID:        id,
+		AudioPath: filepath.Join(filepath.Dir(lrc), "track.mp3"),
+		Root:      root,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// THE CONVERGENCE RAIL: every candidate produces a finding carrying its ID.
+// ---------------------------------------------------------------------------
+
+// TestPlanCandidatesAlwaysFindsEveryCandidate is the convergence rail, and it is
+// the most important test in this file.
+//
+// A row leaves the backlog by being STAMPED, and the sweep stamps what
+// PlanCandidates returns a finding for. So a candidate silently dropped here is
+// a row that returns in the next batch -- and because the backlog is ordered
+// oldest-first, a handful of undroppable rows would sit at the head of every
+// cycle forever, and the sweep would never reach the rest of the backlog nor
+// idle. This asserts the property directly: whatever the input, EVERY candidate
+// comes back with its ID, including the ones no verdict could be reached for.
+func TestPlanCandidatesAlwaysFindsEveryCandidate(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+	dir := filepath.Dir(lrc)
+
+	// A sidecar-less row: the audio exists, the .lrc was deleted by hand.
+	bare := filepath.Join(dir, "gone.mp3")
+	if err := os.WriteFile(bare, []byte("not really audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	// An audio-less row: the .lrc is there, its companion is not.
+	orphanLRC := filepath.Join(dir, "orphan.lrc")
+	if err := os.WriteFile(orphanLRC, []byte(overrunBody), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+
+	candidates := []Candidate{
+		candidateFor(1, root, lrc),
+		{ID: 2, AudioPath: bare, Root: root},
+		{ID: 3, AudioPath: filepath.Join(dir, "orphan.mp3"), Root: root},
+		{ID: 4, AudioPath: "", Root: root},
+		{ID: 5, AudioPath: filepath.Join(dir, "never-existed.mp3"), Root: root},
+	}
+
+	r, _ := newRevalidator(t, root, fixedDuration(), func(o *Options) {
+		o.MisSyncedAction = ActionOff
+		o.CategoricalAction = ActionOff
+	})
+	plan, err := r.PlanCandidates(context.Background(), candidates)
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+
+	seen := map[int64]bool{}
+	for _, f := range plan.Findings {
+		if f.ID == 0 {
+			t.Errorf("finding for %q carries no ID; the sweep could never stamp it", f.Path)
+			continue
+		}
+		if seen[f.ID] {
+			t.Errorf("candidate %d produced more than one finding", f.ID)
+		}
+		seen[f.ID] = true
+	}
+	for _, c := range candidates {
+		if !seen[c.ID] {
+			t.Errorf("candidate %d produced NO finding, so its row would never be stamped and would head-of-line the batch forever", c.ID)
+		}
+	}
+}
+
+// TestPlanCandidatesJudgesWithoutWalking proves the candidate path reaches the
+// same verdict as the walk for the same file. If it did not, an operator's
+// `revalidate` preview would not predict what the unattended sweep does.
+func TestPlanCandidatesJudgesWithoutWalking(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+
+	// The walk's verdict, for comparison.
+	rWalk, _ := newRevalidator(t, root, fixedDuration(), func(o *Options) {
+		o.MisSyncedAction = ActionOff
+		o.CategoricalAction = ActionOff
+	})
+	walked, err := rWalk.Plan(context.Background())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(walked.Findings) != 1 || walked.Findings[0].Outcome != timing.MisSynced {
+		t.Fatalf("walk did not produce the expected single MisSynced finding: %+v", walked.Findings)
+	}
+
+	r, _ := newRevalidator(t, root, fixedDuration(), func(o *Options) {
+		o.MisSyncedAction = ActionOff
+		o.CategoricalAction = ActionOff
+	})
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{candidateFor(7, root, lrc)})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if len(plan.Findings) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(plan.Findings))
+	}
+	got := plan.Findings[0]
+	if got.Outcome != walked.Findings[0].Outcome {
+		t.Errorf("candidate mode reached %q where the walk reached %q; the CLI preview would not predict the sweep",
+			got.Outcome, walked.Findings[0].Outcome)
+	}
+	if got.Path != lrc {
+		t.Errorf("sidecar path = %q, want %q (derived from the audio stem)", got.Path, lrc)
+	}
+	if got.ID != 7 {
+		t.Errorf("finding ID = %d, want 7", got.ID)
+	}
+	if plan.Counts.MisSynced != 1 {
+		t.Errorf("MisSynced count = %d, want 1", plan.Counts.MisSynced)
+	}
+}
+
+// TestPlanCandidatesWritesNothing is the dry-run rail for candidate mode. It
+// must hold as firmly as it does for the walk: PlanCandidates plans, Apply acts.
+func TestPlanCandidatesWritesNothing(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+	before := snapshotTree(t, root)
+
+	r, quarantine := newRevalidator(t, root, fixedDuration(), nil)
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{candidateFor(1, root, lrc)})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if len(plan.Moves) == 0 {
+		t.Fatal("expected a planned move for a MisSynced file; without one this test proves nothing")
+	}
+	if !sameTree(before, snapshotTree(t, root)) {
+		t.Error("PlanCandidates modified the library tree")
+	}
+	if _, err := os.Stat(quarantine); !os.IsNotExist(err) {
+		t.Error("PlanCandidates created the quarantine directory")
+	}
+}
+
+// TestPlanCandidatesQuarantineIsRelativeToTheCandidateRoot pins the per-candidate
+// root. One batch spans every library, so a root taken from Options (as the walk
+// does) would flatten two libraries' identically-named sidecars into one
+// quarantine path -- where the clobber-safe rename would then refuse the second.
+func TestPlanCandidatesQuarantineIsRelativeToTheCandidateRoot(t *testing.T) {
+	rootA, lrcA := lib(t, overrunBody)
+	rootB, lrcB := lib(t, overrunBody)
+
+	r, quarantine := newRevalidator(t, rootA, fixedDuration(), func(o *Options) {
+		// Both roots are configured, as they would be in serve mode.
+		o.Roots = []string{rootA, rootB}
+		o.MisSyncedAction = ActionQuarantine
+	})
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{
+		{ID: 1, AudioPath: filepath.Join(filepath.Dir(lrcA), "track.mp3"), Root: rootA, LibraryID: 11},
+		{ID: 2, AudioPath: filepath.Join(filepath.Dir(lrcB), "track.mp3"), Root: rootB, LibraryID: 22},
+	})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if len(plan.Moves) != 2 {
+		t.Fatalf("want 2 moves, got %d", len(plan.Moves))
+	}
+	// Both sidecars are album/track.lrc under their own root, so a root-relative
+	// layout gives them the SAME target -- which is the collision this test
+	// exists to characterize, and which realign's clobber-safe rename refuses.
+	// What must NOT happen is one of them being computed against the other's
+	// root, which would put a file from library B under library A's tree.
+	for _, mv := range plan.Moves {
+		rel, rerr := filepath.Rel(quarantine, mv.Target)
+		if rerr != nil || rel == "" {
+			t.Fatalf("target %q is not under the quarantine root %q", mv.Target, quarantine)
+		}
+	}
+	if plan.Moves[0].LibraryID != 11 || plan.Moves[1].LibraryID != 22 {
+		t.Errorf("library ids = %d/%d, want 11/22: a backup record stamped with the wrong library cannot be restored by scope",
+			plan.Moves[0].LibraryID, plan.Moves[1].LibraryID)
+	}
+}
+
+// TestPlanCandidatesUnknownDurationNeverRemediates is the fail-open rail. A cold
+// duration cache must leave every file alone -- in an unattended pass even more
+// than in the CLI, since nobody is watching it run.
+func TestPlanCandidatesUnknownDurationNeverRemediates(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+
+	r, _ := newRevalidator(t, root, missingDuration(), nil)
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{candidateFor(1, root, lrc)})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if len(plan.Moves) != 0 {
+		t.Errorf("unknown duration planned %d move(s); it must fail open", len(plan.Moves))
+	}
+	if plan.Counts.UnknownDuration != 1 {
+		t.Errorf("UnknownDuration count = %d, want 1", plan.Counts.UnknownDuration)
+	}
+	// Still a finding, so the row is stamped and does not come back forever.
+	if len(plan.Findings) != 1 || plan.Findings[0].ID != 1 {
+		t.Errorf("unknown-duration candidate produced no stampable finding: %+v", plan.Findings)
+	}
+}
+
+// TestPlanCandidatesSkipsASymlinkedSidecar pins the symlink rail. A link could
+// redirect a move or a delete out of the library root entirely.
+func TestPlanCandidatesSkipsASymlinkedSidecar(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+	dir := filepath.Dir(lrc)
+
+	outside := filepath.Join(t.TempDir(), "elsewhere.lrc")
+	if err := os.WriteFile(outside, []byte(overrunBody), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	audio := filepath.Join(dir, "linked.mp3")
+	if err := os.WriteFile(audio, []byte("not really audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "linked.lrc")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	r, _ := newRevalidator(t, root, fixedDuration(), nil)
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{{ID: 1, AudioPath: audio, Root: root}})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if len(plan.Moves) != 0 {
+		t.Errorf("a symlinked sidecar planned %d move(s); a link must never be a remediation target", len(plan.Moves))
+	}
+	if plan.Counts.NoSidecar != 1 {
+		t.Errorf("NoSidecar count = %d, want 1", plan.Counts.NoSidecar)
+	}
+}
+
+// TestPlanCandidatesAbandonsTheCycleOnADurationStoreFailure separates the two
+// failure lifetimes. A broken duration store is TRANSIENT and says nothing about
+// any particular file, so the cycle must abandon rather than stamp a batch of
+// rows with verdicts a working store would have judged differently -- the stamp
+// is one-way, so a wrong one is not something a later cycle revisits.
+func TestPlanCandidatesAbandonsTheCycleOnADurationStoreFailure(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+	boom := errors.New("duration store is down")
+
+	r, _ := newRevalidator(t, root, func(context.Context, string, int64, int64) (int, bool, error) {
+		return 0, false, boom
+	}, nil)
+	_, err := r.PlanCandidates(context.Background(), []Candidate{candidateFor(1, root, lrc)})
+	if err == nil {
+		t.Fatal("a duration-store failure returned no error; the sweep would stamp rows it never judged")
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %v, want it to wrap %v", err, boom)
+	}
+}
+
+// TestPlanCandidatesHonorsContextCancellation keeps a cycle interruptible: serve
+// mode cancels this goroutine on shutdown and wg.Wait must unblock.
+func TestPlanCandidatesHonorsContextCancellation(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r, _ := newRevalidator(t, root, fixedDuration(), nil)
+	_, err := r.PlanCandidates(ctx, []Candidate{candidateFor(1, root, lrc)})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}

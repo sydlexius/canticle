@@ -477,12 +477,6 @@ name_match = false
 min_margin = 0.05
 
 [timing_validation]
-# NOT YET ACTIVE. These keys are the config surface only: the serve-mode sweep
-# that reads them lands separately, so setting ANY of them -- including
-# `enabled` below -- changes nothing today. `canticle revalidate` does this work
-# on demand and is unaffected either way. Everything below describes what these
-# keys WILL govern once the sweep ships.
-#
 # Timing validation judges whether a synced .lrc's cues actually line up with
 # the length of the audio it sits beside. Three verdicts matter: ok, mis_synced
 # (the cues run past the end of the audio, but the words are the right song's -
@@ -500,8 +494,8 @@ min_margin = 0.05
 # This section governs serve mode only. `canticle revalidate` (dry-run by
 # default, `--apply` to act) runs regardless of every key here.
 
-# Master switch for the serve-mode timing sweep. Default false. Inert today
-# (see NOT YET ACTIVE above): turning this on does not start a sweep.
+# Master switch for the serve-mode timing sweep. Default false. Both this AND
+# `revalidate_existing` must be true for the sweep to run.
 # Env: MXLRC_TIMING_VALIDATION_ENABLED.
 enabled = false
 

@@ -393,8 +393,6 @@ on_mis_synced = "demote"
 on_categorical = "quarantine"
 ```
 
-**Not yet active.** This section is the config surface only; the serve-mode sweep that consumes it lands separately (#443). Setting these keys today changes nothing, and the `revalidate` CLI runs regardless of every one of them. The description below is what they will govern.
-
 Governs serve mode's ongoing timing sweep, which re-judges synced `.lrc` files already on disk against the exact duration of the audio they sit beside. Three verdicts matter: **ok**, **mis_synced** (the cues run past the end of the audio, but the words are the right song's - the timing is wrong, not the content), and **categorical** (the last cue sits far past the end, so the file holds a different song's lyrics entirely). The `revalidate` command (dry-run by default, `--apply` to act) does the same work on demand and runs regardless of every key here; see [Revalidate](CLI_REFERENCE.md#revalidate).
 
 **There is no threshold knob, deliberately.** The overrun tolerance and the categorical ratio are a co-calibrated pair owned by `internal/timing`, and one predicate serves all four callers: the accept-time write guard, the worker's outcome stamp, the CLI, and this sweep. A sweep-local threshold would let an unattended pass demote a lyric the write path had already accepted, and would make recorded `timing_outcome` values incomparable across a single deployment's own history. What this section configures is the **remediation** - what happens to a file once the verdict is in.

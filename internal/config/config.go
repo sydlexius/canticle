@@ -692,11 +692,9 @@ const timingValidationBatchDefault = 100
 // command and shares its remediation core, so both reach one predicate
 // (internal/timing) and one apply path (realign.Apply).
 //
-// NOTHING READS THESE FIELDS YET. The sweep lands in a follow-up; this is the
-// config surface arriving first, the same way RealignConfig.OnScan shipped
-// ahead of the serve-mode realign that consumes it. Setting these keys today
-// changes no behavior, and the `revalidate` CLI is unaffected either way. Wire
-// the consumer and this comment goes away.
+// THE CONSUMER IS commands.runTimingValidationSweep, launched from runServe
+// when BOTH Enabled and RevalidateExisting are true. The `revalidate` CLI does
+// the same work on demand and is unaffected by every field here.
 //
 // NO THRESHOLD KNOB, DELIBERATELY. The issue's original acceptance criteria
 // listed a categorical_ratio field; it is omitted, and that omission is the
