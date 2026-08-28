@@ -28,6 +28,7 @@ type Config struct {
 	InstrumentalDetector InstrumentalDetectorConfig `toml:"instrumental_detector"`
 	Enrichment           EnrichmentConfig           `toml:"enrichment"`
 	Realign              RealignConfig              `toml:"realign"`
+	TimingValidation     TimingValidationConfig     `toml:"timing_validation"`
 	Guard                GuardConfig                `toml:"guard"`
 	Queue                QueueConfig                `toml:"queue"`
 	Watcher              WatcherConfig              `toml:"watcher"`
@@ -651,6 +652,127 @@ const (
 	watcherMaxDirsDefault    = 100000
 )
 
+// TimingAction is what the serve-mode sweep does to a sidecar whose timing the
+// shared predicate rejected. The vocabulary is deliberately about the FILE, not
+// about the verdict: the verdict names live in internal/timing and are recorded
+// verbatim in work_queue.timing_outcome (migration 034), while these name the
+// remediation, which is a separate axis an operator tunes independently.
+type TimingAction string
+
+const (
+	// TimingActionDemote writes the lyric's plain words as a .txt beside the
+	// audio, then moves the .lrc aside. Only meaningful for a MisSynced lyric,
+	// whose words are content-correct (#438 Investigation-0): the timing is
+	// wrong, the song is right.
+	TimingActionDemote TimingAction = "demote"
+	// TimingActionQuarantine moves the sidecar under the quarantine root without
+	// keeping its words. Recoverable: the file is moved, never unlinked.
+	TimingActionQuarantine TimingAction = "quarantine"
+	// TimingActionPurge unlinks the sidecar. IRREVERSIBLE, and never a default;
+	// the JSONL backup record written by realign.Apply is the only trail left.
+	TimingActionPurge TimingAction = "purge"
+	// TimingActionOff remediates nothing for this verdict. The sweep still
+	// evaluates and still stamps the watermark, so the row is recorded and the
+	// review queue and /metrics see it -- this is the observability-only mode,
+	// not a way to disable the sweep (that is enabled = false).
+	TimingActionOff TimingAction = "off"
+)
+
+// timingValidationBatchDefault is how many sidecars one sweep cycle judges.
+// Modest on purpose: each candidate costs a read of the .lrc plus, on a cold
+// audiodur cache, a header read of its companion audio, and the library lives
+// on spun-down array disks (#684/#685). The backlog drains over many cycles
+// rather than in one array-waking burst; a watermarked row is never revisited,
+// so a small batch costs elapsed time, never repeated work.
+const timingValidationBatchDefault = 100
+
+// TimingValidationConfig governs the serve-mode timing sweep: the ongoing
+// re-judging of .lrc files ALREADY on disk against their companion audio's
+// exact duration (#443). It is the unattended half of the `revalidate` CLI
+// command and shares its remediation core, so both reach one predicate
+// (internal/timing) and one apply path (realign.Apply).
+//
+// NOTHING READS THESE FIELDS YET. The sweep lands in a follow-up; this is the
+// config surface arriving first, the same way RealignConfig.OnScan shipped
+// ahead of the serve-mode realign that consumes it. Setting these keys today
+// changes no behavior, and the `revalidate` CLI is unaffected either way. Wire
+// the consumer and this comment goes away.
+//
+// NO THRESHOLD KNOB, DELIBERATELY. The issue's original acceptance criteria
+// listed a categorical_ratio field; it is omitted, and that omission is the
+// design. internal/timing owns Tolerance (2.0s) and CategoricalRatio (1.5) as a
+// CO-CALIBRATED PAIR, pinned together on the 28.7k corpus, and Evaluate checks
+// tolerance FIRST -- so on short audio a large ratio still reads Ok. Exposing
+// one half alone moves a boundary the calibration never characterized. Worse,
+// it would split the predicate by caller: a sweep-local ratio lets the sweep
+// demote a lyric the accept-time guard admitted, and makes timing_outcome
+// values incomparable across one deployment's own history. A threshold that is
+// genuinely worth tuning belongs in internal/timing, where all four callers
+// move together.
+type TimingValidationConfig struct {
+	// Enabled is the master switch for serve-mode timing validation. Default
+	// false. The revalidate CLI command runs regardless of this flag.
+	// Override: MXLRC_TIMING_VALIDATION_ENABLED.
+	Enabled bool `toml:"enabled"`
+	// RevalidateExisting turns on the backlog drain: the sweep re-judges .lrc
+	// files written before the accept-time guard (#439) existed. Default false.
+	// Both this AND Enabled must be true for the sweep to run, matching the
+	// realign gate: the master switch says the feature is on, this says the
+	// unattended pass may touch pre-existing files.
+	// Override: MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING.
+	RevalidateExisting bool `toml:"revalidate_existing"`
+	// RevalidateBatch caps how many sidecars one cycle judges. Default 100.
+	// Values below 1 are reset to the default -- a batch of 0 would drain
+	// nothing forever while still waking the array on every tick.
+	// Override: MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH.
+	RevalidateBatch int `toml:"revalidate_batch"`
+	// OnMisSynced is the action for a lyric that overran the audio but stayed
+	// under the categorical ratio. Default "demote" (keep the words as .txt),
+	// because the words are content-correct. One of: demote, quarantine, purge,
+	// off. Unknown values are reset to the default.
+	// Override: MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED.
+	OnMisSynced TimingAction `toml:"on_mis_synced"`
+	// OnCategorical is the action for a lyric whose last cue sits at or past
+	// CategoricalRatio times the duration -- the wrong song's words entirely.
+	// Default "quarantine". "demote" is NOT accepted here: there is nothing
+	// worth keeping as .txt. One of: quarantine, purge, off.
+	// Override: MXLRC_TIMING_VALIDATION_ON_CATEGORICAL.
+	OnCategorical TimingAction `toml:"on_categorical"`
+}
+
+// timingMisSyncedActions and timingCategoricalActions are the accepted value
+// sets for the two action fields. They are separate because the arms are not
+// interchangeable: a categorical lyric has no words worth demoting, so offering
+// "demote" there would be an accepted value with no honest implementation.
+// enumValues (validate.go) and the loader's re-default checks both read these,
+// so the settings dropdown, ValidateAndSet, and the file/env paths can never
+// disagree about what is legal.
+func timingMisSyncedActions() []TimingAction {
+	return []TimingAction{TimingActionDemote, TimingActionQuarantine, TimingActionPurge, TimingActionOff}
+}
+
+func timingCategoricalActions() []TimingAction {
+	return []TimingAction{TimingActionQuarantine, TimingActionPurge, TimingActionOff}
+}
+
+// validTimingAction reports whether v is in allowed. Case- and space-sensitive
+// by the time it is called: both callers normalize first, so a config file's
+// stray whitespace is forgiven while a genuinely wrong word is not.
+func validTimingAction(v TimingAction, allowed []TimingAction) bool {
+	for _, a := range allowed {
+		if v == a {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeTimingAction lowercases and trims a raw action value so a file's
+// " Demote" and env's "DEMOTE" resolve identically.
+func normalizeTimingAction(v TimingAction) TimingAction {
+	return TimingAction(strings.ToLower(strings.TrimSpace(string(v))))
+}
+
 // defaults sets built-in fallback values.
 func defaults() Config {
 	return Config{
@@ -696,6 +818,13 @@ func defaults() Config {
 			AutoApplyHeuristic: false,
 			NameMatch:          false,
 			MinMargin:          realignMinMarginDefault,
+		},
+		TimingValidation: TimingValidationConfig{
+			Enabled:            false,
+			RevalidateExisting: false,
+			RevalidateBatch:    timingValidationBatchDefault,
+			OnMisSynced:        TimingActionDemote,
+			OnCategorical:      TimingActionQuarantine,
 		},
 		Guard:   GuardConfig{Threshold: guardThresholdDefault},
 		Queue:   QueueConfig{Randomize: true, BatchSize: queueBatchSizeDefault},
@@ -818,6 +947,31 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			// range test alone would accept it and break the [0,1) invariant.
 			if math.IsNaN(cfg.Realign.MinMargin) || cfg.Realign.MinMargin < 0 || cfg.Realign.MinMargin >= 1 {
 				cfg.Realign.MinMargin = d.Realign.MinMargin
+			}
+			// TimingValidation. A file is not more trusted than an env var, so
+			// every bound the env path enforces is enforced here too.
+			//
+			// RevalidateBatch < 1 would drain nothing forever while the ticker
+			// still fires, which on this workload means waking the array on a
+			// schedule to accomplish exactly nothing. Reset rather than honored.
+			// The Enabled/RevalidateExisting bools are NOT re-defaulted: both
+			// default false, so an explicit `false` and an absent key agree and
+			// there is nothing to restore.
+			if cfg.TimingValidation.RevalidateBatch < 1 {
+				cfg.TimingValidation.RevalidateBatch = d.TimingValidation.RevalidateBatch
+			}
+			// An unrecognized (or blank) action resets to the default rather
+			// than being left to fall through to some arm's zero value. The
+			// failure mode being prevented is specific: a typo'd action that
+			// silently resolved to a MORE destructive one than the operator
+			// wrote would delete files on a misspelling.
+			cfg.TimingValidation.OnMisSynced = normalizeTimingAction(cfg.TimingValidation.OnMisSynced)
+			if !validTimingAction(cfg.TimingValidation.OnMisSynced, timingMisSyncedActions()) {
+				cfg.TimingValidation.OnMisSynced = d.TimingValidation.OnMisSynced
+			}
+			cfg.TimingValidation.OnCategorical = normalizeTimingAction(cfg.TimingValidation.OnCategorical)
+			if !validTimingAction(cfg.TimingValidation.OnCategorical, timingCategoricalActions()) {
+				cfg.TimingValidation.OnCategorical = d.TimingValidation.OnCategorical
 			}
 			// SpreadSamples is intentionally NOT re-defaulted: defaults() seeds 6 and
 			// the TOML decode preserves it when the key is omitted, so an explicit
@@ -961,7 +1115,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_WORD_SYNC, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_WORD_SYNC, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -1508,6 +1662,51 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.InstrumentalDetector.Ordering = normalized
 			applied["instrumental_detector.ordering"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_TIMING_VALIDATION_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ENABLED", "value", v, "current", cfg.TimingValidation.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.TimingValidation.Enabled = enabled
+			applied["timing_validation.enabled"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING", "value", v, "current", cfg.TimingValidation.RevalidateExisting) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.TimingValidation.RevalidateExisting = enabled
+			applied["timing_validation.revalidate_existing"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH", "value", v, "current", cfg.TimingValidation.RevalidateBatch) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.TimingValidation.RevalidateBatch = n
+			applied["timing_validation.revalidate_batch"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED"); v != "" {
+		action := normalizeTimingAction(TimingAction(v))
+		if !validTimingAction(action, timingMisSyncedActions()) {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED", "value", v, "current", cfg.TimingValidation.OnMisSynced) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.TimingValidation.OnMisSynced = action
+			applied["timing_validation.on_mis_synced"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_TIMING_VALIDATION_ON_CATEGORICAL"); v != "" {
+		action := normalizeTimingAction(TimingAction(v))
+		if !validTimingAction(action, timingCategoricalActions()) {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ON_CATEGORICAL", "value", v, "current", cfg.TimingValidation.OnCategorical) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.TimingValidation.OnCategorical = action
+			applied["timing_validation.on_categorical"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_GUARD_ACCEPTED_SCRIPTS"); v != "" {

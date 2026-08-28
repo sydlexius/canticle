@@ -8,6 +8,9 @@
 # MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE,
 # MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER,
 # MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE,
+# MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING,
+# MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED,
+# MXLRC_TIMING_VALIDATION_ON_CATEGORICAL,
 # MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL,
 # MXLRC_VERIFICATION_FFMPEG_PATH,
 # MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_MIN_CONFIDENCE,
@@ -472,6 +475,71 @@ name_match = false
 # reported ambiguous rather than guessed. Default 0.05. Values outside [0,1)
 # reset to the default. Env: MXLRC_REALIGN_MIN_MARGIN.
 min_margin = 0.05
+
+[timing_validation]
+# Timing validation judges whether a synced .lrc's cues actually line up with
+# the length of the audio it sits beside. Three verdicts matter: ok, mis_synced
+# (the cues run past the end of the audio, but the words are the right song's -
+# the timing is wrong, not the content), and categorical (the last cue sits far
+# past the end, meaning the file is a different song's lyrics entirely).
+#
+# The verdict itself is not configurable, and that is deliberate. The tolerance
+# and the categorical ratio are a co-calibrated PAIR living in internal/timing,
+# pinned together against a large sample, and one predicate serves the
+# accept-time guard, the worker's outcome stamp, the `canticle revalidate` CLI,
+# and this sweep. Splitting the threshold per caller would let this sweep demote
+# a lyric the write path had already accepted. What IS configurable is the
+# REMEDIATION: what happens to a file once the verdict is in.
+#
+# This section governs serve mode only. `canticle revalidate` (dry-run by
+# default, `--apply` to act) runs regardless of every key here.
+
+# Master switch for the serve-mode timing sweep. Default false.
+# Env: MXLRC_TIMING_VALIDATION_ENABLED.
+enabled = false
+
+# Drain the backlog: re-judge .lrc files written before the accept-time timing
+# guard existed. Both this AND `enabled` must be true for the sweep to run.
+# NOT YET ACTIVE: this is the config surface only. The serve-mode sweep that
+# reads these keys lands separately, so setting them today changes nothing and
+# the `revalidate` CLI runs regardless. What they will govern:
+#
+# The backlog drains a batch per cycle and then idles - a row that carries a
+# verdict leaves the candidate query, so a converged install costs one empty
+# query per cycle and wakes no disk. Judging is ONE-WAY: a file judged once is
+# left alone, and editing a .lrc by hand does not re-queue it. Use the
+# `revalidate` CLI to re-check a file that already has a verdict.
+# Default false.
+# Env: MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING.
+revalidate_existing = false
+
+# How many sidecars one cycle judges. Kept modest on purpose: each candidate
+# costs a read of the .lrc and, on a cold duration cache, a header read of its
+# companion audio, and a music library typically lives on disks that are parked
+# most of the time. A small batch trades elapsed time for a quieter array; it
+# never costs repeated work, since a judged file is not revisited.
+# Default 100. Values below 1 reset to the default.
+# Env: MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH.
+revalidate_batch = 100
+
+# What to do with a MisSynced lyric. Its words are the right song's, so the
+# default keeps them:
+#   demote     - write the plain words as .txt beside the audio, move the .lrc
+#                aside (the default)
+#   quarantine - move the .lrc aside, keep nothing
+#   purge      - delete the .lrc (IRREVERSIBLE; only the JSONL backup record
+#                remains)
+#   off        - judge and record it, change nothing on disk
+# Env: MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED.
+on_mis_synced = "demote"
+
+# What to do with a categorical lyric - a different song's words entirely.
+# There is no `demote` here, because there is nothing worth keeping:
+#   quarantine - move the .lrc aside (the default; recoverable)
+#   purge      - delete the .lrc (IRREVERSIBLE)
+#   off        - judge and record it, change nothing on disk
+# Env: MXLRC_TIMING_VALIDATION_ON_CATEGORICAL.
+on_categorical = "quarantine"
 
 [guard]
 # Optional language/script guard. It rejects fetched lyrics whose body is

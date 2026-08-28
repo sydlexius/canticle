@@ -126,6 +126,11 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_REALIGN_AUTO_APPLY_HEURISTIC` | `false` | Whether serve-mode reactive realign may auto-apply heuristic (name-similarity) matches; off = exact-only. |
 | `MXLRC_REALIGN_NAME_MATCH` | `false` | Enable the N:M name-similarity matcher for directories with multiple orphans and multiple sidecar-less audio files. |
 | `MXLRC_REALIGN_MIN_MARGIN` | `0.05` | Minimum score separation (0-1) an N:M candidate's best score must hold over its runner-up to be accepted; a near-tie is reported ambiguous. |
+| `MXLRC_TIMING_VALIDATION_ENABLED` | `false` | Master switch for the serve-mode timing sweep; the `revalidate` CLI runs regardless. |
+| `MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING` | `false` | Drain the backlog of `.lrc` files written before the accept-time timing guard existed. |
+| `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | Sidecars judged per sweep cycle; values below 1 reset to the default. |
+| `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a lyric whose cues overrun the audio: `demote`, `quarantine`, `purge`, `off`. |
+| `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
 | `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
 
 ## TOML config keys
@@ -376,6 +381,37 @@ When `enabled`, serve mode runs a scoped realign on three triggers: the filesyst
 | `min_margin` | `MXLRC_REALIGN_MIN_MARGIN` | `0.05` | Minimum score separation (0-1) an orphan's best-scoring candidate must hold over its runner-up before the pairing is accepted. Applies to **both** name-similarity tiers: for `heuristic-nm` the runner-up is the orphan's next-best candidate in the matrix; for the single-candidate `heuristic` tier it is the orphan's best score against any *other* audio file in the directory, including ones that already have a sidecar. Values outside `[0,1)` reset to the default. |
 
 The exact tier requires ISRC/MBID-tagged audio; libraries without those tags fall back to the heuristic tier (or, with `name_match` enabled, the N:M matcher for directories the single-candidate heuristic can't resolve).
+
+### `[timing_validation]`
+
+```toml
+[timing_validation]
+enabled = false
+revalidate_existing = false
+revalidate_batch = 100
+on_mis_synced = "demote"
+on_categorical = "quarantine"
+```
+
+**Not yet active.** This section is the config surface only; the serve-mode sweep that consumes it lands separately (#443). Setting these keys today changes nothing, and the `revalidate` CLI runs regardless of every one of them. The description below is what they will govern.
+
+Governs serve mode's ongoing timing sweep, which re-judges synced `.lrc` files already on disk against the exact duration of the audio they sit beside. Three verdicts matter: **ok**, **mis_synced** (the cues run past the end of the audio, but the words are the right song's - the timing is wrong, not the content), and **categorical** (the last cue sits far past the end, so the file holds a different song's lyrics entirely). The `revalidate` command (dry-run by default, `--apply` to act) does the same work on demand and runs regardless of every key here; see [Revalidate](CLI_REFERENCE.md#revalidate).
+
+**There is no threshold knob, deliberately.** The overrun tolerance and the categorical ratio are a co-calibrated pair owned by `internal/timing`, and one predicate serves all four callers: the accept-time write guard, the worker's outcome stamp, the CLI, and this sweep. A sweep-local threshold would let an unattended pass demote a lyric the write path had already accepted, and would make recorded `timing_outcome` values incomparable across a single deployment's own history. What this section configures is the **remediation** - what happens to a file once the verdict is in.
+
+The sweep is designed to converge: it judges a batch per cycle, records each verdict against the row, and then idles. A row carrying a verdict leaves the candidate query, so the backlog drains once rather than being re-read every cycle. Judging is ONE-WAY - a file judged once is left alone, and editing a `.lrc` by hand does not re-queue it; use the `revalidate` CLI to re-check a file that already carries a verdict.
+
+Setting both action keys to `off` gives an observability-only mode: every verdict is still evaluated and recorded (visible on `/metrics` and in the Review queue report), and nothing on disk is touched. That is the recommended way to see what a sweep *would* do before letting it act.
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `MXLRC_TIMING_VALIDATION_ENABLED` | `false` | Master switch for the serve-mode sweep. The `revalidate` CLI command runs regardless. |
+| `revalidate_existing` | `MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING` | `false` | Drain the backlog of `.lrc` files written before the accept-time guard existed. Both this **and** `enabled` must be true for the sweep to run. |
+| `revalidate_batch` | `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | How many sidecars one cycle judges. Modest on purpose: each candidate costs a read of the `.lrc` and, on a cold duration cache, a header read of its companion audio, so a small batch keeps a parked library array quiet. Values below `1` reset to the default. |
+| `on_mis_synced` | `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a MisSynced lyric. One of `demote` (write the plain words as `.txt` beside the audio, move the `.lrc` aside), `quarantine` (move it aside, keep nothing), `purge` (delete it - irreversible), `off` (record only). |
+| `on_categorical` | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a categorical lyric. One of `quarantine`, `purge` (irreversible), `off`. **No `demote`**: the words belong to another song, so there is nothing worth keeping as `.txt`. |
+
+Quarantined files are moved under a quarantine root, preserving their path relative to their library root so two same-named sidecars from different albums cannot collide. `purge` unlinks the file outright; the JSONL backup record is then the only trail, which is why it is never a default.
 
 ### ffmpeg resolution
 

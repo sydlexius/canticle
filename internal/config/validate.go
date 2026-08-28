@@ -94,6 +94,23 @@ var enumValues = map[string][]string{
 	"providers.mode":         {"ordered", "parallel"},
 	"logging.level":          {"debug", "info", "warn", "error"},
 	"logging.format":         {"text", "json"},
+	// The two timing-sweep action sets differ by exactly one value, and the
+	// difference is load-bearing rather than an oversight: a categorical lyric
+	// is the wrong song's words, so it has nothing worth demoting to .txt.
+	// Derived from the config-side sets so the dropdown, ValidateAndSet, and
+	// the loader's re-default checks cannot disagree about what is legal.
+	"timing_validation.on_mis_synced":  timingActionStrings(timingMisSyncedActions()),
+	"timing_validation.on_categorical": timingActionStrings(timingCategoricalActions()),
+}
+
+// timingActionStrings flattens a TimingAction set to the plain strings the
+// validator and settings UI speak.
+func timingActionStrings(actions []TimingAction) []string {
+	out := make([]string, 0, len(actions))
+	for _, a := range actions {
+		out = append(out, string(a))
+	}
+	return out
 }
 
 // AllowedValues returns the allowed values for a fixed-choice config field, or
@@ -251,7 +268,8 @@ func ValidateListenAddr() Validator {
 // loader's own primitives so the write path accepts exactly the set boot does.
 func validatorFor(f FieldSpec) Validator {
 	switch f.Path {
-	case "output.embedded_lyrics", "providers.mode", "logging.level", "logging.format":
+	case "output.embedded_lyrics", "providers.mode", "logging.level", "logging.format",
+		"timing_validation.on_mis_synced", "timing_validation.on_categorical":
 		return ValidateEnum(enumValues[f.Path]...)
 	case "server.tls.cert_file", "server.tls.key_file":
 		return ValidatePEMFile()
@@ -271,6 +289,10 @@ func validatorFor(f FieldSpec) Validator {
 		// Strictly positive: a non-positive cap rejects every watch root (matches
 		// the MXLRCGO_WATCH_MAX_DIRS env rule). watcher.debounce_ms falls through to
 		// the default TypeInt non-negative validator (>= 0), matching its env rule.
+		return ValidatePositiveInt()
+	case "timing_validation.revalidate_batch":
+		// Strictly positive, matching the env and file rules: a batch of 0
+		// drains nothing while the ticker still fires.
 		return ValidatePositiveInt()
 	}
 	switch f.Type {

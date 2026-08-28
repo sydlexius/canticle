@@ -81,6 +81,7 @@ var settingsSectionOrder = []struct {
 	{"instrumental_detector", "Instrumental Detector"},
 	{"enrichment", "Enrichment"},
 	{"realign", "Realign"},
+	{"timing_validation", "Timing Validation"},
 	{"guard", "Guard"},
 	{"queue", "Queue"},
 	{"logging", "Logging"},
@@ -395,20 +396,22 @@ func settingsInputType(spec config.FieldSpec) string {
 // boolLabels gives each boolean field a meaningful label for its two radio
 // choices (on-label, off-label), so the page never renders a bare true/false.
 var boolLabels = map[string][2]string{
-	"output.bilingual_output":       {"Save original and translation together", "Save one language only"},
-	"output.word_sync":              {"Highlight each word as it is sung", "Highlight whole lines only"},
-	"verification.enabled":          {"Verify lyrics against the audio", "Don't verify"},
-	"instrumental_detector.enabled": {"Detect instrumental tracks", "Don't detect"},
-	"enrichment.enabled":            {"Look up extra track info first", "Skip the lookup"},
-	"realign.enabled":               {"Re-attach orphaned lyric files in serve mode", "Off"},
-	"realign.on_scan":               {"Realign after every scan", "Only on watcher/webhook events"},
-	"realign.require_provenance":    {"Only move on an exact ID match", "Allow name-based matches too"},
-	"realign.cross_directory":       {"Allow matches across directories", "Same directory only"},
-	"realign.auto_apply_heuristic":  {"Auto-apply name-based matches too", "Auto-apply only exact ID matches"},
-	"queue.randomize":               {"Process in random order", "Process in order"},
-	"watcher.enabled":               {"Watch for new files", "Don't watch"},
-	"server.tls.self_signed":        {"Use a self-signed certificate", "Off"},
-	"logging.compress":              {"Compress old log files", "Don't compress"},
+	"output.bilingual_output":               {"Save original and translation together", "Save one language only"},
+	"output.word_sync":                      {"Highlight each word as it is sung", "Highlight whole lines only"},
+	"verification.enabled":                  {"Verify lyrics against the audio", "Don't verify"},
+	"instrumental_detector.enabled":         {"Detect instrumental tracks", "Don't detect"},
+	"enrichment.enabled":                    {"Look up extra track info first", "Skip the lookup"},
+	"realign.enabled":                       {"Re-attach orphaned lyric files in serve mode", "Off"},
+	"realign.on_scan":                       {"Realign after every scan", "Only on watcher/webhook events"},
+	"realign.require_provenance":            {"Only move on an exact ID match", "Allow name-based matches too"},
+	"realign.cross_directory":               {"Allow matches across directories", "Same directory only"},
+	"realign.auto_apply_heuristic":          {"Auto-apply name-based matches too", "Auto-apply only exact ID matches"},
+	"timing_validation.enabled":             {"Check that lyric timings match the audio", "Don't check"},
+	"timing_validation.revalidate_existing": {"Also re-check lyric files saved earlier", "Only check new lyrics"},
+	"queue.randomize":                       {"Process in random order", "Process in order"},
+	"watcher.enabled":                       {"Watch for new files", "Don't watch"},
+	"server.tls.self_signed":                {"Use a self-signed certificate", "Off"},
+	"logging.compress":                      {"Compress old log files", "Don't compress"},
 }
 
 // boolOptions builds the two labeled radio choices for a boolean field, marking
@@ -1019,6 +1022,17 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return strconv.FormatBool(cfg.Realign.NameMatch)
 	case "realign.min_margin":
 		return formatFloat(cfg.Realign.MinMargin)
+	// [timing_validation]
+	case "timing_validation.enabled":
+		return strconv.FormatBool(cfg.TimingValidation.Enabled)
+	case "timing_validation.revalidate_existing":
+		return strconv.FormatBool(cfg.TimingValidation.RevalidateExisting)
+	case "timing_validation.revalidate_batch":
+		return strconv.Itoa(cfg.TimingValidation.RevalidateBatch)
+	case "timing_validation.on_mis_synced":
+		return string(cfg.TimingValidation.OnMisSynced)
+	case "timing_validation.on_categorical":
+		return string(cfg.TimingValidation.OnCategorical)
 	// [guard]
 	case "guard.accepted_scripts":
 		return joinSlice(cfg.Guard.AcceptedScripts)
@@ -1196,6 +1210,11 @@ var settingsLabels = map[string]string{
 	"realign.auto_apply_heuristic":                    "Auto-apply name-based matches in serve mode (not just exact IDs)",
 	"realign.name_match":                              "Match multiple renamed files in one folder by name",
 	"realign.min_margin":                              "Minimum score gap over the next-best name match (0-1)",
+	"timing_validation.enabled":                       "Check that synced lyrics line up with the audio length",
+	"timing_validation.revalidate_existing":           "Also re-check lyric files saved before this feature existed",
+	"timing_validation.revalidate_batch":              "Lyric files checked per background round",
+	"timing_validation.on_mis_synced":                 "What to do when the timing runs past the song's end",
+	"timing_validation.on_categorical":                "What to do when the lyrics belong to a different song",
 	"guard.accepted_scripts":                          "Writing systems to accept without asking",
 	"guard.script_guard_threshold":                    "Foreign-script sensitivity (0-1)",
 	"queue.randomize":                                 "Process tracks in random order",

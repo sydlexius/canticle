@@ -46,3 +46,10 @@ preffered = "preffered"
 # says "MisSynced" (the type) rather than the hyphenated adjective.
 MisSynced = "MisSynced"
 mis_synced = "mis_synced"
+# The [timing_validation] config key and its Go field carry the same "mis" stem
+# for the same reason: the key names the outcome it acts on, and renaming either
+# to satisfy the spell checker would break the correspondence with mis_synced.
+on_mis_synced = "on_mis_synced"
+OnMisSynced = "OnMisSynced"
+MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED = "MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED"
+timingMisSyncedActions = "timingMisSyncedActions"
