@@ -125,11 +125,39 @@ func AllowedValues(path string) []string {
 	return append([]string(nil), v...)
 }
 
-// ValidateEnum accepts only one of the allowed values.
+// ValidateEnum accepts only one of the allowed values, compared verbatim.
 func ValidateEnum(allowed ...string) Validator {
 	return func(value string) error {
 		for _, a := range allowed {
 			if value == a {
+				return nil
+			}
+		}
+		return fmt.Errorf("must be one of %v", allowed)
+	}
+}
+
+// ValidateNormalizedEnum accepts one of the allowed values after trimming and
+// lowercasing, for fields whose LOADER normalizes the same way.
+//
+// WHY THIS EXISTS. A validator and a loader that disagree about normalization
+// disagree about what is legal, even when they share a value set. The timing
+// actions are normalized on the file and env paths, so a TOML holding
+// " PURGE " boots fine and purges files -- while a verbatim ValidateEnum
+// rejected that same value on the write path. The operator symptom is bad and
+// hard to trace: a working config, and then opening the settings page and
+// saving ANY field in that section fails on a field they never touched, because
+// a section save validates every value it renders, including the one already on
+// disk.
+//
+// Normalizing here does NOT widen the accepted set -- the value must still land
+// exactly on a member after folding -- so an arm's narrower vocabulary survives
+// (" DEMOTE " stays illegal for on_categorical).
+func ValidateNormalizedEnum(allowed ...string) Validator {
+	return func(value string) error {
+		v := strings.ToLower(strings.TrimSpace(value))
+		for _, a := range allowed {
+			if v == a {
 				return nil
 			}
 		}
@@ -268,9 +296,13 @@ func ValidateListenAddr() Validator {
 // loader's own primitives so the write path accepts exactly the set boot does.
 func validatorFor(f FieldSpec) Validator {
 	switch f.Path {
-	case "output.embedded_lyrics", "providers.mode", "logging.level", "logging.format",
-		"timing_validation.on_mis_synced", "timing_validation.on_categorical":
+	case "output.embedded_lyrics", "providers.mode", "logging.level", "logging.format":
 		return ValidateEnum(enumValues[f.Path]...)
+	case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
+		// NORMALIZED, because the loader normalizes these two before validating
+		// them. A verbatim comparison here would reject a value the next boot
+		// accepts -- see ValidateNormalizedEnum for the operator symptom.
+		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "server.tls.cert_file", "server.tls.key_file":
 		return ValidatePEMFile()
 	case "verification.ffmpeg_path", "instrumental_detector.ffmpeg_path":

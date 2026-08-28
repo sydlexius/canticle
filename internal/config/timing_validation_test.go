@@ -166,7 +166,16 @@ func TestLoad_TimingValidationBlankFileRestoresDefaults(t *testing.T) {
 func TestLoad_TimingValidationFileOutOfRangeRestoresDefault(t *testing.T) {
 	isolateEnv(t)
 	path := filepath.Join(t.TempDir(), "config.toml")
-	body := "[timing_validation]\nrevalidate_batch = 0\non_mis_synced = \"resync\"\non_categorical = \"\"\n"
+	// on_categorical is "demote" ON PURPOSE, and a blank would NOT do here.
+	// "demote" is the one value that DISCRIMINATES between the two enum sets:
+	// it is legal for on_mis_synced and illegal for on_categorical, so this
+	// assertion fails if the file path ever consults the wider set. A blank is
+	// rejected by BOTH sets, so it cannot tell them apart and would let a
+	// one-token slip on the file path admit demote into on_categorical -- the
+	// exact state this asymmetry exists to prevent. Mutation-verified: pointing
+	// the file path's on_categorical check at timingMisSyncedActions() reddens
+	// this test, and reddened nothing while the value was blank.
+	body := "[timing_validation]\nrevalidate_batch = 0\non_mis_synced = \"resync\"\non_categorical = \"demote\"\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -183,7 +192,7 @@ func TestLoad_TimingValidationFileOutOfRangeRestoresDefault(t *testing.T) {
 			cfg.TimingValidation.OnMisSynced, TimingActionDemote)
 	}
 	if cfg.TimingValidation.OnCategorical != TimingActionQuarantine {
-		t.Errorf("TimingValidation.OnCategorical = %q; want %q (blank file value reset)",
+		t.Errorf("TimingValidation.OnCategorical = %q; want %q (a value legal only for the OTHER arm must reset)",
 			cfg.TimingValidation.OnCategorical, TimingActionQuarantine)
 	}
 }
@@ -276,7 +285,11 @@ func TestTimingValidationValidation(t *testing.T) {
 			t.Errorf("timing_validation.on_categorical=%s rejected: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "delete", "DEMOTE"} {
+	// "DEMOTE" is deliberately NOT in this list. Case and surrounding
+	// whitespace are forgiven on every path (the loader folds them, so the
+	// writer must too -- see TestTimingValidationNormalizationIsSymmetric);
+	// what stays rejected is a value that is not a member at all.
+	for _, bad := range []string{"", "delete", "resync"} {
 		if err := ValidateAndSet("timing_validation.on_mis_synced", bad); err == nil {
 			t.Errorf("timing_validation.on_mis_synced=%q accepted; want rejected", bad)
 		}
@@ -299,5 +312,53 @@ func TestTimingValidationAllowedValuesDrivesUI(t *testing.T) {
 		if v == string(TimingActionDemote) {
 			t.Error("AllowedValues(on_categorical) offers demote; want it absent")
 		}
+	}
+}
+
+// TestTimingValidationNormalizationIsSymmetric pins that every path agrees
+// about what is legal, not just about the value SET.
+//
+// The loader normalizes (trim + lowercase) before validating, so a TOML file
+// holding " PURGE " boots fine and purges files. ValidateEnum compares raw, so
+// the settings UI and `config set` rejected that same value. The operator
+// symptom is nasty and hard to diagnose: a working on-disk config, and opening
+// the settings page and saving ANY field in the section fails with "must be one
+// of ..." on a field they never touched -- because the section save validates
+// every value it renders, including the one already on disk.
+//
+// Whitespace and case are forgiven everywhere or nowhere. This asserts
+// everywhere, matching the loader's documented intent.
+func TestTimingValidationNormalizationIsSymmetric(t *testing.T) {
+	variants := []string{"purge", "PURGE", "Purge", " purge", "purge ", "  PuRgE  "}
+	for _, v := range variants {
+		t.Run("mis_synced/"+v, func(t *testing.T) {
+			if err := ValidateAndSet("timing_validation.on_mis_synced", v); err != nil {
+				t.Errorf("ValidateAndSet(on_mis_synced, %q) = %v; want accepted -- the loader accepts it, so the writer must too", v, err)
+			}
+		})
+	}
+	for _, v := range []string{"quarantine", "QUARANTINE", " Quarantine "} {
+		t.Run("categorical/"+v, func(t *testing.T) {
+			if err := ValidateAndSet("timing_validation.on_categorical", v); err != nil {
+				t.Errorf("ValidateAndSet(on_categorical, %q) = %v; want accepted", v, err)
+			}
+		})
+	}
+	// Normalizing must NOT widen the accepted set: the asymmetry has to survive
+	// case-folding, or " DEMOTE " becomes a back door into on_categorical.
+	for _, v := range []string{"demote", "DEMOTE", " Demote "} {
+		t.Run("categorical_rejects/"+v, func(t *testing.T) {
+			if err := ValidateAndSet("timing_validation.on_categorical", v); err == nil {
+				t.Errorf("ValidateAndSet(on_categorical, %q) accepted; want rejected -- normalization must not widen the set", v)
+			}
+		})
+	}
+	// And a genuine typo stays rejected however it is cased.
+	for _, v := range []string{"resync", "RESYNC", " delete "} {
+		t.Run("typo_rejected/"+v, func(t *testing.T) {
+			if err := ValidateAndSet("timing_validation.on_mis_synced", v); err == nil {
+				t.Errorf("ValidateAndSet(on_mis_synced, %q) accepted; want rejected", v)
+			}
+		})
 	}
 }

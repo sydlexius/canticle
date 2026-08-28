@@ -436,6 +436,23 @@ var modeOptionLabels = map[string]string{
 	"parallel": "In parallel (race them)",
 }
 
+// timingActionLabels gives the two remediation dropdowns plain-language labels.
+//
+// THE PURGE LABEL IS LOAD-BEARING. That option UNLINKS a lyric file, and the
+// word "irreversible" otherwise appears only in the TOML comment, the docs, and
+// the registry Description -- none of which are visible in a list of four bare
+// words, since the Description renders once under the control rather than per
+// option. An operator picking a value from a dropdown should not have to have
+// read the manual to know which one deletes their files.
+//
+// Both arms share this map; on_categorical simply never offers "demote".
+var timingActionLabels = map[string]string{
+	"demote":     "Keep the words as a .txt file, move the lyric file aside",
+	"quarantine": "Move the lyric file aside (recoverable)",
+	"purge":      "Delete the lyric file (cannot be undone)",
+	"off":        "Record the problem, change nothing on disk",
+}
+
 // selectOptions builds the dropdown choices for a fixed-choice field: the
 // provider list for providers.primary, otherwise the validation enum set.
 func selectOptions(path, effective string) []templates.SettingsOption {
@@ -448,8 +465,13 @@ func selectOptions(path, effective string) []templates.SettingsOption {
 	opts := make([]templates.SettingsOption, 0, len(vals))
 	for _, v := range vals {
 		label := v
-		if path == "providers.mode" {
+		switch path {
+		case "providers.mode":
 			if l, ok := modeOptionLabels[v]; ok {
+				label = l
+			}
+		case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
+			if l, ok := timingActionLabels[v]; ok {
 				label = l
 			}
 		}
