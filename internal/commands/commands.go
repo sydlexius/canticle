@@ -3158,18 +3158,21 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	case "timing_validation.enabled":
 		b, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("timing_validation.enabled must be true or false")
+			return fmt.Errorf("timing_validation.enabled must be a boolean: %w", err)
 		}
 		cfg.TimingValidation.Enabled = b
 	case "timing_validation.revalidate_existing":
 		b, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("timing_validation.revalidate_existing must be true or false")
+			return fmt.Errorf("timing_validation.revalidate_existing must be a boolean: %w", err)
 		}
 		cfg.TimingValidation.RevalidateExisting = b
 	case "timing_validation.revalidate_batch":
 		n, err := strconv.Atoi(value)
-		if err != nil || n < 1 {
+		if err != nil {
+			return fmt.Errorf("timing_validation.revalidate_batch must be an integer: %w", err)
+		}
+		if n < 1 {
 			return fmt.Errorf("timing_validation.revalidate_batch must be an integer greater than zero")
 		}
 		cfg.TimingValidation.RevalidateBatch = n
@@ -3181,6 +3184,13 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 		// accepts is exactly a value the next boot will keep. Restating the sets
 		// in this switch is how the CLI would drift from the loader.
 		normalized := strings.ToLower(strings.TrimSpace(value))
+		// Returned UNWRAPPED, deliberately. ValidateAndSet yields a
+		// *config.ValidationError carrying the path, the offending value, and the
+		// reason -- it already renders as
+		// `config: timing_validation.on_categorical = "demote": must be one of
+		// [quarantine purge off]`. Adding "validate <key>: " in front would print
+		// the key twice in one line. There is no context to add here that the
+		// error does not already carry.
 		if err := config.ValidateAndSet(key, normalized); err != nil {
 			return err
 		}
