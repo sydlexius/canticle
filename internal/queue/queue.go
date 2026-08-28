@@ -2230,6 +2230,103 @@ type ListInstrumentalOptions struct {
 	CurrentVersion string
 }
 
+// TimingBacklogOptions narrows ListTimingBacklog.
+type TimingBacklogOptions struct {
+	// Limit caps the number of returned rows when > 0. Applied in SQL, not by
+	// the caller: on an unswept library the backlog is the whole synced
+	// population, so filtering in Go would read every one of those rows each
+	// cycle to then discard all but a batch -- the exact cost the budget exists
+	// to bound.
+	Limit int
+}
+
+// ListTimingBacklog returns completed synced rows that carry no timing verdict
+// yet -- the population the serve-mode sweep (#443) drains.
+//
+// THE WATERMARK IS WHAT MAKES THE SWEEP INCREMENTAL. A row leaves this
+// population by being stamped, so "drains the backlog, then idles" is a
+// property of this predicate rather than something the loop maintains: once
+// every synced row carries a verdict, this returns nothing, forever, and the
+// cycle is a no-op. That includes the 'ok' verdict, which is the overwhelming
+// majority of a healthy library -- if a compliant file did not retire its row,
+// the sweep would re-read nearly every .lrc on disk every cycle, which on a
+// spun-down array (#684/#685) is precisely the behavior this design exists to
+// avoid.
+//
+// WHY outcome_type = 'synced' AND NOT NULL. Only a synced lyric has line timing
+// to judge. A NULL outcome_type is excluded deliberately even though some of
+// those rows did write a .lrc: migration 024 records that a legacy row's true
+// outcome is NOT reliably reconstructable from the database (output_paths holds
+// the stale enqueue-time .lrc, not what was written), so treating NULL as
+// "probably synced" would point an unattended, file-moving sweep at paths that
+// may not exist or may not be .lrc at all. Those rows remain reachable by the
+// `revalidate` CLI, which walks the filesystem and therefore judges what is
+// actually on disk instead of what a NULL column implies.
+//
+// source_path is the AUDIO file, and it is required because the sidecar is
+// derived from it. A row without one can never be judged, so admitting it would
+// burn a batch slot every cycle forever -- nothing about such a row ever
+// changes to retire it. 'processing' rows are excluded: the worker is about to
+// stamp its own verdict and may still be writing that very sidecar. Read-only.
+func (q *DBQueue) ListTimingBacklog(ctx context.Context, opts TimingBacklogOptions) (items []WorkItem, retErr error) {
+	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version
+                       FROM work_queue
+                       WHERE timing_outcome IS NULL
+                         AND outcome_type = 'synced'
+                         AND status <> 'processing'
+                         AND TRIM(COALESCE(source_path, '')) <> ''`
+	// Oldest first, so a large backlog drains in a stable order across cycles
+	// and an operator watching the count sees monotonic progress.
+	query := baseQuery + ` ORDER BY completed_at ASC, id ASC`
+	var args []any
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // reason: G202: the only concatenated fragments are package constants and a bound-parameter LIMIT; never user-built SQL
+	if err != nil {
+		return nil, fmt.Errorf("queue: list timing backlog: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close list timing backlog rows: %w", err)
+		}
+	}()
+	for rows.Next() {
+		item, err := scanWorkItem(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: list timing backlog scan: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list timing backlog rows: %w", err)
+	}
+	return items, nil
+}
+
+// CountTimingBacklog returns how many rows ListTimingBacklog would consider,
+// ignoring Limit, so a cycle can report its progress against the whole backlog.
+// It MUST apply the same eligibility as the list: a count over a wider
+// population would overstate the remaining work and make the sweep's "N left"
+// logging a lie an operator would reasonably act on.
+func (q *DBQueue) CountTimingBacklog(ctx context.Context) (int, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue
+         WHERE timing_outcome IS NULL
+           AND outcome_type = 'synced'
+           AND status <> 'processing'
+           AND TRIM(COALESCE(source_path, '')) <> ''`,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("queue: count timing backlog: %w", err)
+	}
+	return n, nil
+}
+
 // ListUnclassifiedOptions narrows ListUnclassified.
 type ListUnclassifiedOptions struct {
 	// LibraryID, when non-nil, scopes results to rows linked to that library via

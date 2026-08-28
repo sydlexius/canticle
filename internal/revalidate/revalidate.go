@@ -59,13 +59,72 @@ const (
 	Delete OnFail = "delete"
 )
 
+// Action is what happens to a sidecar the timing predicate rejected. It is the
+// SINGLE internal representation of that decision: the CLI's --on-fail/--purge
+// flags translate into a pair of Actions in New, and serve mode's
+// [timing_validation] config sets them directly. One vocabulary, so the two
+// entry points cannot drift into disagreeing about what a given setting does to
+// a user's files.
+type Action string
+
+const (
+	// ActionDemote writes the lyric's plain words as a .txt beside the audio,
+	// then moves the .lrc aside. Only meaningful for MisSynced/Degenerate, whose
+	// words are content-correct.
+	ActionDemote Action = "demote"
+	// ActionQuarantine moves the sidecar aside without keeping its words.
+	// Recoverable: the file is moved, never unlinked.
+	ActionQuarantine Action = "quarantine"
+	// ActionPurge unlinks the sidecar. IRREVERSIBLE; the JSONL backup record is
+	// the only trail left, which is why it is never a default.
+	ActionPurge Action = "purge"
+	// ActionOff plans nothing for this verdict. The file is still classified and
+	// counted -- that is the point: an operator can see what a pass WOULD do
+	// before letting it act.
+	ActionOff Action = "off"
+)
+
+// misSyncedActions and categoricalActions are the accepted sets per arm. They
+// differ by exactly one value and the difference is load-bearing: a Categorical
+// lyric is a different song's words, so there is nothing worth demoting to .txt
+// and offering the option would be an accepted value with no honest meaning.
+func misSyncedActions() []Action {
+	return []Action{ActionDemote, ActionQuarantine, ActionPurge, ActionOff}
+}
+
+func categoricalActions() []Action {
+	return []Action{ActionQuarantine, ActionPurge, ActionOff}
+}
+
+func validAction(a Action, allowed []Action) bool {
+	for _, x := range allowed {
+		if a == x {
+			return true
+		}
+	}
+	return false
+}
+
 // Options configures a revalidation pass.
 type Options struct {
-	// Roots are the directory trees to walk.
+	// Roots are the directory trees to walk. The serve sweep leaves this empty:
+	// it judges an explicit candidate list drawn from the timing watermark
+	// rather than walking, so it never re-reads the library each cycle.
 	Roots []string
+	// MisSyncedAction is what happens to a MisSynced (or Degenerate) sidecar.
+	// Empty means "derive from the legacy OnFail/Purge flags" -- see New.
+	MisSyncedAction Action
+	// CategoricalAction is what happens to a Categorical sidecar. Empty means
+	// "derive from the legacy Purge flag" -- see New.
+	CategoricalAction Action
 	// OnFail decides the MisSynced action. Empty means Demote.
+	//
+	// LEGACY, retained for the CLI's --on-fail flag. It and Purge are translated
+	// into the Action pair above by New; nothing downstream reads them.
 	OnFail OnFail
 	// Purge hard-deletes instead of quarantining. Opt-in and irreversible.
+	//
+	// LEGACY, retained for the CLI's --purge flag. See OnFail.
 	Purge bool
 	// QuarantineDir is the root that removed .lrc files are moved under,
 	// preserving their path relative to their library root so two same-named
@@ -120,6 +179,18 @@ func New(lookup DurationLookup, opts Options) *Revalidator {
 	if opts.OnFail == "" {
 		opts.OnFail = Demote
 	}
+	// Translate the legacy CLI flags into the per-arm actions, unless the caller
+	// set them explicitly (serve mode does). Doing it ONCE, through the same
+	// helper Validate uses, is what keeps the two entry points on one
+	// vocabulary: everything downstream reads only the actions, so there is no
+	// second place where --purge could come to mean something subtly different
+	// from on_categorical = "purge".
+	//
+	// --on-fail delete resolves to ActionQuarantine, not ActionPurge: it means
+	// "do not keep the words", and without --purge the file was always MOVED
+	// rather than unlinked. Purge alone decided delete-vs-quarantine before this
+	// refactor, and that is preserved exactly.
+	opts.MisSyncedAction, opts.CategoricalAction = opts.resolvedActions()
 	return &Revalidator{lookup: lookup, opts: opts}
 }
 
@@ -205,7 +276,7 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 		plan.Counts.UnknownDuration++
 	case timing.MisSynced:
 		plan.Counts.MisSynced++
-		mv, mok := r.demotionMove(root, path, audio)
+		mv, mok := r.misSyncedMove(root, path, audio)
 		if mok {
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
@@ -223,16 +294,22 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 		// arm the verdict fell to default and was counted Errored, which never
 		// remediates -- so the existing corpus would have stayed untouched.
 		plan.Counts.Degenerate++
-		mv, mok := r.demotionMove(root, path, audio)
+		mv, mok := r.misSyncedMove(root, path, audio)
 		if mok {
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
 		}
 	case timing.Categorical:
 		plan.Counts.Categorical++
-		mv := r.removalMove(root, path)
-		f.Action = mv.Kind
-		plan.Moves = append(plan.Moves, mv)
+		if r.opts.CategoricalAction != ActionOff {
+			mv := r.removalMove(root, path)
+			if r.opts.CategoricalAction == ActionPurge {
+				mv.Kind = realign.KindPurge
+				mv.Target = ""
+			}
+			f.Action = mv.Kind
+			plan.Moves = append(plan.Moves, mv)
+		}
 	default:
 		// An outcome this package does not recognize must never remediate.
 		plan.Counts.Errored++
@@ -240,15 +317,29 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 	plan.Findings = append(plan.Findings, f)
 }
 
-// demotionMove builds the action for a MisSynced .lrc. Under Demote it reads
-// the cues back and flattens them to the plain words via the shared
-// lyrics.PlainBody, so the demoted .txt matches exactly what the accept-time
-// guard would have written. A lyric that flattens to nothing (all decorative)
-// has no words worth keeping, so it falls through to plain removal rather than
-// writing an empty file.
-func (r *Revalidator) demotionMove(root, path, audio string) (realign.Move, bool) {
-	if r.opts.OnFail == Delete {
+// misSyncedMove builds the move for a MisSynced (or Degenerate) .lrc according
+// to MisSyncedAction, returning ok=false when nothing is to be done.
+//
+// Under ActionDemote it reads the cues back and flattens them to the plain
+// words via the shared lyrics.PlainBody, so the demoted .txt matches exactly
+// what the accept-time guard would have written. A lyric that flattens to
+// nothing (all decorative) has no words worth keeping, so it falls through to
+// plain removal rather than writing an empty file.
+func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, bool) {
+	switch r.opts.MisSyncedAction {
+	case ActionOff:
+		// Classified and counted by the caller; nothing planned. The file is left
+		// exactly as it is.
+		return realign.Move{}, false
+	case ActionQuarantine:
 		return r.removalMove(root, path), true
+	case ActionPurge:
+		mv := r.removalMove(root, path)
+		mv.Kind = realign.KindPurge
+		// A purge unlinks in place, so a quarantine destination would be a
+		// misleading value on the backup record.
+		mv.Target = ""
+		return mv, true
 	}
 	synced, err := lyrics.ReadSyncedLRC(path)
 	if err != nil {
@@ -515,6 +606,62 @@ func companionAudioByListing(lrcPath, stem string, cache *dirListingCache) (stri
 	return "", false
 }
 
+// resolvedActions returns the action pair New would derive from these Options,
+// so Validate reasons about the SAME values the run will use. Kept in lockstep
+// with New by construction: both call this, rather than each deriving the
+// defaults separately and drifting.
+func (o Options) resolvedActions() (misSynced, categorical Action) {
+	misSynced, categorical = o.MisSyncedAction, o.CategoricalAction
+	if misSynced == "" {
+		switch {
+		case o.OnFail == Delete && o.Purge:
+			misSynced = ActionPurge
+		case o.OnFail == Delete:
+			misSynced = ActionQuarantine
+		default:
+			misSynced = ActionDemote
+		}
+	}
+	if categorical == "" {
+		categorical = ActionQuarantine
+		if o.Purge {
+			categorical = ActionPurge
+		}
+	}
+	return misSynced, categorical
+}
+
+// quarantines reports whether any resolved action moves a file into the
+// quarantine root, and therefore whether QuarantineDir is required.
+//
+// ActionDemote counts CONDITIONALLY, which is the subtle part. Demoting is two
+// halves -- write the words as .txt, then get rid of the .lrc -- and only the
+// second half needs a destination. Which flavor that second half takes is what
+// the legacy --purge flag decides: with it, the .lrc is unlinked in place and
+// no quarantine root is involved at all (removalMove returns KindPurge with no
+// Target, and misSyncedMove then relabels it KindDemote). Serve mode never sets
+// Purge, so its `demote` always means "move the .lrc aside", exactly as the
+// config docs promise.
+//
+// Getting this wrong in either direction is a real defect, not a nicety:
+// demanding a directory for a purging run would reject a working CLI
+// invocation, and NOT demanding one for a quarantining run would plan moves to
+// a bare relative path.
+func (o Options) quarantines() bool {
+	misSynced, categorical := o.resolvedActions()
+	for _, a := range []Action{misSynced, categorical} {
+		switch a {
+		case ActionQuarantine:
+			return true
+		case ActionDemote:
+			if !o.Purge {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Validate reports why the options cannot be applied, or nil. Called before any
 // mutation so a misconfigured run fails before it touches a file rather than
 // halfway through one.
@@ -524,8 +671,21 @@ func (o Options) Validate() error {
 	default:
 		return fmt.Errorf("revalidate: unknown --on-fail %q (want demote or delete)", o.OnFail)
 	}
-	if !o.Purge && strings.TrimSpace(o.QuarantineDir) == "" {
-		return errors.New("revalidate: a quarantine directory is required unless --purge is set")
+	// The actions are validated when set explicitly. An empty value is legal and
+	// means "derive from the legacy flags" (New does that), so it is not checked
+	// here -- Validate runs on the caller's Options, before New normalizes them.
+	if o.MisSyncedAction != "" && !validAction(o.MisSyncedAction, misSyncedActions()) {
+		return fmt.Errorf("revalidate: unknown MisSynced action %q (want demote, quarantine, purge, or off)", o.MisSyncedAction)
+	}
+	if o.CategoricalAction != "" && !validAction(o.CategoricalAction, categoricalActions()) {
+		return fmt.Errorf("revalidate: unknown categorical action %q (want quarantine, purge, or off; a categorical lyric has no words worth demoting)", o.CategoricalAction)
+	}
+	// A quarantine destination is required only when something can actually be
+	// quarantined. Keyed on the RESOLVED actions rather than on the legacy Purge
+	// flag alone: a sweep configured to quarantine with no directory would
+	// otherwise plan moves whose target is a bare relative path.
+	if o.quarantines() && strings.TrimSpace(o.QuarantineDir) == "" {
+		return errors.New("revalidate: a quarantine directory is required unless every action is purge or off")
 	}
 	// A quarantine root INSIDE a scanned root re-walks its own output: the next
 	// pass finds the quarantined sidecars, judges them again, and quarantines
@@ -537,7 +697,7 @@ func (o Options) Validate() error {
 	// Rejected here rather than skipped at walk time: a config that quietly
 	// half-works is worse than one that refuses to start, and this is cheap to
 	// state plainly before a single file moves.
-	if !o.Purge {
+	if o.quarantines() {
 		qAbs, qerr := filepath.Abs(o.QuarantineDir)
 		if qerr != nil {
 			return fmt.Errorf("revalidate: resolve quarantine dir %q: %w", o.QuarantineDir, qerr)
