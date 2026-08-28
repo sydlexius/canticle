@@ -302,11 +302,7 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 	case timing.Categorical:
 		plan.Counts.Categorical++
 		if r.opts.CategoricalAction != ActionOff {
-			mv := r.removalMove(root, path)
-			if r.opts.CategoricalAction == ActionPurge {
-				mv.Kind = realign.KindPurge
-				mv.Target = ""
-			}
+			mv := r.removalMove(root, path, r.opts.CategoricalAction)
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
 		}
@@ -331,15 +327,8 @@ func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, boo
 		// Classified and counted by the caller; nothing planned. The file is left
 		// exactly as it is.
 		return realign.Move{}, false
-	case ActionQuarantine:
-		return r.removalMove(root, path), true
-	case ActionPurge:
-		mv := r.removalMove(root, path)
-		mv.Kind = realign.KindPurge
-		// A purge unlinks in place, so a quarantine destination would be a
-		// misleading value on the backup record.
-		mv.Target = ""
-		return mv, true
+	case ActionQuarantine, ActionPurge:
+		return r.removalMove(root, path, r.opts.MisSyncedAction), true
 	}
 	synced, err := lyrics.ReadSyncedLRC(path)
 	if err != nil {
@@ -347,21 +336,48 @@ func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, boo
 	}
 	body := lyrics.PlainBody(synced)
 	if body == "" {
-		return r.removalMove(root, path), true
+		// Nothing worth keeping, so this degenerates to a plain removal -- which
+		// honors the legacy --purge by resolving to ActionPurge.
+		return r.removalMove(root, path, purgeIfLegacy(r.opts.Purge)), true
 	}
-	mv := r.removalMove(root, path)
-	mv.Kind = realign.KindDemote
-	mv.Method = "revalidate-demote"
+	// DEMOTE IS TWO HALVES: write the words as .txt, then get rid of the .lrc.
+	// Which flavor that second half takes is what --purge decides, and it must be
+	// carried on the Kind -- NOT left as a demote with an empty Target. That was
+	// the bug: realign's demote arm writes the .txt and then calls moveAside,
+	// which refuses an empty target, so the .txt was rolled back and the .lrc
+	// left in place. `revalidate --purge --apply` therefore remediated NOTHING on
+	// this arm and reported a failure per file.
+	mv := r.removalMove(root, path, purgeIfLegacy(r.opts.Purge))
+	if mv.Kind == realign.KindPurge {
+		// Write the words, then unlink rather than move aside. realign's demote
+		// arm is move-based by construction, so the two steps are expressed as a
+		// purge that carries a TextPath.
+		mv.Method = "revalidate-demote-purge"
+	} else {
+		mv.Kind = realign.KindDemote
+		mv.Method = "revalidate-demote"
+	}
 	mv.TextPath = strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
 	mv.TextBody = body
 	return mv, true
+}
+
+// purgeIfLegacy maps the legacy --purge flag onto the action the removal half of
+// a demote takes. Demote is not itself in the Action vocabulary for removal --
+// it is "write the words, then remove" -- so the removal half is either a
+// quarantine (the default) or a purge.
+func purgeIfLegacy(purge bool) Action {
+	if purge {
+		return ActionPurge
+	}
+	return ActionQuarantine
 }
 
 // removalMove builds the quarantine (default) or purge (opt-in) action for a
 // .lrc. Quarantine preserves the file's path relative to root under
 // QuarantineDir, so two identically-named sidecars from different albums cannot
 // collide there.
-func (r *Revalidator) removalMove(root, path string) realign.Move {
+func (r *Revalidator) removalMove(root, path string, action Action) realign.Move {
 	mv := realign.Move{
 		Orphan:    path,
 		Method:    "revalidate",
@@ -369,8 +385,16 @@ func (r *Revalidator) removalMove(root, path string) realign.Move {
 		Eligible:  true,
 		Kind:      realign.KindQuarantine,
 	}
-	if r.opts.Purge {
+	// Keyed on the RESOLVED action, never on opts.Purge. Reading the legacy flag
+	// here was the one place that had not been converted, and it is the place
+	// that decides move-vs-unlink: a caller who explicitly asked to quarantine
+	// got an irreversible delete whenever Purge happened also to be set. New
+	// already folds Purge into ActionPurge, so the flag has nothing left to say.
+	if action == ActionPurge {
 		mv.Kind = realign.KindPurge
+		// A purge unlinks in place, so a quarantine destination would be a
+		// misleading restore path on the backup record.
+		mv.Target = ""
 		return mv
 	}
 	mv.Target = quarantineTarget(r.opts.QuarantineDir, root, path)

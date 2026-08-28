@@ -140,6 +140,9 @@ func TestQuarantineActionOnOverrunKeepsNoWords(t *testing.T) {
 	if mv.Kind != realign.KindQuarantine {
 		t.Errorf("Kind = %q; want %q", mv.Kind, realign.KindQuarantine)
 	}
+	if mv.Target == "" {
+		t.Error("Target is empty; a quarantine must carry its destination")
+	}
 	if mv.TextBody != "" || mv.TextPath != "" {
 		t.Errorf("quarantine carried words (TextPath=%q); want none -- that is demote's job", mv.TextPath)
 	}
@@ -177,6 +180,12 @@ func TestPurgeActionOnOverrunDeletes(t *testing.T) {
 	}
 	if plan.Moves[0].Kind != realign.KindPurge {
 		t.Errorf("Kind = %q; want %q", plan.Moves[0].Kind, realign.KindPurge)
+	}
+	// Target must be EMPTY. It is written verbatim into the JSONL backup record
+	// as NewPath, so a surviving quarantine path would advertise a restore
+	// location for a file that was unlinked rather than moved.
+	if plan.Moves[0].Target != "" {
+		t.Errorf("Target = %q; want empty -- a purge unlinks, so a restore path would be a lie", plan.Moves[0].Target)
 	}
 }
 
@@ -219,5 +228,12 @@ func TestValidateRequiresQuarantineDirForAQuarantiningAction(t *testing.T) {
 	// Neither arm quarantines, so no directory is needed.
 	if err := (Options{MisSyncedAction: ActionPurge, CategoricalAction: ActionOff}).Validate(); err != nil {
 		t.Errorf("a non-quarantining config was rejected: %v", err)
+	}
+	// Observability-only: both arms off. This is a value the shipped
+	// [timing_validation] surface offers, and nothing else asserted that
+	// misSyncedActions() actually ACCEPTS "off" -- removing ActionOff from that
+	// set left the whole suite green.
+	if err := (Options{MisSyncedAction: ActionOff, CategoricalAction: ActionOff}).Validate(); err != nil {
+		t.Errorf("an observability-only config (both arms off) was rejected: %v", err)
 	}
 }
