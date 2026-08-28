@@ -128,7 +128,13 @@ type Options struct {
 	Purge bool
 	// QuarantineDir is the root that removed .lrc files are moved under,
 	// preserving their path relative to their library root so two same-named
-	// sidecars cannot collide. Required unless Purge is set.
+	// sidecars cannot collide.
+	//
+	// Required whenever the RESOLVED actions can quarantine -- see quarantines().
+	// That is not the same as "unless Purge is set": an explicit ActionDemote
+	// always moves the .lrc aside and therefore always needs a destination, even
+	// with Purge true. Only a demote DERIVED from the legacy flags takes their
+	// purge semantics.
 	QuarantineDir string
 	// LibraryID stamps the backup records for scoped restores.
 	LibraryID int64
