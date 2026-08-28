@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -403,6 +404,39 @@ func TestLrcWithoutCompanionAudioIsNotRemediated(t *testing.T) {
 	}
 }
 
+// TestDirListingCacheReadsOrphanDirectoryOnce is the fix for the CodeRabbit
+// finding on #801: a directory holding several ORPHAN sidecars (no companion
+// at all, so every one of them reaches companionAudioByListing) must pay for
+// one os.ReadDir of that directory for the whole Plan run, not one per
+// orphan -- otherwise the fallback re-introduces the exact per-directory
+// O(N) cost #691 removed from the probe's hit path, just on the miss path
+// instead. VERIFIED REACHABLE: this is not a hypothetical shape -- #740 (see
+// this repo's memory) is a real production incident where a library
+// reorganization left many orphans concentrated in a handful of
+// directories, so the miss path is not a rare corner here.
+func TestDirListingCacheReadsOrphanDirectoryOnce(t *testing.T) {
+	dir := t.TempDir()
+	const orphans = 5
+	var lrcPaths []string
+	for i := 0; i < orphans; i++ {
+		p := filepath.Join(dir, "orphan"+strconv.Itoa(i)+".lrc")
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		lrcPaths = append(lrcPaths, p)
+	}
+
+	cache := newDirListingCache()
+	for _, p := range lrcPaths {
+		if _, ok := companionAudio(p, cache); ok {
+			t.Fatalf("companionAudio(%q) = ok, want a miss (no companion was written)", p)
+		}
+	}
+	if got := cache.Reads(); got != 1 {
+		t.Errorf("cache.Reads() = %d, want 1 (one os.ReadDir for %d orphans sharing a directory)", got, orphans)
+	}
+}
+
 // TestSymlinkedSidecarIsNeverRemediated: a link must not redirect a move or a
 // delete out of the library root.
 func TestSymlinkedSidecarIsNeverRemediated(t *testing.T) {
@@ -443,6 +477,218 @@ func TestTxtSidecarsAreIgnored(t *testing.T) {
 	}
 	if plan.Counts.Scanned != 1 {
 		t.Errorf("Scanned = %d, want 1 (.txt must not be scanned)", plan.Counts.Scanned)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// companionAudio: stem matching (#691).
+//
+// #691: companionAudio used to os.ReadDir its sidecar's directory once PER
+// SIDECAR -- O(N) directory reads for N sidecars sharing a directory. It is
+// now a bounded stem probe (os.Stat per candidate audio extension), which
+// changes the access pattern but must preserve every existing matching
+// invariant exactly: exact stem only, audio gating via scanner's extension
+// list, directories skipped.
+// ---------------------------------------------------------------------------
+
+// TestCompanionAudioExactStemOnly is the correctness pin #691 requires: a
+// same-stem non-audio file and a similar-but-different-stem audio file must
+// both be rejected, a directory sharing an audio-like name must be skipped,
+// and only the exact-stem audio file is returned. A stem-probe implementation
+// that is loose about matching (e.g. a prefix match) would pass this only by
+// accident, since song2.mp3 and song.mp3-as-a-directory are both deliberately
+// present as traps.
+func TestCompanionAudioExactStemOnly(t *testing.T) {
+	dir := t.TempDir()
+	lrc := filepath.Join(dir, "song.lrc")
+	write := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write("song.lrc")
+	write("song.txt")  // same stem, not audio -- must NOT match
+	write("song2.mp3") // similar but different stem -- must NOT match
+	if err := os.MkdirAll(filepath.Join(dir, "song.mp3"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err) // a DIRECTORY named like audio -- must be skipped
+	}
+	write("song.flac") // the real companion
+
+	got, ok := companionAudio(lrc, newDirListingCache())
+	if !ok {
+		t.Fatal("companionAudio: ok = false, want true")
+	}
+	if want := filepath.Join(dir, "song.flac"); got != want {
+		t.Errorf("companionAudio = %q, want %q", got, want)
+	}
+}
+
+// TestCompanionAudioNoMatch: no exact-stem audio present, no false positive
+// from the similarly-named file.
+func TestCompanionAudioNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	lrc := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "song2.mp3"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, ok := companionAudio(lrc, newDirListingCache()); ok {
+		t.Error("companionAudio: ok = true, want false (no exact-stem audio present)")
+	}
+}
+
+// caseSensitiveFS reports whether dir's filesystem distinguishes "a" from "A"
+// in a file name, by writing a lowercase-named file and probing for it under
+// an uppercased name. macOS (APFS, the default here) and Windows are
+// case-insensitive; the production deployment (Linux/Unraid array disks,
+// which is the whole motivation for #691) is case-sensitive. The uppercase-
+// and mixed-case companion tests below only exercise the interesting branch
+// on a case-sensitive filesystem, so they skip rather than assert on the
+// wrong platform's semantics.
+//
+// This is vacuous only on a case-insensitive dev box (macOS/default TMPDIR).
+// Every job in .github/workflows/ci.yml -- including the `test` job that runs
+// this package -- pins `runs-on: ubuntu-latest`, whose default filesystems
+// (ext4, tmpfs under t.TempDir()) are case-sensitive, so both tests run for
+// real on CI and would fail there if the ReadDir fallback the mixed-case test
+// pins were ever removed. Nothing in this repo runs these packages on a
+// macOS or Windows runner.
+func caseSensitiveFS(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "casecheck.tmp")
+	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write case probe: %v", err)
+	}
+	_, err := os.Stat(filepath.Join(dir, "CASECHECK.tmp"))
+	return os.IsNotExist(err)
+}
+
+// TestCompanionAudioExtensionUppercase: the old ReadDir loop matched an
+// extension via scanner.IsAudioFile, which lowercases before comparing, so it
+// recognized a companion of ANY on-disk casing. The stem probe cannot check
+// arbitrary casing without listing the directory (the exact cost #691
+// removes), so it probes both the lower- and upper-case form of each
+// extension -- pinning that an all-caps companion (a legacy Windows-rip
+// pattern) is still found. Only meaningful on a case-sensitive filesystem
+// (see caseSensitiveFS); on a case-insensitive one the lowercase candidate
+// alone would already resolve to the same file, so the test would pass
+// vacuously and prove nothing.
+func TestCompanionAudioExtensionUppercase(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; this test needs a case-sensitive one to be meaningful")
+	}
+	lrc := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "song.MP3"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, ok := companionAudio(lrc, newDirListingCache())
+	if !ok {
+		t.Fatal("companionAudio: ok = false, want true (all-caps extension must match)")
+	}
+	if want := filepath.Join(dir, "song.MP3"); got != want {
+		t.Errorf("companionAudio = %q, want %q", got, want)
+	}
+}
+
+// TestCompanionAudioExtensionMixedCaseFound pins the invariant #691 names
+// explicitly: scanner.IsAudioFile still gates what counts as audio. IsAudioFile
+// lowercases before comparing, so it accepts ANY casing -- an extension the stem
+// probe's lower/upper pair does not cover must still resolve, via the ReadDir
+// fallback on the probe's miss path.
+//
+// This is the test that fails if the fallback is ever deleted as dead code, and
+// it is meaningful ONLY on a case-sensitive filesystem: on macOS/APFS os.Stat
+// resolves song.Mp3 through the probe itself, so the fallback is never reached
+// and the test would pass with it removed. It runs for real on Linux CI and on
+// the production deployment, which is where a regression would actually bite --
+// a companion that stops being found is a sidecar that is silently never
+// remediated, not a visible error.
+func TestCompanionAudioExtensionMixedCaseFound(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; the probe resolves this without the fallback, so the assertion would be vacuous")
+	}
+	lrc := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	want := filepath.Join(dir, "song.Mp3")
+	if err := os.WriteFile(want, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, ok := companionAudio(lrc, newDirListingCache())
+	if !ok {
+		t.Fatal("companionAudio: ok = false, want true (IsAudioFile accepts any casing; the ReadDir fallback must find it)")
+	}
+	if got != want {
+		t.Errorf("companionAudio = %s, want %s", got, want)
+	}
+}
+
+// TestCompanionAudioPicksLexicographicallyFirstFilename pins the pre-#691
+// selection rule for a directory holding MORE THAN ONE stem-matching
+// companion. os.ReadDir returns entries sorted by filename, so the old
+// ReadDir loop always returned the lexicographically-first match; the #691
+// probe instead walks scanner.SupportedAudioExtensions() in EXTENSION-LIST
+// order (.mp3 before .flac), so on a directory holding both song.mp3 and
+// song.flac it silently started returning song.mp3 instead. Which file wins
+// is not cosmetic: it is the file whose duration judges the sidecar's
+// timing verdict, so a changed winner can move or delete a CORRECT .lrc for
+// the wrong reason. "song.flac" < "song.mp3" byte-wise ('f' < 'm'), so the
+// old code (and this fix) picks song.flac; the unfixed probe picks
+// song.mp3 -- this is the assertion that must redden without the fix.
+func TestCompanionAudioPicksLexicographicallyFirstFilename(t *testing.T) {
+	dir := t.TempDir()
+	lrc := filepath.Join(dir, "song.lrc")
+	for _, name := range []string{"song.mp3", "song.flac"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	got, ok := companionAudio(lrc, newDirListingCache())
+	if !ok {
+		t.Fatal("companionAudio: ok = false, want true")
+	}
+	if want := filepath.Join(dir, "song.flac"); got != want {
+		t.Errorf("companionAudio = %q, want %q (lexicographically-first filename, matching the pre-#691 os.ReadDir order)", got, want)
+	}
+}
+
+// TestCompanionAudioSameExtensionCaseVariantOrder pins the within-extension
+// half of the ordering fix: a directory holding BOTH song.mp3 and song.MP3
+// (two genuinely distinct files, only possible on a case-sensitive
+// filesystem) must resolve to the same winner os.ReadDir's sort would have
+// picked. ASCII uppercase sorts before lowercase ('M'=0x4D < 'm'=0x6D), and
+// this is verified directly against os.ReadDir on the case-sensitive
+// /tmp/cs-mount volume (not merely asserted): a directory holding song.MP3,
+// song.flac, and song.mp3 lists them in that order. So song.MP3 must win over
+// song.mp3 here. Skips on a case-insensitive filesystem, where the two names
+// alias one file and the case-collision path (os.SameFile) is exercised
+// instead, not this cross-file compare.
+func TestCompanionAudioSameExtensionCaseVariantOrder(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.mp3 and song.MP3 would alias the same file")
+	}
+	lrc := filepath.Join(dir, "song.lrc")
+	for _, name := range []string{"song.mp3", "song.MP3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	got, ok := companionAudio(lrc, newDirListingCache())
+	if !ok {
+		t.Fatal("companionAudio: ok = false, want true")
+	}
+	if want := filepath.Join(dir, "song.MP3"); got != want {
+		t.Errorf("companionAudio = %q, want %q (uppercase extension sorts first, matching os.ReadDir order)", got, want)
 	}
 }
 

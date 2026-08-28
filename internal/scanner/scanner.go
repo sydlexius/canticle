@@ -74,6 +74,20 @@ func IsAudioFile(name string) bool {
 	return slices.Contains(supportedFileTypes, strings.ToLower(filepath.Ext(name)))
 }
 
+// SupportedAudioExtensions returns the audio extensions IsAudioFile accepts,
+// lowercase and dotted (".mp3", ".flac", ...). It returns a defensive copy so a
+// caller cannot mutate the scanner's own list, and it is the second exported
+// accessor over supportedFileTypes: a consumer that needs to ENUMERATE audio
+// extensions (rather than just test one file, which IsAudioFile already covers)
+// reads from this instead of hand-copying the list, so the two accessors and
+// scanDir's own check can never drift apart (revalidate's stem probe, #691, is
+// the first consumer).
+func SupportedAudioExtensions() []string {
+	out := make([]string, len(supportedFileTypes))
+	copy(out, supportedFileTypes)
+	return out
+}
+
 // openAndReadTags opens the audio file at path and reads its tag metadata. It is
 // the single implementation of the open/read/error-wrap contract the three
 // exported single-file readers below share, so they cannot drift as that contract
