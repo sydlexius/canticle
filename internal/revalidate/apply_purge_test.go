@@ -124,3 +124,54 @@ func TestQuarantineIsNotUpgradedToPurgeByTheLegacyFlag(t *testing.T) {
 		t.Errorf("the .lrc is not in quarantine; it may have been deleted: %v", err)
 	}
 }
+
+// TestExplicitDemoteIsNotUnlinkedByTheLegacyFlag closes the same hole as
+// TestQuarantineIsNotUpgradedToPurgeByTheLegacyFlag, on the arm where it was
+// reintroduced by the demote fix.
+//
+// An EXPLICIT ActionDemote is a contract: write the words, move the .lrc aside.
+// The legacy --purge flag must not silently turn that second half into an
+// irreversible unlink -- a caller who names the action is not asking about
+// flags. Only a demote DERIVED from those flags carries their purge semantics.
+func TestExplicitDemoteIsNotUnlinkedByTheLegacyFlag(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+
+	r, quarantine := newRevalidator(t, root, fixedDuration(), func(o *Options) {
+		o.MisSyncedAction = ActionDemote // explicit
+		o.Purge = true                   // legacy flag also set
+	})
+	plan, err := r.Plan(context.Background())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Moves) != 1 {
+		t.Fatalf("len(Moves) = %d; want 1", len(plan.Moves))
+	}
+	mv := plan.Moves[0]
+	if mv.Kind != realign.KindDemote {
+		t.Errorf("Kind = %q; want %q -- an explicit demote must move the .lrc aside, not unlink it", mv.Kind, realign.KindDemote)
+	}
+	if mv.Target == "" {
+		t.Error("Target is empty; an explicit demote must carry its quarantine destination")
+	}
+
+	applyPlan(t, plan)
+
+	rel, _ := filepath.Rel(root, lrc)
+	if _, err := os.Stat(filepath.Join(quarantine, rel)); err != nil {
+		t.Errorf("the .lrc is not in quarantine; it may have been unlinked: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(lrc), "track.txt")); err != nil {
+		t.Errorf("the demoted .txt was not written: %v", err)
+	}
+}
+
+// TestExplicitDemoteWithNoQuarantineDirIsRefused is the validation half: an
+// explicit demote always needs a destination, so Purge must not excuse its
+// absence.
+func TestExplicitDemoteWithNoQuarantineDirIsRefused(t *testing.T) {
+	err := Options{MisSyncedAction: ActionDemote, CategoricalAction: ActionPurge, Purge: true}.Validate()
+	if err == nil {
+		t.Error("an explicit demote with no QuarantineDir was accepted; it has nowhere to move the .lrc")
+	}
+}

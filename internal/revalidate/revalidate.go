@@ -170,6 +170,11 @@ type Plan struct {
 type Revalidator struct {
 	lookup DurationLookup
 	opts   Options
+	// demoteRemoval is what a demote does with the .lrc after the words are
+	// written: quarantine (the default, and always so for an explicit demote) or
+	// purge (a demote derived from the legacy --purge flag). Resolved once in
+	// New; never re-derived from opts.Purge at plan time.
+	demoteRemoval Action
 }
 
 // New builds a Revalidator. lookup may be nil, in which case every file reads as
@@ -190,8 +195,9 @@ func New(lookup DurationLookup, opts Options) *Revalidator {
 	// "do not keep the words", and without --purge the file was always MOVED
 	// rather than unlinked. Purge alone decided delete-vs-quarantine before this
 	// refactor, and that is preserved exactly.
-	opts.MisSyncedAction, opts.CategoricalAction = opts.resolvedActions()
-	return &Revalidator{lookup: lookup, opts: opts}
+	var demoteRemoval Action
+	opts.MisSyncedAction, opts.CategoricalAction, demoteRemoval = opts.resolvedActions()
+	return &Revalidator{lookup: lookup, opts: opts, demoteRemoval: demoteRemoval}
 }
 
 // Plan walks every configured root, classifies each .lrc, and returns the
@@ -338,7 +344,7 @@ func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, boo
 	if body == "" {
 		// Nothing worth keeping, so this degenerates to a plain removal -- which
 		// honors the legacy --purge by resolving to ActionPurge.
-		return r.removalMove(root, path, purgeIfLegacy(r.opts.Purge)), true
+		return r.removalMove(root, path, r.demoteRemoval), true
 	}
 	// DEMOTE IS TWO HALVES: write the words as .txt, then get rid of the .lrc.
 	// Which flavor that second half takes is what --purge decides, and it must be
@@ -347,7 +353,7 @@ func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, boo
 	// which refuses an empty target, so the .txt was rolled back and the .lrc
 	// left in place. `revalidate --purge --apply` therefore remediated NOTHING on
 	// this arm and reported a failure per file.
-	mv := r.removalMove(root, path, purgeIfLegacy(r.opts.Purge))
+	mv := r.removalMove(root, path, r.demoteRemoval)
 	if mv.Kind == realign.KindPurge {
 		// Write the words, then unlink rather than move aside. realign's demote
 		// arm is move-based by construction, so the two steps are expressed as a
@@ -360,17 +366,6 @@ func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, boo
 	mv.TextPath = strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
 	mv.TextBody = body
 	return mv, true
-}
-
-// purgeIfLegacy maps the legacy --purge flag onto the action the removal half of
-// a demote takes. Demote is not itself in the Action vocabulary for removal --
-// it is "write the words, then remove" -- so the removal half is either a
-// quarantine (the default) or a purge.
-func purgeIfLegacy(purge bool) Action {
-	if purge {
-		return ActionPurge
-	}
-	return ActionQuarantine
 }
 
 // removalMove builds the quarantine (default) or purge (opt-in) action for a
@@ -634,8 +629,23 @@ func companionAudioByListing(lrcPath, stem string, cache *dirListingCache) (stri
 // so Validate reasons about the SAME values the run will use. Kept in lockstep
 // with New by construction: both call this, rather than each deriving the
 // defaults separately and drifting.
-func (o Options) resolvedActions() (misSynced, categorical Action) {
+func (o Options) resolvedActions() (misSynced, categorical, demoteRemoval Action) {
+	// demoteRemoval is what the SECOND half of a demote does with the .lrc once
+	// the words are safe: move it aside, or unlink it. It is resolved HERE, with
+	// the other two, so planning and validation consume one resolved state
+	// rather than each re-reading the legacy flag and reaching its own answer.
+	//
+	// An EXPLICIT ActionDemote always moves aside. Naming the action is a
+	// contract -- "write the words, set the file aside" -- and a legacy flag the
+	// caller may not even have set must not silently convert that into an
+	// irreversible unlink. Only a demote DERIVED from --on-fail/--purge carries
+	// those flags' own semantics, which is what preserves the CLI behavior.
+	explicitDemote := o.MisSyncedAction == ActionDemote
 	misSynced, categorical = o.MisSyncedAction, o.CategoricalAction
+	demoteRemoval = ActionQuarantine
+	if !explicitDemote && o.Purge {
+		demoteRemoval = ActionPurge
+	}
 	if misSynced == "" {
 		switch {
 		case o.OnFail == Delete && o.Purge:
@@ -652,7 +662,7 @@ func (o Options) resolvedActions() (misSynced, categorical Action) {
 			categorical = ActionPurge
 		}
 	}
-	return misSynced, categorical
+	return misSynced, categorical, demoteRemoval
 }
 
 // quarantines reports whether any resolved action moves a file into the
@@ -672,13 +682,16 @@ func (o Options) resolvedActions() (misSynced, categorical Action) {
 // invocation, and NOT demanding one for a quarantining run would plan moves to
 // a bare relative path.
 func (o Options) quarantines() bool {
-	misSynced, categorical := o.resolvedActions()
+	misSynced, categorical, demoteRemoval := o.resolvedActions()
 	for _, a := range []Action{misSynced, categorical} {
 		switch a {
 		case ActionQuarantine:
 			return true
 		case ActionDemote:
-			if !o.Purge {
+			// Needs a destination unless its removal half unlinks in place.
+			// Keyed on the RESOLVED removal mode, so an explicit demote (which
+			// always moves aside) is never excused by the legacy flag.
+			if demoteRemoval != ActionPurge {
 				return true
 			}
 		}
