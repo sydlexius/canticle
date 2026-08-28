@@ -848,6 +848,33 @@ func applyRemediation(mv Move) error {
 
 	switch mv.Kind {
 	case KindPurge:
+		// A purge MAY carry words to keep: that is "demote, then unlink" -- write
+		// the .txt beside the audio, then delete the .lrc rather than moving it
+		// aside. Written BEFORE the unlink, and a write failure aborts, so the
+		// words can never be lost by deleting the only copy of them first.
+		if mv.TextPath != "" {
+			created, werr := writeDemotedText(mv.TextPath, mv.TextBody)
+			if werr != nil {
+				return werr
+			}
+			if err := os.Remove(mv.Orphan); err != nil {
+				// Roll the .txt back for the same reason the demote arm does: a
+				// failed action must leave nothing on disk the backup record does
+				// not describe. Only when THIS call created it.
+				if created {
+					if rerr := os.Remove(mv.TextPath); rerr != nil && !os.IsNotExist(rerr) {
+						slog.Warn("purge rollback: could not remove the text file",
+							"path", mv.TextPath, "error", rerr)
+					} else {
+						lyrics.FsyncDir(filepath.Dir(mv.TextPath))
+					}
+				}
+				return fmt.Errorf("purge %q: %w", mv.Orphan, err)
+			}
+			lyrics.FsyncDir(filepath.Dir(mv.TextPath))
+			lyrics.FsyncDir(filepath.Dir(mv.Orphan))
+			return nil
+		}
 		if err := os.Remove(mv.Orphan); err != nil {
 			return fmt.Errorf("purge %q: %w", mv.Orphan, err)
 		}

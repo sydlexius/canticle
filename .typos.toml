@@ -53,3 +53,10 @@ on_mis_synced = "on_mis_synced"
 OnMisSynced = "OnMisSynced"
 MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED = "MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED"
 timingMisSyncedActions = "timingMisSyncedActions"
+# revalidate's per-arm remediation actions (#443). Each is a WHOLE identifier
+# here because typos matches whole identifiers, so allowlisting "MisSynced"
+# alone does not cover a name it appears inside.
+MisSyncedAction = "MisSyncedAction"
+misSyncedMove = "misSyncedMove"
+misSyncedActions = "misSyncedActions"
+misSynced = "misSynced"
