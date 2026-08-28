@@ -44,6 +44,12 @@ type workItem struct {
 	// 'categorical'/'degenerate' value on a NULL outcomeType is the row that
 	// renders Result='unknown' with its reason one column over.
 	timingOutcome any // string or nil
+	// overrunMagnitude/overrunRatio/evaluatedAt are migration 034's remaining
+	// timing columns (#629's ReviewQueue report). nil => NULL, matching every
+	// other nullable field on this struct.
+	overrunMagnitude any // float64 or nil
+	overrunRatio     any // float64 or nil
+	evaluatedAt      any // string (RFC3339) or nil
 	// Buffered-panel columns (#572). These are applied as a post-insert UPDATE
 	// only when non-zero/non-empty, so existing callers keep the schema defaults
 	// (priority 0, batch_seq NULL, next_attempt_at 1970 = eligible, created_at now).
@@ -69,11 +75,11 @@ func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
 		`INSERT INTO work_queue
             (artist, title, artist_key, title_key, album, status, last_error, output_paths,
              completed_at, provider_lane, instrumental_result, detect_instrumental, outcome_type,
-             outcome_detail, timing_outcome)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             outcome_detail, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.artist, w.title, w.artist, w.title, w.album, w.status, w.lastError, w.outputPaths,
 		w.completedAt, w.providerLane, w.instrumentalResult, w.detectInstrumental, w.outcomeType,
-		w.outcomeDetail, w.timingOutcome)
+		w.outcomeDetail, w.timingOutcome, w.overrunMagnitude, w.overrunRatio, w.evaluatedAt)
 	if err != nil {
 		t.Fatalf("insert work_queue: %v", err)
 	}
@@ -693,6 +699,110 @@ func TestCountInstrumentalClosedDB(t *testing.T) {
 	}
 	if _, err := reports.New(sqlDB).CountInstrumental(context.Background()); err == nil {
 		t.Error("CountInstrumental on closed DB: want error, got nil")
+	}
+}
+
+// TestReviewQueueEmpty verifies the empty-DB case: no rows at all must return
+// an empty (nil) slice and no error, matching the package's other empty-state
+// contracts.
+func TestReviewQueueEmpty(t *testing.T) {
+	got, err := reports.New(openTestDB(t)).ReviewQueue(context.Background())
+	if err != nil {
+		t.Fatalf("ReviewQueue on empty DB: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ReviewQueue on empty DB = %+v, want empty", got)
+	}
+}
+
+// TestReviewQueueFiltersToTheTwoReviewOutcomes covers the whole point of the
+// report: only 'mis_synced' and 'categorical' rows are the review queue. 'ok',
+// 'unknown_duration', 'degenerate', and a NULL (never evaluated) timing_outcome
+// must all be excluded -- degenerate is a demotion the accept-time guard already
+// acted on with the words kept (like a demoted row), not something still
+// awaiting review, and unknown_duration is a fail-open verdict with nothing to
+// review. Ordered newest-evaluated first.
+func TestReviewQueueFiltersToTheTwoReviewOutcomes(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "ok-row", status: "done", outcomeType: "synced",
+		timingOutcome: "ok", overrunMagnitude: -1.0, overrunRatio: 0.9, evaluatedAt: "2026-08-01T00:00:00Z",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "unknown-duration-row", status: "done",
+		timingOutcome: "unknown_duration", evaluatedAt: "2026-08-01T00:00:00Z",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "degenerate-row", status: "done", outcomeType: "unsynced",
+		timingOutcome: "degenerate", evaluatedAt: "2026-08-01T00:00:00Z",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "never-evaluated-row", status: "done", outcomeType: "instrumental",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Demoted Artist", title: "demoted-row", album: "Demoted Album", status: "done", outcomeType: "unsynced",
+		timingOutcome: "mis_synced", overrunMagnitude: 12.5, overrunRatio: 1.25, evaluatedAt: "2026-08-02T00:00:00Z",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Quarantined Artist", title: "quarantined-row", album: "Quarantined Album", status: "done",
+		timingOutcome: "categorical", overrunMagnitude: 210.0, overrunRatio: 2.75, evaluatedAt: "2026-08-03T00:00:00Z",
+	})
+
+	got, err := repo.ReviewQueue(ctx)
+	if err != nil {
+		t.Fatalf("ReviewQueue: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2 (demoted + quarantined only): %+v", len(got), got)
+	}
+
+	// Newest evaluated_at first: quarantined-row (08-03) before demoted-row (08-02).
+	if got[0].Title != "quarantined-row" || got[1].Title != "demoted-row" {
+		t.Errorf("order = [%s, %s]; want [quarantined-row, demoted-row] (evaluated_at DESC)",
+			got[0].Title, got[1].Title)
+	}
+
+	quarantined := got[0]
+	if quarantined.Artist != "Quarantined Artist" || quarantined.Album != "Quarantined Album" {
+		t.Errorf("categorical row identity = %+v", quarantined)
+	}
+	if quarantined.Outcome != "categorical" {
+		t.Errorf("categorical row Outcome = %q; want categorical", quarantined.Outcome)
+	}
+	if quarantined.OverrunSeconds != 210.0 {
+		t.Errorf("categorical row OverrunSeconds = %v; want 210.0", quarantined.OverrunSeconds)
+	}
+	if quarantined.Ratio != 2.75 {
+		t.Errorf("categorical row Ratio = %v; want 2.75", quarantined.Ratio)
+	}
+	if quarantined.EvaluatedAt.IsZero() {
+		t.Error("categorical row EvaluatedAt is zero; want the stamped time")
+	}
+
+	demoted := got[1]
+	if demoted.Artist != "Demoted Artist" || demoted.Album != "Demoted Album" {
+		t.Errorf("mis_synced row identity = %+v", demoted)
+	}
+	if demoted.Outcome != "mis_synced" {
+		t.Errorf("mis_synced row Outcome = %q; want mis_synced", demoted.Outcome)
+	}
+	if demoted.OverrunSeconds != 12.5 || demoted.Ratio != 1.25 {
+		t.Errorf("mis_synced row magnitude = %+v; want overrun=12.5 ratio=1.25", demoted)
+	}
+}
+
+// TestReviewQueueClosedDB verifies ReviewQueue surfaces the underlying query
+// error rather than swallowing it, matching CountInstrumentalClosedDB.
+func TestReviewQueueClosedDB(t *testing.T) {
+	sqlDB := openTestDB(t)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	if _, err := reports.New(sqlDB).ReviewQueue(context.Background()); err == nil {
+		t.Error("ReviewQueue on closed DB: want error, got nil")
 	}
 }
 

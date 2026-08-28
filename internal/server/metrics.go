@@ -17,6 +17,11 @@ type MetricsReporter interface {
 	ProviderHits(ctx context.Context) (map[string]int64, error)
 	ProviderMisses(ctx context.Context) (map[string]int64, error)
 	CountInstrumental(ctx context.Context) (int64, error)
+	// CountByTimingOutcome returns the current count of work_queue rows grouped
+	// by timing_outcome (#440/#629), restricted to the closed internal/timing
+	// TimingOutcome vocabulary. A NULL timing_outcome (never evaluated) is
+	// excluded, not folded into a label.
+	CountByTimingOutcome(ctx context.Context) (map[string]int64, error)
 }
 
 // CacheStatser reports process-lifetime lyrics-cache hit and lookup counters.
@@ -99,10 +104,18 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	timingOutcomeCounts, err := h.metrics.CountByTimingOutcome(r.Context())
+	if err != nil {
+		slog.Error("metrics: count by timing outcome failed", "error", err)
+		http.Error(w, "metrics unavailable", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store") // prevent proxies from caching stale metrics
 	w.WriteHeader(http.StatusOK)
 	writeMetrics(w, statusCounts, failureCounts, providerHits, providerMisses, instrumentalCount)
+	writeTimingMetrics(w, timingOutcomeCounts)
 	// The cache hit/lookup counters are an optional decorator (#308): a reporter
 	// without the cache seam (the bare work queue) simply omits this family.
 	if cs, ok := h.metrics.(CacheStatser); ok {
@@ -144,6 +157,26 @@ func writeMetrics(w io.Writer, statusCounts, failureCounts, providerHits, provid
 	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_instrumental_tracks Number of work queue items confirmed instrumental by audio detection.")
 	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_instrumental_tracks gauge")
 	_, _ = fmt.Fprintf(w, "mxlrcgo_instrumental_tracks %d\n", instrumentalCount)
+}
+
+// writeTimingMetrics serializes the timing-outcome gauge family (#440/#629) in
+// Prometheus text-exposition format. Like mxlrcgo_queue_items and
+// mxlrcgo_queue_failures, this is a point-in-time count of current work_queue
+// rows recomputed at scrape time, hence gauge rather than counter semantics --
+// there is no suffix-less "_total" here for the same reason those two have
+// none.
+//
+// The outcome label is restricted to the closed internal/timing TimingOutcome
+// vocabulary the column stores verbatim ('ok', 'mis_synced', 'categorical',
+// 'unknown_duration', 'degenerate'). No library metadata (paths, titles,
+// artists) ever reaches this label: /metrics is externally scraped, and that
+// closed vocabulary is the entire label surface.
+func writeTimingMetrics(w io.Writer, timingOutcomeCounts map[string]int64) {
+	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_timing_outcome Current number of work queue items by synced-lyric timing outcome.")
+	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_timing_outcome gauge")
+	for _, outcome := range sortedKeys(timingOutcomeCounts) {
+		_, _ = fmt.Fprintf(w, "mxlrcgo_timing_outcome{outcome=\"%s\"} %d\n", promEscape(outcome), timingOutcomeCounts[outcome])
+	}
 }
 
 // writeCacheMetrics serializes the lyrics-cache hit/lookup counter families in

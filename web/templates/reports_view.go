@@ -35,6 +35,7 @@ type ReportView struct {
 	ProviderRows     []ProviderRow
 	InstrumentalRows []InstrumentalRow
 	FailureRows      []FailureRow
+	ReviewQueueRows  []ReviewQueueRow
 }
 
 // QueueSummaryRow is one status/count pair. IsTotal marks the summary total row
@@ -93,4 +94,29 @@ type FailureRow struct {
 	Status string
 	Reason string
 	Count  string
+}
+
+// ReviewQueueRow is one synced-lyric track the timing guard flagged for an
+// operator's look (#629): a demotion ("mis_synced") or a quarantine
+// ("categorical"). Per-row artist/title/album is deliberate here -- see the
+// reports.ReviewQueue doc comment -- since this is the authenticated,
+// session-gated Reports surface, not an externally scraped endpoint, and the
+// operator's whole reason to run the report is to find the specific track.
+type ReviewQueueRow struct {
+	Artist string
+	Title  string
+	Album  string
+	// Outcome is the raw internal/timing TimingOutcome value ("mis_synced" or
+	// "categorical"), rendered verbatim like RecentOutcomeRow.Result.
+	Outcome string
+	// OverrunSeconds is the formatted (corrected max lyric timestamp -
+	// duration) value. Not clamped or abs()'d: a negative value is meaningful
+	// (the lyric ends before the audio) even though the two review outcomes
+	// this report lists always overran in practice.
+	OverrunSeconds string
+	// Ratio is the formatted (corrected max timestamp / duration) value.
+	Ratio string
+	// EvaluatedAt is the formatted verdict timestamp, or "-" for the zero
+	// value, matching RecentOutcomeRow.CompletedAt's convention.
+	EvaluatedAt string
 }

@@ -515,6 +515,101 @@ func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 	return out, nil
 }
 
+// ReviewQueueItem is one work_queue row whose synced-lyric timing verdict needs
+// operator attention: a demotion (mis_synced) or a quarantine (categorical).
+type ReviewQueueItem struct {
+	Artist string
+	Title  string
+	Album  string
+	// Outcome is the persisted internal/timing TimingOutcome string verbatim
+	// -- "mis_synced" or "categorical" only, since that is the WHERE clause.
+	Outcome string
+	// OverrunSeconds is (corrected max lyric timestamp - duration), matching
+	// work_queue.overrun_magnitude; negative would not appear here since both
+	// review outcomes require an overrun past internal/timing.Tolerance.
+	OverrunSeconds float64
+	// Ratio is (corrected max timestamp / duration), matching
+	// work_queue.overrun_ratio.
+	Ratio float64
+	// EvaluatedAt is when the timing verdict was reached (work_queue.evaluated_at).
+	EvaluatedAt time.Time
+}
+
+// ReviewQueue returns the work_queue rows the timing guard flagged for
+// operator review: 'mis_synced' (demoted to .txt, words kept) and
+// 'categorical' (quarantined, words dropped) -- the two verdicts #440 defined
+// as needing a human look, per the migration 034 comment this report answers.
+//
+// 'degenerate' is DELIBERATELY excluded even though it also demotes: the
+// accept-time guard (#439) already resolved it the same way mis_synced is
+// resolved (words kept as .txt), so by the time a row is queryable here the
+// action is already taken, not pending. Narrowing to exactly the two verdicts
+// the issue names keeps this report answering "what needs a look", not "every
+// row that was ever non-Ok".
+//
+// Source: work_queue.timing_outcome IN ('mis_synced','categorical'), joined
+// with the sibling overrun_magnitude/overrun_ratio/evaluated_at columns
+// migration 034 added alongside it. Ordered newest-evaluated first, matching
+// RecentOutcomes' newest-first convention.
+//
+// PER-ROW ARTIST/TITLE/ALBUM IS DELIBERATE HERE, unlike GET /metrics: this is
+// the authenticated, locally-run Reports surface (internal/web, session-gated),
+// not an externally scraped endpoint, and the operator's whole reason to run it
+// is to find the specific tracks that need a look -- an aggregate count alone
+// would not let them find the sidecar to demote or restore. This mirrors the
+// package's existing RecentOutcomes and InstrumentalInventory reports, which
+// already carry artist/title/path for the same reason.
+func (r *Repo) ReviewQueue(ctx context.Context) ([]ReviewQueueItem, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT artist, title, album, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at
+         FROM work_queue
+         WHERE timing_outcome IN ('mis_synced', 'categorical')
+         ORDER BY evaluated_at DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reports: review queue: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ReviewQueueItem
+	for rows.Next() {
+		var (
+			it             ReviewQueueItem
+			overrunSeconds sql.NullFloat64
+			ratio          sql.NullFloat64
+			evaluatedAt    sql.NullString
+		)
+		if err := rows.Scan(&it.Artist, &it.Title, &it.Album, &it.Outcome, &overrunSeconds, &ratio, &evaluatedAt); err != nil {
+			return nil, fmt.Errorf("reports: scan review queue item: %w", err)
+		}
+		// The 0.0-on-NULL fallback is UNREACHABLE for this report's filter, and
+		// is kept as a guard rather than as live behavior. Both outcomes the
+		// WHERE admits (mis_synced, categorical) are reached in timing.Evaluate
+		// only on a MEASURED comparison, so queue.SetTimingOutcome always writes
+		// both magnitude columns non-NULL for such a row.
+		//
+		// It matters if that filter ever widens: unknown_duration carries
+		// Measured=false and therefore NULL magnitudes, and a 0.0 rendered there
+		// would read as "no overrun" -- the opposite of "not measured". A caller
+		// adding an outcome to the IN list must decide how absence renders
+		// rather than inheriting this zero.
+		it.OverrunSeconds = overrunSeconds.Float64
+		it.Ratio = ratio.Float64
+		if evaluatedAt.Valid && evaluatedAt.String != "" {
+			t, perr := time.Parse(timeFormat, evaluatedAt.String)
+			if perr != nil {
+				return nil, fmt.Errorf("reports: parse evaluated_at %q: %w", evaluatedAt.String, perr)
+			}
+			it.EvaluatedAt = t
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reports: review queue rows: %w", err)
+	}
+	return out, nil
+}
+
 // normalizedReason applies the shared signature normalization while preserving
 // the 'unknown' sentinel the SQL COALESCE produces for an empty last_error.
 // Normalize maps empty to empty, so routing the sentinel through it unchanged

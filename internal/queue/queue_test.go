@@ -4919,6 +4919,83 @@ func TestDBQueue_SetTimingOutcome(t *testing.T) {
 	}
 }
 
+// TestDBQueue_CountByTimingOutcome covers the grouped aggregate #629 adds for
+// GET /metrics: counts must group by the persisted timing_outcome vocabulary
+// verbatim, a NULL timing_outcome (not yet evaluated, or a non-synced settle)
+// must be excluded rather than folded into a bucket, and an empty queue must
+// return an empty map rather than an error.
+func TestDBQueue_CountByTimingOutcome(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	newRow := func(title string) int64 {
+		t.Helper()
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: title}}, PriorityScan); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("Dequeue: %v", err)
+		}
+		return item.ID
+	}
+	stamp := func(id int64, outcome string, measured bool) {
+		t.Helper()
+		if err := q.SetTimingOutcome(ctx, id, TimingRecord{
+			Outcome: outcome, Magnitude: 1, Ratio: 1, Measured: measured, EvaluatedAt: now,
+		}); err != nil {
+			t.Fatalf("SetTimingOutcome: %v", err)
+		}
+	}
+
+	// Empty queue: no rows at all, so the aggregate must return an empty map,
+	// not an error -- mirrors CountFailuresByReason's empty-queue contract.
+	counts, err := q.CountByTimingOutcome(ctx)
+	if err != nil {
+		t.Fatalf("CountByTimingOutcome empty: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("empty queue: got %v; want empty map", counts)
+	}
+
+	// One row per outcome value, plus two "ok" rows to prove grouping actually
+	// sums rather than overwrites.
+	stamp(newRow("T1"), "ok", true)
+	stamp(newRow("T2"), "ok", true)
+	stamp(newRow("T3"), "mis_synced", true)
+	stamp(newRow("T4"), "categorical", true)
+	stamp(newRow("T5"), "unknown_duration", false)
+
+	// A freshly-enqueued row with NO stamp at all: timing_outcome is NULL
+	// (never evaluated, or a non-synced settle) and must be excluded entirely,
+	// not counted under any bucket -- an unevaluated row is not evidence of
+	// anything and folding it into a label would corrupt the ratio an operator
+	// reads off the gauge.
+	newRow("T6-unstamped")
+
+	counts, err = q.CountByTimingOutcome(ctx)
+	if err != nil {
+		t.Fatalf("CountByTimingOutcome: %v", err)
+	}
+	want := map[string]int64{
+		"ok":               2,
+		"mis_synced":       1,
+		"categorical":      1,
+		"unknown_duration": 1,
+	}
+	for k, v := range want {
+		if counts[k] != v {
+			t.Errorf("counts[%q] = %d; want %d (full map %v)", k, counts[k], v, counts)
+		}
+	}
+	if len(counts) != len(want) {
+		t.Errorf("len(counts) = %d; want %d (unexpected keys in %v)", len(counts), len(want), counts)
+	}
+}
+
 // The /metrics failure label is the reason this normalization is not cosmetic:
 // internal/server/metrics.go emits the reason VERBATIM as
 // mxlrcgo_queue_failures{reason="..."}, which an external Prometheus scrapes and

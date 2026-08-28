@@ -1699,6 +1699,41 @@ func normalizedReason(reason string) string {
 	return "unknown"
 }
 
+// CountByTimingOutcome returns the count of work_queue rows grouped by
+// timing_outcome, restricted to the closed internal/timing TimingOutcome
+// vocabulary the column stores verbatim ('ok', 'mis_synced', 'categorical',
+// 'unknown_duration', 'degenerate'). Rows with a NULL timing_outcome (never
+// evaluated -- a legacy row, a non-synced settle, or a guard rejection) are
+// excluded rather than folded into a bucket: an un-evaluated row is not a
+// verdict of any kind, and counting it under any label would corrupt the ratio
+// an operator reads off the /metrics gauge. Used by the GET /metrics endpoint
+// (#629); mirrors CountFailuresByReason's shape exactly.
+func (q *DBQueue) CountByTimingOutcome(ctx context.Context) (map[string]int64, error) {
+	rows, err := q.db.QueryContext(ctx,
+		`SELECT timing_outcome, COUNT(*)
+         FROM work_queue
+         WHERE timing_outcome IS NOT NULL
+         GROUP BY timing_outcome`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("queue: count by timing outcome: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // reason: read-only query; close error is not actionable
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var outcome string
+		var n int64
+		if err := rows.Scan(&outcome, &n); err != nil {
+			return nil, fmt.Errorf("queue: scan timing outcome count: %w", err)
+		}
+		counts[outcome] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: count by timing outcome rows: %w", err)
+	}
+	return counts, nil
+}
+
 // CountByStatus returns the number of work_queue rows grouped by status.
 // Statuses with no rows are omitted from the map.
 func (q *DBQueue) CountByStatus(ctx context.Context) (map[string]int64, error) {

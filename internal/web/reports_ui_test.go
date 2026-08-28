@@ -288,6 +288,63 @@ func TestReportFragmentInstrumentalRows(t *testing.T) {
 	}
 }
 
+// insertReviewQueueRow inserts one work_queue row carrying a timing verdict
+// (migration 034's timing_outcome/overrun_magnitude/overrun_ratio/evaluated_at
+// columns), the source data for the review-queue report (#629).
+func insertReviewQueueRow(t *testing.T, sqlDB *sql.DB, title, outcome string, overrun, ratio float64, evaluatedAt string) {
+	t.Helper()
+	_, err := sqlDB.ExecContext(context.Background(),
+		`INSERT INTO work_queue
+            (artist, title, artist_key, title_key, album, status,
+             timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at)
+         VALUES (?, ?, ?, ?, 'Album', 'done', ?, ?, ?, ?)`,
+		"Artist", title, "Artist", title, outcome, overrun, ratio, evaluatedAt)
+	if err != nil {
+		t.Fatalf("insert review-queue work_queue row: %v", err)
+	}
+}
+
+// TestReportFragmentReviewQueueRows exercises the review-queue report end to
+// end (#629): the wiring from reports.Repo.ReviewQueue through buildReportView
+// onto the rendered table, covering both flagged outcomes and confirming a row
+// NOT in ('mis_synced', 'categorical') -- here 'ok' -- does not appear.
+func TestReportFragmentReviewQueueRows(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertReviewQueueRow(t, sqlDB, "Demoted", "mis_synced", 12.5, 1.25, "2026-08-02T00:00:00Z")
+	insertReviewQueueRow(t, sqlDB, "Quarantined", "categorical", 210.0, 2.75, "2026-08-03T00:00:00Z")
+	insertReviewQueueRow(t, sqlDB, "Fine", "ok", 0, 0, "2026-08-04T00:00:00Z")
+	mux := newReportsUIServer(t, sqlDB)
+
+	body := getFragment(t, mux, "review-queue").Body.String()
+	for _, want := range []string{
+		"Demoted", "mis_synced", "12.5", "1.25",
+		"Quarantined", "categorical", "210.0", "2.75",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("review-queue fragment missing %q; body:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Fine") {
+		t.Errorf("review-queue fragment should exclude an 'ok' row; body:\n%s", body)
+	}
+}
+
+// TestReportFragmentReviewQueueEmptyState confirms the empty state renders
+// when no row carries a review-worthy timing verdict, matching the other
+// reports' empty-state convention.
+func TestReportFragmentReviewQueueEmptyState(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	mux := newReportsUIServer(t, sqlDB)
+
+	body := getFragment(t, mux, "review-queue").Body.String()
+	if !strings.Contains(body, "No tracks awaiting a timing review.") {
+		t.Errorf("empty review-queue report missing empty-state copy; body:\n%s", body)
+	}
+	if strings.Contains(body, "<table") {
+		t.Error("empty report should not render a table element")
+	}
+}
+
 // TestRecentOutcomeNullCompletedAt covers the null-timestamp render path: a done
 // row with no completed_at shows an em-dash, not a bogus epoch.
 func TestRecentOutcomeNullCompletedAt(t *testing.T) {
@@ -387,6 +444,7 @@ func TestBuildRailEncodesKeyPath(t *testing.T) {
 		"provider-effectiveness",
 		"instrumental-inventory",
 		"failure-analysis",
+		"review-queue",
 	}
 	if len(rail) != len(wantKeys) {
 		t.Fatalf("buildRail returned %d items, want %d", len(rail), len(wantKeys))
