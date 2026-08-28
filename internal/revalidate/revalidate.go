@@ -316,8 +316,82 @@ func (r *Revalidator) durationOf(ctx context.Context, audio string) (int, error)
 // companionAudio returns the audio file sharing the sidecar's stem, and whether
 // one exists. A .lrc with no companion is realign's problem (a renamed or
 // deleted audio file), not this pass's, and is never remediated here.
+//
+// #691: this used to os.ReadDir the sidecar's directory on every call -- one
+// full directory listing per sidecar, so a directory holding N sidecars cost
+// O(N) directory reads of the SAME directory. The companion must share the
+// sidecar's exact stem, so instead this probes the bounded candidate set
+// <stem>.<ext> for every extension scanner.SupportedAudioExtensions() names --
+// os.Stat calls independent of directory size, never a directory listing.
+//
+// WHY THE PROBE AND NOT #691's OTHER OPTION. The alternative was one ReadDir
+// per directory, reused across the sidecars in it; implemented WELL (the
+// listing indexed once, so each later sidecar is an O(1) lookup) that option
+// is CPU-COMPARABLE to the probe, not worse -- see companion_bench_test.go's
+// header for the full measurement (including the naive strawman an earlier
+// draft of this comment measured against instead, and overclaimed from).
+// Neither implementation dominates; the CPU numbers are a tiebreak that came
+// back level.
+//
+// The probe is chosen on I/O SHAPE, which is the axis #691 actually names: it
+// issues NO directory read at all, where the indexed option still pays one full
+// ReadDir per directory. On the spun-down array disk that motivated #684/#685
+// that is the difference that matters -- a bounded set of stats against known
+// names denies the disk less idle time than listing a large directory, and the
+// gap widens exactly where libraries are flattest. That is the reason, not the
+// CPU tiebreak.
+//
+// Extension gating is inherent, not a separate check: a candidate is only ever
+// built from scanner's own audio extension list, so it classifies identically
+// to IsAudioFile (both read the same backing slice) and cannot drift from it. A
+// candidate that stats as a directory is rejected, matching the old ReadDir
+// loop's e.IsDir() skip.
+//
+// Case handling, and why the ReadDir fallback below is NOT dead code. The old
+// loop matched an extension via scanner.IsAudioFile, which lowercases before
+// comparing -- so it recognized a companion with ANY casing on disk (song.mp3,
+// song.MP3, song.Mp3, ...). A stat-only probe cannot enumerate arbitrary casing
+// without listing the directory, which is the exact cost being removed here, so
+// the probe covers the lower- and upper-case forms (the two real libraries
+// actually produce: a normal rip and a legacy all-caps Windows rip) and the
+// listing is kept as a FALLBACK for everything else.
+//
+// The fallback runs ONLY when the probe finds nothing, which preserves
+// IsAudioFile as the gate on what counts as audio -- an invariant #691 names
+// explicitly. Without it a mixed-case companion (song.Mp3) would silently stop
+// being found on a CASE-SENSITIVE filesystem, and "not found" here means the
+// sidecar is never remediated: a MisSynced .lrc would be skipped rather than
+// demoted, silently, which is the opposite of what this pass exists to do. That
+// is invisible on macOS/APFS (case-insensitive, so os.Stat finds it anyway) and
+// live on the Linux deployment #691 targets.
+//
+// It costs nothing in the common case: a sidecar WITH a companion -- the case
+// the O(N) reads were being paid for -- returns from the probe and never
+// reaches the listing. Only an orphan pays a directory read, exactly what it
+// paid before this change, so this is a strict improvement over pre-#691 at
+// every input rather than a trade.
 func companionAudio(lrcPath string) (string, bool) {
 	stem := strings.TrimSuffix(lrcPath, filepath.Ext(lrcPath))
+	for _, ext := range scanner.SupportedAudioExtensions() {
+		for _, candidate := range [2]string{stem + ext, stem + strings.ToUpper(ext)} {
+			fi, err := os.Stat(candidate)
+			if err != nil {
+				continue
+			}
+			if fi.IsDir() {
+				continue
+			}
+			return candidate, true
+		}
+	}
+	return companionAudioByListing(lrcPath, stem)
+}
+
+// companionAudioByListing is the pre-#691 lookup, kept as companionAudio's
+// miss-path fallback so an unusually-cased extension still resolves through
+// scanner.IsAudioFile. See companionAudio's comment for why this is reached
+// only on a probe miss.
+func companionAudioByListing(lrcPath, stem string) (string, bool) {
 	dir := filepath.Dir(lrcPath)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -327,10 +401,10 @@ func companionAudio(lrcPath string) (string, bool) {
 		if e.IsDir() {
 			continue
 		}
-		p := filepath.Join(dir, e.Name())
 		if !scanner.IsAudioFile(e.Name()) {
 			continue
 		}
+		p := filepath.Join(dir, e.Name())
 		if strings.TrimSuffix(p, filepath.Ext(p)) == stem {
 			return p, true
 		}
