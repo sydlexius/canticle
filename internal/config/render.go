@@ -160,6 +160,15 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("batch_size = %d%s\n", cfg.Queue.BatchSize, ann("queue.batch_size"))
 	p("\n")
 
+	// [timing_validation]
+	p("[timing_validation]\n")
+	p("enabled = %t%s\n", cfg.TimingValidation.Enabled, ann("timing_validation.enabled"))
+	p("revalidate_existing = %t%s\n", cfg.TimingValidation.RevalidateExisting, ann("timing_validation.revalidate_existing"))
+	p("revalidate_batch = %d%s\n", cfg.TimingValidation.RevalidateBatch, ann("timing_validation.revalidate_batch"))
+	p("on_mis_synced = %s%s\n", cfg.TimingValidation.OnMisSynced, ann("timing_validation.on_mis_synced"))
+	p("on_categorical = %s%s\n", cfg.TimingValidation.OnCategorical, ann("timing_validation.on_categorical"))
+	p("\n")
+
 	// [watcher]
 	p("[watcher]\n")
 	p("enabled = %t%s\n", cfg.Watcher.Enabled, ann("watcher.enabled"))
@@ -379,6 +388,13 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 		group("queue",
 			boolAttr("randomize", "queue.randomize", cfg.Queue.Randomize),
 			intAttr("batch_size", "queue.batch_size", cfg.Queue.BatchSize),
+		),
+		group("timing_validation",
+			boolAttr("enabled", "timing_validation.enabled", cfg.TimingValidation.Enabled),
+			boolAttr("revalidate_existing", "timing_validation.revalidate_existing", cfg.TimingValidation.RevalidateExisting),
+			intAttr("revalidate_batch", "timing_validation.revalidate_batch", cfg.TimingValidation.RevalidateBatch),
+			strAttr("on_mis_synced", "timing_validation.on_mis_synced", string(cfg.TimingValidation.OnMisSynced)),
+			strAttr("on_categorical", "timing_validation.on_categorical", string(cfg.TimingValidation.OnCategorical)),
 		),
 		group("watcher",
 			boolAttr("enabled", "watcher.enabled", cfg.Watcher.Enabled),

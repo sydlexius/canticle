@@ -16,7 +16,7 @@ func TestFormatConfigText_ContainsAllSections(t *testing.T) {
 	sections := []string{
 		"[api]", "[output]", "[db]", "[server]", "[providers]",
 		"[verification]", "[instrumental_detector]", "[enrichment]",
-		"[guard]", "[queue]", "[logging]", "[watcher]",
+		"[guard]", "[queue]", "[logging]", "[watcher]", "[timing_validation]",
 	}
 	for _, s := range sections {
 		if !strings.Contains(got, s) {
@@ -315,6 +315,7 @@ func TestConfigToSlogAttrs_ContainsAllSections(t *testing.T) {
 		"enrichment.enabled=",
 		"guard.script_guard_threshold=",
 		"queue.randomize=",
+		"timing_validation.enabled=",
 		"logging.level=",
 	}
 	for _, c := range checks {

@@ -755,3 +755,49 @@ func TestRawConfigValueWordSync(t *testing.T) {
 		t.Errorf("rawConfigValue(default) = %q; want %q", got, "false")
 	}
 }
+
+// TestTimingActionOptionsWarnAboutIrreversibility verifies the two remediation
+// dropdowns render plain-language labels, and that the irreversible one says so
+// where the operator actually clicks it.
+//
+// "purge" UNLINKS a lyric file. The word IRREVERSIBLE appears in the TOML
+// comment, CONFIGURATION.md, the registry Description, and the Go doc comment --
+// none of which are visible in a dropdown listing four bare words. The registry
+// Description renders as a single help line under the control, not per option,
+// so picking the destructive value gave no indication of what it does. Every
+// other new control on this page got a hand-written plain-language label; these
+// two, the only ones that can delete a file, were left as raw tokens.
+func TestTimingActionOptionsWarnAboutIrreversibility(t *testing.T) {
+	for _, path := range []string{"timing_validation.on_mis_synced", "timing_validation.on_categorical"} {
+		opts := selectOptions(path, "")
+		if len(opts) == 0 {
+			t.Fatalf("selectOptions(%q) returned nothing", path)
+		}
+		for _, o := range opts {
+			if o.Label == o.Value {
+				t.Errorf("%s: option %q renders as a bare token; it needs a plain-language label", path, o.Value)
+			}
+			if o.Value == "purge" && !strings.Contains(strings.ToLower(o.Label), "cannot be undone") {
+				t.Errorf("%s: the purge option reads %q, which does not say it is irreversible", path, o.Label)
+			}
+		}
+	}
+}
+
+// TestTimingActionOptionsMatchTheAllowedSet verifies the labels do not change
+// which values the dropdown offers -- a label map that dropped or invented an
+// option would let the UI disagree with the validator.
+func TestTimingActionOptionsMatchTheAllowedSet(t *testing.T) {
+	for _, path := range []string{"timing_validation.on_mis_synced", "timing_validation.on_categorical"} {
+		allowed := config.AllowedValues(path)
+		opts := selectOptions(path, "")
+		if len(opts) != len(allowed) {
+			t.Fatalf("%s: %d options for %d allowed values", path, len(opts), len(allowed))
+		}
+		for i, o := range opts {
+			if o.Value != allowed[i] {
+				t.Errorf("%s: option %d value = %q; want %q", path, i, o.Value, allowed[i])
+			}
+		}
+	}
+}

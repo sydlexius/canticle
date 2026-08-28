@@ -98,6 +98,8 @@ Directory mode overrides `-o/--outdir`; the output extension is `.lrc` for synce
 
 Renamed an audio file and left its `.lrc`/`.txt` behind? `canticle realign` re-attaches orphaned lyric sidecars to their audio (dry-run by default; `--yes` to apply), and `contrib/lidarr-rename-sidecars.sh` is a Lidarr Custom Script that prevents the orphan at rename time. See [Realign](https://sydlexius.github.io/canticle/CLI_REFERENCE/#realign).
 
+Have lyrics that drift out of sync with the song? `canticle revalidate` re-checks synced `.lrc` files already on disk against the real length of their audio and, where the timing does not fit, keeps the words as `.txt` or sets the file aside (dry-run by default; `--apply` to act). An unattended serve-mode version is in progress; its `[timing_validation]` settings are already documented under [Timing validation](https://sydlexius.github.io/canticle/CONFIGURATION/#timing_validation), but they do not do anything yet.
+
 ## Token
 
 In **serve mode**, a Musixmatch API token is optional: on first run Canticle obtains one automatically and stores it encrypted at rest, reusing it on every later start, so there is nothing to set up. The one-shot `fetch` CLI keeps no state, so it cannot store a token and still needs one supplied explicitly.

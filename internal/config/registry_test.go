@@ -112,6 +112,13 @@ func validEnvValue(f FieldSpec) string {
 		return "json"
 	case "instrumental_detector.ordering":
 		return "front"
+	case "timing_validation.on_mis_synced":
+		return "quarantine"
+	case "timing_validation.on_categorical":
+		// Deliberately NOT "demote": that value is legal for on_mis_synced and
+		// illegal here, so using it would make this helper assert the wrong
+		// contract for the one field whose value set is narrower.
+		return "purge"
 	}
 	switch f.Type {
 	case TypeInt:

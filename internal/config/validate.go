@@ -94,6 +94,23 @@ var enumValues = map[string][]string{
 	"providers.mode":         {"ordered", "parallel"},
 	"logging.level":          {"debug", "info", "warn", "error"},
 	"logging.format":         {"text", "json"},
+	// The two timing-sweep action sets differ by exactly one value, and the
+	// difference is load-bearing rather than an oversight: a categorical lyric
+	// is the wrong song's words, so it has nothing worth demoting to .txt.
+	// Derived from the config-side sets so the dropdown, ValidateAndSet, and
+	// the loader's re-default checks cannot disagree about what is legal.
+	"timing_validation.on_mis_synced":  timingActionStrings(timingMisSyncedActions()),
+	"timing_validation.on_categorical": timingActionStrings(timingCategoricalActions()),
+}
+
+// timingActionStrings flattens a TimingAction set to the plain strings the
+// validator and settings UI speak.
+func timingActionStrings(actions []TimingAction) []string {
+	out := make([]string, 0, len(actions))
+	for _, a := range actions {
+		out = append(out, string(a))
+	}
+	return out
 }
 
 // AllowedValues returns the allowed values for a fixed-choice config field, or
@@ -108,11 +125,39 @@ func AllowedValues(path string) []string {
 	return append([]string(nil), v...)
 }
 
-// ValidateEnum accepts only one of the allowed values.
+// ValidateEnum accepts only one of the allowed values, compared verbatim.
 func ValidateEnum(allowed ...string) Validator {
 	return func(value string) error {
 		for _, a := range allowed {
 			if value == a {
+				return nil
+			}
+		}
+		return fmt.Errorf("must be one of %v", allowed)
+	}
+}
+
+// ValidateNormalizedEnum accepts one of the allowed values after trimming and
+// lowercasing, for fields whose LOADER normalizes the same way.
+//
+// WHY THIS EXISTS. A validator and a loader that disagree about normalization
+// disagree about what is legal, even when they share a value set. The timing
+// actions are normalized on the file and env paths, so a TOML holding
+// " PURGE " boots fine and purges files -- while a verbatim ValidateEnum
+// rejected that same value on the write path. The operator symptom is bad and
+// hard to trace: a working config, and then opening the settings page and
+// saving ANY field in that section fails on a field they never touched, because
+// a section save validates every value it renders, including the one already on
+// disk.
+//
+// Normalizing here does NOT widen the accepted set -- the value must still land
+// exactly on a member after folding -- so an arm's narrower vocabulary survives
+// (" DEMOTE " stays illegal for on_categorical).
+func ValidateNormalizedEnum(allowed ...string) Validator {
+	return func(value string) error {
+		v := strings.ToLower(strings.TrimSpace(value))
+		for _, a := range allowed {
+			if v == a {
 				return nil
 			}
 		}
@@ -253,6 +298,11 @@ func validatorFor(f FieldSpec) Validator {
 	switch f.Path {
 	case "output.embedded_lyrics", "providers.mode", "logging.level", "logging.format":
 		return ValidateEnum(enumValues[f.Path]...)
+	case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
+		// NORMALIZED, because the loader normalizes these two before validating
+		// them. A verbatim comparison here would reject a value the next boot
+		// accepts -- see ValidateNormalizedEnum for the operator symptom.
+		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "server.tls.cert_file", "server.tls.key_file":
 		return ValidatePEMFile()
 	case "verification.ffmpeg_path", "instrumental_detector.ffmpeg_path":
@@ -271,6 +321,10 @@ func validatorFor(f FieldSpec) Validator {
 		// Strictly positive: a non-positive cap rejects every watch root (matches
 		// the MXLRCGO_WATCH_MAX_DIRS env rule). watcher.debounce_ms falls through to
 		// the default TypeInt non-negative validator (>= 0), matching its env rule.
+		return ValidatePositiveInt()
+	case "timing_validation.revalidate_batch":
+		// Strictly positive, matching the env and file rules: a batch of 0
+		// drains nothing while the ticker still fires.
 		return ValidatePositiveInt()
 	}
 	switch f.Type {
