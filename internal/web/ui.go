@@ -46,6 +46,7 @@ var reportDefs = []reportDef{
 	{"provider-effectiveness", "Provider effectiveness", "Per-lane hits, misses, and true per-track hit-rate."},
 	{"instrumental-inventory", "Instrumental inventory", "Tracks confirmed instrumental by the Instrumental Detector."},
 	{"failure-analysis", "Failure analysis", "Failed and deferred tracks grouped by reason."},
+	{"review-queue", "Review queue", "Synced lyrics the timing guard flagged for a look: demoted or quarantined."},
 }
 
 func lookupReportDef(key string) (reportDef, bool) {
@@ -505,6 +506,23 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Status: g.Status,
 				Reason: g.Reason,
 				Count:  strconv.FormatInt(g.Count, 10),
+			})
+		}
+	case "review-queue":
+		rows, err := u.reports.ReviewQueue(ctx)
+		if err != nil {
+			return templates.ReportView{}, err
+		}
+		v.ReviewQueueRows = make([]templates.ReviewQueueRow, 0, len(rows))
+		for _, q := range rows {
+			v.ReviewQueueRows = append(v.ReviewQueueRows, templates.ReviewQueueRow{
+				Artist:         q.Artist,
+				Title:          q.Title,
+				Album:          q.Album,
+				Outcome:        q.Outcome,
+				OverrunSeconds: fmt.Sprintf("%.1f", q.OverrunSeconds),
+				Ratio:          fmt.Sprintf("%.2f", q.Ratio),
+				EvaluatedAt:    formatReportTime(q.EvaluatedAt, serverLoc),
 			})
 		}
 	default:
