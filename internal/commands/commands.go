@@ -2924,6 +2924,11 @@ func configKeys() []string {
 		"verification.min_confidence",
 		"verification.min_similarity",
 		"instrumental_detector.ordering",
+		"timing_validation.enabled",
+		"timing_validation.revalidate_existing",
+		"timing_validation.revalidate_batch",
+		"timing_validation.on_mis_synced",
+		"timing_validation.on_categorical",
 		"guard.accepted_scripts",
 		"guard.script_guard_threshold",
 	}
@@ -2987,6 +2992,16 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.FormatFloat(cfg.Verification.MinSimilarity, 'f', -1, 64), true
 	case "instrumental_detector.ordering":
 		return cfg.InstrumentalDetector.Ordering, true
+	case "timing_validation.enabled":
+		return strconv.FormatBool(cfg.TimingValidation.Enabled), true
+	case "timing_validation.revalidate_existing":
+		return strconv.FormatBool(cfg.TimingValidation.RevalidateExisting), true
+	case "timing_validation.revalidate_batch":
+		return strconv.Itoa(cfg.TimingValidation.RevalidateBatch), true
+	case "timing_validation.on_mis_synced":
+		return string(cfg.TimingValidation.OnMisSynced), true
+	case "timing_validation.on_categorical":
+		return string(cfg.TimingValidation.OnCategorical), true
 	case "guard.accepted_scripts":
 		return strings.Join(cfg.Guard.AcceptedScripts, ","), true
 	case "guard.script_guard_threshold":
@@ -3140,6 +3155,50 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("instrumental_detector.ordering must be \"front\" or \"demoted\"")
 		}
 		cfg.InstrumentalDetector.Ordering = m
+	case "timing_validation.enabled":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("timing_validation.enabled must be a boolean: %w", err)
+		}
+		cfg.TimingValidation.Enabled = b
+	case "timing_validation.revalidate_existing":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("timing_validation.revalidate_existing must be a boolean: %w", err)
+		}
+		cfg.TimingValidation.RevalidateExisting = b
+	case "timing_validation.revalidate_batch":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("timing_validation.revalidate_batch must be an integer: %w", err)
+		}
+		if n < 1 {
+			return fmt.Errorf("timing_validation.revalidate_batch must be an integer greater than zero")
+		}
+		cfg.TimingValidation.RevalidateBatch = n
+	case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
+		// Validation is DELEGATED to the config package rather than restated
+		// here. The two keys accept different value sets (on_categorical has no
+		// "demote"), and config.ValidateAndSet reads the same enum source the
+		// loader, the env path, and the settings UI read -- so a value this CLI
+		// accepts is exactly a value the next boot will keep. Restating the sets
+		// in this switch is how the CLI would drift from the loader.
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		// Returned UNWRAPPED, deliberately. ValidateAndSet yields a
+		// *config.ValidationError carrying the path, the offending value, and the
+		// reason -- it already renders as
+		// `config: timing_validation.on_categorical = "demote": must be one of
+		// [quarantine purge off]`. Adding "validate <key>: " in front would print
+		// the key twice in one line. There is no context to add here that the
+		// error does not already carry.
+		if err := config.ValidateAndSet(key, normalized); err != nil {
+			return err
+		}
+		if key == "timing_validation.on_mis_synced" {
+			cfg.TimingValidation.OnMisSynced = config.TimingAction(normalized)
+		} else {
+			cfg.TimingValidation.OnCategorical = config.TimingAction(normalized)
+		}
 	case "guard.accepted_scripts":
 		// An empty value is valid: it clears the allowlist and disables the guard.
 		cfg.Guard.AcceptedScripts = splitCSV(value)
