@@ -1667,7 +1667,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_TIMING_VALIDATION_ENABLED"); v != "" {
 		enabled, err := strconv.ParseBool(v)
 		if err != nil {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ENABLED", "value", v, "current", cfg.TimingValidation.Enabled) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ENABLED", "value", v, "current", cfg.TimingValidation.Enabled) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.TimingValidation.Enabled = enabled
 			applied["timing_validation.enabled"] = true
@@ -1676,7 +1676,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING"); v != "" {
 		enabled, err := strconv.ParseBool(v)
 		if err != nil {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING", "value", v, "current", cfg.TimingValidation.RevalidateExisting) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING", "value", v, "current", cfg.TimingValidation.RevalidateExisting) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.TimingValidation.RevalidateExisting = enabled
 			applied["timing_validation.revalidate_existing"] = true
@@ -1685,7 +1685,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH", "value", v, "current", cfg.TimingValidation.RevalidateBatch) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH", "value", v, "current", cfg.TimingValidation.RevalidateBatch) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.TimingValidation.RevalidateBatch = n
 			applied["timing_validation.revalidate_batch"] = true
@@ -1694,7 +1694,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED"); v != "" {
 		action := normalizeTimingAction(TimingAction(v))
 		if !validTimingAction(action, timingMisSyncedActions()) {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED", "value", v, "current", cfg.TimingValidation.OnMisSynced) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED", "value", v, "current", cfg.TimingValidation.OnMisSynced) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.TimingValidation.OnMisSynced = action
 			applied["timing_validation.on_mis_synced"] = true
@@ -1703,7 +1703,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_TIMING_VALIDATION_ON_CATEGORICAL"); v != "" {
 		action := normalizeTimingAction(TimingAction(v))
 		if !validTimingAction(action, timingCategoricalActions()) {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ON_CATEGORICAL", "value", v, "current", cfg.TimingValidation.OnCategorical) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_TIMING_VALIDATION_ON_CATEGORICAL", "value", v, "current", cfg.TimingValidation.OnCategorical) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.TimingValidation.OnCategorical = action
 			applied["timing_validation.on_categorical"] = true
