@@ -2263,6 +2263,17 @@ type TimingBacklogOptions struct {
 // `revalidate` CLI, which walks the filesystem and therefore judges what is
 // actually on disk instead of what a NULL column implies.
 //
+// STATUS: the guard excludes 'processing' rather than requiring 'done', so a
+// row parked in 'pending'/'deferred'/'failed' that still carries a stale
+// outcome_type is admitted. No live path reaches that state -- every reset
+// traced (prune, the queue's own re-enqueue paths) clears outcome_type with the
+// verdict, and the two that do not (purgeprovenance, identityrepair) are
+// coupled to a sidecar just deleted or a path just corrected, so the sweep
+// finds nothing to judge. The looser predicate is deliberate: 'processing' is
+// the only status where the WORKER may be mid-write on the same file, which is
+// the race worth excluding. Narrowing to status = 'done' would also be correct
+// today and is worth revisiting if a future path parks a settled row.
+//
 // source_path is the AUDIO file, and it is required because the sidecar is
 // derived from it. A row without one can never be judged, so admitting it would
 // burn a batch slot every cycle forever -- nothing about such a row ever

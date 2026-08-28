@@ -240,7 +240,16 @@ func TestListTimingBacklogHonorsLimit(t *testing.T) {
 		t.Fatalf("ListTimingBacklog: %v", err)
 	}
 	if len(got) != 2 {
-		t.Errorf("len = %d; want 2 (the limit must bound the query, not the caller)", len(got))
+		t.Fatalf("len = %d; want 2 (the limit must bound the query, not the caller)", len(got))
+	}
+	// WHICH two, not just how many. A cardinality-only assertion passes against a
+	// reversed ORDER BY, so the oldest-first ordering the doc comment calls
+	// load-bearing would be unguarded: a large backlog would drain newest-first
+	// and an operator watching the count would not see monotonic progress.
+	// Mutation-verified: flipping both keys to DESC reddens this.
+	if got[0].Inputs.Track.TrackName != "One" || got[1].Inputs.Track.TrackName != "Two" {
+		t.Errorf("batch = [%s %s]; want the two OLDEST [One Two]",
+			got[0].Inputs.Track.TrackName, got[1].Inputs.Track.TrackName)
 	}
 }
 
