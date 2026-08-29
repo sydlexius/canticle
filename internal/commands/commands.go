@@ -1270,6 +1270,22 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			runInstrumentalBackfillSweep(runCtx, sqlDB, cfg, backfillDetector)
 		}()
 	}
+	// Periodic timing-revalidation sweep (#443): re-judge .lrc files already on
+	// disk against their companion audio's exact duration and remediate the ones
+	// the predicate rejects. Gated on BOTH timing_validation.enabled and
+	// .revalidate_existing, mirroring the realign gate -- the master switch says
+	// the feature is live, the second says an unattended pass may touch files
+	// written before the accept-time guard (#439) existed.
+	//
+	// It reuses the `revalidate` CLI's remediation core, so the predicate, the
+	// backup trail, and the apply path are the ones an operator can preview by
+	// hand. It never walks a library: the candidate list comes from the timing
+	// watermark, so a cycle costs a batch, not a library scan.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runTimingValidationSweep(runCtx, sqlDB, cfg, serveScanInterval(cfg, args))
+	}()
 	// Background session sweeper: periodically delete expired/revoked sessions,
 	// mirroring the worker/scheduler goroutine + context-cancel pattern. Only
 	// runs when the authenticated UI is mounted (there are no sessions otherwise).

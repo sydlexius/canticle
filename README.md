@@ -98,7 +98,7 @@ Directory mode overrides `-o/--outdir`; the output extension is `.lrc` for synce
 
 Renamed an audio file and left its `.lrc`/`.txt` behind? `canticle realign` re-attaches orphaned lyric sidecars to their audio (dry-run by default; `--yes` to apply), and `contrib/lidarr-rename-sidecars.sh` is a Lidarr Custom Script that prevents the orphan at rename time. See [Realign](https://sydlexius.github.io/canticle/CLI_REFERENCE/#realign).
 
-Have lyrics that drift out of sync with the song? `canticle revalidate` re-checks synced `.lrc` files already on disk against the real length of their audio and, where the timing does not fit, keeps the words as `.txt` or sets the file aside (dry-run by default; `--apply` to act). An unattended serve-mode version is in progress; its `[timing_validation]` settings are already documented under [Timing validation](https://sydlexius.github.io/canticle/CONFIGURATION/#timing_validation), but they do not do anything yet.
+Have lyrics that drift out of sync with the song? `canticle revalidate` re-checks synced `.lrc` files already on disk against the real length of their audio and, where the timing does not fit, keeps the words as `.txt` or sets the file aside (dry-run by default; `--apply` to act). Serve mode can also do this unattended: set `timing_validation.enabled` and `timing_validation.revalidate_existing`, and a background sweep drains the backlog a batch at a time, then idles. It never re-scans the library - a judged file is recorded and left alone - and it shares the CLI's remediation core, so `canticle revalidate` previews exactly what it will do. See [Timing validation](https://sydlexius.github.io/canticle/CONFIGURATION/#timing_validation).
 
 ## Token
 

@@ -107,9 +107,13 @@ func validAction(a Action, allowed []Action) bool {
 
 // Options configures a revalidation pass.
 type Options struct {
-	// Roots are the directory trees to walk. The serve sweep leaves this empty:
-	// it judges an explicit candidate list drawn from the timing watermark
-	// rather than walking, so it never re-reads the library each cycle.
+	// Roots are the directory trees Plan walks.
+	//
+	// PlanCandidates does NOT walk them -- it judges an explicit candidate list
+	// drawn from the timing watermark, so the serve sweep never re-reads the
+	// library each cycle. The sweep still populates Roots, because Validate's
+	// "quarantine dir is not inside a scanned root" check reads them and that
+	// check is exactly as load-bearing for an unattended pass as for the CLI.
 	Roots []string
 	// MisSyncedAction is what happens to a MisSynced (or Degenerate) sidecar.
 	// Empty means "derive from the legacy OnFail/Purge flags" -- see New.
@@ -151,6 +155,11 @@ type Finding struct {
 	Ratio    float64
 	// Action is the remediation planned for this finding, or "" when none is.
 	Action string
+	// ID is the work_queue row this finding came from in candidate mode, or 0
+	// when the finding came from a filesystem walk. The sweep stamps the timing
+	// watermark by this id, which is what retires the row from the backlog
+	// query and makes the pass converge.
+	ID int64
 }
 
 // Counts is the aggregate report. It is the ONLY thing safe to print.
@@ -162,7 +171,43 @@ type Counts struct {
 	Degenerate      int // every cue at one timestamp: not synced at all (#673)
 	UnknownDuration int // no exact duration: failed open, never remediated
 	NoAudio         int // a .lrc with no companion audio: realign's problem, not this one
+	NoSidecar       int // a candidate whose .lrc is gone: candidate mode only (#443)
 	Errored         int // unreadable file or duration-store failure
+}
+
+// Candidate is one row the serve-mode sweep asks about (#443): a completed
+// synced work_queue row whose sidecar has never been judged.
+//
+// IT IS THE INVERSION OF THE WALK. The CLI discovers .lrc files by walking a
+// library root, which is correct for a command an operator runs deliberately
+// but is exactly the wrong shape for an unattended loop: a full walk of a
+// 60k-file library every cycle keeps the array awake to re-discover files it
+// already knows about, the behavior #684/#685 exist to remove. A row already
+// records its audio path, so the sidecar is DERIVED from it rather than
+// discovered: one stat settles whether it is there.
+//
+// A candidate that HAS a sidecar then costs the companion probe as well --
+// bounded stats across the supported extensions, and a single directory read
+// only in the case where every one of those misses (a sidecar sitting beside no
+// same-stem audio at all). A candidate whose sidecar is already gone, the
+// ordinary moved-by-a-reorg case, pays none of that: judgeCandidate stats the
+// sidecar FIRST and returns before resolving any owner. So a cycle still costs
+// its BATCH rather than the size of the library, which is the property that
+// matters on a spun-down array.
+type Candidate struct {
+	// ID is the work_queue row, carried through onto the Finding so the caller
+	// can stamp the timing watermark for exactly the rows it judged.
+	ID int64
+	// AudioPath is the row's source_path: the audio file the sidecar sits beside.
+	AudioPath string
+	// Root is the library root AudioPath lives under. It anchors the quarantine
+	// layout, so a sidecar keeps its path relative to its own library rather
+	// than colliding with a same-named one from another.
+	Root string
+	// LibraryID stamps this candidate's backup records for scoped restores.
+	// Per-candidate rather than per-run, because one sweep cycle's batch can
+	// span every configured library.
+	LibraryID int64
 }
 
 // Plan is the result of a scan: what would be done, and nothing done yet.
@@ -225,6 +270,177 @@ func (r *Revalidator) Plan(ctx context.Context) (Plan, error) {
 	return plan, nil
 }
 
+// PlanCandidates judges an explicit list of work_queue rows instead of walking a
+// library, and is the entry point the serve-mode sweep uses (#443). Like Plan it
+// MUTATES NOTHING; the caller applies the returned moves and stamps the rows.
+//
+// IT IS NOT AN OPTIMIZED WALK, IT IS A DIFFERENT QUESTION. Plan asks "what is on
+// disk under these roots?", which requires reading the directories. This asks
+// "are these specific, already-known sidecars still correct?", which requires no
+// directory read at all: the row records its audio path, so the sidecar is the
+// stem plus .lrc, and one os.Stat settles whether it is there. That is what lets
+// the sweep run every cycle forever on a spun-down array (#684/#685) -- the cost
+// of a cycle is proportional to the BATCH, never to the size of the library.
+//
+// EVERY CANDIDATE PRODUCES A FINDING, INCLUDING THE UN-JUDGEABLE ONES, and that
+// is the convergence rail rather than a reporting nicety. A row leaves the
+// backlog query by being stamped, and the caller stamps what this returns a
+// finding for. A candidate silently dropped here -- its sidecar deleted by hand,
+// its audio gone, its duration unknown -- is a row that comes back in the next
+// batch, and the batch is ordered oldest-first, so a handful of them would sit at
+// the head of every cycle forever and the sweep would never reach the rest of the
+// backlog, let alone idle. So the arms that CANNOT reach a verdict still emit one
+// (NoSidecar/NoAudio/UnknownDuration), and the caller stamps them exactly as it
+// stamps an Ok.
+func (r *Revalidator) PlanCandidates(ctx context.Context, candidates []Candidate) (Plan, error) {
+	var plan Plan
+	// One cache for the whole call, as Plan does. companionAudio only lists a
+	// directory when its stat probes all miss, so this is usually unused -- but
+	// when a batch does hold several rows from one directory (the backlog drains
+	// oldest-first, and an album was imported together), they share the listing
+	// rather than each paying for it.
+	cache := newDirListingCache()
+	// One sidecar is judged at most ONCE per call. Two rows can reach the same
+	// file two ways: two same-stem audio files (arbitrated in judgeCandidate) and
+	// two rows carrying the SAME source_path, which the queue's uniqueness
+	// constraint admits under different artist/title keys. The second is not a
+	// wrong verdict -- both rows agree -- but planning the move twice means the
+	// first consumes the file and the second fails "no such file", which the
+	// caller records as a genuine failed action and warns about, and which leaves
+	// BOTH rows unstamped for a cycle. Claiming the path here keeps one move per
+	// file, so the log never describes a fault that did not happen.
+	claimed := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		if cerr := ctx.Err(); cerr != nil {
+			return plan, cerr
+		}
+		if err := r.judgeCandidate(ctx, c, &plan, cache, claimed); err != nil {
+			return plan, err
+		}
+	}
+	return plan, nil
+}
+
+// judgeCandidate resolves one row's sidecar and judges it.
+//
+// The sidecar is DERIVED from the audio path (stem + ".lrc"), never discovered.
+// That is the same construction the writer used to create it, so the derivation
+// is exact rather than a guess -- and it is why this costs one stat instead of a
+// directory listing. A .LRC spelled in another case is not probed: this pass
+// only ever judges files canticle itself wrote, and it writes ".lrc".
+func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Plan, cache *dirListingCache, claimed map[string]bool) error {
+	audio := strings.TrimSpace(c.AudioPath)
+	if audio == "" {
+		// A row with no audio path can never be judged. Counted so the caller
+		// stamps it and it leaves the backlog -- see PlanCandidates' rail.
+		plan.Counts.NoAudio++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Outcome: "no_audio"})
+		return nil
+	}
+	path := strings.TrimSuffix(audio, filepath.Ext(audio)) + ".lrc"
+	// THE SIDECAR IS STAT'ED FIRST, BEFORE ANY OWNER IS RESOLVED, because a
+	// sidecar that is not there needs no owner. That ordering is what keeps the
+	// "no directory read per candidate" property honest: companionAudio falls
+	// through to a full os.ReadDir whenever its stem probes all miss, and they
+	// all miss exactly when the audio is gone -- which is the ordinary
+	// moved-by-a-reorg case. Resolving an owner first would pay a directory read
+	// per candidate for the population that has nothing to judge.
+	//
+	// Lstat, not Stat: a symlinked sidecar is out of scope for exactly the reason
+	// the walk skips one -- a link could redirect a move or a delete out of the
+	// library root. Here it reads as "no sidecar to judge", which stamps the row
+	// and retires it rather than leaving it to be re-examined every cycle.
+	fi, lerr := os.Lstat(path)
+	switch {
+	case lerr != nil && !errors.Is(lerr, fs.ErrNotExist):
+		// THE FILE IS THERE AND WE COULD NOT LOOK AT IT, which is a different
+		// fact from "it is gone" and must not be recorded as one. A permission
+		// error, an I/O error, or a briefly unavailable mount all land here, and
+		// no_sidecar is TERMINAL: it would retire the row and exempt a sidecar
+		// that plainly still exists from the unattended pass forever. Errored is
+		// retriable, so the next cycle looks again.
+		plan.Counts.Errored++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "errored"})
+		return nil
+	case lerr != nil:
+		// The overwhelmingly common case is an ordinary one: the row says a synced
+		// lyric was written, and the file is simply not there any more (deleted by
+		// hand, or moved by a library reorg -- realign's problem, not this pass's).
+		// Nothing to judge and nothing to remediate.
+		plan.Counts.NoSidecar++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "no_sidecar"})
+		return nil
+	case fi.Mode()&os.ModeSymlink != 0:
+		plan.Counts.NoSidecar++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "no_sidecar"})
+		return nil
+	}
+	// ONE SIDECAR, ONE COMPANION -- AND THE COMPANION IS THE FILE'S, NOT THE
+	// ROW'S. A directory can hold two same-stem audio files (a lossless and a
+	// lossy copy of one track, an ordinary library shape) sharing one .lrc. The
+	// sidecar was timed against ONE of them, so judging it against whichever copy
+	// a row happens to name is not a judgment about the lyric at all: the shorter
+	// copy reads categorical on a sidecar that is perfectly correct for the
+	// longer one, and quarantines or deletes it.
+	//
+	// So the DURATION JUDGED AGAINST is the resolved companion's, never
+	// c.AudioPath's. companionAudio is the walk's own resolver (lexicographically
+	// first base name, reproducing os.ReadDir's order, per #691/#801), which is
+	// what makes the sweep and `canticle revalidate` reach the SAME verdict on
+	// the same tree -- the property the CLI-preview promise rests on.
+	//
+	// DISOWNING THE ROW INSTEAD WOULD BE WORSE THAN THE BUG IT FIXED, and that is
+	// not hypothetical: it shipped in the previous revision. work_queue is unique
+	// on (artist_key, title_key), NOT on source_path, so two copies of one track
+	// collapse to ONE row -- and if that row names the copy the resolver did not
+	// pick, disowning it means the sidecar is judged by NOBODY. The row retires,
+	// the owner has no row of its own, and a lyric belonging to a different song
+	// stays on disk forever while the sweep reports convergence. Judging against
+	// the owner has no such gap: every row that reaches a real sidecar produces a
+	// real verdict.
+	judged := audio
+	if owner, ok := companionAudio(path, cache); ok {
+		judged = owner
+	}
+	// Claimed by an earlier candidate in this batch. Two rows can still reach one
+	// sidecar (two same-stem copies, or two rows sharing a source_path), and they
+	// now agree on the verdict -- but planning the move twice means the first
+	// consumes the file and the second fails "no such file", which the caller
+	// records as a genuine failed action and warns about. One move per file.
+	//
+	// Safe to skip only because the verdict no longer depends on WHICH row got
+	// here first: every row deriving this path judges against the same owner, so
+	// the claimant's verdict is the one the loser would have reached.
+	if claimed[path] {
+		plan.Counts.NoSidecar++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "no_sidecar"})
+		return nil
+	}
+	claimed[path] = true
+	// The audio file itself is not stat'ed here: durationOf stats it anyway, and
+	// a missing one resolves to unknown-duration, which fails open exactly as a
+	// cold cache does. Two stats to reach the same verdict would be a second
+	// disk touch per candidate for no added certainty.
+	before := len(plan.Findings)
+	if jerr := r.judge(ctx, site{root: c.Root, libraryID: c.LibraryID}, path, judged, plan); jerr != nil {
+		// TRANSIENT and not about this file: the duration store failed. Abandon
+		// the cycle rather than stamp the rest of the batch with verdicts a
+		// working store would have judged differently -- the stamp is one-way,
+		// so a wrong one is not something the next cycle can revisit.
+		return jerr
+	}
+	// judge's error arms (unreadable .lrc, duration-store failure) count Errored
+	// and return without a finding, because for the WALK that is right -- there
+	// is no row to retire. Here there is, and an un-retired row head-of-lines the
+	// batch forever, so give it one.
+	if len(plan.Findings) == before {
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "errored"})
+		return nil
+	}
+	plan.Findings[len(plan.Findings)-1].ID = c.ID
+	return nil
+}
+
 // walkRoot walks one root, honoring ctx cancellation between entries.
 func (r *Revalidator) walkRoot(ctx context.Context, root string, plan *Plan, cache *dirListingCache) error {
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
@@ -263,18 +479,58 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 		plan.Findings = append(plan.Findings, Finding{Path: path, Outcome: "no_audio"})
 		return
 	}
+	// The walk swallows judge's transient error: one bad row must not abandon a
+	// library the operator asked to be scanned, and there is no row to retire, so
+	// Errored (already counted) is the whole record.
+	_ = r.judge(ctx, site{root: root, libraryID: r.opts.LibraryID}, path, audio, plan)
+}
+
+// site is where a sidecar sits: the library root its quarantine layout is
+// relative to, and the library id its backup records are stamped with. The walk
+// takes both from Options (one CLI invocation is scoped to one library at a
+// time); the sweep takes them per candidate, because a single batch drawn from
+// the timing watermark can span every configured library at once.
+type site struct {
+	root      string
+	libraryID int64
+}
+
+// judge classifies one .lrc against a KNOWN companion audio file and appends its
+// finding (and any move) to plan. It is the shared core of both entry points:
+// the walk resolves the companion by probing the sidecar's stem, the sweep
+// already has it from the work_queue row, and from here on the two are
+// identical. One predicate, one set of counts, one move vocabulary -- a second
+// copy here is precisely how an unattended pass would drift into treating a
+// verdict differently from the command an operator uses to preview it.
+// TWO FAILURES WITH DIFFERENT BLAST RADII, and separating them is why this
+// returns an error at all. An unreadable or unparsable .lrc concerns ONE FILE,
+// so it is counted as Errored and the pass continues. A duration-store failure
+// concerns THE WHOLE BATCH -- the database is unhappy, and it says nothing about
+// any particular file -- so it is returned, and the sweep abandons the cycle
+// instead of stamping a batch of rows with a verdict a working store would have
+// judged differently.
+//
+// Note what the caller does with Errored: it does NOT retire the row. An
+// unreadable file is equally what a transient I/O error or a briefly unavailable
+// mount looks like, and the stamp is one-way, so the sweep leaves such a row
+// unstamped and re-judges it next cycle rather than exempting the sidecar from
+// the unattended pass forever. A genuinely corrupt .lrc is therefore retried
+// rather than retired: one recoverable batch slot, against one unrecoverable
+// wrongly-retired file. The walk collapses both failures into Errored, exactly
+// as before: it has no rows to retire, so the distinction buys it nothing.
+func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, plan *Plan) error {
 	plan.Counts.Scanned++
 
 	duration, derr := r.durationOf(ctx, audio)
 	if derr != nil {
 		plan.Counts.Errored++
-		return
+		return derr
 	}
 
 	outcome, mag, _, err := lyrics.EvaluateLRCFile(path, duration)
 	if err != nil {
 		plan.Counts.Errored++
-		return
+		return nil
 	}
 	f := Finding{Path: path, Outcome: outcome, Duration: duration, Overrun: mag.OverrunSeconds, Ratio: mag.Ratio}
 
@@ -288,7 +544,15 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 		plan.Counts.UnknownDuration++
 	case timing.MisSynced:
 		plan.Counts.MisSynced++
-		mv, mok := r.misSyncedMove(root, path, audio)
+		mv, mok, merr := r.misSyncedMove(s, path, audio)
+		if merr != nil {
+			// The verdict stands but its remediation could not be built. Count it
+			// Errored and append NO finding: the caller turns a finding-less
+			// candidate into a retriable "errored" one, so the row stays in the
+			// backlog rather than retiring with the offending .lrc still on disk.
+			plan.Counts.Errored++
+			return nil
+		}
 		if mok {
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
@@ -306,7 +570,12 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 		// arm the verdict fell to default and was counted Errored, which never
 		// remediates -- so the existing corpus would have stayed untouched.
 		plan.Counts.Degenerate++
-		mv, mok := r.misSyncedMove(root, path, audio)
+		mv, mok, merr := r.misSyncedMove(s, path, audio)
+		if merr != nil {
+			// Same rail as the MisSynced arm above.
+			plan.Counts.Errored++
+			return nil
+		}
 		if mok {
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
@@ -314,7 +583,7 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 	case timing.Categorical:
 		plan.Counts.Categorical++
 		if r.opts.CategoricalAction != ActionOff {
-			mv := r.removalMove(root, path, r.opts.CategoricalAction)
+			mv := r.removalMove(s, path, r.opts.CategoricalAction)
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
 		}
@@ -323,6 +592,7 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 		plan.Counts.Errored++
 	}
 	plan.Findings = append(plan.Findings, f)
+	return nil
 }
 
 // misSyncedMove builds the move for a MisSynced (or Degenerate) .lrc according
@@ -333,24 +603,33 @@ func (r *Revalidator) classify(ctx context.Context, root, path string, plan *Pla
 // what the accept-time guard would have written. A lyric that flattens to
 // nothing (all decorative) has no words worth keeping, so it falls through to
 // plain removal rather than writing an empty file.
-func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, bool) {
+func (r *Revalidator) misSyncedMove(s site, path, audio string) (realign.Move, bool, error) {
 	switch r.opts.MisSyncedAction {
 	case ActionOff:
 		// Classified and counted by the caller; nothing planned. The file is left
-		// exactly as it is.
-		return realign.Move{}, false
+		// exactly as it is. NOT an error: this is the operator asking to see the
+		// verdict without acting on it, so the row is settled and retires.
+		return realign.Move{}, false, nil
 	case ActionQuarantine, ActionPurge:
-		return r.removalMove(root, path, r.opts.MisSyncedAction), true
+		return r.removalMove(s, path, r.opts.MisSyncedAction), true, nil
 	}
 	synced, err := lyrics.ReadSyncedLRC(path)
 	if err != nil {
-		return realign.Move{}, false
+		// COULD NOT READ THE WORDS, so no demotion can be planned -- and this is
+		// NOT the same as ActionOff, which is why it returns an error rather than
+		// a bare false. The verdict stands (the file overran), but the
+		// remediation could not be built, so a caller that treated this as
+		// "nothing to do" would stamp the row terminally and leave the offending
+		// .lrc in place forever. EvaluateLRCFile read this same file moments
+		// ago, so a failure here means it changed underneath us or the read
+		// failed transiently -- exactly the case worth retrying.
+		return realign.Move{}, false, fmt.Errorf("revalidate: read lyric for demotion: %w", err)
 	}
 	body := lyrics.PlainBody(synced)
 	if body == "" {
 		// Nothing worth keeping, so this degenerates to a plain removal -- which
 		// honors the legacy --purge by resolving to ActionPurge.
-		return r.removalMove(root, path, r.demoteRemoval), true
+		return r.removalMove(s, path, r.demoteRemoval), true, nil
 	}
 	// DEMOTE IS TWO HALVES: write the words as .txt, then get rid of the .lrc.
 	// Which flavor that second half takes is what --purge decides, and it must be
@@ -359,7 +638,7 @@ func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, boo
 	// which refuses an empty target, so the .txt was rolled back and the .lrc
 	// left in place. `revalidate --purge --apply` therefore remediated NOTHING on
 	// this arm and reported a failure per file.
-	mv := r.removalMove(root, path, r.demoteRemoval)
+	mv := r.removalMove(s, path, r.demoteRemoval)
 	if mv.Kind == realign.KindPurge {
 		// Write the words, then unlink rather than move aside. realign's demote
 		// arm is move-based by construction, so the two steps are expressed as a
@@ -371,18 +650,18 @@ func (r *Revalidator) misSyncedMove(root, path, audio string) (realign.Move, boo
 	}
 	mv.TextPath = strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
 	mv.TextBody = body
-	return mv, true
+	return mv, true, nil
 }
 
 // removalMove builds the quarantine (default) or purge (opt-in) action for a
 // .lrc. Quarantine preserves the file's path relative to root under
 // QuarantineDir, so two identically-named sidecars from different albums cannot
 // collide there.
-func (r *Revalidator) removalMove(root, path string, action Action) realign.Move {
+func (r *Revalidator) removalMove(s site, path string, action Action) realign.Move {
 	mv := realign.Move{
 		Orphan:    path,
 		Method:    "revalidate",
-		LibraryID: r.opts.LibraryID,
+		LibraryID: s.libraryID,
 		Eligible:  true,
 		Kind:      realign.KindQuarantine,
 	}
@@ -398,19 +677,68 @@ func (r *Revalidator) removalMove(root, path string, action Action) realign.Move
 		mv.Target = ""
 		return mv
 	}
-	mv.Target = quarantineTarget(r.opts.QuarantineDir, root, path)
+	mv.Target = quarantineTarget(r.opts.QuarantineDir, s.root, path)
 	return mv
 }
 
-// quarantineTarget maps a sidecar under root to its place under quarantineDir.
-// A path that is somehow not under root falls back to its base name, which the
-// clobber-safe rename in realign still refuses to overwrite.
+// quarantineTarget maps a sidecar under root to its place under quarantineDir,
+// preserving its path relative to root so two same-named sidecars from
+// different albums cannot collide there.
+//
+// THE FALLBACK PRESERVES THE PATH SHAPE, NOT JUST THE FILENAME, and that is a
+// correctness property rather than tidiness. It used to degrade to
+// filepath.Base, which is fine for ONE stray sidecar and wrong for a
+// population: the serve sweep hands an EMPTY root for any candidate under no
+// configured library (a removed library row, an edited mount path, a relative
+// source_path -- none of them rare, and none of them one file). Every such
+// sidecar then mapped to <quarantineDir>/<basename>, so the first one moved and
+// every later one collided. The clobber-safe rename correctly refuses the
+// collision, but the sweep reads that refusal as a FAILED ACTION and
+// deliberately leaves the row unstamped to retry -- so the row returns at the
+// head of the oldest-first batch on every cycle, forever, occupying a budget
+// slot and starving the rest of the backlog. That is exactly the head-of-line
+// stall the convergence rail exists to prevent, reintroduced through the
+// quarantine layout.
+//
+// Falling back to the FULL path (its separators preserved, its root marker and
+// any volume name stripped so the join cannot escape quarantineDir) keeps two
+// distinct sources distinct, so each lands once and the retry never repeats.
 func quarantineTarget(quarantineDir, root, path string) string {
 	rel, err := filepath.Rel(root, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		rel = filepath.Base(path)
+	if root == "" || err != nil || strings.HasPrefix(rel, "..") {
+		rel = containedRel(path)
 	}
 	return filepath.Join(quarantineDir, rel)
+}
+
+// containedRel flattens an arbitrary source path into a relative one that can
+// only ever land INSIDE the directory it is joined onto.
+//
+// TRIMMING A LEADING SEPARATOR IS NOT ENOUGH, which is what the containment
+// test caught: "../../etc/passwd.lrc" has no leading separator to trim, and
+// filepath.Join RESOLVES the traversal, so joining it onto the quarantine root
+// walks out to /etc. Every ".." segment has to be DROPPED, not merely cleaned.
+// The paths here come from a database column rather than from a directory walk,
+// so a stored path with traversal in it is a case that must be handled, not one
+// that cannot arise.
+func containedRel(path string) string {
+	cleaned := filepath.Clean(path)
+	cleaned = strings.TrimPrefix(cleaned, filepath.VolumeName(cleaned))
+	var kept []string
+	for _, seg := range strings.Split(filepath.ToSlash(cleaned), "/") {
+		// Drop empties (a leading separator, a doubled one), "." and every
+		// traversal segment. What survives is pure downward path shape.
+		if seg == "" || seg == "." || seg == ".." {
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	if len(kept) == 0 {
+		// Nothing usable survived (a bare "/" or "..") -- there is no shape to
+		// preserve, so fall back to something non-empty and non-escaping.
+		return "unrooted"
+	}
+	return filepath.Join(kept...)
 }
 
 // durationOf resolves the exact duration for an audio file from the injected
