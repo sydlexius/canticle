@@ -446,3 +446,158 @@ func TestPlanCandidatesClaimsASidecarOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanCandidatesJudgesAgainstTheOwnerNotTheRow is the arbitration's OWN
+// test, and it is deliberately built so the claim map cannot satisfy it: there
+// is exactly ONE candidate, so nothing is ever claimed by an earlier row.
+//
+// This is the shape the previous revision got wrong in both directions. work_queue
+// is unique on (artist_key, title_key), NOT on source_path, so two same-stem
+// copies of one track collapse to ONE row -- and that row may well name the copy
+// the resolver did not pick. Judging against the ROW's audio destroys a correct
+// sidecar (the shorter copy reads categorical on a lyric timed for the longer);
+// DISOWNING the row instead means the sidecar is judged by nobody at all, since
+// the owner has no row of its own. Judging against the resolved OWNER is the only
+// option with neither failure.
+func TestPlanCandidatesJudgesAgainstTheOwnerNotTheRow(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "album")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"track.flac", "track.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("not really audio"), 0o600); err != nil {
+			t.Fatalf("write audio: %v", err)
+		}
+	}
+	lrc := filepath.Join(dir, "track.lrc")
+	// Last cue 4:50 (290s): correct for the 300s owner, categorical against the
+	// 99s copy the row happens to name.
+	if err := os.WriteFile(lrc, []byte("[00:10.00]alpha\n[04:50.00]beta\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	durations := map[string]int{
+		filepath.Join(dir, "track.flac"): 300,
+		filepath.Join(dir, "track.mp3"):  99,
+	}
+	r, _ := newRevalidator(t, root, func(_ context.Context, p string, _, _ int64) (int, bool, error) {
+		return durations[p], durations[p] > 0, nil
+	}, nil)
+
+	// ONE row, and it names the NON-owner (companionAudio picks track.flac).
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{
+		{ID: 1, AudioPath: filepath.Join(dir, "track.mp3"), Root: root},
+	})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if len(plan.Moves) != 0 {
+		t.Errorf("planned %d move(s) against a sidecar correctly timed for its owner; judging against the row's own audio destroys it", len(plan.Moves))
+	}
+	if len(plan.Findings) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(plan.Findings))
+	}
+	if got := plan.Findings[0].Outcome; got != timing.Ok {
+		t.Errorf("outcome = %q, want %q: the verdict must be the owner's", got, timing.Ok)
+	}
+	if got := plan.Findings[0].Duration; got != 300 {
+		t.Errorf("judged against %ds, want the owner's 300s", got)
+	}
+}
+
+// TestPlanCandidatesJudgesASidecarWhoseOwnerHasNoRow is the other half, and it
+// is the regression test for a defect that traded a destroyed file for an
+// invisible one: the previous revision DISOWNED a row whose audio was not the
+// resolver's pick, stamped it, and retired it. With work_queue unique on
+// (artist_key, title_key) the owner frequently has no row of its own, so a
+// sidecar holding a different song's words stayed on disk forever while the
+// sweep reported convergence. It must reach the same verdict the CLI walk does.
+func TestPlanCandidatesJudgesASidecarWhoseOwnerHasNoRow(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "album")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"track.flac", "track.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("not really audio"), 0o600); err != nil {
+			t.Fatalf("write audio: %v", err)
+		}
+	}
+	// Last cue 10:00 against trackSeconds (120): another song's words entirely.
+	if err := os.WriteFile(filepath.Join(dir, "track.lrc"), []byte("[00:10.00]alpha\n[10:00.00]beta\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	r, _ := newRevalidator(t, root, fixedDuration(), nil)
+
+	// The only row names track.mp3; companionAudio picks track.flac.
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{
+		{ID: 42, AudioPath: filepath.Join(dir, "track.mp3"), Root: root},
+	})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if plan.Counts.Categorical != 1 {
+		t.Errorf("Categorical = %d, want 1: a sidecar whose owner has no row would be judged by nobody, forever", plan.Counts.Categorical)
+	}
+	if len(plan.Moves) != 1 {
+		t.Errorf("planned %d move(s), want 1: the bad sidecar must be remediated", len(plan.Moves))
+	}
+
+	// And the sweep must agree with the CLI walk on this exact tree -- that
+	// agreement is what the "revalidate previews what the sweep will do" promise
+	// in the README rests on.
+	walk, werr := r.Plan(context.Background())
+	if werr != nil {
+		t.Fatalf("Plan: %v", werr)
+	}
+	if len(walk.Moves) != len(plan.Moves) {
+		t.Errorf("walk planned %d move(s) but the sweep planned %d on the same tree; the CLI preview no longer predicts the sweep",
+			len(walk.Moves), len(plan.Moves))
+	}
+}
+
+// TestPlanCandidatesReadsNoDirectoryForTheCommonCases pins the I/O SHAPE of a
+// cycle, which is the property that makes an unattended sweep safe on a
+// spun-down array (#684/#685).
+//
+// The ordering inside judgeCandidate is what earns it: the sidecar is stat'ed
+// FIRST, so a candidate whose sidecar is already gone -- the ordinary
+// moved-by-a-reorg case, and the bulk of a stale backlog -- returns before any
+// owner is resolved. Resolving the owner first would pay a full os.ReadDir per
+// candidate for exactly the population with nothing to judge, since
+// companionAudio falls through to a listing precisely when its stem probes all
+// miss, and they all miss when the audio is gone.
+func TestPlanCandidatesReadsNoDirectoryForTheCommonCases(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "album")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A candidate with a sidecar AND its companion present.
+	if err := os.WriteFile(filepath.Join(dir, "present.mp3"), []byte("not really audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "present.lrc"), []byte("[00:01.00]alpha\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		audio string
+	}{
+		{"sidecar already gone", filepath.Join(dir, "vanished.mp3")},
+		{"sidecar and companion present", filepath.Join(dir, "present.mp3")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := newDirListingCache()
+			r, _ := newRevalidator(t, root, fixedDuration(), nil)
+			var plan Plan
+			if err := r.judgeCandidate(context.Background(), Candidate{ID: 1, AudioPath: tc.audio, Root: root}, &plan, cache, map[string]bool{}); err != nil {
+				t.Fatalf("judgeCandidate: %v", err)
+			}
+			if got := cache.Reads(); got != 0 {
+				t.Errorf("issued %d directory read(s); a batch of these would wake the library array every cycle", got)
+			}
+		})
+	}
+}

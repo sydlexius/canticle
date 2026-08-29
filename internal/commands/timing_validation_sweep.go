@@ -366,10 +366,12 @@ func (j *timingSweepJob) candidatesFor(ctx context.Context, items []queue.WorkIt
 			}
 		}
 		// A row under no configured root keeps an empty Root, which
-		// quarantineTarget degrades to the sidecar's base name for -- still
-		// inside the quarantine directory, still clobber-safe on rename. Judging
-		// it is right: the file exists and the verdict is about its content, not
-		// its location.
+		// quarantineTarget degrades to a flattened, containment-checked copy of
+		// the FULL path for -- inside the quarantine directory, and distinct per
+		// source, so two rootless sidecars cannot collide (a base-name fallback
+		// did collide, and a refused move is retried forever). Judging it is
+		// right: the file exists and the verdict is about its content, not its
+		// location.
 		candidates = append(candidates, c)
 	}
 	return candidates, nil

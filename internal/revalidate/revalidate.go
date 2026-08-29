@@ -184,7 +184,16 @@ type Counts struct {
 // 60k-file library every cycle keeps the array awake to re-discover files it
 // already knows about, the behavior #684/#685 exist to remove. A row already
 // records its audio path, so the sidecar is DERIVED from it rather than
-// discovered -- no directory read anywhere in a cycle.
+// discovered: one stat settles whether it is there.
+//
+// A candidate that HAS a sidecar then costs the companion probe as well --
+// bounded stats across the supported extensions, and a single directory read
+// only in the case where every one of those misses (a sidecar sitting beside no
+// same-stem audio at all). A candidate whose sidecar is already gone, the
+// ordinary moved-by-a-reorg case, pays none of that: judgeCandidate stats the
+// sidecar FIRST and returns before resolving any owner. So a cycle still costs
+// its BATCH rather than the size of the library, which is the property that
+// matters on a spun-down array.
 type Candidate struct {
 	// ID is the work_queue row, carried through onto the Finding so the caller
 	// can stamp the timing watermark for exactly the rows it judged.
@@ -329,34 +338,14 @@ func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Pla
 		return nil
 	}
 	path := strings.TrimSuffix(audio, filepath.Ext(audio)) + ".lrc"
-	// ONE SIDECAR IS JUDGED AGAINST ONE COMPANION, and this arbitration is what
-	// makes that true. The derivation above is per-ROW, so a directory holding
-	// two same-stem audio files (a lossless and a lossy copy of one track, a real
-	// library shape) yields TWO backlog rows that derive the SAME .lrc -- and
-	// each would judge it against its OWN duration. The shorter file's row then
-	// reads categorical on a sidecar correctly timed for the longer one and
-	// quarantines it, silently and unattended; under on_categorical = "purge" it
-	// is deleted. The verdict would be decided by which copy happened to be
-	// enqueued, which is not a judgment about the lyric at all.
+	// THE SIDECAR IS STAT'ED FIRST, BEFORE ANY OWNER IS RESOLVED, because a
+	// sidecar that is not there needs no owner. That ordering is what keeps the
+	// "no directory read per candidate" property honest: companionAudio falls
+	// through to a full os.ReadDir whenever its stem probes all miss, and they
+	// all miss exactly when the audio is gone -- which is the ordinary
+	// moved-by-a-reorg case. Resolving an owner first would pay a directory read
+	// per candidate for the population that has nothing to judge.
 	//
-	// companionAudio is the walk's own resolver and picks deterministically (the
-	// lexicographically-first base name, reproducing os.ReadDir's order, per
-	// #691/#801). Deferring to it means both paths agree on which audio a sidecar
-	// belongs to, so the CLI preview keeps predicting the sweep. The row whose
-	// audio is NOT the chosen companion contributes no verdict and no move -- but
-	// it IS still stamped via the no_sidecar finding below, so it retires from the
-	// backlog rather than head-of-lining the batch forever.
-	//
-	// Disowned (another same-stem file is the sidecar's companion) or already
-	// claimed by an earlier candidate in this batch. Either way this row
-	// contributes no verdict and no move -- but it IS still stamped, so it
-	// retires from the backlog rather than head-of-lining it forever.
-	if owner, ok := companionAudio(path, cache); (ok && owner != audio) || claimed[path] {
-		plan.Counts.NoSidecar++
-		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "no_sidecar"})
-		return nil
-	}
-	claimed[path] = true
 	// Lstat, not Stat: a symlinked sidecar is out of scope for exactly the reason
 	// the walk skips one -- a link could redirect a move or a delete out of the
 	// library root. Here it reads as "no sidecar to judge", which stamps the row
@@ -376,12 +365,54 @@ func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Pla
 		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "no_sidecar"})
 		return nil
 	}
+	// ONE SIDECAR, ONE COMPANION -- AND THE COMPANION IS THE FILE'S, NOT THE
+	// ROW'S. A directory can hold two same-stem audio files (a lossless and a
+	// lossy copy of one track, an ordinary library shape) sharing one .lrc. The
+	// sidecar was timed against ONE of them, so judging it against whichever copy
+	// a row happens to name is not a judgment about the lyric at all: the shorter
+	// copy reads categorical on a sidecar that is perfectly correct for the
+	// longer one, and quarantines or deletes it.
+	//
+	// So the DURATION JUDGED AGAINST is the resolved companion's, never
+	// c.AudioPath's. companionAudio is the walk's own resolver (lexicographically
+	// first base name, reproducing os.ReadDir's order, per #691/#801), which is
+	// what makes the sweep and `canticle revalidate` reach the SAME verdict on
+	// the same tree -- the property the CLI-preview promise rests on.
+	//
+	// DISOWNING THE ROW INSTEAD WOULD BE WORSE THAN THE BUG IT FIXED, and that is
+	// not hypothetical: it shipped in the previous revision. work_queue is unique
+	// on (artist_key, title_key), NOT on source_path, so two copies of one track
+	// collapse to ONE row -- and if that row names the copy the resolver did not
+	// pick, disowning it means the sidecar is judged by NOBODY. The row retires,
+	// the owner has no row of its own, and a lyric belonging to a different song
+	// stays on disk forever while the sweep reports convergence. Judging against
+	// the owner has no such gap: every row that reaches a real sidecar produces a
+	// real verdict.
+	judged := audio
+	if owner, ok := companionAudio(path, cache); ok {
+		judged = owner
+	}
+	// Claimed by an earlier candidate in this batch. Two rows can still reach one
+	// sidecar (two same-stem copies, or two rows sharing a source_path), and they
+	// now agree on the verdict -- but planning the move twice means the first
+	// consumes the file and the second fails "no such file", which the caller
+	// records as a genuine failed action and warns about. One move per file.
+	//
+	// Safe to skip only because the verdict no longer depends on WHICH row got
+	// here first: every row deriving this path judges against the same owner, so
+	// the claimant's verdict is the one the loser would have reached.
+	if claimed[path] {
+		plan.Counts.NoSidecar++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "no_sidecar"})
+		return nil
+	}
+	claimed[path] = true
 	// The audio file itself is not stat'ed here: durationOf stats it anyway, and
 	// a missing one resolves to unknown-duration, which fails open exactly as a
 	// cold cache does. Two stats to reach the same verdict would be a second
 	// disk touch per candidate for no added certainty.
 	before := len(plan.Findings)
-	if jerr := r.judge(ctx, site{root: c.Root, libraryID: c.LibraryID}, path, audio, plan); jerr != nil {
+	if jerr := r.judge(ctx, site{root: c.Root, libraryID: c.LibraryID}, path, judged, plan); jerr != nil {
 		// TRANSIENT and not about this file: the duration store failed. Abandon
 		// the cycle rather than stamp the rest of the batch with verdicts a
 		// working store would have judged differently -- the stamp is one-way,
