@@ -185,9 +185,16 @@ func TestPlanCandidatesQuarantineIsRelativeToTheCandidateRoot(t *testing.T) {
 	// What must NOT happen is one of them being computed against the other's
 	// root, which would put a file from library B under library A's tree.
 	for _, mv := range plan.Moves {
-		rel, rerr := filepath.Rel(quarantine, mv.Target)
-		if rerr != nil || rel == "" {
+		// A PREFIX CHECK, not filepath.Rel alone: Rel returns a non-empty result
+		// and a nil error for a target OUTSIDE the root ("../etc/x"), so the
+		// Rel-only form passed even when quarantineTarget escaped -- and it would
+		// equally pass a target computed against the other candidate's root.
+		if !strings.HasPrefix(mv.Target, quarantine+string(filepath.Separator)) {
 			t.Fatalf("target %q is not under the quarantine root %q", mv.Target, quarantine)
+		}
+		rel, rerr := filepath.Rel(quarantine, mv.Target)
+		if rerr != nil || strings.HasPrefix(rel, "..") {
+			t.Fatalf("target %q escapes the quarantine root %q (rel %q)", mv.Target, quarantine, rel)
 		}
 	}
 	if plan.Moves[0].LibraryID != 11 || plan.Moves[1].LibraryID != 22 {

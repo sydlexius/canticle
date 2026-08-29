@@ -842,3 +842,113 @@ func TestBankingDurationLookupResolvesUntaggedAudio(t *testing.T) {
 		t.Errorf("duration = %d, want 10", seconds)
 	}
 }
+
+// TestTimingOutcomeIsTerminalKeepsErroredRetriable separates a fact about the
+// FILE from a fact about the ATTEMPT.
+//
+// The stamp is one-way: it removes a row from ListTimingBacklog forever. Every
+// verdict but one settles the file -- ok/mis_synced/categorical/degenerate are
+// judgments, and no_audio/no_sidecar are filesystem facts. "errored" is neither:
+// judge counts it when the .lrc cannot be read or parsed, which is equally what
+// a temporarily unavailable mount or a transient I/O error looks like. Stamping
+// it means one bad moment permanently exempts a sidecar from the unattended
+// pass, recoverable only by running the CLI by hand.
+func TestTimingOutcomeIsTerminalKeepsErroredRetriable(t *testing.T) {
+	settled := []timing.TimingOutcome{
+		timing.Ok, timing.MisSynced, timing.Categorical, timing.Degenerate,
+		timing.UnknownDuration, "no_audio", "no_sidecar",
+	}
+	for _, outcome := range settled {
+		if !timingOutcomeIsTerminal(revalidate.Finding{Outcome: outcome}) {
+			t.Errorf("outcome %q was treated as retriable; it is a settled fact and its row must retire, or it holds a batch slot forever", outcome)
+		}
+	}
+	if timingOutcomeIsTerminal(revalidate.Finding{Outcome: "errored"}) {
+		t.Error("an errored finding was stamped as terminal; a transient read failure would exempt that sidecar from the sweep permanently")
+	}
+}
+
+// TestRunCycleLeavesAnErroredRowUnstamped is the end-to-end half: an unreadable
+// .lrc must stay in the backlog for the next cycle rather than being retired.
+func TestRunCycleLeavesAnErroredRowUnstamped(t *testing.T) {
+	ctx := context.Background()
+	job, q, root, lrc := sweepFixture(t, nil)
+
+	// A .lrc the parser cannot make sense of: no cue carries a timestamp, so
+	// EvaluateLRCFile fails and judge counts Errored.
+	if err := os.Remove(lrc); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.Mkdir(lrc, 0o750); err != nil {
+		// A directory where the sidecar should be: unreadable as a file.
+		t.Fatalf("mkdir: %v", err)
+	}
+	_ = root
+
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Counts.Errored != 1 {
+		t.Fatalf("Errored = %d, want 1; the fixture did not actually error, so this test proves nothing", res.Counts.Errored)
+	}
+	if res.Stamped != 0 {
+		t.Errorf("Stamped = %d, want 0: an errored row must stay retriable", res.Stamped)
+	}
+	remaining, cerr := q.CountTimingBacklog(ctx)
+	if cerr != nil {
+		t.Fatalf("count: %v", cerr)
+	}
+	if remaining != 1 {
+		t.Errorf("backlog = %d, want 1: the row was retired on a transient failure and only the CLI could bring it back", remaining)
+	}
+}
+
+// TestRunCycleSkipsWhenALibraryStartsContainingTheQuarantineRoot pins the
+// containment check against the LIVE library set rather than the startup one.
+//
+// Libraries are mutable at runtime. The roots feeding Validate are resolved once
+// at construction, so an operator who adds a root that CONTAINS
+// <db-dir>/quarantine while serve is running would keep passing a check made
+// against a stale list -- and the sweep would move rejected sidecars INTO the
+// music library, where the watcher sees them as new files and a later cycle
+// re-quarantines its own output, deeper each time, until the daemon restarts.
+//
+// The cycle must SKIP rather than remediate: nothing is stamped, so every row
+// stays in the backlog and is re-judged once the configuration is sane again.
+func TestRunCycleSkipsWhenALibraryStartsContainingTheQuarantineRoot(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, lrc := sweepFixture(t, nil)
+
+	// Add a library root that contains the quarantine directory, exactly as an
+	// operator could at runtime. The job was constructed before this existed.
+	quarantineParent := filepath.Dir(job.opts.QuarantineDir)
+	if _, err := job.libs.Add(ctx, quarantineParent, "engulfing", models.LibrarySettings{}); err != nil {
+		t.Fatalf("add library: %v", err)
+	}
+
+	before, err := q.CountTimingBacklog(ctx)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Remedied != 0 {
+		t.Errorf("Remedied = %d, want 0: the sweep remediated into a directory now inside a library", res.Remedied)
+	}
+	if res.Stamped != 0 {
+		t.Errorf("Stamped = %d, want 0: a skipped cycle must retire nothing", res.Stamped)
+	}
+	if _, serr := os.Stat(lrc); serr != nil {
+		t.Errorf("the sidecar was moved despite an unsafe configuration: %v", serr)
+	}
+	after, err := q.CountTimingBacklog(ctx)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if after != before {
+		t.Errorf("backlog %d -> %d; a skipped cycle must leave every row to be re-judged", before, after)
+	}
+}

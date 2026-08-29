@@ -83,9 +83,12 @@ type timingSweepResult struct {
 // startup, so a cycle opens no database, resolves no config, and re-reads no
 // library list.
 type timingSweepJob struct {
-	q     *queue.DBQueue
-	libs  *library.Repo
-	rev   *revalidate.Revalidator
+	q    *queue.DBQueue
+	libs *library.Repo
+	rev  *revalidate.Revalidator
+	// opts is the resolved option set the Revalidator was built from, kept so a
+	// cycle can re-run Validate against the CURRENT library roots.
+	opts  revalidate.Options
 	ra    *realign.Realigner
 	batch int
 	// backupPath is the JSONL trail every applied action is recorded to before
@@ -145,6 +148,7 @@ func newTimingSweepJob(ctx context.Context, sqlDB *sql.DB, cfg config.Config) (*
 		q:          queue.NewDBQueue(sqlDB),
 		libs:       libs,
 		rev:        revalidate.New(bankingDurationLookup(audiodur.New(sqlDB, scanner.DurationReaderVersion)), opts),
+		opts:       opts,
 		ra:         realign.New(libs, cfg.Realign),
 		batch:      batch,
 		backupPath: timingSweepBackupPath(cfg),
@@ -291,9 +295,28 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 	if len(items) == 0 {
 		return res, nil
 	}
-	candidates, err := j.candidatesFor(ctx, items)
+	candidates, roots, err := j.candidatesFor(ctx, items)
 	if err != nil {
 		return res, err
+	}
+	// RE-CHECK CONTAINMENT AGAINST THE LIVE LIBRARY SET, not the startup
+	// snapshot. The roots are resolved once at construction, but libraries are
+	// mutable at runtime: an operator who adds a root that CONTAINS
+	// <db-dir>/quarantine while serve is running would otherwise keep passing a
+	// check made against a stale list, and the sweep would move rejected
+	// sidecars INTO the music library -- where the watcher sees them as new
+	// files and a later cycle re-judges and re-quarantines its own output,
+	// deeper each time, until the daemon restarts.
+	//
+	// A failure SKIPS THE CYCLE rather than remediating anyway: nothing is
+	// stamped, so every row stays in the backlog and the next cycle re-judges
+	// it once the configuration is sane. Judging costs a re-read; moving a file
+	// into the wrong place does not undo.
+	live := j.opts
+	live.Roots = roots
+	if verr := live.Validate(); verr != nil {
+		slog.Error("timing validation sweep: the library set changed and the configuration is no longer safe; skipping this cycle", "error", verr)
+		return res, nil
 	}
 	plan, err := j.rev.PlanCandidates(ctx, candidates)
 	if err != nil {
@@ -310,6 +333,10 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 
 	for _, f := range plan.Findings {
 		if f.ID == 0 {
+			continue
+		}
+		if !timingOutcomeIsTerminal(f) {
+			// Transient: the attempt failed, not the file. Re-judged next cycle.
 			continue
 		}
 		if _, bad := failedPaths[f.Path]; bad {
@@ -346,10 +373,14 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 // backlog query is ordered oldest-first across the whole queue, not scoped to
 // one root. The root anchors the quarantine layout, so getting it wrong would
 // flatten two libraries' identically-named sidecars into one directory.
-func (j *timingSweepJob) candidatesFor(ctx context.Context, items []queue.WorkItem) ([]revalidate.Candidate, error) {
+func (j *timingSweepJob) candidatesFor(ctx context.Context, items []queue.WorkItem) ([]revalidate.Candidate, []string, error) {
 	libs, err := j.libs.List(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	roots := make([]string, 0, len(libs))
+	for _, l := range libs {
+		roots = append(roots, l.Path)
 	}
 	candidates := make([]revalidate.Candidate, 0, len(items))
 	for _, it := range items {
@@ -374,7 +405,7 @@ func (j *timingSweepJob) candidatesFor(ctx context.Context, items []queue.WorkIt
 		// location.
 		candidates = append(candidates, c)
 	}
-	return candidates, nil
+	return candidates, roots, nil
 }
 
 // apply runs the planned moves through realign's one apply path and returns the
@@ -413,6 +444,28 @@ func (j *timingSweepJob) apply(moves []realign.Move, res *timingSweepResult) map
 		res.Remedied++
 	}
 	return failed
+}
+
+// timingOutcomeIsTerminal reports whether a finding settles a row for good.
+//
+// EVERY OTHER VERDICT HERE IS A FACT ABOUT THE FILE; "errored" IS A FACT ABOUT
+// THE ATTEMPT, and conflating the two retires a sidecar that nothing is wrong
+// with. judge counts Errored when the .lrc cannot be read or parsed -- which is
+// usually permanent (a corrupt file) but is equally what a temporarily
+// unavailable mount, a transient I/O error, or a file being rewritten right then
+// looks like. Since the stamp is one-way and removes the row from
+// ListTimingBacklog forever, stamping that case means a single bad moment
+// permanently exempts a sidecar from an unattended pass, recoverable only by
+// running the CLI by hand.
+//
+// Left unstamped it is simply re-judged next cycle, which is idempotent and
+// cheap. That does mean a genuinely corrupt .lrc is retried on every cycle
+// rather than retired -- the deliberate trade, because a batch slot spent
+// re-reading one unparsable file is recoverable, and a wrongly-retired sidecar
+// is not. The row does not head-of-line the batch: it is one slot, not a
+// growing set, and an operator sees it in the errored count.
+func timingOutcomeIsTerminal(f revalidate.Finding) bool {
+	return f.Outcome != "errored"
 }
 
 // timingRecordFor maps a finding onto the row stamp.
