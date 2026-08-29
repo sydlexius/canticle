@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -950,5 +951,43 @@ func TestRunCycleSkipsWhenALibraryStartsContainingTheQuarantineRoot(t *testing.T
 	}
 	if after != before {
 		t.Errorf("backlog %d -> %d; a skipped cycle must leave every row to be re-judged", before, after)
+	}
+}
+
+// TestLibraryRootsDropsABlankPath guards a check that would fail SILENTLY and
+// PERMANENTLY if it broke.
+//
+// filepath.Abs("") returns the process working directory rather than an error,
+// so a blank library path would have Validate compare the quarantine root
+// against the CWD. Under the container image that is the likeliest arrangement
+// to collide -- working directory /config with the database beside it, so
+// <db-dir>/quarantine sits under the CWD -- and because containment is now
+// re-checked every cycle, the sweep would skip EVERY cycle for the life of the
+// daemon over a root that does not exist.
+//
+// Both writers reject a blank path today, so this is a guard, not a live bug.
+// It is cheap, and the failure it prevents leaves no trace beyond one log line.
+func TestLibraryRootsDropsABlankPath(t *testing.T) {
+	got := libraryRoots([]models.Library{
+		{Path: "/music"},
+		{Path: ""},
+		{Path: "   "},
+		{Path: "/classical"},
+	})
+	want := []string{"/music", "/classical"}
+	if len(got) != len(want) {
+		t.Fatalf("roots = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("roots[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	// The point of the drop: a blank root resolves to the CWD, which would make
+	// the containment check compare against a directory nobody configured.
+	for _, r := range got {
+		if strings.TrimSpace(r) == "" {
+			t.Error("a blank root survived; filepath.Abs would resolve it to the process working directory")
+		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/realign"
 	"github.com/sydlexius/canticle/internal/revalidate"
@@ -251,8 +252,30 @@ func timingSweepRoots(ctx context.Context, libs *library.Repo) []string {
 		slog.Warn("timing validation sweep: could not list libraries; the quarantine-containment check will not run this cycle", "error", err)
 		return nil
 	}
+	return libraryRoots(all)
+}
+
+// libraryRoots projects library rows onto the root list Validate consumes,
+// dropping any whose path is blank.
+//
+// AN EMPTY ROOT DOES NOT FAIL THE CHECK, IT CORRUPTS IT. filepath.Abs("")
+// returns the PROCESS WORKING DIRECTORY rather than an error, so a blank row
+// would silently have Validate compare the quarantine dir against the CWD. Under
+// the container image that is the likeliest arrangement to collide: with the
+// working directory at /config and the database beside it, <db-dir>/quarantine
+// sits under the CWD, so containment "fails" and the sweep skips -- and since
+// the check now runs per cycle, it would skip EVERY cycle, for the life of the
+// daemon, over a root that does not exist.
+//
+// Both writers (library.Add and library.Update) reject a blank path, so this is
+// a guard rather than a live defect. It is worth having anyway: the cost is one
+// comparison, and the failure it prevents is silent and permanent.
+func libraryRoots(all []models.Library) []string {
 	roots := make([]string, 0, len(all))
 	for _, l := range all {
+		if strings.TrimSpace(l.Path) == "" {
+			continue
+		}
 		roots = append(roots, l.Path)
 	}
 	return roots
@@ -378,10 +401,7 @@ func (j *timingSweepJob) candidatesFor(ctx context.Context, items []queue.WorkIt
 	if err != nil {
 		return nil, nil, err
 	}
-	roots := make([]string, 0, len(libs))
-	for _, l := range libs {
-		roots = append(roots, l.Path)
-	}
+	roots := libraryRoots(libs)
 	candidates := make([]revalidate.Candidate, 0, len(items))
 	for _, it := range items {
 		c := revalidate.Candidate{ID: it.ID, AudioPath: it.Inputs.SourcePath}
