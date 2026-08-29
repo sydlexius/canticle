@@ -262,3 +262,51 @@ func TestRenameOrCopyKeepsBothCopiesWhenTheUnlinkFails(t *testing.T) {
 		t.Errorf("the original vanished despite the unlink failing: %v", serr)
 	}
 }
+
+// TestRenameOrCopyReportsACopyFailure covers the error path OUT of the fallback:
+// when the copy itself fails, renameOrCopy must surface that and leave the
+// source exactly where it was, because the caller's contract on any failure is
+// "the file is still in place".
+func TestRenameOrCopyReportsACopyFailure(t *testing.T) {
+	forceEXDEV(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "track.lrc")
+	dst := filepath.Join(dir, "taken.lrc")
+	if err := os.WriteFile(src, []byte("body"), 0o600); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	// A destination that already exists: O_EXCL refuses it, so the copy fails.
+	if err := os.WriteFile(dst, []byte("PRECIOUS"), 0o600); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	if err := renameOrCopy(src, dst); err == nil {
+		t.Fatal("expected an error when the copy could not be made")
+	}
+	if _, err := os.Lstat(src); err != nil {
+		t.Errorf("the source was disturbed by a failed copy: %v", err)
+	}
+	got, err := os.ReadFile(dst) //nolint:gosec // reason: G304: test-controlled path
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "PRECIOUS" {
+		t.Errorf("destination content = %q, want it untouched", got)
+	}
+}
+
+// TestCopyFileDurableReportsAnUnreadableSource covers the open failure. It is
+// the ordinary way a copy fails in production -- the file vanished, or is not
+// readable -- and it must report rather than create anything.
+func TestCopyFileDurableReportsAnUnreadableSource(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "gone.lrc")
+	dst := filepath.Join(dir, "dst.lrc")
+
+	if err := copyFileDurable(src, dst); err == nil {
+		t.Fatal("expected an error copying a file that does not exist")
+	}
+	if _, err := os.Lstat(dst); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("a destination was created for a source that could not be opened")
+	}
+}
