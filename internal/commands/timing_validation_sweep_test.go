@@ -8,12 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/revalidate"
+	"github.com/sydlexius/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/testutil"
 	"github.com/sydlexius/canticle/internal/timing"
 )
 
@@ -583,5 +586,202 @@ func TestNewTimingSweepJobRefusesAQuarantineInsideALibrary(t *testing.T) {
 
 	if _, ok := newTimingSweepJob(ctx, sqlDB, timingSweepCfg(dbPath, nil)); ok {
 		t.Error("the sweep started with its quarantine root inside a library; it would move rejected sidecars into the music tree and re-quarantine its own output")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// THE COLD-CACHE RAIL: a duration miss must RESOLVE, not become a verdict
+// ---------------------------------------------------------------------------
+
+// TestBankingDurationLookupFillsAColdCache is the regression test for the defect
+// that made this whole feature inert.
+//
+// audiodur.Lookup is a pure SQL read with no fill path, and the population this
+// sweep judges is precisely the one no other component fills: a file that
+// already carries a sidecar is skipped ~200 lines before the scanner's
+// enrichment probe, so it was never duration-probed by an older build (#684).
+// With a raw Lookup every candidate missed, every candidate failed open, and the
+// sweep stamped the entire backlog unknown_duration while remediating nothing --
+// then reported "converged" having judged nothing, with each stamp retiring its
+// row permanently.
+//
+// This exercises the PRODUCTION lookup against a real audio fixture, not a stub:
+// a miss must come back with a real duration AND leave the cache warm.
+func TestBankingDurationLookupFillsAColdCache(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // reason: test cleanup
+
+	// A real FLAC header: 44100 Hz, 4410000 samples = exactly 100 seconds.
+	if err := testutil.WriteFLACFile(base, "track.flac", 44100, 4410000); err != nil {
+		t.Fatalf("write flac: %v", err)
+	}
+	audio := filepath.Join(base, "track.flac")
+	info, err := os.Stat(audio)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	mtime, size := info.ModTime().UnixNano(), info.Size()
+
+	store := audiodur.New(sqlDB, scanner.DurationReaderVersion)
+	// Precondition: the cache really is cold. Without this the test could pass
+	// against a warm cache and prove nothing about the banking path.
+	if _, found, err := store.Lookup(ctx, audio, mtime, size); err != nil || found {
+		t.Fatalf("precondition: cache should be cold, got found=%v err=%v", found, err)
+	}
+
+	lookup := bankingDurationLookup(store)
+	seconds, found, err := lookup(ctx, audio, mtime, size)
+	if err != nil {
+		t.Fatalf("banking lookup: %v", err)
+	}
+	if !found {
+		t.Fatal("a cold cache reported no duration; every candidate would fail open and the sweep would judge nothing")
+	}
+	if seconds != 100 {
+		t.Errorf("duration = %d, want 100", seconds)
+	}
+	// And it BANKED it: the next raw lookup must hit, so the probe is paid once
+	// per file version rather than once per cycle (the #684 bargain).
+	banked, found, err := store.Lookup(ctx, audio, mtime, size)
+	if err != nil || !found {
+		t.Fatalf("the duration was not banked (found=%v err=%v); every cycle would re-read the header and hold the array awake", found, err)
+	}
+	if banked != 100 {
+		t.Errorf("banked duration = %d, want 100", banked)
+	}
+}
+
+// TestBankingDurationLookupDegradesToAMiss keeps every failure on the fail-open
+// path. Banking may only ever turn an unknown into a known; it must never turn a
+// known into a wrong verdict, and an unreadable or unparsable file must read as
+// the miss it already was rather than as an error that abandons the cycle.
+func TestBankingDurationLookupDegradesToAMiss(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // reason: test cleanup
+
+	notAudio := filepath.Join(base, "track.mp3")
+	if err := os.WriteFile(notAudio, []byte("not really audio at all"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	lookup := bankingDurationLookup(audiodur.New(sqlDB, scanner.DurationReaderVersion))
+
+	for _, tc := range []struct{ name, path string }{
+		{"unparsable file", notAudio},
+		{"missing file", filepath.Join(base, "gone.flac")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seconds, found, err := lookup(ctx, tc.path, 0, 0)
+			if err != nil {
+				t.Errorf("error = %v; an unreadable file must degrade to a miss, not abandon the cycle", err)
+			}
+			if found || seconds != 0 {
+				t.Errorf("got (%d, %v), want (0, false): the sidecar must be left unjudged", seconds, found)
+			}
+		})
+	}
+}
+
+// TestBankingDurationLookupPropagatesAStoreFailure keeps the transient/persistent
+// split intact. A broken duration store says nothing about any one file, so it
+// must propagate and abandon the cycle rather than triggering a library-wide
+// header read or stamping rows that were never judged.
+func TestBankingDurationLookupPropagatesAStoreFailure(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	// Closing the database makes every Lookup fail at the store layer.
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	lookup := bankingDurationLookup(audiodur.New(sqlDB, scanner.DurationReaderVersion))
+	if _, _, err := lookup(ctx, filepath.Join(base, "track.flac"), 1, 1); err == nil {
+		t.Error("a store failure returned no error; the sweep would stamp rows it never judged")
+	}
+}
+
+// TestRunCycleUsesTheProductionDurationWiring closes the gap the fixture
+// substitution leaves open, and it is the test that actually pins the fix.
+//
+// Every other end-to-end test here REPLACES job.rev with a hand-built
+// Revalidator, so none of them exercises the duration source newTimingSweepJob
+// actually wires. That substitution is what let the original defect ship: with
+// a raw audiodur.Lookup (a pure SQL read that never fills itself) the whole
+// suite passed while the feature judged nothing on a real install. Reverting the
+// banking wrapper must REDDEN a test, and this is that test -- it builds the job
+// through the production constructor and touches job.rev not at all.
+//
+// The fixture is a real FLAC (44100 Hz, 4410000 samples = 100s) beside a .lrc
+// whose last cue sits at 1:50 -- past 100s + Tolerance, so a sweep that
+// genuinely resolves the duration MUST reach MisSynced and demote it. A sweep
+// that cannot resolve it reads unknown_duration and does nothing.
+func TestRunCycleUsesTheProductionDurationWiring(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	dbPath := filepath.Join(base, "sweep.db")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // reason: test cleanup
+
+	root := filepath.Join(base, "music")
+	dir := filepath.Join(root, "album")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := testutil.WriteFLACFile(dir, "track.flac", 44100, 4410000); err != nil {
+		t.Fatalf("write flac: %v", err)
+	}
+	audio := filepath.Join(dir, "track.flac")
+	lrc := filepath.Join(dir, "track.lrc")
+	// 1:50 = 110s against the 100s fixture: the 10s overrun clears Tolerance (2s)
+	// while ratio 1.1 stays under CategoricalRatio (1.5), so this is MisSynced --
+	// the arm that DEMOTES, which is what makes the remediation assertion below
+	// meaningful. (2:30 would be ratio 1.5 exactly, which classifies Categorical.)
+	if err := os.WriteFile(lrc, []byte("[00:10.00]alpha\n[01:50.00]beta\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, root, "music", models.LibrarySettings{}); err != nil {
+		t.Fatalf("add library: %v", err)
+	}
+	q := queue.NewDBQueue(sqlDB)
+	seedBacklogRow(t, q, audio, "Artist", "Title")
+
+	// The PRODUCTION constructor, and no substitution afterwards.
+	job, ok := newTimingSweepJob(ctx, sqlDB, timingSweepCfg(dbPath, nil))
+	if !ok {
+		t.Fatal("sweep refused to start")
+	}
+
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Counts.UnknownDuration > 0 {
+		t.Errorf("the production wiring could not resolve a duration (%d unknown); on a real install this retires the whole backlog while remediating nothing",
+			res.Counts.UnknownDuration)
+	}
+	if res.Counts.MisSynced != 1 {
+		t.Errorf("MisSynced = %d, want 1: the sweep did not reach the verdict its own fixture guarantees", res.Counts.MisSynced)
+	}
+	if res.Remedied != 1 {
+		t.Errorf("Remedied = %d, want 1", res.Remedied)
+	}
+	if _, err := os.Stat(lrc); !os.IsNotExist(err) {
+		t.Error("the MisSynced .lrc is still in place; the production path did not remediate it")
 	}
 }

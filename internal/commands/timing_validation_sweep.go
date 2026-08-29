@@ -142,16 +142,78 @@ func newTimingSweepJob(ctx context.Context, sqlDB *sql.DB, cfg config.Config) (*
 		return nil, false
 	}
 	return &timingSweepJob{
-		q:    queue.NewDBQueue(sqlDB),
-		libs: libs,
-		rev: revalidate.New(
-			audiodur.New(sqlDB, scanner.DurationReaderVersion).Lookup,
-			opts,
-		),
+		q:          queue.NewDBQueue(sqlDB),
+		libs:       libs,
+		rev:        revalidate.New(bankingDurationLookup(audiodur.New(sqlDB, scanner.DurationReaderVersion)), opts),
 		ra:         realign.New(libs, cfg.Realign),
 		batch:      batch,
 		backupPath: timingSweepBackupPath(cfg),
 	}, true
+}
+
+// bankingDurationLookup wraps the duration cache so a MISS RESOLVES ITSELF
+// instead of being recorded as a verdict.
+//
+// WITHOUT THIS THE WHOLE FEATURE IS INERT ON A REAL INSTALL, which is not a
+// tuning matter but the difference between working and silently doing nothing.
+// audiodur.Lookup is a pure SQL read with no fill path -- Record is the only
+// writer, and its callers are the scanner and the worker. Neither reaches the
+// population this sweep judges: a file that already carries a sidecar is
+// skipped ~200 lines before the scanner's enrichment probe, so by construction
+// it was never duration-probed by an older build (#684, measured in prod -- a
+// full scan banked 690 durations and moved the unknown-duration count by zero).
+// That starved population IS the backlog ListTimingBacklog selects. So a raw
+// Lookup misses on essentially every candidate, every candidate fails open, and
+// the sweep stamps the entire backlog unknown_duration while remediating
+// nothing -- reporting "converged" having judged nothing, with the stamp
+// retiring each row permanently.
+//
+// THE READ IS GATED ON THE MISS, which is what keeps it affordable and is the
+// same bargain #684 struck: a given file VERSION is probed ONCE, ever, because
+// the banked row satisfies every later Lookup. Ungated this would re-read
+// headers for the whole library on every cycle and hold the array awake, the
+// exact symptom #684 exists to remove. Bounded further by revalidate_batch, so
+// one cycle probes at most that many files.
+//
+// EVERY FAILURE DEGRADES TO THE MISS IT ALREADY WAS. A file that cannot be
+// opened, has no parser for its extension, or fails to parse returns
+// found=false, flows to timing.Evaluate as UnknownDuration, and fails open --
+// never remediated. Banking only ever turns an unknown into a known; it can
+// never turn a known into a wrong verdict.
+func bankingDurationLookup(store *audiodur.Store) revalidate.DurationLookup {
+	return func(ctx context.Context, path string, mtimeNano, size int64) (int, bool, error) {
+		seconds, found, err := store.Lookup(ctx, path, mtimeNano, size)
+		if err != nil {
+			// A store failure is TRANSIENT and propagates: the caller abandons
+			// the cycle rather than stamping rows it never judged. Probing here
+			// instead would convert a database problem into a library-wide
+			// header read.
+			return 0, false, err
+		}
+		if found {
+			return seconds, true, nil
+		}
+		// The miss is real, so pay for it once. ReadAudioFacts takes the
+		// (duration, mtime, size) tuple from ONE open handle, so the banked row
+		// always describes a single inode: a tagger swapping the file mid-call
+		// makes the row inert against the replacement (a later miss, the safe
+		// direction) rather than a confidently wrong hit nothing invalidates.
+		facts, ferr := scanner.ReadAudioFacts(path)
+		if ferr != nil || facts.TrackLength <= 0 {
+			// Genuinely unknown for this file version: unreadable, no parser, or
+			// a parse failure. Report the miss and let the caller fail open.
+			slog.Debug("timing validation sweep: could not determine an exact duration; leaving the sidecar unjudged",
+				"path", path, "error", ferr)
+			return 0, false, nil
+		}
+		if rerr := store.Record(ctx, path, facts.MTimeNano, facts.SizeBytes, facts.TrackLength); rerr != nil {
+			// Non-fatal: the duration is known NOW, so judge with it. Failing to
+			// cache costs a re-probe next time, never a wrong verdict.
+			slog.Debug("timing validation sweep: duration cache write failed; judging anyway",
+				"path", path, "error", rerr)
+		}
+		return facts.TrackLength, true, nil
+	}
 }
 
 // timingSweepRoots lists the configured library roots, for Validate's

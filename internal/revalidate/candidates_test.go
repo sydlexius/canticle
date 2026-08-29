@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/timing"
@@ -281,5 +282,57 @@ func TestPlanCandidatesHonorsContextCancellation(t *testing.T) {
 	_, err := r.PlanCandidates(ctx, []Candidate{candidateFor(1, root, lrc)})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}
+
+// TestQuarantineTargetKeepsRootlessSidecarsDistinct is the head-of-line
+// regression test for the rootless collision.
+//
+// The serve sweep hands an EMPTY root for any candidate under no configured
+// library (a removed library row, an edited mount path, a relative
+// source_path). The old fallback mapped every such sidecar to
+// <quarantineDir>/<basename>, so the first moved and every later one collided.
+// The clobber-safe rename correctly refuses a collision, but the sweep reads
+// that refusal as a FAILED ACTION and leaves the row unstamped to retry -- so
+// the row returns at the head of the oldest-first batch on every cycle forever,
+// starving the rest of the backlog. Distinct sources must map to distinct
+// targets.
+func TestQuarantineTargetKeepsRootlessSidecarsDistinct(t *testing.T) {
+	const q = "/var/quarantine"
+	a := quarantineTarget(q, "", "/music/albumA/track.lrc")
+	b := quarantineTarget(q, "", "/music/albumB/track.lrc")
+	if a == b {
+		t.Fatalf("two rootless sidecars mapped to one target %q; the second collides, its row is never stamped, and it head-of-lines every future cycle", a)
+	}
+	for _, got := range []string{a, b} {
+		if !strings.HasPrefix(got, q+string(filepath.Separator)) {
+			t.Errorf("target %q escaped the quarantine root %q", got, q)
+		}
+		if strings.Contains(got, "..") {
+			t.Errorf("target %q contains a parent traversal", got)
+		}
+	}
+}
+
+// TestQuarantineTargetContainsEveryPathShape keeps the fallback from walking out
+// of the quarantine root. A stored path can be absolute, relative, or carry
+// traversal segments; none may produce a target outside quarantineDir.
+func TestQuarantineTargetContainsEveryPathShape(t *testing.T) {
+	const q = "/var/quarantine"
+	for _, path := range []string{
+		"/music/album/track.lrc",
+		"music/album/track.lrc",
+		"../../etc/passwd.lrc",
+		"/music/../../etc/track.lrc",
+		"/",
+		"track.lrc",
+	} {
+		got := quarantineTarget(q, "", path)
+		if !strings.HasPrefix(got, q+string(filepath.Separator)) {
+			t.Errorf("path %q produced target %q, which is outside the quarantine root", path, got)
+		}
+		if strings.Contains(got, "..") {
+			t.Errorf("path %q produced target %q, which contains a parent traversal", path, got)
+		}
 	}
 }

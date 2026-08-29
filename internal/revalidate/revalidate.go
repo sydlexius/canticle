@@ -567,15 +567,64 @@ func (r *Revalidator) removalMove(s site, path string, action Action) realign.Mo
 	return mv
 }
 
-// quarantineTarget maps a sidecar under root to its place under quarantineDir.
-// A path that is somehow not under root falls back to its base name, which the
-// clobber-safe rename in realign still refuses to overwrite.
+// quarantineTarget maps a sidecar under root to its place under quarantineDir,
+// preserving its path relative to root so two same-named sidecars from
+// different albums cannot collide there.
+//
+// THE FALLBACK PRESERVES THE PATH SHAPE, NOT JUST THE FILENAME, and that is a
+// correctness property rather than tidiness. It used to degrade to
+// filepath.Base, which is fine for ONE stray sidecar and wrong for a
+// population: the serve sweep hands an EMPTY root for any candidate under no
+// configured library (a removed library row, an edited mount path, a relative
+// source_path -- none of them rare, and none of them one file). Every such
+// sidecar then mapped to <quarantineDir>/<basename>, so the first one moved and
+// every later one collided. The clobber-safe rename correctly refuses the
+// collision, but the sweep reads that refusal as a FAILED ACTION and
+// deliberately leaves the row unstamped to retry -- so the row returns at the
+// head of the oldest-first batch on every cycle, forever, occupying a budget
+// slot and starving the rest of the backlog. That is exactly the head-of-line
+// stall the convergence rail exists to prevent, reintroduced through the
+// quarantine layout.
+//
+// Falling back to the FULL path (its separators preserved, its root marker and
+// any volume name stripped so the join cannot escape quarantineDir) keeps two
+// distinct sources distinct, so each lands once and the retry never repeats.
 func quarantineTarget(quarantineDir, root, path string) string {
 	rel, err := filepath.Rel(root, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		rel = filepath.Base(path)
+	if root == "" || err != nil || strings.HasPrefix(rel, "..") {
+		rel = containedRel(path)
 	}
 	return filepath.Join(quarantineDir, rel)
+}
+
+// containedRel flattens an arbitrary source path into a relative one that can
+// only ever land INSIDE the directory it is joined onto.
+//
+// TRIMMING A LEADING SEPARATOR IS NOT ENOUGH, which is what the containment
+// test caught: "../../etc/passwd.lrc" has no leading separator to trim, and
+// filepath.Join RESOLVES the traversal, so joining it onto the quarantine root
+// walks out to /etc. Every ".." segment has to be DROPPED, not merely cleaned.
+// The paths here come from a database column rather than from a directory walk,
+// so a stored path with traversal in it is a case that must be handled, not one
+// that cannot arise.
+func containedRel(path string) string {
+	cleaned := filepath.Clean(path)
+	cleaned = strings.TrimPrefix(cleaned, filepath.VolumeName(cleaned))
+	var kept []string
+	for _, seg := range strings.Split(filepath.ToSlash(cleaned), "/") {
+		// Drop empties (a leading separator, a doubled one), "." and every
+		// traversal segment. What survives is pure downward path shape.
+		if seg == "" || seg == "." || seg == ".." {
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	if len(kept) == 0 {
+		// Nothing usable survived (a bare "/" or "..") -- there is no shape to
+		// preserve, so fall back to something non-empty and non-escaping.
+		return "unrooted"
+	}
+	return filepath.Join(kept...)
 }
 
 // durationOf resolves the exact duration for an audio file from the injected
