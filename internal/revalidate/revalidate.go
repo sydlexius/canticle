@@ -492,15 +492,22 @@ type site struct {
 // identical. One predicate, one set of counts, one move vocabulary -- a second
 // copy here is precisely how an unattended pass would drift into treating a
 // verdict differently from the command an operator uses to preview it.
-// TWO FAILURES WITH OPPOSITE LIFETIMES, and separating them is why this returns
-// an error at all. An unreadable or unparsable .lrc is PERSISTENT: the same
-// file fails the same way every time, so the sweep must be able to retire that
-// row rather than meet it again at the head of every batch. A duration-store
-// failure is TRANSIENT and not about this file at all -- the database is
-// unhappy -- so it is returned, and the sweep abandons the cycle instead of
-// stamping a batch of rows with a verdict a working store would have judged
-// differently. The walk collapses both into Errored, exactly as before: it has
-// no rows to retire, so the distinction buys it nothing.
+// TWO FAILURES WITH DIFFERENT BLAST RADII, and separating them is why this
+// returns an error at all. An unreadable or unparsable .lrc concerns ONE FILE,
+// so it is counted as Errored and the pass continues. A duration-store failure
+// concerns THE WHOLE BATCH -- the database is unhappy, and it says nothing about
+// any particular file -- so it is returned, and the sweep abandons the cycle
+// instead of stamping a batch of rows with a verdict a working store would have
+// judged differently.
+//
+// Note what the caller does with Errored: it does NOT retire the row. An
+// unreadable file is equally what a transient I/O error or a briefly unavailable
+// mount looks like, and the stamp is one-way, so the sweep leaves such a row
+// unstamped and re-judges it next cycle rather than exempting the sidecar from
+// the unattended pass forever. A genuinely corrupt .lrc is therefore retried
+// rather than retired: one recoverable batch slot, against one unrecoverable
+// wrongly-retired file. The walk collapses both failures into Errored, exactly
+// as before: it has no rows to retire, so the distinction buys it nothing.
 func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, plan *Plan) error {
 	plan.Counts.Scanned++
 
