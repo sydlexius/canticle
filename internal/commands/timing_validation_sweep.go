@@ -175,6 +175,14 @@ func newTimingSweepJob(ctx context.Context, sqlDB *sql.DB, cfg config.Config) (*
 // exact symptom #684 exists to remove. Bounded further by revalidate_batch, so
 // one cycle probes at most that many files.
 //
+// THAT PROBE IS NOT UNIFORMLY A HEADER READ, and the worst case is worth
+// stating plainly: a FLAC costs 42 bytes of STREAMINFO, an ordinary MP3 64-112
+// KB, but a VBR MP3 with no Xing header is frame-counted END TO END and reads
+// slightly more than its own size (~7% of MP3s, on the measurement recorded in
+// scanner.bankDurationForSkippedFile). That is precisely why the gate above is
+// load-bearing rather than an optimization: paying it once per file version is
+// fine, once per cycle would not be.
+//
 // EVERY FAILURE DEGRADES TO THE MISS IT ALREADY WAS. A file that cannot be
 // opened, has no parser for its extension, or fails to parse returns
 // found=false, flows to timing.Evaluate as UnknownDuration, and fails open --
@@ -193,26 +201,35 @@ func bankingDurationLookup(store *audiodur.Store) revalidate.DurationLookup {
 		if found {
 			return seconds, true, nil
 		}
-		// The miss is real, so pay for it once. ReadAudioFacts takes the
+		// The miss is real, so pay for it once. ReadAudioDuration takes the
 		// (duration, mtime, size) tuple from ONE open handle, so the banked row
 		// always describes a single inode: a tagger swapping the file mid-call
 		// makes the row inert against the replacement (a later miss, the safe
 		// direction) rather than a confidently wrong hit nothing invalidates.
-		facts, ferr := scanner.ReadAudioFacts(path)
-		if ferr != nil || facts.TrackLength <= 0 {
-			// Genuinely unknown for this file version: unreadable, no parser, or
-			// a parse failure. Report the miss and let the caller fail open.
+		//
+		// DURATION-ONLY, NOT ReadAudioFacts, and the difference is a whole
+		// population. ReadAudioFacts reads TAGS first and treats their absence as
+		// fatal, so a valid, perfectly parsable file carrying no tag block reads
+		// as an error and yields no duration -- and untagged files are exactly
+		// the ones most likely to carry a hand-made or scraped sidecar, i.e. the
+		// backlog this sweep exists to judge. It also gates on the extension
+		// before opening, so a row pointing at a non-audio path costs nothing.
+		seconds, mtime, bytes, derr := scanner.ReadAudioDuration(path)
+		if derr != nil || seconds <= 0 {
+			// Genuinely unknown for this file version: unreadable, no parser for
+			// the extension, or a parse failure. Report the miss and let the
+			// caller fail open.
 			slog.Debug("timing validation sweep: could not determine an exact duration; leaving the sidecar unjudged",
-				"path", path, "error", ferr)
+				"path", path, "error", derr)
 			return 0, false, nil
 		}
-		if rerr := store.Record(ctx, path, facts.MTimeNano, facts.SizeBytes, facts.TrackLength); rerr != nil {
+		if rerr := store.Record(ctx, path, mtime, bytes, seconds); rerr != nil {
 			// Non-fatal: the duration is known NOW, so judge with it. Failing to
 			// cache costs a re-probe next time, never a wrong verdict.
 			slog.Debug("timing validation sweep: duration cache write failed; judging anyway",
 				"path", path, "error", rerr)
 		}
-		return facts.TrackLength, true, nil
+		return seconds, true, nil
 	}
 }
 

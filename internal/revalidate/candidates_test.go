@@ -336,3 +336,113 @@ func TestQuarantineTargetContainsEveryPathShape(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanCandidatesArbitratesASharedSidecar is the regression test for the
+// worst defect this feature has had: it DESTROYED a correct file.
+//
+// The sidecar is derived per ROW (stem + ".lrc"), so a directory holding two
+// same-stem audio files -- a lossless and a lossy copy of one track, an ordinary
+// library shape -- produces TWO backlog rows deriving the SAME .lrc. Judged
+// against each row's own duration, the shorter copy's row reads categorical on a
+// sidecar correctly timed for the longer one and quarantines it; under
+// on_categorical = "purge" it is deleted outright. The verdict would be decided
+// by which copy happened to be enqueued, which is not a judgment about the lyric.
+//
+// The walk never had this defect (companionAudio resolves ONE companion per
+// sidecar), so it was introduced by candidate mode and must stay fixed here.
+func TestPlanCandidatesArbitratesASharedSidecar(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "album")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"track.flac", "track.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("not really audio"), 0o600); err != nil {
+			t.Fatalf("write audio: %v", err)
+		}
+	}
+	lrc := filepath.Join(dir, "track.lrc")
+	// Last cue at 4:50 (290s): correct for the 300s copy, wildly past the 99s one.
+	if err := os.WriteFile(lrc, []byte("[00:10.00]alpha\n[04:50.00]beta\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+
+	durations := map[string]int{
+		filepath.Join(dir, "track.flac"): 300,
+		filepath.Join(dir, "track.mp3"):  99,
+	}
+	r, _ := newRevalidator(t, root, func(_ context.Context, p string, _, _ int64) (int, bool, error) {
+		return durations[p], durations[p] > 0, nil
+	}, nil)
+
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{
+		{ID: 1, AudioPath: filepath.Join(dir, "track.flac"), Root: root},
+		{ID: 2, AudioPath: filepath.Join(dir, "track.mp3"), Root: root},
+	})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+
+	if len(plan.Moves) != 0 {
+		t.Errorf("planned %d move(s) against a sidecar that is correctly timed for its own companion; the sweep would destroy it", len(plan.Moves))
+	}
+	// companionAudio picks the lexicographically-first base name, so track.flac
+	// owns the sidecar and track.mp3's row contributes no verdict.
+	var judged, disowned int
+	for _, f := range plan.Findings {
+		switch f.Outcome {
+		case timing.Ok:
+			judged++
+		case "no_sidecar":
+			disowned++
+		default:
+			t.Errorf("unexpected outcome %q for id %d", f.Outcome, f.ID)
+		}
+	}
+	if judged != 1 || disowned != 1 {
+		t.Errorf("judged=%d disowned=%d, want 1 and 1: exactly one row owns a sidecar", judged, disowned)
+	}
+	// BOTH rows still retire, or the disowned one head-of-lines every cycle.
+	if len(plan.Findings) != 2 {
+		t.Fatalf("want 2 findings, got %d", len(plan.Findings))
+	}
+	for _, f := range plan.Findings {
+		if f.ID == 0 {
+			t.Error("a finding carries no ID; its row could never be stamped")
+		}
+	}
+}
+
+// TestPlanCandidatesClaimsASidecarOnce covers the other way two rows reach one
+// file: the SAME source_path twice, which the queue's uniqueness constraint
+// admits under different artist/title keys.
+//
+// Both rows agree on the verdict, so this is not a wrong judgment -- but
+// planning the move twice means the first consumes the file and the second fails
+// "no such file", which the sweep records as a genuine failed action, warns
+// about, and which leaves BOTH rows unstamped for a cycle. One move per file.
+func TestPlanCandidatesClaimsASidecarOnce(t *testing.T) {
+	root, lrc := lib(t, overrunBody)
+	audio := filepath.Join(filepath.Dir(lrc), "track.mp3")
+
+	r, _ := newRevalidator(t, root, fixedDuration(), nil)
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{
+		{ID: 1, AudioPath: audio, Root: root},
+		{ID: 2, AudioPath: audio, Root: root},
+	})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if len(plan.Moves) != 1 {
+		t.Errorf("planned %d moves for one sidecar; every move past the first fails and is logged as a real fault", len(plan.Moves))
+	}
+	// Both rows still retire.
+	if len(plan.Findings) != 2 {
+		t.Fatalf("want 2 findings, got %d", len(plan.Findings))
+	}
+	for _, f := range plan.Findings {
+		if f.ID == 0 {
+			t.Error("a finding carries no ID; its row could never be stamped")
+		}
+	}
+}

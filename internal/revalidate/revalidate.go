@@ -285,11 +285,27 @@ func (r *Revalidator) Plan(ctx context.Context) (Plan, error) {
 // stamps an Ok.
 func (r *Revalidator) PlanCandidates(ctx context.Context, candidates []Candidate) (Plan, error) {
 	var plan Plan
+	// One cache for the whole call, as Plan does. companionAudio only lists a
+	// directory when its stat probes all miss, so this is usually unused -- but
+	// when a batch does hold several rows from one directory (the backlog drains
+	// oldest-first, and an album was imported together), they share the listing
+	// rather than each paying for it.
+	cache := newDirListingCache()
+	// One sidecar is judged at most ONCE per call. Two rows can reach the same
+	// file two ways: two same-stem audio files (arbitrated in judgeCandidate) and
+	// two rows carrying the SAME source_path, which the queue's uniqueness
+	// constraint admits under different artist/title keys. The second is not a
+	// wrong verdict -- both rows agree -- but planning the move twice means the
+	// first consumes the file and the second fails "no such file", which the
+	// caller records as a genuine failed action and warns about, and which leaves
+	// BOTH rows unstamped for a cycle. Claiming the path here keeps one move per
+	// file, so the log never describes a fault that did not happen.
+	claimed := make(map[string]bool, len(candidates))
 	for _, c := range candidates {
 		if cerr := ctx.Err(); cerr != nil {
 			return plan, cerr
 		}
-		if err := r.judgeCandidate(ctx, c, &plan); err != nil {
+		if err := r.judgeCandidate(ctx, c, &plan, cache, claimed); err != nil {
 			return plan, err
 		}
 	}
@@ -303,7 +319,7 @@ func (r *Revalidator) PlanCandidates(ctx context.Context, candidates []Candidate
 // is exact rather than a guess -- and it is why this costs one stat instead of a
 // directory listing. A .LRC spelled in another case is not probed: this pass
 // only ever judges files canticle itself wrote, and it writes ".lrc".
-func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Plan) error {
+func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Plan, cache *dirListingCache, claimed map[string]bool) error {
 	audio := strings.TrimSpace(c.AudioPath)
 	if audio == "" {
 		// A row with no audio path can never be judged. Counted so the caller
@@ -313,6 +329,34 @@ func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Pla
 		return nil
 	}
 	path := strings.TrimSuffix(audio, filepath.Ext(audio)) + ".lrc"
+	// ONE SIDECAR IS JUDGED AGAINST ONE COMPANION, and this arbitration is what
+	// makes that true. The derivation above is per-ROW, so a directory holding
+	// two same-stem audio files (a lossless and a lossy copy of one track, a real
+	// library shape) yields TWO backlog rows that derive the SAME .lrc -- and
+	// each would judge it against its OWN duration. The shorter file's row then
+	// reads categorical on a sidecar correctly timed for the longer one and
+	// quarantines it, silently and unattended; under on_categorical = "purge" it
+	// is deleted. The verdict would be decided by which copy happened to be
+	// enqueued, which is not a judgment about the lyric at all.
+	//
+	// companionAudio is the walk's own resolver and picks deterministically (the
+	// lexicographically-first base name, reproducing os.ReadDir's order, per
+	// #691/#801). Deferring to it means both paths agree on which audio a sidecar
+	// belongs to, so the CLI preview keeps predicting the sweep. The row whose
+	// audio is NOT the chosen companion contributes no verdict and no move -- but
+	// it IS still stamped via the no_sidecar finding below, so it retires from the
+	// backlog rather than head-of-lining the batch forever.
+	//
+	// Disowned (another same-stem file is the sidecar's companion) or already
+	// claimed by an earlier candidate in this batch. Either way this row
+	// contributes no verdict and no move -- but it IS still stamped, so it
+	// retires from the backlog rather than head-of-lining it forever.
+	if owner, ok := companionAudio(path, cache); (ok && owner != audio) || claimed[path] {
+		plan.Counts.NoSidecar++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "no_sidecar"})
+		return nil
+	}
+	claimed[path] = true
 	// Lstat, not Stat: a symlinked sidecar is out of scope for exactly the reason
 	// the walk skips one -- a link could redirect a move or a delete out of the
 	// library root. Here it reads as "no sidecar to judge", which stamps the row

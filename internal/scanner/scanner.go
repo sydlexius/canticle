@@ -176,6 +176,50 @@ type AudioMetadata struct {
 	SizeBytes   int64
 }
 
+// ReadAudioDuration reads ONLY the duration of the audio file at path, plus the
+// (mtime, size) identity of the handle it read from, for a caller that wants to
+// bank a duration and nothing else.
+//
+// WHY IT IS NOT ReadAudioFacts. That reader goes through openAndReadTags, which
+// treats tag.ReadFrom's failure as fatal and returns before the duration parser
+// ever runs -- so a valid, perfectly parsable file carrying NO tag block at all
+// (an untagged MP3, and untagged members of the MP4 family) reads as an error
+// and yields no duration. For a metadata reader that is right: it was asked for
+// tags. For a caller banking a duration it is a silent starvation, and untagged
+// files are exactly the population most likely to carry a hand-made or scraped
+// sidecar, i.e. the backlog the timing sweep exists to judge. FLAC hides the
+// problem, because its STREAMINFO doubles as a tag block.
+//
+// The tuple comes from ONE open handle, matching Scanner.recordDuration: a
+// tagger that swaps the file between the read and the caller's Record then makes
+// the cached row inert against the replacement (a later miss, the safe
+// direction) rather than a confidently wrong hit nothing invalidates.
+//
+// An unsupported extension, an unreadable file, or a parse failure is an error
+// here rather than a zero-value sentinel: the only caller is banking a value it
+// must not guess at, and a 0 duration is how audio_durations spells "unknown".
+func ReadAudioDuration(path string) (seconds int, mtimeNano, sizeBytes int64, err error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if !slices.Contains(supportedFileTypes, ext) {
+		return 0, 0, 0, fmt.Errorf("%w: %s", ErrNoDurationParser, ext)
+	}
+	f, oerr := os.Open(path) //nolint:gosec // reason: G304 -- path is a work_queue source_path, written from a configured library root, the same invariant openAndReadTags documents
+	if oerr != nil {
+		return 0, 0, 0, fmt.Errorf("open %s: %w", path, oerr)
+	}
+	defer func() { _ = f.Close() }()
+
+	secs, derr := audioDuration(f, ext)
+	if derr != nil {
+		return 0, 0, 0, fmt.Errorf("duration %s: %w", path, derr)
+	}
+	info, serr := f.Stat()
+	if serr != nil {
+		return 0, 0, 0, fmt.Errorf("stat %s: %w", path, serr)
+	}
+	return secs, info.ModTime().UnixNano(), info.Size(), nil
+}
+
 // ReadAudioMetadata opens the audio file at path and returns the recording
 // disambiguators a provider query needs: duration, ISRC, and album. It is the
 // seam serve mode uses to reach fetch-mode parity (#584): work_queue persists

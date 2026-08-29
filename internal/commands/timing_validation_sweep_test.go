@@ -785,3 +785,60 @@ func TestRunCycleUsesTheProductionDurationWiring(t *testing.T) {
 		t.Error("the MisSynced .lrc is still in place; the production path did not remediate it")
 	}
 }
+
+// untaggedMP3Bytes builds a real MPEG-1 Layer III stream carrying NO tag block:
+// 128kbps, 44100Hz, no padding, so each frame is 417 bytes and 26.12ms long.
+// Tag-based readers reject such a file outright; its duration is nonetheless
+// perfectly parsable from the frames.
+func untaggedMP3Bytes(frames int) []byte {
+	const frameSize = 417
+	out := make([]byte, 0, frames*frameSize)
+	for range frames {
+		frame := make([]byte, frameSize)
+		frame[0], frame[1], frame[2], frame[3] = 0xFF, 0xFB, 0x90, 0x00
+		out = append(out, frame...)
+	}
+	return out
+}
+
+// TestBankingDurationLookupResolvesUntaggedAudio is the regression test for a
+// population the first banking fix still starved.
+//
+// scanner.ReadAudioFacts reads TAGS first and treats their absence as fatal, so
+// a valid, perfectly parsable file carrying no tag block yielded no duration at
+// all -- the candidate failed open and its row was stamped unknown_duration,
+// which retires it permanently. Untagged files are exactly the ones most likely
+// to carry a hand-made or scraped sidecar, i.e. the backlog this sweep exists to
+// judge, so the original Critical survived for precisely the wrong population.
+// FLAC hid the problem in testing because its STREAMINFO doubles as a tag block.
+func TestBankingDurationLookupResolvesUntaggedAudio(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // reason: test cleanup
+
+	// 383 frames at 26.12ms is ~10 seconds.
+	audio := filepath.Join(base, "untagged.mp3")
+	if err := os.WriteFile(audio, untaggedMP3Bytes(383), 0o600); err != nil {
+		t.Fatalf("write mp3: %v", err)
+	}
+	info, err := os.Stat(audio)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	lookup := bankingDurationLookup(audiodur.New(sqlDB, scanner.DurationReaderVersion))
+	seconds, found, err := lookup(ctx, audio, info.ModTime().UnixNano(), info.Size())
+	if err != nil {
+		t.Fatalf("banking lookup: %v", err)
+	}
+	if !found || seconds <= 0 {
+		t.Fatalf("an untagged but valid MP3 resolved to (%d, %v); its row would be stamped unknown_duration and retired forever, and untagged files are the likeliest to carry the sidecars this sweep judges", seconds, found)
+	}
+	if seconds != 10 {
+		t.Errorf("duration = %d, want 10", seconds)
+	}
+}
