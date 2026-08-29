@@ -608,3 +608,100 @@ func TestPlanCandidatesReadsNoDirectoryForTheCommonCases(t *testing.T) {
 		})
 	}
 }
+
+// TestPlanCandidatesKeepsAnInaccessibleSidecarRetriable separates "the file is
+// gone" from "we could not look at it".
+//
+// no_sidecar is TERMINAL: the sweep stamps it and the row leaves the backlog
+// forever. That is right for a sidecar deleted by hand or moved by a reorg, and
+// wrong for one that plainly still exists behind a permission error, an I/O
+// failure, or a briefly unavailable mount -- there the file would be exempted
+// from the unattended pass permanently, recoverable only by running the CLI.
+func TestPlanCandidatesKeepsAnInaccessibleSidecarRetriable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a root process can traverse a 0o000 directory, so the fixture cannot deny access")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "album")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "track.mp3"), []byte("not really audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "track.lrc"), []byte(overrunBody), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	// Deny traversal, so Lstat fails EACCES while the .lrc plainly still exists.
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) })
+
+	r, _ := newRevalidator(t, root, fixedDuration(), nil)
+	plan, err := r.PlanCandidates(context.Background(), []Candidate{
+		{ID: 1, AudioPath: filepath.Join(dir, "track.mp3"), Root: root},
+	})
+	if err != nil {
+		t.Fatalf("PlanCandidates: %v", err)
+	}
+	if plan.Counts.NoSidecar != 0 {
+		t.Errorf("NoSidecar = %d, want 0: an unreadable sidecar is not a missing one, and no_sidecar retires the row", plan.Counts.NoSidecar)
+	}
+	if plan.Counts.Errored != 1 {
+		t.Errorf("Errored = %d, want 1", plan.Counts.Errored)
+	}
+	if len(plan.Findings) != 1 || plan.Findings[0].Outcome != "errored" {
+		t.Errorf("findings = %+v, want a single errored finding so the row stays retriable", plan.Findings)
+	}
+}
+
+// TestDemotionPlanDistinguishesOffFromAFailedRead is the other half of the
+// same class: a verdict that stands but whose remediation could not be built.
+//
+// misSyncedMove returns "no move" for TWO reasons -- ActionOff, which is the
+// operator deliberately asking to record a verdict without acting on it, and a
+// failed read of the words to demote. Collapsing them let a read failure produce
+// a terminal MisSynced finding with no move, so the row retired and the
+// offending .lrc stayed on disk permanently.
+//
+// THIS TESTS THE SEAM DIRECTLY, and deliberately so. Going through
+// PlanCandidates cannot reach the arm: EvaluateLRCFile calls ReadSyncedLRC
+// itself, so an unreadable file fails there first and judge returns at its own
+// error arm. The only way for the read to fail HERE is for the file to change
+// between those two reads -- a concurrent rewrite, which is exactly the race
+// CodeRabbit named and which cannot be staged deterministically in-process. An
+// earlier version of this test went through PlanCandidates, passed, and proved
+// nothing: its Errored count came from EvaluateLRCFile, not from this fix.
+func TestDemotionPlanDistinguishesOffFromAFailedRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a root process can read a 0o000 file, so the fixture cannot deny the read")
+	}
+	root, lrc := lib(t, overrunBody)
+	audio := filepath.Join(filepath.Dir(lrc), "track.mp3")
+
+	// ActionOff: no move, and NO error -- the row is settled and may retire.
+	rOff, _ := newRevalidator(t, root, fixedDuration(), func(o *Options) {
+		o.MisSyncedAction = ActionOff
+	})
+	if mv, ok, err := rOff.misSyncedMove(site{root: root}, lrc, audio); ok || err != nil {
+		t.Errorf("ActionOff gave (move=%v, ok=%v, err=%v); want no move and no error, or an operator recording verdicts would see rows retried forever", mv.Kind, ok, err)
+	}
+
+	// A failed read: no move, but an ERROR, so the caller keeps the row retriable.
+	if err := os.Chmod(lrc, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lrc, 0o600) })
+
+	rDemote, _ := newRevalidator(t, root, fixedDuration(), func(o *Options) {
+		o.MisSyncedAction = ActionDemote
+	})
+	_, ok, err := rDemote.misSyncedMove(site{root: root}, lrc, audio)
+	if ok {
+		t.Error("planned a demotion from a lyric that could not be read")
+	}
+	if err == nil {
+		t.Error("a failed remediation read was indistinguishable from ActionOff; the row would retire terminally with the offending .lrc still in place")
+	}
+}

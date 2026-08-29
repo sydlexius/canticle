@@ -352,6 +352,16 @@ func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Pla
 	// and retires it rather than leaving it to be re-examined every cycle.
 	fi, lerr := os.Lstat(path)
 	switch {
+	case lerr != nil && !errors.Is(lerr, fs.ErrNotExist):
+		// THE FILE IS THERE AND WE COULD NOT LOOK AT IT, which is a different
+		// fact from "it is gone" and must not be recorded as one. A permission
+		// error, an I/O error, or a briefly unavailable mount all land here, and
+		// no_sidecar is TERMINAL: it would retire the row and exempt a sidecar
+		// that plainly still exists from the unattended pass forever. Errored is
+		// retriable, so the next cycle looks again.
+		plan.Counts.Errored++
+		plan.Findings = append(plan.Findings, Finding{ID: c.ID, Path: path, Outcome: "errored"})
+		return nil
 	case lerr != nil:
 		// The overwhelmingly common case is an ordinary one: the row says a synced
 		// lyric was written, and the file is simply not there any more (deleted by
@@ -534,7 +544,15 @@ func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, pla
 		plan.Counts.UnknownDuration++
 	case timing.MisSynced:
 		plan.Counts.MisSynced++
-		mv, mok := r.misSyncedMove(s, path, audio)
+		mv, mok, merr := r.misSyncedMove(s, path, audio)
+		if merr != nil {
+			// The verdict stands but its remediation could not be built. Count it
+			// Errored and append NO finding: the caller turns a finding-less
+			// candidate into a retriable "errored" one, so the row stays in the
+			// backlog rather than retiring with the offending .lrc still on disk.
+			plan.Counts.Errored++
+			return nil
+		}
 		if mok {
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
@@ -552,7 +570,12 @@ func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, pla
 		// arm the verdict fell to default and was counted Errored, which never
 		// remediates -- so the existing corpus would have stayed untouched.
 		plan.Counts.Degenerate++
-		mv, mok := r.misSyncedMove(s, path, audio)
+		mv, mok, merr := r.misSyncedMove(s, path, audio)
+		if merr != nil {
+			// Same rail as the MisSynced arm above.
+			plan.Counts.Errored++
+			return nil
+		}
 		if mok {
 			f.Action = mv.Kind
 			plan.Moves = append(plan.Moves, mv)
@@ -580,24 +603,33 @@ func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, pla
 // what the accept-time guard would have written. A lyric that flattens to
 // nothing (all decorative) has no words worth keeping, so it falls through to
 // plain removal rather than writing an empty file.
-func (r *Revalidator) misSyncedMove(s site, path, audio string) (realign.Move, bool) {
+func (r *Revalidator) misSyncedMove(s site, path, audio string) (realign.Move, bool, error) {
 	switch r.opts.MisSyncedAction {
 	case ActionOff:
 		// Classified and counted by the caller; nothing planned. The file is left
-		// exactly as it is.
-		return realign.Move{}, false
+		// exactly as it is. NOT an error: this is the operator asking to see the
+		// verdict without acting on it, so the row is settled and retires.
+		return realign.Move{}, false, nil
 	case ActionQuarantine, ActionPurge:
-		return r.removalMove(s, path, r.opts.MisSyncedAction), true
+		return r.removalMove(s, path, r.opts.MisSyncedAction), true, nil
 	}
 	synced, err := lyrics.ReadSyncedLRC(path)
 	if err != nil {
-		return realign.Move{}, false
+		// COULD NOT READ THE WORDS, so no demotion can be planned -- and this is
+		// NOT the same as ActionOff, which is why it returns an error rather than
+		// a bare false. The verdict stands (the file overran), but the
+		// remediation could not be built, so a caller that treated this as
+		// "nothing to do" would stamp the row terminally and leave the offending
+		// .lrc in place forever. EvaluateLRCFile read this same file moments
+		// ago, so a failure here means it changed underneath us or the read
+		// failed transiently -- exactly the case worth retrying.
+		return realign.Move{}, false, fmt.Errorf("revalidate: read lyric for demotion: %w", err)
 	}
 	body := lyrics.PlainBody(synced)
 	if body == "" {
 		// Nothing worth keeping, so this degenerates to a plain removal -- which
 		// honors the legacy --purge by resolving to ActionPurge.
-		return r.removalMove(s, path, r.demoteRemoval), true
+		return r.removalMove(s, path, r.demoteRemoval), true, nil
 	}
 	// DEMOTE IS TWO HALVES: write the words as .txt, then get rid of the .lrc.
 	// Which flavor that second half takes is what --purge decides, and it must be
@@ -618,7 +650,7 @@ func (r *Revalidator) misSyncedMove(s site, path, audio string) (realign.Move, b
 	}
 	mv.TextPath = strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
 	mv.TextBody = body
-	return mv, true
+	return mv, true, nil
 }
 
 // removalMove builds the quarantine (default) or purge (opt-in) action for a
