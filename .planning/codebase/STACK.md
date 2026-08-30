@@ -97,7 +97,6 @@
 - `release.yml` - GoReleaser on `v*.*.*` tags. Produces cross-platform archives with conventional-commit changelogs.
 - `codeql.yml` - GitHub CodeQL security analysis for Go. Runs on push/PR to main and weekly (Monday 04:17 UTC).
 - `dependabot-auto-approve.yml` - Auto-approves Dependabot PRs for patch/minor updates.
-- `dependabot-merge.yml` - Auto-merges approved Dependabot PRs after CI passes (squash merge, delete branch).
 
 **Dependabot:**
 - Weekly updates (Monday) for `gomod` and `github-actions` ecosystems

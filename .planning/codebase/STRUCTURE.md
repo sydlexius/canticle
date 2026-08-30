@@ -35,8 +35,7 @@ mxlrc-go/
 │   │   ├── ci.yml
 │   │   ├── codeql.yml
 │   │   ├── release.yml
-│   │   ├── dependabot-auto-approve.yml
-│   │   └── dependabot-merge.yml
+│   │   └── dependabot-auto-approve.yml
 │   └── dependabot.yml
 ├── .planning/                  # Planning documents
 │   └── codebase/               # Codebase analysis docs
