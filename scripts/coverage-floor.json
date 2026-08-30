@@ -24,6 +24,7 @@
   "internal/scan": 78,
   "internal/scanfail": 86,
   "internal/scanner": 68,
+  "internal/schedule": 90,
   "internal/secrets": 90,
   "internal/server": 88,
   "internal/servetls": 78,
