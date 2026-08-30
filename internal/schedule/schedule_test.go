@@ -23,6 +23,14 @@ func TestParseTimeOfDay(t *testing.T) {
 		{in: "0400", wantErr: true},
 		{in: "", wantErr: true},
 		{in: "aa:bb", wantErr: true},
+		// strconv.Atoi accepts a leading sign ("+4", "-4" both parse with no
+		// error), and both are two bytes, so a naive len-then-Atoi check lets a
+		// signed field through as if it were unsigned.
+		{in: "+4:30", wantErr: true},
+		{in: "-4:30", wantErr: true},
+		{in: "04:+3", wantErr: true},
+		{in: "04:-3", wantErr: true},
+		{in: "+4:+3", wantErr: true},
 	}
 	for _, tc := range cases {
 		got, err := schedule.ParseTimeOfDay(tc.in)
@@ -237,6 +245,55 @@ func TestNextFireSkippedLocalTimeStillFires(t *testing.T) {
 	}
 	if d := next.Sub(now); d > 24*time.Hour {
 		t.Errorf("next = %v (%v away); a nonexistent local anchor must not skip the day", next, d)
+	}
+}
+
+// TestNextFireHourlyAcrossDSTSpringForward is the regression guard for the
+// hourly branch's own DST hazard: unlike daily and weekly, hourly used to
+// build its candidate with a direct time.Date call instead of routing through
+// advanceUntilAfter, so it never got the "strictly after now" retry the other
+// branches have. On the spring-forward day 02:00 does not exist in
+// America/New_York, so a naive "current hour + 1" candidate of 02:00 is
+// normalized backward by time.Date to 01:00 -- before now, not after it. The
+// existing DST coverage never caught this because it only exercises the
+// daily anchor, which already went through the helper; it proved the
+// invariant exactly where it already held.
+func TestNextFireHourlyAcrossDSTSpringForward(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	s := schedule.Schedule{Frequency: schedule.FrequencyHourly}
+	// 2026-03-08 01:37 EST is the hour whose naive "+1 hour, :00" candidate is
+	// the nonexistent 02:00.
+	now := time.Date(2026, time.March, 8, 1, 37, 0, 0, ny)
+	next, ok := s.NextFire(now)
+	if !ok {
+		t.Fatal("NextFire returned no time on the spring-forward day")
+	}
+	if !next.After(now) {
+		t.Fatalf("hourly next = %v; want strictly after %v", next, now)
+	}
+}
+
+// TestNextFireHourlyAcrossDSTFallBack covers the other side of the same
+// hazard: on the fall-back day 01:00-02:00 local occurs twice, so a
+// "current hour + 1" candidate built from a wall-clock hour during the
+// repeated hour must still land strictly after now.
+func TestNextFireHourlyAcrossDSTFallBack(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	s := schedule.Schedule{Frequency: schedule.FrequencyHourly}
+	// 2026-11-01 01:00 EDT is the first occurrence of the repeated 01:00 hour.
+	now := time.Date(2026, time.November, 1, 1, 30, 0, 0, ny)
+	next, ok := s.NextFire(now)
+	if !ok {
+		t.Fatal("NextFire returned no time on the fall-back day")
+	}
+	if !next.After(now) {
+		t.Fatalf("hourly next = %v; want strictly after %v", next, now)
 	}
 }
 

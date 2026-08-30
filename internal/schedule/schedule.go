@@ -57,6 +57,9 @@ func ParseTimeOfDay(s string) (TimeOfDay, error) {
 	if len(h) != 2 || len(m) != 2 {
 		return TimeOfDay{}, fmt.Errorf("must be HH:MM (24-hour, zero-padded), got %q", s)
 	}
+	if !isDigits(h) || !isDigits(m) {
+		return TimeOfDay{}, fmt.Errorf("must be HH:MM (24-hour, zero-padded), got %q", s)
+	}
 	hour, err := strconv.Atoi(h)
 	if err != nil || hour < 0 || hour > 23 {
 		return TimeOfDay{}, fmt.Errorf("hour must be 00-23, got %q", s)
@@ -71,27 +74,43 @@ func ParseTimeOfDay(s string) (TimeOfDay, error) {
 // String renders the time of day back as "HH:MM".
 func (t TimeOfDay) String() string { return fmt.Sprintf("%02d:%02d", t.Hour, t.Minute) }
 
-// weekdayNames maps the config vocabulary to time.Weekday. Lowercase only: the
-// config loader normalizes before this is consulted, so the map has one entry
-// per day rather than a case-insensitive scan that could drift from the
-// validator's accepted set.
-var weekdayNames = map[string]time.Weekday{
-	"sunday":    time.Sunday,
-	"monday":    time.Monday,
-	"tuesday":   time.Tuesday,
-	"wednesday": time.Wednesday,
-	"thursday":  time.Thursday,
-	"friday":    time.Friday,
-	"saturday":  time.Saturday,
+// isDigits reports whether every byte of s is an ASCII digit. strconv.Atoi
+// also accepts a leading '+' or '-', so "+4" and "-4" both parse cleanly and
+// pass a bare length check; without this guard ParseTimeOfDay would accept
+// "+4:30" as 04:30. Checked before Atoi rather than after, since Atoi cannot
+// distinguish "signed but in range" from "unsigned and in range".
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
-// ParseWeekday resolves a lowercase English weekday name.
+// ParseWeekday resolves a lowercase English weekday name. Lowercase only: the
+// config loader normalizes before this is consulted, so the switch has one
+// case per day rather than a case-insensitive scan that could drift from the
+// validator's accepted set.
 func ParseWeekday(s string) (time.Weekday, error) {
-	d, ok := weekdayNames[strings.ToLower(strings.TrimSpace(s))]
-	if !ok {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "sunday":
+		return time.Sunday, nil
+	case "monday":
+		return time.Monday, nil
+	case "tuesday":
+		return time.Tuesday, nil
+	case "wednesday":
+		return time.Wednesday, nil
+	case "thursday":
+		return time.Thursday, nil
+	case "friday":
+		return time.Friday, nil
+	case "saturday":
+		return time.Saturday, nil
+	default:
 		return time.Sunday, fmt.Errorf("must be a weekday name (sunday..saturday), got %q", s)
 	}
-	return d, nil
 }
 
 // WeekdayNames returns the accepted weekday vocabulary in calendar order. It is
@@ -160,8 +179,10 @@ func (s Schedule) NextFire(now time.Time) (time.Time, bool) {
 		}
 		return now.Add(s.Interval), true
 	case FrequencyHourly:
-		y, m, d := now.Date()
-		return time.Date(y, m, d, now.Hour()+1, 0, 0, 0, loc), true
+		return advanceUntilAfter(now, func(offset int) time.Time {
+			y, m, d := now.Date()
+			return time.Date(y, m, d, now.Hour()+1+offset, 0, 0, 0, loc)
+		}, 1), true
 	case FrequencyDaily:
 		return advanceUntilAfter(now, func(offset int) time.Time {
 			y, m, d := now.Date()
