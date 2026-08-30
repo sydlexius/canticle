@@ -70,7 +70,7 @@
 
 **CI Pipeline:**
 - GitHub Actions
-- Workflows: `ci.yml` (lint/test/build), `release.yml` (GoReleaser), `codeql.yml` (security), `dependabot-auto-approve.yml`, `dependabot-merge.yml`
+- Workflows: `ci.yml` (lint/test/build), `release.yml` (GoReleaser), `codeql.yml` (security), `dependabot-auto-approve.yml`
 - Runner: `ubuntu-latest` for all workflows
 
 **Release Process:**
