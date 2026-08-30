@@ -124,7 +124,18 @@ addr = "127.0.0.1:3876"
 # when possible; MXLRC_WEBHOOK_API_KEY can also provide one or more comma-separated keys.
 # webhook_api_keys = ["mxlrc_your-webhook-key"]
 
-# Scheduler scan interval in seconds for `serve` mode (env: MXLRC_SCAN_INTERVAL).
+# DEPRECATED: scheduler scan interval in seconds for `serve` mode (env:
+# MXLRC_SCAN_INTERVAL). Superseded by [server.scan_schedule] below, which is the
+# surface to use. This key still works and still takes effect whenever
+# scan_schedule.frequency is blank, so an existing config keeps running
+# unchanged; it will be removed in a future release.
+#
+# WHY IT IS DEPRECATED: the interval is measured from process start, not from
+# the clock. Any supervisor that restarts the container more often than the
+# interval (a nightly backup that stops it, a watchdog, a deploy) resets the
+# timer before it can fire, so the setting meant to scan LESS often instead
+# produces one full library walk on every restart.
+#
 # Default 900. Set to 0 to scan once and not repeat. The --scan-interval flag
 # overrides this value.
 #
@@ -153,6 +164,40 @@ addr = "127.0.0.1:3876"
 # Default 0, which falls back to api.cooldown. Clamped to a 15-second floor.
 # The --work-interval flag overrides this value.
 # work_interval_seconds = 0
+
+# Wall-clock schedule for the `serve` mode library scan. This is the successor
+# to scan_interval_seconds above: it anchors to the CLOCK, so the schedule
+# survives restarts instead of being reset by them.
+#
+#   frequency     hourly | daily | weekly | off. Blank (the default) means "not
+#                 configured", which keeps the deprecated scan_interval_seconds
+#                 behavior. Use "off" to actually stop periodic scanning.
+#                 (env: MXLRC_SCAN_SCHEDULE)
+#   at            Start time as HH:MM on a 24-hour LOCAL clock. Required for
+#                 daily and weekly; ignored by hourly, which fires on the hour.
+#                 (env: MXLRC_SCAN_SCHEDULE_AT)
+#   day           Lowercase weekday name. Required for weekly only.
+#                 (env: MXLRC_SCAN_SCHEDULE_DAY)
+#   scan_on_start Also walk the whole library at startup. Default false: the
+#                 filesystem watcher already handles change-driven rescans, so
+#                 the periodic walk is a backstop and a restart should not cost
+#                 one. (env: MXLRC_SCAN_SCHEDULE_ON_START)
+#
+# MISSED WINDOWS ARE SKIPPED, NOT RUN LATE. If the machine was asleep or the
+# container was down through the scheduled time, the scan does not run on the
+# way back up; it waits for the next occurrence. Running it late would restore
+# exactly the "every restart triggers a full walk" behavior this replaces.
+#
+# DST: the anchor is a wall-clock time, so "daily at 04:00" stays 04:00 local on
+# both sides of a daylight-saving change (the gap between runs is 23 or 25 hours
+# on those two days). An anchor inside the hour that spring-forward skips still
+# runs once, at the adjacent real time, rather than being missed for the year.
+#
+# [server.scan_schedule]
+# frequency = "daily"
+# at = "04:00"
+# day = "sunday"
+# scan_on_start = false
 
 # Trusted-network allowlist (serve mode). Gates GET /metrics: only requests
 # whose resolved client IP is loopback (always implicitly trusted) or inside a

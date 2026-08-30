@@ -214,6 +214,42 @@ type ServerConfig struct {
 	// TLS configures optional transport security for the serve listener (issue
 	// #204, Area 4). Off by default (plain HTTP), preserving pre-#204 behavior.
 	TLS TLSConfig `toml:"tls"`
+	// ScanSchedule is the WALL-CLOCK periodic library scan schedule (#726) and
+	// the successor to ScanIntervalSeconds above. Leaving Frequency empty keeps
+	// the deprecated interval behavior, so an existing config is never silently
+	// ignored; setting it switches the scheduler to calendar anchoring.
+	ScanSchedule ScanScheduleConfig `toml:"scan_schedule"`
+}
+
+// ScanScheduleConfig is the wall-clock schedule for the serve-mode library scan
+// (issue #726).
+//
+// WHY IT REPLACES A DURATION. server.scan_interval_seconds started a ticker at
+// process start, which is a duration-from-boot rather than a schedule. Any
+// supervisor restarting more often than the interval -- a nightly backup that
+// stops the container, a watchdog, a deploy -- reset the ticker before it could
+// fire, so the knob meant to REDUCE scanning instead guaranteed one full
+// library walk per restart. A wall-clock anchor cannot be inverted that way:
+// "daily at 04:00" means the same thing however often the process restarts.
+type ScanScheduleConfig struct {
+	// Frequency selects the schedule: "hourly", "daily", "weekly", or "off".
+	// EMPTY IS LOAD-BEARING: it means "not configured", which keeps the
+	// deprecated scan_interval_seconds path alive for one release. Use "off" to
+	// actually disable periodic scanning. Override: MXLRC_SCAN_SCHEDULE.
+	Frequency string `toml:"frequency"`
+	// At is the daily/weekly anchor as "HH:MM", 24-hour local time. Required by
+	// "daily" and "weekly"; ignored otherwise. Override: MXLRC_SCAN_SCHEDULE_AT.
+	At string `toml:"at"`
+	// Day is the weekly anchor, a lowercase English weekday name. Required by
+	// "weekly"; ignored otherwise. Override: MXLRC_SCAN_SCHEDULE_DAY.
+	Day string `toml:"day"`
+	// ScanOnStart requests a full library walk at startup, before the first
+	// scheduled fire. Defaults to FALSE under a wall-clock schedule, which is
+	// the whole point of #726: the filesystem watcher covers change-driven
+	// rescans, so the periodic walk is a backstop and a restart must not imply
+	// one. The deprecated interval path keeps its historical always-on startup
+	// walk regardless of this field. Override: MXLRC_SCAN_SCHEDULE_ON_START.
+	ScanOnStart bool `toml:"scan_on_start"`
 }
 
 // TLSConfig holds the optional TLS settings for the serve listener (issue #204,
@@ -1083,6 +1119,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	}
 	applyEnvOverrides(&cfg, appliedEnv)
 	normalizeEmbeddedLyrics(&cfg)
+	normalizeScanSchedule(&cfg)
 	if err := normalizeProvidersMode(&cfg); err != nil {
 		return cfg, appliedEnv, err
 	}
@@ -1102,6 +1139,9 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 		return cfg, appliedEnv, err
 	}
 	if err := ValidateInstrumentalDetectorOrdering(cfg); err != nil {
+		return cfg, appliedEnv, err
+	}
+	if err := ValidateScanSchedule(cfg); err != nil {
 		return cfg, appliedEnv, err
 	}
 	if cfg.DB.Path == "" {
@@ -1254,6 +1294,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 			applied["server.scan_interval_seconds"] = true
 		}
 	}
+	applyScanScheduleEnv(cfg, applied)
 	if v := os.Getenv("MXLRC_SWEEP_INTERVAL"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {

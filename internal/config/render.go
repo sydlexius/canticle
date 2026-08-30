@@ -82,6 +82,16 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("work_interval_seconds = %d%s\n", cfg.Server.WorkIntervalSeconds, ann("server.work_interval_seconds"))
 	p("\n")
 
+	// [server.scan_schedule] -- a sub-table, so it MUST come after every scalar
+	// [server] key above; a scalar emitted below a sub-table heading would be
+	// parsed into the sub-table on the way back in.
+	p("[server.scan_schedule]\n")
+	p("frequency = %s%s\n", cfg.Server.ScanSchedule.Frequency, ann("server.scan_schedule.frequency"))
+	p("at = %s%s\n", cfg.Server.ScanSchedule.At, ann("server.scan_schedule.at"))
+	p("day = %s%s\n", cfg.Server.ScanSchedule.Day, ann("server.scan_schedule.day"))
+	p("scan_on_start = %t%s\n", cfg.Server.ScanSchedule.ScanOnStart, ann("server.scan_schedule.scan_on_start"))
+	p("\n")
+
 	// [providers]
 	p("[providers]\n")
 	p("primary = %s%s\n", cfg.Providers.Primary, ann("providers.primary"))
@@ -335,6 +345,10 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			intAttr("scan_interval_seconds", "server.scan_interval_seconds", cfg.Server.ScanIntervalSeconds),
 			intAttr("sweep_interval_seconds", "server.sweep_interval_seconds", cfg.Server.SweepIntervalSeconds),
 			intAttr("work_interval_seconds", "server.work_interval_seconds", cfg.Server.WorkIntervalSeconds),
+			strAttr("scan_schedule_frequency", "server.scan_schedule.frequency", cfg.Server.ScanSchedule.Frequency),
+			strAttr("scan_schedule_at", "server.scan_schedule.at", cfg.Server.ScanSchedule.At),
+			strAttr("scan_schedule_day", "server.scan_schedule.day", cfg.Server.ScanSchedule.Day),
+			boolAttr("scan_schedule_scan_on_start", "server.scan_schedule.scan_on_start", cfg.Server.ScanSchedule.ScanOnStart),
 		),
 		group("providers",
 			strAttr("primary", "providers.primary", cfg.Providers.Primary),

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/schedule"
 	"github.com/sydlexius/canticle/internal/trustnet"
 )
 
@@ -94,6 +95,14 @@ var enumValues = map[string][]string{
 	"providers.mode":         {"ordered", "parallel"},
 	"logging.level":          {"debug", "info", "warn", "error"},
 	"logging.format":         {"text", "json"},
+	// Derived from the scheduler's own vocabulary rather than restated, so the
+	// dropdown, the validator, and the code that computes the next fire cannot
+	// disagree about which words are legal. The blank "not configured" value is
+	// deliberately absent from the offered set: it exists only as a migration
+	// state for a config written before [server.scan_schedule] did, and
+	// choosing it from a dropdown would mean "silently keep a deprecated key".
+	"server.scan_schedule.frequency": schedule.FrequencyNames(),
+	"server.scan_schedule.day":       schedule.WeekdayNames(),
 	// The two timing-sweep action sets differ by exactly one value, and the
 	// difference is load-bearing rather than an oversight: a categorical lyric
 	// is the wrong song's words, so it has nothing worth demoting to .txt.
@@ -123,6 +132,21 @@ func AllowedValues(path string) []string {
 		return nil
 	}
 	return append([]string(nil), v...)
+}
+
+// ValidateTimeOfDay accepts an empty value (meaning "unset") or a "HH:MM"
+// 24-hour local time. It delegates to the scheduler's own parser so the write
+// path accepts exactly the anchors the next-fire computation can consume.
+func ValidateTimeOfDay() Validator {
+	return func(value string) error {
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		if _, err := schedule.ParseTimeOfDay(value); err != nil {
+			return err
+		}
+		return nil
+	}
 }
 
 // ValidateEnum accepts only one of the allowed values, compared verbatim.
@@ -317,6 +341,13 @@ func validatorFor(f FieldSpec) Validator {
 		return ValidateKnownProviders()
 	case "server.addr":
 		return ValidateListenAddr()
+	case "server.scan_schedule.frequency", "server.scan_schedule.day":
+		// NORMALIZED, because the loader lowercases and trims both before
+		// validating them: a verbatim comparison here would reject a value the
+		// next boot accepts. See ValidateNormalizedEnum for the operator symptom.
+		return ValidateNormalizedEnum(enumValues[f.Path]...)
+	case "server.scan_schedule.at":
+		return ValidateTimeOfDay()
 	case "watcher.max_dirs":
 		// Strictly positive: a non-positive cap rejects every watch root (matches
 		// the MXLRCGO_WATCH_MAX_DIRS env rule). watcher.debounce_ms falls through to

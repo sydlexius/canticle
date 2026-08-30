@@ -114,6 +114,13 @@ func validEnvValue(f FieldSpec) string {
 		return "front"
 	case "timing_validation.on_mis_synced":
 		return "quarantine"
+	case "server.scan_schedule.at":
+		// A HH:MM anchor; anything else is rejected and leaves provenance false.
+		return "04:00"
+	case "server.scan_schedule.day":
+		return "sunday"
+	case "server.scan_schedule.frequency":
+		return "daily"
 	case "timing_validation.on_categorical":
 		// Deliberately NOT "demote": that value is legal for on_mis_synced and
 		// illegal here, so using it would make this helper assert the wrong
