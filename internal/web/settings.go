@@ -103,7 +103,8 @@ var commonPaths = []string{
 	"providers.mode",
 	"server.addr",
 	"server.webhook_api_keys",
-	"server.scan_interval_seconds",
+	"server.scan_schedule.frequency",
+	"server.scan_schedule.at",
 	"enrichment.enabled",
 	"logging.level",
 }
@@ -453,6 +454,25 @@ var timingActionLabels = map[string]string{
 	"off":        "Record the problem, change nothing on disk",
 }
 
+// scanFrequencyLabels gives the schedule dropdown plain-language labels. "off"
+// is the one that needs saying out loud: it stops the periodic library scan
+// entirely, leaving only the filesystem watcher and any manual run, and a bare
+// three-letter token in a list next to "hourly" does not convey that.
+var scanFrequencyLabels = map[string]string{
+	"off":    "Never (rely on the file watcher only)",
+	"hourly": "Every hour, on the hour",
+	"daily":  "Once a day, at the time below",
+	"weekly": "Once a week, on the day and time below",
+}
+
+// scanDayLabels capitalizes the weekday vocabulary for display without changing
+// which values the dropdown offers.
+var scanDayLabels = map[string]string{
+	"sunday": "Sunday", "monday": "Monday", "tuesday": "Tuesday",
+	"wednesday": "Wednesday", "thursday": "Thursday", "friday": "Friday",
+	"saturday": "Saturday",
+}
+
 // selectOptions builds the dropdown choices for a fixed-choice field: the
 // provider list for providers.primary, otherwise the validation enum set.
 func selectOptions(path, effective string) []templates.SettingsOption {
@@ -472,6 +492,14 @@ func selectOptions(path, effective string) []templates.SettingsOption {
 			}
 		case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
 			if l, ok := timingActionLabels[v]; ok {
+				label = l
+			}
+		case "server.scan_schedule.frequency":
+			if l, ok := scanFrequencyLabels[v]; ok {
+				label = l
+			}
+		case "server.scan_schedule.day":
+			if l, ok := scanDayLabels[v]; ok {
 				label = l
 			}
 		}
@@ -955,6 +983,14 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return cfg.Server.Addr
 	case "server.scan_interval_seconds":
 		return strconv.Itoa(cfg.Server.ScanIntervalSeconds)
+	case "server.scan_schedule.frequency":
+		return cfg.Server.ScanSchedule.Frequency
+	case "server.scan_schedule.at":
+		return cfg.Server.ScanSchedule.At
+	case "server.scan_schedule.day":
+		return cfg.Server.ScanSchedule.Day
+	case "server.scan_schedule.scan_on_start":
+		return strconv.FormatBool(cfg.Server.ScanSchedule.ScanOnStart)
 	case "server.sweep_interval_seconds":
 		return strconv.Itoa(cfg.Server.SweepIntervalSeconds)
 	case "server.work_interval_seconds":
@@ -1164,21 +1200,23 @@ func settingsLabel(spec config.FieldSpec) string {
 // path segment in settingsLabel.
 var settingsLabels = map[string]string{
 	// Common tab (exact UAT labels).
-	"api.token":                     "Musixmatch token",
-	"api.cooldown":                  "Seconds to wait between requests",
-	"output.dir":                    "Where to save lyrics",
-	"output.embedded_lyrics":        "What to do with lyrics already in the file",
-	"output.bilingual_output":       "Save the original and the translation together",
-	"output.word_sync":              "Highlight each word as it is sung (karaoke style)",
-	"providers.primary":             "Main lyrics source",
-	"providers.mode":                "How to use multiple sources",
-	"server.addr":                   "Web page address",
-	"server.web_ui_enabled":         "Show the web page",
-	"server.webhook_api_keys":       "Webhook keys",
-	"server.scan_interval_seconds":  "How often to scan the library (seconds)",
-	"server.sweep_interval_seconds": "How often to clean up rows for moved or deleted files (seconds)",
-	"enrichment.enabled":            "Look up extra track info first",
-	"logging.level":                 "How much detail to log",
+	"api.token":                      "Musixmatch token",
+	"api.cooldown":                   "Seconds to wait between requests",
+	"output.dir":                     "Where to save lyrics",
+	"output.embedded_lyrics":         "What to do with lyrics already in the file",
+	"output.bilingual_output":        "Save the original and the translation together",
+	"output.word_sync":               "Highlight each word as it is sung (karaoke style)",
+	"providers.primary":              "Main lyrics source",
+	"providers.mode":                 "How to use multiple sources",
+	"server.addr":                    "Web page address",
+	"server.web_ui_enabled":          "Show the web page",
+	"server.webhook_api_keys":        "Webhook keys",
+	"server.scan_interval_seconds":   "How often to scan the library (seconds, deprecated)",
+	"server.scan_schedule.frequency": "How often to scan the library",
+	"server.scan_schedule.at":        "Time of day the scan starts (24-hour, e.g. 04:00)",
+	"server.sweep_interval_seconds":  "How often to clean up rows for moved or deleted files (seconds)",
+	"enrichment.enabled":             "Look up extra track info first",
+	"logging.level":                  "How much detail to log",
 	// Advanced tab.
 	"api.circuit_open_duration":                       "Max pause after repeated rate-limiting (seconds)",
 	"api.circuit_backoff_base_seconds":                "First pause after rate-limiting (seconds)",
@@ -1188,6 +1226,8 @@ var settingsLabels = map[string]string{
 	"db.path":                                         "Database file location",
 	"secrets.key_file":                                "Secret key file location",
 	"server.work_interval_seconds":                    "How often to process the queue (seconds)",
+	"server.scan_schedule.day":                        "Day of the week to scan (weekly only)",
+	"server.scan_schedule.scan_on_start":              "Also scan everything each time the server starts",
 	"server.trusted_networks.cidrs":                   "Client networks allowed to connect",
 	"server.trusted_networks.trusted_proxies":         "Trusted proxy networks",
 	"server.tls.cert_file":                            "HTTPS certificate file",

@@ -101,6 +101,10 @@ func (u *UI) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := u.checkScanScheduleChanges(r.Context(), changes); err != nil {
+		http.Error(w, validationMessage(err), http.StatusBadRequest)
+		return
+	}
 	if err := u.checkTLSInvariantChanges(r.Context(), changes); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -118,6 +122,35 @@ func (u *UI) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeSaveOK(w)
+}
+
+// checkScanScheduleChanges folds the [server.scan_schedule] entries of a section
+// save onto the current state and validates the result against
+// config.ValidateScanSchedule. It is the multi-field counterpart to the
+// single-field checkScanScheduleInvariant, and it matters more here than the
+// TLS one does: switching to "weekly" and supplying the day in the SAME batch
+// is the ordinary way an operator sets this up, and a per-field check would
+// reject the frequency for missing an anchor that arrived in the same request.
+// Returns nil when no schedule field is in the batch.
+func (u *UI) checkScanScheduleChanges(ctx context.Context, changes map[string]string) error {
+	cur := u.currentConfig(ctx)
+	touched := false
+	if v, ok := changes["server.scan_schedule.frequency"]; ok {
+		cur.Server.ScanSchedule.Frequency = v
+		touched = true
+	}
+	if v, ok := changes["server.scan_schedule.at"]; ok {
+		cur.Server.ScanSchedule.At = v
+		touched = true
+	}
+	if v, ok := changes["server.scan_schedule.day"]; ok {
+		cur.Server.ScanSchedule.Day = v
+		touched = true
+	}
+	if !touched {
+		return nil
+	}
+	return config.ValidateScanSchedule(cur)
 }
 
 // checkTLSInvariantChanges folds the TLS-related entries of a section save onto

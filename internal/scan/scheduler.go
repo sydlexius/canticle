@@ -10,6 +10,7 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/schedule"
 )
 
 // LibraryLister lists configured library roots.
@@ -55,6 +56,14 @@ type Scheduler struct {
 	Interval       time.Duration
 	MaxRuntime     time.Duration
 	OnScanComplete OnCompleteFunc
+	// Schedule is the wall-clock scan schedule (#726). When its Frequency is
+	// empty the scheduler falls back to legacy interval mode driven by Interval
+	// above, so a Scheduler built before this field existed behaves exactly as
+	// it did: one walk at startup, then a ticker.
+	Schedule schedule.Schedule
+	// Now is the clock seam. nil means time.Now. Tests inject a fake so the
+	// next-fire computation can be asserted without waiting for one.
+	Now func() time.Time
 	// EnrichOverride is the scan-CLI override for recording enrichment
 	// (--enrich/--no-enrich); nil means no override. GlobalEnrichDefault is the
 	// config default used when neither the override nor the per-library setting
@@ -159,10 +168,45 @@ func (s *Scheduler) scanAndPersist(ctx context.Context, lib models.Library, path
 	return nil
 }
 
-// Run scans immediately and then repeats at Interval until ctx is canceled or
-// MaxRuntime elapses. If Interval is zero or negative, it performs one scan.
+// now reads the clock seam, defaulting to time.Now.
+func (s *Scheduler) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+// resolvedSchedule returns the schedule to run, folding a bare Interval into
+// legacy interval mode. Keeping the fold in one place means every caller that
+// only ever set Interval -- the one-shot CLI scan among them -- gets its
+// historical behavior without each call site restating it.
+func (s *Scheduler) resolvedSchedule() schedule.Schedule {
+	sch := s.Schedule
+	if sch.Frequency == "" {
+		sch.Frequency = schedule.FrequencyInterval
+		sch.Interval = s.Interval
+		// Legacy mode always walked at startup, and an existing deployment's
+		// only scan is that walk. Preserving it is what makes the compatibility
+		// path a compatibility path.
+		sch.ScanOnStart = true
+	}
+	return sch
+}
+
+// Run performs the optional startup scan and then repeats on the configured
+// schedule until ctx is canceled or MaxRuntime elapses.
+//
+// WHAT CHANGED AND WHY (#726). This used to scan unconditionally and then start
+// a time.NewTicker anchored to process start. Under any supervisor that
+// restarts more often than the interval -- a nightly backup that stops the
+// container, a watchdog, a deploy -- the ticker was unreachable and the only
+// scan that ever ran was the startup one, so the interval knob described a
+// schedule and delivered its opposite: the maximum rate the restart cadence
+// allowed. Each cycle now recomputes its next fire from the WALL CLOCK, so a
+// restart cannot reset the phase, and the startup walk is opt-in.
 func (s *Scheduler) Run(ctx context.Context) error {
-	slog.Info("scheduler started", "interval", s.Interval, "max_runtime", s.MaxRuntime)
+	sch := s.resolvedSchedule()
+	slog.Info("scheduler started", "schedule", sch.String(), "scan_on_start", sch.ScanOnStart, "max_runtime", s.MaxRuntime)
 	if s.MaxRuntime > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.MaxRuntime)
@@ -172,23 +216,36 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := s.RunOnce(ctx); err != nil {
-		return err
-	}
-	if s.Interval <= 0 {
-		return nil
+	if sch.ScanOnStart {
+		if err := s.RunOnce(ctx); err != nil {
+			return err
+		}
 	}
 
-	ticker := time.NewTicker(s.Interval)
-	defer ticker.Stop()
 	for {
+		next, ok := sch.NextFire(s.now())
+		if !ok {
+			return nil
+		}
+		wait := time.Until(next)
+		if s.Now != nil {
+			// With an injected clock, "until" must be measured on that clock too,
+			// or a test's frozen now would be compared against the real one.
+			wait = next.Sub(s.now())
+		}
+		if wait < 0 {
+			wait = 0
+		}
+		slog.Info("scheduler next scan", "at", next.Format(time.RFC3339), "in", wait.String())
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-ticker.C:
-			if err := s.RunOnce(ctx); err != nil {
-				return err
-			}
+		case <-timer.C:
+		}
+		if err := s.RunOnce(ctx); err != nil {
+			return err
 		}
 	}
 }

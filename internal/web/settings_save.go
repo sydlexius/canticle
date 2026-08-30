@@ -99,6 +99,10 @@ func (u *UI) handleSaveField(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := u.checkScanScheduleInvariant(r.Context(), path, value); err != nil {
+		http.Error(w, validationMessage(err), http.StatusBadRequest)
+		return
+	}
 	if err := u.checkTLSInvariant(r.Context(), path, value); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -153,6 +157,29 @@ func (u *UI) checkTLSInvariant(ctx context.Context, path, value string) error {
 		return nil
 	}
 	return config.ValidateTLSSelection(selfSigned, certFile, keyFile)
+}
+
+// checkScanScheduleInvariant validates the [server.scan_schedule] state that
+// would RESULT from the proposed change against the loader's own cross-field
+// rule (config.ValidateScanSchedule): daily needs a time, weekly needs a time
+// and a day. A per-field validator cannot see this -- "weekly" is a perfectly
+// legal frequency in isolation, and only the resulting state says whether the
+// anchor it needs is present. Sharing the loader's function is what makes the
+// page reject exactly what boot would reject, so saving cannot produce a
+// config the next restart refuses. Returns nil for non-schedule fields.
+func (u *UI) checkScanScheduleInvariant(ctx context.Context, path, value string) error {
+	cur := u.currentConfig(ctx)
+	switch path {
+	case "server.scan_schedule.frequency":
+		cur.Server.ScanSchedule.Frequency = value
+	case "server.scan_schedule.at":
+		cur.Server.ScanSchedule.At = value
+	case "server.scan_schedule.day":
+		cur.Server.ScanSchedule.Day = value
+	default:
+		return nil
+	}
+	return config.ValidateScanSchedule(cur)
 }
 
 // splitCommaList splits a comma-joined value into trimmed, non-empty entries.
