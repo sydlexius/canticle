@@ -45,7 +45,20 @@ Two operational notes:
 - The library roots used to confine payload paths (step 2) are snapshotted when `serve` starts. A library added with `canticle library add ...` while `serve` is running is not recognized for raw-payload-path resolution until `serve` is restarted. (The periodic scheduler and watcher still pick up new libraries without a restart; only the webhook payload-path confinement uses the startup snapshot.)
 - Inventory matching for tracks with non-ASCII artist/title metadata converges after one rescan following an upgrade. The key-backfill migration applies a best-effort ASCII fold to pre-existing rows; the exact normalized keys are written on the next library scan, so run `canticle scan` once after upgrading to make non-ASCII webhook matches reliable.
 
-The scheduler scan interval and worker poll interval are configurable for Docker/Unraid deployments. Set `scan_interval_seconds` and `work_interval_seconds` under `[server]` in the config file, or override with `MXLRC_SCAN_INTERVAL` and `MXLRC_WORK_INTERVAL`. Precedence is CLI flag (`--scan-interval`, `--work-interval`) > environment variable > config file > default. Defaults preserve current behavior: scan interval 900 seconds, and worker interval falls back to `api.cooldown` (clamped to a 15-second floor). A scan interval of 0 scans once without repeating.
+The library scan runs on a wall-clock schedule, set under `[server.scan_schedule]`:
+
+```toml
+[server.scan_schedule]
+frequency = "daily"     # hourly | daily | weekly | off
+at = "04:00"            # 24-hour local clock
+scan_on_start = false
+```
+
+This anchors the scan to the clock, so it survives restarts. The older `scan_interval_seconds` measured its interval from process start instead, which meant that on a host restarting the container regularly (a nightly backup, say) the timer was reset before it could fire and every restart cost a full library walk. `scan_on_start` defaults to off for the same reason: the filesystem watcher already catches changes, so a restart need not re-walk everything.
+
+A missed window is skipped rather than run late - if the machine was down through 04:00, the scan waits for the next day. See [Configuration](CONFIGURATION.md#serverscan_schedule) for the full reference including daylight-saving behavior.
+
+`scan_interval_seconds` is deprecated but still honored whenever `scan_schedule.frequency` is blank, so an existing config keeps working; set the schedule when convenient. The worker poll interval is unchanged: set `work_interval_seconds` under `[server]` or `MXLRC_WORK_INTERVAL`, with precedence CLI flag (`--work-interval`) > environment variable > config file > default (it falls back to `api.cooldown`, clamped to a 15-second floor).
 
 ### Health and status endpoints
 

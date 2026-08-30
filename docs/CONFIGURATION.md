@@ -78,7 +78,11 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_MISS_BACKOFF_BASE_HOURS` | `168` | Initial re-check delay in hours for a benign miss (7 days). Doubles on each successive miss up to `MXLRC_MISS_BACKOFF_CAP_HOURS`. Minimum 1. |
 | `MXLRC_MISS_BACKOFF_CAP_HOURS` | `672` | Maximum re-check delay in hours for a benign miss (28 days). Clamped to at least `MXLRC_MISS_BACKOFF_BASE_HOURS`. |
 | `MXLRC_MAX_MISS_ATTEMPTS` | `15` | Maximum number of miss re-fetches before retiring the queue row. `0` means no cap. |
-| `MXLRC_SCAN_INTERVAL` | `900` | `serve` library-scan interval in seconds. `0` scans once without repeating. |
+| `MXLRC_SCAN_INTERVAL` | `900` | DEPRECATED (see `MXLRC_SCAN_SCHEDULE`). `serve` library-scan interval in seconds, measured from process start. `0` scans once without repeating. |
+| `MXLRC_SCAN_SCHEDULE` | (unset) | Wall-clock scan schedule: `hourly`, `daily`, `weekly`, or `off`. Unset keeps the deprecated `MXLRC_SCAN_INTERVAL` behavior. |
+| `MXLRC_SCAN_SCHEDULE_AT` | (unset) | Start time for the daily/weekly scan, `HH:MM` on a 24-hour local clock. |
+| `MXLRC_SCAN_SCHEDULE_DAY` | (unset) | Weekday for the weekly scan (`sunday`..`saturday`). |
+| `MXLRC_SCAN_SCHEDULE_ON_START` | `false` | Also scan the whole library at startup. |
 | `MXLRC_WORK_INTERVAL` | `0` | Worker poll interval in seconds. `0` falls back to `api.cooldown` (15s floor). |
 | `MXLRC_PROVIDER_PRIMARY` | `musixmatch` | Primary lyrics provider. |
 | `MXLRC_PROVIDERS_DISABLED` | (none) | Comma-separated providers to disable. |
@@ -197,7 +201,35 @@ addr = "127.0.0.1:3876"
 
 HTTP listen address, webhook keys, and the scheduler scan/worker poll intervals (env: `MXLRC_SERVER_ADDR`, `MXLRC_WEBHOOK_API_KEY`, `MXLRC_SCAN_INTERVAL`, `MXLRC_WORK_INTERVAL`; CLI: `--listen`, `--scan-interval`, `--work-interval`).
 
+`scan_interval_seconds` is **deprecated** in favor of `[server.scan_schedule]` below. It still works, and still takes effect whenever `scan_schedule.frequency` is blank, so an existing config keeps running unchanged.
+
 `web_ui_enabled` (default `false`, env: `MXLRC_WEB_UI_ENABLED`, precedence env > file) gates the browser UI on the serve listener. When enabled, the UI pages require a session login (a single admin account, separate from the webhook API key), or a request from a trusted network (the `[server.trusted_networks]` CIDR allowlist). Secret values (API token, webhook keys) are always redacted in the Config view. See [Web UI access](#web-ui-access) for the first-run onboarding flow.
+
+### `[server.scan_schedule]`
+
+```toml
+[server.scan_schedule]
+frequency = "daily"     # hourly | daily | weekly | off
+at = "04:00"            # daily/weekly start time, 24-hour local clock
+day = "sunday"          # weekly only
+scan_on_start = false   # also walk the library at startup
+```
+
+The wall-clock schedule for the serve-mode library scan, and the successor to `scan_interval_seconds` (env: `MXLRC_SCAN_SCHEDULE`, `MXLRC_SCAN_SCHEDULE_AT`, `MXLRC_SCAN_SCHEDULE_DAY`, `MXLRC_SCAN_SCHEDULE_ON_START`).
+
+**Why it replaces an interval.** `scan_interval_seconds` started its timer at process start, which is a duration-from-boot rather than a schedule. Any supervisor that restarts the process more often than the interval - a nightly backup that stops the container, a watchdog, a routine deploy - reset the timer before it could fire. The result inverted the setting's intent: the knob meant to scan less often instead produced one full library walk on every restart, and the periodic scan never ran at all. A wall-clock anchor cannot be inverted that way, because "daily at 04:00" means the same thing however often the process restarts.
+
+`frequency` - `hourly` fires at the top of each hour and needs no `at`. `daily` and `weekly` fire at the next occurrence of the configured wall-clock time. `off` disables periodic scanning entirely (the filesystem watcher and any manual `scan` run are unaffected). **Blank is not the same as `off`**: blank means "not configured", which keeps the deprecated `scan_interval_seconds` path alive so that upgrading changes nothing for an existing deployment. Set `off` when you actually want no periodic scan.
+
+`at` - the daily/weekly anchor, `HH:MM` on a 24-hour local clock. Required for `daily` and `weekly`; a missing or malformed anchor is a startup error, not a silent default, since a scan firing at a time nobody chose is the failure this whole surface exists to prevent.
+
+`day` - the weekly anchor, a lowercase weekday name. Required for `weekly` only.
+
+`scan_on_start` - default `false`. The filesystem watcher already covers change-driven rescans, so the periodic walk is a backstop and a restart should not cost a full library pass. Set it `true` if you want the old always-scan-at-boot behavior. The deprecated interval path keeps its historical startup walk regardless of this field.
+
+**Missed windows are skipped, not run late.** If the machine was asleep or the container was down through the scheduled time, the scan does not run on the way back up - it waits for the next occurrence. Running it late would restore precisely the "every restart triggers a full walk" behavior this replaces.
+
+**Daylight saving.** The anchor is a wall-clock time, so `daily at 04:00` stays 04:00 local on both sides of a transition; the interval between those two runs is 23 or 25 hours rather than 24. An anchor inside the hour that spring-forward skips still runs once, at the adjacent real instant, rather than being missed for the year.
 
 ### `[server.trusted_networks]`
 
