@@ -993,6 +993,17 @@ func (q *DBQueue) NeedsInstrumentalTelemetry(ctx context.Context, id int64) (boo
 	return n > 0, nil
 }
 
+// releaseCauseClearedError is the last_error value Release writes when it
+// restores a row to 'pending' and the row was carrying a cause. It exists so
+// clearing the cause on that branch (see Release's comment for why the branch
+// clears at all) is self-describing instead of destructive: before this
+// sentinel, a non-empty last_error was overwritten with ” and nothing marked
+// that a reason had ever been recorded, so the row read as "deferred/failed
+// for no reason" permanently and the same defect happened once already (#624).
+// Reused by migration 047 (the one-time backfill of the historical cohort this
+// defect stranded) and by tests, so the three cannot diverge.
+const releaseCauseClearedError = "cause cleared by release"
+
 // Release returns a processing item to the pool it was claimed from, without
 // recording a failure. Used when the worker dequeued the item but cannot
 // process it for a reason that should not count against the row's retry budget
@@ -1009,10 +1020,18 @@ func (q *DBQueue) NeedsInstrumentalTelemetry(ctx context.Context, id int64) (boo
 // invisible to RecheckDeferred and `queue deferred`, both being scoped
 // WHERE status = 'deferred'.
 //
-// last_error is cleared only when the row returns to 'pending'. A row restored
-// to 'failed' keeps its reason: a throttle is not the song's fault, but the
-// row stays in the failures view, and wiping the reason there would strand it
-// as an "unknown" bucket in CountFailuresByReason with its cause destroyed.
+// last_error is touched only when the row returns to 'pending': a genuinely
+// empty cause stays empty, but a row that WAS carrying a cause has it
+// overwritten with the releaseCauseClearedError sentinel rather than ”. #624
+// found that the plain clear this branch used to do destroyed the only record
+// that a deferral cause had ever existed -- there is no live path today that
+// reaches this branch with a non-empty last_error (a fresh 'pending' row has
+// none to lose), but nothing prevents a future one, and the sentinel makes the
+// row self-describing either way rather than relying on that being permanent.
+// A row restored to 'failed' or 'deferred' keeps its real reason unchanged: a
+// throttle is not the song's fault, but the row stays in the failures view,
+// and wiping the reason there would strand it as a no-reason-recorded bucket
+// in CountFailuresByReason with its cause destroyed.
 //
 // Dequeue is the sole writer of status='processing' and always re-stamps
 // prev_status as it claims, so a stale prev_status from an earlier claim can
@@ -1029,11 +1048,13 @@ func (q *DBQueue) Release(ctx context.Context, id int64) error {
                  ELSE prev_status
              END,
              last_error = CASE
+                 WHEN prev_status IN ('', 'pending') AND last_error <> '' THEN ?
                  WHEN prev_status IN ('', 'pending') THEN ''
                  ELSE last_error
              END
          WHERE id = ?
            AND status = 'processing'`,
+		releaseCauseClearedError,
 		id,
 	)
 	if err != nil {
@@ -1636,20 +1657,35 @@ func (q *DBQueue) CountDone(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// NoReasonRecorded is the failure-reason label used wherever an empty
+// last_error is displayed as a category: CountFailuresByReason (below) and
+// reports.FailureAnalysis, which imports this constant so the two cannot
+// drift. It replaces the misleading literal "unknown" (#624): "unknown" reads
+// as a diagnosis that was attempted and failed, but an empty last_error means
+// no diagnosis was ever recorded -- there is no "unknown" reason in the
+// system, only an empty column. A row whose cause was destroyed by a release
+// is a DIFFERENT case and carries the releaseCauseClearedError sentinel
+// instead, so it is never grouped under this label; the two read as distinct,
+// honest buckets.
+const NoReasonRecorded = "no reason recorded"
+
 // CountFailuresByReason returns the count of work_queue rows with status
 // 'failed' grouped by last_error. Rows whose last_error is empty are grouped
-// under "unknown". Deferred rows (benign misses) are excluded because they are
-// not errors. Used by the GET /metrics endpoint.
+// under NoReasonRecorded. Deferred rows (benign misses) are excluded because
+// they are not errors. Used by the GET /metrics endpoint.
 func (q *DBQueue) CountFailuresByReason(ctx context.Context) (map[string]int64, error) {
 	rows, err := q.db.QueryContext(ctx,
 		// Grouped raw in SQL, then re-merged on the NORMALIZED key below. The
 		// database collapses the row count to a couple of dozen groups first, so
 		// this never pulls every failed row across just to normalize it; SQLite has
-		// no regex, so the normalization cannot live in the query (#478).
-		`SELECT COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*)
+		// no regex, so the normalization cannot live in the query (#478). The
+		// label is bound as a parameter (not inlined) so NoReasonRecorded stays
+		// the single source of truth.
+		`SELECT COALESCE(NULLIF(last_error, ''), ?) AS reason, COUNT(*)
          FROM work_queue
          WHERE status = 'failed'
          GROUP BY reason`,
+		NoReasonRecorded,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("queue: count failures by reason: %w", err)
@@ -1675,8 +1711,8 @@ func (q *DBQueue) CountFailuresByReason(ctx context.Context) (map[string]int64, 
 }
 
 // normalizedReason collapses a raw last_error into a stable failure signature
-// for the metrics label, preserving the 'unknown' sentinel the SQL COALESCE
-// produces for an empty error.
+// for the metrics label, preserving the NoReasonRecorded sentinel the SQL
+// COALESCE produces for an empty error.
 //
 // This label is the reason the normalization is not merely cosmetic:
 // internal/server/metrics.go emits it VERBATIM as
@@ -1686,7 +1722,7 @@ func (q *DBQueue) CountFailuresByReason(ctx context.Context) (map[string]int64, 
 // third route. It also earned a distinct time series per failing file, so
 // normalizing drops cardinality as well.
 func normalizedReason(reason string) string {
-	if reason == "unknown" {
+	if reason == NoReasonRecorded {
 		return reason
 	}
 	if n := failsig.Normalize(reason); n != "" {
@@ -1695,8 +1731,9 @@ func normalizedReason(reason string) string {
 	// Normalization reduced the value to nothing, which means the raw text was
 	// whitespace-only. NULLIF(last_error, '') does not catch that -- it only maps
 	// the EMPTY string -- so returning `reason` here would mint a blank group
-	// alongside 'unknown' instead of joining it. Both mean "no cause recorded".
-	return "unknown"
+	// alongside NoReasonRecorded instead of joining it. Both mean "no cause
+	// recorded".
+	return NoReasonRecorded
 }
 
 // CountByTimingOutcome returns the count of work_queue rows grouped by
