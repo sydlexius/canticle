@@ -128,7 +128,7 @@ func applyScanScheduleEnv(cfg *Config, applied map[string]bool) {
 	}
 	if v := os.Getenv("MXLRC_SCAN_SCHEDULE_AT"); v != "" {
 		if _, err := schedule.ParseTimeOfDay(v); err != nil {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_SCHEDULE_AT", "error", err) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_SCHEDULE_AT", "error", err) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Server.ScanSchedule.At = v
 			applied["server.scan_schedule.at"] = true
@@ -136,7 +136,7 @@ func applyScanScheduleEnv(cfg *Config, applied map[string]bool) {
 	}
 	if v := os.Getenv("MXLRC_SCAN_SCHEDULE_DAY"); v != "" {
 		if _, err := schedule.ParseWeekday(v); err != nil {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_SCHEDULE_DAY", "error", err) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_SCHEDULE_DAY", "error", err) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Server.ScanSchedule.Day = v
 			applied["server.scan_schedule.day"] = true
@@ -145,7 +145,7 @@ func applyScanScheduleEnv(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_SCAN_SCHEDULE_ON_START"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_SCHEDULE_ON_START", "current", cfg.Server.ScanSchedule.ScanOnStart) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_SCAN_SCHEDULE_ON_START", "current", cfg.Server.ScanSchedule.ScanOnStart) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
 			cfg.Server.ScanSchedule.ScanOnStart = b
 			applied["server.scan_schedule.scan_on_start"] = true

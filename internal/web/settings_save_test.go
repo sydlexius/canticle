@@ -931,7 +931,7 @@ func TestSaveFieldLegacyScanScheduleSaveDoesNotDisableScanning(t *testing.T) {
 // rejected instead, with a message naming the missing anchor.
 func TestSaveFieldScanScheduleDailyWithoutAtRejected(t *testing.T) {
 	h, cfgPath := writableTestUI(t, newFakeSecretStore())
-	before, err := os.ReadFile(cfgPath) //nolint:gosec // G304: test-controlled temp path
+	before, err := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test-controlled temp path
 	if err != nil {
 		t.Fatalf("read seed: %v", err)
 	}
@@ -944,7 +944,7 @@ func TestSaveFieldScanScheduleDailyWithoutAtRejected(t *testing.T) {
 		t.Errorf("error body %q does not name the missing anchor field", rec.Body.String())
 	}
 
-	after, err := os.ReadFile(cfgPath) //nolint:gosec // G304: test-controlled temp path
+	after, err := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test-controlled temp path
 	if err != nil {
 		t.Fatalf("reread: %v", err)
 	}
