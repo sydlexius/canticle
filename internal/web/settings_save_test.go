@@ -23,6 +23,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/web/templates"
 )
 
 // fakeSecretStore is an in-memory secrets.Store for the write-path tests: it
@@ -845,6 +846,191 @@ func TestSaveFieldConcurrentSingleWriter(t *testing.T) {
 	}
 	if len(cfg.Providers.Disabled) != 1 || cfg.Providers.Disabled[0] != "petitlyrics" {
 		t.Errorf("providers.disabled = %v, want [petitlyrics]", cfg.Providers.Disabled)
+	}
+}
+
+// browserSelectValue mimics a native <select> element's reported .value: the
+// Selected option's Value, or -- when NO option carries Selected, which a
+// browser never leaves ambiguous -- the FIRST option in DOM order. This is
+// exactly what settings.js's collectValuePairs reads via sel.value before
+// POSTing a save, so a Go-level test can reproduce what the browser would
+// submit without a real DOM.
+func browserSelectValue(t *testing.T, opts []templates.SettingsOption) string {
+	t.Helper()
+	if len(opts) == 0 {
+		t.Fatal("browserSelectValue: no options")
+	}
+	for _, o := range opts {
+		if o.Selected {
+			return o.Value
+		}
+	}
+	return opts[0].Value
+}
+
+// TestSaveFieldLegacyScanScheduleSaveDoesNotDisableScanning is the regression
+// guard for the settings-save silent-disable bug (CodeRabbit finding on PR
+// #817): a LEGACY config's effective server.scan_schedule.frequency is "" (not
+// configured -- ScanScheduleConfig.Frequency), and "" is deliberately absent
+// from config.AllowedValues (see the enumValues comment in
+// internal/config/validate.go). Before the fix, selectOptions marked NO option
+// Selected for that empty effective value, so the rendered <select> left the
+// browser to default to its FIRST <option> -- and schedule.FrequencyNames()
+// orders "off" first. An operator on a legacy config who opened the frequency
+// card and clicked its Save button WITHOUT changing the selection (the card's
+// own explicit Save button, since frequency is Caution-tier and does not
+// hot-save) would submit that browser-default "off" and silently disable the
+// periodic library scan -- the exact failure class #726 exists to prevent,
+// reintroduced through this dropdown.
+//
+// This test drives the real HTTP handler with the value selectOptions itself
+// says a browser would report, so it exercises the actual rendering-selection
+// path rather than a hand-picked value. It MUST FAIL against the pre-fix code
+// (selectOptions offering no "" option, and/or the write-path validator
+// rejecting or silently accepting "off" instead of keeping "").
+func TestSaveFieldLegacyScanScheduleSaveDoesNotDisableScanning(t *testing.T) {
+	h, cfgPath := writableTestUI(t, newFakeSecretStore())
+
+	// seedConfigTOML has no [server.scan_schedule] section at all, so the
+	// effective frequency is "": the legacy state this test targets.
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("seed reload: %v", err)
+	}
+	if cfg.Server.ScanSchedule.Frequency != "" {
+		t.Fatalf("seed frequency = %q, want \"\" (legacy/unconfigured)", cfg.Server.ScanSchedule.Frequency)
+	}
+
+	opts := selectOptions("server.scan_schedule.frequency", cfg.Server.ScanSchedule.Frequency)
+	submitted := browserSelectValue(t, opts)
+
+	rec := postField(t, h, url.Values{"path": {"server.scan_schedule.frequency"}, "value": {submitted}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	after, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if after.Server.ScanSchedule.Frequency != "" {
+		t.Errorf("frequency after an unchanged legacy save = %q, want \"\" (periodic scan must not be silently disabled)", after.Server.ScanSchedule.Frequency)
+	}
+}
+
+// TestSaveFieldScanScheduleDailyWithoutAtRejected is the regression guard for
+// the settings-save cross-field gap (CodeRabbit finding on PR #817):
+// ValidateScanSchedule (the whole-schedule invariant "daily"/"weekly" need
+// "at", "weekly" also needs "day") ran only at config LOAD
+// (internal/config/config.go, LoadWithSources), never on the settings write
+// path. A single-field save of frequency = "daily" passed its own field
+// validator (ValidateNormalizedEnum against the frequency enum) with no
+// visibility into the still-blank "at", so it landed in the file -- and the
+// NEXT server startup then rejected that same config, refusing to boot on a
+// file its own settings UI had just written. This asserts the save is now
+// rejected instead, with a message naming the missing anchor.
+func TestSaveFieldScanScheduleDailyWithoutAtRejected(t *testing.T) {
+	h, cfgPath := writableTestUI(t, newFakeSecretStore())
+	before, err := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test-controlled temp path
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+
+	rec := postField(t, h, url.Values{"path": {"server.scan_schedule.frequency"}, "value": {"daily"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (daily with no \"at\" set); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "server.scan_schedule.at") {
+		t.Errorf("error body %q does not name the missing anchor field", rec.Body.String())
+	}
+
+	after, err := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test-controlled temp path
+	if err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("config mutated on a rejected save (daily without at)")
+	}
+}
+
+// TestSaveFieldScanScheduleWeeklyWithoutDayRejected mirrors the daily case for
+// the weekly frequency's additional "day" requirement.
+func TestSaveFieldScanScheduleWeeklyWithoutDayRejected(t *testing.T) {
+	h, cfgPath := writableTestUI(t, newFakeSecretStore())
+
+	// Set "at" first (valid alone) then attempt "weekly" without a day.
+	rec := postField(t, h, url.Values{"path": {"server.scan_schedule.at"}, "value": {"04:00"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed at status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = postField(t, h, url.Values{"path": {"server.scan_schedule.frequency"}, "value": {"weekly"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (weekly with no day set); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "server.scan_schedule.day") {
+		t.Errorf("error body %q does not name the missing day field", rec.Body.String())
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Server.ScanSchedule.Frequency != "" {
+		t.Errorf("frequency = %q after a rejected save, want unchanged \"\"", cfg.Server.ScanSchedule.Frequency)
+	}
+}
+
+// TestSaveFieldScanScheduleValidCombinationsSave asserts the new cross-field
+// check does not over-reject: hourly/off need no anchor, and a daily/weekly
+// save with its anchor(s) already in place still succeeds.
+func TestSaveFieldScanScheduleValidCombinationsSave(t *testing.T) {
+	h, cfgPath := writableTestUI(t, newFakeSecretStore())
+
+	// hourly needs no anchor.
+	rec := postField(t, h, url.Values{"path": {"server.scan_schedule.frequency"}, "value": {"hourly"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("hourly status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// off needs no anchor.
+	rec = postField(t, h, url.Values{"path": {"server.scan_schedule.frequency"}, "value": {"off"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("off status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// daily WITH at already set (via the section save, so the pair lands
+	// together) must succeed.
+	rec = postSection(t, h, [][2]string{
+		{"server.scan_schedule.frequency", "daily"},
+		{"server.scan_schedule.at", "04:00"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("daily+at section save status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Server.ScanSchedule.Frequency != "daily" || cfg.Server.ScanSchedule.At != "04:00" {
+		t.Errorf("schedule = %+v, want daily at 04:00", cfg.Server.ScanSchedule)
+	}
+
+	// weekly WITH at and day together must succeed.
+	rec = postSection(t, h, [][2]string{
+		{"server.scan_schedule.frequency", "weekly"},
+		{"server.scan_schedule.at", "04:00"},
+		{"server.scan_schedule.day", "sunday"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("weekly+at+day section save status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Server.ScanSchedule.Frequency != "weekly" || cfg.Server.ScanSchedule.Day != "sunday" {
+		t.Errorf("schedule = %+v, want weekly on sunday", cfg.Server.ScanSchedule)
 	}
 }
 

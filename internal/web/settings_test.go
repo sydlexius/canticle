@@ -801,3 +801,62 @@ func TestTimingActionOptionsMatchTheAllowedSet(t *testing.T) {
 		}
 	}
 }
+
+// TestScanFrequencyEmptyEffectiveIsSelected is the regression guard for the
+// legacy-config silent-disable bug: a LEGACY config's effective
+// server.scan_schedule.frequency is "" (not configured -- ScanScheduleConfig.
+// Frequency), but config.AllowedValues never offers "" (see the enumValues
+// comment in internal/config/validate.go), so the dropdown built from
+// AllowedValues alone marks no <option> Selected. A <select> with no selected
+// option renders the browser's default: the FIRST option in DOM order. Since
+// schedule.FrequencyNames() orders "off" first, saving ANY unrelated field on
+// this page silently wrote frequency = "off" and stopped the periodic library
+// scan -- the exact failure class #726 exists to fix, reintroduced through this
+// dropdown. This test asserts the fix: when the effective frequency is "", an
+// explicit "" option exists, is labeled (not a bare blank token), and is the one
+// marked Selected.
+func TestScanFrequencyEmptyEffectiveIsSelected(t *testing.T) {
+	opts := selectOptions("server.scan_schedule.frequency", "")
+	var found bool
+	for _, o := range opts {
+		if o.Value != "" {
+			continue
+		}
+		found = true
+		if !o.Selected {
+			t.Error(`the "" (legacy) option must be Selected when the effective frequency is ""`)
+		}
+		if strings.TrimSpace(o.Label) == "" {
+			t.Error(`the "" option must carry a plain-language label, not render as a blank token`)
+		}
+	}
+	if !found {
+		t.Fatal(`selectOptions("server.scan_schedule.frequency", "") did not offer an "" option`)
+	}
+	// Exactly one option may be Selected: a browser resolves an ambiguous
+	// multi-selected <select> to its own choice, which is the same silent-drift
+	// failure mode this fix exists to close.
+	selected := 0
+	for _, o := range opts {
+		if o.Selected {
+			selected++
+		}
+	}
+	if selected != 1 {
+		t.Errorf("selected option count = %d, want exactly 1", selected)
+	}
+}
+
+// TestScanFrequencyEmptyOptionOnlyOfferedWhenEffectiveIsEmpty asserts the
+// legacy "" choice is not dangled in front of an operator who already has a
+// concrete schedule configured: it must appear only when it is the CURRENT
+// effective value, never as a way to revert a configured schedule back to the
+// deprecated interval path.
+func TestScanFrequencyEmptyOptionOnlyOfferedWhenEffectiveIsEmpty(t *testing.T) {
+	opts := selectOptions("server.scan_schedule.frequency", "daily")
+	for _, o := range opts {
+		if o.Value == "" {
+			t.Error(`the "" option must not be offered when the effective frequency is already concrete (e.g. "daily")`)
+		}
+	}
+}
