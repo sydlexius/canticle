@@ -50,9 +50,15 @@ The library scan runs on a wall-clock schedule, set under `[server.scan_schedule
 ```toml
 [server.scan_schedule]
 frequency = "daily"     # hourly | daily | weekly | off
-at = "04:00"            # 24-hour local clock
+at = "04:00"            # 24-hour local clock, required for daily and weekly
 scan_on_start = false
 ```
+
+`daily` and `weekly` both require `at`, and `weekly` additionally requires
+`day` (a weekday name, e.g. `day = "sunday"`). `hourly` and `off` need
+neither. An incomplete combination is rejected when you save it rather than
+at the next restart, so the server cannot be left holding a config it will
+refuse to start on.
 
 This anchors the scan to the clock, so it survives restarts. The older `scan_interval_seconds` measured its interval from process start instead, which meant that on a host restarting the container regularly (a nightly backup, say) the timer was reset before it could fire and every restart cost a full library walk. `scan_on_start` defaults to off for the same reason: the filesystem watcher already catches changes, so a restart need not re-walk everything.
 

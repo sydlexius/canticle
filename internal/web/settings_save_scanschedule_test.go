@@ -58,7 +58,7 @@ func TestSaveSectionScanScheduleWeeklyPair(t *testing.T) {
 func TestSaveSectionScanScheduleRejectsAnAnchorlessSchedule(t *testing.T) {
 	mux, cfgPath := scheduleTestUI(t, scheduleSeed)
 
-	before, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	before, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
 	rec := postSection(t, mux, [][2]string{
 		{"server.scan_schedule.frequency", "weekly"},
 		{"server.scan_schedule.at", "04:00"},
@@ -67,7 +67,7 @@ func TestSaveSectionScanScheduleRejectsAnAnchorlessSchedule(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (weekly with no day); body=%s", rec.Code, rec.Body.String())
 	}
-	after, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	after, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
 	if !bytes.Equal(before, after) {
 		t.Errorf("config mutated on a rejected section save:\n%s", after)
 	}
@@ -85,7 +85,7 @@ func TestSaveSectionScanScheduleRejectsAnAnchorlessSchedule(t *testing.T) {
 func TestSaveFieldScanScheduleRejectsDailyWithoutATime(t *testing.T) {
 	mux, cfgPath := scheduleTestUI(t, scheduleSeed)
 
-	before, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	before, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
 	rec := postField(t, mux, url.Values{
 		"path":  {"server.scan_schedule.frequency"},
 		"value": {"daily"},
@@ -93,7 +93,7 @@ func TestSaveFieldScanScheduleRejectsDailyWithoutATime(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (daily with no time); body=%s", rec.Code, rec.Body.String())
 	}
-	after, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	after, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
 	if !bytes.Equal(before, after) {
 		t.Errorf("config mutated on a rejected field save:\n%s", after)
 	}
