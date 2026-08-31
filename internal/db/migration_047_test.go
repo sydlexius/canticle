@@ -99,3 +99,54 @@ func TestMigration047StampsOnlyTheReleaseClearedCohort(t *testing.T) {
 		t.Errorf("re-applying the predicate stamped %d additional rows; want 0 (self-emptying)", recount)
 	}
 }
+
+// TestMigration047DownRestoresOnlyItsOwnRows is the point of the backup table.
+// A live Release writes the SAME sentinel as this migration, so a Down that
+// matched on the VALUE would revert rows 047 never touched -- recreating the
+// destroyed-cause state #624 exists to fix, on rows that were correct. The Down
+// must key off the backup's row ids instead.
+func TestMigration047DownRestoresOnlyItsOwnRows(t *testing.T) {
+	ctx := context.Background()
+	dbh, provider := openAtVersion(t, 46)
+
+	insert := `INSERT INTO work_queue
+	           (id, artist_key, title_key, artist, title, source_path, status, last_error, prev_status, priority, miss_count, updated_at)
+	           VALUES (?, ?, ?, 'a', 't', '/x.mp3', ?, ?, ?, ?, ?, '2026-08-04T00:00:00Z')`
+
+	// 901 is the historical cohort: 047 stamps it, so Down must clear it back.
+	if _, err := dbh.ExecContext(ctx, insert, 901, "k1", "k1", "deferred", "", "", -100, 1); err != nil {
+		t.Fatalf("insert cohort row: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 47); err != nil {
+		t.Fatalf("migrate to 47: %v", err)
+	}
+
+	const sentinel = "cause cleared by release"
+
+	// 902 arrives AFTER the migration, carrying the same sentinel from a live
+	// Release. It is not in the backup, so Down must leave it exactly alone.
+	if _, err := dbh.ExecContext(ctx, insert, 902, "k2", "k2", "deferred", sentinel, "", -100, 1); err != nil {
+		t.Fatalf("insert post-migration row: %v", err)
+	}
+
+	if _, err := provider.DownTo(ctx, 46); err != nil {
+		t.Fatalf("migrate down to 46: %v", err)
+	}
+
+	for _, tc := range []struct {
+		id   int64
+		want string
+		why  string
+	}{
+		{901, "", "a row 047 stamped must be restored to its recorded pre-change value"},
+		{902, sentinel, "a row carrying the same sentinel from a live Release must be untouched"},
+	} {
+		var got string
+		if err := dbh.QueryRowContext(ctx, `SELECT last_error FROM work_queue WHERE id = ?`, tc.id).Scan(&got); err != nil {
+			t.Fatalf("query %d: %v", tc.id, err)
+		}
+		if got != tc.want {
+			t.Errorf("row %d last_error = %q; want %q (%s)", tc.id, got, tc.want, tc.why)
+		}
+	}
+}

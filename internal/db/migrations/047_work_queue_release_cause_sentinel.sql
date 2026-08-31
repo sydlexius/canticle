@@ -62,6 +62,39 @@
 -- value, so a stamped row no longer matches `last_error = ''` and re-running
 -- this statement (goose will not, but a hand re-application would) touches
 -- nothing further.
+-- BACKUP-FIRST. This is a provenance repair, not a backfill: it OVERWRITES a
+-- column rather than filling an empty one, so the pre-change value has to be
+-- recorded before it is gone. Migration 039 established this table and this
+-- pattern for the same table and the same class of operation; 047 follows it.
+--
+-- The predicate below MUST match the UPDATE's exactly, or the backup covers a
+-- different set than the change. ON CONFLICT DO NOTHING keeps a re-run
+-- idempotent and preserves the FIRST recorded value, so a second application
+-- can never overwrite the original with the already-stamped one.
+CREATE TABLE IF NOT EXISTS provenance_repair_backup (
+    migration    TEXT    NOT NULL,
+    table_name   TEXT    NOT NULL,
+    row_id       INTEGER NOT NULL,
+    column_name  TEXT    NOT NULL,
+    old_value    TEXT,
+    backed_up_at TEXT    NOT NULL,
+    UNIQUE(migration, table_name, row_id, column_name)
+);
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+INSERT INTO provenance_repair_backup (migration, table_name, row_id, column_name, old_value, backed_up_at)
+SELECT '047', 'work_queue', id, 'last_error', last_error, datetime('now')
+FROM work_queue
+WHERE status = 'deferred'
+  AND last_error = ''
+  AND prev_status = ''
+  AND priority = -100
+  AND miss_count > 0
+ON CONFLICT(migration, table_name, row_id, column_name) DO NOTHING;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
 UPDATE work_queue
 SET last_error = 'cause cleared by release'
 WHERE status = 'deferred'
@@ -73,10 +106,23 @@ WHERE status = 'deferred'
 
 -- +goose Down
 -- +goose StatementBegin
--- Irreversible by design: once stamped, a row is indistinguishable from one a
--- live release genuinely cleared going forward -- restoring '' would recreate
--- the exact "cause destroyed with no trace" state #624 exists to fix. Restore
--- from backup if this specific write must be undone. (Matches migrations 028,
--- 029, 032, 043.)
-SELECT 1;
+-- Restores ONLY the rows this migration stamped, identified by the backup table
+-- rather than by the sentinel value. That distinction is the whole point: a live
+-- Release writes the SAME sentinel, so matching on the value would also revert
+-- rows this migration never touched, recreating the destroyed-cause state #624
+-- exists to fix -- on rows that were correct.
+--
+-- Rows absent from the backup (no 047 record) are left alone, so a database that
+-- never ran the Up, or one whose backup was pruned, is not silently mutated.
+UPDATE work_queue
+SET last_error = (
+    SELECT b.old_value FROM provenance_repair_backup b
+     WHERE b.migration = '047'
+       AND b.table_name = 'work_queue'
+       AND b.column_name = 'last_error'
+       AND b.row_id = work_queue.id)
+WHERE id IN (SELECT row_id FROM provenance_repair_backup
+              WHERE migration = '047'
+                AND table_name = 'work_queue'
+                AND column_name = 'last_error');
 -- +goose StatementEnd
