@@ -116,7 +116,7 @@ canticle serve --listen 127.0.0.1:3876
 canticle serve --config path/to/config.toml
 ```
 
-Relevant serve flags: `--listen` (overrides `MXLRC_SERVER_ADDR`), `--scan-interval`, `--work-interval`, and `--config`.
+Relevant serve flags: `--listen` (overrides `MXLRC_SERVER_ADDR`), `--scan-interval` (deprecated; prefer `[server.scan_schedule]`), `--work-interval`, and `--config`.
 
 ## Library and key management
 
