@@ -103,6 +103,10 @@ func (u *UI) handleSaveField(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := u.checkScanScheduleInvariant(r.Context(), path, value); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := config.ApplyChanges(u.configPath, map[string]string{path: value}); err != nil {
 		slog.Error("settings: config write failed", "path", path, "error", err)
 		http.Error(w, "failed to write config", http.StatusInternalServerError)
@@ -153,6 +157,36 @@ func (u *UI) checkTLSInvariant(ctx context.Context, path, value string) error {
 		return nil
 	}
 	return config.ValidateTLSSelection(selfSigned, certFile, keyFile)
+}
+
+// checkScanScheduleInvariant validates the cross-field [server.scan_schedule]
+// selection that would result from the proposed change against the loader's
+// invariant (config.ValidateScanSchedule): "daily" and "weekly" require an
+// "at" anchor, and "weekly" additionally requires a "day". A single field's own
+// validator (ValidateNormalizedEnum / ValidateTimeOfDay) cannot see that the
+// RESULTING combination is incomplete -- a per-field save that sets frequency to
+// "daily" with the still-blank "at" from before, or sets "at" without ever
+// having set frequency, both currently pass single-field validation and land in
+// the file, then reject the config at next boot (the server's own settings UI
+// wrote a config the server refuses to start on). Mirrors checkTLSInvariant
+// (config.ValidateTLSSelection): read the current section, overlay the proposed
+// change, validate the result before any write. Returns nil for non-schedule
+// fields.
+func (u *UI) checkScanScheduleInvariant(ctx context.Context, path, value string) error {
+	cur := u.currentConfig(ctx).Server.ScanSchedule
+	switch path {
+	case "server.scan_schedule.frequency":
+		cur.Frequency = value
+	case "server.scan_schedule.at":
+		cur.At = value
+	case "server.scan_schedule.day":
+		cur.Day = value
+	default:
+		return nil
+	}
+	var cfg config.Config
+	cfg.Server.ScanSchedule = cur
+	return config.ValidateScanSchedule(cfg)
 }
 
 // splitCommaList splits a comma-joined value into trimmed, non-empty entries.

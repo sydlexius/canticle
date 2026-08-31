@@ -341,10 +341,22 @@ func validatorFor(f FieldSpec) Validator {
 		return ValidateKnownProviders()
 	case "server.addr":
 		return ValidateListenAddr()
-	case "server.scan_schedule.frequency", "server.scan_schedule.day":
-		// NORMALIZED, because the loader lowercases and trims both before
-		// validating them: a verbatim comparison here would reject a value the
-		// next boot accepts. See ValidateNormalizedEnum for the operator symptom.
+	case "server.scan_schedule.frequency":
+		// NORMALIZED, because the loader lowercases and trims before validating:
+		// a verbatim comparison here would reject a value the next boot accepts.
+		// See ValidateNormalizedEnum for the operator symptom. Also accepts "",
+		// unlike enumValues[f.Path] (config.AllowedValues) alone: the empty
+		// frequency is legal at load (ScanScheduleConfig.Frequency -- "not
+		// configured", keeps the deprecated scan_interval_seconds path alive) and
+		// the settings UI offers it as an explicit "use legacy interval" choice
+		// for a config that already has it (selectOptions in internal/web); "" is
+		// excluded from AllowedValues only so it is never OFFERED to an operator
+		// who has not already got it, not so it is rejected outright.
+		return ValidateNormalizedEnum(append([]string{""}, enumValues[f.Path]...)...)
+	case "server.scan_schedule.day":
+		// NORMALIZED, because the loader lowercases and trims before validating:
+		// a verbatim comparison here would reject a value the next boot accepts.
+		// See ValidateNormalizedEnum for the operator symptom.
 		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "server.scan_schedule.at":
 		return ValidateTimeOfDay()

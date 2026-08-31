@@ -105,6 +105,10 @@ func (u *UI) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := u.checkScanScheduleInvariantChanges(r.Context(), changes); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := config.ApplyChanges(u.configPath, changes); err != nil {
 		// A validation error slipping through here (state changed under us) maps to
 		// 400; anything else is a write failure.
@@ -140,6 +144,30 @@ func (u *UI) checkTLSInvariantChanges(ctx context.Context, changes map[string]st
 		keyFile = v
 	}
 	return config.ValidateTLSSelection(selfSigned, certFile, keyFile)
+}
+
+// checkScanScheduleInvariantChanges folds the [server.scan_schedule] entries of
+// a section save onto the current state and validates the result against
+// config.ValidateScanSchedule ("daily"/"weekly" require "at"; "weekly" also
+// requires "day"). It is the multi-field counterpart to the single-field
+// checkScanScheduleInvariant, needed for the same reason the TLS pair needs one:
+// a batch save touching frequency, at, and day at once must be validated as the
+// combination it produces, not as three independently-valid fields. Returns nil
+// when no schedule field is in the batch.
+func (u *UI) checkScanScheduleInvariantChanges(ctx context.Context, changes map[string]string) error {
+	cur := u.currentConfig(ctx).Server.ScanSchedule
+	if v, ok := changes["server.scan_schedule.frequency"]; ok {
+		cur.Frequency = v
+	}
+	if v, ok := changes["server.scan_schedule.at"]; ok {
+		cur.At = v
+	}
+	if v, ok := changes["server.scan_schedule.day"]; ok {
+		cur.Day = v
+	}
+	var cfg config.Config
+	cfg.Server.ScanSchedule = cur
+	return config.ValidateScanSchedule(cfg)
 }
 
 // checkProviderInvariantChanges folds the provider-selection entries of a

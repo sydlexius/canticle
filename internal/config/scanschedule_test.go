@@ -250,6 +250,14 @@ func TestScanScheduleValidateAndSet(t *testing.T) {
 	ok := []struct{ path, value string }{
 		{"server.scan_schedule.frequency", "daily"},
 		{"server.scan_schedule.frequency", " Weekly "},
+		// "" is legal here even though it is absent from AllowedValues /
+		// enumValues: it is the legacy "not configured" state
+		// (ScanScheduleConfig.Frequency), and the settings UI offers it back as
+		// an explicit choice for a config that already has it (selectOptions in
+		// internal/web, PR #817). Rejecting it on the write path would mean an
+		// operator could never re-save that field without accidentally choosing
+		// a concrete frequency.
+		{"server.scan_schedule.frequency", ""},
 		{"server.scan_schedule.day", "sunday"},
 		{"server.scan_schedule.at", "04:00"},
 		{"server.scan_schedule.at", ""},

@@ -458,7 +458,19 @@ var timingActionLabels = map[string]string{
 // is the one that needs saying out loud: it stops the periodic library scan
 // entirely, leaving only the filesystem watcher and any manual run, and a bare
 // three-letter token in a list next to "hourly" does not convey that.
+//
+// "" is the other one that needs saying out loud, and for the same reason:
+// config.AllowedValues never offers it (it is a migration state, not something
+// to newly choose -- see the comment on enumValues in internal/config/validate.go),
+// but a LEGACY config's effective frequency IS "". Without an explicit option for
+// it, selectOptions marks no <option> selected, the browser silently falls back
+// to the first one in the list, and saving ANY unrelated field on this page then
+// writes that first option as the new frequency. schedule.FrequencyNames()
+// starts with "off", so the failure mode was an operator saving something
+// unrelated and silently disabling the periodic scan -- the exact class of bug
+// #726 exists to fix, reintroduced through this dropdown. See selectOptions.
 var scanFrequencyLabels = map[string]string{
+	"":       "Use legacy interval (server.scan_interval_seconds, deprecated)",
 	"off":    "Never (rely on the file watcher only)",
 	"hourly": "Every hour, on the hour",
 	"daily":  "Once a day, at the time below",
@@ -481,6 +493,23 @@ func selectOptions(path, effective string) []templates.SettingsOption {
 		vals = providers.Known()
 	} else {
 		vals = config.AllowedValues(path)
+	}
+	// server.scan_schedule.frequency: a LEGACY config's effective frequency is
+	// "" (not configured -- see ScanScheduleConfig.Frequency), but "" is
+	// deliberately absent from config.AllowedValues (a migration state, not
+	// something to newly choose; see the enumValues comment in
+	// internal/config/validate.go). Without an explicit, SELECTED option for it
+	// here, no <option> in the rendered <select> would carry Selected, the
+	// browser would silently default to the FIRST option, and saving ANY
+	// unrelated field on this page would then persist that first option as the
+	// new frequency. schedule.FrequencyNames() puts "off" first, so the failure
+	// mode was an operator saving something unrelated and silently disabling the
+	// periodic scan -- the exact class of bug #726 exists to fix, reintroduced
+	// through this dropdown. Only offer the empty choice when it is the CURRENT
+	// effective value: an operator with a schedule already configured must not
+	// be handed a dropdown option that reverts to the deprecated interval path.
+	if path == "server.scan_schedule.frequency" && effective == "" {
+		vals = append([]string{""}, vals...)
 	}
 	opts := make([]templates.SettingsOption, 0, len(vals))
 	for _, v := range vals {
