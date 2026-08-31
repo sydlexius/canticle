@@ -1210,6 +1210,84 @@ func TestDBQueue_ReleasePreservesLastErrorOnFailedRow(t *testing.T) {
 	}
 }
 
+// #624: Release used to blank last_error unconditionally on the pending-restore
+// branch, destroying the only record that a deferral cause had ever existed. No
+// live path today claims a 'pending' row while it carries a non-empty
+// last_error, so this test seeds that shape directly via SQL to prove the
+// defensive branch itself, not just its currently-unreachable trigger.
+func TestDBQueue_ReleaseStampsSentinelWhenClearingANonEmptyCause(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	// Simulate a claimed row that somehow carries a cause on the pending-restore
+	// branch (prev_status='pending', last_error non-empty) -- a shape no live
+	// caller produces today, but one Release must not silently destroy if it
+	// ever occurs.
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET last_error = ? WHERE id = ?`, "some cause", item.ID,
+	); err != nil {
+		t.Fatalf("seed last_error: %v", err)
+	}
+
+	if err := q.Release(ctx, item.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	var status, lastError string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT status, last_error FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &lastError); err != nil {
+		t.Fatalf("query released row: %v", err)
+	}
+	if status != StatusPending {
+		t.Fatalf("status = %q; want %q", status, StatusPending)
+	}
+	if lastError != releaseCauseClearedError {
+		t.Fatalf("last_error = %q; want sentinel %q (the cleared cause must be recorded, not destroyed)", lastError, releaseCauseClearedError)
+	}
+}
+
+// The companion case: a pending-restore of a row that never had a cause must
+// stay empty, not acquire the sentinel. The sentinel means "a cause existed and
+// was cleared"; minting it on a row with nothing to clear would be its own kind
+// of dishonest report.
+func TestDBQueue_ReleaseLeavesAlreadyEmptyCauseEmpty(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Title"}}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if err := q.Release(ctx, item.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	var lastError string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT last_error FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&lastError); err != nil {
+		t.Fatalf("query released row: %v", err)
+	}
+	if lastError != "" {
+		t.Fatalf("last_error = %q; want empty (nothing was cleared, so no sentinel is warranted)", lastError)
+	}
+}
+
 func TestDBQueue_ReleaseRequiresProcessingStatus(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
@@ -3061,7 +3139,7 @@ func TestDBQueue_CountFailuresByReason(t *testing.T) {
 	enqAndFail("Artist A", "Track 1", "connection refused")
 	enqAndFail("Artist A", "Track 2", "connection refused")
 	enqAndFail("Artist B", "Track 3", "timeout")
-	enqAndFail("Artist C", "Track 4", "") // empty last_error -> "unknown"
+	enqAndFail("Artist C", "Track 4", "") // empty last_error -> NoReasonRecorded
 
 	counts, err = q.CountFailuresByReason(ctx)
 	if err != nil {
@@ -3073,8 +3151,8 @@ func TestDBQueue_CountFailuresByReason(t *testing.T) {
 	if counts["timeout"] != 1 {
 		t.Errorf("timeout = %d; want 1", counts["timeout"])
 	}
-	if counts["unknown"] != 1 {
-		t.Errorf("unknown (empty reason) = %d; want 1", counts["unknown"])
+	if counts[NoReasonRecorded] != 1 {
+		t.Errorf("%s (empty reason) = %d; want 1", NoReasonRecorded, counts[NoReasonRecorded])
 	}
 	if len(counts) != 3 {
 		t.Errorf("len(counts) = %d; want 3 (got %v)", len(counts), counts)

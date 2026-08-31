@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/failsig"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // timeFormat matches the layout work_queue.completed_at is stored in
@@ -383,9 +384,9 @@ type FailureGroup struct {
 	// they mean different things: 'deferred' rows are benign misses awaiting a
 	// later retry, while 'failed' rows hit a hard error.
 	Status string
-	// Reason is the normalized work_queue.last_error text ('unknown' when no
-	// error was recorded), matching the empty-string-to-unknown normalization
-	// used by internal/queue.CountFailuresByReason.
+	// Reason is the normalized work_queue.last_error text (queue.NoReasonRecorded
+	// when no error was recorded), matching the empty-string normalization used
+	// by internal/queue.CountFailuresByReason.
 	Reason string
 	Count  int64
 }
@@ -396,8 +397,12 @@ type FailureGroup struct {
 // Source: work_queue rows where status IN ('failed','deferred'), grouped by
 // (status, normalized last_error). Status is included in the grouping so a
 // deferred miss and a hard failure carrying the same last_error text are
-// reported separately. An empty last_error normalizes to 'unknown' (via
-// COALESCE over NULLIF), matching internal/queue.CountFailuresByReason.
+// reported separately. An empty last_error normalizes to queue.NoReasonRecorded
+// (via COALESCE over NULLIF), matching internal/queue.CountFailuresByReason. A
+// row whose cause was destroyed by a release carries the distinct
+// "cause cleared by release" sentinel instead (queue.go's
+// releaseCauseClearedError, unexported since only Release writes it), so the
+// two read as separate, honest buckets here rather than being merged.
 //
 // That normalization still matches, but the ROW SCOPE deliberately no longer
 // does: CountFailuresByReason (queue.go:1643, feeding GET /metrics) carries no
@@ -459,13 +464,14 @@ type FailureGroup struct {
 // guard actually recognizes.
 func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT status, COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*) AS n
+		`SELECT status, COALESCE(NULLIF(last_error, ''), ?) AS reason, COUNT(*) AS n
          FROM work_queue
          WHERE status IN ('failed', 'deferred')
            AND NOT (status = 'failed' AND attempts = 0 AND last_error = '')
            AND NOT (status = 'deferred' AND miss_count = 0 AND last_error = '')
          GROUP BY status, reason
-         ORDER BY n DESC, status, reason`)
+         ORDER BY n DESC, status, reason`,
+		queue.NoReasonRecorded)
 	if err != nil {
 		return nil, fmt.Errorf("reports: failure analysis: %w", err)
 	}
@@ -611,11 +617,12 @@ func (r *Repo) ReviewQueue(ctx context.Context) ([]ReviewQueueItem, error) {
 }
 
 // normalizedReason applies the shared signature normalization while preserving
-// the 'unknown' sentinel the SQL COALESCE produces for an empty last_error.
-// Normalize maps empty to empty, so routing the sentinel through it unchanged
-// keeps one bucket rather than splitting into 'unknown' and an empty string.
+// the queue.NoReasonRecorded sentinel the SQL COALESCE produces for an empty
+// last_error. Normalize maps empty to empty, so routing the sentinel through it
+// unchanged keeps one bucket rather than splitting into NoReasonRecorded and an
+// empty string.
 func normalizedReason(reason string) string {
-	if reason == "unknown" {
+	if reason == queue.NoReasonRecorded {
 		return reason
 	}
 	if n := failsig.Normalize(reason); n != "" {
@@ -624,8 +631,9 @@ func normalizedReason(reason string) string {
 	// Normalization reduced the value to nothing, which means the raw text was
 	// whitespace-only. NULLIF(last_error, '') does not catch that -- it only maps
 	// the EMPTY string -- so returning `reason` here would mint a blank group
-	// alongside 'unknown' instead of joining it. Both mean "no cause recorded".
-	return "unknown"
+	// alongside NoReasonRecorded instead of joining it. Both mean "no cause
+	// recorded".
+	return queue.NoReasonRecorded
 }
 
 // UpNextItem is one buffered work_queue row the worker will claim next, in the

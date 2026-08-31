@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
@@ -570,17 +571,19 @@ func TestRecentOutcomesIgnoresOutputPaths(t *testing.T) {
 }
 
 // TestFailureAnalysisEmptyReasonNormalized verifies an empty last_error
-// normalizes to reason "unknown", matching internal/queue.CountFailuresByReason.
+// normalizes to reason queue.NoReasonRecorded, matching
+// internal/queue.CountFailuresByReason.
 func TestFailureAnalysisEmptyReasonNormalized(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
 	// A failed and a deferred row, each with an empty last_error: both must land
-	// under reason 'unknown', kept distinct by status. attempts/missCount are set
-	// to model a GENUINE fetch outcome (queue.Fail/queue.Defer always increment
-	// them before writing these statuses) -- without them the #789 guard would
-	// exclude these rows as non-fetch writes, which is not what this test covers.
+	// under reason NoReasonRecorded, kept distinct by status. attempts/missCount
+	// are set to model a GENUINE fetch outcome (queue.Fail/queue.Defer always
+	// increment them before writing these statuses) -- without them the #789
+	// guard would exclude these rows as non-fetch writes, which is not what this
+	// test covers.
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "ferr", status: "failed", lastError: "", attempts: 1})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "derr", status: "deferred", lastError: "", missCount: 1})
 
@@ -592,8 +595,8 @@ func TestFailureAnalysisEmptyReasonNormalized(t *testing.T) {
 		t.Fatalf("got %d groups, want 2: %+v", len(got), got)
 	}
 	for _, g := range got {
-		if g.Reason != "unknown" {
-			t.Errorf("group %+v Reason = %q, want unknown (empty last_error normalized)", g, g.Reason)
+		if g.Reason != queue.NoReasonRecorded {
+			t.Errorf("group %+v Reason = %q, want %q (empty last_error normalized)", g, g.Reason, queue.NoReasonRecorded)
 		}
 		if g.Count != 1 {
 			t.Errorf("group %+v Count = %d, want 1", g, g.Count)
@@ -1016,10 +1019,10 @@ func TestFailureAnalysisOrdersByMergedCount(t *testing.T) {
 	}
 }
 
-// A whitespace-only last_error must join the 'unknown' group, not mint a blank
-// one beside it. NULLIF(last_error, ”) only maps the EMPTY string, so " \t"
-// survives the SQL and reached the report as its own group. Found by CodeRabbit
-// on #737.
+// A whitespace-only last_error must join the NoReasonRecorded group, not mint a
+// blank one beside it. NULLIF(last_error, ”) only maps the EMPTY string, so
+// " \t" survives the SQL and reached the report as its own group. Found by
+// CodeRabbit on #737.
 func TestFailureAnalysisWhitespaceOnlyJoinsUnknown(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
@@ -1038,8 +1041,8 @@ func TestFailureAnalysisWhitespaceOnlyJoinsUnknown(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d groups, want 1 (both mean 'no cause recorded'): %+v", len(got), got)
 	}
-	if got[0].Reason != "unknown" {
-		t.Errorf("Reason = %q, want unknown", got[0].Reason)
+	if got[0].Reason != queue.NoReasonRecorded {
+		t.Errorf("Reason = %q, want %q", got[0].Reason, queue.NoReasonRecorded)
 	}
 	if got[0].Count != 2 {
 		t.Errorf("Count = %d, want 2", got[0].Count)
@@ -1079,13 +1082,14 @@ func TestFailureAnalysisExcludesNonFetchWrites(t *testing.T) {
 		t.Fatalf("FailureAnalysis: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("got %d groups, want 2 (one failed/unknown, one deferred/unknown -- "+
-			"the maintenance-writer rows excluded, the genuine ones counted): %+v", len(got), got)
+		t.Fatalf("got %d groups, want 2 (one failed/%s, one deferred/%s -- "+
+			"the maintenance-writer rows excluded, the genuine ones counted): %+v",
+			len(got), queue.NoReasonRecorded, queue.NoReasonRecorded, got)
 	}
 	var failedCount, deferredCount int64
 	for _, g := range got {
-		if g.Reason != "unknown" {
-			t.Errorf("group %+v Reason = %q, want unknown", g, g.Reason)
+		if g.Reason != queue.NoReasonRecorded {
+			t.Errorf("group %+v Reason = %q, want %q", g, g.Reason, queue.NoReasonRecorded)
 		}
 		switch g.Status {
 		case "failed":
