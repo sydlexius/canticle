@@ -119,7 +119,7 @@ type ServeCmd struct {
 	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt lyrics to promote them"`
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
 	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
-	ScanInterval   *int    `arg:"--scan-interval" help:"scheduler interval in seconds (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
+	ScanInterval   *int    `arg:"--scan-interval" help:"DEPRECATED scheduler interval in seconds; prefer [server.scan_schedule] (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
 	SweepInterval  *int    `arg:"--sweep-interval" help:"path-reconciliation sweep interval in seconds (default: server.sweep_interval_seconds or 21600; 0 disables the periodic sweep)"`
 	WorkInterval   *int    `arg:"--work-interval" help:"worker poll interval in seconds (default: server.work_interval_seconds or api.cooldown; minimum 15)"`
 }
@@ -2046,7 +2046,7 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
-	s.Interval = serveScanInterval(cfg, args)
+	s.Schedule = config.ResolveScanSchedule(cfg, args.ScanInterval)
 	if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		slog.Warn("scheduler failed", "error", err)
 	}
@@ -2868,6 +2868,21 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 			_, _ = fmt.Fprintln(out, err)
 			return 2
 		}
+		// Same reasoning, same shared-validator arrangement, for
+		// [server.scan_schedule]: frequency, at, and day are three separately
+		// settable keys that only cohere in combination ("weekly" needs both
+		// "at" and "day"; "daily" needs "at"). setConfigValue's per-key
+		// validation cannot see that the MERGED result is incomplete, so a
+		// `config set server.scan_schedule.frequency weekly` with no day ever
+		// set would otherwise write a config the server refuses to boot from
+		// at the next startup. This mirrors the fix already applied to the web
+		// settings-save path (checkScanScheduleInvariant /
+		// checkScanScheduleInvariantChanges in internal/web/settings_save*.go)
+		// so the CLI and the UI agree on what a valid schedule is.
+		if err := config.ValidateScanSchedule(cfg); err != nil {
+			_, _ = fmt.Fprintln(out, err)
+			return 2
+		}
 		if path == "" {
 			path = defaultConfigPath()
 		}
@@ -2926,6 +2941,10 @@ func configKeys() []string {
 		"server.addr",
 		"server.webhook_api_keys",
 		"server.scan_interval_seconds",
+		"server.scan_schedule.frequency",
+		"server.scan_schedule.at",
+		"server.scan_schedule.day",
+		"server.scan_schedule.scan_on_start",
 		"server.sweep_interval_seconds",
 		"server.work_interval_seconds",
 		"providers.primary",
@@ -2980,6 +2999,14 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strings.Join(cfg.Server.WebhookAPIKeys, ","), true
 	case "server.scan_interval_seconds":
 		return strconv.Itoa(cfg.Server.ScanIntervalSeconds), true
+	case "server.scan_schedule.frequency":
+		return cfg.Server.ScanSchedule.Frequency, true
+	case "server.scan_schedule.at":
+		return cfg.Server.ScanSchedule.At, true
+	case "server.scan_schedule.day":
+		return cfg.Server.ScanSchedule.Day, true
+	case "server.scan_schedule.scan_on_start":
+		return strconv.FormatBool(cfg.Server.ScanSchedule.ScanOnStart), true
 	case "server.sweep_interval_seconds":
 		return strconv.Itoa(cfg.Server.SweepIntervalSeconds), true
 	case "server.work_interval_seconds":
@@ -3094,6 +3121,37 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("server.scan_interval_seconds must be a non-negative integer (seconds; 0 disables repeat)")
 		}
 		cfg.Server.ScanIntervalSeconds = n
+	case "server.scan_schedule.frequency":
+		v := strings.ToLower(strings.TrimSpace(value))
+		// Empty is accepted on purpose: it is how an operator reverts to the
+		// deprecated interval key, and refusing it would make that state
+		// reachable only by hand-editing the TOML.
+		if v != "" {
+			if err := config.ValidateAndSet(key, v); err != nil {
+				return err
+			}
+		}
+		cfg.Server.ScanSchedule.Frequency = v
+	case "server.scan_schedule.at":
+		v := strings.TrimSpace(value)
+		if err := config.ValidateAndSet(key, v); err != nil {
+			return err
+		}
+		cfg.Server.ScanSchedule.At = v
+	case "server.scan_schedule.day":
+		v := strings.ToLower(strings.TrimSpace(value))
+		if v != "" {
+			if err := config.ValidateAndSet(key, v); err != nil {
+				return err
+			}
+		}
+		cfg.Server.ScanSchedule.Day = v
+	case "server.scan_schedule.scan_on_start":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("server.scan_schedule.scan_on_start must be a boolean: %w", err)
+		}
+		cfg.Server.ScanSchedule.ScanOnStart = b
 	case "server.sweep_interval_seconds":
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 0 {
