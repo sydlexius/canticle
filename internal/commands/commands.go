@@ -2868,6 +2868,21 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 			_, _ = fmt.Fprintln(out, err)
 			return 2
 		}
+		// Same reasoning, same shared-validator arrangement, for
+		// [server.scan_schedule]: frequency, at, and day are three separately
+		// settable keys that only cohere in combination ("weekly" needs both
+		// "at" and "day"; "daily" needs "at"). setConfigValue's per-key
+		// validation cannot see that the MERGED result is incomplete, so a
+		// `config set server.scan_schedule.frequency weekly` with no day ever
+		// set would otherwise write a config the server refuses to boot from
+		// at the next startup. This mirrors the fix already applied to the web
+		// settings-save path (checkScanScheduleInvariant /
+		// checkScanScheduleInvariantChanges in internal/web/settings_save*.go)
+		// so the CLI and the UI agree on what a valid schedule is.
+		if err := config.ValidateScanSchedule(cfg); err != nil {
+			_, _ = fmt.Fprintln(out, err)
+			return 2
+		}
 		if path == "" {
 			path = defaultConfigPath()
 		}
@@ -2926,6 +2941,10 @@ func configKeys() []string {
 		"server.addr",
 		"server.webhook_api_keys",
 		"server.scan_interval_seconds",
+		"server.scan_schedule.frequency",
+		"server.scan_schedule.at",
+		"server.scan_schedule.day",
+		"server.scan_schedule.scan_on_start",
 		"server.sweep_interval_seconds",
 		"server.work_interval_seconds",
 		"providers.primary",

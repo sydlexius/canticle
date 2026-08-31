@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -11,7 +12,11 @@ import (
 // TestConfigGetSetScanSchedule covers the `config get` / `config set` arms for
 // the new keys. A missing arm is invisible in normal use -- get renders blank
 // and set silently reports success while changing nothing -- so each key is
-// asserted through a set-then-get round trip rather than by inspection.
+// asserted through a set-then-get round trip rather than by inspection. It
+// also asserts each key appears in configKeys(): configValue and
+// setConfigValue handling a key is not enough for `config list` to show it,
+// which is exactly the gap CodeRabbit found -- these four keys were fully
+// wired into the get/set switches but absent from configKeys.
 func TestConfigGetSetScanSchedule(t *testing.T) {
 	cfg := config.Config{}
 	cases := []struct{ key, set, want string }{
@@ -31,6 +36,9 @@ func TestConfigGetSetScanSchedule(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("configValue(%s) = %q; want %q", tc.key, got, tc.want)
+		}
+		if !slices.Contains(configKeys(), tc.key) {
+			t.Errorf("configKeys missing %q (config list cannot show a key it does not enumerate)", tc.key)
 		}
 	}
 	// The round trip must leave a config that actually boots.
