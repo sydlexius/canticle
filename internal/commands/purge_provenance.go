@@ -161,13 +161,21 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	// sidecars an apply run will SKIP. Subtracting the skipped-in-flight count
 	// makes the preview agree with what apply mode actually deletes -- the
 	// whole point of a dry run.
-	deleted := res.Matched - res.SkippedProcessing
+	// Both skip cohorts are counted after Matched, so both must come off the
+	// preview or the dry run promises deletions an apply run will refuse.
+	deleted := res.Matched - res.SkippedProcessing - res.SkippedProvenanceMismatch
 	if args.Yes {
 		verb = "deleted"
 		deleted = res.Deleted
 	}
 	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d, requeued %d (%d scan_results reset, %d cache entries invalidated, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
 		res.Scanned, verb, deleted, res.WorkItemsRequeued, res.ScanResultsReset, res.CacheInvalidated, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
+	if res.SkippedProvenanceMismatch > 0 {
+		// Aggregate only: naming the files would print the library's private
+		// artist/title metadata to stdout. The per-row ids are in the warning log.
+		_, _ = fmt.Fprintf(out, "note: %d matched sidecar(s) were refused because their [source:] tag disagrees with the provider recorded in the database; nothing was deleted or requeued for them (issue #827)\n",
+			res.SkippedProvenanceMismatch)
+	}
 	if res.UnlinkedNoCacheKey > 0 {
 		// Not an error: nothing was lost, but the re-fetch guarantee does not
 		// extend to these, so say so rather than let the summary imply it does.
