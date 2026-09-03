@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/orchestrator"
+	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/verification"
 	"github.com/sydlexius/canticle/internal/version"
@@ -3860,5 +3861,103 @@ func TestSongCacheRoundTripPreservesWordTimings(t *testing.T) {
 			t.Errorf("subtitle line %d changed across the cache round trip: got %#v, want %#v",
 				i, gotLine, want)
 		}
+	}
+}
+
+// namedFakeFetcher is a fakeFetcher that also carries a provider identity, so it
+// satisfies providers.LyricsProvider the way every serve-mode fetcher does
+// (commands.selectedProvider resolves one from providers.primary). The plain
+// fakeFetcher deliberately has no Name(), which is the fetch-mode shape.
+type namedFakeFetcher struct {
+	fakeFetcher
+	name string
+}
+
+func (f *namedFakeFetcher) Name() string { return f.name }
+
+// TestNewLaneNameFollowsFetcherIdentity pins the fix for the provider
+// misattribution bug: worker.New hardcoded the primary lane's name to
+// "musixmatch" regardless of which provider the fetcher actually was, so a
+// PetitLyrics-primary deployment stamped provider_lane='musixmatch' on every
+// row it served -- in work_queue, in lane_attempts, and in the UI credit.
+//
+// The lane name is the attribution shown to users and the key every per-lane
+// metric groups by, so this asserts the NAME, not merely that a lane exists.
+func TestNewLaneNameFollowsFetcherIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		fetcher musixmatch.Fetcher
+		want    string
+	}{
+		{
+			// The regression case. Before the fix this returned "musixmatch".
+			name:    "identity-carrying petitlyrics fetcher names its own lane",
+			fetcher: &namedFakeFetcher{name: providers.PetitLyrics},
+			want:    providers.PetitLyrics,
+		},
+		{
+			name:    "identity-carrying musixmatch fetcher still names musixmatch",
+			fetcher: &namedFakeFetcher{name: providers.Musixmatch},
+			want:    providers.Musixmatch,
+		},
+		{
+			// Fetch mode and most worker tests inject a bare client with no
+			// identity to ask; it must keep the historical name.
+			name:    "bare fetcher without an identity falls back to musixmatch",
+			fetcher: &fakeFetcher{},
+			want:    providers.Musixmatch,
+		},
+		{
+			// An empty name must not be stamped: RecordLaneAttempts and
+			// SetProviderLane both SKIP an empty lane, which would drop the
+			// row's attribution entirely rather than merely getting it wrong.
+			name:    "identity with an empty name falls back rather than stamping empty",
+			fetcher: &namedFakeFetcher{name: ""},
+			want:    providers.Musixmatch,
+		},
+		{
+			name:    "provider name is normalized",
+			fetcher: &namedFakeFetcher{name: "  PetitLyrics  "},
+			want:    providers.PetitLyrics,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := New(&fakeQueue{}, &fakeCache{}, tc.fetcher, &fakeWriter{})
+			if got := w.lane.Name(); got != tc.want {
+				t.Errorf("primary lane name = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLaneAttemptsCreditTheServingProvider is the end-to-end form of the bug: a
+// PetitLyrics-primary worker completing a track must attribute the result to
+// petitlyrics on the LaneAttempt the queue persists. Asserting only the lane's
+// name would not catch a regression that renamed the lane but attributed from
+// somewhere else.
+func TestLaneAttemptsCreditTheServingProvider(t *testing.T) {
+	fetcher := &namedFakeFetcher{name: providers.PetitLyrics}
+	fetcher.song = models.Song{
+		Track:  models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Lyrics: models.Lyrics{LyricsBody: "words"},
+	}
+	w := New(&fakeQueue{}, &fakeCache{}, fetcher, &fakeWriter{})
+
+	song, err := w.orch.FindLyrics(context.Background(),
+		models.Track{ArtistName: "Artist", TrackName: "Title"}, "")
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if len(song.LaneAttempts) != 1 {
+		t.Fatalf("LaneAttempts = %d entries, want 1", len(song.LaneAttempts))
+	}
+	got := song.LaneAttempts[0]
+	if got.Lane != providers.PetitLyrics {
+		t.Errorf("attributed lane = %q, want %q (the provider that actually served it)",
+			got.Lane, providers.PetitLyrics)
+	}
+	if !got.Hit {
+		t.Error("serving lane recorded Hit=false, want true")
 	}
 }
