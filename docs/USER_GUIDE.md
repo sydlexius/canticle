@@ -90,6 +90,10 @@ Example Docker healthcheck: `curl -fsS http://127.0.0.1:3876/readyz`.
 | `mxlrcgo_provider_misses_total{lane="..."}` | counter | Benign no-result misses per provider lane. |
 | `mxlrcgo_instrumental_tracks` | gauge | Queue items confirmed instrumental by audio detection. |
 
+**Lane-attribution caveat (from v1.5.0).** On a deployment whose `[providers].primary` was set to something other than `musixmatch`, the two `mxlrcgo_provider_*_total` families credited the wrong lane. The worker named its primary lane from a hardcoded constant rather than from the provider it had actually been given, so every hit and miss the primary provider earned was tallied under the `lane="musixmatch"` label. The window opens at v1.5.0, the first release in which a non-musixmatch primary could be selected at all, and closes with the release carrying the fix (v1.35.1 is the last release known to be affected). Deployments that left `primary` at its `musixmatch` default are unaffected.
+
+These are cumulative counters in an append-only aggregate keyed on the lane name, with no per-row identity, so the wrongly credited increments cannot be located and reversed. The counters are **not** repaired retroactively: a scrape spanning the window carries the skew forward permanently, and a rate over a window that straddles the fix will show the primary lane appearing from nothing while `musixmatch` flattens. For any per-lane question about that period, use the Provider effectiveness report instead, which reads the per-track `lane_attempts` table. Note the two instruments count different things (see that report's own caveat below), so treat it as the better attribution rather than as a corrected version of these counters.
+
 **Access control.** The endpoint is gated by the trusted-network allowlist, not an API key or session cookie. Loopback (`127.x.x.x`, `::1`) is always trusted. A remote scraper (Prometheus server, Grafana Agent, etc.) must have its host CIDR listed in `[server.trusted_networks].cidrs`. A spoofed `X-Forwarded-For` header cannot forge a trusted source.
 
 To enable a remote scraper, add its CIDR to `config.toml`:
@@ -750,6 +754,8 @@ Note: `.txt` results group plain unsynced lyrics and audio-detected instrumental
 Shows per-lane hit/miss counts and a true per-track hit-rate for each provider lane. The hit-rate is computed as `hits / (hits + misses)` where a "hit" means the lane served the winning result and a "miss" means the lane was tried but did not win (including being outcompeted by a later lane in ordered mode).
 
 **No-backfill caveat.** This report reads the `lane_attempts` table, which was added in a later migration. Traffic that predates the migration has no lane-level records, so the report shows an empty state until new attempts accrue after the migration. This is expected; no historical backfill is possible.
+
+**Lane-attribution caveat (from v1.5.0).** On a deployment whose `[providers].primary` was not `musixmatch`, rows this table recorded during that window name the wrong lane, from the same defect described under the [metrics endpoint](#metrics-endpoint): the primary lane's name came from a hardcoded constant, so the primary provider's work was recorded against `musixmatch`. Unlike the `/metrics` counters, these rows do carry per-track identity and are therefore correctable in principle, but no correction has been applied. This report remains the better instrument for the period even so, because the misnaming is a uniform relabel of one lane rather than an arithmetic distortion: the per-track hit and miss structure is intact, only the name on it is wrong, so a reader who knows which provider was primary can read through it.
 
 ### Instrumental inventory
 
