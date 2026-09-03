@@ -8,11 +8,20 @@
 // dry-run by default, a caller-supplied Report invoked BEFORE each delete so a
 // backup can be written and fsynced write-ahead, symlinked sidecars are never
 // touched, and enumeration never leaves the configured library roots.
+//
+// It also cross-checks each candidate's on-disk [source:] tag against the
+// coupled work_queue.provider_lane and refuses the delete when the two name
+// different providers (issue #827). Sidecars written while the lane
+// misattribution bug of #826 was live carry a tag that does not match the row,
+// so selecting by the tag alone could delete a file the database credits to a
+// different provider. Disputed provenance means the operator's --source cannot
+// be established for that file, and this command deletes.
 package purgeprovenance
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -117,7 +126,12 @@ type Result struct {
 	WorkItemsRequeued int // work_queue rows reset to 'deferred' for re-fetch
 	SkippedSymlink    int // symlinked sidecars never followed or touched
 	SkippedProcessing int // matched sidecars left alone: a linked work_queue row is in-flight
-	CacheInvalidated  int // lyrics_cache rows deleted so the requeued track re-fetches
+	// SkippedProvenanceMismatch counts matched sidecars refused because the
+	// on-disk [source:] tag and the coupled work_queue.provider_lane name
+	// different providers (issue #827). Nothing is deleted and no row is reset
+	// for these.
+	SkippedProvenanceMismatch int
+	CacheInvalidated          int // lyrics_cache rows deleted so the requeued track re-fetches
 	// UnlinkedNoCacheKey counts deleted sidecars that no scan_results row claims.
 	// Nothing was requeued for them and no cache key could be derived, so a future
 	// scan that rediscovers the track could still be served from cache.
@@ -145,17 +159,48 @@ type srInfo struct {
 	title  string
 }
 
-// wqLink is one work_queue row linked to a scan_results row.
+// wqLink is one work_queue row linked to a scan_results row. lane is the row's
+// provider_lane; it is empty when the column is NULL (not-yet-completed, or a
+// verdict whose lane was cleared), which asserts nothing and so can never
+// disagree with a tag.
 type wqLink struct {
 	id     int64
 	status string
+	lane   string
+}
+
+// provenanceAgrees reports whether a sidecar's on-disk [source:] tag and a
+// work_queue row's provider_lane name the same provider (issue #827).
+//
+// This is the deletion guard, so it is written to answer "is there positive
+// evidence of DISAGREEMENT", not "do these strings match". Everything short of
+// that -- an empty tag, a NULL lane -- agrees, because purge-provenance already
+// has a well-defined behavior for those cohorts and this check exists to remove
+// a hazard, not to add a new refusal to files nothing contradicts.
+//
+// The detector spelling is the one deliberate asymmetry: the writer stamps
+// lyrics.SourceDetector ("canticle-detector") into a marker while the queue row
+// carries the lane name ("detector"). Both constants are taken from their owning
+// package rather than re-typed, so a rename cannot silently turn every
+// instrumental marker in a library into a refusal.
+func provenanceAgrees(tag, lane string) bool {
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	lane = strings.ToLower(strings.TrimSpace(lane))
+	if tag == "" || lane == "" {
+		return true
+	}
+	if tag == lane {
+		return true
+	}
+	return tag == lyrics.SourceDetector && lane == lyrics.DetectorLaneName
 }
 
 // Run walks every root for .lrc/.txt sidecars, matches each against opts.Filter
-// via its [source:] tag, and -- for matches not blocked by an in-flight linked
-// work_queue row -- deletes the sidecar (apply only) and resets its coupled
-// database rows so the next scan re-fetches. Per-file errors are counted and
-// logged but never abort the run.
+// via its [source:] tag, and -- for matches blocked by neither an in-flight
+// linked work_queue row nor a provenance disagreement (see provenanceAgrees) --
+// deletes the sidecar (apply only) and resets its coupled database rows so the
+// next scan re-fetches. Per-file errors are counted and logged but never abort
+// the run.
 func (p *Purger) Run(ctx context.Context, opts Options) (Result, error) {
 	idx, wqIdx, err := p.buildIndex(ctx, opts.LibraryID)
 	if err != nil {
@@ -241,6 +286,7 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	seenID := make(map[trackIdentity]bool)
 	seenWQ := make(map[int64]bool)
 	processing := false
+	var mismatched []int64
 	for _, sr := range srs {
 		scanResultIDs = append(scanResultIDs, sr.id)
 		id := trackIdentity{artist: sr.artist, title: sr.title}
@@ -252,11 +298,44 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 			if link.status == "processing" {
 				processing = true
 			}
+			if !provenanceAgrees(pt.Source, link.lane) {
+				mismatched = append(mismatched, link.id)
+			}
 			if !seenWQ[link.id] {
 				seenWQ[link.id] = true
 				workItemIDs = append(workItemIDs, link.id)
 			}
 		}
+	}
+	// The #827 deletion guard, checked BEFORE the Report call so a refused
+	// sidecar never reaches the dry-run preview either: a purge that previews a
+	// file it will not delete is worse than useless to the operator.
+	//
+	// It is ALSO checked before the in-flight return. A sidecar can be both
+	// in-flight and disputed, and reporting it only as "skipped, processing"
+	// hides the safety-relevant half: in-flight is a transient state that
+	// resolves on the next run, while disputed provenance is a standing
+	// contradiction the operator has to look at. So a disputed row is counted
+	// and warned as disputed whatever its status.
+	//
+	// Exactly ONE of the two counters increments per sidecar, because the CLI
+	// preview subtracts BOTH from the matched total; counting a sidecar twice
+	// would undercount what a purge is going to delete.
+	//
+	// A single disagreeing row is enough. The two authorities for "which provider
+	// served this" contradict each other, so which one the operator's --source
+	// named is exactly what cannot be established -- and this command deletes.
+	// The conservative branch is to leave the file alone and say so.
+	//
+	// Row ids only in the log: a work_queue row carries the library's private
+	// artist/title metadata and the path is the same metadata by another name.
+	if len(mismatched) > 0 {
+		res.SkippedProvenanceMismatch++
+		slog.Warn("purge-provenance: sidecar provenance is disputed; refusing to delete it",
+			"work_queue_ids", mismatched,
+			"scan_result_ids", scanResultIDs,
+			"reason", "the on-disk [source:] tag and work_queue.provider_lane name different providers")
+		return
 	}
 	if processing {
 		res.SkippedProcessing++
@@ -297,7 +376,7 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	// Backup-first is unchanged -- the caller's Report has already fsynced the
 	// restorable record above, before either half runs.
 	if len(scanResultIDs) > 0 || len(workItemIDs) > 0 {
-		srReset, wqReset, invalidated, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs, identities)
+		srReset, wqReset, invalidated, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs, identities, pt.Source)
 		if rerr != nil {
 			res.Errors++
 			slog.Warn("purge-provenance: reset rows failed; leaving sidecar in place", "path", path, "error", rerr)
@@ -340,12 +419,78 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 // in-flight write -- the same residual TOCTOU window prune.deletePruned notes
 // and accepts for the same reason (the alternative is holding a transaction
 // open across the file delete, which this package deliberately does not do).
-func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int64, identities []trackIdentity) (srReset, wqReset, invalidated int, retErr error) {
+// errProvenanceChangedUnderfoot reports that a work_queue row's provider_lane
+// stopped agreeing with the sidecar's [source:] tag between the pre-walk index
+// build and the reset transaction. It aborts that sidecar's transaction, so the
+// rows are not reset and the file is not deleted; the next run re-reads a
+// consistent snapshot and either deletes it or refuses it as disputed.
+var errProvenanceChangedUnderfoot = errors.New("purgeprovenance: provenance changed between index and delete")
+
+// disputedLanes re-reads the given work_queue rows through the caller's
+// transaction and returns the ids whose current provider_lane no longer agrees
+// with tag. A row that has since vanished is not disputed: it cannot contradict
+// anything, and the reset simply affects nothing.
+func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag string) ([]int64, error) {
+	placeholders := make([]string, len(workItemIDs))
+	args := make([]any, len(workItemIDs))
+	for i, id := range workItemIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	//nolint:gosec // reason: G201 - the interpolated text is a generated "?,?" placeholder
+	// list sized to workItemIDs; every id is bound as a parameter, never formatted in.
+	q := "SELECT id, COALESCE(provider_lane, '') FROM work_queue WHERE id IN (" +
+		strings.Join(placeholders, ",") + ")"
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read provider lanes: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // reason: read-only cursor; rows.Err() below reports any failure
+	var disputed []int64
+	for rows.Next() {
+		var id int64
+		var lane string
+		if serr := rows.Scan(&id, &lane); serr != nil {
+			return nil, fmt.Errorf("purgeprovenance: scan provider lane: %w", serr)
+		}
+		if !provenanceAgrees(tag, lane) {
+			disputed = append(disputed, id)
+		}
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read provider lanes: %w", rerr)
+	}
+	return disputed, nil
+}
+
+func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int64, identities []trackIdentity, tag string) (srReset, wqReset, invalidated int, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("purgeprovenance: begin reset tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Re-verify the provenance agreement INSIDE this transaction, before any
+	// mutation in it (#827 follow-up). The lanes checked during the walk came
+	// from buildIndex, which runs once BEFORE the filesystem walk -- so on a
+	// large library that snapshot can be minutes stale by the time this sidecar
+	// is reached, and a lane corrected in between would let a now-disputed file
+	// be deleted on an agreeing value that no longer holds.
+	//
+	// Re-reading here rather than taking a process-wide lock: this transaction
+	// is already the serialization point for every mutation the purge makes, so
+	// a row that changes after this read cannot have been read by the rest of
+	// the transaction either. A lock would also have to be held by a
+	// provider-lane repair path, and no such path exists in the tree.
+	if len(workItemIDs) > 0 {
+		disputed, verr := disputedLanes(ctx, tx, workItemIDs, tag)
+		if verr != nil {
+			return 0, 0, 0, verr
+		}
+		if len(disputed) > 0 {
+			return 0, 0, 0, fmt.Errorf("%w: work_queue rows %v", errProvenanceChangedUnderfoot, disputed)
+		}
+	}
 
 	// Cache invalidation rides in the SAME transaction as the row reset because
 	// the two are one indivisible statement of intent: "this track's lyrics are
@@ -440,7 +585,12 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 	// scan_results query above exactly, so the in-scope set is identical; the
 	// srIDs guard below stays as a belt-and-braces check that also covers a
 	// link row whose scan_results row has no filename.
-	wqQuery := `SELECT j.scan_result_id, wq.id, wq.status
+	// COALESCE the nullable provider_lane to '' rather than scanning into a
+	// *string: an empty lane and a NULL lane mean the same thing to
+	// provenanceAgrees ("this row asserts no provider"), so collapsing them at
+	// the boundary keeps the guard from having to distinguish two spellings of
+	// nothing.
+	wqQuery := `SELECT j.scan_result_id, wq.id, wq.status, COALESCE(wq.provider_lane, '')
          FROM work_queue_scan_results j
          JOIN work_queue wq ON wq.id = j.work_queue_id`
 	var wqArgs []any
@@ -458,8 +608,8 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 	defer func() { _ = wqRows.Close() }()
 	for wqRows.Next() {
 		var srID, wqID int64
-		var status string
-		if serr := wqRows.Scan(&srID, &wqID, &status); serr != nil {
+		var status, lane string
+		if serr := wqRows.Scan(&srID, &wqID, &status, &lane); serr != nil {
 			return nil, nil, fmt.Errorf("purgeprovenance: scan work_queue link: %w", serr)
 		}
 		if !srIDs[srID] {
@@ -467,7 +617,7 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 			// to keep the index scoped to what buildIndex actually loaded.
 			continue
 		}
-		wqIdx[srID] = append(wqIdx[srID], wqLink{id: wqID, status: status})
+		wqIdx[srID] = append(wqIdx[srID], wqLink{id: wqID, status: status, lane: lane})
 	}
 	if rerr := wqRows.Err(); rerr != nil {
 		return nil, nil, fmt.Errorf("purgeprovenance: iterate work_queue links: %w", rerr)
