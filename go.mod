@@ -14,7 +14,7 @@ require (
 	github.com/sydlexius/audioduration v0.9.1
 	github.com/ulikunitz/xz v0.5.16
 	github.com/valyala/fastjson v1.6.10
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/text v0.41.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	modernc.org/sqlite v1.57.0
