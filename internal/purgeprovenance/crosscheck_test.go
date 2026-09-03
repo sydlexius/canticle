@@ -3,6 +3,7 @@ package purgeprovenance
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -175,5 +176,179 @@ func TestRun_CrossCheckAgreementCases(t *testing.T) {
 				t.Errorf("sidecar still on disk after an agreeing purge: %v", serr)
 			}
 		})
+	}
+}
+
+// TestRun_DisputedProvenanceIsCountedEvenWhenInFlight covers the ordering
+// CodeRabbit flagged on #830: a sidecar can be BOTH in-flight and disputed, and
+// the in-flight return used to run first, so such a file was reported only as
+// "skipped, processing". The file was safe either way, but the operator never
+// saw the safety-relevant half -- in-flight is transient and resolves on the
+// next run, while disputed provenance is a standing contradiction to look at.
+//
+// Exactly one counter must increment: the CLI preview subtracts BOTH from the
+// matched total, so double-counting would understate what a purge will delete.
+func TestRun_DisputedProvenanceIsCountedEvenWhenInFlight(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	path := filepath.Join(root, "track.lrc")
+	writeSidecar(t, path, "musixmatch")
+	_, wqID := seedTrack(t, ctx, sqlDB, libID, filepath.Dir(path), "track.lrc", "processing")
+	setLane(t, ctx, sqlDB, wqID, "petitlyrics")
+
+	res, err := New(sqlDB).Run(ctx, Options{
+		Roots: []string{root}, LibraryID: &libID,
+		Filter: Filter{Source: "musixmatch"}, DryRun: false,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.SkippedProvenanceMismatch != 1 {
+		t.Errorf("SkippedProvenanceMismatch = %d, want 1: a disputed sidecar must be reported as disputed even while in flight",
+			res.SkippedProvenanceMismatch)
+	}
+	if res.SkippedProcessing != 0 {
+		t.Errorf("SkippedProcessing = %d, want 0: exactly one counter may increment per sidecar (the CLI subtracts both)",
+			res.SkippedProcessing)
+	}
+	if res.Deleted != 0 {
+		t.Errorf("Deleted = %d, want 0", res.Deleted)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("sidecar was deleted: %v", serr)
+	}
+}
+
+// TestRun_InFlightAgreeingSidecarStillCountsAsProcessing is the control for the
+// test above: reordering the two branches must not steal the ordinary in-flight
+// case, which has nothing disputed about it.
+func TestRun_InFlightAgreeingSidecarStillCountsAsProcessing(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	path := filepath.Join(root, "track.lrc")
+	writeSidecar(t, path, "musixmatch")
+	_, wqID := seedTrack(t, ctx, sqlDB, libID, filepath.Dir(path), "track.lrc", "processing")
+	setLane(t, ctx, sqlDB, wqID, "musixmatch")
+
+	res, err := New(sqlDB).Run(ctx, Options{
+		Roots: []string{root}, LibraryID: &libID,
+		Filter: Filter{Source: "musixmatch"}, DryRun: false,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.SkippedProcessing != 1 {
+		t.Errorf("SkippedProcessing = %d, want 1", res.SkippedProcessing)
+	}
+	if res.SkippedProvenanceMismatch != 0 {
+		t.Errorf("SkippedProvenanceMismatch = %d, want 0: this sidecar's provenance is not disputed", res.SkippedProvenanceMismatch)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("sidecar was deleted: %v", serr)
+	}
+}
+
+// TestDisputedLanes_ReReadsThroughTheTransaction covers the stale-snapshot
+// finding: the lanes checked during the walk come from buildIndex, which runs
+// ONCE before the filesystem walk, so on a large library that snapshot can be
+// minutes old by the time a given sidecar is reached. disputedLanes re-reads
+// through the reset transaction so a lane corrected in the interim cannot let a
+// now-disputed file be deleted on an agreeing value that no longer holds.
+func TestDisputedLanes_ReReadsThroughTheTransaction(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	path := filepath.Join(root, "track.lrc")
+	writeSidecar(t, path, "musixmatch")
+	_, wqID := seedTrack(t, ctx, sqlDB, libID, filepath.Dir(path), "track.lrc", "done")
+	setLane(t, ctx, sqlDB, wqID, "musixmatch")
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Agreeing at read time.
+	disputed, err := disputedLanes(ctx, tx, []int64{wqID}, "musixmatch")
+	if err != nil {
+		t.Fatalf("disputedLanes: %v", err)
+	}
+	if len(disputed) != 0 {
+		t.Errorf("disputedLanes = %v, want empty for an agreeing lane", disputed)
+	}
+
+	// Now disagreeing -- what a lane correction landing mid-walk looks like.
+	disputed, err = disputedLanes(ctx, tx, []int64{wqID}, "petitlyrics")
+	if err != nil {
+		t.Fatalf("disputedLanes: %v", err)
+	}
+	if len(disputed) != 1 || disputed[0] != wqID {
+		t.Errorf("disputedLanes = %v, want [%d]: a lane that no longer agrees must be reported", disputed, wqID)
+	}
+
+	// A vanished row cannot contradict anything.
+	disputed, err = disputedLanes(ctx, tx, []int64{wqID + 9999}, "musixmatch")
+	if err != nil {
+		t.Fatalf("disputedLanes: %v", err)
+	}
+	if len(disputed) != 0 {
+		t.Errorf("disputedLanes = %v, want empty for a missing row", disputed)
+	}
+}
+
+// TestResetRows_RefusesWhenTheLaneChangedUnderfoot exercises the guard where it
+// actually lives, in resetRows' transaction -- not the disputedLanes helper in
+// isolation. Testing the helper alone leaves the WIRING unverified: neutering
+// resetRows' use of it left the helper's own test green.
+//
+// The scenario is the stale-snapshot race: buildIndex read an agreeing lane
+// before the walk, the lane was corrected while the walk was still running, and
+// this sidecar is only now reached. The reset must abort rather than authorize a
+// delete on a value that no longer holds, and it must leave the rows untouched.
+func TestResetRows_RefusesWhenTheLaneChangedUnderfoot(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	path := filepath.Join(root, "track.lrc")
+	writeSidecar(t, path, "musixmatch")
+	srID, wqID := seedTrack(t, ctx, sqlDB, libID, filepath.Dir(path), "track.lrc", "done")
+	// The lane as it stands NOW: corrected since the pre-walk snapshot.
+	setLane(t, ctx, sqlDB, wqID, "petitlyrics")
+
+	statusBefore := rowStatus(t, ctx, sqlDB, "work_queue", wqID)
+
+	// The tag the walk matched on still says musixmatch, which is what the stale
+	// index agreed with.
+	_, _, _, err := New(sqlDB).resetRows(ctx,
+		[]int64{srID}, []int64{wqID},
+		[]trackIdentity{{artist: "Artist", title: "Title"}},
+		"musixmatch")
+	if err == nil {
+		t.Fatal("resetRows accepted a lane that changed under it; the delete would have been authorized on a stale value")
+	}
+	if !errors.Is(err, errProvenanceChangedUnderfoot) {
+		t.Errorf("error = %v, want errProvenanceChangedUnderfoot", err)
+	}
+	if got := rowStatus(t, ctx, sqlDB, "work_queue", wqID); got != statusBefore {
+		t.Errorf("work_queue status = %q, want %q unchanged: the aborted transaction must not have reset the row", got, statusBefore)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("sidecar was deleted: %v", serr)
+	}
+}
+
+// The control: an agreeing lane must still reset normally, so the guard cannot
+// pass by refusing everything.
+func TestResetRows_ProceedsWhenTheLaneStillAgrees(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	path := filepath.Join(root, "track.lrc")
+	writeSidecar(t, path, "musixmatch")
+	srID, wqID := seedTrack(t, ctx, sqlDB, libID, filepath.Dir(path), "track.lrc", "done")
+	setLane(t, ctx, sqlDB, wqID, "musixmatch")
+
+	_, wqReset, _, err := New(sqlDB).resetRows(ctx,
+		[]int64{srID}, []int64{wqID},
+		[]trackIdentity{{artist: "Artist", title: "Title"}},
+		"musixmatch")
+	if err != nil {
+		t.Fatalf("resetRows refused an agreeing lane: %v", err)
+	}
+	if wqReset != 1 {
+		t.Errorf("work items requeued = %d, want 1", wqReset)
 	}
 }

@@ -21,6 +21,7 @@ package purgeprovenance
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -306,13 +307,20 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 			}
 		}
 	}
-	if processing {
-		res.SkippedProcessing++
-		return
-	}
 	// The #827 deletion guard, checked BEFORE the Report call so a refused
 	// sidecar never reaches the dry-run preview either: a purge that previews a
 	// file it will not delete is worse than useless to the operator.
+	//
+	// It is ALSO checked before the in-flight return. A sidecar can be both
+	// in-flight and disputed, and reporting it only as "skipped, processing"
+	// hides the safety-relevant half: in-flight is a transient state that
+	// resolves on the next run, while disputed provenance is a standing
+	// contradiction the operator has to look at. So a disputed row is counted
+	// and warned as disputed whatever its status.
+	//
+	// Exactly ONE of the two counters increments per sidecar, because the CLI
+	// preview subtracts BOTH from the matched total; counting a sidecar twice
+	// would undercount what a purge is going to delete.
 	//
 	// A single disagreeing row is enough. The two authorities for "which provider
 	// served this" contradict each other, so which one the operator's --source
@@ -327,6 +335,10 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 			"work_queue_ids", mismatched,
 			"scan_result_ids", scanResultIDs,
 			"reason", "the on-disk [source:] tag and work_queue.provider_lane name different providers")
+		return
+	}
+	if processing {
+		res.SkippedProcessing++
 		return
 	}
 
@@ -364,7 +376,7 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	// Backup-first is unchanged -- the caller's Report has already fsynced the
 	// restorable record above, before either half runs.
 	if len(scanResultIDs) > 0 || len(workItemIDs) > 0 {
-		srReset, wqReset, invalidated, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs, identities)
+		srReset, wqReset, invalidated, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs, identities, pt.Source)
 		if rerr != nil {
 			res.Errors++
 			slog.Warn("purge-provenance: reset rows failed; leaving sidecar in place", "path", path, "error", rerr)
@@ -407,12 +419,78 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 // in-flight write -- the same residual TOCTOU window prune.deletePruned notes
 // and accepts for the same reason (the alternative is holding a transaction
 // open across the file delete, which this package deliberately does not do).
-func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int64, identities []trackIdentity) (srReset, wqReset, invalidated int, retErr error) {
+// errProvenanceChangedUnderfoot reports that a work_queue row's provider_lane
+// stopped agreeing with the sidecar's [source:] tag between the pre-walk index
+// build and the reset transaction. It aborts that sidecar's transaction, so the
+// rows are not reset and the file is not deleted; the next run re-reads a
+// consistent snapshot and either deletes it or refuses it as disputed.
+var errProvenanceChangedUnderfoot = errors.New("purgeprovenance: provenance changed between index and delete")
+
+// disputedLanes re-reads the given work_queue rows through the caller's
+// transaction and returns the ids whose current provider_lane no longer agrees
+// with tag. A row that has since vanished is not disputed: it cannot contradict
+// anything, and the reset simply affects nothing.
+func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag string) ([]int64, error) {
+	placeholders := make([]string, len(workItemIDs))
+	args := make([]any, len(workItemIDs))
+	for i, id := range workItemIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	//nolint:gosec // reason: G201 - the interpolated text is a generated "?,?" placeholder
+	// list sized to workItemIDs; every id is bound as a parameter, never formatted in.
+	q := "SELECT id, COALESCE(provider_lane, '') FROM work_queue WHERE id IN (" +
+		strings.Join(placeholders, ",") + ")"
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read provider lanes: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // reason: read-only cursor; rows.Err() below reports any failure
+	var disputed []int64
+	for rows.Next() {
+		var id int64
+		var lane string
+		if serr := rows.Scan(&id, &lane); serr != nil {
+			return nil, fmt.Errorf("purgeprovenance: scan provider lane: %w", serr)
+		}
+		if !provenanceAgrees(tag, lane) {
+			disputed = append(disputed, id)
+		}
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read provider lanes: %w", rerr)
+	}
+	return disputed, nil
+}
+
+func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int64, identities []trackIdentity, tag string) (srReset, wqReset, invalidated int, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("purgeprovenance: begin reset tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Re-verify the provenance agreement INSIDE this transaction, before any
+	// mutation in it (#827 follow-up). The lanes checked during the walk came
+	// from buildIndex, which runs once BEFORE the filesystem walk -- so on a
+	// large library that snapshot can be minutes stale by the time this sidecar
+	// is reached, and a lane corrected in between would let a now-disputed file
+	// be deleted on an agreeing value that no longer holds.
+	//
+	// Re-reading here rather than taking a process-wide lock: this transaction
+	// is already the serialization point for every mutation the purge makes, so
+	// a row that changes after this read cannot have been read by the rest of
+	// the transaction either. A lock would also have to be held by a
+	// provider-lane repair path, and no such path exists in the tree.
+	if len(workItemIDs) > 0 {
+		disputed, verr := disputedLanes(ctx, tx, workItemIDs, tag)
+		if verr != nil {
+			return 0, 0, 0, verr
+		}
+		if len(disputed) > 0 {
+			return 0, 0, 0, fmt.Errorf("%w: work_queue rows %v", errProvenanceChangedUnderfoot, disputed)
+		}
+	}
 
 	// Cache invalidation rides in the SAME transaction as the row reset because
 	// the two are one indivisible statement of intent: "this track's lyrics are
