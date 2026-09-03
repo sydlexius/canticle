@@ -60,7 +60,14 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # libcrypto3/libssl3, which is what the scanner names. Pinned on `openssl` (the
 # ORIGIN package apk resolves the floor against) rather than on either subpackage.
 # Raise/drop when the base index ships it by default.
-RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.8-r0" su-exec tzdata && \
+# expat floor pinned to remediate the 2.8.3-r0 batch: 2 HIGH (CVE-2026-66046,
+# CVE-2026-76641) plus 2 MEDIUM (CVE-2026-76956, CVE-2026-76957), all four fixed
+# in 2.8.4-r0 per the Alpine 3.24 secdb. It supplies libexpat, which is what the
+# scanner names; pinned on `expat` (the ORIGIN package apk resolves the floor
+# against), same as openssl above. Arrives TRANSITIVELY, so `apk upgrade` alone
+# leaves 2.8.3-r0 in place while the base digest predates the fix.
+# Raise/drop when the base index ships it by default.
+RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.8-r0" "expat>=2.8.4-r0" su-exec tzdata && \
     apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
