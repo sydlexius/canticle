@@ -373,17 +373,58 @@ func logIdle(err error) {
 	}
 }
 
+// laneName reports the lane name to stamp for the worker's primary fetcher.
+//
+// A fetcher that carries its own provider identity (every serve-mode fetcher,
+// since commands.selectedProvider resolves a providers.LyricsProvider from
+// providers.primary) names its own lane. A bare musixmatch.Fetcher has no
+// identity to ask, so it keeps the historical Musixmatch name: that is fetch
+// mode and the worker tests, both of which inject a raw Musixmatch client.
+//
+// An identity-carrying fetcher whose name is empty also falls back rather than
+// stamping "". A blank lane name is not a harmless default: RecordLaneAttempts
+// and SetProviderLane both SKIP an empty lane, so the row would silently lose
+// its attribution entirely instead of being merely wrong. Preferring a
+// possibly-wrong name over no name at all keeps the row auditable, and no
+// in-tree provider constructs itself with an empty name.
+func laneName(fetcher musixmatch.Fetcher) string {
+	named, ok := fetcher.(providers.LyricsProvider)
+	if !ok {
+		return providers.Musixmatch
+	}
+	if n := providers.NormalizeName(named.Name()); n != "" {
+		return n
+	}
+	return providers.Musixmatch
+}
+
 // New creates a queue consumer worker.
 func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Worker {
 	now := time.Now
 	cb := circuit.New(defaultCircuitBackoffBase, defaultCircuitOpenDuration)
 	cb.SetClock(now)
-	// Wrap the injected fetcher as the single Musixmatch lane sharing this
-	// breaker, and build an ordered orchestrator over it. With one lane this is a
+	// Wrap the injected fetcher as the primary lane sharing this breaker, and
+	// build an ordered orchestrator over it. With one lane this is a
 	// pass-through; the lane owns the circuit interaction the worker previously
 	// drove inline. orchestrator.New only errors on an unknown mode, and
 	// ModeOrdered is a constant, so the error is impossible here.
-	lane := orchestrator.NewProviderLane(providers.New(providers.Musixmatch, fetcher), cb)
+	//
+	// The lane takes the fetcher's OWN identity when it carries one, and only
+	// falls back to Musixmatch for a bare musixmatch.Fetcher (fetch mode, and
+	// tests, which inject a client with no provider identity). Hardcoding the
+	// name here was a misattribution bug: serve mode passes a
+	// providers.LyricsProvider resolved from providers.primary, so a
+	// PetitLyrics-primary deployment had every result stamped
+	// provider_lane='musixmatch' -- in work_queue, in lane_attempts, and in the
+	// UI credit that #600 gates on. The name is not cosmetic: it is the
+	// attribution shown to users and the key every per-lane metric groups by.
+	//
+	// This is the same defect class already fixed for the UI credit in
+	// musixmatchIsServing (internal/commands), at the second site that fix did
+	// not reach. SetFallbackProviders already names its lanes from the
+	// provider's own identity, so this makes the primary lane consistent with
+	// the fallbacks rather than inventing a new convention.
+	lane := orchestrator.NewProviderLane(providers.New(laneName(fetcher), fetcher), cb)
 	orch, _ := orchestrator.New(orchestrator.ModeOrdered, lane)
 	return &Worker{
 		queue:                 q,
