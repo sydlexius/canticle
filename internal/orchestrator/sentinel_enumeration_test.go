@@ -79,19 +79,21 @@ func providerPackages(t *testing.T) []string {
 // cannot mutate the set another test reads.
 func classifiedSentinels() map[string]error {
 	return map[string]error{
-		"musixmatch.ErrUnauthorized":         musixmatch.ErrUnauthorized,
-		"musixmatch.ErrRateLimited":          musixmatch.ErrRateLimited,
-		"musixmatch.ErrNotFound":             musixmatch.ErrNotFound,
-		"musixmatch.ErrNoLyrics":             musixmatch.ErrNoLyrics,
-		"musixmatch.ErrTruncatedResponse":    musixmatch.ErrTruncatedResponse,
-		"musixmatch.ErrTokenRenewalRequired": musixmatch.ErrTokenRenewalRequired,
-		"musixmatch.ErrTokenMintRefused":     musixmatch.ErrTokenMintRefused,
-		"petitlyrics.ErrUnauthorized":        petitlyrics.ErrUnauthorized,
-		"petitlyrics.ErrRateLimited":         petitlyrics.ErrRateLimited,
-		"petitlyrics.ErrForbidden":           petitlyrics.ErrForbidden,
-		"petitlyrics.ErrNotFound":            petitlyrics.ErrNotFound,
-		"petitlyrics.ErrUnsupportedTier":     petitlyrics.ErrUnsupportedTier,
-		"petitlyrics.ErrProviderUnavailable": petitlyrics.ErrProviderUnavailable,
+		"musixmatch.ErrUnauthorized":           musixmatch.ErrUnauthorized,
+		"musixmatch.ErrRateLimited":            musixmatch.ErrRateLimited,
+		"musixmatch.ErrNotFound":               musixmatch.ErrNotFound,
+		"musixmatch.ErrNoLyrics":               musixmatch.ErrNoLyrics,
+		"musixmatch.ErrTruncatedResponse":      musixmatch.ErrTruncatedResponse,
+		"musixmatch.ErrUnparsableSubtitleBody": musixmatch.ErrUnparsableSubtitleBody,
+		"musixmatch.ErrMatchMismatch":          musixmatch.ErrMatchMismatch,
+		"musixmatch.ErrTokenRenewalRequired":   musixmatch.ErrTokenRenewalRequired,
+		"musixmatch.ErrTokenMintRefused":       musixmatch.ErrTokenMintRefused,
+		"petitlyrics.ErrUnauthorized":          petitlyrics.ErrUnauthorized,
+		"petitlyrics.ErrRateLimited":           petitlyrics.ErrRateLimited,
+		"petitlyrics.ErrForbidden":             petitlyrics.ErrForbidden,
+		"petitlyrics.ErrNotFound":              petitlyrics.ErrNotFound,
+		"petitlyrics.ErrUnsupportedTier":       petitlyrics.ErrUnsupportedTier,
+		"petitlyrics.ErrProviderUnavailable":   petitlyrics.ErrProviderUnavailable,
 	}
 }
 

@@ -14,7 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/lrcnormalize"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/valyala/fastjson"
 )
 
@@ -80,6 +82,37 @@ var (
 	// rather than a throttle signal, since an empty body is deterministic per
 	// request and not evidence of a transient rate limit (#496).
 	ErrTruncatedResponse = errors.New("musixmatch: truncated or empty response body")
+	// ErrUnparsableSubtitleBody indicates a non-empty subtitle_body that is
+	// neither LRC text nor a JSON cue array -- i.e. the provider changed its
+	// encoding again. It exists so a format change is a NAMED, greppable
+	// condition rather than a bare parse error: an unwrapped error carries no
+	// sentinel, so orchestrator.ClassifyOutcome falls through to
+	// OutcomeTransport, which outranks OutcomeBenignMiss in precedence(), and
+	// every attempt then takes attempts++ plus geometric backoff toward
+	// retirement (the #748 mechanism). That is exactly how the 2026-09-04
+	// LRC-format change silently burned retry budget across the deferred
+	// backlog while presenting as "invalid character '0' after array element".
+	//
+	// Deliberately NOT a benign miss: the track very likely HAS lyrics and the
+	// fault is ours-or-theirs, not an absence. Classifying it benign would hide
+	// the next format change completely.
+	ErrUnparsableSubtitleBody = errors.New("musixmatch: unrecognized subtitle_body encoding")
+	// ErrMatchMismatch indicates the matcher returned a track that does not
+	// correspond to the request at all -- neither the artist nor the title
+	// resembles what was asked for.
+	//
+	// Measured live 2026-09-04 (#838): the endpoint returned ONE fixed track for
+	// every query, including a deliberately nonsensical artist/title. Writing
+	// such a response would stamp one unrelated song's lyrics across the whole
+	// library, so this check is what makes the LRC parse fix safe to ship: the
+	// parse failure had been failing CLOSED and incidentally protecting the
+	// library, and fixing it alone would convert a visible outage into silent
+	// corruption.
+	//
+	// Distinct from ErrNotFound: "the answer is wrong" is not "there is no
+	// answer". Both take the bounded-retry path, but only one of them means the
+	// provider is misbehaving.
+	ErrMatchMismatch = errors.New("musixmatch: response does not match the requested track")
 )
 
 // transportError converts a request-build or transport failure into a clean,
@@ -590,6 +623,9 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		if err := json.Unmarshal(trackNode.MarshalTo(nil), &song.Track); err != nil {
 			return song, err
 		}
+		if err := checkMatchCorresponds(track, song.Track); err != nil {
+			return song, err
+		}
 	case 401:
 		return song, fmt.Errorf("%w: HTTP 401 (token rejected or, per observed behavior, egress IP throttled)", ErrUnauthorized)
 	case 404:
@@ -607,9 +643,11 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		if len(subBody) == 0 {
 			return song, fmt.Errorf("%w: subtitle_body empty despite HasSubtitles=1", ErrTruncatedResponse)
 		}
-		if err := json.Unmarshal(subBody, &song.Subtitles.Lines); err != nil {
+		lines, err := parseSubtitleBody(subBody)
+		if err != nil {
 			return song, err
 		}
+		song.Subtitles.Lines = lines
 	} else {
 		slog.Debug("no synced lyrics found")
 		if song.Track.HasLyrics == 1 {
@@ -630,4 +668,107 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		}
 	}
 	return song, nil
+}
+
+// parseSubtitleBody decodes a non-empty subtitle_body into cues, accepting BOTH
+// encodings the provider has served.
+//
+// Musixmatch changed this field from a JSON cue array to LRC text on
+// 2026-09-04 (#838) without changing anything else: HTTP 200, inner
+// status_codes 200, a complete body. The subtitle_format request parameter no
+// longer selects the encoding -- mxm, lrc, json and a deliberately nonsensical
+// value all returned byte-identical responses -- so there is no way to ask for
+// one, and the client must recognize what it is given.
+//
+// JSON is attempted first so the previous encoding keeps its exact behavior if
+// they revert. The two shapes cannot be confused: a JSON cue array opens "[{",
+// while an LRC line opens with a "[mm:ss.xx]" timestamp or a "[key:value]" tag,
+// neither of which is valid JSON. That near-collision is precisely why the
+// outage was hard to read -- both open with "[", so encoding/json consumed
+// three bytes of a timestamp before failing with "invalid character '0' after
+// array element", which reads like corruption rather than a format change.
+func parseSubtitleBody(subBody []byte) ([]models.Lines, error) {
+	var lines []models.Lines
+	if err := json.Unmarshal(subBody, &lines); err == nil {
+		return lines, nil
+	}
+
+	if doc := lrcnormalize.ParseBody(string(subBody)); len(doc.Cues) > 0 {
+		return doc.Cues, nil
+	}
+
+	// Neither encoding matched. Return the named sentinel rather than a bare
+	// parse error: an unwrapped error carries no sentinel, so ClassifyOutcome
+	// defaults it to OutcomeTransport and every attempt burns retry budget.
+	// The body is NEVER included -- it is the lyric content itself.
+	return nil, fmt.Errorf("%w (%d bytes)", ErrUnparsableSubtitleBody, len(subBody))
+}
+
+// matchMinConfidence is the Jaro-Winkler floor below which a returned field is
+// considered unrelated to the requested one. Calibrated against measured scores
+// rather than chosen by feel (all via normalize.MatchConfidence):
+//
+//	Beatles            -> The Beatles                       0.7597  legitimate
+//	Artist One         -> Artist One feat. Artist Two        0.8741  legitimate
+//	Bohemian Rhapsody  -> Bohemian Rhapsody - 2011 Remaster  0.9030  legitimate
+//	Some Song          -> Some Song (Live)                   0.9125  legitimate
+//	(unrelated artist pair)                                  0.6338  mismatch
+//	(unrelated title pair)                                   0.5349  mismatch
+//
+// The narrowest gap between a legitimate score and a mismatch score is only
+// ~0.13, which is why NO single-field threshold is safe on its own -- see
+// checkMatchCorresponds for the rule that actually separates them.
+const matchMinConfidence = 0.75
+
+// checkMatchCorresponds rejects a matcher response that corresponds to neither
+// the requested artist nor the requested title.
+//
+// It exists because on 2026-09-04 the endpoint returned ONE fixed track for
+// every query, including a deliberately nonsensical artist/title (#838).
+// Parsing that response correctly and handing it to the writer would stamp a
+// single unrelated song's lyrics across the entire library, so this guard is
+// what makes the LRC parse fix safe to ship at all: the parse failure had been
+// failing CLOSED and incidentally protecting the library.
+//
+// THE RULE IS DELIBERATELY PERMISSIVE: reject only when BOTH fields fall below
+// the floor. The two failure directions are not symmetric in KIND, and the
+// asymmetry runs the opposite way to intuition:
+//
+//   - A false REJECT costs a miss. Nothing is written, the row stays deferred
+//     and retries later. Recoverable.
+//   - A false ACCEPT writes the wrong lyrics to disk, and per the writer's
+//     format-transition rule a later re-fetch can DELETE a better sidecar than
+//     it replaces. Not recoverable.
+//
+// So the guard should lean toward rejecting -- but a guard tuned so tight that
+// it rejects ordinary catalog variance (articles, remaster and live suffixes,
+// featured artists) turns every fetch into a miss, which is the same outage in
+// the other direction. Requiring BOTH fields to fail resolves it: a real
+// mismatch fails both, while legitimate variance essentially always keeps one
+// field close (an exact title with a variant artist, or the reverse).
+//
+// Fails OPEN when a field is not comparable: the probe path and some callers
+// leave artist or title blank, and a blank field is not evidence of a mismatch.
+func checkMatchCorresponds(requested, got models.Track) error {
+	artistOK, artistComparable := fieldCorresponds(requested.ArtistName, got.ArtistName)
+	titleOK, titleComparable := fieldCorresponds(requested.TrackName, got.TrackName)
+
+	if !artistComparable && !titleComparable {
+		return nil
+	}
+	if artistOK || titleOK {
+		return nil
+	}
+	// The error carries NO field values. It reaches logs and the
+	// failure-analysis report, and the library's track metadata is private.
+	return fmt.Errorf("%w", ErrMatchMismatch)
+}
+
+// fieldCorresponds reports whether a returned field resembles the requested one,
+// and whether the pair was comparable at all (both non-empty).
+func fieldCorresponds(requested, got string) (ok, comparable bool) {
+	if strings.TrimSpace(requested) == "" || strings.TrimSpace(got) == "" {
+		return false, false
+	}
+	return normalize.MatchConfidence(requested, got) >= matchMinConfidence, true
 }

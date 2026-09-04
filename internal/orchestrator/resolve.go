@@ -149,14 +149,18 @@ func providerClassifier(l *Lane, err error) error {
 		return err
 	}
 
-	if musixmatch.IsBenignMiss(err) || errors.Is(err, musixmatch.ErrTruncatedResponse) {
+	if musixmatch.IsBenignMiss(err) || errors.Is(err, musixmatch.ErrTruncatedResponse) ||
+		errors.Is(err, musixmatch.ErrUnparsableSubtitleBody) ||
+		errors.Is(err, musixmatch.ErrMatchMismatch) {
 		// A clean miss proves the provider round-trip succeeded, so we are not
 		// being throttled: reset the ramp. EverSucceeded is deliberately NOT set
 		// (a miss is a successful round-trip but not a genuine lyric match). A
 		// truncated/empty body is bucketed here too (#496): it is a deterministic
 		// per-request condition, not a transient throttle, so it must not trip the
 		// breaker or ratchet the pacer -- the worker's benign-miss cadence bounds
-		// its cost instead.
+		// its cost instead. An unrecognized subtitle_body encoding (#838) joins it:
+		// the request returned HTTP 200 with a complete body, so the round trip
+		// demonstrably succeeded and a throttle response would be a misreading.
 		if l.breaker.RecordBenignMiss() {
 			slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
 		}
