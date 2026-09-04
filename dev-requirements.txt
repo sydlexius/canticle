@@ -16,5 +16,5 @@
 # dev-requirements.lock generated from this file. Regenerate the lock with:
 #   uv pip compile --generate-hashes --universal dev-requirements.txt -o dev-requirements.lock
 properdocs==1.6.7
-mkdocs-material==9.7.6
+mkdocs-material==9.7.7
 mkdocs-git-revision-date-localized-plugin==1.5.3
