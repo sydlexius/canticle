@@ -125,7 +125,11 @@ func ClassifyOutcome(err error) OutcomeClass {
 		errors.Is(err, petitlyrics.ErrUnauthorized),
 		errors.Is(err, petitlyrics.ErrRateLimited):
 		return OutcomeAuthRateLimit
-	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse),
+	// IsBenignMiss already covers ErrTruncatedResponse,
+	// ErrUnparsableSubtitleBody and ErrMatchMismatch; listing them again here
+	// would drift the moment that function changes. (Same redundancy the review
+	// flagged in resolve.go -- this second site was found by sweeping for it.)
+	case musixmatch.IsBenignMiss(err),
 		errors.Is(err, ErrLaneBenignMiss),
 		// A petitlyrics miss is the same OUTCOME as a musixmatch miss. Without
 		// these the two provider lanes disagreed about what a miss is, and the
