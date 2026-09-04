@@ -125,22 +125,11 @@ func ClassifyOutcome(err error) OutcomeClass {
 		errors.Is(err, petitlyrics.ErrUnauthorized),
 		errors.Is(err, petitlyrics.ErrRateLimited):
 		return OutcomeAuthRateLimit
-	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse),
-		// An unrecognized subtitle_body encoding (#838) is bucketed here for the
-		// same reason as ErrTruncatedResponse (#496): it is DETERMINISTIC per
-		// request, not a transient throttle. Retrying cannot fix a format change,
-		// so it must take the bounded-retry path rather than the transport arm,
-		// where it would outrank a benign miss and march the row toward
-		// retirement on every pass. That retry-burn, across the whole deferred
-		// backlog, was the expensive half of the 2026-09-04 outage.
-		errors.Is(err, musixmatch.ErrUnparsableSubtitleBody),
-		// A response that corresponds to neither the requested artist nor title
-		// (#838) is bucketed here for the same reason: it is deterministic per
-		// request, so retrying cannot fix it, and the transport arm would
-		// outrank a benign miss and retire the row. Note this deliberately does
-		// NOT trip the breaker -- the provider is answering, just wrongly, and a
-		// throttle response would be a misdiagnosis.
-		errors.Is(err, musixmatch.ErrMatchMismatch),
+	// IsBenignMiss already covers ErrTruncatedResponse,
+	// ErrUnparsableSubtitleBody and ErrMatchMismatch; listing them again here
+	// would drift the moment that function changes. (Same redundancy the review
+	// flagged in resolve.go -- this second site was found by sweeping for it.)
+	case musixmatch.IsBenignMiss(err),
 		errors.Is(err, ErrLaneBenignMiss),
 		// A petitlyrics miss is the same OUTCOME as a musixmatch miss. Without
 		// these the two provider lanes disagreed about what a miss is, and the

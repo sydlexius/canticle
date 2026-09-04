@@ -93,9 +93,18 @@ var (
 	// LRC-format change silently burned retry budget across the deferred
 	// backlog while presenting as "invalid character '0' after array element".
 	//
-	// Deliberately NOT a benign miss: the track very likely HAS lyrics and the
-	// fault is ours-or-theirs, not an absence. Classifying it benign would hide
-	// the next format change completely.
+	// It IS a benign miss for RETRY purposes (see IsBenignMiss) and that is not a
+	// contradiction of the paragraph above -- the two concerns are separate:
+	//
+	//   - RETRY/BACKOFF: bounded-retry path. Retrying cannot fix an encoding
+	//     change, so a geometric backoff toward the 1h cap buys nothing.
+	//   - VISIBILITY: this DISTINCT sentinel. It is greppable, separately
+	//     countable, and never conflated with "no such track", which is what
+	//     keeps the next format change from hiding.
+	//
+	// An earlier revision of this comment said "deliberately NOT a benign miss",
+	// which described the visibility concern but read as a claim about the retry
+	// classification, and contradicted IsBenignMiss below.
 	ErrUnparsableSubtitleBody = errors.New("musixmatch: unrecognized subtitle_body encoding")
 	// ErrMatchMismatch indicates the matcher returned a track that does not
 	// correspond to the request at all -- neither the artist nor the title
@@ -706,7 +715,19 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 // array element", which reads like corruption rather than a format change.
 func parseSubtitleBody(subBody []byte) ([]models.Lines, error) {
 	var lines []models.Lines
-	if err := json.Unmarshal(subBody, &lines); err == nil {
+	// len(lines) > 0, not just err == nil: json.Unmarshal ACCEPTS the literal
+	// "null" without error and leaves the slice nil, so the JSON branch returned
+	// (nil, nil) and the caller saw a SUCCESSFUL fetch carrying HasSubtitles=1
+	// and zero cues -- a silent settle rather than a retryable failure.
+	//
+	// The check is len() rather than the nil test the finding proposed, because
+	// "[]" has the same consequence by a different route: it unmarshals to an
+	// EMPTY NON-NIL slice, which a nil test admits. Both are bodies with no
+	// usable content, so both belong on the error path.
+	//
+	// The contract this establishes: a nil error from this function means cues
+	// are present. Nothing downstream should have to re-check.
+	if err := json.Unmarshal(subBody, &lines); err == nil && len(lines) > 0 {
 		return lines, nil
 	}
 

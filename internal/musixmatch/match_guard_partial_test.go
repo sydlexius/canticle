@@ -135,3 +135,37 @@ type wrapped struct{ err error }
 
 func (w wrapped) Error() string { return "lane: " + w.err.Error() }
 func (w wrapped) Unwrap() error { return w.err }
+
+// TestFindLyricsArtistOnlyComparable mirrors the title-only cases for the
+// ARTIST-only path (CodeRabbit, PR #840): a blank TrackName with a non-empty
+// ArtistName. Both directions are covered so a fail-open regression on this
+// branch cannot pass the suite -- the title-only tests alone would not catch it,
+// since fieldCorresponds is called once per field and either call could regress
+// independently.
+func TestFindLyricsArtistOnlyComparable(t *testing.T) {
+	t.Run("rejects a wrong artist when it is the only comparable field", func(t *testing.T) {
+		client := clientReturning(t, matchResponse("Bramblewood Quintet", "Ninefold Ascent"))
+		_, err := client.FindLyrics(context.Background(), models.Track{
+			ArtistName: "Aurora Kestrel", TrackName: "",
+		})
+		if err == nil {
+			t.Fatal("accepted a wrong artist when it was the ONLY comparable field")
+		}
+		if !errors.Is(err, ErrMatchMismatch) {
+			t.Fatalf("error = %v; want ErrMatchMismatch", err)
+		}
+	})
+
+	t.Run("accepts a good artist with a blank title", func(t *testing.T) {
+		client := clientReturning(t, matchResponse("Aurora Kestrel", "Ninefold Ascent"))
+		song, err := client.FindLyrics(context.Background(), models.Track{
+			ArtistName: "Aurora Kestrel", TrackName: "",
+		})
+		if err != nil {
+			t.Fatalf("rejected a good artist match with a blank title: %v", err)
+		}
+		if len(song.Subtitles.Lines) != 1 {
+			t.Errorf("lines = %d; want 1", len(song.Subtitles.Lines))
+		}
+	})
+}

@@ -187,3 +187,44 @@ func TestUnparsableSubtitleBodyStaysDistinct(t *testing.T) {
 		t.Error("ErrUnparsableSubtitleBody must take the bounded-retry path: retrying cannot fix an encoding change")
 	}
 }
+
+// TestFindLyricsRejectsNullSubtitleBody covers a fail-open in the JSON branch
+// (CodeRabbit, PR #840). json.Unmarshal accepts the four bytes "null" WITHOUT
+// error and leaves the slice nil, so the JSON path returned (nil, nil) and the
+// caller saw a SUCCESSFUL fetch carrying HasSubtitles=1 and zero cues.
+//
+// Measured before the fix: parseSubtitleBody("null") -> 0 cues, nil error.
+//
+// That is the worst shape available here: not a parse failure that retries, but
+// a silent success that settles the row with nothing in it.
+func TestFindLyricsRejectsNullSubtitleBody(t *testing.T) {
+	for _, body := range []string{"null", " null ", "NULL"} {
+		t.Run(body, func(t *testing.T) {
+			client := clientReturning(t, subtitleResponse(body))
+			_, err := client.FindLyrics(context.Background(), models.Track{
+				TrackName: "title", ArtistName: "artist",
+			})
+			if err == nil {
+				t.Fatalf("accepted subtitle_body %q as a successful fetch with no cues", body)
+			}
+			if !errors.Is(err, ErrUnparsableSubtitleBody) {
+				t.Fatalf("error = %v; want ErrUnparsableSubtitleBody", err)
+			}
+		})
+	}
+}
+
+// TestParseSubtitleBodyNeverReturnsEmptySuccess is the generalized guard: no
+// input may yield (empty, nil). A caller that gets a nil error is entitled to
+// assume it has cues, and the writer's HasSubtitles path depends on it.
+func TestParseSubtitleBodyNeverReturnsEmptySuccess(t *testing.T) {
+	for _, body := range []string{"null", "[]", "  ", "{}", `""`, "0", "false"} {
+		t.Run(body, func(t *testing.T) {
+			lines, err := parseSubtitleBody([]byte(body))
+			if err == nil && len(lines) == 0 {
+				t.Errorf("parseSubtitleBody(%q) returned SUCCESS with zero cues; "+
+					"a nil error must mean cues are present", body)
+			}
+		})
+	}
+}

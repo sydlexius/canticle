@@ -149,9 +149,10 @@ func providerClassifier(l *Lane, err error) error {
 		return err
 	}
 
-	if musixmatch.IsBenignMiss(err) || errors.Is(err, musixmatch.ErrTruncatedResponse) ||
-		errors.Is(err, musixmatch.ErrUnparsableSubtitleBody) ||
-		errors.Is(err, musixmatch.ErrMatchMismatch) {
+	// IsBenignMiss is the single source of truth: it already covers
+	// ErrTruncatedResponse, ErrUnparsableSubtitleBody and ErrMatchMismatch.
+	// Re-listing them here invited drift between two lists that must agree.
+	if musixmatch.IsBenignMiss(err) {
 		// A clean miss proves the provider round-trip succeeded, so we are not
 		// being throttled: reset the ramp. EverSucceeded is deliberately NOT set
 		// (a miss is a successful round-trip but not a genuine lyric match). A
