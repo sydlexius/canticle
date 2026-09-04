@@ -138,8 +138,9 @@ func providerClassifier(l *Lane, err error) error {
 	case errors.Is(err, petitlyrics.ErrNotFound):
 		// A healthy round trip that found nothing usable. This also covers an
 		// UNDECODABLE tier-2 payload: since #763 shipped the LSY decoder, every
-		// refusal inside decode wraps ErrNotFound (decode.go:177-208, :251),
+		// refusal inside decodeLineSyncTimings and zipLineSync wraps ErrNotFound,
 		// so it arrives here rather than through a tier-specific sentinel.
+		// (Function names rather than line numbers -- the latter drift.)
 		// Neither says anything about lane health, so it resets the ramp.
 		//
 		// EverSucceeded is deliberately NOT set, matching the musixmatch branch: a

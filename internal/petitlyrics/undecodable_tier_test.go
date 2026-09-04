@@ -36,7 +36,10 @@ func TestUndecodableLineSyncWrapsErrNotFound(t *testing.T) {
 	}{
 		{"shorter than the minimum header", []byte{0x00, 0x01, 0x02}},
 		{"declares zero lines", header(0, 0)},
-		{"declares a negative line count", header(^uint32(0), 0)},
+		// NOT a negative count: int(^uint32(0)) is 4294967295 on a 64-bit int,
+		// so this exercises the uint32->int cast at the max-lines CAP, not the
+		// lineCount <= 0 guard (which the zero-lines case above covers).
+		{"line count overflows the uint32->int cast", header(^uint32(0), 0)},
 		{"declares more lines than the cap", header(uint32(lsyMaxLines)+1, 0)},
 		{"truncated before the timestamp array ends", header(64, 0)},
 		{"geometry disagrees with the actual length", append(header(2, 40), make([]byte, 4)...)},
