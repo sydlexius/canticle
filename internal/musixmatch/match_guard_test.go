@@ -3,6 +3,7 @@ package musixmatch
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -122,22 +123,10 @@ func TestFindLyricsMismatchErrorCarriesNoContent(t *testing.T) {
 		t.Fatal("expected a mismatch error")
 	}
 	for _, leak := range []string{"Unrelated Performer", "Unrelated Song", "Requested Artist", "Requested Title"} {
-		if contains(err.Error(), leak) {
+		if strings.Contains(err.Error(), leak) {
 			t.Errorf("error leaks %q into logs: %v", leak, err)
 		}
 	}
-}
-
-func contains(haystack, needle string) bool {
-	return len(needle) > 0 && len(haystack) >= len(needle) &&
-		func() bool {
-			for i := 0; i+len(needle) <= len(haystack); i++ {
-				if haystack[i:i+len(needle)] == needle {
-					return true
-				}
-			}
-			return false
-		}()
 }
 
 // TestFindLyricsEmptyQueryFieldsSkipGuard: the probe path and some callers leave

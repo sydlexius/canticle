@@ -163,8 +163,25 @@ var ErrTokenRenewalRequired error = tokenRenewalError{}
 // that genuine, transient failures warrant. (This concerns only the upstream
 // result; the queue row is not retired -- the worker re-checks it later on a
 // generous cooldown as the catalog grows.)
+// The three deterministic-response sentinels below are included because they
+// share the property this function tests for -- the upstream result is stable
+// and a near-term retry cannot change it -- even though the track may well HAVE
+// lyrics. A truncated body, an unrecognized subtitle_body encoding, and a
+// response for the wrong track are all facts about THIS response, not evidence
+// of a transient fault, so backing off geometrically buys nothing.
+//
+// This matters because internal/app (the `canticle fetch` CLI) calls this
+// function DIRECTLY and never reaches orchestrator.ClassifyOutcome. Classifying
+// them only in the orchestrator fixed serve mode and left the CLI backing off
+// 1s, 2s, 4s ... toward the 1h cap on conditions no wait resolves. Serve mode is
+// unaffected by their presence here: worker.go gates on ClassifyOutcome
+// deliberately, so the two paths agree rather than diverge.
 func IsBenignMiss(err error) bool {
-	return errors.Is(err, ErrNotFound) || errors.Is(err, ErrNoLyrics)
+	return errors.Is(err, ErrNotFound) ||
+		errors.Is(err, ErrNoLyrics) ||
+		errors.Is(err, ErrTruncatedResponse) ||
+		errors.Is(err, ErrUnparsableSubtitleBody) ||
+		errors.Is(err, ErrMatchMismatch)
 }
 
 // TokenRenewer supplies a replacement token when the API explicitly signals that
@@ -730,9 +747,8 @@ const matchMinConfidence = 0.75
 // what makes the LRC parse fix safe to ship at all: the parse failure had been
 // failing CLOSED and incidentally protecting the library.
 //
-// THE RULE IS DELIBERATELY PERMISSIVE: reject only when BOTH fields fall below
-// the floor. The two failure directions are not symmetric in KIND, and the
-// asymmetry runs the opposite way to intuition:
+// EVERY COMPARABLE FIELD MUST CORRESPOND. The two failure directions are not
+// symmetric in KIND, and the asymmetry runs the opposite way to intuition:
 //
 //   - A false REJECT costs a miss. Nothing is written, the row stays deferred
 //     and retries later. Recoverable.
@@ -740,15 +756,26 @@ const matchMinConfidence = 0.75
 //     format-transition rule a later re-fetch can DELETE a better sidecar than
 //     it replaces. Not recoverable.
 //
-// So the guard should lean toward rejecting -- but a guard tuned so tight that
-// it rejects ordinary catalog variance (articles, remaster and live suffixes,
-// featured artists) turns every fetch into a miss, which is the same outage in
-// the other direction. Requiring BOTH fields to fail resolves it: a real
-// mismatch fails both, while legitimate variance essentially always keeps one
-// field close (an exact title with a variant artist, or the reverse).
+// An earlier version of this guard rejected only when BOTH fields fell below the
+// floor, on the theory that legitimate variance "always keeps one field close".
+// Measured against normalize.MatchConfidence, that theory is FALSE in the
+// direction that matters, and the both-fields rule let two realistic wrong-track
+// classes straight through:
 //
-// Fails OPEN when a field is not comparable: the probe path and some callers
-// leave artist or title blank, and a blank field is not evidence of a mismatch.
+//   - a COVER keeps the title at 1.0 and drops the artist to ~0.50
+//   - a WRONGLY-SERVED track on a compilation keeps the artist at 1.0 and
+//     drops the title to ~0.61
+//
+// Both are another song's words. What legitimate variance actually does is keep
+// BOTH fields high -- the weakest measured legitimate field is 0.8051 (a leading
+// article), against 0.6095 for the closest genuine mismatch. So requiring every
+// comparable field to clear the floor separates the two classes with a WIDER
+// margin than the permissive rule ever had, and costs nothing in false rejects.
+//
+// Fails OPEN only when a field is not comparable: the probe path and some
+// callers leave artist or title blank, and a blank field is not evidence of a
+// mismatch. A blank field is skipped, never treated as a pass -- so when only
+// one field is comparable, that field alone still has to clear the floor.
 func checkMatchCorresponds(requested, got models.Track) error {
 	artistOK, artistComparable := fieldCorresponds(requested.ArtistName, got.ArtistName)
 	titleOK, titleComparable := fieldCorresponds(requested.TrackName, got.TrackName)
@@ -756,7 +783,7 @@ func checkMatchCorresponds(requested, got models.Track) error {
 	if !artistComparable && !titleComparable {
 		return nil
 	}
-	if artistOK || titleOK {
+	if (!artistComparable || artistOK) && (!titleComparable || titleOK) {
 		return nil
 	}
 	// The error carries NO field values. It reaches logs and the

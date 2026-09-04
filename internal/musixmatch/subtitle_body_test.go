@@ -158,11 +158,32 @@ func TestFindLyricsUnparsableSubtitleBodyReturnsSentinel(t *testing.T) {
 	}
 }
 
-// TestUnparsableSubtitleBodyIsNotABenignMiss asserts the new sentinel is not
-// swallowed as a routine miss. A format change is a real upstream fault and must
-// stay visible; classifying it benign would hide the next one entirely.
-func TestUnparsableSubtitleBodyIsNotABenignMiss(t *testing.T) {
-	if IsBenignMiss(ErrUnparsableSubtitleBody) {
-		t.Error("ErrUnparsableSubtitleBody must not classify as a benign miss")
+// TestUnparsableSubtitleBodyStaysDistinct asserts the sentinel is never
+// CONFLATED with an ordinary miss, which is what keeps a format change visible
+// and countable.
+//
+// This replaced an assertion that ErrUnparsableSubtitleBody must NOT classify as
+// a benign miss. That earlier assertion conflated two separate concerns, and the
+// distinction is the point:
+//
+//   - IsBenignMiss controls RETRY AND BACKOFF. A deterministic per-request
+//     condition must skip the geometric backoff, because no amount of waiting
+//     changes a format change. Forcing a backoff here made the `canticle fetch`
+//     CLI sleep 1s, 2s, 4s ... toward the 1h cap for nothing.
+//   - VISIBILITY comes from the sentinel being DISTINCT -- greppable in logs,
+//     separately countable, and never indistinguishable from "no such track".
+//
+// So the guard that actually protects against hiding the next format change is
+// the one below: the sentinel must not wrap ErrNotFound or ErrNoLyrics.
+func TestUnparsableSubtitleBodyStaysDistinct(t *testing.T) {
+	if errors.Is(ErrUnparsableSubtitleBody, ErrNotFound) {
+		t.Error("ErrUnparsableSubtitleBody must not wrap ErrNotFound: a wrong encoding is not an absent track")
+	}
+	if errors.Is(ErrUnparsableSubtitleBody, ErrNoLyrics) {
+		t.Error("ErrUnparsableSubtitleBody must not wrap ErrNoLyrics: a wrong encoding is not an absence of lyrics")
+	}
+	// It DOES take the bounded-retry path, deliberately -- see IsBenignMiss.
+	if !IsBenignMiss(ErrUnparsableSubtitleBody) {
+		t.Error("ErrUnparsableSubtitleBody must take the bounded-retry path: retrying cannot fix an encoding change")
 	}
 }
