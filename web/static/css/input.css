@@ -1021,8 +1021,22 @@ body {
   cursor: not-allowed;
 }
 
+/* The status paragraph is a role="status" aria-live="polite" region. Hiding an
+   empty one with display:none removes it from the ACCESSIBILITY TREE, and some
+   screen readers then do not announce the change when announceOrder populates
+   and reveals it in the same frame -- the live region was not present when the
+   mutation happened. Keyboard reorder feedback is a primary goal of this
+   control, so hide it VISUALLY instead and leave it in the tree (PR #843). */
 .mx-orderlist-status:empty {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .mx-settings-checkbox {

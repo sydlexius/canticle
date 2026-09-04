@@ -306,6 +306,19 @@
   function setOrderRowActive(row, path, active) {
     var input = row.querySelector('input[type="hidden"]');
     row.classList.toggle("mx-orderlist-item-off", !active);
+    // An inactive row is out of play: drop its draggable attribute so it cannot
+    // be dragged and does not show a grab cursor (PR #843). Restored on
+    // re-enable only when the row was draggable to begin with -- a locked or
+    // fixed row never becomes draggable by being re-enabled.
+    if (!active) {
+      if (row.getAttribute("draggable") === "true") {
+        row.setAttribute("data-was-draggable", "true");
+      }
+      row.removeAttribute("draggable");
+    } else if (row.getAttribute("data-was-draggable") === "true") {
+      row.setAttribute("draggable", "true");
+      row.removeAttribute("data-was-draggable");
+    }
     if (active && !input) {
       input = document.createElement("input");
       input.type = "hidden";
@@ -353,26 +366,62 @@
     }
   }
 
-  // moveOrderRow swaps a row with its nearest ACTIVE neighbour in the given
-  // direction, then renumbers. Returns true when the DOM actually changed.
+  // reorderActive rewrites a list so the ACTIVE rows appear in nextActive's
+  // order while every INACTIVE row keeps the slot index it already had.
+  //
+  // Inactive rows are fixed points, not participants. A disabled provider's row
+  // stays where it is precisely so re-enabling restores its rank rather than
+  // appending it to the end -- which is the behavior the enablement coupling
+  // promises. An earlier version moved rows with a bare insertBefore against the
+  // nearest active neighbour, which SKIPPED inactive rows when choosing the
+  // target but still displaced them when performing the move: [A, X(off), B]
+  // moving B up produced [B, A, X(off)] rather than [B, X(off), A]. Reported
+  // independently by two reviewers on PR #843.
+  function reorderActive(list, nextActive) {
+    var rows = Array.prototype.slice.call(list.querySelectorAll(".mx-orderlist-item"));
+    var next = [];
+    var take = 0;
+    for (var i = 0; i < rows.length; i++) {
+      // An inactive row keeps ITS OWN index; an active slot draws the next row
+      // from the requested active order.
+      next.push(rows[i].classList.contains("mx-orderlist-item-off") ? rows[i] : nextActive[take++]);
+    }
+    for (var j = 0; j < next.length; j++) {
+      list.appendChild(next[j]);
+    }
+  }
+
+  // activeRows returns the list's active rows in document order.
+  function activeRows(list) {
+    return Array.prototype.slice.call(
+      list.querySelectorAll(".mx-orderlist-item:not(.mx-orderlist-item-off)")
+    );
+  }
+
+  // moveOrderRow swaps a row with its nearest ACTIVE neighbour, leaving every
+  // inactive row in place. Returns true when the order actually changed.
+  //
+  // Both reorder paths -- these buttons and the drag handler -- go through
+  // reorderActive so they cannot produce different results for the same gesture
+  // (PR #843). The drag path previously called insertBefore directly.
   function moveOrderRow(row, dir) {
     var list = row.closest("[data-orderlist]");
     if (!list) {
       console.error("settings.js: order-move button outside an order list");
       return false;
     }
-    var sib = dir === "up" ? row.previousElementSibling : row.nextElementSibling;
-    while (sib && sib.classList.contains("mx-orderlist-item-off")) {
-      sib = dir === "up" ? sib.previousElementSibling : sib.nextElementSibling;
+    if (row.classList.contains("mx-orderlist-item-off")) {
+      return false; // not part of the order; nothing to move
     }
-    if (!sib) {
+    var active = activeRows(list);
+    var i = active.indexOf(row);
+    var j = dir === "up" ? i - 1 : i + 1;
+    if (i === -1 || j < 0 || j >= active.length) {
       return false;
     }
-    if (dir === "up") {
-      list.insertBefore(row, sib);
-    } else {
-      list.insertBefore(sib, row);
-    }
+    active[i] = active[j];
+    active[j] = row;
+    reorderActive(list, active);
     renumberOrderList(list);
     return true;
   }
@@ -380,6 +429,12 @@
   // Drag-to-reorder. The keyboard move buttons are the accessible equivalent and
   // are not a fallback: both paths end in the same DOM move plus renumber.
   var dragRow = null;
+  // dragStartActive is the active order captured at dragstart. A cancelled drag
+  // (Escape, or a release outside a valid target) fires dragend WITHOUT drop, so
+  // without this the last hover position silently became the new order and the
+  // user saw a reorder they cancelled (PR #843).
+  var dragStartActive = null;
+  var dragDropped = false;
 
   function initOrderLists() {
     var lists = document.querySelectorAll("[data-orderlist]");
@@ -394,6 +449,9 @@
       return;
     }
     dragRow = row;
+    dragDropped = false;
+    var startList = row.closest("[data-orderlist]");
+    dragStartActive = startList ? activeRows(startList) : null;
     row.classList.add("mx-orderlist-item-dragging");
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = "move";
@@ -413,13 +471,31 @@
     if (over.closest("[data-orderlist]") !== dragRow.closest("[data-orderlist]")) {
       return;
     }
+    if (over.classList.contains("mx-orderlist-item-off")) {
+      return; // an inactive row is a fixed slot, never a drop target
+    }
     event.preventDefault();
-    // Insert before or after depending on which half of the row the pointer is
-    // over, so the drop lands where the gap is shown.
+    // Move WITHIN the active order, so a drag and the move buttons produce the
+    // same result for the same gesture and inactive rows keep their slots.
+    var list = over.closest("[data-orderlist]");
+    var active = activeRows(list);
+    var from = active.indexOf(dragRow);
+    var to = active.indexOf(over);
+    if (from === -1 || to === -1 || from === to) {
+      return;
+    }
+    // Drop after the hovered row when the pointer is past its midpoint, so the
+    // row lands where the gap is shown.
     var box = over.getBoundingClientRect();
-    var after = event.clientY > box.top + box.height / 2;
-    var list = over.parentNode;
-    list.insertBefore(dragRow, after ? over.nextSibling : over);
+    if (event.clientY > box.top + box.height / 2 && to < active.length - 1) {
+      to++;
+    }
+    if (to > from) {
+      to--;
+    }
+    active.splice(from, 1);
+    active.splice(to, 0, dragRow);
+    reorderActive(list, active);
   });
 
   document.addEventListener("drop", function (event) {
@@ -427,6 +503,7 @@
       return;
     }
     event.preventDefault();
+    dragDropped = true;
     finishDrag();
   });
 
@@ -440,11 +517,20 @@
     }
     var list = dragRow.closest("[data-orderlist]");
     dragRow.classList.remove("mx-orderlist-item-dragging");
+    // No drop means the drag was CANCELLED -- restore the order captured at
+    // dragstart rather than keeping wherever the pointer last hovered.
+    if (!dragDropped && list && dragStartActive) {
+      reorderActive(list, dragStartActive);
+    }
     dragRow = null;
+    dragStartActive = null;
     if (list) {
       renumberOrderList(list);
-      announceOrder(list);
+      if (dragDropped) {
+        announceOrder(list);
+      }
     }
+    dragDropped = false;
   }
 
   // announceOrder reports the new order to the status line so a screen-reader

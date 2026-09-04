@@ -150,7 +150,7 @@ ui-validate:
 	@# check is NOT an @source-glob coverage gate.
 	@for cls in mx-shell mx-sidebar mx-content; do \
 		if ! grep -q "\.$$cls{" web/static/css/output.css; then \
-			echo "ui-check: sentinel class .$$cls missing from output.css"; \
+			echo "ui-validate: sentinel class .$$cls missing from output.css"; \
 			echo "  A @source glob may be missing from web/static/css/input.css for a new template location."; \
 			exit 1; \
 		fi; \
@@ -166,8 +166,8 @@ ui-validate:
 	@# @source glob too narrow to emit the classes), which this change does not touch.
 	@size=$$(wc -c < web/static/css/output.css | awk '{print $$1}'); \
 	if [ "$$size" -lt 7000 ] || [ "$$size" -gt 23000 ]; then \
-		echo "ui-check: output.css is $$size B, outside the expected 7000-23000 B band."; \
-		echo "  Update the band in the Makefile ui-check target if the change is intentional."; \
+		echo "ui-validate: output.css is $$size B, outside the expected 7000-23000 B band."; \
+		echo "  Update the band in the Makefile ui-validate target if the change is intentional."; \
 		exit 1; \
 	fi
 
