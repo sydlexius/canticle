@@ -96,11 +96,12 @@ func TestFallbackOrderHasKeyboardReorderControls(t *testing.T) {
 func TestFallbackOrderIsNotACheckboxList(t *testing.T) {
 	body := renderSettings(t, orderCfg())
 
-	if strings.Contains(body, `type="checkbox"`+"\n"+`					class="mx-settings-checkbox"`+"\n"+`					name="providers.fallback_order"`) {
-		t.Error("fallback_order still renders checkboxes")
-	}
-	// The robust form of the same check: no checkbox input anywhere carries the
-	// fallback_order name.
+	// Matched by REGEX, not a literal string: an equivalent literal assertion
+	// lived here and was removed as brittle (pre-push review, #837). It embedded
+	// templ's exact generated indentation, so any codegen formatting change
+	// would have broken it while the property it checked still held -- and it
+	// guarded nothing the regexes below do not, since they match the attributes
+	// in either order regardless of whitespace.
 	checkboxRE := regexp.MustCompile(`<input[^>]*type="checkbox"[^>]*name="providers\.fallback_order"`)
 	altRE := regexp.MustCompile(`<input[^>]*name="providers\.fallback_order"[^>]*type="checkbox"`)
 	if checkboxRE.MatchString(body) || altRE.MatchString(body) {
