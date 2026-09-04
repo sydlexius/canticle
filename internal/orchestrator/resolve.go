@@ -135,11 +135,12 @@ func providerClassifier(l *Lane, err error) error {
 		l.notifyThrottle()
 		return err
 
-	case errors.Is(err, petitlyrics.ErrNotFound), errors.Is(err, petitlyrics.ErrUnsupportedTier):
-		// Both are healthy round trips. ErrNotFound is a clean miss;
-		// ErrUnsupportedTier means the response arrived fine and its payload was
-		// an undecodable tier (lyricsType 2, the encrypted LSY blob). Neither says
-		// anything about lane health, so both reset the ramp.
+	case errors.Is(err, petitlyrics.ErrNotFound):
+		// A healthy round trip that found nothing usable. This also covers an
+		// UNDECODABLE tier-2 payload: since #763 shipped the LSY decoder, every
+		// refusal inside decode wraps ErrNotFound (decode.go:177-208, :251),
+		// so it arrives here rather than through a tier-specific sentinel.
+		// Neither says anything about lane health, so it resets the ramp.
 		//
 		// EverSucceeded is deliberately NOT set, matching the musixmatch branch: a
 		// miss is a successful round trip but not a genuine lyric match.

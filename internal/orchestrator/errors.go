@@ -135,8 +135,7 @@ func ClassifyOutcome(err error) OutcomeClass {
 		// these the two provider lanes disagreed about what a miss is, and the
 		// worker (worker.go:1187) released the item on a different path depending
 		// on which lane produced it.
-		errors.Is(err, petitlyrics.ErrNotFound),
-		errors.Is(err, petitlyrics.ErrUnsupportedTier):
+		errors.Is(err, petitlyrics.ErrNotFound):
 		return OutcomeBenignMiss
 	case errors.Is(err, ErrLaneNotReady):
 		return OutcomeLaneNotReady

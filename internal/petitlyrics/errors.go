@@ -28,11 +28,6 @@ var (
 	// ErrNotFound indicates the API returned no matching song, meaning no usable
 	// lyrics were found. This is a clean miss, not a failure.
 	ErrNotFound = errors.New("petitlyrics: no results found")
-	// ErrUnsupportedTier indicates the API returned a lyrics tier this client
-	// cannot decode yet -- specifically lyricsType 2, whose payload is an
-	// encrypted LSY binary blob. Callers should treat it as a miss for this tier
-	// rather than failing the track outright.
-	ErrUnsupportedTier = errors.New("petitlyrics: unsupported lyrics tier")
 )
 
 // ErrProviderUnavailable indicates a sustained run of zero-result responses:

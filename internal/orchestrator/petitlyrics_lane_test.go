@@ -99,32 +99,6 @@ func TestPetitLyricsNotFoundIsBenignMiss(t *testing.T) {
 	}
 }
 
-func TestPetitLyricsUnsupportedTierIsBenignMiss(t *testing.T) {
-	// lyricsType 2 (the encrypted LSY blob) is undecodable today. The response
-	// ARRIVED and parsed fine; only its payload tier is unsupported. That is a
-	// per-track capability gap on a healthy lane, so it resets the ramp exactly
-	// like a miss and must never be mistaken for a lane fault.
-	p := &stubProvider{name: "petitlyrics", err: petitlyrics.ErrUnsupportedTier}
-	l, cb := newTestLane(p)
-	fixed := time.Now()
-	cb.SetClock(func() time.Time { return fixed })
-	cb.Trip()
-	cb.Trip()
-	cb.SetClock(func() time.Time { return fixed.Add(2 * time.Hour) })
-
-	_, err := l.FindLyrics(context.Background(), models.Track{}, "")
-	if !errors.Is(err, petitlyrics.ErrUnsupportedTier) {
-		t.Fatalf("err = %v; want ErrUnsupportedTier preserved", err)
-	}
-	if cb.Trips() != 0 {
-		t.Errorf("trips = %d; want 0. An undecodable tier is a healthy round "+
-			"trip, so it must reset the ramp rather than ratchet it.", cb.Trips())
-	}
-	if cb.EverSucceeded() {
-		t.Error("an undecodable tier must NOT set EverSucceeded: no lyric was written")
-	}
-}
-
 func TestPetitLyricsProviderUnavailableTripsBreaker(t *testing.T) {
 	// Sustained zero-results almost certainly means a dead application id, so the
 	// lane opens rather than continuing to spend requests on a provider that
@@ -213,11 +187,6 @@ func TestClassifyOutcome_PetitLyricsSentinels(t *testing.T) {
 			"clean miss", petitlyrics.ErrNotFound, OutcomeBenignMiss,
 			"a miss is a successful round trip; classing it as transport makes the " +
 				"queue release the item on a different path than an identical musixmatch miss",
-		},
-		{
-			"undecodable tier", petitlyrics.ErrUnsupportedTier, OutcomeBenignMiss,
-			"lyricsType 2 arrived and parsed; only its payload is undecodable, " +
-				"which is a per-track gap on a healthy lane",
 		},
 		{
 			"revoked application id", petitlyrics.ErrUnauthorized, OutcomeAuthRateLimit,
