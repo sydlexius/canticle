@@ -92,7 +92,6 @@ func classifiedSentinels() map[string]error {
 		"petitlyrics.ErrRateLimited":           petitlyrics.ErrRateLimited,
 		"petitlyrics.ErrForbidden":             petitlyrics.ErrForbidden,
 		"petitlyrics.ErrNotFound":              petitlyrics.ErrNotFound,
-		"petitlyrics.ErrUnsupportedTier":       petitlyrics.ErrUnsupportedTier,
 		"petitlyrics.ErrProviderUnavailable":   petitlyrics.ErrProviderUnavailable,
 	}
 }
