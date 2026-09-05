@@ -20,6 +20,12 @@ coverage.html
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# JS test-harness dependencies (issue #836). package.json / package-lock.json ARE
+# tracked so the harness is reproducible, but nothing here is bundled, shipped or
+# embedded: the browser loads web/static/js/*.js verbatim and web/static/embed.go
+# embeds those same files. The repo keeps its no-build-step-for-JS property.
+/node_modules/
+
 # Build artifacts
 dist/
 
