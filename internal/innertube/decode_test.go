@@ -1,6 +1,7 @@
 package innertube
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -52,7 +53,7 @@ func TestDecode_FixtureBrowse(t *testing.T) {
 	}
 }
 
-func TestDecode_MonotonicAfterExpand(t *testing.T) {
+func TestDecode_FixtureCuesSortedMonotonic(t *testing.T) {
 	raw := loadTestdata(t, "browse.json")
 
 	song, err := Decode(raw)
@@ -128,8 +129,27 @@ func browseWithCues(rawCues string) []byte {
 	return []byte(`{"contents":{"elementRenderer":{"newElement":{"type":{"componentType":{"model":{"timedLyricsModel":{"lyricsData":{"timedLyricsData":[` + rawCues + `]}}}}}}}}}`)
 }
 
+// cueJSON marshals its fields through encoding/json rather than string
+// concatenation, so a text value containing a quote or backslash still
+// produces valid JSON instead of a broken fixture that fails with a
+// confusing decode error unrelated to whatever the test is actually
+// asserting.
 func cueJSON(text, startMs, endMs string) string {
-	return `{"lyricLine":"` + text + `","cueRange":{"startTimeMilliseconds":"` + startMs + `","endTimeMilliseconds":"` + endMs + `"}}`
+	cue := struct {
+		LyricLine string `json:"lyricLine"`
+		CueRange  struct {
+			StartTimeMilliseconds string `json:"startTimeMilliseconds"`
+			EndTimeMilliseconds   string `json:"endTimeMilliseconds"`
+		} `json:"cueRange"`
+	}{LyricLine: text}
+	cue.CueRange.StartTimeMilliseconds = startMs
+	cue.CueRange.EndTimeMilliseconds = endMs
+
+	b, err := json.Marshal(cue)
+	if err != nil {
+		panic(fmt.Sprintf("cueJSON: marshal: %v", err))
+	}
+	return string(b)
 }
 
 // TestDecode_LeadingBracketedTextNotFabricatedIntoCue guards 852-F1: a cue
@@ -344,6 +364,75 @@ func TestDecode_DuplicateTimestampsPreserveOriginalOrder(t *testing.T) {
 				t.Fatalf("group %d: order not preserved: got %v, want %v", g, got, want)
 			}
 		}
+	}
+}
+
+// TestExtractCues_EndBeforeStartMs_DoesNotWrapErrNotFound guards 871-C4: an
+// endTimeMilliseconds earlier than its own startTimeMilliseconds is a
+// malformed payload -- transport-class, never a benign miss -- the same
+// treatment as the negative-start and negative-end cases above.
+func TestExtractCues_EndBeforeStartMs_DoesNotWrapErrNotFound(t *testing.T) {
+	raw := browseWithCues(cueJSON("line-alpha", "5000", "1000"))
+
+	_, err := ExtractCues(raw)
+	if err == nil {
+		t.Fatal("ExtractCues: expected an error, got nil")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("ExtractCues error = %v, must NOT wrap ErrNotFound (this is a transport-class failure)", err)
+	}
+}
+
+// TestExtractCues_ZeroLengthCueAccepted guards the zero-length-cue decision
+// documented at the endMs<startMs check in decode.go: endMs == startMs is a
+// legitimate degenerate case (a single-instant cue), not malformed, and must
+// still be accepted.
+func TestExtractCues_ZeroLengthCueAccepted(t *testing.T) {
+	raw := browseWithCues(cueJSON("line-alpha", "1000", "1000"))
+
+	cues, err := ExtractCues(raw)
+	if err != nil {
+		t.Fatalf("ExtractCues: unexpected error for a zero-length cue: %v", err)
+	}
+	if len(cues) != 1 || cues[0].StartMs != 1000 || cues[0].EndMs != 1000 {
+		t.Errorf("ExtractCues: got %+v, want one cue with StartMs == EndMs == 1000", cues)
+	}
+}
+
+// TestExtractCues_AscendingCuesStillAccepted is the C4 non-regression check:
+// ordinary cues whose end follows their start must still decode cleanly
+// after the endMs<startMs rejection was added.
+func TestExtractCues_AscendingCuesStillAccepted(t *testing.T) {
+	raw := browseWithCues(strings.Join([]string{
+		cueJSON("line-alpha", "0", "1000"),
+		cueJSON("line-beta", "1000", "2500"),
+	}, ","))
+
+	cues, err := ExtractCues(raw)
+	if err != nil {
+		t.Fatalf("ExtractCues: unexpected error: %v", err)
+	}
+	if len(cues) != 2 {
+		t.Fatalf("ExtractCues: got %d cues, want 2", len(cues))
+	}
+}
+
+// TestCueJSON_QuoteAndBackslashRoundTrip guards 871-C3: the cueJSON test
+// helper must escape its inputs so a value containing a quote or backslash
+// still produces valid JSON, rather than corrupting the fixture.
+func TestCueJSON_QuoteAndBackslashRoundTrip(t *testing.T) {
+	const text = `she said "back\slash" and quit`
+	raw := browseWithCues(cueJSON(text, "0", "1000"))
+
+	cues, err := ExtractCues(raw)
+	if err != nil {
+		t.Fatalf("ExtractCues: unexpected error decoding a quoted/backslashed value: %v", err)
+	}
+	if len(cues) != 1 {
+		t.Fatalf("ExtractCues: got %d cues, want 1", len(cues))
+	}
+	if cues[0].Text != text {
+		t.Errorf("cues[0].Text = %q, want %q", cues[0].Text, text)
 	}
 }
 

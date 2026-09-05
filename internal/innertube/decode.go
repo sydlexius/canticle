@@ -51,13 +51,13 @@ type browseCue struct {
 //
 // The sentinel split follows the petitlyrics convention (decode.go and
 // neighbors): JSON that fails to unmarshal is a transport-level problem and
-// is returned UNWRAPPED. JSON that unmarshals cleanly but yields zero cues --
-// whether because the lyrics section is entirely absent from this response
-// or because it is present and empty -- is a clean miss, wrapping
-// ErrNotFound. Go's json.Unmarshal does not distinguish those two cases: an
-// absent nested object simply leaves the corresponding struct fields at their
-// zero value, the same result as an explicit empty array, so both
-// necessarily land in the same bucket here.
+// does not wrap ErrNotFound -- it is not a benign miss. JSON that unmarshals
+// cleanly but yields zero cues -- whether because the lyrics section is
+// entirely absent from this response or because it is present and empty --
+// is a clean miss, wrapping ErrNotFound. Go's json.Unmarshal does not
+// distinguish those two cases: an absent nested object simply leaves the
+// corresponding struct fields at their zero value, the same result as an
+// explicit empty array, so both necessarily land in the same bucket here.
 func ExtractCues(raw []byte) ([]Cue, error) {
 	var payload browsePayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -90,6 +90,15 @@ func ExtractCues(raw []byte) ([]Cue, error) {
 		}
 		if endMs < 0 {
 			return nil, fmt.Errorf("innertube: cue %d: endTimeMilliseconds %d is negative", i, endMs)
+		}
+		// endMs == startMs (a zero-length cue) is accepted: some providers
+		// emit a single-instant cue for a very short vocalization, and that
+		// is a legitimate degenerate case, not a malformed payload. Only
+		// endMs < startMs -- the range running backwards -- is rejected here,
+		// transport-class like the negative checks above, since a backwards
+		// range cannot describe any real timing.
+		if endMs < startMs {
+			return nil, fmt.Errorf("innertube: cue %d: endTimeMilliseconds %d is before startTimeMilliseconds %d", i, endMs, startMs)
 		}
 		if strings.TrimSpace(rc.LyricLine) != "" {
 			allTextEmpty = false
