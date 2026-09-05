@@ -165,8 +165,10 @@ The tag is inert to every current reader, which was verified rather than assumed
 whose key does not begin with a digit, so `[upstream:...]` parses as a header tag
 and does not terminate the header block; `ReadProvenanceTags` and
 `ReadInstrumentalProvenance` both switch on a closed set of keys and ignore the
-rest; `InjectProvenance` writes a fixed set and does not round-trip unknown keys
-into a rewrite. Adding the tag changes no existing behavior.
+rest; `InjectProvenance` re-emits every existing header tag verbatim (`t.raw`)
+when it rewrites a file, so an unrecognized key like `[upstream:...]` round-trips
+through a later backfill untouched rather than being dropped. Adding the tag
+changes no existing behavior.
 
 ### 3. Exact tokens
 
@@ -322,13 +324,17 @@ later is a nullable-TEXT migration exactly like the one that introduced
 `provider_lane` (migration 018), and the trigger that would justify it is the
 metrics split being reopened.
 
-### 7. No mark for this lane
+### 7. No new mark for this lane
 
-Settled and closed, per #601 and `docs/provider-terms.md`: no provider logo or
-mark is vendored for InnerTube or for either upstream. `laneMark`
-(`internal/web/lanemark.go`) returns `markNone` for an unmapped lane and the
-template degrades to the display name alone, so a lane without a mark renders as
-deliberate text rather than as a gap. Nothing to build.
+Settled and closed, per #601 and `docs/provider-terms.md`: no new mark is
+vendored for the InnerTube lane. `laneMark` (`internal/web/lanemark.go`) is
+keyed off the LANE string, not the upstream: it returns `markNone` for
+InnerTube (an unmapped lane), so the template degrades to the display name
+alone -- deliberate text rather than a gap. This does not contradict the
+existing `markMusixmatch` case: that mark is keyed to Musixmatch's own lane,
+and `[upstream:]` attribution does not feed mark selection, so an InnerTube
+result attributed to upstream A still renders with InnerTube's `markNone`,
+never Musixmatch's mark. Nothing to build.
 
 ## What the implementer builds (slice G)
 
