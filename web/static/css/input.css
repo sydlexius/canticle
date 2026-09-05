@@ -923,11 +923,120 @@ body {
   color: var(--mx-content-text);
 }
 
-/* Multi-pick / ordered list of choices, stacked vertically. */
+/* Multi-pick list of choices, stacked vertically. */
 .mx-settings-checkbox-list {
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
+}
+
+/* Rank-ordered list (providers.fallback_order). Deliberately NOT styled like the
+   checkbox list above it: the two sit on the same page and the order control was
+   previously indistinguishable from the enablement one (#837). Rows read as
+   draggable cards with a grip and a rank badge, not as pickable options. */
+.mx-orderlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  counter-reset: mx-order;
+}
+
+.mx-orderlist-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem 0.35rem 0.375rem;
+  background-color: var(--mx-content-bg);
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+  font-size: 0.875rem;
+  color: var(--mx-content-text);
+}
+
+.mx-orderlist-item[draggable="true"] {
+  cursor: grab;
+}
+
+.mx-orderlist-item-dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+/* An inactive row is a provider disabled by the separate enablement field. It
+   keeps its slot so re-enabling restores its rank, but reads as out of play. */
+.mx-orderlist-item-off {
+  opacity: 0.55;
+}
+
+.mx-orderlist-grip {
+  flex: 0 0 auto;
+  letter-spacing: -0.15em;
+  color: var(--mx-content-text-secondary);
+  user-select: none;
+}
+
+.mx-orderlist-item-off .mx-orderlist-grip {
+  visibility: hidden;
+}
+
+.mx-orderlist-rank {
+  flex: 0 0 auto;
+  min-width: 1.25rem;
+  font-family: var(--mx-font-mono);
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+}
+
+.mx-orderlist-text {
+  flex: 1 1 auto;
+}
+
+.mx-orderlist-moves {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 0.125rem;
+}
+
+.mx-orderlist-move {
+  font-size: 0.875rem;
+  line-height: 1;
+  color: var(--mx-content-text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--mx-radius-sm);
+  padding: 0.2rem 0.35rem;
+  cursor: pointer;
+}
+
+.mx-orderlist-move:hover:not(:disabled) {
+  color: var(--mx-content-text);
+  border-color: var(--mx-surface-border);
+}
+
+.mx-orderlist-move:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* The status paragraph is a role="status" aria-live="polite" region. Hiding an
+   empty one with display:none removes it from the ACCESSIBILITY TREE, and some
+   screen readers then do not announce the change when announceOrder populates
+   and reveals it in the same frame -- the live region was not present when the
+   mutation happened. Keyboard reorder feedback is a primary goal of this
+   control, so hide it VISUALLY instead and leave it in the tree (PR #843). */
+.mx-orderlist-status:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .mx-settings-checkbox {

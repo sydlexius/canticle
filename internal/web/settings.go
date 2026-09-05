@@ -598,28 +598,29 @@ func configSliceValue(cfg config.Config, path string) []string {
 	return nil
 }
 
-// orderedProviderOptions renders the fallback order as an ordered pick list: the
-// configured providers first (in order, numbered), then the remaining known
-// providers unselected. Reordering is a Phase 2 control; this read path shows
-// the current order without a free-text box.
+// orderedProviderOptions renders the fallback order as an ordered list: the
+// configured providers first (in their stored order), then the remaining known
+// providers. The label is the BARE provider name -- the item's POSITION carries
+// the order, so the visible rank is presentation and belongs to the control that
+// renders it (#837). Numbering the label instead would make the rank part of the
+// text, which a reorder has to rewrite on every move and which goes stale the
+// moment an item is dragged without saving.
+//
+// The stored order (not the registry's declaration order) drives the sequence,
+// so a saved reorder is visible on the next render.
 func orderedProviderOptions(order []string) []templates.SettingsOption {
-	pos := map[string]int{}
+	seen := map[string]bool{}
 	opts := []templates.SettingsOption{}
-	n := 0
 	for _, p := range order {
 		k := providers.NormalizeName(p)
-		if !providers.IsKnown(k) {
+		if !providers.IsKnown(k) || seen[k] {
 			continue
 		}
-		if _, dup := pos[k]; dup {
-			continue
-		}
-		n++
-		pos[k] = n
-		opts = append(opts, templates.SettingsOption{Value: k, Label: strconv.Itoa(n) + ". " + k, Selected: true})
+		seen[k] = true
+		opts = append(opts, templates.SettingsOption{Value: k, Label: k, Selected: true})
 	}
 	for _, k := range providers.Known() {
-		if _, ok := pos[k]; ok {
+		if seen[k] {
 			continue
 		}
 		opts = append(opts, templates.SettingsOption{Value: k, Label: k})

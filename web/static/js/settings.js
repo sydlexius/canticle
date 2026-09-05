@@ -107,16 +107,25 @@
       }
     }
 
-    var fb = document.querySelectorAll('input[name="providers.fallback_order"]');
-    for (var m = 0; m < fb.length; m++) {
-      if (fieldLocked(fb[m])) {
+    // Order-list membership follows enablement (#837): a provider disabled in
+    // "which sources to use" carries no hidden input, so it is not submitted as
+    // part of the order, but its row stays visible (greyed) so re-enabling it
+    // restores its rank rather than dropping it to the end.
+    var orderLists = document.querySelectorAll("[data-orderlist]");
+    for (var m = 0; m < orderLists.length; m++) {
+      var list = orderLists[m];
+      if (list.closest(".mx-field-locked")) {
         continue;
       }
-      var on = !!enabled[fb[m].value];
-      fb[m].disabled = !on;
-      if (!on) {
-        fb[m].checked = false;
+      var path = list.getAttribute("data-order-path");
+      if (!path) {
+        continue;
       }
+      var rows = list.querySelectorAll(".mx-orderlist-item");
+      for (var r = 0; r < rows.length; r++) {
+        setOrderRowActive(rows[r], path, !!enabled[rows[r].getAttribute("data-value")]);
+      }
+      renumberOrderList(list);
     }
 
     var mode = document.querySelector('select[name="providers.mode"]');
@@ -284,6 +293,263 @@
     input.focus();
   }
 
+  // --- Rank-ordered list (providers.fallback_order) ------------------------
+  // The list's DOCUMENT ORDER is the value. Each active row carries a hidden
+  // input under the field path, so a save submits the rows in their current
+  // order and the server joins the repeated fields in arrival order (#837).
+  // Reordering is therefore a DOM move plus a renumber -- there is no separate
+  // order model to keep in sync, and no way for the two to disagree.
+
+  // setOrderRowActive toggles whether a row participates in the submitted order.
+  // An inactive row keeps its position (so re-enabling restores its rank) but
+  // contributes no hidden input, so it cannot reach the server.
+  function setOrderRowActive(row, path, active) {
+    var input = row.querySelector('input[type="hidden"]');
+    row.classList.toggle("mx-orderlist-item-off", !active);
+    // An inactive row is out of play: drop its draggable attribute so it cannot
+    // be dragged and does not show a grab cursor (PR #843). Restored on
+    // re-enable only when the row was draggable to begin with -- a locked or
+    // fixed row never becomes draggable by being re-enabled.
+    if (!active) {
+      if (row.getAttribute("draggable") === "true") {
+        row.setAttribute("data-was-draggable", "true");
+      }
+      row.removeAttribute("draggable");
+    } else if (row.getAttribute("data-was-draggable") === "true") {
+      row.setAttribute("draggable", "true");
+      row.removeAttribute("data-was-draggable");
+    }
+    if (active && !input) {
+      input = document.createElement("input");
+      input.type = "hidden";
+      input.name = path;
+      input.value = row.getAttribute("data-value");
+      row.appendChild(input);
+    } else if (!active && input) {
+      input.remove();
+    }
+  }
+
+  // renumberOrderList rewrites the visible rank badges and the move-button
+  // disabled state after any reorder. Rank is presentation only: it is derived
+  // from position here, never stored, so it cannot go stale.
+  function renumberOrderList(list) {
+    var rows = list.querySelectorAll(".mx-orderlist-item");
+    var active = [];
+    var i;
+    for (i = 0; i < rows.length; i++) {
+      if (!rows[i].classList.contains("mx-orderlist-item-off")) {
+        active.push(rows[i]);
+      }
+    }
+    for (i = 0; i < rows.length; i++) {
+      var rank = rows[i].querySelector(".mx-orderlist-rank");
+      var pos = active.indexOf(rows[i]);
+      if (rank) {
+        rank.textContent = pos === -1 ? "-" : String(pos + 1) + ".";
+      }
+    }
+    // Only the ends of the ACTIVE run are non-movable; an inactive row is not
+    // part of the order, so moving it past one is a no-op the user should not
+    // be offered.
+    for (i = 0; i < rows.length; i++) {
+      var up = rows[i].querySelector('[data-order-move="up"]');
+      var down = rows[i].querySelector('[data-order-move="down"]');
+      var idx = active.indexOf(rows[i]);
+      var locked = !!rows[i].closest(".mx-field-locked");
+      if (up) {
+        up.disabled = locked || idx <= 0;
+      }
+      if (down) {
+        down.disabled = locked || idx === -1 || idx === active.length - 1;
+      }
+    }
+  }
+
+  // reorderActive rewrites a list so the ACTIVE rows appear in nextActive's
+  // order while every INACTIVE row keeps the slot index it already had.
+  //
+  // Inactive rows are fixed points, not participants. A disabled provider's row
+  // stays where it is precisely so re-enabling restores its rank rather than
+  // appending it to the end -- which is the behavior the enablement coupling
+  // promises. An earlier version moved rows with a bare insertBefore against the
+  // nearest active neighbour, which SKIPPED inactive rows when choosing the
+  // target but still displaced them when performing the move: [A, X(off), B]
+  // moving B up produced [B, A, X(off)] rather than [B, X(off), A]. Reported
+  // independently by two reviewers on PR #843.
+  function reorderActive(list, nextActive) {
+    var rows = Array.prototype.slice.call(list.querySelectorAll(".mx-orderlist-item"));
+    var next = [];
+    var take = 0;
+    for (var i = 0; i < rows.length; i++) {
+      // An inactive row keeps ITS OWN index; an active slot draws the next row
+      // from the requested active order.
+      next.push(rows[i].classList.contains("mx-orderlist-item-off") ? rows[i] : nextActive[take++]);
+    }
+    for (var j = 0; j < next.length; j++) {
+      list.appendChild(next[j]);
+    }
+  }
+
+  // activeRows returns the list's active rows in document order.
+  function activeRows(list) {
+    return Array.prototype.slice.call(
+      list.querySelectorAll(".mx-orderlist-item:not(.mx-orderlist-item-off)")
+    );
+  }
+
+  // moveOrderRow swaps a row with its nearest ACTIVE neighbour, leaving every
+  // inactive row in place. Returns true when the order actually changed.
+  //
+  // Both reorder paths -- these buttons and the drag handler -- go through
+  // reorderActive so they cannot produce different results for the same gesture
+  // (PR #843). The drag path previously called insertBefore directly.
+  function moveOrderRow(row, dir) {
+    var list = row.closest("[data-orderlist]");
+    if (!list) {
+      console.error("settings.js: order-move button outside an order list");
+      return false;
+    }
+    if (row.classList.contains("mx-orderlist-item-off")) {
+      return false; // not part of the order; nothing to move
+    }
+    var active = activeRows(list);
+    var i = active.indexOf(row);
+    var j = dir === "up" ? i - 1 : i + 1;
+    if (i === -1 || j < 0 || j >= active.length) {
+      return false;
+    }
+    active[i] = active[j];
+    active[j] = row;
+    reorderActive(list, active);
+    renumberOrderList(list);
+    return true;
+  }
+
+  // Drag-to-reorder. The keyboard move buttons are the accessible equivalent and
+  // are not a fallback: both paths end in the same DOM move plus renumber.
+  var dragRow = null;
+  // dragStartActive is the active order captured at dragstart. A cancelled drag
+  // (Escape, or a release outside a valid target) fires dragend WITHOUT drop, so
+  // without this the last hover position silently became the new order and the
+  // user saw a reorder they cancelled (PR #843).
+  var dragStartActive = null;
+  var dragDropped = false;
+
+  function initOrderLists() {
+    var lists = document.querySelectorAll("[data-orderlist]");
+    for (var i = 0; i < lists.length; i++) {
+      renumberOrderList(lists[i]);
+    }
+  }
+
+  document.addEventListener("dragstart", function (event) {
+    var row = event.target.closest ? event.target.closest(".mx-orderlist-item") : null;
+    if (!row || row.getAttribute("draggable") !== "true") {
+      return;
+    }
+    dragRow = row;
+    dragDropped = false;
+    var startList = row.closest("[data-orderlist]");
+    dragStartActive = startList ? activeRows(startList) : null;
+    row.classList.add("mx-orderlist-item-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      // Firefox will not start a drag without payload.
+      event.dataTransfer.setData("text/plain", row.getAttribute("data-value") || "");
+    }
+  });
+
+  document.addEventListener("dragover", function (event) {
+    if (!dragRow) {
+      return;
+    }
+    var over = event.target.closest ? event.target.closest(".mx-orderlist-item") : null;
+    if (!over || over === dragRow) {
+      return;
+    }
+    if (over.closest("[data-orderlist]") !== dragRow.closest("[data-orderlist]")) {
+      return;
+    }
+    if (over.classList.contains("mx-orderlist-item-off")) {
+      return; // an inactive row is a fixed slot, never a drop target
+    }
+    event.preventDefault();
+    // Move WITHIN the active order, so a drag and the move buttons produce the
+    // same result for the same gesture and inactive rows keep their slots.
+    var list = over.closest("[data-orderlist]");
+    var active = activeRows(list);
+    var from = active.indexOf(dragRow);
+    var to = active.indexOf(over);
+    if (from === -1 || to === -1 || from === to) {
+      return;
+    }
+    // Drop after the hovered row when the pointer is past its midpoint, so the
+    // row lands where the gap is shown.
+    var box = over.getBoundingClientRect();
+    if (event.clientY > box.top + box.height / 2 && to < active.length - 1) {
+      to++;
+    }
+    if (to > from) {
+      to--;
+    }
+    active.splice(from, 1);
+    active.splice(to, 0, dragRow);
+    reorderActive(list, active);
+  });
+
+  document.addEventListener("drop", function (event) {
+    if (!dragRow) {
+      return;
+    }
+    event.preventDefault();
+    dragDropped = true;
+    finishDrag();
+  });
+
+  document.addEventListener("dragend", function () {
+    finishDrag();
+  });
+
+  function finishDrag() {
+    if (!dragRow) {
+      return;
+    }
+    var list = dragRow.closest("[data-orderlist]");
+    dragRow.classList.remove("mx-orderlist-item-dragging");
+    // No drop means the drag was CANCELLED -- restore the order captured at
+    // dragstart rather than keeping wherever the pointer last hovered.
+    if (!dragDropped && list && dragStartActive) {
+      reorderActive(list, dragStartActive);
+    }
+    dragRow = null;
+    dragStartActive = null;
+    if (list) {
+      renumberOrderList(list);
+      if (dragDropped) {
+        announceOrder(list);
+      }
+    }
+    dragDropped = false;
+  }
+
+  // announceOrder reports the new order to the status line so a screen-reader
+  // user gets the result of a move, and any user gets a reminder that the
+  // reorder is not yet persisted.
+  function announceOrder(list) {
+    var card = list.closest("[data-field-path]");
+    var status = card ? card.querySelector(".mx-orderlist-status") : null;
+    if (!status) {
+      return;
+    }
+    var rows = list.querySelectorAll(".mx-orderlist-item:not(.mx-orderlist-item-off)");
+    var names = [];
+    for (var i = 0; i < rows.length; i++) {
+      names.push(rows[i].getAttribute("data-value"));
+    }
+    status.textContent = names.length ? "Order: " + names.join(", ") + " - not saved yet" : "";
+  }
+
   // --- Save (POST /settings/field) ----------------------------------------
   function csrfToken() {
     var el = document.getElementById("mx-csrf-token");
@@ -302,9 +568,10 @@
 
   // collectValuePairs reads the field's current value as [name, value] pairs to
   // POST, dispatching on the control kind: duration (number + unit), taglist
-  // (each item), checkboxes (each checked), radios (the checked one), or a
-  // single select/input. A list with nothing selected sends no value pair, which
-  // the server reads as an empty list.
+  // (each item), order list (each active row, IN DOCUMENT ORDER), checkboxes
+  // (each checked), radios (the checked one), or a single select/input. A list
+  // with nothing selected sends no value pair, which the server reads as an
+  // empty list.
   function collectValuePairs(field) {
     var pairs = [];
     var durNum = field.querySelector(".mx-settings-duration-num");
@@ -321,6 +588,17 @@
       var items = taglist.querySelectorAll(".mx-taglist-text");
       for (var i = 0; i < items.length; i++) {
         pairs.push(["value", items[i].textContent]);
+      }
+      return pairs;
+    }
+    // Must precede the checkbox branch: an order list's rows carry hidden
+    // inputs, and its ORDER is the value, so reading it as an unordered set of
+    // checked boxes is exactly the bug #837 fixes.
+    var orderList = field.querySelector("[data-orderlist]");
+    if (orderList) {
+      var rows = orderList.querySelectorAll(".mx-orderlist-item:not(.mx-orderlist-item-off)");
+      for (var n = 0; n < rows.length; n++) {
+        pairs.push(["value", rows[n].getAttribute("data-value")]);
       }
       return pairs;
     }
@@ -483,6 +761,26 @@
       return;
     }
 
+    var moveBtn = event.target.closest("[data-order-move]");
+    if (moveBtn) {
+      event.preventDefault();
+      var moveRow = moveBtn.closest(".mx-orderlist-item");
+      if (!moveRow) {
+        console.error("settings.js: order-move button outside a list row");
+        return;
+      }
+      if (moveOrderRow(moveRow, moveBtn.getAttribute("data-order-move"))) {
+        // Keep focus on the button that moved, so repeated presses walk the row
+        // rather than stranding focus where the row used to be.
+        var again = moveRow.querySelector('[data-order-move="' + moveBtn.getAttribute("data-order-move") + '"]');
+        if (again && !again.disabled) {
+          again.focus();
+        }
+        announceOrder(moveRow.closest("[data-orderlist]"));
+      }
+      return;
+    }
+
     var removeBtn = event.target.closest(".mx-taglist-remove");
     if (removeBtn) {
       event.preventDefault();
@@ -547,9 +845,11 @@
     document.addEventListener("DOMContentLoaded", function () {
       syncAll();
       initTabKeyboard();
+      initOrderLists();
     });
   } else {
     syncAll();
     initTabKeyboard();
+    initOrderLists();
   }
 })();

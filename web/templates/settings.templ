@@ -183,8 +183,10 @@ templ editableField(field SettingsField) {
 			@radioGroup(field)
 		case "select":
 			@selectControl(field)
-		case "providers", "ordered":
+		case "providers":
 			@checkboxList(field)
+		case "ordered":
+			@orderList(field)
 		case "taglist":
 			@tagListControl(field)
 		case "duration":
@@ -300,6 +302,74 @@ templ checkboxList(field SettingsField) {
 			</label>
 		}
 	</div>
+}
+
+// orderList renders a rank-ordered list (providers.fallback_order) as draggable
+// rows with keyboard move-up/move-down buttons (#837). The list's DOCUMENT ORDER
+// is the value.
+//
+// TWO things carry that order, and they are not the same mechanism (PR #843):
+//
+//   - The SAVE reads each active row's data-value in document order
+//     (collectValuePairs in settings.js) and POSTs them as repeated "value"
+//     fields, which the write path joins in arrival order. This is the live path.
+//   - The HIDDEN INPUT on each active row is a RENDERING CONTRACT, not the
+//     submission mechanism. It marks which rows are in the order without
+//     JavaScript having run, which is what the Go render test asserts, and
+//     setOrderRowActive keeps it in sync so the two never disagree.
+//
+// An earlier version of this comment said the save submits the hidden inputs.
+// It does not, and the distinction matters: someone removing them as dead weight
+// would break the render test and the no-JS signal while the save kept working.
+//
+// It replaced a checkbox list, which could not express a permutation at all: the
+// boxes rendered in the stored order and the browser submits checked boxes in
+// DOM order, so every save wrote back the order it started with. The checkbox
+// shape also made this control look like a second copy of the "which sources to
+// use" enablement list (providers.disabled) directly above it.
+//
+// Membership is NOT edited here -- every provider in the list is one the
+// enablement field admitted. settings.js drags, moves, and re-syncs membership.
+templ orderList(field SettingsField) {
+	<ol class="mx-orderlist" data-orderlist data-order-path={ field.Path }>
+		for _, opt := range field.Options {
+			<li
+				class={ "mx-orderlist-item", templ.KV("mx-orderlist-item-off", !opt.Selected) }
+				data-value={ opt.Value }
+				if !field.Locked && field.Savable && !opt.Fixed {
+					draggable="true"
+				}
+			>
+				<span class="mx-orderlist-grip" aria-hidden="true">&#8942;&#8942;</span>
+				<span class="mx-orderlist-rank" aria-hidden="true"></span>
+				<span class="mx-orderlist-text">{ opt.Label }</span>
+				if opt.Selected {
+					<input type="hidden" name={ field.Path } value={ opt.Value }/>
+				}
+				<span class="mx-orderlist-moves">
+					<button
+						type="button"
+						class="mx-orderlist-move"
+						data-order-move="up"
+						aria-label={ "Move " + opt.Label + " earlier" }
+						if field.Locked || !field.Savable || opt.Fixed {
+							disabled
+						}
+					>&uarr;</button>
+					<button
+						type="button"
+						class="mx-orderlist-move"
+						data-order-move="down"
+						aria-label={ "Move " + opt.Label + " later" }
+						if field.Locked || !field.Savable || opt.Fixed {
+							disabled
+						}
+					>&darr;</button>
+				</span>
+			</li>
+		}
+	</ol>
+	<p class="mx-settings-field-meta mx-orderlist-status" role="status" aria-live="polite"></p>
 }
 
 // tagListControl renders an address list (CIDRs, trusted proxies, self-signed
