@@ -1,4 +1,4 @@
-.PHONY: build run test test-shuffle test-cover patch-cover gate scan vulncheck \
+.PHONY: build run test test-js test-shuffle test-cover patch-cover gate scan vulncheck \
         doctor sync-tool-versions coverage-floor smoke lint fmt hooks clean help \
         docs docs-serve docs-deps templ tailwind ui ui-check ui-validate generate
 
@@ -31,6 +31,14 @@ run: build
 ## test: Run all tests
 test:
 	go test -v -race -count=1 ./...
+
+## test-js: Run the web/static/js test suite (needs node; skipped when absent)
+test-js:
+	@if command -v npm >/dev/null 2>&1; then \
+		npm ci --silent && npm test; \
+	else \
+		echo "SKIP test-js: npm not found (the JS harness is dev-only; CI runs it)"; \
+	fi
 
 ## test-shuffle: Run tests with race + randomized order to surface order-dependent tests
 test-shuffle:
