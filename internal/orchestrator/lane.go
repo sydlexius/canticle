@@ -3,10 +3,13 @@ package orchestrator
 import (
 	"context"
 	"log/slog"
+	"strconv"
 
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/respdrift"
 )
 
 // escalationThreshold is the number of consecutive circuit trips (with zero
@@ -33,6 +36,11 @@ type Lane struct {
 	// budget (#534). The zero value is false, so a lane is treated as remote
 	// unless it opts in -- a new lane cannot accidentally suppress pacing.
 	local bool
+	// drift detects a provider that has stopped discriminating between requests
+	// (#839). Optional and nil by default, so a lane that does not opt in behaves
+	// exactly as before. See WithResponseDrift.
+	drift   *respdrift.Detector
+	onDrift func(lane, run string)
 }
 
 // Name reports the lane's name.
@@ -72,7 +80,54 @@ func (l *Lane) FindLyrics(ctx context.Context, track models.Track, sourcePath st
 		slog.Info("lane circuit closed; recovered", "lane", l.Name())
 	}
 	l.notifySuccess()
+	l.observeDrift(track, song)
 	return song, nil
+}
+
+// WithResponseDrift opts this lane into non-discriminating-provider detection
+// (#839). report is called AT MOST ONCE per run, with the lane name and the run
+// length -- never with the identity that repeated, which is a track title from
+// the user's library and must not reach a log line or a metric label.
+//
+// Opt-in rather than automatic: a detector on every lane would change behavior
+// for lanes nobody has reasoned about, and the detector's own cost is only
+// justified where a silent wrong answer is plausible.
+func (l *Lane) WithResponseDrift(d *respdrift.Detector, report func(lane, run string)) *Lane {
+	l.drift = d
+	l.onDrift = report
+	return l
+}
+
+// DriftWired reports whether this lane opted into response-drift detection.
+// It exists so a caller's wiring can be ASSERTED rather than assumed: an
+// unwired detector passes every test its own package has, which is exactly how
+// a feature ships dead.
+func (l *Lane) DriftWired() bool { return l.drift != nil }
+
+// observeDrift feeds one successful response to the detector, if wired.
+//
+// The keys are NORMALIZED artist+title on both sides -- what was asked, and what
+// came back. Normalization matters: without it, ordinary case or spacing
+// variation between the request and the response would read as a different
+// identity and mask a genuinely repeating one.
+func (l *Lane) observeDrift(requested models.Track, got models.Song) {
+	if l.drift == nil {
+		return
+	}
+	query := normalize.NormalizeKey(requested.ArtistName) + "\x00" + normalize.NormalizeKey(requested.TrackName)
+	identity := normalize.NormalizeKey(got.Track.ArtistName) + "\x00" + normalize.NormalizeKey(got.Track.TrackName)
+	// A response carrying no identity at all cannot evidence repetition; the
+	// detector drops it, but check here too so the separator alone never counts.
+	if identity == "\x00" {
+		return
+	}
+	// The run length comes back WITH the verdict: reading it back via Run() takes
+	// the lock a second time, so a concurrent observation could grow the run
+	// between the two calls and the report would name a different run than the
+	// one that fired (PR review, #839).
+	if fired, run := l.drift.Observe(query, identity); fired && l.onDrift != nil {
+		l.onDrift(l.Name(), strconv.Itoa(run))
+	}
 }
 
 // notifyThrottle forwards a throttle notification to the lane's pacer, if any.
