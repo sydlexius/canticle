@@ -25,6 +25,21 @@ func detectorOrderingTestUI(t *testing.T, seed string) (http.Handler, string) {
 	return mux, cfgPath
 }
 
+// readConfig reads the config file, failing the test if the read errors.
+//
+// The error is not ignorable here: bytes.Equal(nil, nil) is TRUE, so a pair of
+// failed reads would make the "config was not mutated" assertion pass without
+// comparing anything -- and that assertion is the whole safety claim these
+// rejection tests exist to make (Copilot, PR #846).
+func readConfig(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // reason: G304: test temp path
+	if err != nil {
+		t.Fatalf("read config %s: %v", path, err)
+	}
+	return b
+}
+
 // frontOrderedSeed is the config an operator legitimately runs: a detector-first
 // ordering, which is only meaningful while dispatch is ordered.
 const frontOrderedSeed = "[server]\naddr = \"127.0.0.1:3876\"\n\n" +
@@ -39,7 +54,7 @@ const frontOrderedSeed = "[server]\naddr = \"127.0.0.1:3876\"\n\n" +
 func TestSaveFieldRejectsParallelModeUnderFrontOrdering(t *testing.T) {
 	mux, cfgPath := detectorOrderingTestUI(t, frontOrderedSeed)
 
-	before, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
+	before := readConfig(t, cfgPath)
 	rec := postField(t, mux, url.Values{
 		"path":  {"providers.mode"},
 		"value": {"parallel"},
@@ -47,7 +62,7 @@ func TestSaveFieldRejectsParallelModeUnderFrontOrdering(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (parallel mode under front ordering); body=%s", rec.Code, rec.Body.String())
 	}
-	after, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
+	after := readConfig(t, cfgPath)
 	if !bytes.Equal(before, after) {
 		t.Errorf("config mutated on a rejected field save:\n%s", after)
 	}
@@ -69,7 +84,7 @@ func TestSaveFieldRejectsFrontOrderingUnderParallelMode(t *testing.T) {
 		"[instrumental_detector]\nordering = \"demoted\"\n"
 	mux, cfgPath := detectorOrderingTestUI(t, seed)
 
-	before, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
+	before := readConfig(t, cfgPath)
 	rec := postField(t, mux, url.Values{
 		"path":  {"instrumental_detector.ordering"},
 		"value": {"front"},
@@ -77,7 +92,7 @@ func TestSaveFieldRejectsFrontOrderingUnderParallelMode(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (front ordering under parallel mode); body=%s", rec.Code, rec.Body.String())
 	}
-	after, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
+	after := readConfig(t, cfgPath)
 	if !bytes.Equal(before, after) {
 		t.Errorf("config mutated on a rejected field save:\n%s", after)
 	}
@@ -113,7 +128,7 @@ func TestSaveFieldAcceptsParallelModeUnderDemotedOrdering(t *testing.T) {
 func TestSaveSectionRejectsFrontOrderingWithParallelMode(t *testing.T) {
 	mux, cfgPath := detectorOrderingTestUI(t, frontOrderedSeed)
 
-	before, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
+	before := readConfig(t, cfgPath)
 	rec := postSection(t, mux, [][2]string{
 		{"providers.mode", "parallel"},
 		{"instrumental_detector.ordering", "front"},
@@ -121,7 +136,7 @@ func TestSaveSectionRejectsFrontOrderingWithParallelMode(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (front + parallel in one batch); body=%s", rec.Code, rec.Body.String())
 	}
-	after, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
+	after := readConfig(t, cfgPath)
 	if !bytes.Equal(before, after) {
 		t.Errorf("config mutated on a rejected section save:\n%s", after)
 	}

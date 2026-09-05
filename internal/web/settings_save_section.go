@@ -188,12 +188,21 @@ func (u *UI) checkScanScheduleInvariantChanges(ctx context.Context, changes map[
 // resulting combination distinguishes them. Returns nil when neither field is in
 // the batch.
 func (u *UI) checkDetectorOrderingInvariantChanges(ctx context.Context, changes map[string]string) error {
-	cur := u.currentConfig(ctx)
-	if v, ok := changes["instrumental_detector.ordering"]; ok {
-		cur.InstrumentalDetector.Ordering = v
+	ordering, hasOrdering := changes["instrumental_detector.ordering"]
+	mode, hasMode := changes["providers.mode"]
+	if !hasOrdering && !hasMode {
+		return nil
 	}
-	if v, ok := changes["providers.mode"]; ok {
-		cur.Providers.Mode = v
+	// Read the config only once a relevant field is actually in the batch:
+	// currentConfig re-reads and re-parses the file on every call, so validating
+	// an untouched pair would cost a file read to re-confirm what the last boot
+	// already validated.
+	cur := u.currentConfig(ctx)
+	if hasOrdering {
+		cur.InstrumentalDetector.Ordering = ordering
+	}
+	if hasMode {
+		cur.Providers.Mode = mode
 	}
 	return config.ValidateInstrumentalDetectorOrdering(cur)
 }
