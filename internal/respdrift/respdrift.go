@@ -64,6 +64,14 @@ type Detector struct {
 	// the observation that first established it.
 	run int
 
+	// seen holds the DISTINCT query keys counted into the current run. A run is
+	// defined by distinctness, not adjacency: tracking only the previous query
+	// let q1, q2, q1 advance the run to 3 on two questions, so an ordinary retry
+	// interleaved with one other request could fire the detector on a provider
+	// that never stopped discriminating (CodeRabbit, PR #844). Cleared whenever
+	// the run resets, and not grown once fired latches -- see Observe.
+	seen map[string]struct{}
+
 	// fired latches at the threshold so one fault produces one report rather
 	// than one per subsequent request. Cleared when the run breaks, matching the
 	// transition-reporting discipline the circuit breaker uses.
@@ -87,8 +95,11 @@ func New(threshold int) *Detector {
 //
 // query is a stable key for what was ASKED (normalized artist+title); identity
 // is a stable key for what came BACK (the returned artist+title). Both are
-// opaque here: this package never parses, stores, or logs their content, so a
-// caller may pass normalized private metadata without it reaching a log line.
+// opaque here: this package never parses the content, and never logs or exposes
+// it, so a caller may pass normalized private metadata without it reaching a log
+// line. It does HOLD the keys in memory for the life of a run -- comparing an
+// answer against the other answers is the whole mechanism, and that requires
+// remembering them (Copilot, PR #844). Nothing is persisted.
 //
 // Returns (fired, run). The run length is returned WITH the verdict rather than
 // read back through Run(), because a caller doing Observe() then Run() takes the
@@ -121,35 +132,59 @@ func (d *Detector) Observe(query, identity string) (fired bool, run int) {
 	// correct behavior. Only an identity unlike the query can evidence a provider
 	// that stopped discriminating.
 	if normalize.MatchConfidence(query, identity) >= relatedFloor {
-		d.lastIdentity = identity
-		d.lastQuery = query
-		d.run = 1
-		d.fired = false
+		// run 0, NOT 1: a related observation is not evidence, so it must not
+		// stand in for a missing unrelated one. Setting it to 1 let the detector
+		// fire having seen only threshold-1 unrelated queries, because one related
+		// answer silently supplied the remaining count (Copilot, PR #844).
+		d.reset(identity, query, 0)
 		return false, d.run
 	}
 
 	// A different identity proves the provider IS discriminating, so whatever
 	// evidence had accumulated is gone. Start over and re-arm the latch.
 	if identity != d.lastIdentity {
-		d.lastIdentity = identity
-		d.lastQuery = query
-		d.run = 1
-		d.fired = false
+		d.reset(identity, query, 1)
 		return false, d.run
 	}
 
-	// Same identity for the same question is not evidence of anything.
-	if query == d.lastQuery {
+	// Same identity for a question already counted is not evidence of anything.
+	// Checked against the whole run, not just the previous query: a repeat is a
+	// repeat whether or not something else was asked in between.
+	if _, dup := d.seen[query]; dup {
+		return false, d.run
+	}
+
+	// Once fired, the run is frozen. The latch holds until the identity changes,
+	// so no further decision reads the length, and continuing to grow the set
+	// would be unbounded during exactly the sustained fault this detects -- a
+	// provider answering every distinct query identically never breaks the run.
+	if d.fired {
 		return false, d.run
 	}
 
 	d.lastQuery = query
+	d.seen[query] = struct{}{}
 	d.run++
-	if d.run >= d.threshold && !d.fired {
+	if d.run >= d.threshold {
 		d.fired = true
 		return true, d.run
 	}
 	return false, d.run
+}
+
+// reset starts a new run at the given length, seeding the distinct-query set to
+// match. run is 1 when the observation itself counts as evidence (an unrelated
+// identity establishing the run) and 0 when it does not (a related identity,
+// which is correct provider behavior). Callers hold d.mu.
+func (d *Detector) reset(identity, query string, run int) {
+	d.lastIdentity = identity
+	d.lastQuery = query
+	d.run = run
+	d.fired = false
+	d.seen = make(map[string]struct{}, d.threshold)
+	if run > 0 {
+		d.seen[query] = struct{}{}
+	}
 }
 
 // Run reports the current consecutive-distinct-query run length. It is for TESTS

@@ -402,17 +402,25 @@ func laneName(fetcher musixmatch.Fetcher) string {
 // driftThreshold is how many CONSECUTIVE DISTINCT queries must return the same
 // track identity before the lane reports a non-discriminating provider (#839).
 //
-// Five, deliberately well clear of coincidence rather than tuned: a healthy
-// catalog answering five different questions with one answer is not something
-// that happens, so a false positive needs a real fault to produce it. The
-// failure this detects (musixmatch serving ONE fixed track for every query on
-// 2026-09-04, #838) would have tripped it in five requests.
+// Five is a coincidence margin, and it is NOT what makes the detector safe. An
+// earlier version of this comment argued that a healthy catalog answering five
+// different questions with one answer "is not something that happens"; a
+// pre-push review reproduced exactly that, at run 5, with no fault present --
+// five edition variants of one recording (remaster, live, punctuation) that the
+// provider correctly canonicalized to a single credited track (#839).
+//
+// What actually prevents that false positive is the RELATEDNESS gate in
+// respdrift: a canonicalized variant stays close to what was asked, while a
+// canned unrelated track does not, and only unrelated answers count toward the
+// run. The threshold is the margin on top of that test, not a substitute for
+// it. Raising this number alone would not make the detector safer; it would
+// only make a real fault (musixmatch serving ONE fixed track for every query on
+// 2026-09-04, #838) take longer to surface.
 //
 // It is NOT the petitlyrics ZeroResultThreshold of 20, and the difference is
 // the point: that one counts responses carrying NOTHING, where an obscure
 // catalog genuinely can produce a long miss run (#767 measured exactly that
-// false positive). This counts responses carrying the SAME WRONG THING, which
-// a real catalog does not produce at any length.
+// false positive). This counts responses carrying the same UNRELATED thing.
 const driftThreshold = 5
 
 // withDriftDetection opts a provider lane into response-drift detection.

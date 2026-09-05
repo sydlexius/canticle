@@ -188,3 +188,51 @@ func TestUnrelatedIdentityStillFires(t *testing.T) {
 		t.Error("did not fire on five distinct queries all answered with ONE unrelated track")
 	}
 }
+
+// TestNonAdjacentRepeatedQueryIsNotEvidence pins the run as DISTINCT queries
+// rather than merely non-adjacent ones. Asking q1, q2, q1 is two questions, not
+// three, so a run built from it is one short of what the sequence looks like.
+// The adjacent-only check let a retry interleaved with one other request inflate
+// the run to the threshold, firing on a provider that never stopped
+// discriminating (CodeRabbit, PR #844).
+func TestNonAdjacentRepeatedQueryIsNotEvidence(t *testing.T) {
+	d := New(3)
+	for i, q := range []string{"q1", "q2", "q1"} {
+		if fired, run := d.Observe(q, "fixed"); fired {
+			t.Fatalf("fired at observation %d (run %d) on only TWO distinct queries; "+
+				"q1 repeated non-adjacently must not advance the run", i+1, run)
+		}
+	}
+}
+
+// TestRelatedObservationDoesNotContributeToTheRun pins that a RELATED response
+// contributes nothing. It is correct provider behavior -- a canonicalized
+// edition -- so it is not evidence, and the run it leaves behind must be zero
+// rather than one. Setting it to one let a single related observation stand in
+// for a missing unrelated one, so the detector could fire having seen only
+// threshold-1 unrelated queries (Copilot, PR #844).
+func TestRelatedObservationDoesNotContributeToTheRun(t *testing.T) {
+	const canonical = "aurora kestrel\x00marigold drift"
+	d := New(3)
+
+	// Related: the provider canonicalized an edition. Not evidence.
+	if _, run := d.Observe("aurora kestrel\x00marigold drift (live)", canonical); run != 0 {
+		t.Fatalf("a RELATED observation left run=%d; it is not evidence and must leave run=0", run)
+	}
+
+	// Two unrelated queries is one short of the threshold of three.
+	for i, q := range []string{
+		"bramblewood quintet\x00ninefold ascent",
+		"cinder vale\x00hollow tide",
+	} {
+		if fired, run := d.Observe(q, canonical); fired {
+			t.Fatalf("fired at unrelated query %d (run %d) with only TWO unrelated queries seen; "+
+				"the related observation must not have counted toward the run", i+1, run)
+		}
+	}
+
+	// The third unrelated query is the first legitimate firing point.
+	if fired, _ := d.Observe("dovetail parade\x00glass orchard", canonical); !fired {
+		t.Error("did not fire on the THIRD unrelated query; the guard must not disarm the detector")
+	}
+}
