@@ -107,6 +107,10 @@ func (u *UI) handleSaveField(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := u.checkDetectorOrderingInvariant(r.Context(), path, value); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := config.ApplyChanges(u.configPath, map[string]string{path: value}); err != nil {
 		slog.Error("settings: config write failed", "path", path, "error", err)
 		http.Error(w, "failed to write config", http.StatusInternalServerError)
@@ -187,6 +191,36 @@ func (u *UI) checkScanScheduleInvariant(ctx context.Context, path, value string)
 	var cfg config.Config
 	cfg.Server.ScanSchedule = cur
 	return config.ValidateScanSchedule(cfg)
+}
+
+// checkDetectorOrderingInvariant validates the cross-field
+// (instrumental_detector.ordering, providers.mode) combination that would result
+// from the proposed change against the loader's invariant
+// (config.ValidateInstrumentalDetectorOrdering): a "front" ordering requires
+// ordered dispatch, because parallel mode fires every lane at once and a
+// detector-first ordering then cannot prevent the provider requests it exists to
+// avoid.
+//
+// Both fields are Safe-tier and hot-save individually, so either half can be
+// flipped in one click while the other keeps its stored value -- and the pair is
+// what config.Load refuses to boot on (#845). Which half moved does not matter,
+// so both paths are checked. Returns nil for every other field.
+//
+// Values are compared verbatim, exactly as the loader compares them. The TOML
+// path RESETS an unrecognized ordering to the default rather than rejecting it,
+// so a differently-cased value never reaches the invariant as "front" at boot
+// either; normalizing here would reject a combination the next boot would not.
+func (u *UI) checkDetectorOrderingInvariant(ctx context.Context, path, value string) error {
+	cur := u.currentConfig(ctx)
+	switch path {
+	case "instrumental_detector.ordering":
+		cur.InstrumentalDetector.Ordering = value
+	case "providers.mode":
+		cur.Providers.Mode = value
+	default:
+		return nil
+	}
+	return config.ValidateInstrumentalDetectorOrdering(cur)
 }
 
 // splitCommaList splits a comma-joined value into trimmed, non-empty entries.

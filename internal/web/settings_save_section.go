@@ -109,6 +109,10 @@ func (u *UI) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := u.checkDetectorOrderingInvariantChanges(r.Context(), changes); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := config.ApplyChanges(u.configPath, changes); err != nil {
 		// A validation error slipping through here (state changed under us) maps to
 		// 400; anything else is a write failure.
@@ -168,6 +172,39 @@ func (u *UI) checkScanScheduleInvariantChanges(ctx context.Context, changes map[
 	var cfg config.Config
 	cfg.Server.ScanSchedule = cur
 	return config.ValidateScanSchedule(cfg)
+}
+
+// checkDetectorOrderingInvariantChanges folds the ordering/mode entries of a
+// batch save onto the current state and validates the result against
+// config.ValidateInstrumentalDetectorOrdering ("front" requires ordered
+// dispatch). It is the multi-field counterpart to the single-field
+// checkDetectorOrderingInvariant.
+//
+// The batch lane needs its own check for the reason the TLS pair does: judging
+// either field alone against the CURRENT config gets BOTH answers wrong. A batch
+// that switches to parallel WHILE demoting the ordering is legal and must be
+// accepted; a batch that sets both halves of the conflict at once is fatal and
+// must be refused, even though each value is individually valid. Only the
+// resulting combination distinguishes them. Returns nil when neither field is in
+// the batch.
+func (u *UI) checkDetectorOrderingInvariantChanges(ctx context.Context, changes map[string]string) error {
+	ordering, hasOrdering := changes["instrumental_detector.ordering"]
+	mode, hasMode := changes["providers.mode"]
+	if !hasOrdering && !hasMode {
+		return nil
+	}
+	// Read the config only once a relevant field is actually in the batch:
+	// currentConfig re-reads and re-parses the file on every call, so validating
+	// an untouched pair would cost a file read to re-confirm what the last boot
+	// already validated.
+	cur := u.currentConfig(ctx)
+	if hasOrdering {
+		cur.InstrumentalDetector.Ordering = ordering
+	}
+	if hasMode {
+		cur.Providers.Mode = mode
+	}
+	return config.ValidateInstrumentalDetectorOrdering(cur)
 }
 
 // checkProviderInvariantChanges folds the provider-selection entries of a
