@@ -306,9 +306,21 @@ templ checkboxList(field SettingsField) {
 
 // orderList renders a rank-ordered list (providers.fallback_order) as draggable
 // rows with keyboard move-up/move-down buttons (#837). The list's DOCUMENT ORDER
-// is the value: each row carries a hidden input under the field path, so a save
-// submits the rows in their current order and the existing write path joins them
-// in arrival order.
+// is the value.
+//
+// TWO things carry that order, and they are not the same mechanism (PR #843):
+//
+//   - The SAVE reads each active row's data-value in document order
+//     (collectValuePairs in settings.js) and POSTs them as repeated "value"
+//     fields, which the write path joins in arrival order. This is the live path.
+//   - The HIDDEN INPUT on each active row is a RENDERING CONTRACT, not the
+//     submission mechanism. It marks which rows are in the order without
+//     JavaScript having run, which is what the Go render test asserts, and
+//     setOrderRowActive keeps it in sync so the two never disagree.
+//
+// An earlier version of this comment said the save submits the hidden inputs.
+// It does not, and the distinction matters: someone removing them as dead weight
+// would break the render test and the no-JS signal while the save kept working.
 //
 // It replaced a checkbox list, which could not express a permutation at all: the
 // boxes rendered in the stored order and the browser submits checked boxes in
