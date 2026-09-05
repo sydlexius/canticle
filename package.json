@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Dev-only test harness for the served web/static/js assets. Nothing here is bundled, shipped, or embedded: the browser loads web/static/js/*.js verbatim and web/static/embed.go embeds those same files, so these stay devDependencies and the repo keeps its no-build-step-for-JS property.",
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+  },
   "scripts": {
     "test": "vitest run"
   },

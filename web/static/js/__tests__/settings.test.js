@@ -2,8 +2,9 @@
 //
 // These describe what settings.js does today, not what it should do. #836
 // changes most of it -- per-tab Save replaces the per-field triggers, the
-// safe-tier hot-save goes away, and the hardcoded restart notice becomes
-// per-key data from the save response. Pinning the present behavior first makes
+// safe-tier fields keep their zero-click path but leave the per-field POST for
+// the tab batch, and the hardcoded restart notice becomes per-key data from the
+// save response. Pinning the present behavior first makes
 // each of those a VISIBLE, deliberate diff rather than an unnoticed side
 // effect, which is the entire reason this harness lands before the rewrite.
 //
@@ -197,7 +198,17 @@ describe("unsaved work", () => {
       fieldCard({ path: "server.addr", tier: "caution", label: "Listen address", control: textControl("server.addr") }),
     );
 
-    h.card("server.addr").querySelector("input").value = "127.0.0.1:9999";
+    // Edit the field the way a person does: set the value, then emit the events
+    // a real keystroke emits. Without them this test could not tell a MISSING
+    // guard from a correct EVENT-DRIVEN one -- it would keep passing after #836
+    // adds the guard, which is the opposite of what it is for (CodeRabbit,
+    // PR #847). Both events are sent because which one a guard listens on is an
+    // implementation choice `input` (per keystroke) or `change` (on commit)
+    // that this test must not pre-judge.
+    const input = h.card("server.addr").querySelector("input");
+    input.value = "127.0.0.1:9999";
+    dispatch(h.window, input, "input");
+    dispatch(h.window, input, "change");
 
     const event = new h.window.Event("beforeunload", { bubbles: false, cancelable: true });
     h.window.dispatchEvent(event);

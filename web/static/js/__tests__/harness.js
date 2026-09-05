@@ -142,7 +142,13 @@ export function loadSettings(cards, options = {}) {
     /**
      * settle flushes the promise chain inside saveField/saveSection. Those
      * handlers are `.then()` chains with no completion signal, so a test must
-     * yield the microtask queue before asserting on the status they write.
+     * let them run before asserting on the status they write.
+     *
+     * setTimeout(0) yields a full event-loop turn (a MACROtask), not just the
+     * microtask queue. That is deliberate and stronger than a bare
+     * `await Promise.resolve()`: a macrotask boundary drains every pending
+     * microtask, so it settles a `.then()` chain of any depth rather than one
+     * link of it.
      */
     settle: () => new Promise((resolve) => setTimeout(resolve, 0)),
   };
