@@ -154,7 +154,7 @@ func TestDecodeWordSync_OrderingIsStableThroughExpand(t *testing.T) {
 }
 
 // TestDecodeWordSync_ClampsNegativeTimings: a negative timestamp must be clamped
-// the same way msToTime clamps the cue, so a cue and its word timings never
+// the same way models.MsToTime clamps the cue, so a cue and its word timings never
 // disagree about the same word.
 func TestDecodeWordSync_ClampsNegativeTimings(t *testing.T) {
 	doc := `<wsy><line><linestring>Lorem</linestring>` +
@@ -213,28 +213,5 @@ func TestDecodeUnsynced(t *testing.T) {
 	}
 	if got[len(got)-1] == '\n' {
 		t.Error("trailing newlines should be trimmed")
-	}
-}
-
-func TestMsToTime(t *testing.T) {
-	tests := []struct {
-		ms            int
-		min, sec, hun int
-		total         float64
-	}{
-		{0, 0, 0, 0, 0},
-		{3790, 0, 3, 79, 3.79},
-		{65432, 1, 5, 43, 65.432},
-		{-5, 0, 0, 0, 0}, // negative clamps rather than producing a negative cue
-	}
-	for _, tc := range tests {
-		got := msToTime(tc.ms)
-		if got.Minutes != tc.min || got.Seconds != tc.sec || got.Hundredths != tc.hun {
-			t.Errorf("msToTime(%d) = %dm%ds%dh, want %dm%ds%dh",
-				tc.ms, got.Minutes, got.Seconds, got.Hundredths, tc.min, tc.sec, tc.hun)
-		}
-		if got.Total != tc.total {
-			t.Errorf("msToTime(%d).Total = %v, want %v", tc.ms, got.Total, tc.total)
-		}
 	}
 }

@@ -490,7 +490,7 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 		// the order is unchanged: Expand ends in a sort, so in general it can
 		// reorder at constant length. That cannot happen HERE because
 		// decodeWordSync sorts by first-word start time before assigning indices
-		// and msToTime is monotone, making Expand's stable sort a no-op on this
+		// and models.MsToTime is monotone, making Expand's stable sort a no-op on this
 		// path -- an invariant defended by
 		// TestDecodeWordSync_OrderingIsStableThroughExpand. If that sort is ever
 		// removed, this check stops being sufficient.

@@ -66,6 +66,23 @@ type Time struct {
 	Hundredths int     `json:"hundredths,omitempty"`
 }
 
+// MsToTime converts a millisecond offset to a Time with all four fields
+// populated consistently: Total/Minutes/Seconds/Hundredths must agree because
+// the LRC writer reads Minutes/Seconds/Hundredths while timing validation
+// recomputes from those same three and sorting uses Total. Negative input
+// clamps to zero.
+func MsToTime(ms int) Time {
+	if ms < 0 {
+		ms = 0
+	}
+	return Time{
+		Total:      float64(ms) / 1000.0,
+		Minutes:    ms / 60000,
+		Seconds:    (ms / 1000) % 60,
+		Hundredths: (ms / 10) % 100,
+	}
+}
+
 // Song represents the complete result from a lyrics lookup.
 type Song struct {
 	Track     Track
