@@ -26,6 +26,7 @@ New here? Start with the [Getting Started](GETTING_STARTED.md) guide - it picks 
 - [Configuration](CONFIGURATION.md) - the complete environment-variable table, the TOML config keys, token precedence, and XDG/Docker/native-package path defaults.
 - [Instrumental Detection](instrumental-detection.md) - the optional audio-based instrumental detector: the two-gate decision model, the YAMNet sidecar setup and `{mean,max}` contract, deploy ordering, and threshold tuning.
 - [Developer Guide](DEVELOPER.md) - development setup, make targets, the quality gate, contributing notes, and design decisions.
+- [Provider Attribution](provider-attribution.md) - how a lane that multiplexes several upstream lyric licensors records per-track attribution: the `[source:]` and `[upstream:]` tokens, and why reports stay grouped by lane.
 
 ## Legal
 
