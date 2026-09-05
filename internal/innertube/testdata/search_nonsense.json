@@ -1,0 +1,87 @@
+{
+  "_note": "CAPTURED against the WEB_REMIX client (clientVersion 1.20240101.01.00), 2026-09-05, from the public unauthenticated /youtubei/v1/search endpoint, for a deliberately garbled nonsense query. This is the #848 spike's core measured-negative finding: the API does NOT say 'no match'. It emits a didYouMeanRenderer (a real signal, but advisory only -- it appears on legitimate near-miss spelling too, not just nonsense) followed by a musicCardShelfRenderer carrying a confident, fully-timed, wholly UNRELATED top hit, structurally indistinguishable from a genuine match. showingResultsForRenderer, the field an earlier probe hoped would discriminate, is ABSENT here exactly as it is on a real hit (see search.json) -- it is not a usable signal either way. This fixture exists so #853's regression test can assert its correspondence guard rejects this shape; do not build a 'confident miss' detector keyed on didYouMeanRenderer alone, since a legitimate near-miss spelling produces the same renderer. Track/artist identifiers replaced with placeholders; the shape is real.",
+  "contents": {
+    "tabbedSearchResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "title": "YT Music",
+            "selected": true,
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "didYouMeanRenderer": {
+                            "didYouMean": {
+                              "runs": [{ "text": "Did you mean:" }]
+                            },
+                            "correctedQuery": {
+                              "runs": [
+                                { "text": "flibbertigibbet", "italics": true },
+                                { "text": " wonkabazoo nonsense query zzzzz9999" }
+                              ]
+                            },
+                            "correctedQueryEndpoint": {
+                              "searchEndpoint": {
+                                "query": "flibbertigibbet wonkabazoo nonsense query zzzzz9999"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "musicCardShelfRenderer": {
+                      "title": {
+                        "runs": [
+                          {
+                            "text": "Unrelated Placeholder Title",
+                            "navigationEndpoint": {
+                              "watchEndpoint": {
+                                "videoId": "PLACEHOLDvi",
+                                "watchEndpointMusicSupportedConfigs": {
+                                  "watchEndpointMusicConfig": {
+                                    "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "subtitle": {
+                        "runs": [
+                          { "text": "Song" },
+                          { "text": " • " },
+                          {
+                            "text": "Unrelated Placeholder Artist",
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "UCplaceholder11111111111",
+                                "browseEndpointContextSupportedConfigs": {
+                                  "browseEndpointContextMusicConfig": {
+                                    "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          { "text": " • " },
+                          { "text": "4:02" }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

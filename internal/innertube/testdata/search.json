@@ -1,0 +1,63 @@
+{
+  "_note": "CAPTURED against the WEB_REMIX client (clientVersion 1.20240101.01.00), 2026-09-05, from the public unauthenticated /youtubei/v1/search endpoint. Trimmed to the musicCardShelfRenderer branch that carries the top hit; sibling itemSectionRenderer shelves (albums, more videos, artists) are omitted because C3's selection logic only needs one representative candidate shape to test against. Track/artist identifiers replaced with placeholders; the videoId and response shape are real.",
+  "contents": {
+    "tabbedSearchResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "title": "YT Music",
+            "selected": true,
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicCardShelfRenderer": {
+                      "title": {
+                        "runs": [
+                          {
+                            "text": "Placeholder Song Title",
+                            "navigationEndpoint": {
+                              "watchEndpoint": {
+                                "videoId": "NrgmdOz227I",
+                                "watchEndpointMusicSupportedConfigs": {
+                                  "watchEndpointMusicConfig": {
+                                    "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "subtitle": {
+                        "runs": [
+                          { "text": "Song" },
+                          { "text": " • " },
+                          {
+                            "text": "Placeholder Artist Name",
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "UCplaceholder00000000000",
+                                "browseEndpointContextSupportedConfigs": {
+                                  "browseEndpointContextMusicConfig": {
+                                    "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          { "text": " • " },
+                          { "text": "2:06" }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

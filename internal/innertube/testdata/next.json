@@ -1,0 +1,31 @@
+{
+  "_note": "CAPTURED against the WEB_REMIX client (clientVersion 1.20240101.01.00), 2026-09-05, from the public unauthenticated /youtubei/v1/next endpoint, for the same videoId as search.json (NrgmdOz227I). Trimmed to the tabs array, which is what C1 needs: the Lyrics tab's browseId. Sibling tabs (Up next, Comments, Related) are kept as bare title stubs to preserve the real tab count and ordering without their large unrelated payloads. The MPLY-prefixed browseId is real and matches browse.json.",
+  "contents": {
+    "singleColumnMusicWatchNextResultsRenderer": {
+      "tabbedRenderer": {
+        "watchNextTabbedResultsRenderer": {
+          "tabs": [
+            { "tabRenderer": { "title": "Up next" } },
+            {
+              "tabRenderer": {
+                "endpoint": {
+                  "browseEndpoint": {
+                    "browseId": "MPLYt_Cn67yAcHym7-13",
+                    "browseEndpointContextSupportedConfigs": {
+                      "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_TRACK_LYRICS"
+                      }
+                    }
+                  }
+                },
+                "title": "Lyrics"
+              }
+            },
+            { "tabRenderer": { "title": "Comments" } },
+            { "tabRenderer": { "title": "Related" } }
+          ]
+        }
+      }
+    }
+  }
+}
