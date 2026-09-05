@@ -22,6 +22,7 @@ import (
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/respdrift"
 	"github.com/sydlexius/canticle/internal/scanner"
 	"github.com/sydlexius/canticle/internal/timing"
 	"github.com/sydlexius/canticle/internal/verification"
@@ -398,6 +399,50 @@ func laneName(fetcher musixmatch.Fetcher) string {
 	return providers.Musixmatch
 }
 
+// driftThreshold is how many CONSECUTIVE DISTINCT queries must return the same
+// track identity before the lane reports a non-discriminating provider (#839).
+//
+// Five is a coincidence margin, and it is NOT what makes the detector safe. An
+// earlier version of this comment argued that a healthy catalog answering five
+// different questions with one answer "is not something that happens"; a
+// pre-push review reproduced exactly that, at run 5, with no fault present --
+// five edition variants of one recording (remaster, live, punctuation) that the
+// provider correctly canonicalized to a single credited track (#839).
+//
+// What actually prevents that false positive is the RELATEDNESS gate in
+// respdrift: a canonicalized variant stays close to what was asked, while a
+// canned unrelated track does not, and only unrelated answers count toward the
+// run. The threshold is the margin on top of that test, not a substitute for
+// it. Raising this number alone would not make the detector safer; it would
+// only make a real fault (musixmatch serving ONE fixed track for every query on
+// 2026-09-04, #838) take longer to surface.
+//
+// It is NOT the petitlyrics ZeroResultThreshold of 20, and the difference is
+// the point: that one counts responses carrying NOTHING, where an obscure
+// catalog genuinely can produce a long miss run (#767 measured exactly that
+// false positive). This counts responses carrying the same UNRELATED thing.
+const driftThreshold = 5
+
+// withDriftDetection opts a provider lane into response-drift detection.
+// Shared by both lane-construction sites so a new lane cannot be added with the
+// detection silently missing -- the defect this whole feature exists to catch is
+// a fault nobody notices, and unwired detection is that same defect one level up.
+func withDriftDetection(lane *orchestrator.Lane) *orchestrator.Lane {
+	return lane.WithResponseDrift(respdrift.New(driftThreshold), func(name, run string) {
+		// WARN, not a breaker trip: the provider IS answering, just not
+		// discriminating, and #838 deliberately classifies the resulting
+		// mismatch as a benign miss so it cannot ratchet the pacer or retire
+		// rows. Escalation needs evidence this detector has not yet produced.
+		//
+		// The report carries the lane and the run length only. The identity that
+		// repeated is a track title from the user's library and must never reach
+		// a log line.
+		slog.Warn("provider returned the same track for consecutive distinct queries; "+
+			"it may have stopped discriminating between requests",
+			"lane", name, "consecutive_distinct_queries", run)
+	})
+}
+
 // New creates a queue consumer worker.
 func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Worker {
 	now := time.Now
@@ -424,7 +469,7 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 	// not reach. SetFallbackProviders already names its lanes from the
 	// provider's own identity, so this makes the primary lane consistent with
 	// the fallbacks rather than inventing a new convention.
-	lane := orchestrator.NewProviderLane(providers.New(laneName(fetcher), fetcher), cb)
+	lane := withDriftDetection(orchestrator.NewProviderLane(providers.New(laneName(fetcher), fetcher), cb))
 	orch, _ := orchestrator.New(orchestrator.ModeOrdered, lane)
 	return &Worker{
 		queue:                 q,
@@ -612,7 +657,7 @@ func (w *Worker) SetFallbackProviders(provs ...providers.LyricsProvider) {
 		}
 		cb := circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
 		cb.SetClock(w.now)
-		lanes = append(lanes, orchestrator.NewProviderLane(p, cb))
+		lanes = append(lanes, withDriftDetection(orchestrator.NewProviderLane(p, cb)))
 	}
 	w.lanes = lanes
 	// Rebuild over the new lane set, re-applying the configured mode, race wait, and
