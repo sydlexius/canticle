@@ -261,7 +261,7 @@ func zipLineSync(timings []int, text string) ([]models.Lines, error) {
 	for i, cs := range timings {
 		cues = append(cues, models.Lines{
 			Text: strings.TrimSpace(lines[i]),
-			Time: msToTime(cs * 10),
+			Time: models.MsToTime(cs * 10),
 		})
 	}
 	return cues, nil
@@ -270,19 +270,6 @@ func zipLineSync(timings []int, text string) ([]models.Lines, error) {
 // decodeUnsynced returns plain lyric text from an unsynced payload.
 func decodeUnsynced(raw []byte) string {
 	return strings.TrimRight(string(raw), "\r\n")
-}
-
-// msToTime converts milliseconds to the models.Time shape used by the writers.
-func msToTime(ms int) models.Time {
-	if ms < 0 {
-		ms = 0
-	}
-	return models.Time{
-		Total:      float64(ms) / 1000.0,
-		Minutes:    ms / 60000,
-		Seconds:    (ms / 1000) % 60,
-		Hundredths: (ms / 10) % 100,
-	}
 }
 
 // decodeWordSync parses a <wsy> payload into line-level cues plus per-word
@@ -337,10 +324,10 @@ func decodeWordSync(raw []byte) ([]models.Lines, []WordTiming, error) {
 		}
 		cues = append(cues, models.Lines{
 			Text: text,
-			Time: msToTime(line.Words[0].StartTime),
+			Time: models.MsToTime(line.Words[0].StartTime),
 		})
 		for _, w := range line.Words {
-			// Clamp the same way msToTime clamps the cue, so a negative timestamp
+			// Clamp the same way models.MsToTime clamps the cue, so a negative timestamp
 			// cannot leave the cue and its word timings disagreeing about the same
 			// word.
 			timings = append(timings, WordTiming{
