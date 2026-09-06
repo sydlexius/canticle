@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"errors"
 
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/petitlyrics"
 )
@@ -123,7 +124,17 @@ func ClassifyOutcome(err error) OutcomeClass {
 		// misdiagnosis. It falls to OutcomeTransport, which is correct.
 		errors.Is(err, petitlyrics.ErrProviderUnavailable),
 		errors.Is(err, petitlyrics.ErrUnauthorized),
-		errors.Is(err, petitlyrics.ErrRateLimited):
+		errors.Is(err, petitlyrics.ErrRateLimited),
+		// innertube equivalents (#856/#870). Same shape as petitlyrics:
+		// ErrForbidden is deliberately ABSENT here and falls to
+		// OutcomeTransport, because a 403 from this API is a refused request
+		// SHAPE rather than a credential or throttle condition. ErrClientVersion
+		// wraps ErrForbidden and is absent for the same reason -- a pinned client
+		// version the gateway now rejects is fixed by bumping the version, not by
+		// waiting. Both are recorded as deliberate exemptions in
+		// sentinel_enumeration_test.go.
+		errors.Is(err, innertube.ErrUnauthorized),
+		errors.Is(err, innertube.ErrRateLimited):
 		return OutcomeAuthRateLimit
 	// IsBenignMiss already covers ErrTruncatedResponse,
 	// ErrUnparsableSubtitleBody and ErrMatchMismatch; listing them again here
@@ -135,7 +146,23 @@ func ClassifyOutcome(err error) OutcomeClass {
 		// these the two provider lanes disagreed about what a miss is, and the
 		// worker (worker.go:1187) released the item on a different path depending
 		// on which lane produced it.
-		errors.Is(err, petitlyrics.ErrNotFound):
+		errors.Is(err, petitlyrics.ErrNotFound),
+		// An innertube miss is the same OUTCOME as any other provider's miss
+		// (#870). Every "reached the API, nothing usable" path in that package
+		// wraps ErrNotFound -- a search with no candidates, a candidate the
+		// correspondence gate rejects, a video with no lyrics tab
+		// (ErrNoLyricsTab, which wraps this), and a browse response carrying no
+		// usable cues -- so this one case covers the whole benign family.
+		//
+		// SAFE TO TEST LAST, but only because nothing in innertube wraps
+		// ErrNotFound while meaning something worse. That is the trap #607 set
+		// and petitlyrics.ErrProviderUnavailable is the live example of, which is
+		// why it sits in the auth/throttle case ABOVE. Any future innertube
+		// sentinel that wraps ErrNotFound and is NOT a clean miss must be
+		// enumerated before this line, or a real outage will read as an ordinary
+		// miss and the worker will record a stable miss against every track it
+		// touched.
+		errors.Is(err, innertube.ErrNotFound):
 		return OutcomeBenignMiss
 	case errors.Is(err, ErrLaneNotReady):
 		return OutcomeLaneNotReady

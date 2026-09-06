@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/sydlexius/canticle/internal/circuit"
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/petitlyrics"
@@ -133,6 +134,84 @@ func providerClassifier(l *Lane, err error) error {
 		// An explicit 429 is an unambiguous throttle signal, so it ratchets the
 		// pacer -- unlike the 401 above.
 		l.notifyThrottle()
+		return err
+
+	// InnerTube fault sentinels (#856/#870). Separate from the petitlyrics block
+	// for the same reason that block is separate from musixmatch's: the throttle
+	// models differ. InnerTube carries no credential at all -- the API key is a
+	// public, non-authenticating constant every unofficial client ships -- so a
+	// 401 here cannot mean "our token expired" and must never ratchet the pacer
+	// the way a musixmatch post-success 401 does.
+	//
+	// ORDER IS LOAD-BEARING TWICE OVER in this block:
+	//
+	//  1. ErrClientVersion WRAPS ErrForbidden, so it must be tested BEFORE it.
+	//     Reversed, a gateway rejecting our pinned ANDROID_MUSIC version would
+	//     log "refused the request shape" and send the operator looking for a
+	//     malformed body, when the actual remedy is bumping the version constant.
+	//     Both trip the breaker, so the classification is unchanged either way --
+	//     what the order protects is the DIAGNOSIS, which is the whole reason
+	//     internal/innertube/errors.go separates the two sentinels.
+	//  2. ErrNoLyricsTab WRAPS ErrNotFound, and both are benign, so they may
+	//     safely share the miss arm below. That is a property of these two
+	//     sentinels, not a general license: a future sentinel wrapping ErrNotFound
+	//     that is NOT benign has to be enumerated above the miss arm.
+	case errors.Is(err, innertube.ErrClientVersion):
+		// The gateway rejected our pinned client version. Retrying an unchanged
+		// request cannot succeed -- measured: ANDROID_MUSIC 5.16.51 returns HTTP
+		// 400 on every call -- so open the lane rather than spend requests on it.
+		// Loud, because this is the failure that silently retires the provider
+		// and the fix is a one-constant change (see internal/innertube/doc.go).
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider rejected the pinned client version; the client version constant must be bumped",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		return err
+
+	case errors.Is(err, innertube.ErrForbidden):
+		// A refused request SHAPE, not throttling -- innertube/errors.go keeps 403
+		// distinct from 429 for the same reason petitlyrics does (#495).
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider refused the request shape (not throttling); a client change is required",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		return err
+
+	case errors.Is(err, innertube.ErrUnauthorized):
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider returned unauthorized for an unauthenticated API; the request shape or public key may have changed",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		// Deliberately does NOT ratchet the pacer. There is no credential here to
+		// have expired, so a 401 is a client-shape problem, not an egress
+		// throttle; slowing the lane would persist past the real fix.
+		return err
+
+	case errors.Is(err, innertube.ErrRateLimited):
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: provider throttling",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		// An explicit 429 is an unambiguous throttle signal, so it ratchets the
+		// pacer -- unlike the 401 above.
+		l.notifyThrottle()
+		return err
+
+	case errors.Is(err, innertube.ErrNotFound):
+		// A healthy round trip that found nothing usable: no search candidates,
+		// no candidate that corresponds to the requested track, no lyrics tab
+		// (ErrNoLyricsTab), or a browse response with no usable cues. None says
+		// anything about lane health, so the ramp resets.
+		//
+		// THE CORRESPONDENCE-GATE REJECTION IS THE IMPORTANT MEMBER HERE. It is
+		// this provider's most common miss by construction -- innertube search
+		// never signals "no match", so it answers a nonsense query with a
+		// confident unrelated candidate that the gate then rejects (see
+		// internal/innertube/doc.go). Left unclassified, the single most frequent
+		// healthy outcome of this lane would have been recorded as a queue
+		// failure.
+		//
+		// EverSucceeded is deliberately NOT set, matching the other providers: a
+		// miss is a successful round trip but not a genuine lyric match.
+		if l.breaker.RecordBenignMiss() {
+			slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
+		}
 		return err
 
 	case errors.Is(err, petitlyrics.ErrNotFound):
