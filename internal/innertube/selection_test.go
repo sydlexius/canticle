@@ -579,3 +579,64 @@ func TestSelectCandidateWithMultipleSurvivors(t *testing.T) {
 		t.Errorf("the selected candidate must clear the gate: %v", err)
 	}
 }
+
+// TestSelectCandidateWinnerIsIndependentOfInputOrder pins the tie-break
+// (853-R5F1). Ties are the COMMON shape, not a corner case: duplicate uploads
+// of one track carry identical artist, title and duration and therefore score
+// identically. Before this, the winner was whichever tied candidate innertube
+// happened to return first, so the same result set could select a different
+// lyric on two identical searches. Shuffling must not move the winner.
+func TestSelectCandidateWinnerIsIndependentOfInputOrder(t *testing.T) {
+	requested := models.Track{ArtistName: "Placeholder Artist", TrackName: "Placeholder Title", TrackLength: 200}
+	tied := []SearchCandidate{
+		{VideoID: "vidC", Artist: "Placeholder Artist", Title: "Placeholder Title", DurationSeconds: 200},
+		{VideoID: "vidA", Artist: "Placeholder Artist", Title: "Placeholder Title", DurationSeconds: 200},
+		{VideoID: "vidB", Artist: "Placeholder Artist", Title: "Placeholder Title", DurationSeconds: 200},
+	}
+
+	first, err := SelectCandidate(tied, requested)
+	if err != nil {
+		t.Fatalf("SelectCandidate: %v", err)
+	}
+
+	// Every permutation of the same set must select the same candidate.
+	perms := [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+	for _, perm := range perms {
+		shuffled := make([]SearchCandidate, 0, len(tied))
+		for _, i := range perm {
+			shuffled = append(shuffled, tied[i])
+		}
+		got, err := SelectCandidate(shuffled, requested)
+		if err != nil {
+			t.Fatalf("permutation %v: %v", perm, err)
+		}
+		if got.VideoID != first.VideoID {
+			t.Errorf("permutation %v selected %q, want %q: the winner must not depend on input order", perm, got.VideoID, first.VideoID)
+		}
+	}
+}
+
+// TestTitleContributesToTheRanking pins the title half of "text dominates".
+// Deleting the title term from scoreCandidate left the whole suite green,
+// because every other ranking case is already ordered correctly by its artist
+// term alone (853-R5F2). These candidates share an artist and an exact
+// duration, so the title is the ONLY signal that can separate them.
+func TestTitleContributesToTheRanking(t *testing.T) {
+	requested := models.Track{ArtistName: "Placeholder Artist", TrackName: "Placeholder Title", TrackLength: 200}
+	// The videoIDs are chosen so the TIE-BREAK favors the WRONG candidate:
+	// "aaa-wrongish" sorts before "zzz-exact". Without that, deleting the
+	// title term makes the two tie and the tie-break picks the right answer by
+	// accident, so the test passes against a scorer that ignores the title.
+	candidates := []SearchCandidate{
+		{VideoID: "aaa-wrongish", Artist: "Placeholder Artist", Title: "Placeholder Titles", DurationSeconds: 200},
+		{VideoID: "zzz-exact", Artist: "Placeholder Artist", Title: "Placeholder Title", DurationSeconds: 200},
+	}
+
+	got, err := SelectCandidate(candidates, requested)
+	if err != nil {
+		t.Fatalf("SelectCandidate: %v", err)
+	}
+	if got.VideoID != "zzz-exact" {
+		t.Errorf("selected %q, want %q: with artist and duration identical, the title must decide", got.VideoID, "zzz-exact")
+	}
+}

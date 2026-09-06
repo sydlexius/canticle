@@ -166,8 +166,23 @@ func SelectCandidate(candidates []SearchCandidate, requested models.Track) (Sear
 		if err := checkCorresponds(requested, c); err != nil {
 			continue
 		}
-		if score := scoreCandidate(c, requested); !found || score > bestScore {
+		// TIES BREAK ON VideoID, not on slice position (853-R5F1). Ties are
+		// the COMMON case, not a corner: duplicate uploads of one track (an
+		// official video, a topic channel, a re-upload) carry identical
+		// artist, title and duration, so they score identically. Taking the
+		// first such candidate makes the winner depend on the order innertube
+		// happened to return them, which is arbitrary and can differ between
+		// two identical searches -- the same set would select a different
+		// lyric. A total order on an ID the server supplies is not a better
+		// CHOICE among duplicates (nothing here can tell which upload is
+		// canonical) but it is a DETERMINISTIC one, which is what a cache key
+		// and a reproducible fetch need.
+		score := scoreCandidate(c, requested)
+		switch {
+		case !found, score > bestScore:
 			best, bestScore, found = c, score, true
+		case score == bestScore && c.VideoID < best.VideoID:
+			best = c
 		}
 	}
 
