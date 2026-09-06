@@ -1,0 +1,20 @@
+{
+  "_note": "A well-formed browse response whose lyrics section carries no timed cues. HAND-BUILT, not captured: the enclosing renderer chain matches browse.json exactly, and the ONLY difference is that timedLyricsData is empty. That isolates the variable under test -- a clean 200 that parses fine and yields nothing usable -- which a second capture could not do, since it would differ in incidental ways too. Decode rejects this with ErrNotFound; the test exists to prove FindLyrics propagates that rather than returning an empty Song with a nil error.",
+  "contents": {
+    "elementRenderer": {
+      "newElement": {
+        "type": {
+          "componentType": {
+            "model": {
+              "timedLyricsModel": {
+                "lyricsData": {
+                  "timedLyricsData": []
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

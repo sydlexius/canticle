@@ -3,8 +3,10 @@ package innertube
 import (
 	"context"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -429,6 +431,217 @@ func TestTrackFromCandidate(t *testing.T) {
 				t.Errorf("trackFromCandidate() =\n  %+v\nwant\n  %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- the pacing COST claim, which is a claim about FindLyrics ---
+//
+// These two were dropped in the split that moved pacing to its own slice. The
+// pacer's own arithmetic is tested there, but the claim fetcher.go makes to the
+// operator -- that a MISS costs one interval and a HIT costs three -- is a
+// statement about the composed chain and can only be tested here.
+
+// TestFindLyrics_HitPaysThreeIntervals pins the expensive half of the cost
+// claim. A hit issues three requests, so it waits twice: the first request
+// finds no prior request to pace against.
+func TestFindLyrics_HitPaysThreeIntervals(t *testing.T) {
+	srv := &fixtureServer{fixtures: chainFixtures()}
+	c := newTestClient(t, srv)
+	fc := withFakeClock(c)
+	c.WithMinInterval(30 * time.Second)
+
+	if _, err := c.FindLyrics(context.Background(), fixtureTrack()); err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+
+	if got, want := len(fc.waits), 2; got != want {
+		t.Fatalf("pacer waited %d times %v, want %d (three requests, the first unpaced)",
+			got, fc.waits, want)
+	}
+	for i, w := range fc.waits {
+		if w != 30*time.Second {
+			t.Errorf("wait %d = %v, want the full 30s interval", i, w)
+		}
+	}
+}
+
+// TestFindLyrics_MissPaysOneInterval pins the cheap half, and it is the half
+// that matters for a fallback lane whose traffic is mostly misses: the
+// correspondence gate rejects before next or browse is issued, so a track this
+// provider has nothing for costs a single request and no wait at all.
+func TestFindLyrics_MissPaysOneInterval(t *testing.T) {
+	srv := &fixtureServer{fixtures: chainFixtures()}
+	c := newTestClient(t, srv)
+	fc := withFakeClock(c)
+	c.WithMinInterval(30 * time.Second)
+
+	_, err := c.FindLyrics(context.Background(), models.Track{
+		ArtistName: "Completely Different Artist",
+		TrackName:  "Completely Different Song",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want a miss", err)
+	}
+	if len(fc.waits) != 0 {
+		t.Errorf("pacer waited %v; a one-request miss must not wait", fc.waits)
+	}
+	if n := len(srv.snapshot()); n != 1 {
+		t.Errorf("requests issued = %d, want 1; the gate must reject before "+
+			"next/browse", n)
+	}
+}
+
+// --- the TAIL of the chain: Browse's error class, Decode's error, per-call ctx ---
+//
+// These three cover the region a hostile review found entirely untested. The
+// survivors clustered rather than scattering: every test above drives the chain
+// only as far as the FIRST thing that goes wrong, so the last calls were
+// covered by nothing.
+
+// TestFindLyrics_BrowseFailurePreservesItsErrorClass stops a transport failure
+// from being laundered into a benign miss.
+//
+// errors.go goes to real length to keep ErrRateLimited, ErrForbidden and
+// ErrNotFound distinguishable, so the lane circuit breaker can bucket them.
+// Measured: wrapping Browse's error in ErrNotFound left the whole suite green,
+// while the identical mutation on Search reddens -- Search is incidentally
+// covered by the cancel test, and Browse was covered by nothing.
+//
+// The consequence of that misclassification runs the wrong way: a browse-stage 429
+// read as a clean miss never trips the breaker, so the lane keeps hammering a
+// throttling gateway while reporting healthy misses.
+func TestFindLyrics_BrowseFailurePreservesItsErrorClass(t *testing.T) {
+	srv := &fixtureServer{
+		fixtures:  chainFixtures(),
+		statusFor: map[string]int{browsePath: 429},
+	}
+	c := newTestClient(t, srv)
+
+	_, err := c.FindLyrics(context.Background(), fixtureTrack())
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("error = %v, want it to wrap ErrRateLimited", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Error("a browse-stage 429 also wrapped ErrNotFound; a throttle laundered " +
+			"into a benign miss never trips the breaker, so the lane keeps " +
+			"hammering a gateway that is refusing it")
+	}
+	// The chain must have reached browse for this to have tested anything.
+	if got := paths(srv.snapshot()); !slices.Equal(got, []string{searchPath, nextPath, browsePath}) {
+		t.Errorf("call chain = %v, want the full chain through browse", got)
+	}
+}
+
+// TestFindLyrics_DecodeFailureIsNotASilentEmptyHit is the false-accept guard.
+//
+// Decode legitimately errors on a reachable production condition: a 200 whose
+// lyrics section carries no cues. Measured, both of these left the suite green:
+// dropping Decode's error check, and returning an empty Song with a nil error.
+//
+// The second is the dangerous shape. A nil error reads as a HIT, so the caller
+// receives a Song carrying a confident stamped identity -- artist, title,
+// HasLyrics=1, HasSubtitles=1 -- and ZERO lines. That is the silent-corruption
+// class the correspondence gate exists to prevent, reached through the back
+// door, past the gate.
+func TestFindLyrics_DecodeFailureIsNotASilentEmptyHit(t *testing.T) {
+	fx := chainFixtures()
+	fx[browsePath] = "browse_no_cues.json"
+	srv := &fixtureServer{fixtures: fx}
+	c := newTestClient(t, srv)
+
+	song, err := c.FindLyrics(context.Background(), fixtureTrack())
+	if err == nil {
+		t.Fatalf("error = nil for a cue-less browse response; got song with %d "+
+			"lines and Track %+v. A nil error reads as a HIT, so this returns a "+
+			"confident identity with no lyrics behind it",
+			len(song.Subtitles.Lines), song.Track)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want it to wrap ErrNotFound; a clean 200 carrying "+
+			"nothing usable is a miss, not a transport failure", err)
+	}
+	if len(song.Subtitles.Lines) != 0 {
+		t.Errorf("returned %d lines alongside an error", len(song.Subtitles.Lines))
+	}
+}
+
+// ctxMarker is a context key used to prove which context reached a request.
+type ctxMarkerKey struct{}
+
+// ctxRecorder is an http.RoundTripper that records, per request path, whether
+// that request's context carried the marker value.
+type ctxRecorder struct {
+	base   http.RoundTripper
+	mu     sync.Mutex
+	marked map[string]bool
+}
+
+func (r *ctxRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	if r.marked == nil {
+		r.marked = map[string]bool{}
+	}
+	_, ok := req.Context().Value(ctxMarkerKey{}).(string)
+	r.marked[req.URL.Path] = ok
+	r.mu.Unlock()
+	return r.base.RoundTrip(req)
+}
+
+func (r *ctxRecorder) snapshot() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]bool, len(r.marked))
+	for k, v := range r.marked {
+		out[k] = v
+	}
+	return out
+}
+
+// TestFindLyrics_EveryCallCarriesTheCallersContext covers ctx on EVERY call,
+// which is what fetcher.go's "every step is ctx-cancellable" actually claims.
+//
+// A CANCELLATION test cannot do this, and that is the point worth recording.
+// Canceling and asserting on the returned error only ever proves that SOME
+// call honored ctx: measured, dropping ctx from Search alone left the suite
+// green, because the search then succeeded against a canceled context and Next
+// -- which still had ctx -- returned the expected error. Moving the cancel
+// mid-chain does not fix it either, it moves the blind spot one call along: a
+// cancel delivered at next makes Next itself fail, so browse is never issued
+// and a Browse mutation is unreachable. Each call ends up covered only by the
+// survival of the ones after it, and the last call by nothing.
+//
+// So this observes the context DIRECTLY, at the transport, rather than
+// inferring it from an error. A marker value on the caller's context reaches
+// every request built from it; a call handed context.Background() instead
+// carries no marker. That is deterministic -- no cancellation race -- and it
+// fails for exactly one reason.
+func TestFindLyrics_EveryCallCarriesTheCallersContext(t *testing.T) {
+	srv := &fixtureServer{fixtures: chainFixtures()}
+	c := newTestClient(t, srv)
+	rec := &ctxRecorder{base: c.httpClient.Transport}
+	if rec.base == nil {
+		rec.base = http.DefaultTransport
+	}
+	c.httpClient.Transport = rec
+
+	ctx := context.WithValue(context.Background(), ctxMarkerKey{}, "caller")
+	if _, err := c.FindLyrics(ctx, fixtureTrack()); err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+
+	marked := rec.snapshot()
+	for _, path := range []string{searchPath, nextPath, browsePath} {
+		seen, issued := marked[path]
+		if !issued {
+			t.Errorf("no request recorded for %s; the chain did not reach it", path)
+			continue
+		}
+		if !seen {
+			t.Errorf("the request to %s did NOT carry the caller's context. That "+
+				"call was handed a fresh context, so a cancellation or deadline on "+
+				"the caller's ctx cannot stop it -- an operator's shutdown would "+
+				"not prevent this outbound request", path)
+		}
 	}
 }
 

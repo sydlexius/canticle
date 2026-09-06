@@ -20,8 +20,19 @@ type fixtureServer struct {
 	// server can stand in for the whole three-call chain in an integration
 	// test.
 	fixtures map[string]string
-	// status, if non-zero, is returned instead of any fixture.
+	// status, if non-zero, is returned instead of any fixture, for EVERY path.
 	status int
+	// statusFor overrides status for one path, so a test can serve a healthy
+	// 200 for the early calls in the chain and a failure for a later one. That
+	// is the only way to test the status mapping of any call but the first:
+	// without it a 429 on browse is unreachable, because the same status would
+	// have failed the search before browse was ever issued.
+	statusFor map[string]int
+	// onRequest, if set, is called with the request path BEFORE the response is
+	// written, letting a test act at a chosen point in the chain -- canceling a
+	// context when a particular call arrives, say. It runs on the SERVER
+	// goroutine, so it must not touch *testing.T.
+	onRequest func(path string)
 }
 
 type recordedRequest struct {
@@ -68,6 +79,18 @@ func newTestClient(t *testing.T, srv *fixtureServer) *Client {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		srv.record(r)
+		// Read under the lock: onRequest is set on the test goroutine before the
+		// listener starts, but the handler runs on the server's.
+		srv.mu.Lock()
+		hook := srv.onRequest
+		srv.mu.Unlock()
+		if hook != nil {
+			hook(r.URL.Path)
+		}
+		if code, ok := srv.statusFor[r.URL.Path]; ok && code != 0 {
+			w.WriteHeader(code)
+			return
+		}
 		if srv.status != 0 {
 			w.WriteHeader(srv.status)
 			return
