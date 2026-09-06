@@ -559,17 +559,22 @@ func assertErrorCarriesNoFieldValues(t *testing.T, err error, requested models.T
 // change should show up as a diff in behavior rather than passing silently.
 func TestSelectCandidateWithMultipleSurvivors(t *testing.T) {
 	requested := models.Track{ArtistName: "Placeholder Artist", TrackName: "Placeholder Title"}
+	// The SLICE-FIRST candidate is lexically LARGER, so first-wins and the
+	// tie-break disagree here. That is deliberate: 853a took the first
+	// survivor and this slice replaced that with the ranker, so a test whose
+	// two orderings agree would pass under either policy and pin neither
+	// (877-R1F2). Under the ranker these tie on score and "aaa" wins.
 	candidates := []SearchCandidate{
-		{VideoID: "firstPasser", Artist: "Placeholder Artist", Title: "Placeholder Title"},
-		{VideoID: "secondPasser", Artist: "Placeholder Artist", Title: "Placeholder Title"},
+		{VideoID: "zzz-slice-first", Artist: "Placeholder Artist", Title: "Placeholder Title"},
+		{VideoID: "aaa-lexically-first", Artist: "Placeholder Artist", Title: "Placeholder Title"},
 	}
 
 	got, err := SelectCandidate(candidates, requested)
 	if err != nil {
 		t.Fatalf("with two corresponding candidates, one must be selected: %v", err)
 	}
-	if got.VideoID != "firstPasser" {
-		t.Errorf("selected %q, want %q: this slice takes the FIRST survivor", got.VideoID, "firstPasser")
+	if got.VideoID != "aaa-lexically-first" {
+		t.Errorf("selected %q, want %q: equal scores break on the smallest videoID, not on slice position", got.VideoID, "aaa-lexically-first")
 	}
 
 	// Whichever is returned must itself have cleared the gate -- the package's
@@ -597,6 +602,13 @@ func TestSelectCandidateWinnerIsIndependentOfInputOrder(t *testing.T) {
 	first, err := SelectCandidate(tied, requested)
 	if err != nil {
 		t.Fatalf("SelectCandidate: %v", err)
+	}
+	// Assert WHICH candidate wins, not merely that the answer is stable
+	// (877-R1F1). Comparing every permutation against an unasserted baseline
+	// pins consistency only, so a reverse-lexical policy would pass this test
+	// unchanged. "vidA" is the lexicographically smallest videoID in the set.
+	if first.VideoID != "vidA" {
+		t.Fatalf("tie-break selected %q, want %q: ties break on the smallest videoID", first.VideoID, "vidA")
 	}
 
 	// Every permutation of the same set must select the same candidate.
