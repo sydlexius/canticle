@@ -752,7 +752,7 @@ func artistTokensEqual(requested, got string) bool {
 }
 
 // artistFieldCorresponds is the artist half of the gate: the floor OR an exact
-// token-set match. This is a WIDENING, and it is the opposite treatment from
+// token-multiset match. This is a WIDENING, and it is the opposite treatment from
 // the title's on purpose.
 //
 // The measured defect it fixes: legitimate artist REORDERINGS score BELOW the

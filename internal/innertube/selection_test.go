@@ -1091,9 +1091,9 @@ func TestArtistReorderIsAccepted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Assert the PREMISE: these are only meaningful while the pair
 			// scores BELOW the floor. If the floor started admitting them the
-			// token-set rule would no longer be what rescues them.
+			// token-multiset rule would no longer be what rescues them.
 			if conf := normalize.MatchConfidence(tc.reqA, tc.candA); conf >= matchMinConfidence {
-				t.Fatalf("test premise broken: artist confidence %.4f already clears the %.2f floor, so this case no longer exercises the token-set rule", conf, matchMinConfidence)
+				t.Fatalf("test premise broken: artist confidence %.4f already clears the %.2f floor, so this case no longer exercises the token-multiset rule", conf, matchMinConfidence)
 			}
 
 			requested := models.Track{ArtistName: tc.reqA, TrackName: title}
@@ -1112,7 +1112,7 @@ func TestArtistReorderIsAccepted(t *testing.T) {
 func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 	const title = "Placeholder Song Title"
 
-	// END-TO-END: pairs that sit BELOW the floor, so the token-set rule is the
+	// END-TO-END: pairs that sit BELOW the floor, so the token-multiset rule is the
 	// only thing that could admit them. These are the cases the widening
 	// actually governs, and each must still be rejected.
 	tests := []struct {
@@ -1127,9 +1127,9 @@ func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Assert the premise: below the floor, so an accept could only
-			// come from the token-set rule this test is guarding.
+			// come from the token-multiset rule this test is guarding.
 			if conf := normalize.MatchConfidence(tc.reqA, tc.candA); conf >= matchMinConfidence {
-				t.Fatalf("test premise broken: artist confidence %.4f clears the %.2f floor, so this case no longer isolates the token-set rule", conf, matchMinConfidence)
+				t.Fatalf("test premise broken: artist confidence %.4f clears the %.2f floor, so this case no longer isolates the token-multiset rule", conf, matchMinConfidence)
 			}
 
 			requested := models.Track{ArtistName: tc.reqA, TrackName: title}
@@ -1146,13 +1146,13 @@ func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 
 	// UNIT-LEVEL: pairs the FLOOR ALREADY ADMITS on its own (all score above
 	// 0.75, a strict superset reaching 0.9286). Those accepts are PRE-EXISTING
-	// behavior of the similarity floor, not a consequence of the token-set
+	// behavior of the similarity floor, not a consequence of the token-multiset
 	// widening, and this fix does not claim to close them -- doing so would
 	// mean tightening the artist gate, which is the opposite of what F2 asks
 	// for and would re-break the reorderings above.
 	//
 	// What IS asserted here is that the widening contributes NOTHING to them:
-	// the token-set rule reports false for every one, so the OR it forms with
+	// the token-multiset rule reports false for every one, so the OR it forms with
 	// the floor adds no accept that the floor was not already making. That is
 	// the precise claim this fix can honestly support.
 	//
@@ -1166,7 +1166,7 @@ func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 	// different order is a coincidence, where a reordering of the SAME act is
 	// routine. The overlap cases below are the ones that stay closed; a
 	// permutation is the one that opens.
-	t.Run("the token-set rule itself never accepts on mere overlap", func(t *testing.T) {
+	t.Run("the token-multiset rule itself never accepts on mere overlap", func(t *testing.T) {
 		overlapping := []struct{ name, a, b string }{
 			{"shared surname only", "Zenith Quartermain", "Wendell Quartermain"},
 			{"shared leading word", "Placeholder Vanguard", "Placeholder Meridian"},
@@ -1176,7 +1176,7 @@ func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 		}
 		for _, tc := range overlapping {
 			if artistTokensEqual(tc.a, tc.b) {
-				t.Errorf("%s: token sets must NOT be equal -- accepting on overlap would make any two acts sharing a word correspond", tc.name)
+				t.Errorf("%s: token multisets must NOT be equal -- accepting on overlap would make any two acts sharing a word correspond", tc.name)
 			}
 		}
 	})
