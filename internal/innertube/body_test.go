@@ -18,13 +18,27 @@ func TestIsUnusableBody_Classification(t *testing.T) {
 		body string
 		want bool
 	}{
-		// Usable: the two shapes a real innertube response can take.
+		// Usable: the one shape a real innertube response takes.
 		{"object", `{"contents":{}}`, false},
 		{"empty_object", `{}`, false},
-		{"array", `[1,2,3]`, false},
-		{"empty_array", `[]`, false},
 		{"leading_whitespace_object", "  \n\t{}", false},
 		{"trailing_whitespace_object", "{}  \n", false},
+		// A BOM-prefixed object is a VALID response and must not be discarded:
+		// bytes.TrimSpace does not strip U+FEFF, so before 854-R5F2 this was
+		// misfiled as a hollow body and the lyric lost silently. Both orderings
+		// are pinned because TrimPrefix only matches at byte zero.
+		{"bom_object", "\ufeff{}", false},
+		{"bom_then_whitespace_object", "\ufeff  {}", false},
+		{"whitespace_then_bom_object", "  \ufeff{}", false},
+
+		// Unusable: a top-level ARRAY. It was accepted until 854-R5F1, which
+		// contradicted this predicate's own rationale -- an array fails to
+		// unmarshal with the same "cannot unmarshal X into ..." class as a
+		// scalar, so it belongs in the benign-miss bucket, not raised as a real
+		// parse failure.
+		{"array", `[1,2,3]`, true},
+		{"empty_array", `[]`, true},
+		{"bom_array", "\ufeff[]", true},
 		// Usable by this predicate on purpose: a body that BEGINS an object
 		// but is truncated mid-document is a genuinely broken response, not a
 		// clean miss, and must stay an unclassified error at the call site.
@@ -125,12 +139,11 @@ func TestIsUnusableBody_ScalarsAreUnreachableOrBenign(t *testing.T) {
 func TestIsUnusableBody_IgnoresContentAfterTheFirstToken(t *testing.T) {
 	for _, body := range []string{
 		`{`,
-		`[`,
 		`{not json at all`,
 		`{"a":1}garbage`,
 	} {
 		if isUnusableBody([]byte(body)) {
-			t.Errorf("isUnusableBody(%q) = true, want false: a body that opens an object or array is the decoder's to reject", body)
+			t.Errorf("isUnusableBody(%q) = true, want false: a body that opens an object is the decoder's to reject", body)
 		}
 	}
 }
