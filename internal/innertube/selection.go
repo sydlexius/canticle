@@ -36,6 +36,74 @@ import (
 // evidence sits inside the separation the floor was calibrated on.
 const matchMinConfidence = 0.75
 
+// Ranking weights. Text dominates duration by construction: the text terms
+// span [0, 2*textWeight] and the duration term is capped at
+// durationExactBonus, so duration can only reorder candidates whose combined
+// text confidence differs by less than durationExactBonus/textWeight = 0.1.
+// Above the 0.75 floor there is only 0.25 of headroom per field, so that
+// window is genuinely "the text cannot tell these apart".
+//
+// That ordering is deliberate and is the same rule petitlyrics' scoreCandidate
+// states -- a stronger signal can never be outvoted by a weaker one -- applied
+// to a different question. petitlyrics ranks "which RECORDING is this", where
+// duration outranks text. Selection here ranks "which candidate corresponds to
+// the track we ASKED FOR", where text IS the correspondence evidence and
+// duration is not (see the durationCloseTolerance block). Letting duration
+// outvote text would promote a duration-alike candidate over a
+// correspondence-alike one, the gate would then reject the winner, and a good
+// candidate sitting one rank below would be lost -- a false reject manufactured
+// entirely by bad ranking.
+const (
+	textWeight          = 10.0
+	durationCloseBonus  = 0.5
+	durationFarBonus    = 0.25
+	durationExactBonus  = 1.0
+	durationExactWindow = 1
+)
+
+// durationCloseTolerance and durationFarTolerance bound the duration
+// TIE-BREAK, in seconds. The values follow internal/petitlyrics' calibrated
+// pair (3s of ordinary tagging/reporting drift; 8s as the outer edge of "still
+// plausibly the same recording") rather than being chosen here, because this
+// package has no corpus of its own to calibrate against.
+//
+// DURATION'S ROLE IS DECIDED EXPLICITLY (issue #853 AC): it RANKS, it never
+// REJECTS. Three reasons, in order of weight:
+//
+//  1. Duration is not correspondence evidence. Any number of unrelated songs
+//     share any given runtime, so a duration match cannot argue a candidate is
+//     the requested track, and a duration mismatch cannot argue it is not --
+//     a remaster, a video with an added outro, or a tagger rounding through a
+//     container estimate all move it legitimately. A signal that is neither
+//     necessary nor sufficient makes a poor gate.
+//
+//  2. A duration REJECT threshold here would be UNCALIBRATED. The #848 spike
+//     measured text confidence against a control group; it measured no
+//     duration-rejection threshold at all. Shipping an eyeballed one is the
+//     exact failure mode this slice exists to avoid -- showingResultsForRenderer
+//     also looked like a clean discriminator until a control group collapsed it.
+//
+//  3. The library ALREADY HAS a calibrated duration guard, downstream and
+//     better positioned. internal/timing.Evaluate judges the accepted lyric's
+//     own cue timings against the audio file's exact duration, on thresholds
+//     calibrated over a 28.7k-track corpus, and internal/lyrics refuses to
+//     promote such a result. A candidate whose runtime is grossly wrong
+//     produces cues that overrun the audio and is caught there, by a predicate
+//     that was measured. Duplicating that judgment here, uncalibrated and on
+//     less information (a catalog runtime rather than the file's), would add
+//     false rejects without removing a single false accept.
+//
+// So duration earns its keep where it is genuinely informative: ordering a list
+// of candidates that have ALL already cleared the correspondence gate, which is
+// the "which of these recordings" question it is actually good at. A zero
+// duration on either side contributes nothing and never penalizes -- absence of
+// a value is not evidence (SearchCandidate.DurationSeconds documents 0 as "not
+// supplied, fails open").
+const (
+	durationCloseTolerance = 3
+	durationFarTolerance   = 8
+)
+
 // SelectCandidate applies the correspondence guard to an innertube search
 // response and returns the one candidate that corresponds to the requested
 // track, or an error wrapping ErrNotFound.
@@ -58,25 +126,16 @@ const matchMinConfidence = 0.75
 // cheap; the other silently corrupts the library. Every threshold, every
 // fail-open and every fail-closed here is chosen against that.
 //
-// SHAPE: GATE EVERY CANDIDATE, THEN CHOOSE AMONG THE SURVIVORS. Both halves
-// are load bearing and they are different jobs. Choosing alone is how a wrong
-// candidate wins by being the best of a bad set -- the nonsense response
-// contains exactly one candidate, so it would be chosen trivially. Gating alone
-// cannot choose among several plausible candidates. Gating FIRST (rather than
-// choosing first and gating the winner, as internal/musixmatch does for its
-// single-result matcher endpoint) is the stricter arrangement for a LIST: it
-// makes it impossible for a non-corresponding candidate to displace a
-// corresponding one, so the returned winner has passed the gate by
-// construction. The invariant is asserted again on the winner before return, so
-// it is explicit rather than merely emergent.
-//
-// THE CHOICE AMONG SURVIVORS IS FIRST-WINS FOR NOW, and that is a deliberately
-// SEPARATE question from the gate this slice owns. Innertube returns its
-// candidates in its own relevance order, so taking the first gate-passing one
-// is the honest placeholder: it adds no uncalibrated judgment of its own. A
-// scorer that orders the survivors on text confidence with duration as a
-// tie-break is the next slice; it changes WHICH survivor is returned and
-// changes nothing about WHICH candidates survive.
+// SHAPE: GATE EVERY CANDIDATE, THEN RANK THE SURVIVORS. Both halves are load
+// bearing and they are different jobs. Ranking alone is how a wrong candidate
+// wins by being the best of a bad set -- the nonsense response contains exactly
+// one candidate, so it ranks first trivially. Gating alone cannot choose among
+// several plausible candidates. Gating FIRST (rather than ranking first and
+// gating the winner, as internal/musixmatch does for its single-result matcher
+// endpoint) is the stricter arrangement for a LIST: it makes it impossible for a
+// non-corresponding candidate to displace a corresponding one, so the returned
+// winner has passed the gate by construction. The invariant is asserted again
+// on the winner before return, so it is explicit rather than merely emergent.
 //
 // PLAY COUNT IS NOT USED, AND MUST NOT BE. Obscure but legitimate tracks carry
 // low counts, so a popularity term rejects exactly the material a lyrics
@@ -94,6 +153,7 @@ func SelectCandidate(candidates []SearchCandidate, requested models.Track) (Sear
 	}
 
 	best := SearchCandidate{}
+	bestScore := -1.0
 	found := false
 
 	for _, c := range candidates {
@@ -106,8 +166,24 @@ func SelectCandidate(candidates []SearchCandidate, requested models.Track) (Sear
 		if err := checkCorresponds(requested, c); err != nil {
 			continue
 		}
-		best, found = c, true
-		break
+		// TIES BREAK ON VideoID, not on slice position (853-R5F1). Ties are
+		// the COMMON case, not a corner: duplicate uploads of one track (an
+		// official video, a topic channel, a re-upload) carry identical
+		// artist, title and duration, so they score identically. Taking the
+		// first such candidate makes the winner depend on the order innertube
+		// happened to return them, which is arbitrary and can differ between
+		// two identical searches -- the same set would select a different
+		// lyric. A total order on an ID the server supplies is not a better
+		// CHOICE among duplicates (nothing here can tell which upload is
+		// canonical) but it is a DETERMINISTIC one, which is what a cache key
+		// and a reproducible fetch need.
+		score := scoreCandidate(c, requested)
+		switch {
+		case !found, score > bestScore:
+			best, bestScore, found = c, score, true
+		case score == bestScore && c.VideoID < best.VideoID:
+			best = c
+		}
 	}
 
 	if !found {
@@ -224,4 +300,45 @@ func fieldCorresponds(requested, got string) (ok, comparable bool) {
 		return false, false
 	}
 	return normalize.MatchConfidence(requested, got) >= matchMinConfidence, true
+}
+
+// scoreCandidate ranks one gate-passing candidate against the requested track.
+// Higher is better. It is a RANKER, not a gate: it is only ever called on
+// candidates that have already cleared checkCorresponds, and it can never
+// reject.
+//
+// Text first, duration only as a tie-break -- see the textWeight and
+// durationCloseTolerance blocks for why that ordering is the opposite of
+// petitlyrics' and why it has to be.
+func scoreCandidate(c SearchCandidate, requested models.Track) float64 {
+	var score float64
+
+	// Text similarity on each comparable field. A non-comparable field
+	// contributes nothing rather than a penalty, so a candidate that supplies
+	// less evidence simply cannot out-rank one that supplies more.
+	if _, comparable := fieldCorresponds(requested.ArtistName, c.Artist); comparable {
+		score += textWeight * normalize.MatchConfidence(requested.ArtistName, c.Artist)
+	}
+	if _, comparable := fieldCorresponds(requested.TrackName, c.Title); comparable {
+		score += textWeight * normalize.MatchConfidence(requested.TrackName, c.Title)
+	}
+
+	// Duration tie-break. requested.TrackLength is seconds; a zero on either
+	// side means "not supplied" and contributes nothing (fails open).
+	if requested.TrackLength > 0 && c.DurationSeconds > 0 {
+		delta := requested.TrackLength - c.DurationSeconds
+		if delta < 0 {
+			delta = -delta
+		}
+		switch {
+		case delta <= durationExactWindow:
+			score += durationExactBonus
+		case delta <= durationCloseTolerance:
+			score += durationCloseBonus
+		case delta <= durationFarTolerance:
+			score += durationFarBonus
+		}
+	}
+
+	return score
 }
