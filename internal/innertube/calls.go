@@ -2,6 +2,7 @@ package innertube
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -165,14 +166,19 @@ func (c *Client) Browse(ctx context.Context, browseID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("innertube: browse: %w", err)
 	}
-	if isUnusableBody(raw) {
-		// A 200 with an empty, all-whitespace, or non-JSON body is not a
-		// payload under any parse (854-F5, widened by 854-R2F1): passing it
-		// through as success hands the decode slice (nil error, unusable
-		// bytes) and forces it to invent its own emptiness check. ErrNotFound
-		// is the right class -- a clean answer with nothing usable in it,
-		// matching Search/Next below (854-F4) -- not a transport failure,
-		// since nothing about the request or connection failed.
+	// Browse is the ONE call that never unmarshals: it hands the bytes to the
+	// decode package. So it validates them fully rather than only checking how
+	// they START. Search and Next get this for free -- an undecodable body
+	// fails their json.Unmarshal -- but a truncated payload like `{"contents":`
+	// opens like an object and passes a first-byte test, which handed decode
+	// (nil error, undecodable bytes): the exact hand-off 854-F5 exists to
+	// prevent, and which its comment wrongly claimed to cover (854-R5F1).
+	if isUnusableBody(raw) || !json.Valid(raw) {
+		// A 200 with an empty, all-whitespace, non-JSON, or malformed body is
+		// not a payload under any parse (854-F5). ErrNotFound is the right
+		// class -- a clean answer with nothing usable in it, matching
+		// Search/Next (854-F4) -- not a transport failure, since nothing about
+		// the request or connection failed.
 		return nil, fmt.Errorf("innertube: browse: unusable response body: %w", ErrNotFound)
 	}
 	return raw, nil

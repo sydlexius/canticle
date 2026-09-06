@@ -105,8 +105,11 @@ func TestSearch_SendsExpectedRequest(t *testing.T) {
 	if req.method != http.MethodPost {
 		t.Errorf("want POST, got %s", req.method)
 	}
-	if req.path != searchPath {
-		t.Errorf("want path %q, got %q", searchPath, req.path)
+	// LITERAL, not the searchPath constant: comparing the constant to itself
+	// is a tautology that survives any change to it, so a typo'd endpoint
+	// would ship green and 404 in production (854-R5F2).
+	if req.path != "/youtubei/v1/search" {
+		t.Errorf("want path %q, got %q", "/youtubei/v1/search", req.path)
 	}
 	if req.contentType != "application/json" {
 		t.Errorf("want application/json content type, got %q", req.contentType)
@@ -148,8 +151,9 @@ func TestNext_SendsExpectedRequest(t *testing.T) {
 	if req.method != http.MethodPost {
 		t.Errorf("want POST, got %s", req.method)
 	}
-	if req.path != nextPath {
-		t.Errorf("want path %q, got %q", nextPath, req.path)
+	// A literal, for the reason given in TestSearch_SendsExpectedRequest.
+	if req.path != "/youtubei/v1/next" {
+		t.Errorf("want path %q, got %q", "/youtubei/v1/next", req.path)
 	}
 	if videoID, _ := req.body["videoId"].(string); videoID != "NrgmdOz227I" {
 		t.Errorf("videoId not forwarded: got %q", videoID)
@@ -172,8 +176,9 @@ func TestBrowse_SendsExpectedRequest(t *testing.T) {
 	if req.method != http.MethodPost {
 		t.Errorf("want POST, got %s", req.method)
 	}
-	if req.path != browsePath {
-		t.Errorf("want path %q, got %q", browsePath, req.path)
+	// A literal, for the reason given in TestSearch_SendsExpectedRequest.
+	if req.path != "/youtubei/v1/browse" {
+		t.Errorf("want path %q, got %q", "/youtubei/v1/browse", req.path)
 	}
 	if browseID, _ := req.body["browseId"].(string); browseID != "MPLYt_Cn67yAcHym7-13" {
 		t.Errorf("browseId not forwarded: got %q", browseID)
@@ -373,6 +378,72 @@ func TestBrowse_EmptyOrUnusableBodyIsErrNotFound(t *testing.T) {
 			}
 			if raw != nil {
 				t.Errorf("want nil bytes on error, got %d bytes", len(raw))
+			}
+		})
+	}
+}
+
+// TestBrowse_MalformedJSONIsErrNotFound covers the half a first-byte test
+// cannot: a body that OPENS like an object and then breaks. Browse is the one
+// call that never unmarshals -- it hands bytes to the decode package -- so
+// without a full validity check it returned (nil error, undecodable bytes),
+// the exact hand-off its own comment claimed to prevent (854-R5F1).
+// Search and Next get this for free from their json.Unmarshal.
+func TestBrowse_MalformedJSONIsErrNotFound(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"truncated_object", `{"contents":`},
+		{"truncated_nested", `{"contents":{"sectionListRenderer":`},
+		{"object_then_garbage", `{"contents":{}}garbage`},
+		{"unclosed_string", `{"contents":"unterminated`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+			c := NewClient()
+			c.baseURL = srv.URL
+
+			raw, err := c.Browse(context.Background(), "MPLYsomeBrowseId")
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("want ErrNotFound for a malformed payload, got %v", err)
+			}
+			if raw != nil {
+				t.Errorf("want nil bytes, got %d: handing these downstream is the defect", len(raw))
+			}
+		})
+	}
+}
+
+// TestNext_EmptyOrUnusableBodyIsErrNotFound pins Next's miss/transport
+// boundary, which had no call-level test at all (854-R5F3). Next is the call
+// where that boundary matters most: ErrNoLyricsTab wrapping ErrNotFound is
+// what stops the worker treating a clean miss as a transport failure and
+// ramping backoff toward retiring the row -- the #607 shape.
+func TestNext_EmptyOrUnusableBodyIsErrNotFound(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"empty", ""},
+		{"whitespace", "   \n\t"},
+		{"html_error_page", "<html><body>captive portal</body></html>"},
+		{"json_scalar", `"just a string"`},
+		{"json_null", `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+			c := NewClient()
+			c.baseURL = srv.URL
+
+			got, err := c.Next(context.Background(), "someVideoId")
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("want an ErrNotFound-class miss, got %v", err)
+			}
+			if got != "" {
+				t.Errorf("want no browseID on a miss, got %q", got)
 			}
 		})
 	}
