@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/petitlyrics"
 )
@@ -59,6 +60,7 @@ func providerPackages(t *testing.T) []string {
 	return []string{
 		filepath.Join(internalDir, "musixmatch"),
 		filepath.Join(internalDir, "petitlyrics"),
+		filepath.Join(internalDir, "innertube"),
 	}
 }
 
@@ -93,6 +95,12 @@ func classifiedSentinels() map[string]error {
 		"petitlyrics.ErrForbidden":             petitlyrics.ErrForbidden,
 		"petitlyrics.ErrNotFound":              petitlyrics.ErrNotFound,
 		"petitlyrics.ErrProviderUnavailable":   petitlyrics.ErrProviderUnavailable,
+		"innertube.ErrUnauthorized":            innertube.ErrUnauthorized,
+		"innertube.ErrRateLimited":             innertube.ErrRateLimited,
+		"innertube.ErrForbidden":               innertube.ErrForbidden,
+		"innertube.ErrClientVersion":           innertube.ErrClientVersion,
+		"innertube.ErrNotFound":                innertube.ErrNotFound,
+		"innertube.ErrNoLyricsTab":             innertube.ErrNoLyricsTab,
 	}
 }
 
@@ -117,6 +125,20 @@ func transportExemptions() map[string]string {
 		// produced by a lyric lookup, so it cannot reach a lane and therefore cannot
 		// reach ClassifyOutcome at all.
 		"musixmatch.ErrTokenMintRefused": "token-bootstrap path only; never returned by a lookup, so it never reaches a lane",
+		// Same reasoning as petitlyrics.ErrForbidden above: a 403 from innertube is
+		// a refused request SHAPE, which no amount of waiting or rotation fixes.
+		// There is additionally no credential in this provider at all -- its API key
+		// is a public non-authenticating constant -- so the auth bucket would be
+		// doubly wrong here.
+		"innertube.ErrForbidden": "a refused request shape on an unauthenticated API, deliberately not an auth/throttle signal (#495)",
+		// ErrClientVersion WRAPS ErrForbidden and inherits its class deliberately.
+		// The gateway rejected whichever ANDROID_MUSIC version we currently pin
+		// (7.03.52 today; the older 5.16.51 was measured returning HTTP 400, which
+		// is what a stale pin looks like). The remedy is bumping the version
+		// constant, not waiting for a throttle to clear. providerClassifier gives
+		// it its OWN breaker arm ahead of ErrForbidden so the operator-facing
+		// diagnosis names the real cause; the OUTCOME class is correctly the same.
+		"innertube.ErrClientVersion": "a stale pinned client version; fixed by bumping the constant, not by waiting (see internal/innertube/doc.go)",
 	}
 }
 
