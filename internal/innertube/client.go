@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -46,6 +47,20 @@ type Client struct {
 	// key is the InnerTube API key sent as a query parameter; injectable for
 	// tests, though no test currently relies on a non-default value.
 	key string
+
+	// Pacer state. The zero value means no pacing (minInterval == 0), which is
+	// what one-shot CLI fetches and tests want. See pacer.go for the pacing
+	// contract -- the interval is enforced per outbound REQUEST rather than per
+	// lookup, and postJSON is the choke point that makes that true for all
+	// three calls without any call site opting in.
+	//
+	// The mutex is required, not defensive: one *Client is shared across the
+	// worker's goroutines, so lastRequest is read-modify-written concurrently.
+	mu          sync.Mutex
+	minInterval time.Duration
+	lastRequest time.Time
+	now         func() time.Time
+	sleep       func(ctx context.Context, d time.Duration) bool
 }
 
 // NewClient creates a new innertube client.
@@ -53,6 +68,8 @@ func NewClient() *Client {
 	c := &Client{
 		baseURL: defaultBaseURL,
 		key:     apiKey,
+		now:     time.Now,
+		sleep:   ctxSleep,
 	}
 	c.httpClient = &http.Client{
 		Timeout: 30 * time.Second,
@@ -162,6 +179,22 @@ func (c *Client) postJSON(ctx context.Context, path string, body any) ([]byte, e
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
+
+	// Paced HERE, at the one point all three calls funnel through, rather than
+	// at each call site or once per lookup -- see the pacing contract in
+	// pacer.go. That placement IS load-bearing and is tested.
+	//
+	// Sitting after the request is BUILT rather than at the top of the function
+	// is a PRECAUTION, not a defended invariant: it means a request that never
+	// goes out (a bad path, an unmarshalable body) cannot consume an interval
+	// slot a real request could have used. No test distinguishes the two
+	// positions, because every caller passes a fixed literal path and a
+	// marshalable struct, so the wasted-slot case is currently unreachable.
+	// Stated honestly rather than asserted, since moving the call to the top of
+	// this function leaves the whole suite green.
+	if err := c.pace(ctx); err != nil {
+		return nil, err
+	}
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {
