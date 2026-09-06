@@ -1056,3 +1056,189 @@ func TestTitleTokensAreAMultisetNotASet(t *testing.T) {
 		}
 	})
 }
+
+// TestArtistReorderIsAccepted is the F2 regression test. Jaro-Winkler is an
+// ordered-string measure, so a legitimate REORDERING of the same artist tokens
+// reads as a large edit: a featured-credit swap measured 0.6736 and a trailing
+// article 0.7076, BOTH below the 0.75 floor, while a genuine wrong-track artist
+// reached 0.8788. That inversion is the defect -- the floor was rejecting
+// correct artists more confidently than it rejected wrong ones.
+func TestArtistReorderIsAccepted(t *testing.T) {
+	const title = "Placeholder Song Title"
+
+	tests := []struct {
+		name        string
+		reqA, candA string
+	}{
+		{
+			name:  "featured-credit ordering swap",
+			reqA:  "Placeholder Artist feat. Zenith Guest Performer",
+			candA: "Zenith Guest Performer feat. Placeholder Artist",
+		},
+		{
+			// 0.7052, just under the floor -- the same shape and nearly the
+			// same value as the 0.7076 the review measured. A longer name in
+			// this form drifts back ABOVE the floor (Jaro-Winkler's prefix
+			// bonus and the shared middle carry it), which is exactly why the
+			// pair is pinned by its measured premise below rather than assumed.
+			name:  "trailing-article form",
+			reqA:  "The Wobblesworth",
+			candA: "Wobblesworth, The",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Assert the PREMISE: these are only meaningful while the pair
+			// scores BELOW the floor. If the floor started admitting them the
+			// token-multiset rule would no longer be what rescues them.
+			if conf := normalize.MatchConfidence(tc.reqA, tc.candA); conf >= matchMinConfidence {
+				t.Fatalf("test premise broken: artist confidence %.4f already clears the %.2f floor, so this case no longer exercises the token-multiset rule", conf, matchMinConfidence)
+			}
+
+			requested := models.Track{ArtistName: tc.reqA, TrackName: title}
+			c := SearchCandidate{VideoID: "vid", Artist: tc.candA, Title: title}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("a legitimate artist reordering was REJECTED: %v", err)
+			}
+		})
+	}
+}
+
+// TestDifferentArtistsSharingATokenAreRejected is the safe-direction guard on
+// the F2 widening. A token-SET comparison must require FULL equality: accepting
+// on mere OVERLAP would make any two acts sharing one common word correspond,
+// a far larger false-accept class than the false rejects F2 removes.
+func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
+	const title = "Placeholder Song Title"
+
+	// END-TO-END: pairs that sit BELOW the floor, so the token-multiset rule is the
+	// only thing that could admit them. These are the cases the widening
+	// actually governs, and each must still be rejected.
+	tests := []struct {
+		name        string
+		reqA, candA string
+	}{
+		{name: "shared token, candidate names more acts", reqA: "Zenith Wobblesworth", candA: "Zenith Kettledrum Quartermain Ensemble"},
+		{name: "shared token in a different position", reqA: "Quartermain Vanguard", candA: "Vanguard Wobblesworth Kettledrum Zenith"},
+		{name: "wholly unrelated", reqA: "Zenith Quartermain", candA: "Wobblesworth Kettledrum"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Assert the premise: below the floor, so an accept could only
+			// come from the token-multiset rule this test is guarding.
+			if conf := normalize.MatchConfidence(tc.reqA, tc.candA); conf >= matchMinConfidence {
+				t.Fatalf("test premise broken: artist confidence %.4f clears the %.2f floor, so this case no longer isolates the token-multiset rule", conf, matchMinConfidence)
+			}
+
+			requested := models.Track{ArtistName: tc.reqA, TrackName: title}
+			c := SearchCandidate{VideoID: "vid", Artist: tc.candA, Title: title}
+			got, err := SelectCandidate([]SearchCandidate{c}, requested)
+			if err == nil {
+				t.Fatalf("two different artists were treated as corresponding (videoID %q)", got.VideoID)
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("error must wrap ErrNotFound, got %v", err)
+			}
+		})
+	}
+
+	// UNIT-LEVEL: pairs the FLOOR ALREADY ADMITS on its own (all score above
+	// 0.75, a strict superset reaching 0.9286). Those accepts are PRE-EXISTING
+	// behavior of the similarity floor, not a consequence of the token-multiset
+	// widening, and this fix does not claim to close them -- doing so would
+	// mean tightening the artist gate, which is the opposite of what F2 asks
+	// for and would re-break the reorderings above.
+	//
+	// What IS asserted here is that the widening contributes NOTHING to them:
+	// the token-multiset rule reports false for every one, so the OR it forms with
+	// the floor adds no accept that the floor was not already making. That is
+	// the precise claim this fix can honestly support.
+	//
+	// THAT IS NOT THE SAME AS "NO NEW ACCEPTS AT ALL", and the difference
+	// belongs here so nobody reads the stronger claim out of the weaker one.
+	// The widening introduces exactly one new accept class: two acts that are
+	// TOKEN PERMUTATIONS of each other, which pass at floor=false, set=true.
+	// That is the intended mechanism -- it is precisely what rescues the
+	// credited-order swap in TestArtistReorderIsAccepted -- and it is rare,
+	// because two DIFFERENT acts named by the same multiset of words in a
+	// different order is a coincidence, where a reordering of the SAME act is
+	// routine. The overlap cases below are the ones that stay closed; a
+	// permutation is the one that opens.
+	t.Run("the token-multiset rule itself never accepts on mere overlap", func(t *testing.T) {
+		overlapping := []struct{ name, a, b string }{
+			{"shared surname only", "Zenith Quartermain", "Wendell Quartermain"},
+			{"shared leading word", "Placeholder Vanguard", "Placeholder Meridian"},
+			{"candidate is a strict superset", "Zenith Quartermain", "Zenith Quartermain Orchestra"},
+			{"candidate is a strict subset", "Zenith Quartermain Orchestra", "Zenith Quartermain"},
+			{"same token count, one token differs", "Quartermain Zenith Ensemble", "Quartermain Wobblesworth Ensemble"},
+		}
+		for _, tc := range overlapping {
+			if artistTokensEqual(tc.a, tc.b) {
+				t.Errorf("%s: token multisets must NOT be equal -- accepting on overlap would make any two acts sharing a word correspond", tc.name)
+			}
+		}
+	})
+
+	t.Run("a reordering of the SAME tokens is equal", func(t *testing.T) {
+		if !artistTokensEqual("Wobblesworth & Kettledrum", "Kettledrum & Wobblesworth") {
+			t.Error("a pure reordering names the same act and must compare equal")
+		}
+	})
+
+	// MULTIPLICITY IS LOAD-BEARING (853-R5F1). These rows are the ones a SET
+	// comparison gets wrong: it collapses duplicates, so a doubled-word act
+	// and its single-word namesake compare equal and a lyric from the wrong
+	// act can be written. A set passes every other test in this file, so
+	// without these rows the set-vs-multiset choice is unpinned and the
+	// regression is silent.
+	t.Run("a repeated token is not the same act as a single one", func(t *testing.T) {
+		differing := []struct{ name, a, b string }{
+			{"doubled name vs its namesake", "Wobble Wobble Kettle", "Kettle Wobble"},
+			{"doubled name in a collaboration", "Wobble Wobble & Kettledrum", "Kettledrum & Wobble"},
+			{"repeat on the candidate side", "Kettle Wobble", "Wobble Wobble Kettle"},
+			{"three tokens, one repeated", "Zenith Zenith Quartermain Vanguard", "Vanguard Quartermain Zenith"},
+		}
+		for _, tc := range differing {
+			if artistTokensEqual(tc.a, tc.b) {
+				t.Errorf("%s: %q and %q repeat a token differently and name different acts; a SET comparison would wrongly accept them", tc.name, tc.a, tc.b)
+			}
+		}
+	})
+
+	t.Run("a repeated token still matches its own reordering", func(t *testing.T) {
+		// The multiset must not over-reject: the same multiplicities in a
+		// different order are still the same act.
+		if !artistTokensEqual("Wobble Wobble Kettle", "Kettle Wobble Wobble") {
+			t.Error("identical multiplicities in a different order name the same act")
+		}
+	})
+
+	// The featMarkers and ignorableTokens skips inside the tokenizer had no
+	// test: every existing case carried the token on BOTH sides, so it
+	// canceled and deleting the skip changed nothing (853-R5F3). These put
+	// the token on ONE side only, which is the shape the skip exists for.
+	t.Run("a marker present on only one side is skipped", func(t *testing.T) {
+		oneSided := []struct{ name, a, b string }{
+			{"feat marker only on the candidate", "Zenith Quartermain", "Zenith feat. Quartermain"},
+			{"ignorable article only on the request", "The Kettledrum Vanguard", "Kettledrum Vanguard"},
+		}
+		for _, tc := range oneSided {
+			if !artistTokensEqual(tc.a, tc.b) {
+				t.Errorf("%s: %q and %q name the same act; the dropped token must not break equality", tc.name, tc.a, tc.b)
+			}
+		}
+	})
+
+	// The empty-multiset guard is reachable: a value can survive NormalizeKey
+	// and still tokenize to nothing. Without the guard two such fields compare
+	// equal and accept at 0.0 confidence.
+	t.Run("a field that tokenizes to nothing never compares equal", func(t *testing.T) {
+		for _, tc := range [][2]string{{"&", "!!!"}, {"...", "&&&"}, {"&", "&"}} {
+			if artistTokensEqual(tc[0], tc[1]) {
+				t.Errorf("%q vs %q: neither carries a token, so there is no evidence to accept on", tc[0], tc[1])
+			}
+		}
+	})
+}
