@@ -29,14 +29,14 @@ func parseDurationSeconds(s string) int {
 	if !durationPattern.MatchString(s) {
 		return 0
 	}
+	// Both Atoi calls are infallible here rather than merely unlikely to fail:
+	// durationPattern has already matched, so each part is one or two ASCII
+	// digits (Go's \d is ASCII-only) and cannot overflow. Handling an error
+	// that cannot occur would add a branch no test can reach, so the errors are
+	// discarded deliberately -- if the pattern is ever widened, restore the
+	// checks along with it.
 	parts := strings.Split(s, ":")
-	minutes, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0
-	}
-	seconds, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0
-	}
+	minutes, _ := strconv.Atoi(parts[0])
+	seconds, _ := strconv.Atoi(parts[1])
 	return minutes*60 + seconds
 }
