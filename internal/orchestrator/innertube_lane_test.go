@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/innertube"
@@ -48,12 +49,23 @@ func TestInnerTubeMissIsBenignNotTransport(t *testing.T) {
 		name string
 		err  error
 	}{
-		// Every "reached the API, nothing usable" path in the provider. They are
-		// listed individually rather than as one representative because each is
-		// produced by a different call in the chain, and a classifier arm that
-		// caught only some of them would leave the rest defaulting to transport.
+		// The "reached the API, nothing usable" family. All of these route
+		// through the SINGLE errors.Is(err, innertube.ErrNotFound) arm -- no arm
+		// exists that could catch one and miss another -- so they are listed to
+		// document the family rather than because each needs separate wiring.
+		//
+		// The correspondence-gate rejection is the one that matters most and was
+		// missing from this table while the comments called it the important
+		// member: innertube search never signals "no match", so a rejected
+		// candidate is this lane's most frequent healthy outcome by
+		// construction. It reaches here by wrapping (selection.go returns it
+		// wrapped around ErrNotFound), which is exactly what the row below
+		// pins.
 		{"no search candidates", innertube.ErrNotFound},
 		{"no lyrics tab for the video", innertube.ErrNoLyricsTab},
+		{"correspondence gate rejects the candidate", fmt.Errorf(
+			"innertube: no search candidate corresponds to the requested track: %w",
+			innertube.ErrNotFound)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Wrapped, the way a lane returns it in production.
@@ -90,6 +102,120 @@ func TestInnerTubeMissDoesNotTripTheBreaker(t *testing.T) {
 	}
 	if cb.Trips() != 0 {
 		t.Errorf("trips = %d, want 0; a benign miss must not advance the ramp", cb.Trips())
+	}
+}
+
+// TestInnerTubeMissResetsTheRamp is the half the test above CANNOT reach, and
+// the distinction is the whole point of the benign-miss arm.
+//
+// Above, the breaker starts fresh: trips are already 0 and the state is already
+// closed, so "the miss did not make things worse" is satisfied by any arm that
+// merely leaves the breaker alone -- including the default transport branch,
+// which touches it by design. Measured: DELETING the entire benign-miss case
+// from providerClassifier leaves that test, and the whole suite, GREEN.
+//
+// Reset is only observable from a ramp that is already advanced. So this
+// pre-trips the breaker twice and advances the clock past the open window
+// (half-open, where the provider is consulted again), then asserts the miss
+// drove trips back to zero. Mirrors TestLaneBenignMissRecordsBenignMiss, which
+// gets this right for musixmatch.
+//
+// The production consequence the fresh-breaker version cannot see: after a real
+// fault has tripped this lane, a healthy miss would never close it back down.
+// Misses are this lane's most frequent outcome by construction, so the lane
+// would ratchet open and stay there.
+func TestInnerTubeMissResetsTheRamp(t *testing.T) {
+	l, cb := newInnertubeLane(innertube.ErrNotFound)
+	fixed := time.Now()
+	cb.SetClock(func() time.Time { return fixed })
+	cb.Trip()
+	cb.Trip()
+	if cb.Trips() != 2 {
+		t.Fatalf("setup: trips = %d, want 2 before the miss", cb.Trips())
+	}
+	// Past the open window, so the lane is half-open and the provider is
+	// actually consulted -- an open breaker would short-circuit to
+	// ErrLaneUnavailable and never reach the classifier at all.
+	cb.SetClock(func() time.Time { return fixed.Add(2 * time.Hour) })
+
+	_, err := l.FindLyrics(context.Background(), models.Track{}, "")
+	if !errors.Is(err, innertube.ErrNotFound) {
+		t.Fatalf("err = %v; want ErrNotFound", err)
+	}
+	if cb.Trips() != 0 {
+		t.Errorf("trips = %d, want 0; a benign miss must RESET the ramp, not merely "+
+			"leave it alone", cb.Trips())
+	}
+	// EverSucceeded is deliberately NOT set by a miss, matching every other
+	// provider: a miss is a successful round trip but not a genuine lyric match.
+	// Without this, adding RecordSuccess() to the miss arm goes undetected.
+	if cb.EverSucceeded() {
+		t.Error("a benign miss set EverSucceeded; that flag means the lane genuinely " +
+			"fetched a lyric, and a miss is not that")
+	}
+}
+
+// TestInnerTubeNoLyricsTabResetsTheRampToo drives ErrNoLyricsTab through the
+// real classifier rather than only through ClassifyOutcome. It wraps
+// ErrNotFound, so it shares the miss arm -- a property asserted in a comment
+// and, before this, nowhere else.
+func TestInnerTubeNoLyricsTabResetsTheRamp(t *testing.T) {
+	l, cb := newInnertubeLane(innertube.ErrNoLyricsTab)
+	fixed := time.Now()
+	cb.SetClock(func() time.Time { return fixed })
+	cb.Trip()
+	cb.SetClock(func() time.Time { return fixed.Add(2 * time.Hour) })
+
+	_, err := l.FindLyrics(context.Background(), models.Track{}, "")
+	if !errors.Is(err, innertube.ErrNoLyricsTab) {
+		t.Fatalf("err = %v; want ErrNoLyricsTab", err)
+	}
+	if cb.Trips() != 0 {
+		t.Errorf("trips = %d, want 0; a video with no lyrics rendition is a clean "+
+			"miss and must reset the ramp like any other", cb.Trips())
+	}
+}
+
+// TestInnerTubeOutcomeClasses pins the OUTCOME CLASS of every innertube
+// sentinel, which is a different question from which breaker arm each one takes
+// and was measured to be unpinned for two of them.
+//
+// Measured: moving ErrUnauthorized and ErrRateLimited out of the auth bucket
+// and into the BENIGN-MISS bucket left the entire suite green. The lane tests
+// below assert breaker state and pacer counts -- a different function -- and
+// the enumeration guard only asserts "not OutcomeTransport", which
+// OutcomeBenignMiss satisfies. So nothing was checking the class itself.
+//
+// The failure that permits is #748/#607 running BACKWARDS. OutcomeAuthRateLimit
+// has precedence 4 and OutcomeBenignMiss has 1, so a 429 read as benign loses
+// the cross-lane ranking, and when it IS the surfaced outcome the worker records
+// a STABLE MISS against a track the provider never answered for. The catalog
+// answer was unknown and it gets written down as "absent" -- durable, and worse
+// than the failure this change fixes.
+//
+// This mirrors TestPetitLyricsControlGroupUnchanged, which had the subject
+// under test less thoroughly pinned than its own control group.
+func TestInnerTubeOutcomeClasses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want OutcomeClass
+	}{
+		{"401 is auth/ratelimit", innertube.ErrUnauthorized, OutcomeAuthRateLimit},
+		{"429 is auth/ratelimit", innertube.ErrRateLimited, OutcomeAuthRateLimit},
+		// The two deliberate exemptions, positively asserted rather than merely
+		// absent from the enumeration guard's complaints.
+		{"403 stays transport by design", innertube.ErrForbidden, OutcomeTransport},
+		{"stale client version stays transport", innertube.ErrClientVersion, OutcomeTransport},
+		{"miss is benign", innertube.ErrNotFound, OutcomeBenignMiss},
+		{"no lyrics tab is benign", innertube.ErrNoLyricsTab, OutcomeBenignMiss},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClassifyOutcome(fmt.Errorf("lane innertube: find lyrics: %w", tc.err))
+			if got != tc.want {
+				t.Errorf("ClassifyOutcome = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
