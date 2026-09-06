@@ -89,9 +89,12 @@ func (c *Client) WithMinInterval(d time.Duration) *Client {
 	return c
 }
 
-// MinInterval returns the configured minimum request interval. Zero means
-// pacing is disabled. Guarded by the same mutex WithMinInterval writes under
-// (#494).
+// MinInterval returns the configured minimum request interval. Any value <= 0
+// means pacing is disabled, and a NEGATIVE value is returned verbatim rather
+// than normalized to zero: WithMinInterval clamps only when d > 0, so a
+// negative is stored as given, and pace() disables on minInterval <= 0. Callers
+// testing whether pacing is on must compare against zero with <=, never ==.
+// Guarded by the same mutex WithMinInterval writes under (#494).
 func (c *Client) MinInterval() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
