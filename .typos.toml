@@ -17,7 +17,15 @@ extend-exclude = [
 # everything else typos scans -- e.g. modelling -> modeling, queueing -> queuing).
 locale = "en-us"
 # Ignore git commit hashes (7-40 hex chars) to avoid false positives on hash substrings.
-extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b"]
+# Also the exact literal of internal/innertube's opaque base64-encoded innertube
+# search "params" blob (issue #854, songs-only shelf filter, 854-F3): it is an
+# undocumented, reverse-engineered wire value, not prose -- changing it would
+# change what the API returns. Scoped to the exact string (not a bare word
+# allowlist like [default.extend-words], which is case-insensitive and
+# repo-wide) so it does not mask the unrelated "ake"/"AKE" -> "ache"/"ACHE"
+# misspelling anywhere else in the repo, mirroring the reasoning documented
+# below for MisSynced: allowlist as an IDENTIFIER/literal, not as a word.
+extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b", "Eg-KAQwIARAAGAAgACgAMABqChAEEAUQAxAKEAk="]
 
 [default.extend-words]
 # ID3v2 frame names are not English words; typos extracts the alpha portion (e.g. TPE from TPE1)
