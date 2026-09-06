@@ -31,6 +31,14 @@
                                             "videoId": "aaaaaaaaaaa"
                                           }
                                         }
+                                      },
+                                      {
+                                        "text": "Later Title Run",
+                                        "navigationEndpoint": {
+                                          "watchEndpoint": {
+                                            "videoId": "laterrunvid"
+                                          }
+                                        }
                                       }
                                     ]
                                   },
@@ -79,6 +87,18 @@
                                     ]
                                   },
                                   "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "1:23"
+                                      }
+                                    ]
+                                  },
+                                  "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_LOW"
                                 }
                               }
                             ],
