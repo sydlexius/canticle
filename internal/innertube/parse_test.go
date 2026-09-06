@@ -393,3 +393,52 @@ func TestParseSearchCandidates_TitleComesFromTheFirstRun(t *testing.T) {
 		t.Errorf("want the FIRST run's text %q, got %q", "First", got[0].Title)
 	}
 }
+
+// TestParseSearchCandidates_MusicShelfRenderer pins #894: the live gateway
+// answers a songs-filtered search with a musicShelfRenderer whose items are
+// musicResponsiveListItemRenderer, NOT the musicCardShelfRenderer every
+// hand-built fixture in this package was written around. Matching only the
+// card shelf made parseSearchCandidates return an empty slice for every real
+// query, which calls.go turns into ErrNotFound -- a total provider failure
+// wearing the costume of a benign miss.
+//
+// Measured before the fix: 4 of 4 live responses (three real tracks, one
+// nonsense query) carried musicShelfRenderer and 0 of 4 carried
+// musicCardShelfRenderer.
+//
+// The fixture reproduces the captured STRUCTURE with placeholder text, which
+// is the axis that was wrong; the values never mattered.
+func TestParseSearchCandidates_MusicShelfRenderer(t *testing.T) {
+	got, err := parseSearchCandidates(readFixture(t, "search_music_shelf.json"))
+	if err != nil {
+		t.Fatalf("parseSearchCandidates: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 candidates from the music shelf, got %d", len(got))
+	}
+
+	first := got[0]
+	if first.VideoID != "aaaaaaaaaaa" {
+		t.Errorf("videoId = %q, want aaaaaaaaaaa", first.VideoID)
+	}
+	if first.Title != "Placeholder Song Title" {
+		t.Errorf("title = %q, want the flexColumn-0 watch-endpoint run", first.Title)
+	}
+	// The album run also carries a browseEndpoint, so a last-wins loop would
+	// report the album here -- the same 854-F2 shape the card-shelf arm guards.
+	if first.Artist != "Placeholder Artist Name" {
+		t.Errorf("artist = %q, want the FIRST browse-bearing run, not the album", first.Artist)
+	}
+	if first.DurationSeconds != 126 {
+		t.Errorf("duration = %d, want 126 (2:06)", first.DurationSeconds)
+	}
+
+	// Every item in the shelf is a candidate: a shelf carries the whole result
+	// list, unlike a card shelf which is one result.
+	if got[1].VideoID != "bbbbbbbbbbb" {
+		t.Errorf("second videoId = %q, want bbbbbbbbbbb", got[1].VideoID)
+	}
+	if got[1].DurationSeconds != 239 {
+		t.Errorf("second duration = %d, want 239 (3:59)", got[1].DurationSeconds)
+	}
+}

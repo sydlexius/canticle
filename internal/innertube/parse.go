@@ -26,6 +26,39 @@ type searchResponse struct {
 
 type searchSectionContent struct {
 	MusicCardShelfRenderer *musicCardShelfRenderer `json:"musicCardShelfRenderer"`
+
+	// MusicShelfRenderer is the shape the LIVE gateway returns for a
+	// songs-filtered search (#894). It carries the whole result LIST, one
+	// musicResponsiveListItemRenderer per song, where a card shelf carries a
+	// single promoted result. Both arms are kept: a response may contain
+	// either, and a section carrying neither is skipped.
+	MusicShelfRenderer *musicShelfRenderer `json:"musicShelfRenderer"`
+}
+
+// musicShelfRenderer is a list shelf: its contents are the search results.
+type musicShelfRenderer struct {
+	Contents []musicShelfItem `json:"contents"`
+}
+
+type musicShelfItem struct {
+	MusicResponsiveListItemRenderer *musicResponsiveListItemRenderer `json:"musicResponsiveListItemRenderer"`
+}
+
+// musicResponsiveListItemRenderer is one row of a music shelf. The videoId is
+// read from playlistItemData rather than from the title run's watchEndpoint:
+// both carry it in every captured response, and playlistItemData is the
+// simpler path with no navigation indirection.
+type musicResponsiveListItemRenderer struct {
+	FlexColumns      []flexColumn `json:"flexColumns"`
+	PlaylistItemData struct {
+		VideoID string `json:"videoId"`
+	} `json:"playlistItemData"`
+}
+
+type flexColumn struct {
+	Renderer struct {
+		Text runsContainer `json:"text"`
+	} `json:"musicResponsiveListItemFlexColumnRenderer"`
 }
 
 type musicCardShelfRenderer struct {
@@ -74,11 +107,20 @@ func parseSearchCandidates(raw []byte) ([]SearchCandidate, error) {
 	var out []SearchCandidate
 	for _, tab := range resp.Contents.TabbedSearchResultsRenderer.Tabs {
 		for _, section := range tab.TabRenderer.Content.SectionListRenderer.Contents {
-			if section.MusicCardShelfRenderer == nil {
-				continue
+			if section.MusicCardShelfRenderer != nil {
+				if cand, ok := candidateFromShelf(*section.MusicCardShelfRenderer); ok {
+					out = append(out, cand)
+				}
 			}
-			if cand, ok := candidateFromShelf(*section.MusicCardShelfRenderer); ok {
-				out = append(out, cand)
+			if section.MusicShelfRenderer != nil {
+				for _, item := range section.MusicShelfRenderer.Contents {
+					if item.MusicResponsiveListItemRenderer == nil {
+						continue
+					}
+					if cand, ok := candidateFromListItem(*item.MusicResponsiveListItemRenderer); ok {
+						out = append(out, cand)
+					}
+				}
 			}
 		}
 	}
@@ -126,6 +168,57 @@ func candidateFromShelf(shelf musicCardShelfRenderer) (SearchCandidate, bool) {
 		}
 		if d := parseDurationSeconds(run.Text); d > 0 {
 			cand.DurationSeconds = d
+		}
+	}
+	return cand, true
+}
+
+// candidateFromListItem extracts a SearchCandidate from one music-shelf row,
+// or reports false if the row carries no usable videoId.
+//
+// The column layout is positional in every captured response: flexColumn 0 is
+// the title (a single run bearing the watchEndpoint) and flexColumn 1 is the
+// subtitle, reading "Artist - Album - Duration" as alternating browse-bearing
+// and plain runs. Rather than trust that layout, this walks EVERY column's runs
+// and classifies each run by what it carries, so a column reorder degrades to a
+// miss on one field instead of reading the wrong field confidently.
+//
+// Artist takes the FIRST browse-bearing run, matching candidateFromShelf and
+// for the same reason (854-F2): the album run carries a browseEndpoint too, so
+// a last-wins loop would report the album as the artist. Both arms therefore
+// share one rule, and the pageType discriminator stays unused -- see the
+// reasoning in candidateFromShelf about not trusting an undocumented browseId
+// format as a second attack surface.
+//
+// As with the card-shelf arm, nothing here establishes that the row
+// CORRESPONDS to the requested track; search has no empty state (doc.go), so
+// that remains SelectCandidate's job.
+func candidateFromListItem(item musicResponsiveListItemRenderer) (SearchCandidate, bool) {
+	videoID := item.PlaylistItemData.VideoID
+	if videoID == "" {
+		return SearchCandidate{}, false
+	}
+
+	cand := SearchCandidate{VideoID: videoID}
+	artistSet := false
+	for _, col := range item.FlexColumns {
+		for _, run := range col.Renderer.Text.Runs {
+			if run.NavigationEndpoint != nil && run.NavigationEndpoint.WatchEndpoint != nil {
+				if cand.Title == "" {
+					cand.Title = run.Text
+				}
+				continue
+			}
+			if run.NavigationEndpoint != nil && run.NavigationEndpoint.BrowseEndpoint != nil {
+				if !artistSet {
+					cand.Artist = run.Text
+					artistSet = true
+				}
+				continue
+			}
+			if d := parseDurationSeconds(run.Text); d > 0 {
+				cand.DurationSeconds = d
+			}
 		}
 	}
 	return cand, true
