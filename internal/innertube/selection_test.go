@@ -839,6 +839,14 @@ func TestMeasuredSiblingPairsFromIssue883(t *testing.T) {
 func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 	const artist = "Placeholder Artist Name"
 
+	// EVERY REJECT ROW ASSERTS ITS FLOOR PREMISE FIRST, and the asymmetry is the
+	// reason. SelectCandidate can reject at the similarity floor BEFORE
+	// titleTokensCorrespond runs, so a REJECT row would pass without ever
+	// reaching the clause it names if normalization ever moved that pair below
+	// the floor -- silently, for the wrong reason. An ACCEPT row needs no such
+	// premise: a floor rejection there fails the test loudly, which is the
+	// correct direction to be wrong in.
+	//
 	// ISOLATION IS THE WHOLE POINT OF THESE ROWS, and it is easy to get wrong.
 	// A pair whose unmatched tokens are CONTENT rejects at the unmatched-token
 	// clause and never reaches the clause under test, so it pins nothing.
@@ -854,6 +862,11 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		// titleVariantTokens calls load bearing.
 		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
 		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title Part"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, "+
+				"so the floor rejects this pair and the row no longer exercises the "+
+				"variant vocabulary", conf, matchMinConfidence)
+		}
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
 			t.Error("a title differing only by `part` was ACCEPTED -- a part marker " +
 				"names a different song and must never become vocabulary")
@@ -866,6 +879,11 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		// yearsDiffer is the only thing that can reject.
 		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Nocturne 1984"}
 		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Nocturne 2019"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, "+
+				"so the floor rejects this pair and the row no longer exercises "+
+				"yearsDiffer", conf, matchMinConfidence)
+		}
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
 			t.Error("two differently-dated works were ACCEPTED -- when both titles " +
 				"carry a year and the years disagree, the year is the identity, not " +
