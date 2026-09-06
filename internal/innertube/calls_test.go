@@ -87,7 +87,13 @@ func newTestClient(t *testing.T, srv *fixtureServer) *Client {
 	return c
 }
 
-// --- AC: all three calls issue the expected method, headers and body shape ---
+// --- AC: all three calls issue the expected method, endpoint and body shape ---
+//
+// HEADERS are deliberately NOT re-asserted per call (884-R1F1). Content-Type
+// and User-Agent are set once in postJSON, which all three share, and
+// client_test.go pins them there. Asserting them three more times here would
+// test the same line thrice and drift out of sync with it; only Search keeps a
+// User-Agent check, as a smoke test that the shared path is wired at all.
 
 func TestSearch_SendsExpectedRequest(t *testing.T) {
 	srv := &fixtureServer{fixtures: map[string]string{searchPath: "search.json"}}
@@ -125,8 +131,11 @@ func TestSearch_SendsExpectedRequest(t *testing.T) {
 	if !strings.Contains(query, "Placeholder Song Title") || !strings.Contains(query, "Placeholder Artist Name") {
 		t.Errorf("query should carry artist and title, got %q", query)
 	}
-	if params, _ := req.body["params"].(string); params == "" {
-		t.Error("search request should carry the songs-only params filter")
+	// LITERAL, not just non-empty (884-R1F2). This opaque base64 blob is the
+	// songs-only filter; any other non-empty value changes what the API
+	// returns while a non-empty check stays green.
+	if params, _ := req.body["params"].(string); params != "Eg-KAQwIARAAGAAgACgAMABqChAEEAUQAxAKEAk=" {
+		t.Errorf("search request must carry the songs-only params filter verbatim, got %q", params)
 	}
 	clientCtx, _ := req.body["context"].(map[string]any)
 	client, _ := clientCtx["client"].(map[string]any)
@@ -243,8 +252,14 @@ func TestSearchAndNext_UseWebRemixContext(t *testing.T) {
 	for _, req := range srv.snapshot() {
 		clientCtx, _ := req.body["context"].(map[string]any)
 		client, _ := clientCtx["client"].(map[string]any)
-		if name, _ := client["clientName"].(string); name != webClientName {
-			t.Errorf("%s should use client %q, got %q", req.path, webClientName, name)
+		// BOTH context fields, against literals. The client name alone left the
+		// VERSION unpinned, and a changed version alters API behavior while
+		// this suite stays green (884-R1F2).
+		if name, _ := client["clientName"].(string); name != "WEB_REMIX" {
+			t.Errorf("%s should use client %q, got %q", req.path, "WEB_REMIX", name)
+		}
+		if ver, _ := client["clientVersion"].(string); ver != "1.20240101.01.00" {
+			t.Errorf("%s should pin client version %q, got %q", req.path, "1.20240101.01.00", ver)
 		}
 	}
 }
