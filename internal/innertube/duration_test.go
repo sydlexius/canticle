@@ -18,13 +18,17 @@ func TestParseDurationSeconds(t *testing.T) {
 		{"", 0},
 		// The edge behaviors parseDurationSeconds' doc comment calls out as
 		// deliberate (854-F8), pinned so a future "fix" cannot change them
-		// silently. The last row pins the OTHER half of the same regex: a
-		// widened seconds field would read "1:2" as 62s, which no other row
-		// observes (854-R4F1):
+		// silently. Each row kills a distinct mutation of the pattern or the
+		// arithmetic:
 		{"1:02:03", 0}, // h:mm:ss does not match; fails open to "not supplied"
-		{"100:00", 0},  // >= 100 minutes exceeds the two-digit cap
-		{"9:99", 639},  // an impossible seconds field matches and is combined
+		{"100:00", 0},  // >= 100 minutes exceeds the two-digit minutes cap
 		{"1:2", 0},     // the seconds field is fixed-width: "m:s" is not a duration
+		// Seconds are range-bounded to 00-59, so an impossible seconds field is
+		// REJECTED rather than combined into a confidently wrong number. A wrong
+		// duration is worse than a missing one: 0 fails open, 639 gets acted on.
+		{"9:99", 0},
+		{"1:60", 0},   // the first value above the boundary
+		{"1:59", 119}, // the boundary itself still parses
 	}
 	for _, tc := range cases {
 		if got := parseDurationSeconds(tc.in); got != tc.want {
