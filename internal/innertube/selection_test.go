@@ -118,9 +118,15 @@ func loadSearchCandidates(t *testing.T, name string) []SearchCandidate {
 	return out
 }
 
-// parseDuration converts an "M:SS" or "H:MM:SS" label to seconds, returning 0
-// (the documented "not supplied, fails open" sentinel) on anything it cannot
-// read.
+// parseDuration converts a colon-separated "M:SS" or "H:MM:SS" fixture label to
+// seconds, returning 0 (the documented "not supplied, fails open" sentinel) if
+// any part is not an integer.
+//
+// It does NOT validate ranges: "3:75" parses to 255 rather than being refused.
+// That is deliberate for a test helper reading a fixture this repo controls --
+// the parser under test is parseDurationSeconds, which DOES range-check, and
+// duplicating that here would let this helper disagree with it. Do not reuse
+// this on untrusted input.
 func parseDuration(s string) int {
 	parts := strings.Split(strings.TrimSpace(s), ":")
 	total := 0
@@ -183,7 +189,7 @@ func TestSelectCandidateAcceptsACorrectResolution(t *testing.T) {
 		t.Errorf("videoID = %q, want %q", got.VideoID, candidates[0].VideoID)
 	}
 	if got.DurationSeconds == 0 {
-		t.Error("the fixture's duration did not survive parsing; the duration tie-break would be untested")
+		t.Error("the fixture's duration did not survive parsing; the duration signal 853b ranks on would be untested")
 	}
 }
 
