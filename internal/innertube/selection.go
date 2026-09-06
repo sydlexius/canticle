@@ -704,21 +704,30 @@ func titleFieldCorresponds(requested, got string) (ok, comparable bool) {
 	return titleTokensCorrespond(requested, got), true
 }
 
-// artistTokenSetsEqual reports whether two artist strings name the same set of
-// tokens, ignoring order.
+// artistTokensEqual reports whether two artist strings name the same tokens
+// with the same multiplicities, ignoring ORDER.
 //
-// This is a SET comparison and it requires FULL equality, never overlap. Two
-// different acts that merely share a token have unequal sets and are still
-// rejected; accepting on overlap would make any act sharing one common word
-// correspond to any other, which is a far larger false-accept class than the
-// false rejects this path exists to remove.
+// Order-insensitivity is the whole point: a credited-order swap names the same
+// act. MULTIPLICITY is kept, and that is a correction (853-R5F1). An earlier
+// revision collapsed duplicates into a set, which made a doubled-word act
+// indistinguishable from its single-word namesake and created a wrong-artist
+// ACCEPT class -- a repeated-word act versus a differently-named one, or the
+// "X X & Y" versus "X & Y" collaboration shape, compared equal and a lyric
+// from the wrong act could be written. A multiset accepts every legitimate
+// reorder the set accepted, so discarding multiplicity bought nothing and
+// cost a false accept.
+//
+// It requires FULL equality, never overlap. Two different acts that merely
+// share a token still have unequal multisets and are rejected; accepting on
+// overlap would make any act sharing one common word correspond to any other,
+// a far larger false-accept class than the false rejects this path removes.
 //
 // Featuring markers are dropped rather than truncating, unlike a title: the
 // names following them are part of the act being named, so a swap of the
 // credited order has to compare equal.
-func artistTokenSetsEqual(requested, got string) bool {
-	set := func(s string) map[string]struct{} {
-		out := make(map[string]struct{})
+func artistTokensEqual(requested, got string) bool {
+	counts := func(s string) map[string]int {
+		out := make(map[string]int)
 		for _, tok := range splitTokens(s) {
 			if _, ok := ignorableTokens[tok]; ok {
 				continue
@@ -726,16 +735,16 @@ func artistTokenSetsEqual(requested, got string) bool {
 			if _, ok := featMarkers[tok]; ok {
 				continue
 			}
-			out[tok] = struct{}{}
+			out[tok]++
 		}
 		return out
 	}
-	req, cand := set(requested), set(got)
+	req, cand := counts(requested), counts(got)
 	if len(req) == 0 || len(cand) == 0 || len(req) != len(cand) {
 		return false
 	}
-	for tok := range req {
-		if _, ok := cand[tok]; !ok {
+	for tok, n := range req {
+		if cand[tok] != n {
 			return false
 		}
 	}
@@ -754,10 +763,15 @@ func artistTokenSetsEqual(requested, got string) bool {
 // named is identical -- the similarity axis is simply the wrong instrument for
 // this field.
 //
-// The token multiset rule used for titles would NOT fix it (order is exactly
-// what it preserves), and the set rule used here must NOT be applied to titles:
-// a set discards the repetition and ordering that distinguish two titles built
-// from the same words. Each field gets the comparison its failure mode needs.
+// The comparison is a token MULTISET, like the title rule -- both are
+// order-insensitive, so an earlier claim here that the title rule "preserves
+// order" and therefore could not fix this was simply false about the code it
+// cited (853-R5F2). What the two rules do NOT share is the rest of the title
+// machinery: the variant-token and shared-content-token requirements exist to
+// separate a track from its remix or live sibling, and applying them to an
+// artist would re-introduce the reordering false rejects this path removes.
+// Each field gets the comparison its failure mode needs; the difference is
+// that machinery, not the multiset.
 func artistFieldCorresponds(requested, got string) (ok, comparable bool) {
 	ok, comparable = fieldCorresponds(requested, got)
 	if !comparable {
@@ -766,5 +780,5 @@ func artistFieldCorresponds(requested, got string) (ok, comparable bool) {
 	if ok {
 		return true, true
 	}
-	return artistTokenSetsEqual(requested, got), true
+	return artistTokensEqual(requested, got), true
 }

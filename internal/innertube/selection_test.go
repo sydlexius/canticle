@@ -1175,15 +1175,70 @@ func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 			{"same token count, one token differs", "Quartermain Zenith Ensemble", "Quartermain Wobblesworth Ensemble"},
 		}
 		for _, tc := range overlapping {
-			if artistTokenSetsEqual(tc.a, tc.b) {
+			if artistTokensEqual(tc.a, tc.b) {
 				t.Errorf("%s: token sets must NOT be equal -- accepting on overlap would make any two acts sharing a word correspond", tc.name)
 			}
 		}
 	})
 
 	t.Run("a reordering of the SAME tokens is equal", func(t *testing.T) {
-		if !artistTokenSetsEqual("Wobblesworth & Kettledrum", "Kettledrum & Wobblesworth") {
+		if !artistTokensEqual("Wobblesworth & Kettledrum", "Kettledrum & Wobblesworth") {
 			t.Error("a pure reordering names the same act and must compare equal")
+		}
+	})
+
+	// MULTIPLICITY IS LOAD-BEARING (853-R5F1). These rows are the ones a SET
+	// comparison gets wrong: it collapses duplicates, so a doubled-word act
+	// and its single-word namesake compare equal and a lyric from the wrong
+	// act can be written. A set passes every other test in this file, so
+	// without these rows the set-vs-multiset choice is unpinned and the
+	// regression is silent.
+	t.Run("a repeated token is not the same act as a single one", func(t *testing.T) {
+		differing := []struct{ name, a, b string }{
+			{"doubled name vs its namesake", "Wobble Wobble Kettle", "Kettle Wobble"},
+			{"doubled name in a collaboration", "Wobble Wobble & Kettledrum", "Kettledrum & Wobble"},
+			{"repeat on the candidate side", "Kettle Wobble", "Wobble Wobble Kettle"},
+			{"three tokens, one repeated", "Zenith Zenith Quartermain Vanguard", "Vanguard Quartermain Zenith"},
+		}
+		for _, tc := range differing {
+			if artistTokensEqual(tc.a, tc.b) {
+				t.Errorf("%s: %q and %q repeat a token differently and name different acts; a SET comparison would wrongly accept them", tc.name, tc.a, tc.b)
+			}
+		}
+	})
+
+	t.Run("a repeated token still matches its own reordering", func(t *testing.T) {
+		// The multiset must not over-reject: the same multiplicities in a
+		// different order are still the same act.
+		if !artistTokensEqual("Wobble Wobble Kettle", "Kettle Wobble Wobble") {
+			t.Error("identical multiplicities in a different order name the same act")
+		}
+	})
+
+	// The featMarkers and ignorableTokens skips inside the tokenizer had no
+	// test: every existing case carried the token on BOTH sides, so it
+	// canceled and deleting the skip changed nothing (853-R5F3). These put
+	// the token on ONE side only, which is the shape the skip exists for.
+	t.Run("a marker present on only one side is skipped", func(t *testing.T) {
+		oneSided := []struct{ name, a, b string }{
+			{"feat marker only on the candidate", "Zenith Quartermain", "Zenith feat. Quartermain"},
+			{"ignorable article only on the request", "The Kettledrum Vanguard", "Kettledrum Vanguard"},
+		}
+		for _, tc := range oneSided {
+			if !artistTokensEqual(tc.a, tc.b) {
+				t.Errorf("%s: %q and %q name the same act; the dropped token must not break equality", tc.name, tc.a, tc.b)
+			}
+		}
+	})
+
+	// The empty-multiset guard is reachable: a value can survive NormalizeKey
+	// and still tokenize to nothing. Without the guard two such fields compare
+	// equal and accept at 0.0 confidence.
+	t.Run("a field that tokenizes to nothing never compares equal", func(t *testing.T) {
+		for _, tc := range [][2]string{{"&", "!!!"}, {"...", "&&&"}, {"&", "&"}} {
+			if artistTokensEqual(tc[0], tc[1]) {
+				t.Errorf("%q vs %q: neither carries a token, so there is no evidence to accept on", tc[0], tc[1])
+			}
 		}
 	})
 }
