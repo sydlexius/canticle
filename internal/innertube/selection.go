@@ -1,0 +1,211 @@
+package innertube
+
+import (
+	"fmt"
+
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
+)
+
+// matchMinConfidence is the Jaro-Winkler floor a comparable field must reach
+// before a candidate may be trusted to be the requested track.
+//
+// 0.75 is NOT a fresh number: it is the floor internal/musixmatch already uses
+// for the same question (client.go, #840), measured there against a corpus
+// whose weakest LEGITIMATE field scored 0.8051 (a leading article) and whose
+// closest genuine MISMATCH scored 0.6095. Reusing it keeps one calibrated
+// separation point across providers rather than inventing a second one here.
+//
+// The #848 innertube spike measured this provider against the same floor:
+//
+//	correct resolution   artist 1.000  title 1.000  -> accept
+//	nonsense query       artist 0.577  title 0.481  -> reject
+//
+// Both nonsense fields sit far below the floor and far below the 0.6095
+// musixmatch mismatch, so the innertube evidence sits comfortably inside the
+// separation the floor was calibrated on.
+const matchMinConfidence = 0.75
+
+// SelectCandidate applies the correspondence guard to an innertube search
+// response and returns the one candidate that corresponds to the requested
+// track, or an error wrapping ErrNotFound.
+//
+// WHY THIS FUNCTION EXISTS. Innertube search HAS NO EMPTY STATE. A deliberately
+// nonsensical artist/title returns a confident, fully-timed, wholly unrelated
+// result: a valid videoId, a real lyrics tab, dozens of monotonic cues of some
+// other song. There is no "not found" in the payload to detect, and no field in
+// it that reliably says so -- showingResultsForRenderer, the one candidate
+// signal, was MEASURED AGAINST A CONTROL GROUP and flagged only 1 of 4 nonsense
+// queries while firing on 4 of 4 real tracks. Good specificity, unusable
+// sensitivity; it is not used here and must not be built on. Correspondence has
+// to be established by the caller, from the values innertube itself returned.
+//
+// THE ASYMMETRY THAT DECIDES EVERY JUDGMENT CALL BELOW. A false REJECT costs
+// one missing lyric file: nothing is written, the queue row defers and retries.
+// A false ACCEPT writes another song's words to a .lrc next to the user's audio,
+// looks entirely correct, and (per the writer's format-transition rule) a later
+// re-fetch can delete a better sidecar than it replaces. One is recoverable and
+// cheap; the other silently corrupts the library. Every threshold, every
+// fail-open and every fail-closed here is chosen against that.
+//
+// SHAPE: GATE EVERY CANDIDATE, THEN CHOOSE AMONG THE SURVIVORS. Both halves
+// are load bearing and they are different jobs. Choosing alone is how a wrong
+// candidate wins by being the best of a bad set -- the nonsense response
+// contains exactly one candidate, so it would be chosen trivially. Gating alone
+// cannot choose among several plausible candidates. Gating FIRST (rather than
+// choosing first and gating the winner, as internal/musixmatch does for its
+// single-result matcher endpoint) is the stricter arrangement for a LIST: it
+// makes it impossible for a non-corresponding candidate to displace a
+// corresponding one, so the returned winner has passed the gate by
+// construction. The invariant is asserted again on the winner before return, so
+// it is explicit rather than merely emergent.
+//
+// THE CHOICE AMONG SURVIVORS IS FIRST-WINS FOR NOW, and that is a deliberately
+// SEPARATE question from the gate this slice owns. Innertube returns its
+// candidates in its own relevance order, so taking the first gate-passing one
+// is the honest placeholder: it adds no uncalibrated judgment of its own. A
+// scorer that orders the survivors on text confidence with duration as a
+// tie-break is the next slice; it changes WHICH survivor is returned and
+// changes nothing about WHICH candidates survive.
+//
+// PLAY COUNT IS NOT USED, AND MUST NOT BE. Obscure but legitimate tracks carry
+// low counts, so a popularity term rejects exactly the material a lyrics
+// provider is most needed for -- the measured false-positive shape of #767,
+// where a threshold tuned on mainstream material fired on obscure tracks.
+// SearchCandidate does not carry a play count and should not gain one for this.
+//
+// The returned error carries NO field values. It reaches logs and the
+// failure-analysis report, and the library's track metadata is private
+// (matching internal/musixmatch's checkMatchCorresponds, whose error is
+// deliberately value-free for the same reason).
+func SelectCandidate(candidates []SearchCandidate, requested models.Track) (SearchCandidate, error) {
+	if len(candidates) == 0 {
+		return SearchCandidate{}, fmt.Errorf("innertube: search returned no candidates: %w", ErrNotFound)
+	}
+
+	best := SearchCandidate{}
+	found := false
+
+	for _, c := range candidates {
+		// A candidate with no videoId cannot be continued into a next() call,
+		// so it is unusable regardless of how well it corresponds. This is a
+		// usability check, not a correspondence one.
+		if c.VideoID == "" {
+			continue
+		}
+		if err := checkCorresponds(requested, c); err != nil {
+			continue
+		}
+		best, found = c, true
+		break
+	}
+
+	if !found {
+		return SearchCandidate{}, fmt.Errorf("innertube: no search candidate corresponds to the requested track: %w", ErrNotFound)
+	}
+
+	// Re-assert the gate on the winner. Redundant by construction above, and
+	// kept deliberately: "the thing we return has cleared the floor" is the
+	// whole promise of this package to the library, and a promise that is only
+	// implied by the loop's structure is one a future refactor can quietly
+	// drop.
+	if err := checkCorresponds(requested, best); err != nil {
+		return SearchCandidate{}, err
+	}
+	return best, nil
+}
+
+// checkCorresponds reports whether a candidate corresponds to the requested
+// track, returning an error wrapping ErrNotFound when it does not.
+//
+// EVERY COMPARABLE FIELD MUST CLEAR THE FLOOR. This mirrors
+// internal/musixmatch's checkMatchCorresponds, including the reasoning that
+// replaced its own earlier permissive rule: requiring only ONE field to clear
+// the floor lets two realistic wrong-track classes straight through -- a COVER
+// holds the title at 1.0 while the artist drops to ~0.50, and a wrongly-served
+// compilation track holds the artist at 1.0 while the title drops to ~0.61.
+// Both are another song's words. Legitimate variance, measured, keeps BOTH
+// fields high.
+//
+// A BLANK FIELD IS NOT COMPARABLE AND IS SKIPPED -- never counted as a pass.
+// Absence of a value is not evidence of correspondence any more than it is
+// evidence of mismatch. The consequence is the important part: when only one
+// field is comparable, THAT FIELD ALONE must still clear the floor.
+//
+// WHEN NO FIELD IS COMPARABLE, THIS REJECTS. That is a deliberate divergence
+// from musixmatch, which accepts in the same situation because its probe path
+// legitimately issues blank-field lookups whose response has nothing to verify
+// against.
+//
+// THE PREMISE FOR DIVERGING IS UNVERIFIED, PENDING THE CALLER -- flagged here
+// rather than left to be inherited as settled. The reasoning is that a search
+// query is BUILT from the requested artist and title, so an all-blank request
+// could not have produced a meaningful query in the first place. That cannot be
+// checked today: the query builder is a later slice and SelectCandidate has no
+// non-test caller yet, so nothing in the tree establishes how a blank-field
+// request reaches search, or whether one can at all.
+//
+// It is safe to ship in that state because the direction is CONSERVATIVE.
+// Rejecting on zero correspondence evidence costs a lookup that was already
+// meaningless; accepting would return an arbitrary result with nothing
+// verifying it, which is the silent-corruption case this guard exists to stop.
+// If the premise is wrong, the symptom is a false REJECT -- the recoverable
+// side of the asymmetry the package doc names.
+//
+// WHOEVER LANDS THE QUERY BUILDER SHOULD RE-CHECK THIS: if a legitimate caller
+// turns out to issue a blank-field lookup (a probe path of the kind musixmatch
+// has), this branch is what will reject it, and the divergence should be
+// revisited against that real caller rather than against this assumption.
+func checkCorresponds(requested models.Track, c SearchCandidate) error {
+	artistOK, artistComparable := fieldCorresponds(requested.ArtistName, c.Artist)
+	titleOK, titleComparable := fieldCorresponds(requested.TrackName, c.Title)
+
+	if !artistComparable && !titleComparable {
+		return fmt.Errorf("innertube: no comparable field to verify the candidate against: %w", ErrNotFound)
+	}
+	if (!artistComparable || artistOK) && (!titleComparable || titleOK) {
+		return nil
+	}
+	// No field values in the message: this reaches logs and the
+	// failure-analysis report, and the library's metadata is private.
+	return fmt.Errorf("innertube: search candidate does not correspond to the requested track: %w", ErrNotFound)
+}
+
+// fieldCorresponds reports whether a returned field resembles the requested
+// one, and whether the pair was comparable at all (both non-blank after
+// normalization).
+//
+// Comparability is decided on the NORMALIZED form rather than a raw
+// strings.TrimSpace. THE TWO CASES THAT MOTIVATED THAT ARE NOT EQUALLY SAFE,
+// and an earlier version of this comment claimed they were:
+//
+//   - ZERO-WIDTH / WHITESPACE PADDING is the safe half. It carries no
+//     characters that could ever have corresponded, so normalizing it to empty
+//     and treating the field as ABSENT is strictly more accurate than scoring
+//     it 0.0 and calling that a comparison. Nothing is lost.
+//
+//   - COMBINING MARKS ARE THE UNSAFE HALF, and the direction matters.
+//     NormalizeKey strips combining marks (NFKD, then Mn removal), so it does
+//     NOT merely discard padding here -- it discards CONTENT. A field written
+//     entirely in combining marks normalizes to empty and is then treated as
+//     absent, which SUPPRESSES a comparison rather than performing one. In a
+//     script where the marks carry meaning this can convert a genuine mismatch
+//     into a skipped field, and when it is the only other field, the remaining
+//     field alone then decides. That is a real widening of what can be
+//     accepted, not a neutral reclassification.
+//
+// WHY IT IS LEFT AS IS. The mark-stripping is normalize.NormalizeKey's own
+// deliberate behavior, shared with the cache keys and every other provider's
+// matching, so narrowing it HERE would put this gate out of step with the rest
+// of the library for a case no measurement has yet observed. The residual
+// exposure is bounded by the surrounding rules rather than by this function:
+// the no-comparable-field branch still REJECTS when nothing is left to check,
+// and any field that does survive normalization must clear the floor on its
+// own. The behavior is therefore unchanged and the claim, not the code, is what
+// was wrong.
+func fieldCorresponds(requested, got string) (ok, comparable bool) {
+	if normalize.NormalizeKey(requested) == "" || normalize.NormalizeKey(got) == "" {
+		return false, false
+	}
+	return normalize.MatchConfidence(requested, got) >= matchMinConfidence, true
+}
