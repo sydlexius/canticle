@@ -16,12 +16,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/secrets"
 	"github.com/sydlexius/canticle/web/templates"
 )
@@ -247,6 +249,21 @@ func TestSaveFieldDurationUnitConversion(t *testing.T) {
 	}
 }
 
+// disabledForEnabled returns the providers.disabled list that enabling exactly
+// the named providers must produce: every known provider except those, in
+// Known() order. Derived rather than hardcoded so registering a provider does
+// not falsely fail the save-path tests -- which is exactly what a hardcoded
+// [petitlyrics] did when innertube was added.
+func disabledForEnabled(enabled ...string) []string {
+	out := []string{}
+	for _, k := range providers.Known() {
+		if !slices.Contains(enabled, k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 func TestSaveFieldProviderEnablementTranslation(t *testing.T) {
 	h, cfgPath := writableTestUI(t, newFakeSecretStore())
 	// Enable only musixmatch -> the inverse (petitlyrics) is stored disabled.
@@ -258,8 +275,8 @@ func TestSaveFieldProviderEnablementTranslation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if len(cfg.Providers.Disabled) != 1 || cfg.Providers.Disabled[0] != "petitlyrics" {
-		t.Errorf("providers.disabled = %v, want [petitlyrics]", cfg.Providers.Disabled)
+	if want := disabledForEnabled("musixmatch"); !slices.Equal(cfg.Providers.Disabled, want) {
+		t.Errorf("providers.disabled = %v, want %v", cfg.Providers.Disabled, want)
 	}
 }
 
@@ -398,15 +415,38 @@ func TestCurrentConfigSecretStoreReadError(t *testing.T) {
 	}
 }
 
+// TestProviderDisabledFromEnabled pins the INVERSION: the settings form submits
+// which providers are ENABLED, and this derives the disabled list from
+// providers.Known() minus that set.
+//
+// The expectations are derived rather than hardcoded, because the function's
+// whole contract is "everything known and not enabled". A hardcoded list would
+// have to be rewritten for every provider registered, and worse, it would fail
+// for the RIGHT answer -- which is what happened when innertube was added.
 func TestProviderDisabledFromEnabled(t *testing.T) {
-	if got := providerDisabledFromEnabled([]string{"musixmatch", "petitlyrics"}); got != "" {
-		t.Errorf("both enabled -> disabled = %q, want empty", got)
+	all := providers.Known()
+
+	// Everything enabled -> nothing disabled.
+	if got := providerDisabledFromEnabled(all); got != "" {
+		t.Errorf("all enabled -> disabled = %q, want empty", got)
 	}
-	if got := providerDisabledFromEnabled(nil); got != "musixmatch,petitlyrics" {
-		t.Errorf("none enabled -> disabled = %q, want musixmatch,petitlyrics", got)
+
+	// Nothing enabled -> everything disabled, in Known() order.
+	if got, want := providerDisabledFromEnabled(nil), strings.Join(all, ","); got != want {
+		t.Errorf("none enabled -> disabled = %q, want %q", got, want)
 	}
-	if got := providerDisabledFromEnabled([]string{"petitlyrics"}); got != "musixmatch" {
-		t.Errorf("only petitlyrics enabled -> disabled = %q, want musixmatch", got)
+
+	// One enabled -> the rest disabled, order preserved. Uses the LAST known
+	// provider so the assertion does not accidentally hold by position.
+	one := all[len(all)-1]
+	rest := make([]string, 0, len(all)-1)
+	for _, k := range all {
+		if k != one {
+			rest = append(rest, k)
+		}
+	}
+	if got, want := providerDisabledFromEnabled([]string{one}), strings.Join(rest, ","); got != want {
+		t.Errorf("only %s enabled -> disabled = %q, want %q", one, got, want)
 	}
 }
 
@@ -844,8 +884,8 @@ func TestSaveFieldConcurrentSingleWriter(t *testing.T) {
 	if cfg.API.Cooldown != 42 {
 		t.Errorf("api.cooldown = %d, want 42", cfg.API.Cooldown)
 	}
-	if len(cfg.Providers.Disabled) != 1 || cfg.Providers.Disabled[0] != "petitlyrics" {
-		t.Errorf("providers.disabled = %v, want [petitlyrics]", cfg.Providers.Disabled)
+	if want := disabledForEnabled("musixmatch"); !slices.Equal(cfg.Providers.Disabled, want) {
+		t.Errorf("providers.disabled = %v, want %v", cfg.Providers.Disabled, want)
 	}
 }
 
