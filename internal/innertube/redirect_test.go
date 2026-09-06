@@ -3,6 +3,8 @@ package innertube
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -222,4 +224,59 @@ func TestCheckRedirect_SchemeComparisonIsCaseInsensitive(t *testing.T) {
 			t.Errorf("%q: same-origin redirect should be allowed regardless of scheme casing: %v", raw, err)
 		}
 	}
+}
+
+// TestCheckRedirect_ErrorNamesTheHostOnly pins the refusal message's CONTENT,
+// not just that a refusal happened. url.URL.String() renders userinfo
+// verbatim and carries the query, so a hostile Location could write
+// credentials into a log and, further up, a work_queue failure reason -- and
+// an innertube search URL's query holds the library's private artist and
+// title. Nothing else asserts on the error text, so without this a
+// "clearer" message citing the full URL would ship green (854-R5F1).
+func TestCheckRedirect_ErrorNamesTheHostOnly(t *testing.T) {
+	const base = "https://music.youtube.com"
+	req := &http.Request{URL: mustParseURL(t, "https://admin:hunter2@evil.example/steal?artist=Private&title=Track")}
+
+	err := checkRedirect(base, req, nil)
+	if err == nil {
+		t.Fatal("a cross-origin redirect must be refused")
+	}
+	got := err.Error()
+	for _, leak := range []string{"admin", "hunter2", "artist=", "title=", "Private", "Track", "/steal"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("refusal message leaks %q: %s", leak, got)
+		}
+	}
+	if !strings.Contains(got, "evil.example") {
+		t.Errorf("refusal message must still name the refused host, got: %s", got)
+	}
+}
+
+// TestCheckRedirect_UnparsableBaseFailsClosed pins the base-URL parse-error
+// branch, which no test reached: deleting it left the suite green. It is
+// reachable because checkRedirect takes the base as a STRING and reads it at
+// redirect time, so a later slice that makes the base configurable can feed
+// it an unparsable value. A guard that fails OPEN there would follow the
+// redirect it exists to refuse (854-R5F2).
+func TestCheckRedirect_UnparsableBaseFailsClosed(t *testing.T) {
+	req := &http.Request{URL: mustParseURL(t, "https://music.youtube.com/watch")}
+
+	for _, base := range []string{
+		"https://exa mple.com/\x7f", // unparsable: control character
+		"",                          // empty: no scheme, no host
+		"music.youtube.com",         // scheme-less, so nothing can match
+	} {
+		if err := checkRedirect(base, req, nil); err == nil {
+			t.Errorf("base %q: must refuse rather than fail open", base)
+		}
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }

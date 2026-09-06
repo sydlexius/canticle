@@ -19,9 +19,9 @@ import (
 // downgrade -- both must be checked. This rejects cross-host and
 // cross-scheme redirects and preserves the standard 10-hop cap.
 //
-// The scheme is compared against base.Scheme, not a hardcoded "https": every
-// test in this package injects an httptest http://127.0.0.1 baseURL, and a
-// hardcoded https would refuse every redirect those tests follow -- a green
+// The scheme is compared against base.Scheme, not a hardcoded "https": the
+// on-the-wire tests here inject an httptest http://127.0.0.1 baseURL, and a
+// hardcoded https would refuse the redirects they follow -- a green
 // suite alone does not prove the guard refuses a downgrade, only that it
 // isn't hardcoded; see TestCheckRedirect_RefusesSchemeDowngradeOnTheWire for
 // the actual end-to-end proof against a real listener.
@@ -63,7 +63,15 @@ func checkRedirect(baseURL string, req *http.Request, via []*http.Request) error
 		return fmt.Errorf("innertube: parse base URL: %w", err)
 	}
 	if !sameOrigin(req.URL, base) {
-		return fmt.Errorf("innertube: refusing cross-origin redirect to %q", req.URL.String())
+		// HOST ONLY, deliberately -- never url.String() and not even
+		// url.Redacted(). String() renders userinfo verbatim, so a hostile
+		// Location carrying credentials would write them into a log and, further
+		// up, into a work_queue failure reason. Redacted() fixes that half but
+		// still carries the QUERY, and an innertube search URL's query holds the
+		// library's private artist and title. The host is the whole finding a
+		// reader needs: which origin was refused. Matches the petitlyrics
+		// sibling, which logs Host for the same reason.
+		return fmt.Errorf("innertube: refusing cross-origin redirect to host %q", req.URL.Host)
 	}
 	return nil
 }
