@@ -345,14 +345,13 @@ func TestBlankFieldIsSkippedNeverCountedAsAPass(t *testing.T) {
 }
 
 // TestSelectCandidateGatesEveryCandidateNotJustTheWinner is the "best of a bad
-// set" guard, and the case that pins the PER-CANDIDATE gate rather than a
-// gate on whichever candidate happened to be chosen.
+// set" guard. Ranking alone would return the highest-scoring candidate even
+// when every candidate is wrong.
 func TestSelectCandidateGatesEveryCandidateNotJustTheWinner(t *testing.T) {
 	requested := models.Track{ArtistName: "Placeholder Artist Name", TrackName: "Placeholder Song Title", TrackLength: 126}
 
-	// All three are unrelated. A implementation that gates only the candidate
-	// it chose would still have to reject here, so this case alone is not
-	// enough -- it is the floor, not the discriminator.
+	// All three are unrelated; one is a slightly better unrelated match than
+	// the others. A rank-then-return implementation returns it.
 	candidates := []SearchCandidate{
 		{VideoID: "a", Artist: "Zzyzx Unrelated Performer", Title: "Zzyzx Unrelated Track", DurationSeconds: 126},
 		{VideoID: "b", Artist: "Qqqqq Other Performer", Title: "Qqqqq Other Track", DurationSeconds: 240},
@@ -363,11 +362,43 @@ func TestSelectCandidateGatesEveryCandidateNotJustTheWinner(t *testing.T) {
 		t.Fatalf("a set with no corresponding candidate was accepted (videoID %q)", got.VideoID)
 	}
 
-	// THE DISCRIMINATOR. A corresponding candidate buried at the END of a bad
-	// set must still be found. An implementation that takes the response's
-	// first candidate and gates only that one returns a rejection here, so
-	// this is the case that proves every candidate is gated in turn rather
-	// than one being picked and checked.
+	// GATE-FIRST, NOT RANK-THEN-GATE. This is the case that distinguishes the
+	// two arrangements, and without it both pass: removing the per-candidate
+	// gate entirely still satisfies every other test here (measured -- the
+	// mutation went GREEN before this case existed).
+	//
+	// The "outranks" candidate has an EXACT artist (1.0000) and a sub-floor
+	// title (0.6773), so it scores 16.773 and FAILS the gate. The "good"
+	// candidate is the weakest legitimate shape, a leading article on both
+	// fields (0.7840 / 0.8434), so it scores 16.274 and PASSES the gate.
+	//
+	// Rank-then-gate picks "outranks", the gate then rejects it, and "good" is
+	// lost -- a false reject manufactured entirely by ranking a candidate that
+	// was never eligible. Gate-first cannot reach that state: an ineligible
+	// candidate never enters the ranking at all.
+	rankedAboveButIneligible := []SearchCandidate{
+		{VideoID: "outranks", Artist: "Placeholder Artist Name", Title: "Different Song Title", DurationSeconds: 126},
+		{VideoID: "good", Artist: "The Placeholder Artist Name", Title: "A Placeholder Song Title", DurationSeconds: 126},
+	}
+	// Assert the premise rather than assuming it: the ineligible candidate
+	// really does out-rank the eligible one, so this test would be vacuous if
+	// normalize.MatchConfidence ever moved.
+	if scoreCandidate(rankedAboveButIneligible[0], requested) <= scoreCandidate(rankedAboveButIneligible[1], requested) {
+		t.Fatal("test premise broken: the gate-failing candidate no longer out-ranks the gate-passing one, so this case no longer distinguishes gate-first from rank-then-gate")
+	}
+	if err := checkCorresponds(requested, rankedAboveButIneligible[0]); err == nil {
+		t.Fatal("test premise broken: the higher-ranked candidate is supposed to FAIL the gate")
+	}
+	gotGF, err := SelectCandidate(rankedAboveButIneligible, requested)
+	if err != nil {
+		t.Fatalf("gate-passing candidate was lost because a gate-FAILING candidate out-ranked it: %v", err)
+	}
+	if gotGF.VideoID != "good" {
+		t.Errorf("videoID = %q, want %q", gotGF.VideoID, "good")
+	}
+
+	// And a corresponding candidate buried at the end of a bad set must still
+	// be found, not shadowed by the better-ranked wrong ones.
 	withGood := append(append([]SearchCandidate{}, candidates...),
 		SearchCandidate{VideoID: "good", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title", DurationSeconds: 400})
 	got, err := SelectCandidate(withGood, requested)
@@ -379,11 +410,10 @@ func TestSelectCandidateGatesEveryCandidateNotJustTheWinner(t *testing.T) {
 	}
 }
 
-// TestDurationNeverRejects pins half of the explicit duration decision (issue
-// #853 AC): duration may never on its own cause a rejection. The other half --
-// that it RANKS -- arrives with the scorer in the following slice, which is
-// what introduces a candidate ORDER for it to affect.
-func TestDurationNeverRejects(t *testing.T) {
+// TestDurationRanksButNeverRejects pins the explicit duration decision: it
+// orders candidates that have already cleared the gate, and it can never on
+// its own cause a rejection.
+func TestDurationRanksButNeverRejects(t *testing.T) {
 	requested := models.Track{ArtistName: "Placeholder Artist Name", TrackName: "Placeholder Song Title", TrackLength: 200}
 
 	t.Run("a wildly wrong duration does not reject a corresponding candidate", func(t *testing.T) {
@@ -393,10 +423,76 @@ func TestDurationNeverRejects(t *testing.T) {
 		}
 	})
 
-	t.Run("a zero duration does not reject", func(t *testing.T) {
+	t.Run("a zero duration does not reject and does not penalize", func(t *testing.T) {
 		zero := SearchCandidate{VideoID: "zero", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title"}
 		if _, err := SelectCandidate([]SearchCandidate{zero}, requested); err != nil {
 			t.Errorf("an absent duration must fail open: %v", err)
+		}
+		// Against an equally-corresponding candidate WITH a matching duration,
+		// the one with evidence wins; the zero one is not penalized below a
+		// candidate whose duration is far off, it simply scores no bonus.
+		far := SearchCandidate{VideoID: "far", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title", DurationSeconds: 4000}
+		if scoreCandidate(zero, requested) != scoreCandidate(far, requested) {
+			t.Error("an absent duration and an out-of-tolerance duration must both contribute zero")
+		}
+	})
+
+	t.Run("among gate-passing candidates the closer duration wins", func(t *testing.T) {
+		candidates := []SearchCandidate{
+			{VideoID: "far", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title", DurationSeconds: 260},
+			{VideoID: "near", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title", DurationSeconds: 200},
+		}
+		got, err := SelectCandidate(candidates, requested)
+		if err != nil {
+			t.Fatalf("unexpected rejection: %v", err)
+		}
+		if got.VideoID != "near" {
+			t.Errorf("videoID = %q, want \"near\"", got.VideoID)
+		}
+	})
+
+	t.Run("duration never outvotes a materially stronger text signal", func(t *testing.T) {
+		// A weaker-but-passing text match with a PERFECT duration must NOT
+		// beat a perfect text match with a wildly wrong duration.
+		//
+		// The weaker candidate's fields are the leading-article shape, which
+		// is the weakest LEGITIMATE variance musixmatch measured (0.8051
+		// there). Measured here with normalize.MatchConfidence: artist 0.7840
+		// ("The " prefix), title 0.8434 ("A " prefix) -- both above the 0.75
+		// floor, so both candidates genuinely pass the gate and this is a
+		// RANKING question, not a gating one. Combined text 1.627 vs 2.000 is
+		// a 0.373 gap, well outside the 0.1 window inside which duration is
+		// allowed to decide, so text must win by construction.
+		req := models.Track{ArtistName: "Placeholder Artist Name", TrackName: "Placeholder Song Title", TrackLength: 200}
+		candidates := []SearchCandidate{
+			{VideoID: "durationalike", Artist: "The Placeholder Artist Name", Title: "A Placeholder Song Title", DurationSeconds: 200},
+			{VideoID: "textalike", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title", DurationSeconds: 4000},
+		}
+		got, err := SelectCandidate(candidates, req)
+		if err != nil {
+			t.Fatalf("unexpected rejection: %v", err)
+		}
+		if got.VideoID != "textalike" {
+			t.Errorf("videoID = %q, want \"textalike\" -- duration outvoted the stronger text signal", got.VideoID)
+		}
+	})
+
+	t.Run("inside the tie-break window duration does decide", func(t *testing.T) {
+		// The complement of the case above, and the reason duration is scored
+		// at all: when the text signals are effectively indistinguishable
+		// (both ~0.99 here, a combined gap under the 0.1 window), the closer
+		// duration is the only evidence left and must break the tie.
+		req := models.Track{ArtistName: "Placeholder Artist Name", TrackName: "Placeholder Song Title", TrackLength: 200}
+		candidates := []SearchCandidate{
+			{VideoID: "near", Artist: "Placeholder Artist Names", Title: "Placeholder Song Titles", DurationSeconds: 200},
+			{VideoID: "far", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title", DurationSeconds: 4000},
+		}
+		got, err := SelectCandidate(candidates, req)
+		if err != nil {
+			t.Fatalf("unexpected rejection: %v", err)
+		}
+		if got.VideoID != "near" {
+			t.Errorf("videoID = %q, want \"near\" -- duration failed to break a text tie", got.VideoID)
 		}
 	})
 }
