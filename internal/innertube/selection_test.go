@@ -732,6 +732,178 @@ func TestSiblingTitleIsRejected(t *testing.T) {
 	}
 }
 
+// TestMeasuredSiblingPairsFromIssue883 pins the FOUR EXACT PAIRS issue #883
+// measured, as that issue's first acceptance criterion requires.
+//
+// These four were ALREADY closed when this test was written, by #879's token
+// rule rather than by anything here. #883 was filed against #853's gate,
+// before that rule existed, and predicted it would catch "several" of these
+// but not `Intro` vs `Interlude` -- reasoning the pair "shares no unmatched
+// content token to reject on". That misreads the rule: titleTokensCorrespond
+// rejects when EITHER side carries an unmatched non-packaging token. A shared
+// token is needed to ACCEPT, not to reject, so `intro` and `interlude` each
+// reject on their own.
+//
+// THE CLASS DID NOT CLOSE WITH THEM, which is why yearsDiffer exists in
+// selection.go. An adversarial review found that #879 also CREATED a sibling
+// class while fixing this one: every four-digit year was packaging, so
+// "Nocturne 1984" vs "Nocturne 2019" accepted at 0.9385 and
+// "Placeholder 1990" vs "Placeholder 1991" at 0.9750 -- the same confidence as
+// row 2 below. Checking only the four pairs an issue happens to list, and
+// generalizing from them, is how that was missed.
+//
+// A THRESHOLD CANNOT DO THIS JOB, and that part of the original reasoning
+// stands. These pairs score 0.8237 to 0.9818, ABOVE the weakest legitimate
+// field in the calibration corpus (0.7597, a leading article), so any floor
+// high enough to reject them rejects that too. Both guards are structural
+// instead: the token rule separates on unmatched content, yearsDiffer on
+// whether a year is carrying identity or a pressing.
+//
+// Each row asserts its premise before its verdict, so a case that stops
+// exercising the rule fails loudly rather than passing vacuously.
+func TestMeasuredSiblingPairsFromIssue883(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+
+	// The confidences #883 measured, reproduced here so a drift in
+	// normalize.MatchConfidence is visible as a failing premise rather than as
+	// a silently different test.
+	tests := []struct {
+		name         string
+		requested    string
+		candidate    string
+		measuredConf float64
+	}{
+		{"roman numeral movement", "Movement I", "Movement II", 0.9818},
+		{"numbered untitled track", "Untitled Track 1", "Untitled Track 2", 0.9750},
+		{"spelled-out suite part", "Suite Part One", "Suite Part Two", 0.9429},
+		// The pair #883 predicted would survive. It is the shape unlike every
+		// other case in this file: no shared base, no appended or dropped
+		// token -- two entirely different short words that Jaro-Winkler's
+		// prefix scaling pulls above the floor.
+		{"short unrelated neighbors", "Intro", "Interlude", 0.8237},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// PREMISE 1: the pair still clears the floor. If it did not, the
+			// floor would be doing the rejecting and this case would prove
+			// nothing about the token rule.
+			conf := normalize.MatchConfidence(tc.requested, tc.candidate)
+			if conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor, "+
+					"so this case no longer exercises the token rule", conf, matchMinConfidence)
+			}
+			// PREMISE 2: the confidence is still what #883 measured. A drift
+			// here does not necessarily break the guard, but it means the
+			// issue's table no longer describes this code.
+			if diff := conf - tc.measuredConf; diff > 0.0001 || diff < -0.0001 {
+				t.Errorf("confidence %.4f differs from the %.4f measured in #883; "+
+					"the issue's analysis no longer describes this code", conf, tc.measuredConf)
+			}
+
+			requested := models.Track{ArtistName: artist, TrackName: tc.requested}
+			// Artist held IDENTICAL, as #883 measured it: the artist field
+			// contributes nothing to separating siblings, so the title is the
+			// only evidence available.
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: tc.candidate}
+
+			got, err := SelectCandidate([]SearchCandidate{c}, requested)
+			if err == nil {
+				t.Fatalf("a sibling track was ACCEPTED (videoID %q) at confidence %.4f -- "+
+					"this writes another song's words to a .lrc next to the user's audio, "+
+					"and internal/timing cannot catch it because a sibling from the same "+
+					"release runs about as long", got.VideoID, conf)
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("error must wrap ErrNotFound so the lane classifies it as a "+
+					"benign miss rather than a transport failure, got %v", err)
+			}
+		})
+	}
+}
+
+// TestTokenRuleClausesAreIndividuallyPinned covers the specific clauses of
+// titleTokensCorrespond that the rows above do NOT discriminate.
+//
+// Measured: the four #883 rows survive two separate mutations that each break
+// the rule. Deleting the shared-content-token requirement leaves them green,
+// because every one of them also has an unmatched content token. Adding
+// `part`/`pt` to the variant vocabulary -- the exact widening the exclusion at
+// titleVariantTokens calls load bearing -- ALSO leaves them green, including
+// the `Suite Part One`/`Suite Part Two` row, because `one` and `two` carry
+// that rejection by themselves. That row does not test what its name implies.
+//
+// A regression net that only re-covers what other tests already catch is
+// documentation, not a guard. These rows are chosen so each fails against one
+// mutation and nothing else does.
+func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+
+	// EVERY REJECT ROW ASSERTS ITS FLOOR PREMISE FIRST, and the asymmetry is the
+	// reason. SelectCandidate can reject at the similarity floor BEFORE
+	// titleTokensCorrespond runs, so a REJECT row would pass without ever
+	// reaching the clause it names if normalization ever moved that pair below
+	// the floor -- silently, for the wrong reason. An ACCEPT row needs no such
+	// premise: a floor rejection there fails the test loudly, which is the
+	// correct direction to be wrong in.
+	//
+	// ISOLATION IS THE WHOLE POINT OF THESE ROWS, and it is easy to get wrong.
+	// A pair whose unmatched tokens are CONTENT rejects at the unmatched-token
+	// clause and never reaches the clause under test, so it pins nothing.
+	// Measured: "Alpha Live" vs "Beta Live" leaves `alpha`/`beta` unmatched and
+	// rejects there, and "Song Part 1" vs "Song Part 2" leaves `1`/`2`
+	// unmatched and rejects there -- neither notices its clause being deleted.
+	// Each row below leaves ONLY the token under test unmatched.
+
+	t.Run("a differing part marker rejects on `part` alone", func(t *testing.T) {
+		// `part` is the ONLY unmatched token: no ordinal, no digit to carry the
+		// rejection. That makes this the one shape that fails when `part` is
+		// added to the variant vocabulary, which the exclusion at
+		// titleVariantTokens calls load bearing.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title Part"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, "+
+				"so the floor rejects this pair and the row no longer exercises the "+
+				"variant vocabulary", conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a title differing only by `part` was ACCEPTED -- a part marker " +
+				"names a different song and must never become vocabulary")
+		}
+	})
+
+	t.Run("differing years are rejected", func(t *testing.T) {
+		// The C1 class, isolated the same way: both sides reduce to
+		// [shared content, year], so the year is the only unmatched token and
+		// yearsDiffer is the only thing that can reject.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Nocturne 1984"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Nocturne 2019"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, "+
+				"so the floor rejects this pair and the row no longer exercises "+
+				"yearsDiffer", conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("two differently-dated works were ACCEPTED -- when both titles " +
+				"carry a year and the years disagree, the year is the identity, not " +
+				"the pressing")
+		}
+	})
+
+	t.Run("a one-sided year is still packaging", func(t *testing.T) {
+		// The false-reject guard on the C1 fix: the remaster shape the year
+		// rule was written for must survive it.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title (2011 Remaster)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a remaster was REJECTED -- the year discriminator must fire only "+
+				"when BOTH sides are dated and disagree, or it trades a corruption bug "+
+				"for a provider that returns nothing: %v", err)
+		}
+	})
+}
+
 // TestLegitimateVariantsStayAccepted is the MANDATORY regression guard on the
 // F1 fix, and it is the larger half of the requirement. Most of what this gate
 // accepts is CORRECT: a live version, a remaster, a radio edit, an acoustic
@@ -821,17 +993,56 @@ func TestVariantVocabularyEdgeCases(t *testing.T) {
 	})
 
 	t.Run("a part number is content, a remaster year is packaging", func(t *testing.T) {
-		if isVariantToken("2") {
+		// yearsAreContent=false is the ordinary case: at most one side carries
+		// a year, so a year is the remaster/reissue label the rule exists for.
+		if isVariantToken("2", false) {
 			t.Error("a bare number must be CONTENT -- treating it as packaging is the measured sibling defect")
 		}
-		if !isVariantToken("2011") {
-			t.Error("a four-digit year must be packaging")
+		if !isVariantToken("2011", false) {
+			t.Error("a four-digit year must be packaging when only one side is dated")
 		}
-		if isVariantToken("1234") {
+		if isVariantToken("1234", false) {
 			t.Error("a four-digit number outside the year range must be CONTENT")
 		}
-		if isVariantToken("part") || isVariantToken("pt") {
+		if isVariantToken("part", false) || isVariantToken("pt", false) {
 			t.Error("part markers must never be vocabulary -- a part number names a different song")
+		}
+	})
+
+	t.Run("a year is CONTENT when both sides are dated differently", func(t *testing.T) {
+		// The C1 discriminator. The same token flips meaning with context:
+		// "Song (2011 Remaster)" against "Song" is packaging, but
+		// "Nocturne 1984" against "Nocturne 2019" is two different works.
+		if isVariantToken("2011", true) {
+			t.Error("a year must be CONTENT when both titles carry differing years -- " +
+				"treating it as packaging accepts a different song by the same artist")
+		}
+		// Vocabulary membership is unaffected by the flag: only the year branch
+		// is context-dependent.
+		if !isVariantToken("live", true) || !isVariantToken("remaster", true) {
+			t.Error("the variant vocabulary must not be disturbed by the year context")
+		}
+	})
+
+	t.Run("yearsDiffer fires only when both sides are dated and disagree", func(t *testing.T) {
+		cases := []struct {
+			name string
+			req  map[string]int
+			cand map[string]int
+			want bool
+		}{
+			{"neither dated", map[string]int{"song": 1}, map[string]int{"song": 1}, false},
+			{"only candidate dated (the remaster shape)", map[string]int{"song": 1}, map[string]int{"song": 1, "2011": 1}, false},
+			{"only requested dated", map[string]int{"song": 1, "1999": 1}, map[string]int{"song": 1}, false},
+			{"same year both sides", map[string]int{"song": 1, "2011": 1}, map[string]int{"song": 1, "2011": 1}, false},
+			{"differing years", map[string]int{"song": 1, "1984": 1}, map[string]int{"song": 1, "2019": 1}, true},
+			{"one shared year among several", map[string]int{"song": 1, "1984": 1}, map[string]int{"song": 1, "1984": 1, "2019": 1}, false},
+			{"non-year numbers are not years", map[string]int{"song": 1, "2": 1}, map[string]int{"song": 1, "3": 1}, false},
+		}
+		for _, tc := range cases {
+			if got := yearsDiffer(tc.req, tc.cand); got != tc.want {
+				t.Errorf("%s: yearsDiffer = %v, want %v", tc.name, got, tc.want)
+			}
 		}
 	})
 

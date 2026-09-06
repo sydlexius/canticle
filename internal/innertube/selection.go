@@ -582,22 +582,94 @@ func splitTokens(s string) []string {
 	})
 }
 
+// isYearToken reports whether a token is a four-digit year in [1900, 2099].
+//
+// The window is deliberate: any OTHER number is CONTENT, which is what keeps a
+// part number a rejecting difference. The bounds are load bearing and measured
+// -- "Placeholder 1899" vs "Placeholder 1900" and "Placeholder 2099" vs
+// "Placeholder 2100" both reject at 0.9500, the same confidence at which a
+// pair inside the window would be judged on the year rule instead.
+func isYearToken(tok string) bool {
+	if len(tok) != 4 {
+		return false
+	}
+	n, err := strconv.Atoi(tok)
+	return err == nil && n >= 1900 && n <= 2099
+}
+
 // isVariantToken reports whether an unmatched token is release packaging
 // rather than content.
 //
-// A four-digit year is treated as packaging: it is how a remaster or reissue is
-// labeled. Any OTHER number is CONTENT, which is what keeps a part number a
-// rejecting difference -- the measured defect turns on exactly that.
-func isVariantToken(tok string) bool {
+// yearsAreContent inverts the year rule for ONE comparison, and it exists
+// because a year is packaging or content depending on what the OTHER title
+// carries -- a fact no per-token predicate can see. See
+// titleTokensCorrespond, which computes it.
+//
+// A four-digit year is otherwise treated as packaging: it is how a remaster or
+// reissue is labeled ("Song (2011 Remaster)"). Any OTHER number is CONTENT.
+func isVariantToken(tok string, yearsAreContent bool) bool {
 	if _, ok := titleVariantTokens[tok]; ok {
 		return true
 	}
-	if len(tok) == 4 {
-		if n, err := strconv.Atoi(tok); err == nil && n >= 1900 && n <= 2099 {
-			return true
-		}
+	if isYearToken(tok) {
+		return !yearsAreContent
 	}
 	return false
+}
+
+// yearsDiffer reports whether both multisets carry a year AND no year is
+// shared between them.
+//
+// THIS IS THE DISCRIMINATOR FOR THE YEAR SIBLING CLASS, and its failure
+// direction is the one that matters. Treating every four-digit year as
+// packaging admitted a whole family of DIFFERENT SONGS by the same artist:
+// measured, "Nocturne 1984" vs "Nocturne 2019" accepted at 0.9385, and
+// "Placeholder 1990" vs "Placeholder 1991" at 0.9750 -- numerically the same
+// territory as the part-number siblings #883 filed as the canonical defect.
+// Both sides reduced to [content, <year>], the year was deemed packaging, the
+// shared content token satisfied the accept, and another song's words would be
+// written next to the user's audio. internal/timing cannot catch it: two
+// pieces from one artist's catalog routinely run similar lengths.
+//
+// The rule is STRUCTURAL rather than a threshold, which is what lets it
+// separate these without costing a legitimate accept. No confidence floor can:
+// these pairs score 0.85 to 0.98, ABOVE the weakest legitimate field in the
+// calibration corpus (0.7597, a leading article), so any floor high enough to
+// reject them rejects that too.
+//
+// ONE SIDE CARRYING A YEAR IS STILL PACKAGING, deliberately. That is exactly
+// the remaster shape the year rule was written for -- "Song" vs
+// "Song (2011 Remaster)" -- where the year appears on one side only. The
+// discriminator fires solely when BOTH titles are dated and the dates
+// disagree, which is when the year is carrying the identity rather than the
+// pressing.
+//
+// A false REJECT here costs one missing lyric and a retry; a false ACCEPT
+// writes another song's words to disk and looks correct. The rule is written
+// against that asymmetry.
+func yearsDiffer(req, cand map[string]int) bool {
+	var reqYears, candYears []string
+	for tok := range req {
+		if isYearToken(tok) {
+			reqYears = append(reqYears, tok)
+		}
+	}
+	for tok := range cand {
+		if isYearToken(tok) {
+			candYears = append(candYears, tok)
+		}
+	}
+	if len(reqYears) == 0 || len(candYears) == 0 {
+		return false
+	}
+	for _, ry := range reqYears {
+		for _, cy := range candYears {
+			if ry == cy {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // tokenizeTitle produces the comparable token sequence for a title: ignorable
@@ -654,6 +726,11 @@ func titleTokensCorrespond(requested, got string) bool {
 	req := countTokens(reqToks)
 	cand := countTokens(gotToks)
 
+	// Computed ONCE for this comparison and threaded through every
+	// isVariantToken call below, so all three decisions agree about whether a
+	// year is content here.
+	yearsAreContent := yearsDiffer(req, cand)
+
 	// Identical multisets are the same words by construction -- accepted
 	// before the shared-content-token requirement below, which would otherwise
 	// reject a title made entirely of vocabulary words matching itself.
@@ -672,12 +749,12 @@ func titleTokensCorrespond(requested, got string) bool {
 
 	// Every unmatched token, in either direction, must be packaging.
 	for tok, n := range req {
-		if n > cand[tok] && !isVariantToken(tok) {
+		if n > cand[tok] && !isVariantToken(tok, yearsAreContent) {
 			return false
 		}
 	}
 	for tok, n := range cand {
-		if n > req[tok] && !isVariantToken(tok) {
+		if n > req[tok] && !isVariantToken(tok, yearsAreContent) {
 			return false
 		}
 	}
@@ -686,7 +763,7 @@ func titleTokensCorrespond(requested, got string) bool {
 	// different titles built only from vocabulary words cannot correspond
 	// merely by both being made of noise.
 	for tok, n := range req {
-		if n > 0 && cand[tok] > 0 && !isVariantToken(tok) {
+		if n > 0 && cand[tok] > 0 && !isVariantToken(tok, yearsAreContent) {
 			return true
 		}
 	}
