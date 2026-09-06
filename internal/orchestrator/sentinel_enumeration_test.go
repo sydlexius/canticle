@@ -132,8 +132,9 @@ func transportExemptions() map[string]string {
 		// doubly wrong here.
 		"innertube.ErrForbidden": "a refused request shape on an unauthenticated API, deliberately not an auth/throttle signal (#495)",
 		// ErrClientVersion WRAPS ErrForbidden and inherits its class deliberately.
-		// The gateway rejected our pinned client version (measured: ANDROID_MUSIC
-		// 5.16.51 returns HTTP 400), and the remedy is bumping the version
+		// The gateway rejected whichever ANDROID_MUSIC version we currently pin
+		// (7.03.52 today; the older 5.16.51 was measured returning HTTP 400, which
+		// is what a stale pin looks like). The remedy is bumping the version
 		// constant, not waiting for a throttle to clear. providerClassifier gives
 		// it its OWN breaker arm ahead of ErrForbidden so the operator-facing
 		// diagnosis names the real cause; the OUTCOME class is correctly the same.

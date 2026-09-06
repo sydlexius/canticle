@@ -157,9 +157,10 @@ func providerClassifier(l *Lane, err error) error {
 	//     sentinels, not a general license: a future sentinel wrapping ErrNotFound
 	//     that is NOT benign has to be enumerated above the miss arm.
 	case errors.Is(err, innertube.ErrClientVersion):
-		// The gateway rejected our pinned client version. Retrying an unchanged
-		// request cannot succeed -- measured: ANDROID_MUSIC 5.16.51 returns HTTP
-		// 400 on every call -- so open the lane rather than spend requests on it.
+		// The gateway rejected whichever ANDROID_MUSIC version we currently pin
+		// (7.03.52 at the time of writing). Retrying an unchanged request cannot
+		// succeed -- measured against the older 5.16.51, which returns HTTP 400 on
+		// every call -- so open the lane rather than spend requests on it.
 		// Loud, because this is the failure that silently retires the provider
 		// and the fix is a one-constant change (see internal/innertube/doc.go).
 		res := l.breaker.Trip()

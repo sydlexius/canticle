@@ -155,7 +155,7 @@ func TestInnerTubeMissResetsTheRamp(t *testing.T) {
 	}
 }
 
-// TestInnerTubeNoLyricsTabResetsTheRampToo drives ErrNoLyricsTab through the
+// TestInnerTubeNoLyricsTabResetsTheRamp drives ErrNoLyricsTab through the
 // real classifier rather than only through ClassifyOutcome. It wraps
 // ErrNotFound, so it shares the miss arm -- a property asserted in a comment
 // and, before this, nowhere else.
@@ -333,9 +333,11 @@ func TestInnerTubeForbiddenTripsBreaker(t *testing.T) {
 // ErrClientVersion wraps ErrForbidden, so a providerClassifier that tested
 // ErrForbidden first would swallow it and log "refused the request shape",
 // sending the operator hunting for a malformed body when the actual remedy is
-// bumping the pinned ANDROID_MUSIC version constant (measured: 5.16.51 returns
-// HTTP 400 -- see internal/innertube/doc.go). That is the single most fragile
-// fact in the provider, and the failure it produces is total: every browse call
+// bumping the pinned ANDROID_MUSIC version constant. The pin today is 7.03.52;
+// 5.16.51 is a DIFFERENT, older version, measured to return HTTP 400 on every
+// call, and it is the evidence for what a stale pin does rather than the value
+// currently in the code (see internal/innertube/doc.go). That pin is the single
+// most fragile fact in the provider, and the failure is total: every browse call
 // fails until the constant moves.
 //
 // The wrapping relationship is asserted directly, since it is the premise the
