@@ -653,12 +653,20 @@ func TestSelectCandidateWinnerIsIndependentOfInputOrder(t *testing.T) {
 // duration, so the title is the ONLY signal that can separate them.
 func TestTitleContributesToTheRanking(t *testing.T) {
 	requested := models.Track{ArtistName: "Placeholder Artist", TrackName: "Placeholder Title", TrackLength: 200}
-	// The videoIDs are chosen so the TIE-BREAK favors the WRONG candidate:
-	// "aaa-wrongish" sorts before "zzz-exact". Without that, deleting the
-	// title term makes the two tie and the tie-break picks the right answer by
-	// accident, so the test passes against a scorer that ignores the title.
+	// TWO constraints on the weaker candidate, and this slice broke the second
+	// one (879-R1F1). It must (a) sort BEFORE the exact match so the tie-break
+	// favors the WRONG one -- otherwise deleting the title term makes them tie
+	// and the tie-break picks correctly by accident -- and (b) still PASS the
+	// gate, so it reaches the ranker at all.
+	//
+	// A pluralized title satisfied (a) but stopped satisfying (b) once this
+	// slice's token rule landed: "titles" is an unmatched content token, so
+	// the candidate is now rejected as a sibling and filtered before scoring,
+	// leaving one survivor and no ranking decision to make. A decorated
+	// variant is the right shape: "(Live)" is packaging, so it passes the
+	// token rule, while scoring lower than the exact match.
 	candidates := []SearchCandidate{
-		{VideoID: "aaa-wrongish", Artist: "Placeholder Artist", Title: "Placeholder Titles", DurationSeconds: 200},
+		{VideoID: "aaa-wrongish", Artist: "Placeholder Artist", Title: "Placeholder Title (Live)", DurationSeconds: 200},
 		{VideoID: "zzz-exact", Artist: "Placeholder Artist", Title: "Placeholder Title", DurationSeconds: 200},
 	}
 
