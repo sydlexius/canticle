@@ -312,3 +312,82 @@ func TestParseLyricsBrowseID_GenuineParseErrorStaysUnclassified(t *testing.T) {
 		t.Error("a genuine mid-document parse error must not classify as ErrNotFound")
 	}
 }
+
+// TestParseSearchCandidates_WalksEveryTabAndShelf pins the two loop breadths
+// the doc claims but no fixture exercised: every captured search response has
+// exactly one tab and one shelf at the parsed depth, so truncating either
+// loop to its first element left the suite green (854-R5F3). Both are real
+// behavior -- the correspondence gate downstream needs EVERY candidate to
+// choose from, so silently dropping one is a lane regression, not a
+// cosmetic loss.
+func TestParseSearchCandidates_WalksEveryTabAndShelf(t *testing.T) {
+	shelf := func(videoID string) string {
+		return `{"musicCardShelfRenderer":{"title":{"runs":[{"text":"T",` +
+			`"navigationEndpoint":{"watchEndpoint":{"videoId":"` + videoID + `"}}}]}}}`
+	}
+	tab := func(shelves ...string) string {
+		return `{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[` +
+			strings.Join(shelves, ",") + `]}}}}`
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "two shelves in one tab",
+			body: `{"contents":{"tabbedSearchResultsRenderer":{"tabs":[` +
+				tab(shelf("vidA"), shelf("vidB")) + `]}}}`,
+			want: []string{"vidA", "vidB"},
+		},
+		{
+			name: "one shelf in each of two tabs",
+			body: `{"contents":{"tabbedSearchResultsRenderer":{"tabs":[` +
+				tab(shelf("vidA")) + `,` + tab(shelf("vidB")) + `]}}}`,
+			want: []string{"vidA", "vidB"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSearchCandidates([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("parseSearchCandidates: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("want %d candidates, got %d: %+v", len(tc.want), len(got), got)
+			}
+			for i, want := range tc.want {
+				if got[i].VideoID != want {
+					t.Errorf("candidate %d: want videoID %q, got %q", i, want, got[i].VideoID)
+				}
+			}
+		})
+	}
+}
+
+// TestParseSearchCandidates_TitleComesFromTheFirstRun pins which title run is
+// read. Every fixture has exactly one, so reading the LAST instead survived
+// mutation (854-R5F2). A multi-run title silently truncated to one run is fed
+// to the correspondence gate, which then rejects a candidate that was
+// actually correct -- a silent miss, not a visible error.
+func TestParseSearchCandidates_TitleComesFromTheFirstRun(t *testing.T) {
+	body := `{"contents":{"tabbedSearchResultsRenderer":{"tabs":[{"tabRenderer":{"content":` +
+		`{"sectionListRenderer":{"contents":[{"musicCardShelfRenderer":{"title":{"runs":[` +
+		`{"text":"First","navigationEndpoint":{"watchEndpoint":{"videoId":"wantedVid"}}},` +
+		`{"text":"Second","navigationEndpoint":{"watchEndpoint":{"videoId":"otherVid"}}}` +
+		`]}}}]}}}}]}}}`
+
+	got, err := parseSearchCandidates([]byte(body))
+	if err != nil {
+		t.Fatalf("parseSearchCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want exactly one candidate, got %d: %+v", len(got), got)
+	}
+	if got[0].VideoID != "wantedVid" {
+		t.Errorf("want the FIRST run's videoID %q, got %q", "wantedVid", got[0].VideoID)
+	}
+	if got[0].Title != "First" {
+		t.Errorf("want the FIRST run's text %q, got %q", "First", got[0].Title)
+	}
+}

@@ -180,10 +180,16 @@ const lyricsBrowseIDPrefix = "MPLY"
 const lyricsPageType = "MUSIC_PAGE_TYPE_TRACK_LYRICS"
 
 // lyricsTabTitleEn is the English display title of the lyrics tab, used ONLY
-// as a fallback for a response that carries no pageType at all. The request
-// pins hl=en/gl=US (the transport slice sets it on every request), so when
-// this fallback is reached the
-// title we get back is English by construction.
+// as a fallback for a response that carries no pageType at all.
+//
+// The fallback is deterministic only when the request pins a locale. That
+// pinning lives in the CALLS slice (see requestHl / requestGl there), not in
+// this one and not in the transport slice, so on this branch alone the title
+// a server returns is whatever it picks from IP or account. That is a
+// FORWARD dependency, deliberately recorded rather than assumed: the
+// pageType match below is what makes tab selection correct here, and the
+// title fallback only becomes locale-deterministic once the calls slice
+// lands.
 const lyricsTabTitleEn = "Lyrics"
 
 // parseLyricsBrowseID scans a next response's tabs for the lyrics tab and
@@ -197,9 +203,9 @@ const lyricsTabTitleEn = "Lyrics"
 // so a non-English response would match no tab at all and return
 // ErrNoLyricsTab -- indistinguishable from a genuine catalog miss, for every
 // track, forever. The title comparison survives only as a fallback for a tab
-// that carries no pageType, and the transport slice pins hl/gl on every
-// request so
-// that fallback is deterministic rather than locale-dependent.
+// that carries no pageType. The calls slice pins hl/gl on every request,
+// which is what makes that fallback deterministic rather than
+// locale-dependent -- see the note on lyricsTabTitleEn above.
 //
 // A non-MPLY browseId under a "Lyrics"-titled tab has never been observed,
 // but if the API ever renders one, ErrNoLyricsTab (rather than returning the
