@@ -58,9 +58,11 @@ func TestIsUnusableBody_Classification(t *testing.T) {
 		// this package parses is a scalar, so a body that is only a scalar
 		// carries nothing usable and belongs in the same benign-miss bucket
 		// as an error page (854-R4F2). The predicate's criterion is
-		// object-or-array, NOT "starts with any JSON value character"; an
-		// earlier comment claimed the broader test and was corrected to
-		// match the code, because the code was the part that was right.
+		// object-only, NOT "starts with any JSON value character" and not
+		// object-or-array: a top-level array fails to unmarshal with the
+		// same "cannot unmarshal X into ..." class as a scalar, so it
+		// belongs in this same bucket rather than being raised as a real
+		// parse failure.
 		{"json_string", `"hello"`, true},
 		{"json_number", `123`, true},
 		{"json_true", `true`, true},
@@ -88,7 +90,7 @@ func TestIsUnusableBody_Classification(t *testing.T) {
 //     "nothing found" path -- the same benign class.
 //
 // The classification is therefore uniform across every scalar shape whichever
-// way the body goes, which is what makes object-or-array correct at all three
+// way the body goes, which is what makes object-only correct at all three
 // call sites at once. If this test ever fails, the assumption the predicate's
 // comment rests on has changed in encoding/json.
 func TestIsUnusableBody_ScalarsAreUnreachableOrBenign(t *testing.T) {
