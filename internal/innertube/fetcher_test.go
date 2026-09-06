@@ -565,7 +565,7 @@ func TestFindLyrics_DecodeFailureIsNotASilentEmptyHit(t *testing.T) {
 	}
 }
 
-// ctxMarker is a context key used to prove which context reached a request.
+// ctxMarkerKey is a context key used to prove which context reached a request.
 type ctxMarkerKey struct{}
 
 // ctxRecorder is an http.RoundTripper that records, per request path, whether

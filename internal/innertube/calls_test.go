@@ -79,20 +79,29 @@ func newTestClient(t *testing.T, srv *fixtureServer) *Client {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		srv.record(r)
-		// Read under the lock: onRequest is set on the test goroutine before the
-		// listener starts, but the handler runs on the server's.
+		// EVERY mutable field this handler reads is read under the lock, and the
+		// effective status is resolved once, here. The handler runs on the
+		// server's goroutine while the fields are written from the test's.
+		//
+		// Today every test sets these before newTestClient starts the listener,
+		// so an unguarded read happens to be safe -- but "safe because of how
+		// the callers happen to be written" is a property no compiler checks,
+		// and a future test that flips a status mid-run would turn it into a
+		// race. Guarding a subset (onRequest but not status) was the worse
+		// shape: it reads as though the distinction were deliberate.
 		srv.mu.Lock()
 		hook := srv.onRequest
+		code, hasCode := srv.statusFor[r.URL.Path]
+		if !hasCode || code == 0 {
+			code, hasCode = srv.status, srv.status != 0
+		}
 		srv.mu.Unlock()
+
 		if hook != nil {
 			hook(r.URL.Path)
 		}
-		if code, ok := srv.statusFor[r.URL.Path]; ok && code != 0 {
+		if hasCode {
 			w.WriteHeader(code)
-			return
-		}
-		if srv.status != 0 {
-			w.WriteHeader(srv.status)
 			return
 		}
 		body, ok := bodies[r.URL.Path]
