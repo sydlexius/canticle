@@ -980,3 +980,71 @@ func TestUploadDecorationStaysRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestTokenRuleOnlySubtractsAccepts pins the STRUCTURAL BOUND this slice rests
+// on: titleFieldCorresponds returns early unless the similarity floor has
+// ALREADY passed, so the token rule can only ever SUBTRACT accepts, never add
+// one. Removing that early return left the whole suite green (853-R5F1), which
+// means the bound every downstream argument leans on was unguarded.
+//
+// The bound is what makes the token rule safe to reason about: no input can
+// reach it that the floor did not already admit, so the rule cannot invent an
+// accept out of a below-floor pair.
+func TestTokenRuleOnlySubtractsAccepts(t *testing.T) {
+	// Pairs BELOW the floor whose tokens would nonetheless correspond. With
+	// the early return, the floor rejects them and the token rule never runs.
+	// Without it, the token rule reaches them and flips them to accept.
+	for _, tc := range []struct{ name, requested, got string }{
+		// A reordering scores ~0.53, far below 0.75, but its token multiset is
+		// IDENTICAL -- so this is the sharpest case the bound protects.
+		{"reordered tokens score below the floor", "Vanguard Kettledrum", "Kettledrum Vanguard"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// PREMISE: below the floor, so only the early return can be what
+			// rejects this. If it ever rose above, the case stops testing the
+			// bound.
+			conf := normalize.MatchConfidence(tc.requested, tc.got)
+			if conf >= matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is at or above the %.2f floor, so this pair no longer isolates the early return", conf, matchMinConfidence)
+			}
+			// And the tokens DO correspond, so the token rule would accept.
+			if !titleTokensCorrespond(tc.requested, tc.got) {
+				t.Fatalf("test premise broken: the tokens must correspond, or removing the early return would change nothing here")
+			}
+
+			ok, comparable := titleFieldCorresponds(tc.requested, tc.got)
+			if !comparable {
+				t.Fatal("both sides carry tokens, so the field must be comparable")
+			}
+			if ok {
+				t.Error("a below-floor pair was ACCEPTED: the token rule may only SUBTRACT accepts, never add one")
+			}
+		})
+	}
+}
+
+// TestTitleTokensAreAMultisetNotASet pins duplicate COUNTING. Replacing the
+// count comparisons with presence-only checks left the suite green
+// (853-R5F2), so the word "multiset" was load-bearing in the design comments
+// and untested in the code. Repeated-word titles are a real shape, and a set
+// makes a doubled title correspond to its single-word sibling.
+func TestTitleTokensAreAMultisetNotASet(t *testing.T) {
+	for _, tc := range []struct{ name, requested, got string }{
+		{"doubled word against single", "Wobble Wobble Kettledrum", "Wobble Kettledrum"},
+		{"single against doubled word", "Wobble Kettledrum", "Wobble Wobble Kettledrum"},
+		{"tripled against doubled", "Wobble Wobble Wobble Kettle", "Wobble Wobble Kettle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if titleTokensCorrespond(tc.requested, tc.got) {
+				t.Errorf("%q and %q repeat a token a different number of times and are different titles; a SET comparison would wrongly accept them", tc.requested, tc.got)
+			}
+		})
+	}
+
+	t.Run("identical multiplicities still correspond", func(t *testing.T) {
+		// The multiset must not over-reject: the same counts are the same title.
+		if !titleTokensCorrespond("Wobble Wobble Kettle", "Wobble Wobble Kettle") {
+			t.Error("identical multiplicities name the same title")
+		}
+	})
+}
