@@ -1,0 +1,16 @@
+{
+  "_note": "DERIVED from next.json by removing its Lyrics tab, and only that. The sibling tabs, their ordering, and the enclosing renderer chain are unchanged, so this fixture differs from a hit in exactly the one respect under test: a video that exists and returns a well-formed next response, but for which InnerTube offers no lyrics rendition. Hand-built rather than captured, because a capture would differ from next.json in incidental ways too and could not isolate the variable.",
+  "contents": {
+    "singleColumnMusicWatchNextResultsRenderer": {
+      "tabbedRenderer": {
+        "watchNextTabbedResultsRenderer": {
+          "tabs": [
+            { "tabRenderer": { "title": "Up next" } },
+            { "tabRenderer": { "title": "Comments" } },
+            { "tabRenderer": { "title": "Related" } }
+          ]
+        }
+      }
+    }
+  }
+}
