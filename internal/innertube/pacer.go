@@ -99,7 +99,26 @@ func (c *Client) MinInterval() time.Duration {
 }
 
 // pace enforces the minimum interval between outbound requests. The wait is
-// ctx-cancellable. Mirrors internal/petitlyrics's pacer.
+// ctx-cancellable.
+//
+// TWO PACERS ARE BORROWED FROM, AND THE SPLIT IS DELIBERATE. The LOCKING
+// follows internal/musixmatch (#494): both accessors and this read take the
+// mutex. The SLOT ALGORITHM is internal/petitlyrics's re-check loop, NOT
+// musixmatch's reservation. Naming only the first would mislead a reader into
+// expecting reservation semantics, so both are stated.
+//
+// The difference is observable. musixmatch reserves the slot under the lock and
+// each caller sleeps its own distinct wait; this loop has every waiter compute
+// the SAME wait, sleep it, wake together, and re-check -- a thundering herd by
+// construction (measured: 8 concurrent callers produce 28 sleep wakeups where
+// reservation produces 7). Throughput is unaffected and no caller starved in
+// repeated runs, but wake order is unfair and nondeterministic.
+//
+// The re-check form is kept because it claims the slot ONLY on the success
+// branch, so there is no reservation to roll back when a caller is canceled
+// mid-wait. musixmatch's form needs a best-effort release for exactly that case.
+// At this package's intended concurrency -- a worker pool, single digits -- the
+// herd costs a few extra wakeups and buys a simpler cancellation path.
 //
 // PACING IS PER OUTBOUND REQUEST, NOT PER LOOKUP, and that is a decision rather
 // than a detail. The interval exists to bound the rate at which canticle draws
@@ -146,27 +165,3 @@ func (c *Client) pace(ctx context.Context) error {
 		}
 	}
 }
-
-// FindLyrics looks up timed lyrics for a track, composing the three-call chain
-// documented in doc.go: search for candidates, verify one corresponds to the
-// requested track, follow it to a lyrics-tab browseId, and decode the timed
-// cues that browse returns.
-//
-// PACING IS PER OUTBOUND REQUEST, NOT PER FindLyrics, and that is a decision
-// this slice owed an answer to rather than a detail. The interval exists to
-// bound the rate at which canticle draws on someone else's gateway, and a
-// gateway counts REQUESTS -- it has no notion of our lookups. Pacing per
-// FindLyrics would satisfy the configured interval on paper while firing three
-// back-to-back requests for every hit: a 3x burst, which is the precise shape
-// the floor exists to prevent. So the wait lives in postJSON, the single point
-// all three calls funnel through, and no call site can opt out of it.
-//
-// The consequence is asymmetric cost, and it is the honest one. A MISS costs
-// one interval: selection rejects the candidate before next() or browse() is
-// ever issued, so a track this provider has nothing for is paid for once. A HIT
-// costs three, because a hit genuinely consumes three times as much of the
-// shared resource. That asymmetry is the right way round for a fallback lane,
-// whose traffic is mostly misses.
-//
-// Every step is ctx-cancellable: the pacer's wait selects on ctx.Done, and each
-// HTTP call is built with NewRequestWithContext, so a canceled context stops

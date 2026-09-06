@@ -162,6 +162,23 @@ func TestPace_ReChecksAfterAShortWait(t *testing.T) {
 		t.Fatalf("pacer waited %d time(s) %v, want at least 2; a waiter that wakes "+
 			"early must re-check and wait again rather than claim the slot", len(waits), waits)
 	}
+
+	// THE SECOND WAIT'S MAGNITUDE, not merely its existence. This is what
+	// separates "waits again" from "waits again for the RIGHT REMAINING TIME".
+	//
+	// The first wake advanced the clock by a quarter of 40s, so 30s of the
+	// interval is left and that is what the pacer must ask for. A pacer that
+	// slept the whole configured interval instead of the remaining wait would
+	// ask for 40s again -- correct-but-slow, compounding under contention.
+	//
+	// Measured: sleeping minInterval rather than wait left the ENTIRE suite
+	// green before this assertion existed. The count check above cannot see it
+	// (over-sleeping still produces two waits) and the elapsed check below
+	// cannot either (over-sleeping only overshoots the >= bound).
+	if want := 30 * time.Second; waits[1] != want {
+		t.Errorf("second wait = %v, want %v (the REMAINING interval after a "+
+			"quarter of it elapsed, not the full configured interval)", waits[1], want)
+	}
 	if elapsed := now.Sub(base); elapsed < 40*time.Second {
 		t.Errorf("returned after %v, want >= the full 40s interval", elapsed)
 	}
@@ -299,9 +316,19 @@ func TestPace_ConcurrentCallersShareThePacerSafely(t *testing.T) {
 		t.Errorf("concurrent Search: %v", err)
 	}
 
+	// A SMOKE CHECK, not a pacing assertion, and the distinction is worth
+	// stating because an earlier comment here claimed the opposite. Eight
+	// Search calls produce eight recorded requests regardless of WHEN they go
+	// out, so this count measures the HTTP layer rather than the pacer:
+	// measured, it passes against a pacer that never claims a slot, against a
+	// single-shot pacer, and against pace() replaced by `return nil`.
+	//
+	// What this test actually defends is the concurrent read-modify-write of
+	// lastRequest under -race, where it is the SOLE detector: guarding
+	// minInterval while leaving the lastRequest RMW unguarded reddens here and
+	// nowhere else.
 	if got := len(srv.snapshot()); got != goroutines {
-		t.Errorf("requests = %d, want %d; a pacer that dropped or double-counted a "+
-			"slot under contention would not land on this number", got, goroutines)
+		t.Errorf("requests = %d, want %d", got, goroutines)
 	}
 }
 
@@ -312,7 +339,10 @@ func TestPace_ConcurrentCallersShareThePacerSafely(t *testing.T) {
 // does not enforce, and #858 will wire a config-driven setter into exactly the
 // world where this Client is shared.
 //
-// Under -race this fails against an unguarded write.
+// Under -race this fails against an unguarded write. The DETECTION is
+// reliable (measured 5 runs of 5 against the unguarded form, 0 against this
+// one); the COUNT of reports is not, varying 1-3 with scheduling, which is what
+// -race sampling always is. Do not restate a specific count here.
 //
 // THE INTERVAL IS ZERO ON PURPOSE, and the choice is what keeps this test
 // honest AND fast. The race is on the minInterval FIELD -- WithMinInterval
@@ -321,11 +351,13 @@ func TestPace_ConcurrentCallersShareThePacerSafely(t *testing.T) {
 // pace perform the read (pace reads the field under the lock BEFORE deciding
 // pacing is disabled), so both sides of the race are exercised.
 //
-// A positive interval would exercise the identical field access and cost 21
-// SECONDS of real sleeping: the first goroutine claims the slot and every
-// other one then waits a full interval for a slot it does not need, serialized.
-// That was measured, not guessed. A test that sleeps for 21s to observe a
-// memory access that takes nanoseconds is one people start skipping.
+// A positive interval would exercise the identical field access and cost 14
+// SECONDS of real sleeping: the first goroutine claims the slot and every other
+// one then waits a full interval for a slot it does not need, serialized. The
+// figure is derivable rather than incidental -- 7 waits (8 goroutines, the
+// first unpaced) times the 2s value WithMinInterval clamps to -- and it was
+// measured at 14.005s. A test that sleeps that long to observe a memory access
+// taking nanoseconds is one people start skipping.
 func TestWithMinInterval_IsRaceFreeAgainstAConcurrentPacer(t *testing.T) {
 	c := NewClient()
 	var wg sync.WaitGroup
