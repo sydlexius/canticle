@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 )
 
 // The fixtures carry PLACEHOLDER artist/title strings, deliberately: the
@@ -482,10 +483,27 @@ func TestDurationRanksButNeverRejects(t *testing.T) {
 		// at all: when the text signals are effectively indistinguishable
 		// (both ~0.99 here, a combined gap under the 0.1 window), the closer
 		// duration is the only evidence left and must break the tie.
+		//
+		// RE-FIXTURED BY THE F1 TOKEN RULE, deliberately. This case originally
+		// built its near-tie from PLURALIZED fields ("...Titles"), which the
+		// title token rule now rejects as a sibling title -- correctly, that
+		// being the measured silent-corruption class. A gate-failing candidate
+		// cannot exercise a RANKING question, so the tie is rebuilt from a
+		// variant decoration instead: "(Live)" scores 0.9517 on the title and
+		// passes the gate, leaving a combined text gap of 0.0483 -- still
+		// inside the 0.1 window where duration is allowed to decide, which is
+		// the property this case exists to pin.
 		req := models.Track{ArtistName: "Placeholder Artist Name", TrackName: "Placeholder Song Title", TrackLength: 200}
 		candidates := []SearchCandidate{
-			{VideoID: "near", Artist: "Placeholder Artist Names", Title: "Placeholder Song Titles", DurationSeconds: 200},
+			{VideoID: "near", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title (Live)", DurationSeconds: 200},
 			{VideoID: "far", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title", DurationSeconds: 4000},
+		}
+		// Assert the premise: both candidates must genuinely clear the gate,
+		// or this is a gating test wearing a ranking test's name.
+		for _, c := range candidates {
+			if err := checkCorresponds(req, c); err != nil {
+				t.Fatalf("test premise broken: candidate %q must pass the gate for this to be a ranking question: %v", c.VideoID, err)
+			}
 		}
 		got, err := SelectCandidate(candidates, req)
 		if err != nil {
@@ -635,12 +653,20 @@ func TestSelectCandidateWinnerIsIndependentOfInputOrder(t *testing.T) {
 // duration, so the title is the ONLY signal that can separate them.
 func TestTitleContributesToTheRanking(t *testing.T) {
 	requested := models.Track{ArtistName: "Placeholder Artist", TrackName: "Placeholder Title", TrackLength: 200}
-	// The videoIDs are chosen so the TIE-BREAK favors the WRONG candidate:
-	// "aaa-wrongish" sorts before "zzz-exact". Without that, deleting the
-	// title term makes the two tie and the tie-break picks the right answer by
-	// accident, so the test passes against a scorer that ignores the title.
+	// TWO constraints on the weaker candidate, and this slice broke the second
+	// one (879-R1F1). It must (a) sort BEFORE the exact match so the tie-break
+	// favors the WRONG one -- otherwise deleting the title term makes them tie
+	// and the tie-break picks correctly by accident -- and (b) still PASS the
+	// gate, so it reaches the ranker at all.
+	//
+	// A pluralized title satisfied (a) but stopped satisfying (b) once this
+	// slice's token rule landed: "titles" is an unmatched content token, so
+	// the candidate is now rejected as a sibling and filtered before scoring,
+	// leaving one survivor and no ranking decision to make. A decorated
+	// variant is the right shape: "(Live)" is packaging, so it passes the
+	// token rule, while scoring lower than the exact match.
 	candidates := []SearchCandidate{
-		{VideoID: "aaa-wrongish", Artist: "Placeholder Artist", Title: "Placeholder Titles", DurationSeconds: 200},
+		{VideoID: "aaa-wrongish", Artist: "Placeholder Artist", Title: "Placeholder Title (Live)", DurationSeconds: 200},
 		{VideoID: "zzz-exact", Artist: "Placeholder Artist", Title: "Placeholder Title", DurationSeconds: 200},
 	}
 
@@ -651,4 +677,382 @@ func TestTitleContributesToTheRanking(t *testing.T) {
 	if got.VideoID != "zzz-exact" {
 		t.Errorf("selected %q, want %q: with artist and duration identical, the title must decide", got.VideoID, "zzz-exact")
 	}
+}
+
+// TestSiblingTitleIsRejected is the F1 regression test: a candidate whose
+// title differs from the requested one by a CONTENT token is a DIFFERENT SONG
+// and must be rejected, even though it scores far above the floor.
+//
+// Both cases below were measured ACCEPTED before the token-multiset rule was
+// added, with the artist held identical so the title is the only variable. No
+// floor value separates them -- the weakest LEGITIMATE shape (a leading
+// article) scores 0.8426, below both -- which is why the fix is structural
+// rather than a tuning change.
+//
+// THE REASON THIS CLASS IS CRITICAL rather than a scoring nit: the safety net
+// below this gate is internal/timing.Evaluate, which catches a grossly wrong
+// RUNTIME. A sibling track from the same release runs about as long, so its
+// cues never overrun, timing returns Ok, and another song's words are promoted
+// to a .lrc beside the user's audio.
+func TestSiblingTitleIsRejected(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
+
+	tests := []struct {
+		name  string
+		title string
+	}{
+		{name: "pluralized sibling", title: "Placeholder Song Titles"},
+		{name: "part-number sibling", title: "Placeholder Song Title Pt.2"},
+		{name: "spelled-out part number", title: "Placeholder Song Title Part 2"},
+		{name: "roman-numeral sequel", title: "Placeholder Song Title II"},
+		{name: "extra content word", title: "Placeholder Song Title Reprise"},
+		{name: "dropped content word", title: "Placeholder Song"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Assert the PREMISE: this case is only meaningful while the
+			// candidate clears the similarity floor. If it ever dropped below,
+			// the floor would be rejecting it and this test would no longer
+			// prove the token rule does anything.
+			if conf := normalize.MatchConfidence(requested.TrackName, tc.title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: title confidence %.4f is already below the %.2f floor, so this case no longer exercises the token rule", conf, matchMinConfidence)
+			}
+
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: tc.title}
+			got, err := SelectCandidate([]SearchCandidate{c}, requested)
+			if err == nil {
+				t.Fatalf("a sibling title was ACCEPTED (videoID %q) -- this writes another song's words next to the user's audio", got.VideoID)
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("error must wrap ErrNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+// TestLegitimateVariantsStayAccepted is the MANDATORY regression guard on the
+// F1 fix, and it is the larger half of the requirement. Most of what this gate
+// accepts is CORRECT: a live version, a remaster, a radio edit, an acoustic
+// take, a deluxe reissue, a karaoke or instrumental cut all carry the SAME
+// WORDS with the same timing, so the lyric is right and must still be returned.
+//
+// A fix that rejected these would trade a silent-corruption bug for a feature
+// that never returns a lyric -- which is why every class the review measured as
+// correctly accepted is pinned here explicitly rather than assumed.
+func TestLegitimateVariantsStayAccepted(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	// reqTi overrides the requested title for cases where the VARIANCE UNDER
+	// TEST is on the requested side (an apostrophe has to differ in RENDERING
+	// between the two sides to be tested at all; comparing a string to itself
+	// would assert nothing).
+	tests := []struct {
+		name                  string
+		artist, reqTi, candTi string
+	}{
+		{name: "live version", artist: artist, candTi: title + " (Live)"},
+		{name: "remaster", artist: artist, candTi: title + " - Remastered"},
+		{name: "remaster with year", artist: artist, candTi: title + " (2011 Remaster)"},
+		{name: "radio edit", artist: artist, candTi: title + " (Radio Edit)"},
+		{name: "acoustic", artist: artist, candTi: title + " (Acoustic Version)"},
+		{name: "deluxe edition", artist: artist, candTi: title + " (Deluxe Edition)"},
+		{name: "instrumental", artist: artist, candTi: title + " (Instrumental)"},
+		{name: "karaoke", artist: artist, candTi: title + " (Karaoke Version)"},
+		{name: "mono", artist: artist, candTi: title + " (Mono)"},
+		{name: "sped up", artist: artist, candTi: title + " (Sped Up)"},
+		{name: "slowed down", artist: artist, candTi: title + " (Slowed Down)"},
+		{name: "extended mix", artist: artist, candTi: title + " (Extended Mix)"},
+		{name: "feat suffix on the title", artist: artist, candTi: title + " (feat. Placeholder Guest)"},
+		{name: "leading article on the title", artist: artist, candTi: "The " + title},
+		{name: "ampersand vs and", artist: "Placeholder & Artist Name", candTi: title},
+		{name: "and vs ampersand", artist: "Placeholder and Artist Name", candTi: title},
+		{name: "diacritics", artist: "Plácehölder Artist Name", candTi: "Plácehölder Söng Title"},
+		{name: "typographic vs straight apostrophe", artist: artist, reqTi: "Placeholder's Song Title", candTi: "Placeholder\u2019s Song Title"},
+		{name: "case and whitespace", artist: "  placeholder   ARTIST name ", candTi: "  PLACEHOLDER song   TITLE  "},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := requested
+			if tc.reqTi != "" {
+				req.TrackName = tc.reqTi
+			}
+			c := SearchCandidate{VideoID: "vid", Artist: tc.artist, Title: tc.candTi}
+			if _, err := SelectCandidate([]SearchCandidate{c}, req); err != nil {
+				t.Errorf("a LEGITIMATE variant was rejected -- this is the failure mode that makes the provider return nothing: %v", err)
+			}
+		})
+	}
+}
+
+// TestVariantVocabularyEdgeCases pins the deliberate boundaries of the variant
+// vocabulary, so a later widening of it has to break a test rather than a
+// library.
+func TestVariantVocabularyEdgeCases(t *testing.T) {
+	t.Run("a variant token in the REQUESTED title is tolerated symmetrically", func(t *testing.T) {
+		// Asking for the remaster and being handed the plain cut is the same
+		// words, so direction must not matter.
+		requested := models.Track{ArtistName: "Placeholder Artist Name", TrackName: "Placeholder Song Title (Remastered)"}
+		c := SearchCandidate{VideoID: "vid", Artist: "Placeholder Artist Name", Title: "Placeholder Song Title"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a variant token on the REQUESTED side must be tolerated the same way: %v", err)
+		}
+	})
+
+	t.Run("two titles made entirely of vocabulary words do not correspond", func(t *testing.T) {
+		// Without the shared-content-token requirement these differ only by
+		// variant tokens and would be accepted.
+		if titleTokensCorrespond("Live", "Karaoke") {
+			t.Error("two titles built only from variant vocabulary must not correspond")
+		}
+	})
+
+	t.Run("an identical all-vocabulary title still corresponds to itself", func(t *testing.T) {
+		// The multiset-identity branch has to run BEFORE the shared-content
+		// requirement, or a song genuinely titled with a vocabulary word could
+		// never match itself.
+		if !titleTokensCorrespond("Live", "Live") {
+			t.Error("an identical title must correspond to itself regardless of vocabulary membership")
+		}
+	})
+
+	t.Run("a part number is content, a remaster year is packaging", func(t *testing.T) {
+		if isVariantToken("2") {
+			t.Error("a bare number must be CONTENT -- treating it as packaging is the measured sibling defect")
+		}
+		if !isVariantToken("2011") {
+			t.Error("a four-digit year must be packaging")
+		}
+		if isVariantToken("1234") {
+			t.Error("a four-digit number outside the year range must be CONTENT")
+		}
+		if isVariantToken("part") || isVariantToken("pt") {
+			t.Error("part markers must never be vocabulary -- a part number names a different song")
+		}
+	})
+
+	t.Run("a title that tokenizes to nothing fails open rather than guessing", func(t *testing.T) {
+		// Punctuation-only and credit-only titles leave no token evidence. The
+		// floor has already been cleared by the caller at that point, so
+		// inventing a rejection here would be a guess.
+		if !titleTokensCorrespond("!!!", "Placeholder Song Title") {
+			t.Error("no token evidence on one side must fail open")
+		}
+	})
+}
+
+// TestApostropheIsErasedNotSplit is the R2F4 regression test, and it guards a
+// FALSE-REJECT class the token rule itself introduced.
+//
+// A dropped apostrophe is one of the most common differences there is between a
+// local tag and an upload title, and the similarity floor handles it correctly
+// on its own -- every pair below clears the floor comfortably, which the premise
+// assertion pins. What broke them was tokenization: splitting on the apostrophe
+// turned a contraction into fragments, so a three-token side compared against a
+// one-token side, no fragment was in the vocabulary, and the multiset rule
+// rejected in both directions. The token rule may only ever make the gate
+// STRICTER THAN THE FLOOR FOR A REASON, and "the apostrophe was typed" is not
+// one.
+//
+// The premise assertion is what makes this test honest: if the floor ever
+// stopped admitting these, an accept here would prove nothing about
+// tokenization.
+func TestApostropheIsErasedNotSplit(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+
+	tests := []struct {
+		name, reqTi, candTi string
+	}{
+		{name: "contraction, apostrophe dropped by the candidate", reqTi: "Don't Quartermain the Meridian", candTi: "Dont Quartermain the Meridian"},
+		{name: "contraction, apostrophe dropped by the request", reqTi: "Its All Wobblesworth", candTi: "It's All Wobblesworth"},
+		{name: "possessive", reqTi: "Zenith's End", candTi: "Zeniths End"},
+		{name: "leading contraction", reqTi: "I'm Not Meridian", candTi: "Im Not Meridian"},
+		{name: "medial contraction", reqTi: "Can't Stop Kettledrum", candTi: "Cant Stop Kettledrum"},
+		{name: "typographic apostrophe against no apostrophe", reqTi: "Zenith’s End", candTi: "Zeniths End"},
+		{name: "prime against no apostrophe (853-R3F1)", reqTi: "Zenith′s End", candTi: "Zeniths End"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// PREMISE: the floor already accepts this pair, so a rejection can
+			// only come from tokenization -- which is what this test guards.
+			if conf := normalize.MatchConfidence(tc.reqTi, tc.candTi); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, so this pair is no longer isolating the token rule", conf, matchMinConfidence)
+			}
+
+			requested := models.Track{ArtistName: artist, TrackName: tc.reqTi}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: tc.candTi}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("a dropped apostrophe was treated as a different song -- the floor accepts this pair and tokenization must not undo that: %v", err)
+			}
+		})
+	}
+}
+
+// TestApostropheErasureClosesNothing is the MANDATORY safe-direction guard on
+// the R2F4 fix, and it is the half that matters: erasing a character from
+// tokenization can only ever make two titles look MORE alike, so every class
+// the sibling rule closes has to be re-proved closed with the erasure in place.
+//
+// The sharpest case is the last one. A possessive and its apostrophe-less
+// spelling now tokenize IDENTICALLY -- that is the fix -- so the ONLY thing
+// still separating a possessive title from its sibling WITH a part number is
+// the part number itself being CONTENT. If that ever stopped holding, the fix
+// would have reopened the exact silent-corruption class the slice exists to
+// close, and this is where that shows up.
+func TestApostropheErasureClosesNothing(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+
+	tests := []struct {
+		name, reqTi, candTi string
+	}{
+		{name: "pluralized sibling", reqTi: "Placeholder Song Title", candTi: "Placeholder Song Titles"},
+		{name: "part-number sibling", reqTi: "Placeholder Song Title", candTi: "Placeholder Song Title Pt.2"},
+		{name: "roman-numeral sequel", reqTi: "Placeholder Song Title", candTi: "Placeholder Song Title II"},
+		{name: "one token is a prefix of the other", reqTi: "Zenith Wobble", candTi: "Zenith Wobblecraft"},
+		{name: "one token is a compound of the other", reqTi: "Zenith Kettle", candTi: "Zenith Kettledrum"},
+		{name: "shared prefix, different suffix", reqTi: "Zenith Meridianset", candTi: "Zenith Meridianrise"},
+		{name: "possessive plus a part number", reqTi: "Wobblesworth's Lament", candTi: "Wobblesworths Lament Pt.2"},
+		{name: "possessive plus a bare part number", reqTi: "Wobblesworth's Lament", candTi: "Wobblesworths Lament 2"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// PREMISE: above the floor, so the token rule is the only thing
+			// that can reject -- and therefore the only thing the apostrophe
+			// erasure could have broken.
+			if conf := normalize.MatchConfidence(tc.reqTi, tc.candTi); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: title confidence %.4f is already below the %.2f floor, so this case no longer exercises the token rule", conf, matchMinConfidence)
+			}
+
+			requested := models.Track{ArtistName: artist, TrackName: tc.reqTi}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: tc.candTi}
+			got, err := SelectCandidate([]SearchCandidate{c}, requested)
+			if err == nil {
+				t.Fatalf("a sibling title was ACCEPTED (videoID %q) -- this writes another song's words next to the user's audio", got.VideoID)
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("error must wrap ErrNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+// TestUploadDecorationStaysRejected PINS AN ABSENCE, which is why it exists at
+// all: nothing else in the package fails if someone adds "video" to the
+// vocabulary.
+//
+// Every title below rejects because its decoration token is NOT in
+// titleVariantTokens. That exclusion is LOAD BEARING, not an unfinished list --
+// no rule available here separates a decoration "video" from a content "video",
+// and admitting the token makes a title correspond to that title with the word
+// prepended, which is the measured sibling defect. The whole upload-decoration
+// family is therefore excluded together; a PARTIAL list is the trap, because
+// the next reader infers the missing members were an oversight and "completes"
+// it, silently flipping every row here to accept.
+//
+// If you are here because you added one of these tokens and this test went red:
+// that is this test working. Read the WHAT THIS DELIBERATELY DOES NOT HANDLE
+// block in selection.go before changing it.
+func TestUploadDecorationStaysRejected(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	decorated := []string{
+		title + " (Official Video)",
+		title + " (Official Audio)",
+		title + " [HD]",
+		title + " (Visualizer)",
+		title + " (Official)",
+		title + " (Lyrics)",
+		title + " (Official Lyric Video)",
+	}
+
+	for _, candTi := range decorated {
+		t.Run(candTi, func(t *testing.T) {
+			// PREMISE: the floor admits these, so the token rule is what
+			// rejects them and the absence is what the token rule turns on.
+			if conf := normalize.MatchConfidence(title, candTi); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, so the floor rejects this and the vocabulary absence is not what is being pinned", conf, matchMinConfidence)
+			}
+
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: candTi}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("upload decoration was ACCEPTED -- a decoration token was added to titleVariantTokens; that exclusion is load-bearing, not an omission")
+			}
+		})
+	}
+}
+
+// TestTokenRuleOnlySubtractsAccepts pins the STRUCTURAL BOUND this slice rests
+// on: titleFieldCorresponds returns early unless the similarity floor has
+// ALREADY passed, so the token rule can only ever SUBTRACT accepts, never add
+// one. Removing that early return left the whole suite green (853-R5F1), which
+// means the bound every downstream argument leans on was unguarded.
+//
+// The bound is what makes the token rule safe to reason about: no input can
+// reach it that the floor did not already admit, so the rule cannot invent an
+// accept out of a below-floor pair.
+func TestTokenRuleOnlySubtractsAccepts(t *testing.T) {
+	// Pairs BELOW the floor whose tokens would nonetheless correspond. With
+	// the early return, the floor rejects them and the token rule never runs.
+	// Without it, the token rule reaches them and flips them to accept.
+	for _, tc := range []struct{ name, requested, got string }{
+		// A reordering scores ~0.53, far below 0.75, but its token multiset is
+		// IDENTICAL -- so this is the sharpest case the bound protects.
+		{"reordered tokens score below the floor", "Vanguard Kettledrum", "Kettledrum Vanguard"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// PREMISE: below the floor, so only the early return can be what
+			// rejects this. If it ever rose above, the case stops testing the
+			// bound.
+			conf := normalize.MatchConfidence(tc.requested, tc.got)
+			if conf >= matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is at or above the %.2f floor, so this pair no longer isolates the early return", conf, matchMinConfidence)
+			}
+			// And the tokens DO correspond, so the token rule would accept.
+			if !titleTokensCorrespond(tc.requested, tc.got) {
+				t.Fatalf("test premise broken: the tokens must correspond, or removing the early return would change nothing here")
+			}
+
+			ok, comparable := titleFieldCorresponds(tc.requested, tc.got)
+			if !comparable {
+				t.Fatal("both sides carry tokens, so the field must be comparable")
+			}
+			if ok {
+				t.Error("a below-floor pair was ACCEPTED: the token rule may only SUBTRACT accepts, never add one")
+			}
+		})
+	}
+}
+
+// TestTitleTokensAreAMultisetNotASet pins duplicate COUNTING. Replacing the
+// count comparisons with presence-only checks left the suite green
+// (853-R5F2), so the word "multiset" was load-bearing in the design comments
+// and untested in the code. Repeated-word titles are a real shape, and a set
+// makes a doubled title correspond to its single-word sibling.
+func TestTitleTokensAreAMultisetNotASet(t *testing.T) {
+	for _, tc := range []struct{ name, requested, got string }{
+		{"doubled word against single", "Wobble Wobble Kettledrum", "Wobble Kettledrum"},
+		{"single against doubled word", "Wobble Kettledrum", "Wobble Wobble Kettledrum"},
+		{"tripled against doubled", "Wobble Wobble Wobble Kettle", "Wobble Wobble Kettle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if titleTokensCorrespond(tc.requested, tc.got) {
+				t.Errorf("%q and %q repeat a token a different number of times and are different titles; a SET comparison would wrongly accept them", tc.requested, tc.got)
+			}
+		})
+	}
+
+	t.Run("identical multiplicities still correspond", func(t *testing.T) {
+		// The multiset must not over-reject: the same counts are the same title.
+		if !titleTokensCorrespond("Wobble Wobble Kettle", "Wobble Wobble Kettle") {
+			t.Error("identical multiplicities name the same title")
+		}
+	})
 }

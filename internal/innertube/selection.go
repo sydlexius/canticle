@@ -2,6 +2,9 @@ package innertube
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
+	"unicode"
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
@@ -244,7 +247,7 @@ func SelectCandidate(candidates []SearchCandidate, requested models.Track) (Sear
 // revisited against that real caller rather than against this assumption.
 func checkCorresponds(requested models.Track, c SearchCandidate) error {
 	artistOK, artistComparable := fieldCorresponds(requested.ArtistName, c.Artist)
-	titleOK, titleComparable := fieldCorresponds(requested.TrackName, c.Title)
+	titleOK, titleComparable := titleFieldCorresponds(requested.TrackName, c.Title)
 
 	if !artistComparable && !titleComparable {
 		return fmt.Errorf("innertube: no comparable field to verify the candidate against: %w", ErrNotFound)
@@ -341,4 +344,366 @@ func scoreCandidate(c SearchCandidate, requested models.Track) float64 {
 	}
 
 	return score
+}
+
+// TOKEN CORRESPONDENCE: THE SECOND HALF OF THE TITLE GATE.
+//
+// The Jaro-Winkler floor alone has a measured false-accept class it cannot
+// close, because the class is not a scoring problem. Holding the artist
+// identical and varying only the title:
+//
+//	requested "Placeholder Song Title" vs "Placeholder Song Titles"     -> ~0.99
+//	requested "Placeholder Song Title" vs "Placeholder Song Title Pt.2" -> ~0.98
+//
+// Those are DIFFERENT SONGS with different words, and both sit above any floor
+// that still admits the weakest legitimate shape (a leading article, 0.8426).
+// No floor value separates them; the separation is not on the similarity axis
+// at all. Edit distance is small precisely because the difference is small --
+// one plural, one part number -- and that is exactly the difference that makes
+// it another song.
+//
+// WHY THIS CLASS IS WORSE THAN THE OTHERS, and why it earns a structural check
+// rather than a tuning pass. Reason 3 in the durationCloseTolerance block
+// leans on internal/timing.Evaluate to catch a grossly wrong runtime
+// downstream. That net exists and works -- for a candidate whose runtime is
+// wrong. A sibling track from the same release runs about as long, so its cues
+// never overrun, timing.Evaluate returns Ok, and internal/lyrics promotes
+// another song's words to a .lrc beside the user's audio. There is NO net below
+// this gate for this class, which is what makes it the silent-corruption case
+// the package doc names.
+//
+// Ranking does not rescue it either: when the correct upload and the sibling
+// are both present the correct one wins, but search returning ONLY the
+// near-neighbor is the ordinary case for obscure material -- which is the
+// material a lyrics provider is most needed for.
+//
+// THE RULE. A candidate title corresponds only if, alongside clearing the
+// floor, its normalized token multiset differs from the requested title's only
+// by tokens drawn from a known VARIANT vocabulary. An unmatched CONTENT token
+// REJECTS. This is deterministic and needs no calibration: it asks a different
+// question from the floor ("are these the same words, modulo release
+// packaging") rather than a stricter version of the same one.
+//
+// It preserves every legitimate variant class, which is the point -- most of
+// what this gate accepts is CORRECT and must stay accepted. A live version, a
+// remaster, a radio edit, an acoustic take, a deluxe reissue, a karaoke or
+// instrumental cut all carry the same words and the same timing; rejecting
+// them would trade a silent-corruption bug for a feature that never returns a
+// lyric.
+//
+// TITLE ONLY. Artist is NOT subject to this rule: it needs the OPPOSITE
+// treatment, because its failure mode is the reverse one (a legitimate
+// REORDERING of the same names scores below the floor, where a title built
+// from the same words in a different order is a different song). The artist
+// half is its own slice; conflating the two reintroduces one defect or the
+// other.
+//
+// WHAT THIS DELIBERATELY DOES NOT HANDLE (the vocabulary is itself an attack
+// surface, so the residue is written down rather than implied):
+//
+//   - A VARIANT WORD USED AS CONTENT. A song genuinely titled with one of these
+//     words is compared on a vocabulary that treats that word as noise, so
+//     "Live" vs "Karaoke" would differ only by variant tokens. Mitigated, not
+//     eliminated: an accept requires at least one shared CONTENT token, so two
+//     titles made ENTIRELY of variant vocabulary can never correspond by this
+//     path (they still may by exact token identity, which is not a false
+//     accept). A title with one content word plus a variant-word content word
+//     remains reachable, and is accepted as the residual cost of admitting the
+//     legitimate classes above.
+//   - UPLOAD DECORATION IS EXCLUDED FROM THE VOCABULARY WHOLESALE, and the
+//     exclusion is LOAD BEARING rather than an unfinished list. "video",
+//     "audio", "hd", "official", "lyrics"/"lyric" and "visualizer" are all
+//     genuine YouTube upload decoration and NONE of them is vocabulary, so
+//     "(Official Video)", "(Official Audio)", "[HD]" and "(Visualizer)" all
+//     REJECT. The reason is the sibling class this whole rule exists to close:
+//     admitting "video" makes a title correspond to that title with "Video"
+//     prepended, which is a DIFFERENT SONG by exactly the measured defect.
+//     There is no rule available here that tells a decoration "video" apart
+//     from a content "video", so the family is excluded uniformly rather than
+//     token by token -- a partial list is the trap, because the next reader
+//     reads four members, infers the missing ones were an oversight, and
+//     "completes" it. TestUploadDecorationStaysRejected pins this so that
+//     completing the list breaks a test rather than a library.
+//     The line drawn is RELEASE packaging (how the RECORDING is issued --
+//     remaster, deluxe, radio edit) stays; UPLOAD/PLATFORM decoration (how the
+//     video is presented) does not. The cost is a false REJECT on decorated
+//     uploads, which is the recoverable direction.
+//   - "WITH" IS NOT A FEATURING MARKER here, though it often reads as one:
+//     truncating at it would collapse a title to its first words and make two
+//     different songs sharing a prefix correspond. Only feat/ft/featuring
+//     truncate.
+//   - DIRECTION IS NOT DISTINGUISHED. A variant token is tolerated whether it
+//     appears in the requested title or the candidate's. Asking for a remaster
+//     and being handed the plain cut (or the reverse) is the same words either
+//     way, so the symmetry is intended rather than an oversight.
+//   - A NAMED VENUE OR A CREDITED REMIXER REJECTS, and only the BARE decoration
+//     accepts. "(Live)", "(Remix)" and "(2011 Remaster)" carry nothing but
+//     vocabulary, so they pass; "(Live at the Venue)", "(Live in the City)" and
+//     a remix crediting the remixer each contribute the venue or remixer word
+//     as an unmatched CONTENT token and reject. This is left as is on the same
+//     reasoning that excludes "video" and "audio" below: a venue or a person's
+//     name is indistinguishable from a real content word by any rule available
+//     here, so admitting it means admitting every content token that looks like
+//     one. A credited remix is also frequently a genuinely different
+//     arrangement rather than the same words. The cost is a false REJECT, the
+//     recoverable direction.
+//   - TWO DIFFERENT PERFORMANCES OF THE SAME SONG CORRESPOND -- "(Live)" vs
+//     "(Acoustic)", and likewise "(Live)"/"(Demo)" or "(Acoustic)"/"(Karaoke)".
+//     DECIDED, NOT MISSED, and it reverses both axes of the sibling-title class
+//     this rule exists to close. That class is a DIFFERENT SONG with different
+//     words at a near-identical runtime, so timing.Evaluate is blind to it and
+//     there is no net below this gate. A performance variant is the SAME WORDS,
+//     so an accept is not corruption, and the runtimes genuinely DIFFER, so the
+//     net that missed the sibling catches this one: a live take judged against
+//     studio audio computes MisSynced and is demoted to .txt with the words
+//     kept, an extended remix computes Categorical and is quarantined. The
+//     residue is two takes within timing's own tolerance of each other -- the
+//     right words with sub-tolerance drift, which is exactly what the already
+//     accepted remaster and radio-edit classes tolerate. Closing it would need
+//     a SECOND vocabulary partitioning performance tokens from packaging ones,
+//     doubling the surface that is itself the risk here, and it would start
+//     rejecting "asked for the live cut, got the plain upload" -- same words,
+//     accepted by design per DIRECTION IS NOT DISTINGUISHED above.
+//   - Case, punctuation, diacritics and "&"/"and" are erased by tokenization,
+//     so they never reach the vocabulary. APOSTROPHES ARE ERASED TOO, but by an
+//     explicit replacer rather than by the split -- see apostropheEraser, and
+//     do not assume any other punctuation JOINS rather than SEPARATES.
+
+// titleVariantTokens is the RELEASE-packaging vocabulary: tokens that may
+// differ between two titles naming the SAME words. Membership criterion, so
+// additions stay principled: a token belongs here only if it names how the
+// RECORDING was ISSUED AND is rare as a standalone content word.
+//
+// TWO EXCLUSIONS ARE DELIBERATE AND BOTH ARE LOAD BEARING. "part"/"pt" are
+// absent because a part number names a different song, which is the measured
+// defect. UPLOAD DECORATION ("video", "audio", "hd", "official",
+// "lyrics"/"lyric", "visualizer") is absent as a family -- see the block above
+// and TestUploadDecorationStaysRejected. Neither gap is an oversight; do not
+// "complete" either one.
+//
+// DROPPING "official", "lyrics", "lyric" and "visualizer" (82b04e6) WAS A
+// BEHAVIOR CHANGE, not merely a pin of the stated policy to the data. A title
+// that genuinely uses one of those four words as CONTENT on one side now
+// REJECTS where it previously accepted -- measured: an otherwise-identical
+// pair still accepts (0.9062) when the varying word stays in the vocabulary,
+// while the same shape with a dropped word measures 0.7814 to 0.8992 and
+// rejects. That is an ACCEPTED COST, not an oversight: keeping those four
+// tokens would have reopened the upload-decoration sibling class this
+// exclusion exists to close, and a false reject is the recoverable direction.
+// Noted here so a reader who sees "pin" does not assume nothing moved.
+var titleVariantTokens = map[string]struct{}{
+	"live": {}, "unplugged": {}, "acoustic": {}, "demo": {},
+	"remaster": {}, "remastered": {}, "remasters": {}, "reissue": {},
+	"remix": {}, "remixed": {}, "mix": {}, "edit": {}, "radio": {},
+	"instrumental": {}, "karaoke": {}, "mono": {}, "stereo": {},
+	"deluxe": {}, "bonus": {}, "extended": {}, "anniversary": {},
+	"edition": {}, "version": {}, "original": {}, "session": {}, "sessions": {},
+	"take": {}, "explicit": {}, "clean": {},
+	// Produced by the phrase collapse in tokenizeTitle, never by a bare word:
+	// "up" and "down" are far too common as content to admit on their own.
+	"spedup": {}, "sloweddown": {},
+}
+
+// ignorableTokens are dropped from BOTH fields before comparison. Articles and
+// the conjunction move around legitimately (a leading vs trailing article, an
+// "&" written out) without changing which song or which act is named.
+var ignorableTokens = map[string]struct{}{
+	"a": {}, "an": {}, "the": {}, "and": {},
+}
+
+// featMarkers introduce a featured-credit suffix. In a TITLE they truncate:
+// everything from the marker onward is a credit, not the song's words. In an
+// ARTIST they are merely ignorable, because the names after them are part of
+// the act being compared -- that is the artist half's own rule, and it lands
+// with the artist slice.
+var featMarkers = map[string]struct{}{
+	"feat": {}, "feats": {}, "ft": {}, "featuring": {},
+}
+
+// apostrophes are ERASED before splitting rather than split on. This is the
+// one punctuation class that must not be a token BOUNDARY: a contraction or a
+// possessive tokenizes to fragments if it is, so a title differing from a
+// candidate only by a dropped apostrophe compares as three tokens against one
+// and no fragment is in the vocabulary, rejecting in both directions. A local
+// tag differing from an upload title by a dropped apostrophe is one of the most
+// common real-world differences there is, and the similarity floor handles it
+// correctly on its own (measured ~0.98), so the token rule must not undo that.
+//
+// THIS LIST IS NOT AN AUDIT OF THE APOSTROPHE FAMILY, and that distinction
+// matters more than any one entry in it. Below are the forms that were
+// actually MEASURED to reproduce the boundary bug and got an entry as a
+// result -- not a sweep of Unicode apostrophe-like codepoints, and not a claim
+// that every such codepoint behaves one of two ways. A THIRD behavior exists
+// and this replacer does nothing for it: U+02BB (MODIFIER LETTER TURNED
+// COMMA) and U+A78C (LATIN SMALL LETTER SALTILLO) are Unicode LETTERS, so
+// FieldsFunc never treats them as a boundary in the first place -- they stay
+// EMBEDDED inside the token whether or not they appear here, the same way
+// U+02BC below does. A future apostrophe-shaped codepoint needs to be
+// MEASURED, not assumed into either bucket: check its Unicode category and
+// whether NormalizeKey disposes of it before deciding it needs an entry here
+// at all.
+//
+// EVERY FORM LISTED HERE WAS MEASURED THROUGH NormalizeKey FIRST, because this
+// replacer runs on the normalized string and a form NormalizeKey already
+// disposes of could never reach it. Measured: the straight apostrophe, U+2018,
+// U+2019, U+02BC, U+2032 (PRIME) and the backtick all SURVIVE NormalizeKey
+// unchanged (they are punctuation or a modifier letter, not combining marks),
+// so each one really would be a FieldsFunc boundary and each entry below is
+// load bearing. U+055A (ARMENIAN APOSTROPHE) was measured to survive
+// NormalizeKey the same way and would be a boundary too, but it is NOT added
+// here -- U+2032 is the one of the measured set plausible enough in a real
+// upload title to earn the entry; an unbounded codepoint list is the same
+// overclaim this comment exists to retire, just written as code instead of
+// prose.
+//
+// U+00B4 ACUTE ACCENT IS DELIBERATELY ABSENT and that absence is a measurement,
+// not an omission: NFKD decomposes it to a space plus a combining acute, the
+// mark is stripped, and it reaches this replacer as a SPACE. It is already a
+// word boundary before any of this runs, and adding it here would be dead code
+// that reads as coverage. The same is true of any other form NFKD decomposes to
+// a space -- measure before adding one.
+var apostropheEraser = strings.NewReplacer(
+	"'", "",
+	"\u2019", "", // right single quotation mark
+	"\u2018", "", // left single quotation mark
+	"\u02bc", "", // modifier letter apostrophe
+	"\u2032", "", // prime
+	"`", "",
+)
+
+// splitTokens lowercases, strips diacritics, ERASES apostrophes, and splits on
+// everything else that is not a letter or digit, so remaining punctuation, "&"
+// and whitespace runs all vanish rather than becoming tokens.
+//
+// The two treatments are different on purpose and the difference is the whole
+// point: an erased rune JOINS what surrounds it into one token, a split rune
+// SEPARATES it into two. Only the apostrophe wants the former -- see
+// apostropheEraser.
+func splitTokens(s string) []string {
+	normalized := apostropheEraser.Replace(normalize.NormalizeKey(s))
+	return strings.FieldsFunc(normalized, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+// isVariantToken reports whether an unmatched token is release packaging
+// rather than content.
+//
+// A four-digit year is treated as packaging: it is how a remaster or reissue is
+// labeled. Any OTHER number is CONTENT, which is what keeps a part number a
+// rejecting difference -- the measured defect turns on exactly that.
+func isVariantToken(tok string) bool {
+	if _, ok := titleVariantTokens[tok]; ok {
+		return true
+	}
+	if len(tok) == 4 {
+		if n, err := strconv.Atoi(tok); err == nil && n >= 1900 && n <= 2099 {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenizeTitle produces the comparable token sequence for a title: ignorable
+// tokens dropped, "sped up"/"slowed down" collapsed to a single variant token,
+// and everything from a featuring marker onward truncated away.
+func tokenizeTitle(s string) []string {
+	raw := splitTokens(s)
+	out := make([]string, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		tok := raw[i]
+		if _, ok := featMarkers[tok]; ok {
+			break
+		}
+		if _, ok := ignorableTokens[tok]; ok {
+			continue
+		}
+		if i+1 < len(raw) {
+			switch {
+			case tok == "sped" && raw[i+1] == "up":
+				out, i = append(out, "spedup"), i+1
+				continue
+			case tok == "slowed" && raw[i+1] == "down":
+				out, i = append(out, "sloweddown"), i+1
+				continue
+			}
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+// countTokens turns a token sequence into a multiset.
+func countTokens(toks []string) map[string]int {
+	counts := make(map[string]int, len(toks))
+	for _, t := range toks {
+		counts[t]++
+	}
+	return counts
+}
+
+// titleTokensCorrespond applies the multiset rule documented above.
+//
+// It fails OPEN when either side tokenizes to nothing (a title that is entirely
+// punctuation, or entirely a featuring credit): there is no token evidence to
+// judge on, and the floor has already been cleared by the caller, so inventing
+// a rejection here would be a guess rather than a finding.
+func titleTokensCorrespond(requested, got string) bool {
+	reqToks := tokenizeTitle(requested)
+	gotToks := tokenizeTitle(got)
+	if len(reqToks) == 0 || len(gotToks) == 0 {
+		return true
+	}
+
+	req := countTokens(reqToks)
+	cand := countTokens(gotToks)
+
+	// Identical multisets are the same words by construction -- accepted
+	// before the shared-content-token requirement below, which would otherwise
+	// reject a title made entirely of vocabulary words matching itself.
+	sameMultiset := len(req) == len(cand)
+	if sameMultiset {
+		for tok, n := range req {
+			if cand[tok] != n {
+				sameMultiset = false
+				break
+			}
+		}
+	}
+	if sameMultiset {
+		return true
+	}
+
+	// Every unmatched token, in either direction, must be packaging.
+	for tok, n := range req {
+		if n > cand[tok] && !isVariantToken(tok) {
+			return false
+		}
+	}
+	for tok, n := range cand {
+		if n > req[tok] && !isVariantToken(tok) {
+			return false
+		}
+	}
+
+	// And the two titles must share at least one CONTENT token, so that two
+	// different titles built only from vocabulary words cannot correspond
+	// merely by both being made of noise.
+	for tok, n := range req {
+		if n > 0 && cand[tok] > 0 && !isVariantToken(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// titleFieldCorresponds is the title half of the gate: the floor AND the token
+// multiset rule. Both must hold, so the token rule can only ever make the gate
+// STRICTER than the floor alone.
+func titleFieldCorresponds(requested, got string) (ok, comparable bool) {
+	ok, comparable = fieldCorresponds(requested, got)
+	if !comparable || !ok {
+		return ok, comparable
+	}
+	return titleTokensCorrespond(requested, got), true
 }
