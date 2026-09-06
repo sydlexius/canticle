@@ -4,10 +4,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/providers"
 )
 
 // orderListItemRE captures the value of each rendered order-list row, in
@@ -47,7 +49,15 @@ func TestFallbackOrderRendersAsOrderList(t *testing.T) {
 	for _, m := range orderListItemRE.FindAllStringSubmatch(body, -1) {
 		got = append(got, m[1])
 	}
+	// Stored order first, then the remaining known providers -- see
+	// orderedProviderOptions. Derived so registering a provider does not
+	// falsely fail this test.
 	want := []string{"petitlyrics", "musixmatch"}
+	for _, k := range providers.Known() {
+		if !slices.Contains(want, k) {
+			want = append(want, k)
+		}
+	}
 	if len(got) != len(want) {
 		t.Fatalf("rendered %d order-list rows %v, want %d %v", len(got), got, len(want), want)
 	}
@@ -84,8 +94,13 @@ func TestFallbackOrderHasKeyboardReorderControls(t *testing.T) {
 			t.Errorf("no move-%s control rendered; keyboard reordering must not depend on drag", dir)
 		}
 	}
-	if n := strings.Count(body, `data-order-move=`); n != 4 {
-		t.Errorf("got %d move controls, want 4 (up+down for each of 2 providers)", n)
+	// Two controls (up + down) per rendered provider row. Derived from
+	// Known(), since every known provider is rendered whether or not it is in
+	// the stored order.
+	wantControls := 2 * len(providers.Known())
+	if n := strings.Count(body, `data-order-move=`); n != wantControls {
+		t.Errorf("got %d move controls, want %d (up+down for each of %d providers)",
+			n, wantControls, len(providers.Known()))
 	}
 }
 

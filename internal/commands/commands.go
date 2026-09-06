@@ -32,6 +32,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/ffmpeg"
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/langguard"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/logging"
@@ -1697,6 +1698,20 @@ func buildProvider(name string, cfg config.Config, token string, newFetcher func
 		// petitlyrics one can make this lane impolite.
 		petit.WithMinInterval(petitLyricsInterval(cfg))
 		return providers.New(providers.PetitLyrics, petit)
+	case providers.InnerTube:
+		tube := innertube.NewClient()
+		// Tokenless, like petitlyrics: the InnerTube API key is a public,
+		// non-authenticating constant shipped by every unofficial client, so
+		// there is no credential to require or to be missing.
+		//
+		// Paced from api.cooldown until #858 gives this provider its own config
+		// key. The client clamps any positive value up to its own floor
+		// (innertube.MinAllowedInterval), so a misconfigured cooldown cannot
+		// make this lane impolite -- and that floor is per REQUEST, which
+		// matters more here than for the other two: one successful lookup costs
+		// THREE requests (search, next, browse) where they cost one.
+		tube.WithMinInterval(clampPacingSeconds(cfg.API.Cooldown))
+		return providers.New(providers.InnerTube, tube)
 	default:
 		return nil
 	}
@@ -1786,6 +1801,7 @@ func selectedProvider(cfg config.Config, token string, newFetcher func(string) m
 		cfg.Providers.Disabled,
 		buildProvider(providers.Musixmatch, cfg, token, newFetcher),
 		buildProvider(providers.PetitLyrics, cfg, token, newFetcher),
+		buildProvider(providers.InnerTube, cfg, token, newFetcher),
 	)
 	if err != nil {
 		return nil, err

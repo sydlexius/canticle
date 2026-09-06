@@ -15,6 +15,10 @@ const (
 	// internal/petitlyrics and is selectable via providers.primary =
 	// "petitlyrics" (wired in internal/commands.selectedProvider).
 	PetitLyrics = "petitlyrics"
+	// InnerTube is the YouTube Music InnerTube provider name. The adapter lives
+	// in internal/innertube and is selectable via providers.primary =
+	// "innertube" (wired in internal/commands.selectedProvider).
+	InnerTube = "innertube"
 )
 
 // Fetcher is the shared lyrics lookup behavior used by provider adapters.
@@ -120,8 +124,24 @@ func NormalizeName(name string) string {
 }
 
 // Known returns the built-in provider names in their canonical form.
+//
+// THIS IS THE LOAD-BEARING LIST. It propagates automatically to IsKnown,
+// ValidateSelection, config.ValidateKnownProviders, normalizeProvidersFallback,
+// the settings primary dropdown, the enable checkboxes and the fallback-order
+// list. A provider omitted here still WORKS when named explicitly but is
+// unconfigurable through every one of those surfaces, which is the quiet
+// failure mode to avoid.
+//
+// ADDING A NAME HERE CHANGES Generation FOR ANY DEPLOYMENT THAT ENABLES IT.
+// The generation is a function of the ACTIVE lane set, not of this list, so
+// merely adding a provider invalidates nothing on its own -- but the first boot
+// that actually enables it stamps a new generation, every queued row's
+// providers_version mismatches, and the next run bypasses the cache for a
+// LIBRARY-WIDE RE-FETCH. That is intended (a new lane may answer what the old
+// set missed), and it is a one-time cost, but it should be a planned event
+// rather than a surprise. See generation.go.
 func Known() []string {
-	return []string{Musixmatch, PetitLyrics}
+	return []string{Musixmatch, PetitLyrics, InnerTube}
 }
 
 // IsKnown reports whether name (case-insensitively) matches a built-in provider.

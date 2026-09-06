@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/circuit"
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/orchestrator"
+	"github.com/sydlexius/canticle/internal/providers"
 )
 
 // TestProviderLanesWireDriftDetection asserts the PRODUCTION construction path
@@ -58,6 +60,51 @@ type driftStubProvider struct{ name string }
 func (p *driftStubProvider) Name() string { return p.name }
 func (p *driftStubProvider) FindLyrics(context.Context, models.Track) (models.Song, error) {
 	return models.Song{}, nil
+}
+
+// TestInnerTubeLaneWiresDriftDetection is #857's "assert it, do not assume it"
+// acceptance criterion.
+//
+// The issue states that worker and lane code need NO change, because
+// NewProviderLane, laneName and withDriftDetection are all generic -- so
+// registering a provider gets drift detection for free. That claim is exactly
+// the kind that is true until it is not: a provider-specific construction path
+// added later would silently opt out, and the detector's whole failure mode is
+// a fault nobody notices.
+//
+// It uses the REAL innertube client rather than a stub named "innertube". A
+// stub would pass even if the concrete type failed to flow through
+// providers.New and laneName -- proving only that the test's own string
+// survives, which is the vacuity this repo keeps rediscovering.
+func TestInnerTubeLaneWiresDriftDetection(t *testing.T) {
+	w := New(nil, nil, nil, nil)
+	w.SetFallbackProviders(providers.New(providers.InnerTube, innertube.NewClient()))
+
+	if len(w.lanes) < 2 {
+		t.Fatalf("got %d lanes; want the primary plus the innertube fallback", len(w.lanes))
+	}
+
+	var found bool
+	for _, l := range w.lanes {
+		if l.Name() != providers.InnerTube {
+			continue
+		}
+		found = true
+		if !l.DriftWired() {
+			t.Error("the innertube lane has no response-drift detector; #844's " +
+				"detection does not in fact cover a newly registered provider")
+		}
+	}
+	if !found {
+		lanes := make([]string, 0, len(w.lanes))
+		for _, l := range w.lanes {
+			lanes = append(lanes, l.Name())
+		}
+		t.Fatalf("no lane named %q among %v -- laneName did not carry the "+
+			"provider's own identity, so every result would be misattributed in "+
+			"work_queue, lane_attempts and the UI credit",
+			providers.InnerTube, lanes)
+	}
 }
 
 // TestDriftWarningIsEmittedAndCarriesNoMetadata drives real traffic through the

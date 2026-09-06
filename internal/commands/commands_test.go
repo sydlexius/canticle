@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -573,6 +574,118 @@ func TestBuildProviderAppliesPetitLyricsInterval(t *testing.T) {
 	if got := client.MinInterval(); got != 90*time.Second {
 		t.Errorf("client MinInterval = %s; want 90s from providers.petitlyrics_cooldown_seconds.\n"+
 			"15s means buildProvider is still using api.cooldown and the key is accepted but ignored (#535 AC2).", got)
+	}
+}
+
+// TestBuildProviderConstructsInnerTube pins that #857's registration actually
+// CONSTRUCTS a client and applies the pacing floor, rather than merely making
+// the name selectable.
+//
+// The distinction is the point: providers.Known() is what makes a provider
+// configurable, but buildProvider is what makes it FETCH. A name registered
+// without a construction arm resolves, validates, renders in the settings
+// dropdown, and then returns nil from every lane -- configurable and inert.
+func TestBuildProviderConstructsInnerTube(t *testing.T) {
+	// Below innertube's own 2s floor, so the clamp is observable: a client that
+	// took this value verbatim would report 1s.
+	cfg := config.Config{API: config.APIConfig{Cooldown: 1}}
+
+	p := buildProvider(providers.InnerTube, cfg, "", nil)
+	if p == nil {
+		t.Fatal("buildProvider returned nil for the innertube provider; " +
+			"the name is registered but nothing constructs it")
+	}
+	if p.Name() != providers.InnerTube {
+		t.Errorf("provider Name = %q, want %q -- the lane name is the attribution "+
+			"shown to users and the key every per-lane metric groups by",
+			p.Name(), providers.InnerTube)
+	}
+
+	inner, ok := p.(interface{ Unwrap() providers.Fetcher })
+	if !ok {
+		t.Fatal("provider wrapper does not expose Unwrap; cannot verify the interval reached the client")
+	}
+	client, ok := inner.Unwrap().(*innertube.Client)
+	if !ok {
+		t.Fatalf("unwrapped fetcher is %T; want *innertube.Client", inner.Unwrap())
+	}
+
+	// Clamped UP to the provider's own floor, not taken verbatim. That floor is
+	// per REQUEST and matters more here than for the other two lanes: one
+	// successful lookup costs three requests (search, next, browse).
+	if got := client.MinInterval(); got != innertube.MinAllowedInterval {
+		t.Errorf("client MinInterval = %s; want %s (innertube.MinAllowedInterval).\n"+
+			"1s means buildProvider passed api.cooldown through without the client "+
+			"clamping it, so a misconfigured cooldown could make this lane impolite.",
+			got, innertube.MinAllowedInterval)
+	}
+}
+
+// TestBuildProviderClampsInnerTubeOverflowCooldown pins that the InnerTube arm
+// routes api.cooldown through clampPacingSeconds rather than converting it
+// directly, and it is the ONLY case that can tell the two apart.
+//
+// Measured: replacing clampPacingSeconds(cfg.API.Cooldown) with
+// time.Duration(cfg.API.Cooldown) * time.Second left the whole suite green,
+// because at any ORDINARY cooldown both forms produce the same duration and
+// innertube's own floor clamps them identically. The two diverge only past
+// maxPacingSeconds, where the multiplication OVERFLOWS int64 and wraps
+// NEGATIVE.
+//
+// A negative is the dangerous direction. WithMinInterval clamps up only when
+// d > 0, so a wrapped value disables pacing entirely -- an absurd config value
+// silently turning the politeness floor OFF, which is the opposite of what a
+// clamp is for. clampPacingSeconds caps it and warns instead.
+func TestBuildProviderClampsInnerTubeOverflowCooldown(t *testing.T) {
+	cfg := config.Config{API: config.APIConfig{Cooldown: maxPacingSeconds + 1}}
+
+	p := buildProvider(providers.InnerTube, cfg, "", nil)
+	if p == nil {
+		t.Fatal("buildProvider returned nil for the innertube provider")
+	}
+	inner, ok := p.(interface{ Unwrap() providers.Fetcher })
+	if !ok {
+		t.Fatal("provider wrapper does not expose Unwrap")
+	}
+	client, ok := inner.Unwrap().(*innertube.Client)
+	if !ok {
+		t.Fatalf("unwrapped fetcher is %T; want *innertube.Client", inner.Unwrap())
+	}
+
+	got := client.MinInterval()
+	if got <= 0 {
+		t.Fatalf("client MinInterval = %s; a non-positive interval DISABLES pacing. "+
+			"An overflowing api.cooldown wrapped negative, so the lane is now "+
+			"completely unpaced against a third-party gateway.", got)
+	}
+	if got != maxPacingInterval {
+		t.Errorf("client MinInterval = %s; want %s (clampPacingSeconds' cap)",
+			got, maxPacingInterval)
+	}
+}
+
+// TestSelectedProviderAcceptsInnerTube drives the real resolver, which is the
+// path serve mode takes. buildProvider alone proves the arm exists; this proves
+// the arm is REACHABLE from a configured primary.
+func TestSelectedProviderAcceptsInnerTube(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Providers.Primary = providers.InnerTube
+
+	// No token deliberately: innertube is tokenless (its API key is a public,
+	// non-authenticating constant), so a missing token must not block it the way
+	// it blocks a musixmatch primary.
+	//
+	// A real fetcher factory is still required even though innertube never uses
+	// it: selectedProvider builds EVERY candidate before Select picks one, so
+	// the musixmatch arm calls newFetcher unconditionally and a nil factory
+	// panics there. That eager construction is pre-existing and shared by every
+	// caller in this file.
+	p, err := selectedProvider(cfg, "", func(string) musixmatch.Fetcher { return fakeFetcher{} })
+	if err != nil {
+		t.Fatalf("selectedProvider with innertube primary and no token: %v", err)
+	}
+	if p.Name() != providers.InnerTube {
+		t.Errorf("selected provider = %q, want %q", p.Name(), providers.InnerTube)
 	}
 }
 

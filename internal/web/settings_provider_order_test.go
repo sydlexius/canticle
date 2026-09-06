@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/providers"
 )
 
 // TestSaveFallbackOrderPreservesSubmittedOrder pins the SERVER half of the #837
@@ -55,9 +56,20 @@ func TestSaveFallbackOrderPreservesSubmittedOrder(t *testing.T) {
 // which a reorder control would have to rewrite on every move -- and which lies
 // the moment the operator drags an item without saving.
 func TestOrderedProviderOptionsLabelsAreBareNames(t *testing.T) {
-	opts := orderedProviderOptions([]string{"petitlyrics", "musixmatch"})
+	stored := []string{"petitlyrics", "musixmatch"}
+	opts := orderedProviderOptions(stored)
 
-	want := []string{"petitlyrics", "musixmatch"}
+	// The stored order first, then every remaining known provider appended
+	// unselected -- so a newly registered provider is offered to the operator
+	// rather than being invisible until they hand-edit the config. Derived from
+	// providers.Known() rather than hardcoded, so registering the NEXT provider
+	// does not falsely fail this test.
+	want := slices.Clone(stored)
+	for _, k := range providers.Known() {
+		if !slices.Contains(want, k) {
+			want = append(want, k)
+		}
+	}
 	if len(opts) != len(want) {
 		t.Fatalf("got %d options, want %d: %+v", len(opts), len(want), opts)
 	}
@@ -68,8 +80,15 @@ func TestOrderedProviderOptionsLabelsAreBareNames(t *testing.T) {
 		if opts[i].Value != w {
 			t.Errorf("option %d value = %q, want %q", i, opts[i].Value, w)
 		}
-		if !opts[i].Selected {
-			t.Errorf("option %d (%s) is not Selected; every configured provider is in the order", i, w)
+		// Selected is load-bearing rather than cosmetic: it separates "in the
+		// operator's configured fallback order" from "known and available but
+		// not yet configured". A provider appended by orderedProviderOptions
+		// because it is in Known() must NOT come back Selected, or enabling it
+		// would look like an existing choice the operator already made.
+		wantSelected := slices.Contains(stored, w)
+		if opts[i].Selected != wantSelected {
+			t.Errorf("option %d (%s) Selected = %v, want %v (stored order: %v)",
+				i, w, opts[i].Selected, wantSelected, stored)
 		}
 	}
 }

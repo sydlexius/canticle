@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -38,12 +39,19 @@ func TestSelectRejectsUnsupportedProvider(t *testing.T) {
 }
 
 func TestKnown(t *testing.T) {
-	known := Known()
-	if len(known) != 2 {
-		t.Fatalf("Known() = %v; want exactly the two built-in providers", known)
-	}
-	if known[0] != Musixmatch || known[1] != PetitLyrics {
-		t.Fatalf("Known() = %v; want [%q %q]", known, Musixmatch, PetitLyrics)
+	// The EXACT list, in order, not merely a length or a membership check.
+	//
+	// Known() is load-bearing: it propagates to IsKnown, ValidateSelection,
+	// config.ValidateKnownProviders, normalizeProvidersFallback, the settings
+	// primary dropdown, the enable checkboxes and the fallback-order list. A
+	// provider silently added or dropped here changes every one of those
+	// surfaces, and adding one also changes providers.Generation for any
+	// deployment that enables it -- a library-wide re-fetch on first boot. That
+	// is a deliberate event, so the list is pinned rather than counted.
+	want := []string{Musixmatch, PetitLyrics, InnerTube}
+	got := Known()
+	if !slices.Equal(got, want) {
+		t.Fatalf("Known() = %v; want %v", got, want)
 	}
 }
 
