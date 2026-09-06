@@ -393,3 +393,124 @@ func TestParseSearchCandidates_TitleComesFromTheFirstRun(t *testing.T) {
 		t.Errorf("want the FIRST run's text %q, got %q", "First", got[0].Title)
 	}
 }
+
+// TestParseSearchCandidates_MusicShelfRenderer pins #894: the live gateway
+// answers a songs-filtered search with a musicShelfRenderer whose items are
+// musicResponsiveListItemRenderer, NOT the musicCardShelfRenderer every
+// hand-built fixture in this package was written around. Matching only the
+// card shelf made parseSearchCandidates return an empty slice for every real
+// query, which calls.go turns into ErrNotFound -- a total provider failure
+// wearing the costume of a benign miss.
+//
+// Measured before the fix: 4 of 4 live responses (three real tracks, one
+// nonsense query) carried musicShelfRenderer and 0 of 4 carried
+// musicCardShelfRenderer.
+//
+// The fixture reproduces the captured STRUCTURE with placeholder text, which
+// is the axis that was wrong; the values never mattered.
+func TestParseSearchCandidates_MusicShelfRenderer(t *testing.T) {
+	got, err := parseSearchCandidates(readFixture(t, "search_music_shelf.json"))
+	if err != nil {
+		t.Fatalf("parseSearchCandidates: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 candidates from the music shelf, got %d", len(got))
+	}
+
+	first := got[0]
+	if first.VideoID != "aaaaaaaaaaa" {
+		t.Errorf("videoId = %q, want aaaaaaaaaaa", first.VideoID)
+	}
+	if first.Title != "Placeholder Song Title" {
+		t.Errorf("title = %q, want the flexColumn-0 watch-endpoint run", first.Title)
+	}
+	// The album run also carries a browseEndpoint, so a last-wins loop would
+	// report the album here -- the same 854-F2 shape the card-shelf arm guards.
+	if first.Artist != "Placeholder Artist Name" {
+		t.Errorf("artist = %q, want the FIRST browse-bearing run, not the album", first.Artist)
+	}
+	if first.DurationSeconds != 126 {
+		t.Errorf("duration = %d, want 126 (2:06)", first.DurationSeconds)
+	}
+
+	// Every item in the shelf is a candidate: a shelf carries the whole result
+	// list, unlike a card shelf which is one result.
+	if got[1].VideoID != "bbbbbbbbbbb" {
+		t.Errorf("second videoId = %q, want bbbbbbbbbbb", got[1].VideoID)
+	}
+	if got[1].DurationSeconds != 239 {
+		t.Errorf("second duration = %d, want 239 (3:59)", got[1].DurationSeconds)
+	}
+}
+
+// TestParseSearchCandidates_MusicShelfFieldPrecedence pins the three precedence
+// rules a hostile review found VACUOUS in the test above: mutating title,
+// duration and videoId-source precedence each left the suite green, because the
+// original fixture gave every row exactly one candidate run per field.
+//
+// The duration rule is the one that was actually WRONG. A real music-shelf row
+// carries extra flex columns (view counts, type labels), and the arm walks all
+// of them, so a duration-shaped run anywhere in the row overwrote the true
+// duration. That value is not inert: it feeds candidate scoring, so a garbage
+// number can promote the wrong upload among duplicates -- exactly the case
+// SelectCandidate's deterministic videoId tie-break exists to decide.
+//
+// FIRST-WINS is the rule for every field here, which is what makes the real
+// subtitle's leading run authoritative and a trailing lookalike ignorable.
+func TestParseSearchCandidates_MusicShelfFieldPrecedence(t *testing.T) {
+	got, err := parseSearchCandidates(readFixture(t, "search_music_shelf.json"))
+	if err != nil {
+		t.Fatalf("parseSearchCandidates: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no candidates parsed")
+	}
+	first := got[0]
+
+	// Row 0 carries a trailing "1:23" run in a third column. First-wins keeps
+	// the subtitle's own 2:06; last-wins would report 83.
+	if first.DurationSeconds != 126 {
+		t.Errorf("duration = %d, want 126 -- a later duration-shaped run in another "+
+			"column must NOT overwrite the subtitle's duration", first.DurationSeconds)
+	}
+
+	// Row 0 carries a second watch-bearing run. First-wins keeps the real title.
+	if first.Title != "Placeholder Song Title" {
+		t.Errorf("title = %q, want the FIRST watch-bearing run", first.Title)
+	}
+
+	// NO videoId-SOURCE assertion here, deliberately. A real row carries the
+	// same id in playlistItemData and in the title run's watchEndpoint, so an
+	// assertion on the value cannot tell which one the parser read -- it passes
+	// under either, which makes it a coincidence rather than a pin. The
+	// behavioral consequence of the choice IS pinned, in the row-drop test
+	// below.
+}
+
+// TestParseSearchCandidates_MusicShelfRequiresPlaylistItemData pins the
+// consequence of reading the videoId from playlistItemData: a row carrying a
+// usable videoId ONLY in its title run's watchEndpoint is DROPPED.
+//
+// That is the deliberate direction. Under this package's governing asymmetry a
+// false reject costs one missing lyric file and defers, while a false accept
+// writes another song's words next to the user's audio -- so an unfamiliar row
+// shape is skipped rather than admitted on a field the shape does not normally
+// carry alone. The captured rows carry both fields; a row carrying only the
+// watch endpoint is a shape nothing has characterized.
+func TestParseSearchCandidates_MusicShelfRequiresPlaylistItemData(t *testing.T) {
+	const envelope = `{"contents":{"tabbedSearchResultsRenderer":{"tabs":[{"tabRenderer":` +
+		`{"content":{"sectionListRenderer":{"contents":[{"musicShelfRenderer":{"contents":[` +
+		`{"musicResponsiveListItemRenderer":%s}]}}]}}}}]}}}`
+
+	const watchOnlyRow = `{"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":` +
+		`{"text":{"runs":[{"text":"T","navigationEndpoint":{"watchEndpoint":{"videoId":"vvvvvvvvvvv"}}}]}}}]}`
+
+	body := strings.Replace(envelope, "%s", watchOnlyRow, 1)
+	got, err := parseSearchCandidates([]byte(body))
+	if err != nil {
+		t.Fatalf("parseSearchCandidates: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("want a row with no playlistItemData dropped, got %+v", got)
+	}
+}

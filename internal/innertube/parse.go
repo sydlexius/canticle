@@ -26,6 +26,46 @@ type searchResponse struct {
 
 type searchSectionContent struct {
 	MusicCardShelfRenderer *musicCardShelfRenderer `json:"musicCardShelfRenderer"`
+
+	// MusicShelfRenderer is the shape the LIVE gateway returns for a
+	// songs-filtered search (#894). It carries the whole result LIST, one
+	// musicResponsiveListItemRenderer per song, where a card shelf carries a
+	// single promoted result. Both arms are kept: a response may carry either
+	// or BOTH, and a section carrying neither is skipped.
+	MusicShelfRenderer *musicShelfRenderer `json:"musicShelfRenderer"`
+}
+
+// musicShelfRenderer is a list shelf: its contents are the search results.
+type musicShelfRenderer struct {
+	Contents []musicShelfItem `json:"contents"`
+}
+
+type musicShelfItem struct {
+	MusicResponsiveListItemRenderer *musicResponsiveListItemRenderer `json:"musicResponsiveListItemRenderer"`
+}
+
+// musicResponsiveListItemRenderer is one row of a music shelf. The videoId is
+// read from playlistItemData rather than from the title run's watchEndpoint.
+//
+// Both carried it in the responses measured while fixing #894 -- an OUT-OF-BAND
+// measurement, deliberately recorded as such: no captured response is committed
+// here, so nothing in this package corroborates it. What IS pinned is the
+// CONSEQUENCE of the choice: a row carrying a videoId only in its watchEndpoint
+// is DROPPED rather than admitted (see the row-drop test). That is the safe
+// direction under this package's governing asymmetry -- a false reject costs one
+// missing lyric file, a false accept writes another song's words to disk -- so
+// an uncharacterized row shape is skipped rather than salvaged.
+type musicResponsiveListItemRenderer struct {
+	FlexColumns      []flexColumn `json:"flexColumns"`
+	PlaylistItemData struct {
+		VideoID string `json:"videoId"`
+	} `json:"playlistItemData"`
+}
+
+type flexColumn struct {
+	Renderer struct {
+		Text runsContainer `json:"text"`
+	} `json:"musicResponsiveListItemFlexColumnRenderer"`
 }
 
 type musicCardShelfRenderer struct {
@@ -61,7 +101,11 @@ type browseEndpoint struct {
 }
 
 // parseSearchCandidates walks every tab and section of a search response and
-// extracts one SearchCandidate per musicCardShelfRenderer found.
+// extracts one SearchCandidate per musicCardShelfRenderer and one per
+// musicResponsiveListItemRenderer inside a musicShelfRenderer. A response may
+// carry BOTH shelves (a promoted "top result" card above the songs list), in
+// which case both are parsed and one videoId can appear twice -- harmless,
+// since a duplicate resolves to the same lyric, but not an accident.
 func parseSearchCandidates(raw []byte) ([]SearchCandidate, error) {
 	var resp searchResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -74,11 +118,20 @@ func parseSearchCandidates(raw []byte) ([]SearchCandidate, error) {
 	var out []SearchCandidate
 	for _, tab := range resp.Contents.TabbedSearchResultsRenderer.Tabs {
 		for _, section := range tab.TabRenderer.Content.SectionListRenderer.Contents {
-			if section.MusicCardShelfRenderer == nil {
-				continue
+			if section.MusicCardShelfRenderer != nil {
+				if cand, ok := candidateFromShelf(*section.MusicCardShelfRenderer); ok {
+					out = append(out, cand)
+				}
 			}
-			if cand, ok := candidateFromShelf(*section.MusicCardShelfRenderer); ok {
-				out = append(out, cand)
+			if section.MusicShelfRenderer != nil {
+				for _, item := range section.MusicShelfRenderer.Contents {
+					if item.MusicResponsiveListItemRenderer == nil {
+						continue
+					}
+					if cand, ok := candidateFromListItem(*item.MusicResponsiveListItemRenderer); ok {
+						out = append(out, cand)
+					}
+				}
 			}
 		}
 	}
@@ -126,6 +179,76 @@ func candidateFromShelf(shelf musicCardShelfRenderer) (SearchCandidate, bool) {
 		}
 		if d := parseDurationSeconds(run.Text); d > 0 {
 			cand.DurationSeconds = d
+		}
+	}
+	return cand, true
+}
+
+// candidateFromListItem extracts a SearchCandidate from one music-shelf row,
+// or reports false if the row carries no usable videoId.
+//
+// The column layout is positional in every captured response: flexColumn 0 is
+// the title (a single run bearing the watchEndpoint) and flexColumn 1 is the
+// subtitle, reading "Artist - Album - Duration" as alternating browse-bearing
+// and plain runs. Rather than trust that layout, this walks EVERY column's runs
+// and classifies each by the endpoint it carries, so a reordering of the
+// COLUMNS is handled correctly rather than merely tolerated.
+//
+// It is NOT proof against a reordering of the RUNS INSIDE a column: the artist
+// rule is "first browse-bearing run", so a subtitle that led with its album run
+// would report the album as the artist. That is the same bounded degradation
+// candidateFromShelf documents, and it is bounded the same way -- by the
+// downstream correspondence guard, which must independently verify every
+// candidate. Every field takes the FIRST run of its kind, which is what makes a
+// trailing lookalike (a second watch run, a duration-shaped run in a later
+// column) ignorable rather than authoritative.
+//
+// Artist takes the FIRST browse-bearing run, matching candidateFromShelf and
+// for the same reason (854-F2): the album run carries a browseEndpoint too, so
+// a last-wins loop would report the album as the artist. Both arms therefore
+// share one rule, and the pageType discriminator stays unused -- see the
+// reasoning in candidateFromShelf about not trusting an undocumented browseId
+// format as a second attack surface.
+//
+// As with the card-shelf arm, nothing here establishes that the row
+// CORRESPONDS to the requested track; search has no empty state (doc.go), so
+// that remains SelectCandidate's job.
+func candidateFromListItem(item musicResponsiveListItemRenderer) (SearchCandidate, bool) {
+	videoID := item.PlaylistItemData.VideoID
+	if videoID == "" {
+		return SearchCandidate{}, false
+	}
+
+	cand := SearchCandidate{VideoID: videoID}
+	artistSet := false
+	for _, col := range item.FlexColumns {
+		for _, run := range col.Renderer.Text.Runs {
+			if run.NavigationEndpoint != nil && run.NavigationEndpoint.WatchEndpoint != nil {
+				if cand.Title == "" {
+					cand.Title = run.Text
+				}
+				continue
+			}
+			if run.NavigationEndpoint != nil && run.NavigationEndpoint.BrowseEndpoint != nil {
+				if !artistSet {
+					cand.Artist = run.Text
+					artistSet = true
+				}
+				continue
+			}
+			// FIRST-WINS, like Title and Artist above. A real row carries extra
+			// flex columns (view counts, type labels), and this walks all of
+			// them, so a last-wins assignment let any duration-shaped run
+			// anywhere in the row overwrite the subtitle's own duration. That
+			// value is not inert: it feeds scoreCandidate, so a garbage number
+			// can promote the wrong upload among duplicates -- the case
+			// SelectCandidate's videoId tie-break exists to decide
+			// deterministically.
+			if cand.DurationSeconds == 0 {
+				if d := parseDurationSeconds(run.Text); d > 0 {
+					cand.DurationSeconds = d
+				}
+			}
 		}
 	}
 	return cand, true
