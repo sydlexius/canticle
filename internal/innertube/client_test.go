@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -130,22 +131,90 @@ func TestPostJSON_MapsStatusToSentinel(t *testing.T) {
 	}
 }
 
+// TestReadBody_CapsResponseSize pins BOTH halves of the cap, which are
+// separable: the io.LimitReader bounds what is read into MEMORY, and the
+// length check turns that into an error. Serving exactly maxResponseSize+1
+// cannot tell them apart -- with or without the LimitReader the reported
+// count is identical -- so removing only the LimitReader survived, leaving
+// the memory bound (the load-bearing half) untested (854-R5F2).
+//
+// Serving well over the cap discriminates: the LimitReader stops at
+// maxResponseSize+1 regardless of how much the server sends, so the REPORTED
+// COUNT is the assertion that proves the read was bounded.
 func TestReadBody_CapsResponseSize(t *testing.T) {
-	oversized := strings.Repeat("a", maxResponseSize+1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(oversized))
-	}))
-	t.Cleanup(srv.Close)
-	c := NewClient()
-	c.baseURL = srv.URL
+	for _, tc := range []struct {
+		name  string
+		serve int
+		want  bool
+	}{
+		{"at the cap", maxResponseSize, false},
+		{"one byte over", maxResponseSize + 1, true},
+		{"far over the cap", maxResponseSize * 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Repeat("a", tc.serve)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			t.Cleanup(srv.Close)
+			c := NewClient()
+			c.baseURL = srv.URL
 
-	_, err := c.postJSON(context.Background(), "/x", map[string]string{})
-	if err == nil {
-		t.Fatal("want an error for an oversized response")
+			_, err := c.postJSON(context.Background(), "/x", map[string]string{})
+			if !tc.want {
+				if err != nil && strings.Contains(err.Error(), "too large") {
+					t.Fatalf("a body exactly at the cap must not be refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("want an error for an oversized response")
+			}
+			if !strings.Contains(err.Error(), "too large") {
+				t.Fatalf("error should report the size cap, got: %v", err)
+			}
+			// The count proves the READ was bounded, not merely that the
+			// finished body was measured: an unbounded read would report the
+			// full served size.
+			want := fmt.Sprintf("%d bytes", maxResponseSize+1)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("want the capped count %q (proving io.LimitReader bounded the read), got: %v", want, err)
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "too large") {
-		t.Errorf("error should report the size cap, got: %v", err)
+}
+
+// TestNewClient_RefusesCrossOriginRedirect proves the redirect guard is
+// actually INSTALLED by NewClient, end to end. The only prior assertion was
+// that CheckRedirect is non-nil, which a no-op guard and a guard pinned to
+// the wrong host both satisfy -- both mutations survived (854-R5F1). The
+// guard's own unit tests live in redirect_test.go and never go through
+// NewClient, so nothing connected the proven function to the shipped client.
+func TestNewClient_RefusesCrossOriginRedirect(t *testing.T) {
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"reached":true}`))
+	}))
+	t.Cleanup(elsewhere.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/steal", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	c := NewClient()
+	c.baseURL = origin.URL
+
+	raw, err := c.postJSON(context.Background(), "/x", map[string]string{})
+	if err == nil {
+		t.Fatalf("a cross-origin redirect must be refused, got body %q", raw)
+	}
+	if !strings.Contains(err.Error(), "refusing cross-origin redirect") {
+		t.Errorf("want the guard's refusal, got: %v", err)
+	}
+	if strings.Contains(string(raw), "reached") {
+		t.Error("the redirect target was actually fetched: the guard is not installed")
 	}
 }
 

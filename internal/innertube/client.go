@@ -56,10 +56,13 @@ func NewClient() *Client {
 	}
 	c.httpClient = &http.Client{
 		Timeout: 30 * time.Second,
-		// A closure, not a bound method value: it reads c.baseURL at
-		// REDIRECT time, so a test that points the client at an httptest
-		// listener after NewClient still gets the guard pinned to that
-		// listener rather than to the default host.
+		// A closure over c, NOT a capture of c.baseURL's VALUE: it reads the
+		// field at REDIRECT time, so a caller that repoints the client after
+		// NewClient still gets the guard pinned to the new host rather than to
+		// the default one. (A bound method value would be equivalent -- it too
+		// reads through the receiver at call time. The refactor that WOULD
+		// break this is hoisting c.baseURL into a local and closing over
+		// that.)
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return checkRedirect(c.baseURL, req, via)
 		},
