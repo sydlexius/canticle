@@ -66,9 +66,9 @@ func parseSearchCandidates(raw []byte) ([]SearchCandidate, error) {
 	var resp searchResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		if isUnusableBody(raw) {
-			return nil, fmt.Errorf("search response unusable: %w", ErrNotFound)
+			return nil, fmt.Errorf("innertube: search response unusable: %w", ErrNotFound)
 		}
-		return nil, fmt.Errorf("decode search response: %w", err)
+		return nil, fmt.Errorf("innertube: decode search response: %w", err)
 	}
 
 	var out []SearchCandidate
@@ -219,9 +219,9 @@ func parseLyricsBrowseID(raw []byte) (string, error) {
 	var resp nextResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		if isUnusableBody(raw) {
-			return "", fmt.Errorf("next response unusable: %w", ErrNotFound)
+			return "", fmt.Errorf("innertube: next response unusable: %w", ErrNotFound)
 		}
-		return "", fmt.Errorf("decode next response: %w", err)
+		return "", fmt.Errorf("innertube: decode next response: %w", err)
 	}
 
 	for _, tab := range resp.Contents.SingleColumnMusicWatchNextResultsRenderer.TabbedRenderer.WatchNextTabbedResultsRenderer.Tabs {

@@ -236,8 +236,10 @@ func TestParseLyricsBrowseID_NonLyricsPageTypeWinsOverTitle(t *testing.T) {
 }
 
 // TestParseLyricsBrowseID_FallsBackToEnglishTitle pins the fallback lane: a
-// tab carrying no pageType at all is matched on the English title, which the
-// transport slice's pinned hl/gl makes deterministic.
+// tab carrying no pageType at all is matched on the English title. That match
+// only becomes locale-deterministic once the CALLS slice pins hl/gl (see the
+// note on lyricsTabTitleEn in parse.go); on this branch the title is whatever
+// locale the gateway picks.
 func TestParseLyricsBrowseID_FallsBackToEnglishTitle(t *testing.T) {
 	got, err := parseLyricsBrowseID([]byte(nextTabsBody(lyricsTabJSON("Lyrics", "", "MPLYnopagetype"))))
 	if err != nil {
