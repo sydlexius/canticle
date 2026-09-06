@@ -89,7 +89,15 @@ func sameOrigin(a, b *url.URL) bool {
 	if a.Scheme != b.Scheme {
 		return false
 	}
-	return stripDefaultPort(a) == stripDefaultPort(b)
+	// EqualFold, not ==: RFC 3986 defines the host as case-insensitive, and
+	// url.Parse lowercases the SCHEME but leaves Host exactly as written. So a
+	// plain == refuses a same-origin redirect that differs only in casing --
+	// "MUSIC.YOUTUBE.COM" against "music.youtube.com" -- which is a spurious
+	// refusal, not a security property (876-R1F1).
+	//
+	// This cannot weaken the guard: folding case never merges two DISTINCT
+	// hostnames, so every cross-origin target the matrix refuses stays refused.
+	return strings.EqualFold(stripDefaultPort(a), stripDefaultPort(b))
 }
 
 // stripDefaultPort returns u.Host with its port removed if that port is the

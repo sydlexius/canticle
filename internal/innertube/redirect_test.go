@@ -96,15 +96,21 @@ func TestCheckRedirect_RefusesCrossHostRedirectOnTheWire(t *testing.T) {
 // end-to-end proof: a real https origin redirecting to a real plain-http
 // target must be refused before the http target is ever reached.
 func TestCheckRedirect_RefusesSchemeDowngradeOnTheWire(t *testing.T) {
-	var httpHit atomic.Bool
-	httpTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		httpHit.Store(true)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(httpTarget.Close)
-
+	// The downgrade target differs from the origin ONLY in scheme: same host,
+	// same port. An earlier version redirected to a second server on a
+	// DIFFERENT port, so the host/port check refused it and the test passed
+	// even with the scheme comparison deleted -- it proved nothing about the
+	// property it names (876-R1F2). Verified: deleting the scheme compare left
+	// that version green.
+	var reached atomic.Bool
 	httpsOrigin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, httpTarget.URL+"/x", http.StatusFound)
+		if r.URL.Path == "/downgraded" {
+			reached.Store(true)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		downgraded := "http://" + r.Host + "/downgraded"
+		http.Redirect(w, r, downgraded, http.StatusFound)
 	}))
 	t.Cleanup(httpsOrigin.Close)
 
@@ -116,7 +122,13 @@ func TestCheckRedirect_RefusesSchemeDowngradeOnTheWire(t *testing.T) {
 		_ = res.Body.Close()
 		t.Fatal("want an error when the server attempts an https->http scheme downgrade")
 	}
-	if httpHit.Load() {
+	// Assert the GUARD refused it, not merely that something failed. Without
+	// this the test would also pass on a transport error, which is exactly how
+	// the previous version read as green while proving nothing.
+	if !strings.Contains(err.Error(), "refusing cross-origin redirect") {
+		t.Errorf("want the guard's refusal, got a different failure: %v", err)
+	}
+	if reached.Load() {
 		t.Error("the client must never have followed the downgraded http redirect")
 	}
 }
@@ -145,8 +157,15 @@ func TestCheckRedirect_HostAndSchemeMatrix(t *testing.T) {
 		{"explicit non-default port 8443", "https://music.youtube.com:8443/x", false},
 		{"userinfo host-looking user", "https://music.youtube.com@evil.example/x", false},
 		{"userinfo before an on-host target", "https://evil.example@music.youtube.com/x", true},
-		{"uppercase host", "https://MUSIC.YOUTUBE.COM/x", false},
-		{"mixed case host", "https://Music.YouTube.com/x", false},
+		// Host casing is ALLOWED: RFC 3986 makes the host case-insensitive and
+		// url.Parse lowercases only the scheme, so refusing these was a
+		// spurious rejection rather than a security property (876-R1F1).
+		{"uppercase host", "https://MUSIC.YOUTUBE.COM/x", true},
+		{"mixed case host", "https://Music.YouTube.com/x", true},
+		// A trailing dot stays REFUSED, deliberately, and is NOT the same
+		// question as casing: EqualFold does not merge these two strings, and
+		// refusing an unexpected host spelling fails closed. Revisit only with
+		// evidence that innertube actually emits one.
 		{"trailing-dot FQDN", "https://music.youtube.com./x", false},
 		{"punycode homograph", "https://xn--msic-0ra.youtube.com/x", false},
 		{"unicode homograph (Cyrillic s)", "https://muѕic.youtube.com/x", false},
