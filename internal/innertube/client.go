@@ -127,8 +127,36 @@ func (c *Client) postJSON(ctx context.Context, path string, body any) ([]byte, e
 		return nil, fmt.Errorf("innertube: encode request body: %w", err)
 	}
 
-	u := c.baseURL + path + "?key=" + url.QueryEscape(c.key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+	// STRUCTURAL join, not string concatenation (882-R1F1). Concatenating let
+	// a hostile path escape the base host entirely: `"@evil.example/x"` made
+	// "music.youtube.com" read as USERINFO and sent the request to
+	// evil.example. The redirect guard cannot catch that -- no redirect is
+	// involved, the request goes to the wrong host directly. Two lesser
+	// defects came with it: a path carrying a fragment silently DROPPED the
+	// key, and one carrying a query produced a double "?".
+	//
+	// ResolveReference against the parsed base cannot leave the base's host
+	// unless the reference is itself absolute, which the check below refuses.
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("innertube: parse base URL: %w", err)
+	}
+	ref, err := url.Parse(path)
+	if err != nil {
+		return nil, fmt.Errorf("innertube: parse request path: %w", err)
+	}
+	// Refuse anything that could redirect the request off-host. Every caller
+	// passes a fixed literal, so this is a guard against a FUTURE caller, and
+	// it fails closed rather than silently retargeting.
+	if ref.IsAbs() || ref.Host != "" || ref.User != nil {
+		return nil, fmt.Errorf("innertube: request path must be relative, got %q", path)
+	}
+	u := base.ResolveReference(ref)
+	q := u.Query()
+	q.Set("key", c.key)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("innertube: build request: %w", err)
 	}

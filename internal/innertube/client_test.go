@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -163,8 +164,13 @@ func TestReadBody_CapsResponseSize(t *testing.T) {
 
 			_, err := c.postJSON(context.Background(), "/x", map[string]string{})
 			if !tc.want {
-				if err != nil && strings.Contains(err.Error(), "too large") {
-					t.Fatalf("a body exactly at the cap must not be refused: %v", err)
+				// ANY error fails here, not just a "too large" one
+				// (882-R1F2). Matching on the message let a regression that
+				// rejected an at-the-cap body for some OTHER reason pass
+				// silently, which is the same shape as a network hiccup
+				// going unnoticed.
+				if err != nil {
+					t.Fatalf("a body exactly at the cap must succeed: %v", err)
 				}
 				return
 			}
@@ -309,3 +315,77 @@ func TestNewClient_DefaultsAreSane(t *testing.T) {
 
 // TestParseDurationSeconds pins the duration-text-run parser used by search
 // candidate extraction, including its fail-open-on-unparsable contract
+
+// TestPostJSON_RefusesANonRelativePath pins the URL join. It was built by
+// string concatenation, which let a hostile path escape the base host
+// entirely: "@evil.example/x" made the base read as USERINFO and sent the
+// request to evil.example (882-R1F1). The redirect guard cannot catch that --
+// no redirect is involved, so the request reaches the wrong host directly.
+//
+// Every caller passes a fixed literal today, so this guards a FUTURE caller.
+// It fails closed: an off-host path is refused rather than silently
+// retargeted.
+func TestPostJSON_RefusesANonRelativePath(t *testing.T) {
+	var reached atomic.Bool
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(elsewhere.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(origin.Close)
+
+	c := NewClient()
+	c.baseURL = origin.URL
+
+	host := strings.TrimPrefix(elsewhere.URL, "http://")
+	for _, path := range []string{
+		"@" + host + "/x",    // base becomes userinfo; the real host is the suffix
+		"//" + host + "/x",   // scheme-relative
+		elsewhere.URL + "/x", // fully absolute
+	} {
+		t.Run(path, func(t *testing.T) {
+			reached.Store(false)
+			if _, err := c.postJSON(context.Background(), path, map[string]string{}); err == nil {
+				t.Fatalf("an off-host path must be refused, got no error")
+			}
+			if reached.Load() {
+				t.Error("the request reached the other host: the path escaped the base URL")
+			}
+		})
+	}
+}
+
+// TestPostJSON_KeySurvivesAPathQueryOrFragment pins the two lesser defects the
+// concatenated join carried: a path with a fragment silently DROPPED the api
+// key, and one with a query produced a double "?" that folded the key into
+// another parameter's value.
+func TestPostJSON_KeySurvivesAPathQueryOrFragment(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient()
+	c.baseURL = srv.URL
+
+	for _, path := range []string{"/x", "/x?b=c", "/x#frag"} {
+		t.Run(path, func(t *testing.T) {
+			gotQuery = ""
+			if _, err := c.postJSON(context.Background(), path, map[string]string{}); err != nil {
+				t.Fatalf("postJSON: %v", err)
+			}
+			if gotQuery != apiKey {
+				t.Errorf("server saw key %q, want the api key: the join dropped or mangled it", gotQuery)
+			}
+		})
+	}
+}
