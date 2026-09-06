@@ -20,8 +20,19 @@ type fixtureServer struct {
 	// server can stand in for the whole three-call chain in an integration
 	// test.
 	fixtures map[string]string
-	// status, if non-zero, is returned instead of any fixture.
+	// status, if non-zero, is returned instead of any fixture, for EVERY path.
 	status int
+	// statusFor overrides status for one path, so a test can serve a healthy
+	// 200 for the early calls in the chain and a failure for a later one. That
+	// is the only way to test the status mapping of any call but the first:
+	// without it a 429 on browse is unreachable, because the same status would
+	// have failed the search before browse was ever issued.
+	statusFor map[string]int
+	// onRequest, if set, is called with the request path BEFORE the response is
+	// written, letting a test act at a chosen point in the chain -- canceling a
+	// context when a particular call arrives, say. It runs on the SERVER
+	// goroutine, so it must not touch *testing.T.
+	onRequest func(path string)
 }
 
 type recordedRequest struct {
@@ -68,8 +79,29 @@ func newTestClient(t *testing.T, srv *fixtureServer) *Client {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		srv.record(r)
-		if srv.status != 0 {
-			w.WriteHeader(srv.status)
+		// EVERY mutable field this handler reads is read under the lock, and the
+		// effective status is resolved once, here. The handler runs on the
+		// server's goroutine while the fields are written from the test's.
+		//
+		// Today every test sets these before newTestClient starts the listener,
+		// so an unguarded read happens to be safe -- but "safe because of how
+		// the callers happen to be written" is a property no compiler checks,
+		// and a future test that flips a status mid-run would turn it into a
+		// race. Guarding a subset (onRequest but not status) was the worse
+		// shape: it reads as though the distinction were deliberate.
+		srv.mu.Lock()
+		hook := srv.onRequest
+		code, hasCode := srv.statusFor[r.URL.Path]
+		if !hasCode || code == 0 {
+			code, hasCode = srv.status, srv.status != 0
+		}
+		srv.mu.Unlock()
+
+		if hook != nil {
+			hook(r.URL.Path)
+		}
+		if hasCode {
+			w.WriteHeader(code)
 			return
 		}
 		body, ok := bodies[r.URL.Path]
