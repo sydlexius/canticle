@@ -209,12 +209,28 @@ func TestMeasuredSpikeConfidencesStraddleTheFloor(t *testing.T) {
 		t.Error("unrelated fields must NOT correspond")
 	}
 
-	// The floor itself: a value just below must fail, one at or above pass.
+	// The floor itself. ENDPOINTS ARE NOT ENOUGH: 1.0-vs-0.0 pins nothing
+	// between them, so the floor could be moved anywhere from 0.60 to 0.99
+	// with this test green (853-R5F1). These two values BRACKET 0.75 tightly
+	// and are measured, not guessed -- see matchMinConfidence's doc.
 	if fieldOK, _ := fieldCorresponds("abcdefgh", "abcdefgh"); !fieldOK {
 		t.Error("an exact field match must clear the floor")
 	}
 	if fieldOK, _ := fieldCorresponds("abcdefgh", "zyxwvuts"); fieldOK {
 		t.Error("a wholly different field must not clear the floor")
+	}
+
+	// 0.7597 -- the WEAKEST legitimate pair in the calibration corpus, a
+	// leading article. It clears 0.75 by 0.01, so raising the floor at all
+	// breaks a case the floor exists to admit.
+	if fieldOK, _ := fieldCorresponds("Beatles", "The Beatles"); !fieldOK {
+		t.Error("a leading-article pair scores 0.7597 and MUST clear the floor: raising it rejects legitimate matches")
+	}
+
+	// 0.6667 -- above the 0.60 a lowered floor would admit, below 0.75. It
+	// must reject, which is what stops the floor being lowered silently.
+	if fieldOK, _ := fieldCorresponds("Vanguard", "Songbird"); fieldOK {
+		t.Error("an unrelated pair scores 0.6667 and must NOT clear the floor: lowering it admits mismatches")
 	}
 }
 
@@ -426,5 +442,38 @@ func assertErrorCarriesNoFieldValues(t *testing.T, err error, requested models.T
 		if strings.Contains(msg, v) {
 			t.Errorf("error message leaks a field value; the message must carry none")
 		}
+	}
+}
+
+// TestSelectCandidateWithMultipleSurvivors covers the case every other test in
+// this file avoids by construction: MORE THAN ONE candidate clears the gate.
+// TestSelectCandidateGatesEveryCandidateNotJustTheWinner deliberately builds a
+// set with exactly one passer, so first-wins was never exercised and removing
+// the loop's break survived mutation (853-R5F2).
+//
+// This slice's driver is a documented PLACEHOLDER -- it takes the first
+// survivor, which is not a judgment about which is better. The point of
+// pinning it is that 853b REPLACES this policy with a ranker, and a policy
+// change should show up as a diff in behavior rather than passing silently.
+func TestSelectCandidateWithMultipleSurvivors(t *testing.T) {
+	requested := models.Track{ArtistName: "Placeholder Artist", TrackName: "Placeholder Title"}
+	candidates := []SearchCandidate{
+		{VideoID: "firstPasser", Artist: "Placeholder Artist", Title: "Placeholder Title"},
+		{VideoID: "secondPasser", Artist: "Placeholder Artist", Title: "Placeholder Title"},
+	}
+
+	got, err := SelectCandidate(candidates, requested)
+	if err != nil {
+		t.Fatalf("with two corresponding candidates, one must be selected: %v", err)
+	}
+	if got.VideoID != "firstPasser" {
+		t.Errorf("selected %q, want %q: this slice takes the FIRST survivor", got.VideoID, "firstPasser")
+	}
+
+	// Whichever is returned must itself have cleared the gate -- the package's
+	// whole promise. This holds regardless of which policy selects it, so it
+	// survives 853b's replacement of first-wins.
+	if err := checkCorresponds(requested, got); err != nil {
+		t.Errorf("the selected candidate must clear the gate: %v", err)
 	}
 }

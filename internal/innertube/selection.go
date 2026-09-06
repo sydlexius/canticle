@@ -11,19 +11,29 @@ import (
 // before a candidate may be trusted to be the requested track.
 //
 // 0.75 is NOT a fresh number: it is the floor internal/musixmatch already uses
-// for the same question (client.go, #840), measured there against a corpus
-// whose weakest LEGITIMATE field scored 0.8051 (a leading article) and whose
-// closest genuine MISMATCH scored 0.6095. Reusing it keeps one calibrated
+// for the same question (client.go, #840). Reusing it keeps one calibrated
 // separation point across providers rather than inventing a second one here.
+//
+// Its calibration corpus, RE-MEASURED rather than inherited (853-R5F4 -- the
+// numbers previously quoted here, 0.8051 legitimate and 0.6095 mismatch, came
+// from the prose at client.go:791, which disagrees with that file's own table
+// at client.go:749; the table is right):
+//
+//	Beatles     -> The Beatles                   0.7597  legitimate, WEAKEST
+//	Artist One  -> Artist One feat. Artist Two   0.8741  legitimate
+//	(unrelated artist pair)                      0.6338  mismatch, closest
+//
+// So the real margin is 0.7597 against a 0.75 floor -- 0.01, far tighter than
+// the 0.8051 figure implied. A leading article is the case that nearly fails,
+// which is worth knowing before anyone moves this number.
 //
 // The #848 innertube spike measured this provider against the same floor:
 //
 //	correct resolution   artist 1.000  title 1.000  -> accept
 //	nonsense query       artist 0.577  title 0.481  -> reject
 //
-// Both nonsense fields sit far below the floor and far below the 0.6095
-// musixmatch mismatch, so the innertube evidence sits comfortably inside the
-// separation the floor was calibrated on.
+// Both nonsense fields sit below the closest mismatch, so the innertube
+// evidence sits inside the separation the floor was calibrated on.
 const matchMinConfidence = 0.75
 
 // SelectCandidate applies the correspondence guard to an innertube search
@@ -179,10 +189,16 @@ func checkCorresponds(requested models.Track, c SearchCandidate) error {
 // strings.TrimSpace. THE TWO CASES THAT MOTIVATED THAT ARE NOT EQUALLY SAFE,
 // and an earlier version of this comment claimed they were:
 //
-//   - ZERO-WIDTH / WHITESPACE PADDING is the safe half. It carries no
-//     characters that could ever have corresponded, so normalizing it to empty
-//     and treating the field as ABSENT is strictly more accurate than scoring
-//     it 0.0 and calling that a comparison. Nothing is lost.
+//   - WHITESPACE PADDING is the safe half, and it is the ONLY thing this buys
+//     over strings.TrimSpace. Measured (853-R5F3): zero-width characters do
+//     NOT normalize to empty -- NormalizeKey("\u200b\u200c\u200d") returns
+//     them unchanged -- so the "zero-width" half of an earlier version of this
+//     comment was simply false, and whitespace is handled identically by
+//     TrimSpace anyway. The honest statement of the trade is therefore that
+//     NormalizeKey buys NOTHING here except the combining-mark stripping
+//     described next, which is the unsafe half. It is kept because the gate
+//     must judge the same normalized form the cache keys on, not because
+//     padding removal earns it.
 //
 //   - COMBINING MARKS ARE THE UNSAFE HALF, and the direction matters.
 //     NormalizeKey strips combining marks (NFKD, then Mn removal), so it does
