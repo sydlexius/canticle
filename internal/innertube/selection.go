@@ -246,7 +246,7 @@ func SelectCandidate(candidates []SearchCandidate, requested models.Track) (Sear
 // has), this branch is what will reject it, and the divergence should be
 // revisited against that real caller rather than against this assumption.
 func checkCorresponds(requested models.Track, c SearchCandidate) error {
-	artistOK, artistComparable := fieldCorresponds(requested.ArtistName, c.Artist)
+	artistOK, artistComparable := artistFieldCorresponds(requested.ArtistName, c.Artist)
 	titleOK, titleComparable := titleFieldCorresponds(requested.TrackName, c.Title)
 
 	if !artistComparable && !titleComparable {
@@ -391,12 +391,9 @@ func scoreCandidate(c SearchCandidate, requested models.Track) float64 {
 // them would trade a silent-corruption bug for a feature that never returns a
 // lyric.
 //
-// TITLE ONLY. Artist is NOT subject to this rule: it needs the OPPOSITE
-// treatment, because its failure mode is the reverse one (a legitimate
-// REORDERING of the same names scores below the floor, where a title built
-// from the same words in a different order is a different song). The artist
-// half is its own slice; conflating the two reintroduces one defect or the
-// other.
+// TITLE ONLY. Artist is NOT subject to this rule -- see artistFieldCorresponds,
+// which needs the opposite treatment. Conflating the two reintroduces one
+// defect or the other.
 //
 // WHAT THIS DELIBERATELY DOES NOT HANDLE (the vocabulary is itself an attack
 // surface, so the residue is written down rather than implied):
@@ -514,8 +511,7 @@ var ignorableTokens = map[string]struct{}{
 // featMarkers introduce a featured-credit suffix. In a TITLE they truncate:
 // everything from the marker onward is a credit, not the song's words. In an
 // ARTIST they are merely ignorable, because the names after them are part of
-// the act being compared -- that is the artist half's own rule, and it lands
-// with the artist slice.
+// the act being compared (see artistFieldCorresponds).
 var featMarkers = map[string]struct{}{
 	"feat": {}, "feats": {}, "ft": {}, "featuring": {},
 }
@@ -706,4 +702,69 @@ func titleFieldCorresponds(requested, got string) (ok, comparable bool) {
 		return ok, comparable
 	}
 	return titleTokensCorrespond(requested, got), true
+}
+
+// artistTokenSetsEqual reports whether two artist strings name the same set of
+// tokens, ignoring order.
+//
+// This is a SET comparison and it requires FULL equality, never overlap. Two
+// different acts that merely share a token have unequal sets and are still
+// rejected; accepting on overlap would make any act sharing one common word
+// correspond to any other, which is a far larger false-accept class than the
+// false rejects this path exists to remove.
+//
+// Featuring markers are dropped rather than truncating, unlike a title: the
+// names following them are part of the act being named, so a swap of the
+// credited order has to compare equal.
+func artistTokenSetsEqual(requested, got string) bool {
+	set := func(s string) map[string]struct{} {
+		out := make(map[string]struct{})
+		for _, tok := range splitTokens(s) {
+			if _, ok := ignorableTokens[tok]; ok {
+				continue
+			}
+			if _, ok := featMarkers[tok]; ok {
+				continue
+			}
+			out[tok] = struct{}{}
+		}
+		return out
+	}
+	req, cand := set(requested), set(got)
+	if len(req) == 0 || len(cand) == 0 || len(req) != len(cand) {
+		return false
+	}
+	for tok := range req {
+		if _, ok := cand[tok]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// artistFieldCorresponds is the artist half of the gate: the floor OR an exact
+// token-set match. This is a WIDENING, and it is the opposite treatment from
+// the title's on purpose.
+//
+// The measured defect it fixes: legitimate artist REORDERINGS score BELOW the
+// worst wrong-track accept. A featured-credit ordering swap measured 0.6736 and
+// a trailing-article form 0.7076, both under the 0.75 floor, while a wrong
+// track reached 0.8788. Jaro-Winkler is an ordered-string measure, so moving a
+// name from the front to the back reads as a large edit even though the act
+// named is identical -- the similarity axis is simply the wrong instrument for
+// this field.
+//
+// The token multiset rule used for titles would NOT fix it (order is exactly
+// what it preserves), and the set rule used here must NOT be applied to titles:
+// a set discards the repetition and ordering that distinguish two titles built
+// from the same words. Each field gets the comparison its failure mode needs.
+func artistFieldCorresponds(requested, got string) (ok, comparable bool) {
+	ok, comparable = fieldCorresponds(requested, got)
+	if !comparable {
+		return false, false
+	}
+	if ok {
+		return true, true
+	}
+	return artistTokenSetsEqual(requested, got), true
 }
