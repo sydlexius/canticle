@@ -689,6 +689,62 @@ func TestSelectedProviderAcceptsInnerTube(t *testing.T) {
 	}
 }
 
+// TestFallbackProvidersIncludesInnerTube covers the construction path
+// registration makes reachable but nothing else tests: an innertube FALLBACK
+// lane.
+//
+// This is the likeliest real deployment of the provider -- an operator adds the
+// new lane behind a working primary rather than replacing it -- and it went in
+// with no coverage. Measured: inserting a `continue` for innertube into
+// fallbackProviders' skip chain left the ENTIRE suite green. Any later edit to
+// that chain (a new "requires a credential" condition, a lane allowlist, a
+// copy-paste of the musixmatch guard) would silently drop the lane, and the
+// operator sees no error, no warning, and no rows in lane_attempts -- a provider
+// they configured that simply never runs.
+//
+// NO TOKEN is passed deliberately. fallbackProviders skips a tokenless
+// MUSIXMATCH lane; the assertion is that no analogous condition touches
+// innertube, which is tokenless by design.
+func TestFallbackProvidersIncludesInnerTube(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Providers.Primary = providers.Musixmatch
+	cfg.Providers.FallbackOrder = []string{providers.InnerTube}
+
+	got := fallbackProviders(cfg, "", providers.Musixmatch,
+		func(string) musixmatch.Fetcher { return fakeFetcher{} })
+
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Name())
+	}
+	if !slices.Contains(names, providers.InnerTube) {
+		t.Errorf("fallback lanes = %v, want one named %q. A configured lane that "+
+			"never appears is invisible in production: no error, no warning, and "+
+			"no lane_attempts rows.", names, providers.InnerTube)
+	}
+}
+
+// TestFallbackProvidersRespectsInnerTubeDisabled is the other branch of the same
+// skip chain: providerDisabledIn had no innertube coverage either, and a
+// disabled lane that still runs is the inverse defect -- traffic to a
+// third-party gateway the operator explicitly turned off.
+func TestFallbackProvidersRespectsInnerTubeDisabled(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Providers.Primary = providers.Musixmatch
+	cfg.Providers.FallbackOrder = []string{providers.InnerTube}
+	cfg.Providers.Disabled = []string{providers.InnerTube}
+
+	got := fallbackProviders(cfg, "", providers.Musixmatch,
+		func(string) musixmatch.Fetcher { return fakeFetcher{} })
+
+	for _, p := range got {
+		if p.Name() == providers.InnerTube {
+			t.Error("a disabled innertube lane was still constructed; the operator " +
+				"turned it off and it would still send traffic")
+		}
+	}
+}
+
 func TestServeWorkerIntervalUsesConfigUnlessFlagProvided(t *testing.T) {
 	cfg := config.Config{
 		API: config.APIConfig{Cooldown: 45},

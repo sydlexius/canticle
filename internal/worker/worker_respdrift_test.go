@@ -63,48 +63,63 @@ func (p *driftStubProvider) FindLyrics(context.Context, models.Track) (models.So
 }
 
 // TestInnerTubeLaneWiresDriftDetection is #857's "assert it, do not assume it"
-// acceptance criterion.
+// acceptance criterion, covering BOTH lane-construction sites.
 //
 // The issue states that worker and lane code need NO change, because
-// NewProviderLane, laneName and withDriftDetection are all generic -- so
+// NewProviderLane, laneName and withDriftDetection are generic -- so
 // registering a provider gets drift detection for free. That claim is exactly
-// the kind that is true until it is not: a provider-specific construction path
-// added later would silently opt out, and the detector's whole failure mode is
-// a fault nobody notices.
+// the kind that is true until it is not, and the detector's whole failure mode
+// is a fault nobody notices.
 //
-// It uses the REAL innertube client rather than a stub named "innertube". A
-// stub would pass even if the concrete type failed to flow through
-// providers.New and laneName -- proving only that the test's own string
-// survives, which is the vacuity this repo keeps rediscovering.
+// The PRIMARY case is not redundant with the fallback case, and the reason is
+// laneName: it is called at exactly ONE site (the primary lane in New), while
+// SetFallbackProviders takes p.Name() directly. So only the primary case can
+// catch a laneName that fails to carry the provider's own identity -- measured,
+// breaking laneName for innertube left this whole package green before that
+// case existed. A misattributed lane stamps provider_lane='musixmatch' on every
+// innertube result in work_queue, in lane_attempts, and in the UI credit #600
+// gates on, which the codebase calls strictly worse than a missing credit.
 func TestInnerTubeLaneWiresDriftDetection(t *testing.T) {
-	w := New(nil, nil, nil, nil)
-	w.SetFallbackProviders(providers.New(providers.InnerTube, innertube.NewClient()))
+	t.Run("primary lane", func(t *testing.T) {
+		// Passed as the FETCHER, which is what laneName reads.
+		w := New(nil, nil, providers.New(providers.InnerTube, innertube.NewClient()), nil)
 
-	if len(w.lanes) < 2 {
-		t.Fatalf("got %d lanes; want the primary plus the innertube fallback", len(w.lanes))
-	}
+		if got := w.lane.Name(); got != providers.InnerTube {
+			t.Errorf("primary lane name = %q, want %q -- laneName did not carry the "+
+				"provider's own identity, so every result would be misattributed",
+				got, providers.InnerTube)
+		}
+		if !w.lane.DriftWired() {
+			t.Error("the innertube primary lane has no response-drift detector")
+		}
+	})
 
-	var found bool
-	for _, l := range w.lanes {
-		if l.Name() != providers.InnerTube {
-			continue
+	t.Run("fallback lane", func(t *testing.T) {
+		w := New(nil, nil, nil, nil)
+		w.SetFallbackProviders(providers.New(providers.InnerTube, innertube.NewClient()))
+
+		if len(w.lanes) < 2 {
+			t.Fatalf("got %d lanes; want the primary plus the innertube fallback", len(w.lanes))
 		}
-		found = true
-		if !l.DriftWired() {
-			t.Error("the innertube lane has no response-drift detector; #844's " +
-				"detection does not in fact cover a newly registered provider")
-		}
-	}
-	if !found {
-		lanes := make([]string, 0, len(w.lanes))
+		var found bool
 		for _, l := range w.lanes {
-			lanes = append(lanes, l.Name())
+			if l.Name() != providers.InnerTube {
+				continue
+			}
+			found = true
+			if !l.DriftWired() {
+				t.Error("the innertube fallback lane has no response-drift detector; " +
+					"#844's detection does not in fact cover a newly registered provider")
+			}
 		}
-		t.Fatalf("no lane named %q among %v -- laneName did not carry the "+
-			"provider's own identity, so every result would be misattributed in "+
-			"work_queue, lane_attempts and the UI credit",
-			providers.InnerTube, lanes)
-	}
+		if !found {
+			lanes := make([]string, 0, len(w.lanes))
+			for _, l := range w.lanes {
+				lanes = append(lanes, l.Name())
+			}
+			t.Fatalf("no lane named %q among %v", providers.InnerTube, lanes)
+		}
+	})
 }
 
 // TestDriftWarningIsEmittedAndCarriesNoMetadata drives real traffic through the
