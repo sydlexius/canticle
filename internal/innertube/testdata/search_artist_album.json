@@ -1,0 +1,62 @@
+{
+  "_note": "SYNTHETIC (854-F2 regression fixture, not captured from a live response): a realistic search subtitle carries an artist run AND an album run, both bearing a browseEndpoint (\"Song • Artist • Album • Duration\"). The shipped search.json fixture has only one browse-bearing run, so it cannot exercise the last-browse-run-wins overwrite this fixture guards against. All identifiers are placeholders.",
+  "contents": {
+    "tabbedSearchResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "title": "YT Music",
+            "selected": true,
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicCardShelfRenderer": {
+                      "title": {
+                        "runs": [
+                          {
+                            "text": "Placeholder Song Title",
+                            "navigationEndpoint": {
+                              "watchEndpoint": {
+                                "videoId": "PLACEHOLDzz"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "subtitle": {
+                        "runs": [
+                          { "text": "Song" },
+                          { "text": " • " },
+                          {
+                            "text": "Placeholder Artist Name",
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "UCplaceholderartist00000"
+                              }
+                            }
+                          },
+                          { "text": " • " },
+                          {
+                            "text": "Placeholder Album Name",
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "MPREplaceholderalbum0000"
+                              }
+                            }
+                          },
+                          { "text": " • " },
+                          { "text": "2:06" }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
