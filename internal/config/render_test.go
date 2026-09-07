@@ -324,3 +324,58 @@ func TestConfigToSlogAttrs_ContainsAllSections(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatConfigText_ProviderCooldownKeysSurvive is the render.go trap guard
+// (#858 AC 3). Both hand-maintained lists in render.go must carry every key, and
+// a missing entry does not fail loudly -- the key silently VANISHES from a
+// rewritten config file, so an operator's setting is deleted on the next write.
+//
+// Both provider cooldown keys are asserted, not just the new one: they are
+// sibling entries in the same list, so a mistake in either is the same class of
+// defect, and pinning only the new key would let a later edit drop the other.
+func TestFormatConfigText_ProviderCooldownKeysSurvive(t *testing.T) {
+	cfg := defaults()
+	cfg.Providers.PetitLyricsCooldownSeconds = 30
+	cfg.Providers.InnerTubeCooldownSeconds = 90
+
+	text := FormatConfigText(cfg, nil, nil)
+
+	for _, want := range []string{
+		"petitlyrics_cooldown_seconds = 30",
+		"innertube_cooldown_seconds = 90",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("rendered config is missing %q -- the key would VANISH from a rewritten file, silently discarding the operator's setting.\nGot:\n%s", want, text)
+		}
+	}
+}
+
+// TestConfigToSlogAttrs_ProviderCooldownKeysPresent covers the SECOND
+// hand-maintained list in render.go, which the text renderer above does not
+// touch. A key present in one list and absent from the other renders in the
+// config file but vanishes from the structured log view, so both are asserted.
+func TestConfigToSlogAttrs_ProviderCooldownKeysPresent(t *testing.T) {
+	cfg := defaults()
+	cfg.Providers.PetitLyricsCooldownSeconds = 30
+	cfg.Providers.InnerTubeCooldownSeconds = 90
+
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	r := slog.NewRecord(time.Time{}, slog.LevelDebug, "test", 0)
+	r.AddAttrs(ConfigToSlogAttrs(cfg, nil, nil)...)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	rendered := buf.String()
+
+	// The text handler renders groups as "group.key=value", so the values are
+	// asserted too: a key present with the wrong value would otherwise pass.
+	for _, want := range []string{
+		"providers.petitlyrics_cooldown_seconds=30",
+		"providers.innertube_cooldown_seconds=90",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("slog attrs are missing %q -- the second render.go list dropped it.\nGot:\n%s", want, rendered)
+		}
+	}
+}

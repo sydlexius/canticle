@@ -3256,3 +3256,211 @@ func TestMusixmatchIsServingMatchesResolveServeProvider(t *testing.T) {
 		}
 	})
 }
+
+// TestInnerTubeIntervalPrecedence pins the resolution order for the InnerTube
+// pacing interval (#858): providers.innertube_cooldown_seconds when set,
+// otherwise api.cooldown. Before this key existed the lane inherited
+// api.cooldown unconditionally, so the fallback arm is what keeps an existing
+// deployment's behavior unchanged.
+func TestInnerTubeIntervalPrecedence(t *testing.T) {
+	// Unset (zero) falls back to api.cooldown, preserving pre-#858 behavior.
+	cfg := config.Config{API: config.APIConfig{Cooldown: 45}}
+	if got := innerTubeInterval(cfg); got != 45*time.Second {
+		t.Fatalf("innerTubeInterval unset = %s; want 45s (api.cooldown fallback)", got)
+	}
+
+	// Set takes precedence over api.cooldown.
+	cfg.Providers.InnerTubeCooldownSeconds = 90
+	if got := innerTubeInterval(cfg); got != 90*time.Second {
+		t.Fatalf("innerTubeInterval set = %s; want 90s (own key wins)", got)
+	}
+
+	// A negative value is not a disable request: pacing this lane off is not
+	// offered, so it falls back rather than yielding a negative interval that
+	// WithMinInterval would silently read as "no pacing".
+	cfg.Providers.InnerTubeCooldownSeconds = -1
+	if got := innerTubeInterval(cfg); got != 45*time.Second {
+		t.Fatalf("innerTubeInterval negative = %s; want 45s (falls back)", got)
+	}
+
+	// THE TWO PROVIDER KEYS ARE INDEPENDENT, and this is the row a copy-paste
+	// resolver fails: reading the petitlyrics field here would return 30s.
+	both := config.Config{
+		API: config.APIConfig{Cooldown: 15},
+		Providers: config.ProvidersConfig{
+			PetitLyricsCooldownSeconds: 30,
+			InnerTubeCooldownSeconds:   90,
+		},
+	}
+	if got := innerTubeInterval(both); got != 90*time.Second {
+		t.Errorf("innerTubeInterval with both keys set = %s; want 90s -- it must read its OWN key, not petitlyrics'", got)
+	}
+	if got := petitLyricsInterval(both); got != 30*time.Second {
+		t.Errorf("petitLyricsInterval with both keys set = %s; want 30s -- the new key must not have disturbed it", got)
+	}
+}
+
+// TestInnerTubeIntervalNeverGoesUnpaced is the same overflow guard the
+// petitlyrics resolver carries (#535 finding C1), asserted here because this
+// resolver is a separate function that could regress independently.
+//
+// time.Duration is int64 NANOSECONDS, so `seconds * time.Second` wraps NEGATIVE
+// above 9223372036 -- and WithMinInterval only clamps values it sees as > 0, so
+// a wrapped negative sails past the policy floor into pace(), which returns
+// immediately on minInterval <= 0. The lane would run COMPLETELY UNPACED, the
+// opposite of what a large cooldown asks for. No input surface bounds the value
+// above, so the resolver is the last line.
+func TestInnerTubeIntervalNeverGoesUnpaced(t *testing.T) {
+	for _, seconds := range []int{9223372036, 9223372037, 1 << 40, 999999999999999999} {
+		cfg := config.Config{
+			API:       config.APIConfig{Cooldown: 15},
+			Providers: config.ProvidersConfig{InnerTubeCooldownSeconds: seconds},
+		}
+		got := innerTubeInterval(cfg)
+		if got <= 0 {
+			t.Errorf("innerTubeInterval(%d) = %s; a positive cooldown must NEVER resolve to a non-positive duration (that disables pacing entirely)", seconds, got)
+		}
+		if got > maxPacingInterval {
+			t.Errorf("innerTubeInterval(%d) = %s; want it clamped to at most %s", seconds, got, maxPacingInterval)
+		}
+	}
+
+	// The same overflow is reachable through the api.cooldown FALLBACK arm.
+	cfg := config.Config{API: config.APIConfig{Cooldown: 999999999999999999}}
+	if got := innerTubeInterval(cfg); got <= 0 {
+		t.Errorf("innerTubeInterval via api.cooldown overflow = %s; want a positive clamped duration", got)
+	}
+
+	// A sane value must pass through untouched.
+	sane := config.Config{Providers: config.ProvidersConfig{InnerTubeCooldownSeconds: 90}}
+	if got := innerTubeInterval(sane); got != 90*time.Second {
+		t.Errorf("innerTubeInterval(90) = %s; want 90s (the clamp must not touch sane values)", got)
+	}
+}
+
+// TestBuildProviderAppliesInnerTubeInterval pins the ONE line the knob is
+// actually for: that the resolved interval REACHES the client rather than being
+// accepted and ignored.
+//
+// This is the assertion the whole slice turns on. Every other test here covers
+// the resolver and the config plumbing AROUND the call site; without this one,
+// reverting buildProvider to the pre-#858 `WithMinInterval(clampPacingSeconds(
+// cfg.API.Cooldown))` leaves the entire suite green and the knob inert.
+func TestBuildProviderAppliesInnerTubeInterval(t *testing.T) {
+	cfg := config.Config{
+		// Deliberately DIFFERENT values: if the wiring regresses to api.cooldown
+		// the observed interval is 15s, not 90s, so the assertion discriminates.
+		API:       config.APIConfig{Cooldown: 15},
+		Providers: config.ProvidersConfig{InnerTubeCooldownSeconds: 90},
+	}
+
+	p := buildProvider(providers.InnerTube, cfg, "", nil)
+	if p == nil {
+		t.Fatal("buildProvider returned nil for the innertube provider")
+	}
+
+	inner, ok := p.(interface{ Unwrap() providers.Fetcher })
+	if !ok {
+		t.Fatal("provider wrapper does not expose Unwrap; cannot verify the interval reached the client")
+	}
+	client, ok := inner.Unwrap().(*innertube.Client)
+	if !ok {
+		t.Fatalf("unwrapped fetcher is %T; want *innertube.Client", inner.Unwrap())
+	}
+
+	if got := client.MinInterval(); got != 90*time.Second {
+		t.Errorf("client MinInterval = %s; want 90s from providers.innertube_cooldown_seconds.\n"+
+			"api.cooldown is 15s here, so this reading means the resolved interval never reached the client.", got)
+	}
+}
+
+// TestConfigInnerTubeCooldownGetSetRoundTrip covers the config get/set arms for
+// providers.innertube_cooldown_seconds (#858), mirroring the petitlyrics test
+// above. The key is Editable in the registry, so a missing CLI arm is exactly
+// the registry/CLI drift #670 tracks -- and the gate found this gap by coverage
+// rather than by any test failing, since a missing arm returns ok=false and
+// nothing asserted otherwise.
+func TestConfigInnerTubeCooldownGetSetRoundTrip(t *testing.T) {
+	// Both keys are set, to DIFFERENT values: an arm reading the sibling field
+	// would pass every assertion below if they matched.
+	cfg := config.Config{
+		Providers: config.ProvidersConfig{
+			PetitLyricsCooldownSeconds: 30,
+			InnerTubeCooldownSeconds:   60,
+		},
+	}
+
+	got, ok := configValue(cfg, "providers.innertube_cooldown_seconds")
+	if !ok {
+		t.Fatal("configValue(providers.innertube_cooldown_seconds) ok = false; want true")
+	}
+	if got != "60" {
+		t.Fatalf("configValue = %q; want %q (a wrong arm returns the sibling's 30)", got, "60")
+	}
+	if !slices.Contains(configKeys(), "providers.innertube_cooldown_seconds") {
+		t.Fatal("configKeys missing providers.innertube_cooldown_seconds; `config set` would reject a key the registry calls editable")
+	}
+
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "90"); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	if cfg.Providers.InnerTubeCooldownSeconds != 90 {
+		t.Fatalf("innertube_cooldown_seconds = %d; want 90", cfg.Providers.InnerTubeCooldownSeconds)
+	}
+	// The setter must not have written through to the sibling.
+	if cfg.Providers.PetitLyricsCooldownSeconds != 30 {
+		t.Fatalf("petitlyrics_cooldown_seconds = %d; want 30 (the innertube setter must not touch it)", cfg.Providers.PetitLyricsCooldownSeconds)
+	}
+
+	// 0 is the documented "use api.cooldown" sentinel, so it must be accepted.
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "0"); err != nil {
+		t.Fatalf("setConfigValue 0: %v (0 is the api.cooldown-fallback sentinel)", err)
+	}
+	if cfg.Providers.InnerTubeCooldownSeconds != 0 {
+		t.Fatalf("innertube_cooldown_seconds = %d; want 0", cfg.Providers.InnerTubeCooldownSeconds)
+	}
+
+	// A negative carries no meaning here (0 already means fall back), so it is
+	// rejected rather than stored.
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "-1"); err == nil {
+		t.Fatal("setConfigValue accepted a negative providers.innertube_cooldown_seconds")
+	}
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "abc"); err == nil {
+		t.Fatal("setConfigValue accepted a non-numeric providers.innertube_cooldown_seconds")
+	}
+}
+
+// TestInnerTubeCooldownValidatorMatchesCLI pins the CLI arm and the web save
+// path to the SAME non-negative rule (#858), mirroring the petitlyrics test
+// above. The web path validates through config.ValidateAndSet (registry-driven,
+// TypeInt -> ValidateNonNegativeInt) while the CLI arm hand-rolls its bound, so
+// the two can silently diverge and let a value in through one surface that the
+// other rejects.
+//
+// Added after a hostile review found the gap by MUTATION: flipping this key's
+// registry Editable to false SURVIVED the whole suite, while the identical
+// mutation on the sibling key was killed by the test above. Editable=false makes
+// the web save path reject the field as read-only while `config set` still
+// accepts it -- exactly the registry/CLI drift this shape exists to catch.
+func TestInnerTubeCooldownValidatorMatchesCLI(t *testing.T) {
+	const path = "providers.innertube_cooldown_seconds"
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"90", true},
+		{"0", true},
+		{"-1", false},
+		{"abc", false},
+	} {
+		webErr := config.ValidateAndSet(path, tc.value)
+		cliErr := setConfigValue(&config.Config{}, path, tc.value)
+		if (webErr == nil) != tc.valid {
+			t.Errorf("ValidateAndSet(%q) err = %v; want valid=%v", tc.value, webErr, tc.valid)
+		}
+		if (webErr == nil) != (cliErr == nil) {
+			t.Errorf("value %q: web accepts=%v but CLI accepts=%v; the two surfaces disagree",
+				tc.value, webErr == nil, cliErr == nil)
+		}
+	}
+}

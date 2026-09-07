@@ -100,6 +100,7 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("race_wait_seconds = %d%s\n", cfg.Providers.RaceWaitSeconds, ann("providers.race_wait_seconds"))
 	p("fallback_order = %s%s\n", sliceVal("providers.fallback_order", cfg.Providers.FallbackOrder), ann("providers.fallback_order"))
 	p("petitlyrics_cooldown_seconds = %d%s\n", cfg.Providers.PetitLyricsCooldownSeconds, ann("providers.petitlyrics_cooldown_seconds"))
+	p("innertube_cooldown_seconds = %d%s\n", cfg.Providers.InnerTubeCooldownSeconds, ann("providers.innertube_cooldown_seconds"))
 	p("\n")
 
 	// [verification]
@@ -357,6 +358,7 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			intAttr("race_wait_seconds", "providers.race_wait_seconds", cfg.Providers.RaceWaitSeconds),
 			sliceAttr("fallback_order", "providers.fallback_order", cfg.Providers.FallbackOrder),
 			intAttr("petitlyrics_cooldown_seconds", "providers.petitlyrics_cooldown_seconds", cfg.Providers.PetitLyricsCooldownSeconds),
+			intAttr("innertube_cooldown_seconds", "providers.innertube_cooldown_seconds", cfg.Providers.InnerTubeCooldownSeconds),
 		),
 		group("verification",
 			boolAttr("enabled", "verification.enabled", cfg.Verification.Enabled),

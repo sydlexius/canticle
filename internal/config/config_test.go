@@ -23,6 +23,11 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_TRUSTED_CIDRS", "MXLRC_TRUSTED_PROXIES",
 		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED", "MXLRC_PROVIDERS_MODE", "MXLRC_PROVIDERS_FALLBACK_ORDER",
 		"MXLRC_PROVIDERS_RACE_WAIT_SECONDS",
+		// Both per-provider cooldowns. The innertube one is what #858's Load
+		// tests need; the petitlyrics sibling has the same gap and is cleared
+		// here prophylactically, since a future Load test for it would hit the
+		// identical flake and the omission is not visible from the test itself.
+		"MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS",
 		"MXLRC_VERIFICATION_ENABLED", "MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL",
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
@@ -2274,5 +2279,139 @@ func TestApplyEnvOverrides_WordSyncInvalidValueKeepsCurrent(t *testing.T) {
 	}
 	if applied["output.word_sync"] {
 		t.Error("a rejected env value recorded provenance; callers would annotate it as (env)")
+	}
+}
+
+// TestLoad_InnerTubeCooldownSeconds covers the file and env halves of #858's
+// round-trip AC. The env arm is also exercised generically by
+// TestRegistryDrift_EveryEnvVarApplies, which iterates the whole registry; it is
+// repeated here because that test proves the var is WIRED, not that the value
+// lands on the right field. A copy-paste slip writing the petitlyrics field
+// would pass the drift test and fail this one.
+func TestLoad_InnerTubeCooldownSeconds(t *testing.T) {
+	t.Run("default is 0, meaning fall back to api.cooldown", func(t *testing.T) {
+		isolateEnv(t)
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.InnerTubeCooldownSeconds != 0 {
+			t.Fatalf("default innertube_cooldown_seconds = %d; want 0 (the api.cooldown fallback sentinel)", cfg.Providers.InnerTubeCooldownSeconds)
+		}
+	})
+
+	t.Run("parsed from file", func(t *testing.T) {
+		isolateEnv(t)
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[providers]\ninnertube_cooldown_seconds = 45\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.InnerTubeCooldownSeconds != 45 {
+			t.Fatalf("innertube_cooldown_seconds = %d; want 45", cfg.Providers.InnerTubeCooldownSeconds)
+		}
+	})
+
+	t.Run("env override", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "70")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.InnerTubeCooldownSeconds != 70 {
+			t.Fatalf("innertube_cooldown_seconds = %d; want 70", cfg.Providers.InnerTubeCooldownSeconds)
+		}
+	})
+
+	t.Run("env overrides the file", func(t *testing.T) {
+		isolateEnv(t)
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[providers]\ninnertube_cooldown_seconds = 45\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "70")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.InnerTubeCooldownSeconds != 70 {
+			t.Fatalf("innertube_cooldown_seconds = %d; want 70 (env beats file)", cfg.Providers.InnerTubeCooldownSeconds)
+		}
+	})
+
+	// THE TWO PROVIDER KEYS ARE INDEPENDENT ON EVERY SURFACE. Setting one must
+	// not move the other -- a shared toml tag or a copy-pasted env block would
+	// pass every single-key row above.
+	t.Run("the two cooldown keys do not bleed into each other", func(t *testing.T) {
+		isolateEnv(t)
+		path := filepath.Join(t.TempDir(), "config.toml")
+		body := "[providers]\npetitlyrics_cooldown_seconds = 30\ninnertube_cooldown_seconds = 90\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.InnerTubeCooldownSeconds != 90 {
+			t.Errorf("innertube_cooldown_seconds = %d; want 90", cfg.Providers.InnerTubeCooldownSeconds)
+		}
+		if cfg.Providers.PetitLyricsCooldownSeconds != 30 {
+			t.Errorf("petitlyrics_cooldown_seconds = %d; want 30 (the new key must not disturb it)", cfg.Providers.PetitLyricsCooldownSeconds)
+		}
+	})
+
+	// An invalid env value must leave the current value alone rather than
+	// zeroing it, which would silently switch the lane to the api.cooldown
+	// fallback without saying so.
+	t.Run("invalid env value keeps the file value", func(t *testing.T) {
+		isolateEnv(t)
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[providers]\ninnertube_cooldown_seconds = 45\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "not-a-number")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Providers.InnerTubeCooldownSeconds != 45 {
+			t.Errorf("innertube_cooldown_seconds = %d; want 45 (an invalid env var must not clobber the configured value)", cfg.Providers.InnerTubeCooldownSeconds)
+		}
+	})
+}
+
+// TestLoad_InnerTubeCooldownEnvRejectsNegative pins the env path's lower bound
+// (#858). The CLI and web surfaces both reject a negative; without this, the env
+// path could silently start accepting one and no test would notice.
+//
+// Added after a hostile review found the gap by MUTATION: deleting the `n < 0`
+// clause from this key's env block SURVIVED the whole suite. The reviewer noted
+// the identical mutation survives on the sibling key too, so the gap is a class
+// the reference pattern never pinned rather than something this key introduced
+// -- but the guard is only harmless today by coincidence, since the resolver
+// happens to treat a negative as a fallback. Pinning it here stops that
+// coincidence from being load-bearing.
+func TestLoad_InnerTubeCooldownEnvRejectsNegative(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[providers]\ninnertube_cooldown_seconds = 45\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "-1")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// The negative is refused and the configured value survives; it is neither
+	// stored nor zeroed (zeroing would silently switch the lane to the
+	// api.cooldown fallback without saying so).
+	if cfg.Providers.InnerTubeCooldownSeconds != 45 {
+		t.Errorf("innertube_cooldown_seconds = %d; want 45 -- a negative env value must be refused, not stored and not zeroed", cfg.Providers.InnerTubeCooldownSeconds)
 	}
 }

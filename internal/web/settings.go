@@ -1052,6 +1052,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return joinSlice(cfg.Providers.FallbackOrder)
 	case "providers.petitlyrics_cooldown_seconds":
 		return strconv.Itoa(cfg.Providers.PetitLyricsCooldownSeconds)
+	case "providers.innertube_cooldown_seconds":
+		return strconv.Itoa(cfg.Providers.InnerTubeCooldownSeconds)
 	// [verification]
 	case "verification.enabled":
 		return strconv.FormatBool(cfg.Verification.Enabled)
@@ -1269,6 +1271,7 @@ var settingsLabels = map[string]string{
 	"providers.race_wait_seconds":                     "Wait for a better match (seconds)",
 	"providers.fallback_order":                        "Which source to try first, second, ...",
 	"providers.petitlyrics_cooldown_seconds":          "Wait between Petit Lyrics requests (seconds)",
+	"providers.innertube_cooldown_seconds":            "Wait between YouTube Music requests (seconds)",
 	"verification.enabled":                            "Check that lyrics match the audio",
 	"verification.whisper_url":                        "Transcription service address",
 	"verification.ffmpeg_path":                        "ffmpeg program location",
