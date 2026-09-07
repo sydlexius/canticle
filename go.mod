@@ -9,7 +9,7 @@ require (
 	github.com/creachadair/tomledit v0.0.29
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/joho/godotenv v1.5.1
-	github.com/pressly/goose/v3 v3.27.3
+	github.com/pressly/goose/v3 v3.28.0
 	github.com/rjeczalik/notify v0.9.3
 	github.com/sydlexius/audioduration v0.9.1
 	github.com/ulikunitz/xz v0.5.16
@@ -23,7 +23,7 @@ require (
 require (
 	github.com/a-h/parse v0.0.0-20250122154542-74294addb73e // indirect
 	github.com/alexflint/go-scalar v1.2.0 // indirect
-	github.com/andybalholm/brotli v1.2.2 // indirect
+	github.com/andybalholm/brotli v1.2.3 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cli/browser v1.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
