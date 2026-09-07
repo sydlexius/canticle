@@ -1,6 +1,10 @@
 package models
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 // TestSongTranslationFieldsZeroValueAbsent verifies the new bilingual tracks are
 // value-typed and default to absent (empty Lines) on a freshly constructed Song,
@@ -94,5 +98,54 @@ func TestMsToTime(t *testing.T) {
 				t.Errorf("MsToTime(%d).Total = %v, want %v", tc.ms, got.Total, tc.total)
 			}
 		})
+	}
+}
+
+// TestSong_UpstreamIsNeverSerialized pins the `json:"-"` on Song.Upstream.
+//
+// THE TAG IS THE WHOLE SAFETY ARGUMENT, and until this test existed nothing
+// held it there: a hostile review mutated it to `json:"upstream,omitempty"` and
+// the mutation SURVIVED the entire tree, green in every package. The field's own
+// doc comment devotes six lines to why the tag is required, which made the gap
+// worse rather than better -- a heavily argued invariant that no test enforces
+// reads as covered.
+//
+// Why it matters concretely: encodeSong/decodeSong round-trip this struct
+// through the lyrics cache, and the cache is keyed on (artist, title, duration
+// bucket) with no knowledge of which licensor served the entry it stored. A
+// serialized upstream would let a cache HIT resurrect an attribution that was
+// true for a DIFFERENT fetch, and the writer would then stamp that licensor into
+// a sidecar it never served -- a false attribution on disk, in the user's own
+// file, with nothing downstream able to detect it.
+//
+// Both directions are asserted. Marshal alone would still pass if the tag were
+// `json:"upstream"` on a struct that never round-trips; the Unmarshal half is
+// what pins the resurrection path itself.
+func TestSong_UpstreamIsNeverSerialized(t *testing.T) {
+	// WinningLane is the CONTROL. It carries the same tag for the same reason,
+	// so if a change ever made Song serializable wholesale, this row shows the
+	// finding is about the struct rather than about Upstream alone.
+	blob, err := json.Marshal(Song{Upstream: "musixmatch", WinningLane: "innertube"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(blob), "musixmatch") {
+		t.Errorf("Song.Upstream was SERIALIZED into %s -- it must carry `json:\"-\"`, or a cache hit can resurrect an attribution true for a different fetch", blob)
+	}
+	if strings.Contains(string(blob), "innertube") {
+		t.Errorf("Song.WinningLane was SERIALIZED into %s -- the same invariant, and its breach means the whole struct became serializable", blob)
+	}
+
+	// The resurrection path proper: a cache row written by some other producer
+	// that DOES carry the key must not populate the field on the way back in.
+	var s Song
+	if err := json.Unmarshal([]byte(`{"upstream":"lyricfind","WinningLane":"innertube"}`), &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if s.Upstream != "" {
+		t.Errorf("Song.Upstream = %q after decoding a blob that carried the key; it must stay empty so a cache hit asserts no attribution", s.Upstream)
+	}
+	if s.WinningLane != "" {
+		t.Errorf("Song.WinningLane = %q after decoding a blob that carried the key; same invariant", s.WinningLane)
 	}
 }

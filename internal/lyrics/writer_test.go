@@ -644,3 +644,68 @@ func TestWriteLRC_ProviderAssertedInstrumentalCarriesUpstream(t *testing.T) {
 		t.Errorf("a provider-asserted instrumental must carry its upstream, got:\n%s", content)
 	}
 }
+
+// TestWriteLRC_UpstreamNeverAppearsWithoutSource is the regression test for the
+// review's F1 finding, and the shape it pins is not hypothetical.
+//
+// Song.WinningLane and Song.Upstream are populated by DIFFERENT layers:
+// WinningLane only by the orchestrator (serve mode), Upstream by the provider
+// itself, one layer below. One-shot `fetch` mode never runs the orchestrator --
+// providers.New returns a bare namedProvider that forwards to the client and
+// stamps no lane -- so with providers.primary set to a multiplexing lane, a
+// writer that guarded the two tags INDEPENDENTLY emitted [upstream:<licensor>]
+// with no [source:] at all. Measured on disk before the fix.
+//
+// Why that file is wrong rather than merely incomplete: purge's --no-source
+// cohort is documented as the inherited/foreign sidecars canticle never wrote,
+// and it matched a file that positively names the licensor canticle fetched
+// from. The two tags must therefore appear and disappear together.
+func TestWriteLRC_UpstreamNeverAppearsWithoutSource(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		instrumental int
+	}{
+		{"synced result", 0},
+		{"instrumental", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewLRCWriter()
+			tmpDir := t.TempDir()
+			song := models.Song{
+				Track: models.Track{
+					ArtistName:   "Test Artist",
+					TrackName:    "Fetch Mode Track",
+					Instrumental: tc.instrumental,
+				},
+				// WinningLane deliberately EMPTY: this is the fetch-mode shape.
+				Upstream: "lyricfind",
+			}
+			if tc.instrumental == 0 {
+				song.Subtitles = models.Synced{Lines: []models.Lines{{Text: "placeholder", Time: models.Time{}}}}
+			}
+			if err := w.WriteLRC(song, "", tmpDir); err != nil {
+				t.Fatalf("WriteLRC: %v", err)
+			}
+			ext := ".lrc"
+			if tc.instrumental == 1 {
+				ext = ".txt"
+			}
+			fp := filepath.Join(tmpDir, Slugify("Test Artist - Fetch Mode Track")+ext)
+			data, err := os.ReadFile(fp) //nolint:gosec // reason: test path built from known test data
+			if err != nil {
+				t.Fatalf("read sidecar: %v", err)
+			}
+			content := string(data)
+
+			// The premise: no [source:] on this path. If a future change starts
+			// stamping a lane in fetch mode, this Fatal says so rather than
+			// letting the real assertion pass vacuously.
+			if strings.Contains(content, "[source:") {
+				t.Fatalf("test premise broken: this path is supposed to write no [source:], got:\n%s", content)
+			}
+			if strings.Contains(content, "[upstream:") {
+				t.Errorf("wrote an ORPHAN [upstream:] with no [source:] beside it -- the file names a licensor while landing in purge's \"canticle never wrote this\" cohort. Got:\n%s", content)
+			}
+		})
+	}
+}

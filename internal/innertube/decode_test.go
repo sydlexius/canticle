@@ -540,3 +540,78 @@ func TestExtractUpstream_FromTheCapturedShape(t *testing.T) {
 		t.Errorf("unparsable input must yield no upstream rather than panicking, got %q", got)
 	}
 }
+
+// TestSourceMessageText covers the coercion the attribution field goes through
+// before upstreamToken sees it (review finding F3).
+//
+// The field is decoded as json.RawMessage rather than string so that a
+// surprising shape costs the ATTRIBUTION and never the CUES -- see
+// upstreamPayload. These rows pin both the shapes that must be read and the
+// shapes that must degrade quietly.
+func TestSourceMessageText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"bare string, the measured shape", `"Source: Musixmatch"`, "Source: Musixmatch"},
+		// A display string split at a styling boundary. Taking runs[0] alone
+		// would truncate this to "Source: " and lose the licensor entirely,
+		// which is why the runs are concatenated.
+		{"runs split across styling boundaries", `{"runs":[{"text":"Source: "},{"text":"LyricFind"}]}`, "Source: LyricFind"},
+		{"single run", `{"runs":[{"text":"Source: Musixmatch"}]}`, "Source: Musixmatch"},
+		{"empty runs array", `{"runs":[]}`, ""},
+
+		// Every remaining shape degrades to "" -- no tag, which asserts nothing.
+		{"absent", ``, ""},
+		{"null", `null`, ""},
+		{"numeric", `42`, ""},
+		{"array", `["Source: Musixmatch"]`, ""},
+		{"object without runs", `{"text":"Source: Musixmatch"}`, ""},
+		{"malformed", `{oops`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sourceMessageText([]byte(tc.raw)); got != tc.want {
+				t.Errorf("sourceMessageText(%s) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExtractCues_SurvivesAnySourceMessageShape is the REGRESSION test for F3,
+// and it is about the cue path rather than the attribution.
+//
+// The two fields are siblings on the wire, and decoding them on ONE struct
+// coupled them fatally: encoding/json aborts the whole unmarshal on a single
+// type mismatch, so a non-string sourceMessage returned ZERO cues and a
+// transport-class error (which does not degrade to a benign miss) even though
+// the payload carried a perfectly valid timedLyricsData array. Measured before
+// the fix: `runs-object -> 0 cues`.
+func TestExtractCues_SurvivesAnySourceMessageShape(t *testing.T) {
+	payload := func(sourceMessage string) []byte {
+		return []byte(`{"contents":{"elementRenderer":{"newElement":{"type":{"componentType":{"model":{"timedLyricsModel":{"lyricsData":{"sourceMessage":` +
+			sourceMessage +
+			`,"timedLyricsData":[{"lyricLine":"placeholder","cueRange":{"startTimeMilliseconds":"0","endTimeMilliseconds":"100"}}]}}}}}}}}}`)
+	}
+	for _, tc := range []struct{ name, raw, wantUpstream string }{
+		{"bare string", `"Source: LyricFind"`, UpstreamLyricFind},
+		{"runs object", `{"runs":[{"text":"Source: "},{"text":"LyricFind"}]}`, UpstreamLyricFind},
+		{"numeric", `42`, ""},
+		{"null", `null`, ""},
+		{"nested object", `{"unexpected":{"deeply":"nested"}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := payload(tc.raw)
+			cues, err := ExtractCues(raw)
+			if err != nil {
+				t.Fatalf("ExtractCues returned %v -- the ATTRIBUTION field must never be able to fail the CUE path", err)
+			}
+			if len(cues) != 1 {
+				t.Errorf("got %d cues, want 1: the payload carried a valid timedLyricsData array", len(cues))
+			}
+			if got := ExtractUpstream(raw); got != tc.wantUpstream {
+				t.Errorf("ExtractUpstream = %q, want %q", got, tc.wantUpstream)
+			}
+		})
+	}
+}

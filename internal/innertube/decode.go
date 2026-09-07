@@ -23,19 +23,12 @@ type browsePayload struct {
 						Model struct {
 							TimedLyricsModel struct {
 								LyricsData struct {
+									// The attribution field (sourceMessage) is a
+									// SIBLING of this cue list in the wire payload,
+									// but is deliberately NOT declared here -- see
+									// upstreamPayload for why the two are decoded
+									// separately.
 									TimedLyricsData []browseCue `json:"timedLyricsData"`
-									// SourceMessage names the upstream licensor this
-									// result was routed to, and is a SIBLING of the cue
-									// list rather than a field on it -- the attribution
-									// is per RESPONSE, not per line. CAPTURED, not
-									// inferred: measured live at this exact path on
-									// 2026-09-07 across four public reference tracks.
-									//
-									// It is a DISPLAY STRING, not a token: the observed
-									// values carry a "Source: " prefix and mixed case
-									// ("Source: LyricFind"). upstreamToken owns the
-									// mapping; nothing else may format this value.
-									SourceMessage string `json:"sourceMessage"`
 								} `json:"lyricsData"`
 							} `json:"timedLyricsModel"`
 						} `json:"model"`
@@ -228,13 +221,58 @@ const sourceMessagePrefix = "Source:"
 // established", the caller treats them identically, and this function is never
 // the place a transport problem is reported -- ExtractCues already owns that.
 func ExtractUpstream(raw []byte) string {
-	var payload browsePayload
+	var payload upstreamPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return ""
 	}
-	msg := payload.Contents.ElementRenderer.NewElement.Type.ComponentType.
+	raw2 := payload.Contents.ElementRenderer.NewElement.Type.ComponentType.
 		Model.TimedLyricsModel.LyricsData.SourceMessage
-	return upstreamToken(msg)
+	return upstreamToken(sourceMessageText(raw2))
+}
+
+// upstreamPayload decodes ONLY the attribution field, and its separateness from
+// browsePayload is a correctness requirement rather than tidiness.
+//
+// The two fields are siblings on the wire, so declaring both on one struct is
+// the obvious shape -- and it couples them fatally. encoding/json aborts the
+// WHOLE unmarshal on a single type mismatch, so a sourceMessage that is not a
+// bare string would take the CUES down with it: measured, a payload carrying a
+// valid timedLyricsData array plus a `{"runs":[...]}` sourceMessage returned
+// zero cues and a transport-class error, which does NOT degrade to a benign
+// miss. That shape is not hypothetical -- a runs-object is this API's dominant
+// form for a display string, and the bare string measured here is the exception.
+//
+// Decoding the attribution separately means the worst a surprising shape can do
+// is cost the attribution (SourceMessage stays "", no [upstream:] tag is
+// written, which asserts nothing) while the lyrics still arrive. The cue path
+// cannot be broken by a field it does not read.
+//
+// SourceMessage is json.RawMessage rather than string for the same reason: a
+// mismatch must never fail the decode. upstreamToken owns the interpretation.
+type upstreamPayload struct {
+	Contents struct {
+		ElementRenderer struct {
+			NewElement struct {
+				Type struct {
+					ComponentType struct {
+						Model struct {
+							TimedLyricsModel struct {
+								LyricsData struct {
+									// CAPTURED, not inferred: measured live at this
+									// path on 2026-09-07 across four public
+									// reference tracks. It is a DISPLAY STRING, not
+									// a token -- the observed values carry a
+									// "Source: " prefix and mixed case
+									// ("Source: LyricFind").
+									SourceMessage json.RawMessage `json:"sourceMessage"`
+								} `json:"lyricsData"`
+							} `json:"timedLyricsModel"`
+						} `json:"model"`
+					} `json:"componentType"`
+				} `json:"type"`
+			} `json:"newElement"`
+		} `json:"elementRenderer"`
+	} `json:"contents"`
 }
 
 // upstreamToken maps one raw sourceMessage to a constant, or "" for anything
@@ -246,6 +284,46 @@ func ExtractUpstream(raw []byte) string {
 // response that drops or re-cases the prefix should still map rather than
 // silently losing attribution. A value with no prefix at all still maps: the
 // trim is a no-op and the switch sees the bare name.
+// sourceMessageText coerces the raw attribution value to the display string it
+// carries, or "" for any shape it does not recognize.
+//
+// TWO SHAPES ARE ACCEPTED, and the second is the reason this function exists
+// rather than a plain string field. A bare JSON string is what was measured
+// live. A `{"runs":[{"text":"..."}]}` object is this API's dominant form for a
+// display string elsewhere, so it is the likeliest way the value changes shape
+// without notice; reading it costs a few lines and turns a silent loss of
+// attribution into a correct one.
+//
+// Anything else -- a number, an array, null, absent, malformed -- yields "" and
+// therefore no [upstream:] tag. That is the honest outcome: an absent tag
+// asserts nothing, and this function must never fail the caller, which is why
+// it returns a string rather than an error.
+func sourceMessageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var runs struct {
+		Runs []struct {
+			Text string `json:"text"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil {
+		return ""
+	}
+	// Concatenated, not just the first run: a display string is split across
+	// runs at styling boundaries, so taking runs[0] alone would truncate
+	// "Source: X" to "Source: " whenever the licensor name is styled separately.
+	var b strings.Builder
+	for _, r := range runs.Runs {
+		b.WriteString(r.Text)
+	}
+	return b.String()
+}
+
 func upstreamToken(sourceMessage string) string {
 	s := strings.ToLower(strings.TrimSpace(sourceMessage))
 	s = strings.TrimSpace(strings.TrimPrefix(s, strings.ToLower(sourceMessagePrefix)))
