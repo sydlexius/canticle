@@ -2,6 +2,7 @@ package innertube
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -1272,31 +1273,77 @@ func stripArtistPrefix(title, artist string) string {
 // same pairs judged WITHOUT the strip score 0.4567 to 0.6617 and reject, so this
 // is surface the strip creates rather than a hole it exposes.
 //
-// So on that path resemblance is not enough and exact normalized equality is
-// required instead. This costs no legitimate accept: a dashed upload of a title
-// that genuinely tokenizes to nothing (a title that is entirely punctuation, or
-// entirely a featuring credit) is the SAME string on both sides once the prefix
-// is gone, so identity holds exactly where the floor's 1.0000 used to carry it.
+// So on that path resemblance is not enough, and the RAW TOKEN SEQUENCE decides
+// instead -- splitTokens, which is tokenizeTitle without the vocabulary drops,
+// compared in order.
 //
-// The condition is deliberately gated on stripFired. A title that tokenizes to
-// nothing WITHOUT any strip having run is the pre-existing case the token rule's
-// fail-open documents, judged by the floor on the strings as written; the strip
-// took nothing away from it, and tightening it here would be an unrelated
-// behavior change smuggled in under a fix.
+// IT IS THE TOKEN SEQUENCE AND NOT THE NORMALIZED STRING, AND THAT IS A
+// MEASUREMENT. The first version of this rule compared NormalizeKey values, on
+// the reasoning that a dashed upload of a tokenize-empty title is the SAME
+// string on both sides once the prefix is gone. That is true of the exemplar it
+// was written from and FALSE of the class: the sides can differ legitimately by
+// punctuation, spacing or bracketing, all of which NormalizeKey keeps. Measured
+// on that version, 9 of 11 ordinary variants that base accepted were rejected --
+// a title against its own parenthesized form, a comma difference, a trailing
+// period, an "&" against "and". splitTokens folds exactly those, because it
+// splits on every non-alphanumeric rune, and the sequence comparison keeps
+// ORDER, so it concedes nothing to the multiset rule.
+//
+// WHAT IT COSTS, MEASURED AGAINST BASE RATHER THAN ASSERTED. The previous two
+// versions of this comment each claimed a cost of zero from an exemplar and each
+// was reproduced FALSE, so this paragraph reports grids and names its own limit.
+// Relative to base, the measured cost on everything probed is zero: 8 of 8
+// ordinary variants that the normalized-string version lost are kept (a title
+// against its own parenthesized form, a comma, a trailing period, "&" vs "and"),
+// and 240 unrelated pairs across 16 remainders still reject.
+//
+// A PACKAGING SUFFIX DOES NOT REACH THIS RULE AT ALL, which is worth stating
+// because it is the cost a reader will predict. "<punctuation title> (Live)"
+// strips to a remainder that tokenizes to [live] -- NOT empty -- so the rule
+// never engages and the variant vocabulary judges it as usual; measured, 24 of
+// 24 kept. The 8 rejections in that grid are all the `feat. X (Live)` shape,
+// where featMarkers truncates the remainder to nothing. Those are PRE-EXISTING:
+// base rejects the same 8 (kept=0), so this rule neither causes nor worsens them.
+//
+// NOT BOUNDED: the grids are constructed inputs, so they say what the predicate
+// DOES, never how often a real upload title tokenizes to nothing. Non-Latin
+// scripts beyond the combining-mark cases are unswept.
+//
+// THE RULE IS PER-SIDE, AND THE EARLIER PER-PAIR FORM WAS A REAL DIVERGENCE
+// between what the code did and what this comment said. A first version gated on
+// one stripFired flag OR'd across both sides, then tested tokenize-emptiness on
+// EITHER side -- so a candidate the strip never touched was held to identity
+// merely because the REQUEST happened to carry a dashed form. One candidate,
+// opposite verdicts, decided by the other side's formatting. The reasoning was
+// always per-side ("the strip took nothing away from THIS side"), so the code
+// now says that: each side is judged against the strip that actually ran on it.
+//
+// A side the strip did NOT touch keeps base behavior deliberately. A title that
+// tokenizes to nothing with no strip anywhere is a PRE-EXISTING fail-open -- the
+// floor alone judging a short stub, measured at 23 accepting pairs on base and
+// unchanged here. It is a real false-accept surface and it is tracked
+// separately; it is not this fix's to close, and closing it here would be an
+// unrelated behavior change smuggled in under a fix.
 func titleFieldCorresponds(requested, got, requestedArtist string) (ok, comparable bool) {
 	strippedRequested := stripArtistPrefix(requested, requestedArtist)
 	strippedGot := stripArtistPrefix(got, requestedArtist)
-	stripFired := strippedRequested != requested || strippedGot != got
+	// Per-side, not per-pair: each flag records whether the strip removed
+	// evidence from THAT side, which is the thing the rule below reasons about.
+	requestedStripped := strippedRequested != requested
+	gotStripped := strippedGot != got
 	requested, got = strippedRequested, strippedGot
 
-	if stripFired && (len(tokenizeTitle(requested)) == 0 || len(tokenizeTitle(got)) == 0) {
+	// Engages only where a strip actually disarmed the judges: the side that was
+	// stripped is the side that must have lost its content tokens.
+	if (requestedStripped && len(tokenizeTitle(requested)) == 0) ||
+		(gotStripped && len(tokenizeTitle(got)) == 0) {
 		// Comparability answered exactly as fieldCorresponds answers it, so a
 		// caller's `(!comparable || ok)` clause behaves the same on this path as
 		// on every other.
 		if normalize.NormalizeKey(requested) == "" || normalize.NormalizeKey(got) == "" {
 			return false, false
 		}
-		return normalize.NormalizeKey(requested) == normalize.NormalizeKey(got), true
+		return slices.Equal(splitTokens(requested), splitTokens(got)), true
 	}
 
 	ok, comparable = fieldCorresponds(requested, got)

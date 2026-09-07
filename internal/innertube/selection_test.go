@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2454,32 +2455,124 @@ func TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist(t *testing.T) {
 	})
 
 	t.Run("a title with no content tokens and NO strip is left to the floor", func(t *testing.T) {
-		// The identity rule is gated on the strip having FIRED, and this pins
-		// that gating. Without a separator there is nothing for the strip to
+		// The rule engages only on a side the strip actually stripped, and this
+		// pins that. Without a separator there is nothing for the strip to
 		// remove, so the pair is the pre-existing case the token rule's
 		// fail-open documents and the floor judges it on the strings as
 		// written. Tightening it here would be an unrelated behavior change
 		// riding along inside a fix.
 		//
-		// THE TWO SIDES MUST DIFFER, and that is the entire value of this case.
-		// An identical pair satisfies the identity rule too, so it passes
-		// whether or not the gate exists and pins nothing -- measured: with an
-		// identical pair, a mutation dropping the stripFired conjunct SURVIVES
-		// the whole suite. These two are tokenize-empty on both sides, score
-		// 0.9417 at the floor, and are NOT normalize-equal, so the floor and
-		// the identity rule give opposite answers and only the gate decides.
-		// Verified on main at 445e90a: base accepts this pair, so a rejection
-		// here is a behavior change this branch has no business making.
-		requested := models.Track{ArtistName: artist, TrackName: "!!!"}
-		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "!!!!"}
+		// THE TWO SIDES MUST DIFFER IN TOKEN SEQUENCE, and that is the entire
+		// value of this case. A pair the rule would accept anyway passes
+		// whether or not the gating exists and pins nothing -- measured: with
+		// such a pair, a mutation dropping the strip-fired condition SURVIVES
+		// the whole suite. (An earlier version of this case used "!!!" against
+		// "!!!!", which separated the rules while they compared normalized
+		// STRINGS and stopped separating them the moment the rule moved to
+		// token SEQUENCES, since splitTokens drops punctuation. The premise
+		// assertion below is what caught that, which is why it is a Fatal and
+		// not a comment.)
+		//
+		// These two are tokenize-empty on both sides, score 0.9273 at the
+		// floor, and have DIFFERENT token sequences, so the floor and the rule
+		// give opposite answers and only the gating decides. Verified on main
+		// at 445e90a: base accepts this pair, so a rejection here is a behavior
+		// change this branch has no business making.
+		requested := models.Track{ArtistName: artist, TrackName: "The The"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "The The The"}
 		if stripArtistPrefix(c.Title, artist) != c.Title {
 			t.Fatal("test premise broken: the strip must NOT fire here")
 		}
-		if normalize.NormalizeKey(requested.TrackName) == normalize.NormalizeKey(c.Title) {
-			t.Fatal("test premise broken: the two sides must NOT be normalize-equal, or the identity rule would accept them anyway and this case pins nothing")
+		if slices.Equal(splitTokens(requested.TrackName), splitTokens(c.Title)) {
+			t.Fatal("test premise broken: the two sides must NOT have equal token sequences, or the rule would accept them anyway and this case pins nothing")
 		}
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
-			t.Errorf("an un-stripped pair the FLOOR accepts was rejected: %v -- the identity rule must not reach a pair the strip never touched", err)
+			t.Errorf("an un-stripped pair the FLOOR accepts was rejected: %v -- the rule must not reach a pair the strip never touched", err)
+		}
+	})
+
+	// THE RULE IS PER-SIDE, AND A PER-PAIR VERSION OF IT SHIPPED GREEN.
+	//
+	// The first version OR'd one strip-fired flag across both sides and then
+	// tested tokenize-emptiness on EITHER side, so a candidate the strip never
+	// touched was held to the rule merely because the REQUEST carried a dashed
+	// form. Same candidate, opposite verdicts, decided by the other side's
+	// formatting -- and nothing in the suite could see it, because every case
+	// was symmetric. That is what this case exists to catch.
+	//
+	// Both rows are unrelated pairs, so ACCEPT is the correct verdict here and
+	// the pre-existing no-strip fail-open supplies it: the point is that the two
+	// rows AGREE. A future change that makes them disagree has reintroduced the
+	// asymmetry regardless of which way it moved.
+	t.Run("a candidate's verdict does not depend on how the REQUEST is written", func(t *testing.T) {
+		for _, tc := range []struct{ candTitle, request string }{
+			{"The", "Theme"},
+			{"A", "Alpha"},
+			{"feat. Alpha", "Feathers"},
+		} {
+			t.Run(tc.candTitle+" vs "+tc.request, func(t *testing.T) {
+				c := SearchCandidate{VideoID: "vid", Artist: artist, Title: tc.candTitle}
+				if stripArtistPrefix(c.Title, artist) != c.Title {
+					t.Fatalf("test premise broken: the strip must NOT fire on the candidate %q", c.Title)
+				}
+				if len(tokenizeTitle(c.Title)) != 0 {
+					t.Fatalf("test premise broken: the candidate %q must tokenize to nothing", c.Title)
+				}
+
+				plain := models.Track{ArtistName: artist, TrackName: tc.request}
+				// The SAME request, written in the dashed upload form. The
+				// strip fires on this side and on this side only.
+				dashed := models.Track{ArtistName: artist, TrackName: artist + " - " + tc.request}
+				if stripArtistPrefix(dashed.TrackName, artist) == dashed.TrackName {
+					t.Fatal("test premise broken: the strip must fire on the dashed request, or the two rows are the same case twice")
+				}
+
+				_, plainErr := SelectCandidate([]SearchCandidate{c}, plain)
+				_, dashedErr := SelectCandidate([]SearchCandidate{c}, dashed)
+				if (plainErr == nil) != (dashedErr == nil) {
+					t.Errorf("candidate %q accepted=%v against a plain request but accepted=%v against the same request written dashed: a strip on the REQUEST must not change how the CANDIDATE is judged",
+						tc.candTitle, plainErr == nil, dashedErr == nil)
+				}
+			})
+		}
+	})
+
+	// THE RULE COMPARES TOKEN SEQUENCES, NOT NORMALIZED STRINGS, and this pins
+	// the class that distinction buys back.
+	//
+	// A NormalizeKey comparison keeps punctuation, spacing and bracketing, so it
+	// rejected a tokenize-empty title against its own ordinary variants --
+	// measured at 9 of 11, including a title against its own parenthesized form.
+	// Each row here is a pair base ACCEPTS, so every one is a false reject the
+	// rule must not introduce.
+	t.Run("ordinary punctuation variants of a tokenize-empty title still accept", func(t *testing.T) {
+		for _, tc := range []struct{ request, remainder string }{
+			{"The, A", "The A"},
+			{"The The", "The, The"},
+			{"The", "The."},
+			{"!!!", "(!!!)"},
+			{"feat. Alpha", "(feat. Alpha)"},
+		} {
+			t.Run(tc.request+" vs "+tc.remainder, func(t *testing.T) {
+				c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + tc.remainder}
+				stripped := stripArtistPrefix(c.Title, artist)
+				if stripped == c.Title {
+					t.Fatalf("test premise broken: the strip did not fire on %q", c.Title)
+				}
+				if len(tokenizeTitle(stripped)) != 0 {
+					t.Fatalf("test premise broken: %q must tokenize to nothing, or this row does not exercise the rule", stripped)
+				}
+				// The premise that makes this row a REGRESSION test rather than
+				// a restatement: a normalized-string comparison rejects it.
+				if normalize.NormalizeKey(tc.request) == normalize.NormalizeKey(stripped) {
+					t.Fatalf("test premise broken: %q and %q are normalize-equal, so a string comparison would accept them too and this row pins nothing", tc.request, stripped)
+				}
+
+				requested := models.Track{ArtistName: artist, TrackName: tc.request}
+				if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+					t.Errorf("an ordinary punctuation variant was rejected: %v -- the rule must fold what splitTokens folds", err)
+				}
+			})
 		}
 	})
 }
