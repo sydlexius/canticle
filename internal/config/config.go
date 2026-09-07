@@ -359,6 +359,27 @@ type ProvidersConfig struct {
 	// policy that config cannot lower. Override:
 	// MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS.
 	PetitLyricsCooldownSeconds int `toml:"petitlyrics_cooldown_seconds"`
+	// InnerTubeCooldownSeconds is the minimum gap between InnerTube requests,
+	// for the same reason the Petit Lyrics key above exists: the providers share
+	// neither a rate-limit budget nor a throttle profile, so api.cooldown (which
+	// means Musixmatch) is the wrong knob for this lane (#858).
+	//
+	// Default 0, which means "fall back to api.cooldown" -- the behavior every
+	// deployment had before this key existed. A negative value is not a disable
+	// request (this lane is never unpaced by configuration) and also falls back.
+	//
+	// THE INTERVAL IS PER OUTBOUND REQUEST, AND THAT MATTERS MORE HERE THAN FOR
+	// THE OTHER LANES. One successful lookup costs THREE requests (search, next,
+	// browse) where Musixmatch and Petit Lyrics cost one, so the same number of
+	// seconds buys a third of the lookup rate. Tune it against how hard this
+	// lane may lean on someone else's gateway, never against how fast a library
+	// scan finishes.
+	//
+	// This is the interval REQUESTED. The client clamps any positive value up to
+	// innertube.MinAllowedInterval, so the effective floor is a client policy
+	// that config cannot lower. Override:
+	// MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS.
+	InnerTubeCooldownSeconds int `toml:"innertube_cooldown_seconds"`
 }
 
 // providersModeDefault and providersModeParallel are the supported dispatch
@@ -1378,6 +1399,15 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.Providers.PetitLyricsCooldownSeconds = n
 			applied["providers.petitlyrics_cooldown_seconds"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "value", v, "current", cfg.Providers.InnerTubeCooldownSeconds) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Providers.InnerTubeCooldownSeconds = n
+			applied["providers.innertube_cooldown_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_VERIFICATION_ENABLED"); v != "" {

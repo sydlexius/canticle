@@ -860,3 +860,37 @@ func TestScanFrequencyEmptyOptionOnlyOfferedWhenEffectiveIsEmpty(t *testing.T) {
 		}
 	}
 }
+
+// TestRawConfigValueInnerTubeCooldown covers the rawConfigValue arm for
+// providers.innertube_cooldown_seconds (#858), mirroring the petitlyrics test
+// above and for the same reason: rawConfigValue ends in a bare `return ""` with
+// no default guard, so a registry field with no arm renders as an EMPTY control
+// on the settings page and fails nowhere.
+//
+// Measured, not assumed: before this test existed, both deleting the arm and
+// pointing it at the petitlyrics field SURVIVED the whole suite. The first
+// blanks the operator's configured value in the UI; the second shows another
+// provider's number under this key. Both are user-visible and neither was
+// caught.
+func TestRawConfigValueInnerTubeCooldown(t *testing.T) {
+	// The two keys carry DIFFERENT values deliberately: with both set to the
+	// same number, an arm reading the wrong field passes.
+	cfg := config.Config{
+		Providers: config.ProvidersConfig{
+			PetitLyricsCooldownSeconds: 30,
+			InnerTubeCooldownSeconds:   45,
+		},
+	}
+	if got := rawConfigValue(cfg, "providers.innertube_cooldown_seconds"); got != "45" {
+		t.Fatalf("rawConfigValue = %q; want %q (a missing arm renders blank in the UI; a wrong arm shows the other provider's cooldown)", got, "45")
+	}
+	// The sibling must be undisturbed by the new arm.
+	if got := rawConfigValue(cfg, "providers.petitlyrics_cooldown_seconds"); got != "30" {
+		t.Fatalf("rawConfigValue petitlyrics = %q; want %q", got, "30")
+	}
+	// 0 is the api.cooldown-fallback sentinel and must render as "0", not blank:
+	// blank is indistinguishable from the no-arm failure above.
+	if got := rawConfigValue(config.Config{}, "providers.innertube_cooldown_seconds"); got != "0" {
+		t.Fatalf("rawConfigValue zero = %q; want %q", got, "0")
+	}
+}

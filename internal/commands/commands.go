@@ -1677,6 +1677,35 @@ func petitLyricsInterval(cfg config.Config) time.Duration {
 	return clampPacingSeconds(seconds)
 }
 
+// innerTubeInterval resolves the InnerTube pacing interval (#858), with the
+// same precedence and the same reasoning as petitLyricsInterval above:
+// providers.innertube_cooldown_seconds > api.cooldown.
+//
+// The api.cooldown fallback preserves the behavior this lane shipped with --
+// before the key existed it inherited api.cooldown unconditionally, so an unset
+// (or negative) value must resolve exactly as it did then. Negative is NOT a
+// disable request; pacing this lane off is not offered, and a negative duration
+// would read as "no pacing" to WithMinInterval.
+//
+// WHAT DIFFERS FROM THE OTHER LANES IS THE COST OF THE SAME NUMBER. The interval
+// is enforced per outbound REQUEST, and one lookup here costs THREE of them
+// (search, next, browse) against one for Musixmatch or Petit Lyrics. So an
+// operator who sets both cooldowns to the same value has not given the lanes
+// equal footing -- this one draws on its gateway a third as often per lookup.
+// That is the intended reading: the knob bounds the rate against someone else's
+// service, not the rate at which a scan completes.
+//
+// The returned value is the interval REQUESTED. The client clamps any positive
+// value up to innertube.MinAllowedInterval, so config can raise the effective
+// interval but never lower it past that policy floor.
+func innerTubeInterval(cfg config.Config) time.Duration {
+	seconds := cfg.API.Cooldown
+	if cfg.Providers.InnerTubeCooldownSeconds > 0 {
+		seconds = cfg.Providers.InnerTubeCooldownSeconds
+	}
+	return clampPacingSeconds(seconds)
+}
+
 // buildProvider constructs the named provider's adapter with the per-request
 // pacing floor applied, or nil for an unknown name. Test-injected fake fetchers
 // do not satisfy *musixmatch.Client so the pacer is a no-op for them, preserving
@@ -1704,13 +1733,13 @@ func buildProvider(name string, cfg config.Config, token string, newFetcher func
 		// non-authenticating constant shipped by every unofficial client, so
 		// there is no credential to require or to be missing.
 		//
-		// Paced from api.cooldown until #858 gives this provider its own config
-		// key. The client clamps any positive value up to its own floor
+		// Its own key when set, otherwise api.cooldown as before (#858). The
+		// client clamps any positive value up to its own floor
 		// (innertube.MinAllowedInterval), so a misconfigured cooldown cannot
 		// make this lane impolite -- and that floor is per REQUEST, which
 		// matters more here than for the other two: one successful lookup costs
 		// THREE requests (search, next, browse) where they cost one.
-		tube.WithMinInterval(clampPacingSeconds(cfg.API.Cooldown))
+		tube.WithMinInterval(innerTubeInterval(cfg))
 		return providers.New(providers.InnerTube, tube)
 	default:
 		return nil
@@ -2968,6 +2997,7 @@ func configKeys() []string {
 		"providers.mode",
 		"providers.race_wait_seconds",
 		"providers.petitlyrics_cooldown_seconds",
+		"providers.innertube_cooldown_seconds",
 		"verification.enabled",
 		"verification.whisper_url",
 		"verification.ffmpeg_path",
@@ -3037,6 +3067,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.Itoa(cfg.Providers.RaceWaitSeconds), true
 	case "providers.petitlyrics_cooldown_seconds":
 		return strconv.Itoa(cfg.Providers.PetitLyricsCooldownSeconds), true
+	case "providers.innertube_cooldown_seconds":
+		return strconv.Itoa(cfg.Providers.InnerTubeCooldownSeconds), true
 	case "verification.enabled":
 		return strconv.FormatBool(cfg.Verification.Enabled), true
 	case "verification.whisper_url":
@@ -3208,6 +3240,15 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("providers.petitlyrics_cooldown_seconds must be a non-negative integer (seconds; 0 uses api.cooldown)")
 		}
 		cfg.Providers.PetitLyricsCooldownSeconds = n
+	case "providers.innertube_cooldown_seconds":
+		// Same shape as the petitlyrics key above: 0 already means "fall back to
+		// api.cooldown", so a negative has no sentinel meaning left and is
+		// rejected rather than silently treated as the fallback.
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("providers.innertube_cooldown_seconds must be a non-negative integer (seconds; 0 uses api.cooldown)")
+		}
+		cfg.Providers.InnerTubeCooldownSeconds = n
 	case "verification.enabled":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
