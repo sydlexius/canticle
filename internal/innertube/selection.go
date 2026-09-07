@@ -2,6 +2,7 @@ package innertube
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -247,7 +248,7 @@ func SelectCandidate(candidates []SearchCandidate, requested models.Track) (Sear
 // revisited against that real caller rather than against this assumption.
 func checkCorresponds(requested models.Track, c SearchCandidate) error {
 	artistOK, artistComparable := artistFieldCorresponds(requested.ArtistName, c.Artist)
-	titleOK, titleComparable := titleFieldCorresponds(requested.TrackName, c.Title)
+	titleOK, titleComparable := titleFieldCorresponds(requested.TrackName, c.Title, requested.ArtistName)
 
 	if !artistComparable && !titleComparable {
 		return fmt.Errorf("innertube: no comparable field to verify the candidate against: %w", ErrNotFound)
@@ -496,6 +497,35 @@ func scoreCandidate(c SearchCandidate, requested models.Track) float64 {
 // tokens would have reopened the upload-decoration sibling class this
 // exclusion exists to close, and a false reject is the recoverable direction.
 // Noted here so a reader who sees "pin" does not assume nothing moved.
+//
+// THE FULL REJECTED-LEGITIMATE SET, MEASURED (#892). The paragraph above
+// described a SUBSET of what this vocabulary rejects and read as though it were
+// the whole of it. What is actually turned away, with the two rows #892 fixed
+// marked as such:
+//
+//	Song -> Artist - Song                 FIXED, see stripArtistPrefix
+//	Song -> Song (Album Version)          FIXED, phrase collapse below
+//	Song -> Song (Single Version)         FIXED, phrase collapse below
+//	Song -> Song HD                       rejects, upload decoration
+//	Song -> Song (Official Audio)         rejects, upload decoration
+//	Song -> Song (Demos)                  rejects, plural absent from vocabulary
+//	Song -> Song (Takes)                  rejects, plural absent from vocabulary
+//	CJK  -> CJK + native-script "live"    rejects, vocabulary is English-only
+//	CJK  -> CJK + "(Live)"                ACCEPTS, the romanized control
+//
+// THE ENGLISH-ONLY LIMITATION IS DELIBERATE AND IS THE SHARPEST ROW HERE,
+// because it holds a non-English release to a STRICTER standard than an English
+// one for the same semantic suffix, which nothing previously documented.
+// Extending the vocabulary across scripts means an unbounded list of guesses
+// about languages nobody here has measured, and a wrong guess in that direction
+// is a false ACCEPT -- the unrecoverable side. The romanized form still
+// accepts, which is the common case for this provider's material. Pinned by
+// TestNonEnglishVariantSuffixesRejectAndThatIsDocumented.
+//
+// The PLURALS ("demos", "takes") are left out for the same reason the
+// singulars are in: each addition is a behavior change that must be measured,
+// and neither plural has been. performanceFamilies notes the same gap from the
+// other side.
 var titleVariantTokens = map[string]struct{}{
 	"live": {}, "unplugged": {}, "acoustic": {}, "demo": {},
 	"remaster": {}, "remastered": {}, "remasters": {}, "reissue": {},
@@ -505,8 +535,11 @@ var titleVariantTokens = map[string]struct{}{
 	"edition": {}, "version": {}, "original": {}, "session": {}, "sessions": {},
 	"take": {}, "explicit": {}, "clean": {},
 	// Produced by the phrase collapse in tokenizeTitle, never by a bare word:
-	// "up" and "down" are far too common as content to admit on their own.
+	// "up" and "down" are far too common as content to admit on their own,
+	// and neither are "album" and "single" (#892). See the collapse itself for
+	// why the two-word form is packaging where either word alone is content.
 	"spedup": {}, "sloweddown": {},
+	"albumversion": {}, "singleversion": {},
 }
 
 // performanceFamilies maps a performance token to the FAMILY of performance it
@@ -989,6 +1022,18 @@ func tokenizeTitle(s string) []string {
 			case tok == "slowed" && raw[i+1] == "down":
 				out, i = append(out, "sloweddown"), i+1
 				continue
+			// #892. `version` is already vocabulary; `album` and `single` are
+			// not, and must not become so -- both are ordinary content words,
+			// and admitting either bare would let a genuinely different song
+			// pass the packaging loop. The PHRASE is unambiguous release
+			// packaging, so it collapses to one token that only the two-word
+			// form can produce.
+			case tok == "album" && raw[i+1] == "version":
+				out, i = append(out, "albumversion"), i+1
+				continue
+			case tok == "single" && raw[i+1] == "version":
+				out, i = append(out, "singleversion"), i+1
+				continue
 			}
 		}
 		out = append(out, tok)
@@ -1083,10 +1128,224 @@ func titleTokensCorrespond(requested, got string) bool {
 	return false
 }
 
+// stripArtistPrefix removes a leading "Artist - " segment from a title when
+// that segment NAMES THE REQUESTED ARTIST, and returns the title unchanged
+// otherwise (#892).
+//
+// WHY THIS EXISTS. "Artist - Title" is one of the most common upload title
+// shapes on the platform. The lane queries with searchParamsSongsOnly so it
+// mostly sees clean shelf titles, but candidateFromShelf takes whatever the
+// shelf's title run says, which for a re-upload or a non-topic channel is
+// frequently the dashed form. Every such candidate was rejected, because the
+// artist's words are unmatched CONTENT tokens in the candidate title -- and
+// they are content, correctly, since nothing in the token rule knows they name
+// the act rather than the song.
+//
+// THE STRIP RESTS ON EVIDENCE, NEVER ON SHAPE. Removing whatever precedes a
+// dash would be a false-accept generator: a title whose words genuinely contain
+// a dash would be truncated, and the truncated remainder could then correspond
+// to a different song. So the prefix is removed only when it NAMES the artist
+// we ASKED FOR. What is removed is therefore a DUPLICATE of a field the gate is
+// separately checking, not information.
+//
+// THE PREDICATE IS artistTokensEqual, NOT artistFieldCorresponds, AND THAT IS A
+// MEASUREMENT rather than a preference. The first revision of this function
+// used the gate's own artist predicate, on the reasoning that it answers
+// exactly this question -- and it does not. That predicate's first clause is
+// the Jaro-Winkler FLOOR, which is a RESEMBLANCE measure, and resemblance is
+// not identity: "Placeholder Artist Name" against the SONG TITLE
+// "Placeholder Song Title" measures 0.9116, far above the 0.75 floor, purely on
+// shared word shape. The strip then fired on "Song Title - Remastered",
+// consumed the song's actual words as though they were the artist, and left a
+// bare packaging token behind -- caught by TestLegitimateVariantsStayAccepted's
+// remaster control, which is precisely the false-reject class this issue exists
+// to close, manufactured by its own fix.
+//
+// An exact token MULTISET is the right instrument because the question here is
+// "is this segment that field, repeated" -- an identity question. It still
+// accepts every legitimate reordering (that is what artistTokensEqual is for),
+// and it answers false on the pair above.
+//
+// IT NEVER LEAVES A TITLE THAT NORMALIZES TO EMPTY, AND THE PRECISE NOTION OF
+// "EMPTY" IS THE WHOLE GUARD. This took three revisions and a CRITICAL review
+// finding to get right; the history is kept because each wrong version was
+// plausible.
+//
+// A first version guarded on `len(tokenizeTitle(rest)) == 0`, reasoning that
+// titleTokensCorrespond fails OPEN when a side tokenizes to nothing. It was
+// deleted for being ACTIVELY HARMFUL in the corner it claimed to own: it
+// rejected a request whose title genuinely IS punctuation against the dashed
+// upload of that same title, which measures 1.0000 and must accept. The
+// deletion was RIGHT and the reasoning offered for it was WRONG -- it claimed
+// the floor made the guard redundant, on the strength of "!!!" alone. See the
+// tokenize-empty block below for what that cost.
+//
+// Deleting it left a `rest == ""` check, and THAT was a CRITICAL false ACCEPT.
+// Go string emptiness is not the gate's notion of empty: fieldCorresponds tests
+// `normalize.NormalizeKey(x) == ""`. A remainder can be non-empty as BYTES
+// while normalizing to NOTHING -- NormalizeKey runs NFKD and strips combining
+// marks, so Hebrew niqqud, Arabic harakat, Thai tone marks and a bare combining
+// accent all vanish. The strip then emptied the title, fieldCorresponds
+// returned comparable=false on its FIRST LINE, and checkCorresponds'
+// `(!titleComparable || titleOK)` clause passed VACUOUSLY: the title half of
+// the gate was skipped and any candidate by the right artist matched any
+// request. Measured across five such remainders, every unrelated request
+// accepted, in BOTH directions.
+//
+// The correction is to guard on the same predicate the gate uses. COMPARABILITY
+// is what protects the NORMALIZE-empty case: an emptied title never reaches the
+// floor at all, so the guard has to run here, in the strip.
+//
+// THE TOKENIZE-EMPTY CASE IS A SEPARATE DEFECT AND IT IS NOT FIXED HERE. Two
+// successive versions of this comment claimed the FLOOR covers it, and both
+// were reproduced FALSE. The claim was generalized from "!!!", which rejects
+// only because punctuation scores near zero against a word; the CLASS does not
+// behave that way. A remainder of "The", "A", "An", "And" (all ignorableTokens)
+// or a bare "feat. X" (truncated at a featMarker) is normalize-NON-empty, so it
+// passes the guard above, and yet tokenizes to NOTHING -- and a stub that short
+// clears the Jaro-Winkler floor against a great many unrelated requests.
+//
+// That case cannot be closed here, and the attempt was measured: guarding the
+// strip on `len(tokenizeTitle(rest)) == 0` re-breaks the legitimate accepts this
+// branch exists to buy, which is why that guard was deleted in the first place.
+// Refusing to strip is the wrong lever, because the strip is CORRECT on those
+// inputs; what is wrong is trusting a resemblance score afterwards. So the rule
+// lives at the point of judgment instead -- see titleFieldCorresponds, which
+// compares the raw token SEQUENCES when the strip fired and left a side with no
+// content tokens.
+//
+// ONLY THE FIRST separator is considered. A title carrying several dashes most
+// often has packaging after the later ones ("Artist - Song - Remastered"), and
+// that packaging must keep reaching the vocabulary rather than being consumed
+// by a greedier split.
+func stripArtistPrefix(title, artist string) string {
+	// The separator is the SPACED dash. An unspaced hyphen is ordinary
+	// intra-word punctuation in a great many titles, and splitting on it would
+	// truncate them; the upload convention writes the spaced form.
+	idx := strings.Index(title, " - ")
+	if idx < 0 {
+		return title
+	}
+	// The TrimSpace is NOT what makes the guard below work, and saying so
+	// prevents a future reader from trusting the wrong line. It was
+	// load-bearing under the old `rest == ""` check (without it a
+	// whitespace-only remainder was non-empty and slipped through); against
+	// NormalizeKey it is redundant, since that already normalizes "   " to "".
+	// Measured: deleting it survives the full suite, and it cannot change a
+	// verdict either way -- both downstream consumers, MatchConfidence and
+	// tokenizeTitle, are insensitive to leading and trailing whitespace. It is
+	// kept only so the returned title is well formed.
+	prefix, rest := title[:idx], strings.TrimSpace(title[idx+len(" - "):])
+	// The gate's own notion of empty, not Go's. See the block above: these
+	// differ, and the gap between them was a false accept.
+	if normalize.NormalizeKey(rest) == "" {
+		return title
+	}
+	if !artistTokensEqual(artist, prefix) {
+		return title
+	}
+	return rest
+}
+
 // titleFieldCorresponds is the title half of the gate: the floor AND the token
 // multiset rule. Both must hold, so the token rule can only ever make the gate
 // STRICTER than the floor alone.
-func titleFieldCorresponds(requested, got string) (ok, comparable bool) {
+//
+// The artist-prefix strip runs BEFORE both, and before the floor specifically,
+// so the two halves judge the same string. Running it between them would let
+// the floor score a title against a prefix the token rule then ignores, which
+// is two rules answering two different questions and calling it one gate.
+//
+// It is applied SYMMETRICALLY. A local tag can carry the dashed form just as an
+// upload can, and a rule that stripped only the candidate would reject the same
+// pair depending on which side happened to be written that way.
+//
+// A STRIP THAT LEAVES NO CONTENT TOKENS IS JUDGED ON IDENTITY, NOT ON THE FLOOR,
+// and that rule is the second half of the strip's safety story -- see the
+// stripArtistPrefix block for why the strip's own guard cannot cover this. When
+// the strip has FIRED and a side tokenizes to nothing, every downstream judge
+// has been disarmed: titleTokensCorrespond fails OPEN on an empty token
+// sequence, so the only thing left is the Jaro-Winkler floor, which is a
+// RESEMBLANCE measure comparing a one-to-three character stub against a whole
+// request. Measured, short-string Jaro-Winkler with its prefix bonus clears the
+// 0.75 floor constantly: a remainder of "The" scores 0.9067 against "Theme",
+// "An" scores 0.8095 against "Android", "A" scores 0.7600 against "Alpha". The
+// same pairs judged WITHOUT the strip score 0.4567 to 0.6617 and reject, so this
+// is surface the strip creates rather than a hole it exposes.
+//
+// So on that path resemblance is not enough, and the RAW TOKEN SEQUENCE decides
+// instead -- splitTokens, which is tokenizeTitle without the vocabulary drops,
+// compared in order.
+//
+// IT IS THE TOKEN SEQUENCE AND NOT THE NORMALIZED STRING, AND THAT IS A
+// MEASUREMENT. The first version of this rule compared NormalizeKey values, on
+// the reasoning that a dashed upload of a tokenize-empty title is the SAME
+// string on both sides once the prefix is gone. That is true of the exemplar it
+// was written from and FALSE of the class: the sides can differ legitimately by
+// punctuation, spacing or bracketing, all of which NormalizeKey keeps. Measured
+// on that version, 9 of 11 ordinary variants that base accepted were rejected --
+// a title against its own parenthesized form, a comma difference, a trailing
+// period, an "&" against "and". splitTokens folds exactly those, because it
+// splits on every non-alphanumeric rune, and the sequence comparison keeps
+// ORDER, so it concedes nothing to the multiset rule.
+//
+// WHAT IT COSTS, MEASURED AGAINST BASE RATHER THAN ASSERTED. The previous two
+// versions of this comment each claimed a cost of zero from an exemplar and each
+// was reproduced FALSE, so this paragraph reports grids and names its own limit.
+// Relative to base, the measured cost on everything probed is zero: 8 of 8
+// ordinary variants that the normalized-string version lost are kept (a title
+// against its own parenthesized form, a comma, a trailing period, "&" vs "and"),
+// and 240 unrelated pairs across 16 remainders still reject.
+//
+// A PACKAGING SUFFIX DOES NOT REACH THIS RULE AT ALL, which is worth stating
+// because it is the cost a reader will predict. "<punctuation title> (Live)"
+// strips to a remainder that tokenizes to [live] -- NOT empty -- so the rule
+// never engages and the variant vocabulary judges it as usual; measured, 24 of
+// 24 kept. The 8 rejections in that grid are all the `feat. X (Live)` shape,
+// where featMarkers truncates the remainder to nothing. Those are PRE-EXISTING:
+// base rejects the same 8 (kept=0), so this rule neither causes nor worsens them.
+//
+// NOT BOUNDED: the grids are constructed inputs, so they say what the predicate
+// DOES, never how often a real upload title tokenizes to nothing. Non-Latin
+// scripts beyond the combining-mark cases are unswept.
+//
+// THE RULE IS PER-SIDE, AND THE EARLIER PER-PAIR FORM WAS A REAL DIVERGENCE
+// between what the code did and what this comment said. A first version gated on
+// one stripFired flag OR'd across both sides, then tested tokenize-emptiness on
+// EITHER side -- so a candidate the strip never touched was held to identity
+// merely because the REQUEST happened to carry a dashed form. One candidate,
+// opposite verdicts, decided by the other side's formatting. The reasoning was
+// always per-side ("the strip took nothing away from THIS side"), so the code
+// now says that: each side is judged against the strip that actually ran on it.
+//
+// A side the strip did NOT touch keeps base behavior deliberately. A title that
+// tokenizes to nothing with no strip anywhere is a PRE-EXISTING fail-open -- the
+// floor alone judging a short stub, measured at 23 accepting pairs on base and
+// unchanged here. It is a real false-accept surface and it is tracked
+// separately; it is not this fix's to close, and closing it here would be an
+// unrelated behavior change smuggled in under a fix.
+func titleFieldCorresponds(requested, got, requestedArtist string) (ok, comparable bool) {
+	strippedRequested := stripArtistPrefix(requested, requestedArtist)
+	strippedGot := stripArtistPrefix(got, requestedArtist)
+	// Per-side, not per-pair: each flag records whether the strip removed
+	// evidence from THAT side, which is the thing the rule below reasons about.
+	requestedStripped := strippedRequested != requested
+	gotStripped := strippedGot != got
+	requested, got = strippedRequested, strippedGot
+
+	// Engages only where a strip actually disarmed the judges: the side that was
+	// stripped is the side that must have lost its content tokens.
+	if (requestedStripped && len(tokenizeTitle(requested)) == 0) ||
+		(gotStripped && len(tokenizeTitle(got)) == 0) {
+		// Comparability answered exactly as fieldCorresponds answers it, so a
+		// caller's `(!comparable || ok)` clause behaves the same on this path as
+		// on every other.
+		if normalize.NormalizeKey(requested) == "" || normalize.NormalizeKey(got) == "" {
+			return false, false
+		}
+		return slices.Equal(splitTokens(requested), splitTokens(got)), true
+	}
+
 	ok, comparable = fieldCorresponds(requested, got)
 	if !comparable || !ok {
 		return ok, comparable

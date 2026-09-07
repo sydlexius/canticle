@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2036,7 +2037,7 @@ func TestTokenRuleOnlySubtractsAccepts(t *testing.T) {
 				t.Fatalf("test premise broken: the tokens must correspond, or removing the early return would change nothing here")
 			}
 
-			ok, comparable := titleFieldCorresponds(tc.requested, tc.got)
+			ok, comparable := titleFieldCorresponds(tc.requested, tc.got, "Placeholder Artist Name")
 			if !comparable {
 				t.Fatal("both sides carry tokens, so the field must be comparable")
 			}
@@ -2255,6 +2256,575 @@ func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 			if artistTokensEqual(tc[0], tc[1]) {
 				t.Errorf("%q vs %q: neither carries a token, so there is no evidence to accept on", tc[0], tc[1])
 			}
+		}
+	})
+}
+
+// TestReleasePackagingPhrasesAreAccepted pins issue #892 AC 1: "album version"
+// and "single version" name how the recording was ISSUED, exactly like the rest
+// of titleVariantTokens, and were rejecting only because `album` and `single`
+// are not themselves vocabulary.
+//
+// THE FIX IS A PHRASE COLLAPSE, NOT A BARE-WORD ADDITION, and that distinction
+// is the whole decision. `album` and `single` are common CONTENT words -- a
+// title naming an album, or the word "single" in its ordinary English sense --
+// so admitting either one bare would let a genuinely different song through the
+// packaging loop. Collapsed as a phrase they can only ever match the two-word
+// release-packaging form, which is the shape actually observed. This is the
+// same treatment "sped up" and "slowed down" already get, and for the same
+// reason: the words are content, the phrase is packaging.
+func TestReleasePackagingPhrasesAreAccepted(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	for _, candTi := range []string{
+		title + " (Album Version)",
+		title + " (Single Version)",
+		title + " - Album Version",
+	} {
+		t.Run(candTi, func(t *testing.T) {
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: candTi}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("release packaging was REJECTED: %v", err)
+			}
+		})
+	}
+}
+
+// TestBareAlbumAndSingleStayContent pins the OTHER half of the #892 AC 1
+// decision, and it is the half that makes the phrase collapse safe. If a later
+// change "completes" the vocabulary by adding the bare words, this reddens.
+func TestBareAlbumAndSingleStayContent(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	for _, candTi := range []string{
+		title + " Album",
+		title + " Single",
+	} {
+		t.Run(candTi, func(t *testing.T) {
+			// PREMISE: the floor admits it, so the token rule is what decides.
+			if conf := normalize.MatchConfidence(title, candTi); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor, so the floor rejects this and the vocabulary is not what is being pinned", conf, matchMinConfidence)
+			}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: candTi}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Error("a BARE `album`/`single` was accepted as packaging: those are content words, and only the two-word phrase is release packaging")
+			}
+		})
+	}
+}
+
+// TestPackagingPhrasesDoNotCorrespondToEachOther pins that the collapse does not
+// manufacture an accept between two DIFFERENT pressings.
+func TestPackagingPhrasesDoNotCorrespondToEachOther(t *testing.T) {
+	if titleTokensCorrespond("Album Version", "Single Version") {
+		t.Error("two titles built only from packaging phrases must not correspond")
+	}
+}
+
+// TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist pins issue #892 AC 2.
+//
+// "Artist - Title" is one of the most common upload title shapes on the
+// platform, and candidateFromShelf takes whatever the shelf's title run says,
+// so a re-upload or a non-topic channel frequently presents it. Every such
+// candidate was rejected: `placeholder`, `artist` and `name` are unmatched
+// content tokens in the candidate.
+//
+// THE STRIP IS GATED ON EVIDENCE, never on shape alone. The leading segment is
+// removed only when it names the artist we ASKED FOR, so the rule cannot invent
+// a correspondence -- it removes a duplicate of a field the gate is separately
+// checking. A dashed title whose prefix is NOT the artist is untouched, which is
+// what keeps "Song Title - Remastered" reading as packaging rather than as a
+// stripped prefix.
+func TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+
+	t.Run("prefix naming the requested artist is stripped", func(t *testing.T) {
+		requested := models.Track{ArtistName: artist, TrackName: title}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + title}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("the `Artist - Title` upload convention was REJECTED: %v", err)
+		}
+	})
+
+	t.Run("prefix naming the requested artist is stripped with packaging still attached", func(t *testing.T) {
+		requested := models.Track{ArtistName: artist, TrackName: title}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + title + " (Live)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a dashed upload title carrying packaging was REJECTED: %v", err)
+		}
+	})
+
+	t.Run("a prefix that is NOT the artist is left alone", func(t *testing.T) {
+		// The whole string is the song's words. Stripping here would compare
+		// a truncated title and could accept a different song.
+		requested := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Sundial Harbor - Vanguard Kettledrum"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a leading segment that does NOT name the requested artist was stripped: the strip must rest on an artist match, never on the dash alone")
+		}
+	})
+
+	t.Run("the requested side is stripped too", func(t *testing.T) {
+		// A local tag can carry the dashed form just as an upload can, so the
+		// treatment has to be symmetric or the same pair rejects one way round.
+		requested := models.Track{ArtistName: artist, TrackName: artist + " - " + title}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a dashed REQUESTED title was rejected against a clean candidate: %v", err)
+		}
+	})
+
+	// A STRIPPED TITLE WITH NO CONTENT TOKENS IS JUDGED ON IDENTITY, AND THIS
+	// CASE IS PINNED AS A CLASS BECAUSE PINNING IT AS AN EXAMPLE ALREADY FAILED
+	// TWICE.
+	//
+	// The history is the reason for the shape of this test. The original version
+	// used a candidate title of just the artist name, with no " - " in it, so
+	// stripArtistPrefix returned at its first early exit and the emptying path
+	// was never reached -- a mutation deleting the strip's guard left the suite
+	// green. It was then rewritten to reach the path for real using "!!!", and
+	// asserted that the FLOOR is what rejects. That passed, and the conclusion
+	// drawn from it was still false: punctuation scores near zero against a
+	// word, so "!!!" rejects at the floor while the CLASS does not. A remainder
+	// of "The", "A", "An", "And" or a bare featuring credit is normalize-non-
+	// empty (so the strip fires) and tokenizes to nothing (so the token rule
+	// fails open), leaving a one-to-three character stub judged only by
+	// Jaro-Winkler -- which its prefix bonus clears against unrelated requests
+	// at 0.76 to 0.91. Measured: 22 of 64 such pairs accepted.
+	//
+	// So the table below sweeps the whole ignorableTokens / featMarkers class
+	// rather than one exemplar, and each request is chosen to be one the FLOOR
+	// would have passed. The rule that rejects them lives in
+	// titleFieldCorresponds, not in the strip: the raw token SEQUENCES are
+	// compared when the strip fired and left a side with no content tokens.
+	t.Run("a stripped title with no content tokens rejects an unrelated request", func(t *testing.T) {
+		for _, tc := range []struct{ remainder, request string }{
+			{"The", "Theme"},
+			{"The", "There"},
+			{"A", "Alpha"},
+			{"A", "Ashes"},
+			{"An", "Android"},
+			{"An", "Anthem"},
+			{"And", "Andante"},
+			{"feat. Alpha", "Feathers"},
+		} {
+			t.Run(tc.remainder+" vs "+tc.request, func(t *testing.T) {
+				c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + tc.remainder}
+
+				// PREMISE, asserted rather than assumed: the strip must really
+				// fire and must really leave nothing to judge on. Without both,
+				// a passing case says nothing about the defect.
+				stripped := stripArtistPrefix(c.Title, artist)
+				if stripped == c.Title {
+					t.Fatalf("test premise broken: the strip did not fire on %q", c.Title)
+				}
+				if len(tokenizeTitle(stripped)) != 0 {
+					t.Fatalf("test premise broken: %q must tokenize to nothing, got %v", stripped, tokenizeTitle(stripped))
+				}
+				// And the floor must be the judge that WOULD have passed it,
+				// or this row is not exercising the defect at all.
+				if normalize.MatchConfidence(tc.request, stripped) < matchMinConfidence {
+					t.Fatalf("test premise broken: %q vs %q scores below the floor, so the floor alone would have rejected it", tc.request, stripped)
+				}
+
+				requested := models.Track{ArtistName: artist, TrackName: tc.request}
+				if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+					t.Errorf("a stripped title with no content tokens accepted the unrelated request %q: the fuzzy floor is not a gate on a stub this short", tc.request)
+				}
+			})
+		}
+	})
+
+	t.Run("an emptied title that CORRESPONDS still accepts", func(t *testing.T) {
+		// The other half, and the reason the deleted guard in the strip was not
+		// merely redundant but wrong. A title that genuinely is punctuation,
+		// against the dashed upload of that same title, is a real match. Under
+		// the identity rule it still accepts -- the two sides are the same
+		// string once the prefix is gone, which is exactly the case the floor's
+		// 1.0000 used to carry.
+		requested := models.Track{ArtistName: artist, TrackName: "!!!"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - !!!"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a correct dashed upload of a punctuation title was rejected: %v", err)
+		}
+	})
+
+	t.Run("a title with no content tokens and NO strip is left to the floor", func(t *testing.T) {
+		// The rule engages only on a side the strip actually stripped, and this
+		// pins that. Without a separator there is nothing for the strip to
+		// remove, so the pair is the pre-existing case the token rule's
+		// fail-open documents and the floor judges it on the strings as
+		// written. Tightening it here would be an unrelated behavior change
+		// riding along inside a fix.
+		//
+		// THE TWO SIDES MUST DIFFER IN TOKEN SEQUENCE, and that is the entire
+		// value of this case. A pair the rule would accept anyway passes
+		// whether or not the gating exists and pins nothing -- measured: with
+		// such a pair, a mutation dropping the strip-fired condition SURVIVES
+		// the whole suite. (An earlier version of this case used "!!!" against
+		// "!!!!", which separated the rules while they compared normalized
+		// STRINGS and stopped separating them the moment the rule moved to
+		// token SEQUENCES, since splitTokens drops punctuation. The premise
+		// assertion below is what caught that, which is why it is a Fatal and
+		// not a comment.)
+		//
+		// These two are tokenize-empty on both sides, score 0.9273 at the
+		// floor, and have DIFFERENT token sequences, so the floor and the rule
+		// give opposite answers and only the gating decides. Verified on main
+		// at 445e90a: base accepts this pair, so a rejection here is a behavior
+		// change this branch has no business making.
+		requested := models.Track{ArtistName: artist, TrackName: "The The"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "The The The"}
+		if stripArtistPrefix(c.Title, artist) != c.Title {
+			t.Fatal("test premise broken: the strip must NOT fire here")
+		}
+		if slices.Equal(splitTokens(requested.TrackName), splitTokens(c.Title)) {
+			t.Fatal("test premise broken: the two sides must NOT have equal token sequences, or the rule would accept them anyway and this case pins nothing")
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("an un-stripped pair the FLOOR accepts was rejected: %v -- the rule must not reach a pair the strip never touched", err)
+		}
+	})
+
+	// THE RULE IS PER-SIDE, AND A PER-PAIR VERSION OF IT SHIPPED GREEN.
+	//
+	// The first version OR'd one strip-fired flag across both sides and then
+	// tested tokenize-emptiness on EITHER side, so a candidate the strip never
+	// touched was held to the rule merely because the REQUEST carried a dashed
+	// form. Same candidate, opposite verdicts, decided by the other side's
+	// formatting -- and nothing in the suite could see it, because every case
+	// was symmetric. That is what this case exists to catch.
+	//
+	// Both rows are unrelated pairs, so ACCEPT is the correct verdict here and
+	// the pre-existing no-strip fail-open supplies it: the point is that the two
+	// rows AGREE. A future change that makes them disagree has reintroduced the
+	// asymmetry regardless of which way it moved.
+	t.Run("a candidate's verdict does not depend on how the REQUEST is written", func(t *testing.T) {
+		for _, tc := range []struct{ candTitle, request string }{
+			{"The", "Theme"},
+			{"A", "Alpha"},
+			{"feat. Alpha", "Feathers"},
+		} {
+			t.Run(tc.candTitle+" vs "+tc.request, func(t *testing.T) {
+				c := SearchCandidate{VideoID: "vid", Artist: artist, Title: tc.candTitle}
+				if stripArtistPrefix(c.Title, artist) != c.Title {
+					t.Fatalf("test premise broken: the strip must NOT fire on the candidate %q", c.Title)
+				}
+				if len(tokenizeTitle(c.Title)) != 0 {
+					t.Fatalf("test premise broken: the candidate %q must tokenize to nothing", c.Title)
+				}
+
+				plain := models.Track{ArtistName: artist, TrackName: tc.request}
+				// The SAME request, written in the dashed upload form. The
+				// strip fires on this side and on this side only.
+				dashed := models.Track{ArtistName: artist, TrackName: artist + " - " + tc.request}
+				if stripArtistPrefix(dashed.TrackName, artist) == dashed.TrackName {
+					t.Fatal("test premise broken: the strip must fire on the dashed request, or the two rows are the same case twice")
+				}
+
+				_, plainErr := SelectCandidate([]SearchCandidate{c}, plain)
+				_, dashedErr := SelectCandidate([]SearchCandidate{c}, dashed)
+				if (plainErr == nil) != (dashedErr == nil) {
+					t.Errorf("candidate %q accepted=%v against a plain request but accepted=%v against the same request written dashed: a strip on the REQUEST must not change how the CANDIDATE is judged",
+						tc.candTitle, plainErr == nil, dashedErr == nil)
+				}
+			})
+		}
+	})
+
+	// THE RULE COMPARES TOKEN SEQUENCES, NOT NORMALIZED STRINGS, and this pins
+	// the class that distinction buys back.
+	//
+	// A NormalizeKey comparison keeps punctuation, spacing and bracketing, so it
+	// rejected a tokenize-empty title against its own ordinary variants --
+	// measured at 9 of 11, including a title against its own parenthesized form.
+	// Each row here is a pair base ACCEPTS, so every one is a false reject the
+	// rule must not introduce.
+	t.Run("ordinary punctuation variants of a tokenize-empty title still accept", func(t *testing.T) {
+		for _, tc := range []struct{ request, remainder string }{
+			{"The, A", "The A"},
+			{"The The", "The, The"},
+			{"The", "The."},
+			{"!!!", "(!!!)"},
+			{"feat. Alpha", "(feat. Alpha)"},
+		} {
+			t.Run(tc.request+" vs "+tc.remainder, func(t *testing.T) {
+				c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + tc.remainder}
+				stripped := stripArtistPrefix(c.Title, artist)
+				if stripped == c.Title {
+					t.Fatalf("test premise broken: the strip did not fire on %q", c.Title)
+				}
+				if len(tokenizeTitle(stripped)) != 0 {
+					t.Fatalf("test premise broken: %q must tokenize to nothing, or this row does not exercise the rule", stripped)
+				}
+				// The premise that makes this row a REGRESSION test rather than
+				// a restatement: a normalized-string comparison rejects it.
+				if normalize.NormalizeKey(tc.request) == normalize.NormalizeKey(stripped) {
+					t.Fatalf("test premise broken: %q and %q are normalize-equal, so a string comparison would accept them too and this row pins nothing", tc.request, stripped)
+				}
+
+				requested := models.Track{ArtistName: artist, TrackName: tc.request}
+				if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+					t.Errorf("an ordinary punctuation variant was rejected: %v -- the rule must fold what splitTokens folds", err)
+				}
+			})
+		}
+	})
+}
+
+// TestNonEnglishVariantSuffixesRejectAndThatIsDocumented pins issue #892 AC 3 as
+// a MEASUREMENT of a known limitation rather than as a fix.
+//
+// THE VOCABULARY IS ENGLISH-ONLY AND STAYS THAT WAY. Extending it with
+// native-script variant suffixes means an unbounded, unmeasured token list
+// across every script the library might hold -- the same overclaim the
+// apostropheEraser comment exists to retire, written as data instead of prose.
+// Each entry would be a guess about a language nobody here measured, and a
+// wrong guess in this direction is a false ACCEPT, which is the unrecoverable
+// side.
+//
+// The cost is real and is recorded here so it is a decision rather than an
+// accident: a non-English release is held to a stricter standard than an
+// English one for the same semantic suffix. The romanized form still accepts,
+// which is the common case for the material this provider serves.
+func TestNonEnglishVariantSuffixesRejectAndThatIsDocumented(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	// A CJK title with a native-script "live" suffix. Held identical apart
+	// from the suffix, so the suffix is the only thing under test.
+	const title = "未来の歌"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	t.Run("native-script suffix rejects", func(t *testing.T) {
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title + " (ライブ)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a native-script variant suffix was ACCEPTED: the vocabulary was extended beyond English, which is an unmeasured false-accept surface -- see the titleVariantTokens comment")
+		}
+	})
+
+	t.Run("the romanized suffix still accepts", func(t *testing.T) {
+		// The control. Without it the reject above could be the CJK title
+		// failing the floor rather than the vocabulary being English-only.
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title + " (Live)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("the romanized suffix must still accept, or the reject above is not measuring the vocabulary: %v", err)
+		}
+	})
+}
+
+// TestArtistPrefixStripRequiresIdentityNotResemblance pins the defect the #892
+// fix produced in its own first revision, which is the sharpest test in this
+// file's #892 group.
+//
+// stripArtistPrefix originally gated on artistFieldCorresponds, whose first
+// clause is the Jaro-Winkler FLOOR. That is a RESEMBLANCE measure, and two
+// strings sharing a boilerplate word pattern resemble each other strongly
+// without naming the same thing: the artist measures 0.9116 against the SONG
+// TITLE below, far above the 0.75 floor. The strip therefore fired on an
+// ordinary packaged title, ate the song's real words as though they were the
+// artist, and left a bare packaging token -- a false reject manufactured by the
+// fix for false rejects.
+//
+// A test that only used a WILDLY different prefix would never have caught this,
+// which is why this case is pinned separately from the one below it.
+func TestArtistPrefixStripRequiresIdentityNotResemblance(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+
+	// PREMISE: the prefix RESEMBLES the artist above the floor. If this ever
+	// drops below it, the case stops discriminating identity from resemblance
+	// and silently becomes a duplicate of the dissimilar-prefix test.
+	conf := normalize.MatchConfidence(artist, title)
+	if conf < matchMinConfidence {
+		t.Fatalf("test premise broken: the prefix measures %.4f against the artist, below the %.2f floor, so a resemblance-based strip would not fire here and this pins nothing", conf, matchMinConfidence)
+	}
+
+	if got := stripArtistPrefix(title+" - Remastered", artist); got != title+" - Remastered" {
+		t.Errorf("the strip fired on a prefix that merely RESEMBLES the artist (%.4f): got %q -- the gate must be token identity, never the similarity floor", conf, got)
+	}
+
+	// And the end-to-end consequence, which is what the library actually feels.
+	requested := models.Track{ArtistName: artist, TrackName: title}
+	c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title + " - Remastered"}
+	if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+		t.Errorf("a plain remaster was rejected because the artist-prefix strip ate the title: %v", err)
+	}
+}
+
+// TestSharedHonorificStillSatisfiesTheSharedNameRule records a KNOWN RESIDUAL
+// in the credit superset lane, inherited from #891 and measured again here. It
+// is deliberately NOT fixed under #892.
+//
+// creditsDiffer accepts a superset relation only when it rests on a shared
+// token that is not packaging -- real evidence the two credits name the same
+// act. An HONORIFIC (`dj`, `mc`, `lil`) is decoration, but it is not in
+// titleVariantTokens, so it satisfies that requirement and a superset built on
+// one alone accepts.
+//
+// WHY IT STAYS OPEN HERE. This is the false-ACCEPT direction, which is #890 and
+// #891's subject, not this issue's. More to the point, the obvious fix is
+// wrong: adding honorifics to a packaging vocabulary would REJECT every act
+// whose name genuinely begins with one, and there are many, converting a narrow
+// false accept into a broad false reject. Closing it properly needs a notion of
+// "decoration inside a name", which the token level does not have.
+//
+// This test asserts the CURRENT behavior, so a future change to it is a
+// deliberate decision that reddens a test rather than a silent drift.
+func TestSharedHonorificStillSatisfiesTheSharedNameRule(t *testing.T) {
+	// ASSERTED, NOT SKIPPED. An earlier version of this loop called t.Skip on
+	// the closed branch and fell off the end otherwise, so it could not fail
+	// either way -- a mutation that CLOSED the residual left the suite green
+	// with two skips. A test that cannot redden records nothing.
+	for _, tc := range []struct{ name, requested, got string }{
+		{"dj", "Song (feat. DJ)", "Song (feat. DJ Alpha)"},
+		{"mc", "Song (feat. MC)", "Song (feat. MC Vanguard)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if creditsDiffer(tc.requested, tc.got) {
+				t.Error("the honorific residual is CLOSED -- that is a BEHAVIOR CHANGE, not a silent improvement: update this test and the comment above it, naming the mechanism that closed it and what it now costs an act whose name genuinely begins with an honorific")
+			}
+		})
+	}
+
+	// The control that proves the rule itself still works: a superset resting
+	// on PACKAGING rather than on any name must still reject.
+	if !creditsDiffer("Song (feat. Mono)", "Song (feat. Alpha) [Mono]") {
+		t.Error("a superset resting only on a packaging token was accepted: the shared-NAME requirement is what separates the honorific residual from a total failure of the rule")
+	}
+}
+
+// TestLiveAndUnpluggedAlreadyCorrespond RETRACTS a claim made in an earlier
+// commit message on this package, which called the live/unplugged cost
+// "unavoidable at this layer". It is not merely avoidable -- it was already
+// avoided, by #899's performanceFamilies grouping, and no probe is needed.
+//
+// Recorded as a test rather than only as prose so the retraction is checkable.
+func TestLiveAndUnpluggedAlreadyCorrespond(t *testing.T) {
+	if !titleTokensCorrespond("Placeholder Song (Live)", "Placeholder Song (Unplugged)") {
+		t.Error("an unplugged set IS a live acoustic performance and the two must correspond; performanceFamilies groups them deliberately")
+	}
+}
+
+// TestStripNeverMakesATitleINCOMPARABLE pins the CRITICAL defect the #892 fix
+// introduced and a hostile pre-push review caught: a false ACCEPT, which is the
+// unrecoverable direction.
+//
+// TWO NOTIONS OF EMPTY, AND THE GAP BETWEEN THEM WAS THE BUG. The strip's own
+// guard tested Go string emptiness (`rest == ""`). The gate's comparability
+// test is `normalize.NormalizeKey(x) == ""`. A remainder can be non-empty as
+// bytes while normalizing to nothing -- combining marks, Hebrew niqqud, Arabic
+// harakat, Thai tone marks -- and NormalizeKey strips exactly those (NFKD, then
+// Mn removal).
+//
+// The consequence was not a bad comparison but NO comparison: the strip emptied
+// the title, fieldCorresponds returned comparable=false on its first line, and
+// checkCorresponds' `(!titleComparable || titleOK)` clause then passed
+// VACUOUSLY, accepting on the artist field alone. Any candidate by the right
+// artist matched any request.
+//
+// THE STRIP CAUSED IT. Before this branch the same candidate was comparable and
+// rejected at the floor, so this was new surface, not a pre-existing hole.
+//
+// The comment that used to sit on stripArtistPrefix argued the floor catches an
+// emptied title. That was exactly inverted: an emptied title never REACHES the
+// floor. Guarding on NormalizeKey rather than on Go emptiness is what actually
+// supplies the protection.
+//
+// THIS TEST COVERS THE NORMALIZE-EMPTY SIBLING ONLY, and saying so matters
+// because fixing this one and assuming the family was closed is precisely how
+// the next defect shipped. The TOKENIZE-empty sibling -- a remainder that
+// normalizes to something and tokenizes to nothing, so it passes this guard and
+// then disarms the token rule -- is a different rule in a different function,
+// pinned by the class sweep in
+// TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist.
+func TestStripNeverMakesATitleINCOMPARABLE(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	// Each remainder is non-empty as a Go string and normalizes to nothing.
+	for _, tc := range []struct{ name, rest string }{
+		{"combining acute", "́"},
+		{"spacing acute", "´"},
+		{"hebrew niqqud", "ְֱ"},
+		{"arabic harakat", "َِ"},
+		{"thai tone marks", "่้"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// PREMISE: non-empty as bytes, empty after normalization. That gap
+			// IS the defect; if a future NormalizeKey change closes it, this
+			// case stops testing anything and must be re-chosen.
+			if tc.rest == "" || normalize.NormalizeKey(tc.rest) != "" {
+				t.Fatalf("test premise broken: rest %q must be non-empty but normalize to empty, got normalized %q", tc.rest, normalize.NormalizeKey(tc.rest))
+			}
+
+			cand := artist + " - " + tc.rest
+			if got := stripArtistPrefix(cand, artist); normalize.NormalizeKey(got) == "" {
+				t.Errorf("the strip emptied the title to %q: an emptied title is INCOMPARABLE, and the gate then accepts on the artist alone", got)
+			}
+
+			// The consequence the library actually feels: an unrelated request.
+			requested := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
+			sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: cand}
+			if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err == nil {
+				t.Error("an UNRELATED request was ACCEPTED: the strip made the title incomparable, so the title half of the gate was skipped entirely")
+			}
+		})
+	}
+
+	t.Run("the requested side has the same hole", func(t *testing.T) {
+		requested := models.Track{ArtistName: artist, TrackName: artist + " - ́"}
+		sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Vanguard Kettledrum"}
+		if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err == nil {
+			t.Error("an unrelated candidate was ACCEPTED against an emptied REQUESTED title: the strip is symmetric, so the guard must be too")
+		}
+	})
+}
+
+// TestStripSeparatorAndTrimAreLoadBearing pins four lines in stripArtistPrefix
+// that a mutation sweep found UNTESTED. Each survived a mutation, and each
+// survivor is a behavior change rather than dead code -- three of the four are
+// independent false ACCEPTS.
+func TestStripSeparatorAndTrimAreLoadBearing(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	unrelated := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
+
+	// Deleting the empty-remainder guard empties the title and accepts anything
+	// by this artist. THE TrimSpace ABOVE IT IS NOT PINNED HERE, and saying so
+	// keeps this file from contradicting stripArtistPrefix's own comment, which
+	// measures the same thing: NormalizeKey folds "   " to "" unaided, so both
+	// rows below reject with or without the trim. Verified by mutation --
+	// deleting the TrimSpace SURVIVES this test. No row can redden it, because
+	// the trim cannot change a verdict at all (probed across 42 adversarial
+	// strings; every downstream predicate agrees on all 1764 pairs).
+	for _, cand := range []string{artist + " - ", artist + " -   "} {
+		t.Run("trailing separator: "+cand, func(t *testing.T) {
+			sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: cand}
+			if _, err := SelectCandidate([]SearchCandidate{sc}, unrelated); err == nil {
+				t.Error("a title that is only the artist and a separator accepted an unrelated request")
+			}
+		})
+	}
+
+	t.Run("only the FIRST separator is consulted", func(t *testing.T) {
+		// The documented decision, previously asserted only in prose. With
+		// LastIndex this legitimate accept is LOST, because the strip would
+		// consume the song's words and leave only the packaging.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
+		sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - Placeholder Song Title - Remastered"}
+		if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err != nil {
+			t.Errorf("a multi-dash upload title was rejected -- the strip must take the FIRST separator, not the last: %v", err)
+		}
+	})
+
+	t.Run("the separator is the SPACED dash, never a bare hyphen", func(t *testing.T) {
+		// A bare hyphen is ordinary intra-word punctuation. Splitting on it
+		// truncates hyphenated titles and manufactures a false accept.
+		requested := models.Track{ArtistName: "Alpha", TrackName: "Alpha-Beta"}
+		sc := SearchCandidate{VideoID: "vid", Artist: "Alpha", Title: "Beta"}
+		if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err == nil {
+			t.Error("a hyphenated title was split: the separator must be the SPACED dash, or an intra-word hyphen truncates the title")
 		}
 	})
 }
