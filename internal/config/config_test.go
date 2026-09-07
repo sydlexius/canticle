@@ -23,6 +23,11 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_TRUSTED_CIDRS", "MXLRC_TRUSTED_PROXIES",
 		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED", "MXLRC_PROVIDERS_MODE", "MXLRC_PROVIDERS_FALLBACK_ORDER",
 		"MXLRC_PROVIDERS_RACE_WAIT_SECONDS",
+		// Both per-provider cooldowns. The innertube one is what #858's Load
+		// tests need; the petitlyrics sibling has the same gap and is cleared
+		// here prophylactically, since a future Load test for it would hit the
+		// identical flake and the omission is not visible from the test itself.
+		"MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS",
 		"MXLRC_VERIFICATION_ENABLED", "MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL",
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
