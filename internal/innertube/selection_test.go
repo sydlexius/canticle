@@ -1353,6 +1353,51 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
+	t.Run("a duplicate token does not manufacture an accept", func(t *testing.T) {
+		// 891-R6D1. Two membership-based tests let a REPEATED token stand in for
+		// a distinct one, and both bypassed the shared-name clause rather than
+		// defeating it:
+		//
+		//	[mono mono] vs [alpha mono]   equal LENGTH, so the shortcut returned
+		//	                              accept before the clause ran
+		//	[duran duran] vs [duran beta] a membership subset, though the second
+		//	                              act shares only one word
+		//
+		// The first is this rule's own headline defect pair with the decoration
+		// present on both sides; the second is an ordinary repeated-word act
+		// name against a different act. Both compare identity now: the shortcut
+		// requires the same MULTISET, and tokensSubset counts multiplicities --
+		// matching artistTokensEqual, which records the identical defect on the
+		// artist field.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (feat. Mono) [Mono]", "Placeholder Song (feat. Alpha) [Mono]"},
+			{"Placeholder Song (feat. Alpha) [Mono]", "Placeholder Song (feat. Mono) [Mono]"},
+			{"Placeholder Song (feat. Duran Duran)", "Placeholder Song (feat. Duran Beta)"},
+			{"Placeholder Song (feat. Duran Beta)", "Placeholder Song (feat. Duran Duran)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- a repeated token must not stand in "+
+					"for a distinct one", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("a genuinely repeated act name still accepts itself", func(t *testing.T) {
+		// The false-reject guard on the multiset rules: keeping multiplicity
+		// must not reject an act whose name really does repeat a word.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (feat. Duran Duran)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (feat. Duran Duran)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a repeated-word act name was REJECTED against itself: %v", err)
+		}
+	})
+
 	t.Run("decoration must not manufacture a subset relation", func(t *testing.T) {
 		// 891-R5C1, the class that deleting the packaging filter reopened. The
 		// filter had been removed on the reasoning that subset "handles it
@@ -1432,14 +1477,30 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		// That filter leaked in four separate ways across four review rounds,
 		// because it requires telling a guest's NAME from DECORATION and the
 		// vocabulary cannot: "Mono", "Radio" and "Clean" are real act names AND
-		// packaging words. It was only ever needed for the OVERLAP comparison
-		// it was born with; subset handles the shared-suffix case unaided.
+		// packaging words.
+		//
+		// AN EARLIER VERSION OF THIS COMMENT CLAIMED "subset handles the
+		// shared-suffix case unaided". That was FALSE and round 5 refuted it by
+		// execution: subset alone let one side's decoration coincide with the
+		// other side's guest name and manufacture a containment relation, which
+		// is why creditsDiffer additionally requires a shared NAME.
 		//
 		// What that costs is here: matching credits carrying DIFFERENT suffixes
 		// now reject, because the suffix sits in the tail and breaks the subset
 		// relation. A false REJECT costs one missing lyric and a retry, against
 		// a class of false ACCEPTS that write another recording's guest verse
 		// to disk. #892 tracks this direction.
+		//
+		// THE COST IS NOT FORCED, and saying otherwise would stop the next
+		// reader looking (891-R6). A credited pair differing only by
+		// performance tokens of ONE family -- "(feat. A) [Live]" against
+		// "(feat. A) [Unplugged]" -- is separable here, because
+		// performanceFamilies already holds exactly that knowledge and a probe
+		// rescuing those pairs leaves this suite green. It is not built in this
+		// change because it is a second discriminator on a gate that has taken
+		// six rounds to settle, and because it belongs to the false-reject
+		// direction #892 owns rather than to the corruption direction this
+		// change closes.
 		for _, pair := range [][2]string{
 			{"Placeholder Song feat Alpha and Beta [Remix]", "Placeholder Song feat Alpha [Live]"},
 			{"Placeholder Song (feat. Mono) [Live]", "Placeholder Song (feat. Mono) [Remix]"},

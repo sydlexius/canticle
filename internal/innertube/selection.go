@@ -889,10 +889,21 @@ func creditsDiffer(requested, got string) bool {
 	if !tokensSubset(req, cand) && !tokensSubset(cand, req) {
 		return true
 	}
-	// Identical tails need no further evidence.
+	// EQUAL LENGTH HERE MEANS IDENTICAL, and that is a proof rather than an
+	// assumption (891-R6D1). Control only reaches this line once one tail is a
+	// MULTISET subset of the other; a multiset subset with equal cardinality is
+	// equality. So no further evidence is needed, and nothing is being inferred.
+	//
+	// The same line was a defect before tokensSubset counted multiplicities: it
+	// then read [mono mono] as length-equal to [alpha mono] and returned accept
+	// before the shared-name clause below could see that the only shared token
+	// is packaging -- this rule's own headline defect pair, admitted through the
+	// shortcut rather than through the rule. Fixing tokensSubset fixed this line
+	// too; a separate multiset check here was tried and was provably redundant.
 	if len(req) == len(cand) {
 		return false
 	}
+
 	// A superset relation must rest on a shared NAME, not on decoration.
 	for _, r := range req {
 		if _, pkg := titleVariantTokens[r]; pkg {
@@ -907,26 +918,30 @@ func creditsDiffer(requested, got string) bool {
 	return true
 }
 
-// tokensSubset reports whether every token in a appears in b.
+// tokensSubset reports whether a is a MULTISET subset of b: every token in a
+// appears in b at least as many times as it appears in a.
+//
+// MULTIPLICITY IS KEPT, and that is a correction (891-R6D1) rather than a
+// detail. A membership-only test read [duran duran] as contained in
+// [duran beta], so a repeated-word act and a different act sharing one word
+// compared as the same collaboration and a wrong guest verse was accepted.
+// internal/artistTokensEqual records the identical defect on the artist field
+// and keeps multiplicity for the same reason; the credit comparison is now
+// consistent with it.
 func tokensSubset(a, b []string) bool {
-	for _, x := range a {
-		found := false
-		for _, y := range b {
-			if x == y {
-				found = true
-				break
-			}
-		}
-		if !found {
+	remaining := make(map[string]int, len(b))
+	for _, t := range b {
+		remaining[t]++
+	}
+	for _, t := range a {
+		if remaining[t] == 0 {
 			return false
 		}
+		remaining[t]--
 	}
 	return true
 }
 
-// tokenizeTitle produces the comparable token sequence for a title: ignorable
-// tokens dropped, "sped up"/"slowed down" collapsed to a single variant token,
-// and everything from a featuring marker onward truncated away.
 func tokenizeTitle(s string) []string {
 	raw := splitTokens(s)
 	out := make([]string, 0, len(raw))
