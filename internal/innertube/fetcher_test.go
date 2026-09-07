@@ -699,11 +699,20 @@ func TestClient_SatisfiesTheFetcherSignature(t *testing.T) {
 // therefore pinned by a candidate that is only beaten by the tier above it.
 //
 // Requested duration is 126s. Tiers: exact <=1s (+1.0), close <=3s (+0.5),
-// far <=8s (+0.25).
+// far <=8s (+0.25). Text is identical on every row, contributing 20.0 to each,
+// so the duration bonus is the whole spread.
 //
-//	index 0  aaawrongwin  300s  delta 174  no bonus     sorts lowest
-//	index 1  zzzrightwin  126s  delta 0    EXACT +1.0   sorts highest  <- winner
-//	index 2  aabnearmiss  128s  delta 2    CLOSE +0.5   sorts 2nd-lowest
+// The last column is the videoId's LEXICOGRAPHIC rank, which is what the
+// tie-break reads -- not the score rank. The two orders are deliberately
+// OPPOSED on the winner: it scores highest while sorting highest, so a
+// tie-break can never elect it. (They coincide on the near-miss row, which
+// ranks middle either way; the column is labeled because that coincidence
+// made one reviewer read it as a score order.)
+//
+//	index  videoId      dur   delta  bonus       score  videoId rank
+//	0      aaawrongwin  300s  174    none        20.00  lowest
+//	1      zzzrightwin  126s  0      EXACT +1.0  21.00  highest   <- winner
+//	2      aabnearmiss  128s  2      CLOSE +0.5  20.50  middle
 //
 // This test passes against correct code, so its passing proves nothing on its
 // own. The proof is that reverting the stamp to candidates[0] REDDENS it.
