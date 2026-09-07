@@ -577,10 +577,18 @@ var performanceFamilies = map[string]string{
 //	"(Radio Edit)" vs "(Demo)"
 //	"(Radio Edit)" vs "(Instrumental)"
 //
-// These accept for a DIFFERENT reason than (1) -- not the one-sided guard, but
-// the deliberate exclusion of `radio` from performanceFamilies (a radio edit is
-// a pressing, not a performance). Recorded separately so a reader does not
-// attribute them to the one-sided rule and "fix" the wrong mechanism.
+// SAME PROXIMATE MECHANISM, DIFFERENT ROOT CAUSE, and the distinction is the
+// point (891-R3 MINOR 4, correcting an earlier claim here that (2) was "not the
+// one-sided guard" -- instrumenting performanceFamiliesIn shows BOTH sets exit
+// at the identical len(reqFam) == 0 return). What differs is WHY the set is
+// empty: in (1) the other side carries no performance token at all, while in
+// (2) `radio` is deliberately excluded from performanceFamilies, so a title
+// carrying it names no family. A reader closing the exclusion without touching
+// the guard would find these pairs still accepting.
+//
+// THE LISTS ARE SAMPLES, NOT INVENTORIES. Others measured in the same class:
+// "(Deluxe Edition)"/"(Demo)", "(Clean)"/"(Instrumental)",
+// "(Stereo)"/"(Karaoke)", "(Explicit)"/"(Demo)".
 //
 // Both sets are left open deliberately: the words are the same or the cut is
 // wordless in ways timing.Evaluate can often catch, and the recoverable
@@ -810,40 +818,74 @@ func creditTail(s string) []string {
 		if _, ok := featMarkers[tok]; !ok {
 			continue
 		}
-		var full, trimmed []string
-		for _, t := range raw[i+1:] {
+		return creditNames(raw[i+1:])
+	}
+	return nil
+}
+
+// creditNames reduces a raw credit tail to the guest names it lists.
+//
+// ELEMENT BY ELEMENT, NOT TAIL BY TAIL (891-R3C1). Two earlier revisions
+// filtered the tail as one blob and both were wrong, in opposite directions:
+// dropping every packaging token erased a guest whose NAME is a vocabulary word
+// ("Mono", "Radio", "Clean" are all real act names and all in
+// titleVariantTokens), while falling back to the unfiltered tail whenever
+// trimming emptied it dragged a decoration suffix back into the comparison and
+// broke two pinned accepts. The hazard is per-TOKEN, so the boundary has to be
+// too.
+//
+// "and" DELIMITS, it does not vanish. It is in ignorableTokens, so an earlier
+// revision discarded it and lost the only element boundary the tokenizer
+// leaves behind -- splitTokens erases the comma. Splitting on it first is what
+// makes "Alpha and Mono" two elements rather than one blob.
+//
+// WITHIN an element, a TRAILING RUN of packaging tokens is decoration and is
+// dropped, but the element's FIRST token is never dropped: that position is a
+// name even when the name is spelled like packaging. So "Alpha [Remix]" reduces
+// to "alpha", "Mono [Remix]" reduces to "mono", and "Alpha and Mono" keeps both
+// guests.
+func creditNames(raw []string) []string {
+	var out []string
+	for _, element := range splitOnConjunction(raw) {
+		var kept []string
+		for _, t := range element {
 			if _, ig := ignorableTokens[t]; ig {
 				continue
 			}
-			full = append(full, t)
-			// PACKAGING TOKENS ARE DROPPED (891-R1C1): a real title routinely
-			// carries a version suffix AFTER the credit -- "Song (feat. A)
-			// [Remix]" -- and that suffix lands in BOTH tails, so a comparison
-			// that kept it found a shared token and concluded the credits
-			// matched.
-			if _, pkg := titleVariantTokens[t]; pkg {
-				continue
+			kept = append(kept, t)
+		}
+		// Trim a trailing packaging run, never past the first token.
+		for len(kept) > 1 {
+			last := kept[len(kept)-1]
+			if _, pkg := titleVariantTokens[last]; !pkg {
+				break
 			}
-			trimmed = append(trimmed, t)
+			kept = kept[:len(kept)-1]
 		}
-		// BUT ONLY WHEN SOMETHING SURVIVES (891-R2C1). An act whose NAME is a
-		// vocabulary word -- "Mono", "Radio", "Clean", "Original" are all real
-		// act names and all in titleVariantTokens -- was filtered away
-		// entirely, and an empty tail hits creditsDiffer's fail-open, which
-		// ACCEPTS any differing credit. That converted four measured rejects
-		// into false accepts: the corruption direction, introduced by the fix
-		// for the opposite problem.
-		//
-		// Falling back to the unfiltered tail keeps the suffix case working
-		// (the suffix is only ever dropped when a real name remains beside it)
-		// while a credit made ENTIRELY of vocabulary words is compared as
-		// written, which is the only evidence there is.
-		if len(trimmed) > 0 {
-			return trimmed
-		}
-		return full
+		out = append(out, kept...)
 	}
-	return nil
+	return out
+}
+
+// splitOnConjunction splits a token run into credit elements on "and", which
+// splitTokens leaves in place where it erased the comma.
+func splitOnConjunction(raw []string) [][]string {
+	var out [][]string
+	cur := []string{}
+	for _, t := range raw {
+		if t == "and" {
+			if len(cur) > 0 {
+				out = append(out, cur)
+			}
+			cur = []string{}
+			continue
+		}
+		cur = append(cur, t)
+	}
+	if len(cur) > 0 {
+		out = append(out, cur)
+	}
+	return out
 }
 
 // creditsDiffer reports whether two titles are BOTH credited and their credits

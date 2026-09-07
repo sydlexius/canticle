@@ -1289,6 +1289,60 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
+	t.Run("a vocabulary-word guest beside a real name is still compared", func(t *testing.T) {
+		// 891-R3C1: the MULTI-GUEST half of the vocabulary-word class, which
+		// two earlier fixes left open while claiming to close it. Filtering the
+		// tail as one blob erased the vocabulary-word guest whenever a real
+		// name survived beside it, so these accepted -- a different guest verse
+		// is another recording's words.
+		//
+		// The first row is the CONTROL: identical shape with two ordinary
+		// names, which must reject. Without it, the rows below could pass
+		// because the shape rejects for some unrelated reason.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (feat. Alpha and Beta)", "Placeholder Song (feat. Alpha and Gamma)"},
+			{"Placeholder Song (feat. Alpha and Mono)", "Placeholder Song (feat. Alpha and Stereo)"},
+			{"Placeholder Song (feat. Alpha and Beta)", "Placeholder Song (feat. Alpha and Mono)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- a guest named with a vocabulary word "+
+					"must not be erased just because a real name survives beside it",
+					pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("a vocabulary-word guest does not break the pinned accepts", func(t *testing.T) {
+		// 891-R3I2: the opposite direction, and a regression the previous fix
+		// introduced. Falling back to the UNFILTERED tail when trimming emptied
+		// it dragged the decoration suffix back into the comparison, so the two
+		// behaviors pinned above -- an extra guest, and differing suffixes
+		// after MATCHING credits -- silently stopped holding whenever the guest
+		// was named with a vocabulary word.
+		//
+		// Each row is the vocabulary-word twin of a control pinned elsewhere in
+		// this function, so a failure here means the two shapes have diverged.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (feat. Mono)", "Placeholder Song (feat. Mono and Alpha)"},
+			{"Placeholder Song (feat. Mono) [Live]", "Placeholder Song (feat. Mono) [Remix]"},
+			{"Placeholder Song (feat. Clean) [Live]", "Placeholder Song (feat. Clean) [Remix]"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("%q vs %q was REJECTED -- the same shape with an ordinary guest "+
+					"name is pinned as an ACCEPT, so the vocabulary word must not change "+
+					"the verdict: %v", pair[0], pair[1], err)
+			}
+		}
+	})
+
 	t.Run("identical vocabulary-word credits still accept", func(t *testing.T) {
 		// The false-reject guard on the fallback: comparing the unfiltered tail
 		// must not reject a credit that genuinely matches.
