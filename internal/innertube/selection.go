@@ -1171,14 +1171,13 @@ func titleTokensCorrespond(requested, got string) bool {
 // plausible.
 //
 // A first version guarded on `len(tokenizeTitle(rest)) == 0`, reasoning that
-// titleTokensCorrespond fails OPEN when a side tokenizes to nothing. Mutation
-// testing could not redden its removal, and the probe showed why: the FLOOR
-// runs before the token rule and compares the STRIPPED strings, so a
-// tokenize-empty remainder like "!!!" is still judged on similarity and
-// rejects there. That guard was redundant, and ACTIVELY HARMFUL in the corner
-// it claimed to own -- it rejected a request whose title genuinely IS
-// punctuation against the dashed upload of that same title, which measures
-// 1.0000 and must accept. It was deleted.
+// titleTokensCorrespond fails OPEN when a side tokenizes to nothing. It was
+// deleted for being ACTIVELY HARMFUL in the corner it claimed to own: it
+// rejected a request whose title genuinely IS punctuation against the dashed
+// upload of that same title, which measures 1.0000 and must accept. The
+// deletion was RIGHT and the reasoning offered for it was WRONG -- it claimed
+// the floor made the guard redundant, on the strength of "!!!" alone. See the
+// tokenize-empty block below for what that cost.
 //
 // Deleting it left a `rest == ""` check, and THAT was a CRITICAL false ACCEPT.
 // Go string emptiness is not the gate's notion of empty: fieldCorresponds tests
@@ -1192,11 +1191,27 @@ func titleTokensCorrespond(requested, got string) bool {
 // request. Measured across five such remainders, every unrelated request
 // accepted, in BOTH directions.
 //
-// The correction is to guard on the same predicate the gate uses. Note what
-// this means about the earlier reasoning: the floor protects the
-// TOKENIZE-empty case, and COMPARABILITY is what protects the NORMALIZE-empty
-// case -- an emptied title never reaches the floor at all. An earlier version
-// of this comment claimed the floor covered both, which was exactly inverted.
+// The correction is to guard on the same predicate the gate uses. COMPARABILITY
+// is what protects the NORMALIZE-empty case: an emptied title never reaches the
+// floor at all, so the guard has to run here, in the strip.
+//
+// THE TOKENIZE-EMPTY CASE IS A SEPARATE DEFECT AND IT IS NOT FIXED HERE. Two
+// successive versions of this comment claimed the FLOOR covers it, and both
+// were reproduced FALSE. The claim was generalized from "!!!", which rejects
+// only because punctuation scores near zero against a word; the CLASS does not
+// behave that way. A remainder of "The", "A", "An", "And" (all ignorableTokens)
+// or a bare "feat. X" (truncated at a featMarker) is normalize-NON-empty, so it
+// passes the guard above, and yet tokenizes to NOTHING -- and a stub that short
+// clears the Jaro-Winkler floor against a great many unrelated requests.
+//
+// That case cannot be closed here, and the attempt was measured: guarding the
+// strip on `len(tokenizeTitle(rest)) == 0` re-breaks the legitimate accepts this
+// branch exists to buy, which is why that guard was deleted in the first place.
+// Refusing to strip is the wrong lever, because the strip is CORRECT on those
+// inputs; what is wrong is trusting a resemblance score afterwards. So the rule
+// lives at the point of judgment instead -- see titleFieldCorresponds, which
+// demands exact normalized equality when the strip fired and left a side with no
+// content tokens.
 //
 // ONLY THE FIRST separator is considered. A title carrying several dashes most
 // often has packaging after the later ones ("Artist - Song - Remastered"), and
@@ -1243,9 +1258,46 @@ func stripArtistPrefix(title, artist string) string {
 // It is applied SYMMETRICALLY. A local tag can carry the dashed form just as an
 // upload can, and a rule that stripped only the candidate would reject the same
 // pair depending on which side happened to be written that way.
+//
+// A STRIP THAT LEAVES NO CONTENT TOKENS IS JUDGED ON IDENTITY, NOT ON THE FLOOR,
+// and that rule is the second half of the strip's safety story -- see the
+// stripArtistPrefix block for why the strip's own guard cannot cover this. When
+// the strip has FIRED and a side tokenizes to nothing, every downstream judge
+// has been disarmed: titleTokensCorrespond fails OPEN on an empty token
+// sequence, so the only thing left is the Jaro-Winkler floor, which is a
+// RESEMBLANCE measure comparing a one-to-three character stub against a whole
+// request. Measured, short-string Jaro-Winkler with its prefix bonus clears the
+// 0.75 floor constantly: a remainder of "The" scores 0.9067 against "Theme",
+// "An" scores 0.8095 against "Android", "A" scores 0.7600 against "Alpha". The
+// same pairs judged WITHOUT the strip score 0.4567 to 0.6617 and reject, so this
+// is surface the strip creates rather than a hole it exposes.
+//
+// So on that path resemblance is not enough and exact normalized equality is
+// required instead. This costs no legitimate accept: a dashed upload of a title
+// that genuinely tokenizes to nothing (a title that is entirely punctuation, or
+// entirely a featuring credit) is the SAME string on both sides once the prefix
+// is gone, so identity holds exactly where the floor's 1.0000 used to carry it.
+//
+// The condition is deliberately gated on stripFired. A title that tokenizes to
+// nothing WITHOUT any strip having run is the pre-existing case the token rule's
+// fail-open documents, judged by the floor on the strings as written; the strip
+// took nothing away from it, and tightening it here would be an unrelated
+// behavior change smuggled in under a fix.
 func titleFieldCorresponds(requested, got, requestedArtist string) (ok, comparable bool) {
-	requested = stripArtistPrefix(requested, requestedArtist)
-	got = stripArtistPrefix(got, requestedArtist)
+	strippedRequested := stripArtistPrefix(requested, requestedArtist)
+	strippedGot := stripArtistPrefix(got, requestedArtist)
+	stripFired := strippedRequested != requested || strippedGot != got
+	requested, got = strippedRequested, strippedGot
+
+	if stripFired && (len(tokenizeTitle(requested)) == 0 || len(tokenizeTitle(got)) == 0) {
+		// Comparability answered exactly as fieldCorresponds answers it, so a
+		// caller's `(!comparable || ok)` clause behaves the same on this path as
+		// on every other.
+		if normalize.NormalizeKey(requested) == "" || normalize.NormalizeKey(got) == "" {
+			return false, false
+		}
+		return normalize.NormalizeKey(requested) == normalize.NormalizeKey(got), true
+	}
 
 	ok, comparable = fieldCorresponds(requested, got)
 	if !comparable || !ok {

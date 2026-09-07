@@ -2378,38 +2378,108 @@ func TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist(t *testing.T) {
 		}
 	})
 
-	t.Run("an emptied title is caught by the FLOOR, not by a guard in the strip", func(t *testing.T) {
-		// THE ORIGINAL VERSION OF THIS CASE PASSED FOR THE WRONG REASON and is
-		// worth keeping as a lesson. It used a candidate title of just the
-		// artist name, with no " - " in it at all, so stripArtistPrefix
-		// returned at its first early exit and the emptying path was never
-		// reached -- which is why a mutation deleting the strip's empty-title
-		// guard left the suite green.
-		//
-		// The guard is now GONE, deleted as redundant, and what actually
-		// protects this is the similarity floor: it compares the STRIPPED
-		// strings before the token rule's fail-open can be consulted. This case
-		// reaches the emptying path for real (the separator is present, and the
-		// remainder tokenizes to nothing) and asserts the floor rejects it.
-		requested := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
-		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - !!!"}
-		if stripped := stripArtistPrefix(c.Title, artist); len(tokenizeTitle(stripped)) != 0 {
-			t.Fatalf("test premise broken: the strip must actually empty the title here, got %q", stripped)
-		}
-		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
-			t.Error("an emptied title accepted an unrelated request: the floor must reject before the token rule's fail-open is reached")
+	// A STRIPPED TITLE WITH NO CONTENT TOKENS IS JUDGED ON IDENTITY, AND THIS
+	// CASE IS PINNED AS A CLASS BECAUSE PINNING IT AS AN EXAMPLE ALREADY FAILED
+	// TWICE.
+	//
+	// The history is the reason for the shape of this test. The original version
+	// used a candidate title of just the artist name, with no " - " in it, so
+	// stripArtistPrefix returned at its first early exit and the emptying path
+	// was never reached -- a mutation deleting the strip's guard left the suite
+	// green. It was then rewritten to reach the path for real using "!!!", and
+	// asserted that the FLOOR is what rejects. That passed, and the conclusion
+	// drawn from it was still false: punctuation scores near zero against a
+	// word, so "!!!" rejects at the floor while the CLASS does not. A remainder
+	// of "The", "A", "An", "And" or a bare featuring credit is normalize-non-
+	// empty (so the strip fires) and tokenizes to nothing (so the token rule
+	// fails open), leaving a one-to-three character stub judged only by
+	// Jaro-Winkler -- which its prefix bonus clears against unrelated requests
+	// at 0.76 to 0.91. Measured: 22 of 64 such pairs accepted.
+	//
+	// So the table below sweeps the whole ignorableTokens / featMarkers class
+	// rather than one exemplar, and each request is chosen to be one the FLOOR
+	// would have passed. The rule that rejects them lives in
+	// titleFieldCorresponds, not in the strip: exact normalized equality when
+	// the strip fired and left a side with no content tokens.
+	t.Run("a stripped title with no content tokens rejects an unrelated request", func(t *testing.T) {
+		for _, tc := range []struct{ remainder, request string }{
+			{"The", "Theme"},
+			{"The", "There"},
+			{"A", "Alpha"},
+			{"A", "Ashes"},
+			{"An", "Android"},
+			{"An", "Anthem"},
+			{"And", "Andante"},
+			{"feat. Alpha", "Feathers"},
+		} {
+			t.Run(tc.remainder+" vs "+tc.request, func(t *testing.T) {
+				c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + tc.remainder}
+
+				// PREMISE, asserted rather than assumed: the strip must really
+				// fire and must really leave nothing to judge on. Without both,
+				// a passing case says nothing about the defect.
+				stripped := stripArtistPrefix(c.Title, artist)
+				if stripped == c.Title {
+					t.Fatalf("test premise broken: the strip did not fire on %q", c.Title)
+				}
+				if len(tokenizeTitle(stripped)) != 0 {
+					t.Fatalf("test premise broken: %q must tokenize to nothing, got %v", stripped, tokenizeTitle(stripped))
+				}
+				// And the floor must be the judge that WOULD have passed it,
+				// or this row is not exercising the defect at all.
+				if normalize.MatchConfidence(tc.request, stripped) < matchMinConfidence {
+					t.Fatalf("test premise broken: %q vs %q scores below the floor, so the floor alone would have rejected it", tc.request, stripped)
+				}
+
+				requested := models.Track{ArtistName: artist, TrackName: tc.request}
+				if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+					t.Errorf("a stripped title with no content tokens accepted the unrelated request %q: the fuzzy floor is not a gate on a stub this short", tc.request)
+				}
+			})
 		}
 	})
 
 	t.Run("an emptied title that CORRESPONDS still accepts", func(t *testing.T) {
-		// The other half, and the reason the deleted guard was not merely
-		// redundant but wrong. A title that genuinely is punctuation, against
-		// the dashed upload of that same title, measures 1.0000 and is a real
-		// match. The guard rejected it.
+		// The other half, and the reason the deleted guard in the strip was not
+		// merely redundant but wrong. A title that genuinely is punctuation,
+		// against the dashed upload of that same title, is a real match. Under
+		// the identity rule it still accepts -- the two sides are the same
+		// string once the prefix is gone, which is exactly the case the floor's
+		// 1.0000 used to carry.
 		requested := models.Track{ArtistName: artist, TrackName: "!!!"}
 		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - !!!"}
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
 			t.Errorf("a correct dashed upload of a punctuation title was rejected: %v", err)
+		}
+	})
+
+	t.Run("a title with no content tokens and NO strip is left to the floor", func(t *testing.T) {
+		// The identity rule is gated on the strip having FIRED, and this pins
+		// that gating. Without a separator there is nothing for the strip to
+		// remove, so the pair is the pre-existing case the token rule's
+		// fail-open documents and the floor judges it on the strings as
+		// written. Tightening it here would be an unrelated behavior change
+		// riding along inside a fix.
+		//
+		// THE TWO SIDES MUST DIFFER, and that is the entire value of this case.
+		// An identical pair satisfies the identity rule too, so it passes
+		// whether or not the gate exists and pins nothing -- measured: with an
+		// identical pair, a mutation dropping the stripFired conjunct SURVIVES
+		// the whole suite. These two are tokenize-empty on both sides, score
+		// 0.9417 at the floor, and are NOT normalize-equal, so the floor and
+		// the identity rule give opposite answers and only the gate decides.
+		// Verified on main at 445e90a: base accepts this pair, so a rejection
+		// here is a behavior change this branch has no business making.
+		requested := models.Track{ArtistName: artist, TrackName: "!!!"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "!!!!"}
+		if stripArtistPrefix(c.Title, artist) != c.Title {
+			t.Fatal("test premise broken: the strip must NOT fire here")
+		}
+		if normalize.NormalizeKey(requested.TrackName) == normalize.NormalizeKey(c.Title) {
+			t.Fatal("test premise broken: the two sides must NOT be normalize-equal, or the identity rule would accept them anyway and this case pins nothing")
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("an un-stripped pair the FLOOR accepts was rejected: %v -- the identity rule must not reach a pair the strip never touched", err)
 		}
 	})
 }
@@ -2570,6 +2640,14 @@ func TestLiveAndUnpluggedAlreadyCorrespond(t *testing.T) {
 // emptied title. That was exactly inverted: an emptied title never REACHES the
 // floor. Guarding on NormalizeKey rather than on Go emptiness is what actually
 // supplies the protection.
+//
+// THIS TEST COVERS THE NORMALIZE-EMPTY SIBLING ONLY, and saying so matters
+// because fixing this one and assuming the family was closed is precisely how
+// the next defect shipped. The TOKENIZE-empty sibling -- a remainder that
+// normalizes to something and tokenizes to nothing, so it passes this guard and
+// then disarms the token rule -- is a different rule in a different function,
+// pinned by the class sweep in
+// TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist.
 func TestStripNeverMakesATitleINCOMPARABLE(t *testing.T) {
 	const artist = "Placeholder Artist Name"
 	// Each remainder is non-empty as a Go string and normalizes to nothing.
