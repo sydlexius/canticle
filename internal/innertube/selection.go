@@ -845,12 +845,30 @@ func creditTail(s string) []string {
 		if _, ok := featMarkers[tok]; !ok {
 			continue
 		}
+		tail := raw[i+1:]
 		var out []string
-		for _, t := range raw[i+1:] {
+		for _, t := range tail {
 			if _, ig := ignorableTokens[t]; ig {
 				continue
 			}
 			out = append(out, t)
+		}
+		// A CREDIT MADE ENTIRELY OF IGNORABLE WORDS KEEPS THEM (891-CR1).
+		// "The The" is a real act name, and dropping both tokens left an EMPTY
+		// tail, which creditsDiffer reads as "no credit here" and fails open --
+		// accepting any differing credit on the other side. Returning the raw
+		// tail instead compares [the the] against [alpha], which is a subset in
+		// neither direction and correctly rejects.
+		//
+		// This is NOT the packaging-filter fallback that leaked four times.
+		// That one had to decide whether a token was a NAME or DECORATION, a
+		// question the vocabulary cannot answer. This decides only whether to
+		// throw away the sole evidence available, and keeping it is never
+		// worse. The ONE-SIDED case is untouched: a title with no marker at all
+		// still returns nil above, so "Song" against "Song (feat. Guest)" still
+		// accepts.
+		if len(out) == 0 {
+			return tail
 		}
 		return out
 	}

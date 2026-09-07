@@ -1260,16 +1260,19 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 	})
 
 	t.Run("a guest whose NAME is a vocabulary word is still compared", func(t *testing.T) {
-		// 891-R2C1, a regression the FIRST fix for this class introduced. The
-		// packaging filter was applied unconditionally, so an act actually
-		// named "Mono", "Radio" or "Clean" -- all real act names, all in
-		// titleVariantTokens -- had its tail emptied, and an empty tail hits
-		// creditsDiffer's fail-open, which ACCEPTS any differing credit. Four
-		// measured rejects became accepts on the corruption axis.
+		// 891-R2C1. An act actually named "Mono", "Radio" or "Clean" -- all
+		// real act names, all in titleVariantTokens -- must be compared like
+		// any other guest. A packaging filter once stripped exactly those
+		// tokens, emptied such a tail, and hit creditsDiffer's empty-tail
+		// fail-open, turning four measured rejects into accepts on the
+		// corruption axis.
 		//
-		// The filter now falls back to the unfiltered tail rather than
-		// returning nothing, so a credit made entirely of vocabulary words is
-		// compared as written.
+		// THAT FILTER NO LONGER EXISTS (891-R4): creditTail drops only
+		// ignorable tokens, so a vocabulary-word guest survives as written and
+		// there is nothing to fall back from. These rows outlived the mechanism
+		// that motivated them, which is the point of keeping them -- they pin
+		// the BEHAVIOR rather than the implementation, and would redden again
+		// if any future filter reintroduced the same erasure.
 		for _, pair := range [][2]string{
 			{"Placeholder Song (feat. Mono)", "Placeholder Song (feat. Alpha)"},
 			{"Placeholder Song (feat. Mono)", "Placeholder Song (feat. Stereo)"},
@@ -1350,6 +1353,44 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 				t.Errorf("%q vs %q was ACCEPTED -- a guest named with a vocabulary word "+
 					"must be compared no matter what joins it to the others", pair[0], pair[1])
 			}
+		}
+	})
+
+	t.Run("a credit made entirely of ignorable words is still compared", func(t *testing.T) {
+		// 891-CR1. creditTail drops articles and conjunctions, which is right
+		// where they sit BESIDE a name -- but an act whose whole name is built
+		// from them ("The The" is a real one) tailed to EMPTY, and an empty tail
+		// is how creditsDiffer says "no credit here" and fails open. A
+		// differing credit on the other side was then accepted.
+		//
+		// The raw tail is kept when filtering would leave nothing, so [the the]
+		// compares against [alpha] and correctly rejects. The ONE-SIDED case is
+		// untouched and pinned separately: a title with no marker at all still
+		// yields nil, so a bare title against a credited one still accepts.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (feat. The The)", "Placeholder Song (feat. Alpha)"},
+			{"Placeholder Song (feat. Alpha)", "Placeholder Song (feat. The The)"},
+			{"Placeholder Song (feat. The The)", "Placeholder Song (feat. The And)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- filtering must not discard the only "+
+					"evidence a credit carries", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("an act named entirely from ignorable words matches itself", func(t *testing.T) {
+		// The false-reject guard on the row above.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (feat. The The)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (feat. The The)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("an act named from ignorable words was REJECTED against itself: %v", err)
 		}
 	})
 
@@ -1458,8 +1499,8 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 	})
 
 	t.Run("identical vocabulary-word credits still accept", func(t *testing.T) {
-		// The false-reject guard on the fallback: comparing the unfiltered tail
-		// must not reject a credit that genuinely matches.
+		// The false-reject guard on the row above: comparing a vocabulary-word
+		// credit as written must not reject one that genuinely matches.
 		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (feat. Mono)"}
 		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (feat. Mono)"}
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
