@@ -327,8 +327,21 @@ func sourceMessageText(raw json.RawMessage) string {
 func upstreamToken(sourceMessage string) string {
 	s := strings.ToLower(strings.TrimSpace(sourceMessage))
 	s = strings.TrimSpace(strings.TrimPrefix(s, strings.ToLower(sourceMessagePrefix)))
+	// THE CASE ARMS ARE WIRE NAMES; THE RETURNS ARE OUR TOKENS. The two sides
+	// of each arm mean different things, and today they coincide because the
+	// tokens were deliberately chosen to match the lowercased upstream names.
+	//
+	// So the case arms are string LITERALS on purpose, and both of them, rather
+	// than the constants they happen to equal. A review flagged the previous
+	// mixture (one arm a constant, one a literal) as an inconsistency, which it
+	// was -- but resolving it toward the CONSTANT is the wrong direction: that
+	// makes a rename of OUR token silently stop matching the upstream's
+	// unchanged wire name, which is the one thing this function must keep doing.
+	// Written as literals, renaming a token changes only what we emit, and the
+	// mapping keeps working. The coincidence is pinned by TestUpstreamToken,
+	// whose inputs are the captured wire strings.
 	switch s {
-	case UpstreamMusixmatch:
+	case "musixmatch":
 		return UpstreamMusixmatch
 	case "lyricfind":
 		return UpstreamLyricFind
