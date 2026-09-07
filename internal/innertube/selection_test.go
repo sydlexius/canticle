@@ -891,6 +891,81 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
+	t.Run("differing guest credits are rejected", func(t *testing.T) {
+		// #891, structurally the SAME shape as the year class above: a token
+		// that is packaging when ONE-SIDED becomes identity when both sides
+		// carry it and they disagree. tokenizeTitle truncates from the feat
+		// marker onward, so both sides reduce to the identical base multiset
+		// and the sameMultiset early-accept fires with no further check.
+		//
+		// A guest verse is lyrics, so this is another recording's words.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title feat Alpha"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title feat Beta"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, "+
+				"so the floor rejects this pair and the row no longer exercises the "+
+				"credit discriminator", conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("two differently-credited recordings were ACCEPTED -- when BOTH " +
+				"titles carry a guest credit and the credits disagree, the credit is " +
+				"identity, not packaging")
+		}
+	})
+
+	t.Run("differing credits are rejected with the parenthesized marker", func(t *testing.T) {
+		// The same class reached through "featuring" rather than "feat", so the
+		// fix cannot pin one spelling of the marker and miss the others.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title (featuring Alpha)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title (featuring Beta)"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("differently-credited recordings were ACCEPTED via `featuring`")
+		}
+	})
+
+	t.Run("a title that is ENTIRELY a differing credit is rejected", func(t *testing.T) {
+		// The worst shape in #891 and a DIFFERENT code path from the two above:
+		// when the whole title is a credit, both sides tokenize to NOTHING and
+		// titleTokensCorrespond fails OPEN by design, so no token evidence
+		// exists at all. A fix wired after the sameMultiset early-accept would
+		// miss this row entirely.
+		requested := models.Track{ArtistName: artist, TrackName: "feat Alpha"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "feat Beta"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("two titles that are entirely DIFFERENT credits were ACCEPTED -- " +
+				"the empty-token fail-open must not admit a pair whose only content " +
+				"is a disagreeing credit")
+		}
+	})
+
+	t.Run("a one-sided credit is still packaging", func(t *testing.T) {
+		// The false-reject guard, and the case the truncation was WRITTEN for:
+		// same song, credit added on one side. This must survive the fix or it
+		// trades a corruption bug for a provider that returns nothing.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title (feat Guest)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a one-sided guest credit was REJECTED -- the credit discriminator "+
+				"must fire only when BOTH sides are credited and disagree: %v", err)
+		}
+	})
+
+	t.Run("identical credits on both sides still accept", func(t *testing.T) {
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title feat Alpha"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title (feat Alpha)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("matching guest credits were REJECTED: %v", err)
+		}
+	})
+
 	t.Run("a one-sided year is still packaging", func(t *testing.T) {
 		// The false-reject guard on the C1 fix: the remaster shape the year
 		// rule was written for must survive it.

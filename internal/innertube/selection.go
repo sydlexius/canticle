@@ -672,6 +672,64 @@ func yearsDiffer(req, cand map[string]int) bool {
 	return true
 }
 
+// creditTail returns the tokens AFTER the first featuring marker -- the guest
+// credit that tokenizeTitle truncates away -- with ignorable tokens dropped.
+// No marker, or nothing after it, yields nil.
+func creditTail(s string) []string {
+	raw := splitTokens(s)
+	for i, tok := range raw {
+		if _, ok := featMarkers[tok]; !ok {
+			continue
+		}
+		var out []string
+		for _, t := range raw[i+1:] {
+			if _, ig := ignorableTokens[t]; ig {
+				continue
+			}
+			out = append(out, t)
+		}
+		return out
+	}
+	return nil
+}
+
+// creditsDiffer reports whether two titles are BOTH credited and their credits
+// name nobody in common (#891).
+//
+// This is the year rule's shape (yearsDiffer, #883) applied to a second token
+// class, and for the same reason: a token that is PACKAGING when one-sided
+// becomes IDENTITY when both sides carry it and they disagree. tokenizeTitle
+// truncates from the marker onward, so two titles with the same base and
+// different guests reduce to the SAME multiset and hit the sameMultiset
+// early-accept with no further evidence. A guest verse is lyrics, so accepting
+// one for the other writes another recording's words.
+//
+// ONE-SIDED CREDITS STAY PACKAGING, deliberately -- "Song" vs
+// "Song (feat. Guest)" is the exact case the truncation was written for, and
+// the discriminator must not touch it.
+//
+// OVERLAP, NOT EQUALITY, IS THE TEST. Credits legitimately vary in form: an
+// extra guest listed on one side, "&" against "and", a reordering. Requiring
+// full equality would reject those. Sharing at least one name is weak evidence
+// of the same collaboration, which is the right strength given the asymmetry --
+// a false REJECT costs one missing lyric and a retry, a false ACCEPT writes
+// another recording's words to disk and looks correct.
+func creditsDiffer(requested, got string) bool {
+	req := creditTail(requested)
+	cand := creditTail(got)
+	if len(req) == 0 || len(cand) == 0 {
+		return false
+	}
+	for _, r := range req {
+		for _, c := range cand {
+			if r == c {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // tokenizeTitle produces the comparable token sequence for a title: ignorable
 // tokens dropped, "sped up"/"slowed down" collapsed to a single variant token,
 // and everything from a featuring marker onward truncated away.
@@ -717,6 +775,16 @@ func countTokens(toks []string) map[string]int {
 // judge on, and the floor has already been cleared by the caller, so inventing
 // a rejection here would be a guess rather than a finding.
 func titleTokensCorrespond(requested, got string) bool {
+	// CHECKED FIRST, above BOTH early-accepts, and the position is the whole
+	// fix. The credit is truncated out of the token sequence, so by the time
+	// either early-accept runs the evidence is already gone: the base-multiset
+	// case returns at sameMultiset, and the whole-title-is-a-credit case
+	// returns at the empty-token fail-open immediately below. A check wired
+	// after either one would miss that second path entirely.
+	if creditsDiffer(requested, got) {
+		return false
+	}
+
 	reqToks := tokenizeTitle(requested)
 	gotToks := tokenizeTitle(got)
 	if len(reqToks) == 0 || len(gotToks) == 0 {
