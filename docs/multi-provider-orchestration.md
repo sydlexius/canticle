@@ -21,8 +21,11 @@ The petitlyrics adapter in `internal/petitlyrics` and the InnerTube adapter in
 `providers.fallback_order`) as well as being selectable as the primary. Neither
 needs an API token. The InnerTube lane multiplexes between upstream lyric
 licensors per track -- see [Provider Attribution](provider-attribution.md) for
-how that is recorded on disk -- and costs three outbound requests per lookup
-(search, next, browse) where the other two lanes cost one; see
+how that is recorded on disk. Its cost per lookup varies where the other lanes'
+does not: one outbound request when the candidate is rejected at the search, two
+when the lyrics tab is absent, and three (search, next, browse) only when it
+serves a result, so on a fallback lane whose traffic is mostly misses the
+typical lookup costs one, the same as the others. See
 `providers.innertube_cooldown_seconds` in
 [Configuration](CONFIGURATION.md#providers) for pacing it independently. A
 single-lane deployment (Musixmatch only, no fallback) behaves identically under

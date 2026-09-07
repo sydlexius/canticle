@@ -259,11 +259,14 @@ addr = "127.0.0.1:3876"
 # petitlyrics has no public API; the adapter scrapes reverse-engineered
 # endpoints (Japanese catalog, JASRAC/NexTone-licensed text). Selecting it opts
 # into that access method - see docs and issue #149.
-# innertube is YouTube Music's unauthenticated internal API; it needs no token
-# but costs three outbound requests per lookup (search, next, browse) versus
-# one for the other two providers - see providers.innertube_cooldown_seconds
-# below. See docs/provider-terms.md for the terms position on both upstreams
-# it can multiplex through.
+# innertube is YouTube Music's unauthenticated internal API; it needs no token.
+# Its cost per lookup VARIES where the other lanes' does not: one outbound
+# request when the candidate is rejected at the search, two when the lyrics tab
+# is absent, and three (search, next, browse) only when it serves a result. On
+# a fallback lane, whose traffic is mostly misses, the typical lookup costs one,
+# the same as the others. See providers.innertube_cooldown_seconds below. See
+# docs/provider-terms.md for the terms position on both upstreams it can
+# multiplex through.
 primary = "musixmatch"
 
 # Provider names to disable explicitly.
@@ -320,14 +323,18 @@ petitlyrics_cooldown_seconds = 0
 
 # Minimum gap between InnerTube requests, in whole seconds. Same pattern as
 # petitlyrics_cooldown_seconds above: 0 (the default) falls back to
-# api.cooldown, and the InnerTube client enforces its own 2-second floor on any
-# positive value (this key can RAISE the effective interval but never lower it
-# past that floor). A negative value is not a disable request and also falls
-# back to api.cooldown.
-# THE NON-OBVIOUS PART: the interval paces outbound REQUESTS, and one InnerTube
-# lookup costs THREE requests (search, next, browse) where Musixmatch and Petit
-# Lyrics cost one. The same cooldown value therefore buys roughly a third of
-# the lookup rate on this lane.
+# api.cooldown, and the InnerTube client raises any POSITIVE value below its own
+# 2-second floor up to that floor. A negative value is not a disable request and
+# also falls back to api.cooldown.
+# The clamp does NOT apply to 0: with this key unset and api.cooldown also 0,
+# the lane runs unpaced and the 2-second floor never applies.
+# THE NON-OBVIOUS PART: the interval paces outbound REQUESTS, and the number of
+# requests per lookup VARIES on this lane where it does not on the others. A
+# lookup costs one request when the candidate is rejected at the search, two
+# when the lyrics tab is absent, and three (search, next, browse) only when the
+# lane actually serves a result. On a fallback lane, whose traffic is mostly
+# misses, the typical lookup therefore costs one request, the same as Musixmatch
+# or Petit Lyrics; three is the ceiling, not the norm.
 # Override: MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS. Default 0.
 innertube_cooldown_seconds = 0
 
