@@ -24,6 +24,18 @@ type browsePayload struct {
 							TimedLyricsModel struct {
 								LyricsData struct {
 									TimedLyricsData []browseCue `json:"timedLyricsData"`
+									// SourceMessage names the upstream licensor this
+									// result was routed to, and is a SIBLING of the cue
+									// list rather than a field on it -- the attribution
+									// is per RESPONSE, not per line. CAPTURED, not
+									// inferred: measured live at this exact path on
+									// 2026-09-07 across four public reference tracks.
+									//
+									// It is a DISPLAY STRING, not a token: the observed
+									// values carry a "Source: " prefix and mixed case
+									// ("Source: LyricFind"). upstreamToken owns the
+									// mapping; nothing else may format this value.
+									SourceMessage string `json:"sourceMessage"`
 								} `json:"lyricsData"`
 							} `json:"timedLyricsModel"`
 						} `json:"model"`
@@ -174,5 +186,75 @@ func Decode(raw []byte) (models.Song, error) {
 
 	return models.Song{
 		Subtitles: models.Synced{Lines: lines},
+		Upstream:  ExtractUpstream(raw),
 	}, nil
+}
+
+// Upstream tokens for the licensors this lane multiplexes. Lowercase and
+// unpunctuated, matching the existing provider-token convention
+// (`petitlyrics`, `canticle-detector`).
+//
+// UpstreamMusixmatch is DELIBERATELY byte-identical to the token the direct
+// first-party Musixmatch lane writes into [source:]. That collision is exactly
+// why the upstream is carried in its own [upstream:] tag and never folded into
+// [source:] -- see docs/provider-attribution.md. Writing it into [source:]
+// would make an InnerTube-routed result indistinguishable from a first-party
+// one, so `--source musixmatch` would sweep in files the operator never
+// targeted, which is the #827 class of defect.
+const (
+	UpstreamMusixmatch = "musixmatch"
+	UpstreamLyricFind  = "lyricfind"
+)
+
+// sourceMessagePrefix is the display prefix the API puts in front of the
+// licensor name. MEASURED, not assumed: every observed value took the form
+// "Source: Musixmatch" / "Source: LyricFind".
+const sourceMessagePrefix = "Source:"
+
+// ExtractUpstream reports which licensor served this response, as one of the
+// Upstream* constants, or "" when the response names none.
+//
+// A CLOSED SET, NEVER A PASSTHROUGH. An unrecognized, renamed, absent or
+// malformed value yields "", and the caller then writes no [upstream:] tag at
+// all -- an omitted tag asserts nothing, which is honest, whereas a passthrough
+// would format an unsanitized third-party string straight into an LRC header.
+// That matters concretely: the fetch-time writer formats the token with
+// fmt.Sprintf and does NOT run sanitizeTagValue, and a NEWLINE in a header
+// value truncates the tag and ends the header block early (parser.go). A closed
+// set means the writer never holds an unsanitized string in the first place.
+// It also keeps the token stable if the upstream renames itself upstream.
+//
+// Parse failure is not distinguished from absence. Both mean "no attribution
+// established", the caller treats them identically, and this function is never
+// the place a transport problem is reported -- ExtractCues already owns that.
+func ExtractUpstream(raw []byte) string {
+	var payload browsePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	msg := payload.Contents.ElementRenderer.NewElement.Type.ComponentType.
+		Model.TimedLyricsModel.LyricsData.SourceMessage
+	return upstreamToken(msg)
+}
+
+// upstreamToken maps one raw sourceMessage to a constant, or "" for anything
+// it does not recognize.
+//
+// The prefix is trimmed with TrimPrefix on a case-folded copy rather than
+// matched exactly, because the casing of the NAME is what varies in the
+// observed data ("LyricFind" carries an interior capital), and a future
+// response that drops or re-cases the prefix should still map rather than
+// silently losing attribution. A value with no prefix at all still maps: the
+// trim is a no-op and the switch sees the bare name.
+func upstreamToken(sourceMessage string) string {
+	s := strings.ToLower(strings.TrimSpace(sourceMessage))
+	s = strings.TrimSpace(strings.TrimPrefix(s, strings.ToLower(sourceMessagePrefix)))
+	switch s {
+	case UpstreamMusixmatch:
+		return UpstreamMusixmatch
+	case "lyricfind":
+		return UpstreamLyricFind
+	default:
+		return ""
+	}
 }

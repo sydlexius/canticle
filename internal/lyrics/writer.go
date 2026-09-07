@@ -290,6 +290,20 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		if song.WinningLane != "" {
 			tags = append(tags, fmt.Sprintf("[source:%s]", song.WinningLane))
 		}
+		// [upstream:] names the LICENSOR a multiplexing lane routed this result
+		// to; [source:] above stays the LANE and never varies with it. Keeping
+		// them separate is what makes purgeprovenance.provenanceAgrees hold
+		// unchanged (it compares the source tag against work_queue.provider_lane)
+		// and what stops `--source musixmatch` sweeping in files that a
+		// multiplexing lane merely ROUTED through Musixmatch. See
+		// docs/provider-attribution.md.
+		//
+		// Omitted when empty, deliberately: an absent tag asserts nothing, which
+		// is the honest reading when no licensor was named. Same rule as [dv:]
+		// below.
+		if song.Upstream != "" {
+			tags = append(tags, fmt.Sprintf("[upstream:%s]", song.Upstream))
+		}
 		if !song.FetchedAt.IsZero() {
 			tags = append(tags, fmt.Sprintf("[fetched:%s]", song.FetchedAt.Format(time.RFC3339)))
 		}
@@ -328,6 +342,15 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		tags = append(tags, "[by:canticle]")
 		if src != "" {
 			tags = append(tags, fmt.Sprintf("[source:%s]", src))
+		}
+		// Guarded on src rather than on song.Upstream alone. src is
+		// SourceDetector whenever canticle's own detector decided, and a
+		// detector verdict is canticle's, never a licensor's -- carrying a
+		// provider's upstream onto it would credit that provider for a call it
+		// did not make. So the upstream rides only a provider-asserted
+		// instrumental, where src is still the winning lane.
+		if src != SourceDetector && song.Upstream != "" {
+			tags = append(tags, fmt.Sprintf("[upstream:%s]", song.Upstream))
 		}
 		// [dv:] is omitted when unknown -- it records WHICH model decided, and an
 		// empty tag would assert a version that was never established. Absent is

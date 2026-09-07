@@ -134,6 +134,25 @@ type Song struct {
 	// Empty on cache hits and zero-value songs. Used by the worker write-path to
 	// record per-lane hit counters without changing the Fetcher interface.
 	WinningLane string `json:"-"`
+	// Upstream is the lyric LICENSOR a MULTIPLEXING lane routed this result to,
+	// when the lane serves several and reports which one. Empty for a lane that
+	// is its own upstream, on cache hits, on zero-value songs, and whenever the
+	// lane served a result without naming a licensor.
+	//
+	// DISTINCT FROM WinningLane, and never a substitute for it. The lane is the
+	// transport canticle chose and can reorder, disable or trip a breaker on;
+	// the upstream is an editorial routing decision made on the far side that
+	// canticle does not make and cannot predict. An empty value asserts NOTHING
+	// -- it is the absence of a claim, not a claim of "none" -- so the writer
+	// omits the [upstream:] tag entirely rather than writing a placeholder.
+	//
+	// `json:"-"` is REQUIRED, for the same reason WinningLane carries it:
+	// encodeSong/decodeSong round-trip this struct through the lyrics cache,
+	// and the cache is keyed on (artist, title, duration bucket) with no
+	// knowledge of which upstream served the entry it stored. A serialized
+	// upstream would let a cache hit resurrect an attribution that was true for
+	// a different fetch. See docs/provider-attribution.md (issue #850).
+	Upstream string `json:"-"`
 	// LaneAttempts carries the per-lane hit/miss attribution for THIS track out of
 	// the orchestrator so the worker can persist a true per-track hit-rate (issue
 	// #282). One entry per ATTEMPTED lane: Hit is true for the winning lane and

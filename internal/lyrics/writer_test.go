@@ -505,3 +505,142 @@ func readOnlyTxt(t *testing.T, dir string) string {
 	}
 	return string(data)
 }
+
+// TestWriteLRC_UpstreamTag pins the [upstream:] tag (#859): the LICENSOR a
+// multiplexing lane routed a result to, carried separately from [source:] (the
+// LANE) so that purgeprovenance.provenanceAgrees holds unchanged and a
+// --source filter on a first-party provider cannot sweep in files that lane
+// merely ROUTED through it. See docs/provider-attribution.md.
+func TestWriteLRC_UpstreamTag(t *testing.T) {
+	// The two upstream tokens are deliberately spelled here rather than
+	// imported from internal/innertube: this package must not depend on a
+	// provider, and a test that imported the constant would pass even if the
+	// constant changed to something the writer mangles. The literal is the
+	// contract.
+	for _, tc := range []struct {
+		name     string
+		lane     string
+		upstream string
+		want     string // the exact tag expected, or "" for none
+	}{
+		{"multiplexing lane, licensor named", "innertube", "musixmatch", "[upstream:musixmatch]"},
+		{"multiplexing lane, other licensor", "innertube", "lyricfind", "[upstream:lyricfind]"},
+		{"multiplexing lane, no licensor named", "innertube", "", ""},
+		{"a lane that is its own upstream", "petitlyrics", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewLRCWriter()
+			tmpDir := t.TempDir()
+			song := models.Song{
+				Track:       models.Track{ArtistName: "Test Artist", TrackName: "Test Track"},
+				Subtitles:   models.Synced{Lines: []models.Lines{{Text: "placeholder", Time: models.Time{}}}},
+				WinningLane: tc.lane,
+				Upstream:    tc.upstream,
+			}
+			if err := w.WriteLRC(song, "", tmpDir); err != nil {
+				t.Fatalf("WriteLRC: %v", err)
+			}
+			fp := filepath.Join(tmpDir, Slugify("Test Artist - Test Track")+".lrc")
+			data, err := os.ReadFile(fp) //nolint:gosec // reason: test path built from known test data
+			if err != nil {
+				t.Fatalf("read sidecar: %v", err)
+			}
+			content := string(data)
+
+			// [source:] is the LANE and must never vary with the upstream --
+			// that invariance is what keeps provenanceAgrees true, so it is
+			// asserted on every row rather than only where the tag appears.
+			wantSource := "[source:" + tc.lane + "]"
+			if !strings.Contains(content, wantSource) {
+				t.Errorf("missing %q: the source tag must carry the LANE, got:\n%s", wantSource, content)
+			}
+			if tc.upstream != "" && strings.Contains(content, "[source:"+tc.upstream+"]") {
+				t.Errorf("the upstream leaked into [source:]: a --source filter on %q would then match this lane's files, got:\n%s", tc.upstream, content)
+			}
+
+			if tc.want == "" {
+				if strings.Contains(content, "[upstream:") {
+					t.Errorf("expected NO upstream tag (an absent tag asserts nothing), got:\n%s", content)
+				}
+				return
+			}
+			if !strings.Contains(content, tc.want) {
+				t.Errorf("expected %q, got:\n%s", tc.want, content)
+			}
+
+			// Round-trip: the tag must read back through the same parser a
+			// consumer would use, not merely be present as a substring.
+			pt, err := ReadProvenanceTags(fp)
+			if err != nil {
+				t.Fatalf("ReadProvenanceTags: %v", err)
+			}
+			if pt.Upstream != tc.upstream {
+				t.Errorf("round-trip: wrote upstream %q, read back %q", tc.upstream, pt.Upstream)
+			}
+			if pt.Source != tc.lane {
+				t.Errorf("round-trip: wrote source %q, read back %q", tc.lane, pt.Source)
+			}
+		})
+	}
+}
+
+// TestWriteLRC_UpstreamNeverRidesADetectorVerdict pins that a detector-decided
+// instrumental carries no [upstream:]. The detector is canticle's own; crediting
+// a licensor for a call canticle made would be a false attribution, and the
+// instrumental branch derives src from the detector rather than the lane.
+func TestWriteLRC_UpstreamNeverRidesADetectorVerdict(t *testing.T) {
+	w := NewLRCWriter()
+	tmpDir := t.TempDir()
+	song := models.Song{
+		Track:           models.Track{ArtistName: "Test Artist", TrackName: "Detected Instrumental", Instrumental: 1},
+		WinningLane:     DetectorLaneName,
+		DetectorVersion: "test-model-1",
+		// Set deliberately: a caller could carry an upstream from an earlier
+		// provider attempt, and the detector branch must not adopt it.
+		Upstream: "musixmatch",
+	}
+	if err := w.WriteLRC(song, "", tmpDir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	fp := filepath.Join(tmpDir, Slugify("Test Artist - Detected Instrumental")+".txt")
+	data, err := os.ReadFile(fp) //nolint:gosec // reason: test path built from known test data
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "[source:"+SourceDetector+"]") {
+		t.Fatalf("premise broken: expected a detector-sourced instrumental, got:\n%s", content)
+	}
+	if strings.Contains(content, "[upstream:") {
+		t.Errorf("a detector verdict must carry NO upstream -- it is canticle's own call, not a licensor's, got:\n%s", content)
+	}
+}
+
+// TestWriteLRC_ProviderAssertedInstrumentalCarriesUpstream is the other half:
+// when a PROVIDER asserted the instrumental, src is still the lane and the
+// upstream rides along. Without this, the guard above would be satisfied by a
+// writer that never writes the tag in the instrumental branch at all.
+func TestWriteLRC_ProviderAssertedInstrumentalCarriesUpstream(t *testing.T) {
+	w := NewLRCWriter()
+	tmpDir := t.TempDir()
+	song := models.Song{
+		Track:       models.Track{ArtistName: "Test Artist", TrackName: "Provider Instrumental", Instrumental: 1},
+		WinningLane: "innertube",
+		Upstream:    "lyricfind",
+	}
+	if err := w.WriteLRC(song, "", tmpDir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	fp := filepath.Join(tmpDir, Slugify("Test Artist - Provider Instrumental")+".txt")
+	data, err := os.ReadFile(fp) //nolint:gosec // reason: test path built from known test data
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "[source:innertube]") {
+		t.Fatalf("premise broken: expected the lane as source, got:\n%s", content)
+	}
+	if !strings.Contains(content, "[upstream:lyricfind]") {
+		t.Errorf("a provider-asserted instrumental must carry its upstream, got:\n%s", content)
+	}
+}

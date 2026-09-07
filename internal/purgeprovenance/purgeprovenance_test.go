@@ -678,3 +678,106 @@ func TestFilter_Matches(t *testing.T) {
 		})
 	}
 }
+
+// writeSidecarWithUpstream writes a sidecar carrying BOTH tags, in the order
+// the writer emits them, so the purge path reads exactly what a real
+// InnerTube-served fetch would have left on disk.
+func writeSidecarWithUpstream(t *testing.T, path, source, upstream string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := "[source:" + source + "]\n[upstream:" + upstream + "]\n[00:01.00]hello\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+}
+
+// TestProvenanceAgrees_HoldsForAMultiplexedUpstream is the #859 acceptance
+// criterion that the guard still holds -- ASSERTED, never assumed.
+//
+// THE INVARIANT: provenanceAgrees compares the on-disk [source:] tag against
+// work_queue.provider_lane, and a mismatch is positive evidence of
+// disagreement that BLOCKS deletion (#827). The whole reason the licensor
+// lives in its own [upstream:] tag is that [source:] then does not vary with
+// it, so the guard needs no new asymmetry case -- and an asymmetry case is
+// what a licensor-valued [source:] would have required, growing every time
+// the multiplexer adds an upstream.
+func TestProvenanceAgrees_HoldsForAMultiplexedUpstream(t *testing.T) {
+	for _, upstream := range []string{"musixmatch", "lyricfind", ""} {
+		name := upstream
+		if name == "" {
+			name = "no upstream reported"
+		}
+		t.Run(name, func(t *testing.T) {
+			// The lane is what the row records, and it is 'innertube'
+			// regardless of which licensor served the words.
+			if !provenanceAgrees("innertube", "innertube") {
+				t.Fatal("the guard must hold for an innertube sidecar: [source:] carries the LANE, which never varies with the upstream")
+			}
+			// And the licensor value must never be what the guard sees. If a
+			// future change routed the upstream into [source:], this is the
+			// assertion that catches it.
+			if upstream != "" && provenanceAgrees(upstream, "innertube") {
+				t.Errorf("provenanceAgrees(%q, \"innertube\") returned true: a licensor-valued [source:] must NOT be treated as agreeing, or the purge guard silently accepts a tag/lane split", upstream)
+			}
+		})
+	}
+}
+
+// TestRun_SourceFilterDoesNotSweepInAMultiplexedSidecar pins harm 2 from
+// docs/provider-attribution.md: an operator purging a first-party provider's
+// results must NOT lose files that a multiplexing lane merely ROUTED through
+// that provider. Those are different fetches from different lanes, and
+// deleting the second set is a deletion the operator never asked for -- the
+// exact class #827 exists to prevent.
+func TestRun_SourceFilterDoesNotSweepInAMultiplexedSidecar(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	dir := filepath.Join(root, "ArtistA")
+
+	// A first-party Musixmatch result, and an InnerTube result that the
+	// multiplexer happened to route to Musixmatch. Same licensor, different
+	// lanes -- only the first is in scope for --source musixmatch.
+	writeSidecar(t, filepath.Join(dir, "direct.lrc"), "musixmatch")
+	writeSidecarWithUpstream(t, filepath.Join(dir, "routed.lrc"), "innertube", "musixmatch")
+	seedTrack(t, ctx, sqlDB, libID, dir, "direct.lrc", "done")
+	seedTrack(t, ctx, sqlDB, libID, dir, "routed.lrc", "done")
+
+	p := New(sqlDB)
+	res, err := p.Run(ctx, Options{Roots: []string{root}, Filter: Filter{Source: "musixmatch"}, LibraryID: &libID})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Matched != 1 || res.Deleted != 1 {
+		t.Fatalf("got matched=%d deleted=%d, want 1/1: only the DIRECT musixmatch sidecar is in scope", res.Matched, res.Deleted)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "direct.lrc")); !os.IsNotExist(statErr) {
+		t.Errorf("the direct musixmatch sidecar should have been deleted")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "routed.lrc")); statErr != nil {
+		t.Errorf("the InnerTube-routed sidecar must SURVIVE --source musixmatch: it was served by a different lane, and deleting it is an untargeted deletion (%v)", statErr)
+	}
+}
+
+// TestRun_SourceFilterMatchesTheLaneRegardlessOfUpstream is the complement:
+// --source innertube must match every InnerTube sidecar whatever licensor
+// served it. Without this, the test above could pass on a purge that simply
+// never matches an InnerTube file at all.
+func TestRun_SourceFilterMatchesTheLaneRegardlessOfUpstream(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	dir := filepath.Join(root, "ArtistA")
+
+	writeSidecarWithUpstream(t, filepath.Join(dir, "one.lrc"), "innertube", "musixmatch")
+	writeSidecarWithUpstream(t, filepath.Join(dir, "two.lrc"), "innertube", "lyricfind")
+	seedTrack(t, ctx, sqlDB, libID, dir, "one.lrc", "done")
+	seedTrack(t, ctx, sqlDB, libID, dir, "two.lrc", "done")
+
+	p := New(sqlDB)
+	res, err := p.Run(ctx, Options{Roots: []string{root}, Filter: Filter{Source: "innertube"}, LibraryID: &libID})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Matched != 2 || res.Deleted != 2 {
+		t.Errorf("got matched=%d deleted=%d, want 2/2: --source innertube must match BOTH licensors, since the lane token does not vary with the upstream", res.Matched, res.Deleted)
+	}
+}
