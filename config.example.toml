@@ -7,6 +7,8 @@
 # MXLRC_BILINGUAL_OUTPUT, MXLRC_DB_PATH, MXLRC_SERVER_ADDR, MXLRC_WEBHOOK_API_KEY,
 # MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE,
 # MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER,
+# MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS,
+# MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS,
 # MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE,
 # MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING,
 # MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED,
@@ -253,10 +255,15 @@ addr = "127.0.0.1:3876"
 # redirect_http = ":80"
 
 [providers]
-# Active lyrics provider: "musixmatch" (default) or "petitlyrics".
+# Active lyrics provider: "musixmatch" (default), "petitlyrics", or "innertube".
 # petitlyrics has no public API; the adapter scrapes reverse-engineered
 # endpoints (Japanese catalog, JASRAC/NexTone-licensed text). Selecting it opts
 # into that access method - see docs and issue #149.
+# innertube is YouTube Music's unauthenticated internal API; it needs no token
+# but costs three outbound requests per lookup (search, next, browse) versus
+# one for the other two providers - see providers.innertube_cooldown_seconds
+# below. See docs/provider-terms.md for the terms position on both upstreams
+# it can multiplex through.
 primary = "musixmatch"
 
 # Provider names to disable explicitly.
@@ -292,9 +299,10 @@ race_wait_seconds = 2
 # the primary yields no suitable result (a miss, an unsuitable result, or a
 # provider error). Each lane runs with its own independent circuit breaker, so a
 # throttled primary never pauses a fallback. Each name must be a known provider
-# ("musixmatch", "petitlyrics"); an unknown name is rejected at load. Empty (the
-# default) means no fallback - only the primary lane runs, preserving
-# single-provider behavior. A musixmatch fallback with no api.token is skipped.
+# ("musixmatch", "petitlyrics", "innertube"); an unknown name is rejected at
+# load. Empty (the default) means no fallback - only the primary lane runs,
+# preserving single-provider behavior. A musixmatch fallback with no api.token
+# is skipped.
 # Example (try Musixmatch first, then Petit Lyrics for the Japanese catalog):
 #   fallback_order = ["petitlyrics"]
 # Override: MXLRC_PROVIDERS_FALLBACK_ORDER (comma-separated). Default [].
@@ -309,6 +317,19 @@ fallback_order = []
 # this key can RAISE the effective interval but never lower it past that floor.
 # Override: MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS. Default 0.
 petitlyrics_cooldown_seconds = 0
+
+# Minimum gap between InnerTube requests, in whole seconds. Same pattern as
+# petitlyrics_cooldown_seconds above: 0 (the default) falls back to
+# api.cooldown, and the InnerTube client enforces its own 2-second floor on any
+# positive value (this key can RAISE the effective interval but never lower it
+# past that floor). A negative value is not a disable request and also falls
+# back to api.cooldown.
+# THE NON-OBVIOUS PART: the interval paces outbound REQUESTS, and one InnerTube
+# lookup costs THREE requests (search, next, browse) where Musixmatch and Petit
+# Lyrics cost one. The same cooldown value therefore buys roughly a third of
+# the lookup rate on this lane.
+# Override: MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS. Default 0.
+innertube_cooldown_seconds = 0
 
 # Cache invalidation across provider-set changes: the active provider set
 # (primary + fallback_order) is hashed into a generation stamped onto each

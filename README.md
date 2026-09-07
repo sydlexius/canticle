@@ -7,7 +7,7 @@
 [![codecov](https://codecov.io/gh/sydlexius/canticle/branch/main/graph/badge.svg)](https://codecov.io/gh/sydlexius/canticle)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/sydlexius/canticle/badge)](https://securityscorecards.dev/viewer/?uri=github.com/sydlexius/canticle)
 
-Command line tool and webhook service to fetch synced lyrics from [Musixmatch](https://www.musixmatch.com/) and save them as `.lrc` files.
+Command line tool and webhook service to fetch synced lyrics from multiple providers -- [Musixmatch](https://www.musixmatch.com/), [Petit Lyrics](https://petitlyrics.com/), and YouTube Music's InnerTube API -- and save them as `.lrc` files.
 
 ## Documentation
 
@@ -102,9 +102,9 @@ Have lyrics that drift out of sync with the song? `canticle revalidate` re-check
 
 ## Token
 
-In **serve mode**, a Musixmatch API token is optional: on first run Canticle obtains one automatically and stores it encrypted at rest, reusing it on every later start, so there is nothing to set up. The one-shot `fetch` CLI keeps no state, so it cannot store a token and still needs one supplied explicitly.
+A token is required only when the **Musixmatch** provider is in use, and only that provider needs one -- Petit Lyrics and the InnerTube lane are both tokenless. In **serve mode** with Musixmatch as the primary or a fallback lane, a token is optional: on first run Canticle obtains one automatically and stores it encrypted at rest, reusing it on every later start, so there is nothing to set up. The one-shot `fetch` CLI keeps no state, so it cannot store a token and still needs one supplied explicitly when Musixmatch is selected.
 
-To supply your own instead, prefer `canticle secrets set musixmatch_token`, which reads the value from stdin and stores it encrypted at rest, keeping it out of shell history and process listings. The `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, and a `.env`/config file remain supported, in that order of precedence (CLI > env > file). A token you supply always takes precedence and is never overwritten. See [Configuration](https://sydlexius.github.io/canticle/CONFIGURATION/) for the full env-var and TOML surface.
+To supply your own instead, prefer `canticle secrets set musixmatch_token`, which reads the value from stdin and stores it encrypted at rest, keeping it out of shell history and process listings. The `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, and a `.env`/config file remain supported, in that order of precedence (CLI > env > file). A token you supply always takes precedence and is never overwritten. See [Configuration](https://sydlexius.github.io/canticle/CONFIGURATION/) for the full env-var and TOML surface, and [Multi-provider orchestration](docs/multi-provider-orchestration.md) for selecting a different primary provider.
 
 ## Encrypted secrets
 
