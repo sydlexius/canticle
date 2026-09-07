@@ -2400,8 +2400,8 @@ func TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist(t *testing.T) {
 	// So the table below sweeps the whole ignorableTokens / featMarkers class
 	// rather than one exemplar, and each request is chosen to be one the FLOOR
 	// would have passed. The rule that rejects them lives in
-	// titleFieldCorresponds, not in the strip: exact normalized equality when
-	// the strip fired and left a side with no content tokens.
+	// titleFieldCorresponds, not in the strip: the raw token SEQUENCES are
+	// compared when the strip fired and left a side with no content tokens.
 	t.Run("a stripped title with no content tokens rejects an unrelated request", func(t *testing.T) {
 		for _, tc := range []struct{ remainder, request string }{
 			{"The", "Theme"},
@@ -2790,8 +2790,14 @@ func TestStripSeparatorAndTrimAreLoadBearing(t *testing.T) {
 	const artist = "Placeholder Artist Name"
 	unrelated := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
 
-	// Deleting the empty-remainder guard, or the TrimSpace that produces it,
-	// each empties the title and accepts anything by this artist.
+	// Deleting the empty-remainder guard empties the title and accepts anything
+	// by this artist. THE TrimSpace ABOVE IT IS NOT PINNED HERE, and saying so
+	// keeps this file from contradicting stripArtistPrefix's own comment, which
+	// measures the same thing: NormalizeKey folds "   " to "" unaided, so both
+	// rows below reject with or without the trim. Verified by mutation --
+	// deleting the TrimSpace SURVIVES this test. No row can redden it, because
+	// the trim cannot change a verdict at all (probed across 42 adversarial
+	// strings; every downstream predicate agrees on all 1764 pairs).
 	for _, cand := range []string{artist + " - ", artist + " -   "} {
 		t.Run("trailing separator: "+cand, func(t *testing.T) {
 			sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: cand}

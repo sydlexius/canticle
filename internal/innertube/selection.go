@@ -1211,7 +1211,7 @@ func titleTokensCorrespond(requested, got string) bool {
 // Refusing to strip is the wrong lever, because the strip is CORRECT on those
 // inputs; what is wrong is trusting a resemblance score afterwards. So the rule
 // lives at the point of judgment instead -- see titleFieldCorresponds, which
-// demands exact normalized equality when the strip fired and left a side with no
+// compares the raw token SEQUENCES when the strip fired and left a side with no
 // content tokens.
 //
 // ONLY THE FIRST separator is considered. A title carrying several dashes most
