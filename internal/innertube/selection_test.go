@@ -891,6 +891,110 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
+	t.Run("differing performance tokens are rejected", func(t *testing.T) {
+		// #890 row 3, and the shape the class is named for: a live take and a
+		// demo are different RECORDINGS, not two pressings of one. Both sides
+		// carry a performance token and they disagree, so the performance is
+		// the identity.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Live"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Demo"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor, "+
+				"so the floor rejects this pair and the row no longer exercises the "+
+				"performance discriminator", conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a live take was ACCEPTED for a demo -- these name different " +
+				"performances, which can carry different words")
+		}
+	})
+
+	t.Run("a radio cut and a live cut are rejected", func(t *testing.T) {
+		// #890 row 1.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Radio"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Live"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a radio cut was ACCEPTED for a live cut")
+		}
+	})
+
+	t.Run("a session and a demo are rejected", func(t *testing.T) {
+		// #890 row 2.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Session"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Demo"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a session take was ACCEPTED for a demo")
+		}
+	})
+
+	t.Run("a PACKAGING token still accepts against another packaging token", func(t *testing.T) {
+		// The partition's whole point: packaging variants are the SAME take
+		// issued differently, so they must keep accepting where performances do
+		// not. This is what separates the #890 fix from simply making the
+		// vocabulary stricter.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title (Remastered)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Title (Deluxe Edition)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("two PACKAGING variants were REJECTED -- a remaster and a deluxe "+
+				"edition are the same take issued differently and carry the same "+
+				"words: %v", err)
+		}
+	})
+
+	t.Run("an instrumental and a live take are rejected", func(t *testing.T) {
+		// #890's AC 3, the MEMBERSHIP half: `instrumental` is in
+		// performanceTokens, so it discriminates against ANOTHER performance.
+		// Without this row, deleting `instrumental` and `karaoke` from the set
+		// leaves the suite green -- measured, and the reason this row exists.
+		// The one-sided case is decided the other way, in the row below.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Instrumental"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Live"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("an instrumental was ACCEPTED for a live take -- one has no sung " +
+				"words at all, so these cannot share a lyric")
+		}
+	})
+
+	t.Run("a karaoke cut and a demo are rejected", func(t *testing.T) {
+		// The membership pin for `karaoke`, the other token P4 showed unpinned.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Karaoke"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song Demo"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a karaoke cut was ACCEPTED for a demo")
+		}
+	})
+
+	t.Run("a one-sided instrumental is still packaging", func(t *testing.T) {
+		// #890 row 4, and #890's AC 3 decided EXPLICITLY: a one-sided
+		// instrumental keeps ACCEPTING. TestLegitimateVariantsStayAccepted
+		// already pins this shape, and it is repeated here so the decision sits
+		// beside the rejects it is contrasted with rather than only in the
+		// controls. Whether the FILE has words is the instrumental-detection
+		// path's question, not a title comparison's.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Words"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Words Instrumental"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a one-sided instrumental was REJECTED -- the performance "+
+				"discriminator must fire only when BOTH sides name a performance: %v", err)
+		}
+	})
+
 	t.Run("differing guest credits are rejected", func(t *testing.T) {
 		// #891, structurally the SAME shape as the year class above: a token
 		// that is packaging when ONE-SIDED becomes identity when both sides

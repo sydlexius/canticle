@@ -501,6 +501,67 @@ var titleVariantTokens = map[string]struct{}{
 	"spedup": {}, "sloweddown": {},
 }
 
+// performanceTokens is the subset of titleVariantTokens naming a distinct
+// PERFORMANCE rather than a distinct pressing of one performance (#890).
+//
+// The distinction is that a remaster, a mono cut and a deluxe edition are the
+// SAME take issued differently -- same words, same timing -- while a live
+// take, a demo and an acoustic session are different recordings that can carry
+// ad-libs, alternate lines, or no words at all.
+//
+// FIRES ONLY WHEN BOTH SIDES CARRY ONE AND THEY DISAGREE, which is the year
+// (#883) and credit (#891) shape a third time. A ONE-SIDED performance token
+// still accepts, and that is not a compromise -- it is pinned by
+// TestLegitimateVariantsStayAccepted, whose controls include "Song" against
+// "Song (Live)", "(Acoustic Version)", "(Instrumental)" and "(Karaoke
+// Version)". Those are the documented, reasoned accept: asked for the live
+// cut, got the plain upload, and the words match.
+//
+// INSTRUMENTAL AND KARAOKE ARE MEMBERS, and #890 asked for that call to be
+// explicit. They discriminate against ANOTHER performance token -- an
+// instrumental is not a live take -- but a ONE-SIDED instrumental still
+// accepts, because the control pins it and because "does this FILE have words"
+// belongs to the instrumental-detection path, not to a title comparison.
+//
+// KNOWN RESIDUAL, recorded rather than hidden: a PACKAGING variant against a
+// PERFORMANCE variant ("Song (Remastered)" vs "Song (Live)") has only one side
+// carrying a performance token, so it still accepts. Closing it would require
+// firing when the sets merely DIFFER, which rejects the one-sided case the
+// controls pin. The recoverable direction wins.
+var performanceTokens = map[string]struct{}{
+	"live": {}, "unplugged": {}, "acoustic": {}, "demo": {},
+	"session": {}, "sessions": {}, "take": {}, "radio": {},
+	"instrumental": {}, "karaoke": {},
+}
+
+// performancesDiffer reports whether both titles name a performance and the
+// performances share nothing. See performanceTokens for why it requires both
+// sides, and yearsDiffer for the shape it mirrors.
+func performancesDiffer(req, cand map[string]int) bool {
+	var reqPerf, candPerf []string
+	for tok := range req {
+		if _, ok := performanceTokens[tok]; ok {
+			reqPerf = append(reqPerf, tok)
+		}
+	}
+	for tok := range cand {
+		if _, ok := performanceTokens[tok]; ok {
+			candPerf = append(candPerf, tok)
+		}
+	}
+	if len(reqPerf) == 0 || len(candPerf) == 0 {
+		return false
+	}
+	for _, r := range reqPerf {
+		for _, c := range candPerf {
+			if r == c {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ignorableTokens are dropped from BOTH fields before comparison. Articles and
 // the conjunction move around legitimately (a leading vs trailing article, an
 // "&" written out) without changing which song or which act is named.
@@ -793,6 +854,14 @@ func titleTokensCorrespond(requested, got string) bool {
 
 	req := countTokens(reqToks)
 	cand := countTokens(gotToks)
+
+	// Checked before the sameMultiset early-accept. Identical multisets carry
+	// identical performance tokens, so this cannot fire on them; the position
+	// matters for the UNEQUAL case, where two different performances would
+	// otherwise reach the packaging loop and pass as mutual variants.
+	if performancesDiffer(req, cand) {
+		return false
+	}
 
 	// Computed ONCE for this comparison and threaded through every
 	// isVariantToken call below, so all three decisions agree about whether a
