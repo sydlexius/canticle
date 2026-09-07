@@ -2036,7 +2036,7 @@ func TestTokenRuleOnlySubtractsAccepts(t *testing.T) {
 				t.Fatalf("test premise broken: the tokens must correspond, or removing the early return would change nothing here")
 			}
 
-			ok, comparable := titleFieldCorresponds(tc.requested, tc.got)
+			ok, comparable := titleFieldCorresponds(tc.requested, tc.got, "Placeholder Artist Name")
 			if !comparable {
 				t.Fatal("both sides carry tokens, so the field must be comparable")
 			}
@@ -2257,4 +2257,287 @@ func TestDifferentArtistsSharingATokenAreRejected(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestReleasePackagingPhrasesAreAccepted pins issue #892 AC 1: "album version"
+// and "single version" name how the recording was ISSUED, exactly like the rest
+// of titleVariantTokens, and were rejecting only because `album` and `single`
+// are not themselves vocabulary.
+//
+// THE FIX IS A PHRASE COLLAPSE, NOT A BARE-WORD ADDITION, and that distinction
+// is the whole decision. `album` and `single` are common CONTENT words -- a
+// title naming an album, or the word "single" in its ordinary English sense --
+// so admitting either one bare would let a genuinely different song through the
+// packaging loop. Collapsed as a phrase they can only ever match the two-word
+// release-packaging form, which is the shape actually observed. This is the
+// same treatment "sped up" and "slowed down" already get, and for the same
+// reason: the words are content, the phrase is packaging.
+func TestReleasePackagingPhrasesAreAccepted(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	for _, candTi := range []string{
+		title + " (Album Version)",
+		title + " (Single Version)",
+		title + " - Album Version",
+	} {
+		t.Run(candTi, func(t *testing.T) {
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: candTi}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("release packaging was REJECTED: %v", err)
+			}
+		})
+	}
+}
+
+// TestBareAlbumAndSingleStayContent pins the OTHER half of the #892 AC 1
+// decision, and it is the half that makes the phrase collapse safe. If a later
+// change "completes" the vocabulary by adding the bare words, this reddens.
+func TestBareAlbumAndSingleStayContent(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	for _, candTi := range []string{
+		title + " Album",
+		title + " Single",
+	} {
+		t.Run(candTi, func(t *testing.T) {
+			// PREMISE: the floor admits it, so the token rule is what decides.
+			if conf := normalize.MatchConfidence(title, candTi); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor, so the floor rejects this and the vocabulary is not what is being pinned", conf, matchMinConfidence)
+			}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: candTi}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Error("a BARE `album`/`single` was accepted as packaging: those are content words, and only the two-word phrase is release packaging")
+			}
+		})
+	}
+}
+
+// TestPackagingPhrasesDoNotCorrespondToEachOther pins that the collapse does not
+// manufacture an accept between two DIFFERENT pressings.
+func TestPackagingPhrasesDoNotCorrespondToEachOther(t *testing.T) {
+	if titleTokensCorrespond("Album Version", "Single Version") {
+		t.Error("two titles built only from packaging phrases must not correspond")
+	}
+}
+
+// TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist pins issue #892 AC 2.
+//
+// "Artist - Title" is one of the most common upload title shapes on the
+// platform, and candidateFromShelf takes whatever the shelf's title run says,
+// so a re-upload or a non-topic channel frequently presents it. Every such
+// candidate was rejected: `placeholder`, `artist` and `name` are unmatched
+// content tokens in the candidate.
+//
+// THE STRIP IS GATED ON EVIDENCE, never on shape alone. The leading segment is
+// removed only when it names the artist we ASKED FOR, so the rule cannot invent
+// a correspondence -- it removes a duplicate of a field the gate is separately
+// checking. A dashed title whose prefix is NOT the artist is untouched, which is
+// what keeps "Song Title - Remastered" reading as packaging rather than as a
+// stripped prefix.
+func TestArtistPrefixIsStrippedWhenItNamesTheRequestedArtist(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+
+	t.Run("prefix naming the requested artist is stripped", func(t *testing.T) {
+		requested := models.Track{ArtistName: artist, TrackName: title}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + title}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("the `Artist - Title` upload convention was REJECTED: %v", err)
+		}
+	})
+
+	t.Run("prefix naming the requested artist is stripped with packaging still attached", func(t *testing.T) {
+		requested := models.Track{ArtistName: artist, TrackName: title}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - " + title + " (Live)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a dashed upload title carrying packaging was REJECTED: %v", err)
+		}
+	})
+
+	t.Run("a prefix that is NOT the artist is left alone", func(t *testing.T) {
+		// The whole string is the song's words. Stripping here would compare
+		// a truncated title and could accept a different song.
+		requested := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Sundial Harbor - Vanguard Kettledrum"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a leading segment that does NOT name the requested artist was stripped: the strip must rest on an artist match, never on the dash alone")
+		}
+	})
+
+	t.Run("the requested side is stripped too", func(t *testing.T) {
+		// A local tag can carry the dashed form just as an upload can, so the
+		// treatment has to be symmetric or the same pair rejects one way round.
+		requested := models.Track{ArtistName: artist, TrackName: artist + " - " + title}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a dashed REQUESTED title was rejected against a clean candidate: %v", err)
+		}
+	})
+
+	t.Run("an emptied title is caught by the FLOOR, not by a guard in the strip", func(t *testing.T) {
+		// THE ORIGINAL VERSION OF THIS CASE PASSED FOR THE WRONG REASON and is
+		// worth keeping as a lesson. It used a candidate title of just the
+		// artist name, with no " - " in it at all, so stripArtistPrefix
+		// returned at its first early exit and the emptying path was never
+		// reached -- which is why a mutation deleting the strip's empty-title
+		// guard left the suite green.
+		//
+		// The guard is now GONE, deleted as redundant, and what actually
+		// protects this is the similarity floor: it compares the STRIPPED
+		// strings before the token rule's fail-open can be consulted. This case
+		// reaches the emptying path for real (the separator is present, and the
+		// remainder tokenizes to nothing) and asserts the floor rejects it.
+		requested := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - !!!"}
+		if stripped := stripArtistPrefix(c.Title, artist); len(tokenizeTitle(stripped)) != 0 {
+			t.Fatalf("test premise broken: the strip must actually empty the title here, got %q", stripped)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("an emptied title accepted an unrelated request: the floor must reject before the token rule's fail-open is reached")
+		}
+	})
+
+	t.Run("an emptied title that CORRESPONDS still accepts", func(t *testing.T) {
+		// The other half, and the reason the deleted guard was not merely
+		// redundant but wrong. A title that genuinely is punctuation, against
+		// the dashed upload of that same title, measures 1.0000 and is a real
+		// match. The guard rejected it.
+		requested := models.Track{ArtistName: artist, TrackName: "!!!"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - !!!"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a correct dashed upload of a punctuation title was rejected: %v", err)
+		}
+	})
+}
+
+// TestNonEnglishVariantSuffixesRejectAndThatIsDocumented pins issue #892 AC 3 as
+// a MEASUREMENT of a known limitation rather than as a fix.
+//
+// THE VOCABULARY IS ENGLISH-ONLY AND STAYS THAT WAY. Extending it with
+// native-script variant suffixes means an unbounded, unmeasured token list
+// across every script the library might hold -- the same overclaim the
+// apostropheEraser comment exists to retire, written as data instead of prose.
+// Each entry would be a guess about a language nobody here measured, and a
+// wrong guess in this direction is a false ACCEPT, which is the unrecoverable
+// side.
+//
+// The cost is real and is recorded here so it is a decision rather than an
+// accident: a non-English release is held to a stricter standard than an
+// English one for the same semantic suffix. The romanized form still accepts,
+// which is the common case for the material this provider serves.
+func TestNonEnglishVariantSuffixesRejectAndThatIsDocumented(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	// A CJK title with a native-script "live" suffix. Held identical apart
+	// from the suffix, so the suffix is the only thing under test.
+	const title = "未来の歌"
+	requested := models.Track{ArtistName: artist, TrackName: title}
+
+	t.Run("native-script suffix rejects", func(t *testing.T) {
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title + " (ライブ)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a native-script variant suffix was ACCEPTED: the vocabulary was extended beyond English, which is an unmeasured false-accept surface -- see the titleVariantTokens comment")
+		}
+	})
+
+	t.Run("the romanized suffix still accepts", func(t *testing.T) {
+		// The control. Without it the reject above could be the CJK title
+		// failing the floor rather than the vocabulary being English-only.
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title + " (Live)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("the romanized suffix must still accept, or the reject above is not measuring the vocabulary: %v", err)
+		}
+	})
+}
+
+// TestArtistPrefixStripRequiresIdentityNotResemblance pins the defect the #892
+// fix produced in its own first revision, which is the sharpest test in this
+// file's #892 group.
+//
+// stripArtistPrefix originally gated on artistFieldCorresponds, whose first
+// clause is the Jaro-Winkler FLOOR. That is a RESEMBLANCE measure, and two
+// strings sharing a boilerplate word pattern resemble each other strongly
+// without naming the same thing: the artist measures 0.9116 against the SONG
+// TITLE below, far above the 0.75 floor. The strip therefore fired on an
+// ordinary packaged title, ate the song's real words as though they were the
+// artist, and left a bare packaging token -- a false reject manufactured by the
+// fix for false rejects.
+//
+// A test that only used a WILDLY different prefix would never have caught this,
+// which is why this case is pinned separately from the one below it.
+func TestArtistPrefixStripRequiresIdentityNotResemblance(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	const title = "Placeholder Song Title"
+
+	// PREMISE: the prefix RESEMBLES the artist above the floor. If this ever
+	// drops below it, the case stops discriminating identity from resemblance
+	// and silently becomes a duplicate of the dissimilar-prefix test.
+	conf := normalize.MatchConfidence(artist, title)
+	if conf < matchMinConfidence {
+		t.Fatalf("test premise broken: the prefix measures %.4f against the artist, below the %.2f floor, so a resemblance-based strip would not fire here and this pins nothing", conf, matchMinConfidence)
+	}
+
+	if got := stripArtistPrefix(title+" - Remastered", artist); got != title+" - Remastered" {
+		t.Errorf("the strip fired on a prefix that merely RESEMBLES the artist (%.4f): got %q -- the gate must be token identity, never the similarity floor", conf, got)
+	}
+
+	// And the end-to-end consequence, which is what the library actually feels.
+	requested := models.Track{ArtistName: artist, TrackName: title}
+	c := SearchCandidate{VideoID: "vid", Artist: artist, Title: title + " - Remastered"}
+	if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+		t.Errorf("a plain remaster was rejected because the artist-prefix strip ate the title: %v", err)
+	}
+}
+
+// TestSharedHonorificStillSatisfiesTheSharedNameRule records a KNOWN RESIDUAL
+// in the credit superset lane, inherited from #891 and measured again here. It
+// is deliberately NOT fixed under #892.
+//
+// creditsDiffer accepts a superset relation only when it rests on a shared
+// token that is not packaging -- real evidence the two credits name the same
+// act. An HONORIFIC (`dj`, `mc`, `lil`) is decoration, but it is not in
+// titleVariantTokens, so it satisfies that requirement and a superset built on
+// one alone accepts.
+//
+// WHY IT STAYS OPEN HERE. This is the false-ACCEPT direction, which is #890 and
+// #891's subject, not this issue's. More to the point, the obvious fix is
+// wrong: adding honorifics to a packaging vocabulary would REJECT every act
+// whose name genuinely begins with one, and there are many, converting a narrow
+// false accept into a broad false reject. Closing it properly needs a notion of
+// "decoration inside a name", which the token level does not have.
+//
+// This test asserts the CURRENT behavior, so a future change to it is a
+// deliberate decision that reddens a test rather than a silent drift.
+func TestSharedHonorificStillSatisfiesTheSharedNameRule(t *testing.T) {
+	for _, tc := range []struct{ name, requested, got string }{
+		{"dj", "Song (feat. DJ)", "Song (feat. DJ Alpha)"},
+		{"mc", "Song (feat. MC)", "Song (feat. MC Vanguard)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if creditsDiffer(tc.requested, tc.got) {
+				t.Skip("the honorific residual has been CLOSED -- update this test and the comment above it, and note which mechanism closed it")
+			}
+		})
+	}
+
+	// The control that proves the rule itself still works: a superset resting
+	// on PACKAGING rather than on any name must still reject.
+	if !creditsDiffer("Song (feat. Mono)", "Song (feat. Alpha) [Mono]") {
+		t.Error("a superset resting only on a packaging token was accepted: the shared-NAME requirement is what separates the honorific residual from a total failure of the rule")
+	}
+}
+
+// TestLiveAndUnpluggedAlreadyCorrespond RETRACTS a claim made in an earlier
+// commit message on this package, which called the live/unplugged cost
+// "unavoidable at this layer". It is not merely avoidable -- it was already
+// avoided, by #899's performanceFamilies grouping, and no probe is needed.
+//
+// Recorded as a test rather than only as prose so the retraction is checkable.
+func TestLiveAndUnpluggedAlreadyCorrespond(t *testing.T) {
+	if !titleTokensCorrespond("Placeholder Song (Live)", "Placeholder Song (Unplugged)") {
+		t.Error("an unplugged set IS a live acoustic performance and the two must correspond; performanceFamilies groups them deliberately")
+	}
 }
