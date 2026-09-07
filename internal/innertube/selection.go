@@ -812,80 +812,49 @@ func yearsDiffer(req, cand map[string]int) bool {
 // creditTail returns the tokens AFTER the first featuring marker -- the guest
 // credit that tokenizeTitle truncates away -- with ignorable tokens dropped.
 // No marker, or nothing after it, yields nil.
+//
+// NOTHING ELSE IS FILTERED, AND THAT IS THE FIX FOR A CLASS THAT REOPENED
+// THREE TIMES (891-R1C1, R2C1, R3C1, R4C1). Earlier revisions tried to strip
+// packaging tokens out of the tail so a shared decoration suffix could not make
+// two different credits look alike. Every variant of that leaked, because it
+// requires telling a guest's NAME from DECORATION and the vocabulary cannot:
+// "Mono", "Radio", "Clean" and "Original" are real act names AND packaging
+// words. Filtering the whole tail erased such a guest; filtering per element
+// erased it whenever two guests shared an element, which happens on every
+// delimiter the tokenizer does not preserve ("&" and "," are erased to
+// whitespace) and on any two-word act name.
+//
+// THE FILTER WAS ONLY EVER NEEDED FOR THE OVERLAP COMPARISON IT WAS BORN WITH.
+// When creditsDiffer asked "do these tails share ANY token", a shared "[Remix]"
+// answered yes and defeated the rule, so the suffix had to be removed. The
+// comparison is SUBSET now, and subset already handles it: [alpha remix]
+// against [beta remix] is a subset in neither direction, so the pair rejects
+// with no filtering at all. Keeping the filter after that change bought
+// nothing and cost four false-accept classes.
+//
+// THE COST, ACCEPTED DELIBERATELY: two titles with MATCHING credits and
+// DIFFERING packaging suffixes ("(feat. A) [Live]" vs "(feat. A) [Remix]") now
+// reject, because the suffix is in the tail and breaks the subset relation.
+// That is a false REJECT -- one missing lyric and a retry -- against a class of
+// false ACCEPTS that write another recording's guest verse to disk. The
+// asymmetry this package is built on decides it. #892 tracks the false-reject
+// direction; this shape belongs to it.
 func creditTail(s string) []string {
 	raw := splitTokens(s)
 	for i, tok := range raw {
 		if _, ok := featMarkers[tok]; !ok {
 			continue
 		}
-		return creditNames(raw[i+1:])
-	}
-	return nil
-}
-
-// creditNames reduces a raw credit tail to the guest names it lists.
-//
-// ELEMENT BY ELEMENT, NOT TAIL BY TAIL (891-R3C1). Two earlier revisions
-// filtered the tail as one blob and both were wrong, in opposite directions:
-// dropping every packaging token erased a guest whose NAME is a vocabulary word
-// ("Mono", "Radio", "Clean" are all real act names and all in
-// titleVariantTokens), while falling back to the unfiltered tail whenever
-// trimming emptied it dragged a decoration suffix back into the comparison and
-// broke two pinned accepts. The hazard is per-TOKEN, so the boundary has to be
-// too.
-//
-// "and" DELIMITS, it does not vanish. It is in ignorableTokens, so an earlier
-// revision discarded it and lost the only element boundary the tokenizer
-// leaves behind -- splitTokens erases the comma. Splitting on it first is what
-// makes "Alpha and Mono" two elements rather than one blob.
-//
-// WITHIN an element, a TRAILING RUN of packaging tokens is decoration and is
-// dropped, but the element's FIRST token is never dropped: that position is a
-// name even when the name is spelled like packaging. So "Alpha [Remix]" reduces
-// to "alpha", "Mono [Remix]" reduces to "mono", and "Alpha and Mono" keeps both
-// guests.
-func creditNames(raw []string) []string {
-	var out []string
-	for _, element := range splitOnConjunction(raw) {
-		var kept []string
-		for _, t := range element {
+		var out []string
+		for _, t := range raw[i+1:] {
 			if _, ig := ignorableTokens[t]; ig {
 				continue
 			}
-			kept = append(kept, t)
+			out = append(out, t)
 		}
-		// Trim a trailing packaging run, never past the first token.
-		for len(kept) > 1 {
-			last := kept[len(kept)-1]
-			if _, pkg := titleVariantTokens[last]; !pkg {
-				break
-			}
-			kept = kept[:len(kept)-1]
-		}
-		out = append(out, kept...)
+		return out
 	}
-	return out
-}
-
-// splitOnConjunction splits a token run into credit elements on "and", which
-// splitTokens leaves in place where it erased the comma.
-func splitOnConjunction(raw []string) [][]string {
-	var out [][]string
-	cur := []string{}
-	for _, t := range raw {
-		if t == "and" {
-			if len(cur) > 0 {
-				out = append(out, cur)
-			}
-			cur = []string{}
-			continue
-		}
-		cur = append(cur, t)
-	}
-	if len(cur) > 0 {
-		out = append(out, cur)
-	}
-	return out
+	return nil
 }
 
 // creditsDiffer reports whether two titles are BOTH credited and their credits

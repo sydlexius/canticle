@@ -1318,28 +1318,52 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
-	t.Run("a vocabulary-word guest does not break the pinned accepts", func(t *testing.T) {
-		// 891-R3I2: the opposite direction, and a regression the previous fix
-		// introduced. Falling back to the UNFILTERED tail when trimming emptied
-		// it dragged the decoration suffix back into the comparison, so the two
-		// behaviors pinned above -- an extra guest, and differing suffixes
-		// after MATCHING credits -- silently stopped holding whenever the guest
-		// was named with a vocabulary word.
+	t.Run("a vocabulary-word guest is compared whatever joins it", func(t *testing.T) {
+		// 891-R4C1. The delimiter dimension, which every earlier round missed:
+		// an element-splitting fix worked on "and" and left the same hazard
+		// open on every other joiner, because splitTokens ERASES "&", "," and
+		// "/" into whitespace while "x", "with" and "vs" survive as ordinary
+		// tokens. Two guests then share one element and a per-element filter
+		// erases the second one.
 		//
-		// Each row is the vocabulary-word twin of a control pinned elsewhere in
-		// this function, so a failure here means the two shapes have diverged.
+		// No filter runs now, so the delimiter cannot matter -- these pass
+		// without any of them being special-cased, which is the property worth
+		// pinning. The final rows need no delimiter at all: a two-word act name
+		// whose SECOND word is vocabulary, and a credit written entirely in
+		// vocabulary words.
 		for _, pair := range [][2]string{
-			{"Placeholder Song (feat. Mono)", "Placeholder Song (feat. Mono and Alpha)"},
-			{"Placeholder Song (feat. Mono) [Live]", "Placeholder Song (feat. Mono) [Remix]"},
-			{"Placeholder Song (feat. Clean) [Live]", "Placeholder Song (feat. Clean) [Remix]"},
+			{"Placeholder Song (feat. Alpha & Mono)", "Placeholder Song (feat. Alpha & Stereo)"},
+			{"Placeholder Song (feat. Alpha, Mono)", "Placeholder Song (feat. Alpha, Stereo)"},
+			{"Placeholder Song (feat. Alpha / Mono)", "Placeholder Song (feat. Alpha / Stereo)"},
+			{"Placeholder Song (feat. Alpha x Mono)", "Placeholder Song (feat. Alpha x Stereo)"},
+			{"Placeholder Song (feat. Alpha with Mono)", "Placeholder Song (feat. Alpha with Stereo)"},
+			{"Placeholder Song (feat. Neon Mono)", "Placeholder Song (feat. Neon Stereo)"},
+			{"Placeholder Song (feat. Mono Stereo)", "Placeholder Song (feat. Mono Karaoke)"},
 		} {
 			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
 			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
-			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
-				t.Errorf("%q vs %q was REJECTED -- the same shape with an ordinary guest "+
-					"name is pinned as an ACCEPT, so the vocabulary word must not change "+
-					"the verdict: %v", pair[0], pair[1], err)
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
 			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- a guest named with a vocabulary word "+
+					"must be compared no matter what joins it to the others", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("a vocabulary-word guest does not break the extra-guest accept", func(t *testing.T) {
+		// 891-R3I2 in its surviving half. A guest named with a vocabulary word
+		// must behave exactly like one named anything else, so this is the
+		// vocabulary-word twin of the "extra guest on one side" control pinned
+		// above -- a divergence between the two means the comparison is reading
+		// the NAME rather than the set.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (feat. Mono)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (feat. Mono and Alpha)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a credit superset was REJECTED because the shared guest is named "+
+				"with a vocabulary word -- the name must not change the verdict: %v", err)
 		}
 	})
 
@@ -1353,18 +1377,68 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
-	t.Run("differing suffixes after matching credits still accept", func(t *testing.T) {
-		// Pins the packaging filter in creditTail, which is a FALSE-REJECT
-		// guard rather than a false-accept one (891-R1V2 showed it unpinned).
-		// Tails here reduce to [alpha beta] and [alpha] -- a superset, so the
-		// same collaboration accepts. Keeping the packaging tokens would make
-		// them [alpha beta remix] and [alpha live], which share no subset
-		// relation and would reject a legitimate pair on its DECORATION.
-		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat Alpha and Beta [Remix]"}
-		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Alpha [Live]"}
+	t.Run("differing suffixes after matching credits REJECT, the accepted cost", func(t *testing.T) {
+		// THE PRICE OF DELETING THE PACKAGING FILTER (891-R4), pinned as a
+		// REJECT rather than removed, so the trade is recorded instead of
+		// merely absent.
+		//
+		// Earlier revisions stripped packaging tokens from the credit tail so a
+		// shared "[Remix]" could not make two different credits look alike.
+		// That filter leaked in four separate ways across four review rounds,
+		// because it requires telling a guest's NAME from DECORATION and the
+		// vocabulary cannot: "Mono", "Radio" and "Clean" are real act names AND
+		// packaging words. It was only ever needed for the OVERLAP comparison
+		// it was born with; subset handles the shared-suffix case unaided.
+		//
+		// What that costs is here: matching credits carrying DIFFERENT suffixes
+		// now reject, because the suffix sits in the tail and breaks the subset
+		// relation. A false REJECT costs one missing lyric and a retry, against
+		// a class of false ACCEPTS that write another recording's guest verse
+		// to disk. #892 tracks this direction.
+		for _, pair := range [][2]string{
+			{"Placeholder Song feat Alpha and Beta [Remix]", "Placeholder Song feat Alpha [Live]"},
+			{"Placeholder Song (feat. Mono) [Live]", "Placeholder Song (feat. Mono) [Remix]"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- with the packaging filter gone the "+
+					"suffix participates in the comparison, so this pair must reject; "+
+					"an accept here means a filter has crept back in", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("articles and conjunctions are dropped from the credit", func(t *testing.T) {
+		// Pins the ignorable filter in creditTail (891-R4 mutation M4, which
+		// survived until this row). It matters only where an article or
+		// conjunction BREAKS the subset relation: "The Alpha" against "Alpha
+		// and Beta" is [alpha] vs [alpha beta] -- a subset, so it accepts --
+		// but keeping the noise words makes it [the alpha] vs [alpha and beta],
+		// a subset in neither direction, and a legitimate superset rejects on
+		// the words that move around for free.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat The Alpha"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Alpha and Beta"}
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
-			t.Errorf("a credit superset carrying a DIFFERENT trailing packaging token was "+
-				"REJECTED -- the suffix must not participate in the credit comparison: %v", err)
+			t.Errorf("a credit superset was REJECTED over an article and a conjunction -- "+
+				"these move around without changing who is credited: %v", err)
+		}
+	})
+
+	t.Run("the credit subset is tested in BOTH directions", func(t *testing.T) {
+		// 891-R4 mutation M5: dropping either tokensSubset call left the suite
+		// green, because every other row has the REQUESTED side as the smaller
+		// credit. This row reverses that -- the request names more guests than
+		// the candidate -- so a one-directional test rejects it.
+		//
+		// Both directions are right on the merits: a local tag naming the full
+		// collaboration and an upload naming only the lead is the same
+		// recording, exactly as the reverse is.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat Alpha and Beta"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Alpha"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a request naming MORE guests than the candidate was REJECTED -- "+
+				"subset must hold in either direction: %v", err)
 		}
 	})
 
