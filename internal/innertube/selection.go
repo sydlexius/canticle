@@ -851,6 +851,16 @@ func creditTail(s string) []string {
 			if _, ig := ignorableTokens[t]; ig {
 				continue
 			}
+			// A LATER MARKER IS A DELIMITER, NOT A NAME (891-CR2). Only the
+			// FIRST marker opens the credit; the ones after it separate guests
+			// within it, and the spelling chosen is arbitrary. Keeping them as
+			// tokens let the SPELLING decide: "feat Alpha ft Beta" tailed to
+			// [alpha ft beta] and "featuring Alpha feat Beta" to
+			// [alpha feat beta], so two writings of ONE credit rejected each
+			// other on the delimiter rather than on the guests.
+			if _, mk := featMarkers[t]; mk {
+				continue
+			}
 			out = append(out, t)
 		}
 		// A CREDIT MADE ENTIRELY OF IGNORABLE WORDS KEEPS THEM (891-CR1).

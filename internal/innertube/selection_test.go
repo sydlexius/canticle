@@ -1356,6 +1356,64 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
+	t.Run("a later featuring marker delimits rather than naming a guest", func(t *testing.T) {
+		// 891-CR2. Only the FIRST marker opens the credit; the ones after it
+		// separate guests within it, and which spelling an uploader picks is
+		// arbitrary. Keeping them as tokens let the SPELLING decide the
+		// comparison -- "feat Alpha ft Beta" tailed to [alpha ft beta] and
+		// "featuring Alpha feat Beta" to [alpha feat beta], so two writings of
+		// ONE credit rejected each other on the delimiter rather than on the
+		// guests.
+		//
+		// The pairs below name the same guests through different marker
+		// spellings and must ACCEPT; the rows after them differ by a real
+		// guest and must still REJECT, so the fix cannot have been to stop
+		// comparing the tail at all.
+		for _, pair := range [][2]string{
+			{"Placeholder Song feat Alpha ft Beta", "Placeholder Song featuring Alpha feat Beta"},
+			{"Placeholder Song feat Alpha ft Beta", "Placeholder Song feats Alpha featuring Beta"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("%q vs %q was REJECTED -- these name the same guests and differ "+
+					"only in which marker spelling the uploader chose: %v", pair[0], pair[1], err)
+			}
+		}
+		for _, pair := range [][2]string{
+			{"Placeholder Song feat Alpha ft Beta", "Placeholder Song featuring Alpha feat Gamma"},
+			{"Placeholder Song feat Alpha ft Gamma", "Placeholder Song featuring Beta feat Gamma"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- dropping the marker must not stop the "+
+					"GUESTS being compared", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("a credit that is nothing but markers keeps them", func(t *testing.T) {
+		// The interaction between dropping later markers and the raw-tail
+		// fallback: a tail made only of marker tokens must not filter down to
+		// EMPTY, which would reach creditsDiffer's fail-open and accept any
+		// differing credit. The fallback already covers it -- "feat ft" tails
+		// to [ft] rather than nil -- and this pins that the two rules compose.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat ft"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Alpha"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor", conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a marker-only credit was ACCEPTED against a named guest -- filtering " +
+				"must not empty the tail into the fail-open")
+		}
+	})
+
 	t.Run("a credit made entirely of ignorable words is still compared", func(t *testing.T) {
 		// 891-CR1. creditTail drops articles and conjunctions, which is right
 		// where they sit BESIDE a name -- but an act whose whole name is built
