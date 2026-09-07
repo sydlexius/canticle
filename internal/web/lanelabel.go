@@ -1,6 +1,9 @@
 package web
 
-import "github.com/sydlexius/canticle/internal/detectorbackfill"
+import (
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
+	"github.com/sydlexius/canticle/internal/providers"
+)
 
 // laneLabel returns the user-facing name for a PERSISTED lane string, falling
 // back to the raw value so an unmapped lane is still shown rather than blanked.
@@ -21,6 +24,18 @@ func laneLabel(lane string) string {
 	switch lane {
 	case detectorbackfill.LaneName:
 		return "Instrumental Detector"
+	// Taken from providers.InnerTube for the same reason the detector's case is
+	// taken from detectorbackfill: that constant IS the persisted value, so the
+	// label can never drift from the lane it labels.
+	//
+	// The label names the LANE, not the licensor. This lane multiplexes, so the
+	// upstream varies per track and no single provider name would be true of
+	// every row aggregated under it -- the licensor is recorded per sidecar in
+	// [upstream:] instead (docs/provider-attribution.md, #859). Naming a
+	// licensor here would assert of a whole column something that is only
+	// sometimes true.
+	case providers.InnerTube:
+		return "YouTube Music"
 	default:
 		return lane
 	}
