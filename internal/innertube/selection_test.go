@@ -1353,17 +1353,62 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
-	t.Run("a vocabulary-word guest does not break the extra-guest accept", func(t *testing.T) {
-		// 891-R3I2 in its surviving half. A guest named with a vocabulary word
-		// must behave exactly like one named anything else, so this is the
-		// vocabulary-word twin of the "extra guest on one side" control pinned
-		// above -- a divergence between the two means the comparison is reading
-		// the NAME rather than the set.
+	t.Run("decoration must not manufacture a subset relation", func(t *testing.T) {
+		// 891-R5C1, the class that deleting the packaging filter reopened. The
+		// filter had been removed on the reasoning that subset "handles it
+		// unaided"; that was true for the shape where BOTH tails carry the same
+		// decoration, and false for the shape where the decoration exists on
+		// ONE side and coincides with the OTHER side's guest name:
+		//
+		//	"(feat. Mono)"          tail [mono]
+		//	"(feat. Alpha) [Mono]"  tail [alpha mono]   -> a subset, so it accepted
+		//
+		// Two different guest verses. Every one of the packaging tokens can
+		// play the part of "Mono" here, so this is measured across several
+		// rather than pinned on one, and in both directions -- the relation is
+		// symmetric and an earlier revision only ever probed one side.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (feat. Mono)", "Placeholder Song (feat. Alpha) [Mono]"},
+			{"Placeholder Song (feat. Radio)", "Placeholder Song (feat. Alpha) [Radio Edit]"},
+			{"Placeholder Song (feat. Clean)", "Placeholder Song (feat. Alpha) [Clean]"},
+			{"Placeholder Song (feat. Alpha) [Mono]", "Placeholder Song (feat. Mono)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- the subset relation here is made by "+
+					"the candidate's DECORATION, not by a shared guest", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("a superset accept needs a shared NAME, not shared packaging", func(t *testing.T) {
+		// 891-R5C1, and the genuine ambiguity this package resolves by the
+		// asymmetry rather than by cleverness. As SETS these two comparisons
+		// are IDENTICAL -- {mono} contained in {mono, alpha}:
+		//
+		//	"(feat. Mono)" vs "(feat. Alpha) [Mono]"    different guest verses
+		//	"(feat. Mono)" vs "(feat. Mono and Alpha)"  same act, extra guest
+		//
+		// Nothing at the token level separates them, because the only shared
+		// token is a packaging word that is ALSO a real act name. Accepting
+		// both admits the first, which writes another recording's guest verse
+		// to disk; rejecting both costs a missing lyric and a retry on the
+		// second. Both therefore REJECT, and this row pins the losing side of
+		// that trade so it is recorded rather than rediscovered.
+		//
+		// The equivalent pair with an ordinary shared name ACCEPTS, and is
+		// pinned separately as "an extra guest on one side still accepts".
 		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (feat. Mono)"}
 		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (feat. Mono and Alpha)"}
-		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
-			t.Errorf("a credit superset was REJECTED because the shared guest is named "+
-				"with a vocabulary word -- the name must not change the verdict: %v", err)
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a superset whose only shared token is PACKAGING was ACCEPTED -- " +
+				"that relation is indistinguishable from decoration manufacturing it, " +
+				"so it must reject")
 		}
 	})
 

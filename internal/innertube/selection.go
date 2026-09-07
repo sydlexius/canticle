@@ -857,46 +857,54 @@ func creditTail(s string) []string {
 	return nil
 }
 
-// creditsDiffer reports whether two titles are BOTH credited and their credits
-// name nobody in common (#891).
+// SUBSET PLUS A SHARED NAME (891-R1C1, corrected 891-R5C1). Overlap asked "do
+// these share any token", which any shared honorific defeats: "feat DJ Alpha"
+// and "feat DJ Beta" share `dj`. Subset asks the better question -- "does one
+// credit list a superset of the other's names" -- but subset ALONE is not
+// enough, because a containment relation can be manufactured by the larger
+// side's DECORATION rather than by a real extra guest:
 //
-// This is the year rule's shape (yearsDiffer, #883) applied to a second token
-// class, and for the same reason: a token that is PACKAGING when one-sided
-// becomes IDENTITY when both sides carry it and they disagree. tokenizeTitle
-// truncates from the marker onward, so two titles with the same base and
-// different guests reduce to the SAME multiset and hit the sameMultiset
-// early-accept with no further evidence. A guest verse is lyrics, so accepting
-// one for the other writes another recording's words.
+//	requested "(feat. Mono)"           tail [mono]
+//	candidate "(feat. Alpha) [Mono]"   tail [alpha mono]      -> subset!
 //
-// ONE-SIDED CREDITS STAY PACKAGING, deliberately -- "Song" vs
-// "Song (feat. Guest)" is the exact case the truncation was written for, and
-// the discriminator must not touch it.
+// Those are two different guest verses, and every one of the 31 packaging
+// tokens can play the part of "Mono" here. So a SUPERSET accept additionally
+// requires at least one shared token that is NOT packaging -- real evidence
+// that the two credits name the same act. Identical tails skip that test:
+// nothing is being inferred there.
 //
-// WHY THE COMPARISON IS LOOSE AT ALL. Credits legitimately vary in form: an
-// extra guest listed on one side, "&" against "and", a reordering. Requiring
-// full equality would reject all three, and each is pinned as an ACCEPT. The
-// STRENGTH of that looseness is chosen below and is not overlap -- see SUBSET,
-// NOT OVERLAP on the comparison itself. (This paragraph previously specified
-// overlap and contradicted the rule seven lines beneath it; the requirement it
-// states is unchanged, only the mechanism moved.)
-//
-// The asymmetry decides the strength: a false REJECT costs one missing lyric
-// and a retry, a false ACCEPT writes another recording's words to disk and
-// looks correct.
+// THE AMBIGUITY THIS RESOLVES IS GENUINE. As SETS, "(feat. Mono)" against
+// "(feat. Alpha) [Mono]" and "(feat. Mono)" against "(feat. Mono and Alpha)"
+// are the same comparison -- {mono} contained in {mono, alpha} -- yet the first
+// is a different recording and the second is the same one with an extra guest.
+// Nothing at the token level separates them, so the asymmetry decides: a false
+// REJECT costs one missing lyric and a retry, a false ACCEPT writes another
+// recording's guest verse to disk. Both reject.
 func creditsDiffer(requested, got string) bool {
 	req := creditTail(requested)
 	cand := creditTail(got)
 	if len(req) == 0 || len(cand) == 0 {
 		return false
 	}
-	// SUBSET, NOT OVERLAP (891-R1C1). Overlap asked "do these share any token",
-	// which any shared honorific defeats: "feat DJ Alpha" and "feat DJ Beta"
-	// share `dj` and were accepted as the same collaboration. Subset asks the
-	// question actually meant -- "does one credit list a superset of the
-	// other's names" -- which still admits every variation the overlap rule was
-	// chosen for (an extra guest, a reordering, "&" against "and", all pinned
-	// below) while refusing two credits that merely share a word.
-	return !tokensSubset(req, cand) && !tokensSubset(cand, req)
+	if !tokensSubset(req, cand) && !tokensSubset(cand, req) {
+		return true
+	}
+	// Identical tails need no further evidence.
+	if len(req) == len(cand) {
+		return false
+	}
+	// A superset relation must rest on a shared NAME, not on decoration.
+	for _, r := range req {
+		if _, pkg := titleVariantTokens[r]; pkg {
+			continue
+		}
+		for _, c := range cand {
+			if r == c {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // tokensSubset reports whether every token in a appears in b.
