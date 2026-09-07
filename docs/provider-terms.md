@@ -14,9 +14,11 @@ official brand mark rather than the exact prescribed button (which is not publis
 usable format -- see below). Clauses 2.1.11, 2.1.4 and 1.1 remain unaddressed.
 petitlyrics imposes no attribution requirement but does constrain use.
 InnerTube multiplexes between two upstream licensors per track (LyricFind and Musixmatch reached
-through Google's own license); LyricFind's terms appear not to reach this use, and reaching
-Musixmatch through Google's license instead of the direct API is a different posture that has not
-been assessed. See the InnerTube section below.
+through Google's own license). LyricFind's terms were READ IN FULL and are a website agreement
+that binds by ACCESS to their site, which this lane never touches; they impose no attribution
+requirement and contain no third-party or developer terms. Reaching Musixmatch through Google's
+license instead of the direct API remains a different posture that has NOT been assessed. See the
+InnerTube section below.
 
 Do not read this file as a compliance sign-off -- it is a record of what the terms say and
 what Canticle does about them, reviewed by an agent rather than by counsel.
@@ -251,27 +253,57 @@ reaches those upstreams' own endpoints or agrees to their developer terms direct
 ### Upstream A: LyricFind
 
 **Checked:** 2026-09-07
-**Source:** LyricFind's published terms of use, on their own website.
+**Source:** LyricFind Terms and Conditions, `https://www.lyricfind.com/terms-and-conditions`.
+Read in full on the date above. The page carries NO last-updated or effective date, so
+this reading cannot be pinned to a document version -- only to the date it was read. The
+terms do provide for amendment on 30 days' posted notice, so a later reader should
+re-check rather than assume this still holds.
 
-LyricFind's published terms govern use of their **website** and do not address
-third-party applications, attribution, or lyric redistribution by a consumer reaching
-their catalog indirectly the way Canticle does (through another platform's licensing
-arrangement with them, mediated by InnerTube). Their intellectual-property clause
-prohibits reproducing the site's own graphics; nothing in the terms as read constrains a
-third party's use of lyric data obtained this way.
+**SCOPE, AND IT IS THE WHOLE FINDING.** The terms open by defining themselves as
+governing use of "this website, www.lyricfind.com", and they bind by ACCESS: the user
+agrees by accessing the Site on a device. They are a website agreement, front to back.
+
+**Canticle never accesses that website.** This lane calls Google's InnerTube endpoint;
+LyricFind's servers are never contacted, no LyricFind page is loaded, and no Canticle
+code path touches their domain. On the terms' own trigger, they do not attach to
+Canticle at all. That is a stronger and more precise statement than the earlier draft's
+"appear not to reach this use", and it is what the document actually says.
+
+What the terms contain, relevant to this lane:
+
+- **Intellectual property**: material on the website -- design, layout, look, appearance,
+  and graphics -- is owned by or licensed to LyricFind, and reproduction is prohibited
+  unless otherwise stated. The enumeration is explicitly non-exhaustive.
+- **Termination**: LyricFind reserves the right to block IP addresses and prevent access
+  to the Site at its discretion. Not applicable while Canticle does not contact them, but
+  worth knowing the remedy they name.
+- **Governing law**: Canada (Ontario), with binding arbitration through the Canadian
+  Arbitration Association in Toronto and a liability cap of US $100.
+
+What the terms do NOT contain, checked for specifically:
+
+- **No attribution or crediting requirement**, in any form, for lyrics or otherwise.
+  Absent entirely rather than waived.
+- **No third-party application, API, or developer terms.** Nothing addresses a consumer
+  reaching their catalog indirectly through a platform that licenses from them.
+- **No redistribution or caching language for lyric TEXT.** The IP clause enumerates site
+  presentation material and does not name lyrics.
+
+**DO NOT READ THAT LAST ABSENCE AS PERMISSION.** Lyric text is copyrighted by music
+publishers, and LyricFind is a licensor of it rather than its owner; a website's terms
+being silent on redistribution says nothing about the underlying copyright, which is not
+LyricFind's to waive in this document and is not addressed here. The finding is narrow
+and should stay narrow: these particular terms impose no attribution duty on Canticle and
+do not reach this access pattern. Whether writing a lyric to a user's own disk is
+permissible rests on copyright and on Google's license, neither of which this file
+assesses.
 
 **This is why no mark or icon is vendored for LyricFind anywhere in Canticle**, following
-the same policy already applied to petitlyrics (#601): no third-party developer terms
-authorizing use of LyricFind's branding were located, so `laneMark` renders this lane as
-text only regardless of which upstream served a given result -- never a LyricFind icon.
-See "No new mark for this lane" in `docs/provider-attribution.md`.
-
-**Honest unknown:** this finding is stated as of the date above and was not independently
-re-fetched during this documentation pass (this environment had no outbound web access
-while it was written). Re-verify before treating "no attribution required" as settled --
-the Musixmatch section above already records one case where an earlier "terms are
-unreachable" finding turned out to be a tooling limitation, not a property of the terms
-themselves, so the same caution applies here.
+the same policy already applied to petitlyrics (#601). The IP clause covers the site's
+graphics, and no third-party developer terms authorizing use of their branding exist to
+grant an exception, so `laneMark` renders this lane as text only regardless of which
+upstream served a given result -- never a LyricFind icon. See "No new mark for this lane"
+in `docs/provider-attribution.md`.
 
 ### Upstream B: Musixmatch, reached through Google's license
 
