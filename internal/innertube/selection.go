@@ -444,23 +444,31 @@ func scoreCandidate(c SearchCandidate, requested models.Track) float64 {
 //     one. A credited remix is also frequently a genuinely different
 //     arrangement rather than the same words. The cost is a false REJECT, the
 //     recoverable direction.
-//   - TWO DIFFERENT PERFORMANCES OF THE SAME SONG CORRESPOND -- "(Live)" vs
-//     "(Acoustic)", and likewise "(Live)"/"(Demo)" or "(Acoustic)"/"(Karaoke)".
-//     DECIDED, NOT MISSED, and it reverses both axes of the sibling-title class
-//     this rule exists to close. That class is a DIFFERENT SONG with different
-//     words at a near-identical runtime, so timing.Evaluate is blind to it and
-//     there is no net below this gate. A performance variant is the SAME WORDS,
-//     so an accept is not corruption, and the runtimes genuinely DIFFER, so the
-//     net that missed the sibling catches this one: a live take judged against
-//     studio audio computes MisSynced and is demoted to .txt with the words
-//     kept, an extended remix computes Categorical and is quarantined. The
-//     residue is two takes within timing's own tolerance of each other -- the
-//     right words with sub-tolerance drift, which is exactly what the already
-//     accepted remaster and radio-edit classes tolerate. Closing it would need
-//     a SECOND vocabulary partitioning performance tokens from packaging ones,
-//     doubling the surface that is itself the risk here, and it would start
-//     rejecting "asked for the live cut, got the plain upload" -- same words,
-//     accepted by design per DIRECTION IS NOT DISTINGUISHED above.
+//   - TWO DIFFERENT PERFORMANCES OF THE SAME SONG: PARTLY SUPERSEDED BY #890.
+//     This entry read "(Live)" vs "(Acoustic)", "(Live)"/"(Demo)" and
+//     "(Acoustic)"/"(Karaoke)" as DECIDED accepts, and predicted that closing
+//     them would need "a SECOND vocabulary partitioning performance tokens from
+//     packaging ones". #890 built that vocabulary; see performanceFamilies.
+//     The entry is kept rather than deleted because its REASONING was right
+//     about the cases it actually named, and the split follows that reasoning:
+//       * "(Live)" vs "(Acoustic)" STILL ACCEPTS, and now so does
+//         "(Unplugged)" against either. These are one live performance under
+//         three labels -- SAME WORDS, so an accept is not corruption, and where
+//         the runtimes differ timing.Evaluate is a real net beneath this gate,
+//         exactly as argued below.
+//       * "(Live)"/"(Demo)" and "(Acoustic)"/"(Karaoke)" NOW REJECT. That is
+//         where the original reasoning did not reach: a demo carries alternate
+//         lines and a karaoke or instrumental cut has NO sung words, so "same
+//         words" is false and the timing net does not catch it -- two takes of
+//         one song run about the same length.
+//     The rest of this entry describes the accepting half and remains accurate
+//     for it: a performance variant is the SAME WORDS, so an accept is not
+//     corruption; the runtimes genuinely DIFFER, so the net that missed the
+//     sibling catches this one -- a live take judged against studio audio
+//     computes MisSynced and is demoted to .txt with the words kept, an
+//     extended remix computes Categorical and is quarantined. And a ONE-SIDED
+//     performance token still accepts, so "asked for the live cut, got the
+//     plain upload" is untouched, per DIRECTION IS NOT DISTINGUISHED above.
 //   - Case, punctuation, diacritics and "&"/"and" are erased by tokenization,
 //     so they never reach the vocabulary. APOSTROPHES ARE ERASED TOO, but by an
 //     explicit replacer rather than by the split -- see apostropheEraser, and
@@ -501,65 +509,106 @@ var titleVariantTokens = map[string]struct{}{
 	"spedup": {}, "sloweddown": {},
 }
 
-// performanceTokens is the subset of titleVariantTokens naming a distinct
-// PERFORMANCE rather than a distinct pressing of one performance (#890).
+// performanceFamilies maps a performance token to the FAMILY of performance it
+// names (#890, corrected by the 891/890 review). Two titles conflict only when
+// each names a performance and the families do not match.
 //
-// The distinction is that a remaster, a mono cut and a deluxe edition are the
-// SAME take issued differently -- same words, same timing -- while a live
-// take, a demo and an acoustic session are different recordings that can carry
-// ad-libs, alternate lines, or no words at all.
+// FAMILIES, NOT TOKENS, AND THE DIFFERENCE IS LOAD BEARING. A token-level
+// comparison rejected "(Live)" against "(Unplugged)" and "(Acoustic)" -- but an
+// unplugged set IS a live acoustic performance, and those are frequently the
+// same recording marketed two ways. Grouping them means the rule fires on a
+// genuine change of performance, not on a synonym.
 //
-// FIRES ONLY WHEN BOTH SIDES CARRY ONE AND THEY DISAGREE, which is the year
-// (#883) and credit (#891) shape a third time. A ONE-SIDED performance token
-// still accepts, and that is not a compromise -- it is pinned by
-// TestLegitimateVariantsStayAccepted, whose controls include "Song" against
-// "Song (Live)", "(Acoustic Version)", "(Instrumental)" and "(Karaoke
-// Version)". Those are the documented, reasoned accept: asked for the live
-// cut, got the plain upload, and the words match.
+// "radio" IS DELIBERATELY ABSENT. A radio edit is a PRESSING of the studio
+// take -- shortened, cleaned -- not a different performance, so it stays plain
+// packaging in titleVariantTokens. Classing it as a performance rejected
+// "(Radio Edit)" against "(Live)" on the token `radio` alone, which is the
+// wrong reason even where the verdict is arguable.
 //
-// INSTRUMENTAL AND KARAOKE ARE MEMBERS, and #890 asked for that call to be
-// explicit. They discriminate against ANOTHER performance token -- an
-// instrumental is not a live take -- but a ONE-SIDED instrumental still
-// accepts, because the control pins it and because "does this FILE have words"
-// belongs to the instrumental-detection path, not to a title comparison.
-//
-// KNOWN RESIDUAL, recorded rather than hidden: a PACKAGING variant against a
-// PERFORMANCE variant ("Song (Remastered)" vs "Song (Live)") has only one side
-// carrying a performance token, so it still accepts. Closing it would require
-// firing when the sets merely DIFFER, which rejects the one-sided case the
-// controls pin. The recoverable direction wins.
-var performanceTokens = map[string]struct{}{
-	"live": {}, "unplugged": {}, "acoustic": {}, "demo": {},
-	"session": {}, "sessions": {}, "take": {}, "radio": {},
-	"instrumental": {}, "karaoke": {},
+// WHAT THIS PRESERVES FROM THE PRE-#890 DECISION, which the block above records
+// and which was RIGHT about its own cases: a live take and an acoustic take
+// carry the SAME WORDS, so accepting one for the other is not corruption, and
+// timing.Evaluate is a real net beneath the gate. What that reasoning did not
+// cover is a performance with DIFFERENT words or NO words -- an instrumental,
+// a karaoke cut, a demo with alternate lines -- where no net exists because the
+// runtimes match. The families below draw the line there.
+var performanceFamilies = map[string]string{
+	// ONE live performance, however it is labeled. These three are SYNONYMS
+	// for a single event type -- an unplugged set is a live acoustic
+	// performance -- and are frequently the same recording marketed two ways,
+	// which is why they must not reject each other.
+	"live": "live", "unplugged": "live", "acoustic": "live",
+	// Distinct working recordings. These are NOT grouped with each other: a
+	// demo and a radio session are different events, not two words for one, so
+	// each keeps its own family and they reject across.
+	"demo": "demo", "demos": "demo",
+	"session": "session", "sessions": "session",
+	"take": "take", "takes": "take",
+	// No sung words at all, so no lyric can be shared with a sung take.
+	"instrumental": "silent", "karaoke": "silent",
 }
 
+// KNOWN RESIDUAL, MEASURED AND RECORDED RATHER THAN IMPLIED (891-R1C2). The
+// both-sides requirement means a rule cannot fire when only ONE side names a
+// performance, so these all still ACCEPT:
+//
+//	"(Remastered)" vs "(Live)"        packaging against a performance
+//	"(Deluxe Edition)" vs "(Demo)"    same shape
+//	"(Mono)" vs "(Karaoke)"           the sharp one: a wordless cut
+//	"(Extended Mix)" vs "(Instrumental)"
+//	"feat Alpha" vs "(Live)"          a credit against a performance
+//
+// Closing them would mean firing when one side names a performance and the
+// other names a DIFFERENT variant token -- which requires distinguishing "the
+// other side is bare" from "the other side is packaged", since a BARE title
+// against any performance must keep accepting (pinned by the 19 controls in
+// TestLegitimateVariantsStayAccepted, and the documented reasoned accept:
+// asked for the live cut, got the plain upload). That is real new surface for a
+// class where the recoverable direction already wins, so it is left open
+// deliberately and stated here rather than discovered later.
+//
 // performancesDiffer reports whether both titles name a performance and the
-// performances share nothing. See performanceTokens for why it requires both
-// sides, and yearsDiffer for the shape it mirrors.
+// performance FAMILIES do not match. See performanceFamilies for the grouping
+// and yearsDiffer (#883) for the shape it mirrors: a token that is packaging
+// when ONE-SIDED becomes identity when both sides carry it and they disagree.
+//
+// A ONE-SIDED performance token still accepts. That is pinned by
+// TestLegitimateVariantsStayAccepted ("Song" against "Song (Live)",
+// "(Instrumental)", "(Karaoke Version)") and it is the documented, reasoned
+// accept: asked for the live cut, got the plain upload, and the words match.
+//
+// SETS, NOT FIRST-MATCH. A multi-token performance carries every family it
+// names, and the rule fires unless the two sets are EQUAL. An earlier revision
+// returned as soon as any one family matched, which accepted "(Live)" against
+// "(Live Instrumental)" -- the same performance, one of them wordless -- on the
+// shared `live`.
 func performancesDiffer(req, cand map[string]int) bool {
-	var reqPerf, candPerf []string
-	for tok := range req {
-		if _, ok := performanceTokens[tok]; ok {
-			reqPerf = append(reqPerf, tok)
-		}
-	}
-	for tok := range cand {
-		if _, ok := performanceTokens[tok]; ok {
-			candPerf = append(candPerf, tok)
-		}
-	}
-	if len(reqPerf) == 0 || len(candPerf) == 0 {
+	reqFam := performanceFamiliesIn(req)
+	candFam := performanceFamiliesIn(cand)
+	if len(reqFam) == 0 || len(candFam) == 0 {
 		return false
 	}
-	for _, r := range reqPerf {
-		for _, c := range candPerf {
-			if r == c {
-				return false
-			}
+	if len(reqFam) != len(candFam) {
+		return true
+	}
+	for f := range reqFam {
+		if !candFam[f] {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// performanceFamiliesIn returns the set of performance families named by a
+// title's tokens.
+func performanceFamiliesIn(toks map[string]int) map[string]bool {
+	out := map[string]bool{}
+	for tok := range toks {
+		if fam, ok := performanceFamilies[tok]; ok {
+			out[fam] = true
+		}
+	}
+	return out
 }
 
 // ignorableTokens are dropped from BOTH fields before comparison. Articles and
@@ -747,6 +796,15 @@ func creditTail(s string) []string {
 			if _, ig := ignorableTokens[t]; ig {
 				continue
 			}
+			// PACKAGING TOKENS ARE DROPPED FROM THE TAIL (891-R1C1). A real
+			// title routinely carries a version suffix AFTER the credit --
+			// "Song (feat. A) [Remix]" -- and that suffix lands in BOTH tails,
+			// so a comparison that kept it found a shared token and concluded
+			// the credits matched. That reopened the exact defect this rule
+			// closes, for the more common title shape.
+			if _, pkg := titleVariantTokens[t]; pkg {
+				continue
+			}
 			out = append(out, t)
 		}
 		return out
@@ -781,11 +839,28 @@ func creditsDiffer(requested, got string) bool {
 	if len(req) == 0 || len(cand) == 0 {
 		return false
 	}
-	for _, r := range req {
-		for _, c := range cand {
-			if r == c {
-				return false
+	// SUBSET, NOT OVERLAP (891-R1C1). Overlap asked "do these share any token",
+	// which any shared honorific defeats: "feat DJ Alpha" and "feat DJ Beta"
+	// share `dj` and were accepted as the same collaboration. Subset asks the
+	// question actually meant -- "does one credit list a superset of the
+	// other's names" -- which still admits every variation the overlap rule was
+	// chosen for (an extra guest, a reordering, "&" against "and", all pinned
+	// below) while refusing two credits that merely share a word.
+	return !tokensSubset(req, cand) && !tokensSubset(cand, req)
+}
+
+// tokensSubset reports whether every token in a appears in b.
+func tokensSubset(a, b []string) bool {
+	for _, x := range a {
+		found := false
+		for _, y := range b {
+			if x == y {
+				found = true
+				break
 			}
+		}
+		if !found {
+			return false
 		}
 	}
 	return true

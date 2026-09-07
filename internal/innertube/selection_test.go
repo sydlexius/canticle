@@ -909,16 +909,28 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
-	t.Run("a radio cut and a live cut are rejected", func(t *testing.T) {
-		// #890 row 1.
-		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Radio"}
-		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Live"}
-		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
-			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
-				conf, matchMinConfidence)
-		}
-		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
-			t.Error("a radio cut was ACCEPTED for a live cut")
+	t.Run("a radio cut and a live cut still ACCEPT, deliberately", func(t *testing.T) {
+		// #890 listed this pair as a defect. DECIDED THE OTHER WAY, which its
+		// AC 1 explicitly permits ("or whether the current accept is correct
+		// and the cases above are an accepted cost"), and the row is kept as an
+		// ACCEPT rather than deleted so the decision is pinned instead of
+		// merely absent.
+		//
+		// A radio edit is a PRESSING of the studio take -- shortened, cleaned --
+		// not a different performance, so `radio` stays plain packaging. When
+		// this pair rejected, it rejected on the token `radio` alone, which is
+		// the wrong REASON even where the verdict looks arguable: it also
+		// rejected "(Radio Edit)" against a live take while accepting a bare
+		// title against either.
+		//
+		// The words are the same either way, and timing.Evaluate is a real net
+		// beneath this gate for a runtime mismatch. A false ACCEPT here is the
+		// documented, reasoned kind.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (Radio Edit)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (Live)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a radio edit was REJECTED against a live take -- `radio` names a "+
+				"pressing, not a performance, and must not discriminate: %v", err)
 		}
 	})
 
@@ -932,6 +944,90 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
 			t.Error("a session take was ACCEPTED for a demo")
+		}
+	})
+
+	t.Run("a live take and a live INSTRUMENTAL are rejected", func(t *testing.T) {
+		// 891-R1C2b: the worst multi-token case. An earlier revision returned
+		// as soon as ANY one performance token matched, so a live take and a
+		// live instrumental of the same song accepted on the shared `live` --
+		// one of them has no sung words at all. The rule compares the FAMILY
+		// SETS, so naming an extra family is a difference.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (Live)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (Live Instrumental)"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a live take was ACCEPTED for a live INSTRUMENTAL -- sharing the " +
+				"`live` token must not admit a wordless cut")
+		}
+	})
+
+	t.Run("a live acoustic set and a live demo are rejected", func(t *testing.T) {
+		// The same set-comparison property on two multi-token performances that
+		// share a family but not the whole set.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (Live Acoustic)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (Live Demo)"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("a live acoustic set was ACCEPTED for a live demo")
+		}
+	})
+
+	t.Run("live, unplugged and acoustic are ONE family and accept each other", func(t *testing.T) {
+		// 891-R1R1/R2, and the correction of a real false REJECT this branch
+		// introduced. An unplugged set IS a live acoustic performance; these
+		// are frequently the same recording marketed two ways, and the block
+		// above titleVariantTokens already DECIDED that "(Live)" vs
+		// "(Acoustic)" corresponds. Grouping them keeps that decision true
+		// while still separating a live take from a demo.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (Live)", "Placeholder Song (Unplugged)"},
+			{"Placeholder Song (Live)", "Placeholder Song (Acoustic)"},
+			{"Placeholder Song (Unplugged)", "Placeholder Song (Acoustic)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("%q vs %q was REJECTED -- these name ONE live performance and "+
+					"carry the same words: %v", pair[0], pair[1], err)
+			}
+		}
+	})
+
+	t.Run("each performance family is pinned by a rejecting pair", func(t *testing.T) {
+		// 891-R1V4: deleting `unplugged`, `acoustic`, `sessions` or `take` from
+		// the vocabulary left the suite GREEN, so four members were unpinned and
+		// a wrong classification of any of them was invisible. Each row below
+		// dies if its token stops naming its family.
+		//
+		// Every pair contrasts against `demo`, whose own membership is pinned
+		// separately above, so a row can only pass by the token under test
+		// being recognized.
+		for _, tc := range []struct{ name, title string }{
+			{"unplugged", "Placeholder Song (Unplugged)"},
+			{"acoustic", "Placeholder Song (Acoustic)"},
+			{"sessions", "Placeholder Song (Sessions)"},
+			{"take", "Placeholder Song (Take)"},
+			{"live", "Placeholder Song (Live)"},
+			{"karaoke", "Placeholder Song (Karaoke)"},
+			{"instrumental", "Placeholder Song (Instrumental)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: tc.title}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (Demo)"}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("%s: test premise broken: confidence %.4f is below the %.2f floor",
+					tc.name, conf, matchMinConfidence)
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q was ACCEPTED against a demo -- its performance family is "+
+					"not being recognized", tc.name)
+			}
 		}
 	})
 
@@ -1047,6 +1143,97 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 			t.Error("two titles that are entirely DIFFERENT credits were ACCEPTED -- " +
 				"the empty-token fail-open must not admit a pair whose only content " +
 				"is a disagreeing credit")
+		}
+	})
+
+	t.Run("a shared suffix after the credit does not dilute it", func(t *testing.T) {
+		// 891-R1C1, the CRITICAL finding: creditTail returned everything after
+		// the marker, so a version suffix landed in BOTH tails and the
+		// comparison found a shared token. That reopened this defect for the
+		// more common real title shape. Every earlier credit row had a
+		// single-token tail, which is why nothing saw it.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (feat. Alpha) [Remix]"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (feat. Beta) [Remix]"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("differing credits carrying the SAME trailing packaging token were " +
+				"ACCEPTED -- the shared suffix must not count as shared credit")
+		}
+	})
+
+	t.Run("a shared honorific does not dilute the credit", func(t *testing.T) {
+		// The same hole reached without any suffix at all: "DJ"/"Lil"/"MC" and
+		// band nouns are the dominant guest naming convention in exactly the
+		// genres that carry a feat credit, and under an OVERLAP comparison the
+		// shared honorific alone defeated the rule.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat DJ Alpha"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat DJ Beta"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: title confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("two different guests sharing an honorific were ACCEPTED")
+		}
+	})
+
+	t.Run("an extra guest on one side still accepts", func(t *testing.T) {
+		// Pins the SUBSET rule's permissive half. This is the case the
+		// comparison is deliberately loose for, and nothing pinned it before:
+		// swapping subset for strict equality left the suite green (891-R1V1),
+		// so the reasoning paragraph was unenforced.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat Alpha"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Alpha and Beta"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a credit listing an EXTRA guest was REJECTED -- one credit being a "+
+				"superset of the other is the same collaboration: %v", err)
+		}
+	})
+
+	t.Run("differing suffixes after matching credits still accept", func(t *testing.T) {
+		// Pins the packaging filter in creditTail, which is a FALSE-REJECT
+		// guard rather than a false-accept one (891-R1V2 showed it unpinned).
+		// Tails here reduce to [alpha beta] and [alpha] -- a superset, so the
+		// same collaboration accepts. Keeping the packaging tokens would make
+		// them [alpha beta remix] and [alpha live], which share no subset
+		// relation and would reject a legitimate pair on its DECORATION.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat Alpha and Beta [Remix]"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Alpha [Live]"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a credit superset carrying a DIFFERENT trailing packaging token was "+
+				"REJECTED -- the suffix must not participate in the credit comparison: %v", err)
+		}
+	})
+
+	t.Run("a reordered credit still accepts", func(t *testing.T) {
+		// The other half of the subset rule, also previously unpinned.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat Alpha Beta"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Beta Alpha"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a reordered credit was REJECTED: %v", err)
+		}
+	})
+
+	t.Run("every featuring marker spelling is honored", func(t *testing.T) {
+		// 891-R1V3: the existing `featuring` row passed even with `featuring`
+		// REMOVED from featMarkers, because the pair then rejected on the
+		// ordinary unmatched-content rule instead -- a different mechanism, so
+		// the row pinned nothing. These use a BARE-vs-credited shape, where an
+		// unrecognized marker ACCEPTS (the content rule cannot reject it), so
+		// only real marker recognition produces the expected verdict.
+		for _, marker := range []string{"feat", "feats", "ft", "featuring"} {
+			requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
+			c := SearchCandidate{
+				VideoID: "vid", Artist: artist,
+				Title: "Placeholder Song Title " + marker + " Placeholder Guest",
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+				t.Errorf("marker %q was not recognized: a one-sided credit using it was "+
+					"REJECTED, so the truncation never fired: %v", marker, err)
+			}
 		}
 	})
 
