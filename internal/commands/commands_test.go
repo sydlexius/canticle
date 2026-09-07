@@ -3373,3 +3373,59 @@ func TestBuildProviderAppliesInnerTubeInterval(t *testing.T) {
 			"api.cooldown is 15s here, so this reading means the resolved interval never reached the client.", got)
 	}
 }
+
+// TestConfigInnerTubeCooldownGetSetRoundTrip covers the config get/set arms for
+// providers.innertube_cooldown_seconds (#858), mirroring the petitlyrics test
+// above. The key is Editable in the registry, so a missing CLI arm is exactly
+// the registry/CLI drift #670 tracks -- and the gate found this gap by coverage
+// rather than by any test failing, since a missing arm returns ok=false and
+// nothing asserted otherwise.
+func TestConfigInnerTubeCooldownGetSetRoundTrip(t *testing.T) {
+	// Both keys are set, to DIFFERENT values: an arm reading the sibling field
+	// would pass every assertion below if they matched.
+	cfg := config.Config{
+		Providers: config.ProvidersConfig{
+			PetitLyricsCooldownSeconds: 30,
+			InnerTubeCooldownSeconds:   60,
+		},
+	}
+
+	got, ok := configValue(cfg, "providers.innertube_cooldown_seconds")
+	if !ok {
+		t.Fatal("configValue(providers.innertube_cooldown_seconds) ok = false; want true")
+	}
+	if got != "60" {
+		t.Fatalf("configValue = %q; want %q (a wrong arm returns the sibling's 30)", got, "60")
+	}
+	if !slices.Contains(configKeys(), "providers.innertube_cooldown_seconds") {
+		t.Fatal("configKeys missing providers.innertube_cooldown_seconds; `config set` would reject a key the registry calls editable")
+	}
+
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "90"); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	if cfg.Providers.InnerTubeCooldownSeconds != 90 {
+		t.Fatalf("innertube_cooldown_seconds = %d; want 90", cfg.Providers.InnerTubeCooldownSeconds)
+	}
+	// The setter must not have written through to the sibling.
+	if cfg.Providers.PetitLyricsCooldownSeconds != 30 {
+		t.Fatalf("petitlyrics_cooldown_seconds = %d; want 30 (the innertube setter must not touch it)", cfg.Providers.PetitLyricsCooldownSeconds)
+	}
+
+	// 0 is the documented "use api.cooldown" sentinel, so it must be accepted.
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "0"); err != nil {
+		t.Fatalf("setConfigValue 0: %v (0 is the api.cooldown-fallback sentinel)", err)
+	}
+	if cfg.Providers.InnerTubeCooldownSeconds != 0 {
+		t.Fatalf("innertube_cooldown_seconds = %d; want 0", cfg.Providers.InnerTubeCooldownSeconds)
+	}
+
+	// A negative carries no meaning here (0 already means fall back), so it is
+	// rejected rather than stored.
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "-1"); err == nil {
+		t.Fatal("setConfigValue accepted a negative providers.innertube_cooldown_seconds")
+	}
+	if err := setConfigValue(&cfg, "providers.innertube_cooldown_seconds", "abc"); err == nil {
+		t.Fatal("setConfigValue accepted a non-numeric providers.innertube_cooldown_seconds")
+	}
+}
