@@ -541,31 +541,50 @@ var performanceFamilies = map[string]string{
 	// Distinct working recordings. These are NOT grouped with each other: a
 	// demo and a radio session are different events, not two words for one, so
 	// each keeps its own family and they reject across.
-	"demo": "demo", "demos": "demo",
+	// Only forms that are ALSO in titleVariantTokens appear here (891-R2C3).
+	// A token absent from that vocabulary is unmatched CONTENT and rejects
+	// before the family rule can run, so listing "demos" or "takes" here read
+	// as coverage while changing no verdict. Adding them to the vocabulary is
+	// a separate behavior decision, tracked under #892.
+	"demo":    "demo",
 	"session": "session", "sessions": "session",
-	"take": "take", "takes": "take",
+	"take": "take",
 	// No sung words at all, so no lyric can be shared with a sung take.
 	"instrumental": "silent", "karaoke": "silent",
 }
 
-// KNOWN RESIDUAL, MEASURED AND RECORDED RATHER THAN IMPLIED (891-R1C2). The
-// both-sides requirement means a rule cannot fire when only ONE side names a
-// performance, so these all still ACCEPT:
+// KNOWN RESIDUAL, MEASURED AND RECORDED RATHER THAN IMPLIED (891-R1C2,
+// corrected 891-R2V2). TWO DISTINCT MECHANISMS leave pairs accepting, and an
+// earlier version of this block listed only the first while implying it was
+// the whole set.
 //
-//	"(Remastered)" vs "(Live)"        packaging against a performance
-//	"(Deluxe Edition)" vs "(Demo)"    same shape
-//	"(Mono)" vs "(Karaoke)"           the sharp one: a wordless cut
+// (1) THE BOTH-SIDES REQUIREMENT. A rule cannot fire when only ONE side names
+// a performance, so a performance against plain PACKAGING accepts:
+//
+//	"(Remastered)" vs "(Live)"
+//	"(Mono)" vs "(Karaoke)"                the sharp one: a wordless cut
 //	"(Extended Mix)" vs "(Instrumental)"
-//	"feat Alpha" vs "(Live)"          a credit against a performance
+//	"feat Alpha" vs "(Live)"               a credit against a performance
 //
-// Closing them would mean firing when one side names a performance and the
-// other names a DIFFERENT variant token -- which requires distinguishing "the
-// other side is bare" from "the other side is packaged", since a BARE title
-// against any performance must keep accepting (pinned by the 19 controls in
-// TestLegitimateVariantsStayAccepted, and the documented reasoned accept:
-// asked for the live cut, got the plain upload). That is real new surface for a
-// class where the recoverable direction already wins, so it is left open
-// deliberately and stated here rather than discovered later.
+// Closing these means distinguishing "the other side is BARE" from "the other
+// side is PACKAGED", because a bare title against any performance MUST keep
+// accepting -- pinned by the 19 controls in TestLegitimateVariantsStayAccepted,
+// and the documented reasoned accept: asked for the live cut, got the plain
+// upload.
+//
+// (2) `radio` IS NOT A PERFORMANCE, so it discriminates against nothing:
+//
+//	"(Radio Edit)" vs "(Demo)"
+//	"(Radio Edit)" vs "(Instrumental)"
+//
+// These accept for a DIFFERENT reason than (1) -- not the one-sided guard, but
+// the deliberate exclusion of `radio` from performanceFamilies (a radio edit is
+// a pressing, not a performance). Recorded separately so a reader does not
+// attribute them to the one-sided rule and "fix" the wrong mechanism.
+//
+// Both sets are left open deliberately: the words are the same or the cut is
+// wordless in ways timing.Evaluate can often catch, and the recoverable
+// direction wins over new surface.
 //
 // performancesDiffer reports whether both titles name a performance and the
 // performance FAMILIES do not match. See performanceFamilies for the grouping
@@ -791,23 +810,38 @@ func creditTail(s string) []string {
 		if _, ok := featMarkers[tok]; !ok {
 			continue
 		}
-		var out []string
+		var full, trimmed []string
 		for _, t := range raw[i+1:] {
 			if _, ig := ignorableTokens[t]; ig {
 				continue
 			}
-			// PACKAGING TOKENS ARE DROPPED FROM THE TAIL (891-R1C1). A real
-			// title routinely carries a version suffix AFTER the credit --
-			// "Song (feat. A) [Remix]" -- and that suffix lands in BOTH tails,
-			// so a comparison that kept it found a shared token and concluded
-			// the credits matched. That reopened the exact defect this rule
-			// closes, for the more common title shape.
+			full = append(full, t)
+			// PACKAGING TOKENS ARE DROPPED (891-R1C1): a real title routinely
+			// carries a version suffix AFTER the credit -- "Song (feat. A)
+			// [Remix]" -- and that suffix lands in BOTH tails, so a comparison
+			// that kept it found a shared token and concluded the credits
+			// matched.
 			if _, pkg := titleVariantTokens[t]; pkg {
 				continue
 			}
-			out = append(out, t)
+			trimmed = append(trimmed, t)
 		}
-		return out
+		// BUT ONLY WHEN SOMETHING SURVIVES (891-R2C1). An act whose NAME is a
+		// vocabulary word -- "Mono", "Radio", "Clean", "Original" are all real
+		// act names and all in titleVariantTokens -- was filtered away
+		// entirely, and an empty tail hits creditsDiffer's fail-open, which
+		// ACCEPTS any differing credit. That converted four measured rejects
+		// into false accepts: the corruption direction, introduced by the fix
+		// for the opposite problem.
+		//
+		// Falling back to the unfiltered tail keeps the suffix case working
+		// (the suffix is only ever dropped when a real name remains beside it)
+		// while a credit made ENTIRELY of vocabulary words is compared as
+		// written, which is the only evidence there is.
+		if len(trimmed) > 0 {
+			return trimmed
+		}
+		return full
 	}
 	return nil
 }
@@ -827,12 +861,17 @@ func creditTail(s string) []string {
 // "Song (feat. Guest)" is the exact case the truncation was written for, and
 // the discriminator must not touch it.
 //
-// OVERLAP, NOT EQUALITY, IS THE TEST. Credits legitimately vary in form: an
+// WHY THE COMPARISON IS LOOSE AT ALL. Credits legitimately vary in form: an
 // extra guest listed on one side, "&" against "and", a reordering. Requiring
-// full equality would reject those. Sharing at least one name is weak evidence
-// of the same collaboration, which is the right strength given the asymmetry --
-// a false REJECT costs one missing lyric and a retry, a false ACCEPT writes
-// another recording's words to disk and looks correct.
+// full equality would reject all three, and each is pinned as an ACCEPT. The
+// STRENGTH of that looseness is chosen below and is not overlap -- see SUBSET,
+// NOT OVERLAP on the comparison itself. (This paragraph previously specified
+// overlap and contradicted the rule seven lines beneath it; the requirement it
+// states is unchanged, only the mechanism moved.)
+//
+// The asymmetry decides the strength: a false REJECT costs one missing lyric
+// and a retry, a false ACCEPT writes another recording's words to disk and
+// looks correct.
 func creditsDiffer(requested, got string) bool {
 	req := creditTail(requested)
 	cand := creditTail(got)

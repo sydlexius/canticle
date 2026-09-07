@@ -1000,6 +1000,72 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		}
 	})
 
+	t.Run("instrumental and karaoke are ONE family", func(t *testing.T) {
+		// 891-R2V1: splitting `instrumental` into its own family left the suite
+		// GREEN, so the grouping was unpinned. It is a deliberate LOOSENING --
+		// both cuts are wordless, so neither can carry a sung lyric the other
+		// lacks, and rejecting between them would buy nothing.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (Instrumental)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (Karaoke)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("an instrumental was REJECTED against a karaoke cut -- both are "+
+				"wordless, so they share a family deliberately: %v", err)
+		}
+	})
+
+	t.Run("demo, session and take are SEPARATE families", func(t *testing.T) {
+		// 891-R2V1: each was pinned only against `demo`, so merging session
+		// into take (or either into the other) left the suite green. These are
+		// distinct recording EVENTS, not three words for one, and each pair
+		// must reject.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (Session)", "Placeholder Song (Take)"},
+			{"Placeholder Song (Session)", "Placeholder Song (Demo)"},
+			{"Placeholder Song (Take)", "Placeholder Song (Demo)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- these name different recording "+
+					"events and must not share a family", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("radio is NOT a performance and joins no family", func(t *testing.T) {
+		// 891-R2V1: mapping `radio` into the live family left the suite green,
+		// so only a radio-in-a-NEW-family mutation was caught. A radio edit is
+		// a PRESSING; if it joined the live family it would start rejecting
+		// against a demo, which it must not.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (Radio Edit)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (Demo)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("a radio edit was REJECTED against a demo -- `radio` names a "+
+				"pressing and must belong to no performance family: %v", err)
+		}
+	})
+
+	t.Run("the credit tail is read from the FIRST marker", func(t *testing.T) {
+		// 891-R2V1: matching the LAST marker instead of the first left the
+		// suite green. With two markers, everything after the FIRST is credit,
+		// so a differing first credit must reject even when the trailing text
+		// matches.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song feat Alpha ft Gamma"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song feat Beta ft Gamma"}
+		if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+			t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor",
+				conf, matchMinConfidence)
+		}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+			t.Error("credits differing at the FIRST marker were ACCEPTED -- the tail " +
+				"must start at the first marker, not the last")
+		}
+	})
+
 	t.Run("each performance family is pinned by a rejecting pair", func(t *testing.T) {
 		// 891-R1V4: deleting `unplugged`, `acoustic`, `sessions` or `take` from
 		// the vocabulary left the suite GREEN, so four members were unpinned and
@@ -1190,6 +1256,46 @@ func TestTokenRuleClausesAreIndividuallyPinned(t *testing.T) {
 		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
 			t.Errorf("a credit listing an EXTRA guest was REJECTED -- one credit being a "+
 				"superset of the other is the same collaboration: %v", err)
+		}
+	})
+
+	t.Run("a guest whose NAME is a vocabulary word is still compared", func(t *testing.T) {
+		// 891-R2C1, a regression the FIRST fix for this class introduced. The
+		// packaging filter was applied unconditionally, so an act actually
+		// named "Mono", "Radio" or "Clean" -- all real act names, all in
+		// titleVariantTokens -- had its tail emptied, and an empty tail hits
+		// creditsDiffer's fail-open, which ACCEPTS any differing credit. Four
+		// measured rejects became accepts on the corruption axis.
+		//
+		// The filter now falls back to the unfiltered tail rather than
+		// returning nothing, so a credit made entirely of vocabulary words is
+		// compared as written.
+		for _, pair := range [][2]string{
+			{"Placeholder Song (feat. Mono)", "Placeholder Song (feat. Alpha)"},
+			{"Placeholder Song (feat. Mono)", "Placeholder Song (feat. Stereo)"},
+			{"Placeholder Song (feat. Radio)", "Placeholder Song (feat. Beta)"},
+			{"Placeholder Song (feat. Clean)", "Placeholder Song (feat. Alpha)"},
+		} {
+			requested := models.Track{ArtistName: artist, TrackName: pair[0]}
+			c := SearchCandidate{VideoID: "vid", Artist: artist, Title: pair[1]}
+			if conf := normalize.MatchConfidence(requested.TrackName, c.Title); conf < matchMinConfidence {
+				t.Fatalf("test premise broken: confidence %.4f is below the %.2f floor for %q vs %q",
+					conf, matchMinConfidence, pair[0], pair[1])
+			}
+			if _, err := SelectCandidate([]SearchCandidate{c}, requested); err == nil {
+				t.Errorf("%q vs %q was ACCEPTED -- a guest named with a vocabulary word "+
+					"must not empty the tail into the fail-open", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("identical vocabulary-word credits still accept", func(t *testing.T) {
+		// The false-reject guard on the fallback: comparing the unfiltered tail
+		// must not reject a credit that genuinely matches.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song (feat. Mono)"}
+		c := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Placeholder Song (feat. Mono)"}
+		if _, err := SelectCandidate([]SearchCandidate{c}, requested); err != nil {
+			t.Errorf("identical credits naming a vocabulary-word act were REJECTED: %v", err)
 		}
 	})
 
