@@ -1687,17 +1687,38 @@ func petitLyricsInterval(cfg config.Config) time.Duration {
 // disable request; pacing this lane off is not offered, and a negative duration
 // would read as "no pacing" to WithMinInterval.
 //
-// WHAT DIFFERS FROM THE OTHER LANES IS THE COST OF THE SAME NUMBER. The interval
-// is enforced per outbound REQUEST, and one lookup here costs THREE of them
-// (search, next, browse) against one for Musixmatch or Petit Lyrics. So an
-// operator who sets both cooldowns to the same value has not given the lanes
-// equal footing -- this one draws on its gateway a third as often per lookup.
-// That is the intended reading: the knob bounds the rate against someone else's
-// service, not the rate at which a scan completes.
+// WHAT DIFFERS FROM THE OTHER LANES IS THAT THE COST PER LOOKUP VARIES. The
+// interval is enforced per outbound REQUEST, and a lookup here costs one, two or
+// three of them depending on how far it gets: a rejected candidate stops after
+// the search, an absent lyrics tab after next(), and only a HIT pays for all
+// three (search, next, browse). See FindLyrics' own doc comment, which owns this
+// accounting, and the two fetcher tests that assert the one- and two-request
+// shapes.
 //
-// The returned value is the interval REQUESTED. The client clamps any positive
-// value up to innertube.MinAllowedInterval, so config can raise the effective
-// interval but never lower it past that policy floor.
+// So the same number of seconds does NOT simply buy a third of the lookup rate.
+// On a fallback lane, whose traffic is mostly misses, the typical lookup costs
+// ONE request, the same as Musixmatch or Petit Lyrics; the three-request cost is
+// the ceiling, paid only when this lane actually serves a result. Tune the knob
+// against the rate at which this lane may draw on someone else's gateway, never
+// against how fast a library scan finishes.
+//
+// The returned value is the interval REQUESTED. The client clamps any POSITIVE
+// value up to innertube.MinAllowedInterval, so a config value between 1 and that
+// floor is raised rather than honored.
+//
+// THE CLAMP DOES NOT COVER ZERO, and that is worth stating because the obvious
+// reading of the line above is that the floor is unconditional. It is not:
+// WithMinInterval guards on `d > 0`, and pace() returns immediately on
+// minInterval <= 0. So when this key is unset (its documented default) AND
+// api.cooldown is 0 -- itself a documented valid value, deliberately not
+// re-defaulted on load -- the resolver returns 0 and the lane runs UNPACED, with
+// the 2s policy floor never applying. Measured: both zero gives client=0s, while
+// a key of 1 gives client=2s.
+//
+// That is pre-existing behavior shared with the petitlyrics lane (measured the
+// same), not something this key introduced, and it is left alone deliberately:
+// flooring a zero would change how every existing deployment paces, which is a
+// policy decision rather than a fix.
 func innerTubeInterval(cfg config.Config) time.Duration {
 	seconds := cfg.API.Cooldown
 	if cfg.Providers.InnerTubeCooldownSeconds > 0 {

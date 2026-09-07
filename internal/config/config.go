@@ -368,17 +368,24 @@ type ProvidersConfig struct {
 	// deployment had before this key existed. A negative value is not a disable
 	// request (this lane is never unpaced by configuration) and also falls back.
 	//
-	// THE INTERVAL IS PER OUTBOUND REQUEST, AND THAT MATTERS MORE HERE THAN FOR
-	// THE OTHER LANES. One successful lookup costs THREE requests (search, next,
-	// browse) where Musixmatch and Petit Lyrics cost one, so the same number of
-	// seconds buys a third of the lookup rate. Tune it against how hard this
-	// lane may lean on someone else's gateway, never against how fast a library
-	// scan finishes.
+	// THE INTERVAL IS PER OUTBOUND REQUEST, AND THE COST PER LOOKUP VARIES HERE
+	// WHERE IT DOES NOT ON THE OTHER LANES. A lookup costs one request when the
+	// candidate is rejected at the search, two when the lyrics tab is absent,
+	// and three (search, next, browse) only when it HITS. On a fallback lane,
+	// whose traffic is mostly misses, the typical lookup therefore costs ONE
+	// request, the same as Musixmatch or Petit Lyrics; three is the ceiling, not
+	// the norm. Tune this against how hard the lane may lean on someone else's
+	// gateway, never against how fast a library scan finishes.
 	//
-	// This is the interval REQUESTED. The client clamps any positive value up to
-	// innertube.MinAllowedInterval, so the effective floor is a client policy
-	// that config cannot lower. Override:
-	// MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS.
+	// This is the interval REQUESTED. The client clamps any POSITIVE value up to
+	// innertube.MinAllowedInterval, so a value between 1 and that floor is
+	// raised rather than honored.
+	//
+	// The clamp does NOT cover zero: with this key at its default AND
+	// api.cooldown at 0 (a documented valid value), the lane runs unpaced and
+	// the floor never applies. That is pre-existing behavior shared with the
+	// petitlyrics lane; see innerTubeInterval in internal/commands for the
+	// measurement. Override: MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS.
 	InnerTubeCooldownSeconds int `toml:"innertube_cooldown_seconds"`
 }
 

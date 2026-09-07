@@ -2379,3 +2379,34 @@ func TestLoad_InnerTubeCooldownSeconds(t *testing.T) {
 		}
 	})
 }
+
+// TestLoad_InnerTubeCooldownEnvRejectsNegative pins the env path's lower bound
+// (#858). The CLI and web surfaces both reject a negative; without this, the env
+// path could silently start accepting one and no test would notice.
+//
+// Added after a hostile review found the gap by MUTATION: deleting the `n < 0`
+// clause from this key's env block SURVIVED the whole suite. The reviewer noted
+// the identical mutation survives on the sibling key too, so the gap is a class
+// the reference pattern never pinned rather than something this key introduced
+// -- but the guard is only harmless today by coincidence, since the resolver
+// happens to treat a negative as a fallback. Pinning it here stops that
+// coincidence from being load-bearing.
+func TestLoad_InnerTubeCooldownEnvRejectsNegative(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[providers]\ninnertube_cooldown_seconds = 45\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "-1")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// The negative is refused and the configured value survives; it is neither
+	// stored nor zeroed (zeroing would silently switch the lane to the
+	// api.cooldown fallback without saying so).
+	if cfg.Providers.InnerTubeCooldownSeconds != 45 {
+		t.Errorf("innertube_cooldown_seconds = %d; want 45 -- a negative env value must be refused, not stored and not zeroed", cfg.Providers.InnerTubeCooldownSeconds)
+	}
+}

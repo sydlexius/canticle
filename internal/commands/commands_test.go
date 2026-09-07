@@ -3429,3 +3429,38 @@ func TestConfigInnerTubeCooldownGetSetRoundTrip(t *testing.T) {
 		t.Fatal("setConfigValue accepted a non-numeric providers.innertube_cooldown_seconds")
 	}
 }
+
+// TestInnerTubeCooldownValidatorMatchesCLI pins the CLI arm and the web save
+// path to the SAME non-negative rule (#858), mirroring the petitlyrics test
+// above. The web path validates through config.ValidateAndSet (registry-driven,
+// TypeInt -> ValidateNonNegativeInt) while the CLI arm hand-rolls its bound, so
+// the two can silently diverge and let a value in through one surface that the
+// other rejects.
+//
+// Added after a hostile review found the gap by MUTATION: flipping this key's
+// registry Editable to false SURVIVED the whole suite, while the identical
+// mutation on the sibling key was killed by the test above. Editable=false makes
+// the web save path reject the field as read-only while `config set` still
+// accepts it -- exactly the registry/CLI drift this shape exists to catch.
+func TestInnerTubeCooldownValidatorMatchesCLI(t *testing.T) {
+	const path = "providers.innertube_cooldown_seconds"
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"90", true},
+		{"0", true},
+		{"-1", false},
+		{"abc", false},
+	} {
+		webErr := config.ValidateAndSet(path, tc.value)
+		cliErr := setConfigValue(&config.Config{}, path, tc.value)
+		if (webErr == nil) != tc.valid {
+			t.Errorf("ValidateAndSet(%q) err = %v; want valid=%v", tc.value, webErr, tc.valid)
+		}
+		if (webErr == nil) != (cliErr == nil) {
+			t.Errorf("value %q: web accepts=%v but CLI accepts=%v; the two surfaces disagree",
+				tc.value, webErr == nil, cliErr == nil)
+		}
+	}
+}
