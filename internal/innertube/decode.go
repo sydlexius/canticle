@@ -23,6 +23,11 @@ type browsePayload struct {
 						Model struct {
 							TimedLyricsModel struct {
 								LyricsData struct {
+									// The attribution field (sourceMessage) is a
+									// SIBLING of this cue list in the wire payload,
+									// but is deliberately NOT declared here -- see
+									// upstreamPayload for why the two are decoded
+									// separately.
 									TimedLyricsData []browseCue `json:"timedLyricsData"`
 								} `json:"lyricsData"`
 							} `json:"timedLyricsModel"`
@@ -174,5 +179,173 @@ func Decode(raw []byte) (models.Song, error) {
 
 	return models.Song{
 		Subtitles: models.Synced{Lines: lines},
+		Upstream:  ExtractUpstream(raw),
 	}, nil
+}
+
+// Upstream tokens for the licensors this lane multiplexes. Lowercase and
+// unpunctuated, matching the existing provider-token convention
+// (`petitlyrics`, `canticle-detector`).
+//
+// UpstreamMusixmatch is DELIBERATELY byte-identical to the token the direct
+// first-party Musixmatch lane writes into [source:]. That collision is exactly
+// why the upstream is carried in its own [upstream:] tag and never folded into
+// [source:] -- see docs/provider-attribution.md. Writing it into [source:]
+// would make an InnerTube-routed result indistinguishable from a first-party
+// one, so `--source musixmatch` would sweep in files the operator never
+// targeted, which is the #827 class of defect.
+const (
+	UpstreamMusixmatch = "musixmatch"
+	UpstreamLyricFind  = "lyricfind"
+)
+
+// sourceMessagePrefix is the display prefix the API puts in front of the
+// licensor name. MEASURED, not assumed: every observed value took the form
+// "Source: Musixmatch" / "Source: LyricFind".
+const sourceMessagePrefix = "Source:"
+
+// ExtractUpstream reports which licensor served this response, as one of the
+// Upstream* constants, or "" when the response names none.
+//
+// A CLOSED SET, NEVER A PASSTHROUGH. An unrecognized, renamed, absent or
+// malformed value yields "", and the caller then writes no [upstream:] tag at
+// all -- an omitted tag asserts nothing, which is honest, whereas a passthrough
+// would format an unsanitized third-party string straight into an LRC header.
+// That matters concretely: the fetch-time writer formats the token with
+// fmt.Sprintf and does NOT run sanitizeTagValue, and a NEWLINE in a header
+// value truncates the tag and ends the header block early (parser.go). A closed
+// set means the writer never holds an unsanitized string in the first place.
+// It also keeps the token stable if the upstream renames itself upstream.
+//
+// Parse failure is not distinguished from absence. Both mean "no attribution
+// established", the caller treats them identically, and this function is never
+// the place a transport problem is reported -- ExtractCues already owns that.
+func ExtractUpstream(raw []byte) string {
+	var payload upstreamPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	raw2 := payload.Contents.ElementRenderer.NewElement.Type.ComponentType.
+		Model.TimedLyricsModel.LyricsData.SourceMessage
+	return upstreamToken(sourceMessageText(raw2))
+}
+
+// upstreamPayload decodes ONLY the attribution field, and its separateness from
+// browsePayload is a correctness requirement rather than tidiness.
+//
+// The two fields are siblings on the wire, so declaring both on one struct is
+// the obvious shape -- and it couples them fatally. encoding/json aborts the
+// WHOLE unmarshal on a single type mismatch, so a sourceMessage that is not a
+// bare string would take the CUES down with it: measured, a payload carrying a
+// valid timedLyricsData array plus a `{"runs":[...]}` sourceMessage returned
+// zero cues and a transport-class error, which does NOT degrade to a benign
+// miss. That shape is not hypothetical -- a runs-object is this API's dominant
+// form for a display string, and the bare string measured here is the exception.
+//
+// Decoding the attribution separately means the worst a surprising shape can do
+// is cost the attribution (SourceMessage stays "", no [upstream:] tag is
+// written, which asserts nothing) while the lyrics still arrive. The cue path
+// cannot be broken by a field it does not read.
+//
+// SourceMessage is json.RawMessage rather than string for the same reason: a
+// mismatch must never fail the decode. upstreamToken owns the interpretation.
+type upstreamPayload struct {
+	Contents struct {
+		ElementRenderer struct {
+			NewElement struct {
+				Type struct {
+					ComponentType struct {
+						Model struct {
+							TimedLyricsModel struct {
+								LyricsData struct {
+									// CAPTURED, not inferred: measured live at this
+									// path on 2026-09-07 across four public
+									// reference tracks. It is a DISPLAY STRING, not
+									// a token -- the observed values carry a
+									// "Source: " prefix and mixed case
+									// ("Source: LyricFind").
+									SourceMessage json.RawMessage `json:"sourceMessage"`
+								} `json:"lyricsData"`
+							} `json:"timedLyricsModel"`
+						} `json:"model"`
+					} `json:"componentType"`
+				} `json:"type"`
+			} `json:"newElement"`
+		} `json:"elementRenderer"`
+	} `json:"contents"`
+}
+
+// upstreamToken maps one raw sourceMessage to a constant, or "" for anything
+// it does not recognize.
+//
+// The prefix is trimmed with TrimPrefix on a case-folded copy rather than
+// matched exactly, because the casing of the NAME is what varies in the
+// observed data ("LyricFind" carries an interior capital), and a future
+// response that drops or re-cases the prefix should still map rather than
+// silently losing attribution. A value with no prefix at all still maps: the
+// trim is a no-op and the switch sees the bare name.
+// sourceMessageText coerces the raw attribution value to the display string it
+// carries, or "" for any shape it does not recognize.
+//
+// TWO SHAPES ARE ACCEPTED, and the second is the reason this function exists
+// rather than a plain string field. A bare JSON string is what was measured
+// live. A `{"runs":[{"text":"..."}]}` object is this API's dominant form for a
+// display string elsewhere, so it is the likeliest way the value changes shape
+// without notice; reading it costs a few lines and turns a silent loss of
+// attribution into a correct one.
+//
+// Anything else -- a number, an array, null, absent, malformed -- yields "" and
+// therefore no [upstream:] tag. That is the honest outcome: an absent tag
+// asserts nothing, and this function must never fail the caller, which is why
+// it returns a string rather than an error.
+func sourceMessageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var runs struct {
+		Runs []struct {
+			Text string `json:"text"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil {
+		return ""
+	}
+	// Concatenated, not just the first run: a display string is split across
+	// runs at styling boundaries, so taking runs[0] alone would truncate
+	// "Source: X" to "Source: " whenever the licensor name is styled separately.
+	var b strings.Builder
+	for _, r := range runs.Runs {
+		b.WriteString(r.Text)
+	}
+	return b.String()
+}
+
+func upstreamToken(sourceMessage string) string {
+	s := strings.ToLower(strings.TrimSpace(sourceMessage))
+	s = strings.TrimSpace(strings.TrimPrefix(s, strings.ToLower(sourceMessagePrefix)))
+	// THE CASE ARMS ARE WIRE NAMES; THE RETURNS ARE OUR TOKENS. The two sides
+	// of each arm mean different things, and today they coincide because the
+	// tokens were deliberately chosen to match the lowercased upstream names.
+	//
+	// So the case arms are string LITERALS on purpose, and both of them, rather
+	// than the constants they happen to equal. A review flagged the previous
+	// mixture (one arm a constant, one a literal) as an inconsistency, which it
+	// was -- but resolving it toward the CONSTANT is the wrong direction: that
+	// makes a rename of OUR token silently stop matching the upstream's
+	// unchanged wire name, which is the one thing this function must keep doing.
+	// Written as literals, renaming a token changes only what we emit, and the
+	// mapping keeps working. The coincidence is pinned by TestUpstreamToken,
+	// whose inputs are the captured wire strings.
+	switch s {
+	case "musixmatch":
+		return UpstreamMusixmatch
+	case "lyricfind":
+		return UpstreamLyricFind
+	default:
+		return ""
+	}
 }

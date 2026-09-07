@@ -287,8 +287,40 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		if song.Track.TrackLength != 0 {
 			tags = append(tags, fmt.Sprintf("[length:%02d:%02d]", song.Track.TrackLength/60, song.Track.TrackLength%60))
 		}
+		// [upstream:] names the LICENSOR a multiplexing lane routed this result
+		// to; [source:] stays the LANE and never varies with it. Keeping them
+		// separate is what makes purgeprovenance.provenanceAgrees hold unchanged
+		// (it compares the source tag against work_queue.provider_lane) and what
+		// stops `--source musixmatch` sweeping in files that a multiplexing lane
+		// merely ROUTED through Musixmatch. See docs/provider-attribution.md.
+		//
+		// [upstream:] IS NESTED INSIDE THE [source:] GUARD, NOT A SIBLING OF IT,
+		// and that nesting is load-bearing rather than tidiness. The two fields
+		// are populated by DIFFERENT layers: WinningLane only by the orchestrator
+		// (serve mode), Upstream by the provider itself, one layer below. One-shot
+		// `fetch` mode never runs the orchestrator -- providers.New returns a bare
+		// namedProvider that forwards to the client and stamps no lane -- so with
+		// providers.primary = "innertube" an uncoupled write emitted
+		// [upstream:<licensor>] with NO [source:] at all.
+		//
+		// That file is a contradiction on disk: purge's --no-source cohort is
+		// documented as the inherited/foreign files canticle never wrote, and it
+		// would match a sidecar that positively names the licensor canticle
+		// fetched from. Measured through Purger.Run: matched=1, deleted=1.
+		//
+		// So the licensor is written only where the lane is. An attribution with
+		// nothing to attribute it TO is not a weaker record, it is a misleading
+		// one -- and fetch mode recording no attribution matches what it already
+		// does for [source:], which has always been absent there.
+		//
+		// Omitted when empty, deliberately: an absent tag asserts nothing, which
+		// is the honest reading when no licensor was named. Same rule as [dv:]
+		// below.
 		if song.WinningLane != "" {
 			tags = append(tags, fmt.Sprintf("[source:%s]", song.WinningLane))
+			if song.Upstream != "" {
+				tags = append(tags, fmt.Sprintf("[upstream:%s]", song.Upstream))
+			}
 		}
 		if !song.FetchedAt.IsZero() {
 			tags = append(tags, fmt.Sprintf("[fetched:%s]", song.FetchedAt.Format(time.RFC3339)))
@@ -326,8 +358,23 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 			src = SourceDetector
 		}
 		tags = append(tags, "[by:canticle]")
+		// NESTED for the same reason as the tagged branch above: an [upstream:]
+		// with no [source:] beside it is an attribution with nothing to attribute
+		// it to, and lands the file in purge's "canticle never wrote this"
+		// cohort while naming the licensor canticle fetched from. src is empty on
+		// exactly the fetch-mode path that motivates the nesting there.
+		//
+		// The inner guard is on src, not on song.Upstream alone. src is
+		// SourceDetector whenever canticle's own detector decided, and a detector
+		// verdict is canticle's, never a licensor's -- carrying a provider's
+		// upstream onto it would credit that provider for a call it did not make.
+		// Note src covers BOTH independent detector signals (the lane and the
+		// version), so a directly-built detector Song is caught too.
 		if src != "" {
 			tags = append(tags, fmt.Sprintf("[source:%s]", src))
+			if src != SourceDetector && song.Upstream != "" {
+				tags = append(tags, fmt.Sprintf("[upstream:%s]", song.Upstream))
+			}
 		}
 		// [dv:] is omitted when unknown -- it records WHICH model decided, and an
 		// empty tag would assert a version that was never established. Absent is

@@ -777,3 +777,50 @@ func TestFindLyrics_TieBreaksOnLowerVideoIDEndToEnd(t *testing.T) {
 			"videoId deterministically, not to whichever row search returned first", got, want)
 	}
 }
+
+// TestFindLyrics_CarriesTheUpstreamThroughTheChain pins that the licensor the
+// browse payload names survives all the way out of FindLyrics (#859).
+//
+// This is the seam a unit test on ExtractUpstream cannot cover. FindLyrics
+// stamps identity onto Decode's song by ASSIGNING a field; a refactor that
+// rebuilt the struct as a literal instead -- models.Song{Track: ..., Subtitles:
+// ...} -- would drop Upstream silently, compile cleanly, and leave every
+// extraction test green, because the loss happens after Decode returns and
+// before the writer is ever reached.
+func TestFindLyrics_CarriesTheUpstreamThroughTheChain(t *testing.T) {
+	fx := chainFixtures()
+	fx[browsePath] = "browse_with_source.json"
+	srv := &fixtureServer{fixtures: fx}
+	c := newTestClient(t, srv)
+
+	song, err := c.FindLyrics(context.Background(), fixtureTrack())
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if song.Upstream != UpstreamLyricFind {
+		t.Errorf("song.Upstream = %q, want %q -- the licensor named in the browse payload did not survive the chain", song.Upstream, UpstreamLyricFind)
+	}
+	// The cues must survive alongside it, or a "fix" that returned only the
+	// upstream would satisfy the assertion above.
+	if len(song.Subtitles.Lines) == 0 {
+		t.Error("Subtitles.Lines is empty: the upstream must not come at the cost of the payload")
+	}
+}
+
+// TestFindLyrics_NoUpstreamWhenThePayloadNamesNone is the control. The shipped
+// browse.json carries no sourceMessage, which is also what the live endpoint
+// returns for an instrumental (lyricsData itself is null). Without this row,
+// the test above would pass against an implementation that hardcoded a
+// licensor.
+func TestFindLyrics_NoUpstreamWhenThePayloadNamesNone(t *testing.T) {
+	srv := &fixtureServer{fixtures: chainFixtures()}
+	c := newTestClient(t, srv)
+
+	song, err := c.FindLyrics(context.Background(), fixtureTrack())
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if song.Upstream != "" {
+		t.Errorf("song.Upstream = %q, want empty -- a payload naming no licensor must assert nothing", song.Upstream)
+	}
+}

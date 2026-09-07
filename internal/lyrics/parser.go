@@ -18,6 +18,12 @@ type ProvenanceTags struct {
 	Fetched string // [fetched:] tag (RFC3339)
 	ISRC    string // [isrc:] tag
 	MBID    string // [mbid:] tag
+	// Upstream is the [upstream:] tag: the LICENSOR a multiplexing lane routed
+	// the result to, distinct from Source (the LANE). Empty means the sidecar
+	// makes no attribution claim -- not that there was no upstream. Written by
+	// the fetch-time writer only; InjectProvenance never writes it, because a
+	// backfill must not invent attribution the original fetch never recorded.
+	Upstream string // [upstream:] tag
 	// Artist and Title mirror the standard [ar:]/[ti:] LRC header tags. They are
 	// read-only identity signals (populated by ReadProvenanceTags for the realign
 	// name guard); InjectProvenance never writes them.
@@ -49,6 +55,8 @@ func ReadProvenanceTags(path string) (ProvenanceTags, error) {
 			pt.MBID = strings.TrimSpace(t.value)
 		case "source":
 			pt.Source = strings.TrimSpace(t.value)
+		case "upstream":
+			pt.Upstream = strings.TrimSpace(t.value)
 		case "fetched":
 			pt.Fetched = strings.TrimSpace(t.value)
 		case "ar":

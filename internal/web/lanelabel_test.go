@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
+	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
@@ -17,6 +18,7 @@ func TestLaneLabel(t *testing.T) {
 		want string
 	}{
 		{"detector lane gets the full display name", "detector", "Instrumental Detector"},
+		{"innertube lane gets the full display name", "innertube", "YouTube Music"},
 		{"provider lanes pass through unchanged", "musixmatch", "musixmatch"},
 		{"unmapped lane passes through rather than blanking", "somefuturelane", "somefuturelane"},
 		{"empty lane stays empty", "", ""},
@@ -115,5 +117,19 @@ func TestLaneLabelDoesNotChangePersistedValue(t *testing.T) {
 	if got := laneLabel(detectorbackfill.LaneName); got == detectorbackfill.LaneName {
 		t.Errorf("laneLabel(%q) returned the raw persisted value; the UI would render "+
 			"the stored string instead of a display name", detectorbackfill.LaneName)
+	}
+
+	// Same guard for the innertube lane. The label's case is keyed on
+	// providers.InnerTube, and that constant IS the value written to
+	// work_queue.provider_lane -- so if it ever changed, the label would follow
+	// it silently while every stored row kept the old string, and the lane would
+	// render raw in the UI with nothing failing.
+	if providers.InnerTube != "innertube" {
+		t.Fatalf("persisted innertube lane string = %q; want %q -- changing it splits "+
+			"provider_outcomes history and zeroes existing queries", providers.InnerTube, "innertube")
+	}
+	if got := laneLabel(providers.InnerTube); got == providers.InnerTube {
+		t.Errorf("laneLabel(%q) returned the raw persisted value; the UI would render "+
+			"the stored string instead of a display name", providers.InnerTube)
 	}
 }

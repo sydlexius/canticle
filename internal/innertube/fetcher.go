@@ -82,8 +82,12 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 		return models.Song{}, err
 	}
 
-	// Decode is pure and returns only Subtitles; the identity is stamped here,
-	// where the request and the winning candidate are both in scope.
+	// Decode is pure and returns only what the RESPONSE carries -- the cues and,
+	// when the payload names one, the upstream licensor. The identity is stamped
+	// here instead, where the request and the winning candidate are both in
+	// scope. Assigning the field (rather than rebuilding the struct) is what
+	// carries Upstream through to the writer; a literal here would silently drop
+	// it and no test upstream of the write path would notice.
 	song.Track = trackFromCandidate(candidate, track)
 	return song, nil
 }
