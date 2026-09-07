@@ -1677,6 +1677,56 @@ func petitLyricsInterval(cfg config.Config) time.Duration {
 	return clampPacingSeconds(seconds)
 }
 
+// innerTubeInterval resolves the InnerTube pacing interval (#858), with the
+// same precedence and the same reasoning as petitLyricsInterval above:
+// providers.innertube_cooldown_seconds > api.cooldown.
+//
+// The api.cooldown fallback preserves the behavior this lane shipped with --
+// before the key existed it inherited api.cooldown unconditionally, so an unset
+// (or negative) value must resolve exactly as it did then. Negative is NOT a
+// disable request; pacing this lane off is not offered, and a negative duration
+// would read as "no pacing" to WithMinInterval.
+//
+// WHAT DIFFERS FROM THE OTHER LANES IS THAT THE COST PER LOOKUP VARIES. The
+// interval is enforced per outbound REQUEST, and a lookup here costs one, two or
+// three of them depending on how far it gets: a rejected candidate stops after
+// the search, an absent lyrics tab after next(), and only a HIT pays for all
+// three (search, next, browse). See FindLyrics' own doc comment, which owns this
+// accounting, and the two fetcher tests that assert the one- and two-request
+// shapes.
+//
+// So the same number of seconds does NOT simply buy a third of the lookup rate.
+// On a fallback lane, whose traffic is mostly misses, the typical lookup costs
+// ONE request, the same as Musixmatch or Petit Lyrics; the three-request cost is
+// the ceiling, paid only when this lane actually serves a result. Tune the knob
+// against the rate at which this lane may draw on someone else's gateway, never
+// against how fast a library scan finishes.
+//
+// The returned value is the interval REQUESTED. The client clamps any POSITIVE
+// value up to innertube.MinAllowedInterval, so a config value between 1 and that
+// floor is raised rather than honored.
+//
+// THE CLAMP DOES NOT COVER ZERO, and that is worth stating because the obvious
+// reading of the line above is that the floor is unconditional. It is not:
+// WithMinInterval guards on `d > 0`, and pace() returns immediately on
+// minInterval <= 0. So when this key is unset (its documented default) AND
+// api.cooldown is 0 -- itself a documented valid value, deliberately not
+// re-defaulted on load -- the resolver returns 0 and the lane runs UNPACED, with
+// the 2s policy floor never applying. Measured: both zero gives client=0s, while
+// a key of 1 gives client=2s.
+//
+// That is pre-existing behavior shared with the petitlyrics lane (measured the
+// same), not something this key introduced, and it is left alone deliberately:
+// flooring a zero would change how every existing deployment paces, which is a
+// policy decision rather than a fix.
+func innerTubeInterval(cfg config.Config) time.Duration {
+	seconds := cfg.API.Cooldown
+	if cfg.Providers.InnerTubeCooldownSeconds > 0 {
+		seconds = cfg.Providers.InnerTubeCooldownSeconds
+	}
+	return clampPacingSeconds(seconds)
+}
+
 // buildProvider constructs the named provider's adapter with the per-request
 // pacing floor applied, or nil for an unknown name. Test-injected fake fetchers
 // do not satisfy *musixmatch.Client so the pacer is a no-op for them, preserving
@@ -1704,13 +1754,13 @@ func buildProvider(name string, cfg config.Config, token string, newFetcher func
 		// non-authenticating constant shipped by every unofficial client, so
 		// there is no credential to require or to be missing.
 		//
-		// Paced from api.cooldown until #858 gives this provider its own config
-		// key. The client clamps any positive value up to its own floor
+		// Its own key when set, otherwise api.cooldown as before (#858). The
+		// client clamps any positive value up to its own floor
 		// (innertube.MinAllowedInterval), so a misconfigured cooldown cannot
 		// make this lane impolite -- and that floor is per REQUEST, which
 		// matters more here than for the other two: one successful lookup costs
 		// THREE requests (search, next, browse) where they cost one.
-		tube.WithMinInterval(clampPacingSeconds(cfg.API.Cooldown))
+		tube.WithMinInterval(innerTubeInterval(cfg))
 		return providers.New(providers.InnerTube, tube)
 	default:
 		return nil
@@ -2968,6 +3018,7 @@ func configKeys() []string {
 		"providers.mode",
 		"providers.race_wait_seconds",
 		"providers.petitlyrics_cooldown_seconds",
+		"providers.innertube_cooldown_seconds",
 		"verification.enabled",
 		"verification.whisper_url",
 		"verification.ffmpeg_path",
@@ -3037,6 +3088,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.Itoa(cfg.Providers.RaceWaitSeconds), true
 	case "providers.petitlyrics_cooldown_seconds":
 		return strconv.Itoa(cfg.Providers.PetitLyricsCooldownSeconds), true
+	case "providers.innertube_cooldown_seconds":
+		return strconv.Itoa(cfg.Providers.InnerTubeCooldownSeconds), true
 	case "verification.enabled":
 		return strconv.FormatBool(cfg.Verification.Enabled), true
 	case "verification.whisper_url":
@@ -3208,6 +3261,15 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("providers.petitlyrics_cooldown_seconds must be a non-negative integer (seconds; 0 uses api.cooldown)")
 		}
 		cfg.Providers.PetitLyricsCooldownSeconds = n
+	case "providers.innertube_cooldown_seconds":
+		// Same shape as the petitlyrics key above: 0 already means "fall back to
+		// api.cooldown", so a negative has no sentinel meaning left and is
+		// rejected rather than silently treated as the fallback.
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("providers.innertube_cooldown_seconds must be a non-negative integer (seconds; 0 uses api.cooldown)")
+		}
+		cfg.Providers.InnerTubeCooldownSeconds = n
 	case "verification.enabled":
 		v, err := strconv.ParseBool(value)
 		if err != nil {

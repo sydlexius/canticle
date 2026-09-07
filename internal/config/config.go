@@ -359,6 +359,34 @@ type ProvidersConfig struct {
 	// policy that config cannot lower. Override:
 	// MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS.
 	PetitLyricsCooldownSeconds int `toml:"petitlyrics_cooldown_seconds"`
+	// InnerTubeCooldownSeconds is the minimum gap between InnerTube requests,
+	// for the same reason the Petit Lyrics key above exists: the providers share
+	// neither a rate-limit budget nor a throttle profile, so api.cooldown (which
+	// means Musixmatch) is the wrong knob for this lane (#858).
+	//
+	// Default 0, which means "fall back to api.cooldown" -- the behavior every
+	// deployment had before this key existed. A negative value is not a disable
+	// request (this lane is never unpaced by configuration) and also falls back.
+	//
+	// THE INTERVAL IS PER OUTBOUND REQUEST, AND THE COST PER LOOKUP VARIES HERE
+	// WHERE IT DOES NOT ON THE OTHER LANES. A lookup costs one request when the
+	// candidate is rejected at the search, two when the lyrics tab is absent,
+	// and three (search, next, browse) only when it HITS. On a fallback lane,
+	// whose traffic is mostly misses, the typical lookup therefore costs ONE
+	// request, the same as Musixmatch or Petit Lyrics; three is the ceiling, not
+	// the norm. Tune this against how hard the lane may lean on someone else's
+	// gateway, never against how fast a library scan finishes.
+	//
+	// This is the interval REQUESTED. The client clamps any POSITIVE value up to
+	// innertube.MinAllowedInterval, so a value between 1 and that floor is
+	// raised rather than honored.
+	//
+	// The clamp does NOT cover zero: with this key at its default AND
+	// api.cooldown at 0 (a documented valid value), the lane runs unpaced and
+	// the floor never applies. That is pre-existing behavior shared with the
+	// petitlyrics lane; see innerTubeInterval in internal/commands for the
+	// measurement. Override: MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS.
+	InnerTubeCooldownSeconds int `toml:"innertube_cooldown_seconds"`
 }
 
 // providersModeDefault and providersModeParallel are the supported dispatch
@@ -1378,6 +1406,15 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.Providers.PetitLyricsCooldownSeconds = n
 			applied["providers.petitlyrics_cooldown_seconds"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS", "value", v, "current", cfg.Providers.InnerTubeCooldownSeconds) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Providers.InnerTubeCooldownSeconds = n
+			applied["providers.innertube_cooldown_seconds"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_VERIFICATION_ENABLED"); v != "" {
