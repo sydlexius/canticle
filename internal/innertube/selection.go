@@ -1165,22 +1165,38 @@ func titleTokensCorrespond(requested, got string) bool {
 // accepts every legitimate reordering (that is what artistTokensEqual is for),
 // and it answers false on the pair above.
 //
-// THERE IS NO "NEVER EMPTY THE TITLE" GUARD, AND ITS ABSENCE IS MEASURED
-// RATHER THAN OVERLOOKED. One was written here first, on the reasoning that
-// titleTokensCorrespond fails OPEN when a side tokenizes to nothing, so a strip
-// down to blank would accept ANY candidate. Mutation testing could not redden
-// its removal, and the probe that followed showed why: the reasoning skipped a
-// step. The FLOOR runs before the token rule and compares the STRIPPED strings,
-// so an emptied title is judged on similarity first -- an unrelated request
-// against a stripped-to-punctuation candidate measures 0.0000 and 0.4620 and
-// rejects there, with the token rule never consulted.
+// IT NEVER LEAVES A TITLE THAT NORMALIZES TO EMPTY, AND THE PRECISE NOTION OF
+// "EMPTY" IS THE WHOLE GUARD. This took three revisions and a CRITICAL review
+// finding to get right; the history is kept because each wrong version was
+// plausible.
 //
-// The guard was therefore redundant in the direction it claimed to protect, and
-// ACTIVELY HARMFUL in the corner it claimed to own: it also rejected the pair
-// where the emptied title is CORRECT -- a request whose title genuinely is
-// punctuation or an article, against the dashed upload of that same title,
-// measures 1.0000 and should accept. Deleting it removes a false reject and
-// costs no protection, which is the whole subject of this issue.
+// A first version guarded on `len(tokenizeTitle(rest)) == 0`, reasoning that
+// titleTokensCorrespond fails OPEN when a side tokenizes to nothing. Mutation
+// testing could not redden its removal, and the probe showed why: the FLOOR
+// runs before the token rule and compares the STRIPPED strings, so a
+// tokenize-empty remainder like "!!!" is still judged on similarity and
+// rejects there. That guard was redundant, and ACTIVELY HARMFUL in the corner
+// it claimed to own -- it rejected a request whose title genuinely IS
+// punctuation against the dashed upload of that same title, which measures
+// 1.0000 and must accept. It was deleted.
+//
+// Deleting it left a `rest == ""` check, and THAT was a CRITICAL false ACCEPT.
+// Go string emptiness is not the gate's notion of empty: fieldCorresponds tests
+// `normalize.NormalizeKey(x) == ""`. A remainder can be non-empty as BYTES
+// while normalizing to NOTHING -- NormalizeKey runs NFKD and strips combining
+// marks, so Hebrew niqqud, Arabic harakat, Thai tone marks and a bare combining
+// accent all vanish. The strip then emptied the title, fieldCorresponds
+// returned comparable=false on its FIRST LINE, and checkCorresponds'
+// `(!titleComparable || titleOK)` clause passed VACUOUSLY: the title half of
+// the gate was skipped and any candidate by the right artist matched any
+// request. Measured across five such remainders, every unrelated request
+// accepted, in BOTH directions.
+//
+// The correction is to guard on the same predicate the gate uses. Note what
+// this means about the earlier reasoning: the floor protects the
+// TOKENIZE-empty case, and COMPARABILITY is what protects the NORMALIZE-empty
+// case -- an emptied title never reaches the floor at all. An earlier version
+// of this comment claimed the floor covered both, which was exactly inverted.
 //
 // ONLY THE FIRST separator is considered. A title carrying several dashes most
 // often has packaging after the later ones ("Artist - Song - Remastered"), and
@@ -1194,8 +1210,19 @@ func stripArtistPrefix(title, artist string) string {
 	if idx < 0 {
 		return title
 	}
+	// The TrimSpace is NOT what makes the guard below work, and saying so
+	// prevents a future reader from trusting the wrong line. It was
+	// load-bearing under the old `rest == ""` check (without it a
+	// whitespace-only remainder was non-empty and slipped through); against
+	// NormalizeKey it is redundant, since that already normalizes "   " to "".
+	// Measured: deleting it survives the full suite, and it cannot change a
+	// verdict either way -- both downstream consumers, MatchConfidence and
+	// tokenizeTitle, are insensitive to leading and trailing whitespace. It is
+	// kept only so the returned title is well formed.
 	prefix, rest := title[:idx], strings.TrimSpace(title[idx+len(" - "):])
-	if rest == "" {
+	// The gate's own notion of empty, not Go's. See the block above: these
+	// differ, and the gap between them was a false accept.
+	if normalize.NormalizeKey(rest) == "" {
 		return title
 	}
 	if !artistTokensEqual(artist, prefix) {

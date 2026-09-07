@@ -2512,13 +2512,17 @@ func TestArtistPrefixStripRequiresIdentityNotResemblance(t *testing.T) {
 // This test asserts the CURRENT behavior, so a future change to it is a
 // deliberate decision that reddens a test rather than a silent drift.
 func TestSharedHonorificStillSatisfiesTheSharedNameRule(t *testing.T) {
+	// ASSERTED, NOT SKIPPED. An earlier version of this loop called t.Skip on
+	// the closed branch and fell off the end otherwise, so it could not fail
+	// either way -- a mutation that CLOSED the residual left the suite green
+	// with two skips. A test that cannot redden records nothing.
 	for _, tc := range []struct{ name, requested, got string }{
 		{"dj", "Song (feat. DJ)", "Song (feat. DJ Alpha)"},
 		{"mc", "Song (feat. MC)", "Song (feat. MC Vanguard)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if creditsDiffer(tc.requested, tc.got) {
-				t.Skip("the honorific residual has been CLOSED -- update this test and the comment above it, and note which mechanism closed it")
+				t.Error("the honorific residual is CLOSED -- that is a BEHAVIOR CHANGE, not a silent improvement: update this test and the comment above it, naming the mechanism that closed it and what it now costs an act whose name genuinely begins with an honorific")
 			}
 		})
 	}
@@ -2540,4 +2544,110 @@ func TestLiveAndUnpluggedAlreadyCorrespond(t *testing.T) {
 	if !titleTokensCorrespond("Placeholder Song (Live)", "Placeholder Song (Unplugged)") {
 		t.Error("an unplugged set IS a live acoustic performance and the two must correspond; performanceFamilies groups them deliberately")
 	}
+}
+
+// TestStripNeverMakesATitleINCOMPARABLE pins the CRITICAL defect the #892 fix
+// introduced and a hostile pre-push review caught: a false ACCEPT, which is the
+// unrecoverable direction.
+//
+// TWO NOTIONS OF EMPTY, AND THE GAP BETWEEN THEM WAS THE BUG. The strip's own
+// guard tested Go string emptiness (`rest == ""`). The gate's comparability
+// test is `normalize.NormalizeKey(x) == ""`. A remainder can be non-empty as
+// bytes while normalizing to nothing -- combining marks, Hebrew niqqud, Arabic
+// harakat, Thai tone marks -- and NormalizeKey strips exactly those (NFKD, then
+// Mn removal).
+//
+// The consequence was not a bad comparison but NO comparison: the strip emptied
+// the title, fieldCorresponds returned comparable=false on its first line, and
+// checkCorresponds' `(!titleComparable || titleOK)` clause then passed
+// VACUOUSLY, accepting on the artist field alone. Any candidate by the right
+// artist matched any request.
+//
+// THE STRIP CAUSED IT. Before this branch the same candidate was comparable and
+// rejected at the floor, so this was new surface, not a pre-existing hole.
+//
+// The comment that used to sit on stripArtistPrefix argued the floor catches an
+// emptied title. That was exactly inverted: an emptied title never REACHES the
+// floor. Guarding on NormalizeKey rather than on Go emptiness is what actually
+// supplies the protection.
+func TestStripNeverMakesATitleINCOMPARABLE(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	// Each remainder is non-empty as a Go string and normalizes to nothing.
+	for _, tc := range []struct{ name, rest string }{
+		{"combining acute", "́"},
+		{"spacing acute", "´"},
+		{"hebrew niqqud", "ְֱ"},
+		{"arabic harakat", "َِ"},
+		{"thai tone marks", "่้"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// PREMISE: non-empty as bytes, empty after normalization. That gap
+			// IS the defect; if a future NormalizeKey change closes it, this
+			// case stops testing anything and must be re-chosen.
+			if tc.rest == "" || normalize.NormalizeKey(tc.rest) != "" {
+				t.Fatalf("test premise broken: rest %q must be non-empty but normalize to empty, got normalized %q", tc.rest, normalize.NormalizeKey(tc.rest))
+			}
+
+			cand := artist + " - " + tc.rest
+			if got := stripArtistPrefix(cand, artist); normalize.NormalizeKey(got) == "" {
+				t.Errorf("the strip emptied the title to %q: an emptied title is INCOMPARABLE, and the gate then accepts on the artist alone", got)
+			}
+
+			// The consequence the library actually feels: an unrelated request.
+			requested := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
+			sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: cand}
+			if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err == nil {
+				t.Error("an UNRELATED request was ACCEPTED: the strip made the title incomparable, so the title half of the gate was skipped entirely")
+			}
+		})
+	}
+
+	t.Run("the requested side has the same hole", func(t *testing.T) {
+		requested := models.Track{ArtistName: artist, TrackName: artist + " - ́"}
+		sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: "Vanguard Kettledrum"}
+		if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err == nil {
+			t.Error("an unrelated candidate was ACCEPTED against an emptied REQUESTED title: the strip is symmetric, so the guard must be too")
+		}
+	})
+}
+
+// TestStripSeparatorAndTrimAreLoadBearing pins four lines in stripArtistPrefix
+// that a mutation sweep found UNTESTED. Each survived a mutation, and each
+// survivor is a behavior change rather than dead code -- three of the four are
+// independent false ACCEPTS.
+func TestStripSeparatorAndTrimAreLoadBearing(t *testing.T) {
+	const artist = "Placeholder Artist Name"
+	unrelated := models.Track{ArtistName: artist, TrackName: "Vanguard Kettledrum"}
+
+	// Deleting the empty-remainder guard, or the TrimSpace that produces it,
+	// each empties the title and accepts anything by this artist.
+	for _, cand := range []string{artist + " - ", artist + " -   "} {
+		t.Run("trailing separator: "+cand, func(t *testing.T) {
+			sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: cand}
+			if _, err := SelectCandidate([]SearchCandidate{sc}, unrelated); err == nil {
+				t.Error("a title that is only the artist and a separator accepted an unrelated request")
+			}
+		})
+	}
+
+	t.Run("only the FIRST separator is consulted", func(t *testing.T) {
+		// The documented decision, previously asserted only in prose. With
+		// LastIndex this legitimate accept is LOST, because the strip would
+		// consume the song's words and leave only the packaging.
+		requested := models.Track{ArtistName: artist, TrackName: "Placeholder Song Title"}
+		sc := SearchCandidate{VideoID: "vid", Artist: artist, Title: artist + " - Placeholder Song Title - Remastered"}
+		if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err != nil {
+			t.Errorf("a multi-dash upload title was rejected -- the strip must take the FIRST separator, not the last: %v", err)
+		}
+	})
+
+	t.Run("the separator is the SPACED dash, never a bare hyphen", func(t *testing.T) {
+		// A bare hyphen is ordinary intra-word punctuation. Splitting on it
+		// truncates hyphenated titles and manufactures a false accept.
+		requested := models.Track{ArtistName: "Alpha", TrackName: "Alpha-Beta"}
+		sc := SearchCandidate{VideoID: "vid", Artist: "Alpha", Title: "Beta"}
+		if _, err := SelectCandidate([]SearchCandidate{sc}, requested); err == nil {
+			t.Error("a hyphenated title was split: the separator must be the SPACED dash, or an intra-word hyphen truncates the title")
+		}
+	})
 }
