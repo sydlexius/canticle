@@ -674,10 +674,36 @@ func TestClient_SatisfiesTheFetcherSignature(t *testing.T) {
 // well-formed, the timings are real, and timing.Evaluate returns Ok because a
 // duplicate upload runs about the same length.
 //
-// The fixture puts the CORRECT candidate at position 1. Both rows carry
-// identical artist and title, so both clear the correspondence gate and the
-// RANKER decides -- on duration, the one field that differs. Position order and
-// the ranker therefore disagree, which is what makes the assertion load-bearing.
+// THE FIXTURE IS BUILT SO DURATION IS THE SOLE DISCRIMINATOR, and getting that
+// right took two corrections a hostile review found. All three rows carry
+// identical artist and title, so all three clear the correspondence gate and
+// the RANKER decides; duration is the only field that differs.
+//
+// The winner sits in the MIDDLE (index 1), defeating BOTH a first-wins and a
+// last-wins selection bug. A two-row fixture with the winner last could not
+// tell a working ranker from one that returns whatever cleared the gate last.
+//
+// The winner also carries the HIGHEST videoId, deliberately. An earlier version
+// named these rows so the lower videoId was also the correct one, which meant
+// the TIE-BREAK independently elected the same winner as the duration bonus.
+// The test could not distinguish "the duration ranker chose correctly" from
+// "the tie-break rescued it", so four scoring mutations survived it. Inverting
+// the ids means a tie-break would elect a WRONG row, leaving real duration
+// scoring as the only way to produce the expected result.
+//
+// The third row is a CLOSE-tier competitor (128s against a requested 126s).
+// Without it, deleting the exact-duration tier merely demoted the winner to the
+// close tier, where it still beat a 300s row -- right answer, weaker reason, and
+// the mutation survived. The near-miss row ties the winner under that mutation,
+// and the inverted ids then hand the tie to the WRONG row. Each duration tier is
+// therefore pinned by a candidate that is only beaten by the tier above it.
+//
+// Requested duration is 126s. Tiers: exact <=1s (+1.0), close <=3s (+0.5),
+// far <=8s (+0.25).
+//
+//	index 0  aaawrongwin  300s  delta 174  no bonus     sorts lowest
+//	index 1  zzzrightwin  126s  delta 0    EXACT +1.0   sorts highest  <- winner
+//	index 2  aabnearmiss  128s  delta 2    CLOSE +0.5   sorts 2nd-lowest
 //
 // This test passes against correct code, so its passing proves nothing on its
 // own. The proof is that reverting the stamp to candidates[0] REDDENS it.
@@ -704,7 +730,7 @@ func TestFindLyrics_StampsTheRANKERsWinnerNotTheFirstCandidate(t *testing.T) {
 	// And the videoId actually SENT to next must belong to that same winner.
 	// Stamping one candidate while fetching another's lyrics would be the worst
 	// version of this defect: a correct-looking identity over the wrong words.
-	if got, want := bodyString(t, requestFor(t, srv.snapshot(), nextPath), "videoId"), "rightwinner"; got != want {
+	if got, want := bodyString(t, requestFor(t, srv.snapshot(), nextPath), "videoId"), "zzzrightwin"; got != want {
 		t.Errorf("next videoId = %q, want %q -- the lyrics fetched must belong to "+
 			"the candidate whose identity was stamped", got, want)
 	}

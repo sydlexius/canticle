@@ -28,7 +28,7 @@
                                         "text": "Placeholder Song Title",
                                         "navigationEndpoint": {
                                           "watchEndpoint": {
-                                            "videoId": "wrongwinner"
+                                            "videoId": "aaawrongwin"
                                           }
                                         }
                                       }
@@ -81,7 +81,7 @@
                               }
                             ],
                             "playlistItemData": {
-                              "videoId": "wrongwinner"
+                              "videoId": "aaawrongwin"
                             }
                           }
                         },
@@ -96,7 +96,7 @@
                                         "text": "Placeholder Song Title",
                                         "navigationEndpoint": {
                                           "watchEndpoint": {
-                                            "videoId": "rightwinner"
+                                            "videoId": "zzzrightwin"
                                           }
                                         }
                                       }
@@ -149,7 +149,75 @@
                               }
                             ],
                             "playlistItemData": {
-                              "videoId": "rightwinner"
+                              "videoId": "zzzrightwin"
+                            }
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Placeholder Song Title",
+                                        "navigationEndpoint": {
+                                          "watchEndpoint": {
+                                            "videoId": "aabnearmiss"
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Placeholder Artist Name",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "UCplaceholderArtist00000",
+                                            "browseEndpointContextSupportedConfigs": {
+                                              "browseEndpointContextMusicConfig": {
+                                                "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      {
+                                        "text": " • "
+                                      },
+                                      {
+                                        "text": "Placeholder Album Name",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "MPREplaceholderAlbum000",
+                                            "browseEndpointContextSupportedConfigs": {
+                                              "browseEndpointContextMusicConfig": {
+                                                "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      {
+                                        "text": " • "
+                                      },
+                                      {
+                                        "text": "2:08"
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "playlistItemData": {
+                              "videoId": "aabnearmiss"
                             }
                           }
                         }
