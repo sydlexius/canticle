@@ -657,3 +657,123 @@ func TestClient_SatisfiesTheFetcherSignature(t *testing.T) {
 	}
 	var _ lyricsProvider = NewClient()
 }
+
+// TestFindLyrics_StampsTheRANKERsWinnerNotTheFirstCandidate closes #888.
+//
+// Every shipped search fixture carried exactly ONE candidate, so `candidates[0]`
+// and the gate winner were the same value in every test: stamping the first
+// search result instead of the selected one left the whole suite green. The
+// selection logic was well covered in isolation; what nothing covered was that
+// FindLyrics actually USES its result.
+//
+// That mattered from the moment the provider was registered. The live API
+// returns many candidates per query -- duplicate uploads, topic-channel copies,
+// live versions, covers -- so "which candidate wins" is a live question on every
+// fetch, and a defect there writes another recording's lyrics to disk under a
+// confident stamped identity. Nothing downstream detects it: the file is
+// well-formed, the timings are real, and timing.Evaluate returns Ok because a
+// duplicate upload runs about the same length.
+//
+// THE FIXTURE IS BUILT SO DURATION IS THE SOLE DISCRIMINATOR, and getting that
+// right took two corrections a hostile review found. All three rows carry
+// identical artist and title, so all three clear the correspondence gate and
+// the RANKER decides; duration is the only field that differs.
+//
+// The winner sits in the MIDDLE (index 1), defeating BOTH a first-wins and a
+// last-wins selection bug. A two-row fixture with the winner last could not
+// tell a working ranker from one that returns whatever cleared the gate last.
+//
+// The winner also carries the HIGHEST videoId, deliberately. An earlier version
+// named these rows so the lower videoId was also the correct one, which meant
+// the TIE-BREAK independently elected the same winner as the duration bonus.
+// The test could not distinguish "the duration ranker chose correctly" from
+// "the tie-break rescued it", so four scoring mutations survived it. Inverting
+// the ids means a tie-break would elect a WRONG row, leaving real duration
+// scoring as the only way to produce the expected result.
+//
+// The third row is a CLOSE-tier competitor (128s against a requested 126s).
+// Without it, deleting the exact-duration tier merely demoted the winner to the
+// close tier, where it still beat a 300s row -- right answer, weaker reason, and
+// the mutation survived. The near-miss row ties the winner under that mutation,
+// and the inverted ids then hand the tie to the WRONG row. Each duration tier is
+// therefore pinned by a candidate that is only beaten by the tier above it.
+//
+// Requested duration is 126s. Tiers: exact <=1s (+1.0), close <=3s (+0.5),
+// far <=8s (+0.25). Text is identical on every row, contributing 20.0 to each,
+// so the duration bonus is the whole spread.
+//
+// The last column is the videoId's LEXICOGRAPHIC rank, which is what the
+// tie-break reads -- not the score rank. The two orders are deliberately
+// OPPOSED on the winner: it scores highest while sorting highest, so a
+// tie-break can never elect it. (They coincide on the near-miss row, which
+// ranks middle either way; the column is labeled because that coincidence
+// made one reviewer read it as a score order.)
+//
+//	index  videoId      dur   delta  bonus       score  videoId rank
+//	0      aaawrongwin  300s  174    none        20.00  lowest
+//	1      zzzrightwin  126s  0      EXACT +1.0  21.00  highest   <- winner
+//	2      aabnearmiss  128s  2      CLOSE +0.5  20.50  middle
+//
+// This test passes against correct code, so its passing proves nothing on its
+// own. The proof is that reverting the stamp to candidates[0] REDDENS it.
+func TestFindLyrics_StampsTheRANKERsWinnerNotTheFirstCandidate(t *testing.T) {
+	fx := chainFixtures()
+	fx[searchPath] = "search_multi_candidate.json"
+	srv := &fixtureServer{fixtures: fx}
+	c := newTestClient(t, srv)
+
+	req := fixtureTrack()
+	req.TrackLength = 126 // matches the position-1 candidate exactly
+
+	song, err := c.FindLyrics(context.Background(), req)
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+
+	// The identity stamped on the returned Song must be the ranker's winner.
+	if got, want := song.Track.TrackLength, 126; got != want {
+		t.Errorf("Track.TrackLength = %d, want %d -- the stamped identity must come "+
+			"from the RANKER's winner (position 1), not from candidates[0] (300s)", got, want)
+	}
+
+	// And the videoId actually SENT to next must belong to that same winner.
+	// Stamping one candidate while fetching another's lyrics would be the worst
+	// version of this defect: a correct-looking identity over the wrong words.
+	if got, want := bodyString(t, requestFor(t, srv.snapshot(), nextPath), "videoId"), "zzzrightwin"; got != want {
+		t.Errorf("next videoId = %q, want %q -- the lyrics fetched must belong to "+
+			"the candidate whose identity was stamped", got, want)
+	}
+}
+
+// TestFindLyrics_TieBreaksOnLowerVideoIDEndToEnd exercises the tie-break through
+// the whole chain rather than through SelectCandidate alone.
+//
+// Ties are the COMMON case, not a corner: duplicate uploads of one track carry
+// identical artist, title and duration, so they score identically. Taking the
+// first such candidate makes the winner depend on the order innertube happened
+// to return them, which can differ between two identical searches -- the same
+// set would select a different lyric, and a cache key would stop being
+// reproducible. The tie-break on the lower VideoID is not a better CHOICE among
+// duplicates (nothing here can tell which upload is canonical) but it is a
+// DETERMINISTIC one.
+//
+// The fixture puts the HIGHER videoId at position 0, so first-wins and the
+// tie-break disagree.
+func TestFindLyrics_TieBreaksOnLowerVideoIDEndToEnd(t *testing.T) {
+	fx := chainFixtures()
+	fx[searchPath] = "search_tied_candidates.json"
+	srv := &fixtureServer{fixtures: fx}
+	c := newTestClient(t, srv)
+
+	req := fixtureTrack()
+	req.TrackLength = 126 // both candidates match it, so the scores tie exactly
+
+	if _, err := c.FindLyrics(context.Background(), req); err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+
+	if got, want := bodyString(t, requestFor(t, srv.snapshot(), nextPath), "videoId"), "aaaduplicate"; got != want {
+		t.Errorf("next videoId = %q, want %q -- a tie must resolve to the LOWER "+
+			"videoId deterministically, not to whichever row search returned first", got, want)
+	}
+}
