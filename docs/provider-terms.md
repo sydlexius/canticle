@@ -7,8 +7,9 @@ as a condition of use, and what else their terms impose. Tracked by #600.
 even when the answer is "not required", with the date it was checked and a link to the
 document that says so. Terms change; a finding is only as good as its date.
 
-**Status: THREE PROVIDERS RECORDED. CREDIT IMPLEMENTED FOR MUSIXMATCH'S DIRECT API, SOME
-OBLIGATIONS OUTSTANDING. BOTH INNERTUBE UPSTREAMS NOW READ.**
+**Status: THREE PROVIDERS RECORDED. MUSIXMATCH DIRECT-API CREDIT IMPLEMENTED IN SUBSTANCE,
+BUT THE CLAUSE 2.1.5 PRESCRIBED BUTTON AND ITS LINKBACK REMAIN OUTSTANDING. BOTH INNERTUBE
+UPSTREAMS NOW READ.**
 Musixmatch's required credit and linkback now render across the authenticated serve UI, using the
 official brand mark rather than the exact prescribed button (which is not published in a
 usable format -- see below). Clauses 2.1.11, 2.1.4 and 1.1 remain unaddressed.

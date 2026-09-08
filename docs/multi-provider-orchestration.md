@@ -371,6 +371,6 @@ the original out-of-scope notes:
 - `internal/worker/worker.go` - current circuit-breaker fields and `tripCircuitIfRateLimited`
 - `internal/langguard/guard.go` - `Guard.Accept` suitability decision
 - `internal/cache/cache.go` - single-slot `lyrics_cache`
-- `internal/providers/providers.go` - `Select` (single-provider today), provider names
-- `internal/petitlyrics` - existing secondary adapter (single-select today)
+- `internal/providers/providers.go` - provider registry and provider names
+- `internal/petitlyrics` - secondary adapter, one of the selectable lanes
 - `internal/innertube` - YouTube Music InnerTube adapter, a third selectable lane; see [Provider Attribution](provider-attribution.md) for its per-track multiplexed attribution

@@ -304,8 +304,12 @@ race_wait_seconds = 2
 # throttled primary never pauses a fallback. Each name must be a known provider
 # ("musixmatch", "petitlyrics", "innertube"); an unknown name is rejected at
 # load. Empty (the default) means no fallback - only the primary lane runs,
-# preserving single-provider behavior. A musixmatch fallback with no api.token
-# is skipped.
+# preserving single-provider behavior. A musixmatch fallback lane is skipped
+# when no EFFECTIVE token resolves for it -- that is the first non-empty of the
+# --token flag, MUSIXMATCH_TOKEN/MXLRC_API_TOKEN, this file's api.token, the
+# encrypted secret store, and (in serve mode) an automatically minted token. So
+# an empty api.token alone does NOT skip the lane: serve mode normally still
+# resolves one from the store or by minting it.
 # Example (try Musixmatch first, then Petit Lyrics for the Japanese catalog):
 #   fallback_order = ["petitlyrics"]
 # Override: MXLRC_PROVIDERS_FALLBACK_ORDER (comma-separated). Default [].
@@ -324,8 +328,12 @@ petitlyrics_cooldown_seconds = 0
 # Minimum gap between InnerTube requests, in whole seconds. Same pattern as
 # petitlyrics_cooldown_seconds above: 0 (the default) falls back to
 # api.cooldown, and the InnerTube client raises any POSITIVE value below its own
-# 2-second floor up to that floor. A negative value is not a disable request and
-# also falls back to api.cooldown.
+# 2-second floor up to that floor. A negative value is not a disable request.
+# What a negative does depends on HOW it is set: written HERE in the TOML it is
+# accepted and falls back to api.cooldown, but the env override
+# (MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS) and `canticle config set` both
+# REJECT it outright -- the env path warns and keeps the current value, and
+# config set returns an error. Only the TOML path treats it as a fallback.
 # The clamp does NOT apply to 0: with this key unset and api.cooldown also 0,
 # the lane runs unpaced and the 2-second floor never applies.
 # THE NON-OBVIOUS PART: the interval paces outbound REQUESTS, and the number of
