@@ -101,6 +101,7 @@ func classifiedSentinels() map[string]error {
 		"innertube.ErrClientVersion":           innertube.ErrClientVersion,
 		"innertube.ErrNotFound":                innertube.ErrNotFound,
 		"innertube.ErrNoLyricsTab":             innertube.ErrNoLyricsTab,
+		"innertube.ErrUntimedLyrics":           innertube.ErrUntimedLyrics,
 	}
 }
 
@@ -139,6 +140,19 @@ func transportExemptions() map[string]string {
 		// it its OWN breaker arm ahead of ErrForbidden so the operator-facing
 		// diagnosis names the real cause; the OUTCOME class is correctly the same.
 		"innertube.ErrClientVersion": "a stale pinned client version; fixed by bumping the constant, not by waiting (see internal/innertube/doc.go)",
+		// Decode-internal only, and the ONE case where transport is correct
+		// because the sentinel never leaves the package. ExtractCues returns it
+		// for a browse response carrying text but no timings; Decode catches it
+		// with errors.Is and returns a SUCCESSFUL unsynced song, so no lane ever
+		// sees it. Verified by grep: no reference to ErrUntimedLyrics,
+		// ExtractCues or ExtractPlainLyrics exists outside internal/innertube.
+		//
+		// Same shape of exemption as musixmatch.ErrTokenMintRefused above --
+		// unreachable from a lane -- and it must STAY that way. If a caller ever
+		// propagates it out of a lookup, it is emphatically NOT a benign miss
+		// (the response carried usable lyrics) and this entry must be replaced
+		// with a real ClassifyOutcome arm rather than left to the default.
+		"innertube.ErrUntimedLyrics": "decode-internal; Decode converts it into a successful unsynced song, so it never reaches a lane",
 	}
 }
 

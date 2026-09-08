@@ -615,3 +615,132 @@ func TestExtractCues_SurvivesAnySourceMessageShape(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractCues_UntimedPayloadIsNotATransportFailure covers the MEASURED
+// production defect: YouTube Music serves two shapes under timedLyricsData,
+// and only one carries cueRange.
+//
+// Captured live 2026-09-08 against three of the five tracks that failed in
+// production on v1.37.0: browse returned 17, 52 and 25 entries whose keyset
+// was exactly {lyricLine} -- cueRange ABSENT on every one -- alongside
+// `"sourceMessage": "Source: LyricFind"`. Go leaves the nested struct at its
+// zero value for an absent object, so startTimeMilliseconds read "" and
+// strconv.Atoi failed, returning an UNWRAPPED error. That classed a response
+// full of usable words as a transport failure and retired the row as `failed`.
+//
+// The fixtures could not have caught this: every one was captured from a
+// timed response, so the code and its tests agreed with each other and both
+// disagreed with the live API.
+func TestExtractCues_UntimedPayloadIsNotATransportFailure(t *testing.T) {
+	raw := browseWithCues(`{"lyricLine":"first line"},{"lyricLine":"second line"}`)
+
+	_, err := ExtractCues(raw)
+	if err == nil {
+		t.Fatal("ExtractCues: expected ErrUntimedLyrics, got nil")
+	}
+	if !errors.Is(err, ErrUntimedLyrics) {
+		t.Fatalf("ExtractCues error = %v, want it to wrap ErrUntimedLyrics", err)
+	}
+	// It must NOT read as a benign miss either: the response carried words,
+	// so a caller that buckets on ErrNotFound would discard usable content.
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("ExtractCues error = %v, must NOT wrap ErrNotFound -- the payload carries usable lyrics", err)
+	}
+}
+
+// TestDecode_UntimedPayloadYieldsUnsyncedLyrics is the behavior the fix
+// exists to deliver: an untimed payload becomes an unsynced result the writer
+// can emit as .txt, rather than being thrown away.
+func TestDecode_UntimedPayloadYieldsUnsyncedLyrics(t *testing.T) {
+	raw := browseWithCues(`{"lyricLine":"first line"},{"lyricLine":""},{"lyricLine":"third line"}`)
+
+	song, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode: unexpected error: %v", err)
+	}
+	if len(song.Subtitles.Lines) != 0 {
+		t.Errorf("Subtitles.Lines = %d, want 0 -- an untimed payload has no timings to claim", len(song.Subtitles.Lines))
+	}
+	// The blank middle line is PRESERVED, not dropped: it is a stanza break in
+	// the plain-text rendering, and this path has no timings whose positions
+	// could be shifted by keeping it (the reason the timed path leaves a
+	// partially-empty cue set alone does not apply, but the same conservatism
+	// about not silently editing a provider's text does).
+	want := "first line\n\nthird line"
+	if song.Lyrics.LyricsBody != want {
+		t.Errorf("LyricsBody = %q, want %q", song.Lyrics.LyricsBody, want)
+	}
+}
+
+// TestDecode_UntimedPayloadCarriesUpstream guards that the attribution still
+// lands on the unsynced path. The production sample was LyricFind-sourced, so
+// this is the exact combination prod sees, not a synthetic pairing.
+func TestDecode_UntimedPayloadCarriesUpstream(t *testing.T) {
+	raw := []byte(`{"contents":{"elementRenderer":{"newElement":{"type":{"componentType":{"model":{"timedLyricsModel":{"lyricsData":{"sourceMessage":"Source: LyricFind","timedLyricsData":[{"lyricLine":"a line"}]}}}}}}}}}`)
+
+	song, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode: unexpected error: %v", err)
+	}
+	if song.Upstream != UpstreamLyricFind {
+		t.Errorf("Upstream = %q, want %q", song.Upstream, UpstreamLyricFind)
+	}
+}
+
+// TestDecode_UntimedPayloadAllTextEmptyIsAMiss: an untimed payload whose every
+// line is blank carries nothing usable, so it is a benign miss like its timed
+// counterpart -- writing an empty .txt would retire the row and block another
+// lane from answering.
+func TestDecode_UntimedPayloadAllTextEmptyIsAMiss(t *testing.T) {
+	raw := browseWithCues(`{"lyricLine":""},{"lyricLine":"   "}`)
+
+	_, err := Decode(raw)
+	if err == nil {
+		t.Fatal("Decode: expected an error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Decode error = %v, want a benign miss wrapping ErrNotFound", err)
+	}
+}
+
+// TestExtractCues_PartiallyTimedPayloadIsTransportClass: a MIX of timed and
+// untimed entries is a shape neither branch can honestly serve. Treating it as
+// timed would place the untimed lines at 00:00; treating it as plain would
+// discard real timings. It has never been observed live, so it is rejected
+// transport-class (retried) rather than retired as a miss.
+func TestExtractCues_PartiallyTimedPayloadIsTransportClass(t *testing.T) {
+	raw := browseWithCues(cueJSON("timed", "0", "100") + `,{"lyricLine":"untimed"}`)
+
+	_, err := ExtractCues(raw)
+	if err == nil {
+		t.Fatal("ExtractCues: expected an error, got nil")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("ExtractCues error = %v, must NOT wrap ErrNotFound", err)
+	}
+	if errors.Is(err, ErrUntimedLyrics) {
+		t.Errorf("ExtractCues error = %v, must NOT wrap ErrUntimedLyrics -- a partial mix is not a plain-text payload", err)
+	}
+}
+
+// TestExtractCues_PresentButMalformedCueRangeStaysTransportClass is the
+// CONTROL for the tests above: the fix distinguishes an ABSENT cueRange from a
+// present-but-broken one, and must not weaken the existing malformed-timestamp
+// guard into the new plain-text branch.
+func TestExtractCues_PresentButMalformedCueRangeStaysTransportClass(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"empty start", `{"lyricLine":"x","cueRange":{"startTimeMilliseconds":"","endTimeMilliseconds":"100"}}`},
+		{"non-numeric start", cueJSON("x", "not-a-number", "100")},
+		{"empty end", `{"lyricLine":"x","cueRange":{"startTimeMilliseconds":"0","endTimeMilliseconds":""}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ExtractCues(browseWithCues(tc.raw))
+			if err == nil {
+				t.Fatal("ExtractCues: expected an error, got nil")
+			}
+			if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUntimedLyrics) {
+				t.Errorf("ExtractCues error = %v, want an unwrapped transport-class failure: cueRange was PRESENT and broken, not absent", err)
+			}
+		})
+	}
+}

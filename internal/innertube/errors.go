@@ -59,4 +59,24 @@ var (
 	// that bucket a miss as benign keep working unchanged, while code that
 	// explicitly tests for this sentinel sees the more specific reason.
 	ErrNoLyricsTab = fmt.Errorf("innertube: no lyrics tab for video: %w", ErrNotFound)
+
+	// ErrUntimedLyrics indicates a browse response carried lyric TEXT but no
+	// timings at all: every timedLyricsData entry had lyricLine and no
+	// cueRange sibling.
+	//
+	// MEASURED 2026-09-08 against the tracks that failed in production on
+	// v1.37.0: this API serves two shapes under the same path, and which one
+	// arrives tracks the LICENSOR it multiplexed to for that result, not the
+	// client string we sent. The untimed shape was observed alongside
+	// "Source: LyricFind" while the timed shape is what the fixtures captured.
+	// Picking ANDROID_MUSIC over WEB_REMIX (see doc.go) is therefore a
+	// preference for timings, never a guarantee of them.
+	//
+	// It deliberately wraps NEITHER ErrNotFound nor a transport class. It is
+	// not a miss -- the response carries usable words -- and nothing failed,
+	// so it must not trip a circuit breaker or burn a retry. It is a
+	// DEGRADED SUCCESS, and ExtractCues's caller converts it into an unsynced
+	// result. A caller that only knows the older sentinels sees an ordinary
+	// error and is no worse off than before this existed.
+	ErrUntimedLyrics = errors.New("innertube: response carried lyrics but no timings")
 )
