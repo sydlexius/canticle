@@ -3,10 +3,24 @@
 
 [build]
 working_dir = "."
-pre_checks = [
-  "go test -count=1 ./...",
-  "golangci-lint run",
-]
+
+# DELIBERATELY EMPTY -- do not re-add `go test` or `golangci-lint` here.
+#
+# `.githooks/pre-push` (wired via core.hooksPath, so every worktree inherits it)
+# execs scripts/pre-push-gate.sh on EVERY push, the release tag push included.
+# That gate is a strict superset of anything worth listing here: `go test -race`
+# with coverage, golangci-lint, govulncheck, actionlint, patch coverage, and the
+# coverage-floor ratchet. CI then runs the same suite again on the pushed tag.
+#
+# So a `go test ./...` at this step is the THIRD run of the same suite, and a
+# weaker one (no -race, no coverage). Measured cutting v1.37.1: the tag push
+# printed "OK: all pre-push checks passed" from the hook, having already been
+# gated identically at PR time.
+#
+# Anything that genuinely must gate a RELEASE and is not already in the gate
+# belongs in scripts/pre-push-gate.sh instead, where every push gets it rather
+# than only the releases that happen to run through this skill.
+pre_checks = []
 
 # Section grouping for generated release notes. Maps a merged PR's GitHub label
 # to the heading it lands under, matching the headings the last several releases
