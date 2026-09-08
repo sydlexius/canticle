@@ -16,12 +16,21 @@ selectable via `providers.mode`:
   (`providers.race_wait_seconds`, default 2) so a slower synced result can
   preempt it.
 
-The petitlyrics adapter in `internal/petitlyrics` is wired as a fallback lane
-(add it to `providers.fallback_order`) as well as being selectable as the
-primary. A single-lane deployment (Musixmatch only, no fallback) behaves
-identically under either mode: one lane, one call. The sections below describe
-how the lanes run together without races, double-writes, or shared rate-limit
-state.
+The petitlyrics adapter in `internal/petitlyrics` and the InnerTube adapter in
+`internal/innertube` are both wired as fallback lanes (add either to
+`providers.fallback_order`) as well as being selectable as the primary. Neither
+needs an API token. The InnerTube lane multiplexes between upstream lyric
+licensors per track -- see [Provider Attribution](provider-attribution.md) for
+how that is recorded on disk. Its cost per lookup varies where the other lanes'
+does not: one outbound request when the candidate is rejected at the search, two
+when the lyrics tab is absent, and three (search, next, browse) only when it
+serves a result, so on a fallback lane whose traffic is mostly misses the
+typical lookup costs one, the same as the others. See
+`providers.innertube_cooldown_seconds` in
+[Configuration](CONFIGURATION.md#providers) for pacing it independently. A
+single-lane deployment (Musixmatch only, no fallback) behaves identically under
+either mode: one lane, one call. The sections below describe how the lanes run
+together without races, double-writes, or shared rate-limit state.
 
 This document is retained for the design rationale and the orchestration
 contracts (cancellation, dedup, suitability/ranking, per-lane breakers); those
@@ -362,5 +371,6 @@ the original out-of-scope notes:
 - `internal/worker/worker.go` - current circuit-breaker fields and `tripCircuitIfRateLimited`
 - `internal/langguard/guard.go` - `Guard.Accept` suitability decision
 - `internal/cache/cache.go` - single-slot `lyrics_cache`
-- `internal/providers/providers.go` - `Select` (single-provider today), provider names
-- `internal/petitlyrics` - existing secondary adapter (single-select today)
+- `internal/providers/providers.go` - provider registry and provider names
+- `internal/petitlyrics` - secondary adapter, one of the selectable lanes
+- `internal/innertube` - YouTube Music InnerTube adapter, a third selectable lane; see [Provider Attribution](provider-attribution.md) for its per-track multiplexed attribution

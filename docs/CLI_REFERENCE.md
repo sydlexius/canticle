@@ -197,7 +197,8 @@ Synced `.lrc` files written by `canticle` carry provenance tags in the header bl
 
 | Tag | Value | Notes |
 |---|---|---|
-| `[source:]` | provider lane name | e.g. `musixmatch`, `petitlyrics` |
+| `[source:]` | provider lane name | e.g. `musixmatch`, `petitlyrics`, `innertube`. Always the lane, never the upstream licensor. |
+| `[upstream:]` | per-result licensor | Only written by a multiplexing lane (today: `innertube`), which routes each result to one of several upstream lyric licensors. Omitted when no upstream was reported. See [Provider Attribution](provider-attribution.md). |
 | `[fetched:]` | ISO 8601 fetch timestamp | UTC; absent on cache hits |
 | `[ve:]` | generating Canticle version | e.g. `v1.2.0`; `dev` on local builds |
 | `[isrc:]` | ISRC recording identifier | when available from the audio file or API response |

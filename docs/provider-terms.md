@@ -7,11 +7,19 @@ as a condition of use, and what else their terms impose. Tracked by #600.
 even when the answer is "not required", with the date it was checked and a link to the
 document that says so. Terms change; a finding is only as good as its date.
 
-**Status: BOTH PROVIDERS READ. CREDIT IMPLEMENTED, SOME OBLIGATIONS OUTSTANDING.**
+**Status: THREE PROVIDERS RECORDED. MUSIXMATCH DIRECT-API CREDIT IMPLEMENTED IN SUBSTANCE,
+BUT THE CLAUSE 2.1.5 PRESCRIBED BUTTON AND ITS LINKBACK REMAIN OUTSTANDING. BOTH INNERTUBE
+UPSTREAMS NOW READ.**
 Musixmatch's required credit and linkback now render across the authenticated serve UI, using the
 official brand mark rather than the exact prescribed button (which is not published in a
 usable format -- see below). Clauses 2.1.11, 2.1.4 and 1.1 remain unaddressed.
 petitlyrics imposes no attribution requirement but does constrain use.
+InnerTube multiplexes between two upstream licensors per track (LyricFind and Musixmatch reached
+through Google's own license). BOTH were read in full on 2026-09-07. Each binds on ACCESS to that
+company's own site, application or services, which this lane never touches, and neither imposes an
+attribution requirement. Silence is the finding, not permission: what authorizes YouTube Music to
+serve the text is a Google-to-licensor arrangement Canticle cannot read. See the InnerTube section
+below.
 
 Do not read this file as a compliance sign-off -- it is a record of what the terms say and
 what Canticle does about them, reviewed by an agent rather than by counsel.
@@ -223,6 +231,170 @@ The For Brands icon is a solid tile carrying its own background (`#fc532e` with 
 in `#fff`), which is exactly why it works on any surface -- including this UI's dark
 `#0b1120`. Do not add a background plate behind it, do not pad it, and do not recolor it;
 the asset already solves the contrast problem the earlier site-header icon had.
+
+---
+
+## InnerTube (YouTube Music internal API)
+
+**Checked:** 2026-09-07
+**Source:** Google publishes no terms specific to the innertube API itself -- no
+documentation, no rate-limit response headers, and no `robots.txt` covering it (see the
+policy note in `internal/innertube/pacer.go`). This section instead records the terms
+position for the two upstream lyric licensors the API multiplexes between, per
+`docs/provider-attribution.md` (#850).
+
+Canticle never calls either upstream directly through this lane; it only calls the
+InnerTube endpoint, which internally routes each track to one of at least two upstream
+providers and returns whichever it chose. That routing decision belongs to Google /
+YouTube Music, not to Canticle, and it varies per track: the #848 spike measured, across
+four reference tracks, an even split between the two upstreams. The terms below describe
+what governs the content reaching Canticle through this lane, even though Canticle never
+reaches those upstreams' own endpoints or agrees to their developer terms directly.
+
+### Upstream A: LyricFind
+
+**Checked:** 2026-09-07
+**Source:** LyricFind Terms and Conditions, `https://www.lyricfind.com/terms-and-conditions`.
+Read in full on the date above. The page carries NO last-updated or effective date, so
+this reading cannot be pinned to a document version -- only to the date it was read. The
+terms do provide for amendment on 30 days' posted notice, so a later reader should
+re-check rather than assume this still holds.
+
+**SCOPE, AND IT IS THE WHOLE FINDING.** The terms open by defining themselves as
+governing use of "this website, www.lyricfind.com", and they bind by ACCESS: the user
+agrees by accessing the Site on a device. They are a website agreement, front to back.
+
+**Canticle never accesses that website.** This lane calls Google's InnerTube endpoint;
+LyricFind's servers are never contacted, no LyricFind page is loaded, and no Canticle
+code path touches their domain. On the terms' own trigger, they do not attach to
+Canticle at all. That is a stronger and more precise statement than the earlier draft's
+"appear not to reach this use", and it is what the document actually says.
+
+What the terms contain, relevant to this lane:
+
+- **Intellectual property**: material on the website -- design, layout, look, appearance,
+  and graphics -- is owned by or licensed to LyricFind, and reproduction is prohibited
+  unless otherwise stated. The enumeration is explicitly non-exhaustive.
+- **Termination**: LyricFind reserves the right to block IP addresses and prevent access
+  to the Site at its discretion. Not applicable while Canticle does not contact them, but
+  worth knowing the remedy they name.
+- **Governing law**: Canada (Ontario), with binding arbitration through the Canadian
+  Arbitration Association in Toronto and a liability cap of US $100.
+
+What the terms do NOT contain, checked for specifically:
+
+- **No attribution or crediting requirement**, in any form, for lyrics or otherwise.
+  Absent entirely rather than waived.
+- **No third-party application, API, or developer terms.** Nothing addresses a consumer
+  reaching their catalog indirectly through a platform that licenses from them.
+- **No redistribution or caching language for lyric TEXT.** The IP clause enumerates site
+  presentation material and does not name lyrics.
+
+**DO NOT READ THAT LAST ABSENCE AS PERMISSION.** Lyric text is copyrighted by music
+publishers, and LyricFind is a licensor of it rather than its owner; a website's terms
+being silent on redistribution says nothing about the underlying copyright, which is not
+LyricFind's to waive in this document and is not addressed here. The finding is narrow
+and should stay narrow: these particular terms impose no attribution duty on Canticle and
+do not reach this access pattern. Whether writing a lyric to a user's own disk is
+permissible rests on copyright and on Google's license, neither of which this file
+assesses.
+
+**This is why no mark or icon is vendored for LyricFind anywhere in Canticle**, following
+the same policy already applied to petitlyrics (#601). The IP clause covers the site's
+graphics, and no third-party developer terms authorizing use of their branding exist to
+grant an exception, so `laneMark` renders this lane as text only regardless of which
+upstream served a given result -- never a LyricFind icon. See "No new mark for this lane"
+in `docs/provider-attribution.md`.
+
+### Upstream B: Musixmatch, reached through Google's license
+
+**Checked:** 2026-09-07
+
+Canticle already has a direct Musixmatch integration (`internal/musixmatch`), and the
+Musixmatch section above analyzes that integration's terms against the direct desktop-API
+endpoint it calls. When InnerTube's routing sends a track to Musixmatch as the upstream
+licensor, Canticle reaches Musixmatch's catalog through Google's own licensing
+relationship with Musixmatch, not through Canticle's Musixmatch integration at all -- no
+Musixmatch endpoint is called, no Musixmatch token is used, and no Musixmatch code path
+executes for that fetch.
+
+**READ 2026-09-07, and the answer is SILENCE.** Source: the Musixmatch EULA page at
+`https://about.musixmatch.com/eula`, which carries TWO agreements, both read in full:
+
+- **Consumer EULA, last updated February 2025.** By its own words it applies where you
+  access and use their Website, Application or Services "on a consumer basis", and the
+  examples it gives are all direct use of Musixmatch's own properties: searching and
+  viewing lyrics there, creating an account, buying premium, contributing to their
+  catalog.
+- **Business-to-business terms, last updated July 2025.** These apply to publishers,
+  labels and distributors who SUPPLY lyrics and metadata TO Musixmatch, which is the
+  opposite direction from this lane.
+
+Neither one addresses a third party reaching Musixmatch content through a partner
+platform's license. Searched for specifically and ABSENT from both: any clause about
+content reached indirectly, via a licensee, or through a partner service. The documents'
+"third party" clauses run the OTHER WAY -- clauses 3.2 and 3.3 disclaim Musixmatch's
+responsibility for third-party content reached THROUGH Musixmatch, not the reverse.
+
+Both agreements bind on ACCESS to Musixmatch's own Website, Application or Services. On
+this lane Canticle accesses none of them: no Musixmatch endpoint is called, no account
+exists, and no Musixmatch code path runs. As with LyricFind, the agreement does not attach
+on its own trigger.
+
+The restrictions that WOULD bite are scoped to that same access. Clause 6.6 grants a
+limited, revocable license to display Musixmatch-provided content, lyrics included, for
+personal non-commercial use and forbids copying, reproducing or distributing it "as part
+of the Services"; clause 1.5(a) forbids using a robot, scraper or crawler against their
+Website or Application; clause 1.8 reserves text-and-data-mining rights. Each is a
+restriction on using MUSIXMATCH'S properties, and none reaches a fetch that never touches
+them.
+
+**No attribution requirement appears in either agreement.** That is worth stating plainly
+because it differs from the direct-API terms recorded above, which DO impose a credit and
+linkback (clause 2.1.5). Those API terms govern Canticle's own relationship with
+Musixmatch as an API consumer, and that relationship is not what this lane uses.
+
+**SILENCE IS THE FINDING, NOT PERMISSION.** These documents do not address this path, so
+they impose nothing on it; that is a verified negative rather than an unknown. What it
+does NOT establish is that the path is unencumbered. Lyric text is copyrighted by
+publishers, Musixmatch is a licensor rather than the owner, and whatever authorizes
+YouTube Music to serve that text is a Google-to-Musixmatch agreement Canticle is not party
+to and cannot read. The compliance question rests there and on copyright, neither of which
+this file assesses.
+
+**Historical note, superseded:** before the reading above, this section recorded the
+posture as unassessed and genuinely unknown. It is no longer unknown. The distinction
+matters and is the reason the note is kept: "we read them and they do not cover this" is a
+finding, where "we could not check" is a gap, and the two should never be confused in a
+file whose purpose is recording what was actually verified.
+
+What is known, and is a separate question from the terms question: `[upstream:musixmatch]`
+is the tag written to the sidecar in this case, never `[source:musixmatch]` -- the
+`[source:]` tag stays `innertube` regardless of which upstream served the result (see
+`docs/provider-attribution.md`). The on-disk record is honest about the routing even
+though the compliance question above remains open.
+
+### Combined status
+
+**Both upstreams' published terms were read in full on 2026-09-07, and neither reaches
+this lane.** Each binds on ACCESS to that company's own website, application or services,
+and this lane accesses neither: it calls Google's InnerTube endpoint and nothing else.
+Neither imposes an attribution requirement. That is a verified negative, not an
+assumption, and it is a change in kind from the earlier record, which had both marked
+unassessed.
+
+Do NOT extrapolate from it. In particular, do not assume the direct-API Musixmatch clauses
+recorded above (2.1.5 credit, 1.1 non-commercial) apply here -- they govern a relationship
+this lane does not use -- and do not read either silence as permission. What authorizes
+YouTube Music to serve this text is a Google-to-Musixmatch and Google-to-LyricFind
+arrangement that Canticle is not party to and cannot read, and the lyrics themselves are
+publishers' copyright. **The unread agreement is the one that matters, and it remains
+unread.** This file settles what the two licensors' PUBLISHED terms require of Canticle;
+it does not settle whether the path is unencumbered.
+
+No mark is vendored for either upstream through this lane (`laneMark` returns `markNone`
+for `innertube`); the lane always renders as plain text, regardless of which upstream
+served a given track.
 
 ---
 

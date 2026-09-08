@@ -6,7 +6,7 @@ A fully commented `config.example.toml` ships in the repository root; copy it an
 
 ## Token precedence
 
-A Musixmatch API token is required for the one-shot `fetch` CLI, and optional in serve mode (which provisions and stores one itself). When you do supply one, these are the sources in order of precedence (highest first):
+A Musixmatch API token is required only when Musixmatch is the active provider (the default); the one-shot `fetch` CLI needs one supplied explicitly in that case. Petit Lyrics and the InnerTube lane are both tokenless. In serve mode with Musixmatch active, a token is optional (serve provisions and stores one itself). When you do supply a Musixmatch token, these are the sources in order of precedence (highest first):
 
 1. **`--token` CLI flag** - highest priority.
    ```sh
@@ -89,6 +89,8 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_PROVIDERS_MODE` | `ordered` | Multi-provider dispatch strategy: `ordered` (first suitable result in priority order) or `parallel` (race every lane). |
 | `MXLRC_PROVIDERS_RACE_WAIT_SECONDS` | `2` | Parallel-mode synced-upgrade window in seconds. Ignored in `ordered` mode. |
 | `MXLRC_PROVIDERS_FALLBACK_ORDER` | (none) | Comma-separated providers consulted, in order, after the primary returns no suitable result. Empty means primary-only. |
+| `MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS` | `0` | Minimum seconds between Petit Lyrics requests. `0` falls back to `api.cooldown`. |
+| `MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS` | `0` | Minimum seconds between InnerTube requests. `0` falls back to `api.cooldown`. |
 | `MXLRC_GUARD_ACCEPTED_SCRIPTS` | (none) | Comma-separated allowlist of Unicode script buckets a lyric body may use (Latin, Han, Kana, Hangul, Other). Empty disables the language/script guard. |
 | `MXLRC_GUARD_THRESHOLD` | `0.20` | Maximum tolerated share of foreign-script letters before a result is rejected. Values outside (0, 1] reset to the default. |
 | `MXLRC_QUEUE_RANDOMIZE` | `true` | Shuffle worker dequeue order within each priority tier (anti-fingerprint). `false` restores deterministic order. |
@@ -303,9 +305,10 @@ disabled = []
 # race_wait_seconds = 2     # parallel-mode synced-upgrade window
 # fallback_order = []       # providers consulted after the primary, in order
 # petitlyrics_cooldown_seconds = 0   # 0 uses api.cooldown
+# innertube_cooldown_seconds = 0     # 0 uses api.cooldown
 ```
 
-Provider selection and multi-provider dispatch. Musixmatch is the default primary provider (env: `MXLRC_PROVIDER_PRIMARY`, `MXLRC_PROVIDERS_DISABLED`, `MXLRC_PROVIDERS_MODE`, `MXLRC_PROVIDERS_RACE_WAIT_SECONDS`, `MXLRC_PROVIDERS_FALLBACK_ORDER`, `MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS`). See [Multi-provider orchestration](multi-provider-orchestration.md) for the full dispatch model.
+Provider selection and multi-provider dispatch. Musixmatch is the default primary provider; Petit Lyrics and InnerTube are the two alternate lanes, selectable as `primary` or added to `fallback_order` (env: `MXLRC_PROVIDER_PRIMARY`, `MXLRC_PROVIDERS_DISABLED`, `MXLRC_PROVIDERS_MODE`, `MXLRC_PROVIDERS_RACE_WAIT_SECONDS`, `MXLRC_PROVIDERS_FALLBACK_ORDER`, `MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS`, `MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS`). See [Multi-provider orchestration](multi-provider-orchestration.md) for the full dispatch model.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
@@ -315,6 +318,7 @@ Provider selection and multi-provider dispatch. Musixmatch is the default primar
 | `race_wait_seconds` | `2` | Parallel-mode only: after a suitable unsynced result arrives, wait up to this many seconds for a synced result (a strict quality upgrade) to preempt it. Non-positive values are reset to the default. Ignored in `ordered` mode. |
 | `fallback_order` | `[]` | Provider names consulted, in order, after the primary when it returns no suitable result. Each name must be a known provider; unknown names are rejected at load. Empty means no fallback (only the primary lane runs). |
 | `petitlyrics_cooldown_seconds` | `0` | Minimum seconds between Petit Lyrics requests. `0` falls back to `api.cooldown`, which is the behavior this lane had before the key existed. The two providers share neither a rate-limit budget nor a throttle profile, so this lets you pace them independently. The Petit Lyrics client enforces its own floor (10s) on any positive value, so this key can raise the interval but never lower it past that floor. |
+| `innertube_cooldown_seconds` | `0` | Minimum seconds between InnerTube requests. `0` falls back to `api.cooldown`. A negative value is not a disable request, and what it does depends on how it is set: accepted and treated as a fallback to `api.cooldown` when written in the TOML file, but **rejected** on the env-override path (`MXLRC_PROVIDERS_INNERTUBE_COOLDOWN_SECONDS` warns and keeps the current value) and by `canticle config set` (which returns an error). The InnerTube client raises any **positive** value below its own 2s floor up to that floor; note the clamp does not apply to `0`, so with this key unset and `api.cooldown` also `0` the lane is unpaced. Precedence is `innertube_cooldown_seconds` > `api.cooldown`, same pattern as `petitlyrics_cooldown_seconds`. The interval is counted per outbound **request**, and a lookup on this lane costs one (candidate rejected at the search), two (no lyrics tab), or three (search, next, browse, only when it serves a result); on a fallback lane, whose traffic is mostly misses, the typical lookup costs one, the same as the other providers. |
 
 `parallel` mode makes more upstream calls (every lane is queried per dispatch), so it is not advised against rate-limited providers unless latency matters more than call volume.
 
