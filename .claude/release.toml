@@ -4,23 +4,51 @@
 [build]
 working_dir = "."
 
-# DELIBERATELY EMPTY -- do not re-add `go test` or `golangci-lint` here.
+# DO NOT re-add `go test` or `golangci-lint` here -- they belong to the hook,
+# and this step ASSERTS THE HOOK IS WIRED instead of duplicating its work.
 #
-# `.githooks/pre-push` (wired via core.hooksPath, so every worktree inherits it)
-# execs scripts/pre-push-gate.sh on EVERY push, the release tag push included.
-# That gate is a strict superset of anything worth listing here: `go test -race`
-# with coverage, golangci-lint, govulncheck, actionlint, patch coverage, and the
-# coverage-floor ratchet. CI then runs the same suite again on the pushed tag.
+# When core.hooksPath points at .githooks, `.githooks/pre-push` execs
+# scripts/pre-push-gate.sh on EVERY push, the release tag push included. That
+# gate runs both checks this list used to carry -- `go test -race` with coverage
+# and golangci-lint -- unconditionally, plus govulncheck, actionlint, patch
+# coverage and the coverage-floor ratchet.
 #
-# So a `go test ./...` at this step is the THIRD run of the same suite, and a
-# weaker one (no -race, no coverage). Measured cutting v1.37.1: the tag push
-# printed "OK: all pre-push checks passed" from the hook, having already been
-# gated identically at PR time.
+# So a `go test ./...` here is a REPEAT of what the hook just ran, and the
+# weaker of the two (no -race, no coverage). Measured cutting v1.37.1: the tag
+# push printed "OK: all pre-push checks passed" from the hook, on a commit CI
+# had already gated identically at PR time.
 #
-# Anything that genuinely must gate a RELEASE and is not already in the gate
-# belongs in scripts/pre-push-gate.sh instead, where every push gets it rather
-# than only the releases that happen to run through this skill.
-pre_checks = []
+# NOTE what does NOT happen, because an earlier version of this comment claimed
+# it and was wrong: CI does NOT re-run the suite on the pushed TAG. ci.yml
+# triggers only on `push: branches: [main]` and `pull_request`; release.yml
+# triggers on tags but runs GoReleaser alone, with no test, lint or vulncheck
+# step. The real argument is the PR-time gate above, not a tag-time one.
+#
+# BUT core.hooksPath IS NOT TRACKED -- it lives in .git/config, so it is set per
+# clone by `make hooks` and a fresh clone has it UNSET. Git cannot require a
+# client-side hook (a repo that ran code on clone would be an RCE vector), so
+# the wiring is asserted at the point of use rather than assumed. check-hooks.sh
+# exits non-zero with remediation guidance when it is missing, which turns the
+# comment above from a claim into a precondition. It reads a git config value:
+# cheap enough to run every release, unlike the suite it stands in for.
+#
+# Releases are cut by a small, known set of people, so requiring the wiring here
+# costs them one `make hooks` per clone and removes the case where a release is
+# tagged with no local gate at all.
+#
+# The command is ANCHORED TO THE REPO ROOT rather than written relative to the
+# working directory. `working_dir = "."` is the caller's cwd, which is not
+# guaranteed to be the root: run from a subdirectory, a bare `bash
+# scripts/check-hooks.sh` exits 127 with "No such file or directory", which
+# reads as a deleted script rather than a wrong cwd. `git rev-parse
+# --show-toplevel` is the same answer the script itself uses to orient.
+#
+# Anything else that must gate a RELEASE and is not already in the gate belongs
+# in scripts/pre-push-gate.sh, where every push gets it rather than only the
+# releases that happen to run through this skill.
+pre_checks = [
+  "bash \"$(git rev-parse --show-toplevel)/scripts/check-hooks.sh\"",
+]
 
 # Section grouping for generated release notes. Maps a merged PR's GitHub label
 # to the heading it lands under, matching the headings the last several releases
