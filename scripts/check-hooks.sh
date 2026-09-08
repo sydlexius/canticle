@@ -87,9 +87,19 @@ fi
 # executable hooks at <super>/.git/modules/.githooks produced a false OK. That is
 # unreachable in this repo (no .gitmodules) but it is a wrong answer either way,
 # and a checker that can be satisfied by a path inside .git is not checking much.
+#
+# The path itself comes from `git worktree list --porcelain`, whose FIRST entry
+# is the main worktree, rather than from `--git-common-dir`/.. -- the same
+# ask-git-rather-than-derive rule the hooks path already follows, and for the
+# same reason. The two agree in an ordinary clone, but a repository created with
+# `git clone --separate-git-dir=<metadata>` puts the common dir outside the
+# checkout entirely, so the `..` form resolves to the metadata directory's parent
+# and the real primary checkout is rejected -- reintroducing exactly the C1 false
+# failure in a layout git considers perfectly valid.
 primary_root=""
 if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
-  primary_root="$(resolve_dir "$(git rev-parse --git-common-dir)/..")"
+  main_worktree="$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
+  [ -n "$main_worktree" ] && primary_root="$(resolve_dir "$main_worktree")"
 fi
 
 accepted=""
