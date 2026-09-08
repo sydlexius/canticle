@@ -318,6 +318,10 @@ func TestFindLyrics_OneBlankFieldStillSearches(t *testing.T) {
 	}
 }
 
+// syncedSong is the result shape the trackFromCandidate table cases assume: a
+// decoded song carrying timings, so HasSubtitles=1 is a true claim about it.
+var syncedSong = models.Song{Subtitles: models.Synced{Lines: []models.Lines{{Text: "a line"}}}}
+
 // --- trackFromCandidate, tested DIRECTLY ---
 //
 // It has to be tested here rather than only through FindLyrics, because the
@@ -426,7 +430,11 @@ func TestTrackFromCandidate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := trackFromCandidate(tc.candidate, local)
+			// A synced song: this table's cases all predate the untimed path
+			// and every one of them expects HasSubtitles=1, so they must be
+			// fed the result shape that claim is true of. The untimed case has
+			// its own test below.
+			got := trackFromCandidate(tc.candidate, local, syncedSong)
 			if got != tc.want {
 				t.Errorf("trackFromCandidate() =\n  %+v\nwant\n  %+v", got, tc.want)
 			}
@@ -822,5 +830,53 @@ func TestFindLyrics_NoUpstreamWhenThePayloadNamesNone(t *testing.T) {
 	}
 	if song.Upstream != "" {
 		t.Errorf("song.Upstream = %q, want empty -- a payload naming no licensor must assert nothing", song.Upstream)
+	}
+}
+
+// TestTrackFromCandidate_UntimedResultDoesNotClaimSubtitles guards the flag
+// against the untimed browse shape (see errors.go, ErrUntimedLyrics).
+//
+// Both flags used to be set unconditionally, justified by "a song reaching
+// this line came back from Decode with at least one non-empty timed cue".
+// That premise stopped holding the moment Decode learned to return an
+// UNSYNCED song, so HasSubtitles=1 became a claim contradicted by the very
+// Song it is stamped onto. Nothing downstream reads it for routing today --
+// the writer and orchestrator.QualityOf both count Subtitles.Lines -- so this
+// is about not persisting a false fact, before something starts trusting it.
+func TestTrackFromCandidate_UntimedResultDoesNotClaimSubtitles(t *testing.T) {
+	local := models.Track{TrackName: "Local Title", ArtistName: "Local Artist"}
+	cand := SearchCandidate{Title: "Provider Title", Artist: "Provider Artist"}
+
+	unsynced := models.Song{Lyrics: models.Lyrics{LyricsBody: "a line"}}
+	got := trackFromCandidate(cand, local, unsynced)
+	if got.HasLyrics != 1 {
+		t.Errorf("HasLyrics = %d, want 1: the response carried words", got.HasLyrics)
+	}
+	if got.HasSubtitles != 0 {
+		t.Errorf("HasSubtitles = %d, want 0: this result has no timings", got.HasSubtitles)
+	}
+
+	synced := models.Song{Subtitles: models.Synced{Lines: []models.Lines{{Text: "a line"}}}}
+	got = trackFromCandidate(cand, local, synced)
+	if got.HasLyrics != 1 || got.HasSubtitles != 1 {
+		t.Errorf("synced result: HasLyrics=%d HasSubtitles=%d, want 1 and 1", got.HasLyrics, got.HasSubtitles)
+	}
+}
+
+// TestTrackFromCandidate_ClearsStaleHasSubtitles covers the second gap CR found:
+// trackFromCandidate starts from `t := local`, so an inbound HasSubtitles=1
+// SURVIVES onto an unsynced result unless it is actively cleared. The original
+// fix only ever SET the flag to 1 and never reset it, which left the defect it
+// claimed to fix reachable whenever the caller's track already carried the flag.
+//
+// The earlier test missed this because it passed a zero-valued local track,
+// where "never set" and "correctly cleared" are indistinguishable.
+func TestTrackFromCandidate_ClearsStaleHasSubtitles(t *testing.T) {
+	local := models.Track{TrackName: "T", ArtistName: "A", HasSubtitles: 1, HasLyrics: 1}
+	unsynced := models.Song{Lyrics: models.Lyrics{LyricsBody: "words"}}
+
+	got := trackFromCandidate(SearchCandidate{}, local, unsynced)
+	if got.HasSubtitles != 0 {
+		t.Errorf("HasSubtitles = %d, want 0: the flag must describe THIS result, not whatever the caller arrived with", got.HasSubtitles)
 	}
 }

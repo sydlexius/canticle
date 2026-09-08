@@ -88,7 +88,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	// scope. Assigning the field (rather than rebuilding the struct) is what
 	// carries Upstream through to the writer; a literal here would silently drop
 	// it and no test upstream of the write path would notice.
-	song.Track = trackFromCandidate(candidate, track)
+	song.Track = trackFromCandidate(candidate, track, song)
 	return song, nil
 }
 
@@ -96,13 +96,18 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 // the requested track's values wherever the candidate has none. Mirrors
 // internal/petitlyrics's function of the same name.
 //
+// It takes the decoded song because the two content flags are facts about the
+// RESULT, not about the candidate: this lane can return either a timed or an
+// untimed payload for the same query (see errors.go, ErrUntimedLyrics), so
+// HasSubtitles has to be read off what actually arrived rather than assumed.
+//
 // Song.AudioDurationSeconds is deliberately NOT set here, and cannot be: it
 // lives on Song, not Track, and it must come from the AUDIO FILE rather than
 // from a provider's catalog. Stamping the candidate's duration there would make
 // the accept-time timing guard compare a lyric against the very length it was
 // timed against -- near-circular, and biased toward "fine" (see the field's own
 // comment in internal/models). The caller that holds the file stamps it.
-func trackFromCandidate(c SearchCandidate, local models.Track) models.Track {
+func trackFromCandidate(c SearchCandidate, local models.Track, song models.Song) models.Track {
 	t := local
 	if c.Title != "" {
 		t.TrackName = c.Title
@@ -113,11 +118,30 @@ func trackFromCandidate(c SearchCandidate, local models.Track) models.Track {
 	if c.DurationSeconds > 0 {
 		t.TrackLength = c.DurationSeconds
 	}
-	// A song reaching this line came back from Decode with at least one
-	// non-empty timed cue -- ExtractCues rejects the zero-cue and all-empty-text
-	// payloads as misses -- so both flags are facts about this result, not
-	// optimism.
+	// A song reaching this line carries content: Decode rejects the zero-cue
+	// and blank-text payloads as misses on BOTH its paths.
+	//
+	// "Blank" is precisely what strings.TrimSpace calls blank, which is narrower
+	// than "renders as nothing". TrimSpace strips Unicode WHITESPACE and does not
+	// strip zero-width characters, so a body of U+200B alone passes both guards
+	// and is stamped HasLyrics=1 (measured). That hole predates this change and
+	// is equally reachable on the timed path; it is named here rather than
+	// claimed away, because an absolute "this is a fact" would be false.
+	//
+	// HasSubtitles is read off the song rather than assumed. The premise the
+	// unconditional version rested on -- "at least one non-empty TIMED cue" --
+	// stopped holding once Decode learned to return an unsynced song for an
+	// untimed payload, and stamping 1 there would contradict the very Song the
+	// flag travels with.
 	t.HasLyrics = 1
-	t.HasSubtitles = 1
+	// ASSIGNED unconditionally, never only set. `t := local` copies whatever the
+	// caller arrived with, so a conditional that can only ever set the flag to 1
+	// lets an inbound HasSubtitles=1 survive onto an unsynced result -- leaving
+	// the exact defect this reads the song to avoid. Both flags describe THIS
+	// result; neither inherits.
+	t.HasSubtitles = 0
+	if len(song.Subtitles.Lines) > 0 {
+		t.HasSubtitles = 1
+	}
 	return t
 }

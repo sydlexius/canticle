@@ -2,6 +2,7 @@ package innertube
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -41,12 +42,61 @@ type browsePayload struct {
 
 // browseCue is one raw timedLyricsData entry. start/end times arrive as
 // quoted decimal strings, not JSON numbers.
+//
+// CueRange is a POINTER so an ABSENT cueRange stays distinguishable from a
+// present-but-broken one. That distinction is the whole defect: a value struct
+// decodes an absent object to its zero value, which made an untimed entry look
+// like a timed entry carrying an empty timestamp, and strconv.Atoi("") then
+// reported a malformed payload for a response that was merely plain text.
+//
+// A pointer alone is NOT sufficient, which is why UnmarshalJSON exists below.
+// encoding/json decodes both an absent field and an explicit `"cueRange": null`
+// to a nil pointer, collapsing the very distinction this type is drawing.
+// CueRangePresent records which one it was.
 type browseCue struct {
-	LyricLine string `json:"lyricLine"`
-	CueRange  struct {
-		StartTimeMilliseconds string `json:"startTimeMilliseconds"`
-		EndTimeMilliseconds   string `json:"endTimeMilliseconds"`
-	} `json:"cueRange"`
+	LyricLine string    `json:"lyricLine"`
+	CueRange  *cueRange `json:"cueRange"`
+
+	// CueRangePresent reports whether the KEY appeared at all, independent of
+	// its value. Absent means the licensor served plain text (a measured, real
+	// shape); present-but-null means the payload named a timing field and then
+	// supplied nothing for it, which is malformed and has never been observed.
+	// The two must not share a branch: settling a row as plain text on the
+	// strength of a JSON encoding accident would accept a payload nobody has
+	// ever seen from this API.
+	CueRangePresent bool `json:"-"`
+}
+
+// UnmarshalJSON decodes a cue while recording whether the cueRange KEY was
+// present, which the struct tags alone cannot express.
+//
+// The alias type is the standard guard against infinite recursion: it has the
+// same fields but not this method, so the inner Unmarshal does the ordinary
+// field decoding rather than re-entering here.
+func (c *browseCue) UnmarshalJSON(data []byte) error {
+	type alias browseCue
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	// A second pass over the raw object reads KEY PRESENCE, which the typed
+	// decode above has already discarded. Only the key set is needed, so the
+	// values stay RawMessage and are never interpreted here -- a surprising
+	// value shape cannot fail this pass.
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	_, present := keys["cueRange"]
+
+	*c = browseCue(a)
+	c.CueRangePresent = present
+	return nil
+}
+
+type cueRange struct {
+	StartTimeMilliseconds string `json:"startTimeMilliseconds"`
+	EndTimeMilliseconds   string `json:"endTimeMilliseconds"`
 }
 
 // ExtractCues parses a raw browse response into the Cue list it carries,
@@ -75,9 +125,48 @@ func ExtractCues(raw []byte) ([]Cue, error) {
 		return nil, fmt.Errorf("innertube: browse response carried no timed lyric cues: %w", ErrNotFound)
 	}
 
+	// UNTIMED PAYLOAD: every entry carries text and no cueRange at all. This
+	// is a real, common shape from this API (see ErrUntimedLyrics), not a
+	// malformed one, so it is separated out BEFORE the timestamp parse rather
+	// than being discovered as an Atoi failure on an empty string.
+	//
+	// Counting first (rather than branching inside the loop) is what makes the
+	// three cases separable: all-timed is the normal path, all-untimed is the
+	// plain-text path, and a MIX is a shape neither branch can serve honestly
+	// -- timing the untimed lines at 00:00 would fabricate positions, and
+	// dropping them would lose words -- so a mix falls through to the timed
+	// path and is reported transport-class by the parse below, which is the
+	// conservative reading for a shape never observed live.
+	// Counted on ABSENCE of the key, never on a nil pointer: an explicit
+	// `"cueRange": null` is also nil and is MALFORMED, not plain text. It is
+	// deliberately excluded from this count so it can never reach the
+	// plain-text branch, and falls to the transport-class arm in the loop
+	// below instead.
+	untimed := 0
+	for _, rc := range rawCues {
+		if !rc.CueRangePresent {
+			untimed++
+		}
+	}
+	if untimed == len(rawCues) {
+		return nil, fmt.Errorf("innertube: browse response carried %d lyric lines with no timings: %w", len(rawCues), ErrUntimedLyrics)
+	}
+
 	cues := make([]Cue, 0, len(rawCues))
 	allTextEmpty := true
 	for i, rc := range rawCues {
+		if rc.CueRange == nil {
+			// Two shapes reach here, both transport-class (unwrapped) so the row
+			// is retried rather than retired on a payload we have never
+			// measured: a cue with NO cueRange in a partially timed payload (the
+			// all-untimed case returned above), and an explicit
+			// `"cueRange": null`, which is malformed at any mix. The message
+			// names which one, since the remedies differ.
+			if rc.CueRangePresent {
+				return nil, fmt.Errorf("innertube: cue %d: cueRange is present but null", i)
+			}
+			return nil, fmt.Errorf("innertube: cue %d: cueRange absent in a partially timed payload", i)
+		}
 		startMs, err := strconv.Atoi(rc.CueRange.StartTimeMilliseconds)
 		if err != nil {
 			return nil, fmt.Errorf("innertube: cue %d: parse startTimeMilliseconds %q: %w", i, rc.CueRange.StartTimeMilliseconds, err)
@@ -132,8 +221,79 @@ func ExtractCues(raw []byte) ([]Cue, error) {
 	return cues, nil
 }
 
+// ExtractPlainLyrics parses the lyric TEXT out of an untimed browse response
+// -- the shape ExtractCues reports as ErrUntimedLyrics -- and returns it as a
+// single newline-joined body suitable for models.Lyrics.LyricsBody.
+//
+// Blank lines are PRESERVED rather than dropped. They are stanza breaks in the
+// provider's own rendering, and this path has no timings whose positions a
+// retained blank could shift, so there is no reason to edit the text. (The
+// timed path's identical restraint about a partially empty cue set is argued
+// in ExtractCues; the conclusion is the same for a different reason.)
+//
+// An all-blank body is an ErrNotFound miss, matching the timed path: writing
+// an empty .txt would retire the queue row and block another lane from
+// answering, which is worse than reporting nothing found.
+//
+// Re-unmarshaling rather than threading the lines out of ExtractCues is
+// deliberate. Cue has no representation for "text with no timing", and
+// widening it (or returning a second slice from ExtractCues) would put an
+// always-empty field in front of every timed caller to serve a branch none of
+// them take. The cost is one extra unmarshal on the untimed path only, which
+// is the same trade ExtractUpstream already makes.
+func ExtractPlainLyrics(raw []byte) (string, error) {
+	var payload browsePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", fmt.Errorf("innertube: decode browse response: %w", err)
+	}
+	rawCues := payload.Contents.ElementRenderer.NewElement.Type.ComponentType.Model.
+		TimedLyricsModel.LyricsData.TimedLyricsData
+
+	lines := make([]string, 0, len(rawCues))
+	allTextEmpty := true
+	for _, rc := range rawCues {
+		text := strings.TrimSpace(rc.LyricLine)
+		if text != "" {
+			allTextEmpty = false
+		}
+		lines = append(lines, text)
+	}
+	if allTextEmpty {
+		return "", fmt.Errorf("innertube: browse response carried %d untimed lines but every line was empty: %w", len(lines), ErrNotFound)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 // Decode parses a raw browse response into a models.Song carrying timed
 // cues in Subtitles. It is pure: no I/O, no network.
+//
+// A response carrying text but NO timings (ErrUntimedLyrics -- see errors.go
+// for why this API serves two shapes) degrades to an UNSYNCED result:
+// Lyrics.LyricsBody is populated and Subtitles is left empty, which is what
+// makes the writer emit .txt instead of .lrc. Returning the error instead
+// would discard lyrics the API had already handed us and, because that error
+// was previously unwrapped, retire the queue row as a hard failure -- the
+// measured production defect this branch exists to fix.
+//
+// THAT DEGRADATION HAS A SECOND CONSEQUENCE, in the orchestrator rather than
+// here, and it is stated rather than left to be discovered. An unsynced result
+// is a SUCCESS: orchestrator.QualityOf scores it QualityUnsynced, IsSuitable
+// accepts at that level, and findOrdered returns on the first suitable lane. So
+// in ordered mode a later lane that would have served SYNCED lyrics is no
+// longer consulted, where previously this lane's error fell through to it. The
+// better result is not deferred, it is not sought.
+//
+// Accepted deliberately, and it is still strictly better than the behavior it
+// replaces: the alternative is a hard queue failure that discards the words and
+// burns a retry, and the .txt remains promotable by --upgrade. It is also
+// exactly what any other provider's unsynced result already does here -- this
+// lane is not being given a special power, it is being made to behave like the
+// others. Parallel mode is unaffected: its raceWait upgrade window already
+// prefers a synced result that arrives within the window.
+//
+// Tracked as #915. It matters most where innertube is ordered AHEAD of another
+// lyric lane, which is the live production configuration, so the tracking issue
+// owns measuring the real cost rather than this comment asserting it is small.
 //
 // Each Cue's StartMs is converted via models.MsToTime (#863). Total keeps
 // full millisecond precision while Minutes/Seconds/Hundredths are derived by
@@ -157,6 +317,16 @@ func ExtractCues(raw []byte) ([]Cue, error) {
 // extra cue.
 func Decode(raw []byte) (models.Song, error) {
 	cues, err := ExtractCues(raw)
+	if errors.Is(err, ErrUntimedLyrics) {
+		body, plainErr := ExtractPlainLyrics(raw)
+		if plainErr != nil {
+			return models.Song{}, plainErr
+		}
+		return models.Song{
+			Lyrics:   models.Lyrics{LyricsBody: body},
+			Upstream: ExtractUpstream(raw),
+		}, nil
+	}
 	if err != nil {
 		return models.Song{}, err
 	}
