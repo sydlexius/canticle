@@ -862,3 +862,21 @@ func TestTrackFromCandidate_UntimedResultDoesNotClaimSubtitles(t *testing.T) {
 		t.Errorf("synced result: HasLyrics=%d HasSubtitles=%d, want 1 and 1", got.HasLyrics, got.HasSubtitles)
 	}
 }
+
+// TestTrackFromCandidate_ClearsStaleHasSubtitles covers the second gap CR found:
+// trackFromCandidate starts from `t := local`, so an inbound HasSubtitles=1
+// SURVIVES onto an unsynced result unless it is actively cleared. The original
+// fix only ever SET the flag to 1 and never reset it, which left the defect it
+// claimed to fix reachable whenever the caller's track already carried the flag.
+//
+// The earlier test missed this because it passed a zero-valued local track,
+// where "never set" and "correctly cleared" are indistinguishable.
+func TestTrackFromCandidate_ClearsStaleHasSubtitles(t *testing.T) {
+	local := models.Track{TrackName: "T", ArtistName: "A", HasSubtitles: 1, HasLyrics: 1}
+	unsynced := models.Song{Lyrics: models.Lyrics{LyricsBody: "words"}}
+
+	got := trackFromCandidate(SearchCandidate{}, local, unsynced)
+	if got.HasSubtitles != 0 {
+		t.Errorf("HasSubtitles = %d, want 0: the flag must describe THIS result, not whatever the caller arrived with", got.HasSubtitles)
+	}
+}

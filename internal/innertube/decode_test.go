@@ -744,3 +744,60 @@ func TestExtractCues_PresentButMalformedCueRangeStaysTransportClass(t *testing.T
 		})
 	}
 }
+
+// TestExtractCues_ExplicitNullCueRangeIsTransportClass covers the gap CR found
+// on this branch: JSON `null` is an EXPLICIT value, not an absent field, and a
+// pointer cannot tell the two apart -- both decode to nil.
+//
+// That collapses exactly the distinction this fix exists to draw. An absent
+// cueRange is the licensor serving plain text (a real, measured shape); an
+// explicit `"cueRange": null` is a payload asserting a timing field and then
+// supplying nothing for it, which is malformed and has never been observed
+// live. Treating the malformed one as plain text would settle a row from a
+// payload nobody has ever seen, on the strength of a JSON encoding accident.
+//
+// Measured before the fix: `cueRange: null` returned ErrUntimedLyrics and
+// Decode succeeded with an unsynced body.
+func TestExtractCues_ExplicitNullCueRangeIsTransportClass(t *testing.T) {
+	raw := browseWithCues(`{"lyricLine":"x","cueRange":null}`)
+
+	_, err := ExtractCues(raw)
+	if err == nil {
+		t.Fatal("ExtractCues: expected an error, got nil")
+	}
+	if errors.Is(err, ErrUntimedLyrics) {
+		t.Errorf("ExtractCues error = %v, must NOT wrap ErrUntimedLyrics: an explicit null is malformed, not a plain-text payload", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("ExtractCues error = %v, must NOT wrap ErrNotFound", err)
+	}
+}
+
+// TestDecode_ExplicitNullCueRangeDoesNotYieldLyrics is the Decode-level twin:
+// a malformed payload must not settle the row with an unsynced body.
+func TestDecode_ExplicitNullCueRangeDoesNotYieldLyrics(t *testing.T) {
+	raw := browseWithCues(`{"lyricLine":"x","cueRange":null}`)
+
+	song, err := Decode(raw)
+	if err == nil {
+		t.Fatalf("Decode: expected an error, got nil (body=%q)", song.Lyrics.LyricsBody)
+	}
+	if song.Lyrics.LyricsBody != "" {
+		t.Errorf("LyricsBody = %q, want empty: a malformed payload must not produce lyrics", song.Lyrics.LyricsBody)
+	}
+}
+
+// TestExtractCues_MixedNullAndAbsentCueRange pins the interaction between the
+// two nil sources. A payload mixing an absent cueRange with an explicit null is
+// not the all-untimed shape, so it must not take the plain-text branch.
+func TestExtractCues_MixedNullAndAbsentCueRange(t *testing.T) {
+	raw := browseWithCues(`{"lyricLine":"a"},{"lyricLine":"b","cueRange":null}`)
+
+	_, err := ExtractCues(raw)
+	if err == nil {
+		t.Fatal("ExtractCues: expected an error, got nil")
+	}
+	if errors.Is(err, ErrUntimedLyrics) || errors.Is(err, ErrNotFound) {
+		t.Errorf("ExtractCues error = %v, want transport-class: an explicit null is present here, so this is not an all-untimed payload", err)
+	}
+}

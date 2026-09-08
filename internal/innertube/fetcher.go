@@ -134,6 +134,12 @@ func trackFromCandidate(c SearchCandidate, local models.Track, song models.Song)
 	// untimed payload, and stamping 1 there would contradict the very Song the
 	// flag travels with.
 	t.HasLyrics = 1
+	// ASSIGNED unconditionally, never only set. `t := local` copies whatever the
+	// caller arrived with, so a conditional that can only ever set the flag to 1
+	// lets an inbound HasSubtitles=1 survive onto an unsynced result -- leaving
+	// the exact defect this reads the song to avoid. Both flags describe THIS
+	// result; neither inherits.
+	t.HasSubtitles = 0
 	if len(song.Subtitles.Lines) > 0 {
 		t.HasSubtitles = 1
 	}

@@ -48,9 +48,50 @@ type browsePayload struct {
 // decodes an absent object to its zero value, which made an untimed entry look
 // like a timed entry carrying an empty timestamp, and strconv.Atoi("") then
 // reported a malformed payload for a response that was merely plain text.
+//
+// A pointer alone is NOT sufficient, which is why UnmarshalJSON exists below.
+// encoding/json decodes both an absent field and an explicit `"cueRange": null`
+// to a nil pointer, collapsing the very distinction this type is drawing.
+// CueRangePresent records which one it was.
 type browseCue struct {
 	LyricLine string    `json:"lyricLine"`
 	CueRange  *cueRange `json:"cueRange"`
+
+	// CueRangePresent reports whether the KEY appeared at all, independent of
+	// its value. Absent means the licensor served plain text (a measured, real
+	// shape); present-but-null means the payload named a timing field and then
+	// supplied nothing for it, which is malformed and has never been observed.
+	// The two must not share a branch: settling a row as plain text on the
+	// strength of a JSON encoding accident would accept a payload nobody has
+	// ever seen from this API.
+	CueRangePresent bool `json:"-"`
+}
+
+// UnmarshalJSON decodes a cue while recording whether the cueRange KEY was
+// present, which the struct tags alone cannot express.
+//
+// The alias type is the standard guard against infinite recursion: it has the
+// same fields but not this method, so the inner Unmarshal does the ordinary
+// field decoding rather than re-entering here.
+func (c *browseCue) UnmarshalJSON(data []byte) error {
+	type alias browseCue
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	// A second pass over the raw object reads KEY PRESENCE, which the typed
+	// decode above has already discarded. Only the key set is needed, so the
+	// values stay RawMessage and are never interpreted here -- a surprising
+	// value shape cannot fail this pass.
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	_, present := keys["cueRange"]
+
+	*c = browseCue(a)
+	c.CueRangePresent = present
+	return nil
 }
 
 type cueRange struct {
@@ -96,9 +137,14 @@ func ExtractCues(raw []byte) ([]Cue, error) {
 	// dropping them would lose words -- so a mix falls through to the timed
 	// path and is reported transport-class by the parse below, which is the
 	// conservative reading for a shape never observed live.
+	// Counted on ABSENCE of the key, never on a nil pointer: an explicit
+	// `"cueRange": null` is also nil and is MALFORMED, not plain text. It is
+	// deliberately excluded from this count so it can never reach the
+	// plain-text branch, and falls to the transport-class arm in the loop
+	// below instead.
 	untimed := 0
 	for _, rc := range rawCues {
-		if rc.CueRange == nil {
+		if !rc.CueRangePresent {
 			untimed++
 		}
 	}
@@ -110,9 +156,15 @@ func ExtractCues(raw []byte) ([]Cue, error) {
 	allTextEmpty := true
 	for i, rc := range rawCues {
 		if rc.CueRange == nil {
-			// Reachable only for a PARTIALLY timed payload -- the all-untimed
-			// case returned above. Transport-class (unwrapped) so the row is
-			// retried rather than retired on a shape we have never measured.
+			// Two shapes reach here, both transport-class (unwrapped) so the row
+			// is retried rather than retired on a payload we have never
+			// measured: a cue with NO cueRange in a partially timed payload (the
+			// all-untimed case returned above), and an explicit
+			// `"cueRange": null`, which is malformed at any mix. The message
+			// names which one, since the remedies differ.
+			if rc.CueRangePresent {
+				return nil, fmt.Errorf("innertube: cue %d: cueRange is present but null", i)
+			}
 			return nil, fmt.Errorf("innertube: cue %d: cueRange absent in a partially timed payload", i)
 		}
 		startMs, err := strconv.Atoi(rc.CueRange.StartTimeMilliseconds)
