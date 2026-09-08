@@ -9,9 +9,16 @@ working_dir = "."
 #
 # When core.hooksPath points at .githooks, `.githooks/pre-push` execs
 # scripts/pre-push-gate.sh on EVERY push, the release tag push included. That
-# gate runs both checks this list used to carry -- `go test -race` with coverage
-# and golangci-lint -- unconditionally, plus govulncheck, actionlint, patch
-# coverage and the coverage-floor ratchet.
+# gate covers both checks this list used to carry -- `go test -race` with
+# coverage and golangci-lint -- and adds govulncheck, actionlint, codecov
+# validation, patch coverage and the coverage-floor ratchet.
+#
+# ONE of those is unconditional and the rest are not, which is worth stating
+# precisely rather than rounding up: `go test -race` runs always
+# (pre-push-gate.sh:104), while golangci-lint, govulncheck, actionlint and
+# codecovcli each sit behind a `command -v` guard and SKIP when the tool is not
+# installed. So the gate is a superset of this list only on a machine that has
+# golangci-lint; without it, neither this list nor the hook lints.
 #
 # So a `go test ./...` here is a REPEAT of what the hook just ran, and the
 # weaker of the two (no -race, no coverage). Measured cutting v1.37.1: the tag

@@ -28,8 +28,31 @@ want=".githooks"
 # a false failure that prescribes a no-op remedy is worse than no check at all.
 # `--type=path` matters for the same reason: git expands a leading `~` in a
 # path-typed value, and a plain `--get` returns the unexpanded string.
-if [ -z "$(git config --type=path --get core.hooksPath 2>/dev/null || true)" ]; then
+#
+# WHAT THIS DOES NOT ASSERT, stated so the check is not mistaken for more than
+# it is: it verifies WHERE git will run hooks from, never that the CONTENT there
+# is the repo's tracked code. A `.githooks` SYMLINK pointing elsewhere is
+# accepted (measured), because `pwd -P` resolves both sides and git really does
+# run whatever the link targets -- so accepting it is honest about execution
+# while being silent about provenance. This is a wiring check for a developer's
+# own clone, not a tamper check: anyone who can plant that symlink can already
+# edit .githooks/pre-push directly, so a content check here would buy nothing
+# against the same actor. CI is what actually gates what lands.
+#
+# UNSET and SET-BUT-EMPTY are reported distinctly. Both fail, and both take the
+# same remedy, but conflating them prints a message that contradicts the config
+# file a reader is looking at: `--get` exits 1 when the key is absent and 0 when
+# it holds an empty string, so the exit STATUS is what separates them, not the
+# value. Telling someone a key they can see is "<unset>" sends them looking for
+# the wrong problem.
+configured_path="$(git config --type=path --get core.hooksPath 2>/dev/null)" || configured_path="__CHH_UNSET__"
+if [ "$configured_path" = "__CHH_UNSET__" ]; then
   echo "FAIL: core.hooksPath is <unset>; expected the repo's '$want'." >&2
+  echo "      Run: make hooks" >&2
+  exit 1
+fi
+if [ -z "$configured_path" ]; then
+  echo "FAIL: core.hooksPath is set but EMPTY; expected the repo's '$want'." >&2
   echo "      Run: make hooks" >&2
   exit 1
 fi
@@ -56,9 +79,22 @@ fi
 # copy, while git keeps using the primary clone's. Both are the same tracked
 # content, so both are accepted -- that is the C1 fix, and it is why this
 # compares against a SET rather than a single expected path.
-primary_root="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"
+#
+# THE SECOND ROOT IS ADDED ONLY FOR AN ACTUAL LINKED WORKTREE, gated on --git-dir
+# differing from --git-common-dir. Deriving it unconditionally was wrong in a
+# SUBMODULE, where the common dir is <super>/.git/modules/<name> and the parent
+# is <super>/.git/modules -- a directory INSIDE .git. Measured: planting
+# executable hooks at <super>/.git/modules/.githooks produced a false OK. That is
+# unreachable in this repo (no .gitmodules) but it is a wrong answer either way,
+# and a checker that can be satisfied by a path inside .git is not checking much.
+primary_root=""
+if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
+  primary_root="$(resolve_dir "$(git rev-parse --git-common-dir)/..")"
+fi
+
 accepted=""
 for root in "$REPO_ROOT" "$primary_root"; do
+  [ -n "$root" ] || continue
   candidate="$(resolve_dir "$root/$want")"
   if [ -n "$candidate" ] && [ "$candidate" = "$hooks_resolved" ]; then
     accepted="$candidate"
@@ -70,10 +106,13 @@ if [ -z "$accepted" ]; then
   # Prints the RESOLVED paths, not just the configured string: the worktree
   # failure above was invisible precisely because the message never showed what
   # the expected path had resolved to.
+  # primary_root is empty outside a linked worktree, so the message names one
+  # root there rather than printing the same path twice, which reads like a bug
+  # in the checker rather than a fact about the config.
   checked="$REPO_ROOT"
-  # In the primary clone the two roots are the same path; printing it twice
-  # reads like a bug in the checker rather than a fact about the config.
-  [ "$primary_root" != "$REPO_ROOT" ] && checked="$REPO_ROOT and $primary_root"
+  if [ -n "$primary_root" ] && [ "$primary_root" != "$REPO_ROOT" ]; then
+    checked="$REPO_ROOT and $primary_root"
+  fi
   echo "FAIL: git runs hooks from '$hooks_resolved'," >&2
   echo "      which is not this repo's '$want' (checked $checked)." >&2
   echo "      Run: make hooks" >&2
