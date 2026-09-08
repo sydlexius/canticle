@@ -406,7 +406,7 @@ jobs:
           image: mxlrcgo-svc:scan
           severity-cutoff: high
           fail-build: true
-          grype-version: v0.114.0
+          grype-version: v0.118.0
           only-fixed: true # transient unfixable CVEs from vuln-DB updates cause flakes that cannot be actioned
           output-format: sarif
 
