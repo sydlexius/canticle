@@ -692,6 +692,9 @@ func TestRun_VisitedCountsEveryEntryNotJustLRC(t *testing.T) {
 	if s.Scanned != 1 {
 		t.Errorf("Scanned=%d, want 1 (only the .lrc)", s.Scanned)
 	}
+	if s.MediaEntries != 2 {
+		t.Errorf("MediaEntries=%d, want 2 (song.mp3 and stacked.lrc; cover.jpg is neither audio nor .lrc)", s.MediaEntries)
+	}
 }
 
 // An empty root (nothing under it at all -- the shape of an unmounted

@@ -2,11 +2,14 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -387,7 +390,7 @@ func TestRunLRCStackedCheck_NeverLogsPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o644) })
-	if _, rerr := os.ReadFile(unreadable); rerr == nil { //nolint:gosec // test probe
+	if _, rerr := os.ReadFile(unreadable); rerr == nil { //nolint:gosec // reason: test probe reads a fixture path this test just created
 		t.Skip("runner can read a 0o000 file; cannot exercise the unreadable-file case")
 	}
 
@@ -452,7 +455,7 @@ func TestRunLRCStackedCheck_ErrorsDoNotStampOrReportClean(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
-		if _, rerr := os.ReadFile(p); rerr == nil { //nolint:gosec // test probe
+		if _, rerr := os.ReadFile(p); rerr == nil { //nolint:gosec // reason: test probe reads a fixture path this test just created
 			t.Skip("runner can read a 0o000 file; cannot exercise this case")
 		}
 	}
@@ -738,5 +741,58 @@ func TestRunLRCStackedCheck_SkippedDoesNotStampOrReportClean(t *testing.T) {
 	}
 	if doneMarker, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || doneMarker {
 		t.Fatalf("walk with a skipped symlink: done=%v err=%v; want unset so a later startup retries", doneMarker, derr)
+	}
+}
+
+// classifyWalkError is the privacy boundary that keeps a configured library
+// root out of the log on the walk-error path (lrcbackfill.Run wraps the
+// failing root's path into the error it returns: fmt.Errorf("walk %s: %w",
+// root, ...)). This test never skips -- unlike
+// TestRunLRCStackedCheck_WalkErrorLeavesMarkerUnset above, which only reaches
+// this code path on a runner that actually enforces 0o000 directory
+// permissions -- so it is the only coverage guaranteed to run everywhere,
+// including as root and on any CI image that can list a 0o000 dir.
+func TestClassifyWalkError(t *testing.T) {
+	const fakePath = "/fake/secret/library/root"
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "permission denied",
+			err:  fmt.Errorf("walk %s: %w", fakePath, &fs.PathError{Op: "lstat", Path: fakePath, Err: fs.ErrPermission}),
+			want: "permission_denied",
+		},
+		{
+			name: "not exist",
+			err:  fmt.Errorf("walk %s: %w", fakePath, &fs.PathError{Op: "lstat", Path: fakePath, Err: fs.ErrNotExist}),
+			want: "not_found",
+		},
+		{
+			name: "other syscall cause",
+			err:  fmt.Errorf("walk %s: %w", fakePath, &fs.PathError{Op: "lstat", Path: fakePath, Err: syscall.EIO}),
+			want: syscall.EIO.Error(),
+		},
+		{
+			name: "non-PathError",
+			err:  fmt.Errorf("walk %s: %w", fakePath, errors.New("some other failure touching "+fakePath)),
+			want: "unknown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyWalkError(tt.err)
+			if got != tt.want {
+				t.Errorf("classifyWalkError() = %q, want %q", got, tt.want)
+			}
+			// The point of this test: the classification must never leak the
+			// path embedded in the wrapped error.
+			if strings.Contains(got, "secret") {
+				t.Errorf("classifyWalkError() = %q leaked the library path", got)
+			}
+		})
 	}
 }
