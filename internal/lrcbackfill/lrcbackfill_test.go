@@ -825,3 +825,64 @@ func TestRun_PeerExpandedLogSiteRespectsQuiet(t *testing.T) {
 		t.Errorf("Quiet=false: want the peer-expanded Debug log naming the path; got: %s", got)
 	}
 }
+
+// A library root configured as a symlink is a fully supported deployment
+// shape (e.g. /music -> /mnt/array/music; see scanner.ScanLibrary's #643
+// comment and fixture). filepath.WalkDir does NOT follow a symlink that is
+// the walk's ROOT ARGUMENT ITSELF -- it Lstat's the root, sees a single
+// non-directory entry, and never descends -- so before the #925 fix this
+// silently produced Visited=1/MediaEntries=0/Scanned=0 for a symlinked root
+// no matter how much content lived behind it.
+func TestRun_SymlinkedRootIsWalkedThroughToRealContents(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "song.mp3"), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "stacked.lrc"), []byte("[00:30.00][01:05.00]C\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(t.TempDir(), "library-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	want, err := Run(context.Background(), Options{Roots: []string{real}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Run(context.Background(), Options{Roots: []string{link}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Visited != want.Visited || got.MediaEntries != want.MediaEntries || got.Scanned != want.Scanned {
+		t.Errorf("symlinked root: Visited=%d MediaEntries=%d Scanned=%d, want Visited=%d MediaEntries=%d Scanned=%d (matching the real dir walked directly)",
+			got.Visited, got.MediaEntries, got.Scanned, want.Visited, want.MediaEntries, want.Scanned)
+	}
+	if got.Scanned != 1 || got.MediaEntries != 2 {
+		t.Fatalf("sanity check failed: got=%+v", got)
+	}
+}
+
+// A root that is a broken symlink (or otherwise fails to resolve) must not
+// silently fall through to walking an unresolved path as if it were an empty
+// directory -- that reproduces the exact blind spot the resolution fix closes.
+// It must fail the same way any other unreadable root does: a wrapped error
+// naming the configured root, never the resolved target.
+func TestRun_BrokenSymlinkRootReturnsWalkError(t *testing.T) {
+	parent := t.TempDir()
+	link := filepath.Join(parent, "broken-link")
+	if err := os.Symlink(filepath.Join(parent, "does-not-exist"), link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	_, err := Run(context.Background(), Options{Roots: []string{link}, Apply: false})
+	if err == nil {
+		t.Fatal("Run with a broken symlink root: want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), link) {
+		t.Errorf("Run error = %q, want it to name the configured root %q", err.Error(), link)
+	}
+}

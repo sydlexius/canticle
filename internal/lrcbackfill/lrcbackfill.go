@@ -17,6 +17,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/lrcnormalize"
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
 
@@ -96,7 +97,34 @@ type backupRecord struct {
 func Run(ctx context.Context, opts Options) (Summary, error) {
 	var s Summary
 	for _, root := range opts.Roots {
-		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		// Resolve the root's canonical (absolute, symlink-free) spelling exactly
+		// ONCE per root, not once per file -- the same tradeoff scanner.ScanLibrary
+		// makes for the same reason (#643), and reusing its helper keeps both
+		// walks canonicalizing a root identically.
+		//
+		// This matters here because filepath.WalkDir does NOT follow a symlink
+		// that is the WALK'S ROOT ARGUMENT ITSELF: it Lstat's the root, sees a
+		// non-directory entry (the symlink), and never descends -- so a
+		// symlinked library root (a fully supported deployment shape; see
+		// scanner.ScanLibrary's comment and its #643 fixture) silently produced
+		// Visited=1/MediaEntries=0/Scanned=0 here, which the caller
+		// (commands.runLRCStackedCheck) then read as "empty or not mounted" and
+		// retried forever without ever finding a single stacked file.
+		//
+		// pathutil.CanonicalRoot itself never surfaces an EvalSymlinks failure
+		// (it falls back to the unresolved absolute path on error) -- exactly the
+		// silent fallback this must not have, since walking that unresolved
+		// fallback for a broken symlink reproduces the same blind spot this fix
+		// exists to close. So the resolved root's existence is verified
+		// independently via os.Stat (which follows symlinks, unlike WalkDir's own
+		// root Lstat) before it is ever walked; a broken symlink or a
+		// permission-denied intermediate component fails here and is routed
+		// through the same wrapped-error return every other walk failure uses.
+		_, canonRoot := pathutil.CanonicalRoot(root)
+		if _, statErr := os.Stat(canonRoot); statErr != nil {
+			return s, fmt.Errorf("walk %s: %w", root, statErr)
+		}
+		walkErr := filepath.WalkDir(canonRoot, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}

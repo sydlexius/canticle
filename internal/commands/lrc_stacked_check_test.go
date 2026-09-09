@@ -796,3 +796,107 @@ func TestClassifyWalkError(t *testing.T) {
 		})
 	}
 }
+
+// A library root configured as a symlink is a fully supported deployment
+// shape (scanner.ScanLibrary resolves it deliberately, #643). Before the #925
+// fix, lrcbackfill.Run's use of filepath.WalkDir on the unresolved root never
+// descended into a symlinked root at all -- MediaEntries stayed 0, which this
+// check reads as "not mounted yet" -- so a stacked .lrc anywhere under a
+// symlinked root was silently never found, forever.
+func TestRunLRCStackedCheck_FindsStackedUnderSymlinkedRoot(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	real := filepath.Join(dir, "real-music")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	stacked := filepath.Join(real, "stacked.lrc")
+	if err := os.WriteFile(stacked, []byte("[00:30.00][01:05.00]C\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(dir, "music-link")
+	if err := os.Symlink(real, root); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if _, err := library.New(sqlDB).Add(ctx, root, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+
+	logBuf := withCapturedLog(t)
+	runLRCStackedCheck(ctx, sqlDB)
+	logged := logBuf.String()
+
+	if !strings.Contains(logged, "stacked=1") {
+		t.Errorf("symlinked root: want the stacked file found (stacked=1); got: %s", logged)
+	}
+	if strings.Contains(logged, "not available") || strings.Contains(logged, "not mounted") {
+		t.Errorf("symlinked root wrongly read as empty/unmounted: %s", logged)
+	}
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || !done {
+		t.Fatalf("symlinked root, clean walk: done=%v err=%v; want stamped", done, derr)
+	}
+}
+
+// Round 4's Critical 1 fixed reporting/stamping separation at the ROOT level;
+// this is the same defect one level down. lrcbackfill.Run returns the Summary
+// it had already accumulated when WalkDir hit an error -- per-file errors
+// never abort the walk, so an earlier file in the same root can legitimately
+// be found stacked before a later, unrelated directory fails to walk. Before
+// the #925 fix the walk-error branch discarded that partial summary via a
+// bare `continue`, so the earlier finding was silently lost and the report
+// could wrongly claim nothing stacked was found.
+//
+// runStackedWalk is faked here (as TestRunLRCStackedCheck_CanceledLeavesMarkerUnset
+// does above) rather than relying on real directory permissions, so this
+// never skips and does not depend on a runner's ability to make a directory
+// genuinely unwalkable.
+func TestRunLRCStackedCheck_WalkErrorStillReportsEarlierFinding(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	root := filepath.Join(dir, "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, root, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+
+	prevWalk := runStackedWalk
+	t.Cleanup(func() { runStackedWalk = prevWalk })
+	runStackedWalk = func(_ context.Context, _ lrcbackfill.Options) (lrcbackfill.Summary, error) {
+		return lrcbackfill.Summary{
+			Visited:      2,
+			MediaEntries: 1,
+			Scanned:      1,
+			Normalized:   1,
+		}, fmt.Errorf("walk %s: %w", filepath.Join(root, "sub"),
+			&fs.PathError{Op: "lstat", Path: filepath.Join(root, "sub"), Err: fs.ErrPermission})
+	}
+
+	logBuf := withCapturedLog(t)
+	runLRCStackedCheck(ctx, sqlDB)
+	logged := logBuf.String()
+
+	if !strings.Contains(logged, "stacked=1") {
+		t.Errorf("want the earlier root's stacked finding (stacked=1) reported despite the later walk error; got: %s", logged)
+	}
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || done {
+		t.Fatalf("degraded walk with a partial finding: done=%v err=%v; want unset so the next startup retries", done, derr)
+	}
+}

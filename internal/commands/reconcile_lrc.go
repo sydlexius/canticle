@@ -304,6 +304,23 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 			slog.Warn("lrc check: failed to walk a configured library root; that root will be retried next startup",
 				"roots_configured", len(roots), "root_index", i, "cause", classifyWalkError(walkErr))
 			degraded = true
+			// lrcbackfill.Run returns the Summary it had already accumulated
+			// BEFORE WalkDir hit the error (per-file errors never abort the
+			// walk, so a root can legitimately find a stacked file and THEN
+			// fail on a later, unrelated unreadable subdirectory). Accumulate
+			// it into total before continuing, same as the successful-walk
+			// path below -- otherwise an earlier finding on this exact root is
+			// silently discarded and the final report can wrongly claim
+			// nothing stacked was found. `degraded` (already set above) still
+			// gates the STAMP; this changes only what gets REPORTED.
+			total.Visited += summary.Visited
+			total.MediaEntries += summary.MediaEntries
+			total.Scanned += summary.Scanned
+			total.Normalized += summary.Normalized
+			total.Clean += summary.Clean
+			total.Skipped += summary.Skipped
+			total.Blocked += summary.Blocked
+			total.Errors += summary.Errors
 			continue
 		}
 
@@ -334,6 +351,18 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 			slog.Warn("lrc check: a configured library root appears empty or not mounted yet; that root will be retried next startup",
 				"roots_configured", len(roots), "root_index", i)
 			degraded = true
+			// Same shape as the walk-error branch above: accumulate whatever
+			// this root's summary holds (near-empty by construction here,
+			// since MediaEntries==0 -- but consistent, and harmless, to fold
+			// in rather than special-case) before continuing.
+			total.Visited += summary.Visited
+			total.MediaEntries += summary.MediaEntries
+			total.Scanned += summary.Scanned
+			total.Normalized += summary.Normalized
+			total.Clean += summary.Clean
+			total.Skipped += summary.Skipped
+			total.Blocked += summary.Blocked
+			total.Errors += summary.Errors
 			continue
 		}
 
