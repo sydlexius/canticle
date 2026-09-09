@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // lockedBuffer is a concurrency-safe io.Writer for capturing slog output in
@@ -204,7 +203,7 @@ func TestRun_TalliesSkippedAndErrors(t *testing.T) {
 	// 0o000 does not guarantee an unreadable file on every runner (e.g. root, or
 	// some filesystems), so verify the premise deterministically before asserting
 	// the error tally.
-	if _, rerr := os.ReadFile(bad); rerr == nil { //nolint:gosec // test probe
+	if _, rerr := os.ReadFile(bad); rerr == nil { //nolint:gosec // reason: test probe
 		t.Skip("runner can read a 0o000 file; cannot exercise the unreadable-file error path")
 	}
 
@@ -352,7 +351,7 @@ func TestNormalizeFile_IdempotentAndNeverOverwritesBackup(t *testing.T) {
 func TestNormalizeFile_OversizeFileIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "huge.lrc")
-	f, err := os.Create(p) //nolint:gosec // test-controlled path
+	f, err := os.Create(p) //nolint:gosec // reason: test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,6 +364,42 @@ func TestNormalizeFile_OversizeFileIsAnError(t *testing.T) {
 
 	if _, err := NormalizeFile(p, nil); err == nil {
 		t.Fatal("want an error for a .lrc exceeding the size guard, got nil")
+	}
+}
+
+// TestLoad_RejectsFileLargerThanGuard pins that load() rejects a .lrc whose
+// on-disk content exceeds maxLRCFileSize, exercised through the bounded-read
+// path (io.LimitReader over an open handle) that replaced the old
+// os.Lstat-then-os.ReadFile shape (issue #923 review, Major finding): stat and
+// read each resolve path independently, so a file that grows or is replaced
+// between the two is a TOCTOU (time-of-check to time-of-use) race a
+// prior-check guard cannot close -- reading through a bound on one
+// already-open handle closes it by construction.
+//
+// This test is deliberately NOT a reproduction of the race itself: that needs
+// a genuine concurrent mutation of the file between the size check and the
+// read, which is inherently nondeterministic, and faking it with a sleep would
+// be exactly the kind of flake the TestRun_ContextCanceledMidWalkStopsShort
+// fix in this same round exists to remove. What this DOES pin, deterministically:
+// a file whose real (non-sparse) on-disk content exceeds the guard is refused
+// when read through load(), via the bounded-read mechanism specifically --
+// confirmed by the mutation pass for this change, which deletes the
+// io.LimitReader/length-check pair entirely (not a mere equivalent
+// substitution) and observes this test fail.
+func TestLoad_RejectsFileLargerThanGuard(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "huge.lrc")
+	content := bytes.Repeat([]byte("x"), maxLRCFileSize+4096)
+	if err := os.WriteFile(p, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, skip, err := load(p)
+	if err == nil {
+		t.Fatal("want an error for a file exceeding the size guard, got nil")
+	}
+	if skip {
+		t.Error("an oversize file must not be reported as a skip (symlink) case")
 	}
 }
 
@@ -577,9 +612,37 @@ func TestRun_CanceledContextAbortsBeforeAnyFile(t *testing.T) {
 	}
 }
 
+// countdownContext is a context.Context whose Err() reports context.Canceled
+// starting on its (after+1)th call, with no timing involved. Run's WalkDir
+// callback calls ctx.Err() exactly once per directory entry, from a single
+// goroutine (see the lockedBuffer comment above), so a plain int counter needs
+// no synchronization here. Embedding context.Background() supplies Deadline,
+// Done, and Value; only Err() is consulted by the code under test.
+type countdownContext struct {
+	context.Context
+	calls int
+	after int
+}
+
+func (c *countdownContext) Err() error {
+	c.calls++
+	if c.calls > c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
 // A context canceled mid-walk stops the walk short of the full tree rather than
 // running to completion. This pins the "stops mid-tree" half of the design's
 // cancellation requirement, distinct from the pre-canceled case above.
+//
+// This must be deterministic, not timing-based: an earlier version canceled
+// from a goroutine after a 1ms sleep, racing the walk itself -- if Run finished
+// the whole 1000-file tree before the timer fired, err was nil and
+// Scanned == total, so the test failed despite cancellation behaving correctly
+// (issue #923 review). countdownContext flips to context.Canceled after a
+// fixed number of Err() calls instead, so the walk always stops at the same
+// point on every run, on every machine.
 func TestRun_ContextCanceledMidWalkStopsShort(t *testing.T) {
 	dir := t.TempDir()
 	const total = 1000
@@ -590,15 +653,10 @@ func TestRun_ContextCanceledMidWalkStopsShort(t *testing.T) {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel from a goroutine shortly after the walk starts, racing the walk --
-	// the assertion below only needs "fewer than the full tree", which holds
-	// regardless of exactly how many files the walk reached before the
-	// cancellation was observed.
-	go func() {
-		time.Sleep(time.Millisecond)
-		cancel()
-	}()
+	// after=5 means the walk observes a handful of directory entries as
+	// not-yet-canceled before Err() starts returning context.Canceled -- comfortably
+	// mid-walk, and always the same handful, so Scanned < total on every run.
+	ctx := &countdownContext{Context: context.Background(), after: 5}
 
 	s, err := Run(ctx, Options{Roots: []string{dir}})
 	if !errors.Is(err, context.Canceled) {

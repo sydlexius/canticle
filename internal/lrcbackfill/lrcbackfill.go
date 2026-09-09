@@ -339,12 +339,17 @@ func inspect(path string) (Result, error) {
 
 // load reads path, returning its body and permission bits. skip is true (with a
 // nil error) when the path is a symlink, which is never followed or rewritten.
-// maxLRCFileSize bounds the unbounded os.ReadFile below. A real .lrc sidecar
-// is a few KB of text; this pass may run in-process inside a longer-lived
-// server, so an implausibly large ".lrc" -- corrupt, wrongly named, or
-// hostile -- must not be read wholesale and risk taking that process down.
-// 16 MiB is generous relative to any real lyric file while still bounding
-// worst case memory to something a server can absorb without incident.
+// maxLRCFileSize bounds the read via io.LimitReader on the open handle, so the
+// guard is enforced DURING the read rather than by a prior os.Lstat size check.
+// A stat-then-read pair each resolves path independently, so a file that grows
+// or is replaced between the two is a TOCTOU (time-of-check to time-of-use)
+// race a prior-check guard cannot close; reading through a bounded reader on
+// one already-open handle closes it by construction. A real .lrc sidecar is a
+// few KB of text; this pass may run in-process inside a longer-lived server, so
+// an implausibly large ".lrc" -- corrupt, wrongly named, or hostile -- must not
+// be read wholesale and risk taking that process down. 16 MiB is generous
+// relative to any real lyric file while still bounding worst case memory to
+// something a server can absorb without incident.
 const maxLRCFileSize = 16 * 1024 * 1024
 
 func load(path string) (body []byte, mode os.FileMode, skip bool, err error) {
@@ -359,14 +364,32 @@ func load(path string) (body []byte, mode os.FileMode, skip bool, err error) {
 		// doc comment) and would otherwise double-log.
 		return nil, 0, true, nil
 	}
-	if fi.Size() > maxLRCFileSize {
-		return nil, 0, false, fmt.Errorf("%s: %d bytes exceeds the %d-byte .lrc size guard", path, fi.Size(), maxLRCFileSize)
+
+	f, err := os.Open(path) //nolint:gosec // reason: path is caller-controlled library enumeration
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("open %s: %w", path, err)
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // path is caller-controlled library enumeration
+	defer func() { _ = f.Close() }()
+
+	// mode comes from the already-open handle, not the earlier Lstat, so a
+	// concurrent permission change between the two calls cannot leave the
+	// caller preserving a mode that no longer matches the bytes it read.
+	openFi, statErr := f.Stat()
+	if statErr != nil {
+		return nil, 0, false, fmt.Errorf("stat %s: %w", path, statErr)
+	}
+
+	// Read at most maxLRCFileSize+1 bytes: if the file is larger, this reads one
+	// byte past the guard and the length check below catches it -- the bound is
+	// enforced by the reader itself, not by a size observed before the read.
+	raw, err := io.ReadAll(io.LimitReader(f, maxLRCFileSize+1))
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("read %s: %w", path, err)
 	}
-	return raw, fi.Mode().Perm(), false, nil
+	if int64(len(raw)) > maxLRCFileSize {
+		return nil, 0, false, fmt.Errorf("%s: read more than %d bytes, exceeds the .lrc size guard", path, maxLRCFileSize)
+	}
+	return raw, openFi.Mode().Perm(), false, nil
 }
 
 // writeBackup preserves content to backupPath with exclusive-create semantics,
@@ -375,7 +398,7 @@ func load(path string) (body []byte, mode os.FileMode, skip bool, err error) {
 // here is a race with another process and is returned as an error rather than
 // silently overwriting the .lrc without a fresh backup.
 func writeBackup(backupPath string, content []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) //nolint:gosec // backupPath derived from a caller-controlled path
+	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) //nolint:gosec // reason: backupPath derived from a caller-controlled path
 	if err != nil {
 		return fmt.Errorf("create backup %s: %w", backupPath, err)
 	}
@@ -394,7 +417,7 @@ func writeBackup(backupPath string, content []byte, mode os.FileMode) error {
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("sync backup %s: %w", backupPath, err)
 	}
-	if err := os.Chmod(backupPath, mode); err != nil { //nolint:gosec // mode copied from the original file
+	if err := os.Chmod(backupPath, mode); err != nil { //nolint:gosec // reason: mode copied from the original file
 		return fmt.Errorf("chmod backup %s: %w", backupPath, err)
 	}
 	committed = true
@@ -427,7 +450,7 @@ func atomicWrite(path string, content []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp %s: %w", tmpPath, err)
 	}
-	if err := os.Chmod(tmpPath, mode); err != nil { //nolint:gosec // mode copied from the original file
+	if err := os.Chmod(tmpPath, mode); err != nil { //nolint:gosec // reason: mode copied from the original file
 		return fmt.Errorf("chmod temp %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
