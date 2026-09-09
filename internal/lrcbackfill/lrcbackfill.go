@@ -61,13 +61,23 @@ type backupRecord struct {
 // each stacked file (backup-first) and emits a JSONL record to Backup. Per-file
 // errors are counted and logged but never abort the run.
 //
-// ctx is checked once per directory entry in the WalkDir callback. The CLI
-// caller can rely on Ctrl-C to kill the process, but a caller embedded inside a
-// longer-lived process has no such escape hatch: an unbounded walk over a large
-// NAS library could otherwise block that process's shutdown for minutes. A
-// canceled context aborts the walk promptly via WalkDir's own early-termination
-// contract (a non-nil, non-SkipDir/SkipAll callback error stops the walk and is
-// returned by WalkDir itself).
+// ctx is checked once per directory entry in the WalkDir callback, and that is
+// the ONLY way to stop a walk in progress -- for every caller, including the
+// CLI. There is no signal-handling escape hatch anywhere: cmd/mxlrcgo-svc wires
+// its root context through signal.NotifyContext, so Ctrl-C CANCELS THE CONTEXT
+// rather than killing the process outright, and a walk that ignored ctx would
+// keep running until it finished the tree. (An earlier version of this comment
+// claimed the CLI could rely on Ctrl-C to kill the process; that was wrong
+// about the actual wiring.)
+//
+// The stakes differ by caller even though the mechanism does not. A CLI run
+// that ignores cancellation merely feels unresponsive; a caller embedded inside
+// a longer-lived process can block that process's shutdown for minutes on an
+// unbounded walk over a large NAS library.
+//
+// A canceled context aborts the walk promptly via WalkDir's own
+// early-termination contract (a non-nil, non-SkipDir/SkipAll callback error
+// stops the walk and is returned by WalkDir itself).
 func Run(ctx context.Context, opts Options) (Summary, error) {
 	var s Summary
 	for _, root := range opts.Roots {
