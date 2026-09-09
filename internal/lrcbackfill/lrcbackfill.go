@@ -17,6 +17,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/lrcnormalize"
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/scanner"
 )
 
 // Options configures a backfill run over one or more library roots.
@@ -33,16 +34,30 @@ type Options struct {
 	// private library metadata that must never reach a log an operator did not
 	// ask for. The operator-invoked `scan reconcile-lrc` CLI leaves this false:
 	// the path detail is its whole purpose, and an operator reading their own
-	// CLI output is not a leak. A caller that runs this walk unattended, with no
-	// human watching the log stream, should set it true. Either way Summary's
-	// Scanned/Skipped/Blocked/Errors counts are always populated, so a quiet
-	// caller still has the tallies -- just not the paths.
+	// CLI output is not a leak. The unattended, marker-gated serve-startup check
+	// sets it true. Either way Summary's Scanned/Skipped/Blocked/Errors counts
+	// are always populated, so a quiet caller still has the tallies -- just not
+	// the paths.
 	Quiet bool
 }
 
 // Summary tallies a backfill run.
 type Summary struct {
-	Scanned    int // .lrc files examined
+	Visited int // every non-directory entry the walk saw, regardless of extension
+
+	// MediaEntries counts only entries that look like actual library content: an
+	// audio file (per scanner.IsAudioFile) or a .lrc sidecar. Unlike Visited, a
+	// single stray file that is neither -- a mount-checker's .mountcheck
+	// sentinel, Syncthing's .stfolder, macOS's .DS_Store, a stray README, or any
+	// other one-off dotfile or metadata file -- does not move this counter. It
+	// is a necessary-not-sufficient heuristic, not proof that a root is
+	// genuinely mounted: a fully reliable check would need statfs/device-id
+	// comparison against the parent, which is out of scope here. See the doc
+	// comment on its zero-check in commands.runLRCStackedCheck for what this
+	// proves and does not prove about a root being mounted.
+	MediaEntries int
+
+	Scanned    int // .lrc files examined (a subset of Visited and of MediaEntries)
 	Normalized int // rewritten (apply) or would-be-rewritten (dry run)
 	Clean      int // already expanded; nothing to do
 	Skipped    int // symlinks and other benign, non-actionable skips
@@ -88,7 +103,32 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			if d.IsDir() || !strings.EqualFold(filepath.Ext(d.Name()), ".lrc") {
+			if d.IsDir() {
+				return nil
+			}
+			// Visited counts every non-directory entry the walk actually
+			// reached, regardless of extension. It is NOT, by itself, reliable
+			// evidence that a root is genuinely mounted: a single stray file
+			// unrelated to the library -- a mount-checker's .mountcheck
+			// sentinel, Syncthing's .stfolder, macOS's .DS_Store, a stray
+			// README -- makes Visited nonzero long before any real library
+			// content exists. MediaEntries (below) is the field actually
+			// consulted for that purpose.
+			name := d.Name()
+			ext := filepath.Ext(name)
+			s.Visited++
+			if scanner.IsAudioFile(name) || strings.EqualFold(ext, ".lrc") {
+				// A necessary-not-sufficient signal, not proof: it still
+				// cannot rule out a mount landing an unrelated audio/.lrc
+				// file by coincidence, and a fully reliable check would need
+				// statfs/device-id comparison against the parent, which is
+				// more machinery than this warrants. It is materially harder
+				// to trip by accident than "any entry at all" because it
+				// requires content that specifically resembles a music
+				// library rather than any single stray file.
+				s.MediaEntries++
+			}
+			if !strings.EqualFold(ext, ".lrc") {
 				return nil
 			}
 			s.Scanned++
