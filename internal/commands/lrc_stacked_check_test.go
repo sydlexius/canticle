@@ -880,13 +880,21 @@ func TestRunLRCStackedCheck_WalkErrorStillReportsEarlierFinding(t *testing.T) {
 	prevWalk := runStackedWalk
 	t.Cleanup(func() { runStackedWalk = prevWalk })
 	runStackedWalk = func(_ context.Context, _ lrcbackfill.Options) (lrcbackfill.Summary, error) {
-		return lrcbackfill.Summary{
+		// Bound to locals and returned on their own line, rather than returning a
+		// multi-line composite literal alongside a second value. gofmt's
+		// indentation for THAT construct differs between Go 1.26 and Go 1.27, so
+		// the inline form cannot satisfy both toolchains at once: CI formats with
+		// go.mod's 1.26.6 and rejects what a newer local gofmt produces (and the
+		// reverse). This shape formats identically under both.
+		partial := lrcbackfill.Summary{
 			Visited:      2,
 			MediaEntries: 1,
 			Scanned:      1,
 			Normalized:   1,
-		}, fmt.Errorf("walk %s: %w", filepath.Join(root, "sub"),
+		}
+		walkErr := fmt.Errorf("walk %s: %w", filepath.Join(root, "sub"),
 			&fs.PathError{Op: "lstat", Path: filepath.Join(root, "sub"), Err: fs.ErrPermission})
+		return partial, walkErr
 	}
 
 	logBuf := withCapturedLog(t)
