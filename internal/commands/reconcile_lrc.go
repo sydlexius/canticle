@@ -87,7 +87,7 @@ func runReconcileLRC(ctx context.Context, out io.Writer, args ScanReconcileLRCCm
 		}()
 	}
 
-	summary, err := lrcbackfill.Run(lrcbackfill.Options{Roots: roots, Apply: args.Yes, Backup: backupW})
+	summary, err := lrcbackfill.Run(ctx, lrcbackfill.Options{Roots: roots, Apply: args.Yes, Backup: backupW})
 	if err != nil {
 		slog.Error("reconcile-lrc failed", "error", err)
 		return 1

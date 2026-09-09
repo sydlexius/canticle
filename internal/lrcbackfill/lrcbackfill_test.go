@@ -2,12 +2,38 @@ package lrcbackfill
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// lockedBuffer is a concurrency-safe io.Writer for capturing slog output in
+// tests; WalkDir's callback runs on one goroutine per Run call here, but a
+// plain bytes.Buffer is still not safe against a stray concurrent write from
+// an unrelated goroutine in the same test binary, so this mirrors the
+// commands package's own lockedBuffer helper.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func TestNormalizeFile_BlockedWhenBackupExistsAndFileStillStacked(t *testing.T) {
 	dir := t.TempDir()
@@ -40,28 +66,40 @@ func TestNormalizeFile_BlockedWhenBackupExistsAndFileStillStacked(t *testing.T) 
 // classifyBackupExists is the seam that separates the two states issue #487
 // conflated. NormalizeFile's own `raw` predates the .orig check, so under a
 // concurrent run it can be stale; classification must re-read the file.
+//
+// This also directly pins the PRODUCER side of ViaBackupCheck (issue #470
+// round 4, Important 3): Run()'s status switch (TestRun_PeerExpandedLogSiteRespectsQuiet)
+// substitutes the classify seam with a fake that hardcodes the flag, so it
+// only pins Run's CONSUMPTION of ViaBackupCheck, never classifyBackupExists
+// actually SETTING it. A regression that stopped setting the flag on the
+// not-stacked branch would pass that seam test unchanged (the fake always
+// returns true) while silently turning off the CLI's peer-expanded Debug log
+// -- this table is what would catch that.
 func TestClassifyBackupExists(t *testing.T) {
 	tests := []struct {
-		name    string
-		onDisk  string
-		want    Status
-		wantWhy string
+		name          string
+		onDisk        string
+		want          Status
+		wantViaBackup bool
+		wantWhy       string
 	}{
 		{
 			// The benign case: a peer run expanded the .lrc and wrote the .orig
 			// after we read stale stacked bytes. Nothing remains to do.
-			name:    "already expanded by a peer run is clean, not blocked",
-			onDisk:  "[00:30.00]C\n[01:05.00]C\n",
-			want:    StatusClean,
-			wantWhy: "the .orig is a legitimate backup of a finished rewrite",
+			name:          "already expanded by a peer run is clean, not blocked",
+			onDisk:        "[00:30.00]C\n[01:05.00]C\n",
+			want:          StatusClean,
+			wantViaBackup: true,
+			wantWhy:       "the .orig is a legitimate backup of a finished rewrite",
 		},
 		{
 			// The actionable case: the file really is still stacked and the
 			// pre-existing .orig is what prevents its expansion.
-			name:    "still stacked is blocked and needs an operator",
-			onDisk:  "[00:30.00][01:05.00]C\n",
-			want:    StatusBlocked,
-			wantWhy: "the .orig blocks a file that still needs work",
+			name:          "still stacked is blocked and needs an operator",
+			onDisk:        "[00:30.00][01:05.00]C\n",
+			want:          StatusBlocked,
+			wantViaBackup: false,
+			wantWhy:       "the .orig blocks a file that still needs work",
 		},
 	}
 	for _, tc := range tests {
@@ -81,12 +119,31 @@ func TestClassifyBackupExists(t *testing.T) {
 			if res.Status != tc.want {
 				t.Errorf("status: want %v, got %v (%s)", tc.want, res.Status, tc.wantWhy)
 			}
+			if res.ViaBackupCheck != tc.wantViaBackup {
+				t.Errorf("ViaBackupCheck: want %v, got %v (%s)", tc.wantViaBackup, res.ViaBackupCheck, tc.wantWhy)
+			}
 		})
 	}
+
+	// The re-read-failure branch is not part of the table above (it returns an
+	// error, not a Result), but it shares the same producer and must not set
+	// ViaBackupCheck on a zero Result either.
+	t.Run("re-read failure returns a zero Result with ViaBackupCheck false", func(t *testing.T) {
+		dir := t.TempDir()
+		gone := filepath.Join(dir, "gone.lrc")
+		res, err := classifyBackupExists(gone, gone+".orig")
+		if err == nil {
+			t.Fatal("want an error for an unreadable path")
+		}
+		if res.ViaBackupCheck {
+			t.Errorf("ViaBackupCheck: want false on an error Result, got true")
+		}
+	})
 }
 
 // The #470 AC2 blocker: a dry run must not promise a rewrite that --yes then
-// declines to perform, because that count is the startup check's entire output.
+// declines to perform, because that count is a caller's entire output when it
+// has no path detail to fall back on.
 func TestRun_DryRunCountMatchesApplyWhenBlocked(t *testing.T) {
 	dir := t.TempDir()
 	blocked := filepath.Join(dir, "blocked.lrc")
@@ -101,7 +158,7 @@ func TestRun_DryRunCountMatchesApplyWhenBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dry, err := Run(Options{Roots: []string{dir}, Apply: false})
+	dry, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +166,7 @@ func TestRun_DryRunCountMatchesApplyWhenBlocked(t *testing.T) {
 		t.Errorf("dry run: %+v (want normalized=1 blocked=1; the blocked file must not be promised)", dry)
 	}
 
-	apply, err := Run(Options{Roots: []string{dir}, Apply: true})
+	apply, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,11 +203,11 @@ func TestRun_TalliesSkippedAndErrors(t *testing.T) {
 	// 0o000 does not guarantee an unreadable file on every runner (e.g. root, or
 	// some filesystems), so verify the premise deterministically before asserting
 	// the error tally.
-	if _, rerr := os.ReadFile(bad); rerr == nil { //nolint:gosec // test probe
+	if _, rerr := os.ReadFile(bad); rerr == nil { //nolint:gosec // reason: test probe
 		t.Skip("runner can read a 0o000 file; cannot exercise the unreadable-file error path")
 	}
 
-	s, err := Run(Options{Roots: []string{dir}, Apply: true})
+	s, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +261,7 @@ func TestRun_DryRunThenApply(t *testing.T) {
 	write("sub/d.lrc", "[00:05.00][00:09.00]Y") // stacked, no trailing newline
 
 	// Dry run: reports, writes nothing.
-	s, err := Run(Options{Roots: []string{dir}, Apply: false})
+	s, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +274,7 @@ func TestRun_DryRunThenApply(t *testing.T) {
 
 	// Apply: rewrites the stacked files and logs a JSONL record per rewrite.
 	var buf bytes.Buffer
-	s2, err := Run(Options{Roots: []string{dir}, Apply: true, Backup: &buf})
+	s2, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: true, Backup: &buf})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +341,65 @@ func TestNormalizeFile_IdempotentAndNeverOverwritesBackup(t *testing.T) {
 	}
 	if backup, _ := os.ReadFile(p + ".orig"); string(backup) != orig {
 		t.Errorf("backup no longer pristine: %q", string(backup))
+	}
+}
+
+// A .lrc larger than the size guard is refused rather than read wholesale --
+// this pass may run in-process inside a longer-lived server, so an
+// implausibly large file (corrupt, wrongly named, or hostile) must not risk
+// taking that process down via an unbounded os.ReadFile.
+func TestNormalizeFile_OversizeFileIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "huge.lrc")
+	f, err := os.Create(p) //nolint:gosec // reason: test-controlled path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxLRCFileSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NormalizeFile(p, nil); err == nil {
+		t.Fatal("want an error for a .lrc exceeding the size guard, got nil")
+	}
+}
+
+// TestLoad_RejectsFileLargerThanGuard pins that load() rejects a .lrc whose
+// on-disk content exceeds maxLRCFileSize, exercised through the bounded-read
+// path (io.LimitReader over an open handle) that replaced the old
+// os.Lstat-then-os.ReadFile shape (issue #923 review, Major finding): stat and
+// read each resolve path independently, so a file that grows or is replaced
+// between the two is a TOCTOU (time-of-check to time-of-use) race a
+// prior-check guard cannot close -- reading through a bound on one
+// already-open handle closes it by construction.
+//
+// This test is deliberately NOT a reproduction of the race itself: that needs
+// a genuine concurrent mutation of the file between the size check and the
+// read, which is inherently nondeterministic, and faking it with a sleep would
+// be exactly the kind of flake the TestRun_ContextCanceledMidWalkStopsShort
+// fix in this same round exists to remove. What this DOES pin, deterministically:
+// a file whose real (non-sparse) on-disk content exceeds the guard is refused
+// when read through load(), via the bounded-read mechanism specifically --
+// confirmed by the mutation pass for this change, which deletes the
+// io.LimitReader/length-check pair entirely (not a mere equivalent
+// substitution) and observes this test fail.
+func TestLoad_RejectsFileLargerThanGuard(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "huge.lrc")
+	content := bytes.Repeat([]byte("x"), maxLRCFileSize+4096)
+	if err := os.WriteFile(p, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, skip, err := load(p)
+	if err == nil {
+		t.Fatal("want an error for a file exceeding the size guard, got nil")
+	}
+	if skip {
+		t.Error("an oversize file must not be reported as a skip (symlink) case")
 	}
 }
 
@@ -464,5 +580,147 @@ func TestInspect_ReReadFailureIsAnError(t *testing.T) {
 
 	if _, err := inspect(path); !errors.Is(err, wantErr) {
 		t.Fatalf("inspect error = %v; want the classifier's re-read failure propagated -- a dry run must surface it, not swallow it and count the file clean", err)
+	}
+}
+
+// Run(ctx, ...) with an already-canceled context aborts the walk before
+// processing any file and returns context.Canceled, rather than completing the
+// walk and reporting a count. This matters for any caller embedded inside a
+// longer-lived process's shutdown path: it must not have to wait out a
+// ~35k-file NAS walk. WalkDir's early-termination contract makes this
+// deterministic: a non-nil, non-SkipDir/SkipAll callback error stops the walk
+// immediately, so zero further entries are ever visited once ctx.Err() is
+// non-nil -- this is not a race with the walk racing to finish first.
+func TestRun_CanceledContextAbortsBeforeAnyFile(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 20; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("f%02d.lrc", i))
+		if err := os.WriteFile(p, []byte("[00:30.00][01:05.00]C\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s, err := Run(ctx, Options{Roots: []string{dir}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run with a pre-canceled ctx returned err=%v; want context.Canceled", err)
+	}
+	if s.Scanned != 0 {
+		t.Errorf("Scanned=%d after a pre-canceled ctx; want 0 -- the walk must abort before touching any file", s.Scanned)
+	}
+}
+
+// countdownContext is a context.Context whose Err() reports context.Canceled
+// starting on its (after+1)th call, with no timing involved. Run's WalkDir
+// callback calls ctx.Err() exactly once per directory entry, from a single
+// goroutine (see the lockedBuffer comment above), so a plain int counter needs
+// no synchronization here. Embedding context.Background() supplies Deadline,
+// Done, and Value; only Err() is consulted by the code under test.
+type countdownContext struct {
+	context.Context
+	calls int
+	after int
+}
+
+func (c *countdownContext) Err() error {
+	c.calls++
+	if c.calls > c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
+// A context canceled mid-walk stops the walk short of the full tree rather than
+// running to completion. This pins the "stops mid-tree" half of the design's
+// cancellation requirement, distinct from the pre-canceled case above.
+//
+// This must be deterministic, not timing-based: an earlier version canceled
+// from a goroutine after a 1ms sleep, racing the walk itself -- if Run finished
+// the whole 1000-file tree before the timer fired, err was nil and
+// Scanned == total, so the test failed despite cancellation behaving correctly
+// (issue #923 review). countdownContext flips to context.Canceled after a
+// fixed number of Err() calls instead, so the walk always stops at the same
+// point on every run, on every machine.
+func TestRun_ContextCanceledMidWalkStopsShort(t *testing.T) {
+	dir := t.TempDir()
+	const total = 1000
+	for i := 0; i < total; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("f%04d.lrc", i))
+		if err := os.WriteFile(p, []byte("[00:30.00][01:05.00]C\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// after=5 means the walk observes a handful of directory entries as
+	// not-yet-canceled before Err() starts returning context.Canceled -- comfortably
+	// mid-walk, and always the same handful, so Scanned < total on every run.
+	ctx := &countdownContext{Context: context.Background(), after: 5}
+
+	s, err := Run(ctx, Options{Roots: []string{dir}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run with a mid-walk-canceled ctx returned err=%v; want context.Canceled", err)
+	}
+	if s.Scanned >= total {
+		t.Errorf("Scanned=%d; want fewer than the full %d-file tree -- cancellation must stop the walk short of completion", s.Scanned, total)
+	}
+}
+
+// The fourth path-bearing log site (issue #470 round 2, Important 3):
+// classifyBackupExists' "already expanded by a peer run" case must stay
+// silent under Quiet, and must log (at Debug) when Quiet is false, naming
+// both the file and its backup -- exactly like the other three path-bearing
+// sites in this package.
+//
+// This is the case the reviewer reproduced only via a genuine race (the file
+// must change between inspect's load() and the .orig Lstat check, hit on
+// attempt 8 of 400) -- not reproducible deterministically through a plain
+// Run() call. Substituting the classify seam (as
+// TestInspect_RoutesOrigGateThroughClassify already does for a different
+// assertion) reaches the same Run()-side logging branch deterministically,
+// without the race: it is Run()'s status switch, not classifyBackupExists
+// itself, that decides whether to log, so driving that switch via the seam
+// exercises the real code path this fix touches.
+//
+// This test pins Run's CONSUMPTION of ViaBackupCheck only -- the fake classify
+// above hardcodes the flag rather than deriving it. The PRODUCER side
+// (classifyBackupExists itself actually setting ViaBackupCheck on its
+// not-stacked branch) is pinned separately by TestClassifyBackupExists (issue
+// #470 round 4, Important 3): without that table, a regression that stopped
+// setting the flag in classifyBackupExists would pass this test unchanged.
+func TestRun_PeerExpandedLogSiteRespectsQuiet(t *testing.T) {
+	prev := classify
+	t.Cleanup(func() { classify = prev })
+	classify = func(path, backupPath string) (Result, error) {
+		return Result{Status: StatusClean, Backup: backupPath, ViaBackupCheck: true}, nil
+	}
+
+	run := func(quiet bool) string {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "song.lrc")
+		if err := os.WriteFile(p, []byte("[00:30.00][01:05.00]C\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p+".orig", []byte("PRIOR\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf lockedBuffer
+		prevLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+		if _, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: false, Quiet: quiet}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+
+	if got := run(true); strings.Contains(got, "song.lrc") {
+		t.Errorf("Quiet=true leaked the path via the peer-expanded log site: %s", got)
+	}
+	if got := run(false); !strings.Contains(got, "song.lrc") || !strings.Contains(got, "already expanded") {
+		t.Errorf("Quiet=false: want the peer-expanded Debug log naming the path; got: %s", got)
 	}
 }

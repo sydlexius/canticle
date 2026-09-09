@@ -5,6 +5,7 @@
 package lrcbackfill
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,20 @@ type Options struct {
 	Roots  []string  // directory trees to walk for *.lrc files
 	Apply  bool      // false = dry run (report only, write nothing)
 	Backup io.Writer // optional JSONL sink; one {path,backup} line per applied normalization
+
+	// Quiet suppresses the four per-file path-bearing logs (symlink skip,
+	// BLOCKED, per-file error, and the peer-expanded Debug) that otherwise name
+	// the offending .lrc path. Not all four are WARN -- the peer-expanded site
+	// logs at Debug -- so "path-bearing", not level, is what Quiet gates. A
+	// sidecar path encodes <root>/<Artist>/<Album>/<Title>.lrc -- exactly the
+	// private library metadata that must never reach a log an operator did not
+	// ask for. The operator-invoked `scan reconcile-lrc` CLI leaves this false:
+	// the path detail is its whole purpose, and an operator reading their own
+	// CLI output is not a leak. A caller that runs this walk unattended, with no
+	// human watching the log stream, should set it true. Either way Summary's
+	// Scanned/Skipped/Blocked/Errors counts are always populated, so a quiet
+	// caller still has the tallies -- just not the paths.
+	Quiet bool
 }
 
 // Summary tallies a backfill run.
@@ -45,12 +60,33 @@ type backupRecord struct {
 // mode (Apply=false) it only reports what would change; in apply mode it rewrites
 // each stacked file (backup-first) and emits a JSONL record to Backup. Per-file
 // errors are counted and logged but never abort the run.
-func Run(opts Options) (Summary, error) {
+//
+// ctx is checked once per directory entry in the WalkDir callback, and that is
+// the ONLY way to stop a walk in progress -- for every caller, including the
+// CLI. There is no signal-handling escape hatch anywhere: cmd/mxlrcgo-svc wires
+// its root context through signal.NotifyContext, so Ctrl-C CANCELS THE CONTEXT
+// rather than killing the process outright, and a walk that ignored ctx would
+// keep running until it finished the tree. (An earlier version of this comment
+// claimed the CLI could rely on Ctrl-C to kill the process; that was wrong
+// about the actual wiring.)
+//
+// The stakes differ by caller even though the mechanism does not. A CLI run
+// that ignores cancellation merely feels unresponsive; a caller embedded inside
+// a longer-lived process can block that process's shutdown for minutes on an
+// unbounded walk over a large NAS library.
+//
+// A canceled context aborts the walk promptly via WalkDir's own
+// early-termination contract (a non-nil, non-SkipDir/SkipAll callback error
+// stops the walk and is returned by WalkDir itself).
+func Run(ctx context.Context, opts Options) (Summary, error) {
 	var s Summary
 	for _, root := range opts.Roots {
 		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
 			}
 			if d.IsDir() || !strings.EqualFold(filepath.Ext(d.Name()), ".lrc") {
 				return nil
@@ -73,7 +109,14 @@ func Run(opts Options) (Summary, error) {
 			}
 			if ferr != nil {
 				s.Errors++
-				slog.Warn("lrcbackfill: file failed; continuing", "path", path, "error", ferr)
+				// Quiet suppresses this entirely rather than substituting a
+				// path-scrubbed message: the wrapped error itself (e.g. an
+				// os.PathError from lstat/read) carries the path in its own
+				// text, so there is no safe partial log here -- only the
+				// count, which the caller reports from Summary.Errors.
+				if !opts.Quiet {
+					slog.Warn("lrcbackfill: file failed; continuing", "path", path, "error", ferr)
+				}
 				return nil
 			}
 			switch res.Status {
@@ -81,10 +124,27 @@ func Run(opts Options) (Summary, error) {
 				s.Normalized++
 			case StatusClean:
 				s.Clean++
+				// A StatusClean reached via classifyBackupExists' re-read (a
+				// pre-existing .orig turned out to be a peer run's legitimate
+				// backup of an already-expanded file) names both paths -- the
+				// fourth path-bearing log site round 1 missed (issue #470
+				// round 2, Important 3). Gated on Quiet exactly like the
+				// Skipped/Blocked WARNs below.
+				if res.ViaBackupCheck && !opts.Quiet {
+					slog.Debug("lrcbackfill: .orig backup exists and the .lrc is already expanded; nothing to do",
+						"path", path, "backup", res.Backup)
+				}
 			case StatusSkipped:
 				s.Skipped++
+				if !opts.Quiet {
+					slog.Warn("lrcbackfill: skipping symlink", "path", path)
+				}
 			case StatusBlocked:
 				s.Blocked++
+				if !opts.Quiet {
+					slog.Warn("lrcbackfill: BLOCKED -- .lrc is still stacked but a pre-existing .orig bars a verifiable rewrite; operator action required (compare the two, then remove or rename the .orig and re-run)",
+						"path", path, "backup", path+".orig")
+				}
 			}
 			return nil
 		})
@@ -131,7 +191,20 @@ const (
 // Result reports what happened to a single file.
 type Result struct {
 	Status Status
-	Backup string // path of the .lrc.orig backup, set when StatusNormalized
+	Backup string // path of the .lrc.orig backup; set for StatusNormalized, and for a StatusClean verdict reached via ViaBackupCheck
+
+	// ViaBackupCheck is true when this Result came from classifyBackupExists'
+	// re-read (a pre-existing .orig triggered the #487 gate), as opposed to the
+	// plain "never was stacked" StatusClean returned directly by load +
+	// NormalizeBody. Run()'s status switch uses it to decide whether the
+	// path-bearing "already expanded by a peer run" Debug log applies -- that
+	// log names a specific backup path and would be meaningless (and
+	// path-leaking) noise for the common case of a file that was simply never
+	// stacked. Logging lives in Run(), not here, so it can be gated on
+	// opts.Quiet the same way the Skipped/Blocked WARNs already are (issue #470
+	// round 2, Important 3: this was the fourth path-bearing log site still
+	// unconditional after round 1's fix).
+	ViaBackupCheck bool
 }
 
 // NormalizeFile expands stacked timestamps in the .lrc at path. It is the
@@ -239,12 +312,15 @@ func classifyBackupExists(path, backupPath string) (Result, error) {
 		return Result{Status: StatusSkipped}, nil
 	}
 	if _, stacked := lrcnormalize.NormalizeBody(string(cur)); !stacked {
-		slog.Debug("lrcbackfill: .orig backup exists and the .lrc is already expanded; nothing to do",
-			"path", path, "backup", backupPath)
-		return Result{Status: StatusClean}, nil
+		// The Debug log naming path/backupPath is emitted by Run()'s status
+		// switch, not here, so it can be gated on opts.Quiet like every other
+		// path-bearing log in this package (see Result.ViaBackupCheck).
+		return Result{Status: StatusClean, Backup: backupPath, ViaBackupCheck: true}, nil
 	}
-	slog.Warn("lrcbackfill: BLOCKED -- .lrc is still stacked but a pre-existing .orig bars a verifiable rewrite; operator action required (compare the two, then remove or rename the .orig and re-run)",
-		"path", path, "backup", backupPath)
+	// The BLOCKED WARN (path-bearing, so Quiet-gated) is logged once by Run()'s
+	// status switch, not here -- classifyBackupExists is reachable only through
+	// NormalizeFile/inspect, both of which are reachable only through Run(), so
+	// logging here too would double the WARN for every apply-mode blocked file.
 	return Result{Status: StatusBlocked}, nil
 }
 
@@ -273,20 +349,57 @@ func inspect(path string) (Result, error) {
 
 // load reads path, returning its body and permission bits. skip is true (with a
 // nil error) when the path is a symlink, which is never followed or rewritten.
+// maxLRCFileSize bounds the read via io.LimitReader on the open handle, so the
+// guard is enforced DURING the read rather than by a prior os.Lstat size check.
+// A stat-then-read pair each resolves path independently, so a file that grows
+// or is replaced between the two is a TOCTOU (time-of-check to time-of-use)
+// race a prior-check guard cannot close; reading through a bounded reader on
+// one already-open handle closes it by construction. A real .lrc sidecar is a
+// few KB of text; this pass may run in-process inside a longer-lived server, so
+// an implausibly large ".lrc" -- corrupt, wrongly named, or hostile -- must not
+// be read wholesale and risk taking that process down. 16 MiB is generous
+// relative to any real lyric file while still bounding worst case memory to
+// something a server can absorb without incident.
+const maxLRCFileSize = 16 * 1024 * 1024
+
 func load(path string) (body []byte, mode os.FileMode, skip bool, err error) {
 	fi, err := os.Lstat(path) // Lstat (not Stat) so a symlink is detected, not followed.
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("lstat %s: %w", path, err)
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		slog.Warn("lrcbackfill: skipping symlink", "path", path)
+		// Logging (path-bearing, so Quiet-gated) is the Run() caller's job, not
+		// this helper's: load is also invoked from classifyBackupExists' re-read,
+		// where a symlink here is a defensive, not live, case (see that function's
+		// doc comment) and would otherwise double-log.
 		return nil, 0, true, nil
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // path is caller-controlled library enumeration
+
+	f, err := os.Open(path) //nolint:gosec // reason: path is caller-controlled library enumeration
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// mode comes from the already-open handle, not the earlier Lstat, so a
+	// concurrent permission change between the two calls cannot leave the
+	// caller preserving a mode that no longer matches the bytes it read.
+	openFi, statErr := f.Stat()
+	if statErr != nil {
+		return nil, 0, false, fmt.Errorf("stat %s: %w", path, statErr)
+	}
+
+	// Read at most maxLRCFileSize+1 bytes: if the file is larger, this reads one
+	// byte past the guard and the length check below catches it -- the bound is
+	// enforced by the reader itself, not by a size observed before the read.
+	raw, err := io.ReadAll(io.LimitReader(f, maxLRCFileSize+1))
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("read %s: %w", path, err)
 	}
-	return raw, fi.Mode().Perm(), false, nil
+	if int64(len(raw)) > maxLRCFileSize {
+		return nil, 0, false, fmt.Errorf("%s: read more than %d bytes, exceeds the .lrc size guard", path, maxLRCFileSize)
+	}
+	return raw, openFi.Mode().Perm(), false, nil
 }
 
 // writeBackup preserves content to backupPath with exclusive-create semantics,
@@ -295,7 +408,7 @@ func load(path string) (body []byte, mode os.FileMode, skip bool, err error) {
 // here is a race with another process and is returned as an error rather than
 // silently overwriting the .lrc without a fresh backup.
 func writeBackup(backupPath string, content []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) //nolint:gosec // backupPath derived from a caller-controlled path
+	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) //nolint:gosec // reason: backupPath derived from a caller-controlled path
 	if err != nil {
 		return fmt.Errorf("create backup %s: %w", backupPath, err)
 	}
@@ -314,7 +427,7 @@ func writeBackup(backupPath string, content []byte, mode os.FileMode) error {
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("sync backup %s: %w", backupPath, err)
 	}
-	if err := os.Chmod(backupPath, mode); err != nil { //nolint:gosec // mode copied from the original file
+	if err := os.Chmod(backupPath, mode); err != nil { //nolint:gosec // reason: mode copied from the original file
 		return fmt.Errorf("chmod backup %s: %w", backupPath, err)
 	}
 	committed = true
@@ -347,7 +460,7 @@ func atomicWrite(path string, content []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp %s: %w", tmpPath, err)
 	}
-	if err := os.Chmod(tmpPath, mode); err != nil { //nolint:gosec // mode copied from the original file
+	if err := os.Chmod(tmpPath, mode); err != nil { //nolint:gosec // reason: mode copied from the original file
 		return fmt.Errorf("chmod temp %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
