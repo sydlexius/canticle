@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -84,10 +85,26 @@ func TestWithControl(t *testing.T) {
 	if len(in) != 1 {
 		t.Fatal("input mutated")
 	}
-	// Already present (case-insensitively): not duplicated.
-	listed := []Track{{Artist: strings.ToUpper(ControlTrack.Artist), Album: "x", Title: ControlTrack.Title, Duration: 5}}
-	if got := WithControl(listed); len(got) != 1 {
-		t.Fatalf("control duplicated: %+v", got)
+	// The canonical control is ALWAYS appended: an entry sharing its artist/title
+	// but not its album/duration must never stand in for it (LoadTracks rejects
+	// such an entry; WithControl does not second-guess the list).
+	lookalike := []Track{{Artist: ControlTrack.Artist, Album: "x", Title: ControlTrack.Title, Duration: 5}}
+	if got := WithControl(lookalike); len(got) != 2 || got[1] != ControlTrack {
+		t.Fatalf("canonical control suppressed by a look-alike: %+v", got)
+	}
+}
+
+func TestLoadTracksRejectsControlIdentity(t *testing.T) {
+	body := "[[track]]\nartist=\"A\"\nalbum=\"B\"\ntitle=\"C\"\nduration=10\n" +
+		"[[track]]\nartist=\" " + strings.ToUpper(ControlTrack.Artist) + "\"\nalbum=\"Other\"\ntitle=\"" + strings.ToLower(ControlTrack.Title) + "\"\nduration=99\n"
+	_, err := LoadTracks(writeFile(t, body))
+	if err == nil || !strings.Contains(err.Error(), "entry 2") || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("got %v, want entry 2 rejected as the reserved control identity", err)
+	}
+	// Same artist, different title is an ordinary track.
+	ok := "[[track]]\nartist=\"" + ControlTrack.Artist + "\"\nalbum=\"B\"\ntitle=\"Something Else\"\nduration=10\n"
+	if _, err := LoadTracks(writeFile(t, ok)); err != nil {
+		t.Fatalf("artist-only match rejected: %v", err)
 	}
 }
 
@@ -195,6 +212,23 @@ func touch(t *testing.T, p string) {
 	}
 }
 
+// fakeGen writes the given body for every fixture and reports the listed length.
+func fakeGen(body string) Generator {
+	return Generator{
+		Encode:       func(_ context.Context, _ Track, p string) error { return os.WriteFile(p, []byte(body), 0o600) },
+		ReadDuration: func(string) (int, error) { return 10, nil },
+	}
+}
+
+func exists(t *testing.T, p string) bool {
+	t.Helper()
+	_, err := os.Lstat(p)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return err == nil
+}
+
 func TestPrepareOut(t *testing.T) {
 	if err := PrepareOut(filepath.Join(t.TempDir(), "missing"), false); err != nil {
 		t.Errorf("missing dir: %v", err)
@@ -204,9 +238,18 @@ func TestPrepareOut(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	owned := []string{"01 - A - T.mp3", "01 - A - T.lrc", "01 - A - T.txt", "01 - A - T.lrc.orig", "02 - Q - W.mp3"}
-	foreign := []string{"notes.txt", "song.mp3", "03 - orphan.lrc", "1 - A - T.mp3"}
-	for _, n := range append(append([]string{}, owned...), foreign...) {
+	tracks := []Track{{Artist: "A", Album: "B", Title: "T", Duration: 10}, {Artist: "Q", Album: "B", Title: "W", Duration: 10}}
+	if _, err := fakeGen("old").Run(context.Background(), tracks, dir); err != nil {
+		t.Fatal(err)
+	}
+	// Sidecars serve would have written for the generated fixtures.
+	owned := []string{"01 - A - T.mp3", "01 - A - T.lrc", "01 - A - T.txt", "01 - A - T.lrc.orig", "02 - Q - W.mp3", ManifestName}
+	for _, n := range []string{"01 - A - T.lrc", "01 - A - T.txt", "01 - A - T.lrc.orig"} {
+		touch(t, filepath.Join(dir, n))
+	}
+	// Files named exactly like fixtures but NOT in the manifest are the user's.
+	foreign := []string{"notes.txt", "song.mp3", "03 - unrelated - track.mp3", "03 - unrelated - track.lrc", "1 - A - T.mp3"}
+	for _, n := range foreign {
 		touch(t, filepath.Join(dir, n))
 	}
 	sub := filepath.Join(dir, "04 - nested.mp3")
@@ -219,32 +262,159 @@ func TestPrepareOut(t *testing.T) {
 		t.Fatalf("non-empty without -clean: got %v, want refusal", err)
 	}
 	for _, n := range owned {
-		if _, err := os.Stat(filepath.Join(dir, n)); err != nil {
-			t.Fatalf("refusal touched %s: %v", n, err)
+		if !exists(t, filepath.Join(dir, n)) {
+			t.Fatalf("refusal touched %s", n)
 		}
 	}
 	if err := PrepareOut(dir, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range owned {
-		if _, err := os.Stat(filepath.Join(dir, n)); !os.IsNotExist(err) {
-			t.Errorf("owned %s not removed (err=%v)", n, err)
+		if exists(t, filepath.Join(dir, n)) {
+			t.Errorf("owned %s not removed", n)
 		}
 	}
 	for _, n := range append(foreign, filepath.Join("04 - nested.mp3", "05 - X - Y.mp3")) {
-		if _, err := os.Stat(filepath.Join(dir, n)); err != nil {
-			t.Errorf("foreign %s removed: %v", n, err)
+		if !exists(t, filepath.Join(dir, n)) {
+			t.Errorf("foreign %s removed", n)
 		}
 	}
+}
 
-	// With -clean, generation then replaces the owned fixtures.
-	encode := func(_ context.Context, _ Track, p string) error { return os.WriteFile(p, []byte("new"), 0o600) }
-	g := Generator{Encode: encode, ReadDuration: func(string) (int, error) { return 10, nil }}
-	if _, err := g.Run(context.Background(), []Track{{Artist: "A", Album: "B", Title: "T", Duration: 10}}, dir); err != nil {
+// TestPrepareOutRemovesOrphanSidecar: a listed fixture whose .mp3 is gone still
+// has its sidecar removed, or a re-run could pass on that stale .lrc.
+func TestPrepareOutRemovesOrphanSidecar(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := fakeGen("x").Run(context.Background(), []Track{{Artist: "A", Album: "B", Title: "T", Duration: 10}}, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "01 - A - T.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(dir, "01 - A - T.lrc")
+	touch(t, orphan)
+	if err := PrepareOut(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	if exists(t, orphan) {
+		t.Errorf("orphaned owned sidecar %s survived -clean", filepath.Base(orphan))
+	}
+}
+
+// TestPrepareOutRefusesWithoutManifest: -clean on a non-empty dir with no
+// manifest must refuse and touch nothing, even fixture-shaped names.
+func TestPrepareOutRefusesWithoutManifest(t *testing.T) {
+	dir := t.TempDir()
+	names := []string{"01 - A - T.mp3", "01 - A - T.lrc"}
+	for _, n := range names {
+		touch(t, filepath.Join(dir, n))
+	}
+	err := PrepareOut(dir, true)
+	if err == nil || !strings.Contains(err.Error(), ManifestName) {
+		t.Fatalf("got %v, want a no-manifest refusal", err)
+	}
+	for _, n := range names {
+		if !exists(t, filepath.Join(dir, n)) {
+			t.Errorf("refusal removed %s", n)
+		}
+	}
+}
+
+// TestPrepareOutRejectsEscapingStem: a hand-edited manifest cannot direct a
+// removal outside the output directory.
+func TestPrepareOutRejectsEscapingStem(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "out")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(parent, "victim.mp3")
+	touch(t, victim)
+	if err := os.WriteFile(filepath.Join(dir, ManifestName), []byte(`{"stems":["../victim"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareOut(dir, true); err == nil || !strings.Contains(err.Error(), "invalid stem") {
+		t.Fatalf("got %v, want invalid-stem refusal", err)
+	}
+	if !exists(t, victim) {
+		t.Error("escaping stem removed a file outside the output dir")
+	}
+}
+
+// TestCleanCoversThreeDigitIndex: Run's %02d is a MINIMUM width, so fixture 100+
+// is "100 - ...". The manifest must record it and -clean must remove it.
+func TestCleanCoversThreeDigitIndex(t *testing.T) {
+	dir := t.TempDir()
+	tracks := make([]Track, 101)
+	for i := range tracks {
+		tracks[i] = Track{Artist: "A", Album: "B", Title: "T" + strconv.Itoa(i+1), Duration: 10}
+	}
+	if _, err := fakeGen("x").Run(context.Background(), tracks, dir); err != nil {
+		t.Fatal(err)
+	}
+	stems, err := readManifest(dir)
+	if err != nil || len(stems) != 101 {
+		t.Fatalf("manifest has %d stems (err=%v), want 101", len(stems), err)
+	}
+	big := filepath.Join(dir, "101 - A - T101.mp3")
+	touch(t, filepath.Join(dir, "100 - A - T100.lrc"))
+	if !exists(t, big) {
+		t.Fatalf("expected %s to be generated", filepath.Base(big))
+	}
+	if err := PrepareOut(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"101 - A - T101.mp3", "100 - A - T100.mp3", "100 - A - T100.lrc"} {
+		if exists(t, filepath.Join(dir, n)) {
+			t.Errorf("three-digit fixture %s survived -clean", n)
+		}
+	}
+}
+
+// TestCleanRerunReplacesFixtures: a normal re-run with -clean replaces the old
+// fixtures and leaves a fresh manifest listing the new set.
+func TestCleanRerunReplacesFixtures(t *testing.T) {
+	dir := t.TempDir()
+	first := []Track{{Artist: "A", Album: "B", Title: "T", Duration: 10}, {Artist: "Gone", Album: "B", Title: "Old", Duration: 10}}
+	if _, err := fakeGen("old").Run(context.Background(), first, dir); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, filepath.Join(dir, "01 - A - T.lrc"))
+	if err := PrepareOut(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fakeGen("new").Run(context.Background(), first[:1], dir); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, "01 - A - T.mp3")); err != nil || string(b) != "new" {
 		t.Errorf("fixture not replaced: %q %v", b, err)
+	}
+	for _, n := range []string{"01 - A - T.lrc", "02 - Gone - Old.mp3"} {
+		if exists(t, filepath.Join(dir, n)) {
+			t.Errorf("stale %s survived the re-run", n)
+		}
+	}
+	if stems, err := readManifest(dir); err != nil || len(stems) != 1 || stems[0] != "01 - A - T" {
+		t.Errorf("manifest after re-run = %v, %v; want [01 - A - T]", stems, err)
+	}
+}
+
+// TestRunManifestSurvivesFailure: a run that fails mid-way still lists the file
+// it was writing, so -clean can remove the partial output.
+func TestRunManifestSurvivesFailure(t *testing.T) {
+	dir := t.TempDir()
+	g := Generator{
+		Encode:       func(_ context.Context, _ Track, p string) error { return os.WriteFile(p, []byte("partial"), 0o600) },
+		ReadDuration: func(string) (int, error) { return 1, nil },
+	}
+	if _, err := g.Run(context.Background(), []Track{{Artist: "A", Album: "B", Title: "T", Duration: 10}}, dir); err == nil {
+		t.Fatal("want a duration-mismatch error")
+	}
+	if err := PrepareOut(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	if exists(t, filepath.Join(dir, "01 - A - T.mp3")) {
+		t.Error("partial fixture from a failed run survived -clean")
 	}
 }
 

@@ -94,11 +94,13 @@ smoke:
 # Silent, tagged MP3s of exact duration plus a negative control, written OUTSIDE
 # the repo (the tool refuses an OUT inside it). TRACKS is gitignored; start from
 # scripts/smoke-fixtures.example.toml. A non-empty OUT is refused unless CLEAN=1,
-# which replaces only the fixtures (and sidecars) the tool itself wrote.
+# which replaces only the fixtures (and their sidecars) listed in the tool's own
+# manifest; with no manifest it refuses rather than guess. Any other CLEAN value
+# (CLEAN=0, CLEAN=yes) does not clean.
 OUT ?= /tmp/canticle-smoke-fixtures
 TRACKS ?= smoke-fixtures.local.toml
 smoke-fixtures:
-	go run ./cmd/smokefixtures -out "$(OUT)" -tracks "$(TRACKS)" $(if $(CLEAN),-clean)
+	go run ./cmd/smokefixtures -out "$(OUT)" -tracks "$(TRACKS)" $(if $(filter 1,$(CLEAN)),-clean)
 
 ## lint: Run golangci-lint
 lint:

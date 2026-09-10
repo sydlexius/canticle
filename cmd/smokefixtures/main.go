@@ -40,7 +40,7 @@ func main() {
 	flag.StringVar(&o.tracks, "tracks", "smoke-fixtures.local.toml", "TOML track list ([[track]] artist/album/title/duration)")
 	flag.StringVar(&o.ffmpegOverride, "ffmpeg", "", "explicit ffmpeg path (default: pinned cache, then PATH, then a checksum-pinned download)")
 	flag.StringVar(&o.cacheDir, "ffmpeg-cache", defaultCacheDir(), "cache directory for the auto-provisioned ffmpeg build")
-	flag.BoolVar(&o.clean, "clean", false, "replace fixtures (and their sidecars) this tool wrote in a non-empty -out; other files are left alone")
+	flag.BoolVar(&o.clean, "clean", false, "replace the fixtures (and their sidecars) listed in the manifest a previous run wrote to -out; unlisted files are left alone, and a non-empty -out with no manifest is refused")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
