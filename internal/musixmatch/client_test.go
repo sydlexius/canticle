@@ -25,6 +25,48 @@ func TestClientName(t *testing.T) {
 	}
 }
 
+// TestFindLyricsRequestCarriesHostAndAppIDTogether is the #934 pinning test on
+// the lyrics-fetch side (token.go has the mint-side equivalent): a token is
+// valid only for the client identity it was minted for, so a request must
+// never carry the app_id for one client identity against the host for
+// another. This asserts the request's HOST, its app_id QUERY PARAM, and its
+// authority HEADER all agree with the single currentClientIdentity value in
+// ONE request, so a future edit that changes only one of the three call sites
+// (client.go's apiURL, app_id param, or authority header) fails here instead
+// of shipping a split identity.
+func TestFindLyricsRequestCarriesHostAndAppIDTogether(t *testing.T) {
+	client := NewClient("test-token")
+	var gotHost, gotAppID, gotAuthority string
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotHost = req.URL.Host
+		gotAppID = req.URL.Query().Get("app_id")
+		// The client sets this header with a lowercase key directly in the map
+		// (req.Header = http.Header{"authority": {...}}), bypassing Set's
+		// canonicalization, so Header.Get("authority") -- which canonicalizes
+		// its lookup key to "Authority" -- would silently miss it. Read the raw
+		// map entry instead of introducing a false pass here.
+		if vs := req.Header["authority"]; len(vs) > 0 { //nolint:staticcheck // reason: SA1008 - deliberately reading the NON-canonical key the client sets (req.Header = http.Header{"authority": {...}}); Header.Get would canonicalize to "Authority" and silently miss it
+			gotAuthority = vs[0]
+		}
+		return jsonResponse(http.StatusNotFound, `{}`), nil
+	})}
+
+	_, _ = client.FindLyrics(context.Background(), models.Track{TrackName: "title", ArtistName: "artist"})
+
+	if gotHost != currentClientIdentity.host {
+		t.Errorf("request host = %q; want %q", gotHost, currentClientIdentity.host)
+	}
+	if gotAppID != currentClientIdentity.appID {
+		t.Errorf("app_id = %q; want %q", gotAppID, currentClientIdentity.appID)
+	}
+	if gotAuthority != currentClientIdentity.host {
+		t.Errorf("authority header = %q; want %q", gotAuthority, currentClientIdentity.host)
+	}
+	if gotHost != gotAuthority {
+		t.Errorf("request host (%q) and authority header (%q) disagree; a split identity would let this happen", gotHost, gotAuthority)
+	}
+}
+
 func TestFindLyricsBuildsRequestAndParsesSyncedLyrics(t *testing.T) {
 	client := NewClient("test-token")
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

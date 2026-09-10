@@ -92,6 +92,7 @@ func classifiedSentinels() map[string]error {
 		"musixmatch.ErrMatcherClientError":     musixmatch.ErrMatcherClientError,
 		"musixmatch.ErrTokenRenewalRequired":   musixmatch.ErrTokenRenewalRequired,
 		"musixmatch.ErrTokenMintRefused":       musixmatch.ErrTokenMintRefused,
+		"musixmatch.ErrClientIdentityRetired":  musixmatch.ErrClientIdentityRetired,
 		"petitlyrics.ErrUnauthorized":          petitlyrics.ErrUnauthorized,
 		"petitlyrics.ErrRateLimited":           petitlyrics.ErrRateLimited,
 		"petitlyrics.ErrForbidden":             petitlyrics.ErrForbidden,
@@ -128,6 +129,16 @@ func transportExemptions() map[string]string {
 		// produced by a lyric lookup, so it cannot reach a lane and therefore cannot
 		// reach ClassifyOutcome at all.
 		"musixmatch.ErrTokenMintRefused": "token-bootstrap path only; never returned by a lookup, so it never reaches a lane",
+		// Same shape of exemption as ErrTokenMintRefused directly above: this is
+		// also returned ONLY by TokenMinter.Mint (internal/musixmatch/token.go).
+		// At startup bootstrapToken (internal/commands/token_bootstrap.go) handles
+		// it with its own ERROR-level log. On the renewal path
+		// persistingRenewer.Renew passes it through unchanged, and
+		// Client.FindLyrics (internal/musixmatch/client.go) only logs it and
+		// returns the ORIGINAL renewal-required error, not this one. So it is
+		// never returned by FindLyrics/findLyricsOnce and can never reach a lane
+		// or ClassifyOutcome.
+		"musixmatch.ErrClientIdentityRetired": "token-bootstrap path only (Mint), like ErrTokenMintRefused; never returned by a lookup, so it never reaches a lane",
 		// Same reasoning as petitlyrics.ErrForbidden above: a 403 from innertube is
 		// a refused request SHAPE, which no amount of waiting or rotation fixes.
 		// There is additionally no credential in this provider at all -- its API key
