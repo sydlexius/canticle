@@ -41,6 +41,12 @@ const (
 	// them. A webhook-priority Enqueue resets next_attempt_at to now, providing
 	// an intentional force-recheck escape hatch.
 	StatusDeferred = "deferred"
+	// StatusUnavailable marks a row RetireMiss retired after exhausting its
+	// benign-miss budget (#477), so a row that never produced a sidecar is not
+	// StatusDone. Terminal but revivable: only RecheckRetired moves it back to
+	// StatusDeferred; Enqueue never revives it, at any priority. StatusFailed
+	// rows are never routed here.
+	StatusUnavailable = "unavailable"
 )
 
 const timeFormat = time.RFC3339
@@ -241,35 +247,35 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(artist_key, title_key) DO UPDATE SET
              artist = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.artist
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.artist
                  ELSE excluded.artist
              END,
              title = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.title
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.title
                  ELSE excluded.title
              END,
              album = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.album
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.album
                  ELSE excluded.album
              END,
              album_artist = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.album_artist
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.album_artist
                  ELSE excluded.album_artist
              END,
              outdir = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.outdir
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.outdir
                  ELSE excluded.outdir
              END,
              filename = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.filename
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.filename
                  ELSE excluded.filename
              END,
              source_path = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.source_path
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.source_path
                  ELSE excluded.source_path
              END,
              output_paths = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.output_paths
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.output_paths
                  ELSE excluded.output_paths
              END,
              scan_result_id = COALESCE(work_queue.scan_result_id, excluded.scan_result_id),
@@ -279,11 +285,13 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE max(work_queue.priority, excluded.priority)
              END,
              status = CASE
-                 WHEN work_queue.status IN ('done', 'processing', 'failed', 'deferred') THEN work_queue.status
+                 -- 'unavailable' is terminal like 'done' (#477): a collision must not
+                 -- reset it to 'pending'. This CASE keeps it at every priority.
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing', 'failed', 'deferred') THEN work_queue.status
                  ELSE 'pending'
              END,
              next_attempt_at = CASE
-                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.next_attempt_at
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.next_attempt_at
                  WHEN work_queue.status = 'failed' AND ? = 1 THEN excluded.next_attempt_at
                  WHEN work_queue.status = 'failed' THEN work_queue.next_attempt_at
                  WHEN work_queue.status = 'deferred' AND ? = 1 THEN excluded.next_attempt_at
@@ -291,11 +299,13 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE excluded.next_attempt_at
              END,
              last_error = CASE
-                 WHEN work_queue.status IN ('done', 'processing', 'failed', 'deferred') THEN work_queue.last_error
+                 -- Load-bearing for 'unavailable': RecheckRetired matches on the
+                 -- missLimitReachedError sentinel, so clearing it strands the row.
+                 WHEN work_queue.status IN ('done', 'unavailable', 'processing', 'failed', 'deferred') THEN work_queue.last_error
                  ELSE ''
              END,
              completed_at = CASE
-                 WHEN work_queue.status = 'done' THEN work_queue.completed_at
+                 WHEN work_queue.status IN ('done', 'unavailable') THEN work_queue.completed_at
                  ELSE NULL
              END
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
@@ -1225,16 +1235,16 @@ const missLimitReachedError = "miss limit reached"
 
 // RetireMiss permanently closes a processing row that has exceeded the
 // configured miss-attempt cap. It runs a transaction that mirrors Complete's
-// scan_results writeback: work_queue is set to status='done' with sentinel
-// last_error "miss limit reached", and every linked scan_results row is also
-// set to status='done' so the scan layer does not strand the track in
-// 'processing' forever. Unlike Complete (which signals a successful lyrics
-// fetch), the last_error clearly marks this as a miss-limit terminal; the
-// distinction is visible in the last_error field, not in the status column.
+// scan_results writeback: work_queue is set to status='unavailable' (#477;
+// previously 'done') with sentinel last_error "miss limit reached", and every
+// linked scan_results row is set to status='done' so the scan layer does not
+// strand the track in 'processing' forever -- scan_results carries no
+// equivalent 'unavailable' state, since from the scan layer's perspective the
+// track has simply been fully examined and needs no further scanning.
 //
-// Retirement is terminal under current providers. A future multi-source sweep
-// (issue #103, slice 103d) could revive a retired track by resetting its
-// scan_results row back to 'pending', but no such mechanism exists today.
+// Retirement is terminal under current providers but revivable: RecheckRetired
+// (below) moves a row back to 'deferred' when the provider set changes (a
+// providers_version bump) or on an explicit `queue recheck --retired` request.
 //
 // The guard AND status = 'processing' ensures only the worker that currently
 // holds the row can retire it; sql.ErrNoRows is returned if the row moved on
@@ -1249,7 +1259,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
 
 	row := tx.QueryRowContext(ctx,
 		`UPDATE work_queue
-         SET status = 'done',
+         SET status = 'unavailable',
              completed_at = ?,
              last_error = ?
          WHERE id = ?
@@ -1307,7 +1317,7 @@ func recheckLibraryClause(libraryID *int64) (clause string, args []any) {
 // scan_results: a deferred work_queue row is non-terminal and remains the
 // active driver for the track, so re-arming next_attempt_at is sufficient for
 // the worker to re-process it (which then updates scan_results as usual). Only
-// retired rows (status='done') need their scan layer revived.
+// retired rows (status='unavailable') need their scan layer revived.
 //
 // When libraryID is non-nil only rows linked to that library are revived.
 // Returns the number of rows affected.
@@ -1353,8 +1363,8 @@ func (q *DBQueue) RecheckDeferred(ctx context.Context, libraryID *int64) (int64,
 // test clock keeps both sides consistent.
 //
 // The retired twin needs no equivalent: RecheckRetired's count and apply share
-// status='done' AND last_error=<sentinel>, and the apply MOVES status, so that
-// count already shrinks on a successful revive.
+// status='unavailable' AND last_error=<sentinel>, and the apply MOVES status,
+// so that count already shrinks on a successful revive.
 func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (int64, error) {
 	libClause, libArgs := recheckLibraryClause(libraryID)
 	args := append([]any{formatTime(q.now())}, libArgs...)
@@ -1370,8 +1380,10 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 
 // RecheckRetired revives work_queue rows that were permanently retired after
 // hitting the miss-attempt cap. A retired row is identified by
-// status='done' AND last_error = missLimitReachedError (the sentinel written by
-// RetireMiss). Revival reverses RetireMiss's terminal writeback:
+// status='unavailable' AND last_error = missLimitReachedError (the sentinel
+// written by RetireMiss; #477 renamed the status from 'done' to 'unavailable'
+// but the sentinel text and this predicate's SHAPE are unchanged). Revival
+// reverses RetireMiss's terminal writeback:
 //   - work_queue: status='deferred', priority=-100, next_attempt_at=now,
 //     last_error=”, completed_at=NULL. miss_count and providers_version are
 //     left unchanged.
@@ -1387,11 +1399,8 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 // Y's scan_result stays 'done' until the row reprocesses, at which point the
 // completion writeback re-confirms it.
 //
-// The scan_results guard is WHERE status='done' (not a literal mirror of
-// RetireMiss, which writes 'done' WHERE status != 'done'). This is intentional:
-// RetireMiss flips every linked scan_result to 'done', so at revival time they
-// are all 'done'; the guard reverts exactly those rows and avoids clobbering a
-// scan_result a future code path may legitimately leave in another state.
+// The scan_results guard is WHERE status='done': RetireMiss sets every linked
+// scan_result to 'done' (scan_results has no 'unavailable' state).
 //
 // Both mutations run in one transaction. When libraryID is non-nil only rows
 // linked to that library are revived.
@@ -1399,8 +1408,8 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 // Enqueue dedup safety: after revival the work_queue row is status='deferred'.
 // A subsequent scan-priority Enqueue for the same artist/title will hit the
 // ON CONFLICT(artist_key, title_key) path and preserve the 'deferred' status
-// (the upsert keeps work_queue.status for deferred/done/processing rows), so
-// no duplicate work_queue row is created alongside the revived one.
+// (the upsert keeps work_queue.status for deferred/done/unavailable/processing
+// rows), so no duplicate work_queue row is created alongside the revived one.
 func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, error) {
 	now := formatTime(q.now())
 	libClause, libArgs := recheckLibraryClause(libraryID)
@@ -1415,7 +1424,7 @@ func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, 
 	// scan_results writeback can target exactly those rows.
 	selectArgs := append([]any{missLimitReachedError}, libArgs...)
 	idRows, err := tx.QueryContext(ctx,
-		`SELECT id FROM work_queue WHERE status = 'done' AND last_error = ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		`SELECT id FROM work_queue WHERE status = 'unavailable' AND last_error = ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
 		selectArgs...,
 	)
 	if err != nil {
@@ -1449,7 +1458,7 @@ func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, 
              next_attempt_at = ?,
              last_error = '',
              completed_at = NULL
-         WHERE status = 'done' AND last_error = ?`
+         WHERE status = 'unavailable' AND last_error = ?`
 	updateArgs := append([]any{now, missLimitReachedError}, libArgs...)
 	res, err := tx.ExecContext(ctx,
 		retireUpdateBase+libClause, //nolint:gosec // G202: libClause is a fixed constant from recheckLibraryClause, not user input
@@ -1500,7 +1509,7 @@ func (q *DBQueue) CountRecheckRetired(ctx context.Context, libraryID *int64) (in
 	args := append([]any{missLimitReachedError}, libArgs...)
 	var count int64
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE status = 'done' AND last_error = ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		`SELECT COUNT(*) FROM work_queue WHERE status = 'unavailable' AND last_error = ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
 		args...,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("queue: count recheck retired: %w", err)

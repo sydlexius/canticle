@@ -37,10 +37,10 @@ type Queue interface {
 	Defer(ctx context.Context, id int64, retryAfter time.Duration, cause error) (queue.WorkItem, error)
 	Release(ctx context.Context, id int64) error
 	// RetireMiss permanently closes a processing row that has exceeded the
-	// max-miss-attempts cap. It sets status='done' with last_error='miss limit
-	// reached' on both the work_queue row and every linked scan_results row,
-	// marking the track as terminal. The scan layer will show the track as done
-	// (not pending) so it is not mistaken for an in-flight item.
+	// max-miss-attempts cap. It sets work_queue.status='unavailable' (#477) with
+	// last_error='miss limit reached', and every linked scan_results row to
+	// 'done', marking the track as terminal. The scan layer will show the track
+	// as done (not pending) so it is not mistaken for an in-flight item.
 	RetireMiss(ctx context.Context, id int64) (queue.WorkItem, error)
 	// SetInstrumentalResult stamps the audio-detection outcome and telemetry onto
 	// a work_queue row. result=1 means instrumental confirmed; result=0 means not
@@ -2152,9 +2152,10 @@ func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) err
 // drives the delay so the first re-check is base, the second is 2*base, etc.
 //
 // When maxMissAttempts > 0 and the next miss_count meets or exceeds the cap the
-// row is retired via RetireMiss (status='done' on work_queue and linked
-// scan_results, last_error='miss limit reached') rather than re-deferred. With
-// max_miss_attempts=N exactly N upstream fetches occur before retirement.
+// row is retired via RetireMiss (status='unavailable' on work_queue, 'done' on
+// linked scan_results, last_error='miss limit reached') rather than
+// re-deferred. With max_miss_attempts=N exactly N upstream fetches occur
+// before retirement.
 //
 // A sql.ErrNoRows from Defer or RetireMiss is benign: the row is no longer
 // 'processing' because it was canceled or re-dequeued out from under us (a lost
