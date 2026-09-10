@@ -129,19 +129,28 @@ func TestFindLyricsMismatchErrorCarriesNoContent(t *testing.T) {
 	}
 }
 
-// TestFindLyricsEmptyQueryFieldsSkipGuard: the probe path and some callers leave
-// artist or title blank. A blank query field cannot be compared, so the guard
-// must fail OPEN there rather than rejecting every such call.
+// TestFindLyricsEmptyQueryFieldsSkipGuard: with artist AND title both blank (and
+// no alternate identifier), the pre-flight unmatchable guard (#479) now rejects
+// the call BEFORE it ever reaches the transport -- there is nothing here that
+// could resolve a match, on this attempt or a retry, so it is never worth a
+// request. This supersedes the guard's OLD fail-open behavior for this exact
+// case (both fields blank): that older behavior let the query travel to the
+// real API, which (per #479's prod diagnostic) answers a blank-title query with
+// an unconditional 400 -- so the fail-open path was never actually reachable in
+// production, only in this test's mock. checkMatchCorresponds's fail-open
+// behavior for a SINGLE blank field (artist-only or title-only) is unaffected
+// and covered separately (TestFindLyricsSingleComparableFieldAccepts,
+// TestFindLyricsArtistOnlyComparable).
 func TestFindLyricsEmptyQueryFieldsSkipGuard(t *testing.T) {
 	client := clientReturning(t, matchResponse("Some Performer", "Some Song"))
 
-	song, err := client.FindLyrics(context.Background(), models.Track{
+	_, err := client.FindLyrics(context.Background(), models.Track{
 		ArtistName: "", TrackName: "",
 	})
-	if err != nil {
-		t.Fatalf("guard rejected a call with no comparable query fields: %v", err)
+	if err == nil {
+		t.Fatal("FindLyrics accepted a track with no title, artist, or alternate identifier")
 	}
-	if len(song.Subtitles.Lines) != 1 {
-		t.Errorf("lines = %d; want 1", len(song.Subtitles.Lines))
+	if !errors.Is(err, ErrUnmatchable) {
+		t.Fatalf("error = %v; want errors.Is(_, ErrUnmatchable)", err)
 	}
 }

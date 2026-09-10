@@ -122,6 +122,41 @@ var (
 	// answer". Both take the bounded-retry path, but only one of them means the
 	// provider is misbehaving.
 	ErrMatchMismatch = errors.New("musixmatch: response does not match the requested track")
+	// ErrUnmatchable indicates the track carries none of the fields the matcher
+	// could use to find it: no title text, and neither alternate identifier
+	// (ISRC, Spotify id) that could resolve a match without one (#479). It is
+	// checked BEFORE any request is built or paced: there is no point spending
+	// an outbound call, a reserved pacer slot, or provider budget on a query
+	// this client can already tell has no possible answer -- the request would
+	// be identical, and identically unanswerable, on every retry.
+	//
+	// That determinism is exactly the property IsBenignMiss tests for, so this
+	// is a benign miss like the other deterministic-response sentinels above,
+	// not a genuine upstream failure: the queue row is not retired, and
+	// re-tagging the file with a title (or an ISRC) later lets it be
+	// reconsidered on the ordinary benign-miss cooldown. A distinct,
+	// permanently-terminal state for a population that stays unmatchable
+	// forever is a separate concern (#477), not built here.
+	//
+	// Deliberately does NOT require ArtistName: checkMatchCorresponds already
+	// treats a blank artist as legitimately incomparable rather than a
+	// mismatch (some callers -- probes, certain scan paths -- leave it blank by
+	// design), and #479's own prod diagnostic found the failing population had
+	// a PRESENT artist; title is the field actually missing.
+	ErrUnmatchable = errors.New("musixmatch: track has no title or alternate identifier to match against")
+	// ErrMatcherClientError indicates the matcher's inner status_code fell in
+	// the 4xx client-error range for a code this client does not otherwise
+	// give its own name (401 and 404 are handled explicitly above; 429 is
+	// deliberately EXCLUDED -- see the switch in findLyricsOnce, and never
+	// route a rate limit here). A 4xx is, by construction, a verdict the
+	// server reached about THIS REQUEST: it recurs identically on a near-term
+	// retry, exactly like the already-handled 404, so it belongs on the same
+	// bounded benign-miss path rather than the genuine/transient default
+	// (#479). This is belt-and-braces alongside ErrUnmatchable above: the
+	// titleless case that motivated #479 is meant to be intercepted by that
+	// guard before any request is sent, but this protects against every OTHER
+	// cause of a stable 4xx the client has not yet named.
+	ErrMatcherClientError = errors.New("musixmatch: matcher rejected the request (client error)")
 )
 
 // transportError converts a request-build or transport failure into a clean,
@@ -172,12 +207,13 @@ var ErrTokenRenewalRequired error = tokenRenewalError{}
 // that genuine, transient failures warrant. (This concerns only the upstream
 // result; the queue row is not retired -- the worker re-checks it later on a
 // generous cooldown as the catalog grows.)
-// The three deterministic-response sentinels below are included because they
-// share the property this function tests for -- the upstream result is stable
-// and a near-term retry cannot change it -- even though the track may well HAVE
-// lyrics. A truncated body, an unrecognized subtitle_body encoding, and a
-// response for the wrong track are all facts about THIS response, not evidence
-// of a transient fault, so backing off geometrically buys nothing.
+// The deterministic-response sentinels below are included because they share
+// the property this function tests for -- the upstream result is stable and a
+// near-term retry cannot change it -- even though the track may well HAVE
+// lyrics. A truncated body, an unrecognized subtitle_body encoding, a response
+// for the wrong track, an unmatchable query (#479), and a matcher 4xx client
+// error (#479) are all facts about THIS request or response, not evidence of a
+// transient fault, so backing off geometrically buys nothing.
 //
 // This matters because internal/app (the `canticle fetch` CLI) calls this
 // function DIRECTLY and never reaches orchestrator.ClassifyOutcome. Classifying
@@ -190,7 +226,9 @@ func IsBenignMiss(err error) bool {
 		errors.Is(err, ErrNoLyrics) ||
 		errors.Is(err, ErrTruncatedResponse) ||
 		errors.Is(err, ErrUnparsableSubtitleBody) ||
-		errors.Is(err, ErrMatchMismatch)
+		errors.Is(err, ErrMatchMismatch) ||
+		errors.Is(err, ErrUnmatchable) ||
+		errors.Is(err, ErrMatcherClientError)
 }
 
 // TokenRenewer supplies a replacement token when the API explicitly signals that
@@ -488,7 +526,31 @@ func (c *Client) Name() string {
 // matches only the body-level hint=renew case; the bare 401 path returns
 // ErrUnauthorized, which observed behavior attributes to throttling rather than a
 // dead credential.
+//
+// PRE-FLIGHT UNMATCHABLE GUARD (#479): a track with no title and no alternate
+// identifier cannot match anything, on this or any other provider, so this
+// checks BEFORE pacing or building a request at all -- unlike every other
+// error path in this file, which is only reachable after the round trip. The
+// alternative (letting the request go out and classifying its resulting
+// matcher status_code) would still spend a paced request slot and provider
+// budget on a query that is unanswerable by construction; the query text
+// itself already proves that, with no need to ask upstream.
 func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
+	// Trim BEFORE the guard, and forward the trimmed track, so one set of values
+	// governs all three consumers: the guard's emptiness decision, the request
+	// params findLyricsOnce builds, and checkMatchCorresponds' comparison
+	// (fieldCorresponds already trims independently). Without this the guard
+	// could admit a track on a valid alternate identifier and still send a
+	// whitespace-only q_track upstream -- a query the guard's own semantics call
+	// empty, inviting exactly the avoidable 4xx this change exists to prevent.
+	// The reassignment covers the token-renewal retry paths below, which call
+	// findLyricsOnce again with this same value.
+	track.TrackName = strings.TrimSpace(track.TrackName)
+	track.ISRC = strings.TrimSpace(track.ISRC)
+	track.SpotifyID = strings.TrimSpace(track.SpotifyID)
+	if !hasMatchableIdentity(track) {
+		return models.Song{}, ErrUnmatchable
+	}
 	song, err := c.findLyricsOnce(ctx, track)
 	if err == nil || !errors.Is(err, ErrTokenRenewalRequired) {
 		return song, err
@@ -657,11 +719,25 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 	case 404:
 		return song, ErrNotFound
 	default:
-		// An unexpected matcher status_code is a genuine/transient upstream
+		code := mtg.GetInt("header", "status_code")
+		// A matcher inner status_code in the 4xx client-error range is stable:
+		// it recurs identically on a near-term retry, exactly like the
+		// already-handled 404 above, so route it through the same
+		// benign-miss/bounded-retry path instead of the genuine/transient
+		// default below (#479). EXCEPT 429: a rate limit is precisely the
+		// transient condition geometric backoff exists for, and folding it in
+		// here would make the client hammer a throttling provider instead of
+		// backing off from it, so it is explicitly carved out and falls
+		// through to the transient default.
+		if code >= 400 && code < 500 && code != http.StatusTooManyRequests {
+			return song, fmt.Errorf("%w: inner status_code %d", ErrMatcherClientError, code)
+		}
+		// An unexpected matcher status_code outside the stable 4xx range (5xx
+		// server errors, or anything else) is a genuine/transient upstream
 		// condition, not a benign miss -- intentionally returned non-sentinel
 		// (IsBenignMiss is false) so it is retried, and it carries the observed
 		// code for diagnosis.
-		return song, fmt.Errorf("musixmatch: unexpected matcher status_code %d", mtg.GetInt("header", "status_code"))
+		return song, fmt.Errorf("musixmatch: unexpected matcher status_code %d", code)
 	}
 
 	if song.Track.HasSubtitles == 1 {
@@ -819,4 +895,28 @@ func fieldCorresponds(requested, got string) (ok, comparable bool) {
 		return false, false
 	}
 	return normalize.MatchConfidence(requested, got) >= matchMinConfidence, true
+}
+
+// hasMatchableIdentity reports whether track carries at least one field the
+// matcher could resolve a match from without a title (#479): the title text
+// itself, or an alternate recording-level identifier (ISRC, Spotify id) the
+// request already sends when present (see findLyricsOnce's params). A track
+// with none of these can never match, on this request or a retry -- the query
+// text does not change on a retry, and neither does the answer.
+//
+// ArtistName is deliberately NOT checked here. checkMatchCorresponds already
+// treats a blank artist as legitimately incomparable rather than disqualifying
+// (some callers -- probes, certain scan paths -- leave it blank by design), and
+// the #479 prod diagnostic that motivated this guard found a PRESENT artist
+// paired with an empty title; title (or an alternate id) is the field that is
+// actually load-bearing for a match.
+//
+// TrimSpace, not a bare "" comparison: a real tagger can write a title field
+// containing only whitespace (a stray space, a placeholder from a ripping
+// tool), and that is exactly as unmatchable as a truly empty string -- the
+// matcher would search on nothing either way.
+func hasMatchableIdentity(track models.Track) bool {
+	return strings.TrimSpace(track.TrackName) != "" ||
+		strings.TrimSpace(track.ISRC) != "" ||
+		strings.TrimSpace(track.SpotifyID) != ""
 }

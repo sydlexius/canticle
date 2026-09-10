@@ -88,6 +88,8 @@ func classifiedSentinels() map[string]error {
 		"musixmatch.ErrTruncatedResponse":      musixmatch.ErrTruncatedResponse,
 		"musixmatch.ErrUnparsableSubtitleBody": musixmatch.ErrUnparsableSubtitleBody,
 		"musixmatch.ErrMatchMismatch":          musixmatch.ErrMatchMismatch,
+		"musixmatch.ErrUnmatchable":            musixmatch.ErrUnmatchable,
+		"musixmatch.ErrMatcherClientError":     musixmatch.ErrMatcherClientError,
 		"musixmatch.ErrTokenRenewalRequired":   musixmatch.ErrTokenRenewalRequired,
 		"musixmatch.ErrTokenMintRefused":       musixmatch.ErrTokenMintRefused,
 		"petitlyrics.ErrUnauthorized":          petitlyrics.ErrUnauthorized,
