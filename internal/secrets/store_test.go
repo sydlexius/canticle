@@ -577,3 +577,41 @@ func TestSQLStoreSetTokenWithIdentityErrors(t *testing.T) {
 		t.Error("invalid key: want error")
 	}
 }
+
+// TestSetMusixmatchTokenWithIdentityFallbackTokenFailure pins the fallback's
+// write ORDER for a minted write: the token is written before the identity
+// record, so a failed token write leaves the previous token+identity pair
+// untouched. Identity-first would leave the OLD token beside the NEW identity,
+// which startup accepts as minted for the current identity.
+func TestSetMusixmatchTokenWithIdentityFallbackTokenFailure(t *testing.T) {
+	ctx := context.Background()
+	w := &nameWriter{failSet: map[string]bool{NameMusixmatchToken: true},
+		vals: map[string]string{NameMusixmatchToken: "old-tok", NameMusixmatchClientIdentity: "old|id"}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "new-tok", "new|id"); err == nil {
+		t.Fatal("err = nil, want the token write's error")
+	}
+	if v := w.vals[NameMusixmatchClientIdentity]; v != "old|id" {
+		t.Errorf("identity = %q after a failed token write, want old|id (untouched)", v)
+	}
+	if v := w.vals[NameMusixmatchToken]; v != "old-tok" {
+		t.Errorf("token = %q, want old-tok", v)
+	}
+
+	// No previous record: a failed token write must not create one.
+	w = &nameWriter{failSet: map[string]bool{NameMusixmatchToken: true}, vals: map[string]string{}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "new-tok", "new|id"); err == nil {
+		t.Fatal("err = nil, want the token write's error")
+	}
+	if v, ok := w.vals[NameMusixmatchClientIdentity]; ok {
+		t.Errorf("identity record %q created beside a failed token write", v)
+	}
+
+	// Success path still writes both.
+	w = &nameWriter{vals: map[string]string{NameMusixmatchToken: "old-tok", NameMusixmatchClientIdentity: "old|id"}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "new-tok", "new|id"); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if w.vals[NameMusixmatchToken] != "new-tok" || w.vals[NameMusixmatchClientIdentity] != "new|id" {
+		t.Errorf("vals = %v, want new-tok + new|id", w.vals)
+	}
+}

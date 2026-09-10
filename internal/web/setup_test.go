@@ -14,6 +14,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/secrets"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/webauth"
@@ -913,7 +914,7 @@ func TestNewOnboardingDefaultsNilPolicyToLoopback(t *testing.T) {
 // the current token, so a test can assert an operator write clears it (#934).
 func seedMintedIdentity(t *testing.T, s secrets.TokenWriter) {
 	t.Helper()
-	if err := s.Set(context.Background(), secrets.NameMusixmatchClientIdentity, "apic.musixmatch.com|android-player-v1.0"); err != nil {
+	if err := s.Set(context.Background(), secrets.NameMusixmatchClientIdentity, musixmatch.ClientIdentityKey()); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 }

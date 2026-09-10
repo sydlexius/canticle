@@ -77,11 +77,14 @@ func SetOperatorMusixmatchToken(ctx context.Context, s TokenWriter, token string
 // atomicity:
 //   - identity "": the record is deleted FIRST and the token is not written if
 //     that fails, so an operator token never sits beside a stale record.
-//   - identity set: an identity write failure does not stop the token write;
-//     the record is deleted instead (best effort) so the token reads as
-//     absent-identity and is kept, rather than discarded and re-minted on every
-//     start by a leftover mismatched record. Only the token write's error is
-//     returned.
+//   - identity set: the token is written FIRST, and the identity record is not
+//     touched if that fails, so the previous token+identity pair stays as it
+//     was (writing the identity first would leave the OLD token beside the NEW
+//     identity, which startup would then accept as minted for the current
+//     identity). Only after the token is stored is the identity written; if
+//     that fails, the record is deleted instead (best effort) so the new token
+//     reads as absent-identity and is kept, rather than paired with a previous
+//     record it was not minted for. Only the token write's error is returned.
 func SetMusixmatchTokenWithIdentity(ctx context.Context, s TokenWriter, token, identity string) error {
 	if pw, ok := s.(TokenPairWriter); ok {
 		return pw.SetTokenWithIdentity(ctx, token, identity)
@@ -93,6 +96,9 @@ func SetMusixmatchTokenWithIdentity(ctx context.Context, s TokenWriter, token, i
 		}
 		return s.Set(ctx, NameMusixmatchToken, token)
 	}
+	if err := s.Set(ctx, NameMusixmatchToken, token); err != nil {
+		return err
+	}
 	if err := s.Set(ctx, NameMusixmatchClientIdentity, identity); err != nil {
 		slog.Error("could not record the client identity of a minted musixmatch token; it will be treated as operator-set until the next mint",
 			"error", err)
@@ -101,7 +107,7 @@ func SetMusixmatchTokenWithIdentity(ctx context.Context, s TokenWriter, token, i
 				"error", derr)
 		}
 	}
-	return s.Set(ctx, NameMusixmatchToken, token)
+	return nil
 }
 
 // SQLStore persists secrets encrypted-at-rest in the SQLite `secrets` table.
