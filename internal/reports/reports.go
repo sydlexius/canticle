@@ -9,6 +9,7 @@ package reports
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -708,6 +709,82 @@ func (r *Repo) UpNext(ctx context.Context, limit int) ([]UpNextItem, error) {
 		return nil, fmt.Errorf("reports: up next rows: %w", err)
 	}
 	return out, nil
+}
+
+// MaintenanceMarkerLRCNormalize names the maintenance_markers (migration 027)
+// row that records the most recent applied `scan reconcile-lrc --yes` pass
+// (#929). internal/commands.markLRCNormalizeApply is the sole writer;
+// LastLRCNormalization below is the sole reader. Defined here, not in
+// internal/commands, so both sides of the read/write seam name the same
+// constant rather than two packages independently agreeing on a string.
+const MaintenanceMarkerLRCNormalize = "lrc_normalize_last_apply"
+
+// LRCNormalizationSummary reports the most recent applied .lrc stacked-line
+// normalization pass (#929): how many sidecars were rewritten, and when.
+type LRCNormalizationSummary struct {
+	// Ever reports whether any apply pass has ever run against this database.
+	// False on a fresh install (or one that has only ever run reconcile-lrc in
+	// dry-run mode, which never applies and so never stamps this marker) --
+	// the pre-pass state the caller must render sensibly rather than as a
+	// bare zero.
+	Ever bool
+	// Normalized is the count of .lrc sidecars the most recent apply pass
+	// rewrote (maintenance_markers.detail_count). Meaningful only when Ever
+	// is true; zero on a pass that ran and found nothing to rewrite is a
+	// legitimate "already clean" result. The caller (internal/web's
+	// formatLRCNormalizeSummary) renders that zero-and-Ever state as its own
+	// distinct sentence, separate from both the never-run (Ever false) state
+	// and the nonzero-count sentence -- so despite sharing the value 0 with
+	// Ever's own zero value, Normalized==0 with Ever==true is a DIFFERENT,
+	// distinguishable state once rendered, not a collapsed one.
+	Normalized int64
+	// CompletedAt is when the most recent apply pass finished
+	// (maintenance_markers.completed_at). Zero value when Ever is false.
+	CompletedAt time.Time
+}
+
+// LastLRCNormalization returns the most recent applied `scan reconcile-lrc
+// --yes` pass, sourced from the maintenance_markers row
+// internal/commands.markLRCNormalizeApply upserts on every apply (#929).
+//
+// SCOPE, matching the design decision recorded on #929: this reports only
+// APPLIED rewrites. The unattended, marker-gated serve-startup discovery
+// pass (internal/commands.runLRCStackedCheck) is deliberately dry-run only
+// -- it never calls lrcbackfill with Apply=true and so never writes this
+// marker -- so a deployment that has only ever booted (never run the CLI
+// with --yes) correctly reads as Ever=false here, even if the startup check
+// already logged a nonzero stacked count. The two surfaces answer different
+// questions: the startup log tells an operator a problem exists, and this
+// tells them what the fix (the CLI) has actually done about it.
+//
+// A row absent (sql.ErrNoRows) is not an error -- it is the honest "never
+// run" state -- and renders as LRCNormalizationSummary{}, Ever=false.
+func (r *Repo) LastLRCNormalization(ctx context.Context) (LRCNormalizationSummary, error) {
+	var (
+		completedAt string
+		count       sql.NullInt64
+	)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT completed_at, detail_count FROM maintenance_markers WHERE name = ?`,
+		MaintenanceMarkerLRCNormalize,
+	).Scan(&completedAt, &count)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LRCNormalizationSummary{}, nil
+	}
+	if err != nil {
+		return LRCNormalizationSummary{}, fmt.Errorf("reports: last lrc normalization: %w", err)
+	}
+	t, perr := time.Parse(timeFormat, completedAt)
+	if perr != nil {
+		// completed_at's schema default (migration 027) and this row's sole
+		// writer both use the same strftime layout, so a parse failure here
+		// means a hand-edited or corrupted row rather than a normal state --
+		// surfaced as an error rather than silently rendering a zero time
+		// that would read as "just now" or "never" to a caller that does not
+		// separately check for it.
+		return LRCNormalizationSummary{}, fmt.Errorf("reports: parse lrc normalization completed_at %q: %w", completedAt, perr)
+	}
+	return LRCNormalizationSummary{Ever: true, Normalized: count.Int64, CompletedAt: t}, nil
 }
 
 // QueueEligibility partitions the not-yet-done backlog by readiness: Eligible

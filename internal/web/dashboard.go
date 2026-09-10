@@ -109,7 +109,54 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	view.UpNextEmpty = fmt.Sprintf("Nothing buffered. %s eligible, %s waiting on retry backoff.",
 		groupThousands(elig.Eligible), groupThousands(elig.RetryBackoff))
 
+	norm, err := u.reports.LastLRCNormalization(ctx)
+	if err != nil {
+		return templates.DashboardView{}, fmt.Errorf("dashboard: last lrc normalization: %w", err)
+	}
+	view.LRCNormalizeSummary = formatLRCNormalizeSummary(norm, serverLoc)
+
 	return view, nil
+}
+
+// formatLRCNormalizeSummary renders the #929 "last LRC normalization" line
+// from the report's summary. It carries only a count and a timestamp -- never
+// a path, artist, title, or album, matching every other dashboard aggregate.
+//
+// THREE DISTINCT SENTENCES, not two (follow-up to #929's original two-branch
+// version):
+//
+//   - Ever false: no apply pass has ever run. Its own sentence rather than a
+//     bare "0 files" -- a fresh install and a deployment that genuinely
+//     rewrote zero sidecars are different states, and collapsing them would
+//     read the pre-pass state as "checked, found nothing" when nothing has
+//     actually been checked yet (this reports applies only, see
+//     reports.Repo.LastLRCNormalization's doc comment for why the
+//     marker-gated startup discovery pass never counts as a run here).
+//   - Ever true, Normalized == 0: a pass DID run and genuinely found nothing
+//     to rewrite. This is deliberately worded as a clean bill of health
+//     ("no stacked sidecars found"), not as "0 files rewritten" -- the
+//     marker is stamped on EVERY applied run, including a no-op one (see
+//     internal/commands.markLRCNormalizeApply's doc comment: this is the
+//     more honest record of "when did I last run this, and what happened"),
+//     so this state is common and must not read as "the feature did
+//     nothing" when it is actually reporting the library is already clean.
+//   - Ever true, Normalized > 0: the original count sentence, unchanged.
+func formatLRCNormalizeSummary(s reports.LRCNormalizationSummary, loc *time.Location) string {
+	if !s.Ever {
+		// No backticks around the command: this string is interpolated into the
+		// template as escaped plain text, so a Markdown convention renders as
+		// literal punctuation rather than as code formatting.
+		return "No LRC normalization pass has run yet. Run \"canticle scan reconcile-lrc --yes\" to expand any stacked (multi-timestamp) .lrc sidecars."
+	}
+	display, _, _ := formatDashboardTime(s.CompletedAt, loc)
+	if s.Normalized == 0 {
+		return fmt.Sprintf("Last LRC normalization: %s -- no stacked sidecars found.", display)
+	}
+	noun := "file"
+	if s.Normalized != 1 {
+		noun = "files"
+	}
+	return fmt.Sprintf("Last LRC normalization: %d %s rewritten, %s.", s.Normalized, noun, display)
 }
 
 // buildUpNextRows shapes buffered work items into ordered panel rows (#572),

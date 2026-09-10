@@ -1,0 +1,32 @@
+-- +goose Up
+-- +goose StatementBegin
+-- Adds an optional numeric payload to maintenance_markers (migration 027)
+-- alongside its existing name/completed_at columns, so a one-shot or
+-- repeatable maintenance pass can record a small count beside its
+-- completion timestamp instead of just the bare fact that it ran.
+--
+-- First consumer (#929): the `scan reconcile-lrc --yes` apply pass records
+-- here how many stacked .lrc sidecars it actually rewrote, so the web
+-- dashboard can show "last LRC normalization: N files, at T" without a new
+-- event-stream table. That marker (name 'lrc_normalize_last_apply', written
+-- by internal/commands.markLRCNormalizeApply) is NOT one-shot the way the
+-- existing identity-repair and lrc-stacked-check markers are: the CLI is
+-- safely re-runnable, so each apply UPSERTS this row (overwriting both
+-- completed_at and detail_count) rather than using the INSERT OR IGNORE
+-- pattern the gate-style markers use. "A pass is done iff a row for its name
+-- exists" (migration 027's invariant) still holds for those; this row's
+-- presence instead means "at least one apply has happened", and its content
+-- reflects only the MOST RECENT one.
+--
+-- Nullable and generic rather than named for this one caller: a future
+-- marker that has no count to report leaves it NULL (same as every existing
+-- row does immediately after this migration runs), and a future marker that
+-- does have one reuses this column rather than growing a fourth
+-- single-purpose count column on this table.
+ALTER TABLE maintenance_markers ADD COLUMN detail_count INTEGER;
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+ALTER TABLE maintenance_markers DROP COLUMN detail_count;
+-- +goose StatementEnd

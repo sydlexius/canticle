@@ -197,13 +197,26 @@
   background: rgba(245, 158, 11, 0.12); /* amber-500 @ 12%; no alpha token exists */
 }
 
-/* -- Metrics footer note --------------------------------------------------- */
-.mx-dash-metrics-note {
+/* -- Maintenance summary note ----------------------------------------------- */
+/* Shares the metrics footer note's muted, small-text treatment (#929) so the
+   two read as one system, but carries its own top border/margin rather than
+   reusing .mx-dash-metrics-note directly -- the metrics note keeps its border
+   as the visual break before the very last line on the page. */
+.mx-dash-maintenance-note {
   font-size: 0.8125rem;
   color: var(--mx-content-text-secondary);
   margin-top: 1.5rem;
   padding-top: 0.75rem;
   border-top: 1px solid var(--mx-surface-border);
+}
+
+/* -- Metrics footer note --------------------------------------------------- */
+.mx-dash-metrics-note {
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+  margin-top: 0.75rem;
+  padding-top: 0;
+  border-top: none;
 }
 
 .mx-dash-metrics-hint {
