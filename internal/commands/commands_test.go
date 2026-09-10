@@ -1848,7 +1848,7 @@ func errorsNew(s string) error { return errors.New(s) }
 func strconvFormatInt(i int64) string { return strconv.FormatInt(i, 10) }
 
 func TestValidateQueueStatus(t *testing.T) {
-	for _, ok := range []string{"", "pending", "processing", "failed", "done"} {
+	for _, ok := range []string{"", "pending", "processing", "failed", "done", "deferred", "unavailable"} {
 		if err := validateQueueStatus(ok); err != nil {
 			t.Errorf("validateQueueStatus(%q) = %v; want nil", ok, err)
 		}
