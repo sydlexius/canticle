@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -350,7 +351,10 @@ func lrcNormalizeMarkerPresent(ctx context.Context, sqlDB *sql.DB) (bool, error)
 	err := sqlDB.QueryRowContext(ctx,
 		`SELECT 1 FROM maintenance_markers WHERE name = 'lrc_normalize_last_apply'`).Scan(&one)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
+		// The sentinel, not a substring of the message: an unrelated query or
+		// driver failure whose text happens to contain "no rows" would
+		// otherwise read as a legitimately absent marker and pass the test.
+		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err

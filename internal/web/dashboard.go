@@ -143,7 +143,10 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 //   - Ever true, Normalized > 0: the original count sentence, unchanged.
 func formatLRCNormalizeSummary(s reports.LRCNormalizationSummary, loc *time.Location) string {
 	if !s.Ever {
-		return "No LRC normalization pass has run yet. Run `canticle scan reconcile-lrc --yes` to expand any stacked (multi-timestamp) .lrc sidecars."
+		// No backticks around the command: this string is interpolated into the
+		// template as escaped plain text, so a Markdown convention renders as
+		// literal punctuation rather than as code formatting.
+		return "No LRC normalization pass has run yet. Run \"canticle scan reconcile-lrc --yes\" to expand any stacked (multi-timestamp) .lrc sidecars."
 	}
 	display, _, _ := formatDashboardTime(s.CompletedAt, loc)
 	if s.Normalized == 0 {
