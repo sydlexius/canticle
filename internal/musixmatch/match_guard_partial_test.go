@@ -142,11 +142,20 @@ func (w wrapped) Unwrap() error { return w.err }
 // branch cannot pass the suite -- the title-only tests alone would not catch it,
 // since fieldCorresponds is called once per field and either call could regress
 // independently.
+//
+// Each case sets ISRC so the #479 pre-flight unmatchable guard (which keys on
+// TrackName/ISRC/SpotifyID, not ArtistName) does not intercept the call before
+// checkMatchCorresponds is ever reached: per #479's own prod diagnostic, a
+// title-blank query with NO alternate identifier 400s unconditionally on the
+// real API, so that combination is exactly what the guard exists to pre-empt
+// (see TestBlankTitleTrackNeverIssuesRequest) and is no longer a route to this
+// code. An ISRC-driven lookup with a blank title remains a legitimate,
+// matchable query, which is what these cases now exercise.
 func TestFindLyricsArtistOnlyComparable(t *testing.T) {
 	t.Run("rejects a wrong artist when it is the only comparable field", func(t *testing.T) {
 		client := clientReturning(t, matchResponse("Bramblewood Quintet", "Ninefold Ascent"))
 		_, err := client.FindLyrics(context.Background(), models.Track{
-			ArtistName: "Aurora Kestrel", TrackName: "",
+			ArtistName: "Aurora Kestrel", TrackName: "", ISRC: "USRC17607839",
 		})
 		if err == nil {
 			t.Fatal("accepted a wrong artist when it was the ONLY comparable field")
@@ -159,7 +168,7 @@ func TestFindLyricsArtistOnlyComparable(t *testing.T) {
 	t.Run("accepts a good artist with a blank title", func(t *testing.T) {
 		client := clientReturning(t, matchResponse("Aurora Kestrel", "Ninefold Ascent"))
 		song, err := client.FindLyrics(context.Background(), models.Track{
-			ArtistName: "Aurora Kestrel", TrackName: "",
+			ArtistName: "Aurora Kestrel", TrackName: "", ISRC: "USRC17607839",
 		})
 		if err != nil {
 			t.Fatalf("rejected a good artist match with a blank title: %v", err)
