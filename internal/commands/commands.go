@@ -238,8 +238,8 @@ type ScanIndexMetadataCmd struct {
 // already moved away from (issue #921). Dry-run unless --yes.
 type ScanReconcilePathsCmd struct {
 	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
-	Yes        bool   `arg:"--yes" help:"actually delete rows (without it, prints what would be deleted)"`
-	Backup     string `arg:"--backup" help:"path for the JSONL backup of pruned rows (default: <db-dir>/reconcile-paths-backup-<ts>.jsonl)" default:""`
+	Yes        bool   `arg:"--yes" help:"actually delete rows and repair stale output_paths (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of pruned/relinked/retained/repaired rows (default: <db-dir>/reconcile-paths-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 

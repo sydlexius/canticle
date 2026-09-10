@@ -225,6 +225,12 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 	})
 	if err != nil {
 		slog.Error("reconcile-paths output_paths repair failed", "error", err)
+		// The sweep above may already have committed pruned or relinked rows
+		// and recorded them in the backup, so its path must still reach the
+		// operator on the failure path.
+		if backupFile != nil {
+			_, _ = fmt.Fprintf(out, "backup of rows changed before the failure written to %s\n", backupPath)
+		}
 		return 1
 	}
 

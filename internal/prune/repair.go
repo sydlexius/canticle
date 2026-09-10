@@ -242,7 +242,7 @@ func (p *Pruner) applyRepair(ctx context.Context, id int64, oldJSON, outdir, fil
 // is valid UTF-8. A row failing it (e.g. queue.cancelByLibrary filtering a
 // merged row down to another library's entry) is not proven to be #921's.
 func relinkShape(outdir, filename, sourcePath string, e models.OutputPath) bool {
-	for _, s := range []string{outdir, filename, e.Outdir, e.Filename} {
+	for _, s := range []string{outdir, filename, sourcePath, e.Outdir, e.Filename} {
 		if !utf8.ValidString(s) {
 			return false
 		}

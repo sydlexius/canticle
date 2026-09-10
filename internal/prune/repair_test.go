@@ -98,7 +98,10 @@ func TestRepairOutputPaths_LeavesNonMatchingRowsAlone(t *testing.T) {
 		return func(root, newDir string) setupFn {
 			return func(t *testing.T, _ context.Context, _ *sql.DB, _ int64, _, _ string) {
 				p := path(root, newDir)
-				if err := os.RemoveAll(p); err != nil || os.WriteFile(p, nil, 0o600) != nil {
+				if err := os.RemoveAll(p); err != nil {
+					t.Fatalf("remove %s: %v", p, err)
+				}
+				if err := os.WriteFile(p, nil, 0o600); err != nil {
 					t.Fatalf("make %s a file: %v", p, err)
 				}
 			}
@@ -271,5 +274,11 @@ func TestRelinkShape_RejectsInvalidUTF8(t *testing.T) {
 		relinkShape("/m/New", "01.flac"+bad, "/m/New/01.flac"+bad, models.OutputPath{Outdir: "/m/Old", Filename: "01.flac" + bad}) ||
 		relinkShape("/m/New"+bad, "01.flac", "/m/New"+bad+"/01.flac", ok) {
 		t.Error("invalid UTF-8 accepted")
+	}
+	// source_path alone: outdir, filename and the entry are all valid, so only
+	// the source_path check can reject it. The directory still matches outdir,
+	// so the shape test itself would pass.
+	if relinkShape("/m/New", "01.flac", "/m/New/01"+bad+".flac", ok) {
+		t.Error("invalid UTF-8 in source_path alone accepted")
 	}
 }
