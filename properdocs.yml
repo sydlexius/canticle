@@ -84,6 +84,7 @@ nav:
   - CLI Reference: CLI_REFERENCE.md
   - Configuration: CONFIGURATION.md
   - Instrumental Detection: instrumental-detection.md
+  - LRC Normalization: lrc-normalization.md
   - Developer Guide:
       - Overview: DEVELOPER.md
       - Multilingual Output Policy: multilingual-output-policy.md

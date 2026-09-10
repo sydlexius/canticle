@@ -210,6 +210,18 @@
   border-top: 1px solid var(--mx-surface-border);
 }
 
+/* Matches .mx-auth-link's treatment (web/static/css/input.css) so an external
+   docs link reads the same wherever it appears in the app. */
+.mx-dash-maintenance-link {
+  color: var(--mx-accent);
+  text-decoration: none;
+  margin-left: 0.375rem;
+}
+
+.mx-dash-maintenance-link:hover {
+  text-decoration: underline;
+}
+
 /* -- Metrics footer note --------------------------------------------------- */
 .mx-dash-metrics-note {
   font-size: 0.8125rem;
