@@ -1,5 +1,5 @@
 .PHONY: build run test test-js test-shuffle test-cover patch-cover gate scan vulncheck \
-        doctor sync-tool-versions coverage-floor smoke lint fmt hooks clean help \
+        doctor sync-tool-versions coverage-floor smoke smoke-fixtures lint fmt hooks clean help \
         docs docs-serve docs-deps templ tailwind ui ui-check ui-validate generate
 
 # Binary name
@@ -89,6 +89,16 @@ sync-tool-versions:
 ## smoke: Run CLI smoke tests
 smoke:
 	./scripts/smoke.sh
+
+## smoke-fixtures: Generate the live serve-smoke library [OUT=<dir>] [TRACKS=<toml>] [CLEAN=1] (docs/DEVELOPER.md)
+# Silent, tagged MP3s of exact duration plus a negative control, written OUTSIDE
+# the repo (the tool refuses an OUT inside it). TRACKS is gitignored; start from
+# scripts/smoke-fixtures.example.toml. A non-empty OUT is refused unless CLEAN=1,
+# which replaces only the fixtures (and sidecars) the tool itself wrote.
+OUT ?= /tmp/canticle-smoke-fixtures
+TRACKS ?= smoke-fixtures.local.toml
+smoke-fixtures:
+	go run ./cmd/smokefixtures -out "$(OUT)" -tracks "$(TRACKS)" $(if $(CLEAN),-clean)
 
 ## lint: Run golangci-lint
 lint:

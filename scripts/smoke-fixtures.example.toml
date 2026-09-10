@@ -1,0 +1,21 @@
+# Track list for `make smoke-fixtures` (#948). Copy to smoke-fixtures.local.toml
+# at the repo root (gitignored) and replace the placeholders with real,
+# well-known songs. Never commit real titles: this example stays placeholder-only.
+#
+# duration is the song's REAL length, as seconds (225) or "m:ss" ("3:45"). The
+# timing guard judges a synced lyric against the audio length, so a wrong value
+# demotes a correct .lrc to .txt.
+#
+# A nonsense-tagged negative control is always added; do not list it here.
+
+[[track]]
+artist = "Placeholder Artist One"
+album = "Placeholder Album One"
+title = "Placeholder Title One"
+duration = "3:45"
+
+[[track]]
+artist = "Placeholder Artist Two"
+album = "Placeholder Album Two"
+title = "Placeholder Title Two"
+duration = 252
