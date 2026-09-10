@@ -59,6 +59,55 @@ func TestResolveTokenWithStore_DBUsedOnlyWhenHigherAbsent(t *testing.T) {
 	}
 }
 
+// TestResolveTokenWithStore_StoredDegenerateTokenIsRemintedAtStartup is the
+// #934 recovery path for an EXISTING install: a pre-#934 build persisted the
+// retired desktop identity's 56-zero token, and bootstrapToken never re-mints
+// over a DB-sourced token. The degenerate stored token must be discarded, and
+// the startup chain (resolve -> bootstrap) must mint and overwrite it.
+func TestResolveTokenWithStore_StoredDegenerateTokenIsRemintedAtStartup(t *testing.T) {
+	ctx := context.Background()
+	store := newSecretStore(t)
+	if err := store.Set(ctx, secrets.NameMusixmatchToken, strings.Repeat("0", 56)); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	got, fromDB, err := resolveTokenWithStore(ctx, "", store)
+	if err != nil {
+		t.Fatalf("resolveTokenWithStore: %v", err)
+	}
+	if got != "" || fromDB {
+		t.Fatalf("got (%q, fromDB=%v); want (\"\", false) -- a degenerate stored token must be discarded", got, fromDB)
+	}
+
+	m := &fakeMinter{token: "fresh-android-token"}
+	tok, minted := bootstrapToken(ctx, got, fromDB, store, m)
+	if !minted || tok != "fresh-android-token" {
+		t.Fatalf("bootstrapToken = (%q, %v); want (fresh-android-token, true)", tok, minted)
+	}
+	stored, _, err := store.Get(ctx, secrets.NameMusixmatchToken)
+	if err != nil || stored != "fresh-android-token" {
+		t.Fatalf("stored token = %q (err %v); want the fresh token to overwrite the degenerate one", stored, err)
+	}
+}
+
+// TestResolveTokenWithStore_StoredGenuineTokenIsKept is the false-positive
+// guard for the degenerate check: an ordinary stored token is still used and
+// never re-minted.
+func TestResolveTokenWithStore_StoredGenuineTokenIsKept(t *testing.T) {
+	ctx := context.Background()
+	store := newSecretStore(t)
+	if err := store.Set(ctx, secrets.NameMusixmatchToken, "a1b2c3-genuine"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, fromDB, err := resolveTokenWithStore(ctx, "", store)
+	if err != nil {
+		t.Fatalf("resolveTokenWithStore: %v", err)
+	}
+	if got != "a1b2c3-genuine" || !fromDB {
+		t.Fatalf("got (%q, fromDB=%v); want (a1b2c3-genuine, true)", got, fromDB)
+	}
+}
+
 func TestResolveTokenWithStore_NoAutoPersist(t *testing.T) {
 	ctx := context.Background()
 	store := newSecretStore(t)
@@ -412,4 +461,87 @@ func writeServeConfig(t *testing.T, path, dbPath string, verifyEnabled bool, ffm
 
 func tomlString(s string) string {
 	return "\"" + strings.ReplaceAll(s, `\`, `\\`) + "\""
+}
+
+// TestWarnDegenerateOperatorToken pins #934's operator-token warning: a
+// degenerate operator token warns once, naming the source but never the value,
+// and is KEPT (flows through the store/bootstrap tiers unchanged, never
+// re-minted); a normal operator token does not warn.
+func TestWarnDegenerateOperatorToken(t *testing.T) {
+	ctx := context.Background()
+	zero := strings.Repeat("0", 56)
+
+	logs := captureLogs(t)
+	if !warnDegenerateOperatorToken(zero, "env") {
+		t.Fatal("warnDegenerateOperatorToken(degenerate) = false; want true")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "degenerate") || !strings.Contains(out, "source=env") {
+		t.Fatalf("missing degenerate-token warning naming the source; logs: %s", out)
+	}
+	if strings.Contains(out, zero) {
+		t.Fatal("warning leaked the token value")
+	}
+
+	logs.Reset()
+	if warnDegenerateOperatorToken("a1b2c3-genuine", "cli") || logs.Len() != 0 {
+		t.Fatalf("normal operator token warned; logs: %s", logs.String())
+	}
+
+	store := newSecretStore(t)
+	m := &fakeMinter{token: "minted"}
+	got, fromDB, err := resolveTokenWithStore(ctx, zero, store)
+	if err != nil {
+		t.Fatalf("resolveTokenWithStore: %v", err)
+	}
+	got, minted := bootstrapToken(ctx, got, fromDB, store, m)
+	if got != zero || minted || m.calls != 0 {
+		t.Fatalf("degenerate operator token not kept: got %q minted=%v calls=%d", got, minted, m.calls)
+	}
+
+	for _, tc := range []struct {
+		cli     string
+		fromEnv bool
+		want    string
+	}{{"x", true, "cli"}, {"", true, "env"}, {"", false, "config file"}} {
+		if s := operatorTokenSource(tc.cli, tc.fromEnv); s != tc.want {
+			t.Errorf("operatorTokenSource(%q, %v) = %q; want %q", tc.cli, tc.fromEnv, s, tc.want)
+		}
+	}
+}
+
+// TestBootstrapToken_FailedMintDeletesDegenerateStoredRow: when the startup mint
+// that follows a degenerate-stored-token discard fails, the known-bad row is
+// deleted rather than left in the store (#934). A non-degenerate row is never
+// deleted by that cleanup.
+func TestBootstrapToken_FailedMintDeletesDegenerateStoredRow(t *testing.T) {
+	for _, mintErr := range []error{musixmatch.ErrClientIdentityRetired, musixmatch.ErrTokenMintRefused} {
+		t.Run(mintErr.Error(), func(t *testing.T) {
+			ctx := context.Background()
+			store := newSecretStore(t)
+			if err := store.Set(ctx, secrets.NameMusixmatchToken, strings.Repeat("0", 56)); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			got, fromDB, err := resolveTokenWithStore(ctx, "", store)
+			if err != nil {
+				t.Fatalf("resolveTokenWithStore: %v", err)
+			}
+			if tok, minted := bootstrapToken(ctx, got, fromDB, store, &fakeMinter{err: mintErr}); tok != "" || minted {
+				t.Fatalf("bootstrapToken = (%q, %v); want (\"\", false)", tok, minted)
+			}
+			if _, ok, err := store.Get(ctx, secrets.NameMusixmatchToken); err != nil || ok {
+				t.Fatalf("degenerate stored token still present after failed mint (ok=%v err=%v)", ok, err)
+			}
+		})
+	}
+
+	ctx := context.Background()
+	store := newSecretStore(t)
+	if err := store.Set(ctx, secrets.NameMusixmatchToken, "a1b2c3-genuine"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	dropDegenerateStoredToken(ctx, store)
+	if v, ok, _ := store.Get(ctx, secrets.NameMusixmatchToken); !ok || v != "a1b2c3-genuine" {
+		t.Fatalf("non-degenerate stored token was touched: (%q, %v)", v, ok)
+	}
 }
