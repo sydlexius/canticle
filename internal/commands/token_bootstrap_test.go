@@ -98,6 +98,26 @@ func TestBootstrapToken_MintsAndPersists(t *testing.T) {
 	}
 }
 
+// TestBootstrapToken_ClientIdentityRetiredDegradesWithoutRetry: a degenerate
+// token from an apparently-retired client identity (#934) degrades to no
+// token, exactly like a rate-limited refusal -- one call, nothing persisted.
+func TestBootstrapToken_ClientIdentityRetiredDegradesWithoutRetry(t *testing.T) {
+	store := secrets.NewMemoryStore()
+	m := &fakeMinter{err: musixmatch.ErrClientIdentityRetired}
+
+	got, minted := bootstrapToken(context.Background(), "", false, store, m)
+
+	if got != "" || minted {
+		t.Errorf("got (%q, %v); want (\"\", false)", got, minted)
+	}
+	if m.calls != 1 {
+		t.Errorf("minter called %d times; want exactly 1 (no retry loop)", m.calls)
+	}
+	if _, ok, _ := store.Get(context.Background(), secrets.NameMusixmatchToken); ok {
+		t.Error("something was persisted after a client-identity-retired mint failure")
+	}
+}
+
 // TestBootstrapToken_RefusedMintDegrades verifies a rate-limited mint yields no
 // token and no retry, rather than spinning against the endpoint.
 func TestBootstrapToken_RefusedMintDegrades(t *testing.T) {

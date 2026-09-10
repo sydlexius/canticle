@@ -20,8 +20,6 @@ import (
 	"github.com/valyala/fastjson"
 )
 
-const apiURL = "https://apic-desktop.musixmatch.com/ws/1.1/macro.subtitles.get"
-
 const (
 	// adaptiveMaxLevel caps the adaptive ratcheting level. The effective request
 	// interval is minInterval << adaptiveLevel, so a max level of 3 yields a
@@ -593,7 +591,7 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		return models.Song{}, err
 	}
 	song := models.Song{}
-	baseURL, err := url.Parse(apiURL)
+	baseURL, err := url.Parse(currentClientIdentity.apiURL())
 	if err != nil {
 		return song, fmt.Errorf("failed to parse API URL: %w", err)
 	}
@@ -618,9 +616,19 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		// Musixmatch. It is not -- it is reachable, just not from here.
 		// The parameter is kept because the request shape is otherwise
 		// unchanged and untested to remove.
-		"namespace":         {"lyrics_richsynched"},
+		"namespace": {"lyrics_richsynched"},
+		// subtitle_format=mxm requests the JSON cue-array encoding. During the
+		// 2026-09 desktop-identity retirement (#914, #934) the fixed decoy body
+		// the retired identity returned did not parse as an "mxm" cue array, so
+		// nothing was written from it. That protection was INCIDENTAL to this
+		// choice, not designed: a sibling client (beetdrop) requesting
+		// subtitle_format=lrc received a decoy that DID parse as LRC text.
+		// Switching this to "lrc" would remove that parse-failure barrier; if it
+		// is ever changed, checkMatchCorresponds below must be re-verified as a
+		// safeguard in its own right rather than assumed redundant with a parse
+		// failure that would no longer occur.
 		"subtitle_format":   {"mxm"},
-		"app_id":            {"web-desktop-app-v1.0"},
+		"app_id":            {currentClientIdentity.appID},
 		"usertoken":         {c.currentToken()},
 		"q_album":           {track.AlbumName},
 		"q_artist":          {track.ArtistName},
@@ -648,8 +656,13 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 	}
 
 	req.Header = http.Header{
-		"authority": {"apic-desktop.musixmatch.com"},
-		"cookie":    {"x-mxm-token-guid="},
+		"authority": {currentClientIdentity.host},
+		// x-mxm-token-guid= is kept as an empty cookie value rather than
+		// removed: it matches the shape reference clients (e.g.
+		// better-lyrics) send, and #934 found no evidence tying it to the
+		// desktop identity specifically -- changing it was outside what was
+		// measured live, so it is left as-is pending contrary evidence.
+		"cookie": {"x-mxm-token-guid="},
 	}
 
 	res, err := c.httpClient.Do(req)
