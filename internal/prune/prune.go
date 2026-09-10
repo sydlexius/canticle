@@ -1274,7 +1274,7 @@ func relinkOutputPaths(existing []models.OutputPath, oldOutdir, oldFilename stri
 		}
 	}
 	if matched {
-		return out
+		return dedupeOutputPaths(out)
 	}
 	kept := make([]models.OutputPath, 0, len(existing)+1)
 	for _, p := range existing {
@@ -1284,9 +1284,16 @@ func relinkOutputPaths(existing []models.OutputPath, oldOutdir, oldFilename stri
 		kept = append(kept, p)
 	}
 	kept = append(kept, newEntry)
-	seen := make(map[models.OutputPath]bool, len(kept))
-	deduped := kept[:0]
-	for _, p := range kept {
+	return dedupeOutputPaths(kept)
+}
+
+// dedupeOutputPaths removes repeated (Outdir, Filename) pairs, keeping first
+// occurrence order. Both branches of relinkOutputPaths need it: a merged row can
+// already hold the new destination beside the entry being rewritten.
+func dedupeOutputPaths(paths []models.OutputPath) []models.OutputPath {
+	seen := make(map[models.OutputPath]bool, len(paths))
+	deduped := paths[:0]
+	for _, p := range paths {
 		if seen[p] {
 			continue
 		}

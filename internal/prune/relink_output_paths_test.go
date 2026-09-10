@@ -104,6 +104,39 @@ func TestSweep_RelinkPreservesUnrelatedOutputPathEntries(t *testing.T) {
 	}
 }
 
+// TestSweep_RelinkMatchedBranchDedupes pins the matched branch's dedupe: a
+// merged row can already hold the new destination beside the pre-relink entry,
+// and rewriting that entry must not leave the destination listed twice.
+func TestSweep_RelinkMatchedBranchDedupes(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+
+	oldPath := filepath.Join(root, "Artist921D", "AlbumOld", "01. track.flac")
+	newPath := filepath.Join(root, "Artist921D", "AlbumNew", "01. track.flac")
+	newEntry := models.OutputPath{Outdir: filepath.Dir(newPath), Filename: "01. track.flac"}
+
+	wqID := seedRowWithOutputPaths(t, ctx, sqlDB, libID, oldPath, "mbid-921-dedupe",
+		[]models.OutputPath{
+			{Outdir: filepath.Dir(oldPath), Filename: "01. track.flac"},
+			newEntry,
+		})
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+	seedPresentScanResult(t, ctx, sqlDB, libID, newPath, "mbid-921-dedupe", "")
+
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Relinked) != 1 {
+		t.Fatalf("Relinked = %d, want 1", len(res.Relinked))
+	}
+	got := workQueueOutputPaths(t, ctx, sqlDB, wqID)
+	if len(got) != 1 || got[0] != newEntry {
+		t.Fatalf("output_paths after relink = %+v, want exactly [%+v] (no duplicate)", got, newEntry)
+	}
+}
+
 // relinkNoMatch seeds a done row whose outdir/filename is A1 but whose
 // output_paths column is set verbatim to raw (so it matches NO entry), moves
 // the file A1 -> A2, sweeps, and returns the decoded output_paths plus A2's
