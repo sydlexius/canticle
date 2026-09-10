@@ -2345,9 +2345,10 @@ func TestDBQueue_DequeuePicksScanOverMissRow(t *testing.T) {
 	}
 }
 
-// TestDBQueue_RetireMiss verifies that RetireMiss sets status=done with the
-// sentinel error message. When no scan_result_id is linked the call must
-// succeed without error (empty junction is a no-op on scan_results).
+// TestDBQueue_RetireMiss verifies that RetireMiss sets status='unavailable'
+// (#477) with the sentinel error message. When no scan_result_id is linked
+// the call must succeed without error (empty junction is a no-op on
+// scan_results).
 func TestDBQueue_RetireMiss(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
@@ -2364,8 +2365,11 @@ func TestDBQueue_RetireMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RetireMiss: %v", err)
 	}
-	if retired.Status != StatusDone {
-		t.Fatalf("status = %q; want %q", retired.Status, StatusDone)
+	if retired.Status != StatusUnavailable {
+		t.Fatalf("status = %q; want %q", retired.Status, StatusUnavailable)
+	}
+	if retired.Status == StatusDone {
+		t.Fatalf("status = %q; RetireMiss must never write the plain 'done' status post-#477 (it would be indistinguishable from a genuine completion)", retired.Status)
 	}
 	if retired.LastError != missLimitReachedError {
 		t.Fatalf("last_error = %q; want %q", retired.LastError, missLimitReachedError)
@@ -2468,6 +2472,77 @@ func TestDBQueue_RetireMissNoRowsWhenNotProcessing(t *testing.T) {
 	_, err = q.RetireMiss(ctx, item.ID)
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("RetireMiss on non-processing row = %v; want sql.ErrNoRows", err)
+	}
+}
+
+// TestDBQueue_EnqueueScanCollisionPreservesUnavailable (#477): a scan-priority
+// Enqueue colliding with an 'unavailable' row must leave every preserved
+// column as it was, or the next nightly scan re-fetches retired rows forever.
+func TestDBQueue_EnqueueScanCollisionPreservesUnavailable(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title", AlbumName: "Album"},
+		Outdir:     "retired-out",
+		Filename:   "retired.lrc",
+		SourcePath: "/lib/retired.mp3",
+	}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	retired, err := q.RetireMiss(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("RetireMiss: %v", err)
+	}
+	if retired.Status != StatusUnavailable {
+		t.Fatalf("precondition: status = %q; want %q", retired.Status, StatusUnavailable)
+	}
+
+	// A later clock, so a next_attempt_at overwritten with excluded's value is
+	// detectable.
+	q.now = func() time.Time { return time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC) }
+	collided, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: " artist ", TrackName: "title", AlbumName: "Other"},
+		Outdir:     "rescan-out",
+		Filename:   "rescan.lrc",
+		SourcePath: "/lib/rescan.mp3",
+	}, PriorityScan)
+	if err != nil {
+		t.Fatalf("Enqueue collision: %v", err)
+	}
+	if collided.ID != item.ID {
+		t.Fatalf("collided ID = %d; want %d (same dedup key)", collided.ID, item.ID)
+	}
+	if collided.Status != StatusUnavailable {
+		t.Fatalf("status after scan collision = %q; want %q (RetireMiss's terminal state must survive a rescan)", collided.Status, StatusUnavailable)
+	}
+	if collided.LastError != missLimitReachedError {
+		t.Fatalf("last_error after scan collision = %q; want %q (RecheckRetired's predicate depends on this surviving)", collided.LastError, missLimitReachedError)
+	}
+	if collided.CompletedAt == nil {
+		t.Fatal("completed_at after scan collision = nil; want the retirement timestamp preserved")
+	}
+	if collided.Inputs.Outdir != "retired-out" || collided.Inputs.Filename != "retired.lrc" {
+		t.Fatalf("payload after scan collision = %q/%q; want the ORIGINAL retired-out/retired.lrc, not the colliding rescan's", collided.Inputs.Outdir, collided.Inputs.Filename)
+	}
+	if got := collided.Inputs.SourcePath; got != "/lib/retired.mp3" {
+		t.Errorf("source_path after scan collision = %q; want the original", got)
+	}
+	if tr := collided.Inputs.Track; tr.ArtistName != "Artist" || tr.TrackName != "Title" || tr.AlbumName != "Album" {
+		t.Errorf("artist/title/album after scan collision = %q/%q/%q; want the original Artist/Title/Album", tr.ArtistName, tr.TrackName, tr.AlbumName)
+	}
+	if !collided.NextAttemptAt.Equal(retired.NextAttemptAt) {
+		t.Errorf("next_attempt_at after scan collision = %v; want preserved %v", collided.NextAttemptAt, retired.NextAttemptAt)
+	}
+
+	// The row must stay non-dequeue-eligible.
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Dequeue after scan collision = %v; want sql.ErrNoRows (row must stay non-dequeue-eligible)", err)
 	}
 }
 
@@ -2840,8 +2915,8 @@ func TestDBQueue_RecheckLibraryScoping(t *testing.T) {
 	if s1 != StatusDeferred {
 		t.Fatalf("wqID1 status = %q; want deferred (in target library)", s1)
 	}
-	if s2 != StatusDone {
-		t.Fatalf("wqID2 status = %q; want done (different library, must be untouched)", s2)
+	if s2 != StatusUnavailable {
+		t.Fatalf("wqID2 status = %q; want unavailable (different library, must be untouched)", s2)
 	}
 
 	// scan_result for srID2 must also remain 'done'.
