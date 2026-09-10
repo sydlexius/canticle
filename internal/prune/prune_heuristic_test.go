@@ -3,8 +3,10 @@ package prune
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -749,14 +751,25 @@ func TestSweep_RelinksMovedUnavailableRowWithoutResurrecting(t *testing.T) {
 		t.Fatalf("Relinked = %+v, want exactly one relink to %q: a settled 'unavailable' row must still "+
 			"reach the name tier, or its dead source_path is never repaired", res.Relinked, moved)
 	}
-	var status, lastErr, source string
+	var status, lastErr, source, rawPaths string
 	var missCount int
 	if err := sqlDB.QueryRowContext(ctx,
-		`SELECT status, last_error, miss_count, source_path FROM work_queue`).Scan(&status, &lastErr, &missCount, &source); err != nil {
+		`SELECT status, last_error, miss_count, source_path, output_paths FROM work_queue`).Scan(&status, &lastErr, &missCount, &source, &rawPaths); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
 	if source != moved {
 		t.Errorf("source_path = %q, want %q", source, moved)
+	}
+	// The relink must also move output_paths (#921): the worker prefers it over
+	// outdir/filename, so a stale entry would send a revived row's write to the
+	// vanished directory.
+	var paths []models.OutputPath
+	if err := json.Unmarshal([]byte(rawPaths), &paths); err != nil {
+		t.Fatalf("decode output_paths %q: %v", rawPaths, err)
+	}
+	wantPath := models.OutputPath{Outdir: filepath.Dir(moved), Filename: filepath.Base(moved)}
+	if !slices.Contains(paths, wantPath) {
+		t.Errorf("output_paths = %+v, want it to include %+v", paths, wantPath)
 	}
 	if status != "unavailable" || lastErr != "miss limit reached" || missCount != 15 {
 		t.Errorf("row = (%q, %q, miss_count=%d), want (unavailable, miss limit reached, 15): a relink "+
