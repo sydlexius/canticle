@@ -488,6 +488,16 @@ func TestWarnDegenerateOperatorToken(t *testing.T) {
 		t.Fatalf("normal operator token warned; logs: %s", logs.String())
 	}
 
+	// A pasted token often carries surrounding whitespace; it must be judged
+	// on its trimmed value, the same one the blank check uses.
+	logs.Reset()
+	if !warnDegenerateOperatorToken(" "+zero+"\n", "config file") {
+		t.Fatalf("whitespace-padded degenerate operator token did not warn; logs: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), zero) {
+		t.Fatal("warning leaked the token value")
+	}
+
 	store := newSecretStore(t)
 	m := &fakeMinter{token: "minted"}
 	got, fromDB, err := resolveTokenWithStore(ctx, zero, store)

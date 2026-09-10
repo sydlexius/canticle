@@ -2864,7 +2864,10 @@ func operatorTokenSource(cliToken string, fromEnv bool) string {
 // names the source tier, never the token value. A blank token is not an
 // operator token and does not warn.
 func warnDegenerateOperatorToken(token, source string) bool {
-	if strings.TrimSpace(token) == "" || !musixmatch.IsDegenerateToken(token) {
+	// Judge the trimmed value so a pasted token with surrounding whitespace is
+	// classified the same way as the blank check above it.
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" || !musixmatch.IsDegenerateToken(trimmed) {
 		return false
 	}
 	slog.Warn("the operator-supplied musixmatch token is degenerate (one character repeated), the shape a retired client identity issued (#934); "+

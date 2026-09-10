@@ -126,6 +126,38 @@ func TestMintToken_SingleRepeatedCharacterIsDegenerate(t *testing.T) {
 	}
 }
 
+// TestMintToken_EmptyVsMissingUserToken separates the two "no token" shapes: a
+// user_token field PRESENT but empty is a degenerate token and must get the
+// retired-identity diagnosis, while an ABSENT field is a malformed response and
+// must stay a generic error rather than being misreported as a retirement.
+func TestMintToken_EmptyVsMissingUserToken(t *testing.T) {
+	for _, tc := range []struct {
+		name, body  string
+		wantRetired bool
+	}{
+		{"present but empty", `{"message":{"header":{"status_code":200},"body":{"user_token":""}}}`, true},
+		{"field missing", `{"message":{"header":{"status_code":200},"body":{}}}`, false},
+		{"wrong type", `{"message":{"header":{"status_code":200},"body":{"user_token":123}}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			m := NewTokenMinter(srv.Client())
+			m.baseURL = srv.URL
+
+			tok, err := m.Mint(context.Background())
+			if err == nil || tok != "" {
+				t.Fatalf("Mint = (%q, %v); want an error and no token", tok, err)
+			}
+			if got := errors.Is(err, ErrClientIdentityRetired); got != tc.wantRetired {
+				t.Fatalf("errors.Is(err, ErrClientIdentityRetired) = %v; want %v (err = %v)", got, tc.wantRetired, err)
+			}
+		})
+	}
+}
+
 // TestMintToken_GenuineTokenIsNotFlaggedDegenerate is the false-positive guard:
 // a normal, varied-character token must mint cleanly.
 func TestMintToken_GenuineTokenIsNotFlaggedDegenerate(t *testing.T) {

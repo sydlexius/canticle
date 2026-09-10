@@ -182,10 +182,14 @@ func (m *TokenMinter) Mint(ctx context.Context) (string, error) {
 	} else if code != http.StatusOK {
 		return "", fmt.Errorf("musixmatch: token endpoint status_code %d", code)
 	}
-	token := string(v.GetStringBytes("message", "body", "user_token"))
-	if token == "" {
+	// A MISSING user_token field is a malformed response and stays a generic
+	// error. A field that is PRESENT but empty is a degenerate token, the same
+	// class as the 56-zero shape, and must reach the retired-identity diagnosis.
+	tokVal := v.Get("message", "body", "user_token")
+	if tokVal == nil || tokVal.Type() != fastjson.TypeString {
 		return "", errors.New("musixmatch: token response carried no user_token")
 	}
+	token := string(tokVal.GetStringBytes())
 	if isDegenerateToken(token) {
 		// LOUD and named (see ErrClientIdentityRetired doc): the endpoint
 		// answered HTTP 200 / status_code 200, which reads as success at every
