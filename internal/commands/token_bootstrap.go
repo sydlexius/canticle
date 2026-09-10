@@ -28,15 +28,16 @@ type persistingRenewer struct {
 	store  secrets.Store
 }
 
-// Renew mints a replacement and persists it. A persist failure is logged at
-// ERROR but the token is still returned: the current run recovers, and the log
-// says the replacement will not survive a restart.
+// Renew mints a replacement and persists it with its client identity (see
+// persistMintedToken). A persist failure is logged at ERROR but the token is
+// still returned: the current run recovers, and the log says the replacement
+// will not survive a restart.
 func (r *persistingRenewer) Renew(ctx context.Context) (string, error) {
 	tok, err := r.minter.Mint(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := r.store.Set(ctx, secrets.NameMusixmatchToken, tok); err != nil {
+	if err := persistMintedToken(ctx, r.store, tok); err != nil {
 		slog.Error("renewed the musixmatch token but could not persist it; the next start will use the old one",
 			"error", err)
 	}
@@ -46,11 +47,16 @@ func (r *persistingRenewer) Renew(ctx context.Context) (string, error) {
 // dropDegenerateStoredToken deletes a stored token that is degenerate (#934),
 // called only after a failed startup mint. bootstrapToken reaches the mint only
 // when no operator token is in play and resolveTokenWithStore returned nothing
-// from the DB, so a stored row at this point is either absent or the degenerate
-// token that resolveTokenWithStore discarded. A successful mint overwrites that
-// row; a failed one would otherwise leave a known-bad credential in the store.
-// This saves no mint: the next start mints either way. A non-degenerate row is
-// never touched, and a store error is logged, not fatal.
+// from the DB, so a stored row at this point is absent, the degenerate token
+// that resolveTokenWithStore discarded, or a non-degenerate token it discarded
+// because its client-identity record names a different identity. A successful
+// mint overwrites that row; a failed one would otherwise leave a known-bad
+// credential in the store. This saves no mint: the next start mints either way.
+//
+// Only a degenerate row is deleted; a non-degenerate row (including a
+// mismatched-identity one) is never touched. When the token is deleted, its
+// client-identity record is deleted too, so no record is left describing a
+// token that no longer exists. Store errors are logged, not fatal.
 func dropDegenerateStoredToken(ctx context.Context, store secrets.Store) {
 	v, ok, err := store.Get(ctx, secrets.NameMusixmatchToken)
 	if err != nil || !ok || !musixmatch.IsDegenerateToken(v) {
@@ -60,7 +66,21 @@ func dropDegenerateStoredToken(ctx context.Context, store secrets.Store) {
 		slog.Warn("could not delete the degenerate stored musixmatch token after a failed mint", "error", err)
 		return
 	}
+	if err := store.Delete(ctx, secrets.NameMusixmatchClientIdentity); err != nil {
+		slog.Warn("deleted the degenerate stored musixmatch token but could not delete its client identity record", "error", err)
+	}
 	slog.Info("deleted the degenerate stored musixmatch token after a failed mint (#934)")
+}
+
+// persistMintedToken stores a token CANTICLE MINTED together with the client
+// identity it was minted for (#934), through secrets.SetMusixmatchTokenWithIdentity.
+// On the production SQLStore the pair is one transaction: a failed write leaves
+// the previous token and record unchanged, and a concurrent operator save
+// cannot interleave with it to leave a minted token beside no record, or an
+// operator token beside a "minted" record. The sequential fallback for stores
+// without atomic writes is documented on that function.
+func persistMintedToken(ctx context.Context, store secrets.Store, tok string) error {
+	return secrets.SetMusixmatchTokenWithIdentity(ctx, store, tok, musixmatch.ClientIdentityKey())
 }
 
 // bootstrapToken is the LOWEST-precedence token source (#554): it mints a token
@@ -112,7 +132,7 @@ func bootstrapToken(ctx context.Context, higher string, fromDB bool, store secre
 		return higher, false
 	}
 
-	if err := store.Set(ctx, secrets.NameMusixmatchToken, tok); err != nil {
+	if err := persistMintedToken(ctx, store, tok); err != nil {
 		slog.Error("minted a musixmatch token but could not persist it; the next start will mint again",
 			"error", err)
 		return tok, true

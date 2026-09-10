@@ -71,7 +71,7 @@ func runSecretsImport(ctx context.Context, out io.Writer, cfg config.Config, sto
 		if token == "" {
 			_, _ = fmt.Fprintf(out, "skipping %s: no effective value from CLI/env/config\n", secrets.NameMusixmatchToken)
 		} else {
-			if err := store.Set(ctx, secrets.NameMusixmatchToken, token); err != nil {
+			if err := secrets.SetOperatorMusixmatchToken(ctx, store, token); err != nil {
 				slog.Error("failed to import musixmatch token", "error", err)
 				return 1
 			}
@@ -146,7 +146,15 @@ func runSecretsSet(ctx context.Context, out io.Writer, store secrets.Store, args
 		_, _ = fmt.Fprintln(os.Stderr, "no value provided on stdin; aborting")
 		return 2
 	}
-	if err := store.Set(ctx, name, value); err != nil {
+	set := store.Set
+	if name == secrets.NameMusixmatchToken {
+		// An operator-set token must not inherit a minted token's identity
+		// record (#934); the helper clears it in the same operation.
+		set = func(ctx context.Context, _ string, v string) error {
+			return secrets.SetOperatorMusixmatchToken(ctx, store, v)
+		}
+	}
+	if err := set(ctx, name, value); err != nil {
 		slog.Error("failed to set secret", "error", err)
 		return 1
 	}
