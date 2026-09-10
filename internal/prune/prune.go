@@ -370,6 +370,11 @@ type workRow struct {
 	// unresolvableGoneError sentinel) as distinct from a genuinely completed one.
 	// See classify's retired-row reconsideration.
 	lastError string
+	// rawOutputPaths is the output_paths column exactly as gathered, used by
+	// relinkOne's UPDATE as an optimistic-concurrency guard: the relinked list
+	// is derived from this snapshot, so the write only lands if the column still
+	// holds it.
+	rawOutputPaths string
 }
 
 // retiredAsUnresolvable reports whether EVERY linked work item carries the
@@ -1166,29 +1171,37 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	resurrect := c.retiredAsUnresolvable()
 	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {
+		relinkedPaths := relinkOutputPaths(w.inputs.OutputPaths, w.inputs.Outdir, w.inputs.Filename, target)
+		outputPathsJSON, err := json.Marshal(relinkedPaths)
+		if err != nil {
+			return relinkDecision{}, fmt.Errorf("prune: marshal relinked output_paths for work_queue %d: %w", w.id, err)
+		}
 		var res sql.Result
-		var err error
 		if resurrect {
 			res, err = tx.ExecContext(ctx,
-				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?,
+				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?,
                      status = 'pending', attempts = 0, next_attempt_at = ?,
                      completed_at = NULL, last_error = '',
                      outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL
-                 WHERE id = ? AND status != 'processing'`,
-				target.filePath, target.outdir, target.filename, resurrectNow, w.id)
+                 WHERE id = ? AND status != 'processing' AND output_paths IS ?`,
+				target.filePath, target.outdir, target.filename, string(outputPathsJSON), resurrectNow, w.id, w.rawOutputPaths)
 		} else {
 			res, err = tx.ExecContext(ctx,
-				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ? WHERE id = ? AND status != 'processing'`,
-				target.filePath, target.outdir, target.filename, w.id)
+				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?
+                 WHERE id = ? AND status != 'processing' AND output_paths IS ?`,
+				target.filePath, target.outdir, target.filename, string(outputPathsJSON), w.id, w.rawOutputPaths)
 		}
 		if err != nil {
 			return relinkDecision{}, fmt.Errorf("prune: relink work_queue %d: %w", w.id, err)
 		}
 		if rowsAffected(res) == 0 {
-			// The row raced into 'processing' (or vanished) after gather. Decline
-			// the whole candidate rather than deleting its scan_results row out
-			// from under a work_queue row still pointing at the gone path.
-			return relinkDecision{reason: fmt.Sprintf("work_queue row %d became in-flight (or vanished) before the relink could apply; kept for a later pass", w.id)}, nil
+			// The row raced into 'processing', vanished, or had its output_paths
+			// rewritten after gather (the relinked list above was derived from the
+			// gathered snapshot, so writing it over a newer value would lose that
+			// update). Decline the whole candidate rather than deleting its
+			// scan_results row out from under a work_queue row still pointing at
+			// the gone path.
+			return relinkDecision{reason: fmt.Sprintf("work_queue row %d became in-flight, vanished, or changed since it was read before the relink could apply; kept for a later pass", w.id)}, nil
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
@@ -1210,6 +1223,77 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 		}
 	}
 	return relinkDecision{}, nil
+}
+
+// relinkOutputPaths returns a work_queue row's output_paths, rewritten so a
+// relink's new destination is actually consulted at write time (#921).
+//
+// internal/worker's outputPaths() prefers a non-empty output_paths verbatim
+// over the outdir/filename pair the relink UPDATE otherwise keeps in sync, so
+// leaving output_paths untouched left every relinked row writing to the
+// vanished pre-move directory forever -- the writer refuses (the directory no
+// longer exists), the worker w.fail()s, and 'failed' is dequeue-eligible, so
+// the row re-fetches from the provider on every backoff expiry with no way to
+// ever succeed.
+//
+// output_paths can carry more than one entry: internal/identityrepair's
+// mergeQueueRows unions two work_queue rows' output_paths when their
+// (artist_key, title_key) collide (e.g. a duplicate track cataloged under two
+// scan_results rows), so a single work_queue row can legitimately name several
+// real write destinations, not all of which correspond to THIS candidate's
+// source_path. Only the entry that matches the row's PRE-relink location
+// (oldOutdir, oldFilename -- the outdir/filename this same UPDATE is replacing)
+// is rewritten to the new one; every other entry is preserved untouched, since
+// it names a destination this relink has no information about and no license
+// to alter or drop.
+//
+// When NOTHING matches the pre-relink location (an empty list included), the
+// row's location columns and its output_paths already disagreed before this
+// relink ran -- e.g. a row a prior build's relink already moved once, or a
+// merged row whose outdir/filename name only one of its unioned entries. The
+// list can then hold both stale entries and real destinations belonging to a
+// merged row, and nothing in the row says which is which. The only evidence
+// consulted is the filesystem: an entry is dropped ONLY when os.Stat on its
+// Outdir reports fs.ErrNotExist. Any other stat error (permission denied, an
+// unavailable mount) keeps the entry, because a transient failure must never
+// delete a destination. The new destination is then appended and the result
+// de-duplicated by (Outdir, Filename), keeping first occurrence order. A kept
+// entry whose directory exists may still be stale; this pass cannot tell, and
+// does not claim to.
+//
+// The stat calls run only here, i.e. only for rows actually being relinked.
+func relinkOutputPaths(existing []models.OutputPath, oldOutdir, oldFilename string, target presentRowDetail) []models.OutputPath {
+	newEntry := models.OutputPath{Outdir: target.outdir, Filename: target.filename}
+	out := make([]models.OutputPath, len(existing))
+	copy(out, existing)
+	matched := false
+	for i, p := range out {
+		if p.Outdir == oldOutdir && p.Filename == oldFilename {
+			out[i] = newEntry
+			matched = true
+		}
+	}
+	if matched {
+		return out
+	}
+	kept := make([]models.OutputPath, 0, len(existing)+1)
+	for _, p := range existing {
+		if _, err := os.Stat(p.Outdir); err != nil && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	kept = append(kept, newEntry)
+	seen := make(map[models.OutputPath]bool, len(kept))
+	deduped := kept[:0]
+	for _, p := range kept {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		deduped = append(deduped, p)
+	}
+	return deduped
 }
 
 // foreignOwner reports whether scanResultID is junction-linked to any
@@ -1548,12 +1632,12 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		return nil, fmt.Errorf("prune: gather scan_results: %w", err)
 	}
 
-	wqQuery := `SELECT id, artist, title, source_path, output_paths, status, isrc, mbid, last_error FROM work_queue WHERE source_path != ''`
+	wqQuery := `SELECT id, artist, title, outdir, filename, source_path, output_paths, status, isrc, mbid, last_error FROM work_queue WHERE source_path != ''`
 	var wqArgs []any
 	if libraryID != nil {
 		// Library-scope work_queue through the junction so a scoped sweep only
 		// prunes queue rows belonging to that library.
-		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.source_path, wq.output_paths, wq.status, wq.isrc, wq.mbid, wq.last_error
+		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.outdir, wq.filename, wq.source_path, wq.output_paths, wq.status, wq.isrc, wq.mbid, wq.last_error
                    FROM work_queue wq
                    JOIN work_queue_scan_results j ON j.work_queue_id = wq.id
                    JOIN scan_results sr ON sr.id = j.scan_result_id
@@ -1568,9 +1652,9 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 	}
 	if err := queryRows(ctx, p.db, wqQuery, wqArgs, func(rows *sql.Rows) error {
 		var id int64
-		var artist, title, source, outputPaths, status string
+		var artist, title, outdir, filename, source, outputPaths, status string
 		var isrc, mbid, lastError sql.NullString
-		if err := rows.Scan(&id, &artist, &title, &source, &outputPaths, &status, &isrc, &mbid, &lastError); err != nil {
+		if err := rows.Scan(&id, &artist, &title, &outdir, &filename, &source, &outputPaths, &status, &isrc, &mbid, &lastError); err != nil {
 			return err
 		}
 		if !sc.matches(source) {
@@ -1603,10 +1687,13 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 			id: id,
 			inputs: models.Inputs{
 				Track:       models.Track{ArtistName: artist, TrackName: title},
+				Outdir:      outdir,
+				Filename:    filename,
 				SourcePath:  source,
 				OutputPaths: paths,
 			},
-			lastError: lastError.String,
+			lastError:      lastError.String,
+			rawOutputPaths: outputPaths,
 		})
 		// work_queue.isrc/mbid (migration 033, the provider's resolved identity
 		// at fetch time) is only a FALLBACK: scan_results' tag-read identity is
