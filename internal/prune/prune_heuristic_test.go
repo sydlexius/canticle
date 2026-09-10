@@ -3,8 +3,10 @@ package prune
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -722,6 +724,56 @@ func TestSweep_ResurrectionLandsOnPendingNotFailed(t *testing.T) {
 	if item.Inputs.SourcePath != moved {
 		t.Errorf("Dequeue returned source_path %q, want %q -- some other row was claimed instead "+
 			"of the resurrected one", item.Inputs.SourcePath, moved)
+	}
+}
+
+// A MOVED 'unavailable' ROW IS RELINKED, NOT RESURRECTED (#477). RetireMiss
+// retired it as an exhausted benign miss; then its artist folder was renamed.
+// Nothing but this tier can repair its source_path (queue.Enqueue's upsert
+// preserves source_path for an 'unavailable' row), so it must reach the tier
+// despite being settled. The relink moves only the path columns: status,
+// RetireMiss's sentinel, and miss_count are its miss history, and resurrection
+// is reserved for prune's own sentinel.
+func TestSweep_RelinksMovedUnavailableRowWithoutResurrecting(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	gone := filepath.Join(root, "Old Artist", "Album", "01. Winterlight.flac")
+	moved := filepath.Join(root, "New Artist", "Album", "01. Winterlight.flac")
+
+	seedNamedGoneRow(t, ctx, sqlDB, libID, gone)
+	seedUnavailable(t, ctx, sqlDB, gone)
+	if err := os.Remove(gone); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+	seedNamedPresent(t, ctx, sqlDB, libID, moved, "New Artist", goneTitle)
+
+	res := sweepExact(t, ctx, sqlDB)
+	if len(res.Relinked) != 1 || res.Relinked[0].NewPath != moved {
+		t.Fatalf("Relinked = %+v, want exactly one relink to %q: a settled 'unavailable' row must still "+
+			"reach the name tier, or its dead source_path is never repaired", res.Relinked, moved)
+	}
+	var status, lastErr, source, rawPaths string
+	var missCount int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, last_error, miss_count, source_path, output_paths FROM work_queue`).Scan(&status, &lastErr, &missCount, &source, &rawPaths); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if source != moved {
+		t.Errorf("source_path = %q, want %q", source, moved)
+	}
+	// The relink must also move output_paths (#921): the worker prefers it over
+	// outdir/filename, so a stale entry would send a revived row's write to the
+	// vanished directory.
+	var paths []models.OutputPath
+	if err := json.Unmarshal([]byte(rawPaths), &paths); err != nil {
+		t.Fatalf("decode output_paths %q: %v", rawPaths, err)
+	}
+	wantPath := models.OutputPath{Outdir: filepath.Dir(moved), Filename: filepath.Base(moved)}
+	if !slices.Contains(paths, wantPath) {
+		t.Errorf("output_paths = %+v, want it to include %+v", paths, wantPath)
+	}
+	if status != "unavailable" || lastErr != "miss limit reached" || missCount != 15 {
+		t.Errorf("row = (%q, %q, miss_count=%d), want (unavailable, miss limit reached, 15): a relink "+
+			"must not resurrect an exhausted miss", status, lastErr, missCount)
 	}
 }
 

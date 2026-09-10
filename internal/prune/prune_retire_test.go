@@ -307,6 +307,108 @@ func TestSweep_MixedWorkItemsAreNotTreatedAsSettled(t *testing.T) {
 	}
 }
 
+// seedUnavailable forces every work_queue row on sourcePath into the shape
+// queue.RetireMiss leaves (#477): status 'unavailable', its miss-limit
+// sentinel, and an exhausted miss_count.
+func seedUnavailable(t *testing.T, ctx context.Context, sqlDB *sql.DB, sourcePath string) {
+	t.Helper()
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'unavailable', last_error = 'miss limit reached', miss_count = 15
+		 WHERE source_path = ?`, sourcePath); err != nil {
+		t.Fatalf("seed unavailable row: %v", err)
+	}
+}
+
+// THE DECLINE CASE for an 'unavailable' row (#477). A gone, identity-less row
+// that RetireMiss already retired, with NO same-title file anywhere, is
+// consulted by the name tier (see TestSweep_RelinksMovedUnavailableRowWithoutResurrecting)
+// and, on the decline, must drop out silently: no Retained entry (re-reporting
+// it every sweep is the churn #732 removed), no Pruned entry, and the row
+// itself byte-for-byte as RetireMiss left it. This candidate is fully settled,
+// so it never reaches retireUnresolvable; the mixed test below is the one that
+// exercises that UPDATE's guard.
+func TestSweep_DeclinedUnavailableRowIsUntouchedAndUncounted(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	gone := filepath.Join(root, "ArtistExhausted", "01. exhausted.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, gone, "done", "unavailable", "", "")
+	seedUnavailable(t, ctx, sqlDB, gone)
+	if err := os.Remove(gone); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Retained) != 0 || len(res.Pruned) != 0 || len(res.Relinked) != 0 {
+		t.Errorf("Retained=%d Pruned=%d Relinked=%d, want 0/0/0: a declined 'unavailable' row is already "+
+			"settled and must not be reported, deleted, or moved", len(res.Retained), len(res.Pruned), len(res.Relinked))
+	}
+	var status, lastErr, source string
+	var missCount int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, last_error, miss_count, source_path FROM work_queue`).Scan(&status, &lastErr, &missCount, &source); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "unavailable" || lastErr != "miss limit reached" || missCount != 15 || source != gone {
+		t.Errorf("row = (%q, %q, miss_count=%d, %q), want (unavailable, miss limit reached, 15, %q) untouched",
+			status, lastErr, missCount, source, gone)
+	}
+}
+
+// THE MIXED CANDIDATE is the only shape that carries an 'unavailable' row into
+// retireUnresolvable's UPDATE: one 'unavailable' row plus one 'failed' row on
+// the same gone, identity-less source. The candidate is not settled (the
+// 'failed' row is still work), so it is retained and retired -- and the
+// UPDATE's `status NOT IN (..., 'unavailable')` guard is what must keep the
+// 'unavailable' row out of it. The 'failed' row retires to 'done' with prune's
+// sentinel; the 'unavailable' row keeps RetireMiss's status and sentinel.
+func TestSweep_RetireDoesNotClobberUnavailableSibling(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	gone := filepath.Join(root, "ArtistMixed", "01. mixed.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, gone, "done", "unavailable", "", "")
+	seedUnavailable(t, ctx, sqlDB, gone)
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist_key, title_key, artist, title, source_path, outdir, filename, status)
+		 VALUES ('mixed', 'mixed', 'Artist', 'Title', ?, ?, ?, 'failed')`,
+		gone, filepath.Dir(gone), filepath.Base(gone)); err != nil {
+		t.Fatalf("insert failed sibling: %v", err)
+	}
+	if err := os.Remove(gone); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Retained) != 1 || !res.Retained[0].Retired {
+		t.Fatalf("Retained=%d, want 1 retired candidate (the 'failed' sibling is still work)", len(res.Retained))
+	}
+	byStatus := map[string]string{}
+	rows, err := sqlDB.QueryContext(ctx, `SELECT status, last_error FROM work_queue WHERE source_path = ?`, gone)
+	if err != nil {
+		t.Fatalf("read rows: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var st, le string
+		if err := rows.Scan(&st, &le); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		byStatus[st] = le
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if le, ok := byStatus["unavailable"]; !ok || le != "miss limit reached" {
+		t.Errorf("rows = %v; want the 'unavailable' row kept with RetireMiss's sentinel, not clobbered by prune's retirement", byStatus)
+	}
+	if le, ok := byStatus["done"]; !ok || le != unresolvableGoneError {
+		t.Errorf("rows = %v; want the 'failed' sibling retired to done with %q", byStatus, unresolvableGoneError)
+	}
+}
+
 // A candidate with no work_queue rows at all (a scan_results row that was never
 // enqueued) must report no retirement rather than a phantom one, or the caller
 // records a mutation that did not happen.

@@ -56,6 +56,7 @@ import (
 	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // timeFormat is the timestamp layout every stored column uses. Declared locally
@@ -336,17 +337,25 @@ type candidate struct {
 	// processing is true when any linked work_queue row is still 'processing',
 	// so the whole source is deferred (the worker owns it) to avoid a half-prune.
 	processing bool
-	// settled is true when EVERY linked work_queue row has reached 'done' -- the
-	// source is no longer work, so there is nothing to retire. Distinct from
-	// processing: a settled source is still a valid relink and prune target, it
-	// just must not be re-retired and re-reported on every sweep.
+	// settled is true when EVERY linked work_queue row has reached a terminal
+	// state -- 'done' OR 'unavailable' (#477) -- so the source is no longer
+	// work, and there is nothing to retire. Distinct from processing: a
+	// settled source is still a valid relink and prune target, it just must
+	// not be re-retired and re-reported on every sweep. 'unavailable' counts
+	// as settled because, like 'done', it is out of the dequeue-eligible set:
+	// there is nothing for prune to retire. Settled does NOT mean "never
+	// relinked" for it, though -- see holdsUnavailable and classify.
 	//
 	// Derived by markSettled after the gather, never latched during it: a source
 	// may carry several work_queue rows, and "at least one is done" is a strictly
 	// weaker claim that would drop a candidate still holding eligible work.
 	settled bool
-	// doneWorkItems counts linked work_queue rows already in 'done'. Compared
-	// against len(workItems) to derive settled.
+	// doneWorkItems counts linked work_queue rows already terminal ('done' or
+	// 'unavailable'). Compared against len(workItems) to derive settled. The
+	// field keeps its pre-#477 name (doneWorkItems, not settledWorkItems)
+	// deliberately: renaming it would touch every reference for no behavioral
+	// gain, and the doc comment here is the single source of truth for what it
+	// now counts.
 	doneWorkItems int
 	// libraryID scopes the present-file candidate pool this row's identity is
 	// matched against. Known whenever a scan_results row backs this source;
@@ -370,6 +379,9 @@ type workRow struct {
 	// unresolvableGoneError sentinel) as distinct from a genuinely completed one.
 	// See classify's retired-row reconsideration.
 	lastError string
+	// status is the row's work_queue status at gather time, carried so classify
+	// can recognize an 'unavailable' row (see holdsUnavailable).
+	status string
 	// rawOutputPaths is the output_paths column exactly as gathered, used by
 	// relinkOne's UPDATE as an optimistic-concurrency guard: the relinked list
 	// is derived from this snapshot, so the write only lands if the column still
@@ -396,6 +408,26 @@ func (c *candidate) retiredAsUnresolvable() bool {
 		}
 	}
 	return true
+}
+
+// holdsUnavailable reports whether any linked work item is in the 'unavailable'
+// status queue.RetireMiss writes for an exhausted benign miss (#477).
+//
+// Such a row is settled but still worth a relink: its source file may simply
+// have moved (an artist-folder rename), and nothing else repairs its
+// source_path -- queue.Enqueue's upsert preserves source_path for an
+// 'unavailable' row, so a rescan of the new location cannot. classify
+// therefore consults the name tier for it exactly as it does for prune's own
+// sentinel-retired rows, and drops it silently on a decline. relinkOne never
+// resurrects it: resurrection keys on prune's own sentinel, and an
+// 'unavailable' row carries RetireMiss's, so only the path columns move.
+func (c *candidate) holdsUnavailable() bool {
+	for _, w := range c.workItems {
+		if w.status == queue.StatusUnavailable {
+			return true
+		}
+	}
+	return false
 }
 
 // taggedTitle returns the first non-empty TAG-derived track title among this
@@ -830,7 +862,10 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		// only writer of this exact string, so it identifies our own retirements
 		// and nothing else -- including retirements by SHIPPED builds, which this
 		// therefore also recovers.
-		if c.settled && len(c.workItems) > 0 && !c.retiredAsUnresolvable() {
+		//
+		// The same carve-out covers an 'unavailable' row (#477, holdsUnavailable):
+		// the tier may relink it, and on a decline it drops out silently below.
+		if c.settled && len(c.workItems) > 0 && !c.retiredAsUnresolvable() && !c.holdsUnavailable() {
 			return classified{outcome: outcomeSettled}, nil
 		}
 		// Gone, and carrying no identity: no relink can ever resolve this row, at any
@@ -901,7 +936,9 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		// reporting it on every sweep would reinstate the per-sweep churn #732
 		// removed -- for a population that is, by construction, every row this
 		// feature has ever retired. Nothing is mutated: it is already 'done'.
-		if c.settled && c.retiredAsUnresolvable() {
+		// An 'unavailable' row (#477) is treated identically: already out of the
+		// eligible set, so a declined tier leaves it untouched and uncounted.
+		if c.settled && (c.retiredAsUnresolvable() || c.holdsUnavailable()) {
 			return classified{outcome: outcomeSettled}, nil
 		}
 		return classified{
@@ -1679,9 +1716,14 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		// it from the sweep while its still-eligible sibling kept being worked,
 		// unretired AND unreported. Invisible is worse than permanent.
 		//
+		// 'unavailable' (#477) counts here too: it is RetireMiss's terminal state
+		// for an exhausted benign miss, already out of the dequeue-eligible set, so
+		// there is nothing left to retire. (It is still relinkable; see
+		// holdsUnavailable.)
+		//
 		// Settledness is derived once, after the gather completes, from these two
 		// counts; see markSettled.
-		if status == "done" {
+		if status == queue.StatusDone || status == queue.StatusUnavailable {
 			c.doneWorkItems++
 		}
 		var paths []models.OutputPath
@@ -1700,6 +1742,7 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 				OutputPaths: paths,
 			},
 			lastError:      lastError.String,
+			status:         status,
 			rawOutputPaths: outputPaths,
 		})
 		// work_queue.isrc/mbid (migration 033, the provider's resolved identity
@@ -1757,19 +1800,31 @@ func markSettled(bySource map[string]*candidate) {
 // dequeue-eligible set without deleting anything (#732). It reports whether any
 // row was actually retired.
 //
-// WHY 'done' AND NOT A NEW STATUS. work_queue.status carries a CHECK constraint,
-// so a genuinely new value means recreating the table -- a migration far out of
-// proportion to the fix. queue.RetireMiss already established the cheaper
-// pattern for exactly this shape: settle to 'done' and record WHY in last_error.
-// A distinct terminal state is the subject of #477, which will want to convert
-// both this and RetireMiss together rather than have one of them arrive early
-// and differently.
+// WHY 'done' AND NOT A NEW STATUS. This retirement is for a categorically
+// different population than #477's 'unavailable' status: a row here has no
+// identity AND its source file is confirmed gone, so it can never be
+// relinked, ever -- distinct from an exhausted benign miss, whose source file
+// is very much still present and simply never had lyrics found for it. #477
+// deliberately scoped its new status to RetireMiss's population only (the
+// maintainer's scoping comment: implement the terminal status for
+// exhausted-deferred rows and the call-site audit, and leave any wider
+// reclassification question untouched); this retirement keeps settling to
+// 'done' with its own distinct sentinel (unresolvableGoneError), which is
+// already disjoint from missLimitReachedError by text and now also disjoint
+// by status.
 //
-// THE STATUS GUARD IS THE IN-FLIGHT GUARD. `status NOT IN ('processing','done')`
-// does two jobs: it never retires a row the worker currently owns, and it makes
-// the whole operation idempotent, since an already-retired row is 'done' and no
-// longer matches. That idempotence is the point of the fix -- without it this
-// would relocate the non-converging fixed point rather than remove it.
+// THE STATUS GUARD IS THE IN-FLIGHT-AND-ALREADY-TERMINAL GUARD.
+// `status NOT IN ('processing','done','unavailable')` does two jobs: it never
+// retires a row the worker currently owns, and it makes the whole operation
+// idempotent, since an already-retired row (by this mechanism OR by
+// RetireMiss, #477) no longer matches. 'unavailable' is included here so this
+// UPDATE can never clobber a row RetireMiss already retired as an exhausted
+// miss -- overwriting its status='unavailable' and last_error=missLimitReached
+// with 'done' and this package's own sentinel would erase exactly the
+// distinction #477 exists to preserve, for a row that is separately, and
+// correctly, already out of the dequeue-eligible set. Idempotence over BOTH
+// terminal shapes is the point of the fix -- without it this would relocate
+// the non-converging fixed point rather than remove it.
 //
 // completed_at is stamped because the row IS settled; leaving it null would make
 // a retired row look perpetually in-flight to every report that reads it.
@@ -1786,7 +1841,7 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
                  completed_at = ?,
                  last_error = ?
              WHERE id = ?
-               AND status NOT IN ('processing', 'done')`,
+               AND status NOT IN ('processing', 'done', 'unavailable')`,
 			now, unresolvableGoneError, w.id)
 		if err != nil {
 			return false, fmt.Errorf("retire work item %d: %w", w.id, err)

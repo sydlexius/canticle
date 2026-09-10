@@ -29,6 +29,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // IdentityReader re-reads the corrected artist and album-artist for a file. It
@@ -347,17 +348,27 @@ func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, exc
 // so would break the invariant that a 'done' work_queue row implies its linked
 // scan_results are 'done' (queue.Complete). Instead, a survivor that already
 // completed is reopened to 'pending' so the worker re-fetches and writes the
-// newly-unioned paths (the write is idempotent for the already-satisfied one); a
-// survivor that has not completed keeps its status and picks up the merged paths
-// on its next run. The dropped row's scan_result links (and the current
-// scan_result, in case it lived only on the dropped row's scalar link) are
-// re-pointed to the survivor before the dropped row is deleted.
+// newly-unioned paths (the write is idempotent for the already-satisfied one).
+//
+// An 'unavailable' survivor (#477: an exhausted benign miss) is deliberately
+// NOT reopened: it gains the unioned output_paths and nothing else. Its
+// (artist, title) key is the one the merge collapses onto, and that key has
+// already exhausted its miss budget, so a reopen would buy one fetch of the
+// same lookup before queue.RetireMiss re-retired it. queue.RecheckRetired is
+// the designed revival path for 'unavailable' rows, and it will carry the
+// unioned paths when it runs.
+//
+// Any other survivor keeps its status and picks up the merged paths on its
+// next run. The dropped row's scan_result links
+// (and the current scan_result, in case it lived only on the dropped row's
+// scalar link) are re-pointed to the survivor before the dropped row is
+// deleted.
 func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID, keepID int64, keepStatus string, scanResultID int64) error {
 	merged, err := unionOutputPaths(ctx, tx, keepID, dropID)
 	if err != nil {
 		return err
 	}
-	if keepStatus == "done" {
+	if keepStatus == queue.StatusDone {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE work_queue
 			 SET output_paths = ?, status = 'pending', attempts = 0,
