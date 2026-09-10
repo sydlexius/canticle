@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -338,5 +339,279 @@ func TestMemoryStoreRoundTrip(t *testing.T) {
 	}
 	if err := store.Set(ctx, "", "v"); err == nil {
 		t.Fatal("Set empty name succeeded; want error")
+	}
+}
+
+// TestSetOperatorMusixmatchTokenClearsIdentity pins the pairing #934 depends
+// on: an operator-set token replaces a minted one AND removes the record that
+// said the stored token was minted, so startup never judges the operator token
+// by a minted token's identity.
+func TestSetOperatorMusixmatchTokenClearsIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	if err := store.Set(ctx, NameMusixmatchToken, "minted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set(ctx, NameMusixmatchClientIdentity, "host|app"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetOperatorMusixmatchToken(ctx, store, "operator"); err != nil {
+		t.Fatalf("SetOperatorMusixmatchToken: %v", err)
+	}
+	if v, _, _ := store.Get(ctx, NameMusixmatchToken); v != "operator" {
+		t.Errorf("token = %q, want operator", v)
+	}
+	if _, ok, _ := store.Get(ctx, NameMusixmatchClientIdentity); ok {
+		t.Error("client identity record survived an operator token write")
+	}
+}
+
+// scriptedWriter is a TokenWriter whose Delete/Set fail on demand and which
+// records the token it was asked to write.
+type scriptedWriter struct {
+	deleteErr, setErr error
+	wrote             map[string]string
+}
+
+func (w *scriptedWriter) Delete(context.Context, string) error { return w.deleteErr }
+
+func (w *scriptedWriter) Set(_ context.Context, name, v string) error {
+	if w.setErr != nil {
+		return w.setErr
+	}
+	w.wrote[name] = v
+	return nil
+}
+
+// TestSetOperatorMusixmatchTokenErrors pins the two failure branches: a failed
+// identity delete must NOT write the token (it would sit beside a stale
+// minted-for record), and a failed token write is surfaced to the caller.
+func TestSetOperatorMusixmatchTokenErrors(t *testing.T) {
+	ctx := context.Background()
+	deleteErr := errors.New("delete refused")
+	w := &scriptedWriter{deleteErr: deleteErr, wrote: map[string]string{}}
+	if err := SetOperatorMusixmatchToken(ctx, w, "operator"); !errors.Is(err, deleteErr) {
+		t.Fatalf("err = %v, want wrapping %v", err, deleteErr)
+	}
+	if _, ok := w.wrote[NameMusixmatchToken]; ok {
+		t.Error("token written although the identity record could not be cleared")
+	}
+
+	setErr := errors.New("set refused")
+	w = &scriptedWriter{setErr: setErr, wrote: map[string]string{}}
+	if err := SetOperatorMusixmatchToken(ctx, w, "operator"); !errors.Is(err, setErr) {
+		t.Fatalf("err = %v, want %v", err, setErr)
+	}
+}
+
+// failTokenWrites installs triggers that abort any insert or update of the
+// token row, so the token half of a pair write fails inside SQLite.
+func failTokenWrites(t *testing.T, sqlDB *sql.DB) {
+	t.Helper()
+	for _, op := range []string{"INSERT", "UPDATE"} {
+		stmt := `CREATE TRIGGER fail_token_` + op + ` BEFORE ` + op + ` ON secrets
+			WHEN NEW.name = '` + NameMusixmatchToken + `' BEGIN SELECT RAISE(ABORT, 'token write refused'); END`
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("create trigger: %v", err)
+		}
+	}
+}
+
+// TestSQLStoreTokenPairWriteIsAtomic pins #934 round-2 fixes 1-3: when the
+// token write fails, the identity record is left exactly as it was, both for
+// a minted write (record set) and an operator write (record deleted). Two
+// independent writes would leave the new record, or no record, beside the old
+// token.
+func TestSQLStoreTokenPairWriteIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	for name, write := range map[string]func(*SQLStore) error{
+		"minted": func(s *SQLStore) error { return s.SetTokenWithIdentity(ctx, "new-tok", "new|id") },
+		"operator": func(s *SQLStore) error {
+			return SetOperatorMusixmatchToken(ctx, s, "operator-tok")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, sqlDB := newTestStore(t)
+			if err := store.SetTokenWithIdentity(ctx, "old-tok", "old|id"); err != nil {
+				t.Fatal(err)
+			}
+			failTokenWrites(t, sqlDB)
+			if err := write(store); err == nil {
+				t.Fatal("pair write succeeded; want the token write's error")
+			}
+			if v, _, _ := store.Get(ctx, NameMusixmatchToken); v != "old-tok" {
+				t.Errorf("token = %q, want old-tok", v)
+			}
+			if v, ok, _ := store.Get(ctx, NameMusixmatchClientIdentity); !ok || v != "old|id" {
+				t.Errorf("identity = (%q, %v), want (old|id, true): a failed token write must roll the record back", v, ok)
+			}
+		})
+	}
+}
+
+// TestSQLStoreSetTokenWithIdentity covers the success paths: a record is
+// written beside the token, and identity "" deletes it.
+func TestSQLStoreSetTokenWithIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	if err := store.SetTokenWithIdentity(ctx, "tok", "host|app"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.Get(ctx, NameMusixmatchClientIdentity); v != "host|app" {
+		t.Fatalf("identity = %q, want host|app", v)
+	}
+	if err := store.SetTokenWithIdentity(ctx, "tok2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.Get(ctx, NameMusixmatchToken); v != "tok2" {
+		t.Errorf("token = %q, want tok2", v)
+	}
+	if _, ok, _ := store.Get(ctx, NameMusixmatchClientIdentity); ok {
+		t.Error("identity record survived SetTokenWithIdentity with an empty identity")
+	}
+}
+
+// TestMemoryStoreSetTokenWithIdentity mirrors the SQL success paths.
+func TestMemoryStoreSetTokenWithIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	if err := store.SetTokenWithIdentity(ctx, "tok", "host|app"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.Get(ctx, NameMusixmatchClientIdentity); v != "host|app" {
+		t.Fatalf("identity = %q, want host|app", v)
+	}
+	if err := SetOperatorMusixmatchToken(ctx, store, "op"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := store.Get(ctx, NameMusixmatchClientIdentity); ok {
+		t.Error("identity record survived an operator write")
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := store.SetTokenWithIdentity(cctx, "x", ""); err == nil {
+		t.Error("canceled context: want error")
+	}
+}
+
+// nameWriter is a TokenWriter (no atomic pair method, so it takes the
+// sequential fallback) whose writes fail per secret name.
+type nameWriter struct {
+	failSet, failDelete map[string]bool
+	vals                map[string]string
+}
+
+func (w *nameWriter) Set(_ context.Context, name, v string) error {
+	if w.failSet[name] {
+		return errors.New("set refused")
+	}
+	w.vals[name] = v
+	return nil
+}
+
+func (w *nameWriter) Delete(_ context.Context, name string) error {
+	if w.failDelete[name] {
+		return errors.New("delete refused")
+	}
+	delete(w.vals, name)
+	return nil
+}
+
+// TestSetMusixmatchTokenWithIdentityFallback pins the sequential fallback for a
+// minted write: an identity write failure still stores the token and clears any
+// previous record (so the token reads as absent-identity and is kept), and a
+// failed clear is logged, not fatal.
+func TestSetMusixmatchTokenWithIdentityFallback(t *testing.T) {
+	ctx := context.Background()
+	w := &nameWriter{failSet: map[string]bool{NameMusixmatchClientIdentity: true},
+		vals: map[string]string{NameMusixmatchClientIdentity: "old|id"}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "tok", "new|id"); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if w.vals[NameMusixmatchToken] != "tok" {
+		t.Errorf("token = %q, want tok", w.vals[NameMusixmatchToken])
+	}
+	if _, ok := w.vals[NameMusixmatchClientIdentity]; ok {
+		t.Error("previous identity record survived a failed identity write")
+	}
+
+	w = &nameWriter{failSet: map[string]bool{NameMusixmatchClientIdentity: true},
+		failDelete: map[string]bool{NameMusixmatchClientIdentity: true}, vals: map[string]string{}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "tok", "new|id"); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if w.vals[NameMusixmatchToken] != "tok" {
+		t.Errorf("token = %q, want tok", w.vals[NameMusixmatchToken])
+	}
+}
+
+// TestSQLStoreSetTokenWithIdentityErrors covers the transaction's failure
+// branches: a refused identity-row write rolls back with the token unchanged,
+// a closed DB fails to begin, and an invalid key fails before touching the DB.
+func TestSQLStoreSetTokenWithIdentityErrors(t *testing.T) {
+	ctx := context.Background()
+	store, sqlDB := newTestStore(t)
+	if err := store.SetTokenWithIdentity(ctx, "old-tok", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`CREATE TRIGGER fail_identity BEFORE INSERT ON secrets
+		WHEN NEW.name = '` + NameMusixmatchClientIdentity + `' BEGIN SELECT RAISE(ABORT, 'identity write refused'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if err := store.SetTokenWithIdentity(ctx, "new-tok", "host|app"); err == nil {
+		t.Fatal("want the identity write's error")
+	}
+	if v, _, _ := store.Get(ctx, NameMusixmatchToken); v != "old-tok" {
+		t.Errorf("token = %q, want old-tok", v)
+	}
+
+	closed, closedDB := newTestStore(t)
+	_ = closedDB.Close()
+	if err := closed.SetTokenWithIdentity(ctx, "tok", "host|app"); err == nil {
+		t.Error("closed DB: want error")
+	}
+
+	badKey := NewSQLStore(sqlDB, []byte("short"))
+	if err := badKey.SetTokenWithIdentity(ctx, "tok", "host|app"); err == nil {
+		t.Error("invalid key: want error")
+	}
+}
+
+// TestSetMusixmatchTokenWithIdentityFallbackTokenFailure pins the fallback's
+// write ORDER for a minted write: the token is written before the identity
+// record, so a failed token write leaves the previous token+identity pair
+// untouched. Identity-first would leave the OLD token beside the NEW identity,
+// which startup accepts as minted for the current identity.
+func TestSetMusixmatchTokenWithIdentityFallbackTokenFailure(t *testing.T) {
+	ctx := context.Background()
+	w := &nameWriter{failSet: map[string]bool{NameMusixmatchToken: true},
+		vals: map[string]string{NameMusixmatchToken: "old-tok", NameMusixmatchClientIdentity: "old|id"}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "new-tok", "new|id"); err == nil {
+		t.Fatal("err = nil, want the token write's error")
+	}
+	if v := w.vals[NameMusixmatchClientIdentity]; v != "old|id" {
+		t.Errorf("identity = %q after a failed token write, want old|id (untouched)", v)
+	}
+	if v := w.vals[NameMusixmatchToken]; v != "old-tok" {
+		t.Errorf("token = %q, want old-tok", v)
+	}
+
+	// No previous record: a failed token write must not create one.
+	w = &nameWriter{failSet: map[string]bool{NameMusixmatchToken: true}, vals: map[string]string{}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "new-tok", "new|id"); err == nil {
+		t.Fatal("err = nil, want the token write's error")
+	}
+	if v, ok := w.vals[NameMusixmatchClientIdentity]; ok {
+		t.Errorf("identity record %q created beside a failed token write", v)
+	}
+
+	// Success path still writes both.
+	w = &nameWriter{vals: map[string]string{NameMusixmatchToken: "old-tok", NameMusixmatchClientIdentity: "old|id"}}
+	if err := SetMusixmatchTokenWithIdentity(ctx, w, "new-tok", "new|id"); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if w.vals[NameMusixmatchToken] != "new-tok" || w.vals[NameMusixmatchClientIdentity] != "new|id" {
+		t.Errorf("vals = %v, want new-tok + new|id", w.vals)
 	}
 }

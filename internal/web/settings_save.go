@@ -249,7 +249,7 @@ func (u *UI) saveSecretToken(w http.ResponseWriter, r *http.Request) {
 	}
 	u.saveMu.Lock()
 	defer u.saveMu.Unlock()
-	if err := u.secretStore.Set(r.Context(), secrets.NameMusixmatchToken, plaintext); err != nil {
+	if err := secrets.SetOperatorMusixmatchToken(r.Context(), u.secretStore, plaintext); err != nil {
 		slog.Error("settings: secret store write failed", "name", secrets.NameMusixmatchToken, "error", err)
 		http.Error(w, "failed to store secret", http.StatusInternalServerError)
 		return

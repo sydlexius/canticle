@@ -108,6 +108,93 @@ func TestResolveTokenWithStore_StoredGenuineTokenIsKept(t *testing.T) {
 	}
 }
 
+// seedToken stores a token and, when identity is non-empty, its client
+// identity record.
+func seedToken(t *testing.T, store secrets.Store, token, identity string) {
+	t.Helper()
+	ctx := context.Background()
+	if identity != "" {
+		if err := store.Set(ctx, secrets.NameMusixmatchClientIdentity, identity); err != nil {
+			t.Fatalf("Set identity: %v", err)
+		}
+	}
+	if err := store.Set(ctx, secrets.NameMusixmatchToken, token); err != nil {
+		t.Fatalf("Set token: %v", err)
+	}
+}
+
+// TestResolveTokenWithStore_ClientIdentityRecord pins the #934 bootstrap
+// decision table: PRESENT+MATCHING uses the token, PRESENT+MISMATCHED discards
+// it (minted for a retired identity), ABSENT keeps it (operator-set or
+// pre-upgrade; #554 forbids silently overwriting an operator credential).
+func TestResolveTokenWithStore_ClientIdentityRecord(t *testing.T) {
+	tests := []struct {
+		name       string
+		identity   string
+		wantToken  string
+		wantFromDB bool
+	}{
+		{"present and matching: used", musixmatch.ClientIdentityKey(), "stored-tok", true},
+		{"present and mismatched: discarded", "retired.example.com|old-app-v1.0", "", false},
+		{"absent: kept", "", "stored-tok", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newSecretStore(t)
+			seedToken(t, store, "stored-tok", tt.identity)
+			got, fromDB, err := resolveTokenWithStore(context.Background(), "", store)
+			if err != nil {
+				t.Fatalf("resolveTokenWithStore: %v", err)
+			}
+			if got != tt.wantToken || fromDB != tt.wantFromDB {
+				t.Fatalf("got (%q, fromDB=%v); want (%q, %v)", got, fromDB, tt.wantToken, tt.wantFromDB)
+			}
+		})
+	}
+}
+
+// TestOperatorWritersClearClientIdentity pins #934 finding 1 on the CLI
+// writers: after canticle minted a token (identity recorded), an operator
+// `secrets set` / `secrets import` must clear the record, so the operator
+// token is then KEPT at startup instead of being judged as a minted one.
+func TestOperatorWritersClearClientIdentity(t *testing.T) {
+	writers := map[string]func(t *testing.T, store secrets.Store) int{
+		"secrets set": func(t *testing.T, store secrets.Store) int {
+			var out bytes.Buffer
+			return runSecretsSet(context.Background(), &out, store, SecretsSetCmd{Name: secrets.NameMusixmatchToken}, stdinFile(t, "operator-tok\n"))
+		},
+		"secrets import": func(_ *testing.T, store secrets.Store) int {
+			cfg := config.Config{}
+			cfg.API.Token = "operator-tok"
+			var out bytes.Buffer
+			return runSecretsImport(context.Background(), &out, cfg, store, SecretsImportCmd{Token: true})
+		},
+	}
+	for name, write := range writers {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newSecretStore(t)
+			// A MISMATCHED record is the sharp case: left in place it would get
+			// the operator token discarded and silently replaced by a mint.
+			seedToken(t, store, "minted-tok", "retired.example.com|old-app-v1.0")
+
+			if code := write(t, store); code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if _, ok, _ := store.Get(ctx, secrets.NameMusixmatchClientIdentity); ok {
+				t.Fatal("client identity record survived an operator token write")
+			}
+			got, fromDB, err := resolveTokenWithStore(ctx, "", store)
+			if err != nil {
+				t.Fatalf("resolveTokenWithStore: %v", err)
+			}
+			if got != "operator-tok" || !fromDB {
+				t.Fatalf("got (%q, fromDB=%v); want (operator-tok, true) -- an operator token must never be discarded", got, fromDB)
+			}
+		})
+	}
+}
+
 func TestResolveTokenWithStore_NoAutoPersist(t *testing.T) {
 	ctx := context.Background()
 	store := newSecretStore(t)
@@ -532,6 +619,9 @@ func TestBootstrapToken_FailedMintDeletesDegenerateStoredRow(t *testing.T) {
 			if err := store.Set(ctx, secrets.NameMusixmatchToken, strings.Repeat("0", 56)); err != nil {
 				t.Fatalf("Set: %v", err)
 			}
+			if err := store.Set(ctx, secrets.NameMusixmatchClientIdentity, musixmatch.ClientIdentityKey()); err != nil {
+				t.Fatalf("Set identity: %v", err)
+			}
 			got, fromDB, err := resolveTokenWithStore(ctx, "", store)
 			if err != nil {
 				t.Fatalf("resolveTokenWithStore: %v", err)
@@ -542,6 +632,9 @@ func TestBootstrapToken_FailedMintDeletesDegenerateStoredRow(t *testing.T) {
 			if _, ok, err := store.Get(ctx, secrets.NameMusixmatchToken); err != nil || ok {
 				t.Fatalf("degenerate stored token still present after failed mint (ok=%v err=%v)", ok, err)
 			}
+			if _, ok, err := store.Get(ctx, secrets.NameMusixmatchClientIdentity); err != nil || ok {
+				t.Fatalf("identity record left behind for a deleted token (ok=%v err=%v)", ok, err)
+			}
 		})
 	}
 
@@ -550,8 +643,14 @@ func TestBootstrapToken_FailedMintDeletesDegenerateStoredRow(t *testing.T) {
 	if err := store.Set(ctx, secrets.NameMusixmatchToken, "a1b2c3-genuine"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
+	if err := store.Set(ctx, secrets.NameMusixmatchClientIdentity, "retired.example.com|old-app-v1.0"); err != nil {
+		t.Fatalf("Set identity: %v", err)
+	}
 	dropDegenerateStoredToken(ctx, store)
 	if v, ok, _ := store.Get(ctx, secrets.NameMusixmatchToken); !ok || v != "a1b2c3-genuine" {
 		t.Fatalf("non-degenerate stored token was touched: (%q, %v)", v, ok)
+	}
+	if _, ok, _ := store.Get(ctx, secrets.NameMusixmatchClientIdentity); !ok {
+		t.Fatalf("identity record of a non-degenerate token was deleted")
 	}
 }

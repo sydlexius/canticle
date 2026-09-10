@@ -34,9 +34,12 @@ type OnboardingService interface {
 
 // SecretSetter is the subset of secrets.Store onboarding uses to persist the
 // optional runtime secrets entered on the setup form. A nil setter disables the
-// secret fields (admin creation still works).
+// secret fields (admin creation still works). Delete is required because an
+// operator-entered Musixmatch token must clear the minted-token identity record
+// (secrets.SetOperatorMusixmatchToken, #934).
 type SecretSetter interface {
 	Set(ctx context.Context, name, plaintext string) error
+	Delete(ctx context.Context, name string) error
 }
 
 // Onboarding implements the first-run setup flow (issue #204, lane 4): the
@@ -394,7 +397,7 @@ func (o *Onboarding) writeSecrets(ctx context.Context, mxToken, webhookKey strin
 		return
 	}
 	if mxToken != "" {
-		if err := o.secrets.Set(ctx, secrets.NameMusixmatchToken, mxToken); err != nil {
+		if err := secrets.SetOperatorMusixmatchToken(ctx, o.secrets, mxToken); err != nil {
 			slog.Error("onboarding: failed to store musixmatch token", "error", err)
 		}
 	}
