@@ -55,6 +55,15 @@ var currentClientIdentity = clientIdentity{
 	appID: "android-player-v1.0",
 }
 
+// ClientIdentityKey returns a stable identifier ("host|app_id") for the client
+// identity canticle currently mints tokens for. The mint and renewal paths
+// persist it next to a minted token (#934) so that after a future identity swap
+// the stored token is recognized as minted for a different identity and
+// re-minted, rather than sent to a host it was never issued for.
+func ClientIdentityKey() string {
+	return currentClientIdentity.host + "|" + currentClientIdentity.appID
+}
+
 // maxTokenBodyBytes caps the token response read. The body is a single small
 // JSON object; anything larger is a wrong endpoint or an error page.
 const maxTokenBodyBytes = 64 << 10

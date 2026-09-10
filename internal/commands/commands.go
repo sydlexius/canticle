@@ -2917,6 +2917,28 @@ func resolveTokenWithStore(ctx context.Context, higher string, store secrets.Sto
 		slog.Warn("stored musixmatch token is degenerate (empty or one repeated character), the shape a retired client identity issued (#934); discarding it and minting a fresh one")
 		return higher, false, nil
 	}
+	// The identity record describes a token CANTICLE MINTED (#934): the mint and
+	// renewal paths write it, and every operator write path clears it
+	// (secrets.SetOperatorMusixmatchToken).
+	//   - PRESENT and MATCHING: minted for the current identity; use it.
+	//   - PRESENT and MISMATCHED: minted for a since-retired identity; discard
+	//     it so bootstrapToken re-mints, rather than send it to the wrong host.
+	//   - ABSENT: operator-set, or stored before this record existed. KEEP it
+	//     (#554: an operator credential is never silently overwritten). If it
+	//     belongs to a retired identity, upstream's renewal signal replaces it.
+	identity, identityOK, err := store.Get(ctx, secrets.NameMusixmatchClientIdentity)
+	if err != nil {
+		return "", false, fmt.Errorf("read musixmatch client identity from secret store: %w", err)
+	}
+	if !identityOK {
+		slog.Warn("stored musixmatch token has no client-identity record (operator-set or stored before #934); keeping it. It may belong to a retired client identity and will be replaced only if upstream signals a renewal")
+		return v, true, nil
+	}
+	if identity != musixmatch.ClientIdentityKey() {
+		slog.Warn("stored musixmatch token was minted for a different client identity than the current one; discarding it and minting a fresh one (#934)",
+			"current_client_identity", musixmatch.ClientIdentityKey())
+		return higher, false, nil
+	}
 	return v, true, nil
 }
 

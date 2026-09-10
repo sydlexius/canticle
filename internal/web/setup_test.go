@@ -625,6 +625,10 @@ func (failingSecretSetter) Set(context.Context, string, string) error {
 	return errFakeSecret
 }
 
+func (failingSecretSetter) Delete(context.Context, string) error {
+	return errFakeSecret
+}
+
 var errFakeSecret = errFake("secret store unavailable")
 
 type errFake string
@@ -902,5 +906,57 @@ func TestNewOnboardingDefaultsNilPolicyToLoopback(t *testing.T) {
 	loopback.RemoteAddr = loopbackPeer
 	if !onb.policy.Trusted(loopback) {
 		t.Error("nil policy did not trust loopback; want loopback-only")
+	}
+}
+
+// seedMintedIdentity stores a client-identity record, as if canticle had minted
+// the current token, so a test can assert an operator write clears it (#934).
+func seedMintedIdentity(t *testing.T, s secrets.TokenWriter) {
+	t.Helper()
+	if err := s.Set(context.Background(), secrets.NameMusixmatchClientIdentity, "apic.musixmatch.com|android-player-v1.0"); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+}
+
+// TestSetupOperatorTokenClearsMintedIdentity pins #934 finding 1 on the
+// onboarding writer: an operator-entered token must not inherit the identity
+// record of a token canticle minted, or startup would treat it as minted.
+func TestSetupOperatorTokenClearsMintedIdentity(t *testing.T) {
+	f := newTestOnboarding(t, trustnet.LoopbackOnly())
+	seedMintedIdentity(t, f.store)
+
+	form := url.Values{
+		"username":         {"admin"},
+		"password":         {"correct-horse-battery"},
+		"confirm":          {"correct-horse-battery"},
+		"musixmatch_token": {"operator-tok"},
+	}
+	if rec := postSetup(t, f.mux, loopbackPeer, form); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /setup = %d, want 303", rec.Code)
+	}
+	if v, _, _ := f.store.Get(context.Background(), secrets.NameMusixmatchToken); v != "operator-tok" {
+		t.Fatalf("token = %q, want operator-tok", v)
+	}
+	if _, ok, _ := f.store.Get(context.Background(), secrets.NameMusixmatchClientIdentity); ok {
+		t.Error("client identity record survived an operator token write; it must describe only a minted token")
+	}
+}
+
+// TestSaveFieldOperatorTokenClearsMintedIdentity is the settings-page writer's
+// counterpart (lives here beside the onboarding case to keep the #934 writer
+// assertions together).
+func TestSaveFieldOperatorTokenClearsMintedIdentity(t *testing.T) {
+	store := newFakeSecretStore()
+	seedMintedIdentity(t, store)
+	h, _ := writableTestUI(t, store)
+
+	if rec := postField(t, h, url.Values{"path": {"api.token"}, "value": {"operator-tok"}}); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if v, _, _ := store.Get(context.Background(), secrets.NameMusixmatchToken); v != "operator-tok" {
+		t.Fatalf("token = %q, want operator-tok", v)
+	}
+	if _, ok, _ := store.Get(context.Background(), secrets.NameMusixmatchClientIdentity); ok {
+		t.Error("client identity record survived an operator token save; it must describe only a minted token")
 	}
 }
