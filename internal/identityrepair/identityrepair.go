@@ -29,6 +29,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // IdentityReader re-reads the corrected artist and album-artist for a file. It
@@ -367,7 +368,7 @@ func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID, keepID int64, keepS
 	if err != nil {
 		return err
 	}
-	if keepStatus == "done" {
+	if keepStatus == queue.StatusDone {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE work_queue
 			 SET output_paths = ?, status = 'pending', attempts = 0,

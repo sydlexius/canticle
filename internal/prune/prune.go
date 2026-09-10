@@ -56,6 +56,7 @@ import (
 	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // timeFormat is the timestamp layout every stored column uses. Declared locally
@@ -417,7 +418,7 @@ func (c *candidate) retiredAsUnresolvable() bool {
 // 'unavailable' row carries RetireMiss's, so only the path columns move.
 func (c *candidate) holdsUnavailable() bool {
 	for _, w := range c.workItems {
-		if w.status == "unavailable" {
+		if w.status == queue.StatusUnavailable {
 			return true
 		}
 	}
@@ -1631,7 +1632,7 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		//
 		// Settledness is derived once, after the gather completes, from these two
 		// counts; see markSettled.
-		if status == "done" || status == "unavailable" {
+		if status == queue.StatusDone || status == queue.StatusUnavailable {
 			c.doneWorkItems++
 		}
 		var paths []models.OutputPath
