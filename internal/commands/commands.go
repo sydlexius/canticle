@@ -147,7 +147,7 @@ type ScanCmd struct {
 	Reconcile                        *ScanReconcileCmd                        `arg:"subcommand:reconcile" help:"re-validate instrumental markers against the current detector and clear stale ones"`
 	ReconcileInstrumental            *ScanReconcileInstrumentalCmd            `arg:"subcommand:reconcile-instrumental" help:"classify deferred rows the detector has never scored and write markers where it agrees; makes no provider requests (issue #499)"`
 	ReconcileInstrumentalRecalibrate *ScanReconcileInstrumentalRecalibrateCmd `arg:"subcommand:reconcile-instrumental-recalibrate" help:"re-decide stamped not-instrumental rows against the current detector thresholds using stored telemetry; makes no provider or detector-sidecar requests (issue #510)"`
-	ReconcilePaths                   *ScanReconcilePathsCmd                   `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted)"`
+	ReconcilePaths                   *ScanReconcilePathsCmd                   `arg:"subcommand:reconcile-paths" help:"delete queue/scan rows whose source audio file has vanished (renamed/merged/deleted), and repair a stale output_paths a prior relink left behind (#921)"`
 	ReconcileIdentity                *ScanReconcileIdentityCmd                `arg:"subcommand:reconcile-identity" help:"re-read tags and correct run-together multi-value artist rows ingested before the fix (issue #466)"`
 	ReconcileLRC                     *ScanReconcileLRCCmd                     `arg:"subcommand:reconcile-lrc" help:"rewrite existing .lrc sidecars that stack multiple timestamps on one line into the expanded, universally-readable form (issue #470)"`
 	ReconcileMarkerProvenance        *ScanReconcileMarkerProvenanceCmd        `arg:"subcommand:reconcile-marker-provenance" help:"backfill provenance headers onto detector-written instrumental markers (#502)"`
@@ -233,7 +233,9 @@ type ScanIndexMetadataCmd struct {
 }
 
 // ScanReconcilePathsCmd deletes work_queue/scan_results rows whose source audio
-// file no longer exists on disk, at Exact granularity. Dry-run unless --yes.
+// file no longer exists on disk, at Exact granularity, and separately repairs
+// a work_queue row whose output_paths still names a directory a PRIOR relink
+// already moved away from (issue #921). Dry-run unless --yes.
 type ScanReconcilePathsCmd struct {
 	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
 	Yes        bool   `arg:"--yes" help:"actually delete rows (without it, prints what would be deleted)"`
