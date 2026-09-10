@@ -70,5 +70,9 @@ docs/design/
 /SESSION-STATE.md
 /FIX496-REPORT.md
 
+# Live serve-smoke track list (#948): real titles, local only. The committed
+# placeholder example is scripts/smoke-fixtures.example.toml.
+smoke-fixtures.local.toml
+
 # Python bytecode from running the yamnet sidecar's tests locally
 __pycache__/

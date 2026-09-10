@@ -40,6 +40,39 @@ make scan                # build the Docker image and scan it for HIGH+ CVEs (ne
 make sync-tool-versions  # assert the golangci-lint and grype pins match across CI and local
 ```
 
+### Live serve smoke (manual)
+
+A manual end-to-end check of a build against the real providers. It is never run in CI: it talks to live third-party APIs and spends a rate-limited token mint.
+
+**1. Generate the fixture library.** Copy `scripts/smoke-fixtures.example.toml` to `smoke-fixtures.local.toml` at the repo root (gitignored) and list a few well-known songs with their real lengths (`duration = 225` or `"3:45"`). Never commit real titles.
+
+```sh
+make smoke-fixtures                                   # OUT=/tmp/canticle-smoke-fixtures TRACKS=smoke-fixtures.local.toml
+make smoke-fixtures OUT=/tmp/smoke-lib TRACKS=$HOME/my-tracks.toml
+make smoke-fixtures CLEAN=1                           # regenerate into a non-empty OUT
+```
+
+Each track becomes a silent, ID3-tagged mono MP3 of exactly the listed length. The length matters: the timing guard judges a synced lyric against the audio duration, so a short file demotes a correct `.lrc` to `.txt`. Every duration is re-read with the same reader serve uses, and a mismatch over 1s fails the run. A nonsense-tagged negative control is always added. ffmpeg comes from the checksum-pinned provisioning in `internal/ffmpeg` (override with `go run ./cmd/smokefixtures -ffmpeg <path>`). An `OUT` inside the repo tree is refused, and so is a non-empty one (a stale `.lrc` there would make the scanner skip its track and the smoke pass on old results): `CLEAN=1` (exactly `1`) replaces only the fixtures listed in the tool's manifest (`.smokefixtures-manifest.json`, written into `OUT` as each file is generated): each listed `.mp3` and its same-stem `.lrc`/`.txt`/`.lrc.orig` sidecars, including a sidecar whose `.mp3` is already gone. Nothing unlisted is touched, and a non-empty `OUT` with no manifest is refused rather than guessed at. The control's artist/title is reserved: a track list entry reusing it is rejected.
+
+**2. Run serve in an isolated config/data dir.** Keep it away from your real config, database and token. `env -i` drops every exported `MXLRC_*`/`MUSIXMATCH_*` variable (a token, `MXLRC_DB_PATH`, `MXLRC_SECRETS_KEY_FILE`, `MXLRC_PROVIDERS_FALLBACK_ORDER`, ...) so none leaks in; with no token, serve mints one:
+
+```sh
+S=/tmp/canticle-smoke
+mkdir -p "$S/config/mxlrcgo-svc"
+printf '[providers]\nprimary = "musixmatch"\nfallback_order = []\ndisabled = []\n' > "$S/config/mxlrcgo-svc/config.toml"
+iso() { env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="$S/config" XDG_DATA_HOME="$S/data" "$@"; }
+iso go run ./cmd/mxlrcgo-svc library add /tmp/canticle-smoke-fixtures --name smoke
+iso go run ./cmd/mxlrcgo-svc serve
+```
+
+`primary = "musixmatch"` with `fallback_order = []` pins attribution, and `disabled = []` ensures an inherited `providers.disabled` cannot silently skip the lane: every result comes from the one lane under test. Start serve **exactly once** for the mint: the token endpoint rate-limits per egress IP, so never loop or script restarts around a failed mint. The log should say `bootstrapped a musixmatch token and persisted it`.
+
+**3. Check the results.**
+
+- Each real track gets an `.lrc` next to it carrying `[source:musixmatch]` (a `.txt` for a song with only unsynced lyrics).
+- The negative control ends as a miss (no `.lrc`/`.txt`, queue status deferred, `unavailable` once retired). A lyric for it is the decoy-payload failure fixed in #939.
+- Stop and restart serve once: it must reuse the stored token (no new bootstrap line in the log).
+
 ### CI test sharding
 
 CI runs the test suite across parallel `Test Shard` jobs rather than one `go test ./...` (issue #662). The split lives in `scripts/ci-shards.sh`, which is the single source of truth for **both** the shard-name list (consumed by the workflow matrix) and the package map each shard resolves to. Keeping them in one file is deliberate: if a shard were named in the map but missing from the matrix, its packages would be excluded from the dynamic `rest` remainder and run by nobody -- nothing would fail, those packages would just stop being tested.

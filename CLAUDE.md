@@ -54,7 +54,7 @@ Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the entry point for the releas
 
 ## Package catalog
 
-Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry point for the released `canticle` binary (`cmd/genlib` is an internal test-data generator, not shipped); everything else lives under `internal/` (the directory matches the package name) except the embedded web assets under `web/`.
+Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry point for the released `canticle` binary (`cmd/genlib` is an internal test-data generator and `cmd/smokefixtures` builds the live serve-smoke library for `make smoke-fixtures`; neither is shipped); everything else lives under `internal/` (the directory matches the package name) except the embedded web assets under `web/`.
 
 **Core fetch/write path**
 - `models` -- shared data types (`Track`, `Song`, `Lyrics`, `Synced`, `Inputs`, `Library`, `ScanResult`, ...); depends on nothing else internal.
