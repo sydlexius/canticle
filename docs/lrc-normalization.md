@@ -9,7 +9,7 @@ dashboard or a startup log tells you stacked files exist.
 The LRC format allows one line to carry several timestamps when the same text
 repeats at multiple points in a song (a repeated chorus, for example):
 
-```
+```text
 [00:30.00][01:45.00][02:50.00]Chorus line here
 ```
 
@@ -21,7 +21,7 @@ up with stray `[01:45.00]` characters glued to the front on every repeat.
 
 The expanded form gives each timestamp its own line:
 
-```
+```text
 [00:30.00]Chorus line here
 [01:45.00]Chorus line here
 [02:50.00]Chorus line here
@@ -49,11 +49,22 @@ This is the part most worth understanding, because the two halves look
 similar and are not the same:
 
 - **The serve-mode startup check detects and reports. It never rewrites
-  anything.** Once per database, Canticle walks your configured library roots
+  anything.** On startup, Canticle walks your configured library roots
   looking for `.lrc` sidecars that still carry a stacked line, and logs how
   many it found. That is the entire scope of the startup pass - it calls the
   same walk the CLI uses, but in report-only mode, so it never writes a
   single byte to your library.
+
+  It is designed to run **once**, and records that it has done so only after
+  a walk that judged every file it saw. If the walk was degraded - a
+  configured root was unavailable, or any file was skipped, blocked, or
+  errored (see below) - it deliberately does not record completion, and runs
+  again on the next startup. The reasoning is that a file it could not read
+  might be the stacked one, so claiming "library clean" on an incomplete walk
+  would retire the notification permanently and wrongly. The practical
+  consequence: under a persistent degraded condition (a symlinked sidecar, a
+  stale root pointing at a decommissioned path) the walk repeats every
+  startup rather than settling.
 - **The CLI applies.** `canticle scan reconcile-lrc --yes` is the only thing
   that ever rewrites a file. Run it without `--yes` first to see what it
   would do:
