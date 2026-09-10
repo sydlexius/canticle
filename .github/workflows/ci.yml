@@ -135,7 +135,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: v2.13.2
           # Weekly (not daily) lint-cache key rotation: a daily interval cold-
           # rebuilds the cache every calendar day and accretes ~7 entries/week.
           cache-invalidation-interval: 7
