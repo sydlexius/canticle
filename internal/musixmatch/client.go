@@ -536,6 +536,18 @@ func (c *Client) Name() string {
 // budget on a query that is unanswerable by construction; the query text
 // itself already proves that, with no need to ask upstream.
 func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
+	// Trim BEFORE the guard, and forward the trimmed track, so one set of values
+	// governs all three consumers: the guard's emptiness decision, the request
+	// params findLyricsOnce builds, and checkMatchCorresponds' comparison
+	// (fieldCorresponds already trims independently). Without this the guard
+	// could admit a track on a valid alternate identifier and still send a
+	// whitespace-only q_track upstream -- a query the guard's own semantics call
+	// empty, inviting exactly the avoidable 4xx this change exists to prevent.
+	// The reassignment covers the token-renewal retry paths below, which call
+	// findLyricsOnce again with this same value.
+	track.TrackName = strings.TrimSpace(track.TrackName)
+	track.ISRC = strings.TrimSpace(track.ISRC)
+	track.SpotifyID = strings.TrimSpace(track.SpotifyID)
 	if !hasMatchableIdentity(track) {
 		return models.Song{}, ErrUnmatchable
 	}

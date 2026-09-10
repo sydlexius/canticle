@@ -224,3 +224,64 @@ func TestNormalMatchIsUnaffected(t *testing.T) {
 		t.Fatalf("song.Track.TrackName = %q; want %q", song.Track.TrackName, "title")
 	}
 }
+
+// TestWhitespaceTitleWithISRCSendsTrimmedQuery pins the guard's trimming as
+// something the REQUEST honors, not merely something the admission decision
+// consults. A whitespace-only title alongside a valid ISRC is admitted (the
+// ISRC alone is matchable), so the request goes out -- and q_track must carry
+// the trimmed empty value rather than the raw spaces, since sending a query
+// the guard's own semantics call empty invites exactly the avoidable 4xx the
+// #479 work exists to prevent.
+//
+// The assertion is on the OUTBOUND PARAM, not on a return value: trimming only
+// where hasMatchableIdentity reads would leave this test green while the wire
+// still carried "   ".
+func TestWhitespaceTitleWithISRCSendsTrimmedQuery(t *testing.T) {
+	var gotTrack string
+	var seen bool
+	crt := &countingRoundTripper{fn: func(req *http.Request) (*http.Response, error) {
+		gotTrack = req.URL.Query().Get("q_track")
+		seen = true
+		return jsonResponse(http.StatusOK, minimalMatchBody), nil
+	}}
+	client := NewClient("token")
+	client.httpClient = &http.Client{Transport: crt}
+
+	_, err := client.FindLyrics(context.Background(), models.Track{
+		ArtistName: "artist", TrackName: "   ", ISRC: "USRC17607839",
+	})
+	if err != nil {
+		t.Fatalf("FindLyrics rejected a whitespace-title track carrying an ISRC: %v", err)
+	}
+	if !seen {
+		t.Fatal("no outbound request observed; the ISRC alone should be matchable")
+	}
+	if gotTrack != "" {
+		t.Fatalf("outbound q_track = %q; want %q (the guard trims, so the request must too)", gotTrack, "")
+	}
+}
+
+// TestWhitespaceISRCNotSentAsDisambiguator is the same contract for the
+// alternate identifier: track_isrc is added only when non-empty, and a
+// whitespace-only ISRC must count as empty there for the same reason it does
+// in the guard. Without trimming before the params are built, the raw spaces
+// pass the `!= ""` check and a meaningless track_isrc goes on the wire.
+func TestWhitespaceISRCNotSentAsDisambiguator(t *testing.T) {
+	var hasISRC bool
+	crt := &countingRoundTripper{fn: func(req *http.Request) (*http.Response, error) {
+		_, hasISRC = req.URL.Query()["track_isrc"]
+		return jsonResponse(http.StatusOK, minimalMatchBody), nil
+	}}
+	client := NewClient("token")
+	client.httpClient = &http.Client{Transport: crt}
+
+	_, err := client.FindLyrics(context.Background(), models.Track{
+		ArtistName: "artist", TrackName: "title", ISRC: "   ",
+	})
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if hasISRC {
+		t.Fatal("outbound request carried track_isrc for a whitespace-only ISRC; want it omitted")
+	}
+}
