@@ -44,6 +44,7 @@
     Done: '--mx-chart-done',
     Failed: '--mx-chart-failed',
     Deferred: '--mx-chart-deferred',
+    Unavailable: '--mx-chart-unavailable',
   };
 
   // resolveVar reads a CSS custom property off an element, trimmed. Returns the

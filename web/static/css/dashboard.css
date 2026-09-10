@@ -137,7 +137,8 @@
   --mx-chart-processing: #3b82f6; /* blue-500: active (matches --mx-accent) */
   --mx-chart-done: #22c55e;       /* green-500: success */
   --mx-chart-failed: #ef4444;     /* red-500: failure */
-  --mx-chart-deferred: #f59e0b;   /* amber-500: rate-limited/transient */
+  --mx-chart-deferred: #f59e0b;   /* amber-500: no lyrics found yet, re-checked later */
+  --mx-chart-unavailable: #8b5cf6; /* violet-500: exhausted-retired (#477); neither success nor active failure */
   --mx-chart-grid: rgba(255, 255, 255, 0.08); /* matches --mx-surface-border */
   --mx-chart-text: #94a3b8;       /* slate-400: axis/legend labels */
 }

@@ -41,14 +41,18 @@ type QueueSummary struct {
 	Done       int64
 	Failed     int64
 	Deferred   int64
-	Total      int64
+	// Unavailable counts rows RetireMiss retired after exhausting
+	// max_miss_attempts (#477) -- a distinct terminal state from Done, since an
+	// unavailable row never wrote a lyrics sidecar.
+	Unavailable int64
+	Total       int64
 }
 
 // QueueSummary returns the count of work_queue rows grouped by status.
 //
 // Source: work_queue.status (CHECK-constrained to pending/processing/done/
-// failed/deferred by migrations 001 + 012). Zero-count statuses are reported
-// as 0 rather than omitted.
+// failed/deferred/unavailable by migrations 001, 012, 049). Zero-count
+// statuses are reported as 0 rather than omitted.
 func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
 	var s QueueSummary
 	rows, err := r.db.QueryContext(ctx,
@@ -65,16 +69,18 @@ func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
 			return QueueSummary{}, fmt.Errorf("reports: scan queue summary: %w", err)
 		}
 		switch status {
-		case "pending":
+		case queue.StatusPending:
 			s.Pending = count
-		case "processing":
+		case queue.StatusProcessing:
 			s.Processing = count
-		case "done":
+		case queue.StatusDone:
 			s.Done = count
-		case "failed":
+		case queue.StatusFailed:
 			s.Failed = count
-		case "deferred":
+		case queue.StatusDeferred:
 			s.Deferred = count
+		case queue.StatusUnavailable:
+			s.Unavailable = count
 		}
 		s.Total += count
 	}
@@ -98,7 +104,8 @@ const (
 	// provider-flagged.
 	ResultInstrumental ResultClass = "instrumental"
 	// ResultMiss means the item exhausted its miss budget with no lyrics found
-	// (status='done', last_error='miss limit reached', no output written).
+	// (status='unavailable' since #477, last_error='miss limit reached', no
+	// output written).
 	ResultMiss ResultClass = "miss"
 	// ResultRejected means the language/script guard refused the fetched lyric,
 	// so the row settled terminally with NOTHING written (outcome_type='rejected',
@@ -164,16 +171,28 @@ type RecentOutcome struct {
 	Detail string
 }
 
-// RecentOutcomes returns the most recently completed (status='done') tracks,
-// newest first by completed_at (NULLs sorted last), capped at limit.
+// RecentOutcomes returns the most recently completed or retired
+// (status IN ('done','unavailable')) tracks, newest first by completed_at
+// (NULLs sorted last), capped at limit.
 //
-// Source: work_queue rows where status='done'. The result classification is
-// computed in SQL from the recorded outcome_type (stamped at completion, #379),
-// NOT the output_paths filename: last_error='miss limit reached' -> miss;
-// otherwise outcome_type 'synced'/'unsynced'/'instrumental'/'rejected' map to
-// the matching ResultClass; a NULL outcome_type -> unknown.
-// output_paths is no longer consulted -- it holds the stale enqueue-time .lrc
-// plan, which is what made every completed row read as synced before this fix.
+// Source: work_queue rows where status='done' OR status='unavailable' (#477).
+// 'unavailable' is included so an exhausted-miss row (RetireMiss's terminal
+// state) still shows up here as a 'miss' result -- exactly as it did before
+// #477, when the same row settled as status='done' with the same
+// last_error='miss limit reached' sentinel. Without this, exhausted-miss rows
+// would simply vanish from the only place they were ever surfaced, the moment
+// #477 shipped, which is the opposite of "queryable and shown distinctly"
+// (issue #477 AC4).
+//
+// The result classification is computed in SQL from the recorded outcome_type
+// (stamped at completion, #379), NOT the output_paths filename:
+// last_error='miss limit reached' -> miss; otherwise outcome_type
+// 'synced'/'unsynced'/'instrumental'/'rejected' map to the matching
+// ResultClass; a NULL outcome_type -> unknown. An 'unavailable' row always has
+// a NULL outcome_type (RetireMiss never stamps one) and the miss sentinel, so
+// it always classifies as 'miss', never 'unknown'. output_paths is no longer
+// consulted -- it holds the stale enqueue-time .lrc plan, which is what made
+// every completed row read as synced before this fix.
 //
 // This comment previously said a NULL outcome_type meant "a legacy row predating
 // the column". That was FALSE, and its being false is #655: the guard-rejection
@@ -208,7 +227,7 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
                 ELSE 'unknown'
             END AS result
          FROM work_queue
-         WHERE status = 'done'
+         WHERE status IN ('done', 'unavailable')
          ORDER BY completed_at IS NULL, completed_at DESC, id DESC
          LIMIT ?`,
 		limit,
