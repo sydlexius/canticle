@@ -1250,6 +1250,21 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		defer wg.Done()
 		runIdentityBackfill(runCtx, sqlDB)
 	}()
+	// One-shot stacked-.lrc discovery check (#470 AC2): walk the configured
+	// library roots once, report how many .lrc sidecars still carry compressed
+	// multi-timestamp lines, and stamp a marker so the walk never runs again.
+	// Report-only, deliberately deviating from the AC's "backfill" wording -- it
+	// never rewrites a file; `scan reconcile-lrc --yes` remains the only thing
+	// that touches an operator's library, since an unattended rewrite of
+	// operator-owned files is a different category of action than the DB-only
+	// mutations the other startup passes make. The marker only ever stamps after
+	// a walk that actually completed and found nothing untrustworthy (see
+	// runLRCStackedCheck's doc comment for the full stamp-on-outcome invariant).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runLRCStackedCheck(runCtx, sqlDB)
+	}()
 	// Periodic instrumental-backfill sweep (#708): classify rows the detector has
 	// never scored. The capability shipped as `scan reconcile-instrumental` (#499)
 	// but is CLI-only, so an install where nobody runs it drifts forever -- which

@@ -667,6 +667,107 @@ func TestRun_ContextCanceledMidWalkStopsShort(t *testing.T) {
 	}
 }
 
+// Visited must count every non-directory entry the walk reaches, not just
+// .lrc files -- that is what lets a caller (runLRCStackedCheck) tell "this
+// root is empty/unmounted" apart from "this root legitimately has no .lrc
+// sidecars yet" (issue #470 round 2, Critical 1).
+func TestRun_VisitedCountsEveryEntryNotJustLRC(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("song.mp3", "not an lrc file")
+	write("cover.jpg", "not an lrc file either")
+	write("stacked.lrc", "[00:30.00][01:05.00]C\n")
+
+	s, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Visited != 3 {
+		t.Errorf("Visited=%d, want 3 (song.mp3, cover.jpg, stacked.lrc)", s.Visited)
+	}
+	if s.Scanned != 1 {
+		t.Errorf("Scanned=%d, want 1 (only the .lrc)", s.Scanned)
+	}
+	if s.MediaEntries != 2 {
+		t.Errorf("MediaEntries=%d, want 2 (song.mp3 and stacked.lrc; cover.jpg is neither audio nor .lrc)", s.MediaEntries)
+	}
+}
+
+// An empty root (nothing under it at all -- the shape of an unmounted
+// bind-mount at container start) must report Visited==0, distinct from a
+// mounted root holding non-.lrc files, which must report Visited>0 even
+// though Scanned stays 0.
+func TestRun_VisitedZeroOnEmptyRootDistinctFromScannedZero(t *testing.T) {
+	empty := t.TempDir()
+	sEmpty, err := Run(context.Background(), Options{Roots: []string{empty}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sEmpty.Visited != 0 {
+		t.Errorf("empty root: Visited=%d, want 0", sEmpty.Visited)
+	}
+	if sEmpty.Scanned != 0 {
+		t.Errorf("empty root: Scanned=%d, want 0", sEmpty.Scanned)
+	}
+
+	populated := t.TempDir()
+	if err := os.WriteFile(filepath.Join(populated, "track.mp3"), []byte("audio, no lyrics yet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sPopulated, err := Run(context.Background(), Options{Roots: []string{populated}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sPopulated.Visited == 0 {
+		t.Error("mounted root with audio but no .lrc: Visited=0, want >0 -- this must NOT look like an unmounted root")
+	}
+	if sPopulated.Scanned != 0 {
+		t.Errorf("mounted root with audio but no .lrc: Scanned=%d, want 0", sPopulated.Scanned)
+	}
+}
+
+// A root holding only stray dotfiles (a mount-checker's .mountcheck sentinel,
+// Syncthing's .stfolder, macOS's .DS_Store) is exactly the shape that defeated
+// the earlier Visited-only mount heuristic (issue #470 round 4, Critical 2):
+// Visited is nonzero, but none of these entries is real library content, so
+// MediaEntries must stay zero. A real audio or .lrc file in the same root must
+// move MediaEntries.
+func TestRun_MediaEntriesIgnoresSentinelDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".mountcheck", "mount probe sentinel")
+	write(".DS_Store", "macOS metadata")
+	write(".stfolder", "syncthing marker")
+
+	s, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Visited != 3 {
+		t.Errorf("Visited=%d, want 3 (the three sentinel dotfiles)", s.Visited)
+	}
+	if s.MediaEntries != 0 {
+		t.Errorf("MediaEntries=%d, want 0 -- sentinel dotfiles must not read as library content", s.MediaEntries)
+	}
+
+	write("track.flac", "real audio content")
+	s2, err := Run(context.Background(), Options{Roots: []string{dir}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.MediaEntries != 1 {
+		t.Errorf("MediaEntries=%d, want 1 once a real audio file is present", s2.MediaEntries)
+	}
+}
+
 // The fourth path-bearing log site (issue #470 round 2, Important 3):
 // classifyBackupExists' "already expanded by a peer run" case must stay
 // silent under Quiet, and must log (at Debug) when Quiet is false, naming
@@ -722,5 +823,66 @@ func TestRun_PeerExpandedLogSiteRespectsQuiet(t *testing.T) {
 	}
 	if got := run(false); !strings.Contains(got, "song.lrc") || !strings.Contains(got, "already expanded") {
 		t.Errorf("Quiet=false: want the peer-expanded Debug log naming the path; got: %s", got)
+	}
+}
+
+// A library root configured as a symlink is a fully supported deployment
+// shape (e.g. /music -> /mnt/array/music; see scanner.ScanLibrary's #643
+// comment and fixture). filepath.WalkDir does NOT follow a symlink that is
+// the walk's ROOT ARGUMENT ITSELF -- it Lstat's the root, sees a single
+// non-directory entry, and never descends -- so before the #925 fix this
+// silently produced Visited=1/MediaEntries=0/Scanned=0 for a symlinked root
+// no matter how much content lived behind it.
+func TestRun_SymlinkedRootIsWalkedThroughToRealContents(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "song.mp3"), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "stacked.lrc"), []byte("[00:30.00][01:05.00]C\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(t.TempDir(), "library-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	want, err := Run(context.Background(), Options{Roots: []string{real}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Run(context.Background(), Options{Roots: []string{link}, Apply: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Visited != want.Visited || got.MediaEntries != want.MediaEntries || got.Scanned != want.Scanned {
+		t.Errorf("symlinked root: Visited=%d MediaEntries=%d Scanned=%d, want Visited=%d MediaEntries=%d Scanned=%d (matching the real dir walked directly)",
+			got.Visited, got.MediaEntries, got.Scanned, want.Visited, want.MediaEntries, want.Scanned)
+	}
+	if got.Scanned != 1 || got.MediaEntries != 2 {
+		t.Fatalf("sanity check failed: got=%+v", got)
+	}
+}
+
+// A root that is a broken symlink (or otherwise fails to resolve) must not
+// silently fall through to walking an unresolved path as if it were an empty
+// directory -- that reproduces the exact blind spot the resolution fix closes.
+// It must fail the same way any other unreadable root does: a wrapped error
+// naming the configured root, never the resolved target.
+func TestRun_BrokenSymlinkRootReturnsWalkError(t *testing.T) {
+	parent := t.TempDir()
+	link := filepath.Join(parent, "broken-link")
+	if err := os.Symlink(filepath.Join(parent, "does-not-exist"), link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	_, err := Run(context.Background(), Options{Roots: []string{link}, Apply: false})
+	if err == nil {
+		t.Fatal("Run with a broken symlink root: want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), link) {
+		t.Errorf("Run error = %q, want it to name the configured root %q", err.Error(), link)
 	}
 }
