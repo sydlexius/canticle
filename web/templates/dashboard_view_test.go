@@ -48,3 +48,15 @@ func TestChartDataJSON(t *testing.T) {
 		t.Errorf("ValuesJSON() for nil = %q, want null or []", got)
 	}
 }
+
+// TestDashQueueTileTooltipUnavailable guards the #477 tile: its tooltip must be
+// set (a missing case renders title="") and must not reuse Failed's copy.
+func TestDashQueueTileTooltipUnavailable(t *testing.T) {
+	got := dashQueueTileTooltip("Unavailable")
+	if got == "" {
+		t.Fatal("Unavailable tooltip is empty")
+	}
+	if got == dashQueueTileTooltip("Failed") {
+		t.Errorf("Unavailable tooltip %q duplicates Failed's", got)
+	}
+}

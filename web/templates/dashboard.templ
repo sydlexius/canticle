@@ -311,9 +311,13 @@ func dashQueueTileTooltip(label string) string {
 	case "Done":
 		return "Tracks that completed successfully (lyrics written)."
 	case "Failed":
-		return "Tracks that exhausted all lyrics sources without a result."
+		return "Tracks that hit an error; retried with backoff."
 	case "Deferred":
-		return "Tracks skipped this cycle due to rate-limiting or transient errors."
+		return "No lyrics found yet; re-checked later."
+	case "Unavailable":
+		// Revival is manual only: RecheckRetired's sole production caller is
+		// `queue recheck --retired`; a provider-set change does not revive.
+		return "Tracks retired after every lyrics source repeatedly found nothing; revived by 'queue recheck --retired'."
 	default:
 		return ""
 	}

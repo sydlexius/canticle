@@ -182,8 +182,9 @@ func TestQueueSummary(t *testing.T) {
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
-	// 2 pending, 1 processing, 3 done, 1 failed, 2 deferred. No 'processing'
-	// extras so we confirm zero-count statuses still report.
+	// 2 pending, 1 processing, 3 done, 1 failed, 2 deferred, 1 unavailable
+	// (#477). No 'processing' extras so we confirm zero-count statuses still
+	// report.
 	for i := 0; i < 2; i++ {
 		insertWorkItem(t, sqlDB, workItem{artist: "A", title: "p" + string(rune('a'+i)), status: "pending"})
 	}
@@ -195,12 +196,13 @@ func TestQueueSummary(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		insertWorkItem(t, sqlDB, workItem{artist: "A", title: "def" + string(rune('a'+i)), status: "deferred"})
 	}
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "u1", status: "unavailable", lastError: "miss limit reached"})
 
 	got, err := repo.QueueSummary(ctx)
 	if err != nil {
 		t.Fatalf("QueueSummary: %v", err)
 	}
-	want := reports.QueueSummary{Pending: 2, Processing: 1, Done: 3, Failed: 1, Deferred: 2, Total: 9}
+	want := reports.QueueSummary{Pending: 2, Processing: 1, Done: 3, Failed: 1, Deferred: 2, Unavailable: 1, Total: 10}
 	if got != want {
 		t.Errorf("QueueSummary = %+v, want %+v", got, want)
 	}
@@ -388,6 +390,46 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	// NULL completed_at -> zero time.
 	if !got[5].CompletedAt.IsZero() {
 		t.Errorf("legacy CompletedAt = %v, want zero", got[5].CompletedAt)
+	}
+}
+
+// TestRecentOutcomesIncludesUnavailable verifies that an exhausted-miss row
+// retired to status='unavailable' (#477) still surfaces here, classified as
+// ResultMiss -- exactly as it did before #477, when the same row settled as
+// status='done' carrying the identical last_error sentinel. Before the
+// accompanying WHERE-clause widening, this row would have simply vanished
+// from RecentOutcomes the moment it left 'done' for 'unavailable', silently
+// removing exhausted misses from the only report that ever surfaced them.
+func TestRecentOutcomesIncludesUnavailable(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Exhausted", title: "E", status: "unavailable",
+		lastError: "miss limit reached", completedAt: "2026-06-15T10:00:00Z",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Synced", title: "S", status: "done",
+		outcomeType: "synced", completedAt: "2026-06-10T10:00:00Z",
+	})
+	// A still-active row of any other status must not appear.
+	insertWorkItem(t, sqlDB, workItem{artist: "Pending", title: "P", status: "pending"})
+	insertWorkItem(t, sqlDB, workItem{artist: "Failed", title: "F", status: "failed", lastError: "boom"})
+
+	got, err := repo.RecentOutcomes(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentOutcomes: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d outcomes, want 2 (done + unavailable only): %+v", len(got), got)
+	}
+	// Newest first: Exhausted (06-15) before Synced (06-10).
+	if got[0].Artist != "Exhausted" || got[0].Result != reports.ResultMiss {
+		t.Errorf("outcome[0] = {artist=%q, result=%q}; want {Exhausted, miss}", got[0].Artist, got[0].Result)
+	}
+	if got[1].Artist != "Synced" || got[1].Result != reports.ResultSynced {
+		t.Errorf("outcome[1] = {artist=%q, result=%q}; want {Synced, synced}", got[1].Artist, got[1].Result)
 	}
 }
 

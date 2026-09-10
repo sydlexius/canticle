@@ -60,6 +60,43 @@ func insertDone(t *testing.T, sqlDB *sql.DB, title, lane, outputPaths, completed
 	}
 }
 
+// insertUnavailable seeds a work_queue row retired by RetireMiss (#477):
+// status='unavailable' with the miss-limit sentinel, no sidecar written.
+func insertUnavailable(t *testing.T, sqlDB *sql.DB, title string) {
+	t.Helper()
+	_, err := sqlDB.ExecContext(context.Background(),
+		`INSERT INTO work_queue
+            (artist, title, artist_key, title_key, album, status, last_error)
+         VALUES (?, ?, ?, ?, ?, 'unavailable', 'miss limit reached')`,
+		"Artist", title, "Artist", title, "Album")
+	if err != nil {
+		t.Fatalf("insert unavailable work_queue: %v", err)
+	}
+}
+
+// TestReportFragmentQueueSummaryUnavailableRow asserts the Unavailable row
+// renders its OWN count: 3 unavailable vs 2 done (total 5), so a row wired to
+// any other field cannot pass.
+func TestReportFragmentQueueSummaryUnavailableRow(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertDone(t, sqlDB, "d1", "musixmatch", `[{"outdir":"/out","filename":"d1.lrc"}]`, "2026-06-17T10:00:00Z")
+	insertDone(t, sqlDB, "d2", "musixmatch", `[{"outdir":"/out","filename":"d2.lrc"}]`, "2026-06-17T11:00:00Z")
+	for _, title := range []string{"u1", "u2", "u3"} {
+		insertUnavailable(t, sqlDB, title)
+	}
+	mux := newReportsUIServer(t, sqlDB)
+
+	body := getFragment(t, mux, "queue-summary").Body.String()
+	row := regexp.MustCompile(`<td>Unavailable</td>\s*<td class="mx-cell-mono">(\d+)</td>`)
+	m := row.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("queue-summary fragment missing Unavailable row; body:\n%s", body)
+	}
+	if m[1] != "3" {
+		t.Errorf("Unavailable row count = %s, want 3", m[1])
+	}
+}
+
 // getFragment issues an htmx report-fragment request (HX-Request set) and
 // returns the recorder.
 func getFragment(t *testing.T, mux *http.ServeMux, key string) *httptest.ResponseRecorder {

@@ -445,6 +445,9 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 			{Status: "Done", Count: strconv.FormatInt(s.Done, 10)},
 			{Status: "Failed", Count: strconv.FormatInt(s.Failed, 10)},
 			{Status: "Deferred", Count: strconv.FormatInt(s.Deferred, 10)},
+			// Unavailable (#477): an exhausted benign miss, retired distinctly
+			// from Done since no sidecar was ever written.
+			{Status: "Unavailable", Count: strconv.FormatInt(s.Unavailable, 10)},
 			{Status: "Total", Count: strconv.FormatInt(s.Total, 10), IsTotal: true},
 		}
 	case "recent-outcomes":

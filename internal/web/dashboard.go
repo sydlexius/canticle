@@ -242,6 +242,10 @@ func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 		{Label: "Done", Value: strconv.FormatInt(qs.Done, 10)},
 		{Label: "Failed", Value: strconv.FormatInt(qs.Failed, 10)},
 		{Label: "Deferred", Value: strconv.FormatInt(qs.Deferred, 10)},
+		// Unavailable (#477): an exhausted benign miss, distinct from Done (which
+		// implies a written sidecar) and from Failed/Deferred (which are still
+		// active or retrying).
+		{Label: "Unavailable", Value: strconv.FormatInt(qs.Unavailable, 10)},
 	}
 }
 
@@ -251,13 +255,14 @@ func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 // excluded -- it is the sum of the segments, not a segment.
 func buildQueueChart(qs reports.QueueSummary) templates.ChartData {
 	return templates.ChartData{
-		Labels: []string{"Pending", "Processing", "Done", "Failed", "Deferred"},
+		Labels: []string{"Pending", "Processing", "Done", "Failed", "Deferred", "Unavailable"},
 		Values: []float64{
 			float64(qs.Pending),
 			float64(qs.Processing),
 			float64(qs.Done),
 			float64(qs.Failed),
 			float64(qs.Deferred),
+			float64(qs.Unavailable),
 		},
 	}
 }
