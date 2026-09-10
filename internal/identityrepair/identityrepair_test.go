@@ -231,6 +231,56 @@ func TestRun_MergeReopensDoneSurvivor(t *testing.T) {
 	}
 }
 
+// An 'unavailable' survivor (#477: RetireMiss's terminal state for an
+// exhausted benign miss) is NOT reopened on merge, unlike a 'done' survivor:
+// the merged key is the one that already exhausted its miss budget, so a
+// reopen buys one repeat of the same lookup. It keeps its status, sentinel and
+// miss_count, and gains the dropped row's output_paths, which
+// queue.RecheckRetired carries when it revives the row.
+func TestRun_MergeKeepsUnavailableSurvivorRetired(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	srBad := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
+	srGood := seedScan(t, db, lib, "/m/2.mp3", "Alpha; Bravo", "", "Song")
+	wqBad := seedQueue(t, db, "AlphaBravo", "", "pending", srBad)
+	wqGood := seedQueue(t, db, "Alpha; Bravo", "", "unavailable", srGood)
+	if _, err := db.Exec(`UPDATE work_queue SET last_error = 'miss limit reached', miss_count = 15 WHERE id = ?`, wqGood); err != nil {
+		t.Fatalf("stamp miss-limit sentinel: %v", err)
+	}
+
+	reader := fakeReader{
+		"/m/1.mp3": {"Alpha; Bravo", ""},
+		"/m/2.mp3": {"Alpha; Bravo", ""}, // already correct -> unchanged
+	}
+	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Changed != 1 || res.QueueMerged != 1 || res.QueueUpdated != 0 {
+		t.Fatalf("Result = %+v; want Changed=1 QueueMerged=1 QueueUpdated=0", res)
+	}
+	if n := queueCount(t, db); n != 1 {
+		t.Fatalf("work_queue count = %d; want 1 (bad merged into good)", n)
+	}
+	var status, lastError string
+	var missCount int
+	if err := db.QueryRow(`SELECT status, last_error, miss_count FROM work_queue WHERE id = ?`, wqGood).
+		Scan(&status, &lastError, &missCount); err != nil {
+		t.Fatalf("read survivor: %v", err)
+	}
+	if status != "unavailable" || lastError != "miss limit reached" || missCount != 15 {
+		t.Errorf("survivor = (%q, %q, miss_count=%d); want (unavailable, miss limit reached, 15): "+
+			"an exhausted-miss survivor must not be reopened by a merge", status, lastError, missCount)
+	}
+	op := queueOutputPaths(t, db, wqGood)
+	if !strings.Contains(op, fmt.Sprintf("f%d.lrc", srBad)) || !strings.Contains(op, fmt.Sprintf("f%d.lrc", srGood)) {
+		t.Errorf("survivor output_paths = %q; want both f%d.lrc and f%d.lrc", op, srBad, srGood)
+	}
+	if err := db.QueryRow(`SELECT 1 FROM work_queue WHERE id = ?`, wqBad).Scan(new(int)); err != sql.ErrNoRows {
+		t.Errorf("bad work_queue row still present; want deleted (err=%v)", err)
+	}
+}
+
 // A file that cannot be re-read leaves its row untouched and is tallied.
 func TestRun_ReadFailureSkips(t *testing.T) {
 	db := openDB(t)
