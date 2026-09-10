@@ -21,13 +21,13 @@ import (
 )
 
 // reconcilePathsBackupRecord is one JSONL line capturing the outcome for one
-// source path -- pruned, relinked, or retained -- so the operation is auditable
-// and hand-restorable (re-enqueue Inputs, re-scan, or undo a relink by
-// reversing OldPath/NewPath). Written before the corresponding mutation
-// commits (backup-first); a retained row is never a mutation, so its record is
-// purely informational.
+// source path -- pruned, relinked, retained, or repaired -- so the operation
+// is auditable and hand-restorable (re-enqueue Inputs, re-scan, undo a relink
+// by reversing OldPath/NewPath, or undo a repair by restoring OldOutputPaths).
+// Written before the corresponding mutation commits (backup-first); a
+// retained row is never a mutation, so its record is purely informational.
 type reconcilePathsBackupRecord struct {
-	Action        string          `json:"action"` // "pruned", "relinked", or "retained"
+	Action        string          `json:"action"` // "pruned", "relinked", "retained", or "repaired"
 	SourcePath    string          `json:"source_path"`
 	ScanResultIDs []int64         `json:"scan_result_ids,omitempty"`
 	WorkItemIDs   []int64         `json:"work_item_ids,omitempty"`
@@ -38,6 +38,16 @@ type reconcilePathsBackupRecord struct {
 	MBID    string `json:"mbid,omitempty"`
 	ISRC    string `json:"isrc,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+	// WorkItemID, OldOutputPaths, and NewOutputPaths are populated for
+	// "repaired" records only (issue #921): the id of the work_queue row whose
+	// output_paths JSON was rewritten, plus its value before and after, so an
+	// operator can hand-restore the prior value if the repair guessed wrong.
+	// SourcePath is left empty for a "repaired" record -- the repair pass
+	// selects candidates by outdir/output_paths, never source_path, so the row
+	// is identified by WorkItemID instead.
+	WorkItemID     int64               `json:"work_item_id,omitempty"`
+	OldOutputPaths []models.OutputPath `json:"old_output_paths,omitempty"`
+	NewOutputPaths []models.OutputPath `json:"new_output_paths,omitempty"`
 }
 
 // runReconcilePaths reconciles the durable queue and scan-result cache against
@@ -54,6 +64,14 @@ type reconcilePathsBackupRecord struct {
 // individually), so single-file renames within a surviving directory are
 // caught, unlike the disk-cheap periodic sweep. Dry-run by default; --yes
 // applies and writes a JSONL backup covering every outcome.
+//
+// After the sweep, a SEPARATE repair pass (issue #921) fixes a row a relink
+// already broke before internal/prune.relinkOne started keeping output_paths
+// in sync with a relinked outdir/filename: such a row's output_paths still
+// names the pre-move directory, so the worker keeps writing to a vanished
+// destination and re-fetching forever, and it cannot be caught by the sweep
+// above because its source_path already resolves (a prior relink already
+// moved it) -- it never looks "gone". See prune.RepairOutputPaths.
 func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePathsCmd) int {
 	cfg, err := config.Load(args.ConfigPath)
 	if err != nil {
@@ -159,6 +177,23 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 			Reason:     row.Reason,
 		})
 	}
+	// The repair pass (#921) calls this inside each row's transaction, before
+	// COMMIT, so a failed append rolls that row back (backup-first). A dry-run
+	// preview still calls it but writes nothing.
+	reportRepaired := func(row prune.RepairedRow) error {
+		if !args.Yes {
+			return nil
+		}
+		if err := openBackup(); err != nil {
+			return err
+		}
+		return appendReconcilePathsBackup(backupFile, reconcilePathsBackupRecord{
+			Action:         "repaired",
+			WorkItemID:     row.WorkItemID,
+			OldOutputPaths: row.OldOutputPaths,
+			NewOutputPaths: row.NewOutputPaths,
+		})
+	}
 
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(cfg.Realign.IdentityKeys)
@@ -176,16 +211,44 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 		return 1
 	}
 
+	// The output_paths repair pass (#921) runs AFTER the sweep, on its own
+	// row population: rows whose output_paths names a directory that no
+	// longer exists while the row's own outdir names one that does. This is
+	// deliberately disjoint from the sweep above -- a repair candidate's
+	// source_path already resolves (a prior relink already moved it), so it
+	// never appears as "gone" to Sweep's gather and the two passes never
+	// double-count or race the same row.
+	repairRes, err := pruner.RepairOutputPaths(ctx, prune.RepairOptions{
+		LibraryID: libID,
+		DryRun:    !args.Yes,
+		Report:    reportRepaired,
+	})
+	if err != nil {
+		slog.Error("reconcile-paths output_paths repair failed", "error", err)
+		// The sweep above may already have committed pruned or relinked rows
+		// and recorded them in the backup, so its path must still reach the
+		// operator on the failure path.
+		if backupFile != nil {
+			_, _ = fmt.Fprintf(out, "backup of rows changed before the failure written to %s\n", backupPath)
+		}
+		return 1
+	}
+
 	verb := "would prune"
 	relinkVerb := "would relink"
+	repairVerb := "would repair"
 	if args.Yes {
 		verb = "pruned"
 		relinkVerb = "relinked"
+		repairVerb = "repaired"
 	}
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d source(s) with a vanished file (%d scan_results, %d work_items), %s %d source(s) to a moved file, retained %d source(s) with unresolved identity%s\n",
 		verb, len(res.Pruned), res.ScanResults, res.WorkItems, relinkVerb, len(res.Relinked), len(res.Retained), suffixDryRun(args.Yes))
+	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d work_queue row(s) with a stale output_paths destination (skipped: %d ambiguous, %d unfixable, %d stat error, %d malformed, %d raced)%s\n",
+		repairVerb, len(repairRes.Repaired), repairRes.SkippedAmbiguous, repairRes.SkippedUnfixable,
+		repairRes.SkippedStatError, repairRes.SkippedMalformed, repairRes.SkippedRaced, suffixDryRun(args.Yes))
 	if backupFile != nil {
-		_, _ = fmt.Fprintf(out, "backup of pruned/relinked/retained rows written to %s\n", backupPath)
+		_, _ = fmt.Fprintf(out, "backup of pruned/relinked/retained/repaired rows written to %s\n", backupPath)
 	}
 	return 0
 }

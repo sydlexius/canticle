@@ -17,7 +17,8 @@ import (
 // queue.Enqueue derives from Outdir/Filename -- needed to exercise a
 // work_queue row whose output_paths already carries more than one entry (the
 // shape identityrepair.mergeQueueRows produces when two rows collide on
-// (artist_key, title_key) and their output_paths are unioned).
+// (artist_key, title_key) and their output_paths are unioned). mbid doubles as
+// the title so several rows can coexist under UNIQUE(artist_key, title_key).
 func seedRowWithOutputPaths(t *testing.T, ctx context.Context, sqlDB *sql.DB, libraryID int64, filePath, mbid string, outputPaths []models.OutputPath) int64 {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -28,7 +29,7 @@ func seedRowWithOutputPaths(t *testing.T, ctx context.Context, sqlDB *sql.DB, li
 	}
 	res, err := sqlDB.ExecContext(ctx,
 		`INSERT INTO scan_results (library_id, file_path, artist, title, status, outdir, filename, recording_mbid) VALUES (?, ?, ?, ?, 'done', ?, ?, ?)`,
-		libraryID, filePath, "Artist", "Title", filepath.Dir(filePath), filepath.Base(filePath), mbid)
+		libraryID, filePath, "Artist", mbid, filepath.Dir(filePath), filepath.Base(filePath), mbid)
 	if err != nil {
 		t.Fatalf("insert scan_result: %v", err)
 	}
@@ -39,7 +40,7 @@ func seedRowWithOutputPaths(t *testing.T, ctx context.Context, sqlDB *sql.DB, li
 	q := queue.NewDBQueue(sqlDB)
 	q.SetRandomized(false)
 	item, err := q.Enqueue(ctx, models.Inputs{
-		Track:        models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Track:        models.Track{ArtistName: "Artist", TrackName: mbid},
 		Outdir:       filepath.Dir(filePath),
 		Filename:     filepath.Base(filePath),
 		SourcePath:   filePath,
