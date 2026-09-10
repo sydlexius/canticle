@@ -43,6 +43,26 @@ func (r *persistingRenewer) Renew(ctx context.Context) (string, error) {
 	return tok, nil
 }
 
+// dropDegenerateStoredToken deletes a stored token that is degenerate (#934),
+// called only after a failed startup mint. bootstrapToken reaches the mint only
+// when no operator token is in play and resolveTokenWithStore returned nothing
+// from the DB, so a stored row at this point is either absent or the degenerate
+// token that resolveTokenWithStore discarded. A successful mint overwrites that
+// row; a failed one would otherwise leave a known-bad credential in the store.
+// This saves no mint: the next start mints either way. A non-degenerate row is
+// never touched, and a store error is logged, not fatal.
+func dropDegenerateStoredToken(ctx context.Context, store secrets.Store) {
+	v, ok, err := store.Get(ctx, secrets.NameMusixmatchToken)
+	if err != nil || !ok || !musixmatch.IsDegenerateToken(v) {
+		return
+	}
+	if err := store.Delete(ctx, secrets.NameMusixmatchToken); err != nil {
+		slog.Warn("could not delete the degenerate stored musixmatch token after a failed mint", "error", err)
+		return
+	}
+	slog.Info("deleted the degenerate stored musixmatch token after a failed mint (#934)")
+}
+
 // bootstrapToken is the LOWEST-precedence token source (#554): it mints a token
 // only when every higher tier came up empty, then persists it so the existing
 // secret-store tier serves it on the next start.
@@ -75,9 +95,17 @@ func bootstrapToken(ctx context.Context, higher string, fromDB bool, store secre
 
 	tok, err := minter.Mint(ctx)
 	if err != nil {
+		dropDegenerateStoredToken(ctx, store)
 		if errors.Is(err, musixmatch.ErrTokenMintRefused) {
 			slog.Warn("musixmatch token bootstrap refused (rate limited); continuing without a token",
 				"hint", "supply MUSIXMATCH_TOKEN or retry later; do not restart in a loop")
+			return higher, false
+		}
+		if errors.Is(err, musixmatch.ErrClientIdentityRetired) {
+			// Not an ordinary mint hiccup: the client identity this build
+			// impersonates appears to have stopped working upstream (#934).
+			// Nothing is persisted; degrade to no token like a refused mint.
+			slog.Error("musixmatch client identity appears retired upstream (the token endpoint issued a degenerate token); continuing without a token -- see internal/musixmatch/token.go currentClientIdentity")
 			return higher, false
 		}
 		slog.Warn("musixmatch token bootstrap failed; continuing without a token", "error", err)
