@@ -120,8 +120,8 @@ type APIConfig struct {
 	MissBackoffCapHours int `toml:"miss_backoff_cap_hours"`
 	// MaxMissAttempts caps the total number of re-check attempts for a benign
 	// miss. When miss_count reaches this value the queue row is retired
-	// (status='done', last_error='miss limit reached') without writing any
-	// scan_results success. Default 15 (~1 year with the default cadence).
+	// (status='unavailable', last_error='miss limit reached') without writing
+	// any scan_results success. Default 15 (~1 year with the default cadence).
 	// Set to 0 for no cap (retry indefinitely). Negative values are clamped
 	// to 0 with a warning.
 	MaxMissAttempts int `toml:"max_miss_attempts"`

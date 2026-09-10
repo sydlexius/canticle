@@ -3460,10 +3460,10 @@ func validateQueueStatus(s string) error {
 		return nil
 	}
 	switch s {
-	case queue.StatusPending, queue.StatusProcessing, queue.StatusFailed, queue.StatusDone, queue.StatusDeferred:
+	case queue.StatusPending, queue.StatusProcessing, queue.StatusFailed, queue.StatusDone, queue.StatusDeferred, queue.StatusUnavailable:
 		return nil
 	default:
-		return fmt.Errorf("invalid status %q (want pending, processing, failed, deferred, or done)", s)
+		return fmt.Errorf("invalid status %q (want pending, processing, failed, deferred, done, or unavailable)", s)
 	}
 }
 
