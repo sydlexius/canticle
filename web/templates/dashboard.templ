@@ -311,7 +311,7 @@ func dashQueueTileTooltip(label string) string {
 	case "Done":
 		return "Tracks that completed successfully (lyrics written)."
 	case "Failed":
-		return "Tracks that hit an error; retried with backoff."
+		return "Tracks that hit an error; retried after a backoff delay."
 	case "Deferred":
 		return "No lyrics found yet; re-checked later."
 	case "Unavailable":
