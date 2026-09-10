@@ -35,6 +35,14 @@ type DashboardView struct {
 	UpNextEmpty  string
 	// AsOf is the formatted timestamp of this render, for the "as of" annotation.
 	AsOf string
+	// LRCNormalizeSummary is the pre-formatted "last LRC normalization" line
+	// (#929): how many stacked .lrc sidecars the most recent applied
+	// `scan reconcile-lrc --yes` pass rewrote, and when. Carries counts and a
+	// timestamp only -- never a path, artist, title, or album -- matching
+	// every other aggregate on this page. Always non-empty; the handler
+	// renders a distinct, non-alarming sentence for the "never run yet"
+	// state rather than leaving this blank.
+	LRCNormalizeSummary string
 }
 
 // UpNextRow is one buffered work item in the dashboard "Up next" panel (#572).

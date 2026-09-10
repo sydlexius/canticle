@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -255,4 +256,111 @@ func TestRunReconcileLRC_NoBlockedPointerWhenNoneBlocked(t *testing.T) {
 	if strings.Contains(out, "see the BLOCKED warnings above") {
 		t.Errorf("the follow-up pointer must not fire when nothing is blocked; got:\n%s", out)
 	}
+}
+
+// #929: an APPLIED reconcile-lrc pass stamps the maintenance_markers summary
+// the web dashboard reads (reports.MaintenanceMarkerLRCNormalize), with the
+// actual rewritten count and a non-empty completed_at. A dry run (the default)
+// must NOT stamp it -- design decision 2 (see reconcile_lrc.go's comment on
+// markLRCNormalizeApply): only an apply pass counts as "the CLI did
+// something", so a caller that only ever ran the default dry-run mode reads
+// as "never run" on the dashboard, not as a phantom zero-file pass.
+func TestRunReconcileLRC_AppliedRunStampsNormalizeMarker(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	mustWrite(t, filepath.Join(root, "stacked.lrc"), "[00:39.26][00:47.06]Chorus\n")
+
+	sqlDB := openDBFromConfig(t, cfgPath)
+
+	// Dry run first: must leave the marker unset.
+	var dry bytes.Buffer
+	if rc := runReconcileLRC(context.Background(), &dry, ScanReconcileLRCCmd{ConfigPath: cfgPath}); rc != 0 {
+		t.Fatalf("dry-run rc=%d out=%s", rc, dry.String())
+	}
+	if done, err := lrcNormalizeMarkerPresent(context.Background(), sqlDB); err != nil {
+		t.Fatalf("marker query: %v", err)
+	} else if done {
+		t.Fatal("dry run stamped the normalize marker; want unset")
+	}
+
+	// Now apply: must stamp with the real rewritten count.
+	var apply bytes.Buffer
+	if rc := runReconcileLRC(context.Background(), &apply, ScanReconcileLRCCmd{ConfigPath: cfgPath, Yes: true}); rc != 0 {
+		t.Fatalf("apply rc=%d out=%s", rc, apply.String())
+	}
+	completedAt, count, err := readLRCNormalizeMarker(context.Background(), sqlDB)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("detail_count = %d, want 1", count)
+	}
+	if completedAt == "" {
+		t.Error("completed_at not stamped")
+	}
+
+	// A second apply (nothing left to rewrite) UPSERTs rather than being
+	// ignored -- the marker's count must fall to 0, proving this is not the
+	// INSERT-OR-IGNORE gate pattern the sibling one-shot markers use (an
+	// IGNORE write would leave count=1 stuck forever). completed_at is not
+	// re-asserted to have advanced: the marker's completed_at has only
+	// second precision, so two applies inside the same test can legitimately
+	// share a timestamp -- that would make a strict inequality assertion
+	// flaky, not wrong.
+	var again bytes.Buffer
+	if rc := runReconcileLRC(context.Background(), &again, ScanReconcileLRCCmd{ConfigPath: cfgPath, Yes: true}); rc != 0 {
+		t.Fatalf("re-apply rc=%d out=%s", rc, again.String())
+	}
+	if _, count2, err := readLRCNormalizeMarker(context.Background(), sqlDB); err != nil {
+		t.Fatalf("read marker after re-apply: %v", err)
+	} else if count2 != 0 {
+		t.Errorf("detail_count after re-apply = %d, want 0 (nothing left to rewrite)", count2)
+	}
+}
+
+func openDBFromConfig(t *testing.T, cfgPath string) *sql.DB {
+	t.Helper()
+	b, err := os.ReadFile(cfgPath) //nolint:gosec // reason: test-generated config path
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	// setupReconcileLRC writes `path = "<dbPath>"`; extract it rather than
+	// re-deriving the temp dir layout, so this stays correct if that helper's
+	// internals ever change.
+	const marker = `path = "`
+	start := strings.Index(string(b), marker)
+	if start < 0 {
+		t.Fatalf("config missing db path: %s", string(b))
+	}
+	start += len(marker)
+	end := strings.Index(string(b)[start:], `"`)
+	if end < 0 {
+		t.Fatalf("config db path unterminated: %s", string(b))
+	}
+	dbPath := strings.ReplaceAll(string(b)[start:start+end], `\\`, `\`)
+	sqlDB, err := db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return sqlDB
+}
+
+func lrcNormalizeMarkerPresent(ctx context.Context, sqlDB *sql.DB) (bool, error) {
+	var one int
+	err := sqlDB.QueryRowContext(ctx,
+		`SELECT 1 FROM maintenance_markers WHERE name = 'lrc_normalize_last_apply'`).Scan(&one)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func readLRCNormalizeMarker(ctx context.Context, sqlDB *sql.DB) (completedAt string, count int64, err error) {
+	err = sqlDB.QueryRowContext(ctx,
+		`SELECT completed_at, detail_count FROM maintenance_markers WHERE name = 'lrc_normalize_last_apply'`).
+		Scan(&completedAt, &count)
+	return completedAt, count, err
 }

@@ -32,6 +32,9 @@ templ dashboardContent(view DashboardView) {
 		@dashProviderTiles(view.ProviderTiles)
 		@dashUpNext(view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
 		@dashRecentOutcomes(view.RecentRows)
+		<p class="mx-dash-maintenance-note" title="Stacked (multi-timestamp) .lrc sidecars render incorrectly in simple players; reconcile-lrc expands them to one cue per line.">
+			{ view.LRCNormalizeSummary }
+		</p>
 		<p class="mx-dash-metrics-note">
 			Prometheus metrics:
 			<code class="mx-dash-code">/metrics</code>

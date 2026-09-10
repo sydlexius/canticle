@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lrcbackfill"
+	"github.com/sydlexius/canticle/internal/reports"
 )
 
 // runReconcileLRC walks the configured library roots and rewrites .lrc sidecars
@@ -92,6 +93,18 @@ func runReconcileLRC(ctx context.Context, out io.Writer, args ScanReconcileLRCCm
 	if err != nil {
 		slog.Error("reconcile-lrc failed", "error", err)
 		return 1
+	}
+
+	// Record this pass for the web dashboard summary (#929), only when it
+	// actually applied: --yes is the only mode that rewrites a file, so a
+	// dry run recording itself here would let a projection be misread as a
+	// count of files actually changed on disk. Best-effort and non-fatal --
+	// the rewrite itself already succeeded, and a stale/missing dashboard
+	// summary is far cheaper than failing a completed reconciliation over it.
+	if args.Yes {
+		if merr := markLRCNormalizeApply(ctx, sqlDB, summary.Normalized); merr != nil {
+			slog.Warn("reconcile-lrc: failed to record normalization summary marker; dashboard summary may be stale", "error", merr)
+		}
 	}
 
 	verb := "would rewrite"
@@ -472,6 +485,32 @@ func markLRCStackedCheckDone(ctx context.Context, sqlDB *sql.DB) error {
 	if _, err := sqlDB.ExecContext(ctx,
 		`INSERT OR IGNORE INTO maintenance_markers (name) VALUES (?)`, lrcStackedCheckMarker); err != nil {
 		return fmt.Errorf("record maintenance marker %q: %w", lrcStackedCheckMarker, err)
+	}
+	return nil
+}
+
+// markLRCNormalizeApply records the most recent `scan reconcile-lrc --yes`
+// apply pass for the web dashboard summary (#929): how many stacked .lrc
+// sidecars it rewrote, and when. It is the sole writer of
+// reports.MaintenanceMarkerLRCNormalize; the read side lives in
+// internal/reports so the dashboard queries it the same way every other
+// dashboard figure is sourced (#929 design decision 1 -- see that package's
+// LastLRCNormalization doc comment for why this reuses maintenance_markers
+// rather than a new table).
+//
+// UNLIKE lrcStackedCheckMarker/markLRCStackedCheckDone above, this is NOT a
+// run-once gate: `scan reconcile-lrc` is safely re-runnable (the backfill's
+// own needs-work gate makes a second pass over an already-clean file a
+// no-op), and each apply should overwrite the summary with its own fresh
+// count and timestamp rather than being silently ignored by an INSERT OR
+// IGNORE after the first ever run. So this UPSERTs.
+func markLRCNormalizeApply(ctx context.Context, sqlDB *sql.DB, normalized int) error {
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO maintenance_markers (name, completed_at, detail_count)
+         VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)
+         ON CONFLICT(name) DO UPDATE SET completed_at = excluded.completed_at, detail_count = excluded.detail_count`,
+		reports.MaintenanceMarkerLRCNormalize, normalized); err != nil {
+		return fmt.Errorf("record maintenance marker %q: %w", reports.MaintenanceMarkerLRCNormalize, err)
 	}
 	return nil
 }
