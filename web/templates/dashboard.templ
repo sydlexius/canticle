@@ -34,6 +34,7 @@ templ dashboardContent(view DashboardView) {
 		@dashRecentOutcomes(view.RecentRows)
 		<p class="mx-dash-maintenance-note" title="Stacked (multi-timestamp) .lrc sidecars render incorrectly in simple players; reconcile-lrc expands them to one cue per line.">
 			{ view.LRCNormalizeSummary }
+			<a class="mx-dash-maintenance-link" href="https://sydlexius.github.io/canticle/lrc-normalization/" target="_blank" rel="noopener noreferrer" aria-label="About LRC normalization (opens in a new tab)">What is this?</a>
 		</p>
 		<p class="mx-dash-metrics-note">
 			Prometheus metrics:
