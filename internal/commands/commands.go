@@ -954,6 +954,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// the lower tiers can substitute one. It gates both auto-minting and renewal:
 	// an operator credential is never overwritten (#554).
 	operatorSupplied := strings.TrimSpace(token) != ""
+	warnDegenerateOperatorToken(token, operatorTokenSource(args.Token, envSrc["api.token"]))
 
 	// DB is the lowest-precedence source for both secrets: consulted only when the
 	// higher tiers (CLI/env/TOML) are empty, and a DB-sourced value is never
@@ -2842,11 +2843,63 @@ func resolveSecretStore(cfg config.Config, sqlDB *sql.DB) (secrets.Store, error)
 	return secrets.NewSQLStore(sqlDB, key), nil
 }
 
+// operatorTokenSource names which operator tier supplied the token, for the
+// degenerate-token warning. Precedence mirrors runServe: CLI, then env, then
+// the TOML file.
+func operatorTokenSource(cliToken string, fromEnv bool) string {
+	switch {
+	case cliToken != "":
+		return "cli"
+	case fromEnv:
+		return "env"
+	default:
+		return "config file"
+	}
+}
+
+// warnDegenerateOperatorToken logs one warning when an OPERATOR-supplied token
+// (CLI/env/TOML) is degenerate (#934) and reports whether it did. It is
+// warn-only by design: an operator credential is never discarded or replaced
+// (#554), so the token is taken by value and cannot be altered here. The log
+// names the source tier, never the token value. A blank token is not an
+// operator token and does not warn.
+func warnDegenerateOperatorToken(token, source string) bool {
+	// Judge the trimmed value so a pasted token with surrounding whitespace is
+	// classified the same way as the blank check above it.
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" || !musixmatch.IsDegenerateToken(trimmed) {
+		return false
+	}
+	slog.Warn("the operator-supplied musixmatch token is degenerate (one character repeated), the shape a retired client identity issued (#934); "+
+		"it is kept as configured but is very unlikely to work -- clear it to let canticle mint its own",
+		"source", source)
+	return true
+}
+
 // resolveTokenWithStore appends the encrypted DB store as the LOWEST-precedence
 // Musixmatch token source. higher is the already-resolved value from the higher
 // tiers (--token CLI > MUSIXMATCH_TOKEN > MXLRC_API_TOKEN > TOML api.token). The
 // DB is consulted only when higher is empty; a present higher tier is used as-is
 // and is NEVER auto-persisted to the DB (import is an explicit operator action).
+//
+// A stored token that is DEGENERATE (musixmatch.IsDegenerateToken: empty, or one
+// character repeated) is treated as if the DB tier were empty (#934). Builds
+// before #934 accepted and persisted the 56-zero token the retired desktop
+// identity issued, and bootstrapToken never re-mints over a DB-sourced token, so
+// without this an existing install would keep sending that token forever. The
+// stale row is not deleted here: returning fromDB=false routes the caller into
+// bootstrapToken's normal mint, whose successful persist overwrites it (and
+// whose failed mint deletes it, see dropDegenerateStoredToken).
+//
+// RECOVERY LIMIT: this recovers an existing install ONLY when the stored token
+// is degenerate. A stored, non-degenerate token (for example a real token
+// minted by a pre-#934 build under the retired desktop identity) is kept and
+// sent to the current host. It is replaced only if upstream answers with inner
+// status_code 401 plus hint=renew (musixmatch.ErrTokenRenewalRequired, the sole
+// renewal trigger); any other rejection leaves the Musixmatch lane failing
+// until the operator replaces the token. The renewal trigger is deliberately
+// not widened: minting is rate limited per IP, so renewing on a bare rejection
+// risks mint churn.
 func resolveTokenWithStore(ctx context.Context, higher string, store secrets.Store) (token string, fromDB bool, err error) {
 	if strings.TrimSpace(higher) != "" || store == nil {
 		return higher, false, nil
@@ -2856,6 +2909,10 @@ func resolveTokenWithStore(ctx context.Context, higher string, store secrets.Sto
 		return "", false, fmt.Errorf("read musixmatch token from secret store: %w", err)
 	}
 	if !ok {
+		return higher, false, nil
+	}
+	if musixmatch.IsDegenerateToken(v) {
+		slog.Warn("stored musixmatch token is degenerate (empty or one repeated character), the shape a retired client identity issued (#934); discarding it and minting a fresh one")
 		return higher, false, nil
 	}
 	return v, true, nil
