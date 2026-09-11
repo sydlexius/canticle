@@ -131,6 +131,11 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 		if err := ctx.Err(); err != nil {
 			return models.Song{}, err
 		}
+		if r.haveHeld && lane.instrumentalOnly {
+			// A suitable lyric is already held (#950), and an instrumental verdict
+			// can never outrank words, so the detector is not run at all.
+			continue
+		}
 
 		song, err := lane.FindLyrics(ctx, track, sourcePath)
 		class := ClassifyOutcome(err)
@@ -145,12 +150,26 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 		attempted = append(attempted, attemptedLane{name: lane.Name(), local: lane.Local()})
 
 		if err == nil {
-			if IsSuitable(song, o.guard) {
-				song.WinningLane = lane.Name()
-				song.LaneAttempts = laneAttemptsFor(attempted, lane.Name())
-				return song, nil
+			// acceptable, not bare IsSuitable (#950): a result the writer's
+			// timing guard would refuse or demote does not end the dispatch.
+			// It commits unless a held demotable lyric lands at least as well;
+			// on that tie the earlier (higher-priority) lane keeps it. The rank
+			// is what the writer lands (landedQuality), so a provider
+			// instrumental carrying a subtitle line never replaces held words.
+			switch classifyCandidate(song, track, o.guard) {
+			case candidateCommit:
+				if !r.haveHeld || landedQuality(song, track) > QualityUnsynced {
+					song.WinningLane = lane.Name()
+					song.LaneAttempts = laneAttemptsFor(attempted, lane.Name())
+					return song, nil
+				}
+				continue
+			case candidateHold:
+				r.hold(song, lane.Name())
+				continue
+			case candidateRetain:
 			}
-			r.retain(song, lane.Name())
+			r.retain(song, lane.Name(), retainQuality(song, track))
 			continue
 		}
 
@@ -159,7 +178,9 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 
 	song, err := o.resolve(ctx, &r)
 	// Attach per-track attribution to whatever resolve returns: a best-available
-	// fallback names its serving lane as the hit; an error (benign miss / transport)
+	// fallback names its serving lane as the hit -- including an exhausted
+	// timing-refused result that lands nothing, which is still attributed to its
+	// lane as the hit, exactly as before; an error (benign miss / transport)
 	// returns no winner, so every attempted lane is recorded as a miss. The worker
 	// persists these only on the success and benign-miss paths (not on hard
 	// failures), so carrying them on the error song here is harmless.
@@ -202,11 +223,28 @@ type dispatchResult struct {
 	topErr      error
 	topClass    OutcomeClass
 	consulted   int
+	// held is the first result that is SUITABLE but that the timing guard would
+	// demote to .txt (MisSynced / degenerate, #950): the result a build before
+	// #950 committed on the spot. It outranks every retained (non-suitable)
+	// result, because it is real words the writer will land; the first one held
+	// keeps it, so the earlier lane wins a tie.
+	heldSong models.Song
+	heldLane string
+	haveHeld bool
 }
 
-// retain keeps song as the best-available fallback if it outranks the current one.
-func (r *dispatchResult) retain(song models.Song, laneName string) {
-	if q := QualityOf(song); !r.haveBest || q > r.bestQuality {
+// hold keeps song as the demotable fallback unless one is already held.
+func (r *dispatchResult) hold(song models.Song, laneName string) {
+	if !r.haveHeld {
+		r.heldSong, r.heldLane, r.haveHeld = song, laneName, true
+	}
+}
+
+// retain keeps song as the best-available fallback if its quality q outranks the
+// current one. q is the caller's retainQuality: what the writer would actually
+// land, so a timing-refused synced result cannot outrank a later usable one.
+func (r *dispatchResult) retain(song models.Song, laneName string, q Quality) {
+	if !r.haveBest || q > r.bestQuality {
 		r.bestSong, r.bestQuality, r.haveBest, r.bestLane = song, q, true, laneName
 	}
 }
@@ -225,7 +263,21 @@ func (r *dispatchResult) rankErr(err error, class OutcomeClass) {
 // error is surfaced; if every lane was unavailable (breaker open) the unavailable
 // sentinel is returned so the worker releases the item, unless the parent context
 // was canceled, in which case its error wins.
+//
+// A held demotable lyric (#950) is returned ahead of any retained result: it
+// is suitable, and the writer lands its words as .txt.
+//
+// A retained result the timing guard would QUARANTINE lands nothing, but it
+// ranks QualityNone and so loses to any other retained result. When it is the
+// only result it is returned exactly as before #950, even if some lane was
+// breaker-open, throttled, not ready, or failed in transport: the row settles
+// terminal done with timing_outcome=categorical and nothing written. Waiting on
+// such an unavailable lane instead is left to a follow-up.
 func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.Song, error) {
+	if r.haveHeld {
+		r.heldSong.WinningLane = r.heldLane
+		return r.heldSong, nil
+	}
 	if r.haveBest {
 		r.bestSong.WinningLane = r.bestLane
 		return r.bestSong, nil

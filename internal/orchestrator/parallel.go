@@ -102,9 +102,22 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 			default:
 				r.consulted++
 				consulted = append(consulted, attemptedLane{name: res.name, local: res.local})
+				kind := candidateRetain
+				if res.err == nil {
+					kind = classifyCandidate(res.song, track, o.guard)
+				}
 				switch {
-				case res.err == nil && IsSuitable(res.song, o.guard):
-					if QualityOf(res.song) >= QualitySynced {
+				case res.err == nil && kind != candidateRetain:
+					// #950: only a result the timing guard promotes as-is may commit
+					// as synced and cancel the rest. A demotable one lands as .txt, so
+					// it takes the held-unsynced path below, exactly like any other
+					// suitable unsynced result (and so still outranks a guard-rejected
+					// one). A quarantined result is never suitable here. While a
+					// lyric is held, a result commits over it only if what the writer
+					// lands outranks it (landedQuality), so a provider instrumental
+					// carrying a subtitle line never replaces held words.
+					if kind == candidateCommit && QualityOf(res.song) >= QualitySynced &&
+						(!haveHeld || landedQuality(res.song, track) > QualityUnsynced) {
 						res.song.WinningLane = res.name
 						// Attribute over the lanes consulted SO FAR (the winner plus any
 						// lane that already reported a non-unavailable result): the winner
@@ -125,7 +138,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 						upgrade = time.After(o.raceWait)
 					}
 				case res.err == nil:
-					r.retain(res.song, res.name)
+					r.retain(res.song, res.name, retainQuality(res.song, track))
 				default:
 					r.rankErr(res.err, class)
 				}

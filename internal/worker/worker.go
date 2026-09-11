@@ -1550,9 +1550,17 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			w.consecutiveFailures = 0
 			return nil
 		}
-		if err := w.store(ctx, resolvedTrack, song); err != nil {
-			slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
-			return w.fail(ctx, item, err)
+		// A result the timing guard refuses writes nothing (#950), so it must not
+		// be cached: a cached copy would satisfy the next lookup for this key as
+		// though it were a good hit. The orchestrator returns one only when no lane
+		// produced anything better, including when some lane was breaker-open or
+		// throttled; the row then settles terminal done below with
+		// timing_outcome=categorical exactly as before #950, NOT miss-backoff.
+		if !refusedByTimingGuard(song, resolvedTrack.TrackLength) {
+			if err := w.store(ctx, resolvedTrack, song); err != nil {
+				slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
+				return w.fail(ctx, item, err)
+			}
 		}
 	}
 
@@ -2036,9 +2044,17 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 	if !bypassCache {
 		cached, err := w.cache.Lookup(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength))
 		if err == nil {
-			return decodeSong(cached, track), true, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+			hit := decodeSong(cached, track)
+			if !refusedByTimingGuard(hit, track.TrackLength) {
+				return hit, true, nil
+			}
+			// A build before #950 cached a lyric ahead of the timing guard, so the
+			// cache can hold one the guard refuses. Serving it would settle the row
+			// with nothing written and never consult a lane; read it as a miss and
+			// dispatch instead. A landed result overwrites the entry.
+			slog.Debug("worker: cached lyric is timing-refused; dispatching instead",
+				"artist", track.ArtistName, "track", track.TrackName)
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			return models.Song{}, false, fmt.Errorf("worker: lookup cache: %w", err)
 		}
 	}
@@ -2061,6 +2077,17 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 		return song, false, err
 	}
 	return song, false, nil
+}
+
+// refusedByTimingGuard reports whether the writer's accept-time timing guard
+// would quarantine song (write nothing) when judged against audioSeconds, the
+// same audio duration RunOnce stamps before the write. It asks
+// lyrics.DecidePromotion, the writer's own decision, so the two cannot disagree;
+// an unknown duration fails open exactly as the writer does.
+func refusedByTimingGuard(song models.Song, audioSeconds int) bool {
+	song.AudioDurationSeconds = audioSeconds
+	decision, _, _ := lyrics.DecidePromotion(song)
+	return decision == lyrics.Quarantine
 }
 
 func (w *Worker) store(ctx context.Context, track models.Track, song models.Song) error {

@@ -36,6 +36,11 @@ type Lane struct {
 	// budget (#534). The zero value is false, so a lane is treated as remote
 	// unless it opts in -- a new lane cannot accidentally suppress pacing.
 	local bool
+	// instrumentalOnly marks a lane whose only possible answer is an
+	// instrumental verdict (the detector lane). Ordered dispatch skips it once a
+	// suitable lyric is already held (#950): words outrank an instrumental
+	// marker, so running YAMNet + ffmpeg could only produce a result that loses.
+	instrumentalOnly bool
 	// drift detects a provider that has stopped discriminating between requests
 	// (#839). Optional and nil by default, so a lane that does not opt in behaves
 	// exactly as before. See WithResponseDrift.
