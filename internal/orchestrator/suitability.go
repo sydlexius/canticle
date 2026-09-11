@@ -166,7 +166,9 @@ func classifyCandidate(song models.Song, track models.Track, guard ScriptGuard) 
 // land, not by what the provider sent. A quarantined synced result writes
 // nothing, so it ranks QualityNone and any later result (even a provider
 // instrumental marker) outranks it; a demoted one lands as .txt, so it ranks
-// QualityUnsynced.
+// QualityUnsynced. A provider instrumental that also carries subtitles still
+// ranks by its cues here; landedQuality is the stricter, writer-aligned rank
+// the while-held upgrade checks use.
 func retainQuality(song models.Song, track models.Track) Quality {
 	switch timingDecision(song, track) {
 	case lyrics.Quarantine:
@@ -176,4 +178,17 @@ func retainQuality(song models.Song, track models.Track) Quality {
 	case lyrics.PromoteAsIs:
 	}
 	return QualityOf(song)
+}
+
+// landedQuality is retainQuality made fully writer-aligned: a song flagged
+// instrumental ranks QualityInstrumental whatever cues it carries, because the
+// writer treats the flag as authoritative and lands only a marker (Musixmatch
+// sends a subtitle line alongside it). It is used ONLY to decide whether a
+// result may replace a held demotable lyric (#950), so a provider instrumental
+// can never displace held words; with nothing held, dispatch is unchanged.
+func landedQuality(song models.Song, track models.Track) Quality {
+	if song.Track.Instrumental == 1 {
+		return QualityInstrumental
+	}
+	return retainQuality(song, track)
 }

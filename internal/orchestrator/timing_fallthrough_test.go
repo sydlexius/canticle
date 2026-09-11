@@ -360,3 +360,83 @@ func TestRetainedGuardRejectedRanksByWhatLands(t *testing.T) {
 		t.Fatalf("winner %q; want the earlier lane (a MisSynced result lands as .txt, tying an unsynced one)", song.WinningLane)
 	}
 }
+
+// instrumentalWithSubtitle is a PROVIDER instrumental (no DetectorVersion) that
+// also carries a subtitle line, which Musixmatch does. The writer treats the
+// flag as authoritative and lands only an instrumental marker, so for ranking
+// it is an instrumental result, whatever cues came with it.
+func instrumentalWithSubtitle() models.Song {
+	return models.Song{
+		Track:     models.Track{Instrumental: 1},
+		Subtitles: models.Synced{Lines: []models.Lines{timedLine(10, "instrumental cue")}},
+	}
+}
+
+// TestOrderedHeldOverrunBeatsProviderInstrumentalWithSubtitle: a held
+// MisSynced lyric is real words; a later provider instrumental must not
+// replace it just because it carries a subtitle line.
+func TestOrderedHeldOverrunBeatsProviderInstrumentalWithSubtitle(t *testing.T) {
+	p1 := &stubProvider{name: "innertube", song: overrunSong("held words")}
+	p2 := &stubProvider{name: "musixmatch", song: instrumentalWithSubtitle()}
+	o, _ := New(ModeOrdered, laneFor(p1), laneFor(p2))
+
+	song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if song.WinningLane != "innertube" || song.Track.Instrumental == 1 || firstLine(song) != "held words" {
+		t.Fatalf("winner %q (instrumental=%d, first line %q); want the held MisSynced words", song.WinningLane, song.Track.Instrumental, firstLine(song))
+	}
+	assertAttempts(t, song.LaneAttempts, map[string]bool{"innertube": true, "musixmatch": false})
+}
+
+// TestParallelHeldOverrunBeatsProviderInstrumentalWithSubtitle mirrors the
+// ordered case: the slower instrumental must not commit over the held lyric.
+func TestParallelHeldOverrunBeatsProviderInstrumentalWithSubtitle(t *testing.T) {
+	fast := &delayProvider{name: "innertube", song: overrunSong("held words")}
+	slow := &delayProvider{name: "musixmatch", song: instrumentalWithSubtitle(), delay: 30 * time.Millisecond}
+	o, _ := New(ModeParallel, delayLane(fast), delayLane(slow))
+
+	song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if song.WinningLane != "innertube" || song.Track.Instrumental == 1 || firstLine(song) != "held words" {
+		t.Fatalf("winner %q (instrumental=%d, first line %q); want the held MisSynced words", song.WinningLane, song.Track.Instrumental, firstLine(song))
+	}
+}
+
+// TestOrderedProviderInstrumentalWithSubtitleNothingHeldCommits pins the
+// pre-existing behavior the fix must not touch: with nothing held, the
+// instrumental-with-subtitle result still ends the dispatch at its lane.
+func TestOrderedProviderInstrumentalWithSubtitleNothingHeldCommits(t *testing.T) {
+	p1 := &stubProvider{name: "musixmatch", song: instrumentalWithSubtitle()}
+	p2 := &stubProvider{name: "innertube", song: goodSyncedSong("never asked")}
+	o, _ := New(ModeOrdered, laneFor(p1), laneFor(p2))
+
+	song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if p2.calls != 0 || song.WinningLane != "musixmatch" || song.Track.Instrumental != 1 {
+		t.Fatalf("second lane calls = %d, winner %q (instrumental=%d); want the first lane's instrumental committed", p2.calls, song.WinningLane, song.Track.Instrumental)
+	}
+}
+
+// TestParallelProviderInstrumentalWithSubtitleNothingHeldCommits: with nothing
+// held, a fast instrumental-with-subtitle still commits immediately and cancels
+// the slower lane, exactly as before.
+func TestParallelProviderInstrumentalWithSubtitleNothingHeldCommits(t *testing.T) {
+	fast := &delayProvider{name: "musixmatch", song: instrumentalWithSubtitle()}
+	slow := &delayProvider{name: "innertube", song: goodSyncedSong("too late"), delay: time.Second}
+	o, _ := New(ModeParallel, delayLane(fast), delayLane(slow))
+
+	song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+	if err != nil {
+		t.Fatalf("FindLyrics: %v", err)
+	}
+	if song.WinningLane != "musixmatch" || song.Track.Instrumental != 1 {
+		t.Fatalf("winner %q (instrumental=%d); want the fast instrumental committed immediately", song.WinningLane, song.Track.Instrumental)
+	}
+	assertAttempts(t, song.LaneAttempts, map[string]bool{"musixmatch": true})
+}

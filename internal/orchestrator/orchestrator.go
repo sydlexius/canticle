@@ -153,10 +153,12 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			// acceptable, not bare IsSuitable (#950): a result the writer's
 			// timing guard would refuse or demote does not end the dispatch.
 			// It commits unless a held demotable lyric lands at least as well;
-			// on that tie the earlier (higher-priority) lane keeps it.
+			// on that tie the earlier (higher-priority) lane keeps it. The rank
+			// is what the writer lands (landedQuality), so a provider
+			// instrumental carrying a subtitle line never replaces held words.
 			switch classifyCandidate(song, track, o.guard) {
 			case candidateCommit:
-				if !r.haveHeld || retainQuality(song, track) > QualityUnsynced {
+				if !r.haveHeld || landedQuality(song, track) > QualityUnsynced {
 					song.WinningLane = lane.Name()
 					song.LaneAttempts = laneAttemptsFor(attempted, lane.Name())
 					return song, nil

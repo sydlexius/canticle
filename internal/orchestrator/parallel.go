@@ -112,8 +112,12 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 					// as synced and cancel the rest. A demotable one lands as .txt, so
 					// it takes the held-unsynced path below, exactly like any other
 					// suitable unsynced result (and so still outranks a guard-rejected
-					// one). A quarantined result is never suitable here.
-					if kind == candidateCommit && QualityOf(res.song) >= QualitySynced {
+					// one). A quarantined result is never suitable here. While a
+					// lyric is held, a result commits over it only if what the writer
+					// lands outranks it (landedQuality), so a provider instrumental
+					// carrying a subtitle line never replaces held words.
+					if kind == candidateCommit && QualityOf(res.song) >= QualitySynced &&
+						(!haveHeld || landedQuality(res.song, track) > QualityUnsynced) {
 						res.song.WinningLane = res.name
 						// Attribute over the lanes consulted SO FAR (the winner plus any
 						// lane that already reported a non-unavailable result): the winner
