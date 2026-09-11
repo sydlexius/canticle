@@ -68,6 +68,9 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker, pacer provid
 		// lane added to this package should make the same call explicitly rather
 		// than silently inheriting whatever this constructor happens to do.
 		pacer: pacer,
+		// instrumentalOnly=true: a gate-positive verdict is the only result this
+		// lane can produce, so it is skipped while a lyric is held (#950).
+		instrumentalOnly: true,
 		resolve: func(ctx context.Context, track models.Track, sourcePath string) (models.Song, error) {
 			// An empty sourcePath means instrumental detection is disabled for this
 			// item (e.g. no audio path on the work item); the detector must never be

@@ -112,16 +112,16 @@ func TestIsSuitable_UnchangedByWordSync(t *testing.T) {
 func TestRetain_PrefersWordSynced(t *testing.T) {
 	t.Run("word-sync arrives second", func(t *testing.T) {
 		var r dispatchResult
-		r.retain(syncedSong(), "line-lane")
-		r.retain(wordSyncedSong(), "word-lane")
+		r.retain(syncedSong(), "line-lane", QualityOf(syncedSong()))
+		r.retain(wordSyncedSong(), "word-lane", QualityOf(wordSyncedSong()))
 		if r.bestLane != "word-lane" {
 			t.Errorf("best lane = %q, want word-lane", r.bestLane)
 		}
 	})
 	t.Run("word-sync arrives first and is not displaced", func(t *testing.T) {
 		var r dispatchResult
-		r.retain(wordSyncedSong(), "word-lane")
-		r.retain(syncedSong(), "line-lane")
+		r.retain(wordSyncedSong(), "word-lane", QualityOf(wordSyncedSong()))
+		r.retain(syncedSong(), "line-lane", QualityOf(syncedSong()))
 		if r.bestLane != "word-lane" {
 			t.Errorf("best lane = %q, want word-lane", r.bestLane)
 		}

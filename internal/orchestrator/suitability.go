@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"log/slog"
 
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -104,4 +105,75 @@ func IsSuitable(song models.Song, guard ScriptGuard) bool {
 		}
 	}
 	return true
+}
+
+// judgeAgainst returns song with the audio duration the writer's accept-time
+// timing guard (#439) will judge it against. The query track's TrackLength is
+// that duration: the worker settles it from the audio file's own tags before
+// dispatch and stamps the very same value onto Song.AudioDurationSeconds before
+// the write. A zero leaves the writer's own fallback (the provider's catalog
+// length) in charge, and a song with neither fails open -- identically on both
+// sides, because both call lyrics.DecidePromotion.
+func judgeAgainst(song models.Song, track models.Track) models.Song {
+	song.AudioDurationSeconds = track.TrackLength
+	return song
+}
+
+// timingDecision is the writer's own promotion decision for song (#950). The
+// orchestrator never recomputes or copies a threshold: the predicate stays owned
+// by internal/timing and the decision by lyrics.DecidePromotion, so what the
+// orchestrator treats as usable is by construction what the writer would land.
+func timingDecision(song models.Song, track models.Track) lyrics.PromotionDecision {
+	decision, _, _ := lyrics.DecidePromotion(judgeAgainst(song, track))
+	return decision
+}
+
+// candidate is what the dispatch does with one lane result (#950).
+type candidate int
+
+const (
+	// candidateRetain: not suitable (script guard, below unsynced quality) or
+	// timed to a different recording (quarantined). Kept only as the ranked
+	// last resort; see retainQuality.
+	candidateRetain candidate = iota
+	// candidateCommit: suitable AND the timing guard promotes it as-is, so it
+	// may end the dispatch.
+	candidateCommit
+	// candidateHold: suitable, but the timing guard would demote it to .txt
+	// (MisSynced / degenerate). It does not end the dispatch, yet it outranks
+	// every retained result: a script-guard-rejected one writes nothing.
+	candidateHold
+)
+
+// classifyCandidate judges a lane result ONCE: the script guard runs exactly
+// one time per result, as it did before #950, and the timing decision is the
+// writer's own (lyrics.DecidePromotion), so no threshold lives here.
+func classifyCandidate(song models.Song, track models.Track, guard ScriptGuard) candidate {
+	if !IsSuitable(song, guard) {
+		return candidateRetain
+	}
+	switch timingDecision(song, track) {
+	case lyrics.PromoteAsIs:
+		return candidateCommit
+	case lyrics.DemoteToUnsynced:
+		return candidateHold
+	case lyrics.Quarantine:
+	}
+	return candidateRetain
+}
+
+// retainQuality ranks a non-committed result by what the writer would actually
+// land, not by what the provider sent. A quarantined synced result writes
+// nothing, so it ranks QualityNone and any later result (even a provider
+// instrumental marker) outranks it; a demoted one lands as .txt, so it ranks
+// QualityUnsynced.
+func retainQuality(song models.Song, track models.Track) Quality {
+	switch timingDecision(song, track) {
+	case lyrics.Quarantine:
+		return QualityNone
+	case lyrics.DemoteToUnsynced:
+		return QualityUnsynced
+	case lyrics.PromoteAsIs:
+	}
+	return QualityOf(song)
 }
