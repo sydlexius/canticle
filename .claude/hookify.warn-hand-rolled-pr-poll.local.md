@@ -3,7 +3,7 @@ name: warn-hand-rolled-pr-poll
 enabled: true
 event: bash
 action: warn
-pattern: (?:while|until)\b[\s\S]{0,200}?\bdo\b[\s\S]{0,200}?gh\s+pr\s+(?:view|checks)|gh\s+pr\s+(?:view|checks)[\s\S]{0,200}?\bsleep\b|\bsleep\b[\s\S]{0,200}?gh\s+pr\s+(?:view|checks)|gh\s+pr\s+checks[\s\S]{0,200}?--(?:watch|interval)
+pattern: (?:while|until)\b(?:(?!\bdone\b)[\s\S]){0,200}?gh\s+pr\s+(?:view|checks)|gh\s+pr\s+(?:view|checks)[\s\S]{0,200}?\bsleep\b|\bsleep\b[\s\S]{0,200}?gh\s+pr\s+(?:view|checks)|gh\s+pr\s+checks[\s\S]{0,200}?--(?:watch|interval)(?![\w-])
 ---
 
 Use `/pr-watch <pr>` instead of hand-rolling a PR-status poll.
@@ -15,15 +15,25 @@ it handles the empty-`conclusion` and CR-trickle races a raw `gh pr checks` loop
 gets wrong, and it does not burn turns re-polling.
 
 This is a WARNING, not a block. What it flags is WAITING, never the command
-name: a `while`/`until ... do` wrapping `gh pr view/checks`, either of those
-near a `sleep` in either order, or `gh pr checks --watch`/`--interval` (gh's
-own built-in poll). If that is what you are doing, stop and arm `/pr-watch`.
+name: a `while`/`until` loop containing `gh pr view/checks` in its CONDITION or
+its BODY, either of those near a `sleep` in either order, or `gh pr checks
+--watch`/`--interval` (gh's own built-in poll). If that is what you are doing,
+stop and arm `/pr-watch`.
 
 The connectors cross NEWLINES, because a Bash tool call is one string and a
 real poll is usually written multiline (`while true; do` on one line, the
 command and the `sleep` on later ones; or a `\`-continued `--watch`). They are
 bounded to ~200 chars, so a `sleep` far away in an unrelated part of a batch
-does not pair with a `gh pr` read.
+does not pair with a `gh pr` read. The loop connector additionally refuses to
+cross `done`, so a read AFTER a loop ends is not attributed to that loop, and
+the option match ends at a token boundary so `--watchdog` is not a `--watch`.
+
+ACCEPTED RESIDUAL: this is a Python `re.search` over the RAW command string, so
+it cannot tell code from a quoted literal - `printf 'gh pr checks --watch'`
+warns. Fixing that needs shell-aware parsing (frame tracking for quotes,
+heredocs and substitutions), which is a scanner, not a frontmatter field. The
+error is in the harmless direction: a spurious advisory line on a command nobody
+runs in anger, versus missing a real poll. Left as-is deliberately.
 
 A one-off SNAPSHOT is fine and does not fire: a bare `gh pr checks <pr>` prints
 once and exits, exactly like `gh pr view <pr> --json state,mergeStateStatus,
