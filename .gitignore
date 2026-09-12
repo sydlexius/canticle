@@ -62,9 +62,10 @@ docs/design/
 # Serena MCP
 .serena/
 
-# AI assistant config (local only — except shared release metadata)
+# AI assistant config (local only — except shared release metadata and hookify rules)
 .claude/*
 !.claude/release.toml
+!.claude/hookify.*.local.md
 
 # Orchestrate session checkpoint (machine-local, transient; never committed)
 /SESSION-STATE.md
