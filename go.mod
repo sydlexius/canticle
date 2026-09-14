@@ -15,7 +15,7 @@ require (
 	github.com/ulikunitz/xz v0.5.16
 	github.com/valyala/fastjson v1.6.10
 	golang.org/x/crypto v0.56.0
-	golang.org/x/text v0.41.0
+	golang.org/x/text v0.42.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	modernc.org/sqlite v1.58.0
 )
@@ -39,9 +39,9 @@ require (
 	github.com/sethvargo/go-retry v0.4.0 // indirect
 	github.com/wadey/gocovmerge v0.0.0-20160331181800-b5bfa59ec0ad // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/mod v0.40.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect
 	modernc.org/libc v1.75.6 // indirect
