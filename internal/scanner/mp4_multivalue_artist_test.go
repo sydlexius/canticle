@@ -105,7 +105,7 @@ func TestScanArtist_MP4MultiValueRecovered(t *testing.T) {
 func TestExtractArtist_MP4ThreeValues(t *testing.T) {
 	buf := buildM4A(tagAtom("\xa9ART", "Alpha", "Bravo", "Charlie"))
 	m := readMP4(t, buf)
-	if got, want := extractArtist(m), "Alpha; Bravo; Charlie"; got != want {
+	if got, want := extractArtist(m, nil), "Alpha; Bravo; Charlie"; got != want {
 		t.Errorf("extractArtist = %q; want %q", got, want)
 	}
 }
@@ -116,7 +116,7 @@ func TestExtractArtist_MP4ThreeValues(t *testing.T) {
 func TestExtractArtist_MP4SingleValueUnchanged(t *testing.T) {
 	buf := buildM4A(tagAtom("\xa9ART", "Solo Artist"))
 	m := readMP4(t, buf)
-	if got, want := extractArtist(m), "Solo Artist"; got != want {
+	if got, want := extractArtist(m, nil), "Solo Artist"; got != want {
 		t.Errorf("extractArtist = %q; want %q", got, want)
 	}
 }
@@ -125,7 +125,7 @@ func TestExtractArtist_MP4SingleValueUnchanged(t *testing.T) {
 func TestExtractAlbumArtist_MP4MultiValueRecovered(t *testing.T) {
 	buf := buildM4A(tagAtom("aART", "Alpha", "Bravo"))
 	m := readMP4(t, buf)
-	if got, want := extractAlbumArtist(m), "Alpha; Bravo"; got != want {
+	if got, want := extractAlbumArtist(m, nil), "Alpha; Bravo"; got != want {
 		t.Errorf("extractAlbumArtist = %q; want %q", got, want)
 	}
 }
@@ -136,7 +136,7 @@ func TestExtractAlbumArtist_MP4MultiValueRecovered(t *testing.T) {
 func TestExtractArtist_MP4ValueContainingDollarSign(t *testing.T) {
 	buf := buildM4A(tagAtom("\xa9ART", "Ke$ha"))
 	m := readMP4(t, buf)
-	if got, want := extractArtist(m), "Ke$ha"; got != want {
+	if got, want := extractArtist(m, nil), "Ke$ha"; got != want {
 		t.Errorf("extractArtist = %q; want %q", got, want)
 	}
 }
@@ -150,7 +150,7 @@ func TestExtractArtist_MP4ValueContainingDollarSign(t *testing.T) {
 func TestExtractArtist_MP4ValueContainingDataSubstring(t *testing.T) {
 	buf := buildM4A(tagAtom("\xa9ART", "metadata artist"))
 	m := readMP4(t, buf)
-	if got, want := extractArtist(m), "metadata artist"; got != want {
+	if got, want := extractArtist(m, nil), "metadata artist"; got != want {
 		t.Errorf("extractArtist = %q; want %q", got, want)
 	}
 }
@@ -205,7 +205,7 @@ func TestExtractArtist_MP4TrailingEmptyValue(t *testing.T) {
 		t.Fatalf("fixture no longer reproduces the splice: Artist() = %q", raw)
 	}
 
-	if got, want := extractArtist(m), "Only One"; got != want {
+	if got, want := extractArtist(m, nil), "Only One"; got != want {
 		t.Errorf("extractArtist() = %q, want %q (raw = %q)", got, want, m.Artist())
 	}
 }
@@ -216,7 +216,7 @@ func TestExtractArtist_MP4TrailingEmptyValue(t *testing.T) {
 func TestExtractArtist_MP4FiveValues(t *testing.T) {
 	m := readMP4(t, buildM4A(tagAtom("\xa9ART", "V1", "V2", "V3", "V4", "V5")))
 
-	if got, want := extractArtist(m), "V1; V2; V3; V4; V5"; got != want {
+	if got, want := extractArtist(m, nil), "V1; V2; V3; V4; V5"; got != want {
 		t.Errorf("extractArtist() = %q, want %q", got, want)
 	}
 }
@@ -227,7 +227,7 @@ func TestExtractArtist_MP4FiveValues(t *testing.T) {
 func TestExtractArtist_MP4LowercaseAtom(t *testing.T) {
 	m := readMP4(t, buildM4A(tagAtom("\xa9art", "Low One", "Low Two")))
 
-	if got, want := extractArtist(m), "Low One; Low Two"; got != want {
+	if got, want := extractArtist(m, nil), "Low One; Low Two"; got != want {
 		t.Errorf("extractArtist() = %q, want %q", got, want)
 	}
 }
@@ -238,7 +238,7 @@ func TestExtractArtist_MP4LowercaseAtom(t *testing.T) {
 func TestExtractArtist_MP4UnicodeValues(t *testing.T) {
 	m := readMP4(t, buildM4A(tagAtom("\xa9ART", "Ólafur", "坂本")))
 
-	if got, want := extractArtist(m), "Ólafur; 坂本"; got != want {
+	if got, want := extractArtist(m, nil), "Ólafur; 坂本"; got != want {
 		t.Errorf("extractArtist() = %q, want %q", got, want)
 	}
 }
@@ -271,7 +271,7 @@ func TestExtractArtist_MP4AllEmptyChildren(t *testing.T) {
 				t.Fatalf("fixture no longer reproduces the splice: Artist() = %q", raw)
 			}
 
-			if got := extractArtist(m); got != "" {
+			if got := extractArtist(m, nil); got != "" {
 				t.Errorf("extractArtist() = %q, want %q (raw = %q)", got, "", m.Artist())
 			}
 		})
@@ -312,7 +312,7 @@ func TestExtractArtist_MP4ChainShapedSingleValue(t *testing.T) {
 		t.Fatalf("fixture mangled before the code under test: Artist() = %q, want %q", got, want)
 	}
 
-	if got := extractArtist(m); got != value {
+	if got := extractArtist(m, nil); got != value {
 		t.Errorf("a chain-shaped SINGLE value was split: extractArtist() = %q, want %q", got, value)
 	}
 }
@@ -324,7 +324,7 @@ func TestExtractArtist_MP4ChainShapedGenuineSplice(t *testing.T) {
 	value := splicedValue("First One", mp4TextClassLocale[:], "Second One")
 	m := readMP4(t, buildM4A(tagAtom("\xa9ART", value)))
 
-	if got, want := extractArtist(m), "First One; Second One"; got != want {
+	if got, want := extractArtist(m, nil), "First One; Second One"; got != want {
 		t.Errorf("extractArtist() = %q, want %q", got, want)
 	}
 }
@@ -362,7 +362,7 @@ func TestExtractArtist_MP4OversizedLengthRejected(t *testing.T) {
 	m := readMP4(t, buildM4A(tagAtom("\xa9ART", value)))
 
 	// Must not panic, and must not split on a length the buffer cannot back.
-	if got := extractArtist(m); got != value {
+	if got := extractArtist(m, nil); got != value {
 		t.Errorf("extractArtist() = %q, want the unsplit value %q", got, value)
 	}
 }
