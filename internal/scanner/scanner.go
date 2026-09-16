@@ -921,8 +921,16 @@ const artistValueSep = "; "
 // separator. Files carrying only a multi-value TPE1 and no ARTISTS frame cannot
 // be recovered (the boundaries are already gone by the time m.Artist() runs);
 // they keep the run-together fallback.
+//
+// MP4-family files (m4a/m4b/m4p/alac) hit a different mangling in the same
+// dependency and are recovered by multiValueMP4Tag below (issue #958): every
+// byte is still present there, so recovery does not depend on a parallel
+// frame existing.
 func extractArtist(m tag.Metadata) string {
 	if v := multiValueTag(m, "ARTISTS"); v != "" {
+		return v
+	}
+	if v, ok := multiValueMP4Tag(m, mp4ArtistAtoms); ok {
 		return v
 	}
 	return m.Artist()
@@ -932,6 +940,9 @@ func extractArtist(m tag.Metadata) string {
 // TXXX "ALBUMARTISTS").
 func extractAlbumArtist(m tag.Metadata) string {
 	if v := multiValueTag(m, "ALBUMARTISTS"); v != "" {
+		return v
+	}
+	if v, ok := multiValueMP4Tag(m, mp4AlbumArtistAtoms); ok {
 		return v
 	}
 	return m.AlbumArtist()
