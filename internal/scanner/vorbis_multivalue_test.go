@@ -5,16 +5,17 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dhowden/tag"
 )
 
-// --- Byte-level FLAC fixture builders (issue #969) ---------------------
+// --- Byte-level FLAC/Ogg fixture builders (issue #969) ---------------------
 //
 // testutil.GenerateFLACExtended takes a map[string]string and therefore
 // cannot express a REPEATED Vorbis-comment key, which is exactly the shape
-// this issue is about. These helpers build the FLAC bytes directly, one
+// this issue is about. These helpers build the FLAC/Ogg bytes directly, one
 // raw "KEY=value" string per comment, duplicates allowed, mirroring
 // testutil's block layout (see internal/testutil/id3.go) but taking a slice
 // instead of a map.
@@ -76,6 +77,78 @@ func buildFLACWithRawComments(t *testing.T, kv []string) []byte {
 	b.Write([]byte{byte(n >> 16), byte(n >> 8), byte(n)}) //nolint:gosec // reason: test fixture, payload is far below the 24-bit block length limit
 	b.Write(payload)
 	return b.Bytes()
+}
+
+// --- Ogg page framing --------------------------------------------------
+
+// oggCRCTableForTest and oggCRCUpdateForTest replicate github.com/dhowden/tag's
+// (non-standard, table-driven) Ogg page CRC exactly (ogg.go), so a fixture
+// built here passes the dependency's own CRC check in ReadOGGTags and can be
+// used for a genuine end-to-end (tag.ReadFrom) test, not just a direct call
+// into this package's own parser.
+func oggCRCTableForTest(poly uint32) *[256]uint32 {
+	var t [256]uint32
+	for i := 0; i < 256; i++ {
+		crc := uint32(i) << 24
+		for j := 0; j < 8; j++ {
+			if crc&0x80000000 != 0 {
+				crc = (crc << 1) ^ poly
+			} else {
+				crc <<= 1
+			}
+		}
+		t[i] = crc
+	}
+	return &t
+}
+
+var oggCRCTableForTestInstance = oggCRCTableForTest(0x04c11db7)
+
+func oggCRCUpdateForTest(crc uint32, tab *[256]uint32, p []byte) uint32 {
+	for _, v := range p {
+		crc = (crc << 8) ^ tab[byte(crc>>24)^v]
+	}
+	return crc
+}
+
+// buildOggPage assembles one complete Ogg page: a 27-byte header (magic,
+// version, flags, granule position, serial, sequence, CRC, segment count),
+// the segment table, then the segment data, with a correct CRC computed over
+// the whole page (CRC field zeroed first, exactly as the spec and dhowden's
+// own reader require).
+func buildOggPage(serial, seq uint32, continued bool, segTable, data []byte) []byte {
+	hdr := make([]byte, 27)
+	copy(hdr[0:4], "OggS")
+	hdr[4] = 0 // version
+	if continued {
+		hdr[5] = 0x1
+	}
+	// bytes 6-13: granule position, left zero
+	binary.LittleEndian.PutUint32(hdr[14:18], serial)
+	binary.LittleEndian.PutUint32(hdr[18:22], seq)
+	// bytes 22-25: CRC, filled below
+	hdr[26] = byte(len(segTable)) //nolint:gosec // reason: test fixture, segTable is always small
+
+	full := make([]byte, 0, len(hdr)+len(segTable)+len(data))
+	full = append(full, hdr...)
+	full = append(full, segTable...)
+	full = append(full, data...)
+	crc := oggCRCUpdateForTest(0, oggCRCTableForTestInstance, full)
+	binary.LittleEndian.PutUint32(full[22:26], crc)
+	return full
+}
+
+// segmentTableFor returns the Ogg lacing values for a data block of length n
+// terminated as a packet (i.e. ending on a value <255): 255 for each full
+// 255-byte run, then the (possibly zero) remainder.
+func segmentTableFor(n int) []byte {
+	var out []byte
+	for n >= 255 {
+		out = append(out, 255)
+		n -= 255
+	}
+	out = append(out, byte(n)) //nolint:gosec // reason: n < 255 here by construction
+	return out
 }
 
 // --- Direct parser tests -------------------------------------------------
@@ -196,6 +269,112 @@ func TestFLACVorbisCommentFields_Hostile(t *testing.T) {
 			t.Error("ok = true with a block length overrunning the actual data, want false")
 		}
 	})
+}
+
+func TestOggVorbisCommentFields_Hostile(t *testing.T) {
+	t.Run("bad magic", func(t *testing.T) {
+		if _, ok := oggVorbisCommentFields(bytes.NewReader([]byte("XXXXnotanoggfile........."))); ok {
+			t.Error("ok = true on bad magic, want false")
+		}
+	})
+
+	t.Run("segment count overruns buffer", func(t *testing.T) {
+		hdr := make([]byte, 27)
+		copy(hdr[0:4], "OggS")
+		hdr[26] = 10 // claims 10 segments, none follow
+		if _, ok := oggVorbisCommentFields(bytes.NewReader(hdr)); ok {
+			t.Error("ok = true with a segment table that overruns the buffer, want false")
+		}
+	})
+}
+
+func TestOggVorbisCommentFields_SinglePage(t *testing.T) {
+	const serial = 1
+	ident := []byte("\x01vorbisIDHEADERPAD") // packet 1: content irrelevant here
+	comment := append(append([]byte{}, vorbisCommentPrefix...),
+		vorbisCommentPayload(t, "vendor", []string{"ARTIST=Solo Artist"})...)
+
+	var stream bytes.Buffer
+	stream.Write(buildOggPage(serial, 0, false, segmentTableFor(len(ident)), ident))
+	stream.Write(buildOggPage(serial, 1, false, segmentTableFor(len(comment)), comment))
+
+	fields, ok := oggVorbisCommentFields(bytes.NewReader(stream.Bytes()))
+	if !ok {
+		t.Fatal("oggVorbisCommentFields() ok = false, want true")
+	}
+	if got := fields["artist"]; len(got) != 1 || got[0] != "Solo Artist" {
+		t.Errorf("artist = %v, want [Solo Artist]", got)
+	}
+}
+
+// A multiplexed Ogg file can carry a non-audio logical stream before the
+// audio one. That stream's second packet is not a Vorbis or Opus comment
+// header, and it must not end the scan: the audio stream's comment block,
+// on a different serial number, still has to be found.
+func TestOggVorbisCommentFields_SkipsUnrecognizedStream(t *testing.T) {
+	const otherSerial, audioSerial = 7, 9
+	otherIdent := []byte("\x80theora-ident-stub")
+	otherSecond := []byte("\x81theora-comment-stub")
+	audioIdent := []byte("\x01vorbisIDHEADERPAD")
+	audioComment := append(append([]byte{}, vorbisCommentPrefix...),
+		vorbisCommentPayload(t, "vendor", []string{"ARTIST=Artist One", "ARTIST=Artist Two"})...)
+
+	var stream bytes.Buffer
+	stream.Write(buildOggPage(otherSerial, 0, false, segmentTableFor(len(otherIdent)), otherIdent))
+	stream.Write(buildOggPage(audioSerial, 0, false, segmentTableFor(len(audioIdent)), audioIdent))
+	stream.Write(buildOggPage(otherSerial, 1, false, segmentTableFor(len(otherSecond)), otherSecond))
+	stream.Write(buildOggPage(audioSerial, 1, false, segmentTableFor(len(audioComment)), audioComment))
+
+	fields, ok := oggVorbisCommentFields(bytes.NewReader(stream.Bytes()))
+	if !ok {
+		t.Fatal("oggVorbisCommentFields() ok = false; want the audio stream's comment block after skipping the other stream")
+	}
+	if got := fields["artist"]; len(got) != 2 || got[0] != "Artist One" || got[1] != "Artist Two" {
+		t.Errorf("artist = %v, want [Artist One Artist Two]", got)
+	}
+}
+
+// TestOggVorbisCommentFields_SpansTwoPages builds the comment header packet
+// long enough that it cannot fit in one Ogg page's 255-byte segment run, so
+// it terminates on the CONTINUATION page instead -- proving the page-
+// reassembly logic, not just the single-page case.
+func TestOggVorbisCommentFields_SpansTwoPages(t *testing.T) {
+	const serial = 42
+	ident := []byte("OpusHead-stub")
+
+	// Pad the vendor string so the whole comment packet is comfortably over
+	// one page's single 255-byte segment, forcing a real continuation.
+	vendor := strings.Repeat("v", 300)
+	comment := append(append([]byte{}, opusTagsPrefix...),
+		vorbisCommentPayload(t, vendor, []string{"ARTIST=Artist One", "ARTIST=Artist Two"})...)
+	if len(comment) <= 255 {
+		t.Fatalf("test setup bug: comment packet too short to span pages (%d bytes)", len(comment))
+	}
+
+	firstChunk := comment[:255]
+	remainder := comment[255:]
+	if len(remainder) >= 255 {
+		t.Fatalf("test setup bug: remainder must fit in one continuation page (%d bytes)", len(remainder))
+	}
+
+	var stream bytes.Buffer
+	// Page 1: packet 1 (ident, terminated) + first 255 bytes of packet 2
+	// (lacing value 255 -- "more to come", no terminator on this page).
+	page1Seg := append(segmentTableFor(len(ident)), 255)
+	page1Data := append(append([]byte{}, ident...), firstChunk...)
+	stream.Write(buildOggPage(serial, 0, false, page1Seg, page1Data))
+	// Page 2: continuation of packet 2, terminated here.
+	stream.Write(buildOggPage(serial, 1, true, segmentTableFor(len(remainder)), remainder))
+
+	fields, ok := oggVorbisCommentFields(bytes.NewReader(stream.Bytes()))
+	if !ok {
+		t.Fatal("oggVorbisCommentFields() ok = false, want true (comment packet spanning two pages)")
+	}
+	want := []string{"Artist One", "Artist Two"}
+	got := fields["artist"]
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("artist = %v, want %v", got, want)
+	}
 }
 
 // --- multiValueVorbisField precedence tests ------------------------------
@@ -383,12 +562,43 @@ func TestReadAudioFacts_FLAC_MultiArtist_DurationStillCorrect(t *testing.T) {
 	}
 }
 
+// The tag.OGG dispatch, end to end: a real tag.Metadata from tag.ReadFrom on
+// an Opus stream (dhowden/tag reports Opus as tag.OGG) must route through
+// vorbisMultiValueFields into the Ogg parser, and extractArtist must return
+// every repeated value rather than the dependency's last one.
+func TestExtractArtist_OggOpus_TwoArtistValues_Joined(t *testing.T) {
+	const serial = 3
+	ident := []byte("OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00")
+	comment := append(append([]byte{}, opusTagsPrefix...),
+		vorbisCommentPayload(t, "vendor", []string{"ARTIST=Artist One", "ARTIST=Artist Two"})...)
+
+	var stream bytes.Buffer
+	stream.Write(buildOggPage(serial, 0, false, segmentTableFor(len(ident)), ident))
+	stream.Write(buildOggPage(serial, 1, false, segmentTableFor(len(comment)), comment))
+	data := stream.Bytes()
+
+	m, err := tag.ReadFrom(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("tag.ReadFrom() error = %v", err)
+	}
+	if m.FileType() != tag.OGG {
+		t.Fatalf("fixture: FileType() = %v, want tag.OGG", m.FileType())
+	}
+	if m.Artist() != "Artist Two" {
+		t.Fatalf("fixture: dependency Artist() = %q; want only the last value, which is the defect under test", m.Artist())
+	}
+	fields := vorbisMultiValueFields(bytes.NewReader(data), m)
+	if got, want := extractArtist(m, fields), "Artist One; Artist Two"; got != want {
+		t.Errorf("extractArtist() = %q, want %q", got, want)
+	}
+}
+
 // TestVorbisMultiValueFields_NonVorbisFileTypeIsNoOp guards the file-type
-// gate: an MP4/ID3 tag.Metadata must never be handed to the FLAC byte
-// parser, which would misread arbitrary bytes as a Vorbis comment block.
+// gate: an MP4/ID3 tag.Metadata must never be handed to the FLAC/Ogg byte
+// parsers, which would misread arbitrary bytes as a Vorbis comment block.
 func TestVorbisMultiValueFields_NonVorbisFileTypeIsNoOp(t *testing.T) {
 	// A minimal ID3v1-only reader is enough to get a real tag.Metadata whose
-	// FileType() is not FLAC.
+	// FileType() is not FLAC/OGG.
 	var raw [128]byte
 	copy(raw[0:3], "TAG")
 	m, err := tag.ReadFrom(bytes.NewReader(raw[:]))

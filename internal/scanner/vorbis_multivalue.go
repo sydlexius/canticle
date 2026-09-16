@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 	"log/slog"
@@ -10,8 +11,8 @@ import (
 )
 
 // This file recovers multi-value Vorbis-comment ARTIST/ARTISTS/ALBUMARTIST/
-// ALBUMARTISTS fields in FLAC files mangled by
-// github.com/dhowden/tag (issue #969). It is the Vorbis-comment sibling of
+// ALBUMARTISTS fields (FLAC, Ogg Vorbis, Ogg Opus) mangled by
+// github.com/dhowden/tag (issues #969, #973). It is the Vorbis-comment sibling of
 // multiValueTag (#466, ID3v2.4 TXXX) and multiValueMP4Tag (#958/#959, MP4
 // atoms), but neither of those mechanisms applies here: the dependency's
 // Vorbis comment reader stores every field in a plain map[string]string
@@ -24,10 +25,10 @@ import (
 // The only way to recover the discrete values is to re-read the Vorbis
 // comment block ourselves, directly off the file's own bytes, keeping every
 // repeated field as an ordered list rather than collapsing it into one
-// string. FLAC embeds the comment block as one of its metadata blocks, which
-// is what this file walks. Ogg Vorbis and Opus carry the same comment payload
-// as a packet reassembled across Ogg pages; that container is not handled
-// here yet, so an Ogg file falls back to the dependency's single value.
+// string. FLAC embeds the comment block as one of its metadata blocks; Ogg
+// (Vorbis and Opus alike -- the container framing and comment-header layout
+// are identical after a different magic prefix) carries it as the second
+// logical packet, which may itself span more than one Ogg page.
 //
 // Every length read while doing this is bounded against the remaining data
 // BEFORE it is used to size a slice or a loop, so a corrupt or hostile file
@@ -55,14 +56,33 @@ const vorbisMultiValueMaxFields = 4096
 // headroom.
 const flacMaxMetadataBlocks = 256
 
+// oggMaxPages bounds how many Ogg pages this package reads while
+// reassembling the comment header packet, so a file with no terminating
+// page (corrupt or hostile) cannot loop forever. The comment packet is
+// always the second logical packet in the stream (after the tiny
+// identification header), so a real file needs only a handful of pages even
+// when the comment header itself spans several.
+const oggMaxPages = 256
+
+// oggPageHeaderLen is the fixed portion of an Ogg page header, before the
+// variable-length segment table: "OggS" (4) + version (1) + header flags
+// (1) + granule position (8) + serial number (4) + sequence number (4) +
+// CRC32 (4) + segment count (1).
+const oggPageHeaderLen = 27
+
+var (
+	vorbisCommentPrefix = []byte("\x03vorbis")
+	opusTagsPrefix      = []byte("OpusTags")
+)
+
 // vorbisMultiValueFields recovers the repeated Vorbis-comment fields from an
-// already-open FLAC file, keyed by lowercased field
+// already-open FLAC or Ogg (Vorbis/Opus) file, keyed by lowercased field
 // name with values in file order. r is repositioned freely and left at an
 // arbitrary offset; every caller in this package either has no further use
 // for the handle's position or (audioDuration) always seeks to 0 itself
 // before reading, so call order relative to duration parsing never matters.
 //
-// Returns nil for any file type other than FLAC, and nil on a genuine
+// Returns nil for any file type other than FLAC/OGG, and nil on a genuine
 // parse failure (corrupt or truncated comment block) -- logged at Debug, not
 // Warn, because this is a best-effort recovery layered on top of a file
 // dhowden/tag already parsed successfully; a caller that gets nil falls
@@ -74,6 +94,8 @@ func vorbisMultiValueFields(r io.ReadSeeker, m tag.Metadata) map[string][]string
 	switch m.FileType() {
 	case tag.FLAC:
 		fields, ok = flacVorbisCommentFields(r)
+	case tag.OGG:
+		fields, ok = oggVorbisCommentFields(r)
 	default:
 		return nil
 	}
@@ -86,7 +108,7 @@ func vorbisMultiValueFields(r io.ReadSeeker, m tag.Metadata) map[string][]string
 
 // multiValueVorbisField returns the recovered discrete values of a repeated
 // Vorbis-comment field from an already-parsed field map (nil-safe: fields
-// may be nil when the file is not FLAC or recovery failed, in which
+// may be nil when the file is not FLAC/OGG or recovery failed, in which
 // case every lookup misses and ok is false), trying keys in PRECEDENCE
 // order -- the plural "artists"/"albumartists" form first, else the singular
 // "artist"/"albumartist" form, mirroring the ID3 TXXX ARTISTS precedence in
@@ -173,6 +195,118 @@ func flacVorbisCommentFields(r io.ReadSeeker) (map[string][]string, bool) {
 		if last {
 			return nil, false
 		}
+	}
+	return nil, false
+}
+
+// oggVorbisCommentFields reassembles the comment header packet from r's Ogg
+// pages and parses it. The comment header is the second logical packet in
+// the elementary bitstream: packet 1 is the tiny identification header
+// ("\x01vorbis" for Vorbis, "OpusHead" for Opus), packet 2 is the comment
+// header ("\x03vorbis" or "OpusTags"), and after that prefix the payload
+// format is identical for both codecs (vendor string, then length-prefixed
+// "KEY=value" entries) -- so one parser serves both.
+//
+// Packets are tracked per Ogg serial number (a file could in principle
+// multiplex more than one logical bitstream); whichever stream's second
+// completed packet carries a recognized prefix wins. A page's CRC is not
+// verified here -- unlike dhowden/tag's own reader, this package trusts the
+// framing fields (segment table, continuation flag) and only cares whether
+// they parse structurally, since a CRC mismatch would already have failed
+// the file at tag.ReadFrom before this ever runs.
+func oggVorbisCommentFields(r io.ReadSeeker) (map[string][]string, bool) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, false
+	}
+
+	type stream struct {
+		buf     bytes.Buffer
+		packets int
+		// done marks a stream whose comment-header position has already been
+		// judged: its second packet was not a usable Vorbis/Opus comment block
+		// (a non-audio stream such as Theora in a multiplexed file, or a
+		// comment block that failed to parse). Later pages for that serial are
+		// skipped rather than ending the scan, so another stream's comment
+		// block can still be found.
+		done bool
+	}
+	streams := make(map[uint32]*stream)
+	totalBytes := 0
+
+	for page := 0; page < oggMaxPages; page++ {
+		hdr := make([]byte, oggPageHeaderLen)
+		if _, err := io.ReadFull(r, hdr); err != nil {
+			return nil, false
+		}
+		if string(hdr[0:4]) != "OggS" {
+			return nil, false
+		}
+		flags := hdr[5]
+		serial := binary.LittleEndian.Uint32(hdr[14:18])
+		segCount := int(hdr[26])
+
+		segTable := make([]byte, segCount)
+		if _, err := io.ReadFull(r, segTable); err != nil {
+			return nil, false
+		}
+		pageDataLen := 0
+		for _, s := range segTable {
+			pageDataLen += int(s)
+		}
+		totalBytes += pageDataLen
+		if totalBytes > vorbisMultiValueCap {
+			return nil, false
+		}
+		pageData := make([]byte, pageDataLen)
+		if _, err := io.ReadFull(r, pageData); err != nil {
+			return nil, false
+		}
+
+		st, ok := streams[serial]
+		if !ok {
+			st = &stream{}
+			streams[serial] = st
+		}
+		if st.done {
+			continue
+		}
+
+		pos := 0
+		for _, s := range segTable {
+			st.buf.Write(pageData[pos : pos+int(s)])
+			pos += int(s)
+			if s < 255 {
+				// Lacing value below 255 terminates the packet.
+				st.packets++
+				if st.packets == 2 {
+					data := st.buf.Bytes()
+					var payload []byte
+					switch {
+					case bytes.HasPrefix(data, vorbisCommentPrefix):
+						payload = data[len(vorbisCommentPrefix):]
+					case bytes.HasPrefix(data, opusTagsPrefix):
+						payload = data[len(opusTagsPrefix):]
+					}
+					if payload != nil {
+						if fields, ok := parseVorbisCommentFields(payload); ok {
+							return fields, true
+						}
+					}
+					// Not a usable comment block on this stream: stop tracking
+					// it and keep reading pages for the others.
+					st.done = true
+					st.buf.Reset()
+					break
+				}
+				st.buf.Reset()
+			}
+		}
+		_ = flags // continuation is implicit in the per-serial buffer; the
+		// flag itself is not consulted -- a page's segment table already
+		// tells us unambiguously whether the accumulating packet continues
+		// (last lacing value 255) or terminates (last lacing value <255)
+		// regardless of what the continuation bit claims, and trusting the
+		// data over a possibly-inconsistent flag is the safer read.
 	}
 	return nil, false
 }
