@@ -21,9 +21,28 @@ import (
 )
 
 // reconcileIdentityBackupRecord is one JSONL line capturing a corrected row's
-// before/after identity so the operation is auditable and hand-reversible.
+// before/after IDENTITY. It is a full hand-reversal record only for the ops that
+// change nothing but identity columns (scan_correction, queue_rekey,
+// queue_display_sync). queue_merge, queue_unlink, and queue_delete also move or
+// drop junction links, status, and output_paths, which this record does not
+// capture: for those it is an AUDIT record of what changed, not a pre-image.
+// That is acceptable because a work_queue row is derived state -- the next scan
+// re-enqueues from the scan_results rows, whose identity these ops never touch
+// (a merge re-points every link to the surviving row; unlink and delete reset
+// each unlinked member to pending). The pre-existing merge in
+// identityrepair.apply had the same limit before #963.
+//
+// Op names which table Old*/New* describe -- see identityrepair.Op's doc
+// comment for the full list. For Op == "scan_correction" (Run's tag re-read
+// pass) they are the SCAN_RESULTS row's prior/corrected identity, keyed by
+// ScanResultID. For every other Op (a RepairDivergence outcome) they are the
+// WORK_QUEUE row's prior/corrected identity, keyed by WorkQueueID; a
+// hand-restore of one of those records must write into work_queue, not
+// scan_results, or it silently repairs the wrong table.
 type reconcileIdentityBackupRecord struct {
+	Op             string `json:"op"`
 	ScanResultID   int64  `json:"scan_result_id"`
+	WorkQueueID    int64  `json:"work_queue_id,omitempty"`
 	LibraryID      int64  `json:"library_id"`
 	FilePath       string `json:"file_path"`
 	OldArtist      string `json:"old_artist"`
@@ -80,7 +99,8 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 		}
 	}()
 	// report is invoked once per corrected row. In dry-run it prints the planned
-	// change; under --yes it also appends a restorable backup record.
+	// change; under --yes it also appends a backup record (see
+	// reconcileIdentityBackupRecord for which ops it can fully reverse).
 	report := func(ch identityrepair.Change) error {
 		_, _ = fmt.Fprintf(out, "  %s\n    %q -> %q\n", ch.FilePath, ch.OldArtist, ch.NewArtist)
 		if !args.Yes {
@@ -96,7 +116,26 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 		return appendReconcileIdentityBackup(backupFile, ch)
 	}
 
-	res, err := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).Run(ctx, identityrepair.Options{
+	repairer := identityrepair.New(sqlDB, scanner.ReadArtistIdentity)
+
+	// The divergence pass runs FIRST and is DB-only (no file re-read): it finds
+	// scan_results/work_queue pairs that already disagree because a PRIOR scan
+	// corrected scan_results without the coupled work_queue row following (#963).
+	// The tag re-read pass below cannot see these -- it compares a file's tags
+	// against scan_results, and scan_results is already correct here -- so
+	// running it second would silently report "no change" for exactly the rows
+	// this pass exists to fix.
+	divRes, err := repairer.RepairDivergence(ctx, identityrepair.Options{
+		LibraryID: libID,
+		DryRun:    !args.Yes,
+		Report:    report,
+	})
+	if err != nil {
+		slog.Error("reconcile-identity divergence pass failed", "error", err)
+		return 1
+	}
+
+	res, err := repairer.Run(ctx, identityrepair.Options{
 		LibraryID: libID,
 		DryRun:    !args.Yes,
 		Report:    report,
@@ -110,6 +149,9 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 	if args.Yes {
 		verb = "corrected"
 	}
+	_, _ = fmt.Fprintf(out, "reconcile-identity: divergence pass scanned %d work_queue row(s); %s %d (%d re-keyed, %d merged, %d display-synced, %d unlinked, %d deleted, %d skipped in-flight)%s\n",
+		divRes.Scanned, verb, divRes.Rekeyed+divRes.Merged+divRes.DisplaySynced+divRes.Unlinked+divRes.Deleted,
+		divRes.Rekeyed, divRes.Merged, divRes.DisplaySynced, divRes.Unlinked, divRes.Deleted, divRes.ProcessingSkips, suffixDryRun(args.Yes))
 	_, _ = fmt.Fprintf(out, "reconcile-identity: scanned %d row(s); %s %d (%d queue re-keyed, %d queue merged, %d skipped in-flight, %d unreadable)%s\n",
 		res.Scanned, verb, res.Changed, res.QueueUpdated, res.QueueMerged, res.ProcessingSkips, res.ReadFailures, suffixDryRun(args.Yes))
 	if backupFile != nil {
@@ -131,6 +173,18 @@ const identityBackfillMarker = "identity_backfill_466"
 // left unset so the next startup (or the CLI) retries; a canceled context
 // (shutdown) simply stops it, also leaving the marker unset. The pass is
 // idempotent, so a partial run followed by a retry is safe.
+//
+// DELIBERATELY DOES NOT ALSO RUN RepairDivergence (#963). This backfill is
+// gated on identityBackfillMarker, which is set PERMANENTLY once the #466
+// re-read has ever completed -- including on the very production deployment
+// #963 was measured against (v1.38.1). Folding the divergence pass in here
+// would make it run exactly zero more times on any install where #466's
+// backfill already finished, which is precisely the population carrying the
+// orphaned rows #963 describes. The divergence pass instead runs (1) as a
+// pre-pass in the `scan reconcile-identity` CLI (recovers the existing
+// backlog, operator-triggered, see runReconcileIdentity) and (2) inline after
+// every scan's Upsert in commands.scheduler's OnScanComplete (prevents new
+// orphans going forward, unconditional, no marker).
 func runIdentityBackfill(ctx context.Context, sqlDB *sql.DB) {
 	done, err := identityBackfillDone(ctx, sqlDB)
 	if err != nil {
@@ -198,7 +252,9 @@ func markIdentityBackfillDone(ctx context.Context, sqlDB *sql.DB) error {
 // a correction can still be reversed by hand from it.
 func appendReconcileIdentityBackup(f *os.File, ch identityrepair.Change) error {
 	rec := reconcileIdentityBackupRecord{
+		Op:             string(ch.Op),
 		ScanResultID:   ch.ScanResultID,
+		WorkQueueID:    ch.WorkQueueID,
 		LibraryID:      ch.LibraryID,
 		FilePath:       ch.FilePath,
 		OldArtist:      ch.OldArtist,
