@@ -391,17 +391,31 @@ func (r *Repairer) repairOneDivergentRow(ctx context.Context, wqID int64, dryRun
 				})
 			}
 		} else {
-			// Dry run: no unlink was written, so compute the same "would every member
-			// end up unlinked" predicate directly from the in-memory group instead of
-			// re-querying a database that was never mutated.
-			anyMatch := false
+			// Dry run: no unlink was written, so compute the predicate the apply
+			// path's queueRowHasLinks would see AFTER the planned unlinks. It must
+			// range over EVERY junction link, not just the title-matched group:
+			// a link whose scan_results title_key differs (prune's identity relink
+			// does not check it) is never unlinked here yet still keeps the row
+			// alive on apply, so a group-only check would preview a delete --yes
+			// never performs.
+			planned := make(map[int64]bool, len(members))
 			for _, m := range members {
-				if m.artistKey == wq.artistKey {
-					anyMatch = true
+				if m.artistKey != wq.artistKey {
+					planned[m.id] = true
+				}
+			}
+			linkIDs, err := queueRowLinkIDs(ctx, tx, wq.id)
+			if err != nil {
+				return divergenceOutcome{}, err
+			}
+			survives := false
+			for _, id := range linkIDs {
+				if !planned[id] {
+					survives = true
 					break
 				}
 			}
-			if !anyMatch {
+			if !survives {
 				outcome.deleted = 1
 				changes = append(changes, Change{
 					Op:             OpQueueDelete,
@@ -460,6 +474,30 @@ func queueRowHasLinks(ctx context.Context, tx *sql.Tx, wqID int64) (bool, error)
 		return false, fmt.Errorf("identityrepair: check work_queue %d links: %w", wqID, err)
 	}
 	return true, nil
+}
+
+// queueRowLinkIDs returns every scan_result_id linked to wqID via the junction,
+// regardless of title_key, so a dry run can evaluate the same survivor set the
+// apply path's queueRowHasLinks sees after its unlinks.
+func queueRowLinkIDs(ctx context.Context, tx *sql.Tx, wqID int64) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?`, wqID)
+	if err != nil {
+		return nil, fmt.Errorf("identityrepair: list work_queue %d links: %w", wqID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("identityrepair: scan work_queue %d link: %w", wqID, err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("identityrepair: iterate work_queue %d links: %w", wqID, err)
+	}
+	return out, nil
 }
 
 // loadDivergenceGroupMembers returns every scan_results row linked (via

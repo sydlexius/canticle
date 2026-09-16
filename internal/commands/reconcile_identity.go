@@ -21,7 +21,16 @@ import (
 )
 
 // reconcileIdentityBackupRecord is one JSONL line capturing a corrected row's
-// before/after identity so the operation is auditable and hand-reversible.
+// before/after IDENTITY. It is a full hand-reversal record only for the ops that
+// change nothing but identity columns (scan_correction, queue_rekey,
+// queue_display_sync). queue_merge, queue_unlink, and queue_delete also move or
+// drop junction links, status, and output_paths, which this record does not
+// capture: for those it is an AUDIT record of what changed, not a pre-image.
+// That is acceptable because a work_queue row is derived state -- the next scan
+// re-enqueues from the scan_results rows, whose identity these ops never touch
+// (a merge re-points every link to the surviving row; unlink and delete reset
+// each unlinked member to pending). The pre-existing merge in
+// identityrepair.apply had the same limit before #963.
 //
 // Op names which table Old*/New* describe -- see identityrepair.Op's doc
 // comment for the full list. For Op == "scan_correction" (Run's tag re-read
@@ -90,7 +99,8 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 		}
 	}()
 	// report is invoked once per corrected row. In dry-run it prints the planned
-	// change; under --yes it also appends a restorable backup record.
+	// change; under --yes it also appends a backup record (see
+	// reconcileIdentityBackupRecord for which ops it can fully reverse).
 	report := func(ch identityrepair.Change) error {
 		_, _ = fmt.Fprintf(out, "  %s\n    %q -> %q\n", ch.FilePath, ch.OldArtist, ch.NewArtist)
 		if !args.Yes {

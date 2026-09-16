@@ -346,6 +346,57 @@ func TestRepairDivergence_DisagreementOrphansQueueRowDryRun(t *testing.T) {
 	}
 }
 
+// A queue row can also carry a junction link whose scan_results title_key does
+// not match its own (prune's identity relink does not check title_key). That
+// link is outside the divergence group, but it still keeps the queue row alive
+// on apply, so a dry run must not predict a delete that --yes will not perform.
+func TestRepairDivergence_DryRunDeleteMatchesApplyWithMismatchedTitleLink(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	srA := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
+	srB := seedScan(t, db, lib, "/m/2.mp3", "AlphaBravo", "", "Song")
+	srOther := seedScan(t, db, lib, "/m/3.mp3", "AlphaBravo", "", "Other")
+	if _, err := db.Exec(`UPDATE scan_results SET artist_key = 'alphabravo' WHERE id IN (?, ?)`, srA, srB); err != nil {
+		t.Fatalf("force shared key: %v", err)
+	}
+	wq := seedQueue(t, db, "AlphaBravo", "", "pending", srA)
+	if _, err := db.Exec(`UPDATE work_queue SET artist_key = 'alphabravo' WHERE id = ?`, wq); err != nil {
+		t.Fatalf("force queue key: %v", err)
+	}
+	for _, sr := range []int64{srB, srOther} {
+		if _, err := db.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wq, sr); err != nil {
+			t.Fatalf("link %d: %v", sr, err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE scan_results SET artist = 'Alpha; Bravo', artist_key = ? WHERE id = ?`,
+		normalize.NormalizeKey("Alpha; Bravo"), srA); err != nil {
+		t.Fatalf("correct srA: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE scan_results SET artist = 'Charlie; Delta', artist_key = ? WHERE id = ?`,
+		normalize.NormalizeKey("Charlie; Delta"), srB); err != nil {
+		t.Fatalf("correct srB: %v", err)
+	}
+
+	r := New(db, fakeReader{}.read)
+	dry, err := r.RepairDivergence(context.Background(), Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run RepairDivergence: %v", err)
+	}
+	applied, err := r.RepairDivergence(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("apply RepairDivergence: %v", err)
+	}
+	if applied.Deleted != 0 {
+		t.Fatalf("apply Result = %+v; want Deleted=0 (the mismatched-title link keeps the row)", applied)
+	}
+	if dry.Deleted != applied.Deleted {
+		t.Errorf("dry-run Deleted = %d, apply Deleted = %d; the preview must predict what --yes does", dry.Deleted, applied.Deleted)
+	}
+	if err := db.QueryRow(`SELECT 1 FROM work_queue WHERE id = ?`, wq).Scan(new(int)); err != nil {
+		t.Errorf("work_queue row gone (err=%v); want kept by its remaining link", err)
+	}
+}
+
 // A DryRun computes and reports the same decision without writing anything.
 func TestRepairDivergence_DryRunWritesNothing(t *testing.T) {
 	db := openDB(t)

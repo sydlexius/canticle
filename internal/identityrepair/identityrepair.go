@@ -76,7 +76,10 @@ const (
 )
 
 // Change describes one corrected row's before/after identity, reported to the
-// caller (for a restorable backup / preview) once per applied change. Op
+// caller (for a backup / preview) once per applied change. It carries identity
+// only: for OpQueueMerge/OpQueueUnlink/OpQueueDelete, which also move or drop
+// junction links, status, and output_paths, it is an audit record rather than a
+// full pre-image (the queue row is derived state a later scan re-creates). Op
 // names the operation and which table Old*/New* describe (see the Op
 // constants); WorkQueueID is set for every RepairDivergence Op and zero for
 // OpScanCorrection, which has no single work_queue row of its own -- Run's
