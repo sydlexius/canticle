@@ -2902,6 +2902,7 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
              vocal_class = NULL,
              detector_version = NULL,
              last_error = '',
+             refused_waits = 0,
              next_attempt_at = ?
          WHERE id = ? AND instrumental_result = 1 AND status = 'done'`,
 		now, id,
@@ -3407,6 +3408,7 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
              completed_at = NULL,
              priority = ?,
              next_attempt_at = ?,
+             refused_waits = 0,
              last_error = 'instrumental verdict reversed by a tightened vocal gate'
          WHERE id = ?
            AND status = 'done'
@@ -3463,8 +3465,10 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
 // backoff timer blocks it.
 //
 // refused_waits (#950) is reset too. Every queue-package settle already zeroes
-// it, but prune's retireUnresolvable writes 'done' directly, so the reopen side
-// is the one place that guarantees a reopened row a fresh wait budget.
+// it, but prune's retireUnresolvable writes 'done' directly, so a settled row
+// can still carry a spent budget. The REOPEN side is therefore what guarantees
+// a fresh one, and every reopen path clears it: this helper, RecheckRetired,
+// ResetInstrumental and UnsettleInstrumental.
 func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue

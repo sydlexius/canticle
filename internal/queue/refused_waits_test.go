@@ -185,3 +185,50 @@ func TestDBQueue_DeferRefusedRowWaitsWithoutBlockingOthers(t *testing.T) {
 		t.Fatalf("dequeued %d after wait; want %d", again.ID, id)
 	}
 }
+
+// Every path that reopens a settled row resets the wait budget, not only the
+// queue's own settles. prune's retireUnresolvable can settle a row straight to
+// 'done' from 'deferred' mid-wait, so a spent refused_waits survives on the row;
+// each instrumental reopen must clear it or the reopened row starts with less
+// than a full budget.
+func TestDBQueue_InstrumentalReopenPathsResetRefusedWaits(t *testing.T) {
+	cases := []struct {
+		name   string
+		reopen func(ctx context.Context, q *DBQueue, id int64) error
+	}{
+		{"ResetInstrumental", func(ctx context.Context, q *DBQueue, id int64) error {
+			_, err := q.ResetInstrumental(ctx, id)
+			return err
+		}},
+		{"UnsettleInstrumental", func(ctx context.Context, q *DBQueue, id int64) error {
+			ok, err := q.UnsettleInstrumental(ctx, id)
+			if err == nil && !ok {
+				return errors.New("UnsettleInstrumental reverted nothing")
+			}
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			q, id, _ := newRefusedQueue(t, 0)
+			// A settled instrumental row carrying a spent budget, the shape
+			// retireUnresolvable leaves behind when it settles a waiting row.
+			if _, err := q.db.ExecContext(ctx,
+				`UPDATE work_queue SET status = 'done', instrumental_result = 1, refused_waits = 3 WHERE id = ?`,
+				id); err != nil {
+				t.Fatalf("seed settled row: %v", err)
+			}
+			if err := tc.reopen(ctx, q, id); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			got := readRefusedRow(t, q, id)
+			if got.status != "deferred" {
+				t.Fatalf("status after %s = %q; want deferred (the reopen did not run)", tc.name, got.status)
+			}
+			if got.refusedWaits != 0 {
+				t.Errorf("refused_waits after %s = %d; want 0 (a reopened row gets a fresh wait budget)", tc.name, got.refusedWaits)
+			}
+		})
+	}
+}
