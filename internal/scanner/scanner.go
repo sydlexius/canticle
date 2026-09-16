@@ -942,7 +942,7 @@ const artistValueSep = "; "
 // byte is still present there, so recovery does not depend on a parallel
 // frame existing.
 //
-// Vorbis-comment files (FLAC/OGG) hit a THIRD mangling, recovered by
+// Vorbis-comment files (FLAC) hit a THIRD mangling, recovered by
 // vorbisFields (issue #969, see vorbis_multivalue.go): the dependency's
 // Vorbis reader overwrites a repeated field in its own map, so nothing
 // survives in Raw() to recover from -- vorbisFields is populated by a
