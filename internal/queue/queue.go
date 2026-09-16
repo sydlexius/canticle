@@ -580,11 +580,14 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// refused_waits is zeroed on settle so a row later reopened from done gets a
+	// fresh DeferRefused wait budget (#950).
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue
          SET status = 'done',
              completed_at = ?,
-             last_error = ''
+             last_error = '',
+             refused_waits = 0
          WHERE id = ?
            AND status = 'processing'`,
 		now,
@@ -746,7 +749,8 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
              provider_lane = ?,
              status = 'done',
              completed_at = ?,
-             last_error = ''
+             last_error = '',
+             refused_waits = 0
          WHERE id = ?
            AND status = ?`,
 		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion,
@@ -841,7 +845,8 @@ func (q *DBQueue) settleGuardRejectedOnce(ctx context.Context, id int64, reason 
              outcome_detail = ?,
              status = 'done',
              completed_at = ?,
-             last_error = ''
+             last_error = '',
+             refused_waits = 0
          WHERE id = ?
            AND status = ?`,
 		detail, now, id, StatusProcessing,
@@ -1228,6 +1233,85 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
 	return item, nil
 }
 
+// DeferRefused parks a processing row for a bounded wait after its only result
+// was refused by the accept-time timing guard while another lane could not yet
+// be consulted (#950). It returns deferred=true when the row was parked, and
+// deferred=false with a nil error when the row has already used maxWaits waits,
+// in which case NOTHING is changed and the caller settles the row as it would
+// have without a wait. A row that is not 'processing' (or no longer exists)
+// returns sql.ErrNoRows, matching Defer and RetireMiss.
+//
+// WHY A SEPARATE COUNTER (refused_waits, migration 050). attempts is
+// incremented by transport failures and never reset by a benign outcome, and
+// miss_count drives miss retirement, so neither can bound this wait without
+// spending a budget that means something else. attempts, miss_count and
+// priority are therefore left unchanged: a refusal is neither a failure nor a
+// miss, and it should not sink the row below fresh work.
+//
+// The wait is PER ROW: the row moves to 'deferred' with next_attempt_at in the
+// future, which removes it from the ready set Dequeue draws from. That is what
+// prevents head-of-line starvation -- the worker moves on to other rows while
+// this one waits, rather than blocking on a lane that is not ready.
+//
+// Like Defer, it leaves linked scan_results untouched: a deferred work_queue row
+// is non-terminal and remains the active driver for the track (see
+// RecheckDeferred), and prev_status is left for Dequeue to re-stamp on the next
+// claim. The cap check and the update share one transaction so two racing
+// callers cannot both take the last wait.
+func (q *DBQueue) DeferRefused(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (bool, error) {
+	var deferred bool
+	err := db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		var err error
+		deferred, err = q.deferRefusedOnce(ctx, id, retryAfter, maxWaits, cause)
+		return err
+	})
+	return deferred, err
+}
+
+func (q *DBQueue) deferRefusedOnce(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (bool, error) {
+	nextAttemptAt := formatTime(q.now().Add(retryAfter))
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("queue: begin defer refused tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var waits int
+	err = tx.QueryRowContext(ctx,
+		`SELECT refused_waits FROM work_queue WHERE id = ? AND status = 'processing'`, id,
+	).Scan(&waits)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, sql.ErrNoRows
+	}
+	if err != nil {
+		return false, fmt.Errorf("queue: defer refused read: %w", err)
+	}
+	if waits >= maxWaits {
+		return false, nil
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE work_queue
+         SET status = 'deferred',
+             refused_waits = refused_waits + 1,
+             next_attempt_at = ?,
+             last_error = ?
+         WHERE id = ?
+           AND status = 'processing'`,
+		nextAttemptAt, cause, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: defer refused: %w", err)
+	}
+	if err := requireAffected(res, "queue: defer refused"); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("queue: commit defer refused tx: %w", err)
+	}
+	return true, nil
+}
+
 // missLimitReachedError is the last_error value RetireMiss writes when a benign
 // miss is retired after exhausting max_miss_attempts. Defined once so the SQL
 // bind, the tests, and any log/inspection of the sentinel cannot drift.
@@ -1261,7 +1345,8 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
 		`UPDATE work_queue
          SET status = 'unavailable',
              completed_at = ?,
-             last_error = ?
+             last_error = ?,
+             refused_waits = 0
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
@@ -1385,8 +1470,9 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 // but the sentinel text and this predicate's SHAPE are unchanged). Revival
 // reverses RetireMiss's terminal writeback:
 //   - work_queue: status='deferred', priority=-100, next_attempt_at=now,
-//     last_error=”, completed_at=NULL. miss_count and providers_version are
-//     left unchanged.
+//     last_error=”, completed_at=NULL, refused_waits=0 (a revived row gets a
+//     fresh #950 wait budget). miss_count and providers_version are left
+//     unchanged.
 //   - scan_results: rows linked via work_queue_scan_results whose status='done'
 //     are reset to 'pending' so the scan layer does not strand the track.
 //
@@ -1457,7 +1543,8 @@ func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, 
              priority = -100,
              next_attempt_at = ?,
              last_error = '',
-             completed_at = NULL
+             completed_at = NULL,
+             refused_waits = 0
          WHERE status = 'unavailable' AND last_error = ?`
 	updateArgs := append([]any{now, missLimitReachedError}, libArgs...)
 	res, err := tx.ExecContext(ctx,
@@ -2815,6 +2902,7 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
              vocal_class = NULL,
              detector_version = NULL,
              last_error = '',
+             refused_waits = 0,
              next_attempt_at = ?
          WHERE id = ? AND instrumental_result = 1 AND status = 'done'`,
 		now, id,
@@ -3320,6 +3408,7 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
              completed_at = NULL,
              priority = ?,
              next_attempt_at = ?,
+             refused_waits = 0,
              last_error = 'instrumental verdict reversed by a tightened vocal gate'
          WHERE id = ?
            AND status = 'done'
@@ -3374,6 +3463,12 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
 // identity re-enters ordinary dequeue eligibility, not an urgent recheck.
 // next_attempt_at is cleared to the zero-backoff sentinel so no residual
 // backoff timer blocks it.
+//
+// refused_waits (#950) is reset too. Every queue-package settle already zeroes
+// it, but prune's retireUnresolvable writes 'done' directly, so a settled row
+// can still carry a spent budget. The REOPEN side is therefore what guarantees
+// a fresh one, and every reopen path clears it: this helper, RecheckRetired,
+// ResetInstrumental and UnsettleInstrumental.
 func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue
@@ -3388,7 +3483,8 @@ func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (
              timing_outcome = NULL,
              overrun_magnitude = NULL,
              overrun_ratio = NULL,
-             evaluated_at = NULL
+             evaluated_at = NULL,
+             refused_waits = 0
          WHERE id = ? AND status = 'done'`,
 		formatTime(now), id,
 	)
