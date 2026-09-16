@@ -2053,12 +2053,23 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 		// a refused row reads as sql.ErrNoRows here too and is never counted as a
 		// served /metrics hit -- serving it would settle the row with nothing
 		// written and never consult a lane.
-		cached, err := w.cache.LookupAccepted(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength),
+		//
+		// accept decodes the row it is judging and stashes the result in
+		// decoded, so the caller can return it directly on a successful lookup
+		// rather than decoding the same JSON a second time. accept may now run
+		// up to twice (an exact-bucket row can be refused and fall through to
+		// the bucket-0 fallback, #952 finding 2), so decoded is overwritten on
+		// every invocation and the accepted call is always the last one to run
+		// before LookupAccepted returns success -- there is no invocation after
+		// it whose (refused) decode could clobber it.
+		var decoded models.Song
+		_, err := w.cache.LookupAccepted(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength),
 			func(raw string) bool {
-				return !lyrics.RefusedByTimingGuard(lyrics.DecodeCachedSong(raw, track), track.TrackLength)
+				decoded = lyrics.DecodeCachedSong(raw, track)
+				return !lyrics.RefusedByTimingGuard(decoded, track.TrackLength)
 			})
 		if err == nil {
-			return lyrics.DecodeCachedSong(cached, track), true, nil
+			return decoded, true, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return models.Song{}, false, fmt.Errorf("worker: lookup cache: %w", err)

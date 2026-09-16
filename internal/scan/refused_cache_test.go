@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/scan"
@@ -38,6 +37,13 @@ func encodeCachedSong(t *testing.T, song models.Song) string {
 // cache MISS -- falling through to the timing-verdict suppression and enqueue
 // path exactly as a sql.ErrNoRows miss would -- rather than marking the scan
 // row done forever with nothing ever written and no lane ever consulted.
+//
+// No Durations store is wired here, so the real file duration is unresolvable;
+// per the doubt-routes-to-worker rule (see duration_source_test.go) a synced
+// entry is refused on that basis alone, which happens to agree with what the
+// catalog-length fallback would have decided too. See
+// TestEnqueuePending_ScanSideJudgesAgainstRealFileDuration for the case where a
+// resolved real duration is what actually catches the refusal.
 func TestEnqueuePending_RefusedCategoricalCacheEntryIsAMiss(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
@@ -89,130 +95,21 @@ func TestEnqueuePending_RefusedCategoricalCacheEntryIsAMiss(t *testing.T) {
 	}
 }
 
-// TestEnqueuePending_WellTimedCacheEntryStillShortCircuits is the control for
-// the above: a cached lyric the timing guard would NOT refuse must still mark
-// the row done without enqueueing, exactly as before #952.
-func TestEnqueuePending_WellTimedCacheEntryStillShortCircuits(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := cache.New(sqlDB)
-
-	const trackLength = 100
-	track := models.Track{ArtistName: "A", TrackName: "WellTimed", TrackLength: trackLength}
-
-	ok := models.Song{
-		Track:     models.Track{ArtistName: "Cached Artist", TrackName: "Cached Title", TrackLength: trackLength},
-		Subtitles: models.Synced{Lines: []models.Lines{guardLine(90, "right recording")}},
-	}
-	if err := repo.Store(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(trackLength), encodeCachedSong(t, ok)); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
-
-	store := &fakePendingStore{results: []models.ScanResult{{
-		ID:       2,
-		FilePath: "/music/welltimed.flac",
-		Track:    track,
-	}}}
-	work := &fakeWorkQueue{}
-	e := scan.Enqueuer{Results: store, Cache: repo, Queue: work, Priority: 5}
-
-	enqueued, cacheHits, err := e.EnqueuePending(ctx, models.Library{ID: 7})
-	if err != nil {
-		t.Fatalf("EnqueuePending: %v", err)
-	}
-	if enqueued != 0 || len(work.inputs) != 0 {
-		t.Fatalf("enqueued=%d items=%d; want 0 -- a well-timed cache entry must still short-circuit", enqueued, len(work.inputs))
-	}
-	if cacheHits != 1 {
-		t.Fatalf("cacheHits=%d; want 1", cacheHits)
-	}
-	if len(store.status) != 1 || store.status[0].status != scan.StatusDone {
-		t.Fatalf("status calls=%+v; want a single done stamp", store.status)
-	}
-	if hits, lookups := repo.CacheStats(); hits != 1 || lookups != 1 {
-		t.Fatalf("CacheStats=(hits %d, lookups %d); want (1, 1)", hits, lookups)
-	}
-}
-
-// TestEnqueuePending_UnknownDurationRefusedEntryStillServed pins the fail-open
-// rule: when the scan result's own TrackLength is unknown (0), the timing guard
-// cannot judge the cached lyric at all (timing.Evaluate returns
-// UnknownDuration for durationSeconds<=0), so it must serve the cache exactly
-// as before -- an overrunning cue is no longer evidence of anything when there
-// is no known duration to overrun.
-func TestEnqueuePending_UnknownDurationRefusedEntryStillServed(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := cache.New(sqlDB)
-
-	track := models.Track{ArtistName: "A", TrackName: "Unknown", TrackLength: 0}
-
-	// The cached song ALSO carries no known TrackLength, so guardDurationSeconds
-	// falls back to 0 too: there is nothing to compare the 400s cue against.
-	cachedNoDuration := models.Song{
-		Track:     models.Track{ArtistName: "Cached Artist", TrackName: "Cached Title"},
-		Subtitles: models.Synced{Lines: []models.Lines{guardLine(400, "irrelevant without a duration")}},
-	}
-	if err := repo.Store(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(0), encodeCachedSong(t, cachedNoDuration)); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
-
-	store := &fakePendingStore{results: []models.ScanResult{{
-		ID:       3,
-		FilePath: "/music/unknown.flac",
-		Track:    track,
-	}}}
-	work := &fakeWorkQueue{}
-	e := scan.Enqueuer{Results: store, Cache: repo, Queue: work, Priority: 5}
-
-	enqueued, cacheHits, err := e.EnqueuePending(ctx, models.Library{ID: 7})
-	if err != nil {
-		t.Fatalf("EnqueuePending: %v", err)
-	}
-	if enqueued != 0 || len(work.inputs) != 0 {
-		t.Fatalf("enqueued=%d items=%d; want 0 -- unknown duration must fail open and serve the cache", enqueued, len(work.inputs))
-	}
-	if cacheHits != 1 {
-		t.Fatalf("cacheHits=%d; want 1", cacheHits)
-	}
-}
-
-// An unknown FILE duration does not by itself make a cached entry servable:
-// the writer's guard falls back to the cached song's own catalog length
-// (guardDurationSeconds), so the scan side must refuse what the writer would
-// quarantine. Accepting it here would mark the track done with nothing written,
-// the failure #952 removes. The expectation is pinned to the writer's own
-// decision rather than restated, so the two cannot drift apart silently.
-func TestEnqueuePending_UnknownFileDurationJudgedAgainstCachedLength(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := cache.New(sqlDB)
-
-	track := models.Track{ArtistName: "A", TrackName: "UnknownFile", TrackLength: 0}
-	cached := models.Song{
-		Track:     models.Track{ArtistName: "Cached Artist", TrackName: "Cached Title", TrackLength: 100},
-		Subtitles: models.Synced{Lines: []models.Lines{guardLine(10, "wrong recording"), guardLine(400, "wrong recording")}},
-	}
-	if decision, _, _ := lyrics.DecidePromotion(cached); decision != lyrics.Quarantine {
-		t.Fatalf("fixture: writer decision = %v; want quarantine (the premise of this test)", decision)
-	}
-	if err := repo.Store(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(0), encodeCachedSong(t, cached)); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
-
-	store := &fakePendingStore{results: []models.ScanResult{{
-		ID:       4,
-		FilePath: "/music/unknown-file.flac",
-		Track:    track,
-	}}}
-	work := &fakeWorkQueue{}
-	e := scan.Enqueuer{Results: store, Cache: repo, Queue: work, Priority: 5}
-
-	enqueued, cacheHits, err := e.EnqueuePending(ctx, models.Library{ID: 7})
-	if err != nil {
-		t.Fatalf("EnqueuePending: %v", err)
-	}
-	if enqueued != 1 || cacheHits != 0 {
-		t.Fatalf("enqueued=%d cacheHits=%d; want 1 and 0 -- an entry the writer quarantines on the catalog-length fallback must not be served", enqueued, cacheHits)
-	}
-}
+// TestEnqueuePending_WellTimedCacheEntryStillShortCircuits,
+// TestEnqueuePending_UnknownDurationRefusedEntryStillServed, and
+// TestEnqueuePending_UnknownFileDurationJudgedAgainstCachedLength used to live
+// here. All three hand-set Track.TrackLength on the scan result and relied on
+// RefusedByTimingGuard's catalog-length fallback to judge a cached entry -- a
+// premise that does not hold in production, where ListPendingByLibrary never
+// selects a duration column and Track.TrackLength is always 0 (a Copilot
+// finding on PR #966, tracked as a #952 follow-up). The scan-side check now
+// resolves the file's REAL duration via an injected audiodur.Store instead of
+// ever consulting that fallback; their coverage moved to
+// duration_source_test.go:
+//   - TestEnqueuePending_WellTimedEntryServedWithKnownDuration (the well-timed
+//     case, now judged against a resolved real duration)
+//   - TestEnqueuePending_NoRecordedDurationRoutesDoubtToWorker and
+//     TestEnqueuePending_NilDurationsRoutesSyncedDoubtToWorker (the
+//     unknown-duration cases: a synced entry is no longer served on faith when
+//     the real duration cannot be resolved -- doubt routes to the worker,
+//     which always re-derives it)

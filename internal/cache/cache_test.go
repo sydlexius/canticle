@@ -345,6 +345,70 @@ func TestLookupAccepted_RefusesBucket0Fallback(t *testing.T) {
 	}
 }
 
+// TestLookupAccepted_RefusedExactRowFallsThroughToBucket0 is the CodeRabbit
+// finding on PR #966: before this, a refused EXACT-bucket row returned
+// sql.ErrNoRows immediately and never tried the bucket-0 sentinel row, so a
+// refused exact row could shadow a perfectly servable bucket-0 entry -- a
+// regression from the pre-#952 behavior, where a miss always fell back.
+// Seeds BOTH an exact-bucket row (which accept refuses) and a bucket-0 row
+// (which accept accepts) for the same key, and asserts the bucket-0 lyrics are
+// served, counted as exactly one hit, over exactly one call's one lookup.
+func TestLookupAccepted_RefusedExactRowFallsThroughToBucket0(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Song", 48, "exact-bucket lyrics (refused)"); err != nil {
+		t.Fatalf("Store exact: %v", err)
+	}
+	if err := repo.Store(ctx, "Artist", "Song", 0, "bucket-0 lyrics (accepted)"); err != nil {
+		t.Fatalf("Store bucket-0: %v", err)
+	}
+
+	var seen []string
+	got, err := repo.LookupAccepted(ctx, "Artist", "Song", 48, func(lyrics string) bool {
+		seen = append(seen, lyrics)
+		return lyrics == "bucket-0 lyrics (accepted)"
+	})
+	if err != nil {
+		t.Fatalf("LookupAccepted: %v", err)
+	}
+	if got != "bucket-0 lyrics (accepted)" {
+		t.Errorf("LookupAccepted = %q; want the bucket-0 fallback lyrics", got)
+	}
+	if len(seen) != 2 || seen[0] != "exact-bucket lyrics (refused)" || seen[1] != "bucket-0 lyrics (accepted)" {
+		t.Fatalf("accept invocations = %+v; want the refused exact row then the accepted bucket-0 row", seen)
+	}
+	if hits, lookups := repo.CacheStats(); hits != 1 || lookups != 1 {
+		t.Fatalf("CacheStats = (hits %d, lookups %d); want (1, 1) -- one served row, one call", hits, lookups)
+	}
+}
+
+// TestLookupAccepted_RefusedExactAndRefusedBucket0IsAMiss is the control: when
+// BOTH the exact-bucket row and the bucket-0 fallback are refused, the overall
+// call is a genuine miss -- sql.ErrNoRows, zero hits.
+func TestLookupAccepted_RefusedExactAndRefusedBucket0IsAMiss(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Song", 48, "exact-bucket lyrics (refused)"); err != nil {
+		t.Fatalf("Store exact: %v", err)
+	}
+	if err := repo.Store(ctx, "Artist", "Song", 0, "bucket-0 lyrics (also refused)"); err != nil {
+		t.Fatalf("Store bucket-0: %v", err)
+	}
+
+	got, err := repo.LookupAccepted(ctx, "Artist", "Song", 48, func(string) bool { return false })
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("LookupAccepted err = %v; want sql.ErrNoRows", err)
+	}
+	if got != "" {
+		t.Errorf("LookupAccepted = %q; want empty string", got)
+	}
+	if hits, lookups := repo.CacheStats(); hits != 0 || lookups != 1 {
+		t.Fatalf("CacheStats = (hits %d, lookups %d); want (0, 1)", hits, lookups)
+	}
+}
+
 // TestLookup_IsLookupAcceptedWithAlwaysAccept pins that Lookup's behavior is
 // unchanged by the LookupAccepted refactor: it is LookupAccepted with a
 // predicate that always accepts, so every existing caller of Lookup keeps
