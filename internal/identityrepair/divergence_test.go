@@ -583,3 +583,143 @@ func TestRepairDivergence_LibraryScope(t *testing.T) {
 		t.Errorf("lib1 queue row not corrected: %q", a)
 	}
 }
+
+// Shared queue row (#967 finding 1): srA is IN the scoped library and
+// diverges to one key, srB is in a DIFFERENT library and diverges to a
+// DIFFERENT key. An unscoped pass sees both as a disagreement (neither
+// matches wq's own key, and they disagree with each other), unlinks both, and
+// deletes the now-orphaned queue row. A pass scoped to srA's library must not
+// do any of that on srB's behalf: srB was never examined by this run, its
+// library gets neither credit nor a backup record, and unlinking it (or
+// deleting the shared queue row) would silently corrupt state for a library
+// this run was not asked to touch. The whole candidate row is skipped instead
+// (ScopeSkips), leaving every column and every link exactly as found.
+func TestRepairDivergence_LibraryScopeSkipsRowWithOutOfScopeDivergentMember(t *testing.T) {
+	db := openDB(t)
+	lib1 := seedLibrary(t, db)
+	lib2 := seedLibrary(t, db)
+	srA := seedScan(t, db, lib1, "/m1/1.mp3", "AlphaBravo", "", "Song")
+	srB := seedScan(t, db, lib2, "/m2/2.mp3", "AlphaBravo", "", "Song")
+	// Force both onto ONE shared queue row (same key/title), as a dedup would.
+	if _, err := db.Exec(`UPDATE scan_results SET artist_key = 'alphabravo' WHERE id IN (?, ?)`, srA, srB); err != nil {
+		t.Fatalf("force shared key: %v", err)
+	}
+	wq := seedQueue(t, db, "AlphaBravo", "", "pending", srA)
+	if _, err := db.Exec(`UPDATE work_queue SET artist_key = 'alphabravo' WHERE id = ?`, wq); err != nil {
+		t.Fatalf("force queue key: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wq, srB); err != nil {
+		t.Fatalf("link srB: %v", err)
+	}
+
+	// srA (in-scope) and srB (out-of-scope) diverge to DIFFERENT keys -- a
+	// disagreement, and srB's key differs from wq's own.
+	if _, err := db.Exec(`UPDATE scan_results SET artist = 'Alpha; Bravo', artist_key = ? WHERE id = ?`,
+		normalize.NormalizeKey("Alpha; Bravo"), srA); err != nil {
+		t.Fatalf("correct srA: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE scan_results SET artist = 'Charlie; Delta', artist_key = ? WHERE id = ?`,
+		normalize.NormalizeKey("Charlie; Delta"), srB); err != nil {
+		t.Fatalf("correct srB: %v", err)
+	}
+
+	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{LibraryID: &lib1})
+	if err != nil {
+		t.Fatalf("RepairDivergence: %v", err)
+	}
+	if res.ScopeSkips != 1 || res.Rekeyed != 0 || res.Merged != 0 || res.Unlinked != 0 || res.Deleted != 0 {
+		t.Fatalf("Result = %+v; want ScopeSkips=1 and every other write-tally 0", res)
+	}
+	if a, k, status := queueIdentity(t, db, wq); a != "AlphaBravo" || k != "alphabravo" || status != "pending" {
+		t.Errorf("shared work_queue row mutated: (%q,%q,%q); want left at the old identity", a, k, status)
+	}
+	if !junctionLinked(t, db, wq, srA) || !junctionLinked(t, db, wq, srB) {
+		t.Errorf("a junction link was dropped; want both left in place (scope-skipped)")
+	}
+	if status := scanStatus(t, db, srA); status != "pending" {
+		t.Errorf("srA status = %q; want its pre-existing pending status untouched", status)
+	}
+	if status := scanStatus(t, db, srB); status != "pending" {
+		t.Errorf("srB (out-of-scope) status = %q; want untouched", status)
+	}
+
+	// An unscoped pass over the same fixture repairs it normally: disagreement,
+	// both unlinked, row deleted once nothing correct remains linked.
+	all, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("unscoped RepairDivergence: %v", err)
+	}
+	if all.Unlinked != 2 || all.Deleted != 1 || all.ScopeSkips != 0 {
+		t.Fatalf("unscoped Result = %+v; want Unlinked=2 Deleted=1 ScopeSkips=0", all)
+	}
+}
+
+// Same shape as the library-scope test above, but scoped by PathPrefix
+// instead of LibraryID: srA sits under the rescanned subtree, srB sits under
+// an entirely different subtree of the same library. The PathPrefix-scoped
+// pass must skip the shared row rather than act on srB's behalf.
+func TestRepairDivergence_PathPrefixScopeSkipsRowWithOutOfScopeDivergentMember(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	srA := seedScan(t, db, lib, "/music/artistA/1.mp3", "AlphaBravo", "", "Song")
+	srB := seedScan(t, db, lib, "/music/artistB/2.mp3", "AlphaBravo", "", "Song")
+	if _, err := db.Exec(`UPDATE scan_results SET artist_key = 'alphabravo' WHERE id IN (?, ?)`, srA, srB); err != nil {
+		t.Fatalf("force shared key: %v", err)
+	}
+	wq := seedQueue(t, db, "AlphaBravo", "", "pending", srA)
+	if _, err := db.Exec(`UPDATE work_queue SET artist_key = 'alphabravo' WHERE id = ?`, wq); err != nil {
+		t.Fatalf("force queue key: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wq, srB); err != nil {
+		t.Fatalf("link srB: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE scan_results SET artist = 'Alpha; Bravo', artist_key = ? WHERE id = ?`,
+		normalize.NormalizeKey("Alpha; Bravo"), srA); err != nil {
+		t.Fatalf("correct srA: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE scan_results SET artist = 'Charlie; Delta', artist_key = ? WHERE id = ?`,
+		normalize.NormalizeKey("Charlie; Delta"), srB); err != nil {
+		t.Fatalf("correct srB: %v", err)
+	}
+
+	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
+		PathPrefix: "/music/artistA",
+	})
+	if err != nil {
+		t.Fatalf("RepairDivergence: %v", err)
+	}
+	if res.ScopeSkips != 1 || res.Rekeyed != 0 || res.Merged != 0 || res.Unlinked != 0 || res.Deleted != 0 {
+		t.Fatalf("Result = %+v; want ScopeSkips=1 and every other write-tally 0", res)
+	}
+	if a, k, status := queueIdentity(t, db, wq); a != "AlphaBravo" || k != "alphabravo" || status != "pending" {
+		t.Errorf("shared work_queue row mutated: (%q,%q,%q); want left at the old identity", a, k, status)
+	}
+	if !junctionLinked(t, db, wq, srA) || !junctionLinked(t, db, wq, srB) {
+		t.Errorf("a junction link was dropped; want both left in place (scope-skipped)")
+	}
+}
+
+// #970 finding 2: PathPrefix "/" (a filesystem root) must include a normal
+// descendant like "/lib/a.mp3" -- the naive range-seek form (always appending
+// a fresh separator to the prefix) doubles up on a prefix that already ends
+// in the separator and excludes every ordinary child.
+func TestRepairDivergence_PathPrefixRootIncludesDescendants(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	sr := seedScan(t, db, lib, "/lib/a.mp3", "AlphaBravo", "", "Song")
+	wq := seedQueue(t, db, "AlphaBravo", "", "pending", sr)
+	setScanIdentity(t, db, sr, "Alpha; Bravo")
+
+	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
+		PathPrefix: "/",
+	})
+	if err != nil {
+		t.Fatalf("RepairDivergence: %v", err)
+	}
+	if res.Scanned != 1 || res.Rekeyed != 1 {
+		t.Fatalf("Result = %+v; want Scanned=1 Rekeyed=1 (root prefix must include /lib/a.mp3)", res)
+	}
+	if a, _, _ := queueIdentity(t, db, wq); a != "Alpha; Bravo" {
+		t.Errorf("root-scoped queue row not corrected: %q", a)
+	}
+}

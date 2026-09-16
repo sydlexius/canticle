@@ -158,9 +158,9 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 	if args.Yes {
 		verb = "corrected"
 	}
-	_, _ = fmt.Fprintf(out, "reconcile-identity: divergence pass scanned %d work_queue row(s); %s %d (%d re-keyed, %d merged, %d unlinked, %d deleted, %d skipped in-flight)%s\n",
+	_, _ = fmt.Fprintf(out, "reconcile-identity: divergence pass scanned %d work_queue row(s); %s %d (%d re-keyed, %d merged, %d unlinked, %d deleted, %d skipped in-flight, %d skipped out-of-scope)%s\n",
 		divRes.Scanned, verb, divRes.Rekeyed+divRes.Merged+divRes.Unlinked+divRes.Deleted,
-		divRes.Rekeyed, divRes.Merged, divRes.Unlinked, divRes.Deleted, divRes.ProcessingSkips, suffixDryRun(args.Yes))
+		divRes.Rekeyed, divRes.Merged, divRes.Unlinked, divRes.Deleted, divRes.ProcessingSkips, divRes.ScopeSkips, suffixDryRun(args.Yes))
 	_, _ = fmt.Fprintf(out, "reconcile-identity: scanned %d row(s); %s %d (%d queue re-keyed, %d queue merged, %d skipped in-flight, %d unreadable)%s\n",
 		res.Scanned, verb, res.Changed, res.QueueUpdated, res.QueueMerged, res.ProcessingSkips, res.ReadFailures, suffixDryRun(args.Yes))
 	if backupFile != nil {

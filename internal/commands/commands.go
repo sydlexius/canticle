@@ -2601,6 +2601,16 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 					"unlinked", divRes.Unlinked,
 					"deleted", divRes.Deleted, "skipped_in_flight", divRes.ProcessingSkips)
 			}
+			if divRes.ScopeSkips > 0 {
+				// Reported separately from the correction-count branch above (#967
+				// finding 1): a ScopeSkip is not itself a correction, but a row this
+				// pass deliberately left untouched because a shared work_queue row
+				// also links a scan_results member outside this run's library/subtree
+				// scope. Surfacing it distinctly keeps a skip visible rather than
+				// silently indistinguishable from "nothing to do".
+				slog.Info("scan: divergence repair skipped out-of-scope shared work_queue row(s)",
+					"library", lib.Name, "trigger", string(trigger), "skipped_out_of_scope", divRes.ScopeSkips)
+			}
 
 			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)
 			if err != nil {
