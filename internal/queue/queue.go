@@ -3336,3 +3336,68 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
 	}
 	return n > 0, nil
 }
+
+// ReopenDoneRowTx reopens a 'done' work_queue row to 'pending' inside a
+// caller-supplied transaction, clearing every settle-state column so the
+// row carries no stale record of the fetch that will no longer be true once
+// it re-runs: attempts, next_attempt_at, last_error, completed_at (the
+// original reset shape, present since before this helper existed) PLUS
+// provider_lane, outcome_type, outcome_detail, timing_outcome,
+// overrun_magnitude, overrun_ratio and evaluated_at (added for #960).
+//
+// This is the shared reopen every "settle state must not survive a reopen"
+// call site in this package converges on: ResetInstrumental and
+// UnsettleInstrumental already clear the instrumental-specific columns
+// inline (their own verdict IS the thing being reversed, so they keep that
+// logic local), but a caller reopening a row for a reason UNRELATED to the
+// detector -- identityrepair's re-key and merge paths are the first such
+// callers -- must not leave a done-era outcome_type/timing_outcome/lane
+// behind. That is precisely the stale-vs-NULL ambiguity #655 and #773 were
+// filed to remove: a NULL outcome_type must mean "not yet evaluated", never
+// "evaluated once, under a since-corrected identity, and never touched
+// again".
+//
+// Guarded on status = 'done', so calling this on a row in any other status
+// is a safe no-op (returns false, nil) rather than fabricating a status --
+// mirroring mergeQueueRows' existing invariant that a work_queue row's
+// status is never invented, only ever moved along its real lifecycle.
+// Deliberately excludes 'unavailable': that status already means "exhausted
+// its miss budget, revive only via RecheckRetired" (#477), and reopening it
+// here would silently grant it a second attempt outside that designed path.
+// A caller that also wants to touch an 'unavailable' row's identity (as
+// identityrepair does) updates the identity columns separately and leaves
+// this helper's guard alone to keep the row retired.
+//
+// priority and next_attempt_at are NOT reset to a scan-priority "run me
+// now" the way ResetInstrumental's does -- the caller may not want the row
+// to jump the queue, and #960's callers do not need it to: the corrected
+// identity re-enters ordinary dequeue eligibility, not an urgent recheck.
+// next_attempt_at is cleared to the zero-backoff sentinel so no residual
+// backoff timer blocks it.
+func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (bool, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE work_queue
+         SET status = 'pending',
+             attempts = 0,
+             next_attempt_at = ?,
+             last_error = '',
+             completed_at = NULL,
+             provider_lane = NULL,
+             outcome_type = NULL,
+             outcome_detail = NULL,
+             timing_outcome = NULL,
+             overrun_magnitude = NULL,
+             overrun_ratio = NULL,
+             evaluated_at = NULL
+         WHERE id = ? AND status = 'done'`,
+		formatTime(now), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: reopen done row %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: reopen done row %d rows affected: %w", id, err)
+	}
+	return n > 0, nil
+}

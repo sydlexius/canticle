@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
@@ -289,13 +290,29 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string, report
 		}
 		out.queueUpdated = 1
 	case conflictID == 0:
-		// Corrected key is free: re-key the queue row in place.
+		// Corrected key is free: re-key the queue row in place. This is the
+		// COMMON path for a genuine identity correction -- the corrected key
+		// usually collides with nothing -- so it is where issue #960 lived: a
+		// 'done' row's identity was corrected here but the row itself stayed
+		// settled forever, since nothing re-queried it under the corrected key.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE work_queue SET artist = ?, album_artist = ?, artist_key = ? WHERE id = ?`,
 			ch.NewArtist, ch.NewAlbumArtist, ch.NewArtistKey, oldID); err != nil {
 			return applyOutcome{}, fmt.Errorf("identityrepair: re-key work_queue %d: %w", oldID, err)
 		}
 		out.queueUpdated = 1
+		// Reopen a 'done' row so the worker re-fetches under the corrected
+		// identity (#960). queue.ReopenDoneRowTx is a no-op (and correctly so)
+		// on any other status: 'pending'/'deferred' have nothing settled to
+		// reopen, and 'unavailable' is deliberately left retired -- that key
+		// already exhausted its miss budget, and queue.RecheckRetired is the
+		// designed revival path (see mergeQueueRows' doc comment for the same
+		// reasoning on the merge side).
+		if oldStatus == queue.StatusDone {
+			if _, err := queue.ReopenDoneRowTx(ctx, tx, oldID, time.Now().UTC()); err != nil {
+				return applyOutcome{}, fmt.Errorf("identityrepair: reopen re-keyed work_queue %d: %w", oldID, err)
+			}
+		}
 	default:
 		// A row already holds the corrected key: merge the old-key row into it.
 		if err := mergeQueueRows(ctx, tx, oldID, conflictID, conflictStatus, ch.ScanResultID); err != nil {
@@ -347,8 +364,14 @@ func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, exc
 // sidecar targets are covered. The survivor's status is NOT fabricated -- doing
 // so would break the invariant that a 'done' work_queue row implies its linked
 // scan_results are 'done' (queue.Complete). Instead, a survivor that already
-// completed is reopened to 'pending' so the worker re-fetches and writes the
-// newly-unioned paths (the write is idempotent for the already-satisfied one).
+// completed is reopened to 'pending' via queue.ReopenDoneRowTx so the worker
+// re-fetches and writes the newly-unioned paths (the write is idempotent for
+// the already-satisfied one). That reopen clears every settle-state column
+// (provider_lane, outcome_type, outcome_detail, timing_outcome, the overrun
+// pair, evaluated_at) alongside status/attempts/next_attempt_at/last_error/
+// completed_at -- #960: a done-era outcome_type left on a now-pending row is
+// the same stale-vs-NULL ambiguity #655/#773 exist to prevent, and the merge
+// path reopened the row without clearing it before this fix.
 //
 // An 'unavailable' survivor (#477: an exhausted benign miss) is deliberately
 // NOT reopened: it gains the unioned output_paths and nothing else. Its
@@ -356,7 +379,10 @@ func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, exc
 // already exhausted its miss budget, so a reopen would buy one fetch of the
 // same lookup before queue.RetireMiss re-retired it. queue.RecheckRetired is
 // the designed revival path for 'unavailable' rows, and it will carry the
-// unioned paths when it runs.
+// unioned paths when it runs. ReopenDoneRowTx's own status = 'done' guard
+// enforces this: calling it on an 'unavailable' (or any non-'done') survivor
+// is a no-op by construction, so this function does not need its own status
+// branch beyond the one that decides whether to call it at all.
 //
 // Any other survivor keeps its status and picks up the merged paths on its
 // next run. The dropped row's scan_result links
@@ -368,17 +394,14 @@ func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID, keepID int64, keepS
 	if err != nil {
 		return err
 	}
-	if keepStatus == queue.StatusDone {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE work_queue
-			 SET output_paths = ?, status = 'pending', attempts = 0,
-			     next_attempt_at = '1970-01-01T00:00:00Z', last_error = '', completed_at = NULL
-			 WHERE id = ?`, merged, keepID); err != nil {
-			return fmt.Errorf("identityrepair: reopen merged work_queue %d: %w", keepID, err)
-		}
-	} else if _, err := tx.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE work_queue SET output_paths = ? WHERE id = ?`, merged, keepID); err != nil {
 		return fmt.Errorf("identityrepair: union output_paths into work_queue %d: %w", keepID, err)
+	}
+	if keepStatus == queue.StatusDone {
+		if _, err := queue.ReopenDoneRowTx(ctx, tx, keepID, time.Now().UTC()); err != nil {
+			return fmt.Errorf("identityrepair: reopen merged work_queue %d: %w", keepID, err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id)
