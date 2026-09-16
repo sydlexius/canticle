@@ -277,3 +277,92 @@ func TestExtractArtist_MP4AllEmptyChildren(t *testing.T) {
 		})
 	}
 }
+
+// splicedValue builds the byte shape a spliced header has: a 4-byte big-endian
+// length, the "data" literal, then the 8-byte class+locale block, then payload.
+// classLocale is a parameter so a test can pin what happens when those 8 bytes
+// do NOT carry the text-class signature.
+func splicedValue(prefix string, classLocale []byte, payload string) string {
+	b := []byte(prefix)
+	b = binary.BigEndian.AppendUint32(b, uint32(mp4SpliceHeaderLen+len(payload))) //nolint:gosec // reason: test payloads are small, no overflow risk
+	b = append(b, "data"...)
+	b = append(b, classLocale...)
+	return string(append(b, payload...))
+}
+
+// A legitimate SINGLE value can be shaped like a chain: a length prefix, the
+// "data" literal, 8 bytes, and a payload whose length lands EXACTLY at
+// end-of-buffer. Length accounting alone cannot tell that apart from a real
+// splice -- it partitions cleanly either way -- so such a value was split into
+// two artists that the file never had.
+//
+// Reported by Copilot on PR #959, and it was right that the earlier
+// "metadata artist" test did not cover this: that one fails because its length
+// prefix is ABSURD, not because the structure is rejected. The discriminator is
+// the class+locale block, which is mostly NUL and which real text does not
+// carry. Here those 8 bytes are printable, so the split is refused and the
+// value passes through whole.
+func TestExtractArtist_MP4ChainShapedSingleValue(t *testing.T) {
+	value := splicedValue("Prefix Artist", []byte("PRINTABL"), "Tail Words")
+	m := readMP4(t, buildM4A(tagAtom("\xa9ART", value)))
+
+	// Precondition: the length really does land at EOF, so this test cannot
+	// pass merely because the accounting failed.
+	if got, want := m.Artist(), value; got != want {
+		t.Fatalf("fixture mangled before the code under test: Artist() = %q, want %q", got, want)
+	}
+
+	if got := extractArtist(m); got != value {
+		t.Errorf("a chain-shaped SINGLE value was split: extractArtist() = %q, want %q", got, value)
+	}
+}
+
+// The same shape carrying the REAL text class+locale block is a genuine splice
+// and must still be recovered -- the discriminator has to reject the impostor
+// above without also rejecting the thing it is modeled on.
+func TestExtractArtist_MP4ChainShapedGenuineSplice(t *testing.T) {
+	value := splicedValue("First One", mp4TextClassLocale[:], "Second One")
+	m := readMP4(t, buildM4A(tagAtom("\xa9ART", value)))
+
+	if got, want := extractArtist(m), "First One; Second One"; got != want {
+		t.Errorf("extractArtist() = %q, want %q", got, want)
+	}
+}
+
+// An oversized length must be rejected BEFORE it is narrowed to int. On a
+// 32-bit build int is 32 bits, so 0x80000010 narrows negative, valLen goes
+// negative, the bounds guard compares as less-than and PASSES, and the slice
+// panics with high < low (verified by narrowing simulation: int32(0x80000010)
+// = -2147483632).
+//
+// Reported by CodeRabbit on PR #959. No shipped build reaches it -- CI and
+// GoReleaser target amd64/arm64 only -- so this is a latent defect gated on a
+// build-config fact that can change, which is exactly the kind that survives
+// until the config changes.
+//
+// HONEST LIMIT OF THIS TEST: on a 64-bit run it does NOT discriminate. int is
+// 64 bits there, 0x80000010 does not overflow, and the pre-fix narrow-then-check
+// order rejects the length too -- measured, the mutation passes on amd64. It
+// would redden on 386, which cannot be executed on the darwin/arm64 dev machine
+// (the binary cross-compiles; there is no runner). So this is a REGRESSION GUARD
+// documenting the shape, not proof the fix works. The proof is that the
+// comparison happens in uint64 before any narrowing, which is word-size
+// independent by construction.
+func TestExtractArtist_MP4OversizedLengthRejected(t *testing.T) {
+	var big [4]byte
+	binary.BigEndian.PutUint32(big[:], 0x80000010)
+
+	raw := []byte("Legit Artist")
+	raw = append(raw, big[:]...)
+	raw = append(raw, "data"...)
+	raw = append(raw, mp4TextClassLocale[:]...)
+	raw = append(raw, "Trailing"...)
+	value := string(raw)
+
+	m := readMP4(t, buildM4A(tagAtom("\xa9ART", value)))
+
+	// Must not panic, and must not split on a length the buffer cannot back.
+	if got := extractArtist(m); got != value {
+		t.Errorf("extractArtist() = %q, want the unsplit value %q", got, value)
+	}
+}

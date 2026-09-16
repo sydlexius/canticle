@@ -1,7 +1,9 @@
 package scanner
 
 import (
+	"bytes"
 	"encoding/binary"
+	"math"
 	"strings"
 
 	"github.com/dhowden/tag"
@@ -56,6 +58,68 @@ import (
 // first: 4 bytes big-endian box length, 4 bytes literal "data", 4 bytes
 // version(1)+flags(3), 4 bytes locale.
 const mp4SpliceHeaderLen = 16
+
+// mp4TextClassLocale is the 8 bytes every spliced header carries between the
+// "data" literal and its payload: a 4-byte version(1 byte, 0) + flags(3 bytes,
+// 0x000001 = the TEXT well-known type) block, then a 4-byte locale that text
+// atoms leave zero.
+//
+// Checking it is what makes the splice signature STRUCTURAL rather than a bare
+// length coincidence. Without it, the only evidence a header exists is that a
+// length prefix happens to account for the remaining bytes, which a legitimate
+// single value CAN satisfy -- a payload shaped
+// <4-byte length><data><8 bytes><rest> whose length lands exactly at EOF parses
+// as a chain and gets split into two artists. These 8 bytes must ALSO match,
+// and they are mostly NUL, which a legitimate text artist value does not carry.
+//
+// Deliberately STRICT about the locale. A non-zero locale falls through to the
+// mangled value rather than being split, because the two failure directions are
+// not symmetric: a false negative leaves the status quo (one corrupted string,
+// which is the bug we already have), while a false positive invents artist
+// boundaries in a value that never had them. Bias toward the recoverable error.
+var mp4TextClassLocale = [8]byte{0, 0, 0, 1, 0, 0, 0, 0}
+
+// mp4SpliceHeaderAt reports whether a spliced "data" header begins at hdr --
+// a 4-byte length, the "data" literal, then mp4TextClassLocale -- and returns
+// the payload length that header claims.
+//
+// The length is compared against the remaining buffer as uint64 BEFORE it is
+// narrowed to int. On a 32-bit build int is 32 bits, so a length such as
+// 0x80000010 narrows NEGATIVE; valLen then goes negative, valStart+valLen
+// compares as less than len(data) so the bounds guard passes, and the slice
+// panics with high < low. Verified by narrowing simulation: int32(0x80000010)
+// = -2147483632. Current CI and GoReleaser targets are amd64/arm64 only, so no
+// shipped build reaches it today -- which makes this a latent defect gated on a
+// build-config fact that can change, not one that is safe by construction.
+func mp4SpliceHeaderAt(data []byte, hdr int) (valLen int, ok bool) {
+	if hdr < 0 || hdr+mp4SpliceHeaderLen > len(data) {
+		return 0, false
+	}
+	if string(data[hdr+4:hdr+8]) != "data" {
+		return 0, false
+	}
+	if !bytes.Equal(data[hdr+8:hdr+mp4SpliceHeaderLen], mp4TextClassLocale[:]) {
+		return 0, false
+	}
+	// Bound the length BEFORE narrowing. int is 32 bits on a 32-bit build, so a
+	// value above MaxInt32 narrows NEGATIVE: valLen would go negative, the
+	// bounds check below would compare as less-than and PASS, and the slice
+	// would panic with high < low (int32(0x80000010) = -2147483632). Rejecting
+	// above MaxInt32 costs nothing real -- it is far beyond any atom a tagger
+	// writes -- and makes int(l) safe on every word size, so the arithmetic
+	// below is plain int with no further conversion.
+	l := binary.BigEndian.Uint32(data[hdr : hdr+4])
+	if l < mp4SpliceHeaderLen || l > math.MaxInt32 {
+		return 0, false
+	}
+	n := int(l) - mp4SpliceHeaderLen
+	// avail is non-negative: the hdr+mp4SpliceHeaderLen > len(data) guard above
+	// already returned. Both sides are int, so nothing converts here.
+	if avail := len(data) - (hdr + mp4SpliceHeaderLen); n > avail {
+		return 0, false
+	}
+	return n, true
+}
 
 // mp4ArtistAtoms and mp4AlbumArtistAtoms name the raw MP4 atom keys
 // dhowden/tag's Raw() stores multi-value artist / album-artist data under.
@@ -163,21 +227,17 @@ func splitMP4SplicedValue(s string) ([]string, bool) {
 		if string(data[idx:idx+4]) != "data" {
 			continue
 		}
-		l := binary.BigEndian.Uint32(data[idx-4 : idx])
-		if l < mp4SpliceHeaderLen {
+		hdr := idx - 4
+		valLen, ok := mp4SpliceHeaderAt(data, hdr)
+		if !ok {
 			continue
 		}
-		valStart := idx + 12 // header start (idx-4) + mp4SpliceHeaderLen
-		valLen := int(l) - mp4SpliceHeaderLen
-		if valStart+valLen > len(data) {
-			continue
-		}
+		valStart := hdr + mp4SpliceHeaderLen
 		values := []string{
-			string(data[:idx-4]),
+			string(data[:hdr]),
 			string(data[valStart : valStart+valLen]),
 		}
-		pos := valStart + valLen
-		if completeMP4SpliceChain(data, pos, &values) {
+		if completeMP4SpliceChain(data, valStart+valLen, &values) {
 			return values, true
 		}
 	}
@@ -193,18 +253,11 @@ func splitMP4SplicedValue(s string) ([]string, bool) {
 // partial match can never yield a silently truncated or padded value.
 func completeMP4SpliceChain(data []byte, pos int, values *[]string) bool {
 	for pos < len(data) {
-		if pos+mp4SpliceHeaderLen > len(data) || string(data[pos+4:pos+8]) != "data" {
-			return false
-		}
-		l := binary.BigEndian.Uint32(data[pos : pos+4])
-		if l < mp4SpliceHeaderLen {
+		valLen, ok := mp4SpliceHeaderAt(data, pos)
+		if !ok {
 			return false
 		}
 		valStart := pos + mp4SpliceHeaderLen
-		valLen := int(l) - mp4SpliceHeaderLen
-		if valStart+valLen > len(data) {
-			return false
-		}
 		*values = append(*values, string(data[valStart:valStart+valLen]))
 		pos = valStart + valLen
 	}
