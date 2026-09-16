@@ -36,9 +36,35 @@ func New(db *sql.DB) *CacheRepo {
 // to the legacy bucket-0 sentinel row so pre-existing cache entries continue to
 // serve without a re-fetch wave or data migration.
 // Returns sql.ErrNoRows only when no row is found under either key.
+//
+// Lookup is LookupAccepted with an accept-everything predicate, so its
+// hit/lookup counting is unchanged: every caller that does not need to judge a
+// found row (most callers) keeps calling this directly.
 func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error) {
+	return r.LookupAccepted(ctx, artist, title, durationBucket, func(string) bool { return true })
+}
+
+// LookupAccepted behaves exactly like Lookup, except a found row is only
+// SERVED when accept(lyrics) reports true. accept is invoked at most once,
+// with the exact stored string, and only when a row is actually found (never
+// on a genuine miss).
+//
+// When accept refuses, the row is treated as though it were never found:
+// LookupAccepted returns ("", sql.ErrNoRows) exactly as a miss would, and the
+// refusal does NOT count as a hit. This is the seam #952 exists for: a
+// timing-refused lyrics_cache row (one a build before #950/#951 cached ahead
+// of the accept-time guard) must read as a miss on EVERY surface that consults
+// the cache -- the worker's live-fetch path and the scan-side enqueue check
+// alike -- and must never inflate the /metrics served-hit rate. Both callers
+// pass the SAME predicate (lyrics.RefusedByTimingGuard, inverted), so the two
+// surfaces cannot disagree about what counts as servable.
+//
+// lookups is still counted exactly once per call regardless of accept's
+// verdict, matching Lookup's existing counting contract.
+func (r *CacheRepo) LookupAccepted(ctx context.Context, artist, title string, durationBucket int, accept func(lyrics string) bool) (string, error) {
 	// Count every lookup exactly once at entry; hits are counted only at the
-	// success-return sites below so the rate excludes miss/error paths.
+	// accepted success-return sites below so the rate excludes miss/error/refusal
+	// paths.
 	r.lookups.Add(1)
 
 	normArtist := normalize.NormalizeKey(artist)
@@ -52,6 +78,9 @@ func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBu
 		durationBucket,
 	).Scan(&lyrics)
 	if err == nil {
+		if !accept(lyrics) {
+			return "", sql.ErrNoRows
+		}
 		r.hits.Add(1) // exact-bucket hit
 		return lyrics, nil
 	}
@@ -73,6 +102,9 @@ func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBu
 	}
 	if err != nil {
 		return "", fmt.Errorf("cache: lookup: %w", err)
+	}
+	if !accept(lyrics) {
+		return "", sql.ErrNoRows
 	}
 	r.hits.Add(1) // bucket-0 fallback hit
 	return lyrics, nil

@@ -68,14 +68,22 @@ type fakeLyricsCache struct {
 	err  error
 }
 
-func (f fakeLyricsCache) Lookup(_ context.Context, artist string, title string, _ int) (string, error) {
+// LookupAccepted mirrors cache.CacheRepo.LookupAccepted: a found row that
+// accept refuses reads as sql.ErrNoRows, exactly as a real miss would, so
+// tests exercising the #952 refusal path can seed a row and toggle accept's
+// verdict via the row's own content.
+func (f fakeLyricsCache) LookupAccepted(_ context.Context, artist string, title string, _ int, accept func(string) bool) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}
-	if f.hits[artist+"\x00"+title] {
-		return "[00:00.00]cached", nil
+	if !f.hits[artist+"\x00"+title] {
+		return "", sql.ErrNoRows
 	}
-	return "", sql.ErrNoRows
+	lyrics := "[00:00.00]cached"
+	if !accept(lyrics) {
+		return "", sql.ErrNoRows
+	}
+	return lyrics, nil
 }
 
 type fakeWorkQueue struct {

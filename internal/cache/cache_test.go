@@ -287,6 +287,87 @@ func TestCacheStats_ConcurrentLookupsRace(t *testing.T) {
 	}
 }
 
+// TestLookupAccepted_RefusalCountsLookupNotHit verifies the #952 metrics
+// contract: a found row that accept refuses reads as sql.ErrNoRows and counts
+// toward lookups but NOT hits, so a rejected lookup can never inflate the
+// /metrics served-hit rate. An accepted row is the ordinary case: both
+// counters advance exactly as Lookup's already do.
+func TestLookupAccepted_RefusalCountsLookupNotHit(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Song", 36, "the stored lyrics"); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	// 1) refused: found, but the predicate rejects it.
+	got, err := repo.LookupAccepted(ctx, "Artist", "Song", 36, func(string) bool { return false })
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("refused LookupAccepted err = %v, want sql.ErrNoRows", err)
+	}
+	if got != "" {
+		t.Errorf("refused LookupAccepted returned %q; want empty string", got)
+	}
+	if hits, lookups := repo.CacheStats(); hits != 0 || lookups != 1 {
+		t.Fatalf("after refusal: (hits %d, lookups %d), want (0, 1)", hits, lookups)
+	}
+
+	// 2) accepted: same row, predicate now accepts -- must count as a hit.
+	got, err = repo.LookupAccepted(ctx, "Artist", "Song", 36, func(lyrics string) bool { return lyrics == "the stored lyrics" })
+	if err != nil {
+		t.Fatalf("accepted LookupAccepted: %v", err)
+	}
+	if got != "the stored lyrics" {
+		t.Errorf("accepted LookupAccepted = %q, want %q", got, "the stored lyrics")
+	}
+	if hits, lookups := repo.CacheStats(); hits != 1 || lookups != 2 {
+		t.Fatalf("after acceptance: (hits %d, lookups %d), want (1, 2)", hits, lookups)
+	}
+}
+
+// TestLookupAccepted_RefusesBucket0Fallback verifies the predicate is also
+// applied to a row served via the bucket-0 fallback, not only an exact-bucket
+// hit, and that a refusal there is likewise not counted as a hit.
+func TestLookupAccepted_RefusesBucket0Fallback(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Legacy", 0, "legacy lyrics"); err != nil {
+		t.Fatalf("Store legacy: %v", err)
+	}
+
+	_, err := repo.LookupAccepted(ctx, "Artist", "Legacy", 48, func(string) bool { return false })
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("refused fallback LookupAccepted err = %v, want sql.ErrNoRows", err)
+	}
+	if hits, lookups := repo.CacheStats(); hits != 0 || lookups != 1 {
+		t.Fatalf("after fallback refusal: (hits %d, lookups %d), want (0, 1)", hits, lookups)
+	}
+}
+
+// TestLookup_IsLookupAcceptedWithAlwaysAccept pins that Lookup's behavior is
+// unchanged by the LookupAccepted refactor: it is LookupAccepted with a
+// predicate that always accepts, so every existing caller of Lookup keeps
+// working exactly as before #952.
+func TestLookup_IsLookupAcceptedWithAlwaysAccept(t *testing.T) {
+	ctx := context.Background()
+	repo := cache.New(openTestDB(t))
+
+	if err := repo.Store(ctx, "Artist", "Song", 36, "lyrics"); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := repo.Lookup(ctx, "Artist", "Song", 36)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if got != "lyrics" {
+		t.Errorf("Lookup = %q, want %q", got, "lyrics")
+	}
+	if hits, lookups := repo.CacheStats(); hits != 1 || lookups != 1 {
+		t.Fatalf("stats = (%d, %d), want (1, 1)", hits, lookups)
+	}
+}
+
 // TestInvalidate_RemovesEveryDurationBucket is the load-bearing property:
 // Lookup falls back to the bucket-0 sentinel on an exact-bucket miss, so an
 // invalidation that spares any bucket can still be satisfied by a sibling row.

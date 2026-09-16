@@ -121,6 +121,10 @@ type Cache interface {
 	// Lookup returns cached lyrics for (artist, title, durationBucket).
 	// Use durationBucket=0 when the recording duration is unknown.
 	Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error)
+	// LookupAccepted behaves like Lookup, but a found row is only served when
+	// accept(lyrics) reports true; otherwise it reads as sql.ErrNoRows and is
+	// not counted as a served hit (#952). See cache.CacheRepo.LookupAccepted.
+	LookupAccepted(ctx context.Context, artist, title string, durationBucket int, accept func(lyrics string) bool) (string, error)
 	Store(ctx context.Context, artist, title string, durationBucket int, lyrics string) error
 }
 
@@ -1556,7 +1560,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// produced anything better, including when some lane was breaker-open or
 		// throttled; the row then settles terminal done below with
 		// timing_outcome=categorical exactly as before #950, NOT miss-backoff.
-		if !refusedByTimingGuard(song, resolvedTrack.TrackLength) {
+		if !lyrics.RefusedByTimingGuard(song, resolvedTrack.TrackLength) {
 			if err := w.store(ctx, resolvedTrack, song); err != nil {
 				slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 				return w.fail(ctx, item, err)
@@ -2042,21 +2046,25 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 // the cache lookup and the provider query so the cache read/write keys agree.
 func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string, bypassCache bool) (models.Song, bool, error) {
 	if !bypassCache {
-		cached, err := w.cache.Lookup(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength))
+		// LookupAccepted (#952), not Lookup: a build before #950 cached a lyric
+		// ahead of the timing guard, so the row itself can be one the guard would
+		// refuse. Deciding that INSIDE the lookup, via the same
+		// lyrics.RefusedByTimingGuard predicate the scan-side enqueuer uses, means
+		// a refused row reads as sql.ErrNoRows here too and is never counted as a
+		// served /metrics hit -- serving it would settle the row with nothing
+		// written and never consult a lane.
+		cached, err := w.cache.LookupAccepted(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength),
+			func(raw string) bool {
+				return !lyrics.RefusedByTimingGuard(lyrics.DecodeCachedSong(raw, track), track.TrackLength)
+			})
 		if err == nil {
-			hit := decodeSong(cached, track)
-			if !refusedByTimingGuard(hit, track.TrackLength) {
-				return hit, true, nil
-			}
-			// A build before #950 cached a lyric ahead of the timing guard, so the
-			// cache can hold one the guard refuses. Serving it would settle the row
-			// with nothing written and never consult a lane; read it as a miss and
-			// dispatch instead. A landed result overwrites the entry.
-			slog.Debug("worker: cached lyric is timing-refused; dispatching instead",
-				"artist", track.ArtistName, "track", track.TrackName)
-		} else if !errors.Is(err, sql.ErrNoRows) {
+			return lyrics.DecodeCachedSong(cached, track), true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return models.Song{}, false, fmt.Errorf("worker: lookup cache: %w", err)
 		}
+		slog.Debug("worker: cache miss (or timing-refused entry); dispatching instead",
+			"artist", track.ArtistName, "track", track.TrackName)
 	}
 
 	// Dispatch through the orchestrator. The lane owns the circuit interaction:
@@ -2077,17 +2085,6 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 		return song, false, err
 	}
 	return song, false, nil
-}
-
-// refusedByTimingGuard reports whether the writer's accept-time timing guard
-// would quarantine song (write nothing) when judged against audioSeconds, the
-// same audio duration RunOnce stamps before the write. It asks
-// lyrics.DecidePromotion, the writer's own decision, so the two cannot disagree;
-// an unknown duration fails open exactly as the writer does.
-func refusedByTimingGuard(song models.Song, audioSeconds int) bool {
-	song.AudioDurationSeconds = audioSeconds
-	decision, _, _ := lyrics.DecidePromotion(song)
-	return decision == lyrics.Quarantine
 }
 
 func (w *Worker) store(ctx context.Context, track models.Track, song models.Song) error {
@@ -2241,22 +2238,12 @@ func encodeSong(song models.Song) (string, error) {
 	return string(b), nil
 }
 
+// decodeSong is a package-local alias for lyrics.DecodeCachedSong (#952): the
+// decode logic itself now lives in internal/lyrics, shared with the scan-side
+// enqueuer, so this stays only as the unqualified name the worker's own tests
+// already call.
 func decodeSong(s string, fallback models.Track) models.Song {
-	var song models.Song
-	if err := json.Unmarshal([]byte(s), &song); err == nil && (song.Track.ArtistName != "" || song.Track.TrackName != "") {
-		// Pair cached lyrics with the live file's identity so .lrc [ar:]/[ti:]/[al:]
-		// tags reflect the actual file, but PRESERVE the cached recording attributes
-		// (Instrumental, HasLyrics, HasSubtitles, TrackLength) - fallback does not
-		// carry them, and overwriting Instrumental=1 would break cached-instrumental output.
-		song.Track.ArtistName = fallback.ArtistName
-		song.Track.TrackName = fallback.TrackName
-		song.Track.AlbumName = fallback.AlbumName
-		return song
-	}
-	return models.Song{
-		Track:  fallback,
-		Lyrics: models.Lyrics{LyricsBody: s},
-	}
+	return lyrics.DecodeCachedSong(s, fallback)
 }
 
 // Confidence returns a simple normalized metadata match score in the range 0..1.

@@ -377,3 +377,71 @@ func TestDecidePromotion_DegenerateDemotes(t *testing.T) {
 		t.Error("degenerate decision reports Measured=true; the numbers are fabricated and would land in the metrics columns")
 	}
 }
+
+// RefusedByTimingGuard is the one predicate the worker and the scan-side cache
+// check share (#952); each case is pinned against what the writer would do.
+func TestRefusedByTimingGuard(t *testing.T) {
+	overrun := []models.Lines{cue(10, "a"), cue(400, "b")}
+	cases := []struct {
+		name         string
+		trackLength  int
+		audioSeconds int
+		want         bool
+	}{
+		{"categorical overrun against the audio is refused", 0, 100, true},
+		{"well within the audio is served", 0, 1000, false},
+		{"unknown audio falls back to the catalog length and is refused", 100, 0, true},
+		{"both durations unknown fails open", 0, 0, false},
+		// A MisSynced lyric is demoted to .txt by the writer, not quarantined, so
+		// it still writes something and must be served: only Quarantine refuses.
+		{"MisSynced demotion is served", 0, 300, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			song := models.Song{
+				Track:     models.Track{ArtistName: "Artist", TrackName: "Track", TrackLength: tc.trackLength},
+				Subtitles: models.Synced{Lines: overrun},
+			}
+			if tc.name == "MisSynced demotion is served" {
+				probe := song
+				probe.AudioDurationSeconds = tc.audioSeconds
+				if d, _, _ := DecidePromotion(probe); d != DemoteToUnsynced {
+					t.Fatalf("fixture: decision = %v; want demote_to_unsynced", d)
+				}
+			}
+			if got := RefusedByTimingGuard(song, tc.audioSeconds); got != tc.want {
+				t.Errorf("RefusedByTimingGuard = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// DecodeCachedSong pairs a cached Song with the live file's identity while
+// preserving the cached recording attributes, and wraps anything that is not a
+// Song with an identity as a legacy plain-text body.
+func TestDecodeCachedSong(t *testing.T) {
+	live := models.Track{ArtistName: "Live Artist", TrackName: "Live Title", AlbumName: "Live Album"}
+
+	t.Run("song JSON keeps attributes and takes the live identity", func(t *testing.T) {
+		cached := `{"track":{"artist_name":"Old","track_name":"Old","album_name":"Old","track_length":212,"instrumental":1}}`
+		got := DecodeCachedSong(cached, live)
+		if got.Track.ArtistName != live.ArtistName || got.Track.TrackName != live.TrackName || got.Track.AlbumName != live.AlbumName {
+			t.Errorf("identity = %+v; want the live file's", got.Track)
+		}
+		if got.Track.TrackLength != 212 || got.Track.Instrumental != 1 {
+			t.Errorf("attributes = length %d instrumental %d; want 212 and 1 preserved", got.Track.TrackLength, got.Track.Instrumental)
+		}
+	})
+
+	for name, cached := range map[string]string{
+		"plain text":          "[00:01.00]legacy body",
+		"json without a name": `{"track":{"track_length":5}}`,
+	} {
+		t.Run(name+" is a legacy body", func(t *testing.T) {
+			got := DecodeCachedSong(cached, live)
+			if got.Lyrics.LyricsBody != cached || got.Track != live {
+				t.Errorf("got body %q track %+v; want the raw string wrapped against the live track", got.Lyrics.LyricsBody, got.Track)
+			}
+		})
+	}
+}

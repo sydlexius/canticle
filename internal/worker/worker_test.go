@@ -401,6 +401,22 @@ func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, bucket int) (s
 	return c.hit, nil
 }
 
+// LookupAccepted mirrors cache.CacheRepo.LookupAccepted: a found row that
+// accept refuses reads as sql.ErrNoRows, exactly as a real miss would.
+func (c *fakeCache) LookupAccepted(_ context.Context, _ string, _ string, bucket int, accept func(string) bool) (string, error) {
+	c.lookupBuckets = append(c.lookupBuckets, bucket)
+	if c.err != nil {
+		return "", c.err
+	}
+	if c.hit == "" {
+		return "", sql.ErrNoRows
+	}
+	if !accept(c.hit) {
+		return "", sql.ErrNoRows
+	}
+	return c.hit, nil
+}
+
 func (c *fakeCache) Store(_ context.Context, artist, title string, bucket int, lyrics string) error {
 	c.stores = append(c.stores, cacheStore{artist: artist, title: title, bucket: bucket, lyrics: lyrics})
 	return nil
@@ -1828,6 +1844,20 @@ func (c *fakeCacheToggle) Lookup(_ context.Context, _ string, _ string, _ int) (
 	}
 	c.idx++
 	if hit {
+		return c.payload, nil
+	}
+	return "", sql.ErrNoRows
+}
+
+// LookupAccepted mirrors cache.CacheRepo.LookupAccepted over the same toggle
+// sequence Lookup uses.
+func (c *fakeCacheToggle) LookupAccepted(_ context.Context, _ string, _ string, _ int, accept func(string) bool) (string, error) {
+	hit := false
+	if c.idx < len(c.hits) {
+		hit = c.hits[c.idx]
+	}
+	c.idx++
+	if hit && accept(c.payload) {
 		return c.payload, nil
 	}
 	return "", sql.ErrNoRows

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -24,9 +25,12 @@ type PendingResultStore interface {
 
 // LyricsCache reports whether lyrics already exist for a scanned track.
 type LyricsCache interface {
-	// Lookup checks the cache for (artist, title, durationBucket).
+	// LookupAccepted checks the cache for (artist, title, durationBucket) and
+	// serves the found row only when accept(lyrics) reports true; otherwise it
+	// reads as sql.ErrNoRows, exactly as a genuine miss would, and is not
+	// counted as a served cache hit (#952; see cache.CacheRepo.LookupAccepted).
 	// Pass durationBucket=0 when the recording duration is not yet known.
-	Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error)
+	LookupAccepted(ctx context.Context, artist, title string, durationBucket int, accept func(lyrics string) bool) (string, error)
 }
 
 // WorkQueue enqueues durable lyrics work.
@@ -186,7 +190,22 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		if err := ctx.Err(); err != nil {
 			return enqueued, cacheHits, err
 		}
-		_, err := e.Cache.Lookup(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength))
+		// accept judges a found row with the SAME predicate the worker's cache
+		// lookup uses (lyrics.RefusedByTimingGuard), so a row the accept-time
+		// timing guard would quarantine reads as a miss here too (#952): a build
+		// before #950/#951 could have cached such an entry ahead of the guard,
+		// and this scan-side check runs before the worker ever sees the track,
+		// so without this the row is marked done forever with nothing written.
+		// The predicate decodes the row exactly as the worker would
+		// (lyrics.DecodeCachedSong) and judges it against res.Track.TrackLength,
+		// the same value the lookup's own duration bucket is derived from.
+		// An unknown file duration (TrackLength == 0) falls back to the cached
+		// song's own catalog length inside the predicate, exactly as the writer
+		// does, and fails open only when that is unknown too.
+		_, err := e.Cache.LookupAccepted(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength),
+			func(raw string) bool {
+				return !lyrics.RefusedByTimingGuard(lyrics.DecodeCachedSong(raw, res.Track), res.Track.TrackLength)
+			})
 		switch {
 		case err == nil:
 			if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusDone); err != nil {
