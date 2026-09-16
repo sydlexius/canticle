@@ -2594,11 +2594,11 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			if direrr != nil {
 				slog.Warn("scan: divergence repair failed (non-fatal)",
 					"library", lib.Name, "trigger", string(trigger), "error", direrr)
-			} else if divRes.Rekeyed+divRes.Merged+divRes.DisplaySynced+divRes.Unlinked+divRes.Deleted > 0 {
+			} else if divRes.Rekeyed+divRes.Merged+divRes.Unlinked+divRes.Deleted > 0 {
 				slog.Info("scan: divergence repair corrected stale work_queue identity",
 					"library", lib.Name, "trigger", string(trigger),
 					"rekeyed", divRes.Rekeyed, "merged", divRes.Merged,
-					"display_synced", divRes.DisplaySynced, "unlinked", divRes.Unlinked,
+					"unlinked", divRes.Unlinked,
 					"deleted", divRes.Deleted, "skipped_in_flight", divRes.ProcessingSkips)
 			}
 

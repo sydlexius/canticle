@@ -477,6 +477,89 @@ func TestRepairDivergence_PathPrefixScopeDoesNotMatchSiblingPrefix(t *testing.T)
 	}
 }
 
+// queueAlbumArtist returns a work_queue row's stored album_artist.
+func queueAlbumArtist(t *testing.T, db *sql.DB, id int64) string {
+	t.Helper()
+	var aa string
+	if err := db.QueryRow(`SELECT album_artist FROM work_queue WHERE id = ?`, id).Scan(&aa); err != nil {
+		t.Fatalf("read album_artist %d: %v", id, err)
+	}
+	return aa
+}
+
+// A shared queue row (#967): two scan_results members with the SAME
+// artist_key but different album_artist -- e.g. the same song on two
+// different releases. The queue row can only hold one album_artist, and
+// neither member is "wrong", so this is not a divergence at all: it must not
+// be selected as a candidate, on a dry run or on apply, and a repeated pass
+// must still find nothing (the pre-#967 query re-selected such a row on
+// every run because it also compared album_artist).
+func TestRepairDivergence_SharedRowAlbumArtistOnlyIsNoOp(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	srA := seedScan(t, db, lib, "/m/1.mp3", "Alpha", "Release One", "Song")
+	srB := seedScan(t, db, lib, "/m/2.mp3", "Alpha", "Release Two", "Song")
+	wq := seedQueue(t, db, "Alpha", "Release One", "pending", srA)
+	if _, err := db.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wq, srB); err != nil {
+		t.Fatalf("link srB: %v", err)
+	}
+
+	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("RepairDivergence: %v", err)
+	}
+	if res.Scanned != 0 {
+		t.Fatalf("Result = %+v; want Scanned=0 (an album_artist-only difference on a shared row is not a divergence)", res)
+	}
+	if a, _, _ := queueIdentity(t, db, wq); a != "Alpha" {
+		t.Errorf("queue row artist mutated: %q; want left at Alpha", a)
+	}
+	if aa := queueAlbumArtist(t, db, wq); aa != "Release One" {
+		t.Errorf("queue row album_artist mutated: %q; want left at Release One", aa)
+	}
+
+	// Dry run agrees.
+	dry, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run RepairDivergence: %v", err)
+	}
+	if dry.Scanned != 0 {
+		t.Fatalf("dry-run Result = %+v; want Scanned=0", dry)
+	}
+
+	// A second pass is still a no-op -- the pre-#967 bug re-selected such a row
+	// on every run.
+	res2, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("second RepairDivergence: %v", err)
+	}
+	if res2.Scanned != 0 {
+		t.Fatalf("second pass Result = %+v; want Scanned=0", res2)
+	}
+}
+
+// A shared queue row where the divergent-looking difference is only the
+// artist DISPLAY string's case (artist_key -- the lookup key -- already
+// agrees): also not a divergence. Distinct from the album_artist case above,
+// this exercises the sr.artist != wq.artist leg of the pre-#967 query.
+func TestRepairDivergence_ArtistDisplayCaseOnlyIsNoOp(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	sr := seedScan(t, db, lib, "/m/1.mp3", "alpha", "", "Song")
+	wq := seedQueue(t, db, "Alpha", "", "pending", sr)
+
+	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("RepairDivergence: %v", err)
+	}
+	if res.Scanned != 0 {
+		t.Fatalf("Result = %+v; want Scanned=0 (artist_key agrees; a display-only case difference is not a divergence)", res)
+	}
+	if a, _, _ := queueIdentity(t, db, wq); a != "Alpha" {
+		t.Errorf("queue row artist mutated: %q; want left at Alpha", a)
+	}
+}
+
 // LibraryID scopes the divergence pass to one library.
 func TestRepairDivergence_LibraryScope(t *testing.T) {
 	db := openDB(t)

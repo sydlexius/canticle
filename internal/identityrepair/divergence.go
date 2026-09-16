@@ -12,11 +12,17 @@ import (
 )
 
 // DivergenceResult tallies RepairDivergence's outcome.
+//
+// There is deliberately no DisplaySynced field (#967): a divergence is now
+// defined by artist_key alone (see loadDivergentWorkQueueIDs), so a group
+// whose key already agrees is never a candidate in the first place and this
+// pass never writes a display-only column. OpQueueDisplaySync still exists as
+// an Op value because a backup written by a v1.38.2 build can carry it on
+// disk; nothing here produces it any more.
 type DivergenceResult struct {
 	Scanned         int // candidate work_queue rows examined
 	Rekeyed         int // whole-group re-key-in-place corrections
 	Merged          int // whole-group merges into an existing correct-key row
-	DisplaySynced   int // key already agreed; only display columns were synced
 	Unlinked        int // scan_results rows unlinked from a disagreeing queue row and reset to pending
 	Deleted         int // work_queue rows deleted after every linked member was unlinked (no member still matches)
 	ProcessingSkips int // candidate groups skipped because the queue row was mid-flight
@@ -45,8 +51,8 @@ type scanMember struct {
 // divergenceOutcome reports what repairOneDivergentRow did for one candidate
 // work_queue row.
 type divergenceOutcome struct {
-	rekeyed, merged, displaySynced, unlinked, deleted int
-	processingSkip                                    bool
+	rekeyed, merged, unlinked, deleted int
+	processingSkip                     bool
 }
 
 // RepairDivergence finds work_queue rows whose stored artist identity has
@@ -120,7 +126,6 @@ func (r *Repairer) RepairDivergence(ctx context.Context, opts Options) (Divergen
 		}
 		res.Rekeyed += outcome.rekeyed
 		res.Merged += outcome.merged
-		res.DisplaySynced += outcome.displaySynced
 		res.Unlinked += outcome.unlinked
 		res.Deleted += outcome.deleted
 		if outcome.processingSkip {
@@ -131,11 +136,26 @@ func (r *Repairer) RepairDivergence(ctx context.Context, opts Options) (Divergen
 }
 
 // loadDivergentWorkQueueIDs returns the ids of work_queue rows with at least
-// one linked scan_results row (matching title_key) whose stored artist,
-// artist_key, or album_artist no longer matches the queue row's own. The list
-// is read outside any transaction -- each candidate is re-validated inside its
-// own transaction in repairOneDivergentRow, so a stale candidate (fixed or
-// vanished between this read and its turn) is simply a safe no-op there.
+// one linked scan_results row (matching title_key) whose stored artist_key no
+// longer matches the queue row's own. The list is read outside any
+// transaction -- each candidate is re-validated inside its own transaction in
+// repairOneDivergentRow, so a stale candidate (fixed or vanished between this
+// read and its turn) is simply a safe no-op there.
+//
+// KEY ONLY, NOT DISPLAY COLUMNS (#967): a work_queue row is unique on
+// (artist_key, title_key), so ONE row is shared by every scan_results member
+// with that key and title -- e.g. the same song on a studio album and a live
+// album. Those members can legitimately carry different artist display
+// strings (case/punctuation that normalizes to the same key) or different
+// album_artist values, and the queue row has only one display slot to hold
+// them in. Selecting on sr.artist != wq.artist or sr.album_artist !=
+// wq.album_artist (as an earlier version of this query did) therefore
+// re-selected such a row on every pass forever and reported it as a change
+// whose printed artist text never differed. Only sr.artist_key disagreeing
+// with wq.artist_key is a genuine divergence: the artist_key is the queue
+// row's lookup identity (what drives the cache key and the provider query),
+// and it is the one column a queue row cannot legitimately show more than one
+// value for.
 //
 // pathPrefix, when non-empty, additionally restricts candidates to
 // scan_results rows whose file_path is at or under that directory (#963
@@ -152,7 +172,7 @@ func (r *Repairer) loadDivergentWorkQueueIDs(ctx context.Context, libraryID *int
 	      JOIN work_queue_scan_results j ON j.scan_result_id = sr.id
 	      JOIN work_queue wq ON wq.id = j.work_queue_id
 	      WHERE sr.title_key = wq.title_key
-	        AND (sr.artist_key != wq.artist_key OR sr.artist != wq.artist OR sr.album_artist != wq.album_artist)`
+	        AND sr.artist_key != wq.artist_key`
 	var args []any
 	if libraryID != nil {
 		q += ` AND sr.library_id = ?`
@@ -252,81 +272,64 @@ func (r *Repairer) repairOneDivergentRow(ctx context.Context, wqID int64, dryRun
 		for k, v := range byKey {
 			key, rep = k, v
 		}
-		switch {
-		case key != wq.artistKey:
-			// Unanimous correction: every linked scan_results row has moved off the
-			// queue row's stored key. Reuse the exact re-key/merge machinery Run's
-			// apply uses for a single scan_result (#960/#961): reopen a 'done'
-			// survivor and clear its settle state, never reopen 'unavailable', merge
-			// on conflict, and skip (without writing anything) if the target key's
-			// row is itself mid-flight.
-			ch := Change{
-				WorkQueueID:    wq.id,
-				ScanResultID:   rep.id,
-				LibraryID:      rep.libraryID,
-				FilePath:       rep.filePath,
-				OldArtist:      wq.artist,
-				NewArtist:      rep.artist,
-				OldAlbumArtist: wq.albumArtist,
-				NewAlbumArtist: rep.albumArtist,
-				OldArtistKey:   wq.artistKey,
-				NewArtistKey:   key,
+		if key == wq.artistKey {
+			// The candidate query is stale (e.g. an earlier candidate in this pass
+			// already re-keyed the queue row via a shared member, or the group's
+			// only disagreement was a display-only difference the #967 fix no
+			// longer treats as a divergence at all): the key already agrees, so
+			// there is nothing to repair. A display-only difference (artist case,
+			// or album_artist on a row legitimately shared by several releases) is
+			// deliberately NOT synced here -- see loadDivergentWorkQueueIDs's doc
+			// comment for why the key is the only column this pass may write.
+			return divergenceOutcome{}, nil
+		}
+		// Unanimous correction: every linked scan_results row has moved off the
+		// queue row's stored key. Reuse the exact re-key/merge machinery Run's
+		// apply uses for a single scan_result (#960/#961): reopen a 'done'
+		// survivor and clear its settle state, never reopen 'unavailable', merge
+		// on conflict, and skip (without writing anything) if the target key's
+		// row is itself mid-flight.
+		ch := Change{
+			WorkQueueID:    wq.id,
+			ScanResultID:   rep.id,
+			LibraryID:      rep.libraryID,
+			FilePath:       rep.filePath,
+			OldArtist:      wq.artist,
+			NewArtist:      rep.artist,
+			OldAlbumArtist: wq.albumArtist,
+			NewAlbumArtist: rep.albumArtist,
+			OldArtistKey:   wq.artistKey,
+			NewArtistKey:   key,
+		}
+		lookup, err := probeQueueConflict(ctx, tx, ch, wq.titleKey)
+		if err != nil {
+			return divergenceOutcome{}, err
+		}
+		if lookup.skip {
+			return divergenceOutcome{processingSkip: true}, nil
+		}
+		if dryRun {
+			if lookup.conflictID != 0 {
+				outcome.merged = 1
+				ch.Op = OpQueueMerge
+			} else {
+				outcome.rekeyed = 1
+				ch.Op = OpQueueRekey
 			}
-			lookup, err := probeQueueConflict(ctx, tx, ch, wq.titleKey)
+		} else {
+			qOut, err := reconcileQueue(ctx, tx, ch, wq.titleKey, lookup)
 			if err != nil {
 				return divergenceOutcome{}, err
 			}
-			if lookup.skip {
-				return divergenceOutcome{processingSkip: true}, nil
-			}
-			if dryRun {
-				if lookup.conflictID != 0 {
-					outcome.merged = 1
-					ch.Op = OpQueueMerge
-				} else {
-					outcome.rekeyed = 1
-					ch.Op = OpQueueRekey
-				}
+			if qOut.queueMerged > 0 {
+				outcome.merged = 1
+				ch.Op = OpQueueMerge
 			} else {
-				qOut, err := reconcileQueue(ctx, tx, ch, wq.titleKey, lookup)
-				if err != nil {
-					return divergenceOutcome{}, err
-				}
-				if qOut.queueMerged > 0 {
-					outcome.merged = 1
-					ch.Op = OpQueueMerge
-				} else {
-					outcome.rekeyed = 1
-					ch.Op = OpQueueRekey
-				}
+				outcome.rekeyed = 1
+				ch.Op = OpQueueRekey
 			}
-			changes = append(changes, ch)
-		case rep.artist != wq.artist || rep.albumArtist != wq.albumArtist:
-			// Key already agrees; only the display columns drifted -- mirrors
-			// apply's !keyChanged sync branch. No conflict is possible (the key is
-			// unchanged), and nothing is reopened: the artist_key that drives the
-			// cache lookup and the provider query never moved.
-			if !dryRun {
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE work_queue SET artist = ?, album_artist = ? WHERE id = ?`,
-					rep.artist, rep.albumArtist, wq.id); err != nil {
-					return divergenceOutcome{}, fmt.Errorf("identityrepair: sync divergent work_queue %d: %w", wq.id, err)
-				}
-			}
-			outcome.displaySynced = 1
-			changes = append(changes, Change{
-				Op:           OpQueueDisplaySync,
-				WorkQueueID:  wq.id,
-				ScanResultID: rep.id, LibraryID: rep.libraryID, FilePath: rep.filePath,
-				OldArtist: wq.artist, NewArtist: rep.artist,
-				OldAlbumArtist: wq.albumArtist, NewAlbumArtist: rep.albumArtist,
-				OldArtistKey: wq.artistKey, NewArtistKey: key,
-			})
-		default:
-			// The candidate query is stale (e.g. an earlier candidate in this pass
-			// already synced it via a shared member): fully consistent already.
-			return divergenceOutcome{}, nil
 		}
+		changes = append(changes, ch)
 	} else {
 		// Disagreement: some members still match the queue row's own key, or the
 		// diverging members disagree with each other. Never re-key -- that would
