@@ -25,7 +25,12 @@ locale = "en-us"
 # repo-wide) so it does not mask the unrelated "ake"/"AKE" -> "ache"/"ACHE"
 # misspelling anywhere else in the repo, mirroring the reasoning documented
 # below for MisSynced: allowlist as an IDENTIFIER/literal, not as a word.
-extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b", "Eg-KAQwIARAAGAAgACgAMABqChAEEAUQAxAKEAk="]
+# Also the hyphenated prose adjective "mis-synced" (any case). typos splits on
+# the hyphen before a word lookup, so no [default.extend-words] or
+# [default.extend-identifiers] entry can cover it; an ignore regex runs on the
+# raw text before that split. Matching the whole hyphenated form keeps a bare
+# "mis" (a genuine "miss" typo) flagged everywhere else.
+extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b", "Eg-KAQwIARAAGAAgACgAMABqChAEEAUQAxAKEAk=", "(?i)\\bmis-synced\\b"]
 
 [default.extend-words]
 # ID3v2 frame names are not English words; typos extracts the alpha portion (e.g. TPE from TPE1)
@@ -49,9 +54,9 @@ preffered = "preffered"
 # MisSynced is the timing-outcome type name fixed by issue #438. typos splits
 # the identifier and reads the "mis" stem as a misspelling of "miss"/"mist".
 # Allowlisted as IDENTIFIERS, not as a word: a bare "mis" in prose stays flagged,
-# so a real "miss" typo is still caught. Note typos splits on the hyphen before
-# any lookup, so "mis-synced" cannot be allowlisted as a unit -- prose therefore
-# says "MisSynced" (the type) rather than the hyphenated adjective.
+# so a real "miss" typo is still caught. The hyphenated prose form "mis-synced"
+# is covered separately by an extend-ignore-re pattern above, since typos splits
+# on the hyphen before any word or identifier lookup.
 MisSynced = "MisSynced"
 mis_synced = "mis_synced"
 # The [timing_validation] config key and its Go field carry the same "mis" stem

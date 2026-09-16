@@ -36,9 +36,43 @@ func New(db *sql.DB) *CacheRepo {
 // to the legacy bucket-0 sentinel row so pre-existing cache entries continue to
 // serve without a re-fetch wave or data migration.
 // Returns sql.ErrNoRows only when no row is found under either key.
+//
+// Lookup is LookupAccepted with an accept-everything predicate, so its
+// hit/lookup counting is unchanged: every caller that does not need to judge a
+// found row (most callers) keeps calling this directly.
 func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error) {
+	return r.LookupAccepted(ctx, artist, title, durationBucket, func(string) bool { return true })
+}
+
+// LookupAccepted behaves exactly like Lookup, except a found row is only
+// SERVED when accept(lyrics) reports true. accept may be invoked up to twice
+// (once for the exact-bucket row, once for the bucket-0 fallback row, per the
+// refusal-continues-the-fallback-chain behavior below), always with the exact
+// stored string of the row it is judging, and only when a row is actually
+// found (never on a genuine miss).
+//
+// When accept refuses a row, that row is treated as though it were never
+// found: LookupAccepted continues exactly as an exact-bucket sql.ErrNoRows
+// miss would (falling through to the bucket-0 fallback query when
+// durationBucket != 0), and the refusal does NOT count as a hit. This is the
+// seam #952 exists for: a timing-refused lyrics_cache row (one a build before
+// #950/#951 cached ahead of the accept-time guard) must read as a miss on
+// EVERY surface that consults the cache -- the worker's live-fetch path and
+// the scan-side enqueue check alike -- and must never inflate the /metrics
+// served-hit rate. A refused EXACT row must not shadow a servable bucket-0
+// row any more than a genuine exact-bucket miss would (a CodeRabbit finding on
+// PR #966): before #952 a miss always fell through to bucket-0, so an exact
+// row failing accept must fall through too, not dead-end early. Both callers
+// pass the SAME predicate (lyrics.RefusedByTimingGuard, inverted), so the two
+// surfaces cannot disagree about what counts as servable.
+//
+// lookups is still counted exactly once per call regardless of how many times
+// accept is invoked or what it decides, matching Lookup's existing counting
+// contract; hits counts only an actually-served (accepted) row.
+func (r *CacheRepo) LookupAccepted(ctx context.Context, artist, title string, durationBucket int, accept func(lyrics string) bool) (string, error) {
 	// Count every lookup exactly once at entry; hits are counted only at the
-	// success-return sites below so the rate excludes miss/error paths.
+	// accepted success-return sites below so the rate excludes miss/error/refusal
+	// paths.
 	r.lookups.Add(1)
 
 	normArtist := normalize.NormalizeKey(artist)
@@ -51,15 +85,21 @@ func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBu
 		normTitle,
 		durationBucket,
 	).Scan(&lyrics)
-	if err == nil {
-		r.hits.Add(1) // exact-bucket hit
-		return lyrics, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	switch {
+	case err == nil:
+		if accept(lyrics) {
+			r.hits.Add(1) // exact-bucket hit
+			return lyrics, nil
+		}
+		// Refused: fall through to the bucket-0 fallback exactly as a genuine
+		// exact-bucket miss would, rather than dead-ending here.
+	case errors.Is(err, sql.ErrNoRows):
+		// Genuine exact-bucket miss: fall through to the bucket-0 fallback below.
+	default:
 		return "", fmt.Errorf("cache: lookup: %w", err)
 	}
-	// Exact-bucket miss. Fall back to the legacy bucket-0 sentinel row only
-	// when the caller requested a real bucket; a bucket-0 miss is already final.
+	// Fall back to the legacy bucket-0 sentinel row only when the caller
+	// requested a real bucket; a bucket-0 miss (or refusal) is already final.
 	if durationBucket == 0 {
 		return "", sql.ErrNoRows
 	}
@@ -73,6 +113,9 @@ func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBu
 	}
 	if err != nil {
 		return "", fmt.Errorf("cache: lookup: %w", err)
+	}
+	if !accept(lyrics) {
+		return "", sql.ErrNoRows
 	}
 	r.hits.Add(1) // bucket-0 fallback hit
 	return lyrics, nil

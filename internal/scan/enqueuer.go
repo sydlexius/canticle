@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/timing"
 )
@@ -24,14 +27,32 @@ type PendingResultStore interface {
 
 // LyricsCache reports whether lyrics already exist for a scanned track.
 type LyricsCache interface {
-	// Lookup checks the cache for (artist, title, durationBucket).
+	// LookupAccepted checks the cache for (artist, title, durationBucket) and
+	// serves the found row only when accept(lyrics) reports true; otherwise it
+	// reads as sql.ErrNoRows, exactly as a genuine miss would, and is not
+	// counted as a served cache hit (#952; see cache.CacheRepo.LookupAccepted).
 	// Pass durationBucket=0 when the recording duration is not yet known.
-	Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error)
+	LookupAccepted(ctx context.Context, artist, title string, durationBucket int, accept func(lyrics string) bool) (string, error)
 }
 
 // WorkQueue enqueues durable lyrics work.
 type WorkQueue interface {
 	Enqueue(ctx context.Context, inputs models.Inputs, priority int) (queue.WorkItem, error)
+}
+
+// DurationLookup reads a cached exact audio duration for a file, keyed by
+// (canonical path, mtime, size). *audiodur.Store satisfies it directly; it is
+// declared here in primitives (rather than importing internal/audiodur) so
+// scan gains no new dependency for an optional seam. See EnqueuePending's use
+// of it (#952): scan_results carries no duration column at all (unlike
+// work_queue and its Track.TrackLength stamp), so res.Track.TrackLength is
+// always 0 for a scan-side row, and the accept check below would otherwise
+// silently fall back to the CACHED song's own catalog length -- almost always
+// a pass, since a lyric is rarely miscategorized against the very metadata it
+// was fetched with. A resolved audio duration is what lets this check actually
+// catch what the worker would refuse.
+type DurationLookup interface {
+	Lookup(ctx context.Context, path string, mtimeNano, size int64) (int, bool, error)
 }
 
 // TimingVerdict is a track's persisted accept-time timing decision, together
@@ -111,6 +132,16 @@ type Enqueuer struct {
 	// the generation stored with a verdict to decide whether the verdict still
 	// speaks for today's provider set. Zero means unknown, which never suppresses.
 	ProvidersVersion int
+	// Durations resolves a scanned file's exact audio duration for the #952
+	// cache-hit timing check below. Optional: nil means "unknown" for every
+	// row, which is the safe direction -- a row whose cached entry carries
+	// synced lines is then routed to the worker rather than accepted here (see
+	// EnqueuePending), never the reverse. A nil Durations therefore changes
+	// behavior versus a plain res.Track.TrackLength fallback (that fallback is
+	// no longer consulted at all; see the DurationLookup doc), but never
+	// panics and never makes this check accept something it would otherwise
+	// have refused.
+	Durations DurationLookup
 }
 
 // shouldSuppress reports whether a track's stored timing verdict means this scan
@@ -144,6 +175,39 @@ func (e *Enqueuer) shouldSuppress(v TimingVerdict) bool {
 		return false
 	}
 	return v.ProvidersVersion == e.ProvidersVersion
+}
+
+// resolveFileDuration looks up the exact, independently-measured audio
+// duration for filePath via e.Durations, keyed exactly as the worker records
+// it (recordDuration, internal/worker/worker.go): the canonical
+// (symlink-resolved) path, plus the current file's mtime and size. found is
+// false whenever no usable duration is available -- a nil Durations, an empty
+// path, a stat failure, or a genuine cache miss -- and the caller must treat
+// that as "unknown", never as "zero seconds".
+//
+// One os.Stat plus one indexed DB read per row that actually reaches a found
+// cache entry (never for a plain miss, since this is called from inside
+// accept). A stat or lookup error is logged and swallowed: this check is an
+// optimization on top of the worker's own judgment, not a new failure mode a
+// scan must abort for.
+func (e *Enqueuer) resolveFileDuration(ctx context.Context, filePath string) (seconds int, found bool) {
+	if e.Durations == nil || strings.TrimSpace(filePath) == "" {
+		return 0, false
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		slog.Debug("scan: stat failed while resolving audio duration for a cache-hit check; treating as unknown",
+			"path", filePath, "error", err)
+		return 0, false
+	}
+	key := pathutil.CanonicalPath(filePath)
+	seconds, found, err = e.Durations.Lookup(ctx, key, info.ModTime().UnixNano(), info.Size())
+	if err != nil {
+		slog.Debug("scan: audio duration lookup failed while resolving a cache-hit check; treating as unknown",
+			"path", key, "error", err)
+		return 0, false
+	}
+	return seconds, found
 }
 
 // EnqueuePending reads pending scan results for libraryID, skips cache hits,
@@ -186,7 +250,43 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		if err := ctx.Err(); err != nil {
 			return enqueued, cacheHits, err
 		}
-		_, err := e.Cache.Lookup(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength))
+		// accept judges a found row with the SAME predicate the worker's cache
+		// lookup uses (lyrics.RefusedByTimingGuard), so a row the accept-time
+		// timing guard would quarantine reads as a miss here too (#952): a build
+		// before #950/#951 could have cached such an entry ahead of the guard,
+		// and this scan-side check runs before the worker ever sees the track,
+		// so without this the row is marked done forever with nothing written.
+		//
+		// res.Track.TrackLength is ALWAYS ZERO here: scan_results carries no
+		// duration column (ListPendingByLibrary never selects one), unlike
+		// work_queue rows, which the worker re-reads from the audio file at fetch
+		// time (refreshRecordingIdentity). Passing 0 straight to
+		// RefusedByTimingGuard would silently fall back to the CACHED song's own
+		// catalog TrackLength -- the very recording the lyric was timed against --
+		// which almost always passes, defeating the check this exists to run. So
+		// resolveFileDuration below is consulted LAZILY (only once a cache row is
+		// actually found) to get the file's real, independently-measured duration
+		// before judging.
+		accept := func(raw string) bool {
+			fileDuration, fileDurationKnown := e.resolveFileDuration(ctx, res.FilePath)
+			song := lyrics.DecodeCachedSong(raw, res.Track)
+			if fileDurationKnown {
+				return !lyrics.RefusedByTimingGuard(song, fileDuration)
+			}
+			// The file's real duration is unknown. A synced cached entry COULD be
+			// a categorical mismatch against the real file -- accepting it here is
+			// irreversible (it marks the row done and the track never reaches the
+			// worker, which is the one path that judges against a freshly re-read
+			// duration). Route doubt to the worker instead: treat as a miss so the
+			// track is enqueued and judged there, where a real duration is always
+			// re-derived. An unsynced/plain or instrumental entry carries no
+			// timing to refuse and is still served as before.
+			if len(song.Subtitles.Lines) == 0 || song.Track.Instrumental == 1 {
+				return true
+			}
+			return false
+		}
+		_, err := e.Cache.LookupAccepted(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength), accept)
 		switch {
 		case err == nil:
 			if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusDone); err != nil {

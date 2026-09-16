@@ -1,6 +1,7 @@
 package lyrics
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -152,4 +153,57 @@ func unsyncedFallbackBody(song models.Song) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// DecodeCachedSong decodes a lyrics_cache row's stored string into a
+// models.Song, pairing it with the live file's identity (fallback).
+//
+// Moved here verbatim from internal/worker (#952) so the scan-side enqueuer can
+// share the exact same decode -- and therefore the exact same refusal check --
+// without importing the worker package (scan must not import worker; see
+// RefusedByTimingGuard below).
+//
+// A decoded cache entry is paired with fallback's file-identity fields
+// (ArtistName/TrackName/AlbumName) so .lrc [ar:]/[ti:]/[al:] tags reflect the
+// actual file, but the cached recording attributes (Instrumental, HasLyrics,
+// HasSubtitles, TrackLength) are PRESERVED -- fallback does not carry them, and
+// overwriting Instrumental=1 would break cached-instrumental output.
+//
+// A row that fails to decode, or decodes to an empty identity, is legacy plain
+// text: it is wrapped as an unsynced Lyrics body against fallback, exactly as
+// before this package owned the decode.
+func DecodeCachedSong(cached string, fallback models.Track) models.Song {
+	var song models.Song
+	if err := json.Unmarshal([]byte(cached), &song); err == nil && (song.Track.ArtistName != "" || song.Track.TrackName != "") {
+		song.Track.ArtistName = fallback.ArtistName
+		song.Track.TrackName = fallback.TrackName
+		song.Track.AlbumName = fallback.AlbumName
+		return song
+	}
+	return models.Song{
+		Track:  fallback,
+		Lyrics: models.Lyrics{LyricsBody: cached},
+	}
+}
+
+// RefusedByTimingGuard reports whether the accept-time timing guard
+// (DecidePromotion) would quarantine song when judged against audioSeconds,
+// the same audio duration a caller stamps before a write. Both the worker's
+// live-fetch path and the scan-side cache-hit check (#952) ask this ONE
+// predicate, so a cached entry can never be accepted on one surface and
+// refused on the other.
+//
+// audioSeconds == 0 does NOT unconditionally accept. DecidePromotion judges
+// against guardDurationSeconds, which falls back to song.Track.TrackLength when
+// the audio duration is unknown, so a cached song carrying its own catalog
+// length is still judged against it. That fallback is deliberately kept rather
+// than short-circuited here: WriteLRC applies the same fallback, and a cache
+// check that accepted what the writer then quarantines would mark a track done
+// with nothing written -- the exact failure #952 exists to remove. Only when
+// BOTH durations are unknown does the verdict fail open (timing.UnknownDuration
+// -> PromoteAsIs), matching the writer.
+func RefusedByTimingGuard(song models.Song, audioSeconds int) bool {
+	song.AudioDurationSeconds = audioSeconds
+	decision, _, _ := DecidePromotion(song)
+	return decision == Quarantine
 }

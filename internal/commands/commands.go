@@ -2506,6 +2506,12 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 	// (serve) that has a generation at all. A one-shot CLI scan passes 0 here,
 	// which is the pre-existing default and changes nothing.
 	workQueue.SetProvidersVersion(providersVersion)
+	// One durations store shared between the scanner's own duration bank
+	// (WithDurationStore below) and the enqueuer's #952 cache-hit check, so a
+	// duration the scan just banked for this file is immediately visible to the
+	// check that judges its cache entry -- not a second, differently-keyed
+	// store that would only agree with the scanner's by coincidence.
+	durations := audiodur.New(sqlDB, scanner.DurationReaderVersion)
 	enq := scan.Enqueuer{
 		Results:             results,
 		Cache:               cacheRepo,
@@ -2520,6 +2526,11 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		// constructed) never suppresses, matching pre-#679 behavior exactly.
 		Timing:           scan.TimingVerdicts{Reader: workQueue},
 		ProvidersVersion: providersVersion,
+		// Durations resolves the file's REAL audio duration for the #952
+		// cache-hit timing check: scan_results carries no duration column, so
+		// without this the check would silently fall back to the cached song's
+		// own catalog length and rarely catch anything. See DurationLookup's doc.
+		Durations: durations,
 	}
 	return scan.Scheduler{
 		Libraries: library.New(sqlDB),
@@ -2528,7 +2539,7 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		// re-read (and re-warned about) on every scheduled/watched scan (#376).
 		Scanner: scanner.NewScanner(
 			scanner.WithMetadataFailureStore(scanfail.New(sqlDB)),
-			scanner.WithDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion)),
+			scanner.WithDurationStore(durations),
 			// Index a settled file the scan has never seen (#786). This is what lets
 			// a MOVED file (which carries its sidecar along, so it arrives already
 			// settled and is skipped before it is ever indexed) enter scan_results at
