@@ -38,11 +38,54 @@ import (
 // repairer skips the row rather than blanking a genuine identity.
 type IdentityReader func(path string) (artist, albumArtist string, err error)
 
-// Change describes one scan_results row whose on-disk identity differs from what
-// is stored. It is reported to the caller (for a restorable backup / preview)
-// once per applied change; the Old* fields capture the pre-repair state.
+// Op names which table -- and which row's prior state -- a Change's Old*
+// fields describe (#963's CodeRabbit finding: a divergence Change's Old*
+// values are the WORK_QUEUE row's prior identity, not scan_results', so a
+// backup consumer needs to know which to restore into). OpScanCorrection is
+// Run's tag-re-read correction, where Old* describes the scan_results row
+// itself. Every OpQueue* value is a RepairDivergence outcome, where Old*
+// describes the work_queue row being touched (or, for OpQueueUnlink/
+// OpQueueDelete, the queue row a member was dropped from) -- scan_results, if
+// it changes at all in that path, is a status reset, not an identity write,
+// and is not what Old*/New* describe.
+type Op string
+
+const (
+	// OpScanCorrection is Run's per-file tag re-read correction: Old*/New*
+	// describe the scan_results row identified by ScanResultID.
+	OpScanCorrection Op = "scan_correction"
+	// OpQueueRekey is RepairDivergence's unanimous-group re-key-in-place:
+	// Old*/New* describe the work_queue row WorkQueueID.
+	OpQueueRekey Op = "queue_rekey"
+	// OpQueueMerge is RepairDivergence's unanimous-group merge into an
+	// existing correct-key row: Old*/New* describe the OLD (dropped)
+	// work_queue row's identity; WorkQueueID is that dropped row's id.
+	OpQueueMerge Op = "queue_merge"
+	// OpQueueDisplaySync is RepairDivergence's key-agrees/display-columns-only
+	// sync: Old*/New* describe the work_queue row WorkQueueID.
+	OpQueueDisplaySync Op = "queue_display_sync"
+	// OpQueueUnlink is RepairDivergence's disagreement-branch unlink of one
+	// divergent scan_results member from its queue row: Old* is the queue
+	// row's (still-unchanged) identity, New* is the unlinked member's own;
+	// WorkQueueID is the queue row the member was unlinked from.
+	OpQueueUnlink Op = "queue_unlink"
+	// OpQueueDelete is RepairDivergence deleting a work_queue row left with no
+	// linked member after every member was unlinked: Old* is the deleted
+	// row's identity, New* is unset; WorkQueueID is the deleted row's id.
+	OpQueueDelete Op = "queue_delete"
+)
+
+// Change describes one corrected row's before/after identity, reported to the
+// caller (for a restorable backup / preview) once per applied change. Op
+// names the operation and which table Old*/New* describe (see the Op
+// constants); WorkQueueID is set for every RepairDivergence Op and zero for
+// OpScanCorrection, which has no single work_queue row of its own -- Run's
+// caller (apply) reconciles a scan_results row's coupled queue row as a
+// separate, unreported side effect of the same Change.
 type Change struct {
+	Op             Op
 	ScanResultID   int64
+	WorkQueueID    int64
 	LibraryID      int64
 	FilePath       string
 	OldArtist      string
@@ -76,6 +119,18 @@ type Options struct {
 	// Progress, when set, is called periodically with the number of rows scanned
 	// so far, so a long backfill over a large library can surface liveness.
 	Progress func(scanned int)
+	// PathPrefix, when non-empty, scopes RepairDivergence's candidate join to
+	// scan_results rows whose file_path is AT or UNDER this directory (equal,
+	// or prefix + a path separator -- never a lexical/LIKE prefix, so a
+	// sibling directory sharing a name prefix, e.g. "/a/b" vs "/a/bc", is not
+	// matched). It is ignored by Run, which always re-reads every in-scope
+	// row's file regardless of path. commands.scheduler's OnScanComplete sets
+	// it to the rescanned subtree on a TriggerWatcher callback (#963 follow-up
+	// findings 3/4): the watcher only just touched files under that path, and
+	// a watcher-driven subtree rescan should not pay for a library-wide join
+	// on every keystroke-sized change. A TriggerScheduler (full-library) pass
+	// leaves this unset and keeps library scope.
+	PathPrefix string
 }
 
 // progressEvery bounds how often Progress fires (every N rows scanned).
@@ -134,6 +189,7 @@ func (r *Repairer) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 
 		ch := Change{
+			Op:             OpScanCorrection,
 			ScanResultID:   rw.id,
 			LibraryID:      rw.libraryID,
 			FilePath:       rw.filePath,
@@ -223,14 +279,65 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string, report
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	lookup, err := probeQueueConflict(ctx, tx, ch, titleKey)
+	if err != nil {
+		return applyOutcome{}, err
+	}
+	if lookup.skip {
+		return applyOutcome{processingSkip: true}, nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE scan_results SET artist = ?, album_artist = ?, artist_key = ? WHERE id = ?`,
+		ch.NewArtist, ch.NewAlbumArtist, ch.NewArtistKey, ch.ScanResultID); err != nil {
+		return applyOutcome{}, fmt.Errorf("identityrepair: update scan_results %d: %w", ch.ScanResultID, err)
+	}
+
+	out, err := reconcileQueue(ctx, tx, ch, titleKey, lookup)
+	if err != nil {
+		return applyOutcome{}, err
+	}
+
+	// Write the restorable backup record (report) before committing, so a report
+	// failure aborts via the deferred rollback -- the correction is never applied
+	// without its record (backup-first), and the report never over-records a row a
+	// commit failure later rolls back.
+	if report != nil {
+		if err := report(ch); err != nil {
+			return applyOutcome{}, fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return applyOutcome{}, fmt.Errorf("identityrepair: commit tx: %w", err)
+	}
+	return out, nil
+}
+
+// queueLookup bundles what probeQueueConflict found about the work_queue row(s)
+// touching ch: the row (if any) carrying the OLD identity, and -- when the key
+// is changing -- the row (if any) already occupying the corrected key. skip is
+// true when either match is mid-flight ('processing'), meaning the whole
+// change must be abandoned so scan_results and work_queue never drift apart.
+type queueLookup struct {
+	oldID, conflictID         int64
+	oldStatus, conflictStatus string
+	skip                      bool
+}
+
+// probeQueueConflict locates the work_queue row(s) relevant to ch without
+// mutating anything, so both apply (which also corrects scan_results) and
+// repairOneDivergentRow (RepairDivergence's queue-only path, #963) can share
+// one conflict-detection reading.
+func probeQueueConflict(ctx context.Context, tx *sql.Tx, ch Change, titleKey string) (queueLookup, error) {
 	// Locate the queue row that carried the OLD identity (UNIQUE(artist_key,
 	// title_key) => at most one). A 'processing' match aborts the whole change.
 	oldID, oldStatus, err := queueRowAt(ctx, tx, ch.OldArtistKey, titleKey, 0)
 	if err != nil {
-		return applyOutcome{}, err
+		return queueLookup{}, err
 	}
 	if oldID != 0 && oldStatus == "processing" {
-		return applyOutcome{processingSkip: true}, nil
+		return queueLookup{skip: true}, nil
 	}
 
 	keyChanged := ch.NewArtistKey != ch.OldArtistKey
@@ -245,18 +352,27 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string, report
 	if keyChanged && oldID != 0 {
 		conflictID, conflictStatus, err = queueRowAt(ctx, tx, ch.NewArtistKey, titleKey, oldID)
 		if err != nil {
-			return applyOutcome{}, err
+			return queueLookup{}, err
 		}
 		if conflictID != 0 && conflictStatus == "processing" {
-			return applyOutcome{processingSkip: true}, nil
+			return queueLookup{skip: true}, nil
 		}
 	}
+	return queueLookup{oldID: oldID, oldStatus: oldStatus, conflictID: conflictID, conflictStatus: conflictStatus}, nil
+}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results SET artist = ?, album_artist = ?, artist_key = ? WHERE id = ?`,
-		ch.NewArtist, ch.NewAlbumArtist, ch.NewArtistKey, ch.ScanResultID); err != nil {
-		return applyOutcome{}, fmt.Errorf("identityrepair: update scan_results %d: %w", ch.ScanResultID, err)
-	}
+// reconcileQueue applies ch's queue-side reconciliation using an
+// already-probed lookup: re-key in place, sync display columns, merge on
+// conflict, or drop a stale junction link -- the same #960/#961-constrained
+// switch apply has always run. It performs NO scan_results write and does NOT
+// commit or report -- the caller (apply, or RepairDivergence's
+// repairOneDivergentRow, #963) owns the transaction lifecycle so a
+// scan_results write (when present) and the queue reconciliation commit or
+// roll back together.
+func reconcileQueue(ctx context.Context, tx *sql.Tx, ch Change, titleKey string, lookup queueLookup) (applyOutcome, error) {
+	keyChanged := ch.NewArtistKey != ch.OldArtistKey
+	oldID, oldStatus := lookup.oldID, lookup.oldStatus
+	conflictID, conflictStatus := lookup.conflictID, lookup.conflictStatus
 
 	var out applyOutcome
 	switch {
@@ -319,20 +435,6 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string, report
 			return applyOutcome{}, err
 		}
 		out.queueMerged = 1
-	}
-
-	// Write the restorable backup record (report) before committing, so a report
-	// failure aborts via the deferred rollback -- the correction is never applied
-	// without its record (backup-first), and the report never over-records a row a
-	// commit failure later rolls back.
-	if report != nil {
-		if err := report(ch); err != nil {
-			return applyOutcome{}, fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return applyOutcome{}, fmt.Errorf("identityrepair: commit tx: %w", err)
 	}
 	return out, nil
 }

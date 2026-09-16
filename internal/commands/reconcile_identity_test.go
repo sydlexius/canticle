@@ -124,6 +124,77 @@ func TestRunReconcileIdentity_ApplyAndBackup(t *testing.T) {
 	}
 }
 
+// The divergence pass's backup record carries the "queue_rekey" op and the
+// affected work_queue id so a hand-restore knows to write into work_queue,
+// not scan_results -- the divergence Change's Old*/New* describe the QUEUE
+// row's prior identity, a different table than the scan_correction op's.
+func TestRunReconcileIdentity_DivergenceBackupRecordCarriesOp(t *testing.T) {
+	ctx, cfgPath, dbPath, _ := setupReconcileIdentity(t)
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	// Give the seeded scan_results row a coupled, stale work_queue row so the
+	// divergence pre-pass (which runs before the tag re-read pass) has
+	// something to re-key: scan_results is seeded at "AlphaBravo", so make the
+	// queue row diverge from it directly, standing in for a prior scan that
+	// already corrected scan_results without the queue row following.
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE scan_results SET artist = 'Alpha; Bravo', artist_key = ? WHERE id = 1`,
+		normalize.NormalizeKey("Alpha; Bravo")); err != nil {
+		t.Fatalf("pre-correct scan_results: %v", err)
+	}
+	wqRes, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, status)
+		 VALUES ('AlphaBravo', 'Song', ?, ?, 'pending')`,
+		normalize.NormalizeKey("AlphaBravo"), normalize.NormalizeKey("Song"))
+	if err != nil {
+		t.Fatalf("seed work_queue: %v", err)
+	}
+	wqID, _ := wqRes.LastInsertId()
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, 1)`, wqID); err != nil {
+		t.Fatalf("seed junction: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close seed db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if code := runReconcileIdentity(ctx, &buf, ScanReconcileIdentityCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(dbPath), "reconcile-identity-backup-*.jsonl"))
+	if len(matches) != 1 {
+		t.Fatalf("want one backup file; got %v", matches)
+	}
+	b, err := os.ReadFile(matches[0]) //nolint:gosec // test-controlled path
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	var sawQueueRekey bool
+	for _, line := range lines {
+		var rec reconcileIdentityBackupRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode backup line %q: %v", line, err)
+		}
+		if rec.Op == "queue_rekey" {
+			sawQueueRekey = true
+			if rec.WorkQueueID != wqID {
+				t.Errorf("queue_rekey record WorkQueueID = %d; want %d", rec.WorkQueueID, wqID)
+			}
+			if rec.OldArtist != "AlphaBravo" || rec.NewArtist != "Alpha; Bravo" {
+				t.Errorf("queue_rekey record = %+v; want OldArtist=AlphaBravo NewArtist=Alpha; Bravo", rec)
+			}
+		}
+	}
+	if !sawQueueRekey {
+		t.Fatalf("no backup record with op=queue_rekey found among %d record(s): %s", len(lines), b)
+	}
+}
+
 // An unknown --library exits 1 with a clear message.
 func TestRunReconcileIdentity_LibraryNotFound(t *testing.T) {
 	ctx, cfgPath, _, _ := setupReconcileIdentity(t)

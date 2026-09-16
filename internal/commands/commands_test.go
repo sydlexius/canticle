@@ -22,6 +22,7 @@ import (
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/petitlyrics"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -3048,6 +3049,177 @@ func TestSchedulerStampsProvidersVersionOnItsQueue(t *testing.T) {
 	if stored != gen {
 		t.Fatalf("providers_version = %d; want %d -- a row stamped 0 can never match the live generation, "+
 			"so the #679 suppression would silently never fire", stored, gen)
+	}
+}
+
+// #963: scheduler's OnScanComplete runs the DB-only divergence repair right
+// after Upsert and BEFORE enqueue, so a scan that just corrected a
+// scan_results row's identity (as baseUpsert's ON CONFLICT does) also
+// re-keys the coupled work_queue row in the SAME scan -- preventing the
+// orphan issue #963 describes, rather than requiring a separate
+// `scan reconcile-identity` pass to recover it afterward.
+func TestSchedulerOnScanCompleteRepairsQueueDivergence(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	lib, err := library.New(sqlDB).Add(ctx, "/music", "Music", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	scanRepo := scan.New(sqlDB)
+	// First upsert: the mangled run-together artist, as an older build stored it.
+	if err := scanRepo.Upsert(ctx, lib.ID, []models.ScanResult{{
+		FilePath: "/music/a.mp3",
+		Track:    models.Track{ArtistName: "AlphaBravo", TrackName: "Song"},
+		Outdir:   "/music",
+		Filename: "a.lrc",
+		Status:   scan.StatusDone, // already fetched under the stale identity
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("seed upsert: %v", err)
+	}
+	var srID int64
+	if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM scan_results WHERE file_path = ?`, "/music/a.mp3").Scan(&srID); err != nil {
+		t.Fatalf("read seeded scan_result id: %v", err)
+	}
+	// A coupled work_queue row carrying the SAME stale identity, linked via the
+	// junction the way a real Enqueue would have left it.
+	wqRes, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, status)
+		 VALUES ('AlphaBravo', 'Song', 'alphabravo', 'song', 'done')`)
+	if err != nil {
+		t.Fatalf("seed work_queue: %v", err)
+	}
+	wqID, _ := wqRes.LastInsertId()
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wqID, srID); err != nil {
+		t.Fatalf("seed junction: %v", err)
+	}
+
+	// A later scan corrects scan_results' identity (baseUpsert's ON CONFLICT
+	// path): this is the #963 mechanism, re-run through the real Upsert rather
+	// than a hand-rolled UPDATE, so the test exercises the actual scan path.
+	if err := scanRepo.Upsert(ctx, lib.ID, []models.ScanResult{{
+		FilePath: "/music/a.mp3",
+		Track:    models.Track{ArtistName: "Alpha; Bravo", TrackName: "Song"},
+		Outdir:   "/music",
+		Filename: "a.lrc",
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("corrective upsert: %v", err)
+	}
+
+	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", 0)
+	if err := s.OnScanComplete(ctx, models.Library{ID: lib.ID}, nil, lib.Path, scan.TriggerScheduler); err != nil {
+		t.Fatalf("OnScanComplete: %v", err)
+	}
+
+	var artist, artistKey, status string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT artist, artist_key, status FROM work_queue WHERE id = ?`, wqID).
+		Scan(&artist, &artistKey, &status); err != nil {
+		t.Fatalf("read work_queue after scan: %v", err)
+	}
+	if artist != "Alpha; Bravo" {
+		t.Errorf("work_queue.artist = %q; want Alpha; Bravo -- the scan's divergence pass should have re-keyed it", artist)
+	}
+	if wantKey := normalize.NormalizeKey("Alpha; Bravo"); artistKey != wantKey {
+		t.Errorf("work_queue.artist_key = %q; want %q (re-keyed alongside artist)", artistKey, wantKey)
+	}
+	if status != "pending" {
+		t.Errorf("work_queue.status = %q; want pending (the stale 'done' row must be reopened by the re-key)", status)
+	}
+}
+
+// #963 follow-up findings 3/4: a TriggerWatcher OnScanComplete scopes its
+// divergence pass to the rescanned subtree (path), so a divergent row OUTSIDE
+// that subtree is left untouched even though it is in the same library --
+// unlike TriggerScheduler, which stays library-wide.
+func TestSchedulerOnScanCompleteWatcherTriggerScopesDivergenceToSubtree(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	lib, err := library.New(sqlDB).Add(ctx, "/music", "Music", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	scanRepo := scan.New(sqlDB)
+
+	// Two tracks in different subtrees of the same library, both carrying a
+	// stale coupled work_queue row (as OnScanComplete's other divergence test
+	// seeds it), so both are divergence candidates before the watcher rescan.
+	seedDivergentPair := func(path, artist, key, title, titleKey string) int64 {
+		if err := scanRepo.Upsert(ctx, lib.ID, []models.ScanResult{{
+			FilePath: path,
+			Track:    models.Track{ArtistName: artist, TrackName: title},
+			Outdir:   filepath.Dir(path),
+			Filename: filepath.Base(path) + ".lrc",
+			Status:   scan.StatusDone,
+		}}, scan.UpsertOptions{}); err != nil {
+			t.Fatalf("seed upsert %s: %v", path, err)
+		}
+		var srID int64
+		if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM scan_results WHERE file_path = ?`, path).Scan(&srID); err != nil {
+			t.Fatalf("read seeded scan_result id: %v", err)
+		}
+		wqRes, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, status)
+			 VALUES (?, ?, ?, ?, 'done')`, artist, title, key, titleKey)
+		if err != nil {
+			t.Fatalf("seed work_queue: %v", err)
+		}
+		wqID, _ := wqRes.LastInsertId()
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wqID, srID); err != nil {
+			t.Fatalf("seed junction: %v", err)
+		}
+		return wqID
+	}
+
+	wqA := seedDivergentPair("/music/artistA/a.mp3", "AlphaBravo", "alphabravo", "SongA", "songa")
+	wqB := seedDivergentPair("/music/artistB/b.mp3", "CharlieDelta", "charliedelta", "SongB", "songb")
+
+	// Correct scan_results for BOTH -- the #963 premise -- but only rescan
+	// artistA's subtree via the watcher trigger.
+	if err := scanRepo.Upsert(ctx, lib.ID, []models.ScanResult{{
+		FilePath: "/music/artistA/a.mp3",
+		Track:    models.Track{ArtistName: "Alpha; Bravo", TrackName: "SongA"},
+		Outdir:   "/music/artistA",
+		Filename: "a.mp3.lrc",
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("corrective upsert A: %v", err)
+	}
+	if err := scanRepo.Upsert(ctx, lib.ID, []models.ScanResult{{
+		FilePath: "/music/artistB/b.mp3",
+		Track:    models.Track{ArtistName: "Charlie; Delta", TrackName: "SongB"},
+		Outdir:   "/music/artistB",
+		Filename: "b.mp3.lrc",
+	}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("corrective upsert B: %v", err)
+	}
+
+	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", 0)
+	if err := s.OnScanComplete(ctx, models.Library{ID: lib.ID}, nil, "/music/artistA", scan.TriggerWatcher); err != nil {
+		t.Fatalf("OnScanComplete: %v", err)
+	}
+
+	var artistA, artistB string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT artist FROM work_queue WHERE id = ?`, wqA).Scan(&artistA); err != nil {
+		t.Fatalf("read work_queue A: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT artist FROM work_queue WHERE id = ?`, wqB).Scan(&artistB); err != nil {
+		t.Fatalf("read work_queue B: %v", err)
+	}
+	if artistA != "Alpha; Bravo" {
+		t.Errorf("in-subtree work_queue.artist = %q; want Alpha; Bravo (rescanned subtree)", artistA)
+	}
+	if artistB != "CharlieDelta" {
+		t.Errorf("out-of-subtree work_queue.artist = %q; want CharlieDelta (untouched by a watcher rescan of artistA)", artistB)
 	}
 }
 

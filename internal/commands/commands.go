@@ -32,6 +32,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/ffmpeg"
+	"github.com/sydlexius/canticle/internal/identityrepair"
 	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/langguard"
 	"github.com/sydlexius/canticle/internal/library"
@@ -2553,6 +2554,43 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		// indistinguishable in the logs. That ambiguity sent a production
 		// diagnosis down a wrong path.
 		OnScanComplete: func(ctx context.Context, lib models.Library, found []models.ScanResult, path string, trigger scan.Trigger) error {
+			// Divergence repair (#963) runs right after this scan's Upsert committed
+			// and BEFORE enqueue: baseUpsert may have just corrected this library's
+			// scan_results identity columns without touching the coupled work_queue
+			// row, and EnqueuePending below only ever looks at scan_results, so an
+			// affected track would otherwise sail through this scan and keep
+			// querying providers under the stale queue-side identity. DB-only (no
+			// file re-read). Best-effort: a failure here is logged and never aborts
+			// the scan, matching every other scan-path sidecar (reactiveRealign
+			// below).
+			//
+			// Scope depends on trigger, not just on library (#963 follow-up findings
+			// 3/4): a TriggerScheduler pass is library-wide already (the periodic
+			// scheduler, or a one-shot scan/CLI run), so it costs one join over the
+			// WHOLE library. A TriggerWatcher rescan is deliberately NOT narrowed to
+			// scheduler-only, because the periodic scheduler's own interval can go a
+			// full nightly cycle without firing under a restarting deployment (#726),
+			// which would leave a watcher-corrected row diverged until the next
+			// restart; instead it is scoped to the rescanned subtree (PathPrefix), so
+			// a single-file/album watcher event costs a join over that subtree, not
+			// the library.
+			libID := lib.ID
+			divOpts := identityrepair.Options{LibraryID: &libID}
+			if trigger == scan.TriggerWatcher {
+				divOpts.PathPrefix = path
+			}
+			divRes, direrr := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).RepairDivergence(ctx, divOpts)
+			if direrr != nil {
+				slog.Warn("scan: divergence repair failed (non-fatal)",
+					"library", lib.Name, "trigger", string(trigger), "error", direrr)
+			} else if divRes.Rekeyed+divRes.Merged+divRes.DisplaySynced+divRes.Unlinked+divRes.Deleted > 0 {
+				slog.Info("scan: divergence repair corrected stale work_queue identity",
+					"library", lib.Name, "trigger", string(trigger),
+					"rekeyed", divRes.Rekeyed, "merged", divRes.Merged,
+					"display_synced", divRes.DisplaySynced, "unlinked", divRes.Unlinked,
+					"deleted", divRes.Deleted, "skipped_in_flight", divRes.ProcessingSkips)
+			}
+
 			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)
 			if err != nil {
 				// Counts are partial on an aborted enqueue; don't log "complete".
