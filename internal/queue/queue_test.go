@@ -5410,3 +5410,133 @@ func TestDBQueue_SettleGuardRejectedAtomically(t *testing.T) {
 		}
 	})
 }
+
+// TestReopenDoneRowTx_ClearsSettleState is ReopenDoneRowTx's own direct
+// coverage (#960): a 'done' row carrying every settle-state column is
+// reopened to 'pending' with attempts/next_attempt_at/last_error/
+// completed_at reset AND provider_lane/outcome_type/outcome_detail/
+// timing_outcome/overrun_magnitude/overrun_ratio/evaluated_at all cleared to
+// NULL, so no caller (identityrepair's re-key and merge paths today) can
+// leave a done-era verdict on a row it reopens for an unrelated reason.
+func TestReopenDoneRowTx_ClearsSettleState(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "Song"}, SourcePath: "/m/a.mp3"}, PriorityScan)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'done', attempts = 3, last_error = 'stale error',
+		 completed_at = '2026-01-01T00:00:00Z', provider_lane = 'musixmatch',
+		 outcome_type = 'lrc', outcome_detail = 'ok', timing_outcome = 'ok',
+		 overrun_magnitude = -1.5, overrun_ratio = 0.98, evaluated_at = '2026-01-01T00:00:00Z'
+		 WHERE id = ?`, item.ID); err != nil {
+		t.Fatalf("stamp settled row: %v", err)
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	reopened, err := ReopenDoneRowTx(ctx, tx, item.ID, now)
+	if err != nil {
+		t.Fatalf("ReopenDoneRowTx: %v", err)
+	}
+	if !reopened {
+		t.Fatal("reopened = false; want true for a 'done' row")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var (
+		status, lastError                                     string
+		attempts                                              int
+		nextAttemptAt                                         string
+		completedAt, providerLane, outcomeType, outcomeDetail sql.NullString
+		timingOutcome, evaluatedAt                            sql.NullString
+		overrunMagnitude, overrunRatio                        sql.NullFloat64
+	)
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, attempts, next_attempt_at, last_error, completed_at, provider_lane,
+		        outcome_type, outcome_detail, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at
+		 FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &attempts, &nextAttemptAt, &lastError, &completedAt, &providerLane,
+		&outcomeType, &outcomeDetail, &timingOutcome, &overrunMagnitude, &overrunRatio, &evaluatedAt); err != nil {
+		t.Fatalf("read reopened row: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q; want pending", status)
+	}
+	if attempts != 0 {
+		t.Errorf("attempts = %d; want 0", attempts)
+	}
+	if lastError != "" {
+		t.Errorf("last_error = %q; want empty", lastError)
+	}
+	if nextAttemptAt != formatTime(now) {
+		t.Errorf("next_attempt_at = %q; want %q", nextAttemptAt, formatTime(now))
+	}
+	if completedAt.Valid || providerLane.Valid || outcomeType.Valid || outcomeDetail.Valid ||
+		timingOutcome.Valid || overrunMagnitude.Valid || overrunRatio.Valid || evaluatedAt.Valid {
+		t.Errorf("settle-state columns not all NULL after reopen: completed_at=%v provider_lane=%v "+
+			"outcome_type=%v outcome_detail=%v timing_outcome=%v overrun_magnitude=%v overrun_ratio=%v evaluated_at=%v",
+			completedAt, providerLane, outcomeType, outcomeDetail, timingOutcome, overrunMagnitude, overrunRatio, evaluatedAt)
+	}
+}
+
+// TestReopenDoneRowTx_NoOpOnNonDoneStatus asserts the status='done' guard: a
+// row in any other status (pending, unavailable, ...) is left completely
+// untouched. This is what makes the guard safe for a caller to invoke
+// unconditionally-ish without fabricating a status transition that never
+// happened -- 'unavailable' in particular must stay retired (#477):
+// queue.RecheckRetired is the designed revival path, not an incidental
+// reopen from an unrelated identity correction.
+func TestReopenDoneRowTx_NoOpOnNonDoneStatus(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+
+	item, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "Song"}, SourcePath: "/m/a.mp3"}, PriorityScan)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'unavailable', last_error = 'miss limit reached', miss_count = 15 WHERE id = ?`,
+		item.ID); err != nil {
+		t.Fatalf("stamp unavailable: %v", err)
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	reopened, err := ReopenDoneRowTx(ctx, tx, item.ID, time.Now())
+	if err != nil {
+		t.Fatalf("ReopenDoneRowTx: %v", err)
+	}
+	if reopened {
+		t.Fatal("reopened = true; want false for a non-'done' row (must not fabricate a status transition)")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var status, lastError string
+	var missCount int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, last_error, miss_count FROM work_queue WHERE id = ?`, item.ID,
+	).Scan(&status, &lastError, &missCount); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "unavailable" || lastError != "miss limit reached" || missCount != 15 {
+		t.Errorf("row = (%q, %q, miss_count=%d); want unchanged (unavailable, miss limit reached, 15)", status, lastError, missCount)
+	}
+}
