@@ -320,6 +320,15 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 	}
 	defer func() { _ = f.Close() }()
 
+	// Vorbis-comment multi-value recovery (#969) re-reads the SAME open
+	// handle from byte 0 (see vorbis_multivalue.go); it leaves f at an
+	// arbitrary offset afterward, which is safe because audioDuration
+	// immediately below seeks to 0 itself before it reads anything -- the two
+	// seeks can run in either order with no effect on the other. A no-op
+	// (nil, cheaply, on the FileType() check alone) for every non-FLAC/OGG
+	// file.
+	vorbisFields := vorbisMultiValueFields(f, m)
+
 	// audioduration seeks to 0 internally, so f may sit at any offset after
 	// tag.ReadFrom; no rewind is needed. A parse failure degrades to the
 	// unknown-duration sentinel exactly as scanDir does.
@@ -355,8 +364,8 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 		SizeBytes:   sizeBytes,
 		MBID:        extractRecordingMBID(m),
 		ISRC:        extractISRC(m),
-		Artist:      extractArtist(m),
-		AlbumArtist: extractAlbumArtist(m),
+		Artist:      extractArtist(m, vorbisFields),
+		AlbumArtist: extractAlbumArtist(m, vorbisFields),
 		Title:       m.Title(),
 		Album:       m.Album(),
 		Composer:    m.Composer(),
@@ -807,6 +816,12 @@ func (sc *Scanner) indexSettledFile(ctx context.Context, dir, filePath, stem str
 	}
 	defer func() { _ = f.Close() }()
 
+	// Vorbis-comment multi-value recovery (#969) needs the raw comment-block
+	// bytes, which m.Raw() cannot supply for a repeated field (see
+	// vorbis_multivalue.go); f is still open here, so read them now while it
+	// is. A no-op (nil, cheaply) for every non-FLAC/OGG file.
+	vorbisFields := vorbisMultiValueFields(f, m)
+
 	// ISRC/MBID are extracted UNCONDITIONALLY here, where the main path gates
 	// them behind EnrichRecording. Deliberate, and not a cost: that gate guards
 	// the DURATION PROBE it is bundled with, while the tags themselves are
@@ -821,10 +836,10 @@ func (sc *Scanner) indexSettledFile(ctx context.Context, dir, filePath, stem str
 	*results = append(*results, models.ScanResult{
 		FilePath: filePath,
 		Track: models.Track{
-			ArtistName:    extractArtist(m),
+			ArtistName:    extractArtist(m, vorbisFields),
 			TrackName:     m.Title(),
 			AlbumName:     m.Album(),
-			AlbumArtist:   extractAlbumArtist(m),
+			AlbumArtist:   extractAlbumArtist(m, vorbisFields),
 			ISRC:          extractISRC(m),
 			RecordingMBID: extractRecordingMBID(m),
 		},
@@ -926,7 +941,18 @@ const artistValueSep = "; "
 // dependency and are recovered by multiValueMP4Tag below (issue #958): every
 // byte is still present there, so recovery does not depend on a parallel
 // frame existing.
-func extractArtist(m tag.Metadata) string {
+//
+// Vorbis-comment files (FLAC/OGG) hit a THIRD mangling, recovered by
+// vorbisFields (issue #969, see vorbis_multivalue.go): the dependency's
+// Vorbis reader overwrites a repeated field in its own map, so nothing
+// survives in Raw() to recover from -- vorbisFields is populated by a
+// caller that re-read the comment block itself off the file's raw bytes.
+// vorbisFields is nil for every non-Vorbis file, so multiValueVorbisField
+// always misses and this path is a no-op for ID3/MP4 files.
+func extractArtist(m tag.Metadata, vorbisFields map[string][]string) string {
+	if v, ok := multiValueVorbisField(vorbisFields, "artists", "artist"); ok {
+		return v
+	}
 	if v := multiValueTag(m, "ARTISTS"); v != "" {
 		return v
 	}
@@ -937,8 +963,11 @@ func extractArtist(m tag.Metadata) string {
 }
 
 // extractAlbumArtist mirrors extractArtist for the album-artist frame (TPE2 /
-// TXXX "ALBUMARTISTS").
-func extractAlbumArtist(m tag.Metadata) string {
+// TXXX "ALBUMARTISTS" / Vorbis "albumartists").
+func extractAlbumArtist(m tag.Metadata, vorbisFields map[string][]string) string {
+	if v, ok := multiValueVorbisField(vorbisFields, "albumartists", "albumartist"); ok {
+		return v
+	}
 	if v := multiValueTag(m, "ALBUMARTISTS"); v != "" {
 		return v
 	}
@@ -1363,16 +1392,24 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			isrc = extractISRC(m)
 			recordingMBID = extractRecordingMBID(m)
 		}
+		// Vorbis-comment multi-value recovery (#969), f is still open (every
+		// branch above that closes it early also `continue`s, so reaching
+		// here means f is guaranteed open). Run AFTER probeDuration above
+		// rather than before: that call already seeks to 0 itself, so
+		// ordering the two calls either way is safe, but running last means
+		// this read never disturbs an offset a future insertion between here
+		// and probeDuration might otherwise rely on.
+		vorbisFields := vorbisMultiValueFields(f, m)
 		_ = f.Close()
 
 		slog.Debug("adding file", "file", file.Name(), "enrich", opts.EnrichRecording)
 		*results = append(*results, models.ScanResult{
 			FilePath: filePath,
 			Track: models.Track{
-				ArtistName:    extractArtist(m),
+				ArtistName:    extractArtist(m, vorbisFields),
 				TrackName:     m.Title(),
 				AlbumName:     m.Album(),
-				AlbumArtist:   extractAlbumArtist(m),
+				AlbumArtist:   extractAlbumArtist(m, vorbisFields),
 				TrackLength:   dur,
 				ISRC:          isrc,
 				RecordingMBID: recordingMBID,
