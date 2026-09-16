@@ -2594,12 +2594,22 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			if direrr != nil {
 				slog.Warn("scan: divergence repair failed (non-fatal)",
 					"library", lib.Name, "trigger", string(trigger), "error", direrr)
-			} else if divRes.Rekeyed+divRes.Merged+divRes.DisplaySynced+divRes.Unlinked+divRes.Deleted > 0 {
+			} else if divRes.Rekeyed+divRes.Merged+divRes.Unlinked+divRes.Deleted > 0 {
 				slog.Info("scan: divergence repair corrected stale work_queue identity",
 					"library", lib.Name, "trigger", string(trigger),
 					"rekeyed", divRes.Rekeyed, "merged", divRes.Merged,
-					"display_synced", divRes.DisplaySynced, "unlinked", divRes.Unlinked,
+					"unlinked", divRes.Unlinked,
 					"deleted", divRes.Deleted, "skipped_in_flight", divRes.ProcessingSkips)
+			}
+			if divRes.ScopeSkips > 0 {
+				// Reported separately from the correction-count branch above (#967
+				// finding 1): a ScopeSkip is not itself a correction, but a row this
+				// pass deliberately left untouched because a shared work_queue row
+				// also links a scan_results member outside this run's library/subtree
+				// scope. Surfacing it distinctly keeps a skip visible rather than
+				// silently indistinguishable from "nothing to do".
+				slog.Info("scan: divergence repair skipped out-of-scope shared work_queue row(s)",
+					"library", lib.Name, "trigger", string(trigger), "skipped_out_of_scope", divRes.ScopeSkips)
 			}
 
 			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)

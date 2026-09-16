@@ -195,6 +195,52 @@ func TestRunReconcileIdentity_DivergenceBackupRecordCarriesOp(t *testing.T) {
 	}
 }
 
+// The dry-run report line names the operation and prints the album artist
+// change alongside the artist change when the two differ (#967): printing the
+// artist alone can show identical old/new text for a change whose only
+// effect was on album_artist, with no way to tell what happened.
+func TestRunReconcileIdentity_ReportLineShowsOpAndAlbumArtist(t *testing.T) {
+	ctx, cfgPath, dbPath, _ := setupReconcileIdentity(t)
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	// Same setup as TestRunReconcileIdentity_DivergenceBackupRecordCarriesOp
+	// (a stale work_queue row the divergence pre-pass re-keys), but the scan
+	// row also carries a corrected album_artist so the re-key's Change reports
+	// an album-artist difference alongside the artist-key correction.
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE scan_results SET artist = 'Alpha; Bravo', album_artist = 'Correct AA', artist_key = ? WHERE id = 1`,
+		normalize.NormalizeKey("Alpha; Bravo")); err != nil {
+		t.Fatalf("pre-correct scan_results: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist, album_artist, title, artist_key, title_key, status)
+		 VALUES ('AlphaBravo', 'Stale AA', 'Song', ?, ?, 'pending')`,
+		normalize.NormalizeKey("AlphaBravo"), normalize.NormalizeKey("Song")); err != nil {
+		t.Fatalf("seed work_queue: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (1, 1)`); err != nil {
+		t.Fatalf("seed junction: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close seed db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if code := runReconcileIdentity(ctx, &buf, ScanReconcileIdentityCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "[queue_rekey]") {
+		t.Errorf("report line missing op label; got: %s", out)
+	}
+	if !strings.Contains(out, `album artist "Stale AA" -> "Correct AA"`) {
+		t.Errorf("report line missing album artist change; got: %s", out)
+	}
+}
+
 // An unknown --library exits 1 with a clear message.
 func TestRunReconcileIdentity_LibraryNotFound(t *testing.T) {
 	ctx, cfgPath, _, _ := setupReconcileIdentity(t)

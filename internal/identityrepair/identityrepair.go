@@ -61,8 +61,12 @@ const (
 	// existing correct-key row: Old*/New* describe the OLD (dropped)
 	// work_queue row's identity; WorkQueueID is that dropped row's id.
 	OpQueueMerge Op = "queue_merge"
-	// OpQueueDisplaySync is RepairDivergence's key-agrees/display-columns-only
-	// sync: Old*/New* describe the work_queue row WorkQueueID.
+	// OpQueueDisplaySync was RepairDivergence's key-agrees/display-columns-only
+	// sync. As of #967, a divergence is defined by artist_key alone, so a group
+	// whose key already agrees is never a candidate and this Op is no longer
+	// produced. The constant is kept, unproduced, because a backup JSONL file
+	// written by a v1.38.2 build can still carry this value on disk, and a
+	// reader (or a hand-restore) needs the name to recognize it.
 	OpQueueDisplaySync Op = "queue_display_sync"
 	// OpQueueUnlink is RepairDivergence's disagreement-branch unlink of one
 	// divergent scan_results member from its queue row: Old* is the queue

@@ -101,8 +101,17 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 	// report is invoked once per corrected row. In dry-run it prints the planned
 	// change; under --yes it also appends a backup record (see
 	// reconcileIdentityBackupRecord for which ops it can fully reverse).
+	//
+	// The line names the operation and shows every column that actually
+	// changes (#967): printing the artist alone, as an earlier version of this
+	// line did, could show identical old/new artist text for a change whose
+	// only effect was on album_artist, with no way to tell what happened.
 	report := func(ch identityrepair.Change) error {
-		_, _ = fmt.Fprintf(out, "  %s\n    %q -> %q\n", ch.FilePath, ch.OldArtist, ch.NewArtist)
+		_, _ = fmt.Fprintf(out, "  %s\n    [%s] artist %q -> %q", ch.FilePath, ch.Op, ch.OldArtist, ch.NewArtist)
+		if ch.OldAlbumArtist != ch.NewAlbumArtist {
+			_, _ = fmt.Fprintf(out, ", album artist %q -> %q", ch.OldAlbumArtist, ch.NewAlbumArtist)
+		}
+		_, _ = fmt.Fprintln(out)
 		if !args.Yes {
 			return nil
 		}
@@ -149,9 +158,9 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 	if args.Yes {
 		verb = "corrected"
 	}
-	_, _ = fmt.Fprintf(out, "reconcile-identity: divergence pass scanned %d work_queue row(s); %s %d (%d re-keyed, %d merged, %d display-synced, %d unlinked, %d deleted, %d skipped in-flight)%s\n",
-		divRes.Scanned, verb, divRes.Rekeyed+divRes.Merged+divRes.DisplaySynced+divRes.Unlinked+divRes.Deleted,
-		divRes.Rekeyed, divRes.Merged, divRes.DisplaySynced, divRes.Unlinked, divRes.Deleted, divRes.ProcessingSkips, suffixDryRun(args.Yes))
+	_, _ = fmt.Fprintf(out, "reconcile-identity: divergence pass scanned %d work_queue row(s); %s %d (%d re-keyed, %d merged, %d unlinked, %d deleted, %d skipped in-flight, %d skipped out-of-scope)%s\n",
+		divRes.Scanned, verb, divRes.Rekeyed+divRes.Merged+divRes.Unlinked+divRes.Deleted,
+		divRes.Rekeyed, divRes.Merged, divRes.Unlinked, divRes.Deleted, divRes.ProcessingSkips, divRes.ScopeSkips, suffixDryRun(args.Yes))
 	_, _ = fmt.Fprintf(out, "reconcile-identity: scanned %d row(s); %s %d (%d queue re-keyed, %d queue merged, %d skipped in-flight, %d unreadable)%s\n",
 		res.Scanned, verb, res.Changed, res.QueueUpdated, res.QueueMerged, res.ProcessingSkips, res.ReadFailures, suffixDryRun(args.Yes))
 	if backupFile != nil {
