@@ -606,12 +606,18 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		// That probe was right that richsync does not arrive UNASKED, and wrong
 		// in the conclusion drawn from it, that reaching it needed a separate
 		// two-step track.richsync.get call keyed by commontrack_id. Re-probed
-		// live 2026-09-17 on the CURRENT identity: the standalone endpoint
-		// returns inner status 404, while the two parameters BELOW make this
-		// same request return a SIXTH macro call, track.richsync.get, inner
-		// status 200, body at message.body.richsync.richsync_body (measured:
-		// 50 entries / 626 chunks, keys {l,te,ts,x} and {c,o}, units SECONDS --
-		// max ts 203.510 against a 228s catalog track_length).
+		// live 2026-09-17 on the CURRENT identity, ON ONE TRACK: the standalone
+		// endpoint returned inner status 404, while the two parameters BELOW
+		// made this same request return a SIXTH macro call, track.richsync.get,
+		// inner status 200, body at message.body.richsync.richsync_body (50
+		// entries / 626 chunks, keys {l,te,ts,x} and {c,o}; units read as
+		// SECONDS from max ts 203.510 against a 228s catalog track_length).
+		//
+		// N=1 ON EVERY FIGURE ABOVE, and stated that way on purpose. One track
+		// establishes that this shape CAN be served; it does not establish that
+		// the standalone endpoint is dead in general, nor the unit as a property
+		// of the endpoint rather than of that response. The parser applies its
+		// own tripwire to the unit rather than trusting this reading.
 		//
 		// Why the first probe misled is worth keeping: a single-request probe
 		// that does not ASK for the optional sub-call cannot distinguish "this
@@ -620,8 +626,14 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		//
 		// Asked UNCONDITIONALLY: the sub-call rides the request canticle
 		// already makes, so it costs no extra paced request and there is no
-		// user-facing decision to gate it on. What is DONE with the result is
-		// output.word_sync's business, not the request's.
+		// user-facing decision to gate it on.
+		//
+		// NOT a no-op for a deployment that leaves output.word_sync off, and it
+		// would be wrong to say otherwise: that key gates only what the WRITER
+		// emits (lyrics/writer.go). Ranking is ungated -- suitability.go
+		// promotes a result carrying word timings to QualityWordSynced -- so
+		// merely populating them changes which lane can win a race, for every
+		// deployment, the moment this ships.
 		"namespace":             {"lyrics_richsynched"},
 		"optional_calls":        {"track.richsync"},
 		"richsync_compact_type": {"words"},
@@ -820,16 +832,38 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 // changed under us -- so it logs at Warn. Byte count only: a richsync body IS
 // the lyric, so no text, title or artist may appear in a log line.
 func richSyncTimings(trg *fastjson.Value, cues []models.Lines) []models.WordTiming {
+	// Every non-200 is swallowed, INCLUDING a 401, and that is deliberate rather
+	// than an oversight about throttle signaling. A 401 on the SUB-CALL carries
+	// nothing the caller does not already have: the outer response's own status
+	// is checked before this runs, so a genuine throttle has already been seen
+	// there. The pacer ratchets from a RETURNED ERROR, and the orchestrator gates
+	// a 401 on the lane having succeeded before -- but this very lookup IS a
+	// success, so surfacing it would record a success and a throttle from one
+	// response. Nothing is discarded by ignoring it here.
 	if trg == nil || trg.GetInt("header", "status_code") != 200 {
 		return nil
 	}
 	bodyNode := trg.Get("body", "richsync", "richsync_body")
-	// The emptiness arm is NOT load-bearing for correctness -- parseRichSyncBody
-	// rejects an empty body on its own -- and a mutation confirms removing it
-	// changes no test outcome. It earns its place by keeping an ORDINARY absent
-	// body out of the Warn below, which is reserved for a payload shape that
-	// actually changed; without it every empty body reads as an incident.
-	if bodyNode == nil || len(trg.GetStringBytes("body", "richsync", "richsync_body")) == 0 {
+	// This arm keeps an ORDINARY empty body out of the Warn below, which is
+	// reserved for a shape that actually changed; without it every empty body
+	// reads as an incident.
+	//
+	// It must test the node's TYPE, not just the length of a string read. A
+	// fastjson string accessor returns nil for any NON-STRING node, so a length
+	// check alone treats a number, object, array or null at this key exactly like
+	// an absent body -- silent, unlogged, forever. That is the single most
+	// plausible way this field evolves (dropping the double encoding and serving
+	// a plain array), i.e. precisely the change the Warn exists to name, so a
+	// type-blind guard would make the alarm deaf to its own alarm condition.
+	//
+	// Three things all mean ABSENCE and must stay quiet: the key missing, an
+	// explicit JSON null, and an empty string. A null is the provider saying
+	// "no value here", which is the same statement as omitting the key -- only a
+	// DIFFERENT TYPE is a shape change.
+	if bodyNode == nil || bodyNode.Type() == fastjson.TypeNull {
+		return nil
+	}
+	if bodyNode.Type() == fastjson.TypeString && len(bodyNode.GetStringBytes()) == 0 {
 		return nil
 	}
 	// MarshalTo, not GetStringBytes: the field is a JSON-ENCODED STRING whose

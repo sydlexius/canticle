@@ -1,10 +1,13 @@
 package musixmatch
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -62,6 +65,20 @@ func richSyncMacroBody(richSyncCall string) string {
 		}
 	}`
 	return body
+}
+
+// richSyncCallRawBody places an arbitrary JSON VALUE at richsync_body, which
+// richSyncCall cannot express because it always quotes its argument into a JSON
+// string. The type of that node is exactly what the shape-change test varies, so
+// it needs a builder that can emit an array, object, number or bare null there.
+func richSyncCallRawBody(rawBody string) string {
+	return `,
+					"track.richsync.get": {
+						"message": {
+							"header": {"status_code": 200},
+							"body": {"richsync": {"richsync_body": ` + rawBody + `}}
+						}
+					}`
 }
 
 // richSyncCall wraps a richsync_body (already JSON-string-escaped) in the
@@ -260,5 +277,65 @@ func TestRichSyncIgnoredWithoutLineSync(t *testing.T) {
 	}
 	if song.WordTimings != nil {
 		t.Errorf("WordTimings = %+v; want nil on a result with no cues to index into", song.WordTimings)
+	}
+}
+
+// TestRichSyncWarnsOnlyOnAShapeChange pins the LOGGING property, which nothing
+// else in this package observes.
+//
+// That gap was not cosmetic: the Warn is the only signal that the richsync
+// payload changed shape, and an arm whose sole purpose is a logging decision
+// cannot be defended by any test that ignores logs -- a mutation of it reddens
+// nothing, so the guard silently rots. Worse, the original guard read the body
+// with a string accessor and tested only its LENGTH; fastjson returns nil for a
+// non-string node, so a number, object, array or null at richsync_body was
+// swallowed exactly like an absent one. That is the most plausible way this
+// field evolves (dropping the double encoding for a plain array), i.e. precisely
+// the change the Warn exists to announce, and it would have arrived in silence.
+func TestRichSyncWarnsOnlyOnAShapeChange(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantWarn bool
+	}{
+		// A shape change: present, non-empty, and not the encoding we expect.
+		{"body is an array", `[{"ts":1.0}]`, true},
+		{"body is an object", `{"ts":1.0}`, true},
+		{"body is a number", `12345`, true},
+		{"body is true", `true`, true},
+		{"body is an undecodable string", `"not json at all"`, true},
+		// Ordinary absence: nothing changed, nothing to announce.
+		{"body is an empty string", `""`, false},
+		{"body is null", `null`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			client, _ := newCountingClient(t, richSyncMacroBody(richSyncCallRawBody(tc.body)))
+
+			song, err := client.FindLyrics(context.Background(), probeTrack())
+			if err != nil {
+				t.Fatalf("FindLyrics returned %v; want nil -- a richsync problem must never cost the song", err)
+			}
+			if len(song.Subtitles.Lines) == 0 {
+				t.Fatal("line-synced cues were lost")
+			}
+			if song.WordTimings != nil {
+				t.Errorf("WordTimings = %v; want nil", song.WordTimings)
+			}
+
+			logged := buf.String()
+			if got := logged != ""; got != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; log was %q", got, tc.wantWarn, logged)
+			}
+			// The body is the lyric. Whatever is logged, it carries a byte count
+			// and nothing from the payload.
+			if strings.Contains(logged, "not json at all") {
+				t.Errorf("log leaked the body: %q", logged)
+			}
+		})
 	}
 }
