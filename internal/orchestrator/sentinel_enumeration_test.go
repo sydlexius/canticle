@@ -87,6 +87,7 @@ func classifiedSentinels() map[string]error {
 		"musixmatch.ErrNoLyrics":               musixmatch.ErrNoLyrics,
 		"musixmatch.ErrTruncatedResponse":      musixmatch.ErrTruncatedResponse,
 		"musixmatch.ErrUnparsableSubtitleBody": musixmatch.ErrUnparsableSubtitleBody,
+		"musixmatch.ErrUnparsableRichSyncBody": musixmatch.ErrUnparsableRichSyncBody,
 		"musixmatch.ErrMatchMismatch":          musixmatch.ErrMatchMismatch,
 		"musixmatch.ErrUnmatchable":            musixmatch.ErrUnmatchable,
 		"musixmatch.ErrMatcherClientError":     musixmatch.ErrMatcherClientError,
@@ -139,6 +140,20 @@ func transportExemptions() map[string]string {
 		// never returned by FindLyrics/findLyricsOnce and can never reach a lane
 		// or ClassifyOutcome.
 		"musixmatch.ErrClientIdentityRetired": "token-bootstrap path only (Mint), like ErrTokenMintRefused; never returned by a lookup, so it never reaches a lane",
+		// Parser-internal, and the exemption is the same shape as
+		// innertube.ErrUntimedLyrics directly below: the error never leaves a
+		// lookup, so it never reaches a lane. parseRichSyncBody
+		// (internal/musixmatch/richsync.go) returns it for a richsync_body this
+		// client cannot decode, and richsync is the OPTIONAL half of a Musixmatch
+		// result -- the surrounding line-synced song is a success either way, so
+		// its caller converts this into "no word data" rather than propagating it.
+		// Trading a good .lrc for a parse failure in a bonus payload would be the
+		// wrong bargain, and classifying it as a miss would be the #748 defect.
+		//
+		// It MUST stay that way. If a caller ever propagates this out of a lookup,
+		// replace this entry with a real ClassifyOutcome arm -- transport would
+		// then be wrong for the same reason it is wrong for any other miss.
+		"musixmatch.ErrUnparsableRichSyncBody": "parser-internal; a richsync parse failure never fails the lookup that carries it, so it never reaches a lane",
 		// Same reasoning as petitlyrics.ErrForbidden above: a 403 from innertube is
 		// a refused request SHAPE, which no amount of waiting or rotation fixes.
 		// There is additionally no credential in this provider at all -- its API key
