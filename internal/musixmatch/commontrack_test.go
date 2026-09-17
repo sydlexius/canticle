@@ -82,12 +82,12 @@ func TestFindLyricsPopulatesCommontrackID(t *testing.T) {
 		want models.FlexID
 	}{
 		{
-			name: "numeric, as the provider serves it",
+			name: "numeric encoding, supported",
 			node: `{"track_name":"alpha","artist_name":"bravo","album_name":"charlie","commontrack_id":10000001,"has_subtitles":1,"has_lyrics":1}`,
 			want: "10000001",
 		},
 		{
-			name: "string, tolerated without failing the lookup",
+			name: "string encoding, supported",
 			node: `{"track_name":"alpha","artist_name":"bravo","album_name":"charlie","commontrack_id":"10000001","has_subtitles":1,"has_lyrics":1}`,
 			want: "10000001",
 		},

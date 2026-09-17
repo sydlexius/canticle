@@ -41,11 +41,18 @@ type Track struct {
 //
 // It exists because the Musixmatch matcher track node is unmarshaled WHOLESALE
 // into Track (internal/musixmatch/client.go, json.Unmarshal over the entire
-// node) and that call's error fails the whole lookup. Musixmatch serves
-// commontrack_id as a bare number; a plain string field therefore returns
-// "cannot unmarshal number into Go struct field ... of type string" and would
-// break EVERY matched track -- for an identifier nothing consumes yet. Measured
-// directly against encoding/json before this type was written, not assumed.
+// node) and that call's error fails the whole lookup. A plain string field
+// returns "cannot unmarshal number into Go struct field ... of type string" on
+// a numeric id and would break EVERY matched track -- for an identifier nothing
+// consumes yet. That Go behavior was measured directly against encoding/json
+// before this type was written, not assumed.
+//
+// The provider's CURRENT wire shape is deliberately NOT asserted here. The one
+// observation of a bare number (#613, 2026-07-22) predates the client-identity
+// move in 92cb6d1 (#939) and was taken against the now-retired desktop
+// identity, so it is an earlier observation, not an established contract.
+// BOTH branches are load-bearing on purpose: either encoding may arrive, and
+// this type is correct without anyone having to know which does.
 //
 // A shape that is neither string, number, nor null decodes to the empty value
 // and returns NO error, deliberately: an optional identifier must never cost a
