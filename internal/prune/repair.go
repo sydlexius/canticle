@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"unicode/utf8"
 
+	dbpkg "github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -201,11 +202,28 @@ func (p *Pruner) RepairOutputPaths(ctx context.Context, opts RepairOptions) (Rep
 // applyRepair runs one row's BEGIN -> compare-and-set UPDATE -> Report ->
 // COMMIT. It returns false (nothing committed) when the row changed since
 // gather; a Report or database error rolls the row back and is returned.
+//
+// Retried whole on SQLITE_BUSY (#978) only until Report has run: a busy Commit
+// after Report has written its backup record is surfaced, never retried, so the
+// row cannot get a second record.
 func (p *Pruner) applyRepair(ctx context.Context, id int64, oldJSON, outdir, filename string, row RepairedRow, report func(RepairedRow) error) (applied bool, retErr error) {
 	newJSON, err := json.Marshal(row.NewOutputPaths)
 	if err != nil {
 		return false, fmt.Errorf("prune: marshal repaired output_paths for work_queue %d: %w", id, err)
 	}
+	err = dbpkg.RetryBatchTx(ctx, "prune output_paths repair", func() error {
+		var aerr error
+		applied, aerr = p.applyRepairOnce(ctx, id, oldJSON, outdir, filename, newJSON, row, report)
+		return aerr
+	})
+	if err != nil {
+		return false, err
+	}
+	return applied, nil
+}
+
+// applyRepairOnce is one attempt of applyRepair's transaction.
+func (p *Pruner) applyRepairOnce(ctx context.Context, id int64, oldJSON, outdir, filename string, newJSON []byte, row RepairedRow, report func(RepairedRow) error) (applied bool, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("prune: begin output_paths repair for work_queue %d: %w", id, err)
@@ -227,11 +245,11 @@ func (p *Pruner) applyRepair(ctx context.Context, id int64, oldJSON, outdir, fil
 	}
 	if report != nil {
 		if err := report(row); err != nil {
-			return false, fmt.Errorf("prune: report repaired work_queue %d: %w", id, err)
+			return false, dbpkg.NotRetryable(fmt.Errorf("prune: report repaired work_queue %d: %w", id, err))
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("prune: commit output_paths repair for work_queue %d: %w", id, err)
+		return false, dbpkg.NotRetryable(fmt.Errorf("prune: commit output_paths repair for work_queue %d: %w", id, err))
 	}
 	return true, nil
 }

@@ -70,7 +70,7 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 		slog.Error("failed to load config", "error", err)
 		return 1
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	sqlDB, err := db.OpenImmediate(ctx, cfg.DB.Path)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		return 1

@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"time"
 
+	dbpkg "github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -279,7 +280,27 @@ type applyOutcome struct {
 // inside a single transaction. When the linked queue row (at either the old or
 // the corrected key) is mid-flight ('processing'), the entire change is skipped
 // so scan_results and work_queue never drift apart.
+//
+// The transaction is retried whole on SQLITE_BUSY (#978), which is safe only
+// while report has not run: every attempt before report is rolled back and
+// leaves no trace. Once report has written its backup record, a busy error
+// (only Commit remains) is surfaced rather than retried, so a retry can never
+// append a second record for the same row.
 func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string, report func(Change) error) (applyOutcome, error) {
+	var out applyOutcome
+	err := dbpkg.RetryBatchTx(ctx, "identityrepair apply", func() error {
+		var err error
+		out, err = r.applyOnce(ctx, ch, titleKey, report)
+		return err
+	})
+	if err != nil {
+		return applyOutcome{}, err
+	}
+	return out, nil
+}
+
+// applyOnce is one attempt of apply's transaction.
+func (r *Repairer) applyOnce(ctx context.Context, ch Change, titleKey string, report func(Change) error) (applyOutcome, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return applyOutcome{}, fmt.Errorf("identityrepair: begin tx: %w", err)
@@ -311,12 +332,13 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string, report
 	// commit failure later rolls back.
 	if report != nil {
 		if err := report(ch); err != nil {
-			return applyOutcome{}, fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err)
+			return applyOutcome{}, dbpkg.NotRetryable(fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err))
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return applyOutcome{}, fmt.Errorf("identityrepair: commit tx: %w", err)
+		// The backup record may already be on disk, so never retry past it.
+		return applyOutcome{}, dbpkg.NotRetryable(fmt.Errorf("identityrepair: commit tx: %w", err))
 	}
 	return out, nil
 }

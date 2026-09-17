@@ -105,6 +105,48 @@ func TestRetryOnBusy_NonBusyReturnsImmediately(t *testing.T) {
 	}
 }
 
+// TestRetryOnBusy_NotRetryableBusyIsReturnedOnce pins the rule the backup-first
+// callers rely on (#978): a busy error marked NotRetryable (raised after a
+// backup record was written) is returned on the first attempt, still reads as
+// busy to callers, and is never retried into a duplicate record.
+func TestRetryOnBusy_NotRetryableBusyIsReturnedOnce(t *testing.T) {
+	busy := triggerBusy(t)
+	attempts := 0
+	err := RetryOnBusy(context.Background(), 5, func() error {
+		attempts++
+		return NotRetryable(fmt.Errorf("commit: %w", busy))
+	})
+	if attempts != 1 {
+		t.Fatalf("attempts = %d; want 1 (NotRetryable must not be retried)", attempts)
+	}
+	if !IsSQLiteBusy(err) {
+		t.Fatalf("err = %v; want the busy error still visible through NotRetryable", err)
+	}
+	if NotRetryable(nil) != nil {
+		t.Fatal("NotRetryable(nil) != nil")
+	}
+}
+
+// TestRetryBatchTx_RetriesBusyPastWarnThreshold verifies the batch budget keeps
+// retrying a busy unit of work past the Warn threshold and returns its success.
+func TestRetryBatchTx_RetriesBusyPastWarnThreshold(t *testing.T) {
+	busy := triggerBusy(t)
+	attempts := 0
+	err := RetryBatchTx(context.Background(), "test", func() error {
+		attempts++
+		if attempts <= batchTxWarnAfter {
+			return busy
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RetryBatchTx = %v; want nil", err)
+	}
+	if attempts != batchTxWarnAfter+1 {
+		t.Fatalf("attempts = %d; want %d", attempts, batchTxWarnAfter+1)
+	}
+}
+
 func TestRetryOnBusy_ExhaustsReturnsLastBusy(t *testing.T) {
 	busy := triggerBusy(t)
 	attempts := 0
