@@ -46,11 +46,27 @@ const richSyncBindToleranceMS = 300
 //
 // The denominator is the last CUE, not the catalog Track.TrackLength the design
 // sketched: a pure parser holds the cues, and widening the signature for one
-// check is the worse trade. The cue span is weaker (it ends at the last SUNG
-// line, so ordinary trailing content overshoots it by a small multiple --
-// measured 6x on this package's fixtures), so the factor is priced to catch
-// 1000x and never fire on that. A tripwire, not a plausibility test.
-const richSyncUnitSanityFactor = 100
+// check is the worse trade.
+//
+// The bound is the LARGER of a multiple and an additive slack, because each arm
+// alone fails on a different real body:
+//
+//   - A pure MULTIPLE is meaninglessly tight when the cue span is tiny (a cue at
+//     0.2s allows 0.8s), so ordinary trailing content trips it. That is what
+//     forced an earlier factor up to 100 -- which then let a real 1000x through,
+//     since a ratio only measures the error RELATIVE to how much of the track the
+//     body covers, and a sparsely-covered track shrinks it below any fixed factor.
+//   - A pure ABSOLUTE ceiling cannot work either: 15 seconds of content sent in
+//     milliseconds reads as 4.2 hours, which no ceiling can reject without also
+//     rejecting a legitimate long-form recording.
+//
+// Together they are tight where it matters: the slack absorbs the short-span case
+// the multiple cannot, so the multiple stays at 4 and a 1000x error is caught at
+// any track length and any coverage fraction. A tripwire, not a plausibility test.
+const (
+	richSyncUnitSanityFactor  = 4
+	richSyncUnitSanitySlackMS = 60_000
+)
 
 // richSyncChunk is one timed chunk of a line: text, and offset from the line
 // start, as the provider spells them.
@@ -96,7 +112,22 @@ func parseRichSyncBody(raw []byte, cues []models.Lines) ([]models.WordTiming, er
 	}
 
 	var entries []richSyncEntry
-	if err := json.Unmarshal([]byte(inner), &entries); err != nil || len(entries) == 0 {
+	if err := json.Unmarshal([]byte(inner), &entries); err != nil {
+		return nil, fmt.Errorf("%w (%d bytes)", ErrUnparsableRichSyncBody, len(raw))
+	}
+
+	// COUNT CHUNKS, not entries. Every field is optional to encoding/json, so a
+	// body whose keys were renamed upstream decodes into N entries of {TS:0,
+	// L:nil} without error -- an entry count sees N and calls it a success,
+	// returning zero word timings and no error. That is the SILENT payload
+	// change this sentinel exists to name, so the emptiness test has to run over
+	// the data actually being read. A body carrying no words at all is
+	// indistinguishable from one this parser cannot read, and both are failures.
+	words := 0
+	for _, e := range entries {
+		words += len(e.L)
+	}
+	if words == 0 {
 		return nil, fmt.Errorf("%w (%d bytes)", ErrUnparsableRichSyncBody, len(raw))
 	}
 
@@ -131,10 +162,11 @@ func checkRichSyncUnits(entries []richSyncEntry, cues []models.Lines, rawLen int
 			}
 		}
 	}
-	if maxStartMS > lastCueMS*richSyncUnitSanityFactor {
-		return fmt.Errorf("%w: word timings imply a track %dx the cues' span, which is what a"+
+	allowedMS := max(lastCueMS*richSyncUnitSanityFactor, lastCueMS+richSyncUnitSanitySlackMS)
+	if maxStartMS > allowedMS {
+		return fmt.Errorf("%w: a word starts at %d ms but the cues end at %d ms, which is what a"+
 			" seconds/milliseconds unit error looks like (%d bytes)",
-			ErrUnparsableRichSyncBody, maxStartMS/lastCueMS, rawLen)
+			ErrUnparsableRichSyncBody, maxStartMS, lastCueMS, rawLen)
 	}
 	return nil
 }
@@ -238,7 +270,23 @@ func bindEntry(e richSyncEntry, refs []cueRef, cues []models.Lines, bound map[in
 	case 0:
 		return 0, false
 	case 1:
-		return candidates[0], true
+		// One candidate is NOT a free pass. Entries bind in ascending ts and the
+		// first bind wins, so a slightly-early entry reaching a cue inside the
+		// window takes it before the entry that matches that cue EXACTLY is ever
+		// considered -- one candidate at the time of asking, two once the whole
+		// body is in view. That writes one line's words onto another line's text,
+		// which is the wrong-content failure this rule exists to refuse, and
+		// a2Words' fidelity guard only masks it when the texts differ a lot.
+		//
+		// So a lone candidate must still not CONTRADICT the text. Disagreement is
+		// only decidable when both sides carry one: richsync's x is optional, and
+		// an absent text is no evidence either way, so an empty on either side
+		// keeps the timestamp's verdict rather than voting against it.
+		idx := candidates[0]
+		if !textsConflict(cues[idx].Text, e.X) {
+			return idx, true
+		}
+		return 0, false
 	}
 
 	// Several cues in the window. Fall back to the line text, the one other thing
@@ -255,6 +303,18 @@ func bindEntry(e richSyncEntry, refs []cueRef, cues []models.Lines, bound map[in
 		return matched[0], true
 	}
 	return 0, false
+}
+
+// textsConflict reports whether two per-line texts POSITIVELY disagree.
+//
+// Absence is not disagreement: richsync's x is optional, and an empty on either
+// side is no evidence, so only two present-and-different texts conflict.
+// Whitespace is ignored because each pipeline joined its own chunks; case is
+// not, because a case difference between two renderings of one performance is a
+// real editorial difference rather than a formatting artifact.
+func textsConflict(cueText, entryText string) bool {
+	a, b := stripSpaceRunes(cueText), stripSpaceRunes(entryText)
+	return a != "" && b != "" && a != b
 }
 
 // chunkTimings converts a bound entry's chunks into WordTimings on line.
@@ -275,11 +335,18 @@ func chunkTimings(e richSyncEntry, line int) []models.WordTiming {
 		if i+1 < len(e.L) {
 			endSec = e.TS + e.L[i+1].O
 		}
+		// EndMS floors at StartMS, never merely at zero. Two provider shapes
+		// invert the span otherwise: a last chunk whose offset runs past the
+		// entry's te, and chunks not ascending by o (the next chunk's start is
+		// read as this one's end without assuming that order). A negative-length
+		// word is not a value any consumer should have to defend against, and it
+		// is latent only because a2Words does not read EndMS yet.
+		start := max(toMS(e.TS+ch.O), 0)
 		out = append(out, models.WordTiming{
 			Line:    line,
 			Text:    ch.C,
-			StartMS: max(toMS(e.TS+ch.O), 0),
-			EndMS:   max(toMS(endSec), 0),
+			StartMS: start,
+			EndMS:   max(toMS(endSec), start),
 		})
 	}
 	return out

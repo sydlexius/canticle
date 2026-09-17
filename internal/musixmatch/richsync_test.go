@@ -105,7 +105,21 @@ func TestParseRichSyncBodyMapsFields(t *testing.T) {
 // unrecognized shape rather than a free pass through the first decode step.
 func TestParseRichSyncBodyNeverReturnsEmptySuccess(t *testing.T) {
 	cues := []models.Lines{cue(1.0, "alpha")}
-	for _, inner := range []string{"null", "[]", "", "  ", "{}", `"nope"`, "0", "false", "[oops"} {
+	// The scalar cases below were never the dangerous ones. EVERY field is
+	// optional to encoding/json, so a body that is a non-empty ARRAY OF OBJECTS
+	// whose keys the provider renamed decodes without error into N entries of
+	// {TS:0, L:nil} -- and an entry-count emptiness test sees N, calls it a
+	// success, and returns zero timings with nil error. That is precisely the
+	// silent payload change this sentinel exists to name, so the class has to be
+	// enumerated here and not just the scalars.
+	renamed := []string{
+		`[{}]`,
+		`[null,null]`,
+		`[{"start":1.0,"end":2.0,"text":"alpha","words":[{"chunk":"alpha","offset":0.0}]}]`,
+		`[{"ts":1.0,"te":2.0,"x":"alpha","words":[{"c":"alpha","o":0.0}]}]`,
+		`[{"ts":1.0,"te":2.0,"x":"alpha","l":[]}]`,
+	}
+	for _, inner := range append([]string{"null", "[]", "", "  ", "{}", `"nope"`, "0", "false", "[oops"}, renamed...) {
 		t.Run(inner, func(t *testing.T) {
 			got, err := parseRichSyncBody(richSyncBody(t, inner), cues)
 			if err == nil {
@@ -334,7 +348,12 @@ func TestCorrelationDoesNotPairByIndex(t *testing.T) {
 	// test edit rather than silent drift.
 	want := map[int]string{0: "alpha", 2: "charlie"}
 	if len(seenLine) != len(want) {
-		t.Fatalf("bound %d cues (%v), want %d (%v)", len(seenLine), seenLine, len(want), want)
+		// Errorf, NOT Fatalf: the negative control below is the half of this test
+		// that discriminates index pairing from timestamp binding, and a Fatal
+		// here returns before it ever runs -- under the exact mutation it exists
+		// to catch. A test whose control is unreachable in the failing case is
+		// not a control.
+		t.Errorf("bound %d cues (%v), want %d (%v)", len(seenLine), seenLine, len(want), want)
 	}
 	for line, text := range want {
 		if seenLine[line] != text {
@@ -371,5 +390,128 @@ func TestCorrelationDoesNotPairByIndex(t *testing.T) {
 	if seenLine[1] == "alpha" {
 		t.Error(`entry "alpha" bound to cue 1, which is where an INDEX pairing would put it; ` +
 			"ts 10.00 corresponds to cue 0")
+	}
+}
+
+// TestBindRefusesALoneCandidateWhoseTextDisagrees covers the false bind a
+// single-candidate fast path allows.
+//
+// Entries bind in ascending ts and the first bind wins, so a slightly-early
+// entry reaches a cue inside the window BEFORE the entry matching that cue
+// exactly is considered: one candidate at the time of asking, two once the whole
+// body is in view. Without a text check the early entry takes the cue and the
+// exact match is dropped -- one line's words written onto another line's text,
+// which is the wrong-content outcome this rule exists to refuse.
+func TestBindRefusesALoneCandidateWhoseTextDisagrees(t *testing.T) {
+	cues := []models.Lines{cue(20.0, "bravo")}
+	raw := richSyncBody(t, `[
+		{"ts":19.8,"te":19.9,"x":"alpha","l":[{"c":"alphaword","o":0.0}]},
+		{"ts":20.0,"te":20.5,"x":"bravo","l":[{"c":"bravoword","o":0.0}]}
+	]`)
+
+	got, err := parseRichSyncBody(raw, cues)
+	if err != nil {
+		t.Fatalf("parseRichSyncBody: %v", err)
+	}
+	for _, w := range got {
+		if w.Text == "alphaword" {
+			t.Errorf(`entry "alpha" bound to the cue whose text is %q; a lone candidate `+
+				`must not bind when the texts positively disagree`, cues[w.Line].Text)
+		}
+	}
+	if len(got) != 1 || got[0].Text != "bravoword" {
+		t.Errorf("got %+v; want only the exactly-matching entry bound", got)
+	}
+}
+
+// TestBindStillBindsWhenEitherTextIsAbsent pins the other half of that rule.
+// richsync's x is optional, so an empty text on either side is NO EVIDENCE and
+// must leave the timestamp's verdict alone. Without this, adding the text check
+// would silently stop binding every body that omits x.
+func TestBindStillBindsWhenEitherTextIsAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name, entries string
+		cueText       string
+	}{
+		{"entry text absent", `[{"ts":20.0,"te":20.5,"l":[{"c":"word","o":0.0}]}]`, "bravo"},
+		{"cue text absent", `[{"ts":20.0,"te":20.5,"x":"bravo","l":[{"c":"word","o":0.0}]}]`, ""},
+		{"both absent", `[{"ts":20.0,"te":20.5,"l":[{"c":"word","o":0.0}]}]`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseRichSyncBody(richSyncBody(t, tc.entries), []models.Lines{cue(20.0, tc.cueText)})
+			if err != nil {
+				t.Fatalf("parseRichSyncBody: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d timings, want 1; an absent text is not a disagreement", len(got))
+			}
+		})
+	}
+}
+
+// TestEndMSNeverPrecedesStartMS covers two provider shapes that invert the span:
+// a last chunk whose offset runs past the entry's te, and chunks not ascending
+// by o (the next chunk's start is read as this one's end without assuming that
+// order). Latent only because a2Words does not read EndMS today.
+func TestEndMSNeverPrecedesStartMS(t *testing.T) {
+	for _, tc := range []struct{ name, entries string }{
+		{"last chunk starts after te", `[{"ts":1.0,"te":1.2,"x":"alpha","l":[{"c":"alpha","o":0.5}]}]`},
+		{"chunks not ascending by offset", `[{"ts":1.0,"te":9.0,"x":"alpha","l":[{"c":"alpha","o":2.0},{"c":"bravo","o":0.5}]}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseRichSyncBody(richSyncBody(t, tc.entries), []models.Lines{cue(1.0, "alpha")})
+			if err != nil {
+				t.Fatalf("parseRichSyncBody: %v", err)
+			}
+			for _, w := range got {
+				if w.EndMS < w.StartMS {
+					t.Errorf("%q: EndMS %d precedes StartMS %d; a word cannot have negative length",
+						w.Text, w.EndMS, w.StartMS)
+				}
+			}
+		})
+	}
+}
+
+// TestUnitSanityCatchesASparseMillisecondBody covers the gap a purely RELATIVE
+// bound leaves. The ratio arm's sensitivity scales with how much of the track the
+// body COVERS: words spanning the first tenth of a long track give a ratio ten
+// times smaller than full coverage carrying the identical error, so a sparse body
+// slips a genuine 1000x past a bound a complete one would trip.
+//
+// Here the last cue is at 200s and a millisecond-valued body's true content spans
+// 0..15s, so the ratio is 75 -- under the factor of 100, caught only by the
+// absolute ceiling.
+func TestUnitSanityCatchesASparseMillisecondBody(t *testing.T) {
+	cues := make([]models.Lines, 0, 20)
+	for i := range 20 {
+		cues = append(cues, cue(float64(i)*10.0, "alpha"))
+	}
+	// 15000.0 "seconds" is 15s expressed in milliseconds: the 1000x error.
+	raw := richSyncBody(t, `[{"ts":15000.0,"te":15100.0,"x":"alpha","l":[{"c":"alpha","o":0.0}]}]`)
+
+	_, err := parseRichSyncBody(raw, cues)
+	if !errors.Is(err, ErrUnparsableRichSyncBody) {
+		t.Fatalf("error = %v; want ErrUnparsableRichSyncBody. A 1000x unit error over a sparsely "+
+			"covered track must not pass merely because the ratio arm is less sensitive there", err)
+	}
+}
+
+// TestUnitSanityAcceptsALegitimateLongRecording is the counterweight: the
+// absolute ceiling must never reject a real long-form track (a DJ set, an
+// audiobook chapter), or it trades a silent failure for a loud wrong answer.
+func TestUnitSanityAcceptsALegitimateLongRecording(t *testing.T) {
+	// A three-hour recording, cues sparse across it, word starts in seconds. The
+	// entry sits ON its cue: this test is about the sanity check accepting the
+	// body, so the bind must not fail for an unrelated tolerance reason.
+	cues := []models.Lines{cue(0.0, "alpha"), cue(10800.0, "bravo")}
+	raw := richSyncBody(t, `[{"ts":10800.0,"te":10801.0,"x":"bravo","l":[{"c":"bravo","o":0.0}]}]`)
+
+	got, err := parseRichSyncBody(raw, cues)
+	if err != nil {
+		t.Fatalf("parseRichSyncBody rejected a legitimate 3-hour recording: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d timings, want 1", len(got))
 	}
 }
