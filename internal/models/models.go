@@ -3,6 +3,7 @@ package models
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"time"
 )
 
@@ -48,9 +49,14 @@ type Track struct {
 //
 // A shape that is neither string, number, nor null decodes to the empty value
 // and returns NO error, deliberately: an optional identifier must never cost a
-// caller its lyrics. A number is kept as its literal text, so a large id never
-// round-trips through float64. Marshaling is ordinary string marshaling, so a
-// cached blob re-reads through the string branch.
+// caller its lyrics. That branch LOGS, though -- silence and non-fatality are
+// separate decisions, and collapsing them would make an upstream encoding
+// change invisible: every lookup would keep succeeding while the consumer of
+// this id went dark, with nothing pointing at the decode. Only the first byte
+// is logged, never the value, since a provider payload is not ours to print.
+// A number is kept as its literal text, so a large id never round-trips through
+// float64. Marshaling is ordinary string marshaling, so a cached blob re-reads
+// through the string branch.
 type FlexID string
 
 // UnmarshalJSON implements json.Unmarshaler for FlexID.
@@ -60,15 +66,20 @@ func (f *FlexID) UnmarshalJSON(b []byte) error {
 	case s == "" || s == "null":
 		*f = ""
 	case s[0] == '"':
+		// No error swallow here: encoding/json validates the whole document
+		// before dispatching to an Unmarshaler, so a syntactically valid
+		// string literal cannot fail to decode into a string. A swallow would
+		// be both silent and unreachable -- a safety net that catches nothing.
 		var v string
 		if err := json.Unmarshal(b, &v); err != nil {
-			*f = ""
-			return nil
+			return err
 		}
 		*f = FlexID(v)
 	case s[0] == '-' || (s[0] >= '0' && s[0] <= '9'):
 		*f = FlexID(s)
 	default:
+		slog.Warn("provider sent an identifier in an unexpected JSON shape; treating it as absent",
+			"type", "FlexID", "first_byte", string(s[0]), "bytes", len(s))
 		*f = ""
 	}
 	return nil

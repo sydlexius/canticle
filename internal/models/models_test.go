@@ -1,7 +1,9 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -182,6 +184,40 @@ func TestFlexIDDecodesBothProviderEncodings(t *testing.T) {
 				t.Errorf("CommontrackID = %q; want %q", tr.CommontrackID, tc.want)
 			}
 		})
+	}
+}
+
+// TestFlexIDUnexpectedShapeWarns pins the OTHER half of the unexpected-shape
+// contract. That the decode is non-fatal is covered above; this asserts it is
+// not also SILENT. The two are separate decisions: an upstream encoding change
+// must never cost a caller its lyrics, but it must leave a trace, or the id's
+// consumer goes dark with nothing pointing at the decode.
+//
+// It also pins the privacy bound -- the provider's value must NOT reach the
+// log line, only its first byte and length.
+func TestFlexIDUnexpectedShapeWarns(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var tr Track
+	if err := json.Unmarshal([]byte(`{"commontrack_id":{"secret":"do-not-log"}}`), &tr); err != nil {
+		t.Fatalf("Unmarshal errored: %v; an optional identifier must never fail the lookup", err)
+	}
+	if tr.CommontrackID != "" {
+		t.Errorf("CommontrackID = %q; want empty", tr.CommontrackID)
+	}
+
+	got := buf.String()
+	if got == "" {
+		t.Fatal("no log emitted; an unexpected provider encoding must not decode silently")
+	}
+	if !strings.Contains(got, "FlexID") {
+		t.Errorf("log does not name the type; got: %s", got)
+	}
+	if strings.Contains(got, "do-not-log") {
+		t.Errorf("log leaked the provider value; got: %s", got)
 	}
 }
 
