@@ -942,13 +942,14 @@ const artistValueSep = "; "
 // byte is still present there, so recovery does not depend on a parallel
 // frame existing.
 //
-// Vorbis-comment files (FLAC) hit a THIRD mangling, recovered by
-// vorbisFields (issue #969, see vorbis_multivalue.go): the dependency's
-// Vorbis reader overwrites a repeated field in its own map, so nothing
-// survives in Raw() to recover from -- vorbisFields is populated by a
-// caller that re-read the comment block itself off the file's raw bytes.
-// vorbisFields is nil for every non-Vorbis file, so multiValueVorbisField
-// always misses and this path is a no-op for ID3/MP4 files.
+// Vorbis-comment files (FLAC, Ogg Vorbis, Opus) hit a THIRD mangling,
+// recovered by vorbisFields (issues #969, #973, see vorbis_multivalue.go):
+// the dependency's Vorbis reader overwrites a repeated field in its own map,
+// so nothing survives in Raw() to recover from -- vorbisFields is populated
+// by a caller that re-read the comment block itself off the file's raw
+// bytes. vorbisFields is nil for every non-Vorbis file, so
+// multiValueVorbisField always misses and this path is a no-op for ID3/MP4
+// files.
 func extractArtist(m tag.Metadata, vorbisFields map[string][]string) string {
 	if v, ok := multiValueVorbisField(vorbisFields, "artists", "artist"); ok {
 		return v
