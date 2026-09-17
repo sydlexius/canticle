@@ -92,7 +92,11 @@ type richSyncEntry struct {
 }
 
 // parseRichSyncBody decodes a richsync_body into word timings correlated against
-// the subtitle cues the same lookup produced. Pure: no I/O, no receiver.
+// the subtitle cues the same lookup produced.
+//
+// No network, no filesystem, no receiver, and no mutation of the caller's cues,
+// so it is fully testable from a byte slice. It is not side-effect free in the
+// strict sense: correlation emits one slog line when most entries fail to bind.
 //
 // The body is a JSON-encoded STRING whose contents are themselves JSON, so the
 // decode is two steps; either failure returns ErrUnparsableRichSyncBody.
@@ -123,9 +127,19 @@ func parseRichSyncBody(raw []byte, cues []models.Lines) ([]models.WordTiming, er
 	// change this sentinel exists to name, so the emptiness test has to run over
 	// the data actually being read. A body carrying no words at all is
 	// indistinguishable from one this parser cannot read, and both are failures.
+	// Count chunks that carry TEXT, not chunks that merely exist. A rename one
+	// level down (`{"chunk":..,"offset":..}` for `{"c":..,"o":..}`) decodes into
+	// the right NUMBER of chunks, every one of them empty -- so a structural
+	// count passes and the parser emits word timings whose Text is "" and whose
+	// stamps are all the line start. That is garbage presented as data, which is
+	// strictly worse than the error it should have been.
 	words := 0
 	for _, e := range entries {
-		words += len(e.L)
+		for _, ch := range e.L {
+			if ch.C != "" {
+				words++
+			}
+		}
 	}
 	if words == 0 {
 		return nil, fmt.Errorf("%w (%d bytes)", ErrUnparsableRichSyncBody, len(raw))

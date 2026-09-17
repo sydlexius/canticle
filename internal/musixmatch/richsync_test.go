@@ -479,9 +479,11 @@ func TestEndMSNeverPrecedesStartMS(t *testing.T) {
 // times smaller than full coverage carrying the identical error, so a sparse body
 // slips a genuine 1000x past a bound a complete one would trip.
 //
-// Here the last cue is at 200s and a millisecond-valued body's true content spans
-// 0..15s, so the ratio is 75 -- under the factor of 100, caught only by the
-// absolute ceiling.
+// Here the last cue is at 190s while a millisecond-valued body's true content
+// spans 0..15s, so the body covers a small fraction of the cue span and the ratio
+// arm is correspondingly less sensitive. The 1000x error is still rejected, by
+// the factor arm (190000*4), which is what decides at this cue span; the additive
+// arm is covered separately below.
 func TestUnitSanityCatchesASparseMillisecondBody(t *testing.T) {
 	cues := make([]models.Lines, 0, 20)
 	for i := range 20 {
@@ -513,5 +515,56 @@ func TestUnitSanityAcceptsALegitimateLongRecording(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("got %d timings, want 1", len(got))
+	}
+}
+
+// TestUnitSanityAdditiveArmDecidesOnAShortCueSpan covers the arm the sparse test
+// above does NOT reach, which CodeRabbit correctly flagged.
+//
+// The two arms swap at a 20s cue span: below it, lastCue*4 is smaller than
+// lastCue+60s, so the ADDITIVE arm sets the bound. That is the whole reason it
+// exists -- a multiple alone is meaninglessly tight on a short span (a cue at
+// 0.2s would allow 0.8s), so ordinary trailing content past the last sung line
+// would trip it. The first case proves the slack accepts that trailing content;
+// the second proves it still rejects a unit error.
+func TestUnitSanityAdditiveArmDecidesOnAShortCueSpan(t *testing.T) {
+	// Cues end at 5s, so factor=20000 but additive=65000: the additive arm binds.
+	cues := []models.Lines{cue(0.0, "alpha"), cue(5.0, "bravo")}
+
+	t.Run("accepts trailing content the factor arm alone would reject", func(t *testing.T) {
+		// A word at 30s: past lastCue*4 (20s), inside lastCue+60s (65s). A jingle
+		// or outro running well past the last sung line looks exactly like this.
+		raw := richSyncBody(t, `[{"ts":5.0,"te":31.0,"x":"bravo","l":[{"c":"bravo","o":25.0}]}]`)
+		if _, err := parseRichSyncBody(raw, cues); err != nil {
+			t.Fatalf("rejected legitimate trailing content: %v. The additive slack exists so a "+
+				"short cue span does not make the bound meaninglessly tight", err)
+		}
+	})
+
+	t.Run("still rejects a unit error", func(t *testing.T) {
+		// 5000.0 "seconds" is 5s in milliseconds: the 1000x error, far past both arms.
+		raw := richSyncBody(t, `[{"ts":5000.0,"te":5100.0,"x":"bravo","l":[{"c":"bravo","o":0.0}]}]`)
+		if _, err := parseRichSyncBody(raw, cues); !errors.Is(err, ErrUnparsableRichSyncBody) {
+			t.Fatalf("error = %v; want ErrUnparsableRichSyncBody", err)
+		}
+	})
+}
+
+// TestParseRejectsRenamedCHUNKKeys is the level the entry-key guard missed.
+//
+// An entry-key rename is caught because the entries decode with no chunks. A
+// CHUNK-key rename decodes the right NUMBER of chunks, every one empty, so a
+// structural count passes and the parser emits timings whose Text is "" and whose
+// stamps are all the line start -- garbage presented as data, which is strictly
+// worse than the error it should have been.
+func TestParseRejectsRenamedCHUNKKeys(t *testing.T) {
+	cues := []models.Lines{cue(1.0, "alpha")}
+	raw := richSyncBody(t, `[{"ts":1.0,"te":2.0,"x":"alpha","l":[
+		{"chunk":"alpha","offset":0.0},{"chunk":"bravo","offset":0.5}]}]`)
+
+	got, err := parseRichSyncBody(raw, cues)
+	if !errors.Is(err, ErrUnparsableRichSyncBody) {
+		t.Fatalf("error = %v (emitted %d timings); want ErrUnparsableRichSyncBody. Chunks that "+
+			"decode to empty text are a payload shape change, not word data", err, len(got))
 	}
 }
