@@ -40,6 +40,41 @@ func init() {
 // and runs any pending goose migrations. Returns a ready-to-use *sql.DB.
 // The caller must close the returned DB when done.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
+	return open(ctx, path, "")
+}
+
+// OpenImmediate is Open, except every read-write transaction on the returned
+// handle begins with BEGIN IMMEDIATE instead of SQLite's default DEFERRED
+// (#978). It is for one-shot batch CLI commands that mutate a database a
+// running `serve` may be writing to at the same time; serve itself keeps Open.
+//
+// A DEFERRED transaction that reads before it writes takes its WAL snapshot at
+// the first read. If another connection commits before the first write, the
+// lock upgrade fails with SQLITE_BUSY at once and busy_timeout does not apply:
+// no amount of waiting makes the stale snapshot valid. IMMEDIATE takes the
+// write lock at BEGIN, where busy_timeout does apply, so contention becomes a
+// bounded wait at BEGIN (and, past the timeout, a busy error before the
+// transaction has done anything, which is safe to retry) rather than an abort
+// part-way through.
+func OpenImmediate(ctx context.Context, path string) (*sql.DB, error) {
+	return open(ctx, path, "?_txlock=immediate")
+}
+
+// OpenForBatch opens a batch CLI command's database: OpenImmediate when apply
+// is true, Open otherwise. A dry run only reads, but several of them still
+// read inside a transaction; on an immediate handle that BEGIN would take the
+// writer lock and stall a live serve for the whole preview.
+func OpenForBatch(ctx context.Context, path string, apply bool) (*sql.DB, error) {
+	if apply {
+		return OpenImmediate(ctx, path)
+	}
+	return Open(ctx, path)
+}
+
+// open is the shared body of Open and OpenImmediate. dsnQuery is appended to
+// path as the driver DSN's query string; the driver strips it back off a
+// non-"file:" DSN before opening, so the file opened is path either way.
+func open(ctx context.Context, path, dsnQuery string) (*sql.DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("db: path must not be empty")
 	}
@@ -47,7 +82,7 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("db: create data dir: %w", err)
 	}
 
-	sqlDB, err := sql.Open("sqlite", path)
+	sqlDB, err := sql.Open("sqlite", path+dsnQuery)
 	if err != nil {
 		return nil, fmt.Errorf("db: open %s: %w", path, err)
 	}

@@ -53,6 +53,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
+	dbpkg "github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/identity"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
@@ -1006,12 +1007,6 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 // alike, so a report is never written for a row a rollback left untouched by
 // a different mechanism than it claims.
 func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, reportRelinked func(RelinkedRow) error, reportRetained func(RetainedRow) error) (applied []RelinkedRow, retained []RetainedRow, retErr error) {
-	tx, err := p.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("prune: begin relink tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	// Retirements owed by DECLINED relinks, applied after the transaction commits
 	// (retireUnresolvable runs against p.db and would deadlock against tx on
 	// SQLite). idx points at the RetainedRow this retirement belongs to, so the
@@ -1022,70 +1017,85 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	}
 	var toRetire []retireePlan
 
-	for i, cg := range targets {
-		// Each candidate runs inside its own savepoint so a decline part-way
-		// through a multi-row candidate (the in-flight guard rejecting the
-		// second of two work items) unwinds that candidate's earlier writes
-		// instead of committing a half-relink. Savepoint names are generated,
-		// never caller-derived, so no identifier can be injected.
-		sp := fmt.Sprintf("prune_relink_%d", i)
-		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
-			return nil, nil, fmt.Errorf("prune: savepoint relink: %w", err)
-		}
-		decision, err := relinkOne(ctx, tx, cg.c, cg.target)
+	// The transaction is retried whole on SQLITE_BUSY (#978). Nothing in it has
+	// an effect outside the database (every report and retirement runs after the
+	// commit), so each attempt starts from empty accumulators and a rolled-back
+	// attempt leaves no trace.
+	if err := dbpkg.RetryBatchTx(ctx, "prune relink", func() error {
+		applied, retained, toRetire = nil, nil, nil
+		tx, err := p.db.BeginTx(ctx, nil)
 		if err != nil {
-			return nil, nil, err
+			return fmt.Errorf("prune: begin relink tx: %w", err)
 		}
-		if decision.reason != "" {
-			// This candidate is declined: either the present-file scan_results
-			// row is already owned by a DIFFERENT work_queue row (merging two
-			// work_queue rows is internal/identityrepair's job, not prune's), or
-			// a work item raced into 'processing' so its relink UPDATE matched
-			// nothing. Either way the row still needs an outcome an operator can
-			// see, not a bare drop from every count -- and its partial writes are
-			// rolled back to the savepoint first, so the reported "retained" is
-			// literally true of the database.
-			if _, err := tx.ExecContext(ctx, "ROLLBACK TO "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
-				return nil, nil, fmt.Errorf("prune: rollback relink savepoint: %w", err)
+		defer func() { _ = tx.Rollback() }()
+		for i, cg := range targets {
+			// Each candidate runs inside its own savepoint so a decline part-way
+			// through a multi-row candidate (the in-flight guard rejecting the
+			// second of two work items) unwinds that candidate's earlier writes
+			// instead of committing a half-relink. Savepoint names are generated,
+			// never caller-derived, so no identifier can be injected.
+			sp := fmt.Sprintf("prune_relink_%d", i)
+			if _, err := tx.ExecContext(ctx, "SAVEPOINT "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+				return fmt.Errorf("prune: savepoint relink: %w", err)
 			}
-			// An already-retired row whose reconsidered relink was declined drops
-			// out silently: it is exactly as settled as before, nothing was
-			// mutated, and reporting it would re-list it on every future sweep.
-			if cg.alreadySettled {
-				if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
-					return nil, nil, fmt.Errorf("prune: release relink savepoint: %w", err)
+			decision, err := relinkOne(ctx, tx, cg.c, cg.target)
+			if err != nil {
+				return err
+			}
+			if decision.reason != "" {
+				// This candidate is declined: either the present-file scan_results
+				// row is already owned by a DIFFERENT work_queue row (merging two
+				// work_queue rows is internal/identityrepair's job, not prune's), or
+				// a work item raced into 'processing' so its relink UPDATE matched
+				// nothing. Either way the row still needs an outcome an operator can
+				// see, not a bare drop from every count -- and its partial writes are
+				// rolled back to the savepoint first, so the reported "retained" is
+				// literally true of the database.
+				if _, err := tx.ExecContext(ctx, "ROLLBACK TO "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+					return fmt.Errorf("prune: rollback relink savepoint: %w", err)
 				}
-				continue
+				// An already-retired row whose reconsidered relink was declined drops
+				// out silently: it is exactly as settled as before, nothing was
+				// mutated, and reporting it would re-list it on every future sweep.
+				if cg.alreadySettled {
+					if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+						return fmt.Errorf("prune: release relink savepoint: %w", err)
+					}
+					continue
+				}
+				row := RetainedRow{
+					SourcePath: cg.relinked.OldPath,
+					Reason:     decision.reason,
+					MBID:       cg.relinked.MBID,
+					ISRC:       cg.relinked.ISRC,
+				}
+				// A declined relink still has to SETTLE, or the row stays
+				// dequeue-eligible pointing at a vanished path and every later sweep
+				// reaches the identical decline (#732's non-converging loop). The plan
+				// was computed by the tier; carrying it here is what makes the retire
+				// branch reachable from the relink path at all.
+				//
+				// Deferred until after the commit rather than run inside tx:
+				// retireUnresolvable executes against p.db, so calling it here would
+				// deadlock against this transaction on SQLite. Collected now, applied
+				// below.
+				if cg.retireIfDeclined {
+					toRetire = append(toRetire, retireePlan{c: cg.c, idx: len(retained)})
+				}
+				retained = append(retained, row)
+			} else {
+				applied = append(applied, cg.relinked)
 			}
-			row := RetainedRow{
-				SourcePath: cg.relinked.OldPath,
-				Reason:     decision.reason,
-				MBID:       cg.relinked.MBID,
-				ISRC:       cg.relinked.ISRC,
+			if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
+				return fmt.Errorf("prune: release relink savepoint: %w", err)
 			}
-			// A declined relink still has to SETTLE, or the row stays
-			// dequeue-eligible pointing at a vanished path and every later sweep
-			// reaches the identical decline (#732's non-converging loop). The plan
-			// was computed by the tier; carrying it here is what makes the retire
-			// branch reachable from the relink path at all.
-			//
-			// Deferred until after the commit rather than run inside tx:
-			// retireUnresolvable executes against p.db, so calling it here would
-			// deadlock against this transaction on SQLite. Collected now, applied
-			// below.
-			if cg.retireIfDeclined {
-				toRetire = append(toRetire, retireePlan{c: cg.c, idx: len(retained)})
-			}
-			retained = append(retained, row)
-		} else {
-			applied = append(applied, cg.relinked)
 		}
-		if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
-			return nil, nil, fmt.Errorf("prune: release relink savepoint: %w", err)
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("prune: commit relink tx: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, nil, fmt.Errorf("prune: commit relink tx: %w", err)
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
 	// Settle every declined relink, now that tx is committed and the row's
 	// pre-decline writes are rolled back. Stamped onto the RetainedRow BEFORE it
@@ -1835,14 +1845,22 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
 	now := time.Now().UTC().Format(timeFormat)
 	retired := false
 	for _, w := range c.workItems {
-		res, err := p.db.ExecContext(ctx,
-			`UPDATE work_queue
+		// Each UPDATE is its own autocommit statement and idempotent (the status
+		// guard excludes a row it already retired), so it retries safely on
+		// SQLITE_BUSY without disturbing rows an earlier iteration committed (#978).
+		var res sql.Result
+		err := dbpkg.RetryBatchTx(ctx, "prune retire", func() error {
+			var execErr error
+			res, execErr = p.db.ExecContext(ctx,
+				`UPDATE work_queue
              SET status = 'done',
                  completed_at = ?,
                  last_error = ?
              WHERE id = ?
                AND status NOT IN ('processing', 'done', 'unavailable')`,
-			now, unresolvableGoneError, w.id)
+				now, unresolvableGoneError, w.id)
+			return execErr
+		})
 		if err != nil {
 			return false, fmt.Errorf("retire work item %d: %w", w.id, err)
 		}
@@ -1854,20 +1872,44 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
 }
 
 func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report func(PrunedRow) error) (scanDeleted, workDeleted int, retErr error) {
+	var applied []PrunedRow // rows that actually lost >=1 row, reported post-commit
+	// Retried whole on SQLITE_BUSY (#978). The report runs only after the commit,
+	// so a rolled-back attempt has written nothing; each attempt resets its tallies.
+	if err := dbpkg.RetryBatchTx(ctx, "prune delete", func() error {
+		var err error
+		scanDeleted, workDeleted, applied, err = p.deletePrunedTx(ctx, pruned)
+		return err
+	}); err != nil {
+		return 0, 0, err
+	}
+	// Report only after the deletes are durably committed, so a backup record is
+	// never written for a row that survived (skipped mid-tx or rolled back).
+	if report != nil {
+		for _, row := range applied {
+			if err := report(row); err != nil {
+				return scanDeleted, workDeleted, fmt.Errorf("prune: report %q: %w", row.SourcePath, err)
+			}
+		}
+	}
+	return scanDeleted, workDeleted, nil
+}
+
+// deletePrunedTx is one attempt of deletePruned's transaction, returning the
+// committed tallies and the rows that actually lost at least one row.
+func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDeleted, workDeleted int, applied []PrunedRow, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, 0, fmt.Errorf("prune: begin tx: %w", err)
+		return 0, 0, nil, fmt.Errorf("prune: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var applied []PrunedRow // rows that actually lost >=1 row, reported post-commit
 	for _, row := range pruned {
 		before := scanDeleted + workDeleted
 		for _, id := range row.WorkItemIDs {
 			res, err := tx.ExecContext(ctx,
 				`DELETE FROM work_queue WHERE id = ? AND status != 'processing'`, id)
 			if err != nil {
-				return 0, 0, fmt.Errorf("prune: delete work_queue %d: %w", id, err)
+				return 0, 0, nil, fmt.Errorf("prune: delete work_queue %d: %w", id, err)
 			}
 			workDeleted += rowsAffected(res)
 		}
@@ -1883,7 +1925,7 @@ func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report fu
                      WHERE j.scan_result_id = ? AND wq.status = 'processing')`,
 				id, id)
 			if err != nil {
-				return 0, 0, fmt.Errorf("prune: delete scan_results %d: %w", id, err)
+				return 0, 0, nil, fmt.Errorf("prune: delete scan_results %d: %w", id, err)
 			}
 			scanDeleted += rowsAffected(res)
 		}
@@ -1892,18 +1934,9 @@ func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report fu
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, 0, fmt.Errorf("prune: commit tx: %w", err)
+		return 0, 0, nil, fmt.Errorf("prune: commit tx: %w", err)
 	}
-	// Report only after the deletes are durably committed, so a backup record is
-	// never written for a row that survived (skipped mid-tx or rolled back).
-	if report != nil {
-		for _, row := range applied {
-			if err := report(row); err != nil {
-				return scanDeleted, workDeleted, fmt.Errorf("prune: report %q: %w", row.SourcePath, err)
-			}
-		}
-	}
-	return scanDeleted, workDeleted, nil
+	return scanDeleted, workDeleted, applied, nil
 }
 
 // rowsAffected returns the affected-row count, treating a driver that does not

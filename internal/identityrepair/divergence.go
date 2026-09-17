@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	dbpkg "github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
 )
@@ -289,7 +290,25 @@ func (r *Repairer) loadDivergentWorkQueueIDs(ctx context.Context, libraryID *int
 // (opts.LibraryID/opts.PathPrefix), threaded through so this function can
 // refuse to act on a shared row's out-of-scope members (#967 finding 1): see
 // the scope guard below.
+//
+// Retried whole on SQLITE_BUSY (#978) under the same rule as apply: an attempt
+// is retryable only until report has run, and a Commit failure after it is
+// surfaced, never retried, so one group never gets its records twice.
 func (r *Repairer) repairOneDivergentRow(ctx context.Context, wqID int64, libraryID *int64, pathPrefix string, dryRun bool, report func(Change) error) (divergenceOutcome, error) {
+	var out divergenceOutcome
+	err := dbpkg.RetryBatchTx(ctx, "identityrepair divergence", func() error {
+		var err error
+		out, err = r.repairOneDivergentRowOnce(ctx, wqID, libraryID, pathPrefix, dryRun, report)
+		return err
+	})
+	if err != nil {
+		return divergenceOutcome{}, err
+	}
+	return out, nil
+}
+
+// repairOneDivergentRowOnce is one attempt of repairOneDivergentRow's transaction.
+func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, libraryID *int64, pathPrefix string, dryRun bool, report func(Change) error) (divergenceOutcome, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return divergenceOutcome{}, fmt.Errorf("identityrepair: begin divergence tx: %w", err)
@@ -530,7 +549,7 @@ func (r *Repairer) repairOneDivergentRow(ctx context.Context, wqID int64, librar
 	if report != nil {
 		for _, ch := range changes {
 			if err := report(ch); err != nil {
-				return divergenceOutcome{}, fmt.Errorf("identityrepair: report divergence change for scan_result %d: %w", ch.ScanResultID, err)
+				return divergenceOutcome{}, dbpkg.NotRetryable(fmt.Errorf("identityrepair: report divergence change for scan_result %d: %w", ch.ScanResultID, err))
 			}
 		}
 	}
@@ -539,7 +558,14 @@ func (r *Repairer) repairOneDivergentRow(ctx context.Context, wqID int64, librar
 		return outcome, nil // rolled back via the deferred Rollback; nothing was written
 	}
 	if err := tx.Commit(); err != nil {
-		return divergenceOutcome{}, fmt.Errorf("identityrepair: commit divergence tx: %w", err)
+		err = fmt.Errorf("identityrepair: commit divergence tx: %w", err)
+		if report != nil && len(changes) > 0 {
+			// Records for this group are already on disk, so never retry past them.
+			// With none written, nothing escaped the transaction and a busy commit
+			// is retryable.
+			err = dbpkg.NotRetryable(err)
+		}
+		return divergenceOutcome{}, err
 	}
 	return outcome, nil
 }

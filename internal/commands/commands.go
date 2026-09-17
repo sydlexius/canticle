@@ -3943,7 +3943,7 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 		slog.Error("failed to load config", "error", err)
 		return 1
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	sqlDB, err := db.OpenForBatch(ctx, cfg.DB.Path, args.Yes)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		return 1
@@ -3983,24 +3983,28 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 	// delete cannot leave the queue canceled while scan_results survive.
 	// Cancel first: it reads the junction (work_queue_scan_results) which
 	// cascades away when ClearByLibraryTx then deletes the scan_results.
-	tx, err := sqlDB.BeginTx(ctx, nil)
-	if err != nil {
-		slog.Error("failed to begin scan clear tx", "error", err)
-		return 1
-	}
-	defer func() { _ = tx.Rollback() }() //nolint:errcheck // rollback is a no-op after commit
-	qDel, qUpd, err := workQueue.CancelByLibraryTx(ctx, tx, lib.ID)
-	if err != nil {
-		slog.Error("failed to cancel work_queue rows", "error", err)
-		return 1
-	}
-	deleted, err := scanRepo.ClearByLibraryTx(ctx, tx, lib.ID)
-	if err != nil {
-		slog.Error("failed to clear scan results", "error", err)
-		return 1
-	}
-	if err := tx.Commit(); err != nil {
-		slog.Error("failed to commit scan clear tx", "error", err)
+	//
+	// Retried whole on SQLITE_BUSY (#978): the transaction has no effect outside
+	// the database, so a rolled-back attempt leaves nothing behind.
+	var qDel, qUpd, deleted int64
+	if err := db.RetryBatchTx(ctx, "scan clear", func() error {
+		tx, err := sqlDB.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin scan clear tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if qDel, qUpd, err = workQueue.CancelByLibraryTx(ctx, tx, lib.ID); err != nil {
+			return fmt.Errorf("cancel work_queue rows: %w", err)
+		}
+		if deleted, err = scanRepo.ClearByLibraryTx(ctx, tx, lib.ID); err != nil {
+			return fmt.Errorf("clear scan results: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit scan clear tx: %w", err)
+		}
+		return nil
+	}); err != nil {
+		slog.Error("failed to clear library scan state", "error", err)
 		return 1
 	}
 	_, _ = fmt.Fprintf(out, "deleted %d scan_results rows and canceled %d / updated %d work_queue rows for library %q (id=%d)\n", deleted, qDel, qUpd, lib.Name, lib.ID)
@@ -4014,7 +4018,7 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 // applies. By default it re-infers only the telemetry-narrowed candidate set
 // (borderline / cross-version / un-scored rows); --all re-infers every tagged row.
 func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd) int {
-	env, code := openDetectorEnv(ctx, out, args.ConfigPath, args.Library, "reconcile")
+	env, code := openDetectorEnv(ctx, out, args.ConfigPath, args.Library, "reconcile", args.Yes)
 	if env == nil {
 		return code
 	}

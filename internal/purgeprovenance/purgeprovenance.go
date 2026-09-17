@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/cache"
+	dbpkg "github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
@@ -463,7 +464,24 @@ func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag str
 	return disputed, nil
 }
 
+// resetRows retries its transaction whole on SQLITE_BUSY (#978). The sidecar's
+// backup record was written by the caller BEFORE this runs and is written once
+// regardless of how many attempts this takes, and nothing here touches the
+// filesystem, so a rolled-back attempt leaves no trace to duplicate.
 func (p *Purger) resetRows(ctx context.Context, scanResultIDs, workItemIDs []int64, identities []trackIdentity, tag string) (srReset, wqReset, invalidated int, retErr error) {
+	retErr = dbpkg.RetryBatchTx(ctx, "purgeprovenance reset", func() error {
+		var err error
+		srReset, wqReset, invalidated, err = p.resetRowsOnce(ctx, scanResultIDs, workItemIDs, identities, tag)
+		return err
+	})
+	if retErr != nil {
+		return 0, 0, 0, retErr
+	}
+	return srReset, wqReset, invalidated, nil
+}
+
+// resetRowsOnce is one attempt of resetRows's transaction.
+func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs []int64, identities []trackIdentity, tag string) (srReset, wqReset, invalidated int, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("purgeprovenance: begin reset tx: %w", err)

@@ -103,13 +103,13 @@ func resolveEnvLibrary(ctx context.Context, out io.Writer, sqlDB *sql.DB, librar
 // written the operator-facing message to out or logged the internal error;
 // the caller returns that code verbatim. On success the caller owns the env
 // and must Close it.
-func openQueueEnv(ctx context.Context, out io.Writer, configPath, libraryArg string) (*queueEnv, int) {
+func openQueueEnv(ctx context.Context, out io.Writer, configPath, libraryArg string, apply bool) (*queueEnv, int) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		return nil, 1
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	sqlDB, err := db.OpenForBatch(ctx, cfg.DB.Path, apply)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		return nil, 1
@@ -142,13 +142,13 @@ func openQueueEnv(ctx context.Context, out io.Writer, configPath, libraryArg str
 // On failure it returns a nil env and a process exit code, having already written
 // the operator-facing message to out or logged the internal error; the caller
 // returns that code verbatim. On success the caller owns the env and must Close it.
-func openDetectorEnv(ctx context.Context, out io.Writer, configPath, libraryArg, verb string) (*detectorEnv, int) {
+func openDetectorEnv(ctx context.Context, out io.Writer, configPath, libraryArg, verb string, apply bool) (*detectorEnv, int) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		return nil, 1
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	sqlDB, err := db.OpenForBatch(ctx, cfg.DB.Path, apply)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		return nil, 1

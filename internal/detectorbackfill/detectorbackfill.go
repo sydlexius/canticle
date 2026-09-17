@@ -63,6 +63,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	dbpkg "github.com/sydlexius/canticle/internal/db"
 )
 
 // LaneName is the lane string this package writes into lane_attempts.
@@ -192,16 +194,37 @@ func (b *Backfiller) runDry(ctx context.Context, rows []row, res Result, opts Op
 // the write it protects commits (backup-first) and a report failure rolls the
 // whole run back. A single transaction is safe here because ON CONFLICT DO
 // NOTHING makes a re-run after an abort a no-op rather than a double-count.
+//
+// The transaction is retried whole on SQLITE_BUSY (#978), each attempt starting
+// from the caller's res, but only while no Report has run: once one has written
+// a record, any error (including a busy Commit) is surfaced, never retried, so a
+// retry cannot append the same records twice.
 func (b *Backfiller) runApply(ctx context.Context, rows []row, res Result, opts Options) (Result, error) {
+	out := res
+	err := dbpkg.RetryBatchTx(ctx, "detectorbackfill apply", func() error {
+		var reported bool
+		var aerr error
+		out, reported, aerr = b.runApplyOnce(ctx, rows, res, opts)
+		if aerr != nil && reported {
+			return dbpkg.NotRetryable(aerr)
+		}
+		return aerr
+	})
+	return out, err
+}
+
+// runApplyOnce is one attempt of runApply's transaction. reported is true once
+// any opts.Report call has been made.
+func (b *Backfiller) runApplyOnce(ctx context.Context, rows []row, res Result, opts Options) (_ Result, reported bool, _ error) {
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
-		return res, fmt.Errorf("detectorbackfill: begin: %w", err)
+		return res, false, fmt.Errorf("detectorbackfill: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	for _, rw := range rows {
 		if err := ctx.Err(); err != nil {
-			return res, fmt.Errorf("detectorbackfill: apply canceled: %w", err)
+			return res, reported, fmt.Errorf("detectorbackfill: apply canceled: %w", err)
 		}
 		res.Scanned++
 
@@ -217,11 +240,11 @@ func (b *Backfiller) runApply(ctx context.Context, rows []row, res Result, opts 
 			rw.id, LaneName, hit, rw.attemptedAt,
 		)
 		if err != nil {
-			return res, fmt.Errorf("detectorbackfill: insert attempt for queue row %d: %w", rw.id, err)
+			return res, reported, fmt.Errorf("detectorbackfill: insert attempt for queue row %d: %w", rw.id, err)
 		}
 		affected, err := out.RowsAffected()
 		if err != nil {
-			return res, fmt.Errorf("detectorbackfill: rows affected for queue row %d: %w", rw.id, err)
+			return res, reported, fmt.Errorf("detectorbackfill: rows affected for queue row %d: %w", rw.id, err)
 		}
 		if affected == 0 {
 			res.AlreadyRecorded++
@@ -230,16 +253,17 @@ func (b *Backfiller) runApply(ctx context.Context, rows []row, res Result, opts 
 
 		tally(&res, rw.hit)
 		if opts.Report != nil {
+			reported = true
 			if err := opts.Report(change(rw)); err != nil {
-				return res, fmt.Errorf("detectorbackfill: report change for queue row %d: %w", rw.id, err)
+				return res, reported, fmt.Errorf("detectorbackfill: report change for queue row %d: %w", rw.id, err)
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return res, fmt.Errorf("detectorbackfill: commit: %w", err)
+		return res, reported, fmt.Errorf("detectorbackfill: commit: %w", err)
 	}
-	return res, nil
+	return res, reported, nil
 }
 
 // tally records one attributed row in the hit or miss bucket.
