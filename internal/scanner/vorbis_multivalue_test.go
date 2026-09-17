@@ -334,6 +334,55 @@ func TestOggVorbisCommentFields_SkipsUnrecognizedStream(t *testing.T) {
 	}
 }
 
+// The 1 MiB cap bounds one stream's in-progress packet, not the whole file:
+// a large non-audio stream ahead of the audio stream must not exhaust the
+// budget before the audio comment block is read.
+func TestOggVorbisCommentFields_LargeOtherStreamDoesNotExhaustCap(t *testing.T) {
+	const otherSerial, audioSerial = 11, 12
+	otherIdent := []byte("\x80theora-ident-stub")
+	audioIdent := []byte("\x01vorbisIDHEADERPAD")
+	audioComment := append(append([]byte{}, vorbisCommentPrefix...),
+		vorbisCommentPayload(t, "vendor", []string{"ARTIST=Artist One", "ARTIST=Artist Two"})...)
+
+	var stream bytes.Buffer
+	stream.Write(buildOggPage(otherSerial, 0, false, segmentTableFor(len(otherIdent)), otherIdent))
+	stream.Write(buildOggPage(audioSerial, 0, false, segmentTableFor(len(audioIdent)), audioIdent))
+	// About 1.2 MiB of other-stream payload, in whole 255-byte segments.
+	chunk := bytes.Repeat([]byte{0x42}, 255*200)
+	seq := uint32(1)
+	for written := 0; written <= vorbisMultiValueCap; written += len(chunk) {
+		stream.Write(buildOggPage(otherSerial, seq, false, segmentTableFor(len(chunk)), chunk))
+		seq++
+	}
+	stream.Write(buildOggPage(audioSerial, 1, false, segmentTableFor(len(audioComment)), audioComment))
+
+	fields, ok := oggVorbisCommentFields(bytes.NewReader(stream.Bytes()))
+	if !ok {
+		t.Fatal("oggVorbisCommentFields() ok = false; want the audio comment block despite a large other stream")
+	}
+	if got := fields["artist"]; len(got) != 2 {
+		t.Errorf("artist = %v, want two values", got)
+	}
+}
+
+// A comment packet is accepted only when the stream's identification packet
+// names the same codec: an Opus identification header followed by a Vorbis
+// comment prefix is not a usable comment block.
+func TestOggVorbisCommentFields_RejectsMismatchedIdentification(t *testing.T) {
+	const serial = 13
+	ident := []byte("OpusHead-stub")
+	comment := append(append([]byte{}, vorbisCommentPrefix...),
+		vorbisCommentPayload(t, "vendor", []string{"ARTIST=Artist One", "ARTIST=Artist Two"})...)
+
+	var stream bytes.Buffer
+	stream.Write(buildOggPage(serial, 0, false, segmentTableFor(len(ident)), ident))
+	stream.Write(buildOggPage(serial, 1, false, segmentTableFor(len(comment)), comment))
+
+	if fields, ok := oggVorbisCommentFields(bytes.NewReader(stream.Bytes())); ok {
+		t.Errorf("oggVorbisCommentFields() = (%v, true); want ok=false for a comment prefix that does not match the identification packet", fields)
+	}
+}
+
 // TestOggVorbisCommentFields_SpansTwoPages builds the comment header packet
 // long enough that it cannot fit in one Ogg page's 255-byte segment run, so
 // it terminates on the CONTINUATION page instead -- proving the page-

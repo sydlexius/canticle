@@ -71,7 +71,9 @@ const oggMaxPages = 256
 const oggPageHeaderLen = 27
 
 var (
+	vorbisIdentPrefix   = []byte("\x01vorbis")
 	vorbisCommentPrefix = []byte("\x03vorbis")
+	opusIdentPrefix     = []byte("OpusHead")
 	opusTagsPrefix      = []byte("OpusTags")
 )
 
@@ -229,9 +231,13 @@ func oggVorbisCommentFields(r io.ReadSeeker) (map[string][]string, bool) {
 		// skipped rather than ending the scan, so another stream's comment
 		// block can still be found.
 		done bool
+		// commentPrefix is the packet-2 prefix this stream's identification
+		// packet (packet 1) commits it to: a Vorbis identification header only
+		// accepts a Vorbis comment header, an Opus one only OpusTags. A stream
+		// whose packet 1 names neither codec is marked done immediately.
+		commentPrefix []byte
 	}
 	streams := make(map[uint32]*stream)
-	totalBytes := 0
 
 	for page := 0; page < oggMaxPages; page++ {
 		hdr := make([]byte, oggPageHeaderLen)
@@ -253,10 +259,11 @@ func oggVorbisCommentFields(r io.ReadSeeker) (map[string][]string, bool) {
 		for _, s := range segTable {
 			pageDataLen += int(s)
 		}
-		totalBytes += pageDataLen
-		if totalBytes > vorbisMultiValueCap {
-			return nil, false
-		}
+		// A single page carries at most 255*255 bytes, so this allocation is
+		// bounded by the page format itself; the 1 MiB cap is enforced per
+		// stream below, on the packet actually being buffered, so a large
+		// unrelated stream cannot exhaust the budget before the audio stream's
+		// comment block is read. oggMaxPages bounds the total pages read.
 		pageData := make([]byte, pageDataLen)
 		if _, err := io.ReadFull(r, pageData); err != nil {
 			return nil, false
@@ -275,30 +282,46 @@ func oggVorbisCommentFields(r io.ReadSeeker) (map[string][]string, bool) {
 		for _, s := range segTable {
 			st.buf.Write(pageData[pos : pos+int(s)])
 			pos += int(s)
+			if st.buf.Len() > vorbisMultiValueCap {
+				// This stream's in-progress packet is oversized: drop the stream,
+				// not the whole scan.
+				st.done = true
+				st.buf.Reset()
+				break
+			}
 			if s < 255 {
 				// Lacing value below 255 terminates the packet.
 				st.packets++
-				if st.packets == 2 {
-					data := st.buf.Bytes()
-					var payload []byte
+				data := st.buf.Bytes()
+				if st.packets == 1 {
 					switch {
-					case bytes.HasPrefix(data, vorbisCommentPrefix):
-						payload = data[len(vorbisCommentPrefix):]
-					case bytes.HasPrefix(data, opusTagsPrefix):
-						payload = data[len(opusTagsPrefix):]
+					case bytes.HasPrefix(data, vorbisIdentPrefix):
+						st.commentPrefix = vorbisCommentPrefix
+					case bytes.HasPrefix(data, opusIdentPrefix):
+						st.commentPrefix = opusTagsPrefix
+					default:
+						// Not an audio stream this package reads comments from.
+						st.done = true
+						st.buf.Reset()
 					}
-					if payload != nil {
-						if fields, ok := parseVorbisCommentFields(payload); ok {
-							return fields, true
-						}
+					if st.done {
+						break
 					}
-					// Not a usable comment block on this stream: stop tracking
-					// it and keep reading pages for the others.
-					st.done = true
 					st.buf.Reset()
-					break
+					continue
 				}
+				// packets == 2: the comment header, accepted only when its prefix
+				// matches the codec packet 1 declared.
+				if bytes.HasPrefix(data, st.commentPrefix) {
+					if fields, ok := parseVorbisCommentFields(data[len(st.commentPrefix):]); ok {
+						return fields, true
+					}
+				}
+				// Not a usable comment block on this stream: stop tracking it and
+				// keep reading pages for the others.
+				st.done = true
 				st.buf.Reset()
+				break
 			}
 		}
 		_ = flags // continuation is implicit in the per-serial buffer; the
