@@ -1,6 +1,11 @@
 package models
 
-import "time"
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"time"
+)
 
 // Track represents a song's metadata from the Musixmatch API.
 type Track struct {
@@ -19,6 +24,72 @@ type Track struct {
 	ISRC          string `json:"isrc,omitempty"`
 	SpotifyID     string `json:"spotify_id,omitempty"`
 	RecordingMBID string `json:"recording_mbid,omitempty"`
+	// CommontrackID is Musixmatch's catalog-level track identifier, returned by
+	// matcher.track.get and populated by the same bulk unmarshal of the track
+	// node that fills the fields above. It is the required input to the
+	// follow-up track.richsync.get call, which is where word-level timing lives
+	// -- macro.subtitles.get never carries it (see internal/musixmatch, #613).
+	// Response-only: nothing sends it as a matcher parameter, unlike the
+	// recording-level identifiers above.
+	//
+	// Typed FlexID, not string, for the reason documented on that type.
+	CommontrackID FlexID `json:"commontrack_id,omitempty"`
+}
+
+// FlexID is a provider-supplied identifier that decodes from EITHER a JSON
+// string or a JSON number, and from nothing else.
+//
+// It exists because the Musixmatch matcher track node is unmarshaled WHOLESALE
+// into Track (internal/musixmatch/client.go, json.Unmarshal over the entire
+// node) and that call's error fails the whole lookup. A plain string field
+// returns "cannot unmarshal number into Go struct field ... of type string" on
+// a numeric id and would break EVERY matched track -- for an identifier nothing
+// consumes yet. That Go behavior was measured directly against encoding/json
+// before this type was written, not assumed.
+//
+// The provider's CURRENT wire shape is deliberately NOT asserted here. The one
+// observation of a bare number (#613, 2026-07-22) predates the client-identity
+// move in 92cb6d1 (#939) and was taken against the now-retired desktop
+// identity, so it is an earlier observation, not an established contract.
+// BOTH branches are load-bearing on purpose: either encoding may arrive, and
+// this type is correct without anyone having to know which does.
+//
+// A shape that is neither string, number, nor null decodes to the empty value
+// and returns NO error, deliberately: an optional identifier must never cost a
+// caller its lyrics. That branch LOGS, though -- silence and non-fatality are
+// separate decisions, and collapsing them would make an upstream encoding
+// change invisible: every lookup would keep succeeding while the consumer of
+// this id went dark, with nothing pointing at the decode. Only the first byte
+// is logged, never the value, since a provider payload is not ours to print.
+// A number is kept as its literal text, so a large id never round-trips through
+// float64. Marshaling is ordinary string marshaling, so a cached blob re-reads
+// through the string branch.
+type FlexID string
+
+// UnmarshalJSON implements json.Unmarshaler for FlexID.
+func (f *FlexID) UnmarshalJSON(b []byte) error {
+	s := string(bytes.TrimSpace(b))
+	switch {
+	case s == "" || s == "null":
+		*f = ""
+	case s[0] == '"':
+		// No error swallow here: encoding/json validates the whole document
+		// before dispatching to an Unmarshaler, so a syntactically valid
+		// string literal cannot fail to decode into a string. A swallow would
+		// be both silent and unreachable -- a safety net that catches nothing.
+		var v string
+		if err := json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		*f = FlexID(v)
+	case s[0] == '-' || (s[0] >= '0' && s[0] <= '9'):
+		*f = FlexID(s)
+	default:
+		slog.Warn("provider sent an identifier in an unexpected JSON shape; treating it as absent",
+			"type", "FlexID", "first_byte", string(s[0]), "bytes", len(s))
+		*f = ""
+	}
+	return nil
 }
 
 // Lyrics holds unsynced lyrics text.

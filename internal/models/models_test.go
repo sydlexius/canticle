@@ -1,7 +1,9 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -147,5 +149,104 @@ func TestSong_UpstreamIsNeverSerialized(t *testing.T) {
 	}
 	if s.WinningLane != "" {
 		t.Errorf("Song.WinningLane = %q after decoding a blob that carried the key; same invariant", s.WinningLane)
+	}
+}
+
+// TestFlexIDDecodesBothProviderEncodings pins FlexID's contract at the type
+// level, complementing the production-path test in internal/musixmatch: a
+// provider identifier arrives as a JSON number or a JSON string, and NEITHER
+// may error, because the caller unmarshals the whole track node in one call
+// whose error fails the entire lookup.
+func TestFlexIDDecodesBothProviderEncodings(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want FlexID
+	}{
+		{"number", `{"commontrack_id":10000001}`, "10000001"},
+		{"string", `{"commontrack_id":"10000001"}`, "10000001"},
+		{"absent", `{}`, ""},
+		{"null", `{"commontrack_id":null}`, ""},
+		{"negative number kept verbatim", `{"commontrack_id":-7}`, "-7"},
+		// An id far past float64's exact-integer range: kept as its literal
+		// text, never routed through a numeric type that would round it.
+		{"large number is not rounded", `{"commontrack_id":123456789012345678901}`, "123456789012345678901"},
+		{"unexpected shape yields empty, not an error", `{"commontrack_id":{"nested":true}}`, ""},
+		{"unexpected array yields empty, not an error", `{"commontrack_id":[1,2]}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tr Track
+			if err := json.Unmarshal([]byte(tc.in), &tr); err != nil {
+				t.Fatalf("Unmarshal(%s) errored: %v; an optional identifier must never fail the lookup", tc.in, err)
+			}
+			if tr.CommontrackID != tc.want {
+				t.Errorf("CommontrackID = %q; want %q", tr.CommontrackID, tc.want)
+			}
+		})
+	}
+}
+
+// TestFlexIDUnexpectedShapeWarns pins the OTHER half of the unexpected-shape
+// contract. That the decode is non-fatal is covered above; this asserts it is
+// not also SILENT. The two are separate decisions: an upstream encoding change
+// must never cost a caller its lyrics, but it must leave a trace, or the id's
+// consumer goes dark with nothing pointing at the decode.
+//
+// It also pins the privacy bound -- the provider's value must NOT reach the
+// log line, only its first byte and length.
+func TestFlexIDUnexpectedShapeWarns(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var tr Track
+	if err := json.Unmarshal([]byte(`{"commontrack_id":{"secret":"do-not-log"}}`), &tr); err != nil {
+		t.Fatalf("Unmarshal errored: %v; an optional identifier must never fail the lookup", err)
+	}
+	if tr.CommontrackID != "" {
+		t.Errorf("CommontrackID = %q; want empty", tr.CommontrackID)
+	}
+
+	got := buf.String()
+	if got == "" {
+		t.Fatal("no log emitted; an unexpected provider encoding must not decode silently")
+	}
+	if !strings.Contains(got, "FlexID") {
+		t.Errorf("log does not name the type; got: %s", got)
+	}
+	if strings.Contains(got, "do-not-log") {
+		t.Errorf("log leaked the provider value; got: %s", got)
+	}
+}
+
+// TestFlexIDCacheRoundTrip guards the cache blob: a Track encoded and decoded
+// again must keep its identifier, and must re-read through the string branch
+// (FlexID marshals as an ordinary string).
+func TestFlexIDCacheRoundTrip(t *testing.T) {
+	in := Track{TrackName: "alpha", CommontrackID: "10000001"}
+	blob, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"commontrack_id":"10000001"`) {
+		t.Errorf("encoded blob = %s; want a string-encoded commontrack_id", blob)
+	}
+	var out Track
+	if err := json.Unmarshal(blob, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.CommontrackID != in.CommontrackID {
+		t.Errorf("round-tripped CommontrackID = %q; want %q", out.CommontrackID, in.CommontrackID)
+	}
+	// omitempty must still drop an absent identifier, so no pre-#613 cache row
+	// gains a key and no new row grows one it does not need.
+	empty, err := json.Marshal(Track{TrackName: "alpha"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(empty), "commontrack_id") {
+		t.Errorf("empty-id blob = %s; want the key omitted", empty)
 	}
 }
