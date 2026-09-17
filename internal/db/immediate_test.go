@@ -34,6 +34,10 @@ func TestOpenImmediate_TxTakesWriteLockAtBegin(t *testing.T) {
 	}{
 		{"immediate", OpenImmediate, true},
 		{"deferred control", Open, false},
+		// A batch command's dry run must not stall a live serve: its preview
+		// transactions only read, so they must not hold the writer lock.
+		{"batch apply", func(ctx context.Context, p string) (*sql.DB, error) { return OpenForBatch(ctx, p, true) }, true},
+		{"batch dry run", func(ctx context.Context, p string) (*sql.DB, error) { return OpenForBatch(ctx, p, false) }, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

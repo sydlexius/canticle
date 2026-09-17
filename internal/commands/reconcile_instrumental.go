@@ -89,7 +89,7 @@ func appendReconcileInstrumentalOutcome(f *os.File, o instrumentalbackfill.Outco
 // resolves config/detector/queue, owns the JSONL backup file and the operator
 // output, and lets the package own the classification logic. Dry-run unless --yes.
 func runReconcileInstrumental(ctx context.Context, out io.Writer, args ScanReconcileInstrumentalCmd) int {
-	env, code := openDetectorEnv(ctx, out, args.ConfigPath, args.Library, "backfill instrumental verdicts")
+	env, code := openDetectorEnv(ctx, out, args.ConfigPath, args.Library, "backfill instrumental verdicts", args.Yes)
 	if env == nil {
 		return code
 	}

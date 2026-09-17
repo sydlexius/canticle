@@ -558,8 +558,14 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 		return outcome, nil // rolled back via the deferred Rollback; nothing was written
 	}
 	if err := tx.Commit(); err != nil {
-		// Records for this group may already be on disk, so never retry past them.
-		return divergenceOutcome{}, dbpkg.NotRetryable(fmt.Errorf("identityrepair: commit divergence tx: %w", err))
+		err = fmt.Errorf("identityrepair: commit divergence tx: %w", err)
+		if report != nil && len(changes) > 0 {
+			// Records for this group are already on disk, so never retry past them.
+			// With none written, nothing escaped the transaction and a busy commit
+			// is retryable.
+			err = dbpkg.NotRetryable(err)
+		}
+		return divergenceOutcome{}, err
 	}
 	return outcome, nil
 }

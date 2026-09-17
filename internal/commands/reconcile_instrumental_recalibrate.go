@@ -101,7 +101,7 @@ func appendJSONLSynced(f *os.File, rec any) error {
 // comparison; when that is unanswerable the engine treats the version as unknown
 // and declines to reset anything.
 func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, args ScanReconcileInstrumentalRecalibrateCmd) int {
-	env, code := openQueueEnv(ctx, out, args.ConfigPath, args.Library)
+	env, code := openQueueEnv(ctx, out, args.ConfigPath, args.Library, args.Yes)
 	if env == nil {
 		return code
 	}

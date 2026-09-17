@@ -1845,14 +1845,22 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
 	now := time.Now().UTC().Format(timeFormat)
 	retired := false
 	for _, w := range c.workItems {
-		res, err := p.db.ExecContext(ctx,
-			`UPDATE work_queue
+		// Each UPDATE is its own autocommit statement and idempotent (the status
+		// guard excludes a row it already retired), so it retries safely on
+		// SQLITE_BUSY without disturbing rows an earlier iteration committed (#978).
+		var res sql.Result
+		err := dbpkg.RetryBatchTx(ctx, "prune retire", func() error {
+			var execErr error
+			res, execErr = p.db.ExecContext(ctx,
+				`UPDATE work_queue
              SET status = 'done',
                  completed_at = ?,
                  last_error = ?
              WHERE id = ?
                AND status NOT IN ('processing', 'done', 'unavailable')`,
-			now, unresolvableGoneError, w.id)
+				now, unresolvableGoneError, w.id)
+			return execErr
+		})
 		if err != nil {
 			return false, fmt.Errorf("retire work item %d: %w", w.id, err)
 		}

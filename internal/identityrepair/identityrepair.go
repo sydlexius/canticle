@@ -337,8 +337,13 @@ func (r *Repairer) applyOnce(ctx context.Context, ch Change, titleKey string, re
 	}
 
 	if err := tx.Commit(); err != nil {
-		// The backup record may already be on disk, so never retry past it.
-		return applyOutcome{}, dbpkg.NotRetryable(fmt.Errorf("identityrepair: commit tx: %w", err))
+		err = fmt.Errorf("identityrepair: commit tx: %w", err)
+		if report != nil {
+			// The backup record is already on disk, so never retry past it. With no
+			// report nothing escaped the transaction, and a busy commit is retryable.
+			err = dbpkg.NotRetryable(err)
+		}
+		return applyOutcome{}, err
 	}
 	return out, nil
 }

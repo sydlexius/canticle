@@ -249,7 +249,12 @@ func (p *Pruner) applyRepairOnce(ctx context.Context, id int64, oldJSON, outdir,
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, dbpkg.NotRetryable(fmt.Errorf("prune: commit output_paths repair for work_queue %d: %w", id, err))
+		err = fmt.Errorf("prune: commit output_paths repair for work_queue %d: %w", id, err)
+		if report != nil {
+			// The record is already on disk; retrying would append a second one.
+			err = dbpkg.NotRetryable(err)
+		}
+		return false, err
 	}
 	return true, nil
 }

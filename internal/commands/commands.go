@@ -3943,7 +3943,7 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 		slog.Error("failed to load config", "error", err)
 		return 1
 	}
-	sqlDB, err := db.OpenImmediate(ctx, cfg.DB.Path)
+	sqlDB, err := db.OpenForBatch(ctx, cfg.DB.Path, args.Yes)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		return 1
@@ -4018,7 +4018,7 @@ func runScanClear(ctx context.Context, out io.Writer, args ScanClearCmd) int {
 // applies. By default it re-infers only the telemetry-narrowed candidate set
 // (borderline / cross-version / un-scored rows); --all re-infers every tagged row.
 func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd) int {
-	env, code := openDetectorEnv(ctx, out, args.ConfigPath, args.Library, "reconcile")
+	env, code := openDetectorEnv(ctx, out, args.ConfigPath, args.Library, "reconcile", args.Yes)
 	if env == nil {
 		return code
 	}

@@ -60,6 +60,17 @@ func OpenImmediate(ctx context.Context, path string) (*sql.DB, error) {
 	return open(ctx, path, "?_txlock=immediate")
 }
 
+// OpenForBatch opens a batch CLI command's database: OpenImmediate when apply
+// is true, Open otherwise. A dry run only reads, but several of them still
+// read inside a transaction; on an immediate handle that BEGIN would take the
+// writer lock and stall a live serve for the whole preview.
+func OpenForBatch(ctx context.Context, path string, apply bool) (*sql.DB, error) {
+	if apply {
+		return OpenImmediate(ctx, path)
+	}
+	return Open(ctx, path)
+}
+
 // open is the shared body of Open and OpenImmediate. dsnQuery is appended to
 // path as the driver DSN's query string; the driver strips it back off a
 // non-"file:" DSN before opening, so the file opened is path either way.

@@ -48,7 +48,7 @@ func dvNote(dv string) string {
 // them as provisional/re-checkable rather than terminal. Dry-run by default;
 // --yes applies and appends a JSONL backup of each stamped file.
 func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanReconcileMarkerProvenanceCmd) int {
-	env, code := openQueueEnv(ctx, out, args.ConfigPath, args.Library)
+	env, code := openQueueEnv(ctx, out, args.ConfigPath, args.Library, args.Yes)
 	if env == nil {
 		return code
 	}
