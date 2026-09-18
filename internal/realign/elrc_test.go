@@ -12,7 +12,8 @@ import (
 )
 
 // The word-synced companion (.elrc, #986) follows its .lrc through every
-// mutation here, but ONLY once sidecar.KindWordSynced is active.
+// mutation here. The Kind is active in production now (slice 4c), so the
+// ActivateForTest calls below are no-ops kept until the cleanup slice.
 
 const (
 	ownedElrc   = "[by:canticle]\n[00:01.00]<00:01.00>hi\n"
@@ -63,7 +64,7 @@ func TestRename_CompanionFollowsOnlyWhenOwnedAndActive(t *testing.T) {
 		active         bool
 		body, occupied string
 		wantFollowed   bool
-	}{{"owned", true, ownedElrc, "", true}, {"foreign", true, foreignElrc, "", false}, {"inactive", false, ownedElrc, "", false}, {"blocked", true, ownedElrc, foreignElrc, false}} {
+	}{{"owned", true, ownedElrc, "", true}, {"foreign", true, foreignElrc, "", false}, {"blocked", true, ownedElrc, foreignElrc, false}} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.active {
 				sidecar.ActivateForTest(t, sidecar.KindWordSynced)
@@ -182,8 +183,8 @@ func remediate(t *testing.T, kind, elrcBody string, mut func(*testing.T, *Move))
 	return lrc, elrc, mv.Target, got, backup
 }
 
-// An owned companion of an active Kind goes with its remediated .lrc and is
-// recorded in the backup; a foreign one, or any while inactive, is untouched.
+// An owned companion goes with its remediated .lrc and is recorded in the
+// backup; a foreign one is untouched.
 func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwnedAndActive(t *testing.T) {
 	for _, kind := range []string{KindDemote, KindQuarantine, KindPurge} {
 		for _, c := range []struct {
@@ -191,7 +192,7 @@ func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwnedAndActive(t *testing.T)
 			active       bool
 			body         string
 			wantFollowed bool
-		}{{"owned", true, ownedElrc, true}, {"foreign", true, foreignElrc, false}, {"inactive", false, ownedElrc, false}} {
+		}{{"owned", true, ownedElrc, true}, {"foreign", true, foreignElrc, false}} {
 			t.Run(kind+"/"+c.name, func(t *testing.T) {
 				if c.active {
 					sidecar.ActivateForTest(t, sidecar.KindWordSynced)

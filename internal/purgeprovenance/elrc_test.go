@@ -11,8 +11,8 @@ import (
 )
 
 // A purged .lrc takes its OWNED word-synced companion (#986) with it, backup
-// first; a foreign companion, and every companion while the kind is inactive,
-// is left exactly as it was. The companion is never judged on its own tags.
+// first; a foreign companion is left exactly as it was. The companion is never
+// judged on its own tags.
 func TestRun_CompanionFollowsItsPurgedLrc(t *testing.T) {
 	const owned = "[by:canticle]\n[source:musixmatch]\n[00:01.00]<00:01.00>hi\n"
 	cases := []struct {
@@ -27,7 +27,6 @@ func TestRun_CompanionFollowsItsPurgedLrc(t *testing.T) {
 		{"owned", true, "track.lrc", false, owned, true, 2},
 		{"owned dry run", true, "track.lrc", true, owned, false, 2},
 		{"foreign", true, "track.lrc", false, "[source:musixmatch]\n[00:01.00]<00:01.00>hi\n", false, 1},
-		{"inactive", false, "track.lrc", false, owned, false, 1},
 		// Only a .lrc has a companion: a purged .txt leaves track.elrc alone.
 		{"purged txt", true, "track.txt", false, owned, false, 1},
 	}

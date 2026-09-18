@@ -16,6 +16,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/sydlexius/canticle/internal/ffmpeg"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // durationTolerance is how far (in whole seconds) a generated file's measured
@@ -224,8 +225,12 @@ func isCanticleModule(dir string) bool {
 const ManifestName = ".smokefixtures-manifest.json"
 
 // ownedExts are the same-stem files -clean removes for each manifest stem: the
-// fixture itself and the sidecars serve writes for it.
-var ownedExts = []string{".mp3", ".lrc", ".txt", ".lrc.orig"}
+// fixture itself and the sidecars serve writes for it. The sidecar set comes
+// from internal/sidecar, so a newly active Kind (the word-synced ".elrc"
+// companion, #986) is cleaned too; a leftover would leave the directory
+// non-empty and refuse every later run. ".lrc.orig" is the backfill's backup,
+// not a sidecar Kind, so it is listed by hand.
+var ownedExts = append(append([]string{".mp3"}, sidecar.Extensions()...), ".lrc.orig")
 
 type manifest struct {
 	Stems []string `json:"stems"`
