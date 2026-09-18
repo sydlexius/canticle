@@ -167,13 +167,11 @@ func uniformStarts(timings []models.WordTiming) bool {
 
 // a2Stamp formats milliseconds as the mm:ss.xx an A2 marker carries.
 //
-// Negative input clamps to zero: models.WordTiming documents that producers MUST
-// clamp but that the type does not enforce it, and tells consumers not to
-// assume. Minutes deliberately do NOT wrap at 60 -- a 70-minute track renders
-// 70:00.00, which is what LRC readers expect, rather than restarting at 10:00.
+// It owns no arithmetic (#862): models.MsToTime owns the clamp and the three
+// field computations, and models.Time.Stamp owns the format (minutes do NOT wrap
+// at 60), so the A2 marker and the LRC line stamp cannot drift apart. The clamp
+// matters here because models.WordTiming documents that producers MUST clamp
+// but that the type does not enforce it.
 func a2Stamp(ms int) string {
-	if ms < 0 {
-		ms = 0
-	}
-	return fmt.Sprintf("%02d:%02d.%02d", ms/60000, (ms/1000)%60, (ms/10)%100)
+	return models.MsToTime(ms).Stamp()
 }

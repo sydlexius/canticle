@@ -147,6 +147,9 @@ func TestA2Stamp_Formats(t *testing.T) {
 		{1500, "00:01.50"},
 		{61230, "01:01.23"},
 		{600000, "10:00.00"},
+		// Minutes do NOT wrap at 60: a track past an hour keeps counting.
+		{4200000, "70:00.00"},
+		{6123450, "102:03.45"},
 	} {
 		if got := a2Stamp(tc.ms); got != tc.want {
 			t.Errorf("a2Stamp(%d) = %q; want %q", tc.ms, got, tc.want)
