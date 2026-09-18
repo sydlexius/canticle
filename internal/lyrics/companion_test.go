@@ -1,6 +1,8 @@
 package lyrics
 
 import (
+	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -305,15 +307,16 @@ func TestWriteLRC_CompanionRecordedAsSelfWrite(t *testing.T) {
 // never a companion beside a missing .lrc.
 func TestWriteLRC_CompanionWrittenAfterLRC(t *testing.T) {
 	dir := t.TempDir()
-	// A directory at the companion path makes its final Remove fail.
-	if err := os.MkdirAll(filepath.Join(dir, "song.elrc", "x"), 0o750); err != nil {
-		t.Fatal(err)
+	w := modeWriter(false, true)
+	w.companionWrite = func(string, string, []string, func(*bufio.Writer) error) error {
+		return errors.New("injected")
 	}
-	err := modeWriter(false, true).WriteLRC(a2Song(), "song.lrc", dir)
+	err := w.WriteLRC(a2Song(), "song.lrc", dir)
 	if err == nil || !strings.Contains(err.Error(), "companion") {
 		t.Fatalf("want a companion write error, got %v", err)
 	}
 	mustExist(t, filepath.Join(dir, "song.lrc"))
+	mustNotExist(t, filepath.Join(dir, "song.elrc"))
 }
 
 // TestWriteLRC_StaleCompanionRemovedBeforeLRC: the old companion is removed
@@ -413,5 +416,80 @@ func TestInjectProvenance_AcceptsCompanion(t *testing.T) {
 	}
 	if _, _, err := InjectProvenance(txt, ProvenanceTags{Source: "x"}); err == nil {
 		t.Error("InjectProvenance(.txt) should still refuse")
+	}
+}
+
+// TestWriteLRC_ForeignCompanionNeverOverwritten: a sidecar-mode write that
+// WOULD produce a companion must not replace a foreign .elrc either. The .lrc
+// is still written; the companion is skipped.
+func TestWriteLRC_ForeignCompanionNeverOverwritten(t *testing.T) {
+	dir := t.TempDir()
+	elrc := filepath.Join(dir, "song.elrc")
+	if err := os.WriteFile(elrc, []byte("[00:01.00]<00:01.00>foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := selfwrite.New(time.Minute)
+	w := modeWriter(false, true)
+	w.SetSelfWriteRegistry(reg)
+	if err := w.WriteLRC(a2Song(), "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	mustExist(t, filepath.Join(dir, "song.lrc"))
+	if got := readFileString(t, elrc); !strings.Contains(got, "foreign") {
+		t.Errorf("foreign companion was overwritten: %q", got)
+	}
+	// An untouched path is not canticle's write: recording it would make the
+	// watcher drop a third party's own change to it.
+	if reg.Suppress(elrc) {
+		t.Error("an untouched foreign companion was recorded as a self-write")
+	}
+}
+
+// TestWriteLRC_SpecialFileAtCompanionPathNotOpened: a FIFO at the companion
+// path is classified from Lstat and never opened. Opening one blocks until a
+// writer appears, so a regression here hangs the test rather than failing it;
+// the deadline turns that into a failure.
+func TestWriteLRC_SpecialFileAtCompanionPathNotOpened(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "song.elrc")
+	if err := mkfifo(fifo); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- modeWriter(false, true).WriteLRC(a2Song(), "song.lrc", dir) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WriteLRC: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteLRC blocked on the FIFO at the companion path")
+	}
+	mustExist(t, filepath.Join(dir, "song.lrc"))
+	fi, err := os.Lstat(fifo)
+	if err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("the FIFO was replaced or removed: mode=%v err=%v", fi, err)
+	}
+}
+
+// TestWriteLRC_FailedCompanionRemovalAbortsBeforeLRC: if an owned stale
+// companion cannot be removed, the .lrc must NOT be replaced, or the old word
+// timing would sit beside the new line timing.
+func TestWriteLRC_FailedCompanionRemovalAbortsBeforeLRC(t *testing.T) {
+	dir := t.TempDir()
+	lrc := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("[00:01.00]old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seedCompanion(t, dir)
+	w := modeWriter(false, false)
+	w.companionRemove = func(string) error { return errors.New("injected") }
+
+	err := w.WriteLRC(a2Song(), "song.lrc", dir)
+	if err == nil || !strings.Contains(err.Error(), "removing stale word-synced companion") {
+		t.Fatalf("want the removal error, got %v", err)
+	}
+	if got := readFileString(t, lrc); !strings.Contains(got, "old") {
+		t.Errorf(".lrc was replaced despite the failed companion removal: %q", got)
 	}
 }

@@ -117,6 +117,15 @@ type LRCWriter struct {
 	// (#986 slice 4): a companion those paths cannot see must never reach a
 	// library. It is a TEST-ONLY seam; nothing outside _test files sets it.
 	companionGate func() bool
+	// companionWrite, when non-nil, replaces writeAtomic for the companion
+	// only. A TEST-ONLY seam, like companionGate: it is the one way to fail the
+	// companion write after the .lrc has landed, since any filesystem obstacle
+	// at the companion path is classified foreign and skipped before that.
+	companionWrite func(outdir, fn string, tags []string, body func(*bufio.Writer) error) error
+	// companionRemove, when non-nil, replaces os.Remove for a stale companion.
+	// TEST-ONLY, for the same reason: it fails the removal without also making
+	// the directory unwritable for the .lrc.
+	companionRemove func(path string) error
 	// selfWrites, when non-nil, records every path this writer touches so the
 	// filesystem watcher can drop the events its own writes generate (#685).
 	// Nil (the default, and every non-serve caller) is a no-op.
@@ -443,7 +452,8 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// opened: a2Words' per-line decision is otherwise made mid-stream, and a
 	// companion none of whose lines qualified would be a byte copy of the .lrc
 	// claiming word timing it does not carry. It is recorded alongside fp for
-	// the same watcher reason, whether it is about to be written or removed.
+	// the same watcher reason, but ONLY when this write touches it: recording
+	// an untouched path would make the watcher drop a third party's change.
 	companion := w.planCompanion(song, fp, synced)
 	w.selfWrites.Record(fp, oppositeSidecar(fp), companion.path)
 
@@ -452,8 +462,16 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// together, so this picks the failure: a crash or a failed companion write
 	// leaves a line-synced file and NO companion, never an older companion
 	// describing the lyric this write replaced.
-	if companion.path != "" {
-		w.removeCompanion(companion.path)
+	if companion.remove {
+		remove := os.Remove
+		if w.companionRemove != nil {
+			remove = w.companionRemove
+		}
+		if err := remove(companion.path); err != nil && !os.IsNotExist(err) {
+			// Abort BEFORE the .lrc/.txt is replaced: continuing would leave
+			// the old word timing beside new line timing.
+			return fmt.Errorf("removing stale word-synced companion: %w", err)
+		}
 	}
 
 	if err := writeAtomic(outdir, fn, tags, writeContent); err != nil {
@@ -474,7 +492,11 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	if companion.write {
 		cfn := filepath.Base(companion.path)
 		body := func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual, true) }
-		if err := writeAtomic(outdir, cfn, tags, body); err != nil {
+		write := writeAtomic
+		if w.companionWrite != nil {
+			write = w.companionWrite
+		}
+		if err := write(outdir, cfn, tags, body); err != nil {
 			return fmt.Errorf("writing word-synced companion: %w", err)
 		}
 		slog.Info("lyrics saved", "path", companion.path, "kind", "word-synced companion",
@@ -483,29 +505,41 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	return nil
 }
 
-// companionPlan is planCompanion's verdict: path is the companion this write
-// touches ("" when it touches none), and write says whether that is a write
-// (true) or a stale-companion removal (false).
+// companionPlan is planCompanion's verdict. path is the companion this write
+// touches ("" when it touches none); remove says an existing canticle-owned
+// companion is deleted before the .lrc/.txt is replaced; write says a fresh
+// one is written after it. Every path in a plan is canticle's to touch, so the
+// plan is also exactly what is recorded with selfwrite.
 type companionPlan struct {
-	path  string
-	write bool
+	path   string
+	remove bool
+	write  bool
 }
+
+// companionOwnership is what is on disk at the companion path.
+type companionOwnership int
+
+const (
+	companionAbsent  companionOwnership = iota // nothing there
+	companionOwned                             // a regular file tagged [by:canticle]
+	companionForeign                           // anything else: never touched
+)
 
 // planCompanion decides what this write does to the word-synced companion
 // beside fp (#986). A companion is NOT an opposite (see oppositeSidecar): it
 // follows the .lrc rather than excluding it. The invariant: a companion on disk
-// always describes the .lrc beside it, never an earlier one.
+// that canticle wrote always describes the .lrc beside it, never an earlier one.
 //
 //   - Gate closed: nothing. With sidecar.KindWordSynced inactive a .elrc on
 //     disk is not canticle's, so it is neither written nor removed.
-//   - A .txt write (unsynced, instrumental, or a MisSynced demotion): the .lrc
-//     it replaces is gone, so its companion is removed with it -- word timing
-//     must not outlive the line timing it was aligned to.
-//   - A .lrc write with the companion enabled and at least one qualifying
-//     line: written.
-//   - Any other .lrc write: the stale companion is removed. It was aligned to
-//     the .lrc this write just replaced, so keeping it would pair new line
-//     timing with old word timing.
+//   - A FOREIGN file at the path (not a regular file, unreadable, or without
+//     [by:canticle]): nothing, not even a write over it. It belongs to another
+//     tool or to the operator, and no mode may cost them a file.
+//   - Otherwise an owned companion is removed, and a fresh one is written when
+//     this is a .lrc write with the companion enabled and at least one
+//     qualifying line. A .txt write (unsynced, instrumental, or a MisSynced
+//     demotion) and any other .lrc write therefore leave no companion: word
+//     timing must not outlive the line timing it was aligned to.
 //
 // A write that touches nothing (quarantine, or a demotion that keeps a settled
 // sidecar) never reaches here, so the companion of a kept .lrc is kept too.
@@ -514,42 +548,42 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) comp
 		return companionPlan{}
 	}
 	path := sidecar.StemOf(fp) + sidecar.ExtWordSynced
-	if !synced {
-		return companionPlan{path: path}
+	own := companionOwnershipOf(path)
+	if own == companionForeign {
+		slog.Info("leaving a word-synced companion canticle did not write", "path", path)
+		return companionPlan{}
 	}
-	if w.wordSyncCompanion && hasA2Line(song) {
-		return companionPlan{path: path, write: true}
+	plan := companionPlan{path: path, remove: own == companionOwned}
+	plan.write = synced && w.wordSyncCompanion && hasA2Line(song)
+	if !plan.remove && !plan.write {
+		return companionPlan{}
 	}
-	return companionPlan{path: path}
+	return plan
 }
 
-// removeCompanion deletes a stale companion, best effort, but ONLY one canticle
-// wrote: a .elrc without a [by:canticle] header belongs to another tool or to
-// the operator, and word_sync_mode = off must never cost them a file. The
-// caller has already recorded path with selfwrite.
-func (w *LRCWriter) removeCompanion(path string) {
-	if !writtenByCanticle(path) {
-		return
+// companionOwnershipOf classifies path WITHOUT following it. Lstat comes first
+// so a symlink, FIFO, or device is never opened: opening a FIFO blocks until a
+// writer appears, which would hang the fetch. Any error other than not-exist,
+// and a regular file whose header cannot be read, count as foreign, so doubt
+// always resolves to leaving the file alone.
+func companionOwnershipOf(path string) companionOwnership {
+	fi, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return companionAbsent
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		slog.Warn("could not remove stale word-synced companion", "path", path, "error", err)
+	if err != nil || !fi.Mode().IsRegular() {
+		return companionForeign
 	}
-}
-
-// writtenByCanticle reports whether the sidecar at path carries the
-// [by:canticle] header tag every canticle write emits. A missing or unreadable
-// file reports false, so the caller leaves it alone.
-func writtenByCanticle(path string) bool {
 	tags, _, err := parseLRCHeader(path)
 	if err != nil {
-		return false
+		return companionForeign
 	}
 	for _, t := range tags {
 		if strings.EqualFold(t.key, "by") && strings.TrimSpace(t.value) == "canticle" {
-			return true
+			return companionOwned
 		}
 	}
-	return false
+	return companionForeign
 }
 
 // resolveOutdir re-resolves and re-confines outdir when it falls under a
