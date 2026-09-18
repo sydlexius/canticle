@@ -33,6 +33,7 @@ import (
 	"github.com/sydlexius/canticle/internal/cache"
 	dbpkg "github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // timeFormat matches the RFC3339-ish stamp the queue package writes for
@@ -123,6 +124,7 @@ type Result struct {
 	Scanned           int // .lrc/.txt sidecars examined (symlinks excluded)
 	Matched           int // sidecars whose provenance matched the filter
 	Deleted           int // sidecars actually removed from disk (apply only)
+	CompanionsDeleted int // owned word-synced companions removed with their .lrc (apply only; #986)
 	ScanResultsReset  int // scan_results rows reset to 'pending'
 	WorkItemsRequeued int // work_queue rows reset to 'deferred' for re-fetch
 	SkippedSymlink    int // symlinked sidecars never followed or touched
@@ -237,8 +239,10 @@ func (p *Purger) Run(ctx context.Context, opts Options) (Result, error) {
 			if d.IsDir() {
 				return nil
 			}
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext != ".lrc" && ext != ".txt" {
+			// Line-synced and unsynced sidecars only. A word-synced companion
+			// (#986) is never judged on its own tags: it goes with its .lrc
+			// (see processSidecar), so walking it here would handle it twice.
+			if k := sidecar.KindOf(path); k != sidecar.KindLineSynced && k != sidecar.KindUnsynced {
 				return nil
 			}
 			// Never follow a symlinked sidecar: skip it entirely, for both
@@ -344,6 +348,10 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	}
 
 	rec := Record{Path: path, ScanResultIDs: scanResultIDs, WorkItemIDs: workItemIDs, Identities: identities}
+	// The owned word-synced companion (#986) goes with its .lrc, under its OWN
+	// Report record (the .lrc's carries the rows). Foreign: never touched;
+	// "" while the Kind is inactive.
+	companion := lyrics.OwnedCompanionOf(path)
 
 	if opts.DryRun {
 		if opts.Report != nil {
@@ -351,18 +359,32 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 				res.Errors++
 				slog.Warn("purge-provenance: report failed", "path", path, "error", rerr)
 			}
+			if companion != "" {
+				if rerr := opts.Report(Record{Path: companion}); rerr != nil {
+					res.Errors++
+					slog.Warn("purge-provenance: report failed", "path", companion, "error", rerr)
+				}
+			}
 		}
 		return
 	}
 
 	// Backup-first / write-ahead: the caller's Report writes and fsyncs the
 	// restorable JSONL record before anything is deleted. A Report failure
-	// skips this sidecar entirely -- it is never deleted without its record.
+	// skips this sidecar entirely -- it is never deleted without its record,
+	// and neither is its companion.
 	if opts.Report != nil {
 		if rerr := opts.Report(rec); rerr != nil {
 			res.Errors++
 			slog.Warn("purge-provenance: backup failed; leaving sidecar untouched", "path", path, "error", rerr)
 			return
+		}
+		if companion != "" {
+			if rerr := opts.Report(Record{Path: companion}); rerr != nil {
+				res.Errors++
+				slog.Warn("purge-provenance: companion backup failed; leaving sidecar untouched", "path", companion, "error", rerr)
+				return
+			}
 		}
 	}
 
@@ -396,7 +418,19 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		slog.Warn("purge-provenance: sidecar has no linked scan_results row; cannot invalidate its cache entry", "path", path)
 	}
 
-	if rerr := os.Remove(path); rerr != nil {
+	// Companion BEFORE the .lrc, the writer's rule: a failed companion removal
+	// leaves the .lrc too, so the pair is never split. The re-fetch's writer
+	// removes an owned companion before it writes, so the retry is safe.
+	if companion != "" {
+		if rerr := removeFile(companion); rerr != nil && !os.IsNotExist(rerr) {
+			res.Errors++
+			slog.Warn("purge-provenance: companion delete failed; leaving the sidecar too", "path", companion, "error", rerr)
+			return
+		}
+		res.CompanionsDeleted++
+	}
+
+	if rerr := removeFile(path); rerr != nil {
 		if !os.IsNotExist(rerr) {
 			res.Errors++
 			slog.Warn("purge-provenance: delete failed; rows already requeued, next scan will rewrite this sidecar", "path", path, "error", rerr)
@@ -425,6 +459,9 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 // build and the reset transaction. It aborts that sidecar's transaction, so the
 // rows are not reset and the file is not deleted; the next run re-reads a
 // consistent snapshot and either deletes it or refuses it as disputed.
+// removeFile is the unlink seam, so a test can fail one delete of a pair.
+var removeFile = os.Remove
+
 var errProvenanceChangedUnderfoot = errors.New("purgeprovenance: provenance changed between index and delete")
 
 // disputedLanes re-reads the given work_queue rows through the caller's

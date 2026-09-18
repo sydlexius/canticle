@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/purgeprovenance"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // purgeProvenanceBackupRecord is one JSONL line capturing a deleted sidecar --
@@ -121,7 +122,13 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 		}
 	}()
 
+	// A word-synced companion (#986) gets its own report line, so the summary
+	// counts it too, or the preview would list more files than it says it deletes.
+	previewCompanions := 0
 	report := func(rec purgeprovenance.Record) error {
+		if sidecar.KindOf(rec.Path) == sidecar.KindWordSynced {
+			previewCompanions++
+		}
 		if args.Yes {
 			_, _ = fmt.Fprintf(out, "  deleting: %s\n", rec.Path)
 		} else {
@@ -164,12 +171,18 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	// Both skip cohorts are counted after Matched, so both must come off the
 	// preview or the dry run promises deletions an apply run will refuse.
 	deleted := res.Matched - res.SkippedProcessing - res.SkippedProvenanceMismatch
+	companions := previewCompanions
 	if args.Yes {
 		verb = "deleted"
 		deleted = res.Deleted
+		companions = res.CompanionsDeleted
 	}
-	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d, requeued %d (%d scan_results reset, %d cache entries invalidated, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
-		res.Scanned, verb, deleted, res.WorkItemsRequeued, res.ScanResultsReset, res.CacheInvalidated, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
+	companionNote := ""
+	if companions > 0 {
+		companionNote = fmt.Sprintf(" (+%d word-synced companion(s))", companions)
+	}
+	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d%s, requeued %d (%d scan_results reset, %d cache entries invalidated, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
+		res.Scanned, verb, deleted, companionNote, res.WorkItemsRequeued, res.ScanResultsReset, res.CacheInvalidated, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
 	if res.SkippedProvenanceMismatch > 0 {
 		// Aggregate only: naming the files would print the library's private
 		// artist/title metadata to stdout. The per-row ids are in the warning log.

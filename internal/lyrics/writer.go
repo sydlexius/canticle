@@ -561,6 +561,33 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) comp
 	return plan
 }
 
+// IsOwnedCompanion reports whether path is a word-synced companion canticle
+// itself wrote: a regular file (never followed) whose header carries
+// [by:canticle]. It is THE ownership predicate for every path that moves or
+// removes a companion outside the writer (realign, revalidate through
+// realign.Apply, purgeprovenance), so none of them can disagree with the writer
+// about which files are canticle's to touch. Absent and foreign both report
+// false: either way there is nothing the caller may touch.
+func IsOwnedCompanion(path string) bool {
+	return companionOwnershipOf(path) == companionOwned
+}
+
+// OwnedCompanionOf returns the word-synced companion that must travel with (or
+// go with) the line-synced sidecar lrc, or "" when there is nothing to touch:
+// the word-synced Kind is inactive, lrc is not a .lrc, or the file beside it is
+// absent or FOREIGN. The gate is the same one the writer consults, so flipping
+// sidecar.KindWordSynced is the single switch for every mutation path.
+func OwnedCompanionOf(lrc string) string {
+	if !sidecar.Active(sidecar.KindWordSynced) || sidecar.KindOf(lrc) != sidecar.KindLineSynced {
+		return ""
+	}
+	c := sidecar.StemOf(lrc) + sidecar.ExtWordSynced
+	if !IsOwnedCompanion(c) {
+		return ""
+	}
+	return c
+}
+
 // companionOwnershipOf classifies path WITHOUT following it. Lstat comes first
 // so a symlink, FIFO, or device is never opened: opening a FIFO blocks until a
 // writer appears, which would hang the fetch. Any error other than not-exist,

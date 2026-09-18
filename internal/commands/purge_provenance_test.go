@@ -15,6 +15,7 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/purgeprovenance"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // writePurgeSidecar writes a minimal .lrc sidecar, optionally carrying a
@@ -531,6 +532,41 @@ func TestPurgeProvenance_SummaryCounts(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "scanned 3 sidecar(s); deleted 2, requeued 2 (2 scan_results reset") {
 		t.Errorf("unexpected summary line: %s", buf.String())
+	}
+}
+
+// The summary counts an owned word-synced companion (#986) its preview lists,
+// in both modes, so the file lines and the count agree.
+func TestPurgeProvenance_SummaryCountsCompanions(t *testing.T) {
+	sidecar.ActivateForTest(t, sidecar.KindWordSynced)
+	ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
+	a := filepath.Join(root, "ArtistA", "a.lrc")
+	writePurgeSidecar(t, a, "musixmatch")
+	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(a), "a.lrc", "done")
+	if err := os.WriteFile(filepath.Join(root, "ArtistA", "a.elrc"), []byte("[by:canticle]\n[00:01.00]<00:01.00>hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, yes := range []bool{false, true} {
+		var buf bytes.Buffer
+		if code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch", Yes: yes}); code != 0 {
+			t.Fatalf("exit=%d out=%s", code, buf.String())
+		}
+		if want := map[bool]string{false: "would delete 1 (+1 word-synced companion(s)),", true: "deleted 1 (+1 word-synced companion(s)),"}[yes]; !strings.Contains(buf.String(), want) {
+			t.Errorf("yes=%v: summary does not count the companion (%q): %s", yes, want, buf.String())
+		}
+	}
+	// Apply counts what it DELETED: a failed companion delete is not claimed.
+	b := filepath.Join(root, "ArtistB", "b.lrc")
+	writePurgeSidecar(t, b, "musixmatch")
+	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(b), "b.lrc", "done")
+	if err := os.WriteFile(filepath.Join(root, "ArtistB", "b.elrc"), []byte("[by:canticle]\n[00:01.00]<00:01.00>hi\n"), 0o600); err != nil || os.Chmod(filepath.Dir(b), 0o500) != nil {
+		t.Fatalf("read-only fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(b), 0o700) })
+	var buf bytes.Buffer
+	runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch", Yes: true})
+	if strings.Contains(buf.String(), "word-synced companion") || !strings.Contains(buf.String(), "deleted 0,") {
+		t.Errorf("summary claims a companion delete that failed: %s", buf.String())
 	}
 }
 

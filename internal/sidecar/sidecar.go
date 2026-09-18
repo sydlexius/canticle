@@ -27,6 +27,8 @@ package sidecar
 import (
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"testing"
 )
 
 // Kind is the flavor of lyric content a sidecar extension carries.
@@ -72,6 +74,47 @@ var table = []entry{
 	{kind: KindWordSynced, ext: ExtWordSynced, active: false},
 }
 
+// override, when non-nil, replaces the table's active flag for the Kinds it
+// names. Only ActivateForTest writes it; production never does, so the table's
+// own flag remains the single switch.
+var override atomic.Pointer[map[Kind]bool]
+
+// isActive reports e's effective active flag.
+func isActive(e entry) bool {
+	if m := override.Load(); m != nil {
+		if v, ok := (*m)[e.kind]; ok {
+			return v
+		}
+	}
+	return e.active
+}
+
+// ActivateForTest makes k ACTIVE for the rest of the calling test, exactly as
+// flipping its table flag would: IsSidecar, Extensions and Active all move
+// together, so a test exercises the post-flip semantics rather than a
+// per-package imitation of them. The previous state is restored on cleanup.
+//
+// It is exported because Go has no cross-package test-only export, and every
+// package that must behave correctly once a declared Kind flips (realign,
+// revalidate through realign.Apply, purgeprovenance) needs to reach the SAME
+// switch. It panics outside a test binary, so no production path can flip a
+// Kind. Tests that call it must not run in parallel with each other.
+func ActivateForTest(t interface{ Cleanup(func()) }, k Kind) {
+	if !testing.Testing() {
+		panic("sidecar.ActivateForTest called outside a test binary")
+	}
+	prev := override.Load()
+	m := map[Kind]bool{}
+	if prev != nil {
+		for kk, v := range *prev {
+			m[kk] = v
+		}
+	}
+	m[k] = true
+	override.Store(&m)
+	t.Cleanup(func() { override.Store(prev) })
+}
+
 // IsSidecar reports whether name (a file name or path) carries an ACTIVE lyric
 // sidecar extension. The comparison is case-insensitive, matching the
 // realign walk's historical behavior.
@@ -80,7 +123,7 @@ var table = []entry{
 func IsSidecar(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
 	for _, e := range table {
-		if e.active && e.ext == ext {
+		if isActive(e) && e.ext == ext {
 			return true
 		}
 	}
@@ -93,7 +136,7 @@ func IsSidecar(name string) bool {
 func Extensions() []string {
 	out := make([]string, 0, len(table))
 	for _, e := range table {
-		if e.active {
+		if isActive(e) {
 			out = append(out, e.ext)
 		}
 	}
@@ -134,7 +177,7 @@ func Ext(k Kind) string {
 func Active(k Kind) bool {
 	for _, e := range table {
 		if e.kind == k {
-			return e.active
+			return isActive(e)
 		}
 	}
 	return false

@@ -164,3 +164,19 @@ func TestStemOf(t *testing.T) {
 		})
 	}
 }
+
+// TestActivateForTest pins the seam every #986 flag-state test relies on: it
+// moves IsSidecar, Extensions and Active together, as the table flip will, and
+// restores the declared state on cleanup.
+func TestActivateForTest(t *testing.T) {
+	t.Run("active", func(t *testing.T) {
+		ActivateForTest(t, KindWordSynced)
+		if !Active(KindWordSynced) || !IsSidecar("a.elrc") || len(Extensions()) != 3 {
+			t.Fatalf("override did not activate the kind: active=%v isSidecar=%v exts=%v",
+				Active(KindWordSynced), IsSidecar("a.elrc"), Extensions())
+		}
+	})
+	if Active(KindWordSynced) || IsSidecar("a.elrc") {
+		t.Fatalf("override leaked past its test")
+	}
+}
