@@ -50,7 +50,10 @@ func TestRunProvenanceBackfill_LeavesWordSyncedCompanionUntouched(t *testing.T) 
 		if code := runProvenanceBackfill(ctx, &out, args); code != 0 {
 			t.Fatalf("exit=%d, output=%s", code, out.String())
 		}
-		lrc, _ := os.ReadFile(lrcPath)
+		lrc, err := os.ReadFile(lrcPath)
+		if err != nil {
+			t.Fatalf("read .lrc: %v", err)
+		}
 		if !strings.Contains(string(lrc), "[source:musixmatch]") {
 			t.Fatalf(".lrc was not tagged: %q", lrc)
 		}
