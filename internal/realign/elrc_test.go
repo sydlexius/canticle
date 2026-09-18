@@ -405,6 +405,54 @@ func TestRename_BareLrcNeverLandsBesideAStaleOwnedCompanion(t *testing.T) {
 	})
 }
 
+// The #997 guard is specific to a bare .lrc and reaches every match tier:
+//   - a .txt orphan (unsynced or instrumental) still moves onto a stem with a
+//     stale owned .elrc: nothing pairs a .elrc with a .txt, and the writer's next
+//     .txt write at that stem removes the companion anyway;
+//   - a heuristic (name) match of a bare .lrc is refused exactly like an exact one.
+func TestRename_StaleOwnedCompanionGuardScope(t *testing.T) {
+	for _, c := range []struct {
+		name, orphan, body string
+		isrc               map[string]string
+		wantMoves          int
+	}{
+		{"txt orphan still moves", "old.txt", "[isrc:US1]\nsome words\n", map[string]string{"new.flac": "US1"}, 1},
+		{"heuristic lrc refused", "01 Song Title.lrc", "[00:01.00]hi\n", nil, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := tempRoot(t)
+			dir := filepath.Join(root, "Album")
+			audioName := "new.flac"
+			if c.isrc == nil {
+				audioName = "01 Song Title (Remastered).flac"
+			}
+			audio := filepath.Join(dir, audioName)
+			write(t, audio, "a")
+			write(t, filepath.Join(dir, c.orphan), c.body)
+			stale := filepath.Join(dir, strings.TrimSuffix(audioName, ".flac")+".elrc")
+			write(t, stale, ownedElrc)
+			isrc := map[string]string{}
+			for k, v := range c.isrc {
+				isrc[filepath.Join(dir, k)] = v
+			}
+			r, lib := newRealigner(root, defaultCfg(), isrc)
+			res, err := r.PlanLibrary(lib)
+			if err != nil {
+				t.Fatalf("PlanLibrary: %v", err)
+			}
+			if len(res.Moves) != c.wantMoves {
+				t.Fatalf("moves=%+v skips=%+v; want %d move(s)", res.Moves, res.Skips, c.wantMoves)
+			}
+			if c.wantMoves == 0 && (len(res.Skips) != 1 || !strings.Contains(res.Skips[0].Reason, "word-synced companion")) {
+				t.Fatalf("skips=%+v; want one stale-companion conflict", res.Skips)
+			}
+			if b, err := os.ReadFile(stale); err != nil || string(b) != ownedElrc {
+				t.Errorf("stale companion = %q, %v; want it untouched at plan time", b, err)
+			}
+		})
+	}
+}
+
 // A FOREIGN .elrc at the target blocks nothing (the writer never touches one
 // either) and is byte-identical afterwards. #997.
 func TestRename_BareLrcBesideForeignCompanionMovesAndLeavesItAlone(t *testing.T) {
