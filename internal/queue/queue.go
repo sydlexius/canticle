@@ -364,10 +364,13 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 // dequeueRandomizedSQL claims the next ready item, shuffling within a priority
 // tier (anti-scraping fingerprint). The ORDER BY lives inside the subquery, so
 // each variant is a complete, standalone statement (no concatenation, no
-// interpolation -> no gosec concern).
+// interpolation -> no gosec concern). Like every claim path it clears batch_seq,
+// so a row buffered before batching was switched off cannot carry its stamp into
+// processing and later pin a buffer slot it can never be served from (#999).
 const dequeueRandomizedSQL = `UPDATE work_queue
          SET status = 'processing',
-             prev_status = status
+             prev_status = status,
+             batch_seq = NULL
          WHERE id = (
              SELECT id
              FROM work_queue
@@ -380,10 +383,12 @@ const dequeueRandomizedSQL = `UPDATE work_queue
                    miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`
 
 // dequeueDeterministicSQL claims the next ready item in stable FIFO order within
-// a priority tier (created_at, then id).
+// a priority tier (created_at, then id). Clears batch_seq for the same reason as
+// dequeueRandomizedSQL (#999).
 const dequeueDeterministicSQL = `UPDATE work_queue
          SET status = 'processing',
-             prev_status = status
+             prev_status = status,
+             batch_seq = NULL
          WHERE id = (
              SELECT id
              FROM work_queue
@@ -494,6 +499,22 @@ func (q *DBQueue) dequeueOnce(ctx context.Context) (WorkItem, error) {
 	return item, nil
 }
 
+// clearStaleBatchSeqSQL drops the batch_seq stamp from every buffered row the
+// batched claim can no longer serve: its status left the eligible set or its
+// next_attempt_at moved past now (#999). The predicate is the exact negation of
+// the claim's (dequeueBatchedClaimSQL) and the "Up next" panel's
+// (reports.UpNext) eligibility test, so afterwards "stamped" and "servable" are
+// the same set. The batch_seq IS NOT NULL term keeps it on the partial index
+// idx_work_queue_batch_seq, so its cost is bounded by the buffer, not the table.
+// A cleared row is simply unbuffered: once eligible again it is redrawn by a
+// later refill like any other row, instead of jumping the buffer on a stale low
+// batch_seq.
+const clearStaleBatchSeqSQL = `UPDATE work_queue
+         SET batch_seq = NULL
+         WHERE batch_seq IS NOT NULL
+           AND NOT (status IN ('pending', 'failed', 'deferred')
+                    AND next_attempt_at <= ?)`
+
 // refillBuffer tops the lookahead buffer up to batchSize by drawing the next
 // eligible unbuffered rows and appending them AFTER the current max batch_seq. It
 // is what keeps the buffer populated between the worker's claim cycles (#587):
@@ -504,7 +525,21 @@ func (q *DBQueue) dequeueOnce(ctx context.Context) (WorkItem, error) {
 // always sort after the rows already buffered -- so the lowest-batch_seq claim
 // order is preserved and no existing buffered row is reordered. A no-op once the
 // buffer already holds batchSize rows. Runs inside the caller's transaction.
+//
+// Stale stamps are cleared first (#999). A stamped row that left eligibility
+// (deferred into the future, or claimed through a path that did not clear its
+// stamp) can never be claimed, and the claim was the only thing that cleared
+// batch_seq, so it would be counted as "full" by every census and shrink the
+// buffer permanently. Clearing here, inside the refill transaction, rather than
+// in a one-shot migration, heals existing databases on the first Dequeue AND any
+// stamp that goes stale later, whatever the path. After the clear every stamped
+// row is servable, so the census COUNT is the servable count, while
+// MAX(batch_seq) is still taken over every remaining stamp, so new stamps append
+// after all of them (#587).
 func (q *DBQueue) refillBuffer(ctx context.Context, tx *sql.Tx, now string) error {
+	if _, err := tx.ExecContext(ctx, clearStaleBatchSeqSQL, now); err != nil {
+		return fmt.Errorf("queue: clear stale buffer stamps: %w", err)
+	}
 	var count, maxSeq int64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(MAX(batch_seq), 0) FROM work_queue WHERE batch_seq IS NOT NULL`,
@@ -545,7 +580,14 @@ func (q *DBQueue) dequeueBatched(ctx context.Context, now string) (WorkItem, err
 	}
 	item, err := scanWorkItem(tx.QueryRowContext(ctx, dequeueBatchedClaimSQL, now))
 	if errors.Is(err, sql.ErrNoRows) {
-		return WorkItem{}, sql.ErrNoRows // pool genuinely empty (refill drew nothing)
+		// Pool genuinely empty (refill drew nothing). Commit anyway: the refill
+		// may have cleared stale stamps (#999), and rolling that back would let
+		// an idle queue keep a stale row's old batch_seq until it came due and
+		// jumped the buffer.
+		if cerr := tx.Commit(); cerr != nil {
+			return WorkItem{}, fmt.Errorf("queue: commit empty batched dequeue tx: %w", cerr)
+		}
+		return WorkItem{}, sql.ErrNoRows
 	}
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: batched claim: %w", err)
