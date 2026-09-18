@@ -195,13 +195,14 @@ type cueRef struct {
 // correlateRichSync binds each line entry to at most one cue BY TIMESTAMP and
 // emits one WordTiming per chunk of every bound entry.
 //
-// Pairing by slice index is forbidden, and not as a matter of taste: it is issue
-// #489, an open bug here, where writeSyncedLRC pairs a bilingual translation to
-// its original by index and silently misaligns the moment the cue counts
-// diverge. These two payloads are at least as free to diverge -- different
-// endpoints, different pipelines, and parseSubtitleBody's LRC branch runs
-// lrcnormalize.ParseBody, which EXPANDS a compressed multi-timestamp line into
-// one cue per timestamp, something richsync has no reason to have done.
+// Pairing by slice index is forbidden, and not as a matter of taste: issue
+// #489 was exactly this mistake in writeSyncedLRC, which paired a bilingual
+// translation to its original by index and silently misaligned the moment the
+// cue counts diverged (fixed by pairBilingualTranslations, same by-timestamp
+// approach as here). These two payloads are at least as free to diverge --
+// different endpoints, different pipelines, and parseSubtitleBody's LRC branch
+// runs lrcnormalize.ParseBody, which EXPANDS a compressed multi-timestamp line
+// into one cue per timestamp, something richsync has no reason to have done.
 //
 // Why a downstream guard cannot cover this: an index-paired implementation
 // attaches one line's timings to another line's text, a2Words'
