@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/db"
@@ -328,6 +329,47 @@ func TestRunOnce_CategoricalWithUntriedLaneWaitsBounded(t *testing.T) {
 	}
 	if got, ok := rig.cached(t); ok {
 		t.Fatalf("cache holds %+v; a timing-refused lyric must never be cached", got)
+	}
+}
+
+// TestRunOnce_UntriedLaneRecoversAfterWait is the path the bounded wait exists
+// for: the other lane fails auth on the first dispatch (so row 1 is parked),
+// then recovers once its breaker window elapses. The re-dispatch must reach it
+// and settle the row done under that lane with its lyric written and cached,
+// not settle categorical.
+func TestRunOnce_UntriedLaneRecoversAfterWait(t *testing.T) {
+	ctx := context.Background()
+	secondary := &fakeFetcher{err: musixmatch.ErrUnauthorized}
+	rig, w := newFallthroughRig(t, byTitleFetcher{
+		"Synthetic Title": fallthroughSong(400, "wrong recording"),
+	}, secondary)
+	now := time.Now()
+	w.setClock(func() time.Time { return now })
+
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	if status, _, _ := rig.row(t); status != queue.StatusDeferred {
+		t.Fatalf("row after pass 1 = %q; want deferred while the lane is untried", status)
+	}
+
+	secondary.err = nil
+	secondary.song = fallthroughSong(90, "right recording")
+	now = now.Add(w.circuitOpenDuration + time.Minute)
+	if _, err := rig.db.Exec(`UPDATE work_queue SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, rig.id); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	if status, lane, outcome := rig.row(t); status != queue.StatusDone || lane != providers.PetitLyrics || outcome == "categorical" {
+		t.Fatalf("row = (%q, %q, %q); want done under %q, not categorical", status, lane, outcome, providers.PetitLyrics)
+	}
+	if n := len(rig.writer.songs); n != 1 || rig.writer.songs[0].Subtitles.Lines[0].Text != "right recording" {
+		t.Fatalf("written = %+v; want only the recovered lane's lyric", rig.writer.songs)
+	}
+	if got, ok := rig.cached(t); !ok || got.Subtitles.Lines[0].Text != "right recording" {
+		t.Fatalf("cache = (%+v, %v); want the recovered lane's lyric", got, ok)
 	}
 }
 
