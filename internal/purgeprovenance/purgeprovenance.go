@@ -83,13 +83,22 @@ type Options struct {
 	// BEFORE the file is deleted, so a Report error aborts that sidecar's
 	// deletion (backup-first): the caller writes and fsyncs a restorable JSONL
 	// record here.
+	//
+	// It is ALSO invoked once for each matched sidecar's owned word-synced
+	// companion (#986), right after that sidecar's own call and before the
+	// companion is deleted, with a Record carrying only Path (no database IDs
+	// or identities: the rows belong to the sidecar's record). A failure there
+	// likewise aborts the pair's deletion.
 	Report func(Record) error
 }
 
 // Record describes one matched sidecar and the database rows coupled to it, for
-// preview output and the restorable JSONL backup.
+// preview output and the restorable JSONL backup. A record for an owned
+// word-synced companion (#986) carries only Path; its rows are on the record
+// of the sidecar it travels with.
 type Record struct {
-	// Path is the matched sidecar file (.lrc or .txt).
+	// Path is the matched sidecar file (.lrc or .txt), or its owned
+	// word-synced companion.
 	Path string
 	// ScanResultIDs are the scan_results rows whose expected output is this
 	// sidecar (usually one; more than one only when distinct scan_results rows

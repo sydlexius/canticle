@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/sidecar"
@@ -202,6 +203,11 @@ func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwnedAndActive(t *testing.T)
 				if b, err := os.ReadFile(elrc); c.wantFollowed == (err == nil) || (!c.wantFollowed && string(b) != c.body) {
 					t.Fatalf("companion beside the .lrc: %q, %v; want gone=%v", b, err, c.wantFollowed)
 				}
+				for _, name := range dirNames(t, filepath.Dir(lrc)) {
+					if strings.Contains(name, ".purge-") {
+						t.Errorf("staged companion left behind after a successful %s: %s", kind, name)
+					}
+				}
 				var rec backupRecord
 				if err := json.Unmarshal([]byte(strings.TrimSpace(backup)), &rec); err != nil {
 					t.Fatalf("backup: %v (%s)", err, backup)
@@ -221,29 +227,43 @@ func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwnedAndActive(t *testing.T)
 	}
 }
 
+// dirNames lists dir's entries, so a test can see a stray staged companion.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
 // A refused remediation leaves the .lrc, never overwrites an occupied
-// destination, and keeps the companion (backup line dropped) -- except a purge
-// failing AFTER the companion was deleted, which must keep the line.
+// destination, and keeps the companion with its backup line dropped. That
+// includes a purge failing AFTER its companion was staged: the stage is put
+// back, so the pair is exactly as it was and nothing else is left beside it.
 func TestRemediation_RefusalsKeepThePairOrItsRecord(t *testing.T) {
 	cases := []struct {
-		name     string
-		kind     string
-		mut      func(t *testing.T, mv *Move)
-		elrcGone bool
+		name string
+		kind string
+		mut  func(t *testing.T, mv *Move)
 	}{
-		{"occupied lrc target", KindQuarantine, func(t *testing.T, mv *Move) { write(t, mv.Target, "EARLIER") }, false},
-		{"occupied companion target", KindQuarantine, func(t *testing.T, mv *Move) { write(t, companionTarget(mv.Target), "EARLIER") }, false},
+		{"occupied lrc target", KindQuarantine, func(t *testing.T, mv *Move) { write(t, mv.Target, "EARLIER") }},
+		{"occupied companion target", KindQuarantine, func(t *testing.T, mv *Move) { write(t, companionTarget(mv.Target), "EARLIER") }},
 		{"symlinked lrc", KindPurge, func(t *testing.T, mv *Move) {
 			real := mv.Orphan + ".real"
 			if err := os.Rename(mv.Orphan, real); err != nil || os.Symlink(real, mv.Orphan) != nil {
 				t.Fatalf("symlink fixture: %v", err)
 			}
-		}, false},
-		{"demote without text path", KindDemote, func(_ *testing.T, mv *Move) { mv.TextPath = "" }, false},
-		{"quarantine without target", KindQuarantine, func(_ *testing.T, mv *Move) { mv.Target = "" }, false},
+		}},
+		{"demote without text path", KindDemote, func(_ *testing.T, mv *Move) { mv.TextPath = "" }},
+		{"quarantine without target", KindQuarantine, func(_ *testing.T, mv *Move) { mv.Target = "" }},
 		{"purge whose text write fails", KindPurge, func(_ *testing.T, mv *Move) {
 			mv.TextPath, mv.TextBody = filepath.Join(filepath.Dir(mv.Orphan), "nodir", "x.txt"), "alpha\n"
-		}, true},
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -252,16 +272,92 @@ func TestRemediation_RefusalsKeepThePairOrItsRecord(t *testing.T) {
 			if got.Err == nil || !exists(lrc) {
 				t.Fatalf("%s: err=%v lrc kept=%v; want a refusal with the .lrc in place", c.name, got.Err, exists(lrc))
 			}
-			if b, err := os.ReadFile(elrc); c.elrcGone == (err == nil) || (!c.elrcGone && string(b) != ownedElrc) {
-				t.Errorf("companion: %q, %v; want gone=%v", b, err, c.elrcGone)
+			if b, err := os.ReadFile(elrc); err != nil || string(b) != ownedElrc {
+				t.Errorf("companion: %q, %v; want it untouched", b, err)
+			}
+			for _, name := range dirNames(t, filepath.Dir(lrc)) {
+				if strings.Contains(name, ".purge-") {
+					t.Errorf("staged companion left behind: %s", name)
+				}
 			}
 			for _, p := range []string{target, companionTarget(target)} {
 				if b, err := os.ReadFile(p); target != "" && err == nil && string(b) != "EARLIER" {
 					t.Errorf("destination %s written by a refused action: %q", filepath.Base(p), b)
 				}
 			}
-			if kept := strings.Contains(backup, `"companion_path"`); kept != c.elrcGone {
-				t.Errorf("backup companion record kept=%v; want %v: %q", kept, c.elrcGone, backup)
+			if strings.TrimSpace(backup) != "" {
+				t.Errorf("backup line kept for a refusal that left the pair untouched: %q", backup)
+			}
+		})
+	}
+}
+
+// A purge whose .lrc step fails AND whose staged companion cannot be put back
+// has mutated the library: the backup line naming the companion must stay.
+func TestRemediation_PurgeRestoreFailureKeepsTheRecord(t *testing.T) {
+	sidecar.ActivateForTest(t, sidecar.KindWordSynced)
+	prev := renameFile
+	renameFile = func(oldpath, newpath string) error {
+		if strings.Contains(filepath.Base(oldpath), ".purge-") {
+			return os.ErrPermission
+		}
+		return prev(oldpath, newpath)
+	}
+	t.Cleanup(func() { renameFile = prev })
+	lrc, elrc, _, got, backup := remediate(t, KindPurge, ownedElrc, func(_ *testing.T, mv *Move) {
+		mv.TextPath, mv.TextBody = filepath.Join(filepath.Dir(mv.Orphan), "nodir", "x.txt"), "alpha\n"
+	})
+	if got.Err == nil || !exists(lrc) || exists(elrc) {
+		t.Fatalf("err=%v lrc=%v elrc=%v; want a failure with the .lrc kept and the companion still staged", got.Err, exists(lrc), exists(elrc))
+	}
+	if !strings.Contains(backup, `"companion_path"`) {
+		t.Errorf("backup line dropped although the companion could not be restored: %q", backup)
+	}
+}
+
+// A cross-device companion move whose copy landed but whose source could not
+// be removed leaves both copies: that is a mutation, so the backup line stays.
+// On the remediation path the companion goes first, so the .lrc is not touched;
+// on the rename path the .lrc already moved and stays with its companion
+// rather than being undone away from it.
+func TestCompanion_PartialCrossDeviceMoveKeepsTheRecord(t *testing.T) {
+	for _, path := range []string{"quarantine", "rename"} {
+		t.Run(path, func(t *testing.T) {
+			sidecar.ActivateForTest(t, sidecar.KindWordSynced)
+			prevRename, prevRemove := renameFile, removeSource
+			renameFile = func(oldpath, newpath string) error {
+				if strings.HasSuffix(oldpath, ".elrc") {
+					return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EXDEV}
+				}
+				return prevRename(oldpath, newpath)
+			}
+			removeSource = func(string) error { return os.ErrPermission }
+			t.Cleanup(func() { renameFile, removeSource = prevRename, prevRemove })
+
+			var got Applied
+			var backup, newLrc, newElrc string
+			if path == "quarantine" {
+				var lrc, target string
+				lrc, _, target, got, backup = remediate(t, KindQuarantine, ownedElrc, nil)
+				if exists(target) {
+					t.Errorf("the .lrc was quarantined after its companion step failed")
+				}
+				newLrc, newElrc = lrc, companionTarget(target)
+			} else {
+				var apply func() ([]Applied, string)
+				var a []Applied
+				_, newLrc, newElrc, _, apply = planRename(t, ownedElrc, "")
+				a, backup = apply()
+				got = a[0]
+			}
+			if got.Err == nil {
+				t.Fatalf("a failed source unlink reported success")
+			}
+			if !exists(newElrc) || !exists(newLrc) {
+				t.Errorf("lrc=%v companion copy=%v; want both present", exists(newLrc), exists(newElrc))
+			}
+			if !strings.Contains(backup, `"companion_new_path"`) {
+				t.Errorf("backup line dropped although the companion copy landed: %q", backup)
 			}
 		})
 	}
