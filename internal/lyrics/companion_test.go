@@ -164,7 +164,8 @@ func TestWriteLRC_CompanionGateOffLeavesForeignFile(t *testing.T) {
 func seedCompanion(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "song.elrc")
-	if err := os.WriteFile(p, []byte("[00:01.00]<00:01.00>stale\n"), 0o600); err != nil {
+	// Tagged as canticle's own: only such a companion is ever removed.
+	if err := os.WriteFile(p, []byte("[by:canticle]\n[00:01.00]<00:01.00>stale\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -313,6 +314,51 @@ func TestWriteLRC_CompanionWrittenAfterLRC(t *testing.T) {
 		t.Fatalf("want a companion write error, got %v", err)
 	}
 	mustExist(t, filepath.Join(dir, "song.lrc"))
+}
+
+// TestWriteLRC_StaleCompanionRemovedBeforeLRC: the old companion is removed
+// BEFORE the .lrc is replaced, not after. That order is what guarantees a
+// crash or a failed companion write never leaves a companion describing the
+// lyric this write replaced. Proven by failing the .lrc write itself: the
+// stale companion must already be gone.
+func TestWriteLRC_StaleCompanionRemovedBeforeLRC(t *testing.T) {
+	dir := t.TempDir()
+	elrc := seedCompanion(t, dir)
+	// A non-empty directory at the .lrc path makes its final Remove fail.
+	if err := os.MkdirAll(filepath.Join(dir, "song.lrc", "x"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := modeWriter(false, true).WriteLRC(a2Song(), "song.lrc", dir); err == nil {
+		t.Fatal("want an error when the .lrc cannot be written")
+	}
+	mustNotExist(t, elrc)
+}
+
+// TestWriteLRC_ForeignCompanionNeverRemoved: a .elrc without [by:canticle]
+// is another tool's or the operator's. Neither an off-mode rewrite nor a
+// demotion may delete it.
+func TestWriteLRC_ForeignCompanionNeverRemoved(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		song models.Song
+	}{
+		{"off-mode rewrite", a2Song()},
+		{"demotion", guardSong(100, cue(10, "first line"), cue(120, "last line"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			elrc := filepath.Join(dir, "song.elrc")
+			if err := os.WriteFile(elrc, []byte("[00:01.00]<00:01.00>foreign\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := modeWriter(false, false).WriteLRC(tc.song, "song.lrc", dir); err != nil {
+				t.Fatalf("WriteLRC: %v", err)
+			}
+			if got := readFileString(t, elrc); !strings.Contains(got, "foreign") {
+				t.Errorf("foreign companion was modified or removed: %q", got)
+			}
+		})
+	}
 }
 
 // TestWriteLRC_FailedLRCWritesNoCompanion is the other half of the crash order:

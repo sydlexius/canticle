@@ -3309,6 +3309,25 @@ func TestConfigureWriterWordSync(t *testing.T) {
 	}
 }
 
+// TestConfigureWriterWordSyncCompanion covers the companion half of the mode
+// wiring. Its observable effect is gated off until slice 4 of #986, so it is
+// read back from the writer; without this, sidecar mode could be wired to
+// nothing and every other test would stay green.
+func TestConfigureWriterWordSyncCompanion(t *testing.T) {
+	for mode, want := range map[config.WordSyncMode]bool{
+		config.WordSyncModeSidecar: true,
+		config.WordSyncModeBoth:    true,
+		config.WordSyncModeOff:     false,
+		config.WordSyncModeInline:  false,
+	} {
+		w := lyrics.NewLRCWriter()
+		configureWriterWordSync(w, config.Config{Output: config.OutputConfig{WordSyncMode: mode}})
+		if got := w.WordSyncCompanion(); got != want {
+			t.Errorf("mode %q: companion = %v, want %v", mode, got, want)
+		}
+	}
+}
+
 // TestConfigValueWordSync covers the CLI `config get` arm. configKeys lists the
 // key, so an operator can ask for it; a missing configValue arm would answer
 // with a bare empty string rather than the setting.

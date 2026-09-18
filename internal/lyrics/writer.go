@@ -146,6 +146,11 @@ func (w *LRCWriter) SetWordSyncCompanion(enabled bool) {
 	w.wordSyncCompanion = enabled
 }
 
+// WordSyncCompanion reports the SetWordSyncCompanion setting.
+func (w *LRCWriter) WordSyncCompanion() bool {
+	return w.wordSyncCompanion
+}
+
 // companionActive reports whether companion files are canticle's to write and
 // remove. See the companionGate field.
 func (w *LRCWriter) companionActive() bool {
@@ -196,6 +201,9 @@ func isUnsafeBaseName(name string) bool {
 // WriteLRC writes the song lyrics to an LRC or TXT file in the given output directory.
 // Only synced lyrics are written as .lrc; unsynced lyrics and instrumentals are
 // written as .txt (the .lrc extension is reserved for timed/synced content).
+// When the word-synced companion is active (#986, see planCompanion) it also
+// writes or removes <stem>.elrc, and can then return an error AFTER the .lrc
+// has already landed (a failed companion write).
 func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) error {
 	// Eligibility gate -- determine content type before touching disk. synced
 	// drives the file extension (.lrc only for synced lyrics, .txt otherwise);
@@ -439,6 +447,15 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	companion := w.planCompanion(song, fp, synced)
 	w.selfWrites.Record(fp, oppositeSidecar(fp), companion.path)
 
+	// Any existing companion is removed BEFORE the .lrc/.txt is replaced, even
+	// when a fresh one is about to be written. The two renames cannot be atomic
+	// together, so this picks the failure: a crash or a failed companion write
+	// leaves a line-synced file and NO companion, never an older companion
+	// describing the lyric this write replaced.
+	if companion.path != "" {
+		w.removeCompanion(companion.path)
+	}
+
 	if err := writeAtomic(outdir, fn, tags, writeContent); err != nil {
 		return err
 	}
@@ -452,12 +469,9 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	slog.Info("lyrics saved", "path", fp, "kind", kind,
 		"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 
-	// Companion SECOND, strictly after the .lrc/.txt is durable. The two
-	// renames cannot be atomic together, so the order picks the failure: a
-	// crash between them leaves a clean line-synced file and no (or an older)
-	// companion, never a fresh companion beside a missing or stale .lrc.
-	switch {
-	case companion.write:
+	// Companion LAST, strictly after the .lrc/.txt is durable, so it can never
+	// sit beside a missing or stale .lrc. The old one is already gone (above).
+	if companion.write {
 		cfn := filepath.Base(companion.path)
 		body := func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual, true) }
 		if err := writeAtomic(outdir, cfn, tags, body); err != nil {
@@ -465,8 +479,6 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		}
 		slog.Info("lyrics saved", "path", companion.path, "kind", "word-synced companion",
 			"artist", song.Track.ArtistName, "track", song.Track.TrackName)
-	case companion.path != "":
-		w.removeCompanion(companion.path)
 	}
 	return nil
 }
@@ -511,13 +523,33 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) comp
 	return companionPlan{path: path}
 }
 
-// removeCompanion deletes a stale companion, best effort, recording the path
-// first so the watcher does not read canticle's own Remove as external (#685).
+// removeCompanion deletes a stale companion, best effort, but ONLY one canticle
+// wrote: a .elrc without a [by:canticle] header belongs to another tool or to
+// the operator, and word_sync_mode = off must never cost them a file. The
+// caller has already recorded path with selfwrite.
 func (w *LRCWriter) removeCompanion(path string) {
-	w.selfWrites.Record(path)
+	if !writtenByCanticle(path) {
+		return
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		slog.Warn("could not remove stale word-synced companion", "path", path, "error", err)
 	}
+}
+
+// writtenByCanticle reports whether the sidecar at path carries the
+// [by:canticle] header tag every canticle write emits. A missing or unreadable
+// file reports false, so the caller leaves it alone.
+func writtenByCanticle(path string) bool {
+	tags, _, err := parseLRCHeader(path)
+	if err != nil {
+		return false
+	}
+	for _, t := range tags {
+		if strings.EqualFold(t.key, "by") && strings.TrimSpace(t.value) == "canticle" {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveOutdir re-resolves and re-confines outdir when it falls under a
