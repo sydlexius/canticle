@@ -7,7 +7,7 @@ import (
 
 func TestExtensions(t *testing.T) {
 	got := Extensions()
-	want := []string{".lrc", ".txt"}
+	want := []string{".lrc", ".txt", ".elrc"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("Extensions() = %v, want %v", got, want)
 	}
@@ -39,7 +39,8 @@ func TestIsSidecar(t *testing.T) {
 		{"dotfile txt", ".txt", true},
 		{"dotfile unrelated", ".gitignore", false},
 		{"empty", "", false},
-		{"elrc is declared but NOT active", "song.elrc", false},
+		{"elrc is active", "song.elrc", true},
+		{"uppercase elrc", "SONG.ELRC", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,30 +51,26 @@ func TestIsSidecar(t *testing.T) {
 	}
 }
 
-// TestELRCDeclaredButInert pins the #986 slice-1 invariant: the word-synced
-// Kind EXISTS (so later slices can name it) but is NOT yet treated as a real
-// sidecar by any call site.
-//
-// THIS TEST IS EXPECTED TO FAIL when the slice that teaches the call sites to
-// handle .elrc flips the table entry to active:true. That failure is the point
-// -- it forces whoever flips it to have read this comment and confirmed that
-// realign's walk, the writer's pairing, and the settled-sidecar probe all
-// handle the new extension. Update this test IN THAT COMMIT, not before.
-func TestELRCDeclaredButInert(t *testing.T) {
+// TestELRCActive pins the #986 slice-4c state: the word-synced Kind is
+// declared AND active, so every call site that reads the active set (realign's
+// walk, the scanner's skip, the writer's companion gate, OwnedCompanionOf)
+// handles ".elrc". Deactivating it again would strand every companion already
+// written into a library, so a change here needs the same audit the flip had.
+func TestELRCActive(t *testing.T) {
 	if Ext(KindWordSynced) != ".elrc" {
-		t.Fatalf("Ext(KindWordSynced) = %q, want %q -- the Kind must be DECLARED", Ext(KindWordSynced), ".elrc")
+		t.Fatalf("Ext(KindWordSynced) = %q, want %q", Ext(KindWordSynced), ".elrc")
 	}
 	if KindOf("song.elrc") != KindWordSynced {
-		t.Fatalf("KindOf(%q) = %v, want KindWordSynced -- the Kind must be DECLARED", "song.elrc", KindOf("song.elrc"))
+		t.Fatalf("KindOf(%q) = %v, want KindWordSynced", "song.elrc", KindOf("song.elrc"))
 	}
-	if Active(KindWordSynced) {
-		t.Fatal("Active(KindWordSynced) = true: .elrc was enabled early. See this test's doc comment.")
+	if !Active(KindWordSynced) {
+		t.Fatal("Active(KindWordSynced) = false: the word-synced companion is switched off")
 	}
-	if IsSidecar("song.elrc") {
-		t.Fatal("IsSidecar(\"song.elrc\") = true: .elrc was enabled early. See this test's doc comment.")
+	if !IsSidecar("song.elrc") {
+		t.Fatal(`IsSidecar("song.elrc") = false: the word-synced companion is switched off`)
 	}
-	if slices.Contains(Extensions(), ".elrc") {
-		t.Fatal("Extensions() contains .elrc: it was enabled early. See this test's doc comment.")
+	if !slices.Contains(Extensions(), ".elrc") {
+		t.Fatal("Extensions() lacks .elrc: the word-synced companion is switched off")
 	}
 }
 
@@ -110,7 +107,7 @@ func TestExtAndActive(t *testing.T) {
 	}{
 		{KindLineSynced, ".lrc", true},
 		{KindUnsynced, ".txt", true},
-		{KindWordSynced, ".elrc", false},
+		{KindWordSynced, ".elrc", true},
 		{KindUnknown, "", false},
 		{Kind(99), "", false},
 	}
@@ -166,8 +163,10 @@ func TestStemOf(t *testing.T) {
 }
 
 // TestActivateForTest pins the seam every #986 flag-state test relies on: it
-// moves IsSidecar, Extensions and Active together, as the table flip will, and
-// restores the declared state on cleanup.
+// moves IsSidecar, Extensions and Active together, as a table flip does, and
+// restores the previous override state on cleanup. Every declared Kind is
+// active now, so its observable effect is nil; what is left to pin is that the
+// call is harmless on an active Kind and that its override does not leak.
 func TestActivateForTest(t *testing.T) {
 	t.Run("active", func(t *testing.T) {
 		ActivateForTest(t, KindWordSynced)
@@ -175,8 +174,11 @@ func TestActivateForTest(t *testing.T) {
 			t.Fatalf("override did not activate the kind: active=%v isSidecar=%v exts=%v",
 				Active(KindWordSynced), IsSidecar("a.elrc"), Extensions())
 		}
+		if override.Load() == nil {
+			t.Fatal("ActivateForTest installed no override")
+		}
 	})
-	if Active(KindWordSynced) || IsSidecar("a.elrc") {
-		t.Fatalf("override leaked past its test")
+	if override.Load() != nil {
+		t.Fatalf("override leaked past its test: %v", *override.Load())
 	}
 }

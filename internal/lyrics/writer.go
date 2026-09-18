@@ -112,9 +112,9 @@ type LRCWriter struct {
 	// the pair (sidecar = companion only, inline = wordSync only, both = both).
 	wordSyncCompanion bool
 	// companionGate reports whether canticle may touch companion files at all.
-	// Nil (production) reads sidecar.Active(sidecar.KindWordSynced), which is
-	// false until the realign/scan/purge/revalidate paths learn the extension
-	// (#986 slice 4): a companion those paths cannot see must never reach a
+	// Nil (production) reads sidecar.Active(sidecar.KindWordSynced), true since
+	// #986 slice 4c once the realign/scan/purge/revalidate paths learned the
+	// extension: a companion those paths cannot see must never reach a
 	// library. It is a TEST-ONLY seam; nothing outside _test files sets it.
 	companionGate func() bool
 	// companionWrite, when non-nil, replaces writeAtomic for the companion

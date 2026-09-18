@@ -243,8 +243,8 @@ func TestPrepareOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Sidecars serve would have written for the generated fixtures.
-	owned := []string{"01 - A - T.mp3", "01 - A - T.lrc", "01 - A - T.txt", "01 - A - T.lrc.orig", "02 - Q - W.mp3", ManifestName}
-	for _, n := range []string{"01 - A - T.lrc", "01 - A - T.txt", "01 - A - T.lrc.orig"} {
+	owned := []string{"01 - A - T.mp3", "01 - A - T.lrc", "01 - A - T.txt", "01 - A - T.elrc", "01 - A - T.lrc.orig", "02 - Q - W.mp3", ManifestName}
+	for _, n := range []string{"01 - A - T.lrc", "01 - A - T.txt", "01 - A - T.elrc", "01 - A - T.lrc.orig"} {
 		touch(t, filepath.Join(dir, n))
 	}
 	// Files named exactly like fixtures but NOT in the manifest are the user's.

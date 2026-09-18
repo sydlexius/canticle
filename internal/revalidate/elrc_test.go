@@ -12,7 +12,7 @@ import (
 // Revalidate remediates only through realign.Apply, so these are end-to-end
 // checks that a rejected .lrc does not leave its word-synced companion (#986)
 // behind: a bad line timing must not keep word timings derived from it. A
-// foreign companion, and every companion while the kind is inactive, stays.
+// foreign companion stays.
 func TestRemediationTakesTheOwnedCompanion(t *testing.T) {
 	cases := []struct {
 		name, body, elrc string
@@ -21,7 +21,6 @@ func TestRemediationTakesTheOwnedCompanion(t *testing.T) {
 		{"demote/owned", overrunBody, "[by:canticle]\n[00:10.00]<00:10.00>alpha\n", true, true},
 		{"quarantine/owned", categoricalBody, "[by:canticle]\n[00:10.00]<00:10.00>alpha\n", true, true},
 		{"quarantine/foreign", categoricalBody, "[00:10.00]<00:10.00>alpha\n", true, false},
-		{"quarantine/inactive", categoricalBody, "[by:canticle]\n[00:10.00]<00:10.00>alpha\n", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

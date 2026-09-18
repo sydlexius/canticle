@@ -16,8 +16,8 @@ import (
 )
 
 // gateOn forces the companion activation gate open for one writer. It is the
-// test-only seam described on LRCWriter.companionGate: the shipped gate reads
-// sidecar.Active(sidecar.KindWordSynced), which is false until slice 4 of #986.
+// test-only seam described on LRCWriter.companionGate; the shipped gate reads
+// sidecar.Active(sidecar.KindWordSynced), which is true since #986 slice 4c.
 func gateOn(w *LRCWriter) *LRCWriter {
 	w.companionGate = func() bool { return true }
 	return w
@@ -123,32 +123,43 @@ func TestWriteLRC_CompanionSkippedWhenNoLineQualifies(t *testing.T) {
 	mustNotExist(t, filepath.Join(dir, "song.elrc"))
 }
 
-// TestWriteLRC_CompanionGateOffWritesNone pins the SHIPPED state: until the
-// sidecar table activates KindWordSynced (slice 4 of #986), the default mode
-// writes no companion and the .lrc stays clean -- it must not fall back to
-// inline. When slice 4 flips the flag this test is expected to fail, and should
-// be rewritten to assert the companion instead.
-func TestWriteLRC_CompanionGateOffWritesNone(t *testing.T) {
-	if sidecar.Active(sidecar.KindWordSynced) {
-		t.Fatal("KindWordSynced is active: rewrite this test for the activated state")
+// TestWriteLRC_ShippedGateFollowsMode pins the SHIPPED state through the real
+// gate (no companionGate seam): with sidecar.KindWordSynced active (#986 slice
+// 4c) the companion switch alone decides. Companion on writes the .elrc beside
+// an unmarked .lrc; companion off -- word_sync_mode "off" or "inline" -- writes
+// no .elrc at all.
+func TestWriteLRC_ShippedGateFollowsMode(t *testing.T) {
+	if !sidecar.Active(sidecar.KindWordSynced) {
+		t.Fatal("KindWordSynced is inactive: the shipped writer can never write a companion")
 	}
-	dir := t.TempDir()
-	w := NewLRCWriter() // shipped gate, no seam
-	w.SetWordSyncCompanion(true)
-	if err := w.WriteLRC(a2Song(), "song.lrc", dir); err != nil {
-		t.Fatalf("WriteLRC: %v", err)
-	}
-	if got := dirFiles(t, dir); strings.Join(got, ",") != "song.lrc" {
-		t.Fatalf("files = %v, want only song.lrc", got)
-	}
-	if lrc := readFileString(t, filepath.Join(dir, "song.lrc")); strings.Contains(lrc, "<00:") {
-		t.Errorf("gated-off sidecar mode fell back to inline markers:\n%s", lrc)
+	for _, tc := range []struct {
+		name      string
+		companion bool
+		want      string
+	}{
+		{"companion on", true, "song.elrc,song.lrc"},
+		{"companion off", false, "song.lrc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			w := NewLRCWriter() // shipped gate, no seam
+			w.SetWordSyncCompanion(tc.companion)
+			if err := w.WriteLRC(a2Song(), "song.lrc", dir); err != nil {
+				t.Fatalf("WriteLRC: %v", err)
+			}
+			if got := dirFiles(t, dir); strings.Join(got, ",") != tc.want {
+				t.Fatalf("files = %v, want %s", got, tc.want)
+			}
+			if lrc := readFileString(t, filepath.Join(dir, "song.lrc")); strings.Contains(lrc, "<00:") {
+				t.Errorf("companion mode put inline markers in the .lrc:\n%s", lrc)
+			}
+		})
 	}
 }
 
-// TestWriteLRC_CompanionGateOffLeavesForeignFile: with the gate off canticle
-// never wrote a .elrc, so one on disk is not canticle's and a demotion must not
-// delete it.
+// TestWriteLRC_CompanionGateOffLeavesForeignFile: through the shipped gate, a
+// .elrc without [by:canticle] is not canticle's, so a demotion must not delete
+// it. (The name predates #986 slice 4c, when this ran with the gate closed.)
 func TestWriteLRC_CompanionGateOffLeavesForeignFile(t *testing.T) {
 	dir := t.TempDir()
 	elrc := filepath.Join(dir, "song.elrc")

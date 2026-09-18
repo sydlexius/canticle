@@ -2051,8 +2051,8 @@ func configureWriterWordSync(w lyrics.Writer, cfg config.Config) {
 }
 
 // wordSyncSwitches is the mode-to-switch table behind configureWriterWordSync,
-// split out so the companion half stays testable while the writer's activation
-// gate keeps the companion itself unobservable on disk. An unrecognized mode
+// split out so the companion half is testable without a fetch and a file on
+// disk. An unrecognized mode
 // (which LoadWithSources never produces) turns both off.
 func wordSyncSwitches(mode config.WordSyncMode) (inline, companion bool) {
 	return mode == config.WordSyncModeInline || mode == config.WordSyncModeBoth,

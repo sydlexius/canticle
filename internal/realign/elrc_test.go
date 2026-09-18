@@ -12,7 +12,8 @@ import (
 )
 
 // The word-synced companion (.elrc, #986) follows its .lrc through every
-// mutation here, but ONLY once sidecar.KindWordSynced is active.
+// mutation here. The Kind is active in production now (slice 4c), so the
+// ActivateForTest calls below are no-ops kept until the cleanup slice.
 
 const (
 	ownedElrc   = "[by:canticle]\n[00:01.00]<00:01.00>hi\n"
@@ -63,7 +64,7 @@ func TestRename_CompanionFollowsOnlyWhenOwnedAndActive(t *testing.T) {
 		active         bool
 		body, occupied string
 		wantFollowed   bool
-	}{{"owned", true, ownedElrc, "", true}, {"foreign", true, foreignElrc, "", false}, {"inactive", false, ownedElrc, "", false}, {"blocked", true, ownedElrc, foreignElrc, false}} {
+	}{{"owned", true, ownedElrc, "", true}, {"foreign", true, foreignElrc, "", false}, {"blocked", true, ownedElrc, foreignElrc, false}} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.active {
 				sidecar.ActivateForTest(t, sidecar.KindWordSynced)
@@ -90,7 +91,7 @@ func TestRename_CompanionFollowsOnlyWhenOwnedAndActive(t *testing.T) {
 
 // A lone .elrc (foreign, or stranded by a crash) is never coverage: counting it
 // turns an ambiguous directory into a wrong-winner auto-move, or hides the gap
-// a correct re-attachment needs. Active must plan exactly as inactive.
+// a correct re-attachment needs.
 func TestClassify_LoneCompanionIsNotCoverage(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -102,25 +103,20 @@ func TestClassify_LoneCompanionIsNotCoverage(t *testing.T) {
 		{"foreign hides the only gap", map[string]string{"01 Song.flac": "a", "01 Song.elrc": foreignElrc, "Song.lrc": "[00:01.00]hi\n"}, 1},
 	}
 	for _, c := range cases {
-		for _, active := range []bool{true, false} {
-			t.Run(c.name+map[bool]string{true: "/active", false: "/inactive"}[active], func(t *testing.T) {
-				if active {
-					sidecar.ActivateForTest(t, sidecar.KindWordSynced)
-				}
-				root := tempRoot(t)
-				for name, body := range c.files {
-					write(t, filepath.Join(root, "Album", name), body)
-				}
-				r, lib := newRealigner(root, defaultCfg(), nil)
-				res, err := r.PlanLibrary(lib)
-				if err != nil {
-					t.Fatalf("PlanLibrary: %v", err)
-				}
-				if len(res.Moves) != c.wantMoves {
-					t.Fatalf("moves=%+v skips=%+v; want %d move(s)", res.Moves, res.Skips, c.wantMoves)
-				}
-			})
-		}
+		t.Run(c.name, func(t *testing.T) {
+			root := tempRoot(t)
+			for name, body := range c.files {
+				write(t, filepath.Join(root, "Album", name), body)
+			}
+			r, lib := newRealigner(root, defaultCfg(), nil)
+			res, err := r.PlanLibrary(lib)
+			if err != nil {
+				t.Fatalf("PlanLibrary: %v", err)
+			}
+			if len(res.Moves) != c.wantMoves {
+				t.Fatalf("moves=%+v skips=%+v; want %d move(s)", res.Moves, res.Skips, c.wantMoves)
+			}
+		})
 	}
 }
 
@@ -182,8 +178,8 @@ func remediate(t *testing.T, kind, elrcBody string, mut func(*testing.T, *Move))
 	return lrc, elrc, mv.Target, got, backup
 }
 
-// An owned companion of an active Kind goes with its remediated .lrc and is
-// recorded in the backup; a foreign one, or any while inactive, is untouched.
+// An owned companion goes with its remediated .lrc and is recorded in the
+// backup; a foreign one is untouched.
 func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwnedAndActive(t *testing.T) {
 	for _, kind := range []string{KindDemote, KindQuarantine, KindPurge} {
 		for _, c := range []struct {
@@ -191,7 +187,7 @@ func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwnedAndActive(t *testing.T)
 			active       bool
 			body         string
 			wantFollowed bool
-		}{{"owned", true, ownedElrc, true}, {"foreign", true, foreignElrc, false}, {"inactive", false, ownedElrc, false}} {
+		}{{"owned", true, ownedElrc, true}, {"foreign", true, foreignElrc, false}} {
 			t.Run(kind+"/"+c.name, func(t *testing.T) {
 				if c.active {
 					sidecar.ActivateForTest(t, sidecar.KindWordSynced)

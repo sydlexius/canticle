@@ -19,9 +19,11 @@
 //
 // ACTIVE vs DECLARED. A Kind can be declared here before the call sites know
 // how to handle it. Extensions()/IsSidecar report only the ACTIVE set; KindOf
-// and Ext cover every declared Kind. KindWordSynced (".elrc", #986) is declared
-// and NOT active: turning it on before the call sites learn to move, pair and
-// settle it would orphan files with no code to handle them.
+// and Ext cover every declared Kind. Every Kind declared today is active:
+// KindWordSynced (".elrc", #986) was declared inactive first and switched on
+// only once realign, revalidate, purgeprovenance, the scanner and the writer had
+// learned to move, pair and settle it. A future Kind should follow the same
+// order, because an active Kind the call sites cannot handle orphans files.
 package sidecar
 
 import (
@@ -41,11 +43,10 @@ const (
 	KindLineSynced
 	// KindUnsynced is plain, untimed lyric text (".txt").
 	KindUnsynced
-	// KindWordSynced is word-level synced lyrics (".elrc").
-	//
-	// DECLARED BUT NOT ACTIVE (#986). Nothing produces it and IsSidecar reports
-	// false for ".elrc"; only the slice that teaches the call sites to handle
-	// it flips the entry's active flag below.
+	// KindWordSynced is word-level synced lyrics (".elrc"): the companion the
+	// writer puts beside a .lrc when output.word_sync_mode asks for one (#986).
+	// It is a companion, not a sidecar in its own right: it never settles a
+	// track, and it travels with (or goes with) the .lrc it describes.
 	KindWordSynced
 )
 
@@ -71,7 +72,7 @@ type entry struct {
 var table = []entry{
 	{kind: KindLineSynced, ext: ExtLineSynced, active: true},
 	{kind: KindUnsynced, ext: ExtUnsynced, active: true},
-	{kind: KindWordSynced, ext: ExtWordSynced, active: false},
+	{kind: KindWordSynced, ext: ExtWordSynced, active: true},
 }
 
 // override, when non-nil, replaces the table's active flag for the Kinds it
@@ -99,6 +100,10 @@ func isActive(e entry) bool {
 // revalidate through realign.Apply, purgeprovenance) needs to reach the SAME
 // switch. It panics outside a test binary, so no production path can flip a
 // Kind. Tests that call it must not run in parallel with each other.
+//
+// It only ACTIVATES: there is no way to deactivate a Kind whose table flag is
+// true. With KindWordSynced now active, every existing call is a no-op; they
+// are removed in the follow-up cleanup slice of #986.
 func ActivateForTest(t interface{ Cleanup(func()) }, k Kind) {
 	if !testing.Testing() {
 		panic("sidecar.ActivateForTest called outside a test binary")
@@ -119,7 +124,7 @@ func ActivateForTest(t interface{ Cleanup(func()) }, k Kind) {
 // sidecar extension. The comparison is case-insensitive, matching the
 // realign walk's historical behavior.
 //
-// A declared-but-inactive extension (".elrc") reports false.
+// A declared-but-inactive extension reports false.
 func IsSidecar(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
 	for _, e := range table {
@@ -145,8 +150,7 @@ func Extensions() []string {
 
 // KindOf maps a file name or path to its Kind, case insensitively. It covers
 // every DECLARED Kind, active or not: a caller asking "what is this?" gets a
-// truthful answer for ".elrc" even while IsSidecar still reports it as
-// not-a-sidecar.
+// truthful answer even for an extension IsSidecar does not report.
 //
 // A bare dotted extension (".lrc") resolves, because filepath.Ext reads the
 // suffix from the FINAL dot and a leading dot is a final dot. That is how the

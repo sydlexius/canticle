@@ -3310,9 +3310,9 @@ func TestConfigureWriterWordSync(t *testing.T) {
 }
 
 // TestConfigureWriterWordSyncCompanion covers the companion half of the mode
-// wiring. Its observable effect is gated off until slice 4 of #986, so it is
-// read back from the writer; without this, sidecar mode could be wired to
-// nothing and every other test would stay green.
+// wiring, read back from the writer: without it, sidecar mode could be wired to
+// nothing here and still pass, because the on-disk result is covered in
+// internal/lyrics (TestWriteLRC_ShippedGateFollowsMode), not through this path.
 func TestConfigureWriterWordSyncCompanion(t *testing.T) {
 	for mode, want := range map[config.WordSyncMode]bool{
 		config.WordSyncModeSidecar: true,

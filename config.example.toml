@@ -90,8 +90,8 @@ dir = "lyrics"
 # bilingual_output = false
 
 # Enhanced-LRC (A2) word markers, a.k.a. karaoke-style per-word timing.
-# Default false. When true AND a provider serves word-level timings (today only
-# Petit Lyrics' word-synced tier), each cue keeps its normal [MM:SS.cc] stamp and
+# Default false. When true AND a provider serves word-level timings (Musixmatch
+# or Petit Lyrics' word-synced tier), each cue keeps its normal [MM:SS.cc] stamp and
 # gains a <MM:SS.cc> marker before each word.
 #
 # LEAVE THIS OFF UNLESS YOU KNOW YOUR PLAYER SUPPORTS A2. Support is not
