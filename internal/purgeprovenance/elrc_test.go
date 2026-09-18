@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // A purged .lrc takes its OWNED word-synced companion (#986) with it, backup
@@ -17,24 +15,20 @@ func TestRun_CompanionFollowsItsPurgedLrc(t *testing.T) {
 	const owned = "[by:canticle]\n[source:musixmatch]\n[00:01.00]<00:01.00>hi\n"
 	cases := []struct {
 		name         string
-		active       bool
 		file         string
 		dryRun       bool
 		elrc         string
 		wantDeleted  bool
 		wantReported int
 	}{
-		{"owned", true, "track.lrc", false, owned, true, 2},
-		{"owned dry run", true, "track.lrc", true, owned, false, 2},
-		{"foreign", true, "track.lrc", false, "[source:musixmatch]\n[00:01.00]<00:01.00>hi\n", false, 1},
+		{"owned", "track.lrc", false, owned, true, 2},
+		{"owned dry run", "track.lrc", true, owned, false, 2},
+		{"foreign", "track.lrc", false, "[source:musixmatch]\n[00:01.00]<00:01.00>hi\n", false, 1},
 		// Only a .lrc has a companion: a purged .txt leaves track.elrc alone.
-		{"purged txt", true, "track.txt", false, owned, false, 1},
+		{"purged txt", "track.txt", false, owned, false, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.active {
-				sidecar.ActivateForTest(t, sidecar.KindWordSynced)
-			}
 			ctx, sqlDB, libID, root := openSeeded(t)
 			lrc := filepath.Join(root, "Album", tc.file)
 			writeSidecar(t, lrc, "musixmatch")
@@ -78,7 +72,6 @@ func TestRun_CompanionFollowsItsPurgedLrc(t *testing.T) {
 func TestRun_FailedCompanionStepLeavesThePair(t *testing.T) {
 	for _, failDelete := range []bool{false, true} {
 		t.Run(map[bool]string{false: "backup", true: "delete"}[failDelete], func(t *testing.T) {
-			sidecar.ActivateForTest(t, sidecar.KindWordSynced)
 			ctx, sqlDB, libID, root := openSeeded(t)
 			lrc := filepath.Join(root, "Album", "track.lrc")
 			writeSidecar(t, lrc, "musixmatch")

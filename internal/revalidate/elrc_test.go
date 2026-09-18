@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // Revalidate remediates only through realign.Apply, so these are end-to-end
@@ -16,17 +14,14 @@ import (
 func TestRemediationTakesTheOwnedCompanion(t *testing.T) {
 	cases := []struct {
 		name, body, elrc string
-		active, gone     bool
+		gone             bool
 	}{
-		{"demote/owned", overrunBody, "[by:canticle]\n[00:10.00]<00:10.00>alpha\n", true, true},
-		{"quarantine/owned", categoricalBody, "[by:canticle]\n[00:10.00]<00:10.00>alpha\n", true, true},
-		{"quarantine/foreign", categoricalBody, "[00:10.00]<00:10.00>alpha\n", true, false},
+		{"demote/owned", overrunBody, "[by:canticle]\n[00:10.00]<00:10.00>alpha\n", true},
+		{"quarantine/owned", categoricalBody, "[by:canticle]\n[00:10.00]<00:10.00>alpha\n", true},
+		{"quarantine/foreign", categoricalBody, "[00:10.00]<00:10.00>alpha\n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.active {
-				sidecar.ActivateForTest(t, sidecar.KindWordSynced)
-			}
 			root, lrc := lib(t, tc.body)
 			elrc := strings.TrimSuffix(lrc, ".lrc") + ".elrc"
 			if err := os.WriteFile(elrc, []byte(tc.elrc), 0o600); err != nil {

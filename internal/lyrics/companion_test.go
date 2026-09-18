@@ -15,18 +15,10 @@ import (
 	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
-// gateOn forces the companion activation gate open for one writer. It is the
-// test-only seam described on LRCWriter.companionGate; the shipped gate reads
-// sidecar.Active(sidecar.KindWordSynced), which is true since #986 slice 4c.
-func gateOn(w *LRCWriter) *LRCWriter {
-	w.companionGate = func() bool { return true }
-	return w
-}
-
 // modeWriter builds a writer configured the way commands maps each
 // output.word_sync_mode value onto the two writer switches.
 func modeWriter(inline, companion bool) *LRCWriter {
-	w := gateOn(NewLRCWriter())
+	w := NewLRCWriter()
 	w.SetWordSync(inline)
 	w.SetWordSyncCompanion(companion)
 	return w
@@ -123,11 +115,10 @@ func TestWriteLRC_CompanionSkippedWhenNoLineQualifies(t *testing.T) {
 	mustNotExist(t, filepath.Join(dir, "song.elrc"))
 }
 
-// TestWriteLRC_ShippedGateFollowsMode pins the SHIPPED state through the real
-// gate (no companionGate seam): with sidecar.KindWordSynced active (#986 slice
-// 4c) the companion switch alone decides. Companion on writes the .elrc beside
-// an unmarked .lrc; companion off -- word_sync_mode "off" or "inline" -- writes
-// no .elrc at all.
+// TestWriteLRC_ShippedGateFollowsMode pins the SHIPPED state: with
+// sidecar.KindWordSynced active (#986) the companion switch alone decides.
+// Companion on writes the .elrc beside an unmarked .lrc; companion off --
+// word_sync_mode "off" or "inline" -- writes no .elrc at all.
 func TestWriteLRC_ShippedGateFollowsMode(t *testing.T) {
 	if !sidecar.Active(sidecar.KindWordSynced) {
 		t.Fatal("KindWordSynced is inactive: the shipped writer can never write a companion")
@@ -157,10 +148,10 @@ func TestWriteLRC_ShippedGateFollowsMode(t *testing.T) {
 	}
 }
 
-// TestWriteLRC_CompanionGateOffLeavesForeignFile: through the shipped gate, a
-// .elrc without [by:canticle] is not canticle's, so a demotion must not delete
-// it. (The name predates #986 slice 4c, when this ran with the gate closed.)
-func TestWriteLRC_CompanionGateOffLeavesForeignFile(t *testing.T) {
+// TestWriteLRC_DefaultWriterDemotionLeavesForeignCompanion: a writer left at
+// its defaults (no SetWordSyncCompanion call) that demotes to .txt must not
+// delete a .elrc without [by:canticle]; it is not canticle's.
+func TestWriteLRC_DefaultWriterDemotionLeavesForeignCompanion(t *testing.T) {
 	dir := t.TempDir()
 	elrc := filepath.Join(dir, "song.elrc")
 	if err := os.WriteFile(elrc, []byte("foreign"), 0o600); err != nil {
