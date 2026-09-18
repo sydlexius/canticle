@@ -12,6 +12,7 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/selfwrite"
+	"github.com/sydlexius/canticle/internal/sidecar"
 	"github.com/sydlexius/canticle/internal/version"
 )
 
@@ -465,12 +466,24 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 // opposite sidecar so a format transition never leaves both on disk) and the
 // self-write recording that keeps the resulting Remove event from waking the
 // watcher.
+//
+// It is a strict PAIRING, deliberately NOT "every other sidecar extension"
+// (#986). Its result is fed to os.Remove, so widening it to the whole
+// sidecar.Extensions() set would silently delete a file the write path never
+// intended to replace. The extensions come from internal/sidecar so the
+// literals live in one place, but the two-way mapping stays hand-written here
+// and a third extension has to be reasoned about rather than picked up for
+// free.
+//
+// The extension comparison is case-SENSITIVE (plain filepath.Ext, no
+// ToLower), unlike sidecar.IsSidecar: a ".LRC" on disk is not paired, and is
+// therefore not removed. That asymmetry is pre-existing and preserved.
 func oppositeSidecar(fp string) string {
 	switch filepath.Ext(fp) {
-	case ".lrc":
-		return strings.TrimSuffix(fp, ".lrc") + ".txt"
-	case ".txt":
-		return strings.TrimSuffix(fp, ".txt") + ".lrc"
+	case sidecar.ExtLineSynced:
+		return sidecar.StemOf(fp) + sidecar.ExtUnsynced
+	case sidecar.ExtUnsynced:
+		return sidecar.StemOf(fp) + sidecar.ExtLineSynced
 	default:
 		return ""
 	}
@@ -584,10 +597,13 @@ func writeText(body string, buff *bufio.Writer) error {
 // A stat error other than not-exist is treated as PRESENT: the guard's job here
 // is to avoid destroying a file, so an unreadable path is assumed occupied
 // rather than assumed free.
+// The probe ORDER is load-bearing and therefore written out rather than taken
+// from sidecar.Extensions(): unsynced is checked first, so when both sidecars
+// somehow exist the .txt is the one reported.
 func settledSidecar(fp string) (string, bool) {
-	stem := strings.TrimSuffix(fp, filepath.Ext(fp))
-	for _, ext := range []string{".txt", ".lrc"} {
-		candidate := stem + ext
+	stem := sidecar.StemOf(fp)
+	for _, kind := range []sidecar.Kind{sidecar.KindUnsynced, sidecar.KindLineSynced} {
+		candidate := stem + sidecar.Ext(kind)
 		if _, err := os.Stat(candidate); err == nil || !os.IsNotExist(err) {
 			return candidate, true
 		}
