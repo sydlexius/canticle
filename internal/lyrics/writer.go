@@ -111,16 +111,10 @@ type LRCWriter struct {
 	// which controls markers INSIDE the .lrc; output.word_sync_mode maps onto
 	// the pair (sidecar = companion only, inline = wordSync only, both = both).
 	wordSyncCompanion bool
-	// companionGate reports whether canticle may touch companion files at all.
-	// Nil (production) reads sidecar.Active(sidecar.KindWordSynced), true since
-	// #986 slice 4c once the realign/scan/purge/revalidate paths learned the
-	// extension: a companion those paths cannot see must never reach a
-	// library. It is a TEST-ONLY seam; nothing outside _test files sets it.
-	companionGate func() bool
 	// companionWrite, when non-nil, replaces writeAtomic for the companion
-	// only. A TEST-ONLY seam, like companionGate: it is the one way to fail the
-	// companion write after the .lrc has landed, since any filesystem obstacle
-	// at the companion path is classified foreign and skipped before that.
+	// only. A TEST-ONLY seam: it is the one way to fail the companion write
+	// after the .lrc has landed, since any filesystem obstacle at the
+	// companion path is classified foreign and skipped before that.
 	companionWrite func(outdir, fn string, tags []string, body func(*bufio.Writer) error) error
 	// companionRemove, when non-nil, replaces os.Remove for a stale companion.
 	// TEST-ONLY, for the same reason: it fails the removal without also making
@@ -147,10 +141,8 @@ func (w *LRCWriter) SetWordSync(enabled bool) {
 
 // SetWordSyncCompanion enables or disables the word-synced companion sidecar
 // (#986). When enabled, a synced write whose word timings qualify on at least
-// one line ALSO writes the A2 body to a companion file beside the .lrc. The
-// companion is gated on the sidecar table activating its Kind; while inactive
-// this setting changes nothing. Not goroutine-safe; call before sharing the
-// writer, alongside SetBilingual.
+// one line ALSO writes the A2 body to a companion file beside the .lrc. Not
+// goroutine-safe; call before sharing the writer, alongside SetBilingual.
 func (w *LRCWriter) SetWordSyncCompanion(enabled bool) {
 	w.wordSyncCompanion = enabled
 }
@@ -158,15 +150,6 @@ func (w *LRCWriter) SetWordSyncCompanion(enabled bool) {
 // WordSyncCompanion reports the SetWordSyncCompanion setting.
 func (w *LRCWriter) WordSyncCompanion() bool {
 	return w.wordSyncCompanion
-}
-
-// companionActive reports whether companion files are canticle's to write and
-// remove. See the companionGate field.
-func (w *LRCWriter) companionActive() bool {
-	if w.companionGate != nil {
-		return w.companionGate()
-	}
-	return sidecar.Active(sidecar.KindWordSynced)
 }
 
 // SetSelfWriteRegistry attaches the registry the watcher consults to recognize
@@ -530,8 +513,9 @@ const (
 // follows the .lrc rather than excluding it. The invariant: a companion on disk
 // that canticle wrote always describes the .lrc beside it, never an earlier one.
 //
-//   - Gate closed: nothing. With sidecar.KindWordSynced inactive a .elrc on
-//     disk is not canticle's, so it is neither written nor removed.
+//   - sidecar.KindWordSynced inactive in the sidecar table: nothing. Every
+//     path that moves or removes a companion reads the same switch, so a
+//     companion they could not see would never reach a library.
 //   - A FOREIGN file at the path (not a regular file, unreadable, or without
 //     [by:canticle]): nothing, not even a write over it. It belongs to another
 //     tool or to the operator, and no mode may cost them a file.
@@ -544,7 +528,7 @@ const (
 // A write that touches nothing (quarantine, or a demotion that keeps a settled
 // sidecar) never reaches here, so the companion of a kept .lrc is kept too.
 func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) companionPlan {
-	if !w.companionActive() {
+	if !sidecar.Active(sidecar.KindWordSynced) {
 		return companionPlan{}
 	}
 	path := sidecar.StemOf(fp) + sidecar.ExtWordSynced
@@ -574,9 +558,9 @@ func IsOwnedCompanion(path string) bool {
 
 // OwnedCompanionOf returns the word-synced companion that must travel with (or
 // go with) the line-synced sidecar lrc, or "" when there is nothing to touch:
-// the word-synced Kind is inactive, lrc is not a .lrc, or the file beside it is
-// absent or FOREIGN. The gate is the same one the writer consults, so flipping
-// sidecar.KindWordSynced is the single switch for every mutation path.
+// lrc is not a .lrc, or the file beside it is absent or FOREIGN. It reads the
+// same sidecar.KindWordSynced switch as the writer, so that table flag stays the
+// single switch for every mutation path.
 func OwnedCompanionOf(lrc string) string {
 	if !sidecar.Active(sidecar.KindWordSynced) || sidecar.KindOf(lrc) != sidecar.KindLineSynced {
 		return ""
