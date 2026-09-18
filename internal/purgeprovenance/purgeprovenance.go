@@ -358,8 +358,8 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 
 	rec := Record{Path: path, ScanResultIDs: scanResultIDs, WorkItemIDs: workItemIDs, Identities: identities}
 	// The owned word-synced companion (#986) goes with its .lrc, under its OWN
-	// Report record (the .lrc's carries the rows). Foreign: never touched;
-	// "" while the Kind is inactive.
+	// Report record (the .lrc's carries the rows). Foreign or absent: "", never
+	// touched.
 	companion := lyrics.OwnedCompanionOf(path)
 
 	if opts.DryRun {
