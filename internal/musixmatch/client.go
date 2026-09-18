@@ -597,26 +597,46 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 	}
 	params := url.Values{
 		"format": {"json"},
-		// This namespace does NOT make macro.subtitles.get return word-level
-		// (richsync) timing. Probed live 2026-07-22 over 12 mainstream tracks:
-		// every response carried exactly five macro calls -- matcher.track.get,
-		// track.lyrics.get, track.snippet.get, track.subtitles.get,
-		// userblob.get -- and never a richsync one. So the parser below is not
-		// silently dropping word-level data on THIS endpoint; none arrives here.
+		// This namespace alone does NOT make macro.subtitles.get return
+		// word-level (richsync) timing. Probed live 2026-07-22 over 12
+		// mainstream tracks: every response carried exactly five macro calls --
+		// matcher.track.get, track.lyrics.get, track.snippet.get,
+		// track.subtitles.get, userblob.get -- and never a richsync one.
 		//
-		// Word-level timing IS available on this token, from a DIFFERENT
-		// endpoint: track.richsync.get, keyed by the commontrack_id that
-		// matcher.track.get returns. Measured the same day, 6 of 9 matched
-		// mainstream tracks had a richsync body (schema {l,te,ts,x}; absolute
-		// word time = ts + o). It is a two-step flow, which is why no
-		// single-request probe of this endpoint could ever find it.
+		// That probe was right that richsync does not arrive UNASKED, and wrong
+		// in the conclusion drawn from it, that reaching it needed a separate
+		// two-step track.richsync.get call keyed by commontrack_id. Re-probed
+		// live 2026-09-17 on the CURRENT identity, ON ONE TRACK: the standalone
+		// endpoint returned inner status 404, while the two parameters BELOW
+		// made this same request return a SIXTH macro call, track.richsync.get,
+		// inner status 200, body at message.body.richsync.richsync_body (50
+		// entries / 626 chunks, keys {l,te,ts,x} and {c,o}; units read as
+		// SECONDS from max ts 203.510 against a 228s catalog track_length).
 		//
-		// Both halves are recorded here because the first, alone, invites the
-		// false conclusion that word-level timing is unreachable from
-		// Musixmatch. It is not -- it is reachable, just not from here.
-		// The parameter is kept because the request shape is otherwise
-		// unchanged and untested to remove.
-		"namespace": {"lyrics_richsynched"},
+		// N=1 ON EVERY FIGURE ABOVE, and stated that way on purpose. One track
+		// establishes that this shape CAN be served; it does not establish that
+		// the standalone endpoint is dead in general, nor the unit as a property
+		// of the endpoint rather than of that response. The parser applies its
+		// own tripwire to the unit rather than trusting this reading.
+		//
+		// Why the first probe misled is worth keeping: a single-request probe
+		// that does not ASK for the optional sub-call cannot distinguish "this
+		// endpoint cannot serve richsync" from "this endpoint was not asked",
+		// and the two look identical in the response.
+		//
+		// Asked UNCONDITIONALLY: the sub-call rides the request canticle
+		// already makes, so it costs no extra paced request and there is no
+		// user-facing decision to gate it on.
+		//
+		// NOT a no-op for a deployment that leaves output.word_sync off, and it
+		// would be wrong to say otherwise: that key gates only what the WRITER
+		// emits (lyrics/writer.go). Ranking is ungated -- suitability.go
+		// promotes a result carrying word timings to QualityWordSynced -- so
+		// merely populating them changes which lane can win a race, for every
+		// deployment, the moment this ships.
+		"namespace":             {"lyrics_richsynched"},
+		"optional_calls":        {"track.richsync"},
+		"richsync_compact_type": {"words"},
 		// subtitle_format=mxm requests the JSON cue-array encoding. During the
 		// 2026-09 desktop-identity retirement (#914, #934) the fixed decoy body
 		// the retired identity returned did not parse as an "mxm" cue array, so
@@ -689,7 +709,19 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		}
 	}
 
-	const maxResponseSize = 2 << 20 // 2 MiB
+	// 8 MiB, raised from 2 MiB when the richsync sub-call was bundled into this
+	// request. The cap is a guard against a runaway response, not a budget, and
+	// it is checked BEFORE anything is parsed -- so at 2 MiB an oversized body
+	// would fail the WHOLE lookup, losing a perfectly good line-synced result to
+	// an OPTIONAL upgrade. That inverts this slice's own rule that no richsync
+	// condition may cost the caller its lyrics.
+	//
+	// Sized from the measured shape rather than picked: the probe's 50-entry /
+	// 626-chunk body was ~16 KiB, so 2 MiB already held roughly 100x it and 8 MiB
+	// holds ~400x. Raising it does not weaken the guard meaningfully -- a
+	// response anywhere near either bound is pathological -- while removing the
+	// realistic path to a lost result.
+	const maxResponseSize = 8 << 20 // 8 MiB
 	body, err := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
 	if err != nil {
 		return song, err
@@ -711,6 +743,27 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 	mtg := v.Get("message", "body", "macro_calls", "matcher.track.get", "message")
 	tlg := v.Get("message", "body", "macro_calls", "track.lyrics.get", "message")
 	tsg := v.Get("message", "body", "macro_calls", "track.subtitles.get", "message")
+	// The OPTIONAL sixth sub-call.
+	//
+	// A nil here is NOT the ordinary no-word-data case, which is what makes it
+	// worth reporting. Measured 2026-09-17 across three tracks on the current
+	// identity: the sub-call is PRESENT in macro_calls whether or not the track
+	// has word timings -- inner 200 when has_richsync=1, inner 404 when
+	// has_richsync=0. The upstream answers the question either way.
+	//
+	// So an ABSENT key means the question was never asked as intended: a
+	// misspelled optional_calls / richsync_compact_type parameter, or a response
+	// shape that stopped carrying the sub-call. Those are otherwise INVISIBLE --
+	// every lookup keeps succeeding, word timings silently never appear, and the
+	// synthetic fixtures pass because they encode the same spelling the code
+	// does. richSyncAbsent reports it (below, once the matcher is known to have
+	// succeeded, so a miss is not mistaken for a spelling fault).
+	//
+	// Deliberately NOT a consecutive-count threshold: the 404-vs-absent
+	// distinction is exact, so the FIRST absence is diagnostic. A count would
+	// reproduce the false-positive shape petitlyrics measured in #767, where
+	// genuine sparse coverage reads as a credential fault.
+	trg := v.Get("message", "body", "macro_calls", "track.richsync.get", "message")
 
 	switch mtg.GetInt("header", "status_code") {
 	case 200:
@@ -763,6 +816,23 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 			return song, err
 		}
 		song.Subtitles.Lines = lines
+		// Word timings are strictly an UPGRADE on top of the line-synced result
+		// that is already in hand, so every richsync failure mode degrades to
+		// "no word timings" and none of them may fail this lookup. Placed here,
+		// inside the HasSubtitles branch and after the cues are populated,
+		// because the parser correlates entries to cues BY TIMESTAMP: the cues
+		// must exist first, and the structural nesting gives the line-sync gate
+		// for free rather than as a separate condition that can drift.
+		//
+		// The absence check sits HERE, not at the read, for a reason: only a
+		// line-synced result establishes that the request was answered normally,
+		// so an absent sub-call at this point cannot be confused with a miss, a
+		// restriction, or an instrumental.
+		if trg == nil {
+			slog.Warn("musixmatch: the response carried no track.richsync.get sub-call on a line-synced track; " +
+				"the richsync request parameters or the response shape may have changed")
+		}
+		song.WordTimings = richSyncTimings(trg, lines)
 	} else {
 		slog.Debug("no synced lyrics found")
 		if song.Track.HasLyrics == 1 {
@@ -783,6 +853,84 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		}
 	}
 	return song, nil
+}
+
+// richSyncTimings extracts the optional track.richsync.get sub-call's word
+// timings, or nil when there are none to be had.
+//
+// It CANNOT fail. Every negative outcome -- the sub-call absent, a non-200
+// inner status, an absent or empty richsync_body, or a parse rejection
+// (including ErrUnparsableRichSyncBody) -- returns nil, because the caller
+// already holds a good line-synced song and losing that to an optional upgrade
+// would be a strictly worse result than shipping it without word markers. The
+// sentinel deliberately does not escape: internal/orchestrator's sentinel
+// enumeration carries an exemption asserting it never reaches a lane, and that
+// exemption is only true because of this function.
+//
+// A parse failure is the one case worth SEEING -- it means the payload shape
+// changed under us -- so it logs at Warn. Byte count only: a richsync body IS
+// the lyric, so no text, title or artist may appear in a log line.
+func richSyncTimings(trg *fastjson.Value, cues []models.Lines) []models.WordTiming {
+	// Every non-200 is swallowed, INCLUDING a 401, and that is deliberate rather
+	// than an oversight about throttle signaling. A 401 on the SUB-CALL carries
+	// nothing the caller does not already have: the outer response's own status
+	// is checked before this runs, so a genuine throttle has already been seen
+	// there. The pacer ratchets from a RETURNED ERROR, and the orchestrator gates
+	// a 401 on the lane having succeeded before -- but this very lookup IS a
+	// success, so surfacing it would record a success and a throttle from one
+	// response. Nothing is discarded by ignoring it here.
+	if trg == nil || trg.GetInt("header", "status_code") != 200 {
+		return nil
+	}
+	// The PARENT is checked first, and for the same reason the body's type is
+	// checked below: `Get` walks a key path and returns nil the moment a level is
+	// not an object, so a `richsync` that arrived as an array, string, number or
+	// bool makes the child lookup nil and reads as ordinary absence. Verified
+	// against fastjson v1.6.10 -- all four parent shapes return a nil child.
+	// Checking only the leaf fixes the alarm one level too shallow.
+	//
+	// Missing and explicitly-null parents stay QUIET: both are the provider
+	// saying there is no richsync for this track, which is the common case.
+	parent := trg.Get("body", "richsync")
+	if parent != nil && parent.Type() != fastjson.TypeNull && parent.Type() != fastjson.TypeObject {
+		slog.Warn("musixmatch: the richsync container is not an object; the response shape changed",
+			"type", parent.Type().String())
+		return nil
+	}
+	bodyNode := trg.Get("body", "richsync", "richsync_body")
+	// This arm keeps an ORDINARY empty body out of the Warn below, which is
+	// reserved for a shape that actually changed; without it every empty body
+	// reads as an incident.
+	//
+	// It must test the node's TYPE, not just the length of a string read. A
+	// fastjson string accessor returns nil for any NON-STRING node, so a length
+	// check alone treats a number, object, array or null at this key exactly like
+	// an absent body -- silent, unlogged, forever. That is the single most
+	// plausible way this field evolves (dropping the double encoding and serving
+	// a plain array), i.e. precisely the change the Warn exists to name, so a
+	// type-blind guard would make the alarm deaf to its own alarm condition.
+	//
+	// Three things all mean ABSENCE and must stay quiet: the key missing, an
+	// explicit JSON null, and an empty string. A null is the provider saying
+	// "no value here", which is the same statement as omitting the key -- only a
+	// DIFFERENT TYPE is a shape change.
+	if bodyNode == nil || bodyNode.Type() == fastjson.TypeNull {
+		return nil
+	}
+	if bodyNode.Type() == fastjson.TypeString && len(bodyNode.GetStringBytes()) == 0 {
+		return nil
+	}
+	// MarshalTo, not GetStringBytes: the field is a JSON-ENCODED STRING whose
+	// contents are themselves JSON, and parseRichSyncBody owns both decode
+	// steps. Handing it the already-unquoted contents would break its contract.
+	raw := bodyNode.MarshalTo(nil)
+	timings, err := parseRichSyncBody(raw, cues)
+	if err != nil {
+		slog.Warn("musixmatch: could not decode the optional richsync body; keeping the line-synced result without word timings",
+			"bytes", len(raw))
+		return nil
+	}
+	return timings
 }
 
 // parseSubtitleBody decodes a non-empty subtitle_body into cues, accepting BOTH
