@@ -23,6 +23,7 @@ import (
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/internal/scan"
 	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/sidecar"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/web"
 )
@@ -733,7 +734,9 @@ func (h *Handler) pathExists(path string) bool {
 func pathInput(artist, title, album, path string) models.Inputs {
 	outdir := filepath.Dir(path)
 	base := filepath.Base(path)
-	filename := strings.TrimSuffix(base, filepath.Ext(base)) + ".lrc"
+	// Line-synced name only; a word-synced companion (#986) is derived from
+	// it, never recorded as a second output path.
+	filename := strings.TrimSuffix(base, filepath.Ext(base)) + sidecar.ExtLineSynced
 	return models.Inputs{
 		Track: models.Track{
 			ArtistName: artist,

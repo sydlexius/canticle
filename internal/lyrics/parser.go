@@ -168,9 +168,9 @@ func sanitizeTagValue(v string) string {
 // renamed over path only on complete success. Only the header block is modified;
 // lyric lines are preserved verbatim. The file must be a tag-bearing LRC: a
 // line-synced .lrc or its word-synced companion (.elrc, #986), which carries the
-// same header. (Its only production caller, the provenance backfill, still
-// filters to .lrc; purge-provenance finds a companion only once slice 4 of #986
-// teaches it the extension.)
+// same header. (Its only production caller, the provenance backfill, is
+// .lrc-only and never tags a companion: purge-provenance removes an owned
+// companion by deriving it from its matching .lrc, not by reading its tags.)
 //
 // Returns (injected, skipped, error) where injected counts tags added and
 // skipped counts tags that already existed and were left untouched.

@@ -23,6 +23,7 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // supportedFileTypes lists audio file extensions that can have metadata read.
@@ -844,7 +845,7 @@ func (sc *Scanner) indexSettledFile(ctx context.Context, dir, filePath, stem str
 			RecordingMBID: extractRecordingMBID(m),
 		},
 		Outdir:   dir,
-		Filename: stem + ".lrc",
+		Filename: stem + sidecar.ExtLineSynced,
 		Status:   "done",
 	})
 	slog.Debug("indexed a settled file missing from the scan index", "file", filePath)
@@ -1132,14 +1133,32 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 
 		ext := strings.ToLower(filepath.Ext(file.Name()))
 
-		// Skip lyrics files themselves -- they are not audio sources.
-		if ext == ".lrc" || ext == ".txt" {
+		// Skip lyrics files themselves -- they are not audio sources. The set is
+		// the sidecar table's ACTIVE extensions, so a word-synced companion
+		// (#986) joins it when its Kind is switched on.
+		if sidecar.IsSidecar(file.Name()) {
 			continue
 		}
 
+		// Only the line-synced and unsynced sidecars SETTLE a file. The
+		// word-synced companion is deliberately absent from this switch in
+		// both directions (#986), mirroring the writer's settledSidecar:
+		//
+		//   - A lone companion (no .lrc) is not coverage. It describes word
+		//     timings for a line-synced file that is not there, so the audio
+		//     stays unsettled and is fetched like any other.
+		//   - A .lrc WITHOUT a companion stays settled. Reopening it for word
+		//     timings would be unbounded: nothing records that a provider has
+		//     no word data for a track, so every such file would be tag-read on
+		//     every scan forever (the #684 disk-wake class), and the reopen
+		//     would not even yield a companion -- a periodic scan preserves a
+		//     'done' row's status, and a cache hit replays a cached song whose
+		//     word timings are absent for every entry older than richsync.
+		//     Re-examining settled tracks for word timings is #982's job, as an
+		//     operator-sized pass, not a side effect of every scan.
 		stem := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
-		lrcFile := stem + ".lrc"
-		txtFile := stem + ".txt"
+		lrcFile := stem + sidecar.ExtLineSynced
+		txtFile := stem + sidecar.ExtUnsynced
 
 		lrcExists := false
 		if _, err := os.Stat(filepath.Join(dir, lrcFile)); err == nil {
@@ -1416,7 +1435,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 				RecordingMBID: recordingMBID,
 			},
 			Outdir:   dir,
-			Filename: stem + ".lrc",
+			Filename: stem + sidecar.ExtLineSynced,
 			Status:   "pending",
 		})
 	}
