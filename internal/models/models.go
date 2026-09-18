@@ -26,11 +26,12 @@ type Track struct {
 	RecordingMBID string `json:"recording_mbid,omitempty"`
 	// CommontrackID is Musixmatch's catalog-level track identifier, returned by
 	// matcher.track.get and populated by the same bulk unmarshal of the track
-	// node that fills the fields above. It is the required input to the
-	// follow-up track.richsync.get call, which is where word-level timing lives
-	// -- macro.subtitles.get never carries it (see internal/musixmatch, #613).
-	// Response-only: nothing sends it as a matcher parameter, unlike the
-	// recording-level identifiers above.
+	// node that fills the fields above. It is the key for Musixmatch's
+	// standalone track.richsync.get endpoint, which canticle does not call:
+	// word-level timing arrives as an optional sub-call of the same
+	// macro.subtitles.get request (see internal/musixmatch, #613), so nothing
+	// reads this field today. Response-only: nothing sends it as a matcher
+	// parameter, unlike the recording-level identifiers above.
 	//
 	// Typed FlexID, not string, for the reason documented on that type.
 	CommontrackID FlexID `json:"commontrack_id,omitempty"`
