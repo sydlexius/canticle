@@ -245,17 +245,9 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		slog.Warn("refusing to write lyrics: timing indicates a different recording",
 			"artist", song.Track.ArtistName, "track", song.Track.TrackName,
 			"outcome", string(verdict), "decision", decision.String())
-		// The one exception to "nothing on disk is touched": a stale word-synced
-		// companion (#986) would keep claiming word timing for a lyric now known
-		// to be timed to another recording. Best effort, and the .lrc (if any)
-		// is still left alone.
-		if w.companionActive() {
-			if dir, err := w.resolveOutdir(outdir); err == nil {
-				if cfn, err := SidecarNameFor(song.Track.ArtistName, song.Track.TrackName, filename, sidecar.KindWordSynced); err == nil {
-					w.removeCompanion(filepath.Join(dir, cfn))
-				}
-			}
-		}
+		// That includes a word-synced companion (#986): the verdict judges this
+		// CANDIDATE, not what is on disk, and a companion there belongs to the
+		// .lrc being kept.
 		return nil
 	case DemoteToUnsynced:
 		// Content-safe demotion (Investigation-0 on #438): the words are the
@@ -489,7 +481,8 @@ type companionPlan struct {
 
 // planCompanion decides what this write does to the word-synced companion
 // beside fp (#986). A companion is NOT an opposite (see oppositeSidecar): it
-// follows the .lrc rather than excluding it.
+// follows the .lrc rather than excluding it. The invariant: a companion on disk
+// always describes the .lrc beside it, never an earlier one.
 //
 //   - Gate closed: nothing. With sidecar.KindWordSynced inactive a .elrc on
 //     disk is not canticle's, so it is neither written nor removed.
@@ -498,8 +491,12 @@ type companionPlan struct {
 //     must not outlive the line timing it was aligned to.
 //   - A .lrc write with the companion enabled and at least one qualifying
 //     line: written.
-//   - Any other .lrc write: nothing, so an existing companion survives a
-//     rewrite by a mode that does not produce one.
+//   - Any other .lrc write: the stale companion is removed. It was aligned to
+//     the .lrc this write just replaced, so keeping it would pair new line
+//     timing with old word timing.
+//
+// A write that touches nothing (quarantine, or a demotion that keeps a settled
+// sidecar) never reaches here, so the companion of a kept .lrc is kept too.
 func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) companionPlan {
 	if !w.companionActive() {
 		return companionPlan{}
@@ -511,7 +508,7 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) comp
 	if w.wordSyncCompanion && hasA2Line(song) {
 		return companionPlan{path: path, write: true}
 	}
-	return companionPlan{}
+	return companionPlan{path: path}
 }
 
 // removeCompanion deletes a stale companion, best effort, recording the path

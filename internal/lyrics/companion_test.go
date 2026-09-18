@@ -192,41 +192,70 @@ func TestWriteLRC_DemotionRemovesStaleCompanion(t *testing.T) {
 	}
 }
 
-// TestWriteLRC_CategoricalRemovesStaleCompanion: a Categorical result writes
-// nothing, and the word timings of a lyric now known to be timed to another
-// recording are removed rather than left to claim word sync.
-func TestWriteLRC_CategoricalRemovesStaleCompanion(t *testing.T) {
+// TestWriteLRC_CategoricalKeepsSettledCompanion: a Categorical verdict judges
+// the CANDIDATE, and quarantine leaves the settled .lrc on disk untouched. The
+// companion beside it belongs to that kept .lrc, so it must survive too.
+func TestWriteLRC_CategoricalKeepsSettledCompanion(t *testing.T) {
 	dir := t.TempDir()
+	lrc := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("[00:01.00]settled\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	elrc := seedCompanion(t, dir)
-	reg := selfwrite.New(time.Minute)
-	w := modeWriter(false, true)
-	w.SetSelfWriteRegistry(reg)
 
 	// 400s cue against 100s audio: ratio 4.0, Categorical.
 	song := guardSong(100, cue(10, "first"), cue(400, "last"))
-	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {
+	if err := modeWriter(false, true).WriteLRC(song, "song.lrc", dir); err != nil {
 		t.Fatalf("WriteLRC: %v", err)
 	}
-	mustNotExist(t, filepath.Join(dir, "song.lrc"))
-	mustNotExist(t, filepath.Join(dir, "song.txt"))
-	mustNotExist(t, elrc)
-	if !reg.Suppress(elrc) {
-		t.Error("companion removal was not recorded as a self-write")
+	mustExist(t, lrc)
+	if got := readFileString(t, elrc); !strings.Contains(got, "stale") {
+		t.Errorf("quarantine touched the settled .lrc's companion: %q", got)
 	}
 }
 
-// TestWriteLRC_LRCRewritePreservesCompanion: a companion is not an opposite. A
-// .lrc rewrite that produces no companion of its own (mode off here) must not
-// delete the one already on disk.
-func TestWriteLRC_LRCRewritePreservesCompanion(t *testing.T) {
+// TestWriteLRC_LRCRewriteRemovesMismatchedCompanion: a companion is aligned to
+// one specific .lrc. A rewrite that produces no companion of its own (mode off,
+// or no qualifying line) must remove the old one, or new line timing sits
+// beside word timing for the lyric it replaced.
+func TestWriteLRC_LRCRewriteRemovesMismatchedCompanion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		companion bool
+		song      models.Song
+	}{
+		{"mode without companion", false, a2Song()},
+		{"no qualifying line", true, guardSong(0, cue(1, "plain line"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			elrc := seedCompanion(t, dir)
+			reg := selfwrite.New(time.Minute)
+			w := modeWriter(false, tc.companion)
+			w.SetSelfWriteRegistry(reg)
+			if err := w.WriteLRC(tc.song, "song.lrc", dir); err != nil {
+				t.Fatalf("WriteLRC: %v", err)
+			}
+			mustExist(t, filepath.Join(dir, "song.lrc"))
+			mustNotExist(t, elrc)
+			if !reg.Suppress(elrc) {
+				t.Error("companion removal was not recorded as a self-write")
+			}
+		})
+	}
+}
+
+// TestWriteLRC_LRCRewriteReplacesCompanion: a rewrite that does produce a
+// companion overwrites the old one with timing for the new .lrc.
+func TestWriteLRC_LRCRewriteReplacesCompanion(t *testing.T) {
 	dir := t.TempDir()
 	elrc := seedCompanion(t, dir)
-	if err := modeWriter(false, false).WriteLRC(a2Song(), "song.lrc", dir); err != nil {
+	if err := modeWriter(false, true).WriteLRC(a2Song(), "song.lrc", dir); err != nil {
 		t.Fatalf("WriteLRC: %v", err)
 	}
-	mustExist(t, filepath.Join(dir, "song.lrc"))
-	if got := readFileString(t, elrc); !strings.Contains(got, "stale") {
-		t.Errorf("existing companion was rewritten or removed: %q", got)
+	got := readFileString(t, elrc)
+	if strings.Contains(got, "stale") || !strings.Contains(got, "<00:01.50>alpha") {
+		t.Errorf("companion was not replaced for the new .lrc: %q", got)
 	}
 }
 
