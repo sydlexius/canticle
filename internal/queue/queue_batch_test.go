@@ -567,7 +567,15 @@ func TestDBQueue_StaleStampsDoNotShrinkBuffer(t *testing.T) {
 	}
 
 	// Once the future row is due again it must not jump ahead of the buffer on
-	// its old batch_seq: the next claim is still the next surviving row.
+	// its old batch_seq: the next claim is still the next surviving row. Every
+	// other unstamped candidate is settled first, so the refill's RANDOM() draw
+	// has exactly one row to redraw and the assertion below is deterministic.
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'done'
+		  WHERE batch_seq IS NULL AND id <> ? AND status IN ('pending', 'failed', 'deferred')`,
+		future); err != nil {
+		t.Fatalf("remove other refill candidates: %v", err)
+	}
 	now = later
 	next, err := q.Dequeue(ctx)
 	if err != nil {
@@ -576,6 +584,55 @@ func TestDBQueue_StaleStampsDoNotShrinkBuffer(t *testing.T) {
 	if next.ID != stayed[1] {
 		t.Fatalf("claimed %d after the deferred row came due; want next surviving row %d (future row %d must not jump the queue)",
 			next.ID, stayed[1], future)
+	}
+	var futureSeq sql.NullInt64
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT batch_seq FROM work_queue WHERE id = ?`, future).Scan(&futureSeq); err != nil {
+		t.Fatalf("read redrawn batch_seq: %v", err)
+	}
+	if !futureSeq.Valid {
+		t.Fatalf("future row %d was not redrawn into the buffer", future)
+	}
+}
+
+// An idle queue must still persist the stale-stamp clear (#999): when every
+// buffered row is stale and nothing else is eligible, the refill+claim finds
+// no row, and a rolled-back transaction would keep the stale batch_seq until
+// the row came due and jumped ahead of freshly drawn work.
+func TestDBQueue_EmptyDequeuePersistsStaleClear(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return now }
+	q.SetBatchSize(10)
+	enqueueN(t, q, 3)
+
+	if _, err := q.Dequeue(ctx); err != nil { // stamps all 3, claims 1
+		t.Fatalf("prime: %v", err)
+	}
+	stale := bufferedIDsBySeq(t, q)[0]
+	later := now.Add(21 * 24 * time.Hour)
+	// Leave exactly one stamped row, pushed out of eligibility; nothing else is due.
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'done' WHERE status IN ('pending', 'failed', 'deferred') AND id <> ?`, stale); err != nil {
+		t.Fatalf("settle the rest: %v", err)
+	}
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'deferred', next_attempt_at = ? WHERE id = ?`,
+		formatTime(later), stale); err != nil {
+		t.Fatalf("defer into the future: %v", err)
+	}
+
+	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("idle dequeue err = %v; want sql.ErrNoRows", err)
+	}
+	var seq sql.NullInt64
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT batch_seq FROM work_queue WHERE id = ?`, stale).Scan(&seq); err != nil {
+		t.Fatalf("read batch_seq: %v", err)
+	}
+	if seq.Valid {
+		t.Fatalf("stale row %d kept batch_seq %d after an idle dequeue; want the clear committed", stale, seq.Int64)
 	}
 }
 

@@ -580,7 +580,14 @@ func (q *DBQueue) dequeueBatched(ctx context.Context, now string) (WorkItem, err
 	}
 	item, err := scanWorkItem(tx.QueryRowContext(ctx, dequeueBatchedClaimSQL, now))
 	if errors.Is(err, sql.ErrNoRows) {
-		return WorkItem{}, sql.ErrNoRows // pool genuinely empty (refill drew nothing)
+		// Pool genuinely empty (refill drew nothing). Commit anyway: the refill
+		// may have cleared stale stamps (#999), and rolling that back would let
+		// an idle queue keep a stale row's old batch_seq until it came due and
+		// jumped the buffer.
+		if cerr := tx.Commit(); cerr != nil {
+			return WorkItem{}, fmt.Errorf("queue: commit empty batched dequeue tx: %w", cerr)
+		}
+		return WorkItem{}, sql.ErrNoRows
 	}
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: batched claim: %w", err)
