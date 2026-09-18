@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/normalize"
@@ -202,23 +205,126 @@ func TestRunOnce_CachedCategoricalIsNotServed(t *testing.T) {
 	}
 }
 
-// TestRunOnce_CategoricalWithThrottledLaneSettles pins that this change cannot
-// starve the queue: the only result is refused and the other lane is rate
-// limited. The row settles done + categorical exactly as before #950 -- it is
-// NOT released or failed, and the pass does not idle on a throttle.
-func TestRunOnce_CategoricalWithThrottledLaneSettles(t *testing.T) {
+// TestRunOnce_CategoricalWithTransportFailureSettles: a transport failure is an
+// ANSWER (the lane was reached, or the request shape is refused, which no wait
+// fixes), so the refused result settles on the first pass as before #950.
+func TestRunOnce_CategoricalWithTransportFailureSettles(t *testing.T) {
 	primary := &fakeFetcher{song: fallthroughSong(400, "wrong recording")}
-	secondary := &fakeFetcher{err: musixmatch.ErrRateLimited}
+	secondary := &fakeFetcher{err: errors.New("connection refused")}
 	rig, w := newFallthroughRig(t, primary, secondary)
 
 	if err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce = %v; want nil (a refused result settles, it does not idle the pass)", err)
-	}
-	if secondary.calls != 1 {
-		t.Fatalf("second lane calls = %d; want 1", secondary.calls)
+		t.Fatalf("RunOnce = %v; want nil", err)
 	}
 	if status, lane, outcome := rig.row(t); status != "done" || lane != providers.Musixmatch || outcome != "categorical" {
 		t.Fatalf("row = (status %q, lane %q, timing %q); want (done, musixmatch, categorical)", status, lane, outcome)
+	}
+	if got, ok := rig.cached(t); ok {
+		t.Fatalf("cache holds %+v; a timing-refused lyric must never be cached", got)
+	}
+}
+
+// byTitleFetcher answers per track title, so two queued rows can get different
+// results from one lane.
+type byTitleFetcher map[string]models.Song
+
+func (f byTitleFetcher) FindLyrics(_ context.Context, t models.Track) (models.Song, error) {
+	return f[t.TrackName], nil
+}
+
+// TestRunOnce_CategoricalWithUntriedLaneWaitsBounded is the #950 part-2 path
+// end to end over a real SQLite queue: row 1's only result is refused and the
+// other lane fails auth (its breaker then stays open), so that lane never
+// answers. Row 1 must be parked via DeferRefused WITHOUT ending the drain pass
+// or charging attempts/miss_count, row 2 must be processed while it waits, and
+// once the refused_waits budget is spent row 1 settles done + categorical as
+// before #950: the refused song handed to the writer (which quarantines it),
+// never cached.
+func TestRunOnce_CategoricalWithUntriedLaneWaitsBounded(t *testing.T) {
+	ctx := context.Background()
+	secondary := &fakeFetcher{err: musixmatch.ErrUnauthorized}
+	rig, w := newFallthroughRig(t, byTitleFetcher{
+		"Synthetic Title": fallthroughSong(400, "wrong recording"),
+		"Other Title":     fallthroughSong(90, "right recording"),
+	}, secondary)
+	row2, err := rig.q.Enqueue(ctx, models.Inputs{
+		Track:  models.Track{ArtistName: "Other Artist", TrackName: "Other Title"},
+		Outdir: "/out", Filename: "other.lrc", SourcePath: "/library/other.flac",
+	}, queue.PriorityScan)
+	if err != nil {
+		t.Fatalf("enqueue row 2: %v", err)
+	}
+	type counters struct{ waits, attempts, misses int }
+	read := func() counters {
+		var c counters
+		if err := rig.db.QueryRow(`SELECT refused_waits, attempts, miss_count FROM work_queue WHERE id = ?`, rig.id).
+			Scan(&c.waits, &c.attempts, &c.misses); err != nil {
+			t.Fatalf("read counters: %v", err)
+		}
+		return c
+	}
+	rewind := func() {
+		if _, err := rig.db.Exec(`UPDATE work_queue SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, rig.id); err != nil {
+			t.Fatalf("rewind: %v", err)
+		}
+	}
+	w.consecutiveFailures = 2 // a stale failure streak; a parked refusal is not a failure
+	logs := captureLogs(t)
+
+	// Pass 1: row 1 is parked and the pass does NOT idle.
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("pass 1 = %v; want nil (a partial outage must not end the drain pass)", err)
+	}
+	if status, _, outcome := rig.row(t); status != queue.StatusDeferred || outcome != "" {
+		t.Fatalf("row 1 after pass 1 = (%q, timing %q); want (deferred, unset)", status, outcome)
+	}
+	if c := read(); c != (counters{waits: 1}) {
+		t.Fatalf("row 1 counters = %+v; want refused_waits 1 and attempts/miss_count untouched", c)
+	}
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (a lane answered)", w.consecutiveFailures)
+	}
+	if len(rig.writer.songs) != 0 {
+		t.Fatalf("written = %+v; want nothing while waiting", rig.writer.songs)
+	}
+	// Pass 2: row 1 waits out its DeferRefused window, so row 2 is claimed.
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	var s2 string
+	if err := rig.db.QueryRow(`SELECT status FROM work_queue WHERE id = ?`, row2.ID).Scan(&s2); err != nil || s2 != queue.StatusDone {
+		t.Fatalf("row 2 status = %q (%v); want done (row 1 must not starve it)", s2, err)
+	}
+	// Row 1 is re-dequeued and re-parked until the budget is spent.
+	for want := 2; want <= maxRefusedWaits; want++ {
+		rewind()
+		if err := w.RunOnce(ctx); err != nil {
+			t.Fatalf("wait %d: %v", want, err)
+		}
+		if status, _, _ := rig.row(t); status != queue.StatusDeferred || read().waits != want {
+			t.Fatalf("wait %d: row 1 = (%q, refused_waits %d); want (deferred, %d)", want, status, read().waits, want)
+		}
+	}
+	rewind()
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("settling pass: %v", err)
+	}
+	// I1: a settle with a lane still untried is findable at Warn, naming the lane.
+	if rec := findLog(*logs, slog.LevelWarn, "lane still untried"); rec == nil ||
+		rec.attrs["untried_lane"].String() != providers.PetitLyrics || rec.attrs["id"].Int64() != rig.id {
+		t.Fatalf("settle log = %+v; want a Warn naming untried_lane %q and the row id", rec, providers.PetitLyrics)
+	}
+	if status, lane, outcome := rig.row(t); status != queue.StatusDone || lane != providers.Musixmatch || outcome != "categorical" {
+		t.Fatalf("row 1 = (%q, %q, %q); want (done, musixmatch, categorical) once the budget is spent", status, lane, outcome)
+	}
+	if c := read(); c.waits != 0 || c.attempts != 0 || c.misses != 0 {
+		t.Fatalf("row 1 counters after settle = %+v; want all zero", c)
+	}
+	if len(rig.writer.songs) != 2 || rig.writer.songs[0].Subtitles.Lines[0].Text != "right recording" {
+		t.Fatalf("written = %+v; want row 2's lyric, then row 1's refused one", rig.writer.songs)
+	}
+	if last := rig.writer.songs[1]; !lyrics.RefusedByTimingGuard(last, last.AudioDurationSeconds) {
+		t.Fatalf("row 1 handed %+v; want a song the writer's guard quarantines (writes nothing)", last)
 	}
 	if got, ok := rig.cached(t); ok {
 		t.Fatalf("cache holds %+v; a timing-refused lyric must never be cached", got)
@@ -248,5 +354,65 @@ func TestRunOnce_OverrunSkipsDetector(t *testing.T) {
 	}
 	if status, _, outcome := rig.row(t); status != "done" || outcome != "mis_synced" {
 		t.Fatalf("row = (status %q, timing %q); want (done, mis_synced)", status, outcome)
+	}
+}
+
+// refusedUntriedFakeWorker is a worker over the fake queue whose one row's only
+// result is timing-refused while the fallback lane fails auth (never answers),
+// so the dispatch returns ErrTimingRefusedUntried.
+func refusedUntriedFakeWorker(q *fakeQueue) *Worker {
+	q.items = []queue.WorkItem{{ID: 91, Inputs: models.Inputs{
+		Track:  models.Track{ArtistName: "Synthetic Artist", TrackName: "Synthetic Title"},
+		Outdir: "/out", Filename: "track.lrc", SourcePath: "/library/track.flac",
+	}}}
+	w := New(q, &fakeCache{}, &fakeFetcher{song: fallthroughSong(400, "wrong recording")}, &capturingWriter{})
+	w.SetFallbackProviders(providers.New(providers.PetitLyrics, &fakeFetcher{err: musixmatch.ErrUnauthorized}))
+	w.SetRecordingEnrichmentDefault(true)
+	w.SetMetadataReader((&fakeMetadataReader{meta: scanner.AudioMetadata{TrackLength: fallthroughFileSeconds}}).read)
+	return w
+}
+
+// TestRunOnce_DeferRefusedErrors (#950 review M2): a row that is no longer
+// processing is left alone (no fail), while any other queue error takes the
+// ordinary fail path.
+func TestRunOnce_DeferRefusedErrors(t *testing.T) {
+	t.Run("no longer processing", func(t *testing.T) {
+		q := &fakeQueue{deferRefusedErr: sql.ErrNoRows}
+		w := refusedUntriedFakeWorker(q)
+		if err := w.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce = %v; want nil (the row moved on)", err)
+		}
+		if len(q.failed) != 0 || len(q.completed) != 0 {
+			t.Fatalf("failed %v completed %v; want the row left alone", q.failed, q.completed)
+		}
+	})
+	t.Run("queue error", func(t *testing.T) {
+		q := &fakeQueue{deferRefusedErr: errors.New("disk full")}
+		w := refusedUntriedFakeWorker(q)
+		_ = w.RunOnce(context.Background())
+		if len(q.failed) != 1 || q.failed[0] != 91 {
+			t.Fatalf("failed = %v; want [91] (a queue error takes the fail path)", q.failed)
+		}
+	})
+}
+
+// TestRunOnce_RefusedUntriedStampsDetectorTelemetry (#950 review M3): the
+// detector's not-instrumental telemetry is stamped BEFORE the row is parked,
+// so the re-dispatch after the wait reuses it instead of re-running YAMNet.
+func TestRunOnce_RefusedUntriedStampsDetectorTelemetry(t *testing.T) {
+	q := &fakeQueue{}
+	w := refusedUntriedFakeWorker(q)
+	w.EnableAudioDetector(&fakeStoredDecider{version: "v1", detectRes: detector.Result{
+		Instrumental: false, Version: "v1", Confidence: 0.4, VocalConfidence: 0.7, WinningVocalClass: "Singing", Reusable: true,
+	}})
+	w.SetInstrumentalDetectionDefault(true)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v", err)
+	}
+	if len(q.deferred) != 1 {
+		t.Fatalf("deferred = %v; want the row parked", q.deferred)
+	}
+	if len(q.instrumentalStamps) != 1 || q.instrumentalStamps[0].Tel.DetectorVersion != "v1" {
+		t.Fatalf("instrumentalStamps = %+v; want the v1 telemetry stamped before the park", q.instrumentalStamps)
 	}
 }

@@ -18,6 +18,9 @@ type laneResult struct {
 	// request. Carried per result so parallel-mode attribution reports locality
 	// the same way ordered mode does (#534).
 	local bool
+	// instrumentalOnly mirrors Lane.instrumentalOnly: such a lane is never
+	// counted as untried (noteUntried, #950).
+	instrumentalOnly bool
 }
 
 // findParallel dispatches every lane concurrently and races the results:
@@ -47,7 +50,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		lane := lane
 		go func() {
 			song, err := lane.FindLyrics(childCtx, track, sourcePath)
-			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local()}
+			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local(), instrumentalOnly: lane.instrumentalOnly}
 		}()
 	}
 
@@ -94,11 +97,14 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		case res := <-results:
 			pending--
 			class := ClassifyOutcome(res.err)
+			// A canceled lane classifies as transport, so it is never untried.
+			r.noteUntried(res.err, class, res.name, res.instrumentalOnly)
 			switch {
 			case errors.Is(res.err, context.Canceled):
 				// A canceled loser, or a parent-canceled lane: no catalog signal, skip.
 			case class == OutcomeUnavailable:
-				// Breaker open, provider not called: skip (matters only if ALL unavailable).
+				// Breaker open, provider not called: skip (matters only if ALL
+				// unavailable, or to hold back a timing-refused result, #950).
 			default:
 				r.consulted++
 				consulted = append(consulted, attemptedLane{name: res.name, local: res.local})
@@ -107,7 +113,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 					kind = classifyCandidate(res.song, track, o.guard)
 				}
 				switch {
-				case res.err == nil && kind != candidateRetain:
+				case res.err == nil && (kind == candidateCommit || kind == candidateHold):
 					// #950: only a result the timing guard promotes as-is may commit
 					// as synced and cancel the rest. A demotable one lands as .txt, so
 					// it takes the held-unsynced path below, exactly like any other
@@ -138,7 +144,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 						upgrade = time.After(o.raceWait)
 					}
 				case res.err == nil:
-					r.retain(res.song, res.name, retainQuality(res.song, track))
+					r.retainCandidate(res.song, res.name, retainQuality(res.song, track), kind)
 				default:
 					r.rankErr(res.err, class)
 				}
