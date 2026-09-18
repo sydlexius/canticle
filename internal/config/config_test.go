@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -2599,14 +2602,17 @@ func TestEnvLegacyWordSyncBoolMaps(t *testing.T) {
 		{"env mode beats env bool", "true", "both", "", WordSyncModeBoth},
 		// An env bool still beats a FILE that never mentioned either key.
 		{"env bool over a silent file", "true", "", "[output]\ndir = \"x\"\n", WordSyncModeInline},
-		// ...AND over a file that set the mode explicitly. This is standard
-		// precedence (CLI > env > file), deliberately NOT special-cased: making
-		// the newer key beat the deprecated one ACROSS source tiers would be a
-		// rule nobody expects from a config system, and the deprecation warning
-		// is what makes a stale MXLRC_WORD_SYNC visible during a migration.
-		{"env bool beats an explicit file mode", "true", "", "[output]\nword_sync_mode = \"off\"\n", WordSyncModeInline},
+		// ...but NOT over a file that set the mode explicitly. The deprecated
+		// key is consulted only when word_sync_mode is unset in EVERY source;
+		// otherwise a mode saved from the settings UI (whose env lock knows
+		// only MXLRC_WORD_SYNC_MODE) would be reverted on every reload.
+		{"explicit file mode beats env bool", "true", "", "[output]\nword_sync_mode = \"off\"\n", WordSyncModeOff},
+		// A file that set only the deprecated bool is still overridden by the
+		// env bool: same key, ordinary env > file precedence.
+		{"env bool beats file bool", "true", "", "[output]\nword_sync = false\n", WordSyncModeInline},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			isolateEnv(t)
 			dir := t.TempDir()
 			path := filepath.Join(dir, "config.toml")
 			if tc.file != "" {
@@ -2629,5 +2635,30 @@ func TestEnvLegacyWordSyncBoolMaps(t *testing.T) {
 				t.Errorf("WordSyncMode = %q, want %q", cfg.Output.WordSyncMode, tc.want)
 			}
 		})
+	}
+}
+
+// TestEnvLegacyWordSyncIgnoredStillWarns asserts the ignored arm is not SILENT.
+// When an explicit mode suppresses MXLRC_WORD_SYNC, the stale var must still be
+// logged, or it stays in a container's environment unnoticed. Only the log can
+// tell this arm from a missing one, so the test reads the log.
+func TestEnvLegacyWordSyncIgnoredStillWarns(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[output]\nword_sync_mode = \"off\"\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	t.Setenv("MXLRC_WORD_SYNC", "true")
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if _, _, err := LoadWithSources(path); err != nil {
+		t.Fatalf("LoadWithSources: %v", err)
+	}
+	if !strings.Contains(buf.String(), "MXLRC_WORD_SYNC is deprecated and ignored") {
+		t.Errorf("no warning for an ignored MXLRC_WORD_SYNC; log was:\n%s", buf.String())
 	}
 }

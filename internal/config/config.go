@@ -997,6 +997,9 @@ func Load(path string) (Config, error) {
 func LoadWithSources(path string) (Config, map[string]bool, error) {
 	cfg := defaults()
 	appliedEnv := map[string]bool{}
+	// fileSetWordSyncMode records that the FILE set word_sync_mode, so the env
+	// pass below can keep the deprecated MXLRC_WORD_SYNC from overriding it.
+	fileSetWordSyncMode := false
 	path = ResolveConfigPath(path)
 	if path != "" {
 		if _, err := os.Stat(path); err == nil {
@@ -1049,6 +1052,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 				// An unrecognized mode resets to the default rather than falling
 				// through to the "" zero value, which is not one of the four and
 				// which no consumer has an arm for.
+				fileSetWordSyncMode = true
 				cfg.Output.WordSyncMode = normalizeWordSyncMode(cfg.Output.WordSyncMode)
 				if !validWordSyncMode(cfg.Output.WordSyncMode) {
 					cfg.Output.WordSyncMode = d.Output.WordSyncMode
@@ -1268,14 +1272,20 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	// The file-path precedence above cannot see the environment, because it runs
 	// on decode metadata and applyEnvOverrides has not happened yet. So the
 	// deprecated bool gets its legacy mapping a SECOND time here, for the env
-	// path only, under the same rule: the bool maps ONLY when the mode was not
-	// set by a more specific source.
+	// path only, under the same rule: the bool maps ONLY when word_sync_mode
+	// was set by NO source -- neither its env var nor the file.
 	//
 	// Without this an operator who sets MXLRC_WORD_SYNC=true in a container's
 	// environment -- a documented, registry-supported path -- silently gets the
 	// new default instead of the inline markers they asked for, with no
 	// deprecation warning, because the bool applied and nothing read it.
-	if appliedEnv["output.word_sync"] && !appliedEnv["output.word_sync_mode"] {
+	//
+	// The file check is deliberately a cross-tier exception to CLI > env > file.
+	// The deprecated key is documented as consulted "only when word_sync_mode is
+	// unset", and letting a stale env bool beat an explicit file mode also broke
+	// the settings UI: the mode field's env lock only knows MXLRC_WORD_SYNC_MODE,
+	// so a mode saved there would be written and then reverted on every reload.
+	if appliedEnv["output.word_sync"] && !appliedEnv["output.word_sync_mode"] && !fileSetWordSyncMode {
 		resolved := WordSyncModeOff
 		if cfg.Output.WordSync {
 			resolved = WordSyncModeInline
@@ -1283,6 +1293,11 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 		cfg.Output.WordSyncMode = resolved
 		slog.Warn("MXLRC_WORD_SYNC is deprecated; set MXLRC_WORD_SYNC_MODE instead (see docs/CONFIGURATION.md)",
 			"word_sync", cfg.Output.WordSync, "resolved_mode", resolved)
+	} else if appliedEnv["output.word_sync"] {
+		// Ignored, not silently: a stale deprecated var left in a container's
+		// environment should still show up during a migration.
+		slog.Warn("MXLRC_WORD_SYNC is deprecated and ignored because word_sync_mode is set; unset it",
+			"word_sync", cfg.Output.WordSync, "resolved_mode", cfg.Output.WordSyncMode)
 	}
 	normalizeEmbeddedLyrics(&cfg)
 	normalizeScanSchedule(&cfg)
