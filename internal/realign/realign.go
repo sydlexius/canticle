@@ -17,8 +17,9 @@
 // instrumental .txt marker keeps its type. An owned word-synced companion (.elrc,
 // #986) is never an orphan of its own: it moves with its .lrc under the same stem
 // change, keeping its own extension. A move whose companion's destination is
-// taken is refused, and one whose companion step fails is rolled back where the
-// filesystem allows. Apply is backup-first and clobber-safe.
+// taken is refused, as is a companion-less .lrc whose target stem already has
+// an owned companion (#997), and one whose companion step fails is rolled back
+// where the filesystem allows. Apply is backup-first and clobber-safe.
 package realign
 
 import (
@@ -277,8 +278,8 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "exact and heuristic candidates disagree"})
 				continue
 			}
-			if moveBlocked(target, orphan) {
-				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "destination " + target + " already exists"})
+			if why := moveBlocked(target, orphan); why != "" {
+				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: why})
 				continue
 			}
 			if claimed[target] {
@@ -301,8 +302,8 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 			}
 			audio := missingAudio[0]
 			target := destForAudio(audio, orphanExt)
-			if moveBlocked(target, orphan) {
-				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "destination " + target + " already exists"})
+			if why := moveBlocked(target, orphan); why != "" {
+				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: why})
 				continue
 			}
 			if claimed[target] {
@@ -366,8 +367,8 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 	for _, p := range pairings {
 		orphanExt := filepath.Ext(p.Orphan)
 		target := destForAudio(p.Audio, orphanExt)
-		if moveBlocked(target, p.Orphan) {
-			res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: p.Orphan, Reason: "destination " + target + " already exists"})
+		if why := moveBlocked(target, p.Orphan); why != "" {
+			res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: p.Orphan, Reason: why})
 			continue
 		}
 		if claimed[target] {
@@ -497,9 +498,9 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 			applied = append(applied, Applied{Move: mv})
 			continue
 		}
-		if moveBlocked(mv.Target, mv.Orphan) {
+		if why := moveBlocked(mv.Target, mv.Orphan); why != "" {
 			rollbackBackup("destination blocked", nil)
-			applied = append(applied, Applied{Move: mv, Err: fmt.Errorf("destination exists: %s", mv.Target)})
+			applied = append(applied, Applied{Move: mv, Err: errors.New(why)})
 			continue
 		}
 		if rerr := renameOrCopy(mv.Orphan, mv.Target); rerr != nil {
@@ -1246,14 +1247,27 @@ func companionTarget(target string) string {
 	return sidecar.StemOf(target) + sidecar.ExtWordSynced
 }
 
-// moveBlocked extends destinationBlocked to the pair: a .lrc whose owned
-// companion cannot follow it is not moved at all, rather than half-moved.
-func moveBlocked(target, orphan string) bool {
+// moveBlocked extends destinationBlocked to the pair and returns why the move
+// is refused, or "" when it is clear. A .lrc whose owned companion cannot
+// follow it (ANY file at the companion's destination, owned or foreign) is not
+// moved at all, rather than half-moved. A .lrc WITHOUT a companion is refused
+// when an owned companion is stranded at the target's stem (#997): landing
+// beside it would break the writer's invariant that an owned companion
+// describes the .lrc beside it. Refusing, like any occupied destination,
+// removes nothing; the next write of that stem owns the stale file. A foreign
+// file there blocks nothing, since no path ever touches one.
+func moveBlocked(target, orphan string) string {
 	if destinationBlocked(target, orphan) {
-		return true
+		return "destination " + target + " already exists"
 	}
-	c := lyrics.OwnedCompanionOf(orphan)
-	return c != "" && destinationBlocked(companionTarget(target), c)
+	if c := lyrics.OwnedCompanionOf(orphan); c != "" {
+		if destinationBlocked(companionTarget(target), c) {
+			return "destination " + target + " already exists"
+		}
+	} else if s := lyrics.OwnedCompanionOf(target); s != "" {
+		return "destination " + target + " has a stale word-synced companion " + s
+	}
+	return ""
 }
 
 // stepCompanion performs kind's action on the companion comp: every kind but

@@ -343,3 +343,79 @@ func TestCompanion_PartialCrossDeviceMoveKeepsTheRecord(t *testing.T) {
 		})
 	}
 }
+
+// planBare: an orphan .lrc WITHOUT a companion (ISRC-tagged) and its renamed
+// audio. A non-empty stranded body is written at the target's companion path
+// before planning when atPlan, else after it, so only Apply's re-check can see
+// it. #997.
+func planBare(t *testing.T, stranded string, atPlan bool) (newLrc, newElrc string, res Result, apply func() []Applied) {
+	t.Helper()
+	root := tempRoot(t)
+	dir := filepath.Join(root, "Album")
+	audio := filepath.Join(dir, "new.flac")
+	write(t, audio, "a")
+	write(t, filepath.Join(dir, "old.lrc"), "[isrc:US1]\n[00:01.00]hi\n")
+	newLrc, newElrc = filepath.Join(dir, "new.lrc"), filepath.Join(dir, "new.elrc")
+	if stranded != "" && atPlan {
+		write(t, newElrc, stranded)
+	}
+	r, lib := newRealigner(root, defaultCfg(), map[string]string{audio: "US1"})
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if stranded != "" && !atPlan {
+		write(t, newElrc, stranded)
+	}
+	return newLrc, newElrc, res, func() []Applied {
+		applied, aerr := r.Apply(res.Moves, filepath.Join(t.TempDir(), "b.jsonl"), Policy{AllowHeuristic: true})
+		if aerr != nil {
+			t.Fatalf("Apply: %v", aerr)
+		}
+		return applied
+	}
+}
+
+// An orphan .lrc with no companion never lands beside a stale OWNED .elrc: the
+// move is refused (a plan-time conflict, or Apply's re-check when the companion
+// appeared after planning), and the stale companion is left for the next write
+// of that stem, which owns its removal. #997.
+func TestRename_BareLrcNeverLandsBesideAStaleOwnedCompanion(t *testing.T) {
+	t.Run("plan", func(t *testing.T) {
+		newLrc, newElrc, res, _ := planBare(t, ownedElrc, true)
+		if len(res.Moves) != 0 || len(res.Skips) != 1 || res.Skips[0].Kind != "conflict" ||
+			!strings.Contains(res.Skips[0].Reason, "word-synced companion") {
+			t.Fatalf("moves=%+v skips=%+v; want one companion conflict skip and no move", res.Moves, res.Skips)
+		}
+		if exists(newLrc) || !exists(newElrc) {
+			t.Errorf("lrc=%v stale companion=%v; want no lrc and the companion untouched", exists(newLrc), exists(newElrc))
+		}
+	})
+	t.Run("apply", func(t *testing.T) {
+		newLrc, newElrc, res, apply := planBare(t, ownedElrc, false)
+		if len(res.Moves) != 1 {
+			t.Fatalf("moves=%+v skips=%+v; want the move planned", res.Moves, res.Skips)
+		}
+		if a := apply(); a[0].Err == nil || exists(newLrc) {
+			t.Fatalf("apply err=%v lrc landed=%v; want a refusal and no lrc", a[0].Err, exists(newLrc))
+		}
+		if b, err := os.ReadFile(newElrc); err != nil || string(b) != ownedElrc {
+			t.Errorf("stale companion = %q, %v; want it untouched", b, err)
+		}
+	})
+}
+
+// A FOREIGN .elrc at the target blocks nothing (the writer never touches one
+// either) and is byte-identical afterwards. #997.
+func TestRename_BareLrcBesideForeignCompanionMovesAndLeavesItAlone(t *testing.T) {
+	newLrc, newElrc, res, apply := planBare(t, foreignElrc, true)
+	if len(res.Moves) != 1 || len(res.Skips) != 0 {
+		t.Fatalf("moves=%+v skips=%+v; want the move planned", res.Moves, res.Skips)
+	}
+	if a := apply(); a[0].Err != nil || !exists(newLrc) {
+		t.Fatalf("apply err=%v lrc landed=%v; want the move applied", a[0].Err, exists(newLrc))
+	}
+	if b, err := os.ReadFile(newElrc); err != nil || string(b) != foreignElrc {
+		t.Errorf("foreign companion = %q, %v; want it byte-identical", b, err)
+	}
+}
