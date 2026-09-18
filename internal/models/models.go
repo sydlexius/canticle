@@ -196,8 +196,8 @@ type Song struct {
 	// omitempty IS applied, and it is not the same question. Timings come from
 	// Musixmatch's richsync sub-call (#613) and petitlyrics' word-synced tier,
 	// and neither covers every track, so many cached songs carry none -- and a
-	// bare field emits `"WordTimings":null` on every
-	// one of those rows, ~20 wasted bytes each across the whole library, on a
+	// bare field emits `"WordTimings":null` on every one of those rows, ~20
+	// wasted bytes each across the whole library, on a
 	// blob rewritten at every settle. The tag keeps the short key AND drops the
 	// field when it is empty.
 	WordTimings []WordTiming `json:",omitempty"`

@@ -16,8 +16,9 @@
 // only ever changes a sidecar's stem, never its extension, so a synced .lrc or an
 // instrumental .txt marker keeps its type. An owned word-synced companion (.elrc,
 // #986) is never an orphan of its own: it moves with its .lrc under the same stem
-// change, keeping its own extension, and a move whose companion cannot follow is
-// not made at all. Apply is backup-first and clobber-safe.
+// change, keeping its own extension. A move whose companion's destination is
+// taken is refused, and one whose companion step fails is rolled back where the
+// filesystem allows. Apply is backup-first and clobber-safe.
 package realign
 
 import (

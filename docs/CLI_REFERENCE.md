@@ -72,7 +72,7 @@ canticle "Dream Theater"
 >
 > **_The `-d/--depth` argument limits the depth of subdirectories to scan; use `-d 0` or `--depth 0` to only scan the specified directory._**
 
-The `--upgrade` flag re-fetches tracks that previously produced a `.txt` (unsynced) file, to promote them to `.lrc` when synced lyrics later become available. Instrumental tracks are always written as `.txt` and are excluded from upgrade - only `--update` (full re-fetch) overrides them. A companion `.elrc` follows its `.lrc`: an `--update` re-fetch rewrites it according to `word_sync_mode`, and one that yields no word timings (or is demoted to `.txt`) removes it, so a companion never describes an older `.lrc`. A `.lrc` without a companion is settled like any other and is not reopened just to add one.
+The `--upgrade` flag re-fetches tracks that previously produced a `.txt` (unsynced) file, to promote them to `.lrc` when synced lyrics later become available. Instrumental tracks are always written as `.txt` and are excluded from upgrade - only `--update` (full re-fetch) overrides them. A Canticle-written `.elrc` follows its `.lrc`: an `--update` re-fetch that replaces the `.lrc` also replaces the companion, or removes it when the new result has no word timings or `word_sync_mode` is `off`/`inline`, so a rewrite never leaves word timings beside a different `.lrc`. A result that is refused for a timing mismatch leaves both files as they were. A `.elrc` Canticle did not write is never touched. A `.lrc` without a companion is settled like any other and is not reopened just to add one.
 
 ### Scoping an upgrade to an older cohort
 

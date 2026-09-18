@@ -76,7 +76,8 @@ func TestDecodeSong_OldCacheLacksWordTimings(t *testing.T) {
 // TestEncodeSong_OmitsEmptyWordTimings covers the cache-size half of the #480
 // review. WordTimings is persisted now, but many cached songs carry none --
 // Musixmatch's richsync sub-call (#613) and petitlyrics' word-synced tier are
-// the only sources, and neither covers every track -- so a bare field emits `"WordTimings":null` on every one of those rows.
+// the only sources, and neither covers every track -- so a bare field emits
+// `"WordTimings":null` on every one of those rows.
 //
 // That is ~20 wasted bytes per row across the whole library for a field the row
 // does not have, and the cache is written on every settle. omitempty removes it
