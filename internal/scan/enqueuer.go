@@ -16,6 +16,7 @@ import (
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/sidecar"
 	"github.com/sydlexius/canticle/internal/timing"
 )
 
@@ -374,7 +375,10 @@ func scanInputs(res models.ScanResult) (models.Inputs, error) {
 	filename := res.Filename
 	if filename == "" && res.FilePath != "" {
 		base := filepath.Base(res.FilePath)
-		filename = strings.TrimSuffix(base, filepath.Ext(base)) + ".lrc"
+		// The line-synced name the writer targets. A word-synced companion
+		// (#986) is never recorded here: it is DERIVED from this .lrc
+		// (lyrics.OwnedCompanionOf) by every path that moves or removes it.
+		filename = strings.TrimSuffix(base, filepath.Ext(base)) + sidecar.ExtLineSynced
 	}
 	if outdir == "" && filename == "" && res.FilePath == "" {
 		return models.Inputs{}, fmt.Errorf("invalid scan result: missing file path and output destination")

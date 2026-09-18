@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // ProvenanceCmd hosts nested provenance subcommands.
@@ -114,6 +115,10 @@ func runProvenanceBackfill(ctx context.Context, out io.Writer, args ProvenanceBa
 			failed = append(failed, p.Path)
 			continue
 		}
+		// A word-synced companion (#986) is deliberately NOT tagged: no canticle
+		// path reads its tags. purge-provenance matches the .lrc and removes an
+		// owned companion by deriving it from that .lrc, whatever the
+		// companion's own header says.
 		if inj == 0 {
 			unchanged++
 		} else if p.Partial {
@@ -183,7 +188,7 @@ func backfillPlansFromDB(ctx context.Context, sqlDB *sql.DB) (plans []provenance
 		rec := buildProvenanceRecord(ctx, sqlDB, r.artist, r.title, r.providerLane, r.completedAt)
 
 		for _, p := range paths {
-			if strings.ToLower(filepath.Ext(p)) != ".lrc" {
+			if sidecar.KindOf(p) != sidecar.KindLineSynced {
 				continue
 			}
 			if _, serr := os.Stat(p); os.IsNotExist(serr) {
@@ -228,7 +233,7 @@ func backfillPlansFromPaths(ctx context.Context, sqlDB *sql.DB, paths []string) 
 			return nil, 0, fmt.Errorf("stat %s: %w", root, err)
 		}
 		if !info.IsDir() {
-			if strings.ToLower(filepath.Ext(root)) != ".lrc" {
+			if sidecar.KindOf(root) != sidecar.KindLineSynced {
 				continue
 			}
 			if p, ok := lookupPlan(ctx, sqlDB, root); ok {
@@ -242,7 +247,7 @@ func backfillPlansFromPaths(ctx context.Context, sqlDB *sql.DB, paths []string) 
 			if err != nil {
 				return err
 			}
-			if d.IsDir() || strings.ToLower(filepath.Ext(path)) != ".lrc" {
+			if d.IsDir() || sidecar.KindOf(path) != sidecar.KindLineSynced {
 				return nil
 			}
 			if p, ok := lookupPlan(ctx, sqlDB, path); ok {
