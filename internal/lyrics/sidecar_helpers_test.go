@@ -3,6 +3,7 @@ package lyrics
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -95,6 +96,22 @@ func TestSettledSidecar_Characterization(t *testing.T) {
 	// unsearchable parent directory produces EACCES on both candidates, so the
 	// first probed extension (.txt) is reported as occupied.
 	t.Run("stat error other than not-exist reads as present", func(t *testing.T) {
+		// Both skips are load-bearing, and for the same underlying reason: this
+		// case needs a stat to fail with something OTHER than not-exist, and it
+		// manufactures that with directory permissions. Where permissions do not
+		// deny a stat, the probe succeeds-as-absent and the assertion below would
+		// fail on a guard that is actually correct.
+		//
+		// Windows is not hypothetical here: os.Geteuid() returns -1 there, so the
+		// root check alone does not skip, and os.Chmod(dir, 0o000) does not make a
+		// directory unsearchable -- both candidates read as absent. CI is
+		// ubuntu-only so it would never catch it, but GoReleaser ships
+		// windows/amd64, so `go test ./...` on a Windows checkout would fail.
+		// Mirrors internal/secrets/key_test.go, which pairs these two skips on the
+		// same reasoning.
+		if runtime.GOOS == "windows" {
+			t.Skip("permission-based stat errors unreliable on Windows")
+		}
 		if os.Geteuid() == 0 {
 			t.Skip("running as root: directory permissions do not deny stat")
 		}
