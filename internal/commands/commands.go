@@ -3158,6 +3158,7 @@ func configKeys() []string {
 		"output.embedded_lyrics",
 		"output.bilingual_output",
 		"output.word_sync",
+		"output.word_sync_mode",
 		"db.path",
 		"server.addr",
 		"server.webhook_api_keys",
@@ -3213,6 +3214,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.FormatBool(cfg.Output.BilingualOutput), true
 	case "output.word_sync":
 		return strconv.FormatBool(cfg.Output.WordSync), true
+	case "output.word_sync_mode":
+		return string(cfg.Output.WordSyncMode), true
 	case "db.path":
 		return cfg.DB.Path, true
 	case "server.addr":
@@ -3333,6 +3336,37 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("output.word_sync must be a boolean: %w", err)
 		}
 		cfg.Output.WordSync = v
+		// The MODE moves with the bool, or setting the bool is a no-op that
+		// reports success. `config set` re-encodes the WHOLE struct, and the
+		// loader has already materialized a resolved word_sync_mode by then, so
+		// writing the bool alone leaves the previously-resolved mode beside it --
+		// and the mode wins on the next boot. An operator would set the
+		// deprecated key, see exit 0, and get nothing, forever.
+		//
+		// Same legacy mapping as the loader and the env path, kept in the one
+		// shape all three use: true means inline, false means off.
+		if v {
+			cfg.Output.WordSyncMode = config.WordSyncModeInline
+		} else {
+			cfg.Output.WordSyncMode = config.WordSyncModeOff
+		}
+	case "output.word_sync_mode":
+		// Validation is DELEGATED to the config package rather than restated
+		// here, following the timing-action arms below: config.ValidateAndSet
+		// reads the same enum source the loader, the env path, and the settings
+		// UI read, so a value this CLI accepts is exactly a value the next boot
+		// will keep. Restating the four modes in this switch is how the CLI
+		// would drift from the loader.
+		//
+		// Normalized first because the loader normalizes: accepting " Sidecar"
+		// here and storing it verbatim would write a value the next boot resets.
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		// Returned UNWRAPPED: the *config.ValidationError already names the path,
+		// the offending value, and the allowed set.
+		if err := config.ValidateAndSet(key, normalized); err != nil {
+			return err
+		}
+		cfg.Output.WordSyncMode = config.WordSyncMode(normalized)
 	case "db.path":
 		cfg.DB.Path = value
 	case "server.addr":

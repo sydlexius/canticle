@@ -66,6 +66,7 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("embedded_lyrics = %s%s\n", cfg.Output.EmbeddedLyrics, ann("output.embedded_lyrics"))
 	p("bilingual_output = %t%s\n", cfg.Output.BilingualOutput, ann("output.bilingual_output"))
 	p("word_sync = %t%s\n", cfg.Output.WordSync, ann("output.word_sync"))
+	p("word_sync_mode = %s%s\n", cfg.Output.WordSyncMode, ann("output.word_sync_mode"))
 	p("\n")
 
 	// [db]
@@ -336,6 +337,7 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			strAttr("embedded_lyrics", "output.embedded_lyrics", cfg.Output.EmbeddedLyrics),
 			boolAttr("bilingual_output", "output.bilingual_output", cfg.Output.BilingualOutput),
 			boolAttr("word_sync", "output.word_sync", cfg.Output.WordSync),
+			strAttr("word_sync_mode", "output.word_sync_mode", string(cfg.Output.WordSyncMode)),
 		),
 		group("db",
 			strAttr("path", "db.path", cfg.DB.Path),

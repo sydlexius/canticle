@@ -3636,3 +3636,99 @@ func TestInnerTubeCooldownValidatorMatchesCLI(t *testing.T) {
 		}
 	}
 }
+
+// TestWordSyncModeCLIMatchesWebValidator pins the CLI `config set` arm and the
+// registry-driven web save path to the SAME rule for output.word_sync_mode
+// (#986), the way TestWordSyncValidatorMatchesCLI does for the bool it
+// supersedes. The CLI arm DELEGATES to config.ValidateAndSet rather than
+// restating the four modes, so this test's job is to prove the delegation is
+// actually there: a hand-rolled switch is exactly how the two surfaces would
+// drift.
+func TestWordSyncModeCLIMatchesWebValidator(t *testing.T) {
+	const path = "output.word_sync_mode"
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"sidecar", true},
+		{"off", true},
+		{"inline", true},
+		{"both", true},
+		// Normalized by both surfaces, so it must be accepted by both.
+		{" Both ", true},
+		{"sidecarr", false},
+		{"true", false},
+		{"", false},
+	} {
+		webErr := config.ValidateAndSet(path, tc.value)
+		cfg := config.Config{}
+		cliErr := setConfigValue(&cfg, path, tc.value)
+		if (webErr == nil) != tc.valid {
+			t.Errorf("ValidateAndSet(%q) err = %v; want valid=%v", tc.value, webErr, tc.valid)
+		}
+		if (webErr == nil) != (cliErr == nil) {
+			t.Errorf("value %q: web accepts=%v but CLI accepts=%v; the two surfaces disagree",
+				tc.value, webErr == nil, cliErr == nil)
+		}
+		// An accepted value must also be STORED normalized: storing " Both "
+		// verbatim would write a value the next boot resets to the default.
+		if cliErr == nil && cfg.Output.WordSyncMode != config.WordSyncMode(strings.ToLower(strings.TrimSpace(tc.value))) {
+			t.Errorf("value %q stored as %q; want it normalized", tc.value, cfg.Output.WordSyncMode)
+		}
+	}
+}
+
+// TestConfigValueWordSyncMode covers the CLI `config get` arm. configKeys lists
+// the key so an operator can ask for it; a missing configValue arm would answer
+// with a bare empty string rather than the setting.
+func TestConfigValueWordSyncMode(t *testing.T) {
+	got, ok := configValue(config.Config{Output: config.OutputConfig{WordSyncMode: config.WordSyncModeBoth}}, "output.word_sync_mode")
+	if !ok {
+		t.Fatal("configValue(output.word_sync_mode) ok = false; the key is listed in configKeys")
+	}
+	if got != "both" {
+		t.Errorf("configValue = %q; want %q", got, "both")
+	}
+	if !slices.Contains(configKeys(), "output.word_sync_mode") {
+		t.Error("configKeys is missing output.word_sync_mode")
+	}
+}
+
+// TestSetConfigValueWordSyncBoolMovesTheMode pins the pairing that keeps the
+// deprecated bool from being a no-op that reports success.
+//
+// `config set` re-encodes the WHOLE config struct, and by then the loader has
+// already materialized a resolved word_sync_mode. So writing the bool alone
+// leaves the PREVIOUSLY resolved mode beside it in the file -- and the mode wins
+// on the next boot. An operator would set output.word_sync, see exit 0, and get
+// nothing, with no error and no warning to explain it.
+//
+// Asserted on the STRUCT here; the on-disk consequence follows from the full
+// re-encode at the runConfig write site.
+func TestSetConfigValueWordSyncBoolMovesTheMode(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start config.WordSyncMode
+		set   string
+		want  config.WordSyncMode
+	}{
+		// The dangerous direction: a previously-resolved inline must not survive
+		// the operator turning the bool off.
+		{"false from a resolved inline", config.WordSyncModeInline, "false", config.WordSyncModeOff},
+		{"true from a resolved off", config.WordSyncModeOff, "true", config.WordSyncModeInline},
+		{"true from the new default", config.WordSyncModeSidecar, "true", config.WordSyncModeInline},
+		{"false from the new default", config.WordSyncModeSidecar, "false", config.WordSyncModeOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{}
+			cfg.Output.WordSyncMode = tc.start
+			if err := setConfigValue(&cfg, "output.word_sync", tc.set); err != nil {
+				t.Fatalf("setConfigValue: %v", err)
+			}
+			if cfg.Output.WordSyncMode != tc.want {
+				t.Errorf("after setting output.word_sync=%s, mode = %q, want %q -- the bool must move the "+
+					"mode or setting it is inert", tc.set, cfg.Output.WordSyncMode, tc.want)
+			}
+		})
+	}
+}

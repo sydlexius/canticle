@@ -88,7 +88,11 @@ var fields = []FieldSpec{
 	{Path: "output.dir", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_OUTPUT_DIR"}, Criticality: Safe, Editable: true, Description: "Default directory for .lrc output files."},
 	{Path: "output.embedded_lyrics", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_EMBEDDED_LYRICS"}, Criticality: Safe, Editable: true, Description: "How to handle embedded lyrics: off, respect, or extract."},
 	{Path: "output.bilingual_output", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_BILINGUAL_OUTPUT"}, Criticality: Safe, Editable: true, Description: "Interleave original and translation lines in one .lrc."},
-	{Path: "output.word_sync", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_WORD_SYNC"}, Criticality: Safe, Editable: true, Description: "Write per-word karaoke timings (Enhanced LRC). Not all players support them; some show the timing codes as text."},
+	{Path: "output.word_sync", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_WORD_SYNC"}, Criticality: Safe, Editable: true, Description: "Deprecated: use word_sync_mode. Write per-word karaoke timings (Enhanced LRC) into the lyric file itself. Only consulted when word_sync_mode is unset."},
+	// TypeString, not a (nonexistent) TypeEnum: an enum here is TypeString PLUS
+	// an enumValues entry, which is what drives both the validator and the
+	// settings dropdown.
+	{Path: "output.word_sync_mode", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_WORD_SYNC_MODE"}, Criticality: Safe, Editable: true, Description: "Where per-word karaoke timings go. sidecar (default) keeps the lyric file playable everywhere and saves the timings beside it; off discards them; inline puts them in the lyric file (not all players support that, some show the timing codes as text); both does inline and beside."},
 
 	// [db]
 	{Path: "db.path", Section: "db", Type: TypeString, EnvVars: []string{"MXLRC_DB_PATH"}, Criticality: Caution, Editable: true, Description: "SQLite database file path."},
