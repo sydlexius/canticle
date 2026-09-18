@@ -273,7 +273,7 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "exact and heuristic candidates disagree"})
 				continue
 			}
-			if destinationBlocked(target, orphan) {
+			if moveBlocked(target, orphan) {
 				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "destination " + target + " already exists"})
 				continue
 			}
@@ -297,7 +297,7 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 			}
 			audio := missingAudio[0]
 			target := destForAudio(audio, orphanExt)
-			if destinationBlocked(target, orphan) {
+			if moveBlocked(target, orphan) {
 				res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: orphan, Reason: "destination " + target + " already exists"})
 				continue
 			}
@@ -362,7 +362,7 @@ func (r *Realigner) classifyDir(dir string, de *dirEntry, pool []string, identit
 	for _, p := range pairings {
 		orphanExt := filepath.Ext(p.Orphan)
 		target := destForAudio(p.Audio, orphanExt)
-		if destinationBlocked(target, p.Orphan) {
+		if moveBlocked(target, p.Orphan) {
 			res.Skips = append(res.Skips, Skip{Kind: "conflict", Path: p.Orphan, Reason: "destination " + target + " already exists"})
 			continue
 		}
@@ -420,7 +420,15 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 			backupOffset = fi.Size()
 			haveOffset = true
 		}
-		if berr := appendBackup(backup, mv); berr != nil {
+		// The owned word-synced companion of a .lrc (#986) travels with it and
+		// is recorded in the SAME backup line, so the undo trail stays complete.
+		// A purge deletes it, so it has no new path (it is only staged under
+		// a temporary name until the .lrc's own step has succeeded).
+		comp, compTarget := lyrics.OwnedCompanionOf(mv.Orphan), ""
+		if comp != "" && mv.Kind != KindPurge {
+			compTarget = companionTarget(mv.Target)
+		}
+		if berr := appendBackup(backup, mv, comp, compTarget); berr != nil {
 			applied = append(applied, Applied{Move: mv, Err: fmt.Errorf("backup write failed: %w", berr)})
 			continue
 		}
@@ -441,15 +449,51 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 		// run-wide, and os.Rename would otherwise overwrite an existing sidecar
 		// on POSIX.
 		if mv.Kind != KindRename {
+			// The .lrc's own refusals first (a refused .lrc never costs its
+			// companion), then the companion, the writer's rule (#986): a
+			// companion that cannot follow aborts with the .lrc untouched.
+			var compAt string
+			cerr := checkRemediation(mv)
+			if cerr == nil {
+				compAt, cerr = stepCompanion(mv.Kind, comp, compTarget)
+			}
+			if cerr != nil {
+				// Drop the record only when the failed step provably left
+				// nothing behind: a copy that landed before its source
+				// could not be removed is a mutation the backup must keep.
+				if compAt == "" {
+					rollbackBackup("companion "+mv.Kind+" failed", cerr)
+				} else {
+					slog.Warn("realign: companion step failed after writing its destination; keeping its backup record", "path", comp, "destination", compAt, "error", cerr)
+				}
+				applied = append(applied, Applied{Move: mv, Err: cerr})
+				continue
+			}
 			if aerr := applyRemediation(mv); aerr != nil {
-				rollbackBackup(mv.Kind+" failed", aerr)
+				// Put the companion back (a purge's is only staged) so the
+				// failure leaves the pair as it was. Only then may the record
+				// go: one that cannot be restored is a mutation the backup
+				// must keep.
+				if undoMove(comp, compAt) {
+					rollbackBackup(mv.Kind+" failed", aerr)
+				}
 				applied = append(applied, Applied{Move: mv, Err: aerr})
 				continue
+			}
+			if mv.Kind == KindPurge && compAt != "" {
+				// The .lrc is gone, so the staged companion may go too. A
+				// failure strands it under a hidden non-sidecar name (never
+				// read as coverage); the backup line still names the original.
+				if rerr := os.Remove(compAt); rerr != nil && !os.IsNotExist(rerr) {
+					slog.Warn("realign: could not remove a staged purged companion", "path", compAt, "error", rerr)
+				} else {
+					lyrics.FsyncDir(filepath.Dir(compAt))
+				}
 			}
 			applied = append(applied, Applied{Move: mv})
 			continue
 		}
-		if destinationBlocked(mv.Target, mv.Orphan) {
+		if moveBlocked(mv.Target, mv.Orphan) {
 			rollbackBackup("destination blocked", nil)
 			applied = append(applied, Applied{Move: mv, Err: fmt.Errorf("destination exists: %s", mv.Target)})
 			continue
@@ -460,6 +504,23 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 			continue
 		}
 		lyrics.FsyncDir(filepath.Dir(mv.Target))
+		// A rename moves the .lrc FIRST and the companion second: a crash
+		// between leaves a correctly attached .lrc and a stranded companion,
+		// never a companion on the new stem beside an orphaned .lrc. The
+		// stranded companion is harmless: the walk never plans it as an orphan
+		// nor counts it as coverage, so it hides no gap; the backup line names it.
+		if compAt, cerr := stepCompanion(mv.Kind, comp, compTarget); cerr != nil {
+			// A companion that reached its destination before the step failed
+			// (both copies on disk) has in effect moved: the .lrc stays with
+			// it and the record stays. Otherwise the .lrc goes back.
+			if compAt != "" {
+				slog.Warn("realign: companion step failed after writing its destination; keeping the move and its backup record", "path", comp, "destination", compAt, "error", cerr)
+			} else if undoMove(mv.Orphan, mv.Target) {
+				rollbackBackup("companion rename failed", cerr)
+			}
+			applied = append(applied, Applied{Move: mv, Err: cerr})
+			continue
+		}
 		applied = append(applied, Applied{Move: mv})
 	}
 	return applied, nil
@@ -533,6 +594,10 @@ func CountApplied(applied []Applied) (moved, skipped, errored int) {
 type dirEntry struct {
 	audio    []string
 	sidecars []string
+	// companions (.elrc, collected only while active) are never orphans; Apply
+	// moves an owned one with its .lrc. They are NOT coverage: an owned one sits
+	// beside its .lrc, so a lone one (foreign or stranded) marks a real gap.
+	companions []string
 }
 
 // audioProvenance caches the identity signals read from one audio file.
@@ -557,6 +622,10 @@ type backupRecord struct {
 	Method    string `json:"method"`
 	Kind      string `json:"kind,omitempty"`
 	TextPath  string `json:"text_path,omitempty"`
+	// The owned word-synced companion (#986) that traveled with this sidecar;
+	// a purge deletes it, so it has no new path. Omitted when there was none.
+	CompanionPath    string `json:"companion_path,omitempty"`
+	CompanionNewPath string `json:"companion_new_path,omitempty"`
 }
 
 // walk walks root and partitions every regular file into audio files and .lrc/.txt
@@ -586,6 +655,10 @@ func walk(root string) (map[string]*dirEntry, []string, error) {
 		case scanner.IsAudioFile(p):
 			entry.audio = append(entry.audio, p)
 			allAudio = append(allAudio, p)
+		case isCompanion(p):
+			// Checked BEFORE isSidecar, which also reports true for an active
+			// word-synced extension.
+			entry.companions = append(entry.companions, p)
 		case isSidecar(p):
 			entry.sidecars = append(entry.sidecars, p)
 		}
@@ -844,10 +917,8 @@ func resolveNameMatch(orphans []string, orphanTags map[string]lyrics.ProvenanceT
 // refused outright rather than acted on, so a link planted in a library root
 // cannot redirect a delete or a rename outside it.
 func applyRemediation(mv Move) error {
-	if fi, err := os.Lstat(mv.Orphan); err != nil {
-		return fmt.Errorf("%s: lstat %q: %w", mv.Kind, mv.Orphan, err)
-	} else if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s: refusing to act on symlink %q", mv.Kind, mv.Orphan)
+	if err := checkRemediation(mv); err != nil {
+		return err
 	}
 
 	switch mv.Kind {
@@ -885,9 +956,6 @@ func applyRemediation(mv Move) error {
 		lyrics.FsyncDir(filepath.Dir(mv.Orphan))
 		return nil
 	case KindDemote:
-		if mv.TextPath == "" {
-			return fmt.Errorf("demote %q: no text path", mv.Orphan)
-		}
 		created, err := writeDemotedText(mv.TextPath, mv.TextBody)
 		if err != nil {
 			return err
@@ -917,6 +985,23 @@ func applyRemediation(mv Move) error {
 	default:
 		return fmt.Errorf("unknown remediation kind %q", mv.Kind)
 	}
+}
+
+// checkRemediation is every refusal applyRemediation makes before it touches
+// anything. Apply runs it BEFORE the companion step as well.
+func checkRemediation(mv Move) error {
+	if fi, err := os.Lstat(mv.Orphan); err != nil {
+		return fmt.Errorf("%s: lstat %q: %w", mv.Kind, mv.Orphan, err)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: refusing to act on symlink %q", mv.Kind, mv.Orphan)
+	}
+	if mv.Kind == KindDemote && mv.TextPath == "" {
+		return fmt.Errorf("demote %q: no text path", mv.Orphan)
+	}
+	if mv.Kind != KindPurge && mv.Target == "" {
+		return fmt.Errorf("%s %q: no target", mv.Kind, mv.Orphan)
+	}
+	return nil
 }
 
 // writeDemotedText writes body to path unless a sidecar is already settled
@@ -988,8 +1073,9 @@ func moveAside(mv Move) error {
 
 // appendBackup writes and fsyncs one JSONL backup record for an applied move, so
 // the backup-first guarantee survives a crash between the record and the rename.
-func appendBackup(f *os.File, mv Move) error {
-	rec := backupRecord{OldPath: mv.Orphan, NewPath: mv.Target, LibraryID: mv.LibraryID, Method: mv.Method, Kind: mv.Kind, TextPath: mv.TextPath}
+func appendBackup(f *os.File, mv Move, comp, compTarget string) error {
+	rec := backupRecord{OldPath: mv.Orphan, NewPath: mv.Target, LibraryID: mv.LibraryID, Method: mv.Method, Kind: mv.Kind, TextPath: mv.TextPath,
+		CompanionPath: comp, CompanionNewPath: compTarget}
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("marshal realign backup record: %w", err)
@@ -1051,6 +1137,13 @@ func destForAudio(audioPath, orphanExt string) string {
 // proof; this seam makes the branch reachable in every environment.
 var renameFile = os.Rename
 
+// removeSource is the copy path's source unlink behind a seam, so a test can
+// reach "destination fully copied, source still present", the one failure of
+// renameOrCopy that leaves a mutation behind. Directory permissions cannot
+// force it portably: root ignores them, so such a test would skip in exactly
+// the containers that run as root.
+var removeSource = os.Remove
+
 func renameOrCopy(orphan, target string) error {
 	if err := renameFile(orphan, target); err == nil {
 		return nil
@@ -1064,7 +1157,7 @@ func renameOrCopy(orphan, target string) error {
 	// The destination is durable, so the source may go. A failure here leaves
 	// both copies, which is safe and visible, so it is reported rather than
 	// swallowed.
-	if err := os.Remove(orphan); err != nil {
+	if err := removeSource(orphan); err != nil {
 		return fmt.Errorf("copied to %q but could not remove the original: %w", target, err)
 	}
 	return nil
@@ -1129,11 +1222,111 @@ func destinationBlocked(target, orphan string) bool {
 
 // isSidecar reports whether name is an active lyric sidecar (.lrc or .txt).
 // The extension set lives in internal/sidecar so this walk cannot drift from
-// the writer's own notion of what a sidecar is (#986). A declared-but-inactive
-// extension (.elrc) is deliberately NOT collected here: the realign planner
-// would move an orphan it has no pairing rules for.
+// the writer's own notion of what a sidecar is (#986). The walk consults
+// isCompanion FIRST, so an active word-synced extension is collected as a
+// companion that moves with its .lrc, never as an orphan with pairing rules of
+// its own; while that Kind is inactive it is not collected at all.
 func isSidecar(name string) bool {
 	return sidecar.IsSidecar(name)
+}
+
+// isCompanion reports whether name is a word-synced companion (.elrc) AND that
+// Kind is active; while inactive the walk behaves exactly as before #986.
+func isCompanion(name string) bool {
+	return sidecar.Active(sidecar.KindWordSynced) && sidecar.KindOf(name) == sidecar.KindWordSynced
+}
+
+// companionTarget is where a companion lands when its .lrc moves to target.
+func companionTarget(target string) string {
+	return sidecar.StemOf(target) + sidecar.ExtWordSynced
+}
+
+// moveBlocked extends destinationBlocked to the pair: a .lrc whose owned
+// companion cannot follow it is not moved at all, rather than half-moved.
+func moveBlocked(target, orphan string) bool {
+	if destinationBlocked(target, orphan) {
+		return true
+	}
+	c := lyrics.OwnedCompanionOf(orphan)
+	return c != "" && destinationBlocked(companionTarget(target), c)
+}
+
+// stepCompanion performs kind's action on the companion comp: every kind but
+// a purge moves it to compTarget, clobber-safe; a purge STAGES it under a
+// unique temporary name in its own directory, so a later failure of the .lrc's
+// step can put it back (Apply removes the staged file once that step
+// succeeds). No companion is a no-op.
+//
+// at is where the companion now sits, or "" when nothing was mutated. It can
+// be non-empty WITH an error: a cross-device copy that landed before its
+// source could not be removed leaves both copies, and the caller must keep the
+// backup record that describes the destination.
+func stepCompanion(kind, comp, compTarget string) (at string, err error) {
+	if comp == "" {
+		return "", nil
+	}
+	if kind == KindPurge {
+		return stageCompanion(comp)
+	}
+	if err := os.MkdirAll(filepath.Dir(compTarget), 0o750); err != nil {
+		return "", fmt.Errorf("companion: mkdir %q: %w", filepath.Dir(compTarget), err)
+	}
+	if destinationBlocked(compTarget, comp) {
+		return "", fmt.Errorf("companion: destination exists: %s", compTarget)
+	}
+	if err := renameOrCopy(comp, compTarget); err != nil {
+		if _, lerr := os.Lstat(compTarget); lerr == nil {
+			at = compTarget
+		}
+		return at, fmt.Errorf("companion: rename %q: %w", comp, err)
+	}
+	lyrics.FsyncDir(filepath.Dir(compTarget))
+	lyrics.FsyncDir(filepath.Dir(comp))
+	return compTarget, nil
+}
+
+// stageCompanion renames comp to a fresh temporary name beside it. The name is
+// reserved with os.CreateTemp first, so the rename can only replace the empty
+// placeholder this call created, never another file; it is hidden and carries
+// no sidecar extension, so a crash that strands it leaves nothing the walk
+// reads as a lyric. realign records no selfwrite entries, so the watcher sees
+// these events like any other non-sidecar file's. Same directory, so a plain
+// rename (never the cross-device copy) suffices.
+func stageCompanion(comp string) (string, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(comp), "."+filepath.Base(comp)+".purge-*")
+	if err != nil {
+		return "", fmt.Errorf("purge companion %q: reserve staging name: %w", comp, err)
+	}
+	staged := tmp.Name()
+	_ = tmp.Close() //nolint:errcheck // reason: an empty placeholder about to be replaced by the rename
+	if err := renameFile(comp, staged); err != nil {
+		_ = os.Remove(staged) //nolint:errcheck // reason: best-effort cleanup of this call's own empty placeholder
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("purge companion %q: stage: %w", comp, err)
+	}
+	lyrics.FsyncDir(filepath.Dir(comp))
+	return staged, nil
+}
+
+// undoMove moves to back to from after a later step failed, and reports whether
+// the filesystem is back as it was (only then may the backup record go). A
+// re-occupied from, or a failed move back, reports false.
+func undoMove(from, to string) bool {
+	if from == "" || to == "" {
+		return true
+	}
+	if destinationBlocked(from, to) {
+		slog.Warn("realign: old path re-occupied; not undoing a partial move, keeping its backup record", "from", to, "to", from)
+		return false
+	}
+	if err := renameOrCopy(to, from); err != nil {
+		slog.Warn("realign: could not undo a partial move; keeping its backup record", "from", to, "to", from, "error", err)
+		return false
+	}
+	lyrics.FsyncDir(filepath.Dir(from))
+	return true
 }
 
 // stemOf returns the base name of path without its extension.
