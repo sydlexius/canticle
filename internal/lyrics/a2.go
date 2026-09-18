@@ -82,6 +82,34 @@ func a2Words(lineText string, timings []models.WordTiming) (string, bool) {
 	return b.String(), true
 }
 
+// wordTimingsByLine groups a song's word timings by the cue index they belong
+// to. Shared by writeSyncedLRC and hasA2Line so the pre-pass and the render see
+// the same per-line input.
+func wordTimingsByLine(song models.Song) map[int][]models.WordTiming {
+	byLine := make(map[int][]models.WordTiming, len(song.Subtitles.Lines))
+	for _, t := range song.WordTimings {
+		byLine[t.Line] = append(byLine[t.Line], t)
+	}
+	return byLine
+}
+
+// hasA2Line reports whether at least one cue would render with word markers,
+// by running a2Words itself over every cue. It is the decide-before-opening
+// pre-pass for the word-synced companion (#986): when it reports false, every
+// line would fall back to plain text and a companion would duplicate the .lrc.
+func hasA2Line(song models.Song) bool {
+	if len(song.WordTimings) == 0 {
+		return false
+	}
+	byLine := wordTimingsByLine(song)
+	for i, line := range song.Subtitles.Lines {
+		if _, ok := a2Words(line.Text, byLine[i]); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // wordsReconstructLine reports whether the concatenated word strings are the
 // same content as the cue text, ignoring whitespace differences.
 //

@@ -3251,13 +3251,37 @@ func TestWordSyncValidatorMatchesCLI(t *testing.T) {
 	}
 }
 
+// TestWordSyncSwitches pins the output.word_sync_mode -> writer switch table
+// (#986). The companion half cannot be observed on disk while the writer's
+// activation gate is closed, so it is asserted here directly.
+func TestWordSyncSwitches(t *testing.T) {
+	cases := []struct {
+		mode              config.WordSyncMode
+		inline, companion bool
+	}{
+		{config.WordSyncModeSidecar, false, true},
+		{config.WordSyncModeOff, false, false},
+		{config.WordSyncModeInline, true, false},
+		{config.WordSyncModeBoth, true, true},
+		{"", false, false},
+	}
+	for _, tc := range cases {
+		inline, companion := wordSyncSwitches(tc.mode)
+		if inline != tc.inline || companion != tc.companion {
+			t.Errorf("wordSyncSwitches(%q) = (%v, %v), want (%v, %v)",
+				tc.mode, inline, companion, tc.inline, tc.companion)
+		}
+	}
+}
+
 // TestConfigureWriterWordSync covers the config-to-writer seam: the type
 // assertion body that actually calls SetWordSync. Without this, the helper is
 // called by both serve and fetch wiring but its effect is never observed, so a
-// helper that silently did nothing would still look exercised.
+// helper that silently did nothing would still look exercised. It is driven by
+// the RESOLVED mode, never the deprecated bool, which LoadWithSources folds in.
 func TestConfigureWriterWordSync(t *testing.T) {
 	w := lyrics.NewLRCWriter()
-	configureWriterWordSync(w, config.Config{Output: config.OutputConfig{WordSync: true}})
+	configureWriterWordSync(w, config.Config{Output: config.OutputConfig{WordSyncMode: config.WordSyncModeInline}})
 
 	dir := t.TempDir()
 	song := models.Song{
