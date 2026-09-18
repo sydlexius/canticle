@@ -28,6 +28,7 @@
   "internal/secrets": 90,
   "internal/server": 88,
   "internal/servetls": 78,
+  "internal/sidecar": 95,
   "internal/testutil": 91,
   "internal/trustnet": 96,
   "internal/verification": 80,
