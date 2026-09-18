@@ -103,6 +103,26 @@ func TestMsToTime(t *testing.T) {
 	}
 }
 
+// TestTimeStamp pins the one mm:ss.xx formatter that both the LRC line stamp
+// and the A2 word marker use (#862). Minutes do NOT wrap at 60.
+func TestTimeStamp(t *testing.T) {
+	for _, tc := range []struct {
+		ms   int
+		want string
+	}{
+		{0, "00:00.00"},
+		{3790, "00:03.79"},
+		{65432, "01:05.43"},
+		{4200000, "70:00.00"},
+		{6000000, "100:00.00"},
+		{-1, "00:00.00"},
+	} {
+		if got := MsToTime(tc.ms).Stamp(); got != tc.want {
+			t.Errorf("MsToTime(%d).Stamp() = %q, want %q", tc.ms, got, tc.want)
+		}
+	}
+}
+
 // TestSong_UpstreamIsNeverSerialized pins the `json:"-"` on Song.Upstream.
 //
 // THE TAG IS THE WHOLE SAFETY ARGUMENT, and until this test existed nothing
