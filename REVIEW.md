@@ -4,7 +4,7 @@ Read by automated PR reviewers. Architecture and the package catalog live in `CL
 
 ## Hard invariants (flag any violation)
 
-- **No CGO.** SQLite is pure-Go `modernc.org/sqlite` and every build sets `CGO_ENABLED=0`. Any import or build tag that needs CGO breaks cross-compilation.
+- **No CGO.** SQLite is pure-Go `modernc.org/sqlite`, and the release and cross-compile builds set `CGO_ENABLED=0` (the local gate's bare `go build` / `go test` do not, so they will not catch a CGO dependency). Any import or build tag that needs CGO breaks cross-compilation.
 - **`//nolint` needs a reason.** Every NEW or TOUCHED directive carries `// reason: ...`. Do not flag untouched directives in the packages listed in the `nolintlint` exclusion block of `.golangci.yml`, and do not suggest adding a path there to silence a new finding.
 - **No runtime global state.** Dependencies are injected through interfaces. Flag a new package-level `var` that production code WRITES at runtime (a cache, counter, registry, or singleton). Read-only lookup tables and the test-seam pattern (`var removeFile = os.Remove`, reassigned only by tests) are fine.
 - **Timing thresholds are not configurable.** `timing.Tolerance` and `timing.CategoricalRatio` are a co-calibrated pair of constants owned by `internal/timing`. Flag a config key, flag, or per-caller override for either, and flag a second timing predicate outside `timing.Evaluate`.
@@ -18,13 +18,13 @@ Code that moves, rewrites, or deletes a user's sidecar (for example `realign`, `
 - Be **dry-run by default** in the CLI: `--yes` for `realign` and the reconcile family, `--apply` for `revalidate`.
 - **Preserve a restorable copy before the mutation** (an fsynced JSONL record, or `lrcbackfill`'s `.lrc.orig`), and abort that file's change if the backup fails.
 - **Never follow a symlinked sidecar** (`Lstat` / `DirEntry.Type`, not `Stat`) and act only under the configured library roots.
-- Keep **coupled state in one transaction**. Example: `purgeprovenance` invalidates the cache in the same transaction as the row reset, and both commit before the unlink; otherwise a re-scan is satisfied from cache and the sidecar is lost permanently.
+- Keep **coupled database/cache updates in one transaction**. Example: `purgeprovenance` invalidates the cache in the same transaction as the row reset, and both commit before the unlink; otherwise a re-scan is satisfied from cache and the sidecar is lost permanently. A filesystem move cannot join a SQLite transaction, so where a row records the outcome of a move, the move comes FIRST and the row is stamped only on success (the timing sweep leaves a row unstamped when its remediation fails, so it is retried).
 
-Code that mutates `work_queue` / `scan_results` rows (`purgeprovenance`, `identityrepair`, `prune`, the timing sweep) must guard on `status != 'processing'` in the UPDATE or DELETE itself, not in an earlier read. Backup timing is per-package and documented at the call site (`prune` reports AFTER its delete commits, by design, so a record never describes a row a race skipped); read that comment before flagging a different ordering.
+Code that mutates `work_queue` / `scan_results` rows (`purgeprovenance`, `identityrepair`, `prune`) must guard on `status != 'processing'` in the UPDATE or DELETE itself, not in an earlier read. (The timing sweep instead excludes `processing` rows when it selects its backlog, and only stamps a column the worker does not write.) Backup timing is per-package and documented at the call site (`prune` reports AFTER its delete commits, by design, so a record never describes a row a race skipped); read that comment before flagging a different ordering.
 
 ## Privacy
 
-A sidecar path, artist, title, or lyric line is private library metadata. Flag new code that emits one from an UNATTENDED path (serve-mode sweeps, startup checks, reports, HTTP responses) at a log level above Debug, and any per-file output from `revalidate` on stdout (it is aggregate-only; per-file detail goes only to its `--tail` file). Operator-invoked dry-run/apply CLIs that list the files they change are allowed. Lyric text never belongs in any log.
+A sidecar path, artist, title, or lyric line is private library metadata. Flag new code that logs one from an UNATTENDED path (serve-mode sweeps, startup checks, reports) at a level above Debug; flag any HTTP response that returns one to a caller not authorized for library detail, whatever the log level; and flag any per-file output from `revalidate` on stdout (it is aggregate-only; per-file detail goes only to its `--tail` file). Operator-invoked dry-run/apply CLIs that list the files they change are allowed. Lyric text never belongs in any log.
 
 ## Queue and worker
 
@@ -41,9 +41,9 @@ A sidecar path, artist, title, or lyric line is private library metadata. Flag n
 
 ## CI and supply chain
 
-- GitHub Actions are pinned to a commit SHA with a `# vX` comment. Checkout steps set `persist-credentials: false`. Job-level `permissions:` replaces the workflow-level block, so include `contents: read` where needed.
+- External actions and reusable workflows are pinned to a commit SHA with a `# vX` comment. Local `uses: ./...` references resolve at the running commit and cannot take a ref; do not ask to pin them. Checkout steps set `persist-credentials: false`. Job-level `permissions:` replaces the workflow-level block, so include `contents: read` where needed.
 - No `paths` or `paths-ignore` trigger filters on workflows that produce required status checks (a check that never runs reads as failed).
-- A PR that edits `.github/**`, `REVIEW.md`, `CLAUDE.md`, `AGENTS.md`, build scripts, hooks, or `go.sum` beyond its stated scope deserves explicit scrutiny. These files steer tooling, including this review.
+- A PR that edits `.github/**`, `REVIEW.md`, `CLAUDE.md`, `AGENTS.md`, build scripts, hooks, or `go.sum` beyond its stated scope deserves explicit scrutiny. These files steer tooling, including this review. Because they are read from the PR's own head, an automated review of a PR that edits them is NOT review of those edits: say so explicitly and leave them to a maintainer.
 
 ## Out of scope
 
