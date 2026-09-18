@@ -34,7 +34,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/identity"
@@ -208,7 +207,7 @@ func (r *Realigner) plan(scopeRoot, poolRoot string, libraryID int64) (Result, e
 	// this run. Two orphans carrying the same ISRC/MBID (duplicated tags) can each
 	// resolve to the same audio file and target; without this both pass the
 	// plan-time destinationBlocked check (nothing on disk yet) and the second
-	// os.Rename would clobber the first. A second claim on a target is a conflict.
+	// move would be refused at apply time with a misleading error. A second claim on a target is a conflict.
 	claimed := map[string]bool{}
 
 	dirPaths := make([]string, 0, len(dirs))
@@ -414,8 +413,8 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 			}
 			backup = f
 		}
-		// Backup first (skip this move if it fails), then a clobber-safe atomic
-		// rename, then fsync the destination dir. The just-written backup line is
+		// Backup first (skip this move if it fails), then a no-replace move
+		// (renameOrCopy), then fsync the destination dir. The just-written backup line is
 		// rolled back on any post-write failure -- but only when we captured a
 		// valid pre-write offset. If Stat failed we skip the truncation rather
 		// than zero the whole file (Truncate(0) would delete prior backup history).
@@ -451,8 +450,9 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 		// Re-check the destination immediately before the rename so Apply stays
 		// clobber-safe even when moves from independently planned libraries are
 		// merged into one slice -- the plan-time claimed map is per-plan, not
-		// run-wide, and os.Rename would otherwise overwrite an existing sidecar
-		// on POSIX.
+		// run-wide. The recheck gives the precise refusal reason; renameOrCopy
+		// is itself no-replace, so a destination created AFTER this recheck is
+		// still refused rather than overwritten.
 		if mv.Kind != KindRename {
 			// The .lrc's own refusals first (a refused .lrc never costs its
 			// companion), then the companion, the writer's rule (#986): a
@@ -1100,22 +1100,51 @@ func destForAudio(audioPath, orphanExt string) string {
 	return filepath.Join(filepath.Dir(audioPath), stemOf(audioPath)+orphanExt)
 }
 
-// renameOrCopy moves orphan to target, falling back to copy-then-unlink when the
-// two sit on different filesystems.
+// renameOrCopy moves orphan to target WITHOUT EVER REPLACING an existing
+// target: a destination that exists when the move reaches the filesystem is
+// refused with an error that satisfies errors.Is(err, fs.ErrExist), and BOTH
+// files are left exactly as they were.
 //
-// WHY A FALLBACK IS REQUIRED, not a nicety (#810). os.Rename is one syscall and
-// cannot cross a filesystem boundary -- it returns EXDEV. Every remediation this
-// package performs routes through here, and the quarantine root is derived from
-// the DATABASE directory while the sidecars live under a LIBRARY root. On the
-// standard container layout those are deliberately different volumes (a fast
-// local config volume, a large media array), so on that layout a bare rename
-// fails for EVERY file and the sweep can remediate nothing at all. Measured in
-// production on v1.35.0: 30 of 30 actions failed, all EXDEV.
+// WHY NO-REPLACE AT THE PRIMITIVE. Every caller re-checks the destination
+// (destinationBlocked / moveBlocked) first, but a check and a move are two
+// steps: a concurrent writer can create the destination in between. os.Rename
+// silently REPLACES an existing file on POSIX, so a rename-based move turned
+// that window into a lost sidecar. There is no shared writer lock to close the
+// window (selfwrite only suppresses watcher events), so the refusal has to live
+// in the syscall itself. Every mutation in this package -- the .lrc move, its
+// companion's move, the remediations and the undo of a partial move -- routes
+// through here, so one primitive carries the invariant for all of them.
 //
-// THE COPY PATH KEEPS EVERY INVARIANT THE RENAME HAD, which is the whole reason
-// it is written out rather than reached for casually:
-//   - The caller has already refused a blocked destination, and O_EXCL refuses
-//     it again at the syscall, so a racing writer cannot be clobbered either.
+// HOW. The same-filesystem move is link-then-unlink: os.Link fails atomically
+// with EEXIST when target exists (it never replaces), and only after the new
+// name exists is the old one removed. That is not one atomic step the way a
+// rename is: a crash between the link and the unlink leaves BOTH names, with
+// identical content (one inode). That is the same recoverable state the copy
+// path below already documents, and it loses nothing. A link that succeeds but
+// whose unlink fails is rolled back by removing the new name again (lossless:
+// both names are the same file), so that failure leaves the filesystem as a
+// failed rename would have.
+//
+// ANY OTHER LINK FAILURE FALLS BACK TO THE COPY. EXDEV (different filesystems)
+// is the reason the fallback exists (#810, below), but some filesystems cannot
+// hardlink at all (EPERM/ENOTSUP on some FUSE and SMB mounts), and on those a
+// link-only move would fail for every file. The copy is O_EXCL, so the fallback
+// is no-replace too, and it leaves the source untouched on failure, so falling
+// back on an unexpected link error can never do worse than report the copy's
+// own error.
+//
+// WHY A FALLBACK IS REQUIRED, not a nicety (#810). A link, like a rename, cannot
+// cross a filesystem boundary -- it returns EXDEV. The quarantine root is
+// derived from the DATABASE directory while the sidecars live under a LIBRARY
+// root. On the standard container layout those are deliberately different
+// volumes (a fast local config volume, a large media array), so on that layout
+// a link or rename fails for EVERY file and the sweep can remediate nothing at
+// all. Measured in production on v1.35.0: 30 of 30 actions failed, all EXDEV.
+//
+// THE COPY PATH KEEPS THE SAME INVARIANTS, which is the whole reason it is
+// written out rather than reached for casually:
+//   - O_EXCL refuses an existing destination at the syscall, so a racing writer
+//     cannot be clobbered.
 //   - The copy is fsync'd before the source is unlinked, so a crash mid-move
 //     leaves the ORIGINAL intact -- never a half-written quarantine copy and no
 //     original to restore from.
@@ -1123,39 +1152,29 @@ func destForAudio(audioPath, orphanExt string) string {
 //     untouched, so the caller's "leave the file in place" contract holds.
 //   - The source is unlinked only after the destination is durable. A crash
 //     between those two leaves BOTH files, which is recoverable by hand; the
-//     reverse order would lose the file outright.
-//
-// A same-filesystem move still takes the rename, so the common path is
-// unchanged and atomic.
-// renameFile is os.Rename behind a seam, so a test can force the EXDEV branch
-// without two real mounts.
-//
-// THE SEAM IS THE ONLY WAY THIS PATH IS TESTABLE EVERYWHERE. EXDEV needs two
-// filesystems, and a portable second one does not exist: /dev/shm is Linux-only,
-// so on any other machine the real cross-device test skips and the entire
-// fallback -- the code this fix consists of -- goes unexercised. That is exactly
-// how the defect shipped in the first place: every existing test uses
-// t.TempDir(), where source and destination are always one filesystem, so no
-// review pass could reach the syscall that actually failed in production.
-//
-// The real cross-device test still runs on Linux CI and remains the end-to-end
-// proof; this seam makes the branch reachable in every environment.
-var renameFile = os.Rename
-
-// removeSource is the copy path's source unlink behind a seam, so a test can
-// reach "destination fully copied, source still present", the one failure of
-// renameOrCopy that leaves a mutation behind. Directory permissions cannot
-// force it portably: root ignores them, so such a test would skip in exactly
-// the containers that run as root.
-var removeSource = os.Remove
-
+//     reverse order would lose the file outright. Unlike the link path, a
+//     failed unlink here is NOT rolled back (the copy is a second file, and
+//     deleting a durable copy to undo it is not obviously safer), so it is
+//     reported with both files present.
 func renameOrCopy(orphan, target string) error {
-	if err := renameFile(orphan, target); err == nil {
+	if filepath.Clean(orphan) == filepath.Clean(target) {
+		// os.Rename(x, x) was a successful no-op; a link onto itself would
+		// report EEXIST. Keep the old semantics for the degenerate case.
 		return nil
-	} else if !errors.Is(err, syscall.EXDEV) {
-		// Any other failure is the real one: report it as the rename it was.
-		return err
 	}
+	lerr := linkFile(orphan, target)
+	if lerr == nil {
+		if err := removeSource(orphan); err != nil {
+			return unlinkAfterLink(orphan, target, err)
+		}
+		return nil
+	}
+	if errors.Is(lerr, fs.ErrExist) {
+		// The destination exists: refuse, touching neither file. This is the
+		// race the no-replace primitive exists to close.
+		return fmt.Errorf("destination %q already exists: %w", target, lerr)
+	}
+	// EXDEV, or a filesystem without hardlinks: the durable O_EXCL copy.
 	if err := copyFileDurable(orphan, target); err != nil {
 		return err
 	}
@@ -1167,6 +1186,53 @@ func renameOrCopy(orphan, target string) error {
 	}
 	return nil
 }
+
+// unlinkAfterLink handles a link that landed but whose source could not be
+// removed: both names are the same file, so dropping the NEW name restores the
+// pre-move state losslessly. It removes target only if target is still that
+// same file (a racer cannot have its file deleted in our place). When the
+// rollback itself fails, both names remain and the error says so.
+func unlinkAfterLink(orphan, target string, uerr error) error {
+	ofi, oerr := os.Lstat(orphan)
+	tfi, terr := os.Lstat(target)
+	if oerr == nil && terr == nil && os.SameFile(ofi, tfi) {
+		if rerr := os.Remove(target); rerr == nil {
+			return fmt.Errorf("could not remove the original after linking it to %q (link rolled back): %w", target, uerr)
+		}
+	}
+	return fmt.Errorf("linked to %q but could not remove the original: %w", target, uerr)
+}
+
+// linkFile is os.Link behind a seam, so a test can force the fallback branch
+// (EXDEV, or a filesystem without hardlinks) without two real mounts, or
+// simulate a destination that appears between the recheck and the move.
+//
+// THE SEAM IS THE ONLY WAY THE FALLBACK IS TESTABLE EVERYWHERE. EXDEV needs two
+// filesystems, and a portable second one does not exist: /dev/shm is Linux-only,
+// so on any other machine the real cross-device test skips and the entire
+// fallback goes unexercised. That is exactly how #810 shipped in the first
+// place: every existing test uses t.TempDir(), where source and destination are
+// always one filesystem, so no review pass could reach the syscall that
+// actually failed in production.
+//
+// The real cross-device test still runs on Linux CI and remains the end-to-end
+// proof; this seam makes the branch reachable in every environment.
+var linkFile = os.Link
+
+// renameFile is os.Rename behind a seam. It is used ONLY by stageCompanion,
+// whose destination is a name this process just reserved with os.CreateTemp
+// (O_EXCL, random, hidden): the rename can only ever replace that empty
+// placeholder, which is exactly what it must do, so it is deliberately NOT the
+// no-replace primitive (a link would fail EEXIST on the placeholder). Every
+// move onto a caller-chosen path goes through renameOrCopy instead.
+var renameFile = os.Rename
+
+// removeSource is the source unlink behind a seam, so a test can reach
+// "destination in place, source still present", the one failure of
+// renameOrCopy that can leave a mutation behind. Directory permissions cannot
+// force it portably: root ignores them, so such a test would skip in exactly
+// the containers that run as root.
+var removeSource = os.Remove
 
 // copyFileDurable writes src to dst and fsyncs it, removing a partial dst on any
 // failure. dst is created O_EXCL, so an existing file is never overwritten.
@@ -1261,8 +1327,8 @@ func moveBlocked(target, orphan string) string {
 		return "destination " + target + " already exists"
 	}
 	if c := lyrics.OwnedCompanionOf(orphan); c != "" {
-		if destinationBlocked(companionTarget(target), c) {
-			return "destination " + target + " already exists"
+		if ct := companionTarget(target); destinationBlocked(ct, c) {
+			return "destination " + ct + " already exists"
 		}
 	} else if s := lyrics.OwnedCompanionOf(target); s != "" {
 		return "destination " + target + " has a stale word-synced companion " + s
@@ -1294,6 +1360,13 @@ func stepCompanion(kind, comp, compTarget string) (at string, err error) {
 		return "", fmt.Errorf("companion: destination exists: %s", compTarget)
 	}
 	if err := renameOrCopy(comp, compTarget); err != nil {
+		// A refusal (fs.ErrExist: the destination appeared after the recheck)
+		// mutated nothing, and the file now at compTarget is someone else's,
+		// not a copy of ours; only any OTHER failure can have left our copy
+		// there.
+		if errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("companion: rename %q: %w", comp, err)
+		}
 		if _, lerr := os.Lstat(compTarget); lerr == nil {
 			at = compTarget
 		}
@@ -1310,7 +1383,9 @@ func stepCompanion(kind, comp, compTarget string) (at string, err error) {
 // no sidecar extension, so a crash that strands it leaves nothing the walk
 // reads as a lyric. realign records no selfwrite entries, so the watcher sees
 // these events like any other non-sidecar file's. Same directory, so a plain
-// rename (never the cross-device copy) suffices.
+// rename (never the cross-device copy) suffices, and it deliberately is NOT the
+// no-replace primitive: its target is this call's own placeholder (see
+// renameFile).
 func stageCompanion(comp string) (string, error) {
 	tmp, err := os.CreateTemp(filepath.Dir(comp), "."+filepath.Base(comp)+".purge-*")
 	if err != nil {
