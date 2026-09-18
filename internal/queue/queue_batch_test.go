@@ -460,3 +460,151 @@ func TestDBQueue_BatchOrderSurvivesRestart(t *testing.T) {
 		t.Fatalf("dequeue after drain: err = %v; want sql.ErrNoRows", err)
 	}
 }
+
+// eligibleBufferedIDsBySeq returns the ids of buffered rows that the batched
+// claim could actually serve at now (the claim's own eligibility predicate), in
+// ascending batch_seq order. This is the count the #572 "Up next" panel shows.
+func eligibleBufferedIDsBySeq(t *testing.T, q *DBQueue, now time.Time) []int64 {
+	t.Helper()
+	rows, err := q.db.QueryContext(context.Background(),
+		`SELECT id FROM work_queue
+         WHERE batch_seq IS NOT NULL
+           AND status IN ('pending', 'failed', 'deferred')
+           AND next_attempt_at <= ?
+         ORDER BY batch_seq ASC`, formatTime(now))
+	if err != nil {
+		t.Fatalf("query eligible buffered ids: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate ids: %v", err)
+	}
+	return ids
+}
+
+// A stamped row that leaves eligibility must not hold a buffer slot (#999).
+// Seed a full buffer, then push two stamped rows out of eligibility: one
+// deferred weeks into the future (the measured prod shape) and one in a
+// non-eligible status. The next Dequeue must top the ELIGIBLE buffer back up to
+// batch_size, serve the surviving rows in their original stamped order, and
+// clear the stale stamps so a row that later becomes eligible again is redrawn
+// rather than jumping the queue on its ancient batch_seq.
+func TestDBQueue_StaleStampsDoNotShrinkBuffer(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q := NewDBQueue(openQueueTestDB(t))
+	q.now = func() time.Time { return now }
+	q.SetBatchSize(10)
+	enqueueN(t, q, 30)
+
+	if _, err := q.Dequeue(ctx); err != nil { // refill(10) + claim -> 9 buffered
+		t.Fatalf("prime: %v", err)
+	}
+	buffered := bufferedIDsBySeq(t, q)
+	if len(buffered) != 9 {
+		t.Fatalf("buffered after prime = %d; want 9", len(buffered))
+	}
+
+	// The two lowest-seq rows leave eligibility while keeping their stamps.
+	future, ineligible := buffered[0], buffered[1]
+	later := now.Add(21 * 24 * time.Hour)
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'deferred', next_attempt_at = ? WHERE id = ?`,
+		formatTime(later), future); err != nil {
+		t.Fatalf("defer into the future: %v", err)
+	}
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'processing' WHERE id = ?`, ineligible); err != nil {
+		t.Fatalf("mark non-eligible: %v", err)
+	}
+	stayed := buffered[2:] // 7 rows still eligible, in stamped order
+
+	got, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("dequeue after staling: %v", err)
+	}
+	if got.ID != stayed[0] {
+		t.Fatalf("claimed %d; want lowest surviving stamped row %d", got.ID, stayed[0])
+	}
+	eligible := eligibleBufferedIDsBySeq(t, q, now)
+	if len(eligible) != 9 {
+		t.Fatalf("eligible buffered after refill+claim = %d; want 9 (batch_size-1) -- stale stamps still hold slots", len(eligible))
+	}
+	// The surviving rows keep their claim order at the head of the buffer; the
+	// refill appended after them.
+	for i, id := range stayed[1:] {
+		if eligible[i] != id {
+			t.Fatalf("buffer order = %v; want surviving rows %v first", eligible, stayed[1:])
+		}
+	}
+
+	var staleStamped int
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE id IN (?, ?) AND batch_seq IS NOT NULL`,
+		future, ineligible).Scan(&staleStamped); err != nil {
+		t.Fatalf("count stale stamps: %v", err)
+	}
+	if staleStamped != 0 {
+		t.Fatalf("%d stale stamps survived the refill; want 0 (self-heal)", staleStamped)
+	}
+
+	// Once the future row is due again it must not jump ahead of the buffer on
+	// its old batch_seq: the next claim is still the next surviving row.
+	now = later
+	next, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("dequeue after future row is due: %v", err)
+	}
+	if next.ID != stayed[1] {
+		t.Fatalf("claimed %d after the deferred row came due; want next surviving row %d (future row %d must not jump the queue)",
+			next.ID, stayed[1], future)
+	}
+}
+
+// No claim path may leave a batch_seq stamp on the row it claims (#999): a
+// stamped row claimed by the per-item random or the deterministic path would
+// otherwise carry the stamp into processing and beyond.
+func TestDBQueue_NonBatchedClaimClearsBatchSeq(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		randomized bool
+	}{
+		{"randomized", true},
+		{"deterministic", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			q := NewDBQueue(openQueueTestDB(t))
+			q.now = func() time.Time { return time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC) }
+			enqueueN(t, q, 3)
+			// Stamp every row, as a batched queue would have, then switch the
+			// live queue off batching (a settings change).
+			if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET batch_seq = id`); err != nil {
+				t.Fatalf("stamp rows: %v", err)
+			}
+			q.SetBatchSize(0)
+			q.SetRandomized(tc.randomized)
+
+			item, err := q.Dequeue(ctx)
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			var seq sql.NullInt64
+			if err := q.db.QueryRowContext(ctx,
+				`SELECT batch_seq FROM work_queue WHERE id = ?`, item.ID).Scan(&seq); err != nil {
+				t.Fatalf("read batch_seq: %v", err)
+			}
+			if seq.Valid {
+				t.Fatalf("claimed row %d kept batch_seq = %d; want NULL", item.ID, seq.Int64)
+			}
+		})
+	}
+}
