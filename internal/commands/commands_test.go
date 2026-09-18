@@ -3252,8 +3252,8 @@ func TestWordSyncValidatorMatchesCLI(t *testing.T) {
 }
 
 // TestWordSyncSwitches pins the output.word_sync_mode -> writer switch table
-// (#986). The companion half cannot be observed on disk while the writer's
-// activation gate is closed, so it is asserted here directly.
+// (#986). The on-disk result of each mode is covered in internal/lyrics
+// (TestWriteLRC_WordSyncModes_FileSet); this pins the mapping that feeds it.
 func TestWordSyncSwitches(t *testing.T) {
 	cases := []struct {
 		mode              config.WordSyncMode

@@ -14,7 +14,11 @@
 // structured plan (Plan*) separately from applying it (Apply), so the CLI can
 // render a dry-run and serve mode can auto-apply, both from the same logic. A move
 // only ever changes a sidecar's stem, never its extension, so a synced .lrc or an
-// instrumental .txt marker keeps its type. Apply is backup-first and clobber-safe.
+// instrumental .txt marker keeps its type. An owned word-synced companion (.elrc,
+// #986) is never an orphan of its own: it moves with its .lrc under the same stem
+// change, keeping its own extension. A move whose companion's destination is
+// taken is refused, and one whose companion step fails is rolled back where the
+// filesystem allows. Apply is backup-first and clobber-safe.
 package realign
 
 import (
@@ -594,8 +598,8 @@ func CountApplied(applied []Applied) (moved, skipped, errored int) {
 type dirEntry struct {
 	audio    []string
 	sidecars []string
-	// companions (.elrc, collected only while active) are never orphans; Apply
-	// moves an owned one with its .lrc. They are NOT coverage: an owned one sits
+	// companions (.elrc) are never orphans; Apply moves an owned one with its
+	// .lrc. They are NOT coverage: an owned one sits
 	// beside its .lrc, so a lone one (foreign or stranded) marks a real gap.
 	companions []string
 }
@@ -1220,18 +1224,19 @@ func destinationBlocked(target, orphan string) bool {
 	return true
 }
 
-// isSidecar reports whether name is an active lyric sidecar (.lrc or .txt).
+// isSidecar reports whether name is an active lyric sidecar extension.
 // The extension set lives in internal/sidecar so this walk cannot drift from
 // the writer's own notion of what a sidecar is (#986). The walk consults
-// isCompanion FIRST, so an active word-synced extension is collected as a
-// companion that moves with its .lrc, never as an orphan with pairing rules of
-// its own; while that Kind is inactive it is not collected at all.
+// isCompanion FIRST, so a word-synced extension is collected as a companion
+// that moves with its .lrc, never as an orphan with pairing rules of its own.
 func isSidecar(name string) bool {
 	return sidecar.IsSidecar(name)
 }
 
-// isCompanion reports whether name is a word-synced companion (.elrc) AND that
-// Kind is active; while inactive the walk behaves exactly as before #986.
+// isCompanion reports whether name is a word-synced companion (.elrc). It still
+// consults the sidecar table's active flag, the single switch every companion
+// path reads, so turning that Kind off would return the walk to its pre-#986
+// behavior.
 func isCompanion(name string) bool {
 	return sidecar.Active(sidecar.KindWordSynced) && sidecar.KindOf(name) == sidecar.KindWordSynced
 }

@@ -72,7 +72,7 @@ type Args struct {
 	Config     *ConfigCmd     `arg:"subcommand:config" help:"inspect or update configuration"`
 	Queue      *QueueCmd      `arg:"subcommand:queue" help:"inspect or maintain the durable work queue"`
 	Provenance *ProvenanceCmd `arg:"subcommand:provenance" help:"embed or inspect provenance tags in .lrc files"`
-	Realign    *RealignCmd    `arg:"subcommand:realign" help:"re-attach orphaned .lrc/.txt sidecars to renamed audio files"`
+	Realign    *RealignCmd    `arg:"subcommand:realign" help:"re-attach orphaned .lrc/.txt sidecars (and their .elrc companions) to renamed audio files"`
 	Revalidate *RevalidateCmd `arg:"subcommand:revalidate" help:"re-check existing .lrc timing against audio duration and remediate the backlog"`
 	Completion *CompletionCmd `arg:"subcommand:completion" help:"output a shell completion script (bash, zsh, or fish)"`
 }
@@ -83,7 +83,7 @@ type LegacyArgs struct {
 	Outdir     *string  `arg:"-o,--outdir" help:"output directory (default: from config or 'lyrics')"`
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
-	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files"`
+	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced) to promote to .lrc if synced lyrics are now available; implied by --update"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Serve      bool     `arg:"--serve" help:"run HTTP server mode"`
@@ -98,7 +98,7 @@ type FetchCmd struct {
 	Outdir     *string  `arg:"-o,--outdir" help:"output directory (default: from config or 'lyrics')"`
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
-	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files"`
+	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt lyrics to promote to .lrc"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Token      string   `arg:"-t,--token" help:"musixmatch token" default:""`
@@ -117,7 +117,7 @@ type ServeCmd struct {
 	Token          string  `arg:"-t,--token" help:"musixmatch token" default:""`
 	ConfigPath     string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth          int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
-	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files"`
+	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt lyrics to promote them"`
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
 	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
@@ -132,7 +132,7 @@ type ServeCmd struct {
 type ScanCmd struct {
 	ConfigPath           string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth                int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
-	Update               bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files"`
+	Update               bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
 	BFS                  bool     `arg:"--bfs" help:"use breadth-first traversal"`
 	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`

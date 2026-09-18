@@ -26,11 +26,12 @@ type Track struct {
 	RecordingMBID string `json:"recording_mbid,omitempty"`
 	// CommontrackID is Musixmatch's catalog-level track identifier, returned by
 	// matcher.track.get and populated by the same bulk unmarshal of the track
-	// node that fills the fields above. It is the required input to the
-	// follow-up track.richsync.get call, which is where word-level timing lives
-	// -- macro.subtitles.get never carries it (see internal/musixmatch, #613).
-	// Response-only: nothing sends it as a matcher parameter, unlike the
-	// recording-level identifiers above.
+	// node that fills the fields above. It is the key for Musixmatch's
+	// standalone track.richsync.get endpoint, which canticle does not call:
+	// word-level timing arrives as an optional sub-call of the same
+	// macro.subtitles.get request (see internal/musixmatch, #613), so nothing
+	// reads this field today. Response-only: nothing sends it as a matcher
+	// parameter, unlike the recording-level identifiers above.
 	//
 	// Typed FlexID, not string, for the reason documented on that type.
 	CommontrackID FlexID `json:"commontrack_id,omitempty"`
@@ -193,10 +194,11 @@ type Song struct {
 	// measured over a 400-word track, snake_case tags came out 3% LARGER (26,228
 	// vs 25,495 bytes), since the tag names exceed the Go identifiers.
 	//
-	// omitempty IS applied, and it is not the same question. Only petitlyrics'
-	// word-synced tier produces timings, so the overwhelming majority of cached
-	// songs carry none -- and a bare field emits `"WordTimings":null` on every
-	// one of those rows, ~20 wasted bytes each across the whole library, on a
+	// omitempty IS applied, and it is not the same question. Timings come from
+	// Musixmatch's richsync sub-call (#613) and petitlyrics' word-synced tier,
+	// and neither covers every track, so many cached songs carry none -- and a
+	// bare field emits `"WordTimings":null` on every one of those rows, ~20
+	// wasted bytes each across the whole library, on a
 	// blob rewritten at every settle. The tag keeps the short key AND drops the
 	// field when it is empty.
 	WordTimings []WordTiming `json:",omitempty"`
