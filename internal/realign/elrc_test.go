@@ -2,6 +2,8 @@ package realign
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,17 +123,20 @@ func TestRename_FailedCompanionStepUndoesTheLrcMove(t *testing.T) {
 		t.Run(map[bool]string{false: "undo", true: "reoccupied"}[reoccupy], func(t *testing.T) {
 			oldElrc, newLrc, newElrc, _, apply := planRename(t, ownedElrc, "")
 			oldLrc := strings.TrimSuffix(oldElrc, ".elrc") + ".lrc"
-			prev := renameFile
-			renameFile = func(oldpath, newpath string) error {
+			// The companion's move is refused (as a destination that appeared
+			// after the recheck would refuse it); nothing lands, so the .lrc goes
+			// back. Any other link error would fall back to the copy and succeed.
+			prev := linkFile
+			linkFile = func(oldpath, newpath string) error {
 				if strings.HasSuffix(oldpath, ".elrc") {
 					if reoccupy {
 						write(t, oldLrc, "FRESH")
 					}
-					return os.ErrPermission
+					return &os.LinkError{Op: "link", Old: oldpath, New: newpath, Err: fs.ErrExist}
 				}
 				return prev(oldpath, newpath)
 			}
-			t.Cleanup(func() { renameFile = prev })
+			t.Cleanup(func() { linkFile = prev })
 			a, backup := apply()
 			if a[0].Err == nil {
 				t.Fatalf("a failed companion move reported success")
@@ -278,14 +283,16 @@ func TestRemediation_RefusalsKeepThePairOrItsRecord(t *testing.T) {
 // A purge whose .lrc step fails AND whose staged companion cannot be put back
 // has mutated the library: the backup line naming the companion must stay.
 func TestRemediation_PurgeRestoreFailureKeepsTheRecord(t *testing.T) {
-	prev := renameFile
-	renameFile = func(oldpath, newpath string) error {
+	// Putting the staged companion back goes through renameOrCopy; refuse it
+	// (a non-EEXIST link error would fall back to the copy and succeed).
+	prev := linkFile
+	linkFile = func(oldpath, newpath string) error {
 		if strings.Contains(filepath.Base(oldpath), ".purge-") {
-			return os.ErrPermission
+			return &os.LinkError{Op: "link", Old: oldpath, New: newpath, Err: fs.ErrExist}
 		}
 		return prev(oldpath, newpath)
 	}
-	t.Cleanup(func() { renameFile = prev })
+	t.Cleanup(func() { linkFile = prev })
 	lrc, elrc, _, got, backup := remediate(t, KindPurge, ownedElrc, func(_ *testing.T, mv *Move) {
 		mv.TextPath, mv.TextBody = filepath.Join(filepath.Dir(mv.Orphan), "nodir", "x.txt"), "alpha\n"
 	})
@@ -305,15 +312,22 @@ func TestRemediation_PurgeRestoreFailureKeepsTheRecord(t *testing.T) {
 func TestCompanion_PartialCrossDeviceMoveKeepsTheRecord(t *testing.T) {
 	for _, path := range []string{"quarantine", "rename"} {
 		t.Run(path, func(t *testing.T) {
-			prevRename, prevRemove := renameFile, removeSource
-			renameFile = func(oldpath, newpath string) error {
+			prevLink, prevRemove := linkFile, removeSource
+			linkFile = func(oldpath, newpath string) error {
 				if strings.HasSuffix(oldpath, ".elrc") {
-					return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EXDEV}
+					return &os.LinkError{Op: "link", Old: oldpath, New: newpath, Err: syscall.EXDEV}
 				}
-				return prevRename(oldpath, newpath)
+				return prevLink(oldpath, newpath)
 			}
-			removeSource = func(string) error { return os.ErrPermission }
-			t.Cleanup(func() { renameFile, removeSource = prevRename, prevRemove })
+			// Only the companion's unlink fails: the .lrc's own move also
+			// unlinks its source (link-then-unlink) and must succeed.
+			removeSource = func(p string) error {
+				if strings.HasSuffix(p, ".elrc") {
+					return os.ErrPermission
+				}
+				return prevRemove(p)
+			}
+			t.Cleanup(func() { linkFile, removeSource = prevLink, prevRemove })
 
 			var got Applied
 			var backup, newLrc, newElrc string
@@ -339,6 +353,213 @@ func TestCompanion_PartialCrossDeviceMoveKeepsTheRecord(t *testing.T) {
 			}
 			if !strings.Contains(backup, `"companion_new_path"`) {
 				t.Errorf("backup line dropped although the companion copy landed: %q", backup)
+			}
+		})
+	}
+}
+
+// planBare: an orphan .lrc WITHOUT a companion (ISRC-tagged) and its renamed
+// audio. A non-empty stranded body is written at the target's companion path
+// before planning when atPlan, else after it, so only Apply's re-check can see
+// it. #997.
+func planBare(t *testing.T, stranded string, atPlan bool) (newLrc, newElrc string, res Result, apply func() []Applied) {
+	t.Helper()
+	root := tempRoot(t)
+	dir := filepath.Join(root, "Album")
+	audio := filepath.Join(dir, "new.flac")
+	write(t, audio, "a")
+	write(t, filepath.Join(dir, "old.lrc"), "[isrc:US1]\n[00:01.00]hi\n")
+	newLrc, newElrc = filepath.Join(dir, "new.lrc"), filepath.Join(dir, "new.elrc")
+	if stranded != "" && atPlan {
+		write(t, newElrc, stranded)
+	}
+	r, lib := newRealigner(root, defaultCfg(), map[string]string{audio: "US1"})
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if stranded != "" && !atPlan {
+		write(t, newElrc, stranded)
+	}
+	return newLrc, newElrc, res, func() []Applied {
+		applied, aerr := r.Apply(res.Moves, filepath.Join(t.TempDir(), "b.jsonl"), Policy{AllowHeuristic: true})
+		if aerr != nil {
+			t.Fatalf("Apply: %v", aerr)
+		}
+		return applied
+	}
+}
+
+// An orphan .lrc with no companion never lands beside a stale OWNED .elrc: the
+// move is refused (a plan-time conflict, or Apply's re-check when the companion
+// appeared after planning), and the stale companion is left for the next write
+// of that stem, which owns its removal. #997.
+func TestRename_BareLrcNeverLandsBesideAStaleOwnedCompanion(t *testing.T) {
+	t.Run("plan", func(t *testing.T) {
+		newLrc, newElrc, res, _ := planBare(t, ownedElrc, true)
+		if len(res.Moves) != 0 || len(res.Skips) != 1 || res.Skips[0].Kind != "conflict" ||
+			!strings.Contains(res.Skips[0].Reason, "word-synced companion") {
+			t.Fatalf("moves=%+v skips=%+v; want one companion conflict skip and no move", res.Moves, res.Skips)
+		}
+		if exists(newLrc) || !exists(newElrc) {
+			t.Errorf("lrc=%v stale companion=%v; want no lrc and the companion untouched", exists(newLrc), exists(newElrc))
+		}
+	})
+	t.Run("apply", func(t *testing.T) {
+		newLrc, newElrc, res, apply := planBare(t, ownedElrc, false)
+		if len(res.Moves) != 1 {
+			t.Fatalf("moves=%+v skips=%+v; want the move planned", res.Moves, res.Skips)
+		}
+		if a := apply(); a[0].Err == nil || exists(newLrc) {
+			t.Fatalf("apply err=%v lrc landed=%v; want a refusal and no lrc", a[0].Err, exists(newLrc))
+		}
+		if b, err := os.ReadFile(newElrc); err != nil || string(b) != ownedElrc {
+			t.Errorf("stale companion = %q, %v; want it untouched", b, err)
+		}
+	})
+}
+
+// The #997 guard is specific to a bare .lrc and reaches every match tier:
+//   - a .txt orphan (unsynced or instrumental) still moves onto a stem with a
+//     stale owned .elrc: nothing pairs a .elrc with a .txt, and the writer's next
+//     .txt write at that stem removes the companion anyway;
+//   - a heuristic (name) match of a bare .lrc is refused exactly like an exact one.
+func TestRename_StaleOwnedCompanionGuardScope(t *testing.T) {
+	for _, c := range []struct {
+		name, orphan, body string
+		isrc               map[string]string
+		wantMoves          int
+	}{
+		{"txt orphan still moves", "old.txt", "[isrc:US1]\nsome words\n", map[string]string{"new.flac": "US1"}, 1},
+		{"heuristic lrc refused", "01 Song Title.lrc", "[00:01.00]hi\n", nil, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := tempRoot(t)
+			dir := filepath.Join(root, "Album")
+			audioName := "new.flac"
+			if c.isrc == nil {
+				audioName = "01 Song Title (Remastered).flac"
+			}
+			audio := filepath.Join(dir, audioName)
+			write(t, audio, "a")
+			write(t, filepath.Join(dir, c.orphan), c.body)
+			stale := filepath.Join(dir, strings.TrimSuffix(audioName, ".flac")+".elrc")
+			write(t, stale, ownedElrc)
+			isrc := map[string]string{}
+			for k, v := range c.isrc {
+				isrc[filepath.Join(dir, k)] = v
+			}
+			r, lib := newRealigner(root, defaultCfg(), isrc)
+			res, err := r.PlanLibrary(lib)
+			if err != nil {
+				t.Fatalf("PlanLibrary: %v", err)
+			}
+			if len(res.Moves) != c.wantMoves {
+				t.Fatalf("moves=%+v skips=%+v; want %d move(s)", res.Moves, res.Skips, c.wantMoves)
+			}
+			if c.wantMoves == 0 && (len(res.Skips) != 1 || !strings.Contains(res.Skips[0].Reason, "word-synced companion")) {
+				t.Fatalf("skips=%+v; want one stale-companion conflict", res.Skips)
+			}
+			if b, err := os.ReadFile(stale); err != nil || string(b) != ownedElrc {
+				t.Errorf("stale companion = %q, %v; want it untouched at plan time", b, err)
+			}
+		})
+	}
+}
+
+// A FOREIGN .elrc at the target blocks nothing (the writer never touches one
+// either) and is byte-identical afterwards. #997.
+func TestRename_BareLrcBesideForeignCompanionMovesAndLeavesItAlone(t *testing.T) {
+	newLrc, newElrc, res, apply := planBare(t, foreignElrc, true)
+	if len(res.Moves) != 1 || len(res.Skips) != 0 {
+		t.Fatalf("moves=%+v skips=%+v; want the move planned", res.Moves, res.Skips)
+	}
+	if a := apply(); a[0].Err != nil || !exists(newLrc) {
+		t.Fatalf("apply err=%v lrc landed=%v; want the move applied", a[0].Err, exists(newLrc))
+	}
+	if b, err := os.ReadFile(newElrc); err != nil || string(b) != foreignElrc {
+		t.Errorf("foreign companion = %q, %v; want it byte-identical", b, err)
+	}
+}
+
+// A move refused because the COMPANION's destination is taken names that
+// path, not the .lrc's target (which is free): the operator has to find the
+// file that is actually in the way. Checked at plan time and again at Apply's
+// recheck, for a companion that appeared after planning.
+func TestRename_CompanionConflictReasonNamesTheCompanionPath(t *testing.T) {
+	t.Run("plan", func(t *testing.T) {
+		_, newLrc, newElrc, res, _ := planRename(t, ownedElrc, foreignElrc)
+		if len(res.Skips) != 1 {
+			t.Fatalf("skips=%+v; want one conflict", res.Skips)
+		}
+		if want := "destination " + newElrc + " already exists"; res.Skips[0].Reason != want {
+			t.Errorf("reason = %q, want %q (the .lrc target %s is free)", res.Skips[0].Reason, want, newLrc)
+		}
+	})
+	t.Run("apply", func(t *testing.T) {
+		_, newLrc, newElrc, res, apply := planRename(t, ownedElrc, "")
+		if len(res.Moves) != 1 {
+			t.Fatalf("moves=%+v; want the move planned", res.Moves)
+		}
+		write(t, newElrc, foreignElrc)
+		a, _ := apply()
+		if want := "destination " + newElrc + " already exists"; a[0].Err == nil || a[0].Err.Error() != want {
+			t.Errorf("err = %v, want %q (the .lrc target %s is free)", a[0].Err, want, newLrc)
+		}
+	})
+}
+
+// A destination created AFTER Apply's recheck and before the move reaches the
+// filesystem (a concurrent writer) is refused, never replaced: the racer's
+// file is byte-identical, the orphan pair is back where it was, and the backup
+// line is rolled back because nothing was mutated. Covers the .lrc's own move
+// and its companion's (after which the .lrc is moved back). The race is
+// injected at the link, which is the first thing the move does after the
+// recheck.
+func TestRename_DestinationCreatedAfterTheRecheckIsNeverReplaced(t *testing.T) {
+	const racer = "RACER WROTE THIS\n"
+	for _, ext := range []string{".lrc", ".elrc"} {
+		t.Run(ext, func(t *testing.T) {
+			oldElrc, newLrc, newElrc, res, apply := planRename(t, ownedElrc, "")
+			if len(res.Moves) != 1 {
+				t.Fatalf("moves=%+v; want the move planned", res.Moves)
+			}
+			oldLrc := strings.TrimSuffix(oldElrc, ".elrc") + ".lrc"
+			oldLrcBody, _ := os.ReadFile(oldLrc) //nolint:gosec // reason: G304: test-controlled path
+			raced := newLrc
+			if ext == ".elrc" {
+				raced = newElrc
+			}
+			prev := linkFile
+			linkFile = func(oldpath, newpath string) error {
+				if newpath == raced {
+					write(t, newpath, racer)
+				}
+				return prev(oldpath, newpath)
+			}
+			t.Cleanup(func() { linkFile = prev })
+
+			a, backup := apply()
+			if a[0].Err == nil || !errors.Is(a[0].Err, fs.ErrExist) {
+				t.Errorf("err = %v; want a refusal satisfying fs.ErrExist", a[0].Err)
+			}
+			if b, err := os.ReadFile(raced); err != nil || string(b) != racer { //nolint:gosec // reason: G304: test-controlled path
+				t.Errorf("racer's %s = %q, %v; want it byte-identical", ext, b, err)
+			}
+			if b, err := os.ReadFile(oldLrc); err != nil || string(b) != string(oldLrcBody) { //nolint:gosec // reason: G304: test-controlled path
+				t.Errorf("orphan .lrc = %q, %v; want it back in place", b, err)
+			}
+			if b, err := os.ReadFile(oldElrc); err != nil || string(b) != ownedElrc { //nolint:gosec // reason: G304: test-controlled path
+				t.Errorf("orphan companion = %q, %v; want it in place", b, err)
+			}
+			if ext == ".lrc" && exists(newElrc) {
+				t.Error("the companion moved although its .lrc was refused")
+			}
+			if ext == ".elrc" && exists(newLrc) {
+				t.Error("the .lrc stayed on the new stem although its companion was refused")
+			}
+			if strings.TrimSpace(backup) != "" {
+				t.Errorf("backup line kept for a refused move that mutated nothing: %q", backup)
 			}
 		})
 	}

@@ -72,8 +72,8 @@ func TestRenameOrCopyCrossesFilesystems(t *testing.T) {
 	}
 }
 
-// TestCopyFileDurableRefusesAnExistingDestination pins the clobber-safety the
-// rename had. The caller checks first, but the check and the write are not
+// TestCopyFileDurableRefusesAnExistingDestination pins the copy fallback's
+// no-replace guarantee. The caller checks first, but the check and the write are not
 // atomic, so O_EXCL has to refuse a file that appeared in between.
 func TestCopyFileDurableRefusesAnExistingDestination(t *testing.T) {
 	dir := t.TempDir()
@@ -129,14 +129,20 @@ func TestCopyFileDurableLeavesNoPartialOnFailure(t *testing.T) {
 	}
 }
 
-// TestRenameOrCopyUsesRenameOnOneFilesystem keeps the common path atomic: the
-// fallback exists for the cross-device case and must not displace the rename.
-func TestRenameOrCopyUsesRenameOnOneFilesystem(t *testing.T) {
+// TestRenameOrCopyLinksOnOneFilesystem keeps the common path on the link, not
+// the copy: the fallback exists for EXDEV and hardlink-less filesystems and
+// must not displace the link. The destination is the SAME inode the source was,
+// which only a link (never a copy) produces.
+func TestRenameOrCopyLinksOnOneFilesystem(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.lrc")
 	dst := filepath.Join(dir, "moved.lrc")
 	if err := os.WriteFile(src, []byte("body"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
+	}
+	before, err := os.Lstat(src)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
 	}
 	if err := renameOrCopy(src, dst); err != nil {
 		t.Fatalf("renameOrCopy: %v", err)
@@ -144,24 +150,31 @@ func TestRenameOrCopyUsesRenameOnOneFilesystem(t *testing.T) {
 	if _, err := os.Lstat(src); !os.IsNotExist(err) {
 		t.Error("source survived a same-filesystem move")
 	}
-	got, err := os.ReadFile(dst) //nolint:gosec // reason: G304: test-controlled path
+	after, err := os.Lstat(dst)
 	if err != nil {
-		t.Fatalf("read dst: %v", err)
+		t.Fatalf("lstat dst: %v", err)
 	}
-	if string(got) != "body" {
-		t.Errorf("content = %q, want %q", got, "body")
+	if !os.SameFile(before, after) {
+		t.Error("the destination is a different file; the same-filesystem move copied instead of linking")
 	}
 }
 
-// forceEXDEV makes renameFile report a cross-device link for the duration of a
-// test, so the fallback is reachable without two real mounts.
+// forceLinkErr makes linkFile fail with errno for the duration of a test, so
+// the copy fallback is reachable without two real mounts or a hardlink-less
+// filesystem.
+func forceLinkErr(t *testing.T, errno error) {
+	t.Helper()
+	prev := linkFile
+	linkFile = func(oldpath, newpath string) error {
+		return &os.LinkError{Op: "link", Old: oldpath, New: newpath, Err: errno}
+	}
+	t.Cleanup(func() { linkFile = prev })
+}
+
+// forceEXDEV makes linkFile report a cross-device link.
 func forceEXDEV(t *testing.T) {
 	t.Helper()
-	prev := renameFile
-	renameFile = func(oldpath, newpath string) error {
-		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EXDEV}
-	}
-	t.Cleanup(func() { renameFile = prev })
+	forceLinkErr(t, syscall.EXDEV)
 }
 
 // TestRenameOrCopyFallsBackOnEXDEV exercises the whole fallback in EVERY
@@ -199,29 +212,87 @@ func TestRenameOrCopyFallsBackOnEXDEV(t *testing.T) {
 	}
 }
 
-// TestRenameOrCopyReportsANonEXDEVFailure keeps the fallback NARROW. Only a
-// cross-device link may take the copy path: any other rename failure is the real
-// error and must surface as itself, not be masked by a copy that might succeed
-// for the wrong reason.
-func TestRenameOrCopyReportsANonEXDEVFailure(t *testing.T) {
-	prev := renameFile
-	sentinel := errors.New("disk is on fire")
-	renameFile = func(string, string) error { return sentinel }
-	t.Cleanup(func() { renameFile = prev })
+// TestRenameOrCopyFallsBackOnAHardlinkLessFilesystem: some production mounts
+// (FUSE, SMB) cannot hardlink at all and report EPERM/ENOTSUP. A link-only
+// move would fail for every file there, so any link failure other than EEXIST
+// must take the durable copy, exactly as EXDEV does.
+func TestRenameOrCopyFallsBackOnAHardlinkLessFilesystem(t *testing.T) {
+	for _, errno := range []error{syscall.EPERM, syscall.ENOTSUP} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			forceLinkErr(t, errno)
+			dir := t.TempDir()
+			src := filepath.Join(dir, "track.lrc")
+			if err := os.WriteFile(src, []byte("body"), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			dst := filepath.Join(dir, "moved.lrc")
+			if err := renameOrCopy(src, dst); err != nil {
+				t.Fatalf("renameOrCopy on %v: %v", errno, err)
+			}
+			if got, err := os.ReadFile(dst); err != nil || string(got) != "body" { //nolint:gosec // reason: G304: test-controlled path
+				t.Errorf("target = %q, %v; want the copied body", got, err)
+			}
+			if _, err := os.Lstat(src); !errors.Is(err, fs.ErrNotExist) {
+				t.Error("the source survived; a move must not leave the original behind")
+			}
+		})
+	}
+}
 
+// TestRenameOrCopyNeverReplacesAnExistingTarget is the primitive-level
+// regression for the recheck-then-move race: a destination that exists when
+// the move reaches the filesystem must be REFUSED (fs.ErrExist), never
+// replaced, on the link path AND on the copy fallback, with both files left
+// exactly as they were. os.Rename silently replaced it on POSIX.
+func TestRenameOrCopyNeverReplacesAnExistingTarget(t *testing.T) {
+	for _, branch := range []string{"link", "copy fallback"} {
+		t.Run(branch, func(t *testing.T) {
+			if branch == "copy fallback" {
+				forceEXDEV(t)
+			}
+			dir := t.TempDir()
+			src := filepath.Join(dir, "track.lrc")
+			dst := filepath.Join(dir, "taken.lrc")
+			if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+				t.Fatalf("write src: %v", err)
+			}
+			if err := os.WriteFile(dst, []byte("PRECIOUS"), 0o600); err != nil {
+				t.Fatalf("write dst: %v", err)
+			}
+
+			err := renameOrCopy(src, dst)
+			if !errors.Is(err, fs.ErrExist) {
+				t.Errorf("error = %v, want one satisfying errors.Is(err, fs.ErrExist)", err)
+			}
+			if got, rerr := os.ReadFile(dst); rerr != nil || string(got) != "PRECIOUS" { //nolint:gosec // reason: G304: test-controlled path
+				t.Errorf("destination = %q, %v; want it untouched (\"PRECIOUS\")", got, rerr)
+			}
+			if got, rerr := os.ReadFile(src); rerr != nil || string(got) != "new" { //nolint:gosec // reason: G304: test-controlled path
+				t.Errorf("source = %q, %v; want it still in place", got, rerr)
+			}
+		})
+	}
+}
+
+// TestRenameOrCopyRollsBackALinkWhoseSourceCannotBeRemoved: on the link path
+// both names are one file, so a failed source unlink is undone by dropping the
+// new name -- the move fails as a whole and leaves only the original.
+func TestRenameOrCopyRollsBackALinkWhoseSourceCannotBeRemoved(t *testing.T) {
+	prev := removeSource
+	removeSource = func(string) error { return os.ErrPermission }
+	t.Cleanup(func() { removeSource = prev })
 	dir := t.TempDir()
 	src := filepath.Join(dir, "track.lrc")
+	dst := filepath.Join(dir, "moved.lrc")
 	if err := os.WriteFile(src, []byte("body"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	dst := filepath.Join(dir, "moved.lrc")
-
 	err := renameOrCopy(src, dst)
-	if !errors.Is(err, sentinel) {
-		t.Errorf("error = %v, want the original rename failure; a non-EXDEV error must not be masked by the copy path", err)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("error = %v, want the unlink failure", err)
 	}
-	if _, serr := os.Lstat(dst); !errors.Is(serr, fs.ErrNotExist) {
-		t.Error("a destination was created for a failure that should not have copied at all")
+	if !exists(src) || exists(dst) {
+		t.Errorf("src=%v dst=%v; want the link rolled back to the original only", exists(src), exists(dst))
 	}
 }
 
@@ -229,6 +300,8 @@ func TestRenameOrCopyReportsANonEXDEVFailure(t *testing.T) {
 // choice. The source is removed only after the destination is durable, so a
 // failure at that last step leaves BOTH files -- recoverable by hand. The
 // reverse order would lose the file outright, which is why it is not used.
+// (The link path rolls such a failure back instead; see
+// TestRenameOrCopyRollsBackALinkWhoseSourceCannotBeRemoved.)
 func TestRenameOrCopyKeepsBothCopiesWhenTheUnlinkFails(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("a root process can unlink from a read-only directory")
