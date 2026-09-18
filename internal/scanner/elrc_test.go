@@ -10,14 +10,14 @@ import (
 	"github.com/sydlexius/canticle/internal/testutil"
 )
 
-// The word-synced companion (#986) must behave identically whether its Kind is
-// still inactive (today) or switched on (slice 4c). Each test runs both states;
-// none may run in parallel, because ActivateForTest flips a package-global.
+// The word-synced companion's Kind is active since #986 slice 4c, and
+// ActivateForTest cannot switch it off, so there is no inactive state left to
+// run. The table (and the no-op activation) goes in slice 5. Not parallel:
+// ActivateForTest writes a package-global.
 var companionFlagStates = []struct {
 	name   string
 	active bool
 }{
-	{"kind inactive", false},
 	{"kind active", true},
 }
 

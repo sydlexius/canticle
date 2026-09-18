@@ -91,7 +91,7 @@ func TestRename_CompanionFollowsOnlyWhenOwnedAndActive(t *testing.T) {
 
 // A lone .elrc (foreign, or stranded by a crash) is never coverage: counting it
 // turns an ambiguous directory into a wrong-winner auto-move, or hides the gap
-// a correct re-attachment needs. Active must plan exactly as inactive.
+// a correct re-attachment needs.
 func TestClassify_LoneCompanionIsNotCoverage(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -103,25 +103,20 @@ func TestClassify_LoneCompanionIsNotCoverage(t *testing.T) {
 		{"foreign hides the only gap", map[string]string{"01 Song.flac": "a", "01 Song.elrc": foreignElrc, "Song.lrc": "[00:01.00]hi\n"}, 1},
 	}
 	for _, c := range cases {
-		for _, active := range []bool{true, false} {
-			t.Run(c.name+map[bool]string{true: "/active", false: "/inactive"}[active], func(t *testing.T) {
-				if active {
-					sidecar.ActivateForTest(t, sidecar.KindWordSynced)
-				}
-				root := tempRoot(t)
-				for name, body := range c.files {
-					write(t, filepath.Join(root, "Album", name), body)
-				}
-				r, lib := newRealigner(root, defaultCfg(), nil)
-				res, err := r.PlanLibrary(lib)
-				if err != nil {
-					t.Fatalf("PlanLibrary: %v", err)
-				}
-				if len(res.Moves) != c.wantMoves {
-					t.Fatalf("moves=%+v skips=%+v; want %d move(s)", res.Moves, res.Skips, c.wantMoves)
-				}
-			})
-		}
+		t.Run(c.name, func(t *testing.T) {
+			root := tempRoot(t)
+			for name, body := range c.files {
+				write(t, filepath.Join(root, "Album", name), body)
+			}
+			r, lib := newRealigner(root, defaultCfg(), nil)
+			res, err := r.PlanLibrary(lib)
+			if err != nil {
+				t.Fatalf("PlanLibrary: %v", err)
+			}
+			if len(res.Moves) != c.wantMoves {
+				t.Fatalf("moves=%+v skips=%+v; want %d move(s)", res.Moves, res.Skips, c.wantMoves)
+			}
+		})
 	}
 }
 

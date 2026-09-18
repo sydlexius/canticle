@@ -176,7 +176,7 @@ Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`,
 
 `bilingual_output` (default `false`): when `true` and a provider returns a non-empty translation track, the original and translation lines are interleaved under shared timestamps in a single `.lrc`. See `docs/multilingual-output-policy.md`.
 
-`word_sync_mode` (default `"sidecar"`) decides WHERE per-word (Enhanced LRC, "A2") timings go when a provider serves them -- today only Petit Lyrics' word-synced tier. Four values:
+`word_sync_mode` (default `"sidecar"`) decides WHERE per-word (Enhanced LRC, "A2") timings go when a provider serves them -- Musixmatch (on most line-synced results) and Petit Lyrics' word-synced tier. With the default, a fetch that carries word timings writes a companion `.elrc` beside the `.lrc`; set `off` to keep the previous one-file output. Already-settled tracks are not re-fetched to add one (#982). Four values:
 
 | value | the `.lrc` | companion sidecar |
 |---|---|---|
