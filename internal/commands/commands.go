@@ -3336,6 +3336,20 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("output.word_sync must be a boolean: %w", err)
 		}
 		cfg.Output.WordSync = v
+		// The MODE moves with the bool, or setting the bool is a no-op that
+		// reports success. `config set` re-encodes the WHOLE struct, and the
+		// loader has already materialized a resolved word_sync_mode by then, so
+		// writing the bool alone leaves the previously-resolved mode beside it --
+		// and the mode wins on the next boot. An operator would set the
+		// deprecated key, see exit 0, and get nothing, forever.
+		//
+		// Same legacy mapping as the loader and the env path, kept in the one
+		// shape all three use: true means inline, false means off.
+		if v {
+			cfg.Output.WordSyncMode = config.WordSyncModeInline
+		} else {
+			cfg.Output.WordSyncMode = config.WordSyncModeOff
+		}
 	case "output.word_sync_mode":
 		// Validation is DELEGATED to the config package rather than restated
 		// here, following the timing-action arms below: config.ValidateAndSet

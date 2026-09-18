@@ -1265,6 +1265,25 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 		}
 	}
 	applyEnvOverrides(&cfg, appliedEnv)
+	// The file-path precedence above cannot see the environment, because it runs
+	// on decode metadata and applyEnvOverrides has not happened yet. So the
+	// deprecated bool gets its legacy mapping a SECOND time here, for the env
+	// path only, under the same rule: the bool maps ONLY when the mode was not
+	// set by a more specific source.
+	//
+	// Without this an operator who sets MXLRC_WORD_SYNC=true in a container's
+	// environment -- a documented, registry-supported path -- silently gets the
+	// new default instead of the inline markers they asked for, with no
+	// deprecation warning, because the bool applied and nothing read it.
+	if appliedEnv["output.word_sync"] && !appliedEnv["output.word_sync_mode"] {
+		resolved := WordSyncModeOff
+		if cfg.Output.WordSync {
+			resolved = WordSyncModeInline
+		}
+		cfg.Output.WordSyncMode = resolved
+		slog.Warn("MXLRC_WORD_SYNC is deprecated; set MXLRC_WORD_SYNC_MODE instead (see docs/CONFIGURATION.md)",
+			"word_sync", cfg.Output.WordSync, "resolved_mode", resolved)
+	}
 	normalizeEmbeddedLyrics(&cfg)
 	normalizeScanSchedule(&cfg)
 	if err := normalizeProvidersMode(&cfg); err != nil {

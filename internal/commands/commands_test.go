@@ -3693,3 +3693,42 @@ func TestConfigValueWordSyncMode(t *testing.T) {
 		t.Error("configKeys is missing output.word_sync_mode")
 	}
 }
+
+// TestSetConfigValueWordSyncBoolMovesTheMode pins the pairing that keeps the
+// deprecated bool from being a no-op that reports success.
+//
+// `config set` re-encodes the WHOLE config struct, and by then the loader has
+// already materialized a resolved word_sync_mode. So writing the bool alone
+// leaves the PREVIOUSLY resolved mode beside it in the file -- and the mode wins
+// on the next boot. An operator would set output.word_sync, see exit 0, and get
+// nothing, with no error and no warning to explain it.
+//
+// Asserted on the STRUCT here; the on-disk consequence follows from the full
+// re-encode at the runConfig write site.
+func TestSetConfigValueWordSyncBoolMovesTheMode(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start config.WordSyncMode
+		set   string
+		want  config.WordSyncMode
+	}{
+		// The dangerous direction: a previously-resolved inline must not survive
+		// the operator turning the bool off.
+		{"false from a resolved inline", config.WordSyncModeInline, "false", config.WordSyncModeOff},
+		{"true from a resolved off", config.WordSyncModeOff, "true", config.WordSyncModeInline},
+		{"true from the new default", config.WordSyncModeSidecar, "true", config.WordSyncModeInline},
+		{"false from the new default", config.WordSyncModeSidecar, "false", config.WordSyncModeOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{}
+			cfg.Output.WordSyncMode = tc.start
+			if err := setConfigValue(&cfg, "output.word_sync", tc.set); err != nil {
+				t.Fatalf("setConfigValue: %v", err)
+			}
+			if cfg.Output.WordSyncMode != tc.want {
+				t.Errorf("after setting output.word_sync=%s, mode = %q, want %q -- the bool must move the "+
+					"mode or setting it is inert", tc.set, cfg.Output.WordSyncMode, tc.want)
+			}
+		})
+	}
+}

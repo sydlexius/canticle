@@ -2574,3 +2574,60 @@ func TestWordSyncModeValidatorIsWired(t *testing.T) {
 		t.Errorf("AllowedValues = %v; want the %d modes wordSyncModes() defines", got, len(wordSyncModes()))
 	}
 }
+
+// TestEnvLegacyWordSyncBoolMaps covers the env half of the deprecation, which
+// the file-path precedence structurally cannot reach.
+//
+// Mode resolution runs on DECODE METADATA, before applyEnvOverrides, so an
+// operator setting MXLRC_WORD_SYNC=true in a container's environment -- a
+// documented, registry-supported path -- had the bool applied and nothing read
+// it: the mode stayed at the new default and no deprecation warning fired. The
+// bool therefore gets its legacy mapping a second time after the env pass, under
+// the same rule the file path uses: it maps only when a more specific source did
+// not set the mode.
+func TestEnvLegacyWordSyncBoolMaps(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		envBool string
+		envMode string
+		file    string
+		want    WordSyncMode
+	}{
+		{"env bool true maps to inline", "true", "", "", WordSyncModeInline},
+		{"env bool false maps to off", "false", "", "", WordSyncModeOff},
+		// The mode env var is MORE SPECIFIC and must win outright.
+		{"env mode beats env bool", "true", "both", "", WordSyncModeBoth},
+		// An env bool still beats a FILE that never mentioned either key.
+		{"env bool over a silent file", "true", "", "[output]\ndir = \"x\"\n", WordSyncModeInline},
+		// ...AND over a file that set the mode explicitly. This is standard
+		// precedence (CLI > env > file), deliberately NOT special-cased: making
+		// the newer key beat the deprecated one ACROSS source tiers would be a
+		// rule nobody expects from a config system, and the deprecation warning
+		// is what makes a stale MXLRC_WORD_SYNC visible during a migration.
+		{"env bool beats an explicit file mode", "true", "", "[output]\nword_sync_mode = \"off\"\n", WordSyncModeInline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			if tc.file != "" {
+				if err := os.WriteFile(path, []byte(tc.file), 0o600); err != nil {
+					t.Fatalf("writing config: %v", err)
+				}
+			}
+			if tc.envBool != "" {
+				t.Setenv("MXLRC_WORD_SYNC", tc.envBool)
+			}
+			if tc.envMode != "" {
+				t.Setenv("MXLRC_WORD_SYNC_MODE", tc.envMode)
+			}
+
+			cfg, _, err := LoadWithSources(path)
+			if err != nil {
+				t.Fatalf("LoadWithSources: %v", err)
+			}
+			if cfg.Output.WordSyncMode != tc.want {
+				t.Errorf("WordSyncMode = %q, want %q", cfg.Output.WordSyncMode, tc.want)
+			}
+		})
+	}
+}
