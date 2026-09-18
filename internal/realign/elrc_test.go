@@ -7,13 +7,10 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-
-	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // The word-synced companion (.elrc, #986) follows its .lrc through every
-// mutation here. The Kind is active in production now (slice 4c), so the
-// ActivateForTest calls below are no-ops kept until the cleanup slice.
+// mutation here.
 
 const (
 	ownedElrc   = "[by:canticle]\n[00:01.00]<00:01.00>hi\n"
@@ -55,20 +52,16 @@ func planRename(t *testing.T, elrcBody, occupiedNewElrc string) (orphanElrc, new
 	}
 }
 
-// Only an OWNED companion of an active Kind follows its renamed .lrc; it is
+// Only an OWNED companion follows its renamed .lrc; it is
 // never planned as an orphan of its own. One whose destination is occupied
 // blocks the whole move at plan time rather than splitting the pair.
-func TestRename_CompanionFollowsOnlyWhenOwnedAndActive(t *testing.T) {
+func TestRename_CompanionFollowsOnlyWhenOwned(t *testing.T) {
 	for _, c := range []struct {
 		name           string
-		active         bool
 		body, occupied string
 		wantFollowed   bool
-	}{{"owned", true, ownedElrc, "", true}, {"foreign", true, foreignElrc, "", false}, {"blocked", true, ownedElrc, foreignElrc, false}} {
+	}{{"owned", ownedElrc, "", true}, {"foreign", foreignElrc, "", false}, {"blocked", ownedElrc, foreignElrc, false}} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.active {
-				sidecar.ActivateForTest(t, sidecar.KindWordSynced)
-			}
 			oldElrc, newLrc, newElrc, res, apply := planRename(t, c.body, c.occupied)
 			if c.occupied != "" {
 				if len(res.Moves) != 0 || len(res.Skips) != 1 || res.Skips[0].Kind != "conflict" {
@@ -126,7 +119,6 @@ func TestClassify_LoneCompanionIsNotCoverage(t *testing.T) {
 func TestRename_FailedCompanionStepUndoesTheLrcMove(t *testing.T) {
 	for _, reoccupy := range []bool{false, true} {
 		t.Run(map[bool]string{false: "undo", true: "reoccupied"}[reoccupy], func(t *testing.T) {
-			sidecar.ActivateForTest(t, sidecar.KindWordSynced)
 			oldElrc, newLrc, newElrc, _, apply := planRename(t, ownedElrc, "")
 			oldLrc := strings.TrimSuffix(oldElrc, ".elrc") + ".lrc"
 			prev := renameFile
@@ -180,18 +172,14 @@ func remediate(t *testing.T, kind, elrcBody string, mut func(*testing.T, *Move))
 
 // An owned companion goes with its remediated .lrc and is recorded in the
 // backup; a foreign one is untouched.
-func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwnedAndActive(t *testing.T) {
+func TestRemediation_CompanionGoesWithTheLrcOnlyWhenOwned(t *testing.T) {
 	for _, kind := range []string{KindDemote, KindQuarantine, KindPurge} {
 		for _, c := range []struct {
 			name         string
-			active       bool
 			body         string
 			wantFollowed bool
-		}{{"owned", true, ownedElrc, true}, {"foreign", true, foreignElrc, false}} {
+		}{{"owned", ownedElrc, true}, {"foreign", foreignElrc, false}} {
 			t.Run(kind+"/"+c.name, func(t *testing.T) {
-				if c.active {
-					sidecar.ActivateForTest(t, sidecar.KindWordSynced)
-				}
 				lrc, elrc, target, got, backup := remediate(t, kind, c.body, nil)
 				if got.Err != nil || exists(lrc) {
 					t.Fatalf("%s: %v; lrc still present=%v", kind, got.Err, exists(lrc))
@@ -263,7 +251,6 @@ func TestRemediation_RefusalsKeepThePairOrItsRecord(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			sidecar.ActivateForTest(t, sidecar.KindWordSynced)
 			lrc, elrc, target, got, backup := remediate(t, c.kind, ownedElrc, c.mut)
 			if got.Err == nil || !exists(lrc) {
 				t.Fatalf("%s: err=%v lrc kept=%v; want a refusal with the .lrc in place", c.name, got.Err, exists(lrc))
@@ -291,7 +278,6 @@ func TestRemediation_RefusalsKeepThePairOrItsRecord(t *testing.T) {
 // A purge whose .lrc step fails AND whose staged companion cannot be put back
 // has mutated the library: the backup line naming the companion must stay.
 func TestRemediation_PurgeRestoreFailureKeepsTheRecord(t *testing.T) {
-	sidecar.ActivateForTest(t, sidecar.KindWordSynced)
 	prev := renameFile
 	renameFile = func(oldpath, newpath string) error {
 		if strings.Contains(filepath.Base(oldpath), ".purge-") {
@@ -319,7 +305,6 @@ func TestRemediation_PurgeRestoreFailureKeepsTheRecord(t *testing.T) {
 func TestCompanion_PartialCrossDeviceMoveKeepsTheRecord(t *testing.T) {
 	for _, path := range []string{"quarantine", "rename"} {
 		t.Run(path, func(t *testing.T) {
-			sidecar.ActivateForTest(t, sidecar.KindWordSynced)
 			prevRename, prevRemove := renameFile, removeSource
 			renameFile = func(oldpath, newpath string) error {
 				if strings.HasSuffix(oldpath, ".elrc") {

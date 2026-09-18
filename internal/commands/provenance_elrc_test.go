@@ -14,14 +14,12 @@ import (
 	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
-// The provenance backfill is .lrc-only: even with the word-synced Kind (#986)
-// active, an OWNED companion beside the .lrc is left byte-for-byte untouched,
-// and its presence does not change the summary. No canticle path reads a
-// companion's tags (purge-provenance removes an owned companion by deriving it
-// from its matching .lrc), so rewriting it would modify a user file for no
-// reader. Not parallel: ActivateForTest flips a package-global.
+// The provenance backfill is .lrc-only: an OWNED word-synced companion (#986)
+// beside the .lrc is left byte-for-byte untouched, and its presence does not
+// change the summary. No canticle path reads a companion's tags
+// (purge-provenance removes an owned companion by deriving it from its matching
+// .lrc), so rewriting it would modify a user file for no reader.
 func TestRunProvenanceBackfill_LeavesWordSyncedCompanionUntouched(t *testing.T) {
-	sidecar.ActivateForTest(t, sidecar.KindWordSynced)
 	const owned = "[by:canticle]\n[ar:Test Artist]\n[ti:Test Track]\n[00:01.00]<00:01.00>Hello <00:01.50>world\n"
 
 	run := func(t *testing.T, withCompanion bool) (summary, companion string) {
