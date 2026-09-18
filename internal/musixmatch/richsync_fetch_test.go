@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -337,5 +338,144 @@ func TestRichSyncWarnsOnlyOnAShapeChange(t *testing.T) {
 				t.Errorf("log leaked the body: %q", logged)
 			}
 		})
+	}
+}
+
+// TestRichSyncParentShapeWarns covers the level ABOVE richsync_body, which the
+// leaf type-check missed.
+//
+// fastjson's Get walks a key path and returns nil the moment a level is not an
+// object, so a `richsync` that arrived as an array, string, number or bool makes
+// the CHILD lookup nil -- indistinguishable, to a leaf-only check, from a track
+// that simply has no word data. Verified against fastjson v1.6.10: all four
+// parent shapes yield a nil child. The alarm was one level too shallow.
+func TestRichSyncParentShapeWarns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		parent   string
+		wantWarn bool
+	}{
+		// A shape change: present, not null, and not an object.
+		{"parent is an array", `[1,2]`, true},
+		{"parent is a string", `"oops"`, true},
+		{"parent is a number", `12345`, true},
+		{"parent is a bool", `true`, true},
+		// Ordinary absence: the provider saying there is no richsync here.
+		{"parent is null", `null`, false},
+		{"parent is absent", ``, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			inner := `,
+					"track.richsync.get": {
+						"message": {
+							"header": {"status_code": 200},
+							"body": {"richsync": ` + tc.parent + `}
+						}
+					}`
+			if tc.parent == "" {
+				inner = `,
+					"track.richsync.get": {
+						"message": {"header": {"status_code": 200}, "body": {}}
+					}`
+			}
+			client, _ := newCountingClient(t, richSyncMacroBody(inner))
+
+			song, err := client.FindLyrics(context.Background(), probeTrack())
+			if err != nil {
+				t.Fatalf("FindLyrics returned %v; want nil -- a richsync problem must never cost the song", err)
+			}
+			if len(song.Subtitles.Lines) == 0 {
+				t.Fatal("line-synced cues were lost")
+			}
+			if song.WordTimings != nil {
+				t.Errorf("WordTimings = %v; want nil", song.WordTimings)
+			}
+			if got := buf.String() != ""; got != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; log was %q", got, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// TestAbsentRichSyncSubCallWarns pins the wrong-spelling detector.
+//
+// MEASURED 2026-09-17 across three tracks on the current client identity: the
+// track.richsync.get sub-call is PRESENT whether or not the track has word data
+// -- inner 200 when has_richsync=1, inner 404 when has_richsync=0. The upstream
+// answers either way, so an ABSENT key does not mean "no word data"; it means the
+// question was never asked as intended (a misspelled optional_calls or
+// richsync_compact_type, or a response that stopped carrying the sub-call).
+//
+// That is otherwise invisible: lookups keep succeeding, word timings never
+// appear, and the fixtures pass because they encode the same spelling the code
+// does. Because the 404-vs-absent distinction is exact, the FIRST absence is
+// diagnostic and no consecutive-count threshold is needed -- a count would
+// reproduce the false-positive shape petitlyrics measured in #767.
+func TestAbsentRichSyncSubCallWarns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		subCall  string
+		wantWarn bool
+	}{
+		{"sub-call absent entirely", ``, true},
+		{"sub-call present with inner 404", richSyncCall(404, ""), false},
+		{"sub-call present with a body", richSyncCall(200, validRichSyncBody), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			client, _ := newCountingClient(t, richSyncMacroBody(tc.subCall))
+			song, err := client.FindLyrics(context.Background(), probeTrack())
+			if err != nil {
+				t.Fatalf("FindLyrics returned %v; want nil", err)
+			}
+			if len(song.Subtitles.Lines) == 0 {
+				t.Fatal("line-synced cues were lost")
+			}
+
+			warned := strings.Contains(buf.String(), "no track.richsync.get sub-call")
+			if warned != tc.wantWarn {
+				t.Errorf("warned about an absent sub-call = %v, want %v; log was %q",
+					warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// TestResponseCapLeavesHeadroomForRichSync guards the cap raise.
+//
+// The cap is checked BEFORE anything is parsed, so an oversized response fails
+// the WHOLE lookup -- losing a good line-synced result to an OPTIONAL upgrade,
+// which inverts this slice's rule that no richsync condition may cost the caller
+// its lyrics. Bundling richsync is what made that reachable, so the cap moved
+// with it. A body around the OLD 2 MiB bound must now succeed.
+func TestResponseCapLeavesHeadroomForRichSync(t *testing.T) {
+	// ~3 MiB of richsync entries: over the old 2 MiB cap, well under the new one.
+	var sb strings.Builder
+	sb.WriteString(`[`)
+	for i := 0; sb.Len() < 3<<20; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `{\"ts\":%d.0,\"te\":%d.5,\"x\":\"alpha\",\"l\":[{\"c\":\"alpha\",\"o\":0.0}]}`, i, i)
+	}
+	sb.WriteString(`]`)
+
+	client, _ := newCountingClient(t, richSyncMacroBody(richSyncCall(200, sb.String())))
+	song, err := client.FindLyrics(context.Background(), probeTrack())
+	if err != nil {
+		t.Fatalf("FindLyrics returned %v; want nil. A large OPTIONAL richsync payload must not "+
+			"fail the whole lookup -- the line-synced result is already in hand", err)
+	}
+	if len(song.Subtitles.Lines) == 0 {
+		t.Error("line-synced cues were lost to an oversized optional payload")
 	}
 }
