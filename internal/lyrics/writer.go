@@ -762,7 +762,7 @@ func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSy
 				text = marked
 			}
 		}
-		fLine := fmt.Sprintf("[%02d:%02d.%02d]%s", line.Time.Minutes, line.Time.Seconds, line.Time.Hundredths, text)
+		fLine := "[" + line.Time.Stamp() + "]" + text
 		if _, err := buff.WriteString(fLine + "\n"); err != nil {
 			return fmt.Errorf("writing synced line: %w", err)
 		}
@@ -772,7 +772,7 @@ func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSy
 				tText = "\u266a"
 			}
 			// Use the ORIGINAL line's timestamp so the pair shares one marker.
-			tLine := fmt.Sprintf("[%02d:%02d.%02d]%s", line.Time.Minutes, line.Time.Seconds, line.Time.Hundredths, tText)
+			tLine := "[" + line.Time.Stamp() + "]" + tText
 			if _, err := buff.WriteString(tLine + "\n"); err != nil {
 				return fmt.Errorf("writing translation line: %w", err)
 			}

@@ -3,6 +3,7 @@ package models
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -136,6 +137,14 @@ type Time struct {
 	Minutes    int     `json:"minutes,omitempty"`
 	Seconds    int     `json:"seconds,omitempty"`
 	Hundredths int     `json:"hundredths,omitempty"`
+}
+
+// Stamp formats t as the mm:ss.xx both an LRC line tag and an Enhanced-LRC (A2)
+// word marker carry, without brackets. Minutes deliberately do NOT wrap at 60:
+// a 70-minute track renders 70:00.00, which is what LRC readers expect, rather
+// than restarting at 10:00. It is the one owner of this format (#862).
+func (t Time) Stamp() string {
+	return fmt.Sprintf("%02d:%02d.%02d", t.Minutes, t.Seconds, t.Hundredths)
 }
 
 // MsToTime converts a millisecond offset to a Time with all four fields
