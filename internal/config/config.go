@@ -150,6 +150,63 @@ const missBackoffCapDefault = 672
 // missBackoffBaseMin is the minimum permissible miss backoff base (1 hour).
 const missBackoffBaseMin = 1
 
+// WordSyncMode is where word-level (Enhanced-LRC "A2") timings go when a
+// provider serves them (#986). The axis is deliberately not a bool: the two
+// destinations -- inline in the .lrc, and a separate companion sidecar -- are
+// independent, so a bool can only ever name two of the four honest
+// combinations.
+//
+// The default is WordSyncModeSidecar rather than the historical off: word
+// timings are real data worth keeping, and putting them beside the .lrc keeps
+// the .lrc itself universally playable, which is exactly what inlining cannot
+// promise (A2 support is not universal, and an unsupporting player may render
+// the markers as literal text).
+type WordSyncMode string
+
+const (
+	// WordSyncModeSidecar writes a clean line-synced .lrc plus a companion
+	// sidecar carrying the word timings. The DEFAULT.
+	WordSyncModeSidecar WordSyncMode = "sidecar"
+	// WordSyncModeOff writes a clean line-synced .lrc and nothing else. Word
+	// timings a provider served are discarded. This is what the historical
+	// word_sync = false did.
+	WordSyncModeOff WordSyncMode = "off"
+	// WordSyncModeInline writes the word markers INTO the .lrc and writes no
+	// companion sidecar. This is what the historical word_sync = true did, and
+	// is why an explicit legacy `true` maps here rather than to sidecar.
+	WordSyncModeInline WordSyncMode = "inline"
+	// WordSyncModeBoth writes the markers inline AND writes the companion
+	// sidecar. "Both" names the two DESTINATIONS for the markers, not two
+	// files: sidecar already writes two files.
+	WordSyncModeBoth WordSyncMode = "both"
+)
+
+// wordSyncModes is the accepted value set, and the ONE place it is written
+// down. enumValues (validate.go), the loader's re-default check, and the env
+// arm all read this, so the settings dropdown, ValidateAndSet, and the file and
+// env paths can never disagree about what is legal.
+func wordSyncModes() []WordSyncMode {
+	return []WordSyncMode{WordSyncModeSidecar, WordSyncModeOff, WordSyncModeInline, WordSyncModeBoth}
+}
+
+// validWordSyncMode reports whether v is one of the accepted modes. Case- and
+// space-sensitive by the time it is called: every caller normalizes first, so a
+// config file's stray whitespace is forgiven while a genuinely wrong word is not.
+func validWordSyncMode(v WordSyncMode) bool {
+	for _, m := range wordSyncModes() {
+		if v == m {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeWordSyncMode lowercases and trims a raw mode so a file's " Sidecar"
+// and env's "SIDECAR" resolve identically.
+func normalizeWordSyncMode(v WordSyncMode) WordSyncMode {
+	return WordSyncMode(strings.ToLower(strings.TrimSpace(string(v))))
+}
+
 // OutputConfig holds output-related configuration.
 type OutputConfig struct {
 	Dir string `toml:"dir"`
@@ -176,7 +233,27 @@ type OutputConfig struct {
 	// served richer data.
 	//
 	// Override: MXLRC_WORD_SYNC.
+	//
+	// DEPRECATED (#986): superseded by WordSyncMode. It still DECODES, and must
+	// keep doing so -- toml.DecodeFile errors on a bool-where-string mismatch and
+	// LoadWithSources turns that into a hard "config: decode" error, so changing
+	// this key's type would stop every deployment carrying `word_sync = false`
+	// from booting. It is consulted only when word_sync_mode is absent, where an
+	// explicit false maps to WordSyncModeOff and an explicit true to
+	// WordSyncModeInline. Mirrors server.scan_interval_seconds ->
+	// [server.scan_schedule]: both keys stay live, the deprecated one warns, the
+	// new one wins.
 	WordSync bool `toml:"word_sync"`
+	// WordSyncMode is where word-level (Enhanced-LRC "A2") timings go when a
+	// provider serves them (#986). One of: sidecar (default; clean .lrc plus a
+	// companion sidecar), off (clean .lrc, timings discarded), inline (markers in
+	// the .lrc, no companion), both (markers inline AND a companion).
+	//
+	// Supersedes WordSync. When this is non-blank it WINS outright and WordSync
+	// is not consulted; an unrecognized value resets to the default rather than
+	// falling through to the empty zero value, which is not one of the four.
+	// Override: MXLRC_WORD_SYNC_MODE.
+	WordSyncMode WordSyncMode `toml:"word_sync_mode"`
 }
 
 // DBConfig holds database configuration.
@@ -846,7 +923,10 @@ func defaults() Config {
 			MissBackoffCapHours:  missBackoffCapDefault,
 			MaxMissAttempts:      15,
 		},
-		Output:       OutputConfig{Dir: DefaultOutputDir, EmbeddedLyrics: "off"},
+		// WordSyncMode is SEEDED here, unlike the bool it supersedes: a bool's
+		// zero value IS its default, while an enum's zero value is "", which is
+		// not one of the four modes.
+		Output:       OutputConfig{Dir: DefaultOutputDir, EmbeddedLyrics: "off", WordSyncMode: WordSyncModeSidecar},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds, SweepIntervalSeconds: defaultSweepIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault, RaceWaitSeconds: raceWaitSecondsDefault},
@@ -946,6 +1026,45 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			// explicit value (true or false) is preserved as decoded.
 			if !md.IsDefined("output", "bilingual_output") {
 				cfg.Output.BilingualOutput = d.Output.BilingualOutput
+			}
+			// WordSyncMode supersedes the deprecated word_sync bool (#986),
+			// resolved here so exactly one of the two reaches the rest of the
+			// program. Precedence, mirroring scan_interval_seconds ->
+			// [server.scan_schedule]: the new key wins when non-blank, the old one
+			// is honored (with a warning) only when it was EXPLICITLY written, and
+			// otherwise the default stands.
+			//
+			// md.IsDefined is what makes the second arm honest: word_sync defaults
+			// to false, so an explicit `word_sync = false` and an absent key are
+			// indistinguishable by equality -- the same reason bilingual_output
+			// above uses it.
+			//
+			// The first arm needs IsDefined TOO, not just a non-blank check:
+			// defaults() SEEDS word_sync_mode, so an absent key leaves the seeded
+			// default sitting in the field and a blankness test would report every
+			// config as having set the new key -- which would make the deprecated
+			// bool permanently unreachable.
+			switch {
+			case md.IsDefined("output", "word_sync_mode") && strings.TrimSpace(string(cfg.Output.WordSyncMode)) != "":
+				// An unrecognized mode resets to the default rather than falling
+				// through to the "" zero value, which is not one of the four and
+				// which no consumer has an arm for.
+				cfg.Output.WordSyncMode = normalizeWordSyncMode(cfg.Output.WordSyncMode)
+				if !validWordSyncMode(cfg.Output.WordSyncMode) {
+					cfg.Output.WordSyncMode = d.Output.WordSyncMode
+				}
+			case md.IsDefined("output", "word_sync"):
+				// true maps to inline, NOT sidecar: an operator who wrote true
+				// asked for inline markers and must keep getting them.
+				if cfg.Output.WordSync {
+					cfg.Output.WordSyncMode = WordSyncModeInline
+				} else {
+					cfg.Output.WordSyncMode = WordSyncModeOff
+				}
+				slog.Warn("output.word_sync is deprecated; set output.word_sync_mode instead (see docs/CONFIGURATION.md)",
+					"word_sync", cfg.Output.WordSync, "resolved_mode", cfg.Output.WordSyncMode)
+			default:
+				cfg.Output.WordSyncMode = d.Output.WordSyncMode
 			}
 			if cfg.Server.Addr == "" {
 				cfg.Server.Addr = d.Server.Addr
@@ -1181,7 +1300,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_WORD_SYNC, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_WORD_SYNC, MXLRC_WORD_SYNC_MODE, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -1286,6 +1405,15 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.Output.WordSync = wordSync
 			applied["output.word_sync"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_WORD_SYNC_MODE"); v != "" {
+		mode := normalizeWordSyncMode(WordSyncMode(v))
+		if !validWordSyncMode(mode) {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_WORD_SYNC_MODE", "value", v, "current", cfg.Output.WordSyncMode) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Output.WordSyncMode = mode
+			applied["output.word_sync_mode"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_DB_PATH"); v != "" {

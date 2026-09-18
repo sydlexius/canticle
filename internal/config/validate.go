@@ -110,6 +110,20 @@ var enumValues = map[string][]string{
 	// the loader's re-default checks cannot disagree about what is legal.
 	"timing_validation.on_mis_synced":  timingActionStrings(timingMisSyncedActions()),
 	"timing_validation.on_categorical": timingActionStrings(timingCategoricalActions()),
+	// Derived from the config-side set (#986) for the same reason: the dropdown,
+	// ValidateAndSet, the loader's re-default check, and the env arm all read one
+	// list, so none of them can offer or accept a mode another rejects.
+	"output.word_sync_mode": wordSyncModeStrings(wordSyncModes()),
+}
+
+// wordSyncModeStrings flattens a WordSyncMode set to the plain strings the
+// validator and settings UI speak.
+func wordSyncModeStrings(modes []WordSyncMode) []string {
+	out := make([]string, 0, len(modes))
+	for _, m := range modes {
+		out = append(out, string(m))
+	}
+	return out
 }
 
 // timingActionStrings flattens a TimingAction set to the plain strings the
@@ -322,6 +336,14 @@ func validatorFor(f FieldSpec) Validator {
 	switch f.Path {
 	case "output.embedded_lyrics", "providers.mode", "logging.level", "logging.format":
 		return ValidateEnum(enumValues[f.Path]...)
+	case "output.word_sync_mode":
+		// AN EXPLICIT ARM IS REQUIRED, not optional. TypeString has no fallback
+		// validator (this function ends `default: return nil`), so omitting the
+		// case would leave the key COMPLETELY UNVALIDATED -- a fail-open
+		// regression, not a cosmetic miss. NORMALIZED because the loader
+		// lowercases and trims before validating: a verbatim comparison here
+		// would reject a value the next boot accepts.
+		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
 		// NORMALIZED, because the loader normalizes these two before validating
 		// them. A verbatim comparison here would reject a value the next boot

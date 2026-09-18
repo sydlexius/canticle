@@ -97,7 +97,12 @@ var commonPaths = []string{
 	"api.cooldown",
 	"output.embedded_lyrics",
 	"output.bilingual_output",
-	"output.word_sync",
+	// word_sync_mode REPLACES output.word_sync here rather than joining it
+	// (#986). The Common tab is the everyday set; offering a deprecated bool
+	// beside the enum that supersedes it invites an operator to set the one that
+	// is only consulted when the other is unset. The bool stays editable on the
+	// Advanced tab, where an existing config can still be seen and cleared.
+	"output.word_sync_mode",
 	"providers.disabled",
 	"providers.primary",
 	"providers.mode",
@@ -447,6 +452,25 @@ var modeOptionLabels = map[string]string{
 // read the manual to know which one deletes their files.
 //
 // Both arms share this map; on_categorical simply never offers "demote".
+// wordSyncModeLabels gives the word-sync destination dropdown plain-language
+// labels (#986). Without it the control renders four bare tokens -- "sidecar",
+// "off", "inline", "both" -- which say nothing about what an operator is
+// choosing between, and "both" in particular reads as "both files" when it
+// actually means "the markers go to both destinations".
+//
+// The inline label is the one that must carry a warning: Enhanced-LRC (A2)
+// support is not universal, and an unsupporting player may render the timing
+// codes as literal text in the lyrics. That caveat otherwise lives only in the
+// TOML comment, the docs, and the registry Description, none of which appear
+// per option -- the same gap TestTimingActionOptionsWarnAboutIrreversibility
+// exists to close for the remediation dropdowns next door.
+var wordSyncModeLabels = map[string]string{
+	"sidecar": "Save them in a separate file (lyric file stays playable everywhere)",
+	"off":     "Don't save per-word timings at all",
+	"inline":  "Put them in the lyric file (some players show the codes as text)",
+	"both":    "Put them in the lyric file AND save a separate file",
+}
+
 var timingActionLabels = map[string]string{
 	"demote":     "Keep the words as a .txt file, move the lyric file aside",
 	"quarantine": "Move the lyric file aside (recoverable)",
@@ -521,6 +545,10 @@ func selectOptions(path, effective string) []templates.SettingsOption {
 			}
 		case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
 			if l, ok := timingActionLabels[v]; ok {
+				label = l
+			}
+		case "output.word_sync_mode":
+			if l, ok := wordSyncModeLabels[v]; ok {
 				label = l
 			}
 		case "server.scan_schedule.frequency":
@@ -1002,6 +1030,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return strconv.FormatBool(cfg.Output.BilingualOutput)
 	case "output.word_sync":
 		return strconv.FormatBool(cfg.Output.WordSync)
+	case "output.word_sync_mode":
+		return string(cfg.Output.WordSyncMode)
 	// [db]
 	case "db.path":
 		return cfg.DB.Path
@@ -1238,6 +1268,7 @@ var settingsLabels = map[string]string{
 	"output.embedded_lyrics":         "What to do with lyrics already in the file",
 	"output.bilingual_output":        "Save the original and the translation together",
 	"output.word_sync":               "Highlight each word as it is sung (karaoke style)",
+	"output.word_sync_mode":          "Where per-word karaoke timings are saved",
 	"providers.primary":              "Main lyrics source",
 	"providers.mode":                 "How to use multiple sources",
 	"server.addr":                    "Web page address",

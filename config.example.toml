@@ -105,7 +105,28 @@ dir = "lyrics"
 # a normal line-level cue, so a partially-timed track degrades line by line
 # rather than losing its words.
 # Override: MXLRC_WORD_SYNC. Default false.
+#
+# DEPRECATED: superseded by word_sync_mode below. It still works and is still
+# read, but ONLY when word_sync_mode is unset; false then means "off" and true
+# means "inline". Setting word_sync_mode is the way forward.
 # word_sync = false
+
+# word_sync_mode: WHERE per-word timings go when a provider serves them. This
+# supersedes word_sync, which could only say "inline or nothing".
+#
+#   "sidecar" (default) -- the .lrc stays clean, line-synced, and playable in
+#                          every player; the word timings are saved beside it.
+#   "off"               -- the .lrc stays clean and word timings are discarded.
+#   "inline"            -- word markers go INTO the .lrc, no companion file.
+#                          This is the old word_sync = true. See the A2 warning
+#                          above before choosing it.
+#   "both"              -- markers inline AND a companion file. "Both" is about
+#                          the two DESTINATIONS for the markers, not two files:
+#                          "sidecar" already writes two.
+#
+# An unrecognized value falls back to the default rather than to nothing.
+# Override: MXLRC_WORD_SYNC_MODE. Default "sidecar".
+# word_sync_mode = "sidecar"
 
 [db]
 # Path to SQLite database file.

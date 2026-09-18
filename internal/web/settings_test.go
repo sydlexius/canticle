@@ -894,3 +894,49 @@ func TestRawConfigValueInnerTubeCooldown(t *testing.T) {
 		t.Fatalf("rawConfigValue zero = %q; want %q", got, "0")
 	}
 }
+
+// TestRawConfigValueWordSyncMode covers the settings-UI arm for the new
+// output.word_sync_mode key (#986). rawConfigValue ends in a bare `return ""`,
+// so a registry field with no case arm renders as an EMPTY control rather than
+// failing anywhere -- and an empty control on a SELECT is worse than on a text
+// box: no <option> matches, the browser silently selects the first one, and
+// saving any unrelated field on the page writes that first option as the mode.
+func TestRawConfigValueWordSyncMode(t *testing.T) {
+	if got := rawConfigValue(config.Config{Output: config.OutputConfig{WordSyncMode: config.WordSyncModeInline}}, "output.word_sync_mode"); got != "inline" {
+		t.Errorf("rawConfigValue(word_sync_mode=inline) = %q; want %q (a missing arm renders blank)", got, "inline")
+	}
+}
+
+// TestWordSyncModeOptionsAreLabeled pins that the mode dropdown renders
+// plain-language labels rather than the four bare tokens. Two of them are
+// actively misleading unlabeled: "both" reads as "both files" when it means
+// "both destinations for the markers", and "inline" gives no hint that a player
+// without Enhanced-LRC support may render the timing codes as literal text in
+// the lyrics -- a caveat that otherwise lives only in the TOML comment, the
+// docs, and the registry Description, none of which render per option.
+//
+// This is the sibling of TestTimingActionOptionsWarnAboutIrreversibility.
+func TestWordSyncModeOptionsAreLabeled(t *testing.T) {
+	opts := selectOptions("output.word_sync_mode", string(config.WordSyncModeSidecar))
+	if len(opts) != len(config.AllowedValues("output.word_sync_mode")) {
+		t.Fatalf("selectOptions returned %d options; want one per allowed value", len(opts))
+	}
+	sawSelected := false
+	for _, o := range opts {
+		if o.Label == o.Value {
+			t.Errorf("option %q renders as a bare token; it needs a plain-language label", o.Value)
+		}
+		if o.Value == "inline" && !strings.Contains(strings.ToLower(o.Label), "player") {
+			t.Errorf("the inline option reads %q, which does not warn about player support", o.Label)
+		}
+		if o.Selected {
+			sawSelected = true
+			if o.Value != string(config.WordSyncModeSidecar) {
+				t.Errorf("selected option is %q; want the effective value", o.Value)
+			}
+		}
+	}
+	if !sawSelected {
+		t.Error("no option was marked selected; the browser would silently pick the first one")
+	}
+}

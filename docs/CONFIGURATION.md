@@ -166,16 +166,30 @@ Request cooldown, the worker circuit-breaker window, and miss re-check backoff (
 dir = "lyrics"
 # embedded_lyrics = "off"
 # bilingual_output = false
-# word_sync = false
+# word_sync = false          # deprecated, see word_sync_mode
+# word_sync_mode = "sidecar"
 ```
 
-Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`, `MXLRC_WORD_SYNC`; CLI: `--embedded-lyrics`).
+Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`, `MXLRC_WORD_SYNC`, `MXLRC_WORD_SYNC_MODE`; CLI: `--embedded-lyrics`).
 
 `embedded_lyrics` controls how lyrics already embedded in the audio file's tags are handled. `off` (default) ignores them and always fetches from providers. `respect` skips fetching for files that already carry embedded lyrics. `extract` writes the embedded lyrics to a sidecar (never overwriting an existing one) and then skips fetching: a Vorbis `SYNCEDLYRICS` comment carrying timestamped LRC text is written as a synced `.lrc` and takes precedence over unsynced lyrics, which are written as `.txt`. ID3 `SYLT` and MP4 synced-lyric atoms are intentionally not handled.
 
 `bilingual_output` (default `false`): when `true` and a provider returns a non-empty translation track, the original and translation lines are interleaved under shared timestamps in a single `.lrc`. See `docs/multilingual-output-policy.md`.
 
-`word_sync` (default `false`): when `true` and a provider serves word-level timings -- today only Petit Lyrics' word-synced tier -- each cue keeps its normal `[MM:SS.cc]` stamp and gains a `<MM:SS.cc>` marker before each word (Enhanced LRC, "A2"). This is the karaoke-style per-word highlighting some players support.
+`word_sync_mode` (default `"sidecar"`) decides WHERE per-word (Enhanced LRC, "A2") timings go when a provider serves them -- today only Petit Lyrics' word-synced tier. Four values:
+
+| value | the `.lrc` | companion sidecar |
+|---|---|---|
+| `sidecar` (default) | line-synced, clean | written |
+| `off` | line-synced, clean | none |
+| `inline` | carries `<MM:SS.cc>` word markers | none |
+| `both` | carries the markers | written |
+
+`both` names the two DESTINATIONS for the markers, not two files: `sidecar` already writes two. An unrecognized value resets to `sidecar` rather than resolving to nothing.
+
+`word_sync` (default `false`) is **deprecated** and superseded by `word_sync_mode`. It still decodes and is still honored, so an existing config keeps booting unchanged, but only when `word_sync_mode` is unset: an explicit `word_sync = false` then resolves to `off` and an explicit `true` resolves to `inline` (not `sidecar` -- someone who wrote `true` asked for inline markers and keeps getting them), with a deprecation warning naming the new key. When `word_sync_mode` is set it wins outright and `word_sync` is not consulted. This mirrors `server.scan_interval_seconds` -> `[server.scan_schedule]`.
+
+Historically, `word_sync` (default `false`): when `true` and a provider serves word-level timings -- today only Petit Lyrics' word-synced tier -- each cue keeps its normal `[MM:SS.cc]` stamp and gains a `<MM:SS.cc>` marker before each word (Enhanced LRC, "A2"). This is the karaoke-style per-word highlighting some players support.
 
 **Leave this off unless you know your player handles A2.** Support is not universal and there are three outcomes, only one of which is obviously wrong: the player highlights each word (the intent), silently ignores the markers (harmless), or renders them as literal text mixed into the lyrics (visibly broken). Music Assistant does not support A2; Symfonium ships marker stripping. Verify against one album before enabling library-wide.
 

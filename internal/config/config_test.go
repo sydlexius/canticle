@@ -41,6 +41,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH", "MXLRC_INSTRUMENTAL_DETECTOR_ORDERING",
 		"MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_ENABLED", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_BATCH_SIZE",
 		"MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES", "MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS",
+		"MXLRC_WORD_SYNC", "MXLRC_WORD_SYNC_MODE",
 		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
 		"MXLRC_REALIGN_NAME_MATCH", "MXLRC_REALIGN_MIN_MARGIN",
 		"MXLRC_QUEUE_RANDOMIZE",
@@ -2413,5 +2414,163 @@ func TestLoad_InnerTubeCooldownEnvRejectsNegative(t *testing.T) {
 	// api.cooldown fallback without saying so).
 	if cfg.Providers.InnerTubeCooldownSeconds != 45 {
 		t.Errorf("innertube_cooldown_seconds = %d; want 45 -- a negative env value must be refused, not stored and not zeroed", cfg.Providers.InnerTubeCooldownSeconds)
+	}
+}
+
+// TestLoad_LegacyWordSyncBoolStillBoots is THE regression this whole design
+// exists to prevent (#986). word_sync stayed a bool rather than becoming the
+// four-valued enum because toml.DecodeFile errors on a bool-where-string
+// mismatch, and LoadWithSources turns that into a hard "config: decode" error
+// BEFORE any re-default logic can run -- so retyping the key would have stopped
+// every deployment carrying a literal `word_sync = false` from booting at all,
+// production included, with no migration machinery to lean on (#604 is open).
+//
+// Asserting the resolved mode is not enough: the load must also NOT ERROR, which
+// is the half a type change would have broken. Both literals are covered because
+// they take different arms -- false maps to off, true maps to inline.
+func TestLoad_LegacyWordSyncBoolStillBoots(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want WordSyncMode
+	}{
+		{"explicit false", "[output]\nword_sync = false\n", WordSyncModeOff},
+		{"explicit true", "[output]\nword_sync = true\n", WordSyncModeInline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateEnv(t)
+			cfgFile := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(cfgFile, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+
+			cfg, err := Load(cfgFile)
+			if err != nil {
+				t.Fatalf("a config carrying the legacy bool failed to load: %v", err)
+			}
+			if cfg.Output.WordSyncMode != tc.want {
+				t.Errorf("word_sync = %v resolved to mode %q; want %q", tc.body, cfg.Output.WordSyncMode, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoad_WordSyncModePrecedence covers the three-arm resolution in one place:
+// the new key wins outright when present, the deprecated bool is consulted only
+// in its absence, and neither key present leaves the default standing.
+//
+// The mode-wins case deliberately pairs `word_sync_mode = "off"` with
+// `word_sync = true`: if precedence were inverted the result would be "inline",
+// which no other arm produces, so the assertion cannot pass by accident.
+func TestLoad_WordSyncModePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want WordSyncMode
+	}{
+		{"mode wins over the deprecated bool", "[output]\nword_sync = true\nword_sync_mode = \"off\"\n", WordSyncModeOff},
+		{"bool applies when mode is absent", "[output]\nword_sync = true\n", WordSyncModeInline},
+		{"neither key present keeps the default", "[output]\ndir = \"lyrics\"\n", WordSyncModeSidecar},
+		{"an empty mode falls through to the bool", "[output]\nword_sync = true\nword_sync_mode = \"\"\n", WordSyncModeInline},
+		{"whitespace and case are normalized", "[output]\nword_sync_mode = \"  BOTH \"\n", WordSyncModeBoth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateEnv(t)
+			cfgFile := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(cfgFile, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+
+			cfg, err := Load(cfgFile)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Output.WordSyncMode != tc.want {
+				t.Errorf("WordSyncMode = %q; want %q", cfg.Output.WordSyncMode, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoad_UnrecognizedWordSyncModeResetsToDefault pins that a typo resolves to
+// the default rather than falling through to the "" zero value, which is not one
+// of the four modes and which no downstream consumer has an arm for. The bool is
+// set to true alongside, so a fall-through to the deprecated arm would produce
+// "inline" and be caught here too.
+func TestLoad_UnrecognizedWordSyncModeResetsToDefault(t *testing.T) {
+	isolateEnv(t)
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+	body := "[output]\nword_sync = true\nword_sync_mode = \"sidecarr\"\n"
+	if err := os.WriteFile(cfgFile, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Output.WordSyncMode != WordSyncModeSidecar {
+		t.Errorf("a typo'd mode resolved to %q; want the default %q", cfg.Output.WordSyncMode, WordSyncModeSidecar)
+	}
+}
+
+// TestApplyEnvOverrides_WordSyncMode covers both halves of the env arm. The
+// reject half matters most: an invalid value must leave the configured mode
+// alone AND record no provenance, or FormatConfigText annotates a value the
+// operator never set as "(env)".
+func TestApplyEnvOverrides_WordSyncMode(t *testing.T) {
+	t.Run("valid value applies with provenance", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_WORD_SYNC_MODE", " Both ")
+
+		cfg := defaults()
+		applied := map[string]bool{}
+		applyEnvOverrides(&cfg, applied)
+
+		if cfg.Output.WordSyncMode != WordSyncModeBoth {
+			t.Errorf("WordSyncMode = %q; want %q (the env value, normalized)", cfg.Output.WordSyncMode, WordSyncModeBoth)
+		}
+		if !applied["output.word_sync_mode"] {
+			t.Error("an applied env override recorded no provenance; the (env) annotation would be missing")
+		}
+	})
+
+	t.Run("invalid value keeps the current value and records nothing", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_WORD_SYNC_MODE", "sidcar")
+
+		cfg := defaults()
+		cfg.Output.WordSyncMode = WordSyncModeInline // a deliberate prior setting
+		applied := map[string]bool{}
+		applyEnvOverrides(&cfg, applied)
+
+		if cfg.Output.WordSyncMode != WordSyncModeInline {
+			t.Errorf("an invalid env value overwrote the configured mode: got %q, want %q", cfg.Output.WordSyncMode, WordSyncModeInline)
+		}
+		if applied["output.word_sync_mode"] {
+			t.Error("a rejected env value recorded provenance; callers would annotate it as (env)")
+		}
+	})
+}
+
+// TestWordSyncModeValidatorIsWired guards a fail-OPEN gap rather than a
+// cosmetic one. validatorFor ends in `default: return nil` and TypeString has no
+// fallback arm, so omitting the explicit case for this key would leave it
+// COMPLETELY UNVALIDATED -- ValidateAndSet would accept any string at all
+// through the settings UI and the CLI, and the loader would then silently reset
+// whatever was written. A nil validator is indistinguishable from a passing one
+// unless a rejection is asserted.
+func TestWordSyncModeValidatorIsWired(t *testing.T) {
+	if err := ValidateAndSet("output.word_sync_mode", "nonsense"); err == nil {
+		t.Fatal("ValidateAndSet accepted an unrecognized mode; the validatorFor arm is missing and the key is unvalidated")
+	}
+	// Normalized, matching the loader: a value the write path rejects here but
+	// the next boot would accept is the symptom ValidateNormalizedEnum exists for.
+	if err := ValidateAndSet("output.word_sync_mode", " Inline "); err != nil {
+		t.Errorf("ValidateAndSet rejected a value the loader normalizes and accepts: %v", err)
+	}
+	// AllowedValues drives the settings dropdown from the same list.
+	if got := AllowedValues("output.word_sync_mode"); len(got) != len(wordSyncModes()) {
+		t.Errorf("AllowedValues = %v; want the %d modes wordSyncModes() defines", got, len(wordSyncModes()))
 	}
 }
