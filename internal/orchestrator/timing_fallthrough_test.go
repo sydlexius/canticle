@@ -8,6 +8,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/detector"
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 )
@@ -250,37 +251,146 @@ func TestOrderedDetectorStillRunsAfterCategorical(t *testing.T) {
 	}
 }
 
-// TestOrderedCategoricalWithUnavailableLaneSettles pins the base behavior this
-// change keeps: when the only result would be refused and another lane was
-// breaker-open, rate limited, or not ready, the refused result is still
-// returned with a nil error, never that lane's error, so the worker settles the
-// row instead of releasing it. Waiting on such a lane is left to a follow-up.
-func TestOrderedCategoricalWithUnavailableLaneSettles(t *testing.T) {
-	open := circuit.New(time.Minute, time.Hour)
-	open.Trip()
+// TestCategoricalWithUntriedLaneWaits: when the only result would be refused
+// and some lane did NOT answer (rate limited, unauthorized, breaker open, not
+// ready), the dispatch returns ErrTimingRefusedUntried carrying the refused
+// song -- never the untried lane's own class, whose worker arms idle the whole
+// drain pass -- in both dispatch modes.
+func TestCategoricalWithUntriedLaneWaits(t *testing.T) {
+	for _, mode := range []string{ModeOrdered, ModeParallel} {
+		for _, tc := range []struct {
+			name string
+			lane func() *Lane
+		}{
+			{"rate limited", func() *Lane { return laneFor(&stubProvider{name: "musixmatch", err: musixmatch.ErrRateLimited}) }},
+			{"unauthorized", func() *Lane { return laneFor(&stubProvider{name: "musixmatch", err: musixmatch.ErrUnauthorized}) }},
+			{"breaker open", func() *Lane {
+				open := circuit.New(time.Minute, time.Hour)
+				open.Trip()
+				return NewProviderLane(&stubProvider{name: "musixmatch", song: goodSyncedSong("never asked")}, open)
+			}},
+			{"not ready", func() *Lane { return laneFor(&stubProvider{name: "musixmatch", err: ErrLaneNotReady}) }},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				p1 := &stubProvider{name: "innertube", song: categoricalSong("wrong recording")}
+				o, _ := New(mode, laneFor(p1), tc.lane())
+
+				song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+				if !errors.Is(err, ErrTimingRefusedUntried) || ClassifyOutcome(err) != OutcomeRefusedUntried {
+					t.Fatalf("err = %v (class %d); want ErrTimingRefusedUntried", err, ClassifyOutcome(err))
+				}
+				if song.WinningLane != "innertube" || firstLine(song) != "wrong recording" {
+					t.Fatalf("carried %q from %q; want the refused lyric for the bounded settle", firstLine(song), song.WinningLane)
+				}
+			})
+		}
+	}
+}
+
+// TestCategoricalWithAnsweringLanesSettles: a transport failure (including a
+// request-shape 403 and a stale client version) and a benign miss are
+// ANSWERS, not untried lanes, so the refused result settles with a nil error as
+// it did before #950 -- waiting does not fix a refused request shape.
+func TestCategoricalWithAnsweringLanesSettles(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		lane *Lane
+		err  error
 	}{
-		{"rate limited", laneFor(&stubProvider{name: "musixmatch", err: musixmatch.ErrRateLimited})},
-		{"unauthorized", laneFor(&stubProvider{name: "musixmatch", err: musixmatch.ErrUnauthorized})},
-		{"transport", laneFor(&stubProvider{name: "musixmatch", err: errors.New("connection refused")})},
-		{"breaker open", NewProviderLane(&stubProvider{name: "musixmatch", song: goodSyncedSong("never asked")}, open)},
-		{"not ready", laneFor(&stubProvider{name: "musixmatch", err: ErrLaneNotReady})},
+		{"transport", errors.New("connection refused")},
+		{"forbidden", innertube.ErrForbidden},
+		{"client version", innertube.ErrClientVersion},
+		{"benign miss", musixmatch.ErrNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p1 := &stubProvider{name: "innertube", song: categoricalSong("wrong recording")}
-			o, _ := New(ModeOrdered, laneFor(p1), tc.lane)
+			p2 := &stubProvider{name: "musixmatch", err: tc.err}
+			o, _ := New(ModeOrdered, laneFor(p1), laneFor(p2))
 
 			song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
-			if err != nil {
-				t.Fatalf("err = %v; want nil (the refused result settles as before)", err)
-			}
-			if song.WinningLane != "innertube" || firstLine(song) != "wrong recording" {
-				t.Fatalf("got %q from %q; want the refused lyric", firstLine(song), song.WinningLane)
+			if err != nil || song.WinningLane != "innertube" || firstLine(song) != "wrong recording" {
+				t.Fatalf("got (%q from %q, %v); want the refused lyric with a nil error", firstLine(song), song.WinningLane, err)
 			}
 		})
 	}
+}
+
+// TestGuardRejectedWithUntriedLaneSettles: only a TIMING refusal waits. A
+// retained result the script guard rejected, or a later non-refused result that
+// displaced a refused one, settles even while a lane did not answer.
+func TestGuardRejectedWithUntriedLaneSettles(t *testing.T) {
+	t.Run("script guard", func(t *testing.T) {
+		p1 := &stubProvider{name: "innertube", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "foreign"}}}
+		p2 := &stubProvider{name: "musixmatch", err: musixmatch.ErrRateLimited}
+		o, _ := New(ModeOrdered, laneFor(p1), laneFor(p2))
+		o.SetGuard(scriptOnlyGuard{accept: func(models.Song) bool { return false }})
+
+		song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+		if err != nil || song.WinningLane != "innertube" {
+			t.Fatalf("got (%q, %v); want the guard-rejected result with a nil error", song.WinningLane, err)
+		}
+	})
+	t.Run("refused displaced by instrumental", func(t *testing.T) {
+		p1 := &stubProvider{name: "innertube", song: categoricalSong("wrong recording")}
+		p2 := &stubProvider{name: "petitlyrics", song: models.Song{Track: models.Track{Instrumental: 1}}}
+		p3 := &stubProvider{name: "musixmatch", err: musixmatch.ErrRateLimited}
+		o, _ := New(ModeOrdered, laneFor(p1), laneFor(p2), laneFor(p3))
+
+		song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+		if err != nil || song.WinningLane != "petitlyrics" {
+			t.Fatalf("got (%q, %v); want the instrumental with a nil error", song.WinningLane, err)
+		}
+	})
+	t.Run("instrumental then refused", func(t *testing.T) {
+		// The refused result arrives AFTER an instrumental and is not retained,
+		// so the kept result is the instrumental and nothing waits.
+		p1 := &stubProvider{name: "petitlyrics", song: models.Song{Track: models.Track{Instrumental: 1}}}
+		p2 := &stubProvider{name: "innertube", song: categoricalSong("wrong recording")}
+		p3 := &stubProvider{name: "musixmatch", err: musixmatch.ErrRateLimited}
+		o, _ := New(ModeOrdered, laneFor(p1), laneFor(p2), laneFor(p3))
+
+		song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+		if err != nil || song.WinningLane != "petitlyrics" {
+			t.Fatalf("got (%q, %v); want the instrumental with a nil error", song.WinningLane, err)
+		}
+	})
+}
+
+// TestCategoricalWithDetectorBreakerOpenSettles (#950 review I2): an
+// instrumental-only lane is never an untried lane. With the detector's breaker
+// open, a refused result settles at once in both modes -- including for an
+// item with detection disabled (empty sourcePath), which could never run it.
+func TestCategoricalWithDetectorBreakerOpenSettles(t *testing.T) {
+	for _, mode := range []string{ModeOrdered, ModeParallel} {
+		for _, sourcePath := range []string{"/lib/a.flac", ""} {
+			t.Run(mode+"/path="+sourcePath, func(t *testing.T) {
+				open := circuit.New(time.Minute, time.Hour)
+				open.Trip()
+				det := NewDetectorLane(&stubDetector{}, open, nil)
+				p1 := &stubProvider{name: "innertube", song: categoricalSong("wrong recording")}
+				p2 := &stubProvider{name: "musixmatch", err: musixmatch.ErrNotFound}
+				o, _ := New(mode, laneFor(p1), laneFor(p2), det)
+
+				song, err := o.FindLyrics(context.Background(), fallthroughTrack(), sourcePath)
+				if err != nil || song.WinningLane != "innertube" {
+					t.Fatalf("got (%q, %v); want the refused lyric with a nil error (a detector is never untried)", song.WinningLane, err)
+				}
+			})
+		}
+	}
+	// The reviewer's sequence: a live detector outage trips its breaker on row
+	// A; row B then sees it open. Neither row may wait on it.
+	t.Run("outage then open breaker", func(t *testing.T) {
+		cb := circuit.New(time.Minute, time.Hour)
+		det := NewDetectorLane(&stubDetector{err: errors.Join(ErrLaneOutage, errors.New("dial refused"))}, cb, nil)
+		p1 := &stubProvider{name: "innertube", song: categoricalSong("wrong recording")}
+		p2 := &stubProvider{name: "musixmatch", err: musixmatch.ErrNotFound}
+		o, _ := New(ModeOrdered, laneFor(p1), laneFor(p2), det)
+		for _, row := range []string{"/lib/a.flac", "/lib/b.flac", ""} {
+			if _, err := o.FindLyrics(context.Background(), fallthroughTrack(), row); err != nil {
+				t.Fatalf("row %q: err = %v; want nil (a detector outage or open breaker never holds a refused result)", row, err)
+			}
+		}
+	})
 }
 
 // TestOrderedFirstHeldKeepsPriority: two demotable results; the first held

@@ -139,11 +139,13 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 
 		song, err := lane.FindLyrics(ctx, track, sourcePath)
 		class := ClassifyOutcome(err)
+		r.noteUntried(err, class, lane.Name(), lane.instrumentalOnly)
 
 		if class == OutcomeUnavailable {
 			// The breaker was open and the provider was not called. An unavailable
 			// lane does not contribute to error ranking; it only matters when EVERY
-			// lane was unavailable (handled by resolve via consulted == 0).
+			// lane was unavailable (handled by resolve via consulted == 0), or when
+			// it holds back a timing-refused result (noteUntried above, #950).
 			continue
 		}
 		r.consulted++
@@ -156,7 +158,8 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			// on that tie the earlier (higher-priority) lane keeps it. The rank
 			// is what the writer lands (landedQuality), so a provider
 			// instrumental carrying a subtitle line never replaces held words.
-			switch classifyCandidate(song, track, o.guard) {
+			kind := classifyCandidate(song, track, o.guard)
+			switch kind {
 			case candidateCommit:
 				if !r.haveHeld || landedQuality(song, track) > QualityUnsynced {
 					song.WinningLane = lane.Name()
@@ -167,9 +170,9 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			case candidateHold:
 				r.hold(song, lane.Name())
 				continue
-			case candidateRetain:
+			case candidateRetain, candidateRefused:
 			}
-			r.retain(song, lane.Name(), retainQuality(song, track))
+			r.retainCandidate(song, lane.Name(), retainQuality(song, track), kind)
 			continue
 		}
 
@@ -231,6 +234,50 @@ type dispatchResult struct {
 	heldSong models.Song
 	heldLane string
 	haveHeld bool
+	// bestRefused reports that bestSong is a result the timing guard would
+	// quarantine (candidateRefused), as opposed to a script-guard rejection or
+	// a below-unsynced result (#950).
+	bestRefused bool
+	// untriedErr is the first error from a lane that did NOT answer: breaker
+	// open, throttled / auth-failing, or not ready (#950). A transport failure
+	// is not recorded: that lane answered, badly, and a request-shape refusal
+	// (403, stale client version) is not fixed by waiting.
+	untriedErr error
+	// untriedLane names the lane untriedErr came from.
+	untriedLane string
+}
+
+// noteUntried records err if its class says the lane did not answer the
+// catalog question. A benign miss is an answer, as is a transport failure; a
+// detector outage says nothing about lyrics. None of those holds a refused
+// result back. An instrumental-only lane (the detector) is NEVER untried,
+// whatever its class: its only possible answer is an instrumental marker, which
+// cannot turn a refused lyric into words, and an open detector breaker is
+// reported before the lane even checks whether detection is enabled for the
+// item, so counting it would park rows that can never run it (#950 review I2).
+func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName string, instrumentalOnly bool) {
+	if instrumentalOnly {
+		return
+	}
+	switch class {
+	case OutcomeUnavailable, OutcomeAuthRateLimit, OutcomeLaneNotReady:
+		if r.untriedErr == nil {
+			r.untriedErr, r.untriedLane = err, laneName
+		}
+	case OutcomeSuccess, OutcomeBenignMiss, OutcomeLaneOutage, OutcomeTransport, OutcomeRefusedUntried:
+	}
+}
+
+// retainCandidate is retain plus the bookkeeping of WHY the kept result is not
+// committable: bestRefused follows whichever result retain actually keeps.
+// Known tie edge (#950 review M4): a result both guard-rejected and timing-
+// quarantined classifies as candidateRetain at QualityNone; a later pure
+// refusal ties it and is not retained, so no wait happens. Accepted: that row
+// settles down the script-guard path either way.
+func (r *dispatchResult) retainCandidate(song models.Song, laneName string, q Quality, kind candidate) {
+	if r.retain(song, laneName, q) {
+		r.bestRefused = kind == candidateRefused
+	}
 }
 
 // hold keeps song as the demotable fallback unless one is already held.
@@ -243,13 +290,17 @@ func (r *dispatchResult) hold(song models.Song, laneName string) {
 // retain keeps song as the best-available fallback if its quality q outranks the
 // current one. q is the caller's retainQuality: what the writer would actually
 // land, so a timing-refused synced result cannot outrank a later usable one.
-func (r *dispatchResult) retain(song models.Song, laneName string, q Quality) {
+// It reports whether song replaced the kept result.
+func (r *dispatchResult) retain(song models.Song, laneName string, q Quality) bool {
 	if !r.haveBest || q > r.bestQuality {
 		r.bestSong, r.bestQuality, r.haveBest, r.bestLane = song, q, true, laneName
+		return true
 	}
+	return false
 }
 
 // rankErr keeps err if its class outranks the current top error (Gap 4).
+// Whether the erroring lane answered at all is the caller's noteUntried.
 func (r *dispatchResult) rankErr(err error, class OutcomeClass) {
 	if r.topErr == nil || class.precedence() > r.topClass.precedence() {
 		r.topErr, r.topClass = err, class
@@ -267,16 +318,23 @@ func (r *dispatchResult) rankErr(err error, class OutcomeClass) {
 // A held demotable lyric (#950) is returned ahead of any retained result: it
 // is suitable, and the writer lands its words as .txt.
 //
-// A retained result the timing guard would QUARANTINE lands nothing, but it
-// ranks QualityNone and so loses to any other retained result. When it is the
-// only result it is returned exactly as before #950, even if some lane was
-// breaker-open, throttled, not ready, or failed in transport: the row settles
-// terminal done with timing_outcome=categorical and nothing written. Waiting on
-// such an unavailable lane instead is left to a follow-up.
+// A retained result the timing guard would QUARANTINE lands nothing, and it
+// ranks QualityNone, so it is kept only when nothing else was. If every lane
+// answered (a transport failure counts as an answer), it is returned with a nil
+// error and the row settles terminal done with timing_outcome=categorical and
+// nothing written, as before #950. If some lane did NOT answer (untriedErr), it
+// is returned WITH ErrTimingRefusedUntried: the worker parks that one row for a
+// bounded wait (queue.DeferRefused) and settles the carried song as above once
+// the wait budget is spent. A demotable (held) result never waits: its .txt is
+// real output.
 func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.Song, error) {
 	if r.haveHeld {
 		r.heldSong.WinningLane = r.heldLane
 		return r.heldSong, nil
+	}
+	if r.haveBest && r.bestRefused && r.untriedErr != nil {
+		r.bestSong.WinningLane = r.bestLane
+		return r.bestSong, &RefusedUntriedError{Lane: r.untriedLane, Cause: r.untriedErr.Error()}
 	}
 	if r.haveBest {
 		r.bestSong.WinningLane = r.bestLane

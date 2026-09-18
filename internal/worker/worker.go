@@ -36,6 +36,11 @@ type Queue interface {
 	Fail(ctx context.Context, id int64, cause error) (queue.WorkItem, error)
 	Defer(ctx context.Context, id int64, retryAfter time.Duration, cause error) (queue.WorkItem, error)
 	Release(ctx context.Context, id int64) error
+	// DeferRefused parks a processing row whose only result was timing-refused
+	// while a lane did not answer (#950), bounded by maxWaits on the row's own
+	// refused_waits counter. deferred=false with a nil error means the budget is
+	// spent and NOTHING changed: the caller settles the row as it otherwise would.
+	DeferRefused(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (deferred bool, err error)
 	// RetireMiss permanently closes a processing row that has exceeded the
 	// max-miss-attempts cap. It sets work_queue.status='unavailable' (#477) with
 	// last_error='miss limit reached', and every linked scan_results row to
@@ -1329,6 +1334,20 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// a row with no prior detection so it runs live inference. (#582)
 	w.primeDetectorMemo(item)
 	song, cacheHit, err := w.song(ctx, resolvedTrack, detectorPath, bypassCache)
+	if orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeRefusedUntried {
+		// Stamp the detector's not-instrumental telemetry BEFORE parking, as the
+		// benign-miss branch does, so the re-dispatch after the wait re-decides from
+		// stored scores instead of re-running YAMNet (#582, #950 review M3).
+		w.stampDetectorMissTelemetry(context.WithoutCancel(ctx), item.ID)
+		deferred, derr := w.deferRefusedUntried(ctx, item, err)
+		if deferred || derr != nil {
+			return derr
+		}
+		// Wait budget spent: settle the carried refused song below exactly as when
+		// every lane answered (done + timing_outcome=categorical, nothing written,
+		// never cached).
+		err = nil
+	}
 	if err == nil {
 		w.lastItemContactedProvider = contactedProvider(song)
 	}
@@ -1372,7 +1391,8 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 				return releaseErr
 			}
 			return errThrottled
-		case orchestrator.OutcomeSuccess, orchestrator.OutcomeBenignMiss, orchestrator.OutcomeLaneOutage, orchestrator.OutcomeTransport:
+		case orchestrator.OutcomeSuccess, orchestrator.OutcomeBenignMiss, orchestrator.OutcomeLaneOutage, orchestrator.OutcomeTransport,
+			orchestrator.OutcomeRefusedUntried: // handled (err cleared) before this switch
 			// Fall through to the miss / failure handling below.
 		}
 		// A no-result (no matching track, or a match with no usable lyrics) is
@@ -1556,10 +1576,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		}
 		// A result the timing guard refuses writes nothing (#950), so it must not
 		// be cached: a cached copy would satisfy the next lookup for this key as
-		// though it were a good hit. The orchestrator returns one only when no lane
-		// produced anything better, including when some lane was breaker-open or
-		// throttled; the row then settles terminal done below with
-		// timing_outcome=categorical exactly as before #950, NOT miss-backoff.
+		// though it were a good hit. One arrives here only when no lane produced
+		// anything better: after every lane answered, or after the bounded wait on
+		// a lane that did not (deferRefusedUntried). The row then settles terminal
+		// done below with timing_outcome=categorical, NOT miss-backoff.
 		if !lyrics.RefusedByTimingGuard(song, resolvedTrack.TrackLength) {
 			if err := w.store(ctx, resolvedTrack, song); err != nil {
 				slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
@@ -2096,6 +2116,57 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 		return song, false, err
 	}
 	return song, false, nil
+}
+
+// maxRefusedWaits bounds how many times a row whose only result is
+// timing-refused is parked while a lane did not answer (#950). It counts the
+// row's own refused_waits column (queue.DeferRefused), never attempts or
+// miss_count, so a transport history cannot shorten the wait and the wait cannot
+// spend the miss-retirement budget. Each wait is the breaker's cap
+// (circuitOpenDuration). The guarantee is a BOUNDED wait, not a guaranteed
+// probe: the breaker has passed its half-open window by the next claim only if
+// no other row re-tripped it meanwhile, and under a sustained outage another
+// row will, so every wait can be spent without the lane ever being asked. The
+// row then settles done + categorical as before #950, logged at Warn with the
+// untried lane (deferRefusedUntried). Retrying such a row later (miss-backoff or
+// a findable marker) is the #950 follow-up. A lane that never recovers settles
+// the row in hours rather than cycling it forever.
+const maxRefusedWaits = 3
+
+// deferRefusedUntried handles orchestrator.ErrTimingRefusedUntried. Below the
+// budget it parks ONLY this row (queue.DeferRefused moves it out of the ready
+// set) and reports handled=true with a nil error, so the drain pass continues
+// with the next row -- unlike errLanesUnavailable / errThrottled, which idle
+// the whole pass. consecutiveFailures is reset, not bumped: a lane answered, so
+// the worker is not in a failure backoff. With the budget spent it reports
+// (false, nil) and the caller settles the carried song. A row no longer in
+// 'processing' is left alone; any other queue error takes the ordinary fail path.
+// handled=true means RunOnce is finished with the row and returns err.
+func (w *Worker) deferRefusedUntried(ctx context.Context, item queue.WorkItem, cause error) (handled bool, err error) {
+	deferred, qerr := w.queue.DeferRefused(context.WithoutCancel(ctx), item.ID, w.circuitOpenDuration, maxRefusedWaits, cause.Error())
+	switch {
+	case errors.Is(qerr, sql.ErrNoRows):
+		slog.Warn("worker: timing-refused row no longer processing; leaving it", "id", item.ID)
+		return true, nil
+	case qerr != nil:
+		return true, w.fail(ctx, item, fmt.Errorf("worker: defer timing-refused item %d: %w", item.ID, qerr))
+	case deferred:
+		w.consecutiveFailures = 0
+		slog.Debug("worker: timing-refused result parked for a lane that did not answer",
+			"id", item.ID, "wait", w.circuitOpenDuration, "cause", cause)
+		return true, nil
+	}
+	// The budget is spent with a lane still untried: the row settles terminal
+	// done without that lane ever being asked (see maxRefusedWaits). Warn with
+	// the lane and row id so an operator can find and re-queue these rows.
+	var ru *orchestrator.RefusedUntriedError
+	lane := ""
+	if errors.As(cause, &ru) {
+		lane = ru.Lane
+	}
+	slog.Warn("worker: settling timing-refused result with a lane still untried; wait budget spent",
+		"id", item.ID, "untried_lane", lane, "cause", cause)
+	return false, nil
 }
 
 func (w *Worker) store(ctx context.Context, track models.Track, song models.Song) error {

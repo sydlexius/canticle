@@ -118,6 +118,7 @@ type fakeQueue struct {
 	completeErr        error
 	failErr            error
 	deferErr           error
+	deferRefusedErr    error
 	releaseErr         error
 	retireErr          error
 	setProviderLaneErr error
@@ -191,6 +192,17 @@ func (q *fakeQueue) Defer(_ context.Context, id int64, retryAfter time.Duration,
 	q.deferCauses = append(q.deferCauses, cause)
 	q.deferDurations = append(q.deferDurations, retryAfter)
 	return queue.WorkItem{ID: id, Status: queue.StatusDeferred}, nil
+}
+
+// DeferRefused is exercised end to end over the real DBQueue
+// (timing_fallthrough_test.go); the fake adds deferRefusedErr injection.
+func (q *fakeQueue) DeferRefused(_ context.Context, id int64, _ time.Duration, _ int, _ string) (bool, error) {
+	if q.deferRefusedErr != nil {
+		return false, q.deferRefusedErr
+	}
+	q.removeFromProcessing(id)
+	q.deferred = append(q.deferred, id)
+	return true, nil
 }
 
 func (q *fakeQueue) Release(_ context.Context, id int64) error {

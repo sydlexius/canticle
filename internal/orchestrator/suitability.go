@@ -143,6 +143,11 @@ const (
 	// (MisSynced / degenerate). It does not end the dispatch, yet it outranks
 	// every retained result: a script-guard-rejected one writes nothing.
 	candidateHold
+	// candidateRefused: suitable, but the timing guard would quarantine it
+	// (timed to a different recording; writes nothing). Retained and ranked
+	// exactly like candidateRetain, but kept distinct so the dispatch can tell a
+	// timing refusal from a script-guard rejection when deciding to wait (#950).
+	candidateRefused
 )
 
 // classifyCandidate judges a lane result ONCE: the script guard runs exactly
@@ -158,6 +163,7 @@ func classifyCandidate(song models.Song, track models.Track, guard ScriptGuard) 
 	case lyrics.DemoteToUnsynced:
 		return candidateHold
 	case lyrics.Quarantine:
+		return candidateRefused
 	}
 	return candidateRetain
 }

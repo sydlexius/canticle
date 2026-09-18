@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/musixmatch"
@@ -34,6 +35,30 @@ var ErrLaneOutage = errors.New("orchestrator: lane outage")
 // the breaker is NOT tripped, so the next work cycle re-attempts the lane once
 // the sidecar has finished booting (issue #567).
 var ErrLaneNotReady = errors.New("orchestrator: lane not ready (starting up)")
+
+// ErrTimingRefusedUntried is returned by the dispatch (never by a lane) when the
+// only result is one the writer's timing guard would quarantine AND some lane
+// did not answer: breaker open, throttled / auth-failing, or not ready (#950).
+// The refused song rides along on the returned Song (WinningLane and
+// LaneAttempts set), so the caller can settle it once it stops waiting. The
+// untried lane's error is carried as TEXT only, so this class is never mistaken
+// for that lane's own (whose worker arms idle the whole drain pass).
+var ErrTimingRefusedUntried = errors.New("orchestrator: only result is timing-refused and a lane did not answer")
+
+// RefusedUntriedError is the concrete ErrTimingRefusedUntried: it names the
+// first lane that did not answer so the worker can log which lane a parked or
+// settled row was waiting on. Cause is that lane's error as TEXT (see above).
+type RefusedUntriedError struct {
+	Lane  string
+	Cause string
+}
+
+func (e *RefusedUntriedError) Error() string {
+	return fmt.Sprintf("%v (untried lane %s: %s)", ErrTimingRefusedUntried, e.Lane, e.Cause)
+}
+
+// Unwrap makes errors.Is(err, ErrTimingRefusedUntried) hold.
+func (e *RefusedUntriedError) Unwrap() error { return ErrTimingRefusedUntried }
 
 // OutcomeClass classifies a lane's outcome for cross-lane precedence (design
 // doc Gap 4). The precedence rule is "least-certain-negative wins": any signal
@@ -82,6 +107,9 @@ const (
 	// OutcomeUnavailable means the lane's breaker was open and the provider was
 	// not called (ErrLaneUnavailable).
 	OutcomeUnavailable
+	// OutcomeRefusedUntried is ErrTimingRefusedUntried: a dispatch-level outcome
+	// no lane produces, so it carries no cross-lane precedence.
+	OutcomeRefusedUntried
 )
 
 // ClassifyOutcome maps a lane error to its OutcomeClass. A nil error is a
@@ -107,6 +135,8 @@ func ClassifyOutcome(err error) OutcomeClass {
 	switch {
 	case err == nil:
 		return OutcomeSuccess
+	case errors.Is(err, ErrTimingRefusedUntried):
+		return OutcomeRefusedUntried
 	case errors.Is(err, ErrLaneUnavailable):
 		return OutcomeUnavailable
 	case errors.Is(err, musixmatch.ErrTokenRenewalRequired),
@@ -179,7 +209,7 @@ func ClassifyOutcome(err error) OutcomeClass {
 // orchestrator can surface ErrLaneUnavailable when every lane was unavailable.
 func (c OutcomeClass) precedence() int {
 	switch c {
-	case OutcomeSuccess:
+	case OutcomeSuccess, OutcomeRefusedUntried:
 		return 0
 	case OutcomeBenignMiss:
 		return 1
