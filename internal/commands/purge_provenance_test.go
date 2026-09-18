@@ -15,7 +15,6 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/purgeprovenance"
 	"github.com/sydlexius/canticle/internal/queue"
-	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // writePurgeSidecar writes a minimal .lrc sidecar, optionally carrying a
@@ -538,7 +537,6 @@ func TestPurgeProvenance_SummaryCounts(t *testing.T) {
 // The summary counts an owned word-synced companion (#986) its preview lists,
 // in both modes, so the file lines and the count agree.
 func TestPurgeProvenance_SummaryCountsCompanions(t *testing.T) {
-	sidecar.ActivateForTest(t, sidecar.KindWordSynced)
 	ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
 	a := filepath.Join(root, "ArtistA", "a.lrc")
 	writePurgeSidecar(t, a, "musixmatch")
