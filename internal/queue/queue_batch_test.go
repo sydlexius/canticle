@@ -526,6 +526,16 @@ func TestDBQueue_StaleStampsDoNotShrinkBuffer(t *testing.T) {
 		t.Fatalf("mark non-eligible: %v", err)
 	}
 	stayed := buffered[2:] // 7 rows still eligible, in stamped order
+	// Two survivors carry the other ELIGIBLE statuses, still due: the clear must
+	// leave their stamps alone, which the order assertion below pins (a clear
+	// missing 'failed' or 'deferred' would redraw them at the back).
+	for id, status := range map[int64]string{stayed[2]: "failed", stayed[3]: "deferred"} {
+		if _, err := q.db.ExecContext(ctx,
+			`UPDATE work_queue SET status = ?, next_attempt_at = ? WHERE id = ?`,
+			status, formatTime(now), id); err != nil {
+			t.Fatalf("mark %s: %v", status, err)
+		}
+	}
 
 	got, err := q.Dequeue(ctx)
 	if err != nil {
