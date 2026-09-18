@@ -37,6 +37,7 @@ import (
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // LibraryLister lists and resolves configured library roots. Satisfied by
@@ -1126,20 +1127,18 @@ func destinationBlocked(target, orphan string) bool {
 	return true
 }
 
-// isSidecar reports whether name is a .lrc or .txt lyric sidecar.
+// isSidecar reports whether name is an active lyric sidecar (.lrc or .txt).
+// The extension set lives in internal/sidecar so this walk cannot drift from
+// the writer's own notion of what a sidecar is (#986). A declared-but-inactive
+// extension (.elrc) is deliberately NOT collected here: the realign planner
+// would move an orphan it has no pairing rules for.
 func isSidecar(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".lrc", ".txt":
-		return true
-	default:
-		return false
-	}
+	return sidecar.IsSidecar(name)
 }
 
 // stemOf returns the base name of path without its extension.
 func stemOf(path string) string {
-	base := filepath.Base(path)
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	return sidecar.StemOf(filepath.Base(path))
 }
 
 func stemSet(paths []string) map[string]bool {
