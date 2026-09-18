@@ -34,9 +34,21 @@ const InstrumentalMarker = "♪ Instrumental ♪"
 // sidecar an instrumental marker would occupy, guaranteeing its path logic matches
 // the writer's rather than re-implementing it.
 func SidecarName(artist, track, filename string, synced bool) (string, error) {
-	ext := ".txt"
+	kind := sidecar.KindUnsynced
 	if synced {
-		ext = ".lrc"
+		kind = sidecar.KindLineSynced
+	}
+	return SidecarNameFor(artist, track, filename, kind)
+}
+
+// SidecarNameFor is SidecarName with the extension selected by a sidecar.Kind
+// rather than a two-valued bool, so a third kind (the word-synced companion,
+// #986) can be named without changing SidecarName's exported signature. It
+// errors for a Kind with no declared extension.
+func SidecarNameFor(artist, track, filename string, kind sidecar.Kind) (string, error) {
+	ext := sidecar.Ext(kind)
+	if ext == "" {
+		return "", fmt.Errorf("refusing to write: no sidecar extension for kind %d", kind)
 	}
 	var fn string
 	if filename != "" {
@@ -93,6 +105,27 @@ type LRCWriter struct {
 	// same line-level .lrc it always did, so an existing library never changes
 	// shape because a provider served richer data.
 	wordSync bool
+	// wordSyncCompanion enables the word-synced companion sidecar (#986): a
+	// separate file (sidecar.ExtWordSynced) carrying the A2 body beside a .lrc
+	// that is left exactly as it would be without it. Independent of wordSync,
+	// which controls markers INSIDE the .lrc; output.word_sync_mode maps onto
+	// the pair (sidecar = companion only, inline = wordSync only, both = both).
+	wordSyncCompanion bool
+	// companionGate reports whether canticle may touch companion files at all.
+	// Nil (production) reads sidecar.Active(sidecar.KindWordSynced), which is
+	// false until the realign/scan/purge/revalidate paths learn the extension
+	// (#986 slice 4): a companion those paths cannot see must never reach a
+	// library. It is a TEST-ONLY seam; nothing outside _test files sets it.
+	companionGate func() bool
+	// companionWrite, when non-nil, replaces writeAtomic for the companion
+	// only. A TEST-ONLY seam, like companionGate: it is the one way to fail the
+	// companion write after the .lrc has landed, since any filesystem obstacle
+	// at the companion path is classified foreign and skipped before that.
+	companionWrite func(outdir, fn string, tags []string, body func(*bufio.Writer) error) error
+	// companionRemove, when non-nil, replaces os.Remove for a stale companion.
+	// TEST-ONLY, for the same reason: it fails the removal without also making
+	// the directory unwritable for the .lrc.
+	companionRemove func(path string) error
 	// selfWrites, when non-nil, records every path this writer touches so the
 	// filesystem watcher can drop the events its own writes generate (#685).
 	// Nil (the default, and every non-serve caller) is a no-op.
@@ -110,6 +143,30 @@ type LRCWriter struct {
 // goroutine-safe; call before sharing the writer, alongside SetBilingual.
 func (w *LRCWriter) SetWordSync(enabled bool) {
 	w.wordSync = enabled
+}
+
+// SetWordSyncCompanion enables or disables the word-synced companion sidecar
+// (#986). When enabled, a synced write whose word timings qualify on at least
+// one line ALSO writes the A2 body to a companion file beside the .lrc. The
+// companion is gated on the sidecar table activating its Kind; while inactive
+// this setting changes nothing. Not goroutine-safe; call before sharing the
+// writer, alongside SetBilingual.
+func (w *LRCWriter) SetWordSyncCompanion(enabled bool) {
+	w.wordSyncCompanion = enabled
+}
+
+// WordSyncCompanion reports the SetWordSyncCompanion setting.
+func (w *LRCWriter) WordSyncCompanion() bool {
+	return w.wordSyncCompanion
+}
+
+// companionActive reports whether companion files are canticle's to write and
+// remove. See the companionGate field.
+func (w *LRCWriter) companionActive() bool {
+	if w.companionGate != nil {
+		return w.companionGate()
+	}
+	return sidecar.Active(sidecar.KindWordSynced)
 }
 
 // SetSelfWriteRegistry attaches the registry the watcher consults to recognize
@@ -153,7 +210,10 @@ func isUnsafeBaseName(name string) bool {
 // WriteLRC writes the song lyrics to an LRC or TXT file in the given output directory.
 // Only synced lyrics are written as .lrc; unsynced lyrics and instrumentals are
 // written as .txt (the .lrc extension is reserved for timed/synced content).
-func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (retErr error) {
+// When the word-synced companion is active (#986, see planCompanion) it also
+// writes or removes <stem>.elrc, and can then return an error AFTER the .lrc
+// has already landed (a failed companion write).
+func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) error {
 	// Eligibility gate -- determine content type before touching disk. synced
 	// drives the file extension (.lrc only for synced lyrics, .txt otherwise);
 	// writeTags drives whether the LRC metadata header is emitted.
@@ -202,6 +262,9 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		slog.Warn("refusing to write lyrics: timing indicates a different recording",
 			"artist", song.Track.ArtistName, "track", song.Track.TrackName,
 			"outcome", string(verdict), "decision", decision.String())
+		// That includes a word-synced companion (#986): the verdict judges this
+		// CANDIDATE, not what is on disk, and a companion there belongs to the
+		// .lrc being kept.
 		return nil
 	case DemoteToUnsynced:
 		// Content-safe demotion (Investigation-0 on #438): the words are the
@@ -230,23 +293,9 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 		return err
 	}
 
-	// When the output directory falls under a confinement root, re-resolve and
-	// re-confine it right before the write so a symlink swapped in since the
-	// caller validated the path cannot redirect the write outside the root.
-	if root, ok := w.matchRoot(outdir); ok {
-		resolved, ok := pathutil.ResolveWithinRoot(root, outdir)
-		if !ok {
-			// ResolveWithinRoot fails (EvalSymlinks) both when the dir does not
-			// exist and when it escapes the root via a symlink. Distinguish the
-			// two so the error is not misleading: a missing dir is a plain setup
-			// error, not a confinement violation. (No MkdirAll here -- behavior is
-			// unchanged; os.CreateTemp below already requires the dir to exist.)
-			if _, statErr := os.Stat(outdir); os.IsNotExist(statErr) {
-				return fmt.Errorf("refusing to write: output dir %q does not exist", outdir)
-			}
-			return fmt.Errorf("refusing to write to %q: output dir escapes confinement root %q or is unresolvable", outdir, root)
-		}
-		outdir = resolved
+	outdir, err = w.resolveOutdir(outdir)
+	if err != nil {
+		return err
 	}
 	fp := filepath.Join(outdir, fn)
 
@@ -398,10 +447,174 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	// Recorded before the write rather than after, because an event can be
 	// delivered while the write is still in flight. Entries expire on their own,
 	// so recording a path a failed write never produces costs nothing.
-	w.selfWrites.Record(fp, oppositeSidecar(fp))
+	//
+	// The word-synced companion (#986) is decided HERE, before any file is
+	// opened: a2Words' per-line decision is otherwise made mid-stream, and a
+	// companion none of whose lines qualified would be a byte copy of the .lrc
+	// claiming word timing it does not carry. It is recorded alongside fp for
+	// the same watcher reason, but ONLY when this write touches it: recording
+	// an untouched path would make the watcher drop a third party's change.
+	companion := w.planCompanion(song, fp, synced)
+	w.selfWrites.Record(fp, oppositeSidecar(fp), companion.path)
 
-	// Write to a temp file in the same directory, then rename atomically so a
-	// mid-write failure never leaves a partial .lrc at the final path.
+	// Any existing companion is removed BEFORE the .lrc/.txt is replaced, even
+	// when a fresh one is about to be written. The two renames cannot be atomic
+	// together, so this picks the failure: a crash or a failed companion write
+	// leaves a line-synced file and NO companion, never an older companion
+	// describing the lyric this write replaced.
+	if companion.remove {
+		remove := os.Remove
+		if w.companionRemove != nil {
+			remove = w.companionRemove
+		}
+		if err := remove(companion.path); err != nil && !os.IsNotExist(err) {
+			// Abort BEFORE the .lrc/.txt is replaced: continuing would leave
+			// the old word timing beside new line timing.
+			return fmt.Errorf("removing stale word-synced companion: %w", err)
+		}
+	}
+
+	if err := writeAtomic(outdir, fn, tags, writeContent); err != nil {
+		return err
+	}
+	// Remove the opposite sidecar so format transitions never leave both files on disk.
+	// Writing .lrc removes a stale .txt (upgrade), writing .txt removes a stale .lrc (downgrade).
+	if stale := oppositeSidecar(fp); stale != "" {
+		if err := os.Remove(stale); err != nil && !os.IsNotExist(err) {
+			slog.Warn("could not remove stale sidecar", "path", stale, "error", err)
+		}
+	}
+	slog.Info("lyrics saved", "path", fp, "kind", kind,
+		"artist", song.Track.ArtistName, "track", song.Track.TrackName)
+
+	// Companion LAST, strictly after the .lrc/.txt is durable, so it can never
+	// sit beside a missing or stale .lrc. The old one is already gone (above).
+	if companion.write {
+		cfn := filepath.Base(companion.path)
+		body := func(buf *bufio.Writer) error { return writeSyncedLRC(song, buf, w.bilingual, true) }
+		write := writeAtomic
+		if w.companionWrite != nil {
+			write = w.companionWrite
+		}
+		if err := write(outdir, cfn, tags, body); err != nil {
+			return fmt.Errorf("writing word-synced companion: %w", err)
+		}
+		slog.Info("lyrics saved", "path", companion.path, "kind", "word-synced companion",
+			"artist", song.Track.ArtistName, "track", song.Track.TrackName)
+	}
+	return nil
+}
+
+// companionPlan is planCompanion's verdict. path is the companion this write
+// touches ("" when it touches none); remove says an existing canticle-owned
+// companion is deleted before the .lrc/.txt is replaced; write says a fresh
+// one is written after it. Every path in a plan is canticle's to touch, so the
+// plan is also exactly what is recorded with selfwrite.
+type companionPlan struct {
+	path   string
+	remove bool
+	write  bool
+}
+
+// companionOwnership is what is on disk at the companion path.
+type companionOwnership int
+
+const (
+	companionAbsent  companionOwnership = iota // nothing there
+	companionOwned                             // a regular file tagged [by:canticle]
+	companionForeign                           // anything else: never touched
+)
+
+// planCompanion decides what this write does to the word-synced companion
+// beside fp (#986). A companion is NOT an opposite (see oppositeSidecar): it
+// follows the .lrc rather than excluding it. The invariant: a companion on disk
+// that canticle wrote always describes the .lrc beside it, never an earlier one.
+//
+//   - Gate closed: nothing. With sidecar.KindWordSynced inactive a .elrc on
+//     disk is not canticle's, so it is neither written nor removed.
+//   - A FOREIGN file at the path (not a regular file, unreadable, or without
+//     [by:canticle]): nothing, not even a write over it. It belongs to another
+//     tool or to the operator, and no mode may cost them a file.
+//   - Otherwise an owned companion is removed, and a fresh one is written when
+//     this is a .lrc write with the companion enabled and at least one
+//     qualifying line. A .txt write (unsynced, instrumental, or a MisSynced
+//     demotion) and any other .lrc write therefore leave no companion: word
+//     timing must not outlive the line timing it was aligned to.
+//
+// A write that touches nothing (quarantine, or a demotion that keeps a settled
+// sidecar) never reaches here, so the companion of a kept .lrc is kept too.
+func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) companionPlan {
+	if !w.companionActive() {
+		return companionPlan{}
+	}
+	path := sidecar.StemOf(fp) + sidecar.ExtWordSynced
+	own := companionOwnershipOf(path)
+	if own == companionForeign {
+		slog.Info("leaving a word-synced companion canticle did not write", "path", path)
+		return companionPlan{}
+	}
+	plan := companionPlan{path: path, remove: own == companionOwned}
+	plan.write = synced && w.wordSyncCompanion && hasA2Line(song)
+	if !plan.remove && !plan.write {
+		return companionPlan{}
+	}
+	return plan
+}
+
+// companionOwnershipOf classifies path WITHOUT following it. Lstat comes first
+// so a symlink, FIFO, or device is never opened: opening a FIFO blocks until a
+// writer appears, which would hang the fetch. Any error other than not-exist,
+// and a regular file whose header cannot be read, count as foreign, so doubt
+// always resolves to leaving the file alone.
+func companionOwnershipOf(path string) companionOwnership {
+	fi, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return companionAbsent
+	}
+	if err != nil || !fi.Mode().IsRegular() {
+		return companionForeign
+	}
+	tags, _, err := parseLRCHeader(path)
+	if err != nil {
+		return companionForeign
+	}
+	for _, t := range tags {
+		if strings.EqualFold(t.key, "by") && strings.TrimSpace(t.value) == "canticle" {
+			return companionOwned
+		}
+	}
+	return companionForeign
+}
+
+// resolveOutdir re-resolves and re-confines outdir when it falls under a
+// confinement root, so a symlink swapped in since the caller validated the path
+// cannot redirect the write outside the root. Outside every root it returns
+// outdir unchanged.
+func (w *LRCWriter) resolveOutdir(outdir string) (string, error) {
+	root, ok := w.matchRoot(outdir)
+	if !ok {
+		return outdir, nil
+	}
+	resolved, ok := pathutil.ResolveWithinRoot(root, outdir)
+	if !ok {
+		// ResolveWithinRoot fails (EvalSymlinks) both when the dir does not
+		// exist and when it escapes the root via a symlink. Distinguish the
+		// two so the error is not misleading: a missing dir is a plain setup
+		// error, not a confinement violation. (No MkdirAll here -- behavior is
+		// unchanged; os.CreateTemp already requires the dir to exist.)
+		if _, statErr := os.Stat(outdir); os.IsNotExist(statErr) {
+			return "", fmt.Errorf("refusing to write: output dir %q does not exist", outdir)
+		}
+		return "", fmt.Errorf("refusing to write to %q: output dir escapes confinement root %q or is unresolvable", outdir, root)
+	}
+	return resolved, nil
+}
+
+// writeAtomic writes tags then writeContent to outdir/fn through a temp file in
+// the same directory, renamed into place only on complete success, so a
+// mid-write failure never leaves a partial file at the final path.
+func writeAtomic(outdir, fn string, tags []string, writeContent func(*bufio.Writer) error) (retErr error) {
+	fp := filepath.Join(outdir, fn)
 	tmp, err := os.CreateTemp(outdir, selfwrite.TempPattern(fn)) //nolint:gosec // path is constructed from sanitized song metadata
 	if err != nil {
 		return fmt.Errorf("creating temp file in %s: %w", outdir, err)
@@ -448,15 +661,6 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 	}
 	// NEW-3: fsync the parent dir so the rename is durable across a hard crash.
 	fsyncDir(outdir)
-	// Remove the opposite sidecar so format transitions never leave both files on disk.
-	// Writing .lrc removes a stale .txt (upgrade), writing .txt removes a stale .lrc (downgrade).
-	if stale := oppositeSidecar(fp); stale != "" {
-		if err := os.Remove(stale); err != nil && !os.IsNotExist(err) {
-			slog.Warn("could not remove stale sidecar", "path", stale, "error", err)
-		}
-	}
-	slog.Info("lyrics saved", "path", fp, "kind", kind,
-		"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 	return nil
 }
 
@@ -531,10 +735,7 @@ func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSy
 	// so the lookup below needs no guard of its own.
 	var byLine map[int][]models.WordTiming
 	if wordSync && len(song.WordTimings) > 0 {
-		byLine = make(map[int][]models.WordTiming, len(song.Subtitles.Lines))
-		for _, t := range song.WordTimings {
-			byLine[t.Line] = append(byLine[t.Line], t)
-		}
+		byLine = wordTimingsByLine(song)
 	}
 
 	for i, line := range song.Subtitles.Lines {

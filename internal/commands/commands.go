@@ -2035,13 +2035,28 @@ func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 	}
 }
 
-// configureWriterWordSync enables Enhanced-LRC (A2) word markers on an LRC
-// writer when configured (#480). Same type-assertion shape as the bilingual
-// setter above: a test double that is not *lyrics.LRCWriter is left alone.
+// configureWriterWordSync maps output.word_sync_mode (#986) onto the LRC
+// writer's two independent switches: inline Enhanced-LRC (A2) markers in the
+// .lrc (#480) for inline/both, and the word-synced companion sidecar for
+// sidecar/both. It reads the RESOLVED mode only; the deprecated word_sync bool
+// was already folded into it by config.LoadWithSources. Same type-assertion
+// shape as the bilingual setter above: a test double that is not
+// *lyrics.LRCWriter is left alone.
 func configureWriterWordSync(w lyrics.Writer, cfg config.Config) {
 	if lw, ok := w.(*lyrics.LRCWriter); ok {
-		lw.SetWordSync(cfg.Output.WordSync)
+		inline, companion := wordSyncSwitches(cfg.Output.WordSyncMode)
+		lw.SetWordSync(inline)
+		lw.SetWordSyncCompanion(companion)
 	}
+}
+
+// wordSyncSwitches is the mode-to-switch table behind configureWriterWordSync,
+// split out so the companion half stays testable while the writer's activation
+// gate keeps the companion itself unobservable on disk. An unrecognized mode
+// (which LoadWithSources never produces) turns both off.
+func wordSyncSwitches(mode config.WordSyncMode) (inline, companion bool) {
+	return mode == config.WordSyncModeInline || mode == config.WordSyncModeBoth,
+		mode == config.WordSyncModeSidecar || mode == config.WordSyncModeBoth
 }
 
 // configureWriterSelfWrites attaches the shared self-write registry to the

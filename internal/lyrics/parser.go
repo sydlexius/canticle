@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // ProvenanceTags holds the tag key-value pairs to inject into an LRC header.
@@ -164,12 +166,16 @@ func sanitizeTagValue(v string) string {
 // skipping any tag whose key already exists in the file (idempotent per S4).
 // The rewrite is atomic: a temp file in the same directory is written and
 // renamed over path only on complete success. Only the header block is modified;
-// lyric lines are preserved verbatim. The file must be a .lrc file.
+// lyric lines are preserved verbatim. The file must be a tag-bearing LRC: a
+// line-synced .lrc or its word-synced companion (.elrc, #986), which carries the
+// same header. (Its only production caller, the provenance backfill, still
+// filters to .lrc; purge-provenance finds a companion only once slice 4 of #986
+// teaches it the extension.)
 //
 // Returns (injected, skipped, error) where injected counts tags added and
 // skipped counts tags that already existed and were left untouched.
 func InjectProvenance(path string, pt ProvenanceTags) (injected, skipped int, err error) {
-	if strings.ToLower(filepath.Ext(path)) != ".lrc" {
+	if k := sidecar.KindOf(path); k != sidecar.KindLineSynced && k != sidecar.KindWordSynced {
 		return 0, 0, fmt.Errorf("not an LRC file: %s", path)
 	}
 
