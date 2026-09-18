@@ -286,6 +286,21 @@ func TestWriteLRC_CompanionWrittenAfterLRC(t *testing.T) {
 	mustExist(t, filepath.Join(dir, "song.lrc"))
 }
 
+// TestWriteLRC_FailedLRCWritesNoCompanion is the other half of the crash order:
+// if the .lrc cannot land, no companion may appear beside the stale or missing
+// line-synced file it would then silently disagree with.
+func TestWriteLRC_FailedLRCWritesNoCompanion(t *testing.T) {
+	dir := t.TempDir()
+	// A non-empty directory at the .lrc path makes its final Remove fail.
+	if err := os.MkdirAll(filepath.Join(dir, "song.lrc", "x"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := modeWriter(false, true).WriteLRC(a2Song(), "song.lrc", dir); err == nil {
+		t.Fatal("want an error when the .lrc cannot be written")
+	}
+	mustNotExist(t, filepath.Join(dir, "song.elrc"))
+}
+
 // TestSidecarNameFor covers the kind-taking sibling of SidecarName.
 func TestSidecarNameFor(t *testing.T) {
 	got, err := SidecarNameFor("A", "T", "song.lrc", sidecar.KindWordSynced)
