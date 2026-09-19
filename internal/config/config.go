@@ -652,9 +652,13 @@ type WordSyncGenerateConfig struct {
 	// Values below 1 reset to the default (1).
 	// Override: MXLRC_WORD_SYNC_GENERATE_CONCURRENCY.
 	Concurrency int `toml:"concurrency"`
-	// Model optionally names a WhisperX (or equivalent) model for the sidecar
-	// to use. Empty (the default) means "let the sidecar choose its own
-	// default" -- canticle does not hardcode a model name it does not control.
+	// Model is RESERVED and NOT YET SENT to the sidecar: internal/aligner's
+	// HTTPClient has no model parameter on its wire contract (POST /align
+	// takes only "file" and "lyrics"; see the aligner package doc), and the
+	// sidecar itself selects its models via its own ALIGNER_* environment
+	// variables, not a per-request field. This key is kept (never removed or
+	// retyped -- a config key's type change breaks boot for anyone who set
+	// it) for a future slice that wires a model choice through the client.
 	// Override: MXLRC_WORD_SYNC_GENERATE_MODEL.
 	Model string `toml:"model"`
 }

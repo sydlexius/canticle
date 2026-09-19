@@ -141,7 +141,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
 | `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | Tracks aligned per sweep cycle; values below 1 reset to the default. |
 | `MXLRC_WORD_SYNC_GENERATE_CONCURRENCY` | `1` | Concurrent aligner calls per cycle; values below 1 reset to the default. |
-| `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Optional model name passed to the aligner sidecar; empty uses the sidecar's own default. |
+| `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Reserved, not yet sent to the sidecar; the sidecar selects its own models via its own `ALIGNER_*` env vars. |
 | `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
 
 ## TOML config keys
@@ -407,7 +407,7 @@ model = ""
 
 **EXPERIMENTAL and opt-in.** Forced-aligns lyric lines Canticle already believes are correct to a track's own audio, via an external sidecar (`deploy/aligner`: Demucs vocal separation, then WhisperX forced alignment). This is the "generate" counterpart to provider word-sync coverage (Petit Lyrics, Musixmatch richsync): it produces per-word timings for a track whose lyric text is already known, rather than depending on a provider having word-sync coverage for it, and it never overrides a provider-supplied word timing.
 
-The reference sidecar image ships **CPU-only** today (a CUDA build is tracked separately, #1013), and forced alignment (vocal separation, transcription, alignment) is far heavier per track than any other sidecar in this file -- one call can take minutes, longer on a cold start while models load lazily on first use. Leave `enabled` off unless you run a dedicated aligner sidecar (see `deploy/aligner/README.md`) with hardware and time budget for that. `url` points at that sidecar. `budget_per_cycle` and `concurrency` bound how much of that work one sweep cycle spends, and `model` optionally names a specific alignment model for the sidecar to use (blank lets the sidecar pick its own default).
+The reference sidecar image ships **CPU-only** today (a CUDA build is tracked separately, #1013), and forced alignment (vocal separation, transcription, alignment) is far heavier per track than any other sidecar in this file -- one call can take minutes, longer on a cold start while models load lazily on first use. Leave `enabled` off unless you run a dedicated aligner sidecar (see `deploy/aligner/README.md`) with hardware and time budget for that. `url` points at that sidecar; it also accepts an optional `language` field (an ISO 639-1 hint that skips its own language detection), which the client does not send. `budget_per_cycle` and `concurrency` bound how much of that work one sweep cycle spends. `model` is **reserved and not yet sent**: the aligner client's wire contract has no model parameter, and the sidecar picks its own models via its own `ALIGNER_*` environment variables.
 
 **There is no production caller of this section yet.** It is inert even with `enabled = true` until a later release wires up the candidate-selection sweep and the accept/write path (see the epic tracking this work for the full slice plan).
 
@@ -417,7 +417,7 @@ The reference sidecar image ships **CPU-only** today (a CUDA build is tracked se
 | `url` | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
 | `budget_per_cycle` | `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | Tracks aligned per sweep cycle. One call's decode step alone is capped at the sidecar's `ALIGNER_DECODE_TIMEOUT_SECONDS` (default 300s), on top of model load and inference time. Values below `1` reset to the default. |
 | `concurrency` | `MXLRC_WORD_SYNC_GENERATE_CONCURRENCY` | `1` | Concurrent aligner calls per cycle. The reference sidecar admits only `ALIGNER_MAX_PENDING` requests at once (default 2: one running, one queued) and answers `429` with `Retry-After` beyond that, rather than refusing outright. Values below `1` reset to the default. |
-| `model` | `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Optional model name passed to the sidecar; blank uses the sidecar's own default. |
+| `model` | `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Reserved, not yet sent to the sidecar (no model parameter on the client's wire contract); the sidecar selects its own models via its own `ALIGNER_*` env vars. |
 
 ### `[enrichment]`
 
