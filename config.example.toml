@@ -494,6 +494,47 @@ min_similarity = 0.35
 # Env: MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS.
 # cooldown_seconds = 0
 
+[word_sync_generate]
+# EXPERIMENTAL and OPT-IN. Forced-aligns lyric lines canticle already believes
+# are correct to a track's own audio, via an external sidecar (deploy/aligner:
+# Demucs vocal separation, then WhisperX forced alignment). This is the
+# "generate" counterpart to provider word-sync coverage (petitlyrics,
+# Musixmatch richsync); it never overrides a provider-supplied word timing.
+#
+# The reference sidecar image ships CPU-only today (a CUDA build is tracked
+# separately, #1013) and forced alignment is far heavier per track than any
+# other sidecar in this file -- one call can take minutes, longer on a cold
+# start while models load lazily on first use. Leave this disabled unless you
+# run a dedicated aligner sidecar (see deploy/aligner) with hardware and time
+# budget for that. There is no production caller of this section yet -- it is
+# inert even when enabled=true until a later release wires up the candidate
+# sweep and gate-and-write path.
+# Env: MXLRC_WORD_SYNC_GENERATE_ENABLED.
+# enabled = false
+
+# Base URL of the aligner sidecar. Env: MXLRC_WORD_SYNC_GENERATE_URL.
+# url = ""
+
+# Tracks aligned per sweep cycle. Default 10, kept small since one alignment
+# call can take minutes (decode + separation + transcription + alignment;
+# the sidecar's own decode step alone is capped at
+# ALIGNER_DECODE_TIMEOUT_SECONDS, default 300s, on top of model load time).
+# Values below 1 reset to the default.
+# Env: MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE.
+# budget_per_cycle = 10
+
+# Concurrent aligner calls per cycle. Default 1 (serialized) -- the reference
+# sidecar processes /align requests one at a time by design (it admits up to
+# ALIGNER_MAX_PENDING, default 2: one running, one queued; a request beyond
+# that gets 429 with Retry-After rather than being refused outright). Values
+# below 1 reset to the default. Env: MXLRC_WORD_SYNC_GENERATE_CONCURRENCY.
+# concurrency = 1
+
+# Optional model name passed to the aligner sidecar (e.g. a WhisperX model).
+# Empty (the default) lets the sidecar choose its own default.
+# Env: MXLRC_WORD_SYNC_GENERATE_MODEL.
+# model = ""
+
 [enrichment]
 # Recording enrichment reads the ISRC, MusicBrainz recording ID, and duration
 # from each file's audio tags and feeds them to the matcher to disambiguate

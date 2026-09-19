@@ -15,7 +15,7 @@ func TestFormatConfigText_ContainsAllSections(t *testing.T) {
 
 	sections := []string{
 		"[api]", "[output]", "[db]", "[server]", "[providers]",
-		"[verification]", "[instrumental_detector]", "[enrichment]",
+		"[verification]", "[instrumental_detector]", "[word_sync_generate]", "[enrichment]",
 		"[guard]", "[queue]", "[logging]", "[watcher]", "[timing_validation]",
 	}
 	for _, s := range sections {

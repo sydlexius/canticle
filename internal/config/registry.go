@@ -156,6 +156,16 @@ var fields = []FieldSpec{
 	{Path: "instrumental_detector.backfill.interval_minutes", Section: "instrumental_detector", Type: TypeInt, EnvVars: []string{"MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_INTERVAL_MINUTES"}, Criticality: Safe, Editable: true, Description: "Minutes between backfill cycles (default 60). The gap is what lets the library disks spin down."},
 	{Path: "instrumental_detector.backfill.cooldown_seconds", Section: "instrumental_detector", Type: TypeInt, EnvVars: []string{"MXLRC_INSTRUMENTAL_DETECTOR_BACKFILL_COOLDOWN_SECONDS"}, Criticality: Safe, Editable: true, Description: "Seconds between the backfill's own detector calls (default 0). The throughput/power knob: raise it to spread a cycle out, at the cost of holding the disks awake longer."},
 
+	// [word_sync_generate] -- EXPERIMENTAL, opt-in, no production caller yet
+	// (#482 slice 2, #1006). Forced-aligns already-known lyric lines to a
+	// track's own audio via an external GPU-capable sidecar (#1005); the
+	// default install has no GPU, so this stays off by default.
+	{Path: "word_sync_generate.enabled", Section: "word_sync_generate", Type: TypeBool, EnvVars: []string{"MXLRC_WORD_SYNC_GENERATE_ENABLED"}, Criticality: Safe, Editable: true, Description: "Master switch for the experimental word-sync generate lane (forced alignment via an external sidecar). Off by default; the default install has no GPU."},
+	{Path: "word_sync_generate.url", Section: "word_sync_generate", Type: TypeString, EnvVars: []string{"MXLRC_WORD_SYNC_GENERATE_URL"}, Criticality: Caution, Editable: true, Description: "Base URL of the aligner sidecar."},
+	{Path: "word_sync_generate.budget_per_cycle", Section: "word_sync_generate", Type: TypeInt, EnvVars: []string{"MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE"}, Criticality: Safe, Editable: true, Description: "Tracks aligned per sweep cycle. Default 10, kept small since alignment is GPU-bound work. Values below 1 reset to the default."},
+	{Path: "word_sync_generate.concurrency", Section: "word_sync_generate", Type: TypeInt, EnvVars: []string{"MXLRC_WORD_SYNC_GENERATE_CONCURRENCY"}, Criticality: Safe, Editable: true, Description: "Concurrent aligner calls per cycle. Default 1 (serialized). Values below 1 reset to the default."},
+	{Path: "word_sync_generate.model", Section: "word_sync_generate", Type: TypeString, EnvVars: []string{"MXLRC_WORD_SYNC_GENERATE_MODEL"}, Criticality: Safe, Editable: true, Description: "Optional model name passed to the aligner sidecar. Empty uses the sidecar's own default."},
+
 	// [enrichment]
 	{Path: "enrichment.enabled", Section: "enrichment", Type: TypeBool, EnvVars: []string{"MXLRC_ENRICHMENT_ENABLED"}, Criticality: Safe, Editable: true, Description: "Look up recording IDs (ISRC, MusicBrainz MBID, Spotify ID) before fetching, and feed them to the matcher to improve match accuracy."},
 
