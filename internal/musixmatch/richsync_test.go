@@ -286,10 +286,10 @@ const divergentEntriesJSON = `[
 	{"ts":45.00,"te":46.00,"x":"foxtrot", "l":[{"c":"foxtrot","o":0.0}]}
 ]`
 
-// TestCorrelationDoesNotPairByIndex is the #489 regression test. #489 is an OPEN
-// bug here caused by exactly the mistake asserted against: writeSyncedLRC pairs
-// a bilingual translation to its original BY SLICE INDEX and silently misaligns
-// every line after the counts diverge.
+// TestCorrelationDoesNotPairByIndex is the #489 regression test. #489 was a bug
+// caused by exactly the mistake asserted against: writeSyncedLRC paired a
+// bilingual translation to its original BY SLICE INDEX and silently misaligned
+// every line after the counts diverged (it now pairs by timestamp).
 //
 // BOTH halves are load-bearing. The first asserts the rule holds. The second is
 // the NEGATIVE CONTROL: what a naive index pairing would produce on this same

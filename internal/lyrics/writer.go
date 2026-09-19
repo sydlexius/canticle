@@ -719,11 +719,14 @@ func (w *LRCWriter) matchRoot(outdir string) (string, bool) {
 
 // writeSyncedLRC writes the synced original track. When bilingual is true AND
 // the song carries a non-empty translation track, each original line is
-// followed immediately by its index-matched translation line under the
+// followed immediately by its TIME-MATCHED translation line under the
 // ORIGINAL line's timestamp (the interleaved format in
-// docs/multilingual-output-policy.md). Mismatched line counts are handled
-// gracefully: an original line with no translation counterpart is emitted
-// alone, and surplus translation lines (beyond the original count) are dropped.
+// docs/multilingual-output-policy.md). Pairing is keyed on the rendered
+// mm:ss.xx stamp (models.Time.Stamp()), never on slice position (#489): the
+// two tracks are parsed independently and are free to diverge in cue count
+// and order, so a positional pairing silently misaligns every cue after the
+// first divergence. See pairBilingualTranslations for the matching rule and
+// its policy on unmatched/duplicate timestamps.
 //
 // When wordSync is true AND a cue's word timings pass a2Words' fidelity and
 // distinctness checks, that cue's text is replaced by inline <mm:ss.xx> word
@@ -739,6 +742,13 @@ func (w *LRCWriter) matchRoot(outdir string) (string, bool) {
 func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSync bool) error {
 	interleave := bilingual && len(song.TranslationSubtitles.Lines) > 0
 	translations := song.TranslationSubtitles.Lines
+	// pairs[i] is the index into translations matched to Subtitles.Lines[i], or
+	// -1 when the original cue at i has no timestamp counterpart. Computed once
+	// up front rather than the old i<len(translations) indexing.
+	var pairs []int
+	if interleave {
+		pairs = pairBilingualTranslations(song.Subtitles.Lines, translations)
+	}
 	// Left nil unless word sync is on. This is the default write path for every
 	// synced lyric in the library, and wordSync is opt-in, so allocating a map
 	// the common case never reads is pure waste. A nil map is safe to read --
@@ -766,8 +776,8 @@ func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSy
 		if _, err := buff.WriteString(fLine + "\n"); err != nil {
 			return fmt.Errorf("writing synced line: %w", err)
 		}
-		if interleave && i < len(translations) {
-			tText := translations[i].Text
+		if interleave && pairs[i] >= 0 {
+			tText := translations[pairs[i]].Text
 			if tText == "" {
 				tText = "\u266a"
 			}
@@ -783,6 +793,60 @@ func writeSyncedLRC(song models.Song, buff *bufio.Writer, bilingual bool, wordSy
 		return fmt.Errorf("flushing synced lyrics: %w", err)
 	}
 	return nil
+}
+
+// pairBilingualTranslations matches each cue in original to at most one cue
+// in translation, BY RENDERED TIMESTAMP (models.Time.Stamp()) rather than by
+// slice position (#489). It returns a slice parallel to original; entry i is
+// the matched index into translation, or -1 when original[i] has no
+// timestamp counterpart.
+//
+// The stamp string, not Time.Total, is the match key: it is the exact text
+// every cue is written as (the "one owner of this format", #862), so two
+// cues that render identically are the same instant for pairing purposes,
+// and two cues that render differently never pair merely because their
+// underlying floats are close. Both producers of a Synced track
+// (lrcnormalize.newCue for the LRC-text parse lane, and models.MsToTime for
+// the millisecond lanes) TRUNCATE to hundredths at construction, so an exact
+// string match needs no tolerance window. A producer that ROUNDED instead
+// would split near-equal instants (12.495s -> 12.49 vs 12.50) and silently
+// drop the pair; such a producer needs a tolerance window here, not a
+// different stamp format.
+//
+// Policy for the three divergence cases an issue #489 fix must define:
+//   - An original cue whose stamp matches no translation cue is left
+//     unmatched (-1): emitted alone by the caller.
+//   - A translation cue whose stamp matches no original cue is left unused:
+//     dropped, since the interleaved single-file format has no slot for a
+//     translation-only line.
+//   - Duplicate timestamps (either track has more than one cue at the same
+//     rendered stamp, e.g. a stacked-expansion repeat or an echoed line) are
+//     resolved FIFO per stamp: the Nth original cue at a given timestamp
+//     claims the Nth not-yet-claimed translation cue at that same timestamp,
+//     so a translation cue is consumed at most once and a reordered
+//     translation slice still pairs correctly (matching keys off the stamp
+//     value, never position).
+func pairBilingualTranslations(original, translation []models.Lines) []int {
+	// One FIFO queue of translation indices per stamp, built once so the
+	// per-original walk below is a simple pop rather than a rescan.
+	byStamp := make(map[string][]int, len(translation))
+	for j, t := range translation {
+		stamp := t.Time.Stamp()
+		byStamp[stamp] = append(byStamp[stamp], j)
+	}
+
+	pairs := make([]int, len(original))
+	for i, o := range original {
+		stamp := o.Time.Stamp()
+		queue := byStamp[stamp]
+		if len(queue) == 0 {
+			pairs[i] = -1
+			continue
+		}
+		pairs[i] = queue[0]
+		byStamp[stamp] = queue[1:]
+	}
+	return pairs
 }
 
 func writeUnsyncedLRC(song models.Song, buff *bufio.Writer) error {
