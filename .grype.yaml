@@ -12,10 +12,12 @@ ignore:
   # scanning alert (below the build's HIGH fail-on cutoff). Re-evaluate on any
   # ffmpeg/base-image bump (fix is rand 0.9.3); a slimmed ffmpeg without librav1e
   # would remove it outright (tracked in #297 as a future option).
+  # Re-checked 2026-09-18: Alpine 3.24 and edge still ship rav1e-libs 0.8.1-r0
+  # (embeds rand 0.9.1); a scan of the published image still matches.
   # Upstream: https://github.com/advisories/GHSA-cq8v-f236-94qc
   - vulnerability: GHSA-cq8v-f236-94qc
     package:
       name: rand
       type: rust-crate
-    review-by: "2026-09-18"
+    review-by: "2026-11-17"
     reason: "Unreachable: librav1e is the AV1 encoder; mxlrcgo only decodes audio, never AV1-encodes. LOW severity. Fix is rand 0.9.3."
