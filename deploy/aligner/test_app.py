@@ -11,16 +11,19 @@ the handler reads -- same trick as deploy/yamnet-detector/test_app.py.
 Runs locally with only the lightweight test deps:
     pip install --require-hashes -r requirements-test.txt
     pytest test_app.py -q
+The I1 real-ffmpeg tests skip when no ffmpeg is on PATH, but FAIL when CI is set.
 """
 
 import asyncio
 import io
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import threading
 import time
+import types
 import wave
 from types import SimpleNamespace as ns
 
@@ -260,13 +263,17 @@ def _post(lyrics=None, files_override=None, **data):
     return TestClient(appmod.app).post("/align", files=files, data=body)
 
 
-def test_model_builders_fail_loudly_until_the_model_layer_lands(monkeypatch):
-    for build in (appmod._build_separator, appmod._build_aligner):
-        with pytest.raises(NotImplementedError, match="slice 3"):
-            build("cpu")
+def test_boot_builds_the_real_model_layer_without_loading_a_model(monkeypatch):
+    import _aligner_models
+
     monkeypatch.setitem(sys.modules, "torch", ns(cuda=(no := ns(is_available=lambda: False)), backends=ns(mps=no)))
     monkeypatch.setitem(sys.modules, "whisperx", None)  # lifespan's ImportError fallback
-    pytest.raises(NotImplementedError, TestClient(appmod.app).__enter__)  # no model layer yet: a real boot fails
+    monkeypatch.setitem(sys.modules, "demucs", None)  # any model load at boot would ImportError
+    appmod._state.clear()
+    with TestClient(appmod.app):  # runs lifespan, which calls both builders
+        sep, al = appmod._state["separator"], appmod._state["aligner"]
+        assert isinstance(sep, _aligner_models.DemucsSeparator) and isinstance(al, _aligner_models.WhisperXAligner)
+        assert (sep._model, al._whisper_model, al._align) == (None, None, None)  # lazy: nothing loaded yet
 
 
 # --------------------------------------------------------------------------
@@ -634,6 +641,69 @@ def test_admission_slot_is_released_after_success_and_after_a_500(monkeypatch):
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# error classification: environment fault is 5xx, bad input is 400 (#1005)
+# --------------------------------------------------------------------------
+
+
+class _DecodingSeparator:
+    """Runs the REAL decode_pcm classification; only the ffmpeg binary is faked."""
+
+    def separate(self, audio_path):
+        appmod.decode_pcm(audio_path, 16000, 1)
+        return audio_path
+
+
+def _fake_ffmpeg(tmp_path, body):
+    script = tmp_path / "ffmpeg"
+    script.write_text("#!/bin/sh\n" + body + "\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_decode_rejecting_input_is_400(monkeypatch, tmp_path):
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, "exit 1"))
+    _install_stubs(separator=_DecodingSeparator())
+    resp = _post(lyrics="a line")
+    assert resp.status_code == 400
+    assert "cannot read audio" in resp.json()["detail"]
+
+
+def test_decode_failure_logs_a_bounded_sanitized_ffmpeg_diagnostic(monkeypatch, tmp_path, caplog):
+    # ffmpeg stderr is upload-derived: it reaches the log (so an operator can
+    # see a missing decoder) bounded and without control characters, and
+    # never reaches the client.
+    body = "printf 'bad\\033[31m header\\n' >&2; head -c 5000 /dev/zero | tr '\\0' x >&2; exit 1"
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, body))
+    _install_stubs(separator=_DecodingSeparator())
+    with caplog.at_level(logging.WARNING, logger="canticle.aligner"):
+        resp = _post(lyrics="a line")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "cannot read audio"
+    diag = [r.getMessage() for r in caplog.records if "decode: ffmpeg exit=1" in r.getMessage()]
+    assert len(diag) == 1
+    assert "\x1b" not in diag[0] and len(diag[0]) < 600
+
+
+def test_decode_environment_faults_are_5xx_never_400(monkeypatch, tmp_path, caplog):
+    _install_stubs(separator=_DecodingSeparator())
+    # ffmpeg missing from the image: a broken environment, not the caller's audio.
+    monkeypatch.setattr(appmod, "FFMPEG", str(tmp_path / "no-such-ffmpeg"))
+    with caplog.at_level(logging.ERROR, logger="canticle.aligner"):
+        resp = _post(lyrics="a line")
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"] == "alignment failed"
+    assert "pipeline failed: FileNotFoundError" in caplog.text
+    # ffmpeg killed by a signal (e.g. the OOM killer) is a server fault too.
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, "kill -9 $$"))
+    assert _post(lyrics="a line").status_code == 500
+
+
+# --------------------------------------------------------------------------
+# I1: the client filename never reaches ffmpeg; only the fd protocol is allowed
+# --------------------------------------------------------------------------
+
+
 class _PathRecordingSeparator(_StubSeparator):
     def __init__(self):
         super().__init__()
@@ -644,15 +714,142 @@ class _PathRecordingSeparator(_StubSeparator):
         return super().separate(audio_path)
 
 
-def test_client_filename_never_reaches_the_filesystem():
+def test_client_filename_never_reaches_the_filesystem_or_ffmpeg(monkeypatch, tmp_path):
     sep = _PathRecordingSeparator()
     _install_stubs(separator=sep)
     assert _post(lyrics="a", files_override={"file": ("x.m3u8", _wav_bytes(), "audio/wav")}).status_code == 200
     assert sep.paths[0].endswith(".upload") and "m3u8" not in sep.paths[0]
 
+    argv_file = tmp_path / "argv"
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, f'echo "$@" > {argv_file}; cat > /dev/null; exit 1'))
+    _install_stubs(separator=_DecodingSeparator())
+    assert _post(lyrics="a", files_override={"file": ("x.m3u8", _wav_bytes(), "audio/wav")}).status_code == 400
+    argv = argv_file.read_text().split()
+    assert "-protocol_whitelist" in argv and argv[argv.index("-protocol_whitelist") + 1] == "fd", argv
+    assert argv[argv.index("-i") + 1] == "fd:", argv
+    assert not any("m3u8" in a or a.endswith(".upload") for a in argv), argv
+
+
+def _require_ffmpeg():
+    """Skips locally without ffmpeg, but FAILS under CI: a skipped security
+    test would leave a required check green without ever running it."""
+    if shutil.which("ffmpeg") is None:
+        if os.environ.get("CI"):
+            pytest.fail("CI is set but no ffmpeg is on PATH: the real-ffmpeg security tests must run in CI")
+        pytest.skip("needs a real ffmpeg")
+
+
+def test_hls_playlist_upload_cannot_read_a_local_file(tmp_path):
+    import subprocess
+
+    _require_ffmpeg()
+
+    # A readable local media file, and a playlist pointing at it, uploaded
+    # under a playlist name: before the fix, ffmpeg followed the playlist and
+    # decoded the local file (a 200 with its audio).
+    seg = tmp_path / "secret.ts"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "mp2", "-f", "mpegts", str(seg)], check=True
+    )
+    playlist = f"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1,\n{seg}\n#EXT-X-ENDLIST\n".encode()
+    _install_stubs(separator=_DecodingSeparator())
+    resp = _post(lyrics="a line", files_override={"file": ("x.m3u8", playlist, "application/vnd.apple.mpegurl")})
+    assert resp.status_code == 400, resp.text
+
+
+def test_real_ffmpeg_decodes_a_plain_upload(tmp_path):
+    # Positive control for the playlist tests below: they assert NOTHING comes
+    # out, which an ffmpeg that cannot run decode_pcm's argv at all (e.g. one
+    # without the fd: protocol, added in ffmpeg 6.0) would satisfy vacuously.
+    _require_ffmpeg()
+    upload = tmp_path / "in.upload"
+    upload.write_bytes(_wav_bytes())
+    assert len(appmod.decode_pcm(str(upload), 16000, 1)) == 16000 * 4
+
+
+@pytest.mark.parametrize(
+    ("forced", "entry"),
+    [
+        ("-f hls", "file:{seg}"),
+        ("-f concat -safe 0", "file 'file:{seg}'"),
+        # The case only the whitelist blocks: fd:'s default nested whitelist is
+        # crypto,data, so data: is the one nested URL `-protocol_whitelist fd`
+        # alone refuses (measured on ffmpeg 9.0, and 7.1 in the image).
+        ("-f concat -safe 0", "file 'data:video/mp2t;base64,{b64}'"),
+    ],
+    ids=["hls-file", "concat-file", "concat-data"],
+)
+def test_forced_playlist_demuxer_opens_no_nested_url(monkeypatch, tmp_path, forced, entry):
+    # Guards -protocol_whitelist on any ffmpeg version. Whether ffmpeg PROBES
+    # stdin as a playlist varies by version, so a probe-based test can pass
+    # without the whitelist. A shim instead FORCES the demuxer (injected
+    # before `-i`) and otherwise execs decode_pcm's exact argv on the real
+    # binary; a test-only kwarg on decode_pcm would widen production code.
+    import base64
+    import subprocess
+
+    _require_ffmpeg()
+    real = shutil.which("ffmpeg")
+    seg = tmp_path / "secret.ts"
+    subprocess.run(
+        [real, "-v", "error", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "mp2", "-f", "mpegts", str(seg)], check=True
+    )
+    line = entry.format(seg=seg, b64=base64.b64encode(seg.read_bytes()).decode())
+    header = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1,\n" if "hls" in forced else "ffconcat version 1.0\n"
+    footer = "#EXT-X-ENDLIST\n" if "hls" in forced else ""
+    upload = tmp_path / "in.upload"
+    upload.write_text(header + line + "\n" + footer)
+    shim = f'for a do shift; [ "$a" = "-i" ] && set -- "$@" {forced}; set -- "$@" "$a"; done\nexec "{real}" "$@"'
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, shim))
+    try:
+        out = appmod.decode_pcm(str(upload), 16000, 1)
+    except appmod._BadAudioError:
+        out = b""
+    assert out == b"", f"{forced} decoded {len(out)} bytes through a nested URL"
+
+
+# --------------------------------------------------------------------------
+# I3: decoded duration cap and decode timeout; M6: empty decode
+# --------------------------------------------------------------------------
+
+
+def test_decode_with_no_output_is_400(monkeypatch, tmp_path):
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, "cat > /dev/null; exit 0"))
+    _install_stubs(separator=_DecodingSeparator())
+    resp = _post(lyrics="a line")
+    assert resp.status_code == 400
+    assert "cannot read audio" in resp.json()["detail"]
+
+
+def test_audio_longer_than_the_cap_is_413(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(appmod, "MAX_AUDIO_SECONDS", 1)
+    argv_file = tmp_path / "argv"
+    # 1s of 16 kHz mono float32 is 64000 bytes; emit more than that.
+    body = f'echo "$@" > {argv_file}; cat > /dev/null; head -c 70000 /dev/zero'
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, body))
+    _install_stubs(separator=_DecodingSeparator())
+    with caplog.at_level(logging.WARNING, logger="canticle.aligner"):
+        resp = _post(lyrics="a line")
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "audio too long"
+    assert "audio rejected: audio longer than 1s" in caplog.text
+    argv = argv_file.read_text().split()
+    assert "-t" in argv and argv[argv.index("-t") + 1] == "2", argv  # the decode itself is bounded
+
+
+def test_decode_timeout_is_500(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(appmod, "DECODE_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, "exec sleep 5"))
+    _install_stubs(separator=_DecodingSeparator())
+    with caplog.at_level(logging.ERROR, logger="canticle.aligner"):
+        resp = _post(lyrics="a line")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "alignment failed"
+    assert "pipeline failed: TimeoutExpired" in caplog.text
+
 
 class _StemWritingSeparator:
-    """Writes a real vocal-stem temp file, as the real separator will."""
+    """Writes a real vocal-stem temp file, as DemucsSeparator does."""
 
     def __init__(self):
         self.paths = []
@@ -690,3 +887,85 @@ def test_upload_temp_file_is_removed_when_the_write_fails(monkeypatch, tmp_path)
     _install_stubs()
     assert _post(lyrics="a line").status_code == 500
     assert [p for p in os.listdir(tmp_path) if p.endswith(".upload")] == []
+
+
+# --------------------------------------------------------------------------
+# I3: lazy model loads are locked; align model and dictionary stay paired
+# --------------------------------------------------------------------------
+
+
+def _fake_ml_modules(monkeypatch, load_seconds=0.05):
+    calls = {"demucs": 0, "whisper": 0, "align": []}
+
+    def get_model(name):
+        calls["demucs"] += 1
+        time.sleep(load_seconds)
+        return types.SimpleNamespace(to=lambda d: None, eval=lambda: None)
+
+    def load_model(name, device, compute_type):
+        calls["whisper"] += 1
+        calls["whisper_device"] = device
+        time.sleep(load_seconds)
+        return object()
+
+    def load_align_model(language_code, device):
+        calls["align"].append(language_code)
+        time.sleep(load_seconds)
+        return f"model-{language_code}", {"dictionary": {}, "language": language_code}
+
+    import contextlib
+
+    torch = types.ModuleType("torch")
+    torch.serialization = types.SimpleNamespace(safe_globals=lambda g: contextlib.nullcontext())
+    whisperx = types.ModuleType("whisperx")
+    whisperx.load_model, whisperx.load_align_model = load_model, load_align_model
+    pretrained = types.ModuleType("demucs.pretrained")
+    pretrained.get_model = get_model
+    for name, mod in {"torch": torch, "whisperx": whisperx, "demucs": types.ModuleType("demucs"),
+                      "demucs.pretrained": pretrained}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    import _aligner_models
+
+    monkeypatch.setattr(_aligner_models, "vad_safe_globals", lambda: [])
+    return _aligner_models, calls
+
+
+def _hammer(fn, args_list):
+    results = [None] * len(args_list)
+    barrier = threading.Barrier(len(args_list))
+
+    def run(i):
+        barrier.wait()
+        results[i] = fn(*args_list[i])
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(len(args_list))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+def test_concurrent_cold_model_loads_load_once(monkeypatch):
+    models, calls = _fake_ml_modules(monkeypatch)
+    sep = models.DemucsSeparator("htdemucs", "cpu")
+    al = models.WhisperXAligner("base", "cpu")
+    _hammer(sep._load, [()] * 4)
+    _hammer(al._load_whisper, [()] * 4)
+    _hammer(al._load_align_model, [("en",)] * 4)
+    assert (calls["demucs"], calls["whisper"], calls["align"]) == (1, 1, ["en"])
+
+
+def test_align_model_and_dictionary_always_belong_to_one_language(monkeypatch):
+    models, _ = _fake_ml_modules(monkeypatch, load_seconds=0.01)
+    al = models.WhisperXAligner("base", "cpu")
+    langs = ["en", "fr", "de", "en", "fr", "de"] * 3
+    for (model, metadata), lang in zip(_hammer(al._load_align_model, [(lang,) for lang in langs]), langs):
+        assert model == f"model-{lang}" and metadata["language"] == lang
+
+
+def test_whisper_runs_on_cpu_when_the_device_is_mps(monkeypatch):
+    # CTranslate2 (faster-whisper) rejects "mps"; alignment keeps the device.
+    models, calls = _fake_ml_modules(monkeypatch, load_seconds=0)
+    models.WhisperXAligner("base", "mps")._load_whisper()
+    assert calls["whisper_device"] == "cpu"

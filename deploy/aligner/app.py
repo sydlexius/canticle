@@ -6,21 +6,18 @@ transcript so Canticle can run its own content gate
 (`verification.Similarity`) without a second sidecar.
 
 NEVER returns a blind transcription as lyrics: `words` always comes from
-aligning the caller's own lines; the transcript is an independent ASR pass,
-a content-gate input only.
+aligning the caller's own lines to the separated vocal stem; `transcript` is
+an independent ASR pass over that stem, a content-gate input only.
 
-This module holds the pure core (configuration, device selection, lyric line
-splitting, and the CTC alignment planning that aligns every supplied line as
-ONE sequence and maps the result back to the caller's line indices) and the
-HTTP layer (`/health`, `/align`, size limits, error classification, the
-pipeline lock). The model layer behind the Separator/Aligner seam -- audio
-decoding, Demucs vocal separation, WhisperX ASR + alignment -- lands in a
-later slice of #1005 (slice 3): until then `_build_separator` /
-`_build_aligner` raise, so a real server boot fails loudly rather than
-serving `/align` without a model layer.
+Pipeline: Demucs isolates the vocal stem, then the supplied lines are
+forced-aligned against it as ONE CTC sequence (WhisperX's wav2vec2 alignment
+model, not the Whisper decoder) while a Whisper ASR pass over the same stem
+produces the transcript. The model implementations live in
+`_aligner_models.py`; this module holds the pure core, the ffmpeg decode, and
+the HTTP layer.
 
 Heavy ML imports (torch, torchaudio, demucs, whisperx) are NEVER imported at
-module scope -- only inside `lifespan()`, which runs at real startup, so
+module scope -- only inside functions `lifespan()` calls at real startup, so
 test_app.py can import this module and drive the full HTTP contract with the
 model layer stubbed, with none of those packages installed.
 
@@ -323,6 +320,54 @@ class _AudioTooLongError(Exception):
     """Raised when the decoded audio exceeds MAX_AUDIO_SECONDS (413)."""
 
 
+FFMPEG = "ffmpeg"
+
+
+def decode_pcm(audio_path: str, sample_rate: int, channels: int) -> bytes:
+    """Decodes any ffmpeg-readable file to interleaved float32 PCM bytes.
+
+    Classification is the point (the Go client treats 4xx as a benign miss
+    that never trips its breaker, so a server fault must NOT read as 400):
+    only ffmpeg REJECTING the input (exit code > 0, or no samples) is the
+    caller's fault -> _BadAudioError. A missing/unrunnable ffmpeg (OSError),
+    ffmpeg killed by a signal (exit code < 0, e.g. OOM), or a decode that
+    outlives DECODE_TIMEOUT_SECONDS (subprocess.TimeoutExpired) is an
+    environment fault and propagates as a 500.
+
+    The file reaches ffmpeg as its stdin (`fd:`), never by name, and
+    `-protocol_whitelist fd` forbids every other protocol: format detection
+    therefore never sees a file extension, and a playlist-style upload (HLS,
+    concat) cannot make ffmpeg open a local file or a URL. `fd:` rather than
+    `pipe:` because fd: stays seekable on a regular file, which an MP4 with
+    its index (moov) at the end needs.
+
+    Output is capped at MAX_AUDIO_SECONDS + 1 (`-t`), so an over-long input
+    costs a bounded decode and is then rejected as _AudioTooLongError (413).
+    """
+    import subprocess  # noqa: PLC0415
+
+    cmd = [
+        FFMPEG, "-nostdin", "-v", "error", "-protocol_whitelist", "fd", "-i", "fd:",
+        "-t", str(MAX_AUDIO_SECONDS + 1), "-f", "f32le", "-ac", str(channels), "-ar", str(sample_rate), "-",
+    ]
+    with open(audio_path, "rb") as src:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            cmd, stdin=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=DECODE_TIMEOUT_SECONDS
+        )
+    if proc.returncode != 0 or not proc.stdout:
+        # stderr is upload-derived: bounded and stripped of control characters
+        # before it reaches the log, and never returned to the client.
+        diag = "".join(c if c.isprintable() else " " for c in proc.stderr[-400:].decode("utf-8", "replace")).strip()
+        logger.warning("decode: ffmpeg exit=%d stderr=%r", proc.returncode, diag)
+    if proc.returncode < 0:
+        raise RuntimeError(f"ffmpeg killed by signal {-proc.returncode}")
+    if proc.returncode > 0 or not proc.stdout:
+        raise _BadAudioError("cannot decode audio")
+    if len(proc.stdout) > MAX_AUDIO_SECONDS * sample_rate * channels * 4:
+        raise _AudioTooLongError(f"audio longer than {MAX_AUDIO_SECONDS}s")
+    return proc.stdout
+
+
 class Separator(Protocol):
     """Isolates the vocal stem from a mixed-audio file."""
 
@@ -347,20 +392,21 @@ class Aligner(Protocol):
 
 
 def _build_separator(_device: str) -> Separator:
-    """Constructs the real Demucs-backed separator.
+    """Constructs the real Demucs-backed separator; imports demucs lazily.
 
-    Only called from lifespan() at real startup, never at module import. The
-    model layer (audio decoding + Demucs) lands in slice 3 of #1005; until
-    then this raises, so a real boot fails loudly instead of serving /align
-    with no model layer. Tests install stubs into _state and never run
-    lifespan().
+    Only called from lifespan() at real startup -- never at module import
+    time, so importing this module never requires torch/demucs installed.
     """
-    raise NotImplementedError("aligner: the Demucs separator lands in slice 3 of #1005")
+    from _aligner_models import DemucsSeparator  # noqa: PLC0415 - deliberate lazy import
+
+    return DemucsSeparator(model_name=SEPARATION_MODEL, device=_device)
 
 
 def _build_aligner(_device: str) -> Aligner:
-    """Constructs the real WhisperX-backed aligner (slice 3 of #1005; see above)."""
-    raise NotImplementedError("aligner: the WhisperX aligner lands in slice 3 of #1005")
+    """Constructs the real WhisperX-backed aligner; imports whisperx lazily (see above)."""
+    from _aligner_models import WhisperXAligner  # noqa: PLC0415 - deliberate lazy import
+
+    return WhisperXAligner(whisper_model=WHISPER_MODEL, device=_device)
 
 
 _state: dict = {}
@@ -455,7 +501,7 @@ async def part_cap_is_413(request: Request, exc: StarletteHTTPException):
 
 @app.get("/health")
 async def health():
-    """Liveness only; loads no model."""
+    """Liveness only: models load lazily on the first /align, not here."""
     return {
         "status": "ok",
         "device": _state.get("device", "unknown"),
@@ -549,8 +595,8 @@ def _run_pipeline(
     /health) stays responsive, and serialized on _PIPELINE_LOCK.
 
     Writes the upload to a temp file with a FIXED suffix (the client's
-    filename never reaches the filesystem or the decoder) and removes it,
-    plus the separator's vocal-stem file, whatever the outcome.
+    filename never reaches the filesystem or ffmpeg) and removes it, plus the
+    separator's vocal-stem file, whatever the outcome.
     """
     import contextlib
     import tempfile
@@ -564,8 +610,8 @@ def _run_pipeline(
             with tmp:
                 tmp.write(raw_audio)
             # separator.separate raises _BadAudioError itself when the upload
-            # cannot be decoded/used (the real implementation, slice 3 of
-            # #1005, decodes it); any other exception here is a genuine
+            # cannot be decoded/used (the real Demucs-backed implementation
+            # decodes via decode_pcm); any other exception here is a genuine
             # pipeline failure and is left to propagate as a 500, not
             # reclassified as the caller's fault.
             vocal_path = separator.separate(audio_path)
