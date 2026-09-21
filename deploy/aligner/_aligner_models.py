@@ -8,7 +8,7 @@ none of these packages installed.
 
 test_app.py covers only the model-load locking here, with the ML packages
 faked in sys.modules; the inference paths run only in a container (see
-README.md "Test"; the README lands in slice 4 of #1005).
+README.md "Test").
 """
 
 import contextlib
@@ -25,9 +25,8 @@ _EMISSION_WINDOW_SECONDS = 30
 class DemucsSeparator:
     """Isolates the vocal stem from a mix using Demucs (htdemucs by default).
 
-    Demucs, not UVR-Karaoke -- see README.md "Why Demucs, not UVR-Karaoke" (README lands in
-    slice 4 of #1005) for the rationale (packaging/reproducibility, not a
-    claimed quality edge).
+    Demucs, not UVR-Karaoke -- see README.md "Why Demucs, not UVR-Karaoke" for
+    the rationale (packaging/reproducibility, not a claimed quality edge).
     """
 
     def __init__(self, model_name: str, device: str):

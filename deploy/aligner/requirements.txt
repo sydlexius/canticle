@@ -1,0 +1,26 @@
+# TOP-LEVEL PINS ONLY, NOT a transitive lock and NOT hash-pinned: each
+# package this image imports directly is pinned here, and pip resolves their
+# transitive dependencies at build time. requirements.in lists the same set.
+#
+# deploy/yamnet-detector/requirements.txt is a full transitive lock with
+# hashes (`uv pip compile --generate-hashes`, installed with
+# `--require-hashes`). Doing the same here means resolving torch (CPU index),
+# demucs and whisperx's whole closure, several GB of wheels; that lock, and
+# switching the Dockerfile to --require-hashes, is issue #1017.
+fastapi==0.138.0
+uvicorn[standard]==0.49.0
+python-multipart==0.0.32
+# torch/torchaudio held at 2.8.0: torchaudio 2.9 moves load/save onto
+# TorchCodec (its matching 0.8.x has no linux/arm64 wheel), and removes
+# list_audio_backends, which the pyannote VAD bundled with whisperx calls.
+# 2.8.0 ships cp311 manylinux wheels for both aarch64 and x86_64.
+# The Dockerfile installs these two from the PyTorch CPU index
+# (https://download.pytorch.org/whl/cpu) BEFORE this file, reading the
+# versions from the lines below: PyPI's x86_64 torch is the CUDA build and
+# pulls ~5 GB of nvidia-*-cu12 libraries. Keep the pins in exactly this
+# `name==version` form -- the Dockerfile greps for them and fails the build
+# if either is missing.
+torch==2.8.0
+torchaudio==2.8.0
+demucs==4.0.1
+whisperx==3.4.3

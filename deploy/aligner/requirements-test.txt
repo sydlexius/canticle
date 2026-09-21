@@ -1,4 +1,5 @@
-# GENERATED -- do not edit by hand. Top-level pins live in requirements-test.in.
+# GENERATED -- do not edit by hand. Top-level names live in requirements-test.in;
+# fastapi/python-multipart versions come from requirements.txt (a constraint).
 # Fully pinned + hash-pinned so `pip install --require-hashes` satisfies the
 # Scorecard Pinned-Dependencies check. Hashes cover all wheels + sdist per
 # version, so the lock is platform-portable.
@@ -6,10 +7,10 @@
 # TEST-only. These tools are installed into a throwaway environment, never
 # into the shipped image.
 #
-# Regenerate after editing requirements-test.in (resolved in a linux/amd64
+# Regenerate after editing requirements-test.in or requirements.txt (resolved in a linux/amd64
 # container for a faithful transitive closure, same recipe as
 # deploy/yamnet-detector/requirements-test.txt):
-#   docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.11-slim \
+#   cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.11-slim \
 #     bash -c 'pip install -q uv==0.5.31 && uv pip compile --generate-hashes \
 #       --no-header --no-emit-index-url requirements-test.in -o requirements-test.txt'
 #   (then re-add this header block)
@@ -36,7 +37,9 @@ certifi==2026.7.22 \
 fastapi==0.138.0 \
     --hash=sha256:b6f54fd1bd72c80b0f899f172c61a600f6f7af9b43d4d772a018f35624048cb0 \
     --hash=sha256:d445a4877636ad191e7053e08c9bf98cb921a6756776848400bb773d1740c061
-    # via -r requirements-test.in
+    # via
+    #   -c requirements.txt
+    #   -r requirements-test.in
 h11==0.16.0 \
     --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
     --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
@@ -204,7 +207,9 @@ pytest==9.1.1 \
 python-multipart==0.0.32 \
     --hash=sha256:be54b7f3fa167bb83e4fcd936b887b708f4e57fe75911c02aebf53efaf8d938e \
     --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
-    # via -r requirements-test.in
+    # via
+    #   -c requirements.txt
+    #   -r requirements-test.in
 starlette==1.6.0 \
     --hash=sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c \
     --hash=sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b
