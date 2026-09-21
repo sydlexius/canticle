@@ -316,6 +316,7 @@ func TestConfigToSlogAttrs_ContainsAllSections(t *testing.T) {
 		"guard.script_guard_threshold=",
 		"queue.randomize=",
 		"timing_validation.enabled=",
+		"word_sync_generate.enabled=",
 		"logging.level=",
 	}
 	for _, c := range checks {
