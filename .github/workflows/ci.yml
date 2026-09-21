@@ -530,6 +530,63 @@ jobs:
           fi
           echo "All Grype ignore entries are within their review-by window."
 
+  aligner-test:
+    name: Aligner Sidecar Tests
+    runs-on: ubuntu-latest
+    # Runs unconditionally (not gated on `changes`, mirroring
+    # grype-ignore-expiry above) so every PR reports a result. It is
+    # deliberately NOT a required branch-protection check (maintainer
+    # decision on #1030); if it is ever made required, a paths filter must
+    # still never skip it, or it would report as missing (issue #1027). app.py never imports the
+    # ML stack (torch/demucs/whisperx) at module scope and the model layer is
+    # stubbed in tests, so the suite runs on the bare runner via
+    # actions/setup-python -- no Docker image needed. ubuntu-latest (24.04)
+    # ships no ffmpeg, though, and the decode security tests need a real
+    # binary (a security test asserting an HLS playlist upload can't read a
+    # local file only proves anything against a real decoder), so it is
+    # apt-installed below; the aligner image ships its own ffmpeg, which
+    # slice 4's image smoke test covers separately. In-image testing
+    # against the real ML stack belongs to the aligner image workflow
+    # (#1013 / #1005 slice 4), not here.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Matches the interpreter the lock file was compiled for (see the
+          # header of deploy/aligner/requirements-test.txt: python:3.11-slim)
+          # and what the aligner image ships.
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: deploy/aligner/requirements-test.txt
+
+      # --require-hashes against the generated lockfile, not a bare `pip
+      # install pytest`: an unpinned install resolves to whatever PyPI serves
+      # at run time, which is an unverified dependency executing in CI
+      # (Scorecard Pinned-Dependencies check, issue #636). As later #1005
+      # slices extend requirements-test.in, this keeps working off the
+      # regenerated lock with no workflow change.
+      - name: Install test dependencies
+        run: pip install --require-hashes -r deploy/aligner/requirements-test.txt
+
+      # ubuntu-latest carries no ffmpeg; the decode security tests need a
+      # real binary to prove anything. No version pin: the distro package is
+      # fine here, since the aligner image (which ships its own ffmpeg) is
+      # what slice 4's image smoke test exercises for version parity.
+      - name: Install ffmpeg (the decode security tests need a real binary)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Report ffmpeg version
+        run: ffmpeg -version | head -1
+
+      - name: Run aligner sidecar tests
+        run: pytest deploy/aligner -q
+
   coverage-floor:
     name: Coverage Floor
     runs-on: ubuntu-latest
