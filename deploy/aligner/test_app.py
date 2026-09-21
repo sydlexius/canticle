@@ -669,6 +669,22 @@ def test_decode_rejecting_input_is_400(monkeypatch, tmp_path):
     assert "cannot read audio" in resp.json()["detail"]
 
 
+def test_decode_failure_logs_a_bounded_sanitized_ffmpeg_diagnostic(monkeypatch, tmp_path, caplog):
+    # ffmpeg stderr is upload-derived: it reaches the log (so an operator can
+    # see a missing decoder) bounded and without control characters, and
+    # never reaches the client.
+    body = "printf 'bad\\033[31m header\\n' >&2; head -c 5000 /dev/zero | tr '\\0' x >&2; exit 1"
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, body))
+    _install_stubs(separator=_DecodingSeparator())
+    with caplog.at_level(logging.WARNING, logger="canticle.aligner"):
+        resp = _post(lyrics="a line")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "cannot read audio"
+    diag = [r.getMessage() for r in caplog.records if "decode: ffmpeg exit=1" in r.getMessage()]
+    assert len(diag) == 1
+    assert "\x1b" not in diag[0] and len(diag[0]) < 600
+
+
 def test_decode_environment_faults_are_5xx_never_400(monkeypatch, tmp_path, caplog):
     _install_stubs(separator=_DecodingSeparator())
     # ffmpeg missing from the image: a broken environment, not the caller's audio.
@@ -888,6 +904,7 @@ def _fake_ml_modules(monkeypatch, load_seconds=0.05):
 
     def load_model(name, device, compute_type):
         calls["whisper"] += 1
+        calls["whisper_device"] = device
         time.sleep(load_seconds)
         return object()
 
@@ -945,3 +962,10 @@ def test_align_model_and_dictionary_always_belong_to_one_language(monkeypatch):
     langs = ["en", "fr", "de", "en", "fr", "de"] * 3
     for (model, metadata), lang in zip(_hammer(al._load_align_model, [(lang,) for lang in langs]), langs):
         assert model == f"model-{lang}" and metadata["language"] == lang
+
+
+def test_whisper_runs_on_cpu_when_the_device_is_mps(monkeypatch):
+    # CTranslate2 (faster-whisper) rejects "mps"; alignment keeps the device.
+    models, calls = _fake_ml_modules(monkeypatch, load_seconds=0)
+    models.WhisperXAligner("base", "mps")._load_whisper()
+    assert calls["whisper_device"] == "cpu"

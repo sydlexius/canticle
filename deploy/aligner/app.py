@@ -354,6 +354,11 @@ def decode_pcm(audio_path: str, sample_rate: int, channels: int) -> bytes:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
             cmd, stdin=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=DECODE_TIMEOUT_SECONDS
         )
+    if proc.returncode != 0 or not proc.stdout:
+        # stderr is upload-derived: bounded and stripped of control characters
+        # before it reaches the log, and never returned to the client.
+        diag = "".join(c if c.isprintable() else " " for c in proc.stderr[-400:].decode("utf-8", "replace")).strip()
+        logger.warning("decode: ffmpeg exit=%d stderr=%r", proc.returncode, diag)
     if proc.returncode < 0:
         raise RuntimeError(f"ffmpeg killed by signal {-proc.returncode}")
     if proc.returncode > 0 or not proc.stdout:

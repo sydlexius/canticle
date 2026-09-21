@@ -129,10 +129,16 @@ class WhisperXAligner:
     def __init__(self, whisper_model: str, device: str):
         self._whisper_model_name = whisper_model
         self._device = device
+        # faster-whisper's CTranslate2 backend rejects "mps" (ValueError:
+        # unsupported device), so ASR runs on CPU there; alignment keeps MPS.
+        self._whisper_device = "cpu" if device == "mps" else device
         self._compute_type = "float16" if device == "cuda" else "float32"
         self._whisper_model = None
         # (language, model, metadata) as ONE value, replaced atomically, so a
         # reader can never pair one language's model with another's dictionary.
+        # ONE slot on purpose: an align model is ~0.36-1.2 GB, a library is
+        # overwhelmingly one language, and the sidecar has no memory budget to
+        # hold several; a language switch pays one model load instead.
         self._align = None
         self._whisper_lock = threading.Lock()
         self._align_lock = threading.Lock()
@@ -146,7 +152,7 @@ class WhisperXAligner:
 
             with torch.serialization.safe_globals(vad_safe_globals()):
                 self._whisper_model = whisperx.load_model(
-                    self._whisper_model_name, self._device, compute_type=self._compute_type
+                    self._whisper_model_name, self._whisper_device, compute_type=self._compute_type
                 )
             return self._whisper_model
 
