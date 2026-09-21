@@ -1,0 +1,7 @@
+# TEST-only tools for the sidecar's unit tests, installed into a throwaway
+# environment -- never into the shipped image.
+#
+# Deliberately minimal: the pure core under test needs nothing beyond pytest.
+# The HTTP-contract tests (and the httpx that starlette's TestClient needs)
+# arrive with the endpoints in a later slice of #1005.
+pytest
