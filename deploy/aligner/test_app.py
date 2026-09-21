@@ -135,6 +135,14 @@ def test_parse_lines_splits_on_newline_only():
     assert appmod._parse_lines(text) == ["one\x0cstill one", "two\x85still two and more", "three"]
 
 
+def test_parse_lines_drops_lines_of_only_u001c_to_u001f():
+    # str.strip() treats U+001C..U+001F as whitespace (Go's unicode.IsSpace
+    # does not); the docstring makes that the contract a Go caller mirrors
+    # for line_index, so a narrower blank check must fail here.
+    text = "first\n\x1c\n\x1d\x1e\n\x1f  \nsecond"
+    assert appmod._parse_lines(text) == ["first", "second"]
+
+
 # --------------------------------------------------------------------------
 # default-language validation
 # --------------------------------------------------------------------------
