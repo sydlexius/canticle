@@ -385,7 +385,7 @@ def test_align_returns_400_on_undecodable_audio():
     _install_stubs(separator=_StubSeparator(raise_bad_audio=True))
     resp = _post(lyrics="a line", files_override={"file": ("t.wav", b"garbage", "audio/wav")})
     assert resp.status_code == 400
-    assert "cannot read audio" in resp.json()["detail"]
+    assert resp.json()["detail"] == "cannot read audio"
 
 
 def test_align_returns_413_when_the_model_layer_reports_audio_too_long():
@@ -396,7 +396,7 @@ def test_align_returns_413_when_the_model_layer_reports_audio_too_long():
     _install_stubs(separator=_TooLongSeparator())
     resp = _post(lyrics="a line")
     assert resp.status_code == 413
-    assert resp.json()["detail"] == "audio longer than 1s"
+    assert resp.json()["detail"] == "audio too long"  # stable, never the exception text
 
 
 def test_align_returns_500_when_model_layer_not_initialized():
@@ -429,12 +429,22 @@ def test_align_500_on_pipeline_failure_never_leaks_lyrics_response_or_logs(caplo
     with caplog.at_level(logging.INFO, logger="canticle.aligner"):
         resp = _post(lyrics=secret)
     assert resp.status_code == 500
+    assert resp.json()["detail"] == "alignment failed"
     assert secret not in resp.text
     # The FORMATTED record (message + traceback), which is what reaches stderr,
     # not just getMessage(): a logged traceback quotes the exception message.
     formatted = "\n".join(logging.Formatter().format(r) for r in caplog.records)
     assert "pipeline failed: ValueError" in formatted
     assert secret not in formatted
+
+
+def test_debug_failure_log_has_frames_but_never_the_lyric(caplog):
+    _install_stubs(aligner=_LeakyAligner())
+    secret = "a private lyric line for the debug log"
+    with caplog.at_level(logging.DEBUG, logger="canticle.aligner"):
+        assert _post(lyrics=secret).status_code == 500
+    assert "in _run_pipeline" in caplog.text  # the frames are logged...
+    assert secret not in caplog.text  # ...the exception message is not
 
 
 def test_align_never_logs_lyric_text_on_success(caplog):
@@ -467,6 +477,30 @@ def test_oversized_declared_body_rejected_before_multipart_parsing(monkeypatch):
     resp = _post(lyrics="a", files_override={"file": ("t.wav", b"x" * (2 * 1024 * 1024), "audio/wav")})
     assert resp.status_code == 413
     assert reads == [], "the upload was parsed and spooled before the 413"
+
+
+def test_align_without_content_length_is_411_before_the_handler(monkeypatch):
+    import httpx
+
+    seen = []
+    monkeypatch.setattr(appmod, "_parse_lines", lambda lyrics: seen.append(lyrics) or ["x"])
+    _install_stubs()
+    full = httpx.Request("POST", "http://t/align", files=_FILES, data={"lyrics": "a"})
+    body = full.read()
+
+    async def chunks():
+        yield body
+
+    async def _run():
+        async with _async_client() as client:
+            req = client.build_request("POST", "/align", content=chunks(), headers={"content-type": full.headers["content-type"]})
+            assert "content-length" not in req.headers
+            return await client.send(req)
+
+    resp = asyncio.run(_run())
+    assert resp.status_code == 411
+    assert resp.json()["detail"] == "Content-Length required"
+    assert seen == []
 
 
 def test_lyrics_over_the_multipart_part_cap_is_413(monkeypatch):
@@ -517,6 +551,16 @@ def _async_client():
 _FILES = {"file": ("track.wav", _wav_bytes(), "audio/wav")}
 
 
+async def _wait_started(aligner, task):
+    deadline = time.monotonic() + 2
+    while not aligner.started.is_set():
+        if task.done():
+            raise AssertionError(f"/align finished before the pipeline started: {task.result().status_code}")
+        if time.monotonic() > deadline:
+            raise AssertionError("pipeline never started within 2s")
+        await asyncio.sleep(0.01)
+
+
 def test_health_answers_while_align_is_running():
     release = threading.Event()
     aligner = _BlockingAligner(release=release)
@@ -525,8 +569,7 @@ def test_health_answers_while_align_is_running():
     async def _run():
         async with _async_client() as client:
             task = asyncio.create_task(client.post("/align", files=_FILES, data={"lyrics": "one line"}))
-            while not aligner.started.is_set():
-                await asyncio.sleep(0.01)
+            await _wait_started(aligner, task)
             health = await asyncio.wait_for(client.get("/health"), timeout=2)
             still_running = not task.done()
             release.set()
@@ -537,7 +580,8 @@ def test_health_answers_while_align_is_running():
     assert align.status_code == 200, align.text
 
 
-def test_concurrent_align_requests_queue_and_never_overlap():
+def test_concurrent_align_requests_queue_and_never_overlap(monkeypatch):
+    monkeypatch.setattr(appmod, "_ADMISSION", threading.BoundedSemaphore(3))
     aligner = _BlockingAligner(hold_seconds=0.1)
     _install_stubs(aligner=aligner)
 
@@ -550,6 +594,39 @@ def test_concurrent_align_requests_queue_and_never_overlap():
     assert [r.status_code for r in responses] == [200, 200, 200]
     # ...and never two pipelines at once.
     assert aligner.max_active == 1, f"{aligner.max_active} pipelines ran concurrently"
+
+
+def test_align_over_the_admission_limit_is_429_and_the_first_completes(monkeypatch):
+    monkeypatch.setattr(appmod, "_ADMISSION", threading.BoundedSemaphore(1))
+    release = threading.Event()
+    aligner = _BlockingAligner(release=release)
+    _install_stubs(aligner=aligner)
+
+    async def _run():
+        async with _async_client() as client:
+            task = asyncio.create_task(client.post("/align", files=_FILES, data={"lyrics": "l"}))
+            await _wait_started(aligner, task)
+            busy_task = asyncio.create_task(client.post("/align", files=_FILES, data={"lyrics": "l"}))
+            refused_promptly = bool((await asyncio.wait({busy_task}, timeout=2))[0])
+            health = await asyncio.wait_for(client.get("/health"), timeout=2)
+            release.set()
+            return refused_promptly, await busy_task, health, await task
+
+    refused_promptly, busy, health, first = asyncio.run(_run())
+    assert refused_promptly, "the over-limit request was queued, not refused"
+    assert busy.status_code == 429 and busy.json()["detail"] == "aligner busy"
+    assert busy.headers["retry-after"]
+    assert health.status_code == 200
+    assert first.status_code == 200, first.text
+
+
+def test_admission_slot_is_released_after_success_and_after_a_500(monkeypatch):
+    monkeypatch.setattr(appmod, "_ADMISSION", threading.BoundedSemaphore(1))
+    _install_stubs(aligner=_StubAligner(raise_error=True))
+    assert _post(lyrics="l").status_code == 500
+    _install_stubs()
+    assert _post(lyrics="l").status_code == 200
+    assert _post(lyrics="l").status_code == 200
 
 
 # --------------------------------------------------------------------------
@@ -598,3 +675,18 @@ def test_upload_and_vocal_stem_temp_files_are_removed(monkeypatch, tmp_path, fai
     leftover = [p for p in sep.paths if os.path.exists(p)]
     assert leftover == [], f"temp files left behind: {leftover}"
     assert os.listdir(tmp_path) == []
+
+
+def test_upload_temp_file_is_removed_when_the_write_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    real = tempfile.NamedTemporaryFile
+
+    def failing(*a, **kw):
+        f = real(*a, **kw)
+        f.write = lambda _data: (_ for _ in ()).throw(OSError("disk full"))
+        return f
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", failing)
+    _install_stubs()
+    assert _post(lyrics="a line").status_code == 500
+    assert [p for p in os.listdir(tmp_path) if p.endswith(".upload")] == []

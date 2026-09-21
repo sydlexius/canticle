@@ -30,6 +30,7 @@ No lyric text is ever logged: only counts, byte lengths, and line indices.
 import logging
 import os
 import threading
+import traceback
 import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -104,6 +105,10 @@ MAX_AUDIO_BYTES = _env_int("ALIGNER_MAX_AUDIO_BYTES", DEFAULT_MAX_AUDIO_BYTES)
 MAX_LYRICS_BYTES = _resolve_max_lyrics_bytes()
 MAX_AUDIO_SECONDS = _env_int("ALIGNER_MAX_AUDIO_SECONDS", DEFAULT_MAX_AUDIO_SECONDS)
 DECODE_TIMEOUT_SECONDS = _env_int("ALIGNER_DECODE_TIMEOUT_SECONDS", DEFAULT_DECODE_TIMEOUT_SECONDS)
+# /align requests admitted at once (running + queued on _PIPELINE_LOCK). Each
+# holds up to MAX_AUDIO_BYTES in memory while it waits, so this bounds queued
+# memory; one over it gets 429. Default 2: one running plus one queued.
+MAX_PENDING = _env_int("ALIGNER_MAX_PENDING", 2)
 SEPARATION_MODEL = os.environ.get("ALIGNER_SEPARATION_MODEL", "").strip() or DEFAULT_SEPARATION_MODEL
 WHISPER_MODEL = os.environ.get("ALIGNER_WHISPER_MODEL", "").strip() or DEFAULT_WHISPER_MODEL
 ALIGN_LANGUAGE = (os.environ.get("ALIGNER_ALIGN_LANGUAGE", "").strip() or DEFAULT_ALIGN_LANGUAGE).lower()
@@ -360,13 +365,16 @@ def _build_aligner(_device: str) -> Aligner:
 
 _state: dict = {}
 
-# One pipeline at a time. Requests beyond the first QUEUE on this lock rather
-# than being refused: a 503 would read as a sidecar fault to the Go client,
+# One pipeline at a time. Admitted requests (_ADMISSION) QUEUE on this lock
+# rather than being refused: a 503 would read as a sidecar fault to the Go client,
 # which counts 5xx toward its circuit breaker. Two concurrent Demucs +
 # Whisper + wav2vec2 passes would also double peak memory for no throughput
 # gain on a CPU-bound box. /health is `async def`, so it runs on the event
 # loop and never waits behind a queued /align in the threadpool.
 _PIPELINE_LOCK = threading.Lock()
+# Admission gate, taken non-blocking before the body is parsed or copied into
+# memory; a request over MAX_PENDING gets 429 (a 4xx, not a breaker-counted 5xx).
+_ADMISSION = threading.BoundedSemaphore(MAX_PENDING)
 
 
 def _configure_logging() -> None:
@@ -411,13 +419,24 @@ app = FastAPI(title="Canticle forced-alignment sidecar", lifespan=lifespan)
 @app.middleware("http")
 async def reject_oversized_body(request: Request, call_next):
     """Rejects an /align body whose declared size exceeds every limit, BEFORE
-    multipart parsing spools it to disk. A chunked request (no
-    Content-Length) falls through to the per-field checks in the handler.
+    multipart parsing spools it to disk. A POST with no valid Content-Length
+    (e.g. chunked) gets 411: Starlette would spool its uncapped file part to
+    disk first, and Canticle's client always sends Content-Length. Then
+    admits at most MAX_PENDING /align requests (429 beyond), released on
+    every exit path; /health is never gated.
     """
-    if request.url.path == "/align":
+    if request.url.path == "/align" and request.method == "POST":
         declared = request.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES + MAX_LYRICS_BYTES + _MULTIPART_OVERHEAD_BYTES:
+        if not (declared.isascii() and declared.isdigit()):
+            return JSONResponse(status_code=411, content={"detail": "Content-Length required"})
+        if int(declared) > MAX_AUDIO_BYTES + MAX_LYRICS_BYTES + _MULTIPART_OVERHEAD_BYTES:
             return JSONResponse(status_code=413, content={"detail": "request body too large"})
+        if not _ADMISSION.acquire(blocking=False):
+            return JSONResponse(status_code=429, content={"detail": "aligner busy"}, headers={"Retry-After": "30"})
+        try:
+            return await call_next(request)
+        finally:
+            _ADMISSION.release()
     return await call_next(request)
 
 
@@ -488,17 +507,17 @@ async def align(
         transcript, words = await run_in_threadpool(_run_pipeline, separator, aligner, raw_audio, lines, lang)
     except _AudioTooLongError as e:
         logger.warning("align: audio rejected: %s", e)
-        raise HTTPException(status_code=413, detail=str(e)) from e
+        raise HTTPException(status_code=413, detail="audio too long") from e
     except _BadAudioError as e:
         logger.warning("align: cannot read audio: %s", e)
-        raise HTTPException(status_code=400, detail=f"cannot read audio: {e}") from e
+        raise HTTPException(status_code=400, detail="cannot read audio") from e
     except Exception as e:  # noqa: BLE001 - surface a clean 500, never the raw traceback
-        # Class name only at ERROR: an exception message or traceback can
-        # carry lyric text (a tokenizer error quoting the line). The full
-        # traceback is opt-in at DEBUG.
+        # Class name only: an exception message can carry lyric text (a
+        # tokenizer error quoting the line), so even DEBUG gets only the
+        # traceback FRAMES, never str(e).
         logger.error("align: pipeline failed: %s", e.__class__.__name__)
-        logger.debug("align: pipeline failure detail", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"alignment failed: {e.__class__.__name__}") from e
+        logger.debug("align: pipeline failure frames:\n%s", "".join(traceback.format_tb(e.__traceback__)))
+        raise HTTPException(status_code=500, detail="alignment failed") from e
 
     logger.info("align: request complete, words=%d transcript_chars=%d", len(words), len(transcript))
 
@@ -537,12 +556,13 @@ def _run_pipeline(
     import tempfile
 
     with _PIPELINE_LOCK:
-        with tempfile.NamedTemporaryFile(suffix=".upload", delete=False) as tmp:
-            tmp.write(raw_audio)
-            audio_path = tmp.name
-
+        # Path recorded before the write, so a failed write is still removed.
+        tmp = tempfile.NamedTemporaryFile(suffix=".upload", delete=False)
+        audio_path = tmp.name
         vocal_path = None
         try:
+            with tmp:
+                tmp.write(raw_audio)
             # separator.separate raises _BadAudioError itself when the upload
             # cannot be decoded/used (the real implementation, slice 3 of
             # #1005, decodes it); any other exception here is a genuine
