@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+# CPU wheels: the Dockerfile installs torch/torchaudio from the PyTorch CPU
+# index (https://download.pytorch.org/whl/cpu), since PyPI's x86_64 torch is
+# the CUDA build. When regenerating requirements.txt, resolve against that
+# index for these two (e.g. uv's --index-url for torch). The CUDA variant is
+# issue #1013's; see README "GPU support".
+torch==2.8.0  # see requirements.txt: 2.9 needs TorchCodec + drops APIs whisperx uses
+torchaudio==2.8.0
+demucs
+whisperx
