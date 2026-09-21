@@ -79,6 +79,7 @@ var settingsSectionOrder = []struct {
 	{"providers", "Providers"},
 	{"verification", "Verification"},
 	{"instrumental_detector", "Instrumental Detector"},
+	{"word_sync_generate", "Word-Sync Generate (Experimental)"},
 	{"enrichment", "Enrichment"},
 	{"realign", "Realign"},
 	{"timing_validation", "Timing Validation"},
@@ -330,6 +331,14 @@ func buildFieldEnabledBy() map[string]string {
 	} {
 		m[p] = settingsDOMID("instrumental_detector.enabled")
 	}
+	for _, p := range []string{
+		"word_sync_generate.url",
+		"word_sync_generate.budget_per_cycle",
+		"word_sync_generate.concurrency",
+		"word_sync_generate.model",
+	} {
+		m[p] = settingsDOMID("word_sync_generate.enabled")
+	}
 	// TLS: cert_file / key_file are usable only when self_signed is OFF (they are
 	// mutually exclusive, #288). boolOptions renders the false radio at index 1,
 	// so OptionID(domid, 1) == domid+"-1" is its id; the field is enabled while
@@ -406,6 +415,7 @@ var boolLabels = map[string][2]string{
 	"output.word_sync":                      {"Highlight each word as it is sung", "Highlight whole lines only"},
 	"verification.enabled":                  {"Verify lyrics against the audio", "Don't verify"},
 	"instrumental_detector.enabled":         {"Detect instrumental tracks", "Don't detect"},
+	"word_sync_generate.enabled":            {"Generate word timings (experimental)", "Don't generate"},
 	"enrichment.enabled":                    {"Look up extra track info first", "Skip the lookup"},
 	"realign.enabled":                       {"Re-attach orphaned lyric files in serve mode", "Off"},
 	"realign.on_scan":                       {"Realign after every scan", "Only on watcher/webhook events"},
@@ -1120,6 +1130,17 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return strconv.Itoa(cfg.InstrumentalDetector.Backfill.IntervalMinutes)
 	case "instrumental_detector.backfill.cooldown_seconds":
 		return strconv.Itoa(cfg.InstrumentalDetector.Backfill.CooldownSeconds)
+	// [word_sync_generate]
+	case "word_sync_generate.enabled":
+		return strconv.FormatBool(cfg.WordSyncGenerate.Enabled)
+	case "word_sync_generate.url":
+		return cfg.WordSyncGenerate.URL
+	case "word_sync_generate.budget_per_cycle":
+		return strconv.Itoa(cfg.WordSyncGenerate.BudgetPerCycle)
+	case "word_sync_generate.concurrency":
+		return strconv.Itoa(cfg.WordSyncGenerate.Concurrency)
+	case "word_sync_generate.model":
+		return cfg.WordSyncGenerate.Model
 	// [enrichment]
 	case "enrichment.enabled":
 		return strconv.FormatBool(cfg.Enrichment.Enabled)
@@ -1327,6 +1348,11 @@ var settingsLabels = map[string]string{
 	"instrumental_detector.backfill.batch_size":       "Tracks checked per background round",
 	"instrumental_detector.backfill.interval_minutes": "Wait between background rounds (minutes)",
 	"instrumental_detector.backfill.cooldown_seconds": "Wait between checks during a background round (seconds)",
+	"word_sync_generate.enabled":                      "Generate word timings by aligning lyrics to audio (experimental, needs a dedicated aligner sidecar)",
+	"word_sync_generate.url":                          "Aligner sidecar address",
+	"word_sync_generate.budget_per_cycle":             "Tracks aligned per background round",
+	"word_sync_generate.concurrency":                  "Concurrent alignment jobs per round",
+	"word_sync_generate.model":                        "Alignment model name (blank uses the sidecar's default)",
 	"realign.enabled":                                 "Re-attach orphaned lyric files in serve mode",
 	"realign.on_scan":                                 "Realign automatically after each scan",
 	"realign.require_provenance":                      "Require an exact ID match to move a file",

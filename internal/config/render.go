@@ -142,6 +142,15 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("cooldown_seconds = %d%s\n", cfg.InstrumentalDetector.Backfill.CooldownSeconds, ann("instrumental_detector.backfill.cooldown_seconds"))
 	p("\n")
 
+	// [word_sync_generate] -- experimental, opt-in, no production caller yet.
+	p("[word_sync_generate]\n")
+	p("enabled = %t%s\n", cfg.WordSyncGenerate.Enabled, ann("word_sync_generate.enabled"))
+	p("url = %s%s\n", cfg.WordSyncGenerate.URL, ann("word_sync_generate.url"))
+	p("budget_per_cycle = %d%s\n", cfg.WordSyncGenerate.BudgetPerCycle, ann("word_sync_generate.budget_per_cycle"))
+	p("concurrency = %d%s\n", cfg.WordSyncGenerate.Concurrency, ann("word_sync_generate.concurrency"))
+	p("model = %s%s\n", cfg.WordSyncGenerate.Model, ann("word_sync_generate.model"))
+	p("\n")
+
 	// [enrichment]
 	p("[enrichment]\n")
 	p("enabled = %t%s\n", cfg.Enrichment.Enabled, ann("enrichment.enabled"))
@@ -384,6 +393,13 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			intAttr("spread_samples", "instrumental_detector.spread_samples", cfg.InstrumentalDetector.SpreadSamples),
 			strAttr("ffprobe_path", "instrumental_detector.ffprobe_path", cfg.InstrumentalDetector.FFprobePath),
 			intAttr("cooldown_seconds", "instrumental_detector.cooldown_seconds", cfg.InstrumentalDetector.CooldownSeconds),
+		),
+		group("word_sync_generate",
+			boolAttr("enabled", "word_sync_generate.enabled", cfg.WordSyncGenerate.Enabled),
+			strAttr("url", "word_sync_generate.url", cfg.WordSyncGenerate.URL),
+			intAttr("budget_per_cycle", "word_sync_generate.budget_per_cycle", cfg.WordSyncGenerate.BudgetPerCycle),
+			intAttr("concurrency", "word_sync_generate.concurrency", cfg.WordSyncGenerate.Concurrency),
+			strAttr("model", "word_sync_generate.model", cfg.WordSyncGenerate.Model),
 		),
 		group("enrichment",
 			boolAttr("enabled", "enrichment.enabled", cfg.Enrichment.Enabled),

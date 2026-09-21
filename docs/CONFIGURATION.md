@@ -137,6 +137,11 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | Sidecars judged per sweep cycle; values below 1 reset to the default. |
 | `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a lyric whose cues overrun the audio: `demote`, `quarantine`, `purge`, `off`. |
 | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
+| `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | EXPERIMENTAL: master switch for the word-sync generate lane (forced alignment via an external sidecar). The reference sidecar is CPU-only and slow; leave this off unless you run a dedicated aligner. No production caller yet. |
+| `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
+| `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | Tracks aligned per sweep cycle; values below 1 reset to the default. |
+| `MXLRC_WORD_SYNC_GENERATE_CONCURRENCY` | `1` | Concurrent aligner calls per cycle; values below 1 reset to the default. |
+| `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Optional model name passed to the aligner sidecar; empty uses the sidecar's own default. |
 | `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
 
 ## TOML config keys
@@ -388,6 +393,31 @@ To catch vocals that enter after an instrumental intro (arias, jazz, classical),
 `sample_duration_seconds` is clamped to [30, 60]. `min_confidence` and `vocal_max_confidence` values outside (0, 1] reset to `0.90` and `0.015` respectively. `cooldown_seconds` is the minimum gap between consecutive inference calls; `0` disables the cooldown. Track-duration probing needs `ffprobe`; the auto-provisioned ffmpeg ships none, so set `ffprobe_path` (or rely on a PATH ffprobe) or the detector falls back to a single window. **Deploy order:** upgrade Canticle before the sidecar (new Canticle tolerates the old flat-map response; old Canticle cannot parse `{mean,max}`). See **[Instrumental Detection](instrumental-detection.md)** for the full reference (decision model, sidecar setup, and tuning), and the [Instrumental detection](USER_GUIDE.md#instrumental-detection) guide for the per-library and per-run override controls.
 
 ffmpeg resolution is shared with `[verification]`; see [ffmpeg resolution](#ffmpeg-resolution) below. Set `ffmpeg_path` here only to pin a binary separately from the verification path.
+
+### `[word_sync_generate]`
+
+```toml
+[word_sync_generate]
+enabled = false
+url = ""
+budget_per_cycle = 10
+concurrency = 1
+model = ""
+```
+
+**EXPERIMENTAL and opt-in.** Forced-aligns lyric lines Canticle already believes are correct to a track's own audio, via an external sidecar (`deploy/aligner`: Demucs vocal separation, then WhisperX forced alignment). This is the "generate" counterpart to provider word-sync coverage (Petit Lyrics, Musixmatch richsync): it produces per-word timings for a track whose lyric text is already known, rather than depending on a provider having word-sync coverage for it, and it never overrides a provider-supplied word timing.
+
+The reference sidecar image ships **CPU-only** today (a CUDA build is tracked separately, #1013), and forced alignment (vocal separation, transcription, alignment) is far heavier per track than any other sidecar in this file -- one call can take minutes, longer on a cold start while models load lazily on first use. Leave `enabled` off unless you run a dedicated aligner sidecar (see `deploy/aligner/README.md`) with hardware and time budget for that. `url` points at that sidecar. `budget_per_cycle` and `concurrency` bound how much of that work one sweep cycle spends, and `model` optionally names a specific alignment model for the sidecar to use (blank lets the sidecar pick its own default).
+
+**There is no production caller of this section yet.** It is inert even with `enabled = true` until a later release wires up the candidate-selection sweep and the accept/write path (see the epic tracking this work for the full slice plan).
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | Master switch. Stays off by default: the reference sidecar is CPU-only and forced alignment is heavy, slow work. |
+| `url` | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
+| `budget_per_cycle` | `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | Tracks aligned per sweep cycle. One call's decode step alone is capped at the sidecar's `ALIGNER_DECODE_TIMEOUT_SECONDS` (default 300s), on top of model load and inference time. Values below `1` reset to the default. |
+| `concurrency` | `MXLRC_WORD_SYNC_GENERATE_CONCURRENCY` | `1` | Concurrent aligner calls per cycle. The reference sidecar admits only `ALIGNER_MAX_PENDING` requests at once (default 2: one running, one queued) and answers `429` with `Retry-After` beyond that, rather than refusing outright. Values below `1` reset to the default. |
+| `model` | `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Optional model name passed to the sidecar; blank uses the sidecar's own default. |
 
 ### `[enrichment]`
 

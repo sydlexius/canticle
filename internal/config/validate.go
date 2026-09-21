@@ -353,7 +353,7 @@ func validatorFor(f FieldSpec) Validator {
 		return ValidatePEMFile()
 	case "verification.ffmpeg_path", "instrumental_detector.ffmpeg_path":
 		return ValidatePathExists()
-	case "verification.whisper_url", "instrumental_detector.classifier_url":
+	case "verification.whisper_url", "instrumental_detector.classifier_url", "word_sync_generate.url":
 		return ValidateURL()
 	case "server.trusted_networks.cidrs", "server.trusted_networks.trusted_proxies":
 		return ValidateCIDRList()
@@ -390,6 +390,12 @@ func validatorFor(f FieldSpec) Validator {
 	case "timing_validation.revalidate_batch":
 		// Strictly positive, matching the env and file rules: a batch of 0
 		// drains nothing while the ticker still fires.
+		return ValidatePositiveInt()
+	case "word_sync_generate.budget_per_cycle", "word_sync_generate.concurrency":
+		// Strictly positive, matching the env and file re-default rules: a
+		// budget or concurrency of 0 would drain nothing while a future sweep
+		// still fires, the same failure mode timing_validation.revalidate_batch
+		// guards against.
 		return ValidatePositiveInt()
 	}
 	switch f.Type {
