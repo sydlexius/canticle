@@ -1,31 +1,44 @@
 """Canticle forced-alignment sidecar (issue #1005, epic #482 slice 1).
 
-The finished sidecar serves `POST /align`: it takes an audio file plus lyric
-text Canticle already has and returns word-level timestamps keyed to the
-supplied lines, plus the raw ASR transcript so Canticle can run its own
-content gate (`verification.Similarity`) without a second sidecar.
+`POST /align` takes an audio file plus lyric text Canticle already has and
+returns word-level timestamps keyed to the supplied lines, plus the raw ASR
+transcript so Canticle can run its own content gate
+(`verification.Similarity`) without a second sidecar.
 
 NEVER returns a blind transcription as lyrics: `words` always comes from
 aligning the caller's own lines; the transcript is an independent ASR pass,
 a content-gate input only.
 
-This module currently holds only the pure, model-free core: configuration,
-device selection, lyric line splitting, and the CTC alignment planning that
-aligns every supplied line as ONE sequence and maps the result back to the
-caller's line indices. The HTTP endpoints, audio decoding, the vocal
-separation + ASR model layer, and the container image land in later slices
-of #1005.
+This module holds the pure core (configuration, device selection, lyric line
+splitting, and the CTC alignment planning that aligns every supplied line as
+ONE sequence and maps the result back to the caller's line indices) and the
+HTTP layer (`/health`, `/align`, size limits, error classification, the
+pipeline lock). The model layer behind the Separator/Aligner seam -- audio
+decoding, Demucs vocal separation, WhisperX ASR + alignment -- lands in a
+later slice of #1005 (slice 3): until then `_build_separator` /
+`_build_aligner` raise, so a real server boot fails loudly rather than
+serving `/align` without a model layer.
 
-Nothing here imports a heavy ML package (torch, torchaudio, demucs,
-whisperx), so test_app.py runs with only pytest installed.
+Heavy ML imports (torch, torchaudio, demucs, whisperx) are NEVER imported at
+module scope -- only inside `lifespan()`, which runs at real startup, so
+test_app.py can import this module and drive the full HTTP contract with the
+model layer stubbed, with none of those packages installed.
 
 No lyric text is ever logged: only counts, byte lengths, and line indices.
 """
 
 import logging
 import os
+import threading
 import unicodedata
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Optional, Protocol
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger("canticle.aligner")
 
@@ -45,9 +58,8 @@ DEFAULT_DEVICE = "auto"
 DEFAULT_MAX_AUDIO_BYTES = 100 * 1024 * 1024  # 100 MiB
 DEFAULT_MAX_LYRICS_BYTES = 64 * 1024  # 64 KiB
 # Starlette's multipart parser rejects any single form field over 1 MiB with
-# its own 400 before an endpoint sees it (the /align handler lands in a later
-# slice), so a lyrics limit above it would be unreachable: the configured
-# value is clamped to it.
+# its own 400 before the /align handler runs, so a lyrics limit above it would
+# be unreachable: the configured value is clamped to it.
 LYRICS_PART_CAP_BYTES = 1024 * 1024
 # Decoded-duration ceiling: bytes alone do not bound work (10 hours of
 # silence compresses to a few MB of Opus), and every pipeline stage scales
@@ -57,9 +69,8 @@ DEFAULT_MAX_AUDIO_SECONDS = 1200
 # MAX_AUDIO_SECONDS of output, which a healthy ffmpeg does in seconds, so
 # hitting this means the environment is starved or wedged: a 500, not 413.
 DEFAULT_DECODE_TIMEOUT_SECONDS = 300
-# Multipart framing + the `language` field, on top of the two content limits.
-# Reserved for the request Content-Length pre-check, which lands with the
-# /align handler in a later slice.
+# Multipart framing + the `language` field, on top of the two content limits,
+# for the Content-Length pre-check.
 _MULTIPART_OVERHEAD_BYTES = 64 * 1024
 
 
@@ -102,10 +113,10 @@ LOG_LEVEL = os.environ.get("ALIGNER_LOG_LEVEL", "").strip().upper() or "INFO"
 # Languages whisperx has a DEFAULT align model for, and that model's name.
 # Source: whisperx 3.4.3, whisperx/alignment.py
 # DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF.
-# A static copy so validation works without whisperx installed (the test
-# venv). The boot path (added in a later slice) is meant to replace it with
-# whisperx's own tables, so a whisperx bump cannot silently drift from what
-# is validated; in this slice the static copy is the only table.
+# A static copy so request validation works without whisperx installed (the
+# test venv); lifespan() replaces it with whisperx's own tables at real boot
+# when whisperx is importable, so a whisperx bump cannot silently drift from
+# what is validated.
 ALIGN_MODELS = {
     "en": "WAV2VEC2_ASR_BASE_960H",
     "fr": "VOXPOPULI_ASR_BASE_10K_FR",
@@ -152,8 +163,8 @@ ALIGN_MODELS = {
 def validate_config(align_models: dict) -> None:
     """Fails startup loudly on a default language with no align model.
 
-    Otherwise, once the HTTP endpoints land (a later slice), every request
-    that omits `language` would fail while the service still looked healthy.
+    Otherwise every request that omits `language` would 400 while /health
+    reads ok.
     """
     if ALIGN_LANGUAGE not in align_models:
         raise RuntimeError(
@@ -169,7 +180,7 @@ def select_device(env_value: str, cuda_available: bool, mps_available: bool) -> 
     """Pick the inference device from an explicit override or availability.
 
     Pure function (availability is passed in, not detected here) so it is
-    unit-testable with no ML deps installed; the server's startup supplies
+    unit-testable with no ML deps installed; `lifespan()` supplies
     `torch.cuda.is_available()` / `torch.backends.mps.is_available()`.
 
     An explicit override always wins, even against unavailable hardware
@@ -287,3 +298,261 @@ def _parse_lines(lyrics: str) -> list[str]:
     only of those separators shifts every later index.
     """
     return [line for line in (raw.strip() for raw in lyrics.split("\n")) if line]
+
+
+# --------------------------------------------------------------------------
+# Model layer seam
+# --------------------------------------------------------------------------
+
+
+class _BadAudioError(Exception):
+    """Raised by a Separator/Aligner when the upload cannot be decoded/used.
+
+    The ONLY exception type the pipeline treats as the caller's fault (400).
+    Anything else raised by the model layer is a genuine pipeline failure and
+    is left to propagate as a 500.
+    """
+
+
+class _AudioTooLongError(Exception):
+    """Raised when the decoded audio exceeds MAX_AUDIO_SECONDS (413)."""
+
+
+class Separator(Protocol):
+    """Isolates the vocal stem from a mixed-audio file."""
+
+    def separate(self, audio_path: str) -> str:
+        """Returns the path to an extracted vocal-only audio file.
+
+        Raises _BadAudioError if the input cannot be decoded.
+        """
+        ...
+
+
+class Aligner(Protocol):
+    """Transcribes and forced-aligns a vocal stem against supplied lyric lines."""
+
+    def transcribe(self, vocal_path: str, language: str) -> str:
+        """Returns the raw ASR transcript of the vocal stem (content-gate input)."""
+        ...
+
+    def align(self, vocal_path: str, lines: list[str], language: str) -> list[WordSpan]:
+        """Forced-aligns the SUPPLIED lines to the vocal stem; never invents words."""
+        ...
+
+
+def _build_separator(_device: str) -> Separator:
+    """Constructs the real Demucs-backed separator.
+
+    Only called from lifespan() at real startup, never at module import. The
+    model layer (audio decoding + Demucs) lands in slice 3 of #1005; until
+    then this raises, so a real boot fails loudly instead of serving /align
+    with no model layer. Tests install stubs into _state and never run
+    lifespan().
+    """
+    raise NotImplementedError("aligner: the Demucs separator lands in slice 3 of #1005")
+
+
+def _build_aligner(_device: str) -> Aligner:
+    """Constructs the real WhisperX-backed aligner (slice 3 of #1005; see above)."""
+    raise NotImplementedError("aligner: the WhisperX aligner lands in slice 3 of #1005")
+
+
+_state: dict = {}
+
+# One pipeline at a time. Requests beyond the first QUEUE on this lock rather
+# than being refused: a 503 would read as a sidecar fault to the Go client,
+# which counts 5xx toward its circuit breaker. Two concurrent Demucs +
+# Whisper + wav2vec2 passes would also double peak memory for no throughput
+# gain on a CPU-bound box. /health is `async def`, so it runs on the event
+# loop and never waits behind a queued /align in the threadpool.
+_PIPELINE_LOCK = threading.Lock()
+
+
+def _configure_logging() -> None:
+    """Gives the canticle.* loggers a handler so INFO request logs appear.
+
+    uvicorn configures only its own loggers, so without this the aligner's
+    INFO lines were dropped (only WARNING+ reached stderr via logging's
+    last-resort handler).
+    """
+    root = logging.getLogger("canticle")
+    root.setLevel(LOG_LEVEL)
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root.addHandler(handler)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global ALIGN_MODELS  # noqa: PLW0603 - replaced once at boot with whisperx's own tables
+    import torch  # noqa: PLC0415 - only the real server boot needs torch present
+
+    _configure_logging()
+    try:
+        from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH  # noqa: PLC0415
+    except ImportError:
+        logger.warning("aligner: whisperx not importable at boot, validating languages against the static table")
+    else:
+        ALIGN_MODELS = {**DEFAULT_ALIGN_MODELS_TORCH, **DEFAULT_ALIGN_MODELS_HF}
+    validate_config(ALIGN_MODELS)
+    device = select_device(DEVICE_ENV, torch.cuda.is_available(), torch.backends.mps.is_available())
+    _state["device"] = device
+    _state["separator"] = _build_separator(device)
+    _state["aligner"] = _build_aligner(device)
+    yield
+    _state.clear()
+
+
+app = FastAPI(title="Canticle forced-alignment sidecar", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def reject_oversized_body(request: Request, call_next):
+    """Rejects an /align body whose declared size exceeds every limit, BEFORE
+    multipart parsing spools it to disk. A chunked request (no
+    Content-Length) falls through to the per-field checks in the handler.
+    """
+    if request.url.path == "/align":
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES + MAX_LYRICS_BYTES + _MULTIPART_OVERHEAD_BYTES:
+            return JSONResponse(status_code=413, content={"detail": "request body too large"})
+    return await call_next(request)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def part_cap_is_413(request: Request, exc: StarletteHTTPException):
+    """Starlette rejects a form field over its 1 MiB part cap with a 400
+    ("Part exceeded maximum size ..."); that is an oversized field, so it
+    becomes the documented 413. Everything else keeps FastAPI's default.
+    """
+    from fastapi.exception_handlers import http_exception_handler  # noqa: PLC0415
+
+    if exc.status_code == 400 and str(exc.detail).startswith(("Part exceeded maximum size", "Field exceeded maximum size")):
+        return JSONResponse(status_code=413, content={"detail": "form field too large"})
+    return await http_exception_handler(request, exc)
+
+
+@app.get("/health")
+async def health():
+    """Liveness only; loads no model."""
+    return {
+        "status": "ok",
+        "device": _state.get("device", "unknown"),
+        "separation_model": SEPARATION_MODEL,
+        "align_model": ALIGN_MODELS.get(ALIGN_LANGUAGE, "unknown"),
+        "whisper_model": WHISPER_MODEL,
+    }
+
+
+@app.post("/align")
+async def align(
+    file: UploadFile = File(...),
+    lyrics: str = Form(...),
+    language: Optional[str] = Form(None),
+):
+    # By now Starlette has already spooled the whole upload to a temp file
+    # (the Content-Length middleware is what keeps an oversized declared body
+    # from getting that far). Reading MAX_AUDIO_BYTES + 1 bounds only how much
+    # of it is copied into memory here.
+    raw_audio = await file.read(MAX_AUDIO_BYTES + 1)
+    if len(raw_audio) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="audio file too large")
+    if len(raw_audio) == 0:
+        raise HTTPException(status_code=400, detail="empty audio upload")
+
+    lyrics_bytes = lyrics.encode("utf-8", errors="ignore")
+    if len(lyrics_bytes) > MAX_LYRICS_BYTES:
+        raise HTTPException(status_code=413, detail="lyrics text too large")
+
+    lines = _parse_lines(lyrics)
+    if not lines:
+        raise HTTPException(status_code=400, detail="lyrics text is empty")
+
+    lang = ((language or "").strip() or ALIGN_LANGUAGE).lower()
+    if lang not in ALIGN_MODELS:
+        raise HTTPException(status_code=400, detail=f"unsupported language: {lang[:16]!r}")
+
+    separator: Optional[Separator] = _state.get("separator")
+    aligner: Optional[Aligner] = _state.get("aligner")
+    if separator is None or aligner is None:
+        # Never reachable once lifespan() has run; guards a misuse of the app
+        # (e.g. calling /align before startup) with a clean 500 instead of an
+        # AttributeError.
+        raise HTTPException(status_code=500, detail="model layer not initialized")
+
+    logger.info("align: request received, audio_bytes=%d lines=%d language=%s", len(raw_audio), len(lines), lang)
+
+    try:
+        transcript, words = await run_in_threadpool(_run_pipeline, separator, aligner, raw_audio, lines, lang)
+    except _AudioTooLongError as e:
+        logger.warning("align: audio rejected: %s", e)
+        raise HTTPException(status_code=413, detail=str(e)) from e
+    except _BadAudioError as e:
+        logger.warning("align: cannot read audio: %s", e)
+        raise HTTPException(status_code=400, detail=f"cannot read audio: {e}") from e
+    except Exception as e:  # noqa: BLE001 - surface a clean 500, never the raw traceback
+        # Class name only at ERROR: an exception message or traceback can
+        # carry lyric text (a tokenizer error quoting the line). The full
+        # traceback is opt-in at DEBUG.
+        logger.error("align: pipeline failed: %s", e.__class__.__name__)
+        logger.debug("align: pipeline failure detail", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"alignment failed: {e.__class__.__name__}") from e
+
+    logger.info("align: request complete, words=%d transcript_chars=%d", len(words), len(transcript))
+
+    return {
+        "words": [
+            {
+                "text": w.text,
+                "start_ms": w.start_ms,
+                "end_ms": w.end_ms,
+                "line_index": w.line_index,
+                "confidence": w.confidence,
+            }
+            for w in sorted(words, key=lambda w: w.start_ms)
+        ],
+        "transcript": transcript,
+    }
+
+
+def _run_pipeline(
+    separator: Separator,
+    aligner: Aligner,
+    raw_audio: bytes,
+    lines: list[str],
+    language: str,
+) -> tuple[str, list[WordSpan]]:
+    """Runs separation + transcription + alignment. Synchronous, CPU/GPU-bound.
+
+    Dispatched to the threadpool by the caller so the event loop (and
+    /health) stays responsive, and serialized on _PIPELINE_LOCK.
+
+    Writes the upload to a temp file with a FIXED suffix (the client's
+    filename never reaches the filesystem or the decoder) and removes it,
+    plus the separator's vocal-stem file, whatever the outcome.
+    """
+    import contextlib
+    import tempfile
+
+    with _PIPELINE_LOCK:
+        with tempfile.NamedTemporaryFile(suffix=".upload", delete=False) as tmp:
+            tmp.write(raw_audio)
+            audio_path = tmp.name
+
+        vocal_path = None
+        try:
+            # separator.separate raises _BadAudioError itself when the upload
+            # cannot be decoded/used (the real implementation, slice 3 of
+            # #1005, decodes it); any other exception here is a genuine
+            # pipeline failure and is left to propagate as a 500, not
+            # reclassified as the caller's fault.
+            vocal_path = separator.separate(audio_path)
+            transcript = aligner.transcribe(vocal_path, language)
+            words = aligner.align(vocal_path, lines, language)
+            return transcript, words
+        finally:
+            for path in {audio_path, vocal_path} - {None}:
+                with contextlib.suppress(OSError):
+                    os.remove(path)
