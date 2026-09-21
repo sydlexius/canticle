@@ -147,7 +147,7 @@ def test_plan_alignment_folds_curly_apostrophe_and_normalizes_nfc():
 
 def test_parse_lines_splits_on_newline_only():
     text = "one\x0cstill one\r\ntwo\x85still two and more\n\nthree\r"
-    assert appmod._parse_lines(text) == ["one\x0cstill one", "two\x85still two and more", "three"]
+    assert appmod._parse_lines(text) == ["one\x0cstill one", "two\x85still two and more", "three", "DELIBERATE-RED"]
 
 
 def test_parse_lines_drops_lines_of_only_u001c_to_u001f():
