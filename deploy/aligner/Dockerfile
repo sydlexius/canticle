@@ -102,7 +102,7 @@ gpu = sorted(d.metadata['Name'] for d in distributions() \
 assert torch.version.cuda is None, 'CUDA torch build installed: %s' % torch.__version__; \
 assert not gpu, 'GPU distributions installed: %s' % gpu; \
 ctx = torch.serialization.safe_globals(vad_safe_globals()); ctx.__enter__(); \
-load_vad_model('cpu'); \
+load_vad_model('cpu'); ctx.__exit__(None, None, None); \
 import app; from whisperx.alignment import DEFAULT_ALIGN_MODELS_TORCH as T, DEFAULT_ALIGN_MODELS_HF as H; \
 assert app.ALIGN_MODELS == {**T, **H}, 'app.ALIGN_MODELS drifted from whisperx'; \
 print('smoke ok: torch', torch.__version__, 'ctranslate2', ctranslate2.__version__, 'vad loaded')"

@@ -289,7 +289,7 @@ lock never pulls in `torch`/`demucs`/`whisperx`. Regenerate it after
 changing either file:
 
 ```bash
-docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.11-slim \
+cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.11-slim \
   bash -c 'pip install -q uv==0.5.31 && uv pip compile --generate-hashes \
     --no-header --no-emit-index-url requirements-test.in -o requirements-test.txt'
 ```
