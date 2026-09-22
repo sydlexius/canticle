@@ -389,3 +389,110 @@ func TestReEnqueueKeepsQueuedRowIntact(t *testing.T) {
 		t.Fatalf("after collision (%s,%s,%s,%q,%q); want (%s,%s,%s,%q,%q)", s, w, p, o, c, s0, w0, p0, o0, c0)
 	}
 }
+
+// TestWordRecheckSettleAndDefer covers the worker's two recheck transitions:
+// served moves completed_at, absent keeps it, a defer stays 'queued' and due
+// later, no counter moves, and each refuses a row that is not a processing
+// recheck row (an ordinary processing row included).
+func TestWordRecheckSettleAndDefer(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	now := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+	claim := func(key string, queued bool) int64 {
+		id := seedWordCandidate(t, dbh, key)
+		state := any(nil)
+		if queued {
+			state = WordTimingQueued
+		}
+		mustExec(t, dbh, `UPDATE work_queue SET status = 'processing', miss_count = 3, attempts = 1, word_timing_state = ? WHERE id = ?`, state, id)
+		return id
+	}
+	var checked, lastErr string
+	read := func(id int64) (status, state, completed, next string, gen sql.NullInt64, miss, attempts int) {
+		t.Helper()
+		if err := dbh.QueryRow(`SELECT status, COALESCE(word_timing_state, ''), completed_at, next_attempt_at,
+            word_timing_generation, miss_count, attempts, COALESCE(word_timing_checked_at, ''), last_error FROM work_queue WHERE id = ?`, id).Scan(
+			&status, &state, &completed, &next, &gen, &miss, &attempts, &checked, &lastErr); err != nil {
+			t.Fatalf("read %d: %v", id, err)
+		}
+		return
+	}
+	served, absent, deferred, ordinary := claim("s", true), claim("a", true), claim("d", true), claim("o", false)
+	// Another path (identityrepair, purgeprovenance) re-pended the served row's
+	// scan result while it was queued; the settle is what re-settles it.
+	mustExec(t, dbh, `INSERT INTO libraries (id, path, name) VALUES (1, '/m', 'lib')`)
+	mustExec(t, dbh, `INSERT INTO scan_results (id, library_id, file_path, status) VALUES (1, 1, '/m/x.flac', 'pending')`)
+	mustExec(t, dbh, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, 1)`, served)
+	// A prior lane attempt per row: no transition may add, change, or drop one.
+	laneRows := func() string {
+		t.Helper()
+		var s string
+		if err := dbh.QueryRow(`SELECT COALESCE(group_concat(queue_id || ':' || lane || ':' || hit || ':' || attempted_at, ','), '')
+            FROM (SELECT * FROM lane_attempts ORDER BY queue_id, lane)`).Scan(&s); err != nil {
+			t.Fatalf("read lane_attempts: %v", err)
+		}
+		return s
+	}
+	for _, id := range []int64{served, absent, deferred} {
+		mustExec(t, dbh, `INSERT INTO lane_attempts (queue_id, lane, hit, attempted_at) VALUES (?, 'musixmatch', 0, '2026-01-10T00:00:00Z')`, id)
+	}
+	lane0 := laneRows()
+	if err := q.SettleWordRecheck(ctx, served, WordTimingServed, 9); err != nil {
+		t.Fatalf("settle served: %v", err)
+	}
+	if err := q.SettleWordRecheck(ctx, absent, WordTimingAbsent, 9); err != nil {
+		t.Fatalf("settle absent: %v", err)
+	}
+	if err := q.DeferWordRecheck(ctx, deferred, time.Hour, "throttled"); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if got := laneRows(); got != lane0 {
+		t.Fatalf("lane_attempts after settle/defer = %q; want unchanged %q", got, lane0)
+	}
+	if st, s, c, _, g, m, a := read(served); st != "done" || s != WordTimingServed || c != formatTime(now) || g.Int64 != 9 || m != 3 || a != 1 {
+		t.Fatalf("served = (%s,%s,%s,%v,%d,%d)", st, s, c, g, m, a)
+	}
+	if checked != formatTime(now) {
+		t.Fatalf("served word_timing_checked_at = %q; want %q", checked, formatTime(now))
+	}
+	var srStatus string
+	if err := dbh.QueryRow(`SELECT status FROM scan_results WHERE id = 1`).Scan(&srStatus); err != nil || srStatus != "done" {
+		t.Fatalf("linked scan_results status = (%q, %v); want done", srStatus, err)
+	}
+	if st, s, c, _, g, m, a := read(absent); st != "done" || s != WordTimingAbsent || c != "2026-01-10T00:00:00Z" || g.Int64 != 9 || m != 3 || a != 1 {
+		t.Fatalf("absent = (%s,%s,%s,%v,%d,%d); completed_at must not move", st, s, c, g, m, a)
+	}
+	if checked != formatTime(now) {
+		t.Fatalf("absent word_timing_checked_at = %q; want %q", checked, formatTime(now))
+	}
+	// RecheckDeferred must not cancel the defer's back-off, nor count the row.
+	if n, err := q.CountRecheckDeferred(ctx, nil); err != nil || n != 0 {
+		t.Fatalf("CountRecheckDeferred = (%d, %v); want (0, nil)", n, err)
+	}
+	if n, err := q.RecheckDeferred(ctx, nil); err != nil || n != 0 {
+		t.Fatalf("RecheckDeferred = (%d, %v); want (0, nil)", n, err)
+	}
+	if st, s, _, n, g, m, a := read(deferred); st != "deferred" || s != WordTimingQueued || n != formatTime(now.Add(time.Hour)) || g.Valid || m != 3 || a != 1 {
+		t.Fatalf("deferred = (%s,%s,%s,%v,%d,%d)", st, s, n, g, m, a)
+	}
+	if lastErr != "throttled" {
+		t.Fatalf("deferred last_error = %q; want throttled", lastErr)
+	}
+	for name, err := range map[string]error{
+		"settle ordinary": q.SettleWordRecheck(ctx, ordinary, WordTimingAbsent, 9),
+		"defer ordinary":  q.DeferWordRecheck(ctx, ordinary, time.Hour, "x"),
+		"settle settled":  q.SettleWordRecheck(ctx, served, WordTimingServed, 9),
+		// Right state, wrong status: only the status half of the guard refuses.
+		"settle deferred": q.SettleWordRecheck(ctx, deferred, WordTimingAbsent, 9),
+		"defer deferred":  q.DeferWordRecheck(ctx, deferred, time.Hour, "x"),
+	} {
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("%s = %v; want sql.ErrNoRows", name, err)
+		}
+	}
+	if err := q.SettleWordRecheck(ctx, deferred, WordTimingQueued, 9); err == nil {
+		t.Fatal("settle with state queued succeeded; want refusal")
+	}
+}

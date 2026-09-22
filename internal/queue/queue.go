@@ -1448,6 +1448,9 @@ func recheckLibraryClause(libraryID *int64) (clause string, args []any) {
 		" JOIN scan_results sr ON sr.id = wqsr.scan_result_id WHERE sr.library_id = ?)", []any{*libraryID}
 }
 
+// recheckDeferredWhere is the population RecheckDeferred and its count share.
+const recheckDeferredWhere = ` WHERE status = 'deferred'` + notWordRecheckQueued
+
 // RecheckDeferred resets next_attempt_at to now for all rows currently in the
 // 'deferred' (benign-miss cooldown) state. The worker's deferred sweep will
 // pick them up on the next tick. status, priority, miss_count, and
@@ -1461,12 +1464,18 @@ func recheckLibraryClause(libraryID *int64) (clause string, args []any) {
 //
 // When libraryID is non-nil only rows linked to that library are revived.
 // Returns the number of rows affected.
+//
+// A word-recheck row (#982, word_timing_state='queued') is excluded, from the
+// apply AND its dry-run count, like every other 'deferred' sweep: its
+// next_attempt_at is DeferWordRecheck's back-off from a throttled lane, and
+// resetting it would re-ask that lane at once. It is a settled synced row, not
+// a benign miss, so "recheck deferred" has nothing to revive there.
 func (q *DBQueue) RecheckDeferred(ctx context.Context, libraryID *int64) (int64, error) {
 	now := formatTime(q.now())
 	libClause, libArgs := recheckLibraryClause(libraryID)
 	args := append([]any{now}, libArgs...)
 	res, err := q.db.ExecContext(ctx,
-		`UPDATE work_queue SET next_attempt_at = ? WHERE status = 'deferred'`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		`UPDATE work_queue SET next_attempt_at = ?`+recheckDeferredWhere+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
 		args...,
 	)
 	if err != nil {
@@ -1510,7 +1519,7 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 	args := append([]any{formatTime(q.now())}, libArgs...)
 	var count int64
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE status = 'deferred' AND next_attempt_at > ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
+		`SELECT COUNT(*) FROM work_queue`+recheckDeferredWhere+` AND next_attempt_at > ?`+libClause, //nolint:gosec // G202: libClause is a hardcoded constant from recheckLibraryClause, never user input
 		args...,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("queue: count recheck deferred: %w", err)
