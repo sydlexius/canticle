@@ -74,6 +74,25 @@ func TestMinCommit_LineSyncedFirstLaneDoesNotEndGatedDispatch(t *testing.T) {
 	}
 }
 
+// TestMinCommit_GatedEarlyWinnerAggregatesWordAnswer: under a synced gate the
+// first lane's synced result commits at once, before the second word lane is
+// asked. Its own absent must not survive as terminal: it becomes the aggregate,
+// unknown here because only one of two word lanes answered.
+func TestMinCommit_GatedEarlyWinnerAggregatesWordAnswer(t *testing.T) {
+	mxm := &stubProvider{name: providers.Musixmatch, song: lineSyncedAnswer("line", models.WordAnswerAbsent)}
+	pl := &stubProvider{name: providers.PetitLyrics, song: wordSyncedAnswer("word")}
+	song, err := wordOrchestrator(t, QualitySynced, mxm, pl).FindLyrics(context.Background(), wordTrack, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if song.WinningLane != providers.Musixmatch || pl.calls != 0 {
+		t.Fatalf("winner %q after %d second-lane calls; want musixmatch after 0", song.WinningLane, pl.calls)
+	}
+	if song.WordAnswer != models.WordAnswerUnknown {
+		t.Errorf("early gated winner word answer = %q; want unknown (a word lane was never asked)", song.WordAnswer)
+	}
+}
+
 // TestMinCommit_NoWordsFallsBackToFirstLineSynced: with no lane reaching the
 // gate, the kept line-synced result is returned, the earlier lane on a tie.
 // Its word answer is the aggregate: absent only when every word lane answered.

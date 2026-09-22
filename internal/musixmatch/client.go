@@ -230,10 +230,13 @@ func IsBenignMiss(err error) bool {
 }
 
 // IsNoMatch reports a genuine no-match, the only miss that answers the word
-// question (#982); other benign misses say nothing about word data. A matcher
-// 4xx other than 404 refuses THIS request's shape, which a client fix changes.
+// question (#982); other benign misses say nothing about word data. Only
+// ErrNotFound qualifies: ErrUnmatchable fires before any request, and
+// ErrMatchMismatch means the provider returned a DIFFERENT track, so neither
+// says whether the requested track has word timings. A matcher 4xx other than
+// 404 refuses THIS request's shape, which a client fix changes.
 func IsNoMatch(err error) bool {
-	return errors.Is(err, ErrNotFound) || errors.Is(err, ErrMatchMismatch) || errors.Is(err, ErrUnmatchable)
+	return errors.Is(err, ErrNotFound)
 }
 
 // TokenRenewer supplies a replacement token when the API explicitly signals that

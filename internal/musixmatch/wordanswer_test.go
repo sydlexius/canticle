@@ -74,7 +74,7 @@ func TestRichSyncWordAnswerWithoutCues(t *testing.T) {
 
 func TestIsNoMatch(t *testing.T) {
 	for err, want := range map[error]bool{
-		ErrNotFound: true, fmt.Errorf("x: %w", ErrMatchMismatch): true, ErrUnmatchable: true,
+		ErrNotFound: true, fmt.Errorf("x: %w", ErrMatchMismatch): false, ErrUnmatchable: false,
 		ErrMatcherClientError: false, ErrTruncatedResponse: false, ErrUnparsableSubtitleBody: false,
 		fmt.Errorf("%w: restricted", ErrNoLyrics): false, ErrUnauthorized: false, nil: false,
 	} {

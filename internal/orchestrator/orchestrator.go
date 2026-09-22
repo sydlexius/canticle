@@ -229,6 +229,11 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 					}
 					song.WinningLane = lane.Name()
 					song.LaneAttempts = laneAttemptsFor(attempted, lane.Name())
+					if o.minCommit > QualityNone && song.WordAnswer != models.WordAnswerServed {
+						// Same aggregate as the resolve path: a lane's own absent is
+						// terminal only when every word-capable lane answered (#982).
+						song.WordAnswer = o.wordAnswerFor(r.wordAnswered)
+					}
 					return song, nil
 				}
 				continue

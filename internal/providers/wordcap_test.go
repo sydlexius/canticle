@@ -12,7 +12,7 @@ func TestWordCapable(t *testing.T) {
 	}
 }
 
-// TestWordGeneration_OrderIndependent reddens if the sort is dropped: the two
+// TestWordGeneration_OrderIndependent fails if the sort is dropped: the two
 // orders hash different joined strings.
 func TestWordGeneration_OrderIndependent(t *testing.T) {
 	a := WordGeneration([]string{Musixmatch, PetitLyrics})
