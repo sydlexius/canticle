@@ -98,6 +98,13 @@ type Queue interface {
 	// outcome is a no-op. It records a verdict only -- it never changes what was
 	// written (that guard is #439).
 	SetTimingOutcome(ctx context.Context, id int64, rec queue.TimingRecord) error
+	// SettleWordRecheck settles a processing word-recheck row (#982) done with
+	// its verdict and generation in one statement; sql.ErrNoRows means the row
+	// is no longer a processing recheck row.
+	SettleWordRecheck(ctx context.Context, id int64, state string, generation int64) error
+	// DeferWordRecheck re-parks an unanswered word-recheck row after retryAfter,
+	// still 'queued', touching no miss or failure counter.
+	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, cause string) error
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -1316,6 +1323,12 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// and the cache store all see the same values. Any later position would break
 	// the read/write key agreement the comment above promises.
 	resolvedTrack = w.refreshRecordingIdentity(ctx, item, resolvedTrack)
+	if item.WordTimingState == queue.WordTimingQueued {
+		// A settled .lrc flipped back for word timings (#982) never takes the
+		// ordinary path below: its unsynced or instrumental result would
+		// replace the .lrc, and a miss would spend the row's miss budget.
+		return w.runWordRecheck(ctx, item, resolvedTrack)
+	}
 
 	// A configured providers generation that no longer matches the stamp the item
 	// was enqueued under means a cached result (if any) predates the current
@@ -1637,6 +1650,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	return nil
 }
 
+// errVerificationRejected marks a verifier's rejection (a verdict), as opposed
+// to a verifier error; word recheck settles the former absent (#982).
+var errVerificationRejected = errors.New("worker: verification rejected lyrics")
+
 func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.Song, confidence float64) error {
 	if w.verifier == nil || item.Inputs.SourcePath == "" || confidence >= w.verifyBelowConfidence {
 		return nil
@@ -1647,7 +1664,7 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 	}
 	slog.Debug("worker verification result", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "similarity", res.Similarity, "accepted", res.Accepted)
 	if !res.Accepted {
-		return fmt.Errorf("worker: verification rejected lyrics: similarity %.3f", res.Similarity)
+		return fmt.Errorf("%w: similarity %.3f", errVerificationRejected, res.Similarity)
 	}
 	return nil
 }
