@@ -46,15 +46,16 @@ type WordRecheckOptions struct {
 	Limit int
 }
 
-// wordRecheckWhere is the ONE candidate predicate shared by the count and the
-// list, so a dry-run count can never describe a different population than the
-// list an apply flips. status='done' excludes 'processing' (the worker owns
+// wordRecheckPredicate is the ONE candidate predicate (no leading WHERE/AND)
+// shared by the count, the list, and the flip's in-transaction revalidation,
+// so a dry-run count can never describe a different population than the rows
+// an apply flips. status='done' excludes 'processing' (the worker owns
 // it) and non-settled rows (fetched anyway); timing-rejected rows are never
 // re-examined (mis_synced is #1007's retime source); source_path is required
 // because the sidecar is derived from it.
-func wordRecheckWhere(opts WordRecheckOptions) (string, []any) {
+func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	var b strings.Builder
-	b.WriteString(` WHERE status = 'done'
+	b.WriteString(` status = 'done'
    AND outcome_type = 'synced'
    AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
    AND TRIM(COALESCE(source_path, '')) <> ''
@@ -85,9 +86,9 @@ func wordRecheckWhere(opts WordRecheckOptions) (string, []any) {
 
 // CountWordRecheckCandidates is ListWordRecheckCandidates' size, ignoring Limit.
 func (q *DBQueue) CountWordRecheckCandidates(ctx context.Context, opts WordRecheckOptions) (int, error) {
-	where, args := wordRecheckWhere(opts)
+	pred, args := wordRecheckPredicate(opts)
 	var n int
-	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue`+where, args...).Scan(&n); err != nil { //nolint:gosec // reason: G202 -- where is built from package-constant fragments with bound parameters only
+	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE`+pred, args...).Scan(&n); err != nil { //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
 		return 0, fmt.Errorf("queue: count word recheck candidates: %w", err)
 	}
 	return n, nil
@@ -98,8 +99,8 @@ func (q *DBQueue) CountWordRecheckCandidates(ctx context.Context, opts WordReche
 // order. Read-only, and it opens no file: the state column, not the sidecar,
 // says whether a row was examined.
 func (q *DBQueue) ListWordRecheckCandidates(ctx context.Context, opts WordRecheckOptions) ([]int64, error) {
-	where, args := wordRecheckWhere(opts)
-	query := `SELECT id FROM work_queue` + where + ` ORDER BY completed_at ASC, id ASC`
+	pred, args := wordRecheckPredicate(opts)
+	query := `SELECT id FROM work_queue WHERE` + pred + ` ORDER BY completed_at ASC, id ASC`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)
@@ -110,11 +111,11 @@ func (q *DBQueue) ListWordRecheckCandidates(ctx context.Context, opts WordRechec
 // ListWordTimingAbsent returns the ids of rows whose provider path is
 // exhausted under generation (#1007's selection contract): 'absent' stamped
 // with exactly that generation. NULL, 'queued', 'served' and a stale-generation
-// 'absent' are excluded, and so is any non-synced row: #1007 retimes .lrc
-// files only, and the term is what lets the planner use the partial index.
+// 'absent' are excluded, as is any non-synced (#1007 retimes .lrc only) or
+// non-done row (absent is stamped before Complete); both match the index.
 // Limit caps it when > 0. Read-only.
 func (q *DBQueue) ListWordTimingAbsent(ctx context.Context, generation int64, limit int) ([]int64, error) {
-	query := `SELECT id FROM work_queue WHERE outcome_type = 'synced' AND word_timing_state = 'absent'
+	query := `SELECT id FROM work_queue WHERE outcome_type = 'synced' AND status = 'done' AND word_timing_state = 'absent'
          AND word_timing_generation = ? ORDER BY id ASC`
 	args := []any{generation}
 	if limit > 0 {
@@ -163,20 +164,21 @@ type WordRecheckPrior struct {
 // MarkWordRecheckQueued flips settled rows back into the queue in ONE
 // transaction: deferred at PriorityMiss (purgeprovenance's repair tier, behind
 // fresh work), due now, attempts and last_error cleared, state 'queued'.
-// miss_count, providers_version and lyrics_cache are untouched. ONLY 'done'
-// rows flip; any other id is skipped, so a stale candidate list never yanks a
-// row from the worker. report (optional) receives each row's prior state
+// miss_count, providers_version and lyrics_cache are untouched. Each id is
+// revalidated against the candidate predicate for opts (Limit ignored) in both
+// the prior read and the UPDATE, so a stale list never yanks a row from the
+// worker nor requeues a settled one. report (optional) gets each prior state
 // INSIDE the transaction, before that row's UPDATE, so a restorable backup is
 // durable before the flip commits (identityrepair's write-ahead pattern); a
 // report or any other error rolls the whole batch back. Retried whole on
 // SQLITE_BUSY only until report has run. Returns the priors of the rows changed.
-func (q *DBQueue) MarkWordRecheckQueued(ctx context.Context, ids []int64, report func(WordRecheckPrior) error) (prior []WordRecheckPrior, err error) {
+func (q *DBQueue) MarkWordRecheckQueued(ctx context.Context, ids []int64, opts WordRecheckOptions, report func(WordRecheckPrior) error) (prior []WordRecheckPrior, err error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	err = db.RetryBatchTx(ctx, "word recheck flip", func() error {
 		var rerr error
-		prior, rerr = q.markWordRecheckQueuedOnce(ctx, ids, report)
+		prior, rerr = q.markWordRecheckQueuedOnce(ctx, ids, opts, report)
 		return rerr
 	})
 	if err != nil {
@@ -185,7 +187,7 @@ func (q *DBQueue) MarkWordRecheckQueued(ctx context.Context, ids []int64, report
 	return prior, nil
 }
 
-func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, report func(WordRecheckPrior) error) (prior []WordRecheckPrior, retErr error) {
+func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, opts WordRecheckOptions, report func(WordRecheckPrior) error) (prior []WordRecheckPrior, retErr error) {
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("queue: begin word recheck flip tx: %w", err)
@@ -200,6 +202,9 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, re
 		return err
 	}
 	now := formatTime(q.now())
+	pred, predArgs := wordRecheckPredicate(opts)
+	flipSQL := `UPDATE work_queue SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0, last_error = '', word_timing_state = ?` + //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
+		` WHERE id = ? AND` + pred
 	for _, id := range ids {
 		var (
 			p     WordRecheckPrior
@@ -208,7 +213,7 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, re
 		)
 		err := tx.QueryRowContext(ctx,
 			`SELECT id, status, priority, next_attempt_at, attempts, last_error, word_timing_state, word_timing_generation
-             FROM work_queue WHERE id = ? AND status = 'done'`, id,
+             FROM work_queue WHERE id = ? AND`+pred, append([]any{id}, predArgs...)...,
 		).Scan(&p.ID, &p.Status, &p.Priority, &p.NextAttemptAt, &p.Attempts, &p.LastError, &state, &gen)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -228,12 +233,8 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, re
 				return nil, db.NotRetryable(fmt.Errorf("queue: report word recheck prior for id %d: %w", id, err))
 			}
 		}
-		res, err := tx.ExecContext(ctx,
-			`UPDATE work_queue
-             SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0,
-                 last_error = '', word_timing_state = ?
-             WHERE id = ? AND status = 'done'`,
-			PriorityMiss, now, WordTimingQueued, id)
+		res, err := tx.ExecContext(ctx, flipSQL,
+			append([]any{PriorityMiss, now, WordTimingQueued, id}, predArgs...)...)
 		if err != nil {
 			return nil, escape(fmt.Errorf("queue: flip word recheck id %d: %w", id, err))
 		}

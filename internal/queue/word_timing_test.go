@@ -136,7 +136,7 @@ func TestMarkWordRecheckQueuedOnlyFlipsDone(t *testing.T) {
         next_attempt_at = '2026-01-03T00:00:00Z', word_timing_state = 'absent', word_timing_generation = 6 WHERE id = ?`, done)
 
 	var reported []WordRecheckPrior
-	prior, err := q.MarkWordRecheckQueued(ctx, []int64{done, busy, 12345}, func(p WordRecheckPrior) error {
+	prior, err := q.MarkWordRecheckQueued(ctx, []int64{done, busy, 12345}, WordRecheckOptions{}, func(p WordRecheckPrior) error {
 		reported = append(reported, p)
 		return nil
 	})
@@ -176,6 +176,28 @@ func TestMarkWordRecheckQueuedOnlyFlipsDone(t *testing.T) {
 	}
 }
 
+// TestMarkWordRecheckQueuedRevalidatesPredicate: a listed candidate settled
+// (served, or absent at the current generation) before the flip is skipped.
+func TestMarkWordRecheckQueuedRevalidatesPredicate(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	opts := WordRecheckOptions{Generation: 7}
+	served := seedWordCandidate(t, dbh, "served")
+	absent := seedWordCandidate(t, dbh, "absent")
+	ids, err := q.ListWordRecheckCandidates(ctx, opts)
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("list = (%v, %v); want both rows", ids, err)
+	}
+	if errS, errA := q.SetWordTimingState(ctx, served, WordTimingServed, 7, time.Time{}),
+		q.SetWordTimingState(ctx, absent, WordTimingAbsent, 7, time.Time{}); errS != nil || errA != nil {
+		t.Fatalf("settle: %v, %v", errS, errA)
+	}
+	if prior, err := q.MarkWordRecheckQueued(ctx, ids, opts, nil); err != nil || len(prior) != 0 {
+		t.Fatalf("flip = (%+v, %v); want nothing flipped (both rows settled since the list)", prior, err)
+	}
+}
+
 // TestMarkWordRecheckQueuedRollsBackOnError proves the batch is one
 // transaction: a failed UPDATE or a failed backup report on a later id undoes
 // the earlier flip.
@@ -199,7 +221,7 @@ func TestMarkWordRecheckQueuedRollsBackOnError(t *testing.T) {
 				mustExec(t, dbh, `CREATE TRIGGER fail_second BEFORE UPDATE OF word_timing_state ON work_queue
                     WHEN NEW.id = `+strconv.FormatInt(second, 10)+` BEGIN SELECT RAISE(ABORT, 'boom'); END`)
 			}
-			if _, err := q.MarkWordRecheckQueued(ctx, []int64{first, second}, report); err == nil {
+			if _, err := q.MarkWordRecheckQueued(ctx, []int64{first, second}, WordRecheckOptions{}, report); err == nil {
 				t.Fatal("flip succeeded; want an error")
 			}
 			var n int
@@ -221,7 +243,7 @@ func TestWordRecheckQueuedHiddenFromDeferredSweeps(t *testing.T) {
 	mustExec(t, dbh, `INSERT INTO libraries (id, path, name) VALUES (1, '/m', 'lib')`)
 	mustExec(t, dbh, `INSERT INTO scan_results (id, library_id, file_path, status) VALUES (1, 1, '/m/x.flac', 'done')`)
 	mustExec(t, dbh, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, 1)`, id)
-	if _, err := q.MarkWordRecheckQueued(ctx, []int64{id}, nil); err != nil {
+	if _, err := q.MarkWordRecheckQueued(ctx, []int64{id}, WordRecheckOptions{}, nil); err != nil {
 		t.Fatalf("flip: %v", err)
 	}
 	// Give it every column the instrumental sweeps key on, and no timing verdict.
@@ -280,12 +302,14 @@ func TestSetWordTimingStateRoundTrip(t *testing.T) {
 	absent := seedWordCandidate(t, dbh, "absent")
 	stale := seedWordCandidate(t, dbh, "stale")
 	served := seedWordCandidate(t, dbh, "served")
+	inflight := seedWordCandidate(t, dbh, "inflight")
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, inflight)
 	at := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	for _, s := range []struct {
 		id    int64
 		state string
 		gen   int64
-	}{{absent, WordTimingAbsent, 9}, {stale, WordTimingAbsent, 8}, {served, WordTimingServed, 9}} {
+	}{{absent, WordTimingAbsent, 9}, {stale, WordTimingAbsent, 8}, {served, WordTimingServed, 9}, {inflight, WordTimingAbsent, 9}} {
 		if err := q.SetWordTimingState(ctx, s.id, s.state, s.gen, at); err != nil {
 			t.Fatalf("settle %d: %v", s.id, err)
 		}
@@ -333,5 +357,35 @@ func TestReEnqueueLeavesDoneRowDone(t *testing.T) {
 	}
 	if _, err := q.Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("Dequeue err = %v; want sql.ErrNoRows (done row not claimable)", err)
+	}
+}
+
+// TestReEnqueueKeepsQueuedRowIntact: a colliding Enqueue must not rewrite a
+// flipped row's paths or clear its completion, since its .lrc is on disk.
+func TestReEnqueueKeepsQueuedRowIntact(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	item := completeSynced(t, q, "Song", "/music/song.flac")
+	if _, err := q.MarkWordRecheckQueued(ctx, []int64{item.ID}, WordRecheckOptions{}, nil); err != nil {
+		t.Fatalf("flip: %v", err)
+	}
+	read := func() (st, state, src, outs, done string) {
+		if err := dbh.QueryRow(`SELECT status, word_timing_state, source_path, COALESCE(output_paths, ''), COALESCE(completed_at, '')
+            FROM work_queue WHERE id = ?`, item.ID).Scan(&st, &state, &src, &outs, &done); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		return
+	}
+	s0, w0, p0, o0, c0 := read()
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track:       models.Track{ArtistName: "Artist", TrackName: "Song"},
+		SourcePath:  "/music/moved.flac",
+		OutputPaths: []models.OutputPath{{Outdir: "moved", Filename: "b.lrc"}},
+	}, PriorityWebhook); err != nil {
+		t.Fatalf("re-enqueue: %v", err)
+	}
+	if s, w, p, o, c := read(); s != s0 || w != WordTimingQueued || w != w0 || p != p0 || o != o0 || c != c0 || c == "" {
+		t.Fatalf("after collision (%s,%s,%s,%q,%q); want (%s,%s,%s,%q,%q)", s, w, p, o, c, s0, w0, p0, o0, c0)
 	}
 }

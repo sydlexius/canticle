@@ -251,34 +251,42 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
          ON CONFLICT(artist_key, title_key) DO UPDATE SET
              artist = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.artist
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.artist
                  ELSE excluded.artist
              END,
              title = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.title
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.title
                  ELSE excluded.title
              END,
              album = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.album
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.album
                  ELSE excluded.album
              END,
              album_artist = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.album_artist
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.album_artist
                  ELSE excluded.album_artist
              END,
              outdir = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.outdir
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.outdir
                  ELSE excluded.outdir
              END,
              filename = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.filename
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.filename
                  ELSE excluded.filename
              END,
              source_path = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.source_path
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.source_path
                  ELSE excluded.source_path
              END,
              output_paths = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.output_paths
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.output_paths
                  ELSE excluded.output_paths
              END,
              scan_result_id = COALESCE(work_queue.scan_result_id, excluded.scan_result_id),
@@ -309,6 +317,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
              END,
              completed_at = CASE
                  WHEN work_queue.status IN ('done', 'unavailable') THEN work_queue.completed_at
+                 WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.completed_at
                  ELSE NULL
              END
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
