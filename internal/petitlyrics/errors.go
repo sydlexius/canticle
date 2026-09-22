@@ -30,6 +30,13 @@ var (
 	ErrNotFound = errors.New("petitlyrics: no results found")
 )
 
+// ErrNoMatch is the genuine no-match, the search returning no songs (#982). It
+// wraps ErrNotFound for existing callers; a decode or tier failure does not.
+var ErrNoMatch = fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+
+// IsNoMatch reports a genuine no-match; ErrProviderUnavailable is not one.
+func IsNoMatch(err error) bool { return errors.Is(err, ErrNoMatch) }
+
 // ErrProviderUnavailable indicates a sustained run of zero-result responses:
 // the request shape is valid and the API keeps answering HTTP 200 with
 // well-formed XML, but every response carries no songs at all (#607).

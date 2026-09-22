@@ -54,6 +54,11 @@ func (l *Lane) Name() string { return l.name }
 // Local reports whether the lane resolves without an outbound provider request.
 func (l *Lane) Local() bool { return l.local }
 
+// WordCapable reports whether the lane can serve word-level timings (#982):
+// the provider-name rule in providers.WordCapable, and never an
+// instrumental-only lane, whatever it is named.
+func (l *Lane) WordCapable() bool { return !l.instrumentalOnly && providers.WordCapable(l.name) }
+
 // Breaker exposes the lane's breaker (construction + tests asserting ramp state).
 func (l *Lane) Breaker() *circuit.Breaker { return l.breaker }
 

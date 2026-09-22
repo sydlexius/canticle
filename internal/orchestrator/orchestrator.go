@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/petitlyrics"
 )
 
 // Mode names the dispatch strategy (docs/multi-provider-orchestration.md).
@@ -41,6 +43,9 @@ type Orchestrator struct {
 	// raceWait bounds the parallel-mode upgrade window (synced preempts a held
 	// unsynced). Unused in ordered mode. Defaults to DefaultRaceWait.
 	raceWait time.Duration
+	// minCommit is the lowest quality that may END an ordered dispatch
+	// (SetMinCommitQuality, #982). QualityNone, the zero value, is no gate.
+	minCommit Quality
 }
 
 // New builds an orchestrator over lanes in priority order. mode must be "ordered"
@@ -94,6 +99,56 @@ func (o *Orchestrator) SetRaceWait(d time.Duration) {
 	o.raceWait = d
 }
 
+// SetMinCommitQuality gates which results may end an ordered dispatch (#982).
+// With q set, a result the dispatch would otherwise commit ends it only when
+// QualityOf reaches q; a lower one is kept (the best by landed quality, the
+// earlier lane on a tie) and the remaining lanes are tried. When no lane
+// reaches q the kept result is returned as the best available, ahead of a held
+// demotable lyric unless it lands below unsynced (a result kept after a lyric
+// was held always lands above it, so an unsynced one was kept first and wins
+// the tie as the earlier lane). Every other rule is untouched: timing
+// fall-through, held lyrics, ErrTimingRefusedUntried and first-lane ties.
+//
+// While gated, a result the orchestrator returns that does not itself carry
+// served words has its WordAnswer replaced by the dispatch's aggregate: absent
+// only when EVERY word-capable lane answered (a word answer, or a genuine
+// no-match; see isWordNoMatch), otherwise unknown -- a lane that did not answer has not said "no words".
+//
+// QualityNone (the default) is no gate, which is byte-identical to a build
+// without this option. Parallel mode refuses a gate: its race commits on
+// arrival order, and word-only dispatch is ordered by design (#982 plan 2.3).
+func (o *Orchestrator) SetMinCommitQuality(q Quality) error {
+	if q < QualityNone || q > QualityWordSynced {
+		return fmt.Errorf("orchestrator: minimum commit quality %d is outside [%d, %d]", q, QualityNone, QualityWordSynced)
+	}
+	if o.mode == ModeParallel && q > QualityNone {
+		return fmt.Errorf("orchestrator: a minimum commit quality needs %q mode, not %q", ModeOrdered, o.mode)
+	}
+	o.minCommit = q
+	return nil
+}
+
+// isWordNoMatch reports a GENUINE no-match, the only error that answers the word
+// question (#982); any other error leaves it unanswered, as absent is terminal.
+func isWordNoMatch(err error) bool {
+	return err != nil && (musixmatch.IsNoMatch(err) || petitlyrics.IsNoMatch(err))
+}
+
+// wordAnswerFor aggregates a gated dispatch's word answer from the number of
+// word-capable lanes that answered.
+func (o *Orchestrator) wordAnswerFor(answered int) models.WordAnswer {
+	lanes := 0
+	for _, l := range o.lanes {
+		if l.WordCapable() {
+			lanes++
+		}
+	}
+	if lanes > 0 && answered == lanes {
+		return models.WordAnswerAbsent
+	}
+	return models.WordAnswerUnknown
+}
+
 // FindLyrics dispatches the lookup using the configured mode. Ordered mode walks
 // lanes in priority order; parallel mode races them with a bounded synced-upgrade
 // window. Both share the same suitability rule and the same resolution precedence
@@ -131,15 +186,20 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 		if err := ctx.Err(); err != nil {
 			return models.Song{}, err
 		}
-		if r.haveHeld && lane.instrumentalOnly {
+		if (r.haveHeld || r.haveGated) && lane.instrumentalOnly {
 			// A suitable lyric is already held (#950), and an instrumental verdict
-			// can never outrank words, so the detector is not run at all.
+			// can never outrank words, so the detector is not run at all. A result
+			// kept below the commit gate would have ended the dispatch ungated, so
+			// the detector could not have run then either.
 			continue
 		}
 
 		song, err := lane.FindLyrics(ctx, track, sourcePath)
 		class := ClassifyOutcome(err)
 		r.noteUntried(err, class, lane.Name(), lane.instrumentalOnly)
+		if lane.WordCapable() && (isWordNoMatch(err) || (err == nil && song.WordAnswer != models.WordAnswerUnknown)) {
+			r.wordAnswered++
+		}
 
 		if class == OutcomeUnavailable {
 			// The breaker was open and the provider was not called. An unavailable
@@ -162,6 +222,11 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			switch kind {
 			case candidateCommit:
 				if !r.haveHeld || landedQuality(song, track) > QualityUnsynced {
+					if QualityOf(song) < o.minCommit {
+						// Below the commit gate (#982): keep it, try the next lane.
+						r.gate(song, lane.Name(), landedQuality(song, track))
+						continue
+					}
 					song.WinningLane = lane.Name()
 					song.LaneAttempts = laneAttemptsFor(attempted, lane.Name())
 					return song, nil
@@ -188,6 +253,9 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 	// persists these only on the success and benign-miss paths (not on hard
 	// failures), so carrying them on the error song here is harmless.
 	song.LaneAttempts = laneAttemptsFor(attempted, song.WinningLane)
+	if o.minCommit > QualityNone && song.WordAnswer != models.WordAnswerServed {
+		song.WordAnswer = o.wordAnswerFor(r.wordAnswered)
+	}
 	return song, err
 }
 
@@ -245,6 +313,23 @@ type dispatchResult struct {
 	untriedErr error
 	// untriedLane names the lane untriedErr came from.
 	untriedLane string
+	// gated is the best result that would have committed but sat below the
+	// minimum commit quality (#982); gatedQuality is its landed quality. Only
+	// ever set while a gate is configured.
+	gatedSong    models.Song
+	gatedLane    string
+	gatedQuality Quality
+	haveGated    bool
+	// wordAnswered counts word-capable lanes that answered the word question.
+	wordAnswered int
+}
+
+// gate keeps song as the below-gate commit candidate if it lands strictly
+// better than the one kept, so the earlier lane wins a tie.
+func (r *dispatchResult) gate(song models.Song, laneName string, q Quality) {
+	if !r.haveGated || q > r.gatedQuality {
+		r.gatedSong, r.gatedLane, r.gatedQuality, r.haveGated = song, laneName, q, true
+	}
 }
 
 // noteUntried records err if its class says the lane did not answer the
@@ -328,6 +413,10 @@ func (r *dispatchResult) rankErr(err error, class OutcomeClass) {
 // the wait budget is spent. A demotable (held) result never waits: its .txt is
 // real output.
 func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.Song, error) {
+	if r.haveGated && (!r.haveHeld || r.gatedQuality >= QualityUnsynced) {
+		r.gatedSong.WinningLane = r.gatedLane
+		return r.gatedSong, nil
+	}
 	if r.haveHeld {
 		r.heldSong.WinningLane = r.heldLane
 		return r.heldSong, nil

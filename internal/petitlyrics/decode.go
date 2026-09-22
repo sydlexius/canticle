@@ -48,8 +48,11 @@ type wsyWord struct {
 // (declarations, processing instructions, comments) stripped, so the caller sees
 // the first real element. Observed payloads open with <wsy> directly, but a
 // declaration is valid XML and must not change the classification.
+//
+// A leading UTF-8 BOM is stripped too: encoding/xml accepts one, so a
+// BOM-prefixed <wsy> is a word payload, not plain text (#982).
 func xmlRootPrefix(raw []byte) []byte {
-	b := bytes.TrimLeft(raw, " \t\r\n")
+	b := bytes.TrimLeft(bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF")), " \t\r\n")
 	for {
 		switch {
 		case bytes.HasPrefix(b, []byte("<?")):
