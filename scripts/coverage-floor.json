@@ -1,4 +1,5 @@
 {
+  "internal/aligner": 86,
   "internal/app": 67,
   "internal/auth": 79,
   "internal/backoff": 92,

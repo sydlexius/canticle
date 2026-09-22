@@ -530,8 +530,9 @@ min_similarity = 0.35
 # below 1 reset to the default. Env: MXLRC_WORD_SYNC_GENERATE_CONCURRENCY.
 # concurrency = 1
 
-# Optional model name passed to the aligner sidecar (e.g. a WhisperX model).
-# Empty (the default) lets the sidecar choose its own default.
+# RESERVED, not yet sent to the sidecar: the aligner client has no model
+# parameter on its wire contract, and the sidecar selects its own models via
+# its own ALIGNER_* environment variables. Kept for a future release.
 # Env: MXLRC_WORD_SYNC_GENERATE_MODEL.
 # model = ""
 

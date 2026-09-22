@@ -1352,7 +1352,7 @@ var settingsLabels = map[string]string{
 	"word_sync_generate.url":                          "Aligner sidecar address",
 	"word_sync_generate.budget_per_cycle":             "Tracks aligned per background round",
 	"word_sync_generate.concurrency":                  "Concurrent alignment jobs per round",
-	"word_sync_generate.model":                        "Alignment model name (blank uses the sidecar's default)",
+	"word_sync_generate.model":                        "Reserved, not sent yet (the sidecar picks its own model)",
 	"realign.enabled":                                 "Re-attach orphaned lyric files in serve mode",
 	"realign.on_scan":                                 "Realign automatically after each scan",
 	"realign.require_provenance":                      "Require an exact ID match to move a file",
