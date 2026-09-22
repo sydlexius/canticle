@@ -280,7 +280,8 @@ const wordRecheckOwned = ` WHERE id = ? AND status = 'processing' AND word_timin
 // row would then run as an ORDINARY fetch, whose unsynced result replaces the
 // .lrc. completed_at moves only on served (a new sidecar landed); absent
 // leaves it, like the file. miss_count, attempts and lane_attempts are never
-// touched. sql.ErrNoRows means the row was not a processing recheck row.
+// touched. sql.ErrNoRows means the row was not a processing recheck row, or
+// no longer exists (pruned or cleared while the worker held it).
 func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string, generation int64) error {
 	if state != WordTimingServed && state != WordTimingAbsent {
 		return fmt.Errorf("queue: settle word recheck id %d: invalid state %q", id, state)
@@ -321,10 +322,15 @@ func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string,
 // not said "no words". The delay is what a plain Release lacks: a released
 // recheck row is due again at once and would be re-asked in a tight loop.
 func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, cause string) error {
-	res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'deferred', next_attempt_at = ?, last_error = ?`+wordRecheckOwned,
-		formatTime(q.now().Add(retryAfter)), cause, id)
-	if err != nil {
-		return fmt.Errorf("queue: defer word recheck id %d: %w", id, err)
-	}
-	return requireAffected(res, "queue: defer word recheck")
+	next := formatTime(q.now().Add(retryAfter))
+	// Retried like Settle: a lost write strands the row in 'processing', which
+	// nothing reclaims.
+	return db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'deferred', next_attempt_at = ?, last_error = ?`+wordRecheckOwned,
+			next, cause, id)
+		if err != nil {
+			return fmt.Errorf("queue: defer word recheck id %d: %w", id, err)
+		}
+		return requireAffected(res, "queue: defer word recheck")
+	})
 }
