@@ -277,7 +277,28 @@ type Song struct {
 	// zero here and the caller re-stamps it from the live file, which is correct
 	// -- the duration belongs to the file on disk, not to the cached lyrics.
 	AudioDurationSeconds int `json:"-"`
+	// WordAnswer is what the serving lane said about WORD-level timing for this
+	// track (#982): served, absent (the lane affirmatively has none), or unknown
+	// (the zero value: the lane did not say, or could not be read). It is a
+	// claim about the provider's answer, never about WordTimings' length -- a
+	// dropped or unbindable payload reads unknown, not absent. Transient like
+	// WinningLane: a cache hit must not resurrect a verdict from another fetch.
+	WordAnswer WordAnswer `json:"-"`
 }
+
+// WordAnswer is a lane's per-fetch answer to "does this track have word
+// timings?" (#982). The zero value is WordAnswerUnknown, so a lane that never
+// sets it (innertube, the detector) or a cache hit asserts nothing.
+type WordAnswer string
+
+const (
+	// WordAnswerUnknown means the lane gave no usable answer.
+	WordAnswerUnknown WordAnswer = ""
+	// WordAnswerServed means the lane returned word timings on this result.
+	WordAnswerServed WordAnswer = "served"
+	// WordAnswerAbsent means the lane answered, and it has no word timings.
+	WordAnswerAbsent WordAnswer = "absent"
+)
 
 // LaneAttempt is one provider lane's outcome for a single track: the lane name
 // and whether it served the track (Hit) or was attempted and lost (miss). The

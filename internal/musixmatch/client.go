@@ -229,6 +229,16 @@ func IsBenignMiss(err error) bool {
 		errors.Is(err, ErrMatcherClientError)
 }
 
+// IsNoMatch reports a genuine no-match, the only miss that answers the word
+// question (#982); other benign misses say nothing about word data. Only
+// ErrNotFound qualifies: ErrUnmatchable fires before any request, and
+// ErrMatchMismatch means the provider returned a DIFFERENT track, so neither
+// says whether the requested track has word timings. A matcher 4xx other than
+// 404 refuses THIS request's shape, which a client fix changes.
+func IsNoMatch(err error) bool {
+	return errors.Is(err, ErrNotFound)
+}
+
 // TokenRenewer supplies a replacement token when the API explicitly signals that
 // the current one is finished. It is deliberately narrow: the ONLY trigger is the
 // body-level hint=renew signal (see ErrTokenRenewalRequired), never a bare HTTP
@@ -832,9 +842,14 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 			slog.Warn("musixmatch: the response carried no track.richsync.get sub-call on a line-synced track; " +
 				"the richsync request parameters or the response shape may have changed")
 		}
-		song.WordTimings = richSyncTimings(trg, lines)
+		song.WordTimings, song.WordAnswer = richSyncTimings(trg, lines)
 	} else {
 		slog.Debug("no synced lyrics found")
+		// No cues to bind timings to, but an inner 404 is still the provider's
+		// "no word data" answer (#982); anything else stays unknown.
+		if richSyncNotFound(trg) {
+			song.WordAnswer = models.WordAnswerAbsent
+		}
 		if song.Track.HasLyrics == 1 {
 			if tlg.GetInt("body", "lyrics", "restricted") == 1 {
 				return song, fmt.Errorf("%w: restricted", ErrNoLyrics)
@@ -870,7 +885,30 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 // A parse failure is the one case worth SEEING -- it means the payload shape
 // changed under us -- so it logs at Warn. Byte count only: a richsync body IS
 // the lyric, so no text, title or artist may appear in a log line.
-func richSyncTimings(trg *fastjson.Value, cues []models.Lines) []models.WordTiming {
+//
+// The second result is the lane's WORD ANSWER (#982). Only an inner 404 is
+// WordAnswerAbsent: measured, it is the provider saying has_richsync=0. An
+// absent sub-call, a 401, any other status, an empty or unparsable body, or a
+// body whose words bind to no cue is WordAnswerUnknown -- none of those is the
+// provider saying "no words", and a false absent is a terminal verdict.
+func richSyncTimings(trg *fastjson.Value, cues []models.Lines) ([]models.WordTiming, models.WordAnswer) {
+	if richSyncNotFound(trg) {
+		return nil, models.WordAnswerAbsent
+	}
+	timings := richSyncWordTimings(trg, cues)
+	if len(timings) > 0 {
+		return timings, models.WordAnswerServed
+	}
+	return nil, models.WordAnswerUnknown
+}
+
+// richSyncNotFound reports the sub-call's inner 404: has_richsync=0.
+func richSyncNotFound(trg *fastjson.Value) bool {
+	return trg != nil && trg.GetInt("header", "status_code") == 404
+}
+
+// richSyncWordTimings is richSyncTimings' extraction: the word timings, or nil.
+func richSyncWordTimings(trg *fastjson.Value, cues []models.Lines) []models.WordTiming {
 	// Every non-200 is swallowed, INCLUDING a 401, and that is deliberate rather
 	// than an oversight about throttle signaling. A 401 on the SUB-CALL carries
 	// nothing the caller does not already have: the outer response's own status

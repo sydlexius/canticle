@@ -25,6 +25,7 @@
 package petitlyrics
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/xml"
@@ -424,6 +425,10 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 // makes the two responses provably the same song, and its absence a typed miss.
 func (c *Client) lookupUnsyncedText(ctx context.Context, track models.Track, lyricsID string) (string, error) {
 	songs, err := c.request(ctx, track, tierUnsynced)
+	if IsNoMatch(err) {
+		// The first request matched: an empty continuation is a tier failure (#982).
+		return "", fmt.Errorf("petitlyrics: line-sync text lookup returned no songs: %w", ErrNotFound)
+	}
 	if err != nil {
 		return "", fmt.Errorf("petitlyrics: line-sync text lookup: %w", err)
 	}
@@ -494,8 +499,13 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 		// path -- an invariant defended by
 		// TestDecodeWordSync_OrderingIsStableThroughExpand. If that sort is ever
 		// removed, this check stops being sufficient.
+		// The word answer (#982) follows what is ATTACHED: timings dropped for a
+		// split cue are unknown, never absent -- the provider did serve words.
 		if len(expanded.Lines) == len(cues) {
 			song.WordTimings = timings
+			if len(timings) > 0 {
+				song.WordAnswer = models.WordAnswerServed
+			}
 		} else {
 			// Info, not Debug: this silently demotes a result a full quality tier,
 			// and it should be rare. If it ever becomes common that signals a
@@ -526,12 +536,20 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 		// the one-cue-per-line model too. No word timings exist at this tier, so
 		// unlike the word-sync branch there is no index-stability concern.
 		song.Subtitles = lrcnormalize.Expand(models.Synced{Lines: cues})
+		// The API returns the highest tier a track has (see FindLyrics), so a
+		// line-sync or plain-text answer to a word-sync request is the provider
+		// saying it has no word timings (#982).
+		song.WordAnswer = models.WordAnswerAbsent
 		return song, nil
 
 	default:
 		text := decodeUnsynced(raw)
 		if strings.TrimSpace(text) == "" {
 			return models.Song{}, fmt.Errorf("petitlyrics: empty lyrics payload: %w", ErrNotFound)
+		}
+		// Absent only for positively plain text; unrecognized markup is unknown (#982).
+		if !bytes.HasPrefix(xmlRootPrefix(raw), []byte("<")) {
+			song.WordAnswer = models.WordAnswerAbsent
 		}
 		// A plain-text payload may still carry LRC timestamps; prefer them.
 		if doc := lrcnormalize.ParseBody(text); len(doc.Cues) > 0 {
@@ -588,12 +606,12 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 		// When the run reaches the threshold, ASK the provider a question it can
 		// only answer one way.
 		if !c.recordZeroResult() {
-			return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+			return nil, ErrNoMatch
 		}
 		if c.confirmOutage(ctx) {
 			return nil, ErrProviderUnavailable
 		}
-		return nil, fmt.Errorf("petitlyrics: no songs in response: %w", ErrNotFound)
+		return nil, ErrNoMatch
 	}
 	// At least one song came back, which proves the application id is still
 	// accepted. Reset regardless of what the client then makes of the payload: a
