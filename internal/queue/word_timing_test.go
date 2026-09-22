@@ -425,6 +425,20 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	mustExec(t, dbh, `INSERT INTO libraries (id, path, name) VALUES (1, '/m', 'lib')`)
 	mustExec(t, dbh, `INSERT INTO scan_results (id, library_id, file_path, status) VALUES (1, 1, '/m/x.flac', 'pending')`)
 	mustExec(t, dbh, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, 1)`, served)
+	// A prior lane attempt per row: no transition may add, change, or drop one.
+	laneRows := func() string {
+		t.Helper()
+		var s string
+		if err := dbh.QueryRow(`SELECT COALESCE(group_concat(queue_id || ':' || lane || ':' || hit || ':' || attempted_at, ','), '')
+            FROM (SELECT * FROM lane_attempts ORDER BY queue_id, lane)`).Scan(&s); err != nil {
+			t.Fatalf("read lane_attempts: %v", err)
+		}
+		return s
+	}
+	for _, id := range []int64{served, absent, deferred} {
+		mustExec(t, dbh, `INSERT INTO lane_attempts (queue_id, lane, hit, attempted_at) VALUES (?, 'musixmatch', 0, '2026-01-10T00:00:00Z')`, id)
+	}
+	lane0 := laneRows()
 	if err := q.SettleWordRecheck(ctx, served, WordTimingServed, 9); err != nil {
 		t.Fatalf("settle served: %v", err)
 	}
@@ -433,6 +447,9 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	}
 	if err := q.DeferWordRecheck(ctx, deferred, time.Hour, "throttled"); err != nil {
 		t.Fatalf("defer: %v", err)
+	}
+	if got := laneRows(); got != lane0 {
+		t.Fatalf("lane_attempts after settle/defer = %q; want unchanged %q", got, lane0)
 	}
 	if st, s, c, _, g, m, a := read(served); st != "done" || s != WordTimingServed || c != formatTime(now) || g.Int64 != 9 || m != 3 || a != 1 {
 		t.Fatalf("served = (%s,%s,%s,%v,%d,%d)", st, s, c, g, m, a)
