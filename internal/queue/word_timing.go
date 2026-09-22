@@ -269,3 +269,62 @@ func (q *DBQueue) SetWordTimingState(ctx context.Context, id int64, state string
 	}
 	return nil
 }
+
+// wordRecheckOwned is the guard both word-recheck transitions share: the
+// worker holds the row AND it is still a recheck row.
+const wordRecheckOwned = ` WHERE id = ? AND status = 'processing' AND word_timing_state = 'queued'`
+
+// SettleWordRecheck settles a word-recheck row (#982) back to 'done' with its
+// verdict (served or absent) and generation in ONE statement. A verdict
+// stamped apart from the settle could survive a failed settle, and the retried
+// row would then run as an ORDINARY fetch, whose unsynced result replaces the
+// .lrc. completed_at moves only on served (a new sidecar landed); absent
+// leaves it, like the file. miss_count, attempts and lane_attempts are never
+// touched. sql.ErrNoRows means the row was not a processing recheck row.
+func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string, generation int64) error {
+	if state != WordTimingServed && state != WordTimingAbsent {
+		return fmt.Errorf("queue: settle word recheck id %d: invalid state %q", id, state)
+	}
+	now := formatTime(q.now())
+	return db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("queue: begin word recheck settle tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		res, err := tx.ExecContext(ctx, `UPDATE work_queue SET status = 'done', last_error = '', refused_waits = 0,
+             completed_at = CASE WHEN ? = 'served' THEN ? ELSE completed_at END,
+             word_timing_state = ?, word_timing_generation = ?, word_timing_checked_at = ?`+wordRecheckOwned,
+			state, now, state, generation, now, id)
+		if err != nil {
+			return fmt.Errorf("queue: settle word recheck id %d: %w", id, err)
+		}
+		if err := requireAffected(res, "queue: settle word recheck"); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE scan_results SET status = 'done'
+             WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+               AND status != 'done'`, id); err != nil {
+			return fmt.Errorf("queue: settle word recheck scan_results writeback: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("queue: commit word recheck settle: %w", err)
+		}
+		return nil
+	})
+}
+
+// DeferWordRecheck releases a word-recheck row whose word question went
+// unanswered (a lane throttled, was unavailable, or gave no usable answer) for
+// a retry after retryAfter. The row stays 'queued' and nothing a miss or a
+// failure counts changes (miss_count, attempts): a lane that did not answer has
+// not said "no words". The delay is what a plain Release lacks: a released
+// recheck row is due again at once and would be re-asked in a tight loop.
+func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, cause string) error {
+	res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'deferred', next_attempt_at = ?, last_error = ?`+wordRecheckOwned,
+		formatTime(q.now().Add(retryAfter)), cause, id)
+	if err != nil {
+		return fmt.Errorf("queue: defer word recheck id %d: %w", id, err)
+	}
+	return requireAffected(res, "queue: defer word recheck")
+}

@@ -389,3 +389,64 @@ func TestReEnqueueKeepsQueuedRowIntact(t *testing.T) {
 		t.Fatalf("after collision (%s,%s,%s,%q,%q); want (%s,%s,%s,%q,%q)", s, w, p, o, c, s0, w0, p0, o0, c0)
 	}
 }
+
+// TestWordRecheckSettleAndDefer covers the worker's two recheck transitions:
+// served moves completed_at, absent keeps it, a defer stays 'queued' and due
+// later, no counter moves, and each refuses a row that is not a processing
+// recheck row (an ordinary processing row included).
+func TestWordRecheckSettleAndDefer(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	now := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+	claim := func(key string, queued bool) int64 {
+		id := seedWordCandidate(t, dbh, key)
+		state := any(nil)
+		if queued {
+			state = WordTimingQueued
+		}
+		mustExec(t, dbh, `UPDATE work_queue SET status = 'processing', miss_count = 3, attempts = 1, word_timing_state = ? WHERE id = ?`, state, id)
+		return id
+	}
+	read := func(id int64) (status, state, completed, next string, gen sql.NullInt64, miss, attempts int) {
+		t.Helper()
+		if err := dbh.QueryRow(`SELECT status, COALESCE(word_timing_state, ''), completed_at, next_attempt_at,
+            word_timing_generation, miss_count, attempts FROM work_queue WHERE id = ?`, id).Scan(
+			&status, &state, &completed, &next, &gen, &miss, &attempts); err != nil {
+			t.Fatalf("read %d: %v", id, err)
+		}
+		return
+	}
+	served, absent, deferred, ordinary := claim("s", true), claim("a", true), claim("d", true), claim("o", false)
+	if err := q.SettleWordRecheck(ctx, served, WordTimingServed, 9); err != nil {
+		t.Fatalf("settle served: %v", err)
+	}
+	if err := q.SettleWordRecheck(ctx, absent, WordTimingAbsent, 9); err != nil {
+		t.Fatalf("settle absent: %v", err)
+	}
+	if err := q.DeferWordRecheck(ctx, deferred, time.Hour, "throttled"); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if st, s, c, _, g, m, a := read(served); st != "done" || s != WordTimingServed || c != formatTime(now) || g.Int64 != 9 || m != 3 || a != 1 {
+		t.Fatalf("served = (%s,%s,%s,%v,%d,%d)", st, s, c, g, m, a)
+	}
+	if st, s, c, _, g, m, a := read(absent); st != "done" || s != WordTimingAbsent || c != "2026-01-10T00:00:00Z" || g.Int64 != 9 || m != 3 || a != 1 {
+		t.Fatalf("absent = (%s,%s,%s,%v,%d,%d); completed_at must not move", st, s, c, g, m, a)
+	}
+	if st, s, _, n, g, m, a := read(deferred); st != "deferred" || s != WordTimingQueued || n != formatTime(now.Add(time.Hour)) || g.Valid || m != 3 || a != 1 {
+		t.Fatalf("deferred = (%s,%s,%s,%v,%d,%d)", st, s, n, g, m, a)
+	}
+	for name, err := range map[string]error{
+		"settle ordinary": q.SettleWordRecheck(ctx, ordinary, WordTimingAbsent, 9),
+		"defer ordinary":  q.DeferWordRecheck(ctx, ordinary, time.Hour, "x"),
+		"settle settled":  q.SettleWordRecheck(ctx, served, WordTimingServed, 9),
+	} {
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("%s = %v; want sql.ErrNoRows", name, err)
+		}
+	}
+	if err := q.SettleWordRecheck(ctx, deferred, WordTimingQueued, 9); err == nil {
+		t.Fatal("settle with state queued succeeded; want refusal")
+	}
+}
