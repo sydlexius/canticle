@@ -133,26 +133,31 @@ func TestAlign_RequestMatchesSidecarContract(t *testing.T) {
 }
 
 // TestAlign_LineIndexRespectsBlankLineFiltering verifies the client checks a
-// response's line_index against the sidecar's blank-line-filtered count,
-// not the raw line count, and that filteredLineCount's blank test (via
-// isPythonBlank) matches Python's str.strip() end-to-end through Align.
+// response's line_index against the sidecar's blank-line-filtered count, not
+// the raw line count, and that filteredToRawLineIndex's blank test (via
+// isPythonBlank) matches Python's str.strip() end-to-end through Align. Where
+// a case is valid, it also asserts the returned Word.LineIndex is the RAW
+// index in the caller's lines slice, not the sidecar's filtered index (see
+// TestAlign_LineIndexRemappedToRawIndex for the dedicated remap coverage).
 func TestAlign_LineIndexRespectsBlankLineFiltering(t *testing.T) {
-	// 3 lines, 1 blank -> 2 non-blank; index 1 is "world" (3rd element).
+	// 3 lines, 1 blank -> 2 non-blank; filtered index 1 is "world" (3rd
+	// element, raw index 2).
 	blankMiddleLines := []string{"hello", "", "world"}
 	// Python-blank-but-not-Go-blank runes must also be dropped.
 	pySpaceOnlyLines := []string{"hello", "\u001c\u001d", "world"}
 
 	cases := []struct {
-		name      string
-		lines     []string
-		lineIndex int
-		wantValid bool
+		name         string
+		lines        []string
+		lineIndex    int
+		wantValid    bool
+		wantRawIndex int
 	}{
-		{"index_within_filtered_count_is_valid", blankMiddleLines, 1, true},
-		{"index_at_raw_len_but_beyond_filtered_count_is_invalid", blankMiddleLines, 2, false},
-		{"index_far_out_of_range_is_invalid", []string{"only one line"}, 5, false},
-		{"python_only_blank_runes_dropped_like_ordinary_blank", pySpaceOnlyLines, 1, true},
-		{"python_only_blank_runes_still_bound_the_range", pySpaceOnlyLines, 2, false},
+		{"index_within_filtered_count_is_valid", blankMiddleLines, 1, true, 2},
+		{"index_at_raw_len_but_beyond_filtered_count_is_invalid", blankMiddleLines, 2, false, 0},
+		{"index_far_out_of_range_is_invalid", []string{"only one line"}, 5, false, 0},
+		{"python_only_blank_runes_dropped_like_ordinary_blank", pySpaceOnlyLines, 1, true, 2},
+		{"python_only_blank_runes_still_bound_the_range", pySpaceOnlyLines, 2, false, 0},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -170,10 +175,58 @@ func TestAlign_LineIndexRespectsBlankLineFiltering(t *testing.T) {
 				if len(res.Words) != 1 {
 					t.Fatalf("len(Words) = %d; want 1", len(res.Words))
 				}
+				if res.Words[0].LineIndex != tc.wantRawIndex {
+					t.Fatalf("Words[0].LineIndex = %d; want raw index %d", res.Words[0].LineIndex, tc.wantRawIndex)
+				}
 				return
 			}
 			if !errors.Is(err, ErrInvalidResponse) {
 				t.Fatalf("Align error = %v; want ErrInvalidResponse (line_index %d out of range)", err, tc.lineIndex)
+			}
+		})
+	}
+}
+
+// TestAlign_LineIndexRemappedToRawIndex is the dedicated regression for the
+// real bug this fix addresses: Word.LineIndex is documented as indexing the
+// caller's lines slice, but the sidecar's line_index counts only non-blank
+// lines, so without a remap a word from a line after a blank one comes back
+// pointing at the wrong (blank) raw line. Covers a leading, a middle, and a
+// trailing blank line, plus a line that is blank only under Python's wider
+// whitespace set (U+001C). Mutation-checked: skipping the
+// filteredToRaw[lineIndex] remap in decodeAndValidate and returning the
+// sidecar's filtered index unchanged fails every non-identity case below.
+func TestAlign_LineIndexRemappedToRawIndex(t *testing.T) {
+	cases := []struct {
+		name         string
+		lines        []string
+		sidecarIndex int // index the sidecar reports (over its filtered lines)
+		wantRawIndex int // raw index in the caller's lines slice
+	}{
+		{"leading_blank", []string{"", "hello", "world"}, 0, 1},
+		{"leading_blank_second_word", []string{"", "hello", "world"}, 1, 2},
+		{"middle_blank", []string{"hello", "", "world"}, 1, 2},
+		{"trailing_blank", []string{"hello", "world", ""}, 1, 1},
+		{"u001c_only_line_is_blank", []string{"hello", "\u001c", "world"}, 1, 2},
+		{"no_blanks_is_identity", []string{"hello", "world"}, 1, 1},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"words":[{"text":"x","start_ms":0,"end_ms":100,"line_index":%d,"confidence":0.9}],"transcript":"x"}`, tc.sidecarIndex)
+			srv := jsonServer(body)
+			defer srv.Close()
+
+			c := newClientForServer(t, srv, newTestBreaker())
+			res, err := c.Align(context.Background(), newTestAudio(t), tc.lines)
+			if err != nil {
+				t.Fatalf("Align: %v", err)
+			}
+			if len(res.Words) != 1 {
+				t.Fatalf("len(Words) = %d; want 1", len(res.Words))
+			}
+			if got := res.Words[0].LineIndex; got != tc.wantRawIndex {
+				t.Fatalf("Words[0].LineIndex = %d; want raw index %d (caller lines = %q)", got, tc.wantRawIndex, tc.lines)
 			}
 		})
 	}
@@ -372,6 +425,13 @@ func TestAlign_BusyReturns429AsErrBusy(t *testing.T) {
 // input falling back to 0 (unknown), and the [0, maxRetryAfter] clamp
 // (mutation-checked: removing the clamp lets "10000000000" seconds or a
 // far-future HTTP-date through unbounded, failing their assertions below).
+// "int64_overflow_clamps_to_max" is the dedicated regression for a value
+// beyond strconv.ParseInt's range (int64 max + 1): isAllDigits routes it to
+// the overflow clamp instead of falling through to the HTTP-date parse and
+// silently reading it as 0 (unknown) like ordinary non-digit garbage.
+// Mutation-checked: reverting to a bare strconv.Atoi (or ParseInt with the
+// overflow error treated as "unparsable") fails that case, since Atoi errors
+// out on a value this large and the old code path returned 0.
 func TestParseRetryAfter(t *testing.T) {
 	cases := []struct {
 		name string
@@ -386,6 +446,8 @@ func TestParseRetryAfter(t *testing.T) {
 		{"past_http_date", "Mon, 01 Jan 2001 00:00:00 GMT", 0},
 		{"huge_seconds_clamps_to_max", "10000000000", maxRetryAfter},
 		{"far_future_http_date_clamps_to_max", "Mon, 01 Jan 2200 00:00:00 GMT", maxRetryAfter},
+		{"int64_overflow_clamps_to_max", "9223372036854775808", maxRetryAfter},
+		{"int64_overflow_with_more_digits_clamps_to_max", "99999999999999999999999999999999", maxRetryAfter},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -489,9 +551,14 @@ func TestAlign_OversizedResponse(t *testing.T) {
 
 // TestAlign_ResponseValidationFailures tables decodeAndValidate's checks: a
 // negative start, an end before its own start, a non-monotonic start across
-// words, and confidence above/below [0, 1]. NaN confidence fails at JSON
-// decode instead (not valid JSON), so it still wants a non-nil error but not
-// necessarily ErrInvalidResponse.
+// words, confidence above/below [0, 1], and a word with a missing or
+// explicitly null required field. NaN confidence fails at JSON decode
+// instead (not valid JSON), so it still wants a non-nil error but not
+// necessarily ErrInvalidResponse. The missing/null cases are mutation-
+// checked: reverting wireWord's fields to scalars (so a missing/null key
+// decodes as a silent zero value instead of a nil pointer) fails every one
+// of them, since a zero-valued word (start_ms 0, confidence 0, ...) is
+// otherwise indistinguishable from a genuinely valid one.
 func TestAlign_ResponseValidationFailures(t *testing.T) {
 	cases := []struct {
 		name               string
@@ -504,6 +571,11 @@ func TestAlign_ResponseValidationFailures(t *testing.T) {
 		{"confidence_above_range", `{"words":[{"text":"x","start_ms":0,"end_ms":100,"line_index":0,"confidence":1.5}],"transcript":"x"}`, true},
 		{"confidence_below_range", `{"words":[{"text":"x","start_ms":0,"end_ms":100,"line_index":0,"confidence":-0.1}],"transcript":"x"}`, true},
 		{"confidence_nan", `{"words":[{"text":"x","start_ms":0,"end_ms":100,"line_index":0,"confidence":NaN}],"transcript":"x"}`, false},
+		{"empty_word_object", `{"words":[{}],"transcript":"x"}`, true},
+		{"null_start_ms", `{"words":[{"text":"x","start_ms":null,"end_ms":100,"line_index":0,"confidence":0.5}],"transcript":"x"}`, true},
+		{"missing_confidence", `{"words":[{"text":"x","start_ms":0,"end_ms":100,"line_index":0}],"transcript":"x"}`, true},
+		{"null_text", `{"words":[{"text":null,"start_ms":0,"end_ms":100,"line_index":0,"confidence":0.5}],"transcript":"x"}`, true},
+		{"missing_line_index", `{"words":[{"text":"x","start_ms":0,"end_ms":100,"confidence":0.5}],"transcript":"x"}`, true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -571,6 +643,52 @@ func TestAlign_ContextTermination(t *testing.T) {
 			t.Fatalf("breaker.Trips() = %d; want 0 (a caller-initiated timeout is not breaker evidence)", got)
 		}
 	})
+}
+
+// TestAlign_ContextCanceledDuringBodyRead covers the read-error path AFTER a
+// 200 status line has already been received: a server that sends headers and
+// a partial body, then blocks (never closing the connection), followed by
+// the caller canceling ctx mid-read. This must apply the same ctx.Err()
+// carve-out as the Do() error path above, since io.ReadAll(res.Body) can
+// fail from context cancellation just as easily as the round-trip itself,
+// and it is equally not breaker evidence. Mutation-checked: removing the
+// carve-out at the top of the body-read error branch falls through to
+// c.breaker.Trip(), failing the Trips()==0 assertion.
+func TestAlign_ContextCanceledDuringBodyRead(t *testing.T) {
+	headersSent := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "4096") // promise more than is ever written
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"words`)) // partial body, never valid JSON on its own
+		w.(http.Flusher).Flush()
+		close(headersSent)
+		<-release
+	}))
+	defer func() {
+		close(release)
+		srv.Close()
+	}()
+
+	breaker := newTestBreaker()
+	c := newClientForServer(t, srv, breaker)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-headersSent
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, err := c.Align(ctx, newTestAudio(t), []string{"line"})
+	if err == nil {
+		t.Fatal("Align: want error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Align error = %v; want context.Canceled", err)
+	}
+	if got := breaker.Trips(); got != 0 {
+		t.Fatalf("breaker.Trips() = %d; want 0 (a caller-initiated cancel during the body read is not breaker evidence)", got)
+	}
 }
 
 // TestAlign_BreakerOpenSkipsCall is mutation-checked: removing the

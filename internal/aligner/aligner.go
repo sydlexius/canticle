@@ -12,14 +12,18 @@
 // field (lines newline-joined, UTF-8). The sidecar's _parse_lines splits
 // ONLY on "\n" (never str.splitlines()), strips each line with Python
 // str.strip(), and drops the ones that come out empty before assigning
-// line_index (0-based, in order) -- see filteredLineCount/isPythonBlank,
-// which must use the SAME blank test as the sidecar (Python's whitespace
-// set is wider than Go's unicode.IsSpace), not len(lines). Because the
-// sidecar splits on "\n" only, a caller line containing "\n" would
-// silently become two sidecar lines and shift every later line_index;
-// Align rejects such a line with ErrEmbeddedNewline before sending
-// anything. A bare trailing "\r" is contract-legal (str.strip() removes
-// it). The 200 response is JSON:
+// line_index (0-based, in order over the sidecar's OWN filtered lines) --
+// see filteredToRawLineIndex/isPythonBlank, which must use the SAME blank
+// test as the sidecar (Python's whitespace set is wider than Go's
+// unicode.IsSpace), not len(lines). Because a sidecar line_index counts only
+// non-blank lines, Align remaps every returned Word.LineIndex back to its
+// raw index in the caller's lines slice (see decodeAndValidate), so
+// Word.LineIndex always indexes the lines slice the caller passed, never the
+// sidecar's filtered one. Because the sidecar splits on "\n" only, a caller
+// line containing "\n" would silently become two sidecar lines and shift
+// every later line_index; Align rejects such a line with ErrEmbeddedNewline
+// before sending anything. A bare trailing "\r" is contract-legal
+// (str.strip() removes it). The 200 response is JSON:
 //
 //	{"words":[{"text":"...","start_ms":0,"end_ms":100,"line_index":0,"confidence":0.9}],"transcript":"..."}
 //
@@ -153,15 +157,23 @@ func parseRetryAfter(v string) time.Duration {
 	if v == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs < 0 {
-			return 0
+	if isAllDigits(v) {
+		// Parse as a big.Int-free range check: strconv.Atoi/ParseInt fails
+		// outright on a value beyond the platform int range (e.g.
+		// "9223372036854775808"), which would otherwise fall through to the
+		// HTTP-date parse (always fails on digits-only input) and silently
+		// return 0 (unknown) for what is clearly an oversized value, not
+		// garbage. An all-digit string that doesn't fit clamps to the max
+		// instead.
+		secs, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return maxRetryAfter
 		}
 		// Clamp the seconds value itself, before converting to a
 		// time.Duration: a large-enough secs overflows the int64
 		// nanosecond multiplication below (e.g. 10000000000s) and would
 		// otherwise wrap to a garbage (even negative) Duration.
-		if secs > int(maxRetryAfter/time.Second) {
+		if secs > int64(maxRetryAfter/time.Second) {
 			return maxRetryAfter
 		}
 		return clampRetryAfter(time.Duration(secs) * time.Second)
@@ -172,6 +184,23 @@ func parseRetryAfter(v string) time.Duration {
 		}
 	}
 	return 0
+}
+
+// isAllDigits reports whether v is non-empty and consists only of ASCII
+// digits (no sign, no whitespace -- v is already trimmed by the caller).
+// Distinguishing "all-digits but too big to parse" from "not a number at
+// all" is what lets parseRetryAfter clamp the former to maxRetryAfter
+// instead of silently reading it as 0 (unknown) like ordinary garbage.
+func isAllDigits(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // clampRetryAfter bounds d to [0, maxRetryAfter].
@@ -367,6 +396,12 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 
 	body, err := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Same carve-out as the Do() error path above: a caller-initiated
+			// cancel or deadline can abort the body read just as easily as
+			// the round-trip itself, and it is equally not breaker evidence.
+			return Result{}, fmt.Errorf("aligner: %w", ctxErr)
+		}
 		c.breaker.Trip()
 		return Result{}, fmt.Errorf("aligner: read response: %w", err)
 	}
@@ -375,7 +410,7 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 		return Result{}, fmt.Errorf("%w (%d byte limit)", ErrResponseTooLarge, maxResponseSize)
 	}
 
-	result, err := decodeAndValidate(body, filteredLineCount(lines))
+	result, err := decodeAndValidate(body, filteredToRawLineIndex(lines))
 	if err != nil {
 		c.breaker.Trip()
 		return Result{}, err
@@ -386,13 +421,17 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 }
 
 // wireWord and wireResult mirror the sidecar's JSON field names (snake_case)
-// without leaking those names into the exported Word/Result types.
+// without leaking those names into the exported Word/Result types. Every
+// field is a pointer so JSON decode leaves it nil when the key is absent OR
+// explicitly null, distinct from a present zero value (a genuine start_ms of
+// 0, or an empty-string Text) -- see decodeAndValidate, which rejects a word
+// with any nil field before it can pass through as a silently-zeroed Word.
 type wireWord struct {
-	Text       string  `json:"text"`
-	StartMS    int     `json:"start_ms"`
-	EndMS      int     `json:"end_ms"`
-	LineIndex  int     `json:"line_index"`
-	Confidence float64 `json:"confidence"`
+	Text       *string  `json:"text"`
+	StartMS    *int     `json:"start_ms"`
+	EndMS      *int     `json:"end_ms"`
+	LineIndex  *int     `json:"line_index"`
+	Confidence *float64 `json:"confidence"`
 }
 
 type wireResult struct {
@@ -431,30 +470,42 @@ func isPythonBlank(s string) bool {
 	return strings.TrimFunc(s, isPythonSpace) == ""
 }
 
-// filteredLineCount returns how many of lines are non-blank per
-// isPythonBlank, mirroring the sidecar's own _parse_lines: blank lines are
-// dropped and never consume a line_index. This is the count
-// decodeAndValidate must check a response's line_index against -- raw
-// len(lines) would be wrong whenever any line is blank.
-func filteredLineCount(lines []string) int {
-	n := 0
-	for _, l := range lines {
+// filteredToRawLineIndex returns, for each non-blank line in lines (per
+// isPythonBlank, mirroring the sidecar's own _parse_lines), that line's raw
+// index in lines, in order. Its length is the sidecar's own filtered line
+// count -- what a response's line_index must be checked against, since blank
+// lines are dropped and never consume a line_index there (raw len(lines)
+// would be wrong whenever any line is blank). Its VALUES are what
+// decodeAndValidate remaps a validated line_index through: the sidecar
+// counts line_index over its own filtered lines, but Word.LineIndex is
+// documented as indexing the caller's original lines slice, so a caller
+// index must be translated back to the raw slice position it actually
+// corresponds to -- otherwise, with lines = ["hello", "", "world"], a word
+// from "world" (sidecar line_index 1, since "hello" is line_index 0 and the
+// blank line consumes no index) would be reported as caller LineIndex 1,
+// which is the blank line in the caller's slice, not "world".
+func filteredToRawLineIndex(lines []string) []int {
+	raw := make([]int, 0, len(lines))
+	for i, l := range lines {
 		if !isPythonBlank(l) {
-			n++
+			raw = append(raw, i)
 		}
 	}
-	return n
+	return raw
 }
 
 // decodeAndValidate parses the sidecar's JSON body and checks internal
 // consistency: a present "words" key (see wireResult.Words); non-negative,
 // non-decreasing timings; end not before start; a line index within
-// lineCount (filteredLineCount(lines), NOT len(lines)); and a confidence in
-// [0, 1].
+// len(filteredToRaw) (the sidecar's own filtered line count, NOT
+// len(lines)); and a confidence in [0, 1]. A word that passes validation has
+// its LineIndex remapped through filteredToRaw[w.LineIndex] before being
+// returned, so the caller-facing Word.LineIndex indexes the ORIGINAL lines
+// slice the caller passed to Align, not the sidecar's blank-filtered one.
 //
 // A validation failure's error text NEVER includes the offending word's Text
 // or any lyric content -- only its position and the failing numeric field.
-func decodeAndValidate(body []byte, lineCount int) (Result, error) {
+func decodeAndValidate(body []byte, filteredToRaw []int) (Result, error) {
 	var wire wireResult
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return Result{}, fmt.Errorf("aligner: decode response: %w", err)
@@ -463,28 +514,37 @@ func decodeAndValidate(body []byte, lineCount int) (Result, error) {
 		return Result{}, fmt.Errorf(`%w: response has no "words" key`, ErrInvalidResponse)
 	}
 
+	lineCount := len(filteredToRaw)
 	words := make([]Word, 0, len(*wire.Words))
 	prevStart := -1
 	for i, w := range *wire.Words {
-		if w.StartMS < 0 {
+		if w.Text == nil || w.StartMS == nil || w.EndMS == nil || w.LineIndex == nil || w.Confidence == nil {
+			return Result{}, fmt.Errorf("%w: word %d is missing a required field", ErrInvalidResponse, i)
+		}
+		startMS, endMS, lineIndex, confidence := *w.StartMS, *w.EndMS, *w.LineIndex, *w.Confidence
+		if startMS < 0 {
 			return Result{}, fmt.Errorf("%w: word %d has negative start_ms", ErrInvalidResponse, i)
 		}
-		if w.EndMS < w.StartMS {
+		if endMS < startMS {
 			return Result{}, fmt.Errorf("%w: word %d end_ms precedes start_ms", ErrInvalidResponse, i)
 		}
-		if w.StartMS < prevStart {
+		if startMS < prevStart {
 			return Result{}, fmt.Errorf("%w: word %d start_ms is not monotonic non-decreasing", ErrInvalidResponse, i)
 		}
-		prevStart = w.StartMS
-		if w.LineIndex < 0 || w.LineIndex >= lineCount {
-			return Result{}, fmt.Errorf("%w: word %d line_index %d out of range [0,%d)", ErrInvalidResponse, i, w.LineIndex, lineCount)
+		prevStart = startMS
+		if lineIndex < 0 || lineIndex >= lineCount {
+			return Result{}, fmt.Errorf("%w: word %d line_index %d out of range [0,%d)", ErrInvalidResponse, i, lineIndex, lineCount)
 		}
-		if math.IsNaN(w.Confidence) || w.Confidence < 0 || w.Confidence > 1 {
+		if math.IsNaN(confidence) || confidence < 0 || confidence > 1 {
 			return Result{}, fmt.Errorf("%w: word %d confidence out of range [0,1]", ErrInvalidResponse, i)
 		}
-		// wireWord and Word share identical field order, so a direct
-		// conversion mirrors the struct without restating every field.
-		words = append(words, Word(w))
+		words = append(words, Word{
+			Text:       *w.Text,
+			StartMS:    startMS,
+			EndMS:      endMS,
+			LineIndex:  filteredToRaw[lineIndex],
+			Confidence: confidence,
+		})
 	}
 
 	return Result{Words: words, Transcript: wire.Transcript}, nil
