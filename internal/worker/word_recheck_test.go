@@ -346,23 +346,42 @@ func TestWordRecheck_LanesAndBreakers(t *testing.T) {
 	}
 }
 
-// TestWordRecheck_WaitBudgetUnflips (review I3): once the wait budget is
-// spent, an unanswered row returns to done with NO verdict (never absent) and
-// completed_at untouched, so it stops rechecking and stays a candidate.
+// TestWordRecheck_WaitBudgetUnflips (review I3): an unanswered row re-parks
+// exactly 3 times (refused_waits 1..3), then the 4th pass returns it to done
+// with NO verdict (never absent), completed_at untouched, and writes its linked
+// scan_results back to done, so it stops rechecking and stays a candidate.
 func TestWordRecheck_WaitBudgetUnflips(t *testing.T) {
 	rig, w := newRecheckRig(t, &fakeFetcher{song: recheckSong("line only", false, models.WordAnswerUnknown)}, nil, false)
 	var before string
-	if err := rig.db.QueryRow(`UPDATE work_queue SET refused_waits = ? WHERE id = ? RETURNING completed_at`, maxWordRecheckWaits, rig.id).Scan(&before); err != nil {
+	if err := rig.db.QueryRow(`SELECT completed_at FROM work_queue WHERE id = ?`, rig.id).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	for _, stmt := range []string{`INSERT INTO libraries (id, path, name) VALUES (1, '/m', 'lib')`,
+		`INSERT INTO scan_results (id, library_id, file_path, status) VALUES (1, 1, '/m/x.flac', 'pending')`,
+		`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, 1)`} {
+		if _, err := rig.db.Exec(stmt, rig.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var waits int
+	var sr string
+	for pass := 1; pass <= 4; pass++ {
+		if _, err := rig.db.Exec(`UPDATE work_queue SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, rig.id); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.RunOnce(context.Background()); err != nil {
+			t.Fatalf("pass %d RunOnce: %v", pass, err)
+		}
+		_ = rig.db.QueryRow(`SELECT refused_waits, (SELECT status FROM scan_results WHERE id = 1) FROM work_queue WHERE id = ?`, rig.id).Scan(&waits, &sr)
+		if row := rig.recheckRow(t); pass < 4 && (row.status != "deferred" || row.state != queue.WordTimingQueued || waits != pass || sr != "pending") {
+			t.Fatalf("pass %d: row = %+v, refused_waits %d, scan_results %s; want deferred, queued, %d, pending", pass, row, waits, sr, pass)
+		}
 	}
 	rig.assertUntouched(t)
 	var after string
 	_ = rig.db.QueryRow(`SELECT completed_at FROM work_queue WHERE id = ?`, rig.id).Scan(&after)
-	if row := rig.recheckRow(t); row.status != "done" || row.state != "" || row.generation != 0 || after != before {
-		t.Fatalf("row = %+v, completed_at %s -> %s; want done, no verdict, completed_at kept", row, before, after)
+	if row := rig.recheckRow(t); row.status != "done" || row.state != "" || row.generation != 0 || after != before || waits != 0 || sr != "done" {
+		t.Fatalf("row = %+v, completed_at %s -> %s, refused_waits %d, scan_results %s; want done, no verdict, completed_at kept, 0, done", row, before, after, waits, sr)
 	}
 }
 

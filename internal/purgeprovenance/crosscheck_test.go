@@ -340,6 +340,9 @@ func TestResetRows_ProceedsWhenTheLaneStillAgrees(t *testing.T) {
 	writeSidecar(t, path, "musixmatch")
 	srID, wqID := seedTrack(t, ctx, sqlDB, libID, filepath.Dir(path), "track.lrc", "done")
 	setLane(t, ctx, sqlDB, wqID, "musixmatch")
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET word_timing_state = 'queued' WHERE id = ?`, wqID); err != nil {
+		t.Fatal(err)
+	}
 
 	_, wqReset, _, err := New(sqlDB).resetRows(ctx,
 		[]int64{srID}, []int64{wqID},
@@ -348,7 +351,9 @@ func TestResetRows_ProceedsWhenTheLaneStillAgrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resetRows refused an agreeing lane: %v", err)
 	}
-	if wqReset != 1 {
-		t.Errorf("work items requeued = %d, want 1", wqReset)
+	var state string
+	_ = sqlDB.QueryRowContext(ctx, `SELECT COALESCE(word_timing_state, 'NULL') FROM work_queue WHERE id = ?`, wqID).Scan(&state)
+	if wqReset != 1 || state != "NULL" {
+		t.Errorf("work items requeued = %d, word_timing_state %s; want 1, NULL (out of word-recheck mode, #982)", wqReset, state)
 	}
 }

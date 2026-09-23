@@ -132,7 +132,7 @@ func TestMarkWordRecheckQueuedOnlyFlipsDone(t *testing.T) {
 	done := seedWordCandidate(t, dbh, "done")
 	busy := seedWordCandidate(t, dbh, "busy")
 	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, busy)
-	mustExec(t, dbh, `UPDATE work_queue SET priority = 3, attempts = 2, last_error = 'x', miss_count = 4,
+	mustExec(t, dbh, `UPDATE work_queue SET priority = 3, attempts = 2, last_error = 'x', miss_count = 4, refused_waits = 2,
         next_attempt_at = '2026-01-03T00:00:00Z', word_timing_state = 'absent', word_timing_generation = 6 WHERE id = ?`, done)
 
 	var reported []WordRecheckPrior
@@ -154,12 +154,12 @@ func TestMarkWordRecheckQueuedOnlyFlipsDone(t *testing.T) {
 		t.Fatalf("prior = %+v; want only the done row's pre-flip state", prior)
 	}
 	var status, state, next, lastErr string
-	var prio, attempts, miss int
-	if err := dbh.QueryRow(`SELECT status, priority, attempts, miss_count, last_error, next_attempt_at, word_timing_state
-        FROM work_queue WHERE id = ?`, done).Scan(&status, &prio, &attempts, &miss, &lastErr, &next, &state); err != nil {
+	var prio, attempts, miss, waits int
+	if err := dbh.QueryRow(`SELECT status, priority, attempts, miss_count, last_error, next_attempt_at, word_timing_state, refused_waits
+        FROM work_queue WHERE id = ?`, done).Scan(&status, &prio, &attempts, &miss, &lastErr, &next, &state, &waits); err != nil {
 		t.Fatalf("read flipped: %v", err)
 	}
-	if status != "deferred" || prio != PriorityMiss || attempts != 0 || miss != 4 || lastErr != "" ||
+	if status != "deferred" || prio != PriorityMiss || attempts != 0 || miss != 4 || lastErr != "" || waits != 0 ||
 		next != formatTime(now) || state != WordTimingQueued {
 		t.Fatalf("flipped = (%s,%d,%d,%d,%q,%s,%s)", status, prio, attempts, miss, lastErr, next, state)
 	}

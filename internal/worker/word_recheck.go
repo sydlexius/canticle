@@ -179,9 +179,10 @@ func (w *Worker) settleWordRecheck(ctx context.Context, item queue.WorkItem, sta
 }
 
 // deferWordRecheck re-parks a recheck row whose word question went unanswered.
-// The queue effect never touches a counter; the worker-level effects mirror the
-// ordinary path: a shutdown releases the row untouched, a throttle or open
-// breaker idles the pass, and any other error feeds the failure backoff.
+// The queue effect spends one refused_waits (never attempts/miss_count); the
+// worker-level effects mirror the ordinary path: a shutdown releases the row
+// untouched, a throttle or open breaker idles the pass, errNoWordAnswer resets
+// the failure backoff, and a transport cause (verifier error included) feeds it.
 func (w *Worker) deferWordRecheck(ctx context.Context, item queue.WorkItem, cause error) error {
 	noCancel := context.WithoutCancel(ctx)
 	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(cause, context.Canceled) {

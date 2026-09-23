@@ -203,7 +203,7 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, op
 	}
 	now := formatTime(q.now())
 	pred, predArgs := wordRecheckPredicate(opts)
-	flipSQL := `UPDATE work_queue SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0, last_error = '', word_timing_state = ?` + //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
+	flipSQL := `UPDATE work_queue SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0, last_error = '', refused_waits = 0, word_timing_state = ?` + //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
 		` WHERE id = ? AND` + pred
 	for _, id := range ids {
 		var (

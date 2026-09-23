@@ -573,6 +573,8 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
 	}
 
 	now := formatNow()
+	// A word-recheck row (#982) leaves recheck mode, or its settle would write
+	// scan_results back to done and the purged track would never be re-fetched.
 	for _, id := range workItemIDs {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE work_queue
@@ -580,7 +582,8 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
                  priority = -100,
                  attempts = 0,
                  next_attempt_at = ?,
-                 last_error = ''
+                 last_error = '',
+                 word_timing_state = CASE WHEN word_timing_state = 'queued' THEN NULL ELSE word_timing_state END
              WHERE id = ? AND status != 'processing'`,
 			now, id)
 		if err != nil {
