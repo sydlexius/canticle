@@ -129,9 +129,9 @@ RUN python smoke_decode.py
 # checksum-pinned SavedModel bake. Demucs, faster-whisper, and the forced-
 # alignment models (torchaudio.pipelines / Hugging Face wav2vec2) each pull
 # their own pretrained weights from their normal hubs (torch.hub / Hugging
-# Face) on first use and cache them under the running user's home directory.
-# Mount a persistent volume at that cache path in production so a container
-# restart does not re-download weights on every request. This is a deliberate
+# Face) on first use and cache them under HF_HOME / TORCH_HOME, both set
+# below to paths under /data. Mount a persistent volume at /data in
+# production so a container restart does not re-download weights. This is a deliberate
 # deviation from yamnet's build-time bake (documented in README.md) -- there
 # is no single canonical checksum to pin for an align-model set that varies
 # per requested language.

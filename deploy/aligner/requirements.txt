@@ -30,8 +30,9 @@ demucs==4.0.1
 # wrapped this same library plus its own bundled pyannote VAD). transformers:
 # the Hugging Face wav2vec2 forced-alignment models for the non-torchaudio
 # languages (see app.ALIGN_MODELS / _aligner_models.FasterWhisperAligner).
-# Pinned at 5.17.0/1.2.1, the versions whisperx's own baseline image ran, not
-# a fresh resolution: transformers 4.57.1 carries known advisories a current
+# Pinned at 5.17.0/1.2.1, the same versions the whisperx image's own freeze
+# carried (measured, #1016 review). A fresh resolution of this file first
+# picked transformers 4.57.1, which carries known advisories a current
 # release fixes (PYSEC-2026-2289, a config.json-driven RCE fixed in 5.3.0;
 # PYSEC-2026-3929, fixed in 5.10.0), and _load_align_model `from_pretrained`s
 # third-party, non-revision-pinned HF repo ids (jonatasgrosman/*, Yehor/*,
