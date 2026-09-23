@@ -497,7 +497,8 @@ min_similarity = 0.35
 [word_sync_generate]
 # EXPERIMENTAL and OPT-IN. Forced-aligns lyric lines canticle already believes
 # are correct to a track's own audio, via an external sidecar (deploy/aligner:
-# Demucs vocal separation, then WhisperX forced alignment). This is the
+# Demucs vocal separation, then a faster-whisper transcript plus a direct
+# wav2vec2 forced alignment). This is the
 # "generate" counterpart to provider word-sync coverage (petitlyrics,
 # Musixmatch richsync); it never overrides a provider-supplied word timing.
 #

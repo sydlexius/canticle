@@ -1,4 +1,4 @@
-"""Real (non-stub) Demucs/WhisperX model implementations.
+"""Real (non-stub) Demucs/faster-whisper/wav2vec2 model implementations.
 
 A SEPARATE module from app.py, imported only from inside app.py's
 `_build_separator`/`_build_aligner` (never at app.py's module scope). Keeps
@@ -96,34 +96,47 @@ class DemucsSeparator:
         return out_path
 
 
-def vad_safe_globals() -> list:
-    """The torch weights_only allowlist for whisperx's BUNDLED pyannote VAD.
+# Sample rate every alignment/transcription call in this module decodes and
+# reasons about, matching the wav2vec2/whisper models' expected input rate.
+# Was `whisperx.audio.SAMPLE_RATE` (also 16000); now a local constant since
+# whisperx is gone (#1016).
+_ALIGN_SAMPLE_RATE = 16000
 
-    That checkpoint pickles these classes and torch >= 2.6 loads with
-    weights_only=True, which refuses them. Allow exactly this set, scoped to
-    the one load (never the global TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD, which
-    would also unguard the runtime-downloaded Demucs and wav2vec2 weights).
-    Each entry was confirmed required by probing the load one refusal at a
-    time. The Dockerfile's smoke check loads the VAD with this same list, so
-    a dependency bump that needs a new entry fails the build.
+
+def _decode_audio_f32(path: str):
+    """Decodes `path` to a 1-D float32 numpy array at `_ALIGN_SAMPLE_RATE`, mono.
+
+    The sidecar's ONE audio-decode path (ffmpeg via app.decode_pcm), reused
+    here instead of a second decoder (torchaudio.load or faster-whisper's own
+    PyAV-based file decode) -- see DemucsSeparator.separate's comment on why
+    decode_pcm and not torchaudio.load.
+
+    Every caller here passes the SEPARATED VOCAL STEM (Demucs' own output),
+    never the caller's original upload, so a decode rejection is this
+    sidecar's own fault (a pipeline bug or broken environment), not the
+    caller's -- reject_error=_InternalAudioError makes that read as a 500,
+    not the documented 400 "cannot read audio" _BadAudioError produces for a
+    genuinely bad upload.
     """
-    import collections  # noqa: PLC0415
-    import typing  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
 
-    import omegaconf  # noqa: PLC0415
-    import torch  # noqa: PLC0415
-    from pyannote.audio.core.model import Introspection  # noqa: PLC0415
-    from pyannote.audio.core.task import Problem, Resolution, Specifications  # noqa: PLC0415
+    from app import _InternalAudioError, decode_pcm  # noqa: PLC0415
 
-    return [
-        omegaconf.listconfig.ListConfig, omegaconf.base.ContainerMetadata, omegaconf.base.Metadata,
-        omegaconf.nodes.AnyNode, typing.Any, list, dict, int, collections.defaultdict,
-        torch.torch_version.TorchVersion, Introspection, Specifications, Problem, Resolution,
-    ]
+    pcm = decode_pcm(path, _ALIGN_SAMPLE_RATE, channels=1, reject_error=_InternalAudioError)
+    return np.frombuffer(pcm, dtype=np.float32)
 
 
-class WhisperXAligner:
-    """Transcribes and forced-aligns a vocal stem using WhisperX."""
+class FasterWhisperAligner:
+    """Transcribes with faster-whisper and forced-aligns with a direct wav2vec2 load.
+
+    Replaces whisperx (#1016), which only wrapped these two steps: whisperx's
+    `load_model`/`transcribe` was a thin layer over `faster_whisper.WhisperModel`
+    plus its own bundled pyannote VAD, and `load_align_model` picked one of two
+    branches this class now picks itself -- a `torchaudio.pipelines` bundle for
+    the torch-type languages, a `transformers` `Wav2Vec2ForCTC`/`Wav2Vec2Processor`
+    checkpoint for the rest -- keyed by `app.ALIGN_MODELS`, the static table this
+    module used to get overwritten by whisperx's own tables at boot.
+    """
 
     def __init__(self, whisper_model: str, device: str):
         self._whisper_model_name = whisper_model
@@ -146,13 +159,11 @@ class WhisperXAligner:
         with self._whisper_lock:
             if self._whisper_model is not None:
                 return self._whisper_model
-            import torch  # noqa: PLC0415
-            import whisperx  # noqa: PLC0415
+            from faster_whisper import WhisperModel  # noqa: PLC0415
 
-            with torch.serialization.safe_globals(vad_safe_globals()):
-                self._whisper_model = whisperx.load_model(
-                    self._whisper_model_name, self._whisper_device, compute_type=self._compute_type
-                )
+            self._whisper_model = WhisperModel(
+                self._whisper_model_name, device=self._whisper_device, compute_type=self._compute_type
+            )
             return self._whisper_model
 
     def _load_align_model(self, language: str):
@@ -160,23 +171,64 @@ class WhisperXAligner:
             cached = self._align
             if cached is not None and cached[0] == language:
                 return cached[1], cached[2]
-            import whisperx  # noqa: PLC0415
+            import torchaudio  # noqa: PLC0415
 
-            model, metadata = whisperx.load_align_model(language_code=language, device=self._device)
+            from app import ALIGN_MODELS, is_torchaudio_align_model  # noqa: PLC0415
+
+            model_name = ALIGN_MODELS[language]
+            if is_torchaudio_align_model(model_name, torchaudio):
+                # The 5 languages whisperx served from torchaudio's own
+                # bundled wav2vec2 checkpoints (en/fr/de/es/it).
+                bundle = getattr(torchaudio.pipelines, model_name)
+                model = bundle.get_model().to(self._device)
+                dictionary = {c.lower(): i for i, c in enumerate(bundle.get_labels())}
+                metadata = {"dictionary": dictionary, "type": "torchaudio"}
+            else:
+                # Every other language: a Hugging Face wav2vec2-CTC checkpoint,
+                # same source whisperx used for its DEFAULT_ALIGN_MODELS_HF entries.
+                from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor  # noqa: PLC0415
+
+                processor = Wav2Vec2Processor.from_pretrained(model_name)
+                model = Wav2Vec2ForCTC.from_pretrained(model_name).to(self._device)
+                dictionary = {c.lower(): i for c, i in processor.tokenizer.get_vocab().items()}
+                metadata = {"dictionary": dictionary, "type": "huggingface"}
+            model.eval()
             self._align = (language, model, metadata)
             return model, metadata
 
     def transcribe(self, vocal_path: str, language: str) -> str:
-        import whisperx  # noqa: PLC0415
-
         model = self._load_whisper()
-        audio = whisperx.load_audio(vocal_path)
-        result = model.transcribe(audio, language=language)
-        return " ".join(seg.get("text", "").strip() for seg in result.get("segments", [])).strip()
+        audio = _decode_audio_f32(vocal_path)
+        # vad_filter: faster-whisper's own bundled Silero VAD (a different,
+        # lighter VAD than whisperx's bundled pyannote one it replaces).
+        # Exact parity is not required -- transcript only feeds the content
+        # gate (verification.Similarity), never `words`.
+        # condition_on_previous_text=False: whisperx ran with this off, and
+        # faster-whisper's own default is True. Conditioning on prior text
+        # raises the risk of repetition/hallucination loops on sung material
+        # (a Whisper failure mode distinct from plain speech); restoring
+        # whisperx's posture costs nothing here since each request is one
+        # short vocal stem, not a long multi-segment transcript that would
+        # benefit from cross-segment context.
+        # without_timestamps=True: whisperx also ran with this on (faster-
+        # whisper's own default is False). It only tells the decoder to skip
+        # predicting timestamp tokens; segment.text is plain text either way,
+        # so it does not change what this method joins -- verified against
+        # faster-whisper's WhisperModel.transcribe, which returns Segment
+        # objects with a .text field regardless of this flag. transcript is
+        # a content-gate input only, never `words` (which comes from the
+        # forced-align step below, not from Whisper's own timestamps).
+        segments, _info = model.transcribe(
+            audio,
+            language=language,
+            vad_filter=True,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+        return " ".join(seg.text.strip() for seg in segments).strip()
 
     def align(self, vocal_path: str, lines: list[str], language: str):
         import torch  # noqa: PLC0415
-        import whisperx  # noqa: PLC0415
         from torchaudio.functional import forced_align, merge_tokens  # noqa: PLC0415
 
         from app import _BadAudioError, plan_alignment, words_from_token_spans  # noqa: PLC0415
@@ -189,16 +241,17 @@ class WhisperXAligner:
             return []
 
         # ONE CTC forced alignment of the whole lyric over the whole stem, not
-        # whisperx.align() per line: per-line segments each searched the full
-        # clip (later lines overlapped earlier ones), and whisperx folds the
-        # blank frames after a character into it, so each segment's last word
-        # stretched to the end of the audio. merge_tokens drops blanks.
-        # Emissions are computed in fixed windows and concatenated: one forward
-        # pass over a whole song would make wav2vec2's attention memory grow
-        # with the square of the track length. The alignment itself still
-        # runs once over the concatenated emission, so it stays monotonic.
-        audio = whisperx.load_audio(vocal_path)
-        window = _EMISSION_WINDOW_SECONDS * whisperx.audio.SAMPLE_RATE
+        # per line: per-line segments would each search the full clip (later
+        # lines overlapping earlier ones), and folding the blank frames after
+        # a character into it would stretch each segment's last word to the
+        # end of the audio. merge_tokens drops blanks.
+        # Emissions are computed in fixed windows and concatenated: one
+        # forward pass over a whole song would make wav2vec2's attention
+        # memory grow with the square of the track length. The alignment
+        # itself still runs once over the concatenated emission, so it stays
+        # monotonic.
+        audio = _decode_audio_f32(vocal_path)
+        window = _EMISSION_WINDOW_SECONDS * _ALIGN_SAMPLE_RATE
         chunks = []
         with torch.inference_mode():
             for offset in range(0, len(audio), window):
@@ -222,4 +275,4 @@ class WhisperXAligner:
         spans = [(s.start, s.end, s.score) for s in merge_tokens(path[0], scores[0].exp(), blank=blank_id)]
         if len(spans) != len(targets):
             raise RuntimeError(f"forced alignment produced {len(spans)} spans for {len(targets)} targets")
-        return words_from_token_spans(planned, spans, len(audio) / whisperx.audio.SAMPLE_RATE / frames)
+        return words_from_token_spans(planned, spans, len(audio) / _ALIGN_SAMPLE_RATE / frames)

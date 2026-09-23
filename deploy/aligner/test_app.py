@@ -4,7 +4,8 @@ Covers config resolution, device selection, lyric line splitting, the
 one-sequence CTC alignment planning, and the /health + /align contract.
 
 Stubs the Separator/Aligner model layer so the tests need no torch, demucs,
-or whisperx installed. TestClient is used WITHOUT a `with` block so lifespan
+faster-whisper, or transformers installed. TestClient is used WITHOUT a
+`with` block so lifespan
 (which would build the real models) never runs, and stubbed `_state` is what
 the handler reads -- same trick as deploy/yamnet-detector/test_app.py.
 
@@ -267,12 +268,11 @@ def test_boot_builds_the_real_model_layer_without_loading_a_model(monkeypatch):
     import _aligner_models
 
     monkeypatch.setitem(sys.modules, "torch", ns(cuda=(no := ns(is_available=lambda: False)), backends=ns(mps=no)))
-    monkeypatch.setitem(sys.modules, "whisperx", None)  # lifespan's ImportError fallback
     monkeypatch.setitem(sys.modules, "demucs", None)  # any model load at boot would ImportError
     appmod._state.clear()
     with TestClient(appmod.app):  # runs lifespan, which calls both builders
         sep, al = appmod._state["separator"], appmod._state["aligner"]
-        assert isinstance(sep, _aligner_models.DemucsSeparator) and isinstance(al, _aligner_models.WhisperXAligner)
+        assert isinstance(sep, _aligner_models.DemucsSeparator) and isinstance(al, _aligner_models.FasterWhisperAligner)
         assert (sep._model, al._whisper_model, al._align) == (None, None, None)  # lazy: nothing loaded yet
 
 
@@ -890,11 +890,193 @@ def test_upload_temp_file_is_removed_when_the_write_fails(monkeypatch, tmp_path)
 
 
 # --------------------------------------------------------------------------
+# I1: the real model logic (dictionaries, transcript join, decode channels) --
+# faked transformers/faster_whisper modules, no ML deps needed.
+# --------------------------------------------------------------------------
+
+
+def test_load_align_model_torchaudio_branch_lowercases_labels_and_calls_eval(monkeypatch):
+    fake_model = types.SimpleNamespace(eval_calls=[])
+    fake_model.to = lambda device: fake_model
+    fake_model.eval = lambda: fake_model.eval_calls.append(True)
+
+    class _Bundle:
+        def get_model(self):
+            return fake_model
+
+        def get_labels(self):
+            return ["-", "|", "A", "B"]  # uppercase, as WAV2VEC2_ASR_BASE_960H's real labels are
+
+    pipelines_ns = types.SimpleNamespace(__all__=["WAV2VEC2_ASR_BASE_960H"], WAV2VEC2_ASR_BASE_960H=_Bundle())
+    torchaudio = types.ModuleType("torchaudio")
+    torchaudio.pipelines = pipelines_ns
+    monkeypatch.setitem(sys.modules, "torchaudio", torchaudio)
+
+    import _aligner_models
+
+    al = _aligner_models.FasterWhisperAligner("base", "cpu")
+    model, metadata = al._load_align_model("en")
+
+    # Dictionary keys are lowercased ("A" -> "a"); a caller's lowercased lyric
+    # text would miss every entry otherwise.
+    assert metadata["dictionary"] == {"-": 0, "|": 1, "a": 2, "b": 3}
+    assert metadata["type"] == "torchaudio"
+    assert model is fake_model
+    assert fake_model.eval_calls == [True]
+
+
+def test_load_align_model_huggingface_branch_dictionary_orientation_and_lowercasing(monkeypatch):
+    fake_model = types.SimpleNamespace(eval_calls=[])
+    fake_model.to = lambda device: fake_model
+    fake_model.eval = lambda: fake_model.eval_calls.append(True)
+
+    class _FakeTokenizer:
+        def get_vocab(self):
+            # HF vocab is {token_string: id}; a key/value swap here would put
+            # ints as dictionary keys, which plan_alignment's dictionary.get(ch)
+            # (a character) could never hit.
+            return {"<pad>": 0, "A": 1, "B": 2}
+
+    class _FakeProcessor:
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+
+        @staticmethod
+        def from_pretrained(_name):
+            return _FakeProcessor()
+
+    class _FakeCTC:
+        @staticmethod
+        def from_pretrained(_name):
+            return fake_model
+
+    transformers = types.ModuleType("transformers")
+    transformers.Wav2Vec2ForCTC = _FakeCTC
+    transformers.Wav2Vec2Processor = _FakeProcessor
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+    torchaudio = types.ModuleType("torchaudio")
+    torchaudio.pipelines = types.SimpleNamespace(__all__=[])  # no torch-type bundles: forces the HF branch
+    monkeypatch.setitem(sys.modules, "torchaudio", torchaudio)
+
+    import _aligner_models
+
+    al = _aligner_models.FasterWhisperAligner("base", "cpu")
+    model, metadata = al._load_align_model("ja")  # app.ALIGN_MODELS["ja"] is an HF repo id
+
+    assert metadata["dictionary"] == {"<pad>": 0, "a": 1, "b": 2}
+    assert metadata["type"] == "huggingface"
+    assert model is fake_model
+    assert fake_model.eval_calls == [True]
+
+
+def test_transcribe_joins_segments_with_space_and_passes_vad_and_condition_kwargs(monkeypatch):
+    calls = {}
+
+    class _FakeSegment:
+        def __init__(self, text):
+            self.text = text
+
+    class _FakeWhisperModel:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def transcribe(self, _audio, **kwargs):
+            calls.update(kwargs)
+            return [_FakeSegment(" hello "), _FakeSegment("world ")], None
+
+    faster_whisper = types.ModuleType("faster_whisper")
+    faster_whisper.WhisperModel = _FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", faster_whisper)
+
+    import _aligner_models
+
+    monkeypatch.setattr(_aligner_models, "_decode_audio_f32", lambda _path: "AUDIO")
+
+    al = _aligner_models.FasterWhisperAligner("base", "cpu")
+    transcript = al.transcribe("/tmp/vocal.wav", "en")
+
+    # " ".join + per-segment strip -- "".join (I1's third mutation) would
+    # collapse this to "helloworld" with no space.
+    assert transcript == "hello world"
+    assert calls["language"] == "en"
+    assert calls["vad_filter"] is True  # I1's fourth mutation flips this
+    assert calls["condition_on_previous_text"] is False  # M4
+
+
+def test_decode_audio_f32_uses_mono_channel_and_the_internal_audio_error(monkeypatch):
+    calls = {}
+
+    def fake_decode_pcm(path, sample_rate, **kwargs):
+        calls["path"] = path
+        calls["sample_rate"] = sample_rate
+        calls["channels"] = kwargs.get("channels")
+        calls["reject_error"] = kwargs.get("reject_error")
+        return b"\x00\x00\x00\x00"  # one float32 zero sample
+
+    monkeypatch.setattr(appmod, "decode_pcm", fake_decode_pcm)
+
+    # _decode_audio_f32 imports numpy at call time; the test venv is
+    # deliberately ML-free (see module docstring), so a minimal fake standing
+    # in for np.frombuffer is enough -- no real numpy needed.
+    fake_np = types.ModuleType("numpy")
+    fake_np.float32 = "float32"
+    fake_np.frombuffer = lambda data, dtype: data
+    monkeypatch.setitem(sys.modules, "numpy", fake_np)
+
+    import _aligner_models
+
+    _aligner_models._decode_audio_f32("/tmp/vocal.wav")
+
+    # channels=2 (I1's fifth mutation) would read interleaved stereo as mono,
+    # scrambling every downstream alignment frame.
+    assert calls["channels"] == 1
+    assert calls["sample_rate"] == _aligner_models._ALIGN_SAMPLE_RATE
+    # M3: this decode is of the sidecar's OWN generated vocal stem, never the
+    # caller's upload, so a rejection here must read as a server fault (500),
+    # never the caller's fault (400) -- the default _BadAudioError.
+    assert calls["reject_error"] is appmod._InternalAudioError
+
+
+def test_decode_pcm_reject_error_is_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(appmod, "FFMPEG", _fake_ffmpeg(tmp_path, "exit 1"))
+    upload = tmp_path / "in.upload"
+    upload.write_bytes(b"x")
+
+    with pytest.raises(appmod._BadAudioError):
+        appmod.decode_pcm(str(upload), 16000, 1)
+    with pytest.raises(appmod._InternalAudioError):
+        appmod.decode_pcm(str(upload), 16000, 1, reject_error=appmod._InternalAudioError)
+
+
+def test_internal_audio_error_from_the_model_layer_is_500_not_400():
+    # M3 end to end: a decode rejection on the sidecar's OWN vocal stem (not
+    # the caller's upload) must never read as the documented 400 "cannot read
+    # audio" -- the Go client's circuit breaker never counts a 4xx, so a
+    # misclassified server fault here would go permanently unnoticed.
+    class _InternalFailingAligner(_StubAligner):
+        def transcribe(self, vocal_path, language):
+            raise appmod._InternalAudioError("cannot decode vocal stem")
+
+    _install_stubs(aligner=_InternalFailingAligner())
+    resp = _post(lyrics="a line")
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"] == "alignment failed"
+
+
+# --------------------------------------------------------------------------
 # I3: lazy model loads are locked; align model and dictionary stay paired
 # --------------------------------------------------------------------------
 
 
 def _fake_ml_modules(monkeypatch, load_seconds=0.05):
+    """Fakes torchaudio/faster_whisper/demucs.pretrained for the model-load-locking tests.
+
+    Only the torchaudio branch of `_load_align_model` is faked (en/fr/de, all
+    torch-type in app.ALIGN_MODELS): these tests cover load-once/lock
+    behavior, not the torchaudio-vs-transformers branch choice itself, so one
+    fake bundle type is enough.
+    """
     calls = {"demucs": 0, "whisper": 0, "align": []}
 
     def get_model(name):
@@ -902,31 +1084,56 @@ def _fake_ml_modules(monkeypatch, load_seconds=0.05):
         time.sleep(load_seconds)
         return types.SimpleNamespace(to=lambda d: None, eval=lambda: None)
 
-    def load_model(name, device, compute_type):
-        calls["whisper"] += 1
-        calls["whisper_device"] = device
-        time.sleep(load_seconds)
-        return object()
+    class _FakeWhisperModel:
+        def __init__(self, name, device, compute_type):
+            calls["whisper"] += 1
+            calls["whisper_device"] = device
+            time.sleep(load_seconds)
 
-    def load_align_model(language_code, device):
-        calls["align"].append(language_code)
-        time.sleep(load_seconds)
-        return f"model-{language_code}", {"dictionary": {}, "language": language_code}
+    class _FakeAlignModel:
+        def __init__(self, lang):
+            self.lang = lang
 
-    import contextlib
+        def to(self, device):
+            return self
+
+        def eval(self):
+            pass
+
+    class _FakeBundle:
+        def __init__(self, lang):
+            self._lang = lang
+
+        def get_model(self):
+            calls["align"].append(self._lang)
+            time.sleep(load_seconds)
+            return _FakeAlignModel(self._lang)
+
+        def get_labels(self):
+            return ["-", "|", "a"]
+
+    lang_by_model_name = {name: lang for lang, name in appmod.ALIGN_MODELS.items() if lang in ("en", "fr", "de")}
+    pipelines_ns = types.SimpleNamespace(__all__=list(lang_by_model_name))
+    for model_name, lang in lang_by_model_name.items():
+        setattr(pipelines_ns, model_name, _FakeBundle(lang))
 
     torch = types.ModuleType("torch")
-    torch.serialization = types.SimpleNamespace(safe_globals=lambda g: contextlib.nullcontext())
-    whisperx = types.ModuleType("whisperx")
-    whisperx.load_model, whisperx.load_align_model = load_model, load_align_model
+    torchaudio = types.ModuleType("torchaudio")
+    torchaudio.pipelines = pipelines_ns
+    faster_whisper = types.ModuleType("faster_whisper")
+    faster_whisper.WhisperModel = _FakeWhisperModel
     pretrained = types.ModuleType("demucs.pretrained")
     pretrained.get_model = get_model
-    for name, mod in {"torch": torch, "whisperx": whisperx, "demucs": types.ModuleType("demucs"),
-                      "demucs.pretrained": pretrained}.items():
+    for name, mod in {
+        "torch": torch,
+        "torchaudio": torchaudio,
+        "faster_whisper": faster_whisper,
+        "demucs": types.ModuleType("demucs"),
+        "demucs.pretrained": pretrained,
+    }.items():
         monkeypatch.setitem(sys.modules, name, mod)
     import _aligner_models
 
-    monkeypatch.setattr(_aligner_models, "vad_safe_globals", lambda: [])
     return _aligner_models, calls
 
 
@@ -949,7 +1156,7 @@ def _hammer(fn, args_list):
 def test_concurrent_cold_model_loads_load_once(monkeypatch):
     models, calls = _fake_ml_modules(monkeypatch)
     sep = models.DemucsSeparator("htdemucs", "cpu")
-    al = models.WhisperXAligner("base", "cpu")
+    al = models.FasterWhisperAligner("base", "cpu")
     _hammer(sep._load, [()] * 4)
     _hammer(al._load_whisper, [()] * 4)
     _hammer(al._load_align_model, [("en",)] * 4)
@@ -958,14 +1165,14 @@ def test_concurrent_cold_model_loads_load_once(monkeypatch):
 
 def test_align_model_and_dictionary_always_belong_to_one_language(monkeypatch):
     models, _ = _fake_ml_modules(monkeypatch, load_seconds=0.01)
-    al = models.WhisperXAligner("base", "cpu")
+    al = models.FasterWhisperAligner("base", "cpu")
     langs = ["en", "fr", "de", "en", "fr", "de"] * 3
     for (model, metadata), lang in zip(_hammer(al._load_align_model, [(lang,) for lang in langs]), langs):
-        assert model == f"model-{lang}" and metadata["language"] == lang
+        assert model.lang == lang and metadata["type"] == "torchaudio" and metadata["dictionary"]
 
 
 def test_whisper_runs_on_cpu_when_the_device_is_mps(monkeypatch):
     # CTranslate2 (faster-whisper) rejects "mps"; alignment keeps the device.
     models, calls = _fake_ml_modules(monkeypatch, load_seconds=0)
-    models.WhisperXAligner("base", "mps")._load_whisper()
+    models.FasterWhisperAligner("base", "mps")._load_whisper()
     assert calls["whisper_device"] == "cpu"
