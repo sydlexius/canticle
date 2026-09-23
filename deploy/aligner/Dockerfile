@@ -5,10 +5,11 @@
 #   docker buildx imagetools inspect python:3.11-slim --format '{{.Manifest.Digest}}'
 FROM python:3.11-slim@sha256:cdbd05fb6f457ca275ff51ce00d93d865ca0b6a25f5ffb08262d94f6835771e5
 
-# ffmpeg decodes every upload (app.decode_pcm and whisperx.load_audio), so
-# any container Canticle's library holds is accepted; libsndfile backs the
-# soundfile dependency pulled in by the ML stack. patchelf clears the
-# executable-stack flag on ctranslate2's bundled library (see below).
+# ffmpeg decodes every upload (app.decode_pcm is the sidecar's ONE audio
+# decode path, #1016), so any container Canticle's library holds is accepted;
+# libsndfile backs the soundfile dependency pulled in by the ML stack.
+# patchelf clears the executable-stack flag on ctranslate2's bundled library
+# (see below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
         ffmpeg \
@@ -16,14 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Image provenance (mirrors deploy/yamnet-detector's LABEL block). Model
-# choices (Demucs for separation, WhisperX for forced alignment) are informed
-# by rzru/nightingale (GPL-3.0-or-later per its own repository, confirmed at
-# authoring time) as a reference implementation -- this sidecar is an
-# independent, from-scratch FastAPI service and vendors none of Nightingale's
-# code, only the choice of libraries. See README.md "Licensing and
-# provenance".
+# choices (Demucs for separation, faster-whisper + a direct wav2vec2 load for
+# forced alignment, #1016) are informed by rzru/nightingale (GPL-3.0-or-later
+# per its own repository, confirmed at authoring time) as a reference
+# implementation -- this sidecar is an independent, from-scratch FastAPI
+# service and vendors none of Nightingale's code, only the choice of
+# libraries. See README.md "Licensing and provenance".
 LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
-      org.opencontainers.image.description="Forced-alignment sidecar (Demucs + WhisperX) for canticle word-sync generation" \
+      org.opencontainers.image.description="Forced-alignment sidecar (Demucs + faster-whisper + wav2vec2) for canticle word-sync generation" \
       org.opencontainers.image.licenses="GPL-3.0" \
       net.sydlexius.canticle.aligner.reference="rzru/nightingale (GPL-3.0-or-later)"
 
@@ -84,28 +85,33 @@ COPY app.py _aligner_models.py smoke_decode.py .
 # /health is liveness only and models load lazily, so a broken native import
 # would otherwise surface only as a 500 on the first /align in production
 # (exactly how the ctranslate2 exec-stack failure shipped). Imports every
-# module the real /align path uses, then loads whisperx's BUNDLED pyannote
-# VAD checkpoint (it ships in the wheel, so no network) inside the same scoped
-# torch weights_only allowlist the app uses (_aligner_models.vad_safe_globals),
-# so a dependency bump that needs a new allowlist entry fails here. Also
-# asserts the image stayed CPU-only: a CUDA torch build or any nvidia-* /
-# triton distribution means the CPU index was bypassed.
+# module the real /align path uses (#1016: faster-whisper for the transcript,
+# torchaudio + transformers for the two forced-alignment model kinds). Also
+# asserts the image stayed CPU-only (a CUDA torch build or any nvidia-* /
+# triton distribution means the CPU index was bypassed) and that every
+# app.ALIGN_MODELS entry resolves to a real torchaudio.pipelines bundle or
+# looks like a Hugging Face repo id -- catching a typo/rename in the language
+# table here rather than at request time. Model WEIGHTS are not downloaded
+# here (no network, no baked weights -- see README "Known limitations"), only
+# the torchaudio.pipelines bundle NAME is checked to exist.
 RUN python -c "\
-import ctranslate2, faster_whisper, whisperx, whisperx.asr, whisperx.alignment, omegaconf, torchaudio, torch; \
-import pyannote.audio, demucs.pretrained, demucs.apply; \
+import ctranslate2, faster_whisper, torchaudio, torch, transformers; \
+import demucs.pretrained, demucs.apply; \
 from torchaudio.functional import forced_align, merge_tokens; \
-from whisperx.vads.pyannote import load_vad_model; \
-from _aligner_models import vad_safe_globals; \
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor; \
 from importlib.metadata import distributions; \
 gpu = sorted(d.metadata['Name'] for d in distributions() \
     if d.metadata['Name'].lower().startswith(('nvidia-', 'triton'))); \
 assert torch.version.cuda is None, 'CUDA torch build installed: %s' % torch.__version__; \
 assert not gpu, 'GPU distributions installed: %s' % gpu; \
-ctx = torch.serialization.safe_globals(vad_safe_globals()); ctx.__enter__(); \
-load_vad_model('cpu'); ctx.__exit__(None, None, None); \
-import app; from whisperx.alignment import DEFAULT_ALIGN_MODELS_TORCH as T, DEFAULT_ALIGN_MODELS_HF as H; \
-assert app.ALIGN_MODELS == {**T, **H}, 'app.ALIGN_MODELS drifted from whisperx'; \
-print('smoke ok: torch', torch.__version__, 'ctranslate2', ctranslate2.__version__, 'vad loaded')"
+import app; \
+torch_langs = [lang for lang, name in app.ALIGN_MODELS.items() if hasattr(torchaudio.pipelines, name)]; \
+assert torch_langs, 'no ALIGN_MODELS entry resolves to a torchaudio.pipelines bundle'; \
+bad = [(lang, name) for lang, name in app.ALIGN_MODELS.items() \
+    if not hasattr(torchaudio.pipelines, name) and '/' not in name]; \
+assert not bad, 'ALIGN_MODELS entries neither a torchaudio bundle nor a HF repo id: %r' % bad; \
+print('smoke ok: torch', torch.__version__, 'ctranslate2', ctranslate2.__version__, \
+    'faster_whisper', faster_whisper.__version__, 'torch-type langs', sorted(torch_langs))"
 
 # Build-time decode smoke check against THIS image's ffmpeg (the CI test job
 # uses the runner's apt ffmpeg, a different build): a synthetic concat
@@ -114,14 +120,15 @@ print('smoke ok: torch', torch.__version__, 'ctranslate2', ctranslate2.__version
 RUN python smoke_decode.py
 
 # Model weights are NOT baked into this image at build time, unlike YAMNet's
-# checksum-pinned SavedModel bake. Demucs and WhisperX each pull their own
-# pretrained weights from their normal hubs (torch.hub / Hugging Face) on
-# first use and cache them under the running user's home directory. Mount a
-# persistent volume at that cache path in production so a container restart
-# does not re-download weights on every request. This is a deliberate
+# checksum-pinned SavedModel bake. Demucs, faster-whisper, and the forced-
+# alignment models (torchaudio.pipelines / Hugging Face wav2vec2) each pull
+# their own pretrained weights from their normal hubs (torch.hub / Hugging
+# Face) on first use and cache them under the running user's home directory.
+# Mount a persistent volume at that cache path in production so a container
+# restart does not re-download weights on every request. This is a deliberate
 # deviation from yamnet's build-time bake (documented in README.md) -- there
-# is no single canonical checksum to pin for a WhisperX align-model set that
-# varies per requested language.
+# is no single canonical checksum to pin for an align-model set that varies
+# per requested language.
 ENV HF_HOME=/data/hf-cache \
     TORCH_HOME=/data/torch-cache
 

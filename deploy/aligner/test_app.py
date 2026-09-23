@@ -4,7 +4,8 @@ Covers config resolution, device selection, lyric line splitting, the
 one-sequence CTC alignment planning, and the /health + /align contract.
 
 Stubs the Separator/Aligner model layer so the tests need no torch, demucs,
-or whisperx installed. TestClient is used WITHOUT a `with` block so lifespan
+faster-whisper, or transformers installed. TestClient is used WITHOUT a
+`with` block so lifespan
 (which would build the real models) never runs, and stubbed `_state` is what
 the handler reads -- same trick as deploy/yamnet-detector/test_app.py.
 
@@ -267,12 +268,11 @@ def test_boot_builds_the_real_model_layer_without_loading_a_model(monkeypatch):
     import _aligner_models
 
     monkeypatch.setitem(sys.modules, "torch", ns(cuda=(no := ns(is_available=lambda: False)), backends=ns(mps=no)))
-    monkeypatch.setitem(sys.modules, "whisperx", None)  # lifespan's ImportError fallback
     monkeypatch.setitem(sys.modules, "demucs", None)  # any model load at boot would ImportError
     appmod._state.clear()
     with TestClient(appmod.app):  # runs lifespan, which calls both builders
         sep, al = appmod._state["separator"], appmod._state["aligner"]
-        assert isinstance(sep, _aligner_models.DemucsSeparator) and isinstance(al, _aligner_models.WhisperXAligner)
+        assert isinstance(sep, _aligner_models.DemucsSeparator) and isinstance(al, _aligner_models.FasterWhisperAligner)
         assert (sep._model, al._whisper_model, al._align) == (None, None, None)  # lazy: nothing loaded yet
 
 
@@ -895,6 +895,13 @@ def test_upload_temp_file_is_removed_when_the_write_fails(monkeypatch, tmp_path)
 
 
 def _fake_ml_modules(monkeypatch, load_seconds=0.05):
+    """Fakes torchaudio/faster_whisper/demucs.pretrained for the model-load-locking tests.
+
+    Only the torchaudio branch of `_load_align_model` is faked (en/fr/de, all
+    torch-type in app.ALIGN_MODELS): these tests cover load-once/lock
+    behavior, not the torchaudio-vs-transformers branch choice itself, so one
+    fake bundle type is enough.
+    """
     calls = {"demucs": 0, "whisper": 0, "align": []}
 
     def get_model(name):
@@ -902,31 +909,56 @@ def _fake_ml_modules(monkeypatch, load_seconds=0.05):
         time.sleep(load_seconds)
         return types.SimpleNamespace(to=lambda d: None, eval=lambda: None)
 
-    def load_model(name, device, compute_type):
-        calls["whisper"] += 1
-        calls["whisper_device"] = device
-        time.sleep(load_seconds)
-        return object()
+    class _FakeWhisperModel:
+        def __init__(self, name, device, compute_type):
+            calls["whisper"] += 1
+            calls["whisper_device"] = device
+            time.sleep(load_seconds)
 
-    def load_align_model(language_code, device):
-        calls["align"].append(language_code)
-        time.sleep(load_seconds)
-        return f"model-{language_code}", {"dictionary": {}, "language": language_code}
+    class _FakeAlignModel:
+        def __init__(self, lang):
+            self.lang = lang
 
-    import contextlib
+        def to(self, device):
+            return self
+
+        def eval(self):
+            pass
+
+    class _FakeBundle:
+        def __init__(self, lang):
+            self._lang = lang
+
+        def get_model(self):
+            calls["align"].append(self._lang)
+            time.sleep(load_seconds)
+            return _FakeAlignModel(self._lang)
+
+        def get_labels(self):
+            return ["-", "|", "a"]
+
+    lang_by_model_name = {name: lang for lang, name in appmod.ALIGN_MODELS.items() if lang in ("en", "fr", "de")}
+    pipelines_ns = types.SimpleNamespace(__all__=list(lang_by_model_name))
+    for model_name, lang in lang_by_model_name.items():
+        setattr(pipelines_ns, model_name, _FakeBundle(lang))
 
     torch = types.ModuleType("torch")
-    torch.serialization = types.SimpleNamespace(safe_globals=lambda g: contextlib.nullcontext())
-    whisperx = types.ModuleType("whisperx")
-    whisperx.load_model, whisperx.load_align_model = load_model, load_align_model
+    torchaudio = types.ModuleType("torchaudio")
+    torchaudio.pipelines = pipelines_ns
+    faster_whisper = types.ModuleType("faster_whisper")
+    faster_whisper.WhisperModel = _FakeWhisperModel
     pretrained = types.ModuleType("demucs.pretrained")
     pretrained.get_model = get_model
-    for name, mod in {"torch": torch, "whisperx": whisperx, "demucs": types.ModuleType("demucs"),
-                      "demucs.pretrained": pretrained}.items():
+    for name, mod in {
+        "torch": torch,
+        "torchaudio": torchaudio,
+        "faster_whisper": faster_whisper,
+        "demucs": types.ModuleType("demucs"),
+        "demucs.pretrained": pretrained,
+    }.items():
         monkeypatch.setitem(sys.modules, name, mod)
     import _aligner_models
 
-    monkeypatch.setattr(_aligner_models, "vad_safe_globals", lambda: [])
     return _aligner_models, calls
 
 
@@ -949,7 +981,7 @@ def _hammer(fn, args_list):
 def test_concurrent_cold_model_loads_load_once(monkeypatch):
     models, calls = _fake_ml_modules(monkeypatch)
     sep = models.DemucsSeparator("htdemucs", "cpu")
-    al = models.WhisperXAligner("base", "cpu")
+    al = models.FasterWhisperAligner("base", "cpu")
     _hammer(sep._load, [()] * 4)
     _hammer(al._load_whisper, [()] * 4)
     _hammer(al._load_align_model, [("en",)] * 4)
@@ -958,14 +990,14 @@ def test_concurrent_cold_model_loads_load_once(monkeypatch):
 
 def test_align_model_and_dictionary_always_belong_to_one_language(monkeypatch):
     models, _ = _fake_ml_modules(monkeypatch, load_seconds=0.01)
-    al = models.WhisperXAligner("base", "cpu")
+    al = models.FasterWhisperAligner("base", "cpu")
     langs = ["en", "fr", "de", "en", "fr", "de"] * 3
     for (model, metadata), lang in zip(_hammer(al._load_align_model, [(lang,) for lang in langs]), langs):
-        assert model == f"model-{lang}" and metadata["language"] == lang
+        assert model.lang == lang and metadata["type"] == "torchaudio" and metadata["dictionary"]
 
 
 def test_whisper_runs_on_cpu_when_the_device_is_mps(monkeypatch):
     # CTranslate2 (faster-whisper) rejects "mps"; alignment keeps the device.
     models, calls = _fake_ml_modules(monkeypatch, load_seconds=0)
-    models.WhisperXAligner("base", "mps")._load_whisper()
+    models.FasterWhisperAligner("base", "mps")._load_whisper()
     assert calls["whisper_device"] == "cpu"

@@ -1,11 +1,14 @@
 # Canticle forced-alignment sidecar
 
 A thin FastAPI service that forced-aligns lyric text Canticle already has to
-the user's own audio, using Demucs vocal separation followed by WhisperX
-forced alignment. Slice 1 of epic
-[#482](https://github.com/sydlexius/canticle/issues/482) (word-sync
+the user's own audio, using Demucs vocal separation followed by a
+faster-whisper transcript and a direct wav2vec2 forced alignment. Slice 1 of
+epic [#482](https://github.com/sydlexius/canticle/issues/482) (word-sync
 generation); implements issue
-[#1005](https://github.com/sydlexius/canticle/issues/1005).
+[#1005](https://github.com/sydlexius/canticle/issues/1005). The forced-
+alignment stack dropped whisperx in favor of calling faster-whisper and the
+wav2vec2 models directly: issue
+[#1016](https://github.com/sydlexius/canticle/issues/1016).
 
 This sidecar **never returns a blind transcription as lyrics**. The `words`
 array always comes from aligning the CALLER-SUPPLIED lyric lines to the
@@ -24,7 +27,7 @@ without standing up a second sidecar.
 |---|---|---|---|
 | `file` | yes | binary | audio, any container ffmpeg can decode |
 | `lyrics` | yes | text (UTF-8) | one lyric line per newline |
-| `language` | no | text | ISO 639-1 code; defaults to `ALIGNER_ALIGN_LANGUAGE`. Must be a language whisperx 3.4.3 has a default align model for (`ALIGN_MODELS` in `app.py`), else `400` |
+| `language` | no | text | ISO 639-1 code; defaults to `ALIGNER_ALIGN_LANGUAGE`. Must be a language this sidecar has a default align model for (`ALIGN_MODELS` in `app.py`), else `400` |
 
 `lyrics` is split on `\n` only (a trailing `\r` is stripped), so a line
 means the same thing to the caller and the sidecar. Blank lines in `lyrics` are dropped and do **not** consume a `line_index` --
@@ -178,26 +181,35 @@ The CUDA variant is issue
 image's. `ALIGNER_DEVICE` and the `select_device` seam are already
 GPU-ready; only the installed `torch` wheel and base image need to change.
 
-### amd64: ctranslate2's executable-stack flag
+### amd64: ctranslate2's executable-stack flag (historical, now a no-op guard)
 
-whisperx 3.4.3 pins `ctranslate2<4.5.0` (resolves 4.4.0), whose x86_64 wheel
-bundles `libctranslate2-*.so` with an executable-stack (`PT_GNU_STACK` RWE)
-header. The base image's glibc (2.41, Debian trixie) refuses to load such a
-library, so without intervention `import ctranslate2` fails and every
-`/align` returns 500 on amd64 (arm64's build of the library is unaffected).
-The Dockerfile clears that one flag with `patchelf --clear-execstack` on
-exactly the bundled library, failing the build if the file is not found or
-the flag survives, rather than setting
-`GLIBC_TUNABLES=glibc.rtld.execstack=2` process-wide. A build-time
-`import ctranslate2, whisperx, ...` smoke check then fails the build if the
-ML stack cannot load, so this class cannot ship behind a green `/health`.
+whisperx 3.4.3 pinned `ctranslate2<4.5.0` (resolved 4.4.0), whose x86_64
+wheel bundled `libctranslate2-*.so` with an executable-stack (`PT_GNU_STACK`
+RWE) header. The base image's glibc (2.41, Debian trixie) refuses to load
+such a library, so without intervention `import ctranslate2` failed and
+every `/align` returned 500 on amd64 (arm64's build of the library was
+unaffected).
+
+Dropping whisperx (#1016) lets faster-whisper resolve its own ctranslate2
+unconstrained by whisperx's `<4.5.0` pin; it resolves 4.8.2, whose bundled
+library already ships with the executable-stack flag clear on **both**
+arches -- verified at build time (see the Dockerfile's `patchelf
+--print-execstack` before/after log): `execstack: -` before the patch runs,
+on amd64 as well as arm64. The `patchelf --clear-execstack` step is KEPT
+rather than removed, now as a guard against a future downgrade or pin
+reintroducing the flag: it fails the build loudly (`FATAL: execstack still
+set on $lib`) rather than shipping a silently-broken amd64 image, and its
+cost when the flag is already clear is a few hundred milliseconds. A build-time
+`import ctranslate2, faster_whisper, ...` smoke check then fails the build if
+the ML stack cannot load, so this class cannot ship behind a green `/health`.
 
 ### Image smoke checks
 
 Two build-time `RUN` steps fail the build rather than ship a broken image:
 
-1. The ML-stack import check above (plus the bundled VAD load, the CPU-only
-   assertion, and `app.ALIGN_MODELS` matching whisperx's own tables).
+1. The ML-stack import check above (plus the CPU-only assertion, and that
+   every `app.ALIGN_MODELS` entry resolves to a real `torchaudio.pipelines`
+   bundle or looks like a Hugging Face repo id).
 2. `smoke_decode.py`, the decode hardening against the image's OWN ffmpeg
    (the CI test job uses the runner's apt ffmpeg, a different build). It
    builds a synthetic 1 s tone, wraps it in a concat playlist whose entry is
@@ -298,11 +310,12 @@ cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w p
 
 - **No GPU Docker variant yet** -- CPU-only image; the CUDA variant is
   tracked in #1013.
-- **No baked-in model weights.** Unlike YAMNet's checksum-pinned bake, Demucs
-  and WhisperX pull weights from their normal hubs on first use, cached under
-  `/data` (see the Dockerfile's `HF_HOME`/`TORCH_HOME`). Mount `/data` as a
-  persistent volume in production. No single checksum to pin here, since
-  WhisperX's align-model set varies per requested language.
+- **No baked-in model weights.** Unlike YAMNet's checksum-pinned bake, Demucs,
+  faster-whisper, and the forced-alignment models pull weights from their
+  normal hubs on first use, cached under `/data` (see the Dockerfile's
+  `HF_HOME`/`TORCH_HOME`). Mount `/data` as a persistent volume in
+  production. No single checksum to pin here, since the align-model set
+  varies per requested language.
 - **`requirements.txt` pins top-level packages only** -- the transitive
   hash lock is #1017.
 - **No image workflow.** `deploy/yamnet-detector` has

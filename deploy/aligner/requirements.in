@@ -6,7 +6,8 @@ python-multipart
 # the CUDA build. When regenerating requirements.txt, resolve against that
 # index for these two (e.g. uv's --index-url for torch). The CUDA variant is
 # issue #1013's; see README "GPU support".
-torch==2.8.0  # see requirements.txt: 2.9 needs TorchCodec + drops APIs whisperx uses
+torch==2.8.0  # see requirements.txt: 2.9 needs TorchCodec + drops APIs the aligner uses
 torchaudio==2.8.0
 demucs
-whisperx
+faster-whisper
+transformers

@@ -10,16 +10,17 @@ aligning the caller's own lines to the separated vocal stem; `transcript` is
 an independent ASR pass over that stem, a content-gate input only.
 
 Pipeline: Demucs isolates the vocal stem, then the supplied lines are
-forced-aligned against it as ONE CTC sequence (WhisperX's wav2vec2 alignment
-model, not the Whisper decoder) while a Whisper ASR pass over the same stem
-produces the transcript. The model implementations live in
-`_aligner_models.py`; this module holds the pure core, the ffmpeg decode, and
-the HTTP layer.
+forced-aligned against it as ONE CTC sequence (a wav2vec2 alignment model
+loaded directly via torchaudio/transformers, not the Whisper decoder) while a
+faster-whisper ASR pass over the same stem produces the transcript. The model
+implementations live in `_aligner_models.py`; this module holds the pure
+core, the ffmpeg decode, and the HTTP layer.
 
-Heavy ML imports (torch, torchaudio, demucs, whisperx) are NEVER imported at
-module scope -- only inside functions `lifespan()` calls at real startup, so
-test_app.py can import this module and drive the full HTTP contract with the
-model layer stubbed, with none of those packages installed.
+Heavy ML imports (torch, torchaudio, demucs, faster_whisper, transformers)
+are NEVER imported at module scope -- only inside functions `lifespan()`
+calls at real startup, so test_app.py can import this module and drive the
+full HTTP contract with the model layer stubbed, with none of those packages
+installed.
 
 No lyric text is ever logged: only counts, byte lengths, and line indices.
 """
@@ -112,13 +113,20 @@ ALIGN_LANGUAGE = (os.environ.get("ALIGNER_ALIGN_LANGUAGE", "").strip() or DEFAUL
 DEVICE_ENV = os.environ.get("ALIGNER_DEVICE", "").strip().lower() or DEFAULT_DEVICE
 LOG_LEVEL = os.environ.get("ALIGNER_LOG_LEVEL", "").strip().upper() or "INFO"
 
-# Languages whisperx has a DEFAULT align model for, and that model's name.
-# Source: whisperx 3.4.3, whisperx/alignment.py
-# DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF.
-# A static copy so request validation works without whisperx installed (the
-# test venv); lifespan() replaces it with whisperx's own tables at real boot
-# when whisperx is importable, so a whisperx bump cannot silently drift from
-# what is validated.
+# Languages this sidecar has a DEFAULT align model for, and that model's name:
+# a name in torchaudio.pipelines.__all__ (the 5 torch-type languages) is
+# loaded via torchaudio; anything else is a Hugging Face repo id loaded via
+# transformers. See _aligner_models.FasterWhisperAligner._load_align_model.
+#
+# THE SOLE SOURCE OF TRUTH (#1016): this used to be a static copy that
+# lifespan() overwrote at real boot with whisperx's own
+# DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF tables. Now that
+# whisperx is gone there is nothing to sync from, so this table is what both
+# request validation AND the real model load consult -- a language added here
+# must have a real torchaudio bundle or HF repo id, checked by the
+# Dockerfile's build-time smoke check loading one of each type.
+# Original source (informational only, nothing copied): whisperx 3.4.3,
+# whisperx/alignment.py DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF.
 ALIGN_MODELS = {
     "en": "WAV2VEC2_ASR_BASE_960H",
     "fr": "VOXPOPULI_ASR_BASE_10K_FR",
@@ -170,7 +178,7 @@ def validate_config(align_models: dict) -> None:
     """
     if ALIGN_LANGUAGE not in align_models:
         raise RuntimeError(
-            f"ALIGNER_ALIGN_LANGUAGE={ALIGN_LANGUAGE!r} has no default whisperx align model; "
+            f"ALIGNER_ALIGN_LANGUAGE={ALIGN_LANGUAGE!r} has no default align model; "
             f"supported: {', '.join(sorted(align_models))}"
         )
 
@@ -403,10 +411,10 @@ def _build_separator(_device: str) -> Separator:
 
 
 def _build_aligner(_device: str) -> Aligner:
-    """Constructs the real WhisperX-backed aligner; imports whisperx lazily (see above)."""
-    from _aligner_models import WhisperXAligner  # noqa: PLC0415 - deliberate lazy import
+    """Constructs the real faster-whisper/wav2vec2-backed aligner; imports lazily (see above)."""
+    from _aligner_models import FasterWhisperAligner  # noqa: PLC0415 - deliberate lazy import
 
-    return WhisperXAligner(whisper_model=WHISPER_MODEL, device=_device)
+    return FasterWhisperAligner(whisper_model=WHISPER_MODEL, device=_device)
 
 
 _state: dict = {}
@@ -440,16 +448,9 @@ def _configure_logging() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global ALIGN_MODELS  # noqa: PLW0603 - replaced once at boot with whisperx's own tables
     import torch  # noqa: PLC0415 - only the real server boot needs torch present
 
     _configure_logging()
-    try:
-        from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH  # noqa: PLC0415
-    except ImportError:
-        logger.warning("aligner: whisperx not importable at boot, validating languages against the static table")
-    else:
-        ALIGN_MODELS = {**DEFAULT_ALIGN_MODELS_TORCH, **DEFAULT_ALIGN_MODELS_HF}
     validate_config(ALIGN_MODELS)
     device = select_device(DEVICE_ENV, torch.cuda.is_available(), torch.backends.mps.is_available())
     _state["device"] = device
