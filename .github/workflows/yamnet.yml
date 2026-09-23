@@ -364,5 +364,9 @@ jobs:
           platforms: linux/amd64 # AVX-dependent TF wheel; no arm64 leg
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
+          # scope=yamnet: the same scope the `build` job populates above, for
+          # this identical context/Dockerfile -- without it this job fell back
+          # to the default (unscoped) buildkit cache and cold-rebuilt on every
+          # publish even though `build` had just built the identical image.
+          cache-from: type=gha,scope=yamnet
+          cache-to: type=gha,scope=yamnet,mode=min

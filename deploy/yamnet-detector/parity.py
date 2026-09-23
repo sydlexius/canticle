@@ -234,12 +234,48 @@ def gate_scores(resp: dict) -> dict:
     }
 
 
+def check_key_parity(base: dict, head: dict, clip: str) -> list[str]:
+    """Require base and head to report the IDENTICAL key set in both 'mean'
+    and 'max' for a clip. Without this, max_abs_diff's old `.get(k, 0.0)`
+    fallback treated a key present on only one side as score 0 on the other,
+    so a class the head model dropped (or gained) compared zero drift instead
+    of failing -- the exact class-set drift this check exists to catch.
+    Returns human-readable error strings (empty when the key sets match)."""
+    errors: list[str] = []
+    for field in ("mean", "max"):
+        base_keys = set(base.get(field, {}))
+        head_keys = set(head.get(field, {}))
+        only_base = base_keys - head_keys
+        only_head = head_keys - base_keys
+        if only_base:
+            errors.append(f"clip '{clip}': '{field}' keys present in base but missing from head: {sorted(only_base)}")
+        if only_head:
+            errors.append(f"clip '{clip}': '{field}' keys present in head but missing from base: {sorted(only_head)}")
+    return errors
+
+
 def max_abs_diff(base: dict, head: dict) -> float:
+    """Assumes base and head already have identical key sets in both fields
+    (enforced by check_key_parity before this is called) -- no `.get(k, 0.0)`
+    fallback, so a genuinely missing key raises instead of silently scoring
+    as a zero-diff match."""
     worst = 0.0
     for field in ("mean", "max"):
-        keys = set(base.get(field, {})) | set(head.get(field, {}))
-        worst = max(worst, max((abs(base.get(field, {}).get(k, 0.0) - head.get(field, {}).get(k, 0.0)) for k in keys), default=0.0))
+        keys = set(base[field]) | set(head[field])
+        worst = max(worst, max((abs(base[field][k] - head[field][k]) for k in keys), default=0.0))
     return worst
+
+
+def health_class_count_errors(base_classes: int, head_classes: int) -> list[str]:
+    """base and head must report the SAME /health class count, or every
+    per-clip key-set check downstream is comparing two differently-shaped
+    models and every score diff is meaningless. A pure helper so --selftest
+    can exercise it without a running server."""
+    if base_classes != head_classes:
+        return [
+            f"class count mismatch: base /health reports {base_classes} classes, head reports {head_classes}"
+        ]
+    return []
 
 
 def compare(name: str, note: str, base: dict, head: dict, tolerance: float) -> dict:
@@ -255,6 +291,27 @@ def compare(name: str, note: str, base: dict, head: dict, tolerance: float) -> d
         "ok": not gate_mismatches and diff <= tolerance,
         "base_instrumental": base_instrumental, "head_instrumental": head_instrumental,
     }
+
+
+def evaluate_clip(
+    name: str, note: str, base_resp: dict, head_resp: dict,
+    base_classes: int, head_classes: int, tolerance: float,
+) -> tuple[list[str], dict | None]:
+    """One clip's full validate -> key-parity -> compare pipeline, shared by
+    main()'s per-clip loop and --selftest so both exercise the exact same
+    skip-on-invalid logic (finding #3, Copilot 4087340486): a malformed or
+    key-set-mismatched response returns its errors and a None row rather than
+    being handed to compare()/max_abs_diff(), which would otherwise
+    KeyError/TypeError on it instead of producing the intended validation
+    failure. Returns (errors, row); row is None whenever errors is non-empty.
+    """
+    errors = validate_scores(base_resp, "base", name, base_classes)
+    errors += validate_scores(head_resp, "head", name, head_classes)
+    if not errors:
+        errors += check_key_parity(base_resp, head_resp, name)
+    if errors:
+        return errors, None
+    return errors, compare(name, note, base_resp, head_resp, tolerance)
 
 
 def _margin(value: float, threshold: float, sense: str) -> str:
@@ -290,10 +347,14 @@ def render_table(rows: list[dict], tolerance: float) -> str:
 
 
 def run_selftest() -> int:
-    """Canned-JSON unit checks for validate_scores(): one well-formed
-    response plus one case per required failure mode (missing key, empty
-    maps, NaN, out-of-range, missing max class). Runs with plain python3, no
-    docker/server/TensorFlow needed -- `python3 parity.py --selftest`."""
+    """Canned-JSON unit checks, no docker/server/TensorFlow needed --
+    `python3 parity.py --selftest`. Covers validate_scores() (one well-formed
+    response plus one case per required failure mode: missing key, empty
+    maps, NaN, out-of-range, missing max class), check_key_parity() (base and
+    head each with their own zero-scored extra key), health_class_count_errors()
+    (mismatched and matching /health class counts), and evaluate_clip() on a
+    malformed response (missing 'max' entirely), which must produce a
+    validation failure and skip compare() rather than raising."""
     # A small closed class set (the three gates' classes plus two fillers),
     # so the expected-class-count check has something to under/overcount
     # against.
@@ -330,6 +391,57 @@ def run_selftest() -> int:
             continue
         print(f"selftest OK: {desc} -> {'; '.join(errors) if errors else 'no errors'}")
 
+    # check_key_parity: base and head each carry their OWN extra key, both
+    # scored 0.0 -- the exact shape the old `.get(k, 0.0)` fallback in
+    # max_abs_diff would have scored as zero drift instead of flagging
+    # (finding #2, CodeRabbit 4088005953 / Copilot 4087340419).
+    base_extra_key = good()
+    base_extra_key["mean"]["Only In Base"] = 0.0
+    base_extra_key["max"]["Only In Base"] = 0.0
+    head_extra_key = good()
+    head_extra_key["mean"]["Only In Head"] = 0.0
+    head_extra_key["max"]["Only In Head"] = 0.0
+    key_parity_errors = check_key_parity(base_extra_key, head_extra_key, "selftest-key-mismatch")
+    if not key_parity_errors:
+        failures.append("mismatched key sets: expected check_key_parity to report errors, got none")
+    else:
+        print(f"selftest OK: mismatched key sets -> {'; '.join(key_parity_errors)}")
+
+    # health_class_count_errors: base and head disagree on /health's class
+    # count -- must fail loudly rather than silently comparing two
+    # differently-shaped models.
+    class_count_errors = health_class_count_errors(n, n + 1)
+    if not class_count_errors:
+        failures.append("mismatched class counts: expected health_class_count_errors to report errors, got none")
+    else:
+        print(f"selftest OK: mismatched class counts -> {'; '.join(class_count_errors)}")
+    no_class_count_errors = health_class_count_errors(n, n)
+    if no_class_count_errors:
+        failures.append(f"matching class counts: expected no errors, got {no_class_count_errors!r}")
+    else:
+        print("selftest OK: matching class counts -> no errors")
+
+    # evaluate_clip on a malformed response (missing 'max' entirely) must
+    # produce a validation failure and a None row -- never let compare()/
+    # max_abs_diff() run on it and raise KeyError/TypeError (finding #3,
+    # Copilot 4087340486). The bug this guards against would surface here as
+    # an uncaught exception, not a wrong return value, so the try/except is
+    # deliberate: catching it as a self-test failure produces a readable
+    # selftest FAILED line instead of the traceback the fix exists to avoid.
+    malformed = {"mean": good()["mean"]}  # no 'max' field at all
+    try:
+        clip_errors, row = evaluate_clip(
+            "selftest-malformed", "malformed response (missing 'max')",
+            malformed, good(), n, n, DEFAULT_TOLERANCE,
+        )
+    except Exception as exc:  # noqa: BLE001 - this IS the failure mode under test
+        failures.append(f"malformed response: evaluate_clip raised {exc!r} instead of returning a validation failure")
+    else:
+        if not clip_errors or row is not None:
+            failures.append(f"malformed response: expected (errors, None), got ({clip_errors!r}, {row!r})")
+        else:
+            print(f"selftest OK: malformed response -> validation failure, no traceback ({'; '.join(clip_errors)})")
+
     if failures:
         print("\nselftest FAILED:\n" + "\n".join(f"  - {f}" for f in failures), file=sys.stderr)
         return 1
@@ -359,15 +471,23 @@ def main() -> int:
         if not isinstance(classes, int) or isinstance(classes, bool) or classes <= 0:
             print(f"{side} /health reports an invalid 'classes' count: {classes!r}", file=sys.stderr)
             return 1
+    class_count_errors = health_class_count_errors(base_classes, head_classes)
+    if class_count_errors:
+        for e in class_count_errors:
+            print(e, file=sys.stderr)
+        return 1
 
     clips = generate_clips(Path(args.clips_dir))
     rows: list[dict] = []
     validation_errors: list[str] = []
     for name, (path, note) in clips.items():
         base_resp, head_resp = score_clip(args.base_url, path), score_clip(args.head_url, path)
-        validation_errors += validate_scores(base_resp, "base", name, base_classes)
-        validation_errors += validate_scores(head_resp, "head", name, head_classes)
-        rows.append(compare(name, note, base_resp, head_resp, args.tolerance))
+        clip_errors, row = evaluate_clip(
+            name, note, base_resp, head_resp, base_classes, head_classes, args.tolerance,
+        )
+        validation_errors += clip_errors
+        if row is not None:
+            rows.append(row)
 
     table = render_table(rows, args.tolerance)
     print(table)
