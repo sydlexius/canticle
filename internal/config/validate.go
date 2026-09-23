@@ -61,6 +61,20 @@ func ValidatePositiveInt() Validator {
 	}
 }
 
+// ValidateIntRange accepts an integer in [lo, hi].
+func ValidateIntRange(lo, hi int) Validator {
+	return func(value string) error {
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("must be an integer")
+		}
+		if n < lo || n > hi {
+			return fmt.Errorf("must be between %d and %d", lo, hi)
+		}
+		return nil
+	}
+}
+
 // ValidateBool accepts a TOML boolean.
 func ValidateBool() Validator {
 	return func(value string) error {
@@ -391,6 +405,16 @@ func validatorFor(f FieldSpec) Validator {
 		// Strictly positive, matching the env and file rules: a batch of 0
 		// drains nothing while the ticker still fires.
 		return ValidatePositiveInt()
+	case "word_sync_recheck.batch":
+		// Bounded both ways, by the same predicate the file and env paths
+		// use, so the settings page cannot save a value the next boot
+		// resets FOR RANGE. This does not cover the literal TOML written:
+		// tomlValue writes an integer string verbatim, so a value with a
+		// leading zero ("007") round-trips as invalid TOML the next Load
+		// rejects at boot. That is a pre-existing writer.go gap shared by
+		// every TypeInt field, not specific to this key -- tracked at #1049,
+		// not fixed here.
+		return ValidateIntRange(1, wordSyncRecheckBatchMax)
 	case "word_sync_generate.budget_per_cycle", "word_sync_generate.concurrency":
 		// Strictly positive, matching the env and file re-default rules: a
 		// budget or concurrency of 0 would drain nothing while a future sweep

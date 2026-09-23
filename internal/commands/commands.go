@@ -3221,6 +3221,8 @@ func configKeys() []string {
 		"timing_validation.revalidate_batch",
 		"timing_validation.on_mis_synced",
 		"timing_validation.on_categorical",
+		"word_sync_recheck.enabled",
+		"word_sync_recheck.batch",
 		"guard.accepted_scripts",
 		"guard.script_guard_threshold",
 	}
@@ -3306,6 +3308,10 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return string(cfg.TimingValidation.OnMisSynced), true
 	case "timing_validation.on_categorical":
 		return string(cfg.TimingValidation.OnCategorical), true
+	case "word_sync_recheck.enabled":
+		return strconv.FormatBool(cfg.WordSyncRecheck.Enabled), true
+	case "word_sync_recheck.batch":
+		return strconv.Itoa(cfg.WordSyncRecheck.Batch), true
 	case "guard.accepted_scripts":
 		return strings.Join(cfg.Guard.AcceptedScripts, ","), true
 	case "guard.script_guard_threshold":
@@ -3574,6 +3580,26 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 		} else {
 			cfg.TimingValidation.OnCategorical = config.TimingAction(normalized)
 		}
+	case "word_sync_recheck.enabled":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("word_sync_recheck.enabled must be a boolean: %w", err)
+		}
+		cfg.WordSyncRecheck.Enabled = b
+	case "word_sync_recheck.batch":
+		// Validation is DELEGATED to the config package rather than restated
+		// here, following the timing-action arms above: config.ValidateAndSet
+		// runs the same ValidateIntRange(1, wordSyncRecheckBatchMax) the file
+		// and env paths enforce, so a value this CLI accepts is exactly a
+		// value the next boot will keep.
+		if err := config.ValidateAndSet(key, value); err != nil {
+			return err
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("word_sync_recheck.batch must be an integer: %w", err)
+		}
+		cfg.WordSyncRecheck.Batch = n
 	case "guard.accepted_scripts":
 		// An empty value is valid: it clears the allowlist and disables the guard.
 		cfg.Guard.AcceptedScripts = splitCSV(value)

@@ -30,6 +30,7 @@ type Config struct {
 	Enrichment           EnrichmentConfig           `toml:"enrichment"`
 	Realign              RealignConfig              `toml:"realign"`
 	TimingValidation     TimingValidationConfig     `toml:"timing_validation"`
+	WordSyncRecheck      WordSyncRecheckConfig      `toml:"word_sync_recheck"`
 	Guard                GuardConfig                `toml:"guard"`
 	Queue                QueueConfig                `toml:"queue"`
 	Watcher              WatcherConfig              `toml:"watcher"`
@@ -944,6 +945,55 @@ type TimingValidationConfig struct {
 	OnCategorical TimingAction `toml:"on_categorical"`
 }
 
+// wordSyncRecheckBatchDefault and wordSyncRecheckBatchMax bound
+// word_sync_recheck.batch, the most rows the serve sweep keeps in word-recheck
+// mode at once (#1048).
+//
+// The default is the #982 plan's value: at a production cooldown of 60s a full
+// cap drains in about 100 minutes, so the cap bounds how far rechecks
+// interleave with fresh work rather than throttling the recheck itself.
+//
+// The ceiling exists because a cycle is planned to flip its admissions in ONE
+// write transaction (queue.MarkWordRecheckQueued), which the worker and the
+// scanner wait behind, and because at 60s a cap of 1000 is already ~16.7h of
+// serial drain: a larger cap no longer bounds anything a day-scale operator
+// would notice, it only lengthens that transaction. A one-time bulk backlog
+// belongs to `scan reconcile-word-sync --limit`, which has no such cap.
+const (
+	wordSyncRecheckBatchDefault = 100
+	wordSyncRecheckBatchMax     = 1000
+)
+
+// WordSyncRecheckConfig governs the serve-mode word-timing recheck sweep
+// (#1048): the steady-state feed that re-examines newly settled line-synced
+// tracks for word timings, the unattended counterpart of
+// `canticle scan reconcile-word-sync` (#1046). Dark by default.
+//
+// NOT DEAD CODE: nothing reads this section YET. Its consumer, the serve-mode
+// sweep, is #1048 slice 7; this slice lands the key surface first so the sweep
+// ships against a settled, never-retyped schema. Until then both keys are inert.
+type WordSyncRecheckConfig struct {
+	// Enabled turns the sweep on. Default false. The reconcile-word-sync CLI
+	// runs regardless of this flag.
+	// Override: MXLRC_WORD_SYNC_RECHECK_ENABLED.
+	Enabled bool `toml:"enabled"`
+	// Batch is the most rows the serve sweep keeps in word-recheck mode at
+	// once, across cycles: each cycle admits Batch minus the rows already
+	// queued. `scan reconcile-word-sync --limit` queues independently of this
+	// cap, so the true in-flight count can exceed Batch. Default 100, range
+	// 1..wordSyncRecheckBatchMax; a value outside it resets to the default (0
+	// would admit nothing while the ticker still fires, and a huge value would
+	// defeat the bound).
+	// Override: MXLRC_WORD_SYNC_RECHECK_BATCH.
+	Batch int `toml:"batch"`
+}
+
+// validWordSyncRecheckBatch is the single range check the file, env, and
+// `config set` paths share, so none of them accepts a value another resets.
+func validWordSyncRecheckBatch(n int) bool {
+	return n >= 1 && n <= wordSyncRecheckBatchMax
+}
+
 // timingMisSyncedActions and timingCategoricalActions are the accepted value
 // sets for the two action fields. They are separate because the arms are not
 // interchangeable: a categorical lyric has no words worth demoting, so offering
@@ -1037,6 +1087,10 @@ func defaults() Config {
 			RevalidateBatch:    timingValidationBatchDefault,
 			OnMisSynced:        TimingActionDemote,
 			OnCategorical:      TimingActionQuarantine,
+		},
+		WordSyncRecheck: WordSyncRecheckConfig{
+			Enabled: false,
+			Batch:   wordSyncRecheckBatchDefault,
 		},
 		Guard:   GuardConfig{Threshold: guardThresholdDefault},
 		Queue:   QueueConfig{Randomize: true, BatchSize: queueBatchSizeDefault},
@@ -1227,6 +1281,12 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			cfg.TimingValidation.OnCategorical = normalizeTimingAction(cfg.TimingValidation.OnCategorical)
 			if !validTimingAction(cfg.TimingValidation.OnCategorical, timingCategoricalActions()) {
 				cfg.TimingValidation.OnCategorical = d.TimingValidation.OnCategorical
+			}
+			// WordSyncRecheck.Batch outside 1..max resets to the default, the same
+			// bound the env and `config set` paths enforce. Enabled is not
+			// re-defaulted: it defaults false, so absent and explicit false agree.
+			if !validWordSyncRecheckBatch(cfg.WordSyncRecheck.Batch) {
+				cfg.WordSyncRecheck.Batch = d.WordSyncRecheck.Batch
 			}
 			// WordSyncGenerate. A file is not more trusted than an env var, so
 			// every bound the env path enforces is enforced here too.
@@ -1420,7 +1480,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_WORD_SYNC, MXLRC_WORD_SYNC_MODE, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_WORD_SYNC_GENERATE_ENABLED, MXLRC_WORD_SYNC_GENERATE_URL, MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE, MXLRC_WORD_SYNC_GENERATE_CONCURRENCY, MXLRC_WORD_SYNC_GENERATE_MODEL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_WORD_SYNC, MXLRC_WORD_SYNC_MODE, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_WORD_SYNC_RECHECK_ENABLED, MXLRC_WORD_SYNC_RECHECK_BATCH, MXLRC_WORD_SYNC_GENERATE_ENABLED, MXLRC_WORD_SYNC_GENERATE_URL, MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE, MXLRC_WORD_SYNC_GENERATE_CONCURRENCY, MXLRC_WORD_SYNC_GENERATE_MODEL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -2031,6 +2091,24 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.TimingValidation.OnCategorical = action
 			applied["timing_validation.on_categorical"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_WORD_SYNC_RECHECK_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_WORD_SYNC_RECHECK_ENABLED", "value", v, "current", cfg.WordSyncRecheck.Enabled) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.WordSyncRecheck.Enabled = enabled
+			applied["word_sync_recheck.enabled"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_WORD_SYNC_RECHECK_BATCH"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || !validWordSyncRecheckBatch(n) {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_WORD_SYNC_RECHECK_BATCH", "value", v, "current", cfg.WordSyncRecheck.Batch) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.WordSyncRecheck.Batch = n
+			applied["word_sync_recheck.batch"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_WORD_SYNC_GENERATE_ENABLED"); v != "" {
