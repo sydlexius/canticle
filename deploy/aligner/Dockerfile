@@ -52,19 +52,24 @@ RUN grep -E '^(torch|torchaudio)==' requirements.txt > /tmp/torch-cpu.txt \
     && pip install --no-cache-dir -r requirements.txt \
     && rm /tmp/torch-cpu.txt
 
-# whisperx 3.4.3 pins ctranslate2<4.5.0, which resolves 4.4.0. Its x86_64
-# wheel bundles libctranslate2-*.so with a PT_GNU_STACK header requesting an
-# executable stack (RWE); this base image's glibc (2.41, Debian trixie)
-# refuses to dlopen such a library, so `import ctranslate2` -- and with it
-# every /align -- fails with "cannot enable executable stack". The library
-# does not actually need an executable stack, so clear the flag on exactly
+# HISTORICAL (#1016 dropped whisperx): whisperx 3.4.3 pinned
+# ctranslate2<4.5.0, which resolved 4.4.0, whose x86_64 wheel bundled
+# libctranslate2-*.so with a PT_GNU_STACK header requesting an executable
+# stack (RWE); this base image's glibc (2.41, Debian trixie) refused to
+# dlopen such a library, so `import ctranslate2` -- and with it every
+# /align -- failed with "cannot enable executable stack". The library does
+# not actually need an executable stack, so this clears the flag on exactly
 # that file rather than relaxing the loader for the whole process
 # (GLIBC_TUNABLES=glibc.rtld.execstack=2 also works, but re-enables the
-# exec-stack allowance for every library the process loads). The glob fails
-# the build if it matches nothing, so a ctranslate2 upgrade that renames or
-# moves the library is caught here rather than shipping unpatched. On aarch64
-# the flag is already clear and --clear-execstack is a no-op; the verify loop
-# asserts the final state on both arches.
+# exec-stack allowance for every library the process loads). Without
+# whisperx's pin, faster-whisper now resolves ctranslate2 4.8.2, already
+# clear on both arches (README.md "amd64: ctranslate2's executable-stack
+# flag" has the measured before/after) -- this step is KEPT as a guard
+# against a future downgrade reintroducing the flag. The glob fails the
+# build if it matches nothing, so a ctranslate2 upgrade that renames or
+# moves the library is caught here rather than shipping unpatched. On
+# aarch64 the flag is already clear and --clear-execstack is a no-op; the
+# verify loop asserts the final state on both arches.
 RUN set -eu; \
     site="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
     set -- "$site"/ctranslate2.libs/libctranslate2-*.so*; \
@@ -104,11 +109,12 @@ gpu = sorted(d.metadata['Name'] for d in distributions() \
     if d.metadata['Name'].lower().startswith(('nvidia-', 'triton'))); \
 assert torch.version.cuda is None, 'CUDA torch build installed: %s' % torch.__version__; \
 assert not gpu, 'GPU distributions installed: %s' % gpu; \
-import app; \
-torch_langs = [lang for lang, name in app.ALIGN_MODELS.items() if hasattr(torchaudio.pipelines, name)]; \
+import app, _aligner_models; \
+torch_langs = [lang for lang, name in app.ALIGN_MODELS.items() \
+    if app.is_torchaudio_align_model(name, torchaudio)]; \
 assert torch_langs, 'no ALIGN_MODELS entry resolves to a torchaudio.pipelines bundle'; \
 bad = [(lang, name) for lang, name in app.ALIGN_MODELS.items() \
-    if not hasattr(torchaudio.pipelines, name) and '/' not in name]; \
+    if not app.is_torchaudio_align_model(name, torchaudio) and '/' not in name]; \
 assert not bad, 'ALIGN_MODELS entries neither a torchaudio bundle nor a HF repo id: %r' % bad; \
 print('smoke ok: torch', torch.__version__, 'ctranslate2', ctranslate2.__version__, \
     'faster_whisper', faster_whisper.__version__, 'torch-type langs', sorted(torch_langs))"

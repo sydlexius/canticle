@@ -124,7 +124,10 @@ LOG_LEVEL = os.environ.get("ALIGNER_LOG_LEVEL", "").strip().upper() or "INFO"
 # whisperx is gone there is nothing to sync from, so this table is what both
 # request validation AND the real model load consult -- a language added here
 # must have a real torchaudio bundle or HF repo id, checked by the
-# Dockerfile's build-time smoke check loading one of each type.
+# Dockerfile's build-time smoke check, which imports this module and every
+# entry's torchaudio.pipelines.__all__ membership (the SAME check
+# _aligner_models.FasterWhisperAligner._load_align_model makes at request
+# time) rather than loading any model weights.
 # Original source (informational only, nothing copied): whisperx 3.4.3,
 # whisperx/alignment.py DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF.
 ALIGN_MODELS = {
@@ -168,6 +171,18 @@ ALIGN_MODELS = {
     "lv": "jimregan/wav2vec2-large-xlsr-latvian-cv",
     "tl": "Khalsuu/filipino-wav2vec2-l-xls-r-300m-official",
 }
+
+
+def is_torchaudio_align_model(name: str, torchaudio_module) -> bool:
+    """True if `name` is one of torchaudio's own bundled align-model names.
+
+    The ONE membership test shared by the real request-time model load
+    (_aligner_models.FasterWhisperAligner._load_align_model) and the
+    Dockerfile's build-time smoke check, so the two cannot drift: a name in
+    `torchaudio_module.pipelines.__all__` loads via torchaudio, everything
+    else is assumed to be a Hugging Face repo id.
+    """
+    return name in torchaudio_module.pipelines.__all__
 
 
 def validate_config(align_models: dict) -> None:
@@ -316,11 +331,27 @@ def _parse_lines(lyrics: str) -> list[str]:
 
 
 class _BadAudioError(Exception):
-    """Raised by a Separator/Aligner when the upload cannot be decoded/used.
+    """Raised when the CALLER's upload cannot be decoded/used.
 
     The ONLY exception type the pipeline treats as the caller's fault (400).
     Anything else raised by the model layer is a genuine pipeline failure and
-    is left to propagate as a 500.
+    is left to propagate as a 500. Reserved for the original upload; a
+    rejection decoding audio this sidecar generated itself (the separated
+    vocal stem) is _InternalAudioError instead -- see decode_pcm's
+    `reject_error`.
+    """
+
+
+class _InternalAudioError(Exception):
+    """Raised when THIS SIDECAR's own generated audio cannot be decoded.
+
+    Covers a decode rejection on the separated vocal stem (Demucs' own
+    output), inside FasterWhisperAligner.transcribe/align: that file was
+    never the caller's upload, so a decode failure there is a pipeline bug or
+    a broken environment, not the caller's fault, and must propagate as a
+    500 like any other unclassified exception -- never read as the
+    documented 400 "cannot read audio", which would misclassify a server
+    fault as a benign miss the Go client's circuit breaker never counts.
     """
 
 
@@ -331,16 +362,22 @@ class _AudioTooLongError(Exception):
 FFMPEG = "ffmpeg"
 
 
-def decode_pcm(audio_path: str, sample_rate: int, channels: int) -> bytes:
+def decode_pcm(
+    audio_path: str, sample_rate: int, channels: int, *, reject_error: type[Exception] = _BadAudioError
+) -> bytes:
     """Decodes any ffmpeg-readable file to interleaved float32 PCM bytes.
 
     Classification is the point (the Go client treats 4xx as a benign miss
     that never trips its breaker, so a server fault must NOT read as 400):
-    only ffmpeg REJECTING the input (exit code > 0, or no samples) is the
-    caller's fault -> _BadAudioError. A missing/unrunnable ffmpeg (OSError),
-    ffmpeg killed by a signal (exit code < 0, e.g. OOM), or a decode that
-    outlives DECODE_TIMEOUT_SECONDS (subprocess.TimeoutExpired) is an
-    environment fault and propagates as a 500.
+    only ffmpeg REJECTING the input (exit code > 0, or no samples) is
+    caller-classified, raising `reject_error` (default _BadAudioError, for
+    the caller's own upload; callers decoding audio this sidecar generated
+    itself pass `reject_error=_InternalAudioError` so the same ffmpeg
+    rejection reads as a server fault instead). A missing/unrunnable ffmpeg
+    (OSError), ffmpeg killed by a signal (exit code < 0, e.g. OOM), or a
+    decode that outlives DECODE_TIMEOUT_SECONDS (subprocess.TimeoutExpired)
+    is always an environment fault and propagates as a 500, regardless of
+    `reject_error`.
 
     The file reaches ffmpeg as its stdin (`fd:`), never by name, and
     `-protocol_whitelist fd` forbids every other protocol: format detection
@@ -370,7 +407,7 @@ def decode_pcm(audio_path: str, sample_rate: int, channels: int) -> bytes:
     if proc.returncode < 0:
         raise RuntimeError(f"ffmpeg killed by signal {-proc.returncode}")
     if proc.returncode > 0 or not proc.stdout:
-        raise _BadAudioError("cannot decode audio")
+        raise reject_error("cannot decode audio")
     if len(proc.stdout) > MAX_AUDIO_SECONDS * sample_rate * channels * 4:
         raise _AudioTooLongError(f"audio longer than {MAX_AUDIO_SECONDS}s")
     return proc.stdout

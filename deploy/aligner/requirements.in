@@ -9,5 +9,6 @@ python-multipart
 torch==2.8.0  # see requirements.txt: 2.9 needs TorchCodec + drops APIs the aligner uses
 torchaudio==2.8.0
 demucs
-faster-whisper
-transformers
+# Held at >=5.17.0 / >=1.2.1: see requirements.txt for the CVE/parity rationale.
+faster-whisper>=1.2.1
+transformers>=5.17.0

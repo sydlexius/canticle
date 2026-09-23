@@ -110,12 +110,19 @@ def _decode_audio_f32(path: str):
     here instead of a second decoder (torchaudio.load or faster-whisper's own
     PyAV-based file decode) -- see DemucsSeparator.separate's comment on why
     decode_pcm and not torchaudio.load.
+
+    Every caller here passes the SEPARATED VOCAL STEM (Demucs' own output),
+    never the caller's original upload, so a decode rejection is this
+    sidecar's own fault (a pipeline bug or broken environment), not the
+    caller's -- reject_error=_InternalAudioError makes that read as a 500,
+    not the documented 400 "cannot read audio" _BadAudioError produces for a
+    genuinely bad upload.
     """
     import numpy as np  # noqa: PLC0415
 
-    from app import decode_pcm  # noqa: PLC0415
+    from app import _InternalAudioError, decode_pcm  # noqa: PLC0415
 
-    pcm = decode_pcm(path, _ALIGN_SAMPLE_RATE, channels=1)
+    pcm = decode_pcm(path, _ALIGN_SAMPLE_RATE, channels=1, reject_error=_InternalAudioError)
     return np.frombuffer(pcm, dtype=np.float32)
 
 
@@ -166,10 +173,10 @@ class FasterWhisperAligner:
                 return cached[1], cached[2]
             import torchaudio  # noqa: PLC0415
 
-            from app import ALIGN_MODELS  # noqa: PLC0415
+            from app import ALIGN_MODELS, is_torchaudio_align_model  # noqa: PLC0415
 
             model_name = ALIGN_MODELS[language]
-            if model_name in torchaudio.pipelines.__all__:
+            if is_torchaudio_align_model(model_name, torchaudio):
                 # The 5 languages whisperx served from torchaudio's own
                 # bundled wav2vec2 checkpoints (en/fr/de/es/it).
                 bundle = getattr(torchaudio.pipelines, model_name)
@@ -196,7 +203,28 @@ class FasterWhisperAligner:
         # lighter VAD than whisperx's bundled pyannote one it replaces).
         # Exact parity is not required -- transcript only feeds the content
         # gate (verification.Similarity), never `words`.
-        segments, _info = model.transcribe(audio, language=language, vad_filter=True)
+        # condition_on_previous_text=False: whisperx ran with this off, and
+        # faster-whisper's own default is True. Conditioning on prior text
+        # raises the risk of repetition/hallucination loops on sung material
+        # (a Whisper failure mode distinct from plain speech); restoring
+        # whisperx's posture costs nothing here since each request is one
+        # short vocal stem, not a long multi-segment transcript that would
+        # benefit from cross-segment context.
+        # without_timestamps=True: whisperx also ran with this on (faster-
+        # whisper's own default is False). It only tells the decoder to skip
+        # predicting timestamp tokens; segment.text is plain text either way,
+        # so it does not change what this method joins -- verified against
+        # faster-whisper's WhisperModel.transcribe, which returns Segment
+        # objects with a .text field regardless of this flag. transcript is
+        # a content-gate input only, never `words` (which comes from the
+        # forced-align step below, not from Whisper's own timestamps).
+        segments, _info = model.transcribe(
+            audio,
+            language=language,
+            vad_filter=True,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
         return " ".join(seg.text.strip() for seg in segments).strip()
 
     def align(self, vocal_path: str, lines: list[str], language: str):

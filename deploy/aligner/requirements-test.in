@@ -5,7 +5,7 @@
 # (starlette comes with fastapi). They are listed UNPINNED: their versions
 # come from requirements.txt through the constraint below, so the runtime
 # lock is their one pin home and this lock cannot drift from it. A
-# constraint only pins what is requested, so torch/demucs/whisperx never
+# constraint only pins what is requested, so torch/demucs/faster-whisper never
 # enter this lock and the test venv stays ML-free. Regenerate with uv (the
 # recipe in requirements-test.txt): pip/pip-tools refuse this constraint
 # file ("Constraints cannot have extras", from uvicorn[standard]).
