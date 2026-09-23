@@ -940,3 +940,53 @@ func TestWordSyncModeOptionsAreLabeled(t *testing.T) {
 		t.Error("no option was marked selected; the browser would silently pick the first one")
 	}
 }
+
+// TestRawConfigValueWordSyncRecheck covers the settings-UI arms for
+// word_sync_recheck.enabled and .batch (#1048 slice 6). Same reasoning as
+// TestRawConfigValueWordSyncMode above: rawConfigValue ends in a bare
+// `return ""`, so a missing arm renders as an empty control rather than
+// failing loudly, and a checkbox/number field left blank silently reads as
+// off/zero rather than the configured value.
+func TestRawConfigValueWordSyncRecheck(t *testing.T) {
+	cfg := config.Config{WordSyncRecheck: config.WordSyncRecheckConfig{Enabled: true, Batch: 250}}
+	if got := rawConfigValue(cfg, "word_sync_recheck.enabled"); got != "true" {
+		t.Errorf("rawConfigValue(word_sync_recheck.enabled) = %q; want %q (a missing arm renders blank)", got, "true")
+	}
+	if got := rawConfigValue(cfg, "word_sync_recheck.batch"); got != "250" {
+		t.Errorf("rawConfigValue(word_sync_recheck.batch) = %q; want %q", got, "250")
+	}
+	// The zero-value config, so a missing/wrong arm has nowhere to hide behind
+	// the fixture's non-default values above.
+	if got := rawConfigValue(config.Config{}, "word_sync_recheck.enabled"); got != "false" {
+		t.Errorf("rawConfigValue(word_sync_recheck.enabled) default = %q; want %q", got, "false")
+	}
+	if got := rawConfigValue(config.Config{}, "word_sync_recheck.batch"); got != "0" {
+		t.Errorf("rawConfigValue(word_sync_recheck.batch) default = %q; want %q", got, "0")
+	}
+}
+
+// TestWordSyncRecheckBatchGatedByEnabled verifies word_sync_recheck.batch is
+// wired into fieldEnabledBy so the rendered settings page greys the batch
+// field out until "enabled" is checked (#1048 slice 6 review finding M1): it
+// checks both the enableController lookup buildFieldEnabledBy feeds and the
+// live rendered attribute settings.templ emits from it, so a break in either
+// the map or the template wiring fails this test rather than shipping a batch
+// field a user can edit while the sweep is off.
+func TestWordSyncRecheckBatchGatedByEnabled(t *testing.T) {
+	want := settingsDOMID("word_sync_recheck.enabled")
+	if got := enableController("word_sync_recheck.batch"); got != want {
+		t.Fatalf("enableController(word_sync_recheck.batch) = %q; want %q", got, want)
+	}
+
+	mux := newUIServer(config.Config{}, "v0")
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /settings status = %d, want 200", rec.Code)
+	}
+	needle := `data-enable-when-checked="` + want + `"`
+	if !strings.Contains(rec.Body.String(), needle) {
+		t.Errorf("rendered page missing %s; the batch field would be editable while the sweep is off", needle)
+	}
+}

@@ -137,6 +137,8 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | Sidecars judged per sweep cycle; values below 1 reset to the default. |
 | `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a lyric whose cues overrun the audio: `demote`, `quarantine`, `purge`, `off`. |
 | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
+| `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode word-timing re-check sweep. Not yet used: the sweep lands in a later release. |
+| `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | Most rows in word-recheck mode at once (1-1000); out-of-range values are ignored. |
 | `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | EXPERIMENTAL: master switch for the word-sync generate lane (forced alignment via an external sidecar). The reference sidecar is CPU-only and slow; leave this off unless you run a dedicated aligner. No production caller yet. |
 | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
 | `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | Tracks aligned per sweep cycle; values below 1 reset to the default. |
@@ -490,6 +492,23 @@ Setting both action keys to `off` gives an observability-only mode: every verdic
 | `on_categorical` | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a categorical lyric. One of `quarantine`, `purge` (irreversible), `off`. **No `demote`**: the words belong to another song, so there is nothing worth keeping as `.txt`. |
 
 Quarantined files are moved under a quarantine root, preserving their path relative to their library root so two same-named sidecars from different albums cannot collide. `purge` unlinks the file outright; the JSONL backup record is then the only trail, which is why it is never a default.
+
+### `[word_sync_recheck]`
+
+```toml
+[word_sync_recheck]
+enabled = false
+batch = 100
+```
+
+The unattended counterpart of [`canticle scan reconcile-word-sync`](CLI_REFERENCE.md#reconcile-word-sync). That command re-examines the tracks that are settled when you run it; this sweep will keep feeding newly settled line-synced tracks into the same word-timing re-check, so a library does not depend on someone re-running the command. Each re-checked track costs at least one provider request at the worker's pace; read [Word-timing re-check cost](USER_GUIDE.md#word-timing-re-check-cost) before enabling it.
+
+**Not yet used.** The keys are accepted and shown, but nothing reads them until the serve-mode sweep ships in a later release. Like the CLI, the sweep will do nothing while `output.word_sync_mode` is `off`.
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode sweep. The `scan reconcile-word-sync` command runs regardless. |
+| `batch` | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | The most rows the serve sweep keeps in word-recheck mode at once, across cycles: each cycle admits only `batch` minus the rows still waiting, so re-checks never pile up behind themselves. `scan reconcile-word-sync --limit` queues independently of this cap, so the true in-flight count can exceed it. Range `1`-`1000`; a file value outside it resets to the default, and an out-of-range environment variable is ignored (the file or default value stands). For a one-time bulk pass larger than that, use the CLI's `--limit`. |
 
 ### ffmpeg resolution
 

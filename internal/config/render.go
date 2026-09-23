@@ -190,6 +190,12 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("on_categorical = %s%s\n", cfg.TimingValidation.OnCategorical, ann("timing_validation.on_categorical"))
 	p("\n")
 
+	// [word_sync_recheck] -- no consumer yet (#1048 slice 7).
+	p("[word_sync_recheck]\n")
+	p("enabled = %t%s\n", cfg.WordSyncRecheck.Enabled, ann("word_sync_recheck.enabled"))
+	p("batch = %d%s\n", cfg.WordSyncRecheck.Batch, ann("word_sync_recheck.batch"))
+	p("\n")
+
 	// [watcher]
 	p("[watcher]\n")
 	p("enabled = %t%s\n", cfg.Watcher.Enabled, ann("watcher.enabled"))
@@ -429,6 +435,10 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			intAttr("revalidate_batch", "timing_validation.revalidate_batch", cfg.TimingValidation.RevalidateBatch),
 			strAttr("on_mis_synced", "timing_validation.on_mis_synced", string(cfg.TimingValidation.OnMisSynced)),
 			strAttr("on_categorical", "timing_validation.on_categorical", string(cfg.TimingValidation.OnCategorical)),
+		),
+		group("word_sync_recheck",
+			boolAttr("enabled", "word_sync_recheck.enabled", cfg.WordSyncRecheck.Enabled),
+			intAttr("batch", "word_sync_recheck.batch", cfg.WordSyncRecheck.Batch),
 		),
 		group("watcher",
 			boolAttr("enabled", "watcher.enabled", cfg.Watcher.Enabled),
