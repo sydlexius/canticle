@@ -369,9 +369,9 @@ func TestReEnqueueLeavesDoneRowDone(t *testing.T) {
 	}
 }
 
-// TestReEnqueueKeepsQueuedRowIntact: a colliding Enqueue must not rewrite a
-// flipped row's paths or clear its completion, since its .lrc is on disk.
-func TestReEnqueueKeepsQueuedRowIntact(t *testing.T) {
+// TestReEnqueueKeepsProcessingRecheckIntact: a colliding Enqueue must not move
+// a recheck row the worker holds; its settle is guarded on 'queued'.
+func TestReEnqueueKeepsProcessingRecheckIntact(t *testing.T) {
 	ctx := context.Background()
 	dbh := openQueueTestDB(t)
 	q := NewDBQueue(dbh)
@@ -379,8 +379,9 @@ func TestReEnqueueKeepsQueuedRowIntact(t *testing.T) {
 	if _, err := q.MarkWordRecheckQueued(ctx, []int64{item.ID}, WordRecheckOptions{}, nil); err != nil {
 		t.Fatalf("flip: %v", err)
 	}
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, item.ID)
 	read := func() (st, state, src, outs, done string) {
-		if err := dbh.QueryRow(`SELECT status, word_timing_state, source_path, COALESCE(output_paths, ''), COALESCE(completed_at, '')
+		if err := dbh.QueryRow(`SELECT status, COALESCE(word_timing_state, ''), source_path, COALESCE(output_paths, ''), COALESCE(completed_at, '')
             FROM work_queue WHERE id = ?`, item.ID).Scan(&st, &state, &src, &outs, &done); err != nil {
 			t.Fatalf("read: %v", err)
 		}
@@ -394,8 +395,203 @@ func TestReEnqueueKeepsQueuedRowIntact(t *testing.T) {
 	}, PriorityWebhook); err != nil {
 		t.Fatalf("re-enqueue: %v", err)
 	}
-	if s, w, p, o, c := read(); s != s0 || w != WordTimingQueued || w != w0 || p != p0 || o != o0 || c != c0 || c == "" {
+	if s, w, p, o, c := read(); s != s0 || w != WordTimingQueued || w != w0 || p != p0 || o != o0 || c != c0 {
 		t.Fatalf("after collision (%s,%s,%s,%q,%q); want (%s,%s,%s,%q,%q)", s, w, p, o, c, s0, w0, p0, o0, c0)
+	}
+}
+
+// scanInputs is what the scan enqueuer sends for key ("A","t"): it always
+// carries the scan_result it just reserved.
+func scanInputs(t *testing.T, dbh *sql.DB) models.Inputs {
+	t.Helper()
+	mustExec(t, dbh, `INSERT OR IGNORE INTO libraries (id, name, path) VALUES (1, 'l', '/m')`)
+	var srID int64
+	if err := dbh.QueryRow(`INSERT INTO scan_results (library_id, file_path, artist, title, artist_key, title_key, outdir, filename, status)
+        VALUES (1, '/m/x.flac', 'A', 't', 'a', 't', '/m', 'x.lrc', 'processing') RETURNING id`).Scan(&srID); err != nil {
+		t.Fatalf("seed scan_result: %v", err)
+	}
+	return models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "t"}, SourcePath: "/m/x.flac",
+		Outdir: "/m", Filename: "x.lrc", ScanResultID: srID}
+}
+
+// TestWebhookCollisionKeepsWordRecheckRow (#1039 review I1): a Lidarr webhook
+// (no scan_result) colliding with a flipped row keeps recheck mode and its
+// paths, exactly as the same webhook leaves a plain 'done' row untouched, so
+// the ordinary path can never replace the settled .lrc with a .txt.
+func TestWebhookCollisionKeepsWordRecheckRow(t *testing.T) {
+	for _, flip := range []bool{false, true} {
+		ctx := context.Background()
+		dbh := openQueueTestDB(t)
+		q := NewDBQueue(dbh)
+		id := seedWordCandidate(t, dbh, "t")
+		mustExec(t, dbh, `UPDATE work_queue SET output_paths = '[{"outdir":"/m","filename":"x.lrc"}]' WHERE id = ?`, id)
+		if flip {
+			if _, err := q.MarkWordRecheckQueued(ctx, []int64{id}, WordRecheckOptions{}, nil); err != nil {
+				t.Fatalf("flip: %v", err)
+			}
+		}
+		read := func() (row string) {
+			if err := dbh.QueryRow(`SELECT status || '|' || COALESCE(word_timing_state, '') || '|' || output_paths || '|' ||
+                COALESCE(completed_at, '') || '|' || COALESCE(outcome_type, '') FROM work_queue WHERE id = ?`, id).Scan(&row); err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			return row
+		}
+		before := read()
+		if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "t"}, SourcePath: "/m/x.flac",
+			OutputPaths: []models.OutputPath{{Outdir: "/other", Filename: "dup.lrc"}}}, PriorityWebhook); err != nil {
+			t.Fatalf("webhook enqueue: %v", err)
+		}
+		if after := read(); after != before {
+			t.Fatalf("flip=%v: webhook collision moved the row %q -> %q", flip, before, after)
+		}
+	}
+}
+
+// TestScanCollisionReopensWordRecheckRow (#1039 review I2/M2): a scan collision
+// reopens a flipped row the way ReopenDoneRowTx does -- no stale settle columns
+// (so it is not an instrumental-backfill candidate), scan priority, not
+// PriorityMiss -- and it dequeues as an ordinary fetch of the scan's paths.
+func TestScanCollisionReopensWordRecheckRow(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	q.SetRandomized(false)
+	id := seedWordCandidate(t, dbh, "t")
+	mustExec(t, dbh, `UPDATE work_queue SET provider_lane = 'musixmatch' WHERE id = ?`, id)
+	if _, err := q.MarkWordRecheckQueued(ctx, []int64{id}, WordRecheckOptions{}, nil); err != nil {
+		t.Fatalf("flip: %v", err)
+	}
+	mustExec(t, dbh, `UPDATE work_queue SET refused_waits = 2, last_error = 'lane throttled' WHERE id = ?`, id)
+	if _, err := q.Enqueue(ctx, scanInputs(t, dbh), PriorityScan); err != nil {
+		t.Fatalf("scan enqueue: %v", err)
+	}
+	var row string
+	if err := dbh.QueryRow(`SELECT status || '|' || priority || '|' || refused_waits || '|' || last_error || '|' ||
+        COALESCE(outcome_type, '') || COALESCE(timing_outcome, '') || COALESCE(provider_lane, '') || COALESCE(completed_at, '')
+        FROM work_queue WHERE id = ?`, id).Scan(&row); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if row != "pending|0|0||" {
+		t.Fatalf("reopened row = %q; want pending|0|0|| (settle columns cleared)", row)
+	}
+	if got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{GlobalDetectDefault: true}); err != nil || len(got) != 0 {
+		t.Fatalf("ListUnclassified = (%d, %v); want 0 -- a reopened row is no backfill candidate", len(got), err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil || item.ID != id || item.WordTimingState != "" || item.Inputs.Filename != "x.lrc" {
+		t.Fatalf("Dequeue = (%d, %q, %q, %v); want (%d, \"\", x.lrc)", item.ID, item.WordTimingState, item.Inputs.Filename, err, id)
+	}
+}
+
+// TestReopenPathsLeaveWordRecheckMode (#1039): every reopen path turns a
+// 'queued' row into an ordinary fetch (the dequeued item no longer carries
+// 'queued', which is the worker's only recheck switch), and leaves a served
+// verdict and its generation alone. Each case starts from the status the path
+// is guarded on.
+func TestReopenPathsLeaveWordRecheckMode(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup string // extra SET clause putting the row in the path's precondition
+		run   func(ctx context.Context, t *testing.T, q *DBQueue, dbh *sql.DB, id int64)
+	}{
+		{"Retry", `status = 'failed'`, func(ctx context.Context, t *testing.T, q *DBQueue, _ *sql.DB, id int64) {
+			if _, err := q.Retry(ctx, id); err != nil {
+				t.Fatalf("Retry: %v", err)
+			}
+		}},
+		{"RecheckRetired", `status = 'unavailable', last_error = '` + missLimitReachedError + `'`, func(ctx context.Context, t *testing.T, q *DBQueue, _ *sql.DB, _ int64) {
+			if n, err := q.RecheckRetired(ctx, nil); err != nil || n != 1 {
+				t.Fatalf("RecheckRetired = (%d, %v); want 1", n, err)
+			}
+		}},
+		{"ResetInstrumental", `status = 'done', instrumental_result = 1`, func(ctx context.Context, t *testing.T, q *DBQueue, _ *sql.DB, id int64) {
+			if n, err := q.ResetInstrumental(ctx, id); err != nil || n != 1 {
+				t.Fatalf("ResetInstrumental = (%d, %v); want 1", n, err)
+			}
+		}},
+		{"UnsettleInstrumental", `status = 'done', instrumental_result = 1`, func(ctx context.Context, t *testing.T, q *DBQueue, _ *sql.DB, id int64) {
+			if ok, err := q.UnsettleInstrumental(ctx, id); err != nil || !ok {
+				t.Fatalf("UnsettleInstrumental = (%v, %v); want true", ok, err)
+			}
+		}},
+		// A flipped row is 'deferred'; a served row is 'done'.
+		{"ReopenDoneRowTx", `status = CASE WHEN word_timing_state = 'queued' THEN 'deferred' ELSE 'done' END`, func(ctx context.Context, t *testing.T, _ *DBQueue, dbh *sql.DB, id int64) {
+			tx, err := dbh.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			ok, err := ReopenDoneRowTx(ctx, tx, id, time.Now().UTC())
+			if err != nil || !ok {
+				t.Fatalf("ReopenDoneRowTx = (%v, %v); want true", ok, err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+		}},
+		// Only a SCAN collision reopens (#1039 review I1); see
+		// TestWebhookCollisionKeepsWordRecheckRow for the webhook side.
+		{"Enqueue scan collision", `status = 'deferred'`, func(ctx context.Context, t *testing.T, q *DBQueue, dbh *sql.DB, id int64) {
+			item, err := q.Enqueue(ctx, scanInputs(t, dbh), PriorityScan)
+			if err != nil || item.ID != id {
+				t.Fatalf("Enqueue = (%d, %v); want the existing row %d", item.ID, err, id)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		for _, state := range []string{WordTimingQueued, WordTimingServed} {
+			t.Run(tc.name+"/"+state, func(t *testing.T) {
+				ctx := context.Background()
+				dbh := openQueueTestDB(t)
+				q := NewDBQueue(dbh)
+				q.SetRandomized(false)
+				id := seedWordCandidate(t, dbh, "t")
+				mustExec(t, dbh, `UPDATE work_queue SET word_timing_state = ?, word_timing_generation = 3, next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, state, id)
+				mustExec(t, dbh, `UPDATE work_queue SET `+tc.setup+` WHERE id = ?`, id)
+				tc.run(ctx, t, q, dbh, id)
+				want := state
+				if state == WordTimingQueued {
+					want = ""
+				}
+				var got sql.NullString
+				var gen sql.NullInt64
+				if err := dbh.QueryRow(`SELECT word_timing_state, word_timing_generation FROM work_queue WHERE id = ?`, id).Scan(&got, &gen); err != nil {
+					t.Fatalf("read: %v", err)
+				}
+				if got.String != want || gen.Int64 != 3 {
+					t.Fatalf("after reopen state=%q gen=%d; want %q gen 3", got.String, gen.Int64, want)
+				}
+				item, err := q.Dequeue(ctx)
+				if err != nil || item.ID != id || item.WordTimingState != want {
+					t.Fatalf("Dequeue = (%d, %q, %v); want (%d, %q)", item.ID, item.WordTimingState, err, id, want)
+				}
+			})
+		}
+	}
+}
+
+// TestReopenDoneRowTxWidenedGuardIsNarrow: the widened guard admits only a
+// parked recheck row, never one the worker holds nor an ordinary deferred row.
+func TestReopenDoneRowTxWidenedGuardIsNarrow(t *testing.T) {
+	for _, set := range []string{
+		`status = 'processing', word_timing_state = 'queued'`,
+		`status = 'deferred', word_timing_state = NULL`,
+		`status = 'deferred', word_timing_state = 'absent'`,
+	} {
+		t.Run(set, func(t *testing.T) {
+			ctx := context.Background()
+			dbh := openQueueTestDB(t)
+			id := seedWordCandidate(t, dbh, "t")
+			mustExec(t, dbh, `UPDATE work_queue SET `+set+` WHERE id = ?`, id)
+			tx, err := dbh.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			if ok, err := ReopenDoneRowTx(ctx, tx, id, time.Now().UTC()); err != nil || ok {
+				t.Fatalf("ReopenDoneRowTx = (%v, %v); want (false, nil)", ok, err)
+			}
+		})
 	}
 }
 

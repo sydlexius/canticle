@@ -1215,6 +1215,10 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	// retirement above. The two sibling unsettle paths, queue.ResetInstrumental
 	// and queue.UnsettleInstrumental, already NULL outcome_type for exactly this
 	// reason; this matches them.
+	//
+	// A resurrected row also leaves word-recheck mode (#1039): it is reopened
+	// for an ordinary fetch, and a 'queued' state would route it to the recheck
+	// path, which writes nothing without words and settles it straight back.
 	resurrect := c.retiredAsUnresolvable()
 	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {
@@ -1226,11 +1230,7 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 		var res sql.Result
 		if resurrect {
 			res, err = tx.ExecContext(ctx,
-				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?,
-                     status = 'pending', attempts = 0, next_attempt_at = ?,
-                     completed_at = NULL, last_error = '',
-                     outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL
-                 WHERE id = ? AND status != 'processing' AND output_paths IS ?`,
+				relinkResurrectSQL,
 				target.filePath, target.outdir, target.filename, string(outputPathsJSON), resurrectNow, w.id, w.rawOutputPaths)
 		} else {
 			res, err = tx.ExecContext(ctx,
@@ -1838,6 +1838,24 @@ func markSettled(bySource map[string]*candidate) {
 //
 // completed_at is stamped because the row IS settled; leaving it null would make
 // a retired row look perpetually in-flight to every report that reads it.
+// relinkResurrectSQL carries queue.ClearWordRecheckQueued (#1039); a constant,
+// so the fragment is joined at compile time. retireUnresolvableSQL deliberately
+// does NOT: see retireUnresolvable.
+const (
+	relinkResurrectSQL = `UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?,
+                     status = 'pending', attempts = 0, next_attempt_at = ?,
+                     completed_at = NULL, last_error = '',
+                     outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL,
+                     ` + queue.ClearWordRecheckQueued + `
+                 WHERE id = ? AND status != 'processing' AND output_paths IS ?`
+	retireUnresolvableSQL = `UPDATE work_queue
+             SET status = 'done',
+                 completed_at = ?,
+                 last_error = ?
+             WHERE id = ?
+               AND status NOT IN ('processing', 'done', 'unavailable')`
+)
+
 func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, error) {
 	if c == nil || len(c.workItems) == 0 {
 		return false, nil
@@ -1845,6 +1863,13 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
 	now := time.Now().UTC().Format(timeFormat)
 	retired := false
 	for _, w := range c.workItems {
+		// A word-recheck row ('deferred' + 'queued', #982) retired here KEEPS
+		// 'queued' (#1039 review): as 'done' it is never dequeued, and 'queued'
+		// is the marker the recheck candidate predicate already excludes, so a
+		// gone source is never re-flipped. Clearing it would leave done+synced+
+		// NULL, a candidate every later --yes wastes provider calls on. The
+		// resurrect path (relinkResurrectSQL) clears it when the file returns.
+		//
 		// Each UPDATE is its own autocommit statement and idempotent (the status
 		// guard excludes a row it already retired), so it retries safely on
 		// SQLITE_BUSY without disturbing rows an earlier iteration committed (#978).
@@ -1852,12 +1877,7 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
 		err := dbpkg.RetryBatchTx(ctx, "prune retire", func() error {
 			var execErr error
 			res, execErr = p.db.ExecContext(ctx,
-				`UPDATE work_queue
-             SET status = 'done',
-                 completed_at = ?,
-                 last_error = ?
-             WHERE id = ?
-               AND status NOT IN ('processing', 'done', 'unavailable')`,
+				retireUnresolvableSQL,
 				now, unresolvableGoneError, w.id)
 			return execErr
 		})
