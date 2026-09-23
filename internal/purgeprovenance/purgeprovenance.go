@@ -573,6 +573,11 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
 	}
 
 	now := formatNow()
+	// The whole word-timing verdict (#982) is cleared: a 'queued' row must leave
+	// recheck mode, or its settle would write scan_results back to done and the
+	// purged track would never be re-fetched; and a served/absent verdict judged
+	// the file being deleted, so keeping it would exclude the refetched lyric
+	// from ever being rechecked.
 	for _, id := range workItemIDs {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE work_queue
@@ -580,7 +585,10 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
                  priority = -100,
                  attempts = 0,
                  next_attempt_at = ?,
-                 last_error = ''
+                 last_error = '',
+                 word_timing_state = NULL,
+                 word_timing_generation = NULL,
+                 word_timing_checked_at = NULL
              WHERE id = ? AND status != 'processing'`,
 			now, id)
 		if err != nil {

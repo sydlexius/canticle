@@ -538,7 +538,7 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) comp
 		return companionPlan{}
 	}
 	plan := companionPlan{path: path, remove: own == companionOwned}
-	plan.write = synced && w.wordSyncCompanion && hasA2Line(song)
+	plan.write = synced && w.wordSyncCompanion && HasQualifyingWords(song)
 	if !plan.remove && !plan.write {
 		return companionPlan{}
 	}

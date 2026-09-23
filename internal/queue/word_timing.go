@@ -203,7 +203,7 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, op
 	}
 	now := formatTime(q.now())
 	pred, predArgs := wordRecheckPredicate(opts)
-	flipSQL := `UPDATE work_queue SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0, last_error = '', word_timing_state = ?` + //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
+	flipSQL := `UPDATE work_queue SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0, last_error = '', refused_waits = 0, word_timing_state = ?` + //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
 		` WHERE id = ? AND` + pred
 	for _, id := range ids {
 		var (
@@ -321,16 +321,43 @@ func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string,
 // failure counts changes (miss_count, attempts): a lane that did not answer has
 // not said "no words". The delay is what a plain Release lacks: a released
 // recheck row is due again at once and would be re-asked in a tight loop.
-func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, cause string) error {
-	next := formatTime(q.now().Add(retryAfter))
+//
+// The wait is bounded by maxWaits on refused_waits, the same per-row "waited
+// for a lane that did not answer" budget #950 uses (every settle zeroes it, so
+// a flipped row starts at 0). Once spent it returns released=true having
+// UN-FLIPPED the row instead: back to 'done' with word_timing_state NULL,
+// completed_at untouched, so it stops rechecking and stays a candidate for a
+// later run. Never absent: an unanswered lane has not said "no words".
+func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (released bool, err error) {
 	// Retried like Settle: a lost write strands the row in 'processing', which
 	// nothing reclaims.
-	return db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
-		res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'deferred', next_attempt_at = ?, last_error = ?`+wordRecheckOwned,
-			next, cause, id)
+	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		// Per attempt, like deferRefusedOnce: a long busy wait must not shorten the park.
+		next := formatTime(q.now().Add(retryAfter))
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("queue: begin defer word recheck tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		// Every CASE reads the PRE-update refused_waits.
+		err = tx.QueryRowContext(ctx, `UPDATE work_queue SET
+             status = CASE WHEN refused_waits >= ? THEN 'done' ELSE 'deferred' END,
+             word_timing_state = CASE WHEN refused_waits >= ? THEN NULL ELSE word_timing_state END,
+             next_attempt_at = CASE WHEN refused_waits >= ? THEN next_attempt_at ELSE ? END,
+             last_error = CASE WHEN refused_waits >= ? THEN '' ELSE ? END,
+             refused_waits = CASE WHEN refused_waits >= ? THEN 0 ELSE refused_waits + 1 END`+wordRecheckOwned+
+			` RETURNING status = 'done'`, maxWaits, maxWaits, maxWaits, next, maxWaits, cause, maxWaits, id).Scan(&released)
 		if err != nil {
 			return fmt.Errorf("queue: defer word recheck id %d: %w", id, err)
 		}
-		return requireAffected(res, "queue: defer word recheck")
+		if released {
+			if _, err := tx.ExecContext(ctx, `UPDATE scan_results SET status = 'done'
+             WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+               AND status != 'done'`, id); err != nil {
+				return fmt.Errorf("queue: release word recheck scan_results writeback: %w", err)
+			}
+		}
+		return tx.Commit()
 	})
+	return released, err
 }

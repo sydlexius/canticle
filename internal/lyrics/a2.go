@@ -83,7 +83,7 @@ func a2Words(lineText string, timings []models.WordTiming) (string, bool) {
 }
 
 // wordTimingsByLine groups a song's word timings by the cue index they belong
-// to. Shared by writeSyncedLRC and hasA2Line so the pre-pass and the render see
+// to. Shared by writeSyncedLRC and HasQualifyingWords so the pre-pass and the render see
 // the same per-line input.
 func wordTimingsByLine(song models.Song) map[int][]models.WordTiming {
 	byLine := make(map[int][]models.WordTiming, len(song.Subtitles.Lines))
@@ -93,11 +93,13 @@ func wordTimingsByLine(song models.Song) map[int][]models.WordTiming {
 	return byLine
 }
 
-// hasA2Line reports whether at least one cue would render with word markers,
-// by running a2Words itself over every cue. It is the decide-before-opening
-// pre-pass for the word-synced companion (#986): when it reports false, every
-// line would fall back to plain text and a companion would duplicate the .lrc.
-func hasA2Line(song models.Song) bool {
+// HasQualifyingWords reports whether at least one cue would render with word
+// markers, by running a2Words itself over every cue. It is the
+// decide-before-opening pre-pass for the word-synced companion (#986): when it
+// reports false, every line would fall back to plain text and a companion would
+// duplicate the .lrc. It is also the ONLY definition of "usable word timings"
+// outside this package (#982 word recheck), so no caller can hold a looser one.
+func HasQualifyingWords(song models.Song) bool {
 	if len(song.WordTimings) == 0 {
 		return false
 	}

@@ -194,6 +194,16 @@ func (q *fakeQueue) Defer(_ context.Context, id int64, retryAfter time.Duration,
 	return queue.WorkItem{ID: id, Status: queue.StatusDeferred}, nil
 }
 
+// SettleWordRecheck and DeferWordRecheck are exercised end to end over the
+// real DBQueue (word_recheck_test.go); no fake-queue test produces a recheck row.
+func (q *fakeQueue) SettleWordRecheck(context.Context, int64, string, int64) error {
+	return errors.New("fakeQueue: SettleWordRecheck not modeled")
+}
+
+func (q *fakeQueue) DeferWordRecheck(context.Context, int64, time.Duration, int, string) (bool, error) {
+	return false, errors.New("fakeQueue: DeferWordRecheck not modeled")
+}
+
 // DeferRefused is exercised end to end over the real DBQueue
 // (timing_fallthrough_test.go); the fake adds deferRefusedErr injection.
 func (q *fakeQueue) DeferRefused(_ context.Context, id int64, _ time.Duration, _ int, _ string) (bool, error) {

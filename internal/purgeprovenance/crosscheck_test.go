@@ -340,6 +340,12 @@ func TestResetRows_ProceedsWhenTheLaneStillAgrees(t *testing.T) {
 	writeSidecar(t, path, "musixmatch")
 	srID, wqID := seedTrack(t, ctx, sqlDB, libID, filepath.Dir(path), "track.lrc", "done")
 	setLane(t, ctx, sqlDB, wqID, "musixmatch")
+	// A served verdict judged the file being purged; keeping it would exclude
+	// the refetched lyric from word rechecks (queued is cleared the same way).
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET word_timing_state = 'served',
+        word_timing_generation = 7, word_timing_checked_at = '2026-01-01T00:00:00Z' WHERE id = ?`, wqID); err != nil {
+		t.Fatal(err)
+	}
 
 	_, wqReset, _, err := New(sqlDB).resetRows(ctx,
 		[]int64{srID}, []int64{wqID},
@@ -348,7 +354,10 @@ func TestResetRows_ProceedsWhenTheLaneStillAgrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resetRows refused an agreeing lane: %v", err)
 	}
-	if wqReset != 1 {
-		t.Errorf("work items requeued = %d, want 1", wqReset)
+	var state string
+	_ = sqlDB.QueryRowContext(ctx, `SELECT COALESCE(word_timing_state, 'NULL') || '/' || COALESCE(word_timing_generation, 'NULL')
+        || '/' || COALESCE(word_timing_checked_at, 'NULL') FROM work_queue WHERE id = ?`, wqID).Scan(&state)
+	if wqReset != 1 || state != "NULL/NULL/NULL" {
+		t.Errorf("work items requeued = %d, word_timing state/generation/checked_at %s; want 1, NULL/NULL/NULL (verdict cleared, #982)", wqReset, state)
 	}
 }
