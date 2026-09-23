@@ -2,8 +2,8 @@
 # readability; Docker resolves by the digest. Update both together -- use the
 # multi-arch manifest-list (index) digest, NOT a local arch-specific one, so the
 # pin resolves on any build arch:
-#   docker buildx imagetools inspect python:3.11-slim --format '{{.Manifest.Digest}}'
-FROM python:3.11-slim@sha256:cdbd05fb6f457ca275ff51ce00d93d865ca0b6a25f5ffb08262d94f6835771e5
+#   docker buildx imagetools inspect python:3.13-slim --format '{{.Manifest.Digest}}'
+FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0
 
 # libsndfile is the native backend soundfile needs to decode the WAV samples.
 # curl fetches the YAMNet SavedModel below; it is removed again in the same layer
