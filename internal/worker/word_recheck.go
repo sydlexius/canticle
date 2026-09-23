@@ -9,21 +9,21 @@ import (
 
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
-	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // wordRecheckWritable is the ONLY gate in front of the writer in recheck mode
-// (#982): the result carries word timings on its line cues, is not an
-// instrumental, and the timing guard promotes it as-is, so the writer lands a
-// synced .lrc. Anything else -- unsynced, instrumental, line-synced without
+// (#982): the result carries words the writer will land (its own predicate,
+// lyrics.HasQualifyingWords; looser words would delete an owned .elrc and stamp
+// served on a file without them), is not an instrumental, and the timing guard
+// promotes it as-is. Anything else -- unsynced, instrumental, line-synced without
 // words, or a word result the guard would demote or quarantine -- is never
 // written, because WriteLRC removes the opposite sidecar and would replace the
 // settled .lrc with a .txt or nothing (the downgrade trap, plan 2.4).
 func wordRecheckWritable(song models.Song, audioSeconds int) bool {
-	if song.Track.Instrumental == 1 || orchestrator.QualityOf(song) != orchestrator.QualityWordSynced {
+	if song.Track.Instrumental == 1 || orchestrator.QualityOf(song) != orchestrator.QualityWordSynced || !lyrics.HasQualifyingWords(song) {
 		return false
 	}
 	song.AudioDurationSeconds = audioSeconds
@@ -76,17 +76,21 @@ func (w *Worker) wordGeneration() int64 {
 // word-capable lane have word timings for this settled .lrc?", and the settle
 // table (plan 2.4) keeps every answer off the counters an ordinary miss moves:
 //
-//   - served: a writable word result (cache or lane) is written and the row
+//   - served: a writable word result from a lane is written and the row
 //     settles done + served.
-//   - absent: every word lane answered with no words or no match, or its words
-//     are unusable here (demoted, quarantined, script- or verifier-rejected). NOTHING is
-//     written and the row settles done + absent.
-//   - unanswered (unknown word answer, throttle, open breaker, transport,
-//     verification error): the row is re-deferred still 'queued'.
+//   - absent: every word lane answered with no usable words or no match
+//     (usable = qualifying words the guard promotes as-is), or the words were
+//     script- or verifier-rejected. NOTHING is written; done + absent.
+//   - unanswered (a word lane did not answer: unknown, throttle, open breaker,
+//     transport, verification error): re-deferred still 'queued', at most
+//     maxWordRecheckWaits times, then un-flipped (queue.DeferWordRecheck).
 //
-// No path calls Defer, RetireMiss or Fail, so miss_count, attempts and the
-// miss-retirement budget are never touched, and lane_attempts is written only
-// on served.
+// The cache is NOT consulted: an entry carries no lane or fetch time, so a
+// cache-served rewrite would strip [source:]/[fetched:] from a settled file
+// and NULL fetched_at. No path calls Defer, RetireMiss or Fail, and none writes
+// lane_attempts: a recheck result would repoint the row's ordinary per-track
+// hit history (#282), e.g. flip a Musixmatch hit to a miss when only its words
+// were missing.
 func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track models.Track) error {
 	ctxNoCancel := context.WithoutCancel(ctx)
 	orch := w.wordOrchestrator()
@@ -96,21 +100,6 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 		// generation, so adding a word-capable lane re-opens the row.
 		return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
 	}
-	var cached models.Song
-	_, err := w.cache.LookupAccepted(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength),
-		func(raw string) bool {
-			cached = lyrics.DecodeCachedSong(raw, track)
-			return wordRecheckWritable(cached, track.TrackLength)
-		})
-	switch {
-	case err == nil:
-		// A cached word result is written with zero provider requests.
-		w.lastItemContactedProvider = false
-		return w.writeWordRecheck(ctx, item, track, cached)
-	case !errors.Is(err, sql.ErrNoRows):
-		return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: lookup cache: %w", err))
-	}
-
 	song, err := orch.FindLyrics(ctx, track, "")
 	if err != nil {
 		if orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeBenignMiss && song.WordAnswer == models.WordAnswerAbsent {
@@ -137,23 +126,30 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 			return w.deferWordRecheck(ctx, item, serr)
 		}
 		w.recordHit(ctxNoCancel, item.ID, song.WinningLane)
-		w.recordLaneAttempts(ctxNoCancel, item.ID, song.LaneAttempts)
 		return w.writeWordRecheck(ctx, item, track, song)
 	}
-	if orchestrator.QualityOf(song) == orchestrator.QualityWordSynced || song.WordAnswer == models.WordAnswerAbsent {
-		// Words that the timing guard would demote or quarantine (a held word
-		// result included) are unusable here, which is absent (plan 2.4 row 3);
-		// #1007 can retime them.
+	if song.WordAnswer == models.WordAnswerAbsent {
+		// The gated orchestrator's aggregate: every word lane answered, none
+		// with usable words (a held or unqualified word result included, plan
+		// 2.4 rows 2-3; #1007 can retime them).
 		w.consecutiveFailures = 0
 		return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
 	}
-	// A result that says nothing about words (a lane did not answer): retry.
-	return w.deferWordRecheck(ctx, item, errors.New("worker: word recheck: no word answer"))
+	// Some word lane did not answer (plan 2.4 row 4): retry, never absent.
+	return w.deferWordRecheck(ctx, item, errNoWordAnswer)
 }
+
+// errNoWordAnswer is a healthy round-trip that left the word question open. It
+// is not a failure and never feeds the worker's failure backoff.
+var errNoWordAnswer = errors.New("worker: word recheck: no word answer")
+
+// maxWordRecheckWaits bounds the re-parks of one unanswered recheck row,
+// mirroring maxRefusedWaits (#950) and sharing its refused_waits counter.
+const maxWordRecheckWaits = 3
 
 // writeWordRecheck writes a writable word result and settles the row served.
 // A write error defers the row: a companion write can fail after the .lrc
-// landed, and the retry is served from the cache at zero requests.
+// landed, and the retry asks the lanes again.
 func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, track models.Track, song models.Song) error {
 	song.AudioDurationSeconds = track.TrackLength
 	for _, p := range outputPaths(item.Inputs) {
@@ -194,10 +190,20 @@ func (w *Worker) deferWordRecheck(ctx context.Context, item queue.WorkItem, caus
 		}
 		return nil
 	}
-	if err := w.queue.DeferWordRecheck(noCancel, item.ID, w.circuitOpenDuration, cause.Error()); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	released, err := w.queue.DeferWordRecheck(noCancel, item.ID, w.circuitOpenDuration, maxWordRecheckWaits, cause.Error())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("worker: defer word recheck %d after %v: %w", item.ID, cause, err)
 	}
-	slog.Debug("worker word recheck: unanswered; re-deferred", "id", item.ID, "retry_after", w.circuitOpenDuration, "cause", cause)
+	if released {
+		slog.Warn("worker word recheck: word lane still unanswered after the wait budget; row returned to done unverdicted",
+			"id", item.ID, "waits", maxWordRecheckWaits, "cause", cause)
+	} else {
+		slog.Debug("worker word recheck: unanswered; re-deferred", "id", item.ID, "retry_after", w.circuitOpenDuration, "cause", cause)
+	}
+	if errors.Is(cause, errNoWordAnswer) {
+		w.consecutiveFailures = 0
+		return nil
+	}
 	switch orchestrator.ClassifyOutcome(cause) {
 	case orchestrator.OutcomeUnavailable:
 		return errLanesUnavailable

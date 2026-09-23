@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/petitlyrics"
@@ -128,6 +129,16 @@ func (o *Orchestrator) SetMinCommitQuality(q Quality) error {
 	return nil
 }
 
+// gateQuality is QualityOf for the commit gate: a word result reaches
+// QualityWordSynced only when the writer would land its words
+// (lyrics.HasQualifyingWords), so unusable words never end a word dispatch.
+func gateQuality(song models.Song) Quality {
+	if q := QualityOf(song); q != QualityWordSynced || lyrics.HasQualifyingWords(song) {
+		return q
+	}
+	return QualitySynced
+}
+
 // isWordNoMatch reports a GENUINE no-match, the only error that answers the word
 // question (#982); any other error leaves it unanswered, as absent is terminal.
 func isWordNoMatch(err error) bool {
@@ -222,7 +233,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			switch kind {
 			case candidateCommit:
 				if !r.haveHeld || landedQuality(song, track) > QualityUnsynced {
-					if QualityOf(song) < o.minCommit {
+					if gateQuality(song) < o.minCommit {
 						// Below the commit gate (#982): keep it, try the next lane.
 						r.gate(song, lane.Name(), landedQuality(song, track))
 						continue
@@ -258,7 +269,10 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 	// persists these only on the success and benign-miss paths (not on hard
 	// failures), so carrying them on the error song here is harmless.
 	song.LaneAttempts = laneAttemptsFor(attempted, song.WinningLane)
-	if o.minCommit > QualityNone && song.WordAnswer != models.WordAnswerServed {
+	if o.minCommit > QualityNone {
+		// Nothing reached the gate, so even a lane's own "served" (words that
+		// do not qualify, or a held word result) is not a usable answer: the
+		// aggregate decides, absent only when every word lane answered (#982).
 		song.WordAnswer = o.wordAnswerFor(r.wordAnswered)
 	}
 	return song, err

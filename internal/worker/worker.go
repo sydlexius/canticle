@@ -103,8 +103,9 @@ type Queue interface {
 	// is no longer a processing recheck row.
 	SettleWordRecheck(ctx context.Context, id int64, state string, generation int64) error
 	// DeferWordRecheck re-parks an unanswered word-recheck row after retryAfter,
-	// still 'queued', touching no miss or failure counter.
-	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, cause string) error
+	// still 'queued', touching no miss or failure counter; past maxWaits it
+	// un-flips the row to done with no verdict and reports released.
+	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (bool, error)
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil

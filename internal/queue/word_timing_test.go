@@ -445,8 +445,8 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	if err := q.SettleWordRecheck(ctx, absent, WordTimingAbsent, 9); err != nil {
 		t.Fatalf("settle absent: %v", err)
 	}
-	if err := q.DeferWordRecheck(ctx, deferred, time.Hour, "throttled"); err != nil {
-		t.Fatalf("defer: %v", err)
+	if released, err := q.DeferWordRecheck(ctx, deferred, time.Hour, 1, "throttled"); err != nil || released {
+		t.Fatalf("defer = (%v, %v); want parked", released, err)
 	}
 	if got := laneRows(); got != lane0 {
 		t.Fatalf("lane_attempts after settle/defer = %q; want unchanged %q", got, lane0)
@@ -480,13 +480,14 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	if lastErr != "throttled" {
 		t.Fatalf("deferred last_error = %q; want throttled", lastErr)
 	}
+	deferErr := func(id int64) error { _, err := q.DeferWordRecheck(ctx, id, time.Hour, 1, "x"); return err }
 	for name, err := range map[string]error{
 		"settle ordinary": q.SettleWordRecheck(ctx, ordinary, WordTimingAbsent, 9),
-		"defer ordinary":  q.DeferWordRecheck(ctx, ordinary, time.Hour, "x"),
+		"defer ordinary":  deferErr(ordinary),
 		"settle settled":  q.SettleWordRecheck(ctx, served, WordTimingServed, 9),
 		// Right state, wrong status: only the status half of the guard refuses.
 		"settle deferred": q.SettleWordRecheck(ctx, deferred, WordTimingAbsent, 9),
-		"defer deferred":  q.DeferWordRecheck(ctx, deferred, time.Hour, "x"),
+		"defer deferred":  deferErr(deferred),
 	} {
 		if !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("%s = %v; want sql.ErrNoRows", name, err)
@@ -494,5 +495,14 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	}
 	if err := q.SettleWordRecheck(ctx, deferred, WordTimingQueued, 9); err == nil {
 		t.Fatal("settle with state queued succeeded; want refusal")
+	}
+	// The wait budget (maxWaits=1) is spent: the next unanswered defer un-flips
+	// the row to done with no verdict, completed_at and counters untouched.
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, deferred)
+	if released, err := q.DeferWordRecheck(ctx, deferred, time.Hour, 1, "again"); err != nil || !released {
+		t.Fatalf("defer past cap = (%v, %v); want released", released, err)
+	}
+	if st, s, c, _, g, m, a := read(deferred); st != "done" || s != "" || c != "2026-01-10T00:00:00Z" || g.Valid || m != 3 || a != 1 || lastErr != "" {
+		t.Fatalf("released = (%s,%q,%s,%v,%d,%d,%q); want done, no verdict, completed_at kept", st, s, c, g, m, a, lastErr)
 	}
 }

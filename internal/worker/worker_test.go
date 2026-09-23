@@ -200,8 +200,8 @@ func (q *fakeQueue) SettleWordRecheck(context.Context, int64, string, int64) err
 	return errors.New("fakeQueue: SettleWordRecheck not modeled")
 }
 
-func (q *fakeQueue) DeferWordRecheck(context.Context, int64, time.Duration, string) error {
-	return errors.New("fakeQueue: DeferWordRecheck not modeled")
+func (q *fakeQueue) DeferWordRecheck(context.Context, int64, time.Duration, int, string) (bool, error) {
+	return false, errors.New("fakeQueue: DeferWordRecheck not modeled")
 }
 
 // DeferRefused is exercised end to end over the real DBQueue
