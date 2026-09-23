@@ -179,6 +179,20 @@ func TestOrdinaryStamp_FailureIsNonFatal(t *testing.T) {
 	}
 }
 
+// TestOrdinaryStamp_FailedStampClearsAContradictedVerdict: a reopened row's
+// prior absent must not survive a failed served stamp, or it would exclude the
+// row from rechecks while the words sit on disk.
+func TestOrdinaryStamp_FailedStampClearsAContradictedVerdict(t *testing.T) {
+	rig, w := newStampRig(t, &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}, nil, "sidecar", queue.WordTimingAbsent)
+	w.queue = failingWordQueue{rig.q}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if row := rig.recheckRow(t); row.status != "done" || row.state != "" {
+		t.Fatalf("row = %+v; want done with the contradicted absent cleared", row)
+	}
+}
+
 // TestWordRecheck_Metrics pins the section-8 decision: a recheck records no
 // provider_outcomes hit (an absent one has no symmetric miss, and lane_attempts
 // already excludes rechecks), and provider_lane moves only after the write, so

@@ -277,6 +277,13 @@ func (w *Worker) stampWordTiming(ctxNoCancel context.Context, item queue.WorkIte
 	}
 	if err := w.queue.SetWordTimingState(ctxNoCancel, item.ID, state, w.wordGeneration(), time.Time{}); err != nil {
 		slog.Warn("worker: stamp word timing state failed; continuing", "id", item.ID, "error", err)
+		// A failed stamp must not leave a reopened row's PRIOR verdict standing:
+		// a kept served/absent that this completion contradicts excludes the row
+		// from rechecks. Falling back to NULL keeps the "lost stamp = candidate"
+		// contract.
+		if item.WordTimingState != state {
+			w.clearWordTiming(ctxNoCancel, item)
+		}
 	}
 }
 
