@@ -83,6 +83,7 @@ var settingsSectionOrder = []struct {
 	{"enrichment", "Enrichment"},
 	{"realign", "Realign"},
 	{"timing_validation", "Timing Validation"},
+	{"word_sync_recheck", "Word-Timing Re-check"},
 	{"guard", "Guard"},
 	{"queue", "Queue"},
 	{"logging", "Logging"},
@@ -339,6 +340,7 @@ func buildFieldEnabledBy() map[string]string {
 	} {
 		m[p] = settingsDOMID("word_sync_generate.enabled")
 	}
+	m["word_sync_recheck.batch"] = settingsDOMID("word_sync_recheck.enabled")
 	// TLS: cert_file / key_file are usable only when self_signed is OFF (they are
 	// mutually exclusive, #288). boolOptions renders the false radio at index 1,
 	// so OptionID(domid, 1) == domid+"-1" is its id; the field is enabled while
@@ -424,6 +426,7 @@ var boolLabels = map[string][2]string{
 	"realign.auto_apply_heuristic":          {"Auto-apply name-based matches too", "Auto-apply only exact ID matches"},
 	"timing_validation.enabled":             {"Check that lyric timings match the audio", "Don't check"},
 	"timing_validation.revalidate_existing": {"Also re-check lyric files saved earlier", "Only check new lyrics"},
+	"word_sync_recheck.enabled":             {"Keep re-checking synced tracks for word timings", "Don't re-check"},
 	"queue.randomize":                       {"Process in random order", "Process in order"},
 	"watcher.enabled":                       {"Watch for new files", "Don't watch"},
 	"server.tls.self_signed":                {"Use a self-signed certificate", "Off"},
@@ -1174,6 +1177,11 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return string(cfg.TimingValidation.OnMisSynced)
 	case "timing_validation.on_categorical":
 		return string(cfg.TimingValidation.OnCategorical)
+	// [word_sync_recheck]
+	case "word_sync_recheck.enabled":
+		return strconv.FormatBool(cfg.WordSyncRecheck.Enabled)
+	case "word_sync_recheck.batch":
+		return strconv.Itoa(cfg.WordSyncRecheck.Batch)
 	// [guard]
 	case "guard.accepted_scripts":
 		return joinSlice(cfg.Guard.AcceptedScripts)
@@ -1367,6 +1375,8 @@ var settingsLabels = map[string]string{
 	"timing_validation.revalidate_batch":              "Lyric files checked per background round",
 	"timing_validation.on_mis_synced":                 "What to do when the timing runs past the song's end",
 	"timing_validation.on_categorical":                "What to do when the lyrics belong to a different song",
+	"word_sync_recheck.enabled":                       "Re-check synced tracks for word timings in the background (not yet active)",
+	"word_sync_recheck.batch":                         "Most tracks waiting for a word-timing re-check at once",
 	"guard.accepted_scripts":                          "Writing systems to accept without asking",
 	"guard.script_guard_threshold":                    "Foreign-script sensitivity (0-1)",
 	"queue.randomize":                                 "Process tracks in random order",

@@ -4,13 +4,34 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
+
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
-// TestOppositeSidecar_Characterization pins the exact pairing oppositeSidecar
-// has always had, so the #986 refactor onto internal/sidecar cannot have
-// widened it. The result feeds os.Remove, so a widening silently deletes user
-// files: ".elrc" and every non-sidecar extension MUST map to "".
+// caseSensitiveFS reports whether dir's filesystem distinguishes "a" from "A"
+// in a file name. macOS (APFS, the default local dev box) and Windows are
+// case-insensitive; CI (ubuntu-latest, ext4/tmpfs) and the production
+// deployment target are case-sensitive. Mirrors
+// internal/revalidate/revalidate_test.go's helper of the same name and
+// reasoning; duplicated rather than exported because it is test-only and this
+// package has no test-support package to share it from.
+func caseSensitiveFS(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "casecheck.tmp")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil { //nolint:gosec // reason: test fixture, not a security-relevant mode
+		t.Fatalf("write case probe: %v", err)
+	}
+	_, err := os.Stat(filepath.Join(dir, "CASECHECK.tmp"))
+	return os.IsNotExist(err)
+}
+
+// TestOppositeSidecar_Characterization pins the pairing oppositeSidecar
+// decides on a NAME ALONE (no disk involved): which extension is the opposite
+// of which, and that a third extension or a non-sidecar name maps to "". This
+// is the classification half, unaffected by #989 -- KindOf already read case
+// insensitively before and after.
 func TestOppositeSidecar_Characterization(t *testing.T) {
 	tests := []struct {
 		name string
@@ -27,9 +48,6 @@ func TestOppositeSidecar_Characterization(t *testing.T) {
 		{"audio has no opposite", "/music/song.mp3", ""},
 		{"no extension has no opposite", "/music/song", ""},
 		{"empty", "", ""},
-		// Case-SENSITIVE, unlike sidecar.IsSidecar. Pre-existing and preserved:
-		// the result is removed from disk, so an unrecognized case is left alone.
-		{"uppercase LRC is not paired", "/music/song.LRC", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -37,6 +55,70 @@ func TestOppositeSidecar_Characterization(t *testing.T) {
 				t.Fatalf("oppositeSidecar(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestOppositeSidecar_UppercaseInput_NothingOnDisk: an uppercase fp is
+// paired case-insensitively (KindOf) with the lowercase-extension name of its
+// opposite; oppositeSidecar is name-only and never consults the disk.
+func TestOppositeSidecar_UppercaseInput_NothingOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "song.LRC")
+	want := filepath.Join(dir, "song.txt")
+	if got := oppositeSidecar(fp); got != want {
+		t.Fatalf("oppositeSidecar(%q) = %q, want %q", fp, got, want)
+	}
+}
+
+// settledAt runs settledSidecar against a fresh listing of p's directory, as
+// WriteLRC does.
+func settledAt(p string) (string, bool) {
+	return settledSidecar(p, sidecar.List(filepath.Dir(p)))
+}
+
+// TestStaleSidecars_CaseVariants is the #989 pairing on a case-sensitive
+// filesystem (skipped elsewhere: there the variants alias one file). Every
+// extension-case variant of the SAME stem is stale and returned under its real
+// name (I1: not only the first); a different-case stem is another track's
+// sidecar and is never returned (C1).
+func TestStaleSidecars_CaseVariants(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.lrc and song.LRC would alias the same file")
+	}
+	for _, n := range []string{"song.LRC", "song.Lrc", "Song.lrc", "SONG.LRC"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fp := filepath.Join(dir, "song.txt")
+	got := staleSidecars(fp, sidecar.List(dir))
+	want := []string{filepath.Join(dir, "song.LRC"), filepath.Join(dir, "song.Lrc")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("staleSidecars(%q) = %q, want %q", fp, got, want)
+	}
+}
+
+// TestSettledSidecar_CaseVariants (M4): an extension-case variant of the same
+// stem is settled; a different-case stem is another track's and is not.
+func TestSettledSidecar_CaseVariants(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; the variants would alias the same file")
+	}
+	other := filepath.Join(dir, "Intro.lrc")
+	if err := os.WriteFile(other, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := settledAt(filepath.Join(dir, "intro.lrc")); ok {
+		t.Fatalf("settledSidecar(intro) = %q: another track's Intro.lrc read as settled", got)
+	}
+	upper := filepath.Join(dir, "song.LRC")
+	if err := os.WriteFile(upper, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := settledAt(filepath.Join(dir, "song.lrc")); !ok || got != upper {
+		t.Fatalf("settledSidecar(song) = (%q, %v), want (%q, true)", got, ok, upper)
 	}
 }
 
@@ -53,7 +135,7 @@ func TestSettledSidecar_Characterization(t *testing.T) {
 
 	t.Run("neither present", func(t *testing.T) {
 		dir := t.TempDir()
-		got, ok := settledSidecar(filepath.Join(dir, "song.lrc"))
+		got, ok := settledAt(filepath.Join(dir, "song.lrc"))
 		if ok || got != "" {
 			t.Fatalf("settledSidecar = (%q, %v), want (\"\", false)", got, ok)
 		}
@@ -63,7 +145,7 @@ func TestSettledSidecar_Characterization(t *testing.T) {
 		dir := t.TempDir()
 		lrc := filepath.Join(dir, "song.lrc")
 		write(t, lrc)
-		got, ok := settledSidecar(filepath.Join(dir, "song.txt"))
+		got, ok := settledAt(filepath.Join(dir, "song.txt"))
 		if !ok || got != lrc {
 			t.Fatalf("settledSidecar = (%q, %v), want (%q, true)", got, ok, lrc)
 		}
@@ -73,7 +155,7 @@ func TestSettledSidecar_Characterization(t *testing.T) {
 		dir := t.TempDir()
 		txt := filepath.Join(dir, "song.txt")
 		write(t, txt)
-		got, ok := settledSidecar(filepath.Join(dir, "song.lrc"))
+		got, ok := settledAt(filepath.Join(dir, "song.lrc"))
 		if !ok || got != txt {
 			t.Fatalf("settledSidecar = (%q, %v), want (%q, true)", got, ok, txt)
 		}
@@ -86,7 +168,7 @@ func TestSettledSidecar_Characterization(t *testing.T) {
 		txt := filepath.Join(dir, "song.txt")
 		write(t, txt)
 		write(t, filepath.Join(dir, "song.lrc"))
-		got, ok := settledSidecar(filepath.Join(dir, "song.lrc"))
+		got, ok := settledAt(filepath.Join(dir, "song.lrc"))
 		if !ok || got != txt {
 			t.Fatalf("settledSidecar = (%q, %v), want (%q, true) -- probe order changed", got, ok, txt)
 		}
@@ -126,7 +208,7 @@ func TestSettledSidecar_Characterization(t *testing.T) {
 		t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
 
 		target := filepath.Join(sub, "song.lrc")
-		got, ok := settledSidecar(target)
+		got, ok := settledAt(target)
 		if !ok {
 			t.Fatal("settledSidecar reported no settled sidecar on an unreadable path; the guard must fail CLOSED")
 		}
@@ -139,7 +221,7 @@ func TestSettledSidecar_Characterization(t *testing.T) {
 		dir := t.TempDir()
 		txt := filepath.Join(dir, "song.txt")
 		write(t, txt)
-		got, ok := settledSidecar(filepath.Join(dir, "song"))
+		got, ok := settledAt(filepath.Join(dir, "song"))
 		if !ok || got != txt {
 			t.Fatalf("settledSidecar = (%q, %v), want (%q, true)", got, ok, txt)
 		}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/selfwrite"
 )
 
 func TestWriteLRC_NothingToSave(t *testing.T) {
@@ -375,6 +376,89 @@ func TestWriteLRC_StaleSidecarCleanup(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, "song.lrc")); !os.IsNotExist(err) {
 			t.Errorf("expected .lrc to be removed, but it still exists (err=%v)", err)
+		}
+	})
+
+	// #989: an uppercase stale sidecar must be reliably removed, exactly like
+	// a lowercase one, on BOTH transitions -- writing .txt over a stale
+	// uppercase .LRC, and writing .lrc over a stale uppercase .TXT. Only
+	// meaningful on a case-sensitive filesystem; on a case-insensitive one
+	// "song.lrc"/"song.LRC" alias the same file and the test would pass
+	// vacuously.
+	t.Run("writes_txt_removes_stale_uppercase_LRC", func(t *testing.T) {
+		dir := t.TempDir()
+		if !caseSensitiveFS(t, dir) {
+			t.Skip("filesystem is case-insensitive; song.lrc and song.LRC would alias the same file")
+		}
+		staleLrc := filepath.Join(dir, "song.LRC")
+		if err := os.WriteFile(staleLrc, []byte("[00:01.00]Old line\n"), 0o644); err != nil {
+			t.Fatalf("creating stale uppercase .LRC: %v", err)
+		}
+		reg := selfwrite.New(time.Minute)
+		w := NewLRCWriter()
+		w.SetSelfWriteRegistry(reg)
+		if err := w.WriteLRC(unsyncedSong, "song.lrc", dir); err != nil {
+			t.Fatalf("WriteLRC: %v", err)
+		}
+		if _, err := os.Stat(staleLrc); !os.IsNotExist(err) {
+			t.Errorf("expected stale uppercase .LRC to be removed, but it still exists (err=%v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "song.txt")); err != nil {
+			t.Errorf("expected .txt to exist: %v", err)
+		}
+		if !reg.Suppress(staleLrc) {
+			t.Error("removal of the real uppercase .LRC name was not recorded as a self-write")
+		}
+	})
+
+	t.Run("writes_lrc_removes_stale_uppercase_TXT", func(t *testing.T) {
+		dir := t.TempDir()
+		if !caseSensitiveFS(t, dir) {
+			t.Skip("filesystem is case-insensitive; song.txt and song.TXT would alias the same file")
+		}
+		staleTxt := filepath.Join(dir, "song.TXT")
+		if err := os.WriteFile(staleTxt, []byte("old unsynced"), 0o644); err != nil {
+			t.Fatalf("creating stale uppercase .TXT: %v", err)
+		}
+		reg := selfwrite.New(time.Minute)
+		w := NewLRCWriter()
+		w.SetSelfWriteRegistry(reg)
+		if err := w.WriteLRC(syncedSong, "song.lrc", dir); err != nil {
+			t.Fatalf("WriteLRC: %v", err)
+		}
+		if _, err := os.Stat(staleTxt); !os.IsNotExist(err) {
+			t.Errorf("expected stale uppercase .TXT to be removed, but it still exists (err=%v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "song.lrc")); err != nil {
+			t.Errorf("expected .lrc to exist: %v", err)
+		}
+		if !reg.Suppress(staleTxt) {
+			t.Error("removal of the real uppercase .TXT name was not recorded as a self-write")
+		}
+	})
+
+	// Negative: a file that merely resembles a stale sidecar -- a different
+	// stem, or a non-sidecar extension appended after the real one -- must
+	// never be touched by the widened case-insensitive removal.
+	t.Run("never_removes_a_lookalike_non_sidecar", func(t *testing.T) {
+		dir := t.TempDir()
+		backup := filepath.Join(dir, "song.lrc.bak")
+		if err := os.WriteFile(backup, []byte("keep me"), 0o644); err != nil {
+			t.Fatalf("creating song.lrc.bak: %v", err)
+		}
+		otherStem := filepath.Join(dir, "songs.LRC")
+		if err := os.WriteFile(otherStem, []byte("keep me too"), 0o644); err != nil {
+			t.Fatalf("creating songs.LRC: %v", err)
+		}
+		w := NewLRCWriter()
+		if err := w.WriteLRC(unsyncedSong, "song.lrc", dir); err != nil {
+			t.Fatalf("WriteLRC: %v", err)
+		}
+		if _, err := os.Stat(backup); err != nil {
+			t.Errorf("song.lrc.bak was removed: %v", err)
+		}
+		if _, err := os.Stat(otherStem); err != nil {
+			t.Errorf("songs.LRC (different stem) was removed: %v", err)
 		}
 	})
 }
