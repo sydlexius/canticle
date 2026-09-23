@@ -329,10 +329,11 @@ func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string,
 // completed_at untouched, so it stops rechecking and stays a candidate for a
 // later run. Never absent: an unanswered lane has not said "no words".
 func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (released bool, err error) {
-	next := formatTime(q.now().Add(retryAfter))
 	// Retried like Settle: a lost write strands the row in 'processing', which
 	// nothing reclaims.
 	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		// Per attempt, like deferRefusedOnce: a long busy wait must not shorten the park.
+		next := formatTime(q.now().Add(retryAfter))
 		tx, err := q.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("queue: begin defer word recheck tx: %w", err)
