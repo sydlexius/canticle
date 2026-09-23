@@ -255,6 +255,22 @@ func TestVariants_OnlyRegularCaseVariants(t *testing.T) {
 	}
 }
 
+// TestVariants_HardLinkedExactAndVariant: a hard-linked variant is a distinct entry.
+func TestVariants_HardLinkedExactAndVariant(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.LRC cannot be a second name")
+	}
+	p, v := filepath.Join(dir, "song.lrc"), filepath.Join(dir, "song.LRC")
+	touch(t, p)
+	if err := os.Link(p, v); err != nil {
+		t.Fatal(err)
+	}
+	if got := List(dir).Variants(p); !slices.Equal(got, []string{p, v}) {
+		t.Fatalf("Variants = %q, want [%q %q]", got, p, v)
+	}
+}
+
 // TestAsciiEqualFold pins the extension comparison: ASCII letters fold, any
 // non-ASCII byte must match exactly (the Kelvin sign is not "k").
 func TestAsciiEqualFold(t *testing.T) {

@@ -555,7 +555,7 @@ const (
 //     path that moves or removes a companion reads the same switch, so a
 //     companion they could not see would never reach a library.
 //   - A FOREIGN file at the path (not a regular file, unreadable, or without
-//     [by:canticle]): nothing, not even a write over it. It belongs to another
+//     [by:canticle]): never written over or removed. It belongs to another
 //     tool or to the operator, and no mode may cost them a file.
 //   - Otherwise an owned companion is removed, and a fresh one is written when
 //     this is a .lrc write with the companion enabled and at least one
@@ -569,17 +569,17 @@ const (
 // Every extension-case variant of the companion (#989, sidecar
 // Listing.Variants: same stem byte-for-byte, ".ELRC"/".Elrc"...) is judged
 // separately: an owned one is removed under its real name, a foreign one is
-// left alone. A foreign file at the exact write path still blocks the whole
-// plan, since a fresh companion would overwrite it. A fresh companion is
-// always written under the plain lowercase construction.
+// left alone. A foreign file at the exact write path blocks only the fresh
+// write (it would overwrite it); owned variants beside it are still removed.
+// A fresh companion is always written under the plain lowercase construction.
 func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool, l sidecar.Listing) companionPlan {
 	if !sidecar.Active(sidecar.KindWordSynced) {
 		return companionPlan{}
 	}
 	path := sidecar.StemOf(fp) + sidecar.ExtWordSynced
-	if companionOwnershipOf(path) == companionForeign {
+	foreign := companionOwnershipOf(path) == companionForeign
+	if foreign {
 		slog.Info("leaving a word-synced companion canticle did not write", "path", path)
-		return companionPlan{}
 	}
 	var plan companionPlan
 	for _, v := range l.Variants(path) {
@@ -587,7 +587,7 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool, l si
 			plan.removes = append(plan.removes, v)
 		}
 	}
-	if synced && w.wordSyncCompanion && HasQualifyingWords(song) {
+	if !foreign && synced && w.wordSyncCompanion && HasQualifyingWords(song) {
 		plan.path, plan.write = path, true
 	}
 	return plan

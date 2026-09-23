@@ -619,15 +619,17 @@ func TestOwnedCompanionOf_UppercaseForeignNeverClaimed(t *testing.T) {
 // silently no-op and leave the file behind), and the self-write registry must
 // record that real name so the watcher does not treat canticle's own removal
 // as an external change (#685, AC "self-write registry records whatever the
-// writer may remove").
+// writer may remove"), even beside a FOREIGN song.elrc, which survives as is.
 func TestWriteLRC_DemotionRemovesStaleUppercaseCompanion(t *testing.T) {
 	dir := t.TempDir()
 	if !caseSensitiveFS(t, dir) {
 		t.Skip("filesystem is case-insensitive; song.elrc and song.ELRC would alias the same file")
 	}
-	real := filepath.Join(dir, "song.ELRC")
-	if err := os.WriteFile(real, []byte("[by:canticle]\n[00:01.00]<00:01.00>stale\n"), 0o600); err != nil {
-		t.Fatal(err)
+	real, foreign := filepath.Join(dir, "song.ELRC"), filepath.Join(dir, "song.elrc")
+	for p, body := range map[string]string{real: "[by:canticle]\n[00:01.00]<00:01.00>stale\n", foreign: "theirs\n"} {
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	reg := selfwrite.New(time.Minute)
 	w := modeWriter(false, true)
@@ -642,6 +644,9 @@ func TestWriteLRC_DemotionRemovesStaleUppercaseCompanion(t *testing.T) {
 	mustNotExist(t, real)
 	if !reg.Suppress(real) {
 		t.Error("removal of the real uppercase companion name was not recorded as a self-write")
+	}
+	if got := readFileString(t, foreign); got != "theirs\n" {
+		t.Errorf("foreign song.elrc was modified: %q", got)
 	}
 }
 

@@ -43,6 +43,7 @@ package sidecar
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -198,8 +199,7 @@ func List(dir string) Listing {
 //     directory, so a symlink there is unlinked, never followed, exactly as
 //     before).
 //
-// On a case-insensitive filesystem the exact Lstat already matches, and a
-// listing entry that is the same file (os.SameFile) is not reported twice.
+// An os.SameFile entry aliases an UNLISTED candidate and is reported once.
 func (l Listing) Variants(candidate string) []string {
 	var out []string
 	exact, err := os.Lstat(candidate)
@@ -213,6 +213,9 @@ func (l Listing) Variants(candidate string) []string {
 		return out
 	}
 	stem, ext := StemOf(base), filepath.Ext(base)
+	if slices.ContainsFunc(l.entries, func(e os.DirEntry) bool { return e.Name() == base }) {
+		exact = nil // listed under its own name: a same-file entry is a hard link, not an alias
+	}
 	for _, e := range l.entries {
 		name := e.Name()
 		if name == base || StemOf(name) != stem || !asciiEqualFold(filepath.Ext(name), ext) || !e.Type().IsRegular() {
