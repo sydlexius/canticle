@@ -294,6 +294,30 @@ canticle revalidate --tail ./offenders.tsv
 
 **Output is aggregate-only.** Only counts are printed; no path, artist, title, or lyric text ever reaches stdout, so the report is safe to paste into an issue. Per-file detail goes only to the local file you name with `--tail`.
 
+## Reconcile word sync
+
+`scan reconcile-word-sync` queues tracks that already have a line-synced `.lrc` for a word-timing re-check. Turning on `output.word_sync_mode` only changes new fetches, so without this pass an established library keeps its line-only output. The command itself fetches nothing. It marks the selected queue rows, and a running `canticle serve` worker re-asks only the word-capable providers (Musixmatch, Petit Lyrics) for them, behind all fresh work. A track whose providers have no word data is marked as such and not asked again, unless the provider set changes or you pass `--recheck-absent-before`.
+
+```sh
+# Count the candidates and the minimum drain time (dry run, the default: writes nothing)
+canticle scan reconcile-word-sync
+
+# Size the run: the 500 oldest tracks settled before 2026-06-01, in one library
+canticle scan reconcile-word-sync --completed-before 2026-06-01 --limit 500 --library music
+
+# Apply
+canticle scan reconcile-word-sync --completed-before 2026-06-01 --limit 500 --library music --yes
+
+# Also re-check tracks judged "no word data" before a date (catalogs gain word timings over time)
+canticle scan reconcile-word-sync --recheck-absent-before 2026-01-01 --yes
+```
+
+- **Output is aggregate-only:** `candidates=N selected=M already-queued=K estimated-minimum-drain=<duration>`. No path, artist, or title is printed.
+- **Cutoffs are strict** and take a date (midnight UTC) or an RFC3339 instant, like `--unsynced-before`. `--library` takes a name or numeric id and can be repeated.
+- **Refused when `output.word_sync_mode = "off"`.** Under `off` a re-check could not write any word timings.
+- **Reversible.** Each row's prior queue state is written as a JSONL line in `<db-dir>/reconcile-word-sync-backup-<timestamp>.jsonl` (or `--backup`, appended to if it exists) and fsynced before its batch commits. If that write fails, the batch is rolled back and the command names how many trailing records belong to it.
+- **Cost.** See [Word-timing re-check cost](USER_GUIDE.md#word-timing-re-check-cost). Read the dry-run count first.
+
 ## Index Metadata
 
 `scan index-metadata` walks a library's audio files and records the complete tag set into the `audio_metadata` table. This populates audio metadata coverage independently of fetch history - a library that has never had lyrics fetched can be indexed to record ISRC, MBID, duration, and other technical metadata from the audio files themselves.

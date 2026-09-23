@@ -51,7 +51,8 @@ func scanSubcommandSelected(args ScanCmd) bool {
 		args.ReconcileMarkerProvenance != nil ||
 		args.ReconcileDetectorStats != nil ||
 		args.IndexMetadata != nil ||
-		args.PurgeProvenance != nil
+		args.PurgeProvenance != nil ||
+		args.ReconcileWordSync != nil
 }
 
 // resolveUnsyncedBefore parses the scan --unsynced-before cutoff into the
@@ -85,10 +86,17 @@ func resolveUnsyncedBefore(raw string, upgrade, update bool) (time.Time, error) 
 	if !upgrade {
 		return time.Time{}, fmt.Errorf("--unsynced-before requires --upgrade: it narrows a .txt re-fetch, and without --upgrade no .txt sidecar is reopened")
 	}
+	return parseCutoff("--unsynced-before", raw)
+}
+
+// parseCutoff parses a cutoff flag's value with the --unsynced-before layouts
+// (a bare date read as midnight UTC, or an RFC3339 instant). Shared by every
+// strict cutoff flag so they accept exactly the same forms.
+func parseCutoff(flag, raw string) (time.Time, error) {
 	for _, layout := range unsyncedBeforeLayouts {
 		if t, err := time.Parse(layout, raw); err == nil {
 			return t, nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("invalid --unsynced-before %q: want a date (2026-04-01) or an RFC3339 instant (2026-04-01T00:00:00Z)", raw)
+	return time.Time{}, fmt.Errorf("invalid %s %q: want a date (2026-04-01) or an RFC3339 instant (2026-04-01T00:00:00Z)", flag, raw)
 }

@@ -731,6 +731,25 @@ N:M matcher for directories the single-candidate heuristic can't resolve). To
 prevent orphaning at the source, Lidarr users can install the
 [rename hook](#lidarr-rename-hook) below.
 
+### Word-timing re-check cost
+
+`output.word_sync_mode` changes what a new fetch writes. Tracks that already have a line-synced `.lrc` keep it, because they are never fetched again. [`canticle scan reconcile-word-sync`](CLI_REFERENCE.md#reconcile-word-sync) queues those tracks so a running `serve` worker asks the providers for word timings.
+
+**Per track:** at most one Musixmatch request (the word timings come with the lyrics call, not a second one). Only when Musixmatch has no word timings, at most two Petit Lyrics requests. The lyrics cache is not used, so every re-checked track costs at least one request. One case costs a little more: a track that Musixmatch fetched without word timings while Petit Lyrics was also configured was never asked of Petit Lyrics, so it stays unmarked and the re-check asks Musixmatch again (one paced request) before Petit Lyrics.
+
+**Time:** the worker handles one track at a time at its poll interval (`server.work_interval_seconds` when set, otherwise `api.cooldown`; 60 seconds in a typical production setup), so the minimum drain time is candidates x interval:
+
+| candidates | minimum drain at 60 s |
+|---|---|
+| 1,000 | 60,000 s = 16.7 hours |
+| 5,000 | 300,000 s = 3.5 days |
+| 10,000 | 600,000 s = 6.9 days |
+| 14,000 | 840,000 s = 9.7 days |
+
+These are floors. Re-checks wait behind all fresh work and due retries. While they wait they show as deferred rows, so deferred counts rise during a run. Read your own count from the dry run (it prints `candidates=` and the drain estimate at your configured interval; a `serve --work-interval` flag is not visible to it), then size the run with `--completed-before`, `--limit`, and `--library`.
+
+**What changes on disk.** A re-check writes only a result that carries word timings and passes the same timing check as any fetch. It never replaces a `.lrc` with a `.txt` or removes one. When word timings do land, the `.lrc` is rewritten from that provider's lines, so the line text or timing can differ slightly from the file you had. Emby and similar players pick the change up on their next library scan. Music Assistant does not: it re-reads lyrics only when the audio file itself changes (#505), so it keeps showing the old lyrics.
+
 ## Reports workspace
 
 The web UI exposes five read-only report views under the Reports section. Every report runs a live database query at request time; there is no pre-aggregation or caching. The reports require the web UI to be enabled (`web_ui_enabled = true`).
