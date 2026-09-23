@@ -152,6 +152,38 @@ func (w *LRCWriter) WordSyncCompanion() bool {
 	return w.wordSyncCompanion
 }
 
+// WordSyncEnabled reports whether word timings have anywhere to land: inline
+// markers, the companion, or both (output.word_sync_mode other than off).
+func (w *LRCWriter) WordSyncEnabled() bool {
+	return w.wordSync || w.wordSyncCompanion
+}
+
+// WordsLanded reports whether a synced WriteLRC of song to (filename, outdir)
+// that returned nil left its word timings on disk (#982 ordinary stamping):
+// the writer's own HasQualifyingWords holds AND the words went inline into the
+// .lrc, or a canticle-owned companion now sits beside it. The companion is
+// checked on disk rather than inferred, because planCompanion skips a FOREIGN
+// file: qualifying words under sidecar mode do not by themselves mean landed.
+func (w *LRCWriter) WordsLanded(song models.Song, filename, outdir string) bool {
+	if !HasQualifyingWords(song) {
+		return false
+	}
+	if w.wordSync {
+		return true
+	}
+	if !w.wordSyncCompanion {
+		return false
+	}
+	fn, err := SidecarName(song.Track.ArtistName, song.Track.TrackName, filename, true)
+	if err != nil {
+		return false
+	}
+	if outdir, err = w.resolveOutdir(outdir); err != nil {
+		return false
+	}
+	return OwnedCompanionOf(filepath.Join(outdir, fn)) != ""
+}
+
 // SetSelfWriteRegistry attaches the registry the watcher consults to recognize
 // this process's own writes (#685). Not goroutine-safe; call before sharing the
 // writer, alongside SetBilingual.

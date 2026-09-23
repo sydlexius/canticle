@@ -21,6 +21,8 @@ type laneResult struct {
 	// instrumentalOnly mirrors Lane.instrumentalOnly: such a lane is never
 	// counted as untried (noteUntried, #950).
 	instrumentalOnly bool
+	// wordCapable mirrors Lane.WordCapable() for the word-answer aggregate.
+	wordCapable bool
 }
 
 // findParallel dispatches every lane concurrently and races the results:
@@ -50,7 +52,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		lane := lane
 		go func() {
 			song, err := lane.FindLyrics(childCtx, track, sourcePath)
-			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local(), instrumentalOnly: lane.instrumentalOnly}
+			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local(), instrumentalOnly: lane.instrumentalOnly, wordCapable: lane.WordCapable()}
 		}()
 	}
 
@@ -85,6 +87,9 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		// know their outcome, and recording them as misses would be the very
 		// over-count this table exists to avoid.
 		consulted []attemptedLane
+		// wordAnswered counts word-capable lanes that answered the word question
+		// (answersWord), for ungatedWordAnswer.
+		wordAnswered int
 	)
 
 	for {
@@ -99,6 +104,9 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 			class := ClassifyOutcome(res.err)
 			// A canceled lane classifies as transport, so it is never untried.
 			r.noteUntried(res.err, class, res.name, res.instrumentalOnly)
+			if answersWord(res.wordCapable, res.song, res.err) {
+				wordAnswered++
+			}
 			switch {
 			case errors.Is(res.err, context.Canceled):
 				// A canceled loser, or a parent-canceled lane: no catalog signal, skip.
@@ -132,6 +140,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 						// recorded as a miss -- without inventing misses for breaker-open
 						// or still-in-flight lanes that were never consulted.
 						res.song.LaneAttempts = laneAttemptsFor(consulted, res.name)
+						res.song.WordAnswer = o.ungatedWordAnswer(res.song.WordAnswer, wordAnswered)
 						return res.song, nil // synced: commit now; defer cancels the losers.
 					}
 					// Suitable but unsynced: hold the first such result. Arm the upgrade
@@ -156,6 +165,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 				if haveHeld {
 					heldSong.WinningLane = heldLane
 					heldSong.LaneAttempts = laneAttemptsFor(consulted, heldLane)
+					heldSong.WordAnswer = o.ungatedWordAnswer(heldSong.WordAnswer, wordAnswered)
 					return heldSong, nil
 				}
 				song, err := o.resolve(ctx, &r)
@@ -166,6 +176,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 				// the success and benign-miss paths, so attaching on the error song is
 				// harmless.
 				song.LaneAttempts = laneAttemptsFor(consulted, song.WinningLane)
+				song.WordAnswer = o.ungatedWordAnswer(song.WordAnswer, wordAnswered)
 				return song, err
 			}
 		case <-upgrade:
@@ -176,6 +187,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 			}
 			heldSong.WinningLane = heldLane
 			heldSong.LaneAttempts = laneAttemptsFor(consulted, heldLane)
+			heldSong.WordAnswer = o.ungatedWordAnswer(heldSong.WordAnswer, wordAnswered)
 			return heldSong, nil
 		}
 	}

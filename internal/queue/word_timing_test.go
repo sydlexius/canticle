@@ -506,3 +506,38 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 		t.Fatalf("released = (%s,%q,%s,%v,%d,%d,%q); want done, no verdict, completed_at kept", st, s, c, g, m, a, lastErr)
 	}
 }
+
+// TestClearWordTimingState (#982 slice 4): a served/absent verdict is dropped
+// with its generation and checked_at; 'queued' and an unexamined row are not
+// touched.
+func TestClearWordTimingState(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	served := seedWordCandidate(t, dbh, "served")
+	queued := seedWordCandidate(t, dbh, "queued")
+	if err := q.SetWordTimingState(ctx, served, WordTimingServed, 9, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, dbh, `UPDATE work_queue SET word_timing_state = 'queued' WHERE id = ?`, queued)
+	for _, id := range []int64{served, queued} {
+		if err := q.ClearWordTimingState(ctx, id); err != nil {
+			t.Fatalf("clear %d: %v", id, err)
+		}
+	}
+	for id, want := range map[int64]string{served: "", queued: WordTimingQueued} {
+		var state string
+		var gen, checked sql.NullString
+		if err := dbh.QueryRow(`SELECT COALESCE(word_timing_state, ''), word_timing_generation, word_timing_checked_at FROM work_queue WHERE id = ?`,
+			id).Scan(&state, &gen, &checked); err != nil {
+			t.Fatal(err)
+		}
+		if state != want || (want == "" && (gen.Valid || checked.Valid)) {
+			t.Fatalf("row %d = (%q, %v, %v); want %q", id, state, gen, checked, want)
+		}
+	}
+	_ = dbh.Close()
+	if err := q.ClearWordTimingState(ctx, served); err == nil {
+		t.Fatal("ClearWordTimingState on a closed db returned nil")
+	}
+}

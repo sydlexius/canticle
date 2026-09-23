@@ -106,6 +106,11 @@ type Queue interface {
 	// still 'queued', touching no miss or failure counter; past maxWaits it
 	// un-flips the row to done with no verdict and reports released.
 	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (bool, error)
+	// SetWordTimingState stamps an ordinary completion's word verdict (served or
+	// absent) and generation (#982 slice 4); zero checkedAt means now.
+	SetWordTimingState(ctx context.Context, id int64, state string, generation int64, checkedAt time.Time) error
+	// ClearWordTimingState drops a prior served/absent verdict; 'queued' is kept.
+	ClearWordTimingState(ctx context.Context, id int64) error
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -1565,6 +1570,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// -- it fails and retries, and the guard will reject it again
 			// deterministically, so a retry costs one provider round-trip and
 			// cannot loop forever on a row that would otherwise settle unlabeled.
+			w.clearWordTiming(ctxNoCancel, item)
 			outcome, settleErr := w.queue.SettleGuardRejected(ctxNoCancel, item.ID, reason)
 			if settleErr != nil {
 				return w.fail(ctx, item, fmt.Errorf("worker: settle guard-rejected item %d: %w", item.ID, settleErr))
@@ -1639,6 +1645,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// MisSynced result landed as .txt and a categorical one was not written --
 	// so this is the durable record of a decision, not an ignored observation.
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
+	w.stampWordTiming(ctxNoCancel, item, song)
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++
@@ -2017,6 +2024,7 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// to tell them apart. The detector's own timing lives in completed_at and the
 	// detector telemetry, so nothing is lost by not inventing one here.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
+	w.clearWordTiming(ctxNoCancel, item)
 	// Settle only AFTER the marker write succeeded (a failed WriteLRC above
 	// requeues and returns before here), so a transient write error never leaves a
 	// row tagged instrumental with stale telemetry.

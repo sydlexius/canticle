@@ -122,7 +122,8 @@ func TestMinCommit_NoWordsFallsBackToFirstLineSynced(t *testing.T) {
 }
 
 // TestMinCommit_UngatedLeavesWordAnswerAlone: without a gate the lane's own
-// answer passes through untouched (no aggregation).
+// unknown (or served) passes through untouched; only an absent is aggregated
+// (TestUngated_AbsentIsTheAggregate).
 func TestMinCommit_UngatedLeavesWordAnswerAlone(t *testing.T) {
 	mxm := &stubProvider{name: providers.Musixmatch, song: lineSyncedAnswer("line", models.WordAnswerUnknown)}
 	pl := &stubProvider{name: providers.PetitLyrics, err: musixmatch.ErrNotFound}
@@ -218,5 +219,68 @@ func TestLaneWordCapable(t *testing.T) {
 		if got := l.WordCapable(); got != want {
 			t.Errorf("lane %q WordCapable = %v, want %v", l.Name(), got, want)
 		}
+	}
+}
+
+// TestUngated_AbsentIsTheAggregate (#982 slice 4): an ORDINARY dispatch's
+// absent is the aggregate in both modes, since the worker stamps it: a lane's
+// own absent survives only when every word-capable lane answered.
+func TestUngated_AbsentIsTheAggregate(t *testing.T) {
+	absent := func() *stubProvider {
+		return &stubProvider{name: providers.Musixmatch, song: lineSyncedAnswer("line", models.WordAnswerAbsent)}
+	}
+	for _, mode := range []string{ModeOrdered, ModeParallel} {
+		for _, tc := range []struct {
+			name   string
+			others []*stubProvider
+			want   models.WordAnswer
+		}{
+			{"sole word lane", nil, models.WordAnswerAbsent},
+			{"non-word lane beside it", []*stubProvider{{name: providers.InnerTube, err: musixmatch.ErrNotFound}}, models.WordAnswerAbsent},
+			{"word lane that did not answer", []*stubProvider{{name: providers.PetitLyrics, err: petitlyrics.ErrRateLimited}}, models.WordAnswerUnknown},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				lanes := []*Lane{laneFor(absent())}
+				for _, p := range tc.others {
+					lanes = append(lanes, laneFor(p))
+				}
+				o, err := New(mode, lanes...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				song, err := o.FindLyrics(context.Background(), wordTrack, "")
+				if err != nil || song.WinningLane != providers.Musixmatch || song.WordAnswer != tc.want {
+					t.Fatalf("got %q from %q (%v); want %q", song.WordAnswer, song.WinningLane, err, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// TestUngated_NonCommitReturnsCarryTheAggregate: the held and resolve returns
+// (#982 slice 4) are not stamped today, but absent must mean the aggregate on
+// every return, so an unanswered word lane still reads unknown.
+func TestUngated_NonCommitReturnsCarryTheAggregate(t *testing.T) {
+	withAnswer := func(s models.Song) models.Song { s.WordAnswer = models.WordAnswerAbsent; return s }
+	for _, tc := range []struct {
+		name, mode string
+		song       models.Song
+	}{
+		{"parallel held", ModeParallel, withAnswer(overrunSong("line"))},
+		{"parallel resolve", ModeParallel, withAnswer(categoricalSong("line"))},
+		{"ordered resolve", ModeOrdered, withAnswer(categoricalSong("line"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, err := New(tc.mode,
+				laneFor(&stubProvider{name: providers.Musixmatch, song: tc.song}),
+				laneFor(&stubProvider{name: providers.PetitLyrics, err: petitlyrics.ErrRateLimited}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			song, err := o.FindLyrics(context.Background(), wordTrack, "")
+			if song.WinningLane != providers.Musixmatch || song.WordAnswer != models.WordAnswerUnknown {
+				t.Fatalf("got %q from %q (%v); want unknown from musixmatch", song.WordAnswer, song.WinningLane, err)
+			}
+		})
 	}
 }

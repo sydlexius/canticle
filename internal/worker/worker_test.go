@@ -149,6 +149,8 @@ type fakeQueue struct {
 	// assert the detector path does NOT stamp the lane advisorily (it is written
 	// inside the settle transaction) while the provider path still does.
 	providerLaneStamps []int64
+	wordTimingStates   map[int64]string
+	wordTimingErr      error
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -202,6 +204,24 @@ func (q *fakeQueue) SettleWordRecheck(context.Context, int64, string, int64) err
 
 func (q *fakeQueue) DeferWordRecheck(context.Context, int64, time.Duration, int, string) (bool, error) {
 	return false, errors.New("fakeQueue: DeferWordRecheck not modeled")
+}
+
+// SetWordTimingState records ordinary-completion word verdicts (#982 slice 4);
+// wordTimingErr injects the non-fatal stamp failure.
+func (q *fakeQueue) SetWordTimingState(_ context.Context, id int64, state string, _ int64, _ time.Time) error {
+	if q.wordTimingErr != nil {
+		return q.wordTimingErr
+	}
+	if q.wordTimingStates == nil {
+		q.wordTimingStates = make(map[int64]string)
+	}
+	q.wordTimingStates[id] = state
+	return nil
+}
+
+func (q *fakeQueue) ClearWordTimingState(_ context.Context, id int64) error {
+	delete(q.wordTimingStates, id)
+	return q.wordTimingErr
 }
 
 // DeferRefused is exercised end to end over the real DBQueue

@@ -270,6 +270,21 @@ func (q *DBQueue) SetWordTimingState(ctx context.Context, id int64, state string
 	return nil
 }
 
+// ClearWordTimingState drops a served/absent verdict (and its generation and
+// checked_at) from a row an ordinary completion settled without one (#982
+// slice 4), so a verdict about an earlier file never outlives it. 'queued' is
+// never touched (the flip's state), and a row with no verdict matches nothing,
+// so the common case changes no row.
+func (q *DBQueue) ClearWordTimingState(ctx context.Context, id int64) error {
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET word_timing_state = NULL, word_timing_generation = NULL, word_timing_checked_at = NULL
+         WHERE id = ? AND word_timing_state IN ('served', 'absent')`, id,
+	); err != nil {
+		return fmt.Errorf("queue: clear word timing state for id %d: %w", id, err)
+	}
+	return nil
+}
+
 // wordRecheckOwned is the guard both word-recheck transitions share: the
 // worker holds the row AND it is still a recheck row.
 const wordRecheckOwned = ` WHERE id = ? AND status = 'processing' AND word_timing_state = 'queued'`
