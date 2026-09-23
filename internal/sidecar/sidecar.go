@@ -24,9 +24,24 @@
 // only once realign, revalidate, purgeprovenance, the scanner and the writer had
 // learned to move, pair and settle it. A future Kind should follow the same
 // order, because an active Kind the call sites cannot handle orphans files.
+//
+// CASE (#989). IsSidecar/KindOf have always been case-insensitive (they
+// lowercase before comparing), matching realign's historical walk. Until
+// #989, the writer's pairing (oppositeSidecar) and companion lookup
+// (OwnedCompanionOf) disagreed: they were case-SENSITIVE, so an uppercase
+// sidecar realign would collect and re-attach was invisible to the writer --
+// never paired, never cleaned up, never suppressed at the watcher. #989
+// resolved that by making the writer case-insensitive too, via
+// Listing.Variants: a real deployment can see an uppercase extension (macOS or
+// an SMB share upstream of a case-sensitive Linux/ext4 library), and losing
+// re-attachability for it was judged the worse regression. This DOES widen a
+// delete path (the writer now removes files it previously ignored), so
+// Variants matches only the EXTENSION's case (ASCII), never the stem's, and
+// returns REAL on-disk names -- so it cannot touch another track's file.
 package sidecar
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -146,4 +161,91 @@ func Active(k Kind) bool {
 // filepath.Base itself.
 func StemOf(path string) string {
 	return strings.TrimSuffix(path, filepath.Ext(path))
+}
+
+// Listing is one directory's entry names, read ONCE and reused for every
+// candidate a single write asks about (#989): a write resolves its stale
+// opposite sidecar, its settled check and its companion from the same
+// snapshot, so the name it records with the self-write registry and the name
+// it removes can never come from two different reads.
+type Listing struct {
+	dir     string
+	entries []os.DirEntry
+}
+
+// List reads dir once. An unreadable directory yields an empty Listing, so
+// doubt resolves to "no case variant found" rather than guessing; the exact
+// candidate name is still honored by Variants.
+func List(dir string) Listing {
+	entries, _ := os.ReadDir(dir)
+	return Listing{dir: dir, entries: entries}
+}
+
+// Variants returns every path on disk that IS candidate's sidecar under a
+// different extension case (#989), exact-case name first, the rest in name
+// order. The rule is deliberately narrow because callers feed the result to
+// os.Remove:
+//
+//   - The STEM must be byte-identical. Only the extension is compared
+//     case-insensitively, so "Intro.lrc" is never a variant of "intro.lrc":
+//     on a case-sensitive filesystem those are two different tracks' sidecars.
+//   - The extension is folded with ASCII-only folding, never Unicode
+//     (strings.EqualFold): sidecar extensions are ASCII, and Unicode simple
+//     folding aliases unrelated names (the long s, the micro sign, final sigma).
+//   - A case variant is accepted only when it is a REGULAR file: never a
+//     directory, symlink, or special file. The exact-case candidate keeps the
+//     pre-#989 behavior (it is included when it exists and is not a
+//     directory, so a symlink there is unlinked, never followed, exactly as
+//     before).
+//
+// On a case-insensitive filesystem the exact Lstat already matches, and a
+// listing entry that is the same file (os.SameFile) is not reported twice.
+func (l Listing) Variants(candidate string) []string {
+	var out []string
+	exact, err := os.Lstat(candidate)
+	if err == nil && !exact.IsDir() {
+		out = append(out, candidate)
+	} else {
+		exact = nil
+	}
+	dir, base := filepath.Dir(candidate), filepath.Base(candidate)
+	if filepath.Clean(dir) != filepath.Clean(l.dir) {
+		return out
+	}
+	stem, ext := StemOf(base), filepath.Ext(base)
+	for _, e := range l.entries {
+		name := e.Name()
+		if name == base || StemOf(name) != stem || !asciiEqualFold(filepath.Ext(name), ext) || !e.Type().IsRegular() {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		if exact != nil {
+			if fi, err := os.Lstat(p); err == nil && os.SameFile(exact, fi) {
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// asciiEqualFold reports whether a and b are equal under ASCII-only case
+// folding; any non-ASCII byte must match exactly.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }

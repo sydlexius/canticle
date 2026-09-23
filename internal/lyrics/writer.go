@@ -313,6 +313,10 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		return err
 	}
 	fp := filepath.Join(outdir, fn)
+	// One directory listing per write (#989), shared by the settled check, the
+	// stale-opposite resolution and the companion plan, so what is recorded
+	// with the self-write registry and what is removed come from one snapshot.
+	listing := sidecar.List(filepath.Dir(fp))
 
 	// A demotion must never destroy settled content. Both sidecar forms count as
 	// settled: an existing .txt is the upgrade scenario the issue calls out (the
@@ -331,7 +335,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// directly, and any caller that got it wrong would silently truncate a
 	// settled sidecar.
 	if demoted {
-		if settled, ok := settledSidecar(fp); ok {
+		if settled, ok := settledSidecar(fp, listing); ok {
 			slog.Info("keeping settled lyrics: candidate timing overruns the audio",
 				"path", settled, "artist", song.Track.ArtistName, "track", song.Track.TrackName,
 				"outcome", string(verdict))
@@ -469,20 +473,21 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// claiming word timing it does not carry. It is recorded alongside fp for
 	// the same watcher reason, but ONLY when this write touches it: recording
 	// an untouched path would make the watcher drop a third party's change.
-	companion := w.planCompanion(song, fp, synced)
-	w.selfWrites.Record(fp, oppositeSidecar(fp), companion.path)
+	companion := w.planCompanion(song, fp, synced, listing)
+	stale := staleSidecars(fp, listing)
+	w.selfWrites.Record(append(append([]string{fp, oppositeSidecar(fp), companion.path}, stale...), companion.removes...)...)
 
 	// Any existing companion is removed BEFORE the .lrc/.txt is replaced, even
 	// when a fresh one is about to be written. The two renames cannot be atomic
 	// together, so this picks the failure: a crash or a failed companion write
 	// leaves a line-synced file and NO companion, never an older companion
 	// describing the lyric this write replaced.
-	if companion.remove {
-		remove := os.Remove
-		if w.companionRemove != nil {
-			remove = w.companionRemove
-		}
-		if err := remove(companion.path); err != nil && !os.IsNotExist(err) {
+	remove := os.Remove
+	if w.companionRemove != nil {
+		remove = w.companionRemove
+	}
+	for _, old := range companion.removes {
+		if err := remove(old); err != nil && !os.IsNotExist(err) {
 			// Abort BEFORE the .lrc/.txt is replaced: continuing would leave
 			// the old word timing beside new line timing.
 			return fmt.Errorf("removing stale word-synced companion: %w", err)
@@ -494,9 +499,10 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	}
 	// Remove the opposite sidecar so format transitions never leave both files on disk.
 	// Writing .lrc removes a stale .txt (upgrade), writing .txt removes a stale .lrc (downgrade).
-	if stale := oppositeSidecar(fp); stale != "" {
-		if err := os.Remove(stale); err != nil && !os.IsNotExist(err) {
-			slog.Warn("could not remove stale sidecar", "path", stale, "error", err)
+	// Every extension-case variant goes (#989), under the exact names recorded above.
+	for _, old := range stale {
+		if err := os.Remove(old); err != nil && !os.IsNotExist(err) {
+			slog.Warn("could not remove stale sidecar", "path", old, "error", err)
 		}
 	}
 	slog.Info("lyrics saved", "path", fp, "kind", kind,
@@ -520,15 +526,15 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	return nil
 }
 
-// companionPlan is planCompanion's verdict. path is the companion this write
-// touches ("" when it touches none); remove says an existing canticle-owned
-// companion is deleted before the .lrc/.txt is replaced; write says a fresh
-// one is written after it. Every path in a plan is canticle's to touch, so the
-// plan is also exactly what is recorded with selfwrite.
+// companionPlan is planCompanion's verdict. removes are the existing
+// canticle-owned companions (every extension-case variant, #989) deleted before
+// the .lrc/.txt is replaced; when write is set, a fresh one is written at path
+// after it. Every path in a plan is canticle's to touch, so the plan is also
+// exactly what is recorded with selfwrite.
 type companionPlan struct {
-	path   string
-	remove bool
-	write  bool
+	path    string
+	removes []string
+	write   bool
 }
 
 // companionOwnership is what is on disk at the companion path.
@@ -559,20 +565,30 @@ const (
 //
 // A write that touches nothing (quarantine, or a demotion that keeps a settled
 // sidecar) never reaches here, so the companion of a kept .lrc is kept too.
-func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool) companionPlan {
+//
+// Every extension-case variant of the companion (#989, sidecar
+// Listing.Variants: same stem byte-for-byte, ".ELRC"/".Elrc"...) is judged
+// separately: an owned one is removed under its real name, a foreign one is
+// left alone. A foreign file at the exact write path still blocks the whole
+// plan, since a fresh companion would overwrite it. A fresh companion is
+// always written under the plain lowercase construction.
+func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool, l sidecar.Listing) companionPlan {
 	if !sidecar.Active(sidecar.KindWordSynced) {
 		return companionPlan{}
 	}
 	path := sidecar.StemOf(fp) + sidecar.ExtWordSynced
-	own := companionOwnershipOf(path)
-	if own == companionForeign {
+	if companionOwnershipOf(path) == companionForeign {
 		slog.Info("leaving a word-synced companion canticle did not write", "path", path)
 		return companionPlan{}
 	}
-	plan := companionPlan{path: path, remove: own == companionOwned}
-	plan.write = synced && w.wordSyncCompanion && HasQualifyingWords(song)
-	if !plan.remove && !plan.write {
-		return companionPlan{}
+	var plan companionPlan
+	for _, v := range l.Variants(path) {
+		if companionOwnershipOf(v) == companionOwned {
+			plan.removes = append(plan.removes, v)
+		}
+	}
+	if synced && w.wordSyncCompanion && HasQualifyingWords(song) {
+		plan.path, plan.write = path, true
 	}
 	return plan
 }
@@ -593,15 +609,35 @@ func IsOwnedCompanion(path string) bool {
 // lrc is not a .lrc, or the file beside it is absent or FOREIGN. It reads the
 // same sidecar.KindWordSynced switch as the writer, so that table flag stays the
 // single switch for every mutation path.
+//
+// KindOf(lrc) is case-insensitive, so an uppercase "song.LRC" is still
+// recognized as line-synced here, and an owned companion under a different
+// EXTENSION case ("song.ELRC") is found too (#989) -- a caller mutating lrc
+// (realign's rename/quarantine/purge) would otherwise strand it. Only the
+// extension's case varies: the stem must match byte-for-byte, so "Intro.elrc"
+// is never the companion of "intro.lrc" (another track on a case-sensitive
+// filesystem). Every caller moves or removes the returned path, so it is the
+// exact name that exists; variants are consulted only when the exact name is
+// absent, first owned one in name order.
 func OwnedCompanionOf(lrc string) string {
 	if !sidecar.Active(sidecar.KindWordSynced) || sidecar.KindOf(lrc) != sidecar.KindLineSynced {
 		return ""
 	}
 	c := sidecar.StemOf(lrc) + sidecar.ExtWordSynced
-	if !IsOwnedCompanion(c) {
+	if _, err := os.Lstat(c); !os.IsNotExist(err) {
+		// Exact name present (or unknowable): it alone decides, and the common
+		// case costs no directory read.
+		if IsOwnedCompanion(c) {
+			return c
+		}
 		return ""
 	}
-	return c
+	for _, v := range sidecar.List(filepath.Dir(c)).Variants(c) {
+		if IsOwnedCompanion(v) {
+			return v
+		}
+	}
+	return ""
 }
 
 // companionOwnershipOf classifies path WITHOUT following it. Lstat comes first
@@ -722,18 +758,31 @@ func writeAtomic(outdir, fn string, tags []string, writeContent func(*bufio.Writ
 // and a third extension has to be reasoned about rather than picked up for
 // free.
 //
-// The extension comparison is case-SENSITIVE (plain filepath.Ext, no
-// ToLower), unlike sidecar.IsSidecar: a ".LRC" on disk is not paired, and is
-// therefore not removed. That asymmetry is pre-existing and preserved.
+// The PAIRING is decided case-insensitively via sidecar.KindOf, matching
+// sidecar.IsSidecar (#989). This returns only the NAME; what is actually
+// removed is staleSidecars' resolution of it against the directory.
 func oppositeSidecar(fp string) string {
-	switch filepath.Ext(fp) {
-	case sidecar.ExtLineSynced:
+	switch sidecar.KindOf(fp) {
+	case sidecar.KindLineSynced:
 		return sidecar.StemOf(fp) + sidecar.ExtUnsynced
-	case sidecar.ExtUnsynced:
+	case sidecar.KindUnsynced:
 		return sidecar.StemOf(fp) + sidecar.ExtLineSynced
 	default:
 		return ""
 	}
+}
+
+// staleSidecars resolves fp's opposite sidecar against l to every real on-disk
+// name that must be removed (#989): the exact name plus each extension-case
+// variant ("song.LRC", "song.Lrc") of the SAME byte-identical stem. See
+// sidecar.Listing.Variants for why the stem never folds and a case variant
+// must be a regular file.
+func staleSidecars(fp string, l sidecar.Listing) []string {
+	opp := oppositeSidecar(fp)
+	if opp == "" {
+		return nil
+	}
+	return l.Variants(opp)
 }
 
 // matchRoot returns the longest configured confinement root that outdir is
@@ -908,12 +957,22 @@ func writeText(body string, buff *bufio.Writer) error {
 // The probe ORDER is load-bearing and therefore written out rather than taken
 // from sidecar.Extensions(): unsynced is checked first, so when both sidecars
 // somehow exist the .txt is the one reported.
-func settledSidecar(fp string) (string, bool) {
+//
+// An extension-case variant of the same byte-identical stem ("song.LRC")
+// counts as settled too (#989, sidecar.Listing.Variants); a different-case
+// stem ("Song.lrc") is another track's and does not. This guard only READS the
+// result, so widening recognition costs nothing on the delete path.
+func settledSidecar(fp string, l sidecar.Listing) (string, bool) {
 	stem := sidecar.StemOf(fp)
 	for _, kind := range []sidecar.Kind{sidecar.KindUnsynced, sidecar.KindLineSynced} {
 		candidate := stem + sidecar.Ext(kind)
 		if _, err := os.Stat(candidate); err == nil || !os.IsNotExist(err) {
 			return candidate, true
+		}
+		for _, v := range l.Variants(candidate) {
+			if v != candidate { // a dangling symlink at candidate stays absent, as before #989
+				return v, true
+			}
 		}
 	}
 	return "", false

@@ -558,3 +558,186 @@ func TestWordsLanded(t *testing.T) {
 		t.Fatal("WordsLanded = true for an outdir escaping the confinement root")
 	}
 }
+
+// TestOwnedCompanionOf_UppercaseFound is the #989 fix for the maintainer
+// comment on #986 slice 4a: OwnedCompanionOf used to build the companion path
+// as StemOf(lrc) + ExtWordSynced (always lowercase ".elrc"), so realign's
+// case-insensitive walk could collect an owned "song.ELRC" as a companion
+// that OwnedCompanionOf itself could never find -- a rename/quarantine/purge
+// would then act on the .lrc and strand the uppercase companion. Only
+// meaningful on a case-sensitive filesystem: on a case-insensitive one
+// "song.elrc" and "song.ELRC" alias the same file and the exact-match branch
+// would already succeed, proving nothing about the
+// listing fallback this test exists to pin (sidecar.Listing.Variants).
+func TestOwnedCompanionOf_UppercaseFound(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.elrc and song.ELRC would alias the same file")
+	}
+	lrc := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("[00:01.00]line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "song.ELRC")
+	if err := os.WriteFile(real, []byte("[by:canticle]\n[00:01.00]<00:01.00>word\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := OwnedCompanionOf(lrc)
+	if got != real {
+		t.Fatalf("OwnedCompanionOf(%q) = %q, want %q (the real uppercase on-disk name)", lrc, got, real)
+	}
+	if !IsOwnedCompanion(real) {
+		t.Error("IsOwnedCompanion did not recognize the uppercase companion")
+	}
+}
+
+// TestOwnedCompanionOf_UppercaseForeignNeverClaimed: an uppercase companion
+// WITHOUT [by:canticle] must still read as foreign (not owned), exactly like
+// its lowercase counterpart. Resolving the real on-disk name must not, by
+// itself, grant ownership.
+func TestOwnedCompanionOf_UppercaseForeignNeverClaimed(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.elrc and song.ELRC would alias the same file")
+	}
+	lrc := filepath.Join(dir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("[00:01.00]line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "song.ELRC"), []byte("theirs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := OwnedCompanionOf(lrc); got != "" {
+		t.Errorf("OwnedCompanionOf(%q) = %q, want \"\" (foreign companion, no [by:canticle])", lrc, got)
+	}
+}
+
+// TestWriteLRC_DemotionRemovesStaleUppercaseCompanion exercises the same
+// stale-removal path as TestWriteLRC_DemotionRemovesStaleCompanion, but with
+// the companion on disk under an uppercase extension: the removal must target
+// the REAL name (not a lowercase reconstruction fed to os.Remove, which would
+// silently no-op and leave the file behind), and the self-write registry must
+// record that real name so the watcher does not treat canticle's own removal
+// as an external change (#685, AC "self-write registry records whatever the
+// writer may remove").
+func TestWriteLRC_DemotionRemovesStaleUppercaseCompanion(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.elrc and song.ELRC would alias the same file")
+	}
+	real := filepath.Join(dir, "song.ELRC")
+	if err := os.WriteFile(real, []byte("[by:canticle]\n[00:01.00]<00:01.00>stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := selfwrite.New(time.Minute)
+	w := modeWriter(false, true)
+	w.SetSelfWriteRegistry(reg)
+
+	// 120s cue against 100s audio: MisSynced, demoted.
+	song := guardSong(100, cue(10, "first line"), cue(120, "last line"))
+	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	mustExist(t, filepath.Join(dir, "song.txt"))
+	mustNotExist(t, real)
+	if !reg.Suppress(real) {
+		t.Error("removal of the real uppercase companion name was not recorded as a self-write")
+	}
+}
+
+// TestWriteLRC_UppercaseForeignCompanionNeverRemoved is the negative half of
+// the uppercase removal path: a foreign (no [by:canticle]) uppercase
+// companion must survive a demotion untouched, exactly like a lowercase
+// foreign companion does. This is the guard against the widened,
+// case-insensitive removal touching a file that only LOOKS like a stale
+// companion.
+func TestWriteLRC_UppercaseForeignCompanionNeverRemoved(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.elrc and song.ELRC would alias the same file")
+	}
+	real := filepath.Join(dir, "song.ELRC")
+	if err := os.WriteFile(real, []byte("theirs, not [by:canticle]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	song := guardSong(100, cue(10, "first line"), cue(120, "last line"))
+	if err := modeWriter(false, true).WriteLRC(song, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	mustExist(t, real)
+	if got := readFileString(t, real); !strings.Contains(got, "theirs") {
+		t.Errorf("foreign uppercase companion was modified: %q", got)
+	}
+}
+
+// TestWriteLRC_NeverTouchesADifferentCaseStem is the C1/C2 guard (#989): on a
+// case-sensitive filesystem "Intro.flac" and "intro.flac" are two tracks, so
+// writing intro's sidecars must never remove Intro.lrc nor remove or overwrite
+// Intro.elrc, and OwnedCompanionOf(intro.lrc) must never return Intro.elrc.
+func TestWriteLRC_NeverTouchesADifferentCaseStem(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; Intro.lrc and intro.lrc are one file there")
+	}
+	otherLRC := filepath.Join(dir, "Intro.lrc")
+	otherELRC := filepath.Join(dir, "Intro.elrc")
+	if err := os.WriteFile(otherLRC, []byte("[00:01.00]other track\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherELRC, []byte("[by:canticle]\n[00:01.00]<00:01.00>other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := OwnedCompanionOf(filepath.Join(dir, "intro.lrc")); got != "" {
+		t.Fatalf("OwnedCompanionOf(intro.lrc) = %q, want \"\" (Intro.elrc is another track's)", got)
+	}
+	// .txt write (demotion): would remove a stale .lrc and an owned companion.
+	demote := guardSong(100, cue(10, "first line"), cue(120, "last line"))
+	if err := modeWriter(false, true).WriteLRC(demote, "intro.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC(.txt): %v", err)
+	}
+	// .lrc write with a companion: would overwrite a same-named companion.
+	if err := modeWriter(false, true).WriteLRC(a2Song(), "intro.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC(.lrc): %v", err)
+	}
+	if got := readFileString(t, otherLRC); !strings.Contains(got, "other track") {
+		t.Errorf("Intro.lrc (another track) was touched: %q", got)
+	}
+	if got := readFileString(t, otherELRC); !strings.Contains(got, "<00:01.00>other") {
+		t.Errorf("Intro.elrc (another track) was touched: %q", got)
+	}
+	mustExist(t, filepath.Join(dir, "intro.elrc"))
+}
+
+// TestWriteLRC_RemovesEveryStaleCaseVariant is the I1 guard: every
+// extension-case variant of the stale opposite and of an owned companion is
+// removed (not only the first), each recorded as a self-write under its real
+// name.
+func TestWriteLRC_RemovesEveryStaleCaseVariant(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; the variants alias one file")
+	}
+	var stale []string
+	for _, n := range []string{"song.lrc", "song.LRC", "song.Lrc", "song.ELRC", "song.Elrc"} {
+		p := filepath.Join(dir, n)
+		if err := os.WriteFile(p, []byte("[by:canticle]\n[00:01.00]<00:01.00>stale\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stale = append(stale, p)
+	}
+	reg := selfwrite.New(time.Minute)
+	w := modeWriter(false, true)
+	w.SetSelfWriteRegistry(reg)
+	// An unsynced write (a demotion would keep the settled .lrc instead).
+	song := models.Song{Track: models.Track{ArtistName: "a", TrackName: "t"}, Lyrics: models.Lyrics{LyricsBody: "words"}}
+	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	mustExist(t, filepath.Join(dir, "song.txt"))
+	for _, p := range stale {
+		mustNotExist(t, p)
+		if !reg.Suppress(p) {
+			t.Errorf("removal of %s not recorded as a self-write", filepath.Base(p))
+		}
+	}
+}
