@@ -1,9 +1,9 @@
 fastapi==0.138.0
 uvicorn[standard]==0.49.0
 python-multipart==0.0.32
-tensorflow-cpu==2.18.1
+tensorflow-cpu==2.21.0
 soundfile==0.12.1
-numpy==2.0.2
+numpy==2.5.3
 # tensorflow-hub is deliberately absent (#491). It only resolved a URL to a local
 # cache and then called tf.saved_model.load; the Dockerfile bakes the model in at
 # build time, so app.py loads the SavedModel directly. Dropping it also drops the
