@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,7 @@ func TestOrdinaryStamp_Verdicts(t *testing.T) {
 		name, mode, prior  string
 		primary, secondary *fakeFetcher
 		soleLane, foreign  bool
+		mirrorFirst        bool // a second output path, listed FIRST, holding the foreign .elrc
 		innertube          *fakeFetcher
 		want               string
 	}{
@@ -61,6 +63,8 @@ func TestOrdinaryStamp_Verdicts(t *testing.T) {
 		{name: "served, inline markers", mode: "inline", primary: &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}, want: queue.WordTimingServed},
 		// planCompanion never writes over a foreign file: the words did not land.
 		{name: "foreign companion blocks landing", mode: "sidecar", foreign: true, primary: &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}},
+		// served needs the words at EVERY output path, not just the last one.
+		{name: "foreign companion at the first of two paths", mode: "sidecar", foreign: true, mirrorFirst: true, primary: &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}},
 		// The lane said served, but the writer's a2 check refuses the words: not
 		// served, and not absent either (the lane has words), so a recheck decides.
 		{name: "words fail HasQualifyingWords", mode: "sidecar", prior: queue.WordTimingServed, primary: &fakeFetcher{song: unqualified}},
@@ -94,8 +98,21 @@ func TestOrdinaryStamp_Verdicts(t *testing.T) {
 				w.SetFallbackProviders(providers.New(providers.InnerTube, tc.innertube))
 			}
 			foreign := []byte("[00:10.00]<00:10.00>someone else's\n")
+			foreignAt := rig.elrc()
+			if tc.mirrorFirst {
+				lib := filepath.Dir(rig.lrc)
+				mirror := filepath.Join(lib, "mirror")
+				if err := os.Mkdir(mirror, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				foreignAt = filepath.Join(mirror, "track.elrc")
+				paths := fmt.Sprintf(`[{"outdir":%q,"filename":"track.lrc"},{"outdir":%q,"filename":"track.lrc"}]`, mirror, lib)
+				if _, err := rig.db.Exec(`UPDATE work_queue SET output_paths = ? WHERE id = ?`, paths, rig.id); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.foreign {
-				if err := os.WriteFile(rig.elrc(), foreign, 0o644); err != nil {
+				if err := os.WriteFile(foreignAt, foreign, 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -113,7 +130,7 @@ func TestOrdinaryStamp_Verdicts(t *testing.T) {
 				t.Fatalf("row = %+v; an unstamped row must carry no generation or checked_at", row)
 			}
 			if tc.foreign {
-				if got, _ := os.ReadFile(rig.elrc()); string(got) != string(foreign) {
+				if got, _ := os.ReadFile(foreignAt); string(got) != string(foreign) {
 					t.Fatalf("foreign .elrc = %q; want untouched", got)
 				}
 			}
@@ -193,5 +210,41 @@ func TestWordRecheck_Metrics(t *testing.T) {
 		if hits != 0 || lane != wantLane {
 			t.Fatalf("write fails %v: provider_outcomes rows %d, provider_lane %q; want 0 and %q", writeFails, hits, lane, wantLane)
 		}
+	}
+}
+
+// TestOrdinaryStamp_EarlySettlesClearAStaleVerdict: the detector-instrumental
+// and guard-reject settles return before stampWordTiming, so each must drop a
+// prior served/absent itself; neither leaves a verdict about an earlier file.
+func TestOrdinaryStamp_EarlySettlesClearAStaleVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name, prior, outcome string
+		setup                func(*Worker)
+	}{
+		{"detector instrumental", queue.WordTimingServed, "instrumental", func(w *Worker) {
+			w.SetFallbackProviders()
+			w.EnableAudioDetector(&fakeDetector{instrumental: true, version: "9.9.9"})
+			w.SetInstrumentalDetectionDefault(true)
+		}},
+		{"guard reject", queue.WordTimingAbsent, outcomeTypeRejected, func(w *Worker) { w.EnableGuard(rejectAllGuard{reason: "script"}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}
+			if tc.outcome == "instrumental" {
+				primary = &fakeFetcher{err: musixmatch.ErrNotFound}
+			}
+			rig, w := newStampRig(t, primary, nil, "sidecar", tc.prior)
+			tc.setup(w)
+			if err := w.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			var outcome string
+			if err := rig.db.QueryRow(`SELECT COALESCE(outcome_type, '') FROM work_queue WHERE id = ?`, rig.id).Scan(&outcome); err != nil {
+				t.Fatal(err)
+			}
+			if row := rig.recheckRow(t); row.status != "done" || outcome != tc.outcome || row.state != "" || row.generation != 0 || row.hasChecked {
+				t.Fatalf("row = %+v, outcome %q; want done %s with the prior %q cleared", row, outcome, tc.outcome, tc.prior)
+			}
+		})
 	}
 }

@@ -266,15 +266,29 @@ func (w *Worker) ordinaryWordVerdict(item queue.WorkItem, song models.Song) stri
 // Complete, best-effort like its sibling stamps: a lost stamp leaves the row
 // NULL (a recheck candidate), never a wrong verdict, so it must not cost the
 // written result. A completion with no verdict clears a prior one (a retried
-// or reopened row), so no served/absent outlives the file it described.
+// or reopened row); the detector-instrumental and guard-reject settles, which
+// return before this, clear it via clearWordTiming, so no served/absent
+// outlives an ordinary completion that did not re-derive it.
 func (w *Worker) stampWordTiming(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
-	var err error
-	if state := w.ordinaryWordVerdict(item, song); state != "" {
-		err = w.queue.SetWordTimingState(ctxNoCancel, item.ID, state, w.wordGeneration(), time.Time{})
-	} else if item.WordTimingState == queue.WordTimingServed || item.WordTimingState == queue.WordTimingAbsent {
-		err = w.queue.ClearWordTimingState(ctxNoCancel, item.ID)
+	state := w.ordinaryWordVerdict(item, song)
+	if state == "" {
+		w.clearWordTiming(ctxNoCancel, item)
+		return
 	}
-	if err != nil {
+	if err := w.queue.SetWordTimingState(ctxNoCancel, item.ID, state, w.wordGeneration(), time.Time{}); err != nil {
 		slog.Warn("worker: stamp word timing state failed; continuing", "id", item.ID, "error", err)
+	}
+}
+
+// clearWordTiming drops a prior served/absent verdict the dequeued row carried
+// (never 'queued'; ClearWordTimingState's guard), best-effort and before the
+// row settles: a lost clear costs at most one stale verdict, a kept one would
+// outlive the file it described. A row with no verdict issues no statement.
+func (w *Worker) clearWordTiming(ctxNoCancel context.Context, item queue.WorkItem) {
+	if item.WordTimingState != queue.WordTimingServed && item.WordTimingState != queue.WordTimingAbsent {
+		return
+	}
+	if err := w.queue.ClearWordTimingState(ctxNoCancel, item.ID); err != nil {
+		slog.Warn("worker: clear word timing state failed; continuing", "id", item.ID, "error", err)
 	}
 }

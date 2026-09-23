@@ -1570,6 +1570,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// -- it fails and retries, and the guard will reject it again
 			// deterministically, so a retry costs one provider round-trip and
 			// cannot loop forever on a row that would otherwise settle unlabeled.
+			w.clearWordTiming(ctxNoCancel, item)
 			outcome, settleErr := w.queue.SettleGuardRejected(ctxNoCancel, item.ID, reason)
 			if settleErr != nil {
 				return w.fail(ctx, item, fmt.Errorf("worker: settle guard-rejected item %d: %w", item.ID, settleErr))
@@ -2023,6 +2024,7 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// to tell them apart. The detector's own timing lives in completed_at and the
 	// detector telemetry, so nothing is lost by not inventing one here.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
+	w.clearWordTiming(ctxNoCancel, item)
 	// Settle only AFTER the marker write succeeded (a failed WriteLRC above
 	// requeues and returns before here), so a transient write error never leaves a
 	// row tagged instrumental with stale telemetry.
