@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -88,11 +89,10 @@ func (w *Worker) wordGeneration() int64 {
 // The cache is NOT consulted: an entry carries no lane or fetch time, so a
 // cache-served rewrite would strip [source:]/[fetched:] from a settled file
 // and NULL fetched_at. No path calls Defer, RetireMiss or Fail, and none writes
-// lane_attempts: a recheck result would repoint the row's ordinary per-track
-// hit history (#282), e.g. flip a Musixmatch hit to a miss when only its words
-// were missing.
+// lane_attempts or provider_outcomes: a recheck result would repoint the row's
+// ordinary per-track hit history (#282), e.g. flip a Musixmatch hit to a miss
+// when only its words were missing, and would count hits with no matching miss.
 func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track models.Track) error {
-	ctxNoCancel := context.WithoutCancel(ctx)
 	orch := w.wordOrchestrator()
 	if orch == nil {
 		// No lane can ever answer under this configuration, so the provider path
@@ -125,7 +125,6 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 		if serr := w.store(ctx, track, song); serr != nil {
 			return w.deferWordRecheck(ctx, item, serr)
 		}
-		w.recordHit(ctxNoCancel, item.ID, song.WinningLane)
 		return w.writeWordRecheck(ctx, item, track, song)
 	}
 	if song.WordAnswer == models.WordAnswerAbsent {
@@ -158,6 +157,13 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 		}
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)
+	// provider_lane follows the [source:] now on disk, so it moves only after
+	// the write (purgeprovenance compares the two). No provider_outcomes hit:
+	// like lane_attempts, that instrument counts ordinary dispatches, and an
+	// absent recheck has no symmetric miss to record.
+	if err := w.queue.SetProviderLane(ctxNoCancel, item.ID, song.WinningLane); err != nil {
+		slog.Warn("worker: stamp provider lane failed", "id", item.ID, "lane", song.WinningLane, "error", err)
+	}
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
 	w.consecutiveFailures = 0
@@ -218,4 +224,57 @@ func (w *Worker) deferWordRecheck(ctx context.Context, item queue.WorkItem, caus
 		w.consecutiveFailures = 0
 	}
 	return nil
+}
+
+// wordLandingWriter is the part of *lyrics.LRCWriter the ordinary word stamp
+// reads. A writer without it (a test double) stamps nothing.
+type wordLandingWriter interface {
+	WordSyncEnabled() bool
+	WordsLanded(song models.Song, filename, outdir string) bool
+}
+
+// ordinaryWordVerdict is an ORDINARY completion's word verdict (#982 slice 4),
+// or "" for none. Only a synced .lrc served by a word-capable lane, with
+// word_sync_mode not off, carries one, so a txt, instrumental, refused or
+// innertube/cache-served completion leaves the row a recheck candidate:
+//
+//   - served: the words LANDED at every output path (the writer's own
+//     HasQualifyingWords, inline or in an owned companion), never merely
+//     "WordTimings is non-empty" (the 3b C1 class).
+//   - absent: the dispatch's aggregate answer is absent, i.e. every
+//     word-capable lane answered with no words (orchestrator
+//     ungatedWordAnswer). A lane never asked leaves it unknown: "".
+func (w *Worker) ordinaryWordVerdict(item queue.WorkItem, song models.Song) string {
+	lw, ok := w.writer.(wordLandingWriter)
+	if !ok || !lw.WordSyncEnabled() || outcomeTypeFromSong(song) != outcomeTypeSynced || !providers.WordCapable(song.WinningLane) {
+		return ""
+	}
+	landed := true
+	for _, p := range outputPaths(item.Inputs) {
+		landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
+	}
+	if landed {
+		return queue.WordTimingServed
+	}
+	if song.WordAnswer == models.WordAnswerAbsent {
+		return queue.WordTimingAbsent
+	}
+	return ""
+}
+
+// stampWordTiming records an ordinary completion's word verdict before
+// Complete, best-effort like its sibling stamps: a lost stamp leaves the row
+// NULL (a recheck candidate), never a wrong verdict, so it must not cost the
+// written result. A completion with no verdict clears a prior one (a retried
+// or reopened row), so no served/absent outlives the file it described.
+func (w *Worker) stampWordTiming(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
+	var err error
+	if state := w.ordinaryWordVerdict(item, song); state != "" {
+		err = w.queue.SetWordTimingState(ctxNoCancel, item.ID, state, w.wordGeneration(), time.Time{})
+	} else if item.WordTimingState == queue.WordTimingServed || item.WordTimingState == queue.WordTimingAbsent {
+		err = w.queue.ClearWordTimingState(ctxNoCancel, item.ID)
+	}
+	if err != nil {
+		slog.Warn("worker: stamp word timing state failed; continuing", "id", item.ID, "error", err)
+	}
 }

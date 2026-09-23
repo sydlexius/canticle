@@ -106,6 +106,11 @@ type Queue interface {
 	// still 'queued', touching no miss or failure counter; past maxWaits it
 	// un-flips the row to done with no verdict and reports released.
 	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (bool, error)
+	// SetWordTimingState stamps an ordinary completion's word verdict (served or
+	// absent) and generation (#982 slice 4); zero checkedAt means now.
+	SetWordTimingState(ctx context.Context, id int64, state string, generation int64, checkedAt time.Time) error
+	// ClearWordTimingState drops a prior served/absent verdict; 'queued' is kept.
+	ClearWordTimingState(ctx context.Context, id int64) error
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -1639,6 +1644,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// MisSynced result landed as .txt and a categorical one was not written --
 	// so this is the durable record of a decision, not an ignored observation.
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
+	w.stampWordTiming(ctxNoCancel, item, song)
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++

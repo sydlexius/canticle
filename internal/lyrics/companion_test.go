@@ -495,3 +495,53 @@ func TestWriteLRC_FailedCompanionRemovalAbortsBeforeLRC(t *testing.T) {
 		t.Errorf(".lrc was replaced despite the failed companion removal: %q", got)
 	}
 }
+
+// TestWordsLanded (#982 slice 4) reads each mode's landing off the disk the
+// writer just produced: inline needs only qualifying words; a companion must
+// be canticle's own; off, and words a2 refuses, never land.
+func TestWordsLanded(t *testing.T) {
+	refused := a2Song()
+	refused.WordTimings = []models.WordTiming{{Line: 0, Text: "zzz", StartMS: 1500, EndMS: 2000}}
+	cases := []struct {
+		name              string
+		inline, companion bool
+		song              models.Song
+		foreign, badName  bool
+		want              bool
+	}{
+		{"inline", true, false, a2Song(), false, false, true},
+		{"sidecar", false, true, a2Song(), false, false, true},
+		{"sidecar, foreign companion", false, true, a2Song(), true, false, false},
+		{"sidecar, unsafe filename", false, true, a2Song(), false, true, false},
+		{"off", false, false, a2Song(), false, false, false},
+		{"inline, words a2 refuses", true, false, refused, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			w := modeWriter(tc.inline, tc.companion)
+			if tc.foreign {
+				if err := os.WriteFile(filepath.Join(dir, "song.elrc"), []byte("[00:01.00]theirs\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := w.WriteLRC(tc.song, "song.lrc", dir); err != nil {
+				t.Fatalf("WriteLRC: %v", err)
+			}
+			if got := w.WordSyncEnabled(); got != (tc.inline || tc.companion) {
+				t.Fatalf("WordSyncEnabled = %v", got)
+			}
+			name := "song.lrc"
+			if tc.badName {
+				name = "../song.lrc"
+			}
+			if got := w.WordsLanded(tc.song, name, dir); got != tc.want {
+				t.Fatalf("WordsLanded = %v; want %v", got, tc.want)
+			}
+		})
+	}
+	root := t.TempDir()
+	if NewLRCWriter(root).WordsLanded(a2Song(), "song.lrc", filepath.Join(root, "missing")) {
+		t.Fatal("WordsLanded = true for an unresolvable outdir")
+	}
+}

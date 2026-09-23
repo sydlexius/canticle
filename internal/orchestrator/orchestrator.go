@@ -160,6 +160,25 @@ func (o *Orchestrator) wordAnswerFor(answered int) models.WordAnswer {
 	return models.WordAnswerUnknown
 }
 
+// answersWord reports whether a word-capable lane's result answered the word
+// question: a word answer on a result, or a genuine no-match.
+func answersWord(wordCapable bool, song models.Song, err error) bool {
+	return wordCapable && (isWordNoMatch(err) || (err == nil && song.WordAnswer != models.WordAnswerUnknown))
+}
+
+// ungatedWordAnswer applies the aggregate to an UNGATED dispatch's result too
+// (#982 slice 4, which stamps it on ordinary completions): the lane's own
+// served or unknown stands, but its absent is terminal only when every
+// word-capable lane answered. An ordinary dispatch ends at the first suitable
+// lane, so a word lane after it was never asked and has not said "no words".
+// A gated result already carries the aggregate, so this is a no-op there.
+func (o *Orchestrator) ungatedWordAnswer(a models.WordAnswer, answered int) models.WordAnswer {
+	if a != models.WordAnswerAbsent {
+		return a
+	}
+	return o.wordAnswerFor(answered)
+}
+
 // FindLyrics dispatches the lookup using the configured mode. Ordered mode walks
 // lanes in priority order; parallel mode races them with a bounded synced-upgrade
 // window. Both share the same suitability rule and the same resolution precedence
@@ -208,7 +227,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 		song, err := lane.FindLyrics(ctx, track, sourcePath)
 		class := ClassifyOutcome(err)
 		r.noteUntried(err, class, lane.Name(), lane.instrumentalOnly)
-		if lane.WordCapable() && (isWordNoMatch(err) || (err == nil && song.WordAnswer != models.WordAnswerUnknown)) {
+		if answersWord(lane.WordCapable(), song, err) {
 			r.wordAnswered++
 		}
 
@@ -245,6 +264,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 						// terminal only when every word-capable lane answered (#982).
 						song.WordAnswer = o.wordAnswerFor(r.wordAnswered)
 					}
+					song.WordAnswer = o.ungatedWordAnswer(song.WordAnswer, r.wordAnswered)
 					return song, nil
 				}
 				continue
@@ -275,6 +295,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 		// aggregate decides, absent only when every word lane answered (#982).
 		song.WordAnswer = o.wordAnswerFor(r.wordAnswered)
 	}
+	song.WordAnswer = o.ungatedWordAnswer(song.WordAnswer, r.wordAnswered)
 	return song, err
 }
 
