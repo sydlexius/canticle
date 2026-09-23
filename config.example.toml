@@ -683,6 +683,25 @@ on_mis_synced = "demote"
 # Env: MXLRC_TIMING_VALIDATION_ON_CATEGORICAL.
 on_categorical = "quarantine"
 
+[word_sync_recheck]
+# Serve-mode word-timing re-check sweep: keeps queuing newly settled
+# line-synced tracks for a paced re-check for word timings, the unattended
+# counterpart of `canticle scan reconcile-word-sync`. It fetches nothing
+# itself; the worker drains the queued tracks behind fresh work, and each
+# costs at least one provider request at the worker's pace. It runs on the
+# scan interval (6 hours in scan-once mode) and does nothing while
+# output.word_sync_mode is "off". A track whose word lane never answered is
+# held out for a week before the sweep queues it again.
+
+# Master switch. Default false.
+# Env: MXLRC_WORD_SYNC_RECHECK_ENABLED.
+enabled = false
+
+# The most tracks waiting in word-timing re-check at once; each cycle tops the
+# count back up to this. Default 100, range 1-1000.
+# Env: MXLRC_WORD_SYNC_RECHECK_BATCH.
+batch = 100
+
 [guard]
 # Optional language/script guard. It rejects fetched lyrics whose body is
 # dominated by scripts outside the allowlist below, so a wrong-language match

@@ -13,6 +13,17 @@ import (
 
 // Word-timing re-examination states (#982), stored in work_queue.word_timing_state.
 // NULL (WorkItem.WordTimingState == "") means NOT EXAMINED, never "no words".
+//
+// word_timing_checked_at carries TWO meanings depending on the state it sits
+// beside. On a 'served'/'absent' row it is the ordinary "verdict last reached
+// at" timestamp SetWordTimingState/SettleWordRecheck stamp. On a row whose
+// word_timing_state is NULL, it instead means "the sweep's flip last touched
+// this row at" -- a StampChecked flip (#1048) stamps it even though the row
+// has no verdict yet, specifically so a row that comes back unverdicted (the
+// worker's wait-budget un-flip, or a scan reopen) is held out of the candidate
+// set by UnexaminedCheckedBefore rather than re-admitted every cycle. A NULL
+// row with a NULL checked_at was truly never examined; a NULL row WITH a
+// checked_at was examined once and is cooling down.
 const (
 	// WordTimingQueued marks a settled row flipped back by MarkWordRecheckQueued.
 	WordTimingQueued = "queued"
@@ -44,6 +55,23 @@ type WordRecheckOptions struct {
 	// library outside them (the candidate predicate; the queued count only
 	// requires a link).
 	LibraryIDs []int64
+	// UnexaminedCheckedBefore, when non-zero, admits an unverdicted (NULL
+	// state) row only if its word_timing_checked_at is NULL or strictly
+	// earlier. A NULL row carries a checked_at only when a StampChecked flip
+	// admitted it and it came back without a verdict (the wait-budget un-flip,
+	// or a scan reopen): the serve sweep's re-admission cooldown (#1048).
+	UnexaminedCheckedBefore time.Time
+	// StampChecked (flip only) also sets word_timing_checked_at to the flip
+	// time, so a row that returns unverdicted is held by UnexaminedCheckedBefore
+	// rather than re-admitted on the next cycle. Off for the CLI, whose backup
+	// record does not carry the column -- which means a CLI-queued row that
+	// comes back unverdicted carries no checked_at, so it is NOT held by the
+	// cooldown: the sweep (which does set StampChecked) can re-admit it once on
+	// its own next cycle, at which point ITS flip finally stamps checked_at and
+	// the cooldown takes over as usual from there. One bounded, one-time
+	// re-admission per such row, not the unbounded per-cycle churn the cooldown
+	// exists to prevent.
+	StampChecked bool
 	// Limit caps ListWordRecheckCandidates when > 0; the count ignores it.
 	Limit int
 	// BeforeCommit (flip only, optional) runs inside the flip transaction just
@@ -61,14 +89,20 @@ type WordRecheckOptions struct {
 // because the sidecar is derived from it.
 func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	var b strings.Builder
+	var args []any
 	b.WriteString(` status = 'done'
    AND outcome_type = 'synced'
    AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
    AND TRIM(COALESCE(source_path, '')) <> ''
-   AND (word_timing_state IS NULL
+   AND ((word_timing_state IS NULL`)
+	if !opts.UnexaminedCheckedBefore.IsZero() {
+		b.WriteString(` AND COALESCE(word_timing_checked_at, '') < ?`)
+		args = append(args, formatTime(opts.UnexaminedCheckedBefore))
+	}
+	b.WriteString(`)
         OR (word_timing_state = 'absent'
             AND (word_timing_generation IS NULL OR word_timing_generation <> ?))`)
-	args := []any{opts.Generation}
+	args = append(args, opts.Generation)
 	if !opts.RecheckAbsentBefore.IsZero() {
 		b.WriteString(`
         OR (word_timing_state = 'absent' AND COALESCE(word_timing_checked_at, '') < ?)`)
@@ -127,12 +161,42 @@ func (q *DBQueue) CountWordRecheckCandidates(ctx context.Context, opts WordReche
 // CountWordRecheckQueued counts rows already flipped and waiting for the worker
 // (word_timing_state='queued', any status), limited to libraryIDs when set. The
 // reconcile-word-sync CLI reports it beside the candidate count, since those
-// rows are ahead of anything a new run adds. Read-only.
+// rows are ahead of anything a new run adds. This is the "already queued"
+// figure operators see; it deliberately includes a row prune.retireUnresolvable
+// retired (status='done', word_timing_state left 'queued' so the candidate
+// predicate never re-flips it, per #1039) because that row genuinely is queued
+// from a CLI operator's point of view -- it simply will never drain on its own.
+// A caller that needs to know how many SLOTS a cap should count against wants
+// CountWordRecheckInFlight instead. Read-only.
 func (q *DBQueue) CountWordRecheckQueued(ctx context.Context, libraryIDs []int64) (int, error) {
 	lib, args := wordRecheckLibraryClause(libraryIDs)
 	var n int
 	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE word_timing_state = 'queued'`+lib, args...).Scan(&n); err != nil { //nolint:gosec // reason: G202 -- lib is a package-constant fragment with bound parameters only
 		return 0, fmt.Errorf("queue: count word recheck queued: %w", err)
+	}
+	return n, nil
+}
+
+// CountWordRecheckInFlight counts DRAINABLE recheck rows: word_timing_state =
+// 'queued' AND status <> 'done'. This excludes a row prune.retireUnresolvable
+// retired for a vanished source file: retirement deliberately sets status =
+// 'done' while leaving word_timing_state = 'queued' (#1039, so the candidate
+// predicate -- which requires word_timing_state IS NULL or 'absent' -- never
+// re-flips a row it already knows is gone), which means that row can never be
+// dequeued, settled, or deferred again. Counting it toward a cap holds the
+// cap's slot forever and the sweep's admissions silently drift toward zero
+// over the life of a library with any churn. The sweep is this function's only
+// caller; CountWordRecheckQueued (any status) keeps its existing meaning for
+// the reconcile-word-sync CLI's "already queued" report. A row stranded
+// 'processing' + 'queued' by a crash (pre-existing gap, plan section 8 M5)
+// still counts here and still occupies a slot until something reclaims it --
+// this fix narrows the leak to that pre-existing, separately-tracked case
+// rather than closing every way a slot can go stale.
+func (q *DBQueue) CountWordRecheckInFlight(ctx context.Context, libraryIDs []int64) (int, error) {
+	lib, args := wordRecheckLibraryClause(libraryIDs)
+	var n int
+	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE word_timing_state = 'queued' AND status <> 'done'`+lib, args...).Scan(&n); err != nil { //nolint:gosec // reason: G202 -- lib is a package-constant fragment with bound parameters only
+		return 0, fmt.Errorf("queue: count word recheck in flight: %w", err)
 	}
 	return n, nil
 }
@@ -247,7 +311,13 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, op
 	}
 	now := formatTime(q.now())
 	pred, predArgs := wordRecheckPredicate(opts)
-	flipSQL := `UPDATE work_queue SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0, last_error = '', refused_waits = 0, word_timing_state = ?` + //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
+	setArgs := []any{PriorityMiss, now, WordTimingQueued}
+	stamp := ``
+	if opts.StampChecked {
+		stamp = `, word_timing_checked_at = ?`
+		setArgs = append(setArgs, now)
+	}
+	flipSQL := `UPDATE work_queue SET status = 'deferred', priority = ?, next_attempt_at = ?, attempts = 0, last_error = '', refused_waits = 0, word_timing_state = ?` + stamp + //nolint:gosec // reason: G202 -- pred and stamp are package-constant fragments with bound parameters only
 		` WHERE id = ? AND` + pred
 	for _, id := range ids {
 		var (
@@ -277,8 +347,8 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, op
 				return nil, db.NotRetryable(fmt.Errorf("queue: report word recheck prior for id %d: %w", id, err))
 			}
 		}
-		res, err := tx.ExecContext(ctx, flipSQL,
-			append([]any{PriorityMiss, now, WordTimingQueued, id}, predArgs...)...)
+		flipArgs := append(append(append([]any(nil), setArgs...), id), predArgs...)
+		res, err := tx.ExecContext(ctx, flipSQL, flipArgs...)
 		if err != nil {
 			return nil, escape(fmt.Errorf("queue: flip word recheck id %d: %w", id, err))
 		}

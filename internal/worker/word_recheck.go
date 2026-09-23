@@ -62,6 +62,12 @@ func (w *Worker) wordOrchestrator() *orchestrator.Orchestrator {
 	return orch
 }
 
+// WordGeneration exposes the generation this worker stamps, so the serve-mode
+// recheck sweep (#1048) selects stale 'absent' verdicts against the lanes serve
+// actually built rather than re-deriving them from config. Read it after the
+// lane setters and before the worker loop starts: w.lanes is not synchronized.
+func (w *Worker) WordGeneration() int64 { return w.wordGeneration() }
+
 // wordGeneration is the word-capability generation of the configured lanes,
 // stamped with every recheck verdict.
 func (w *Worker) wordGeneration() int64 {
