@@ -213,7 +213,9 @@ func (q *DBQueue) SetProvidersVersion(v int) {
 // item with the same normalized artist/title key. When the item carries a
 // scan_result_id, the link is also recorded in work_queue_scan_results so a
 // later Complete writeback can flip every collapsed scan_results row, not just
-// the first one observed.
+// the first one observed. The link is recorded for every caller that carries
+// a scan_result_id (an inventory-matched webhook included); only inputs.FromScan
+// decides whether a word-recheck row is reopened.
 //
 // Priority update semantics on conflict:
 //   - A webhook-priority (>= PriorityWebhook) enqueue always overrides the
@@ -245,12 +247,14 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 
 	// A SCAN collision with a word-recheck row (#982, 'deferred'+'queued')
 	// reopens it for an ordinary fetch first (#1039), so the upsert below treats
-	// it as the fresh 'pending' row it now is. Only the scan enqueuer sets
-	// ScanResultID, and only for a scan_result it just reserved from 'pending'
-	// (sidecar gone, --update, a new copy): the file wants fetching. A webhook
-	// (no ScanResultID) says only "this file changed", so it mirrors a 'done'
-	// row and keeps recheck mode and its paths, and the settled .lrc stays safe.
-	if inputs.ScanResultID > 0 {
+	// it as the fresh 'pending' row it now is. Origin is the explicit
+	// inputs.FromScan, set only by the scan enqueuer for a scan_result it just
+	// reserved from 'pending' (sidecar gone, --update, a new copy): the file
+	// wants fetching. ScanResultID is NOT an origin signal: an inventory-matched
+	// webhook carries one too (scan.ResultInputs). A webhook, or any unmarked
+	// caller, says only "this file changed", so it mirrors a 'done' row and keeps
+	// recheck mode and its paths, and the settled .lrc stays safe.
+	if inputs.FromScan {
 		if err := reopenWordRecheckForScan(ctx, tx, inputs, q.now()); err != nil {
 			return WorkItem{}, err
 		}
@@ -3529,8 +3533,9 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
 // source), so a database holds that shape.
 const ClearWordRecheckQueued = `word_timing_state = CASE WHEN word_timing_state = 'queued' THEN NULL ELSE word_timing_state END`
 
-// reopenWordRecheckForScan reopens the word-recheck row a scan enqueue collides
-// with through ReopenDoneRowTx, so it carries no stale settle columns into the
+// reopenWordRecheckForScan reopens the word-recheck row a scan-origin enqueue
+// (inputs.FromScan, never merely a ScanResultID) collides with through
+// ReopenDoneRowTx, so it carries no stale settle columns into the
 // fetch (an outcome_type/lane left on a 'deferred' row makes it an
 // instrumental-backfill candidate). No colliding recheck row is a no-op.
 func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {

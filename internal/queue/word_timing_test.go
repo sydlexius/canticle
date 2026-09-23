@@ -411,7 +411,7 @@ func scanInputs(t *testing.T, dbh *sql.DB) models.Inputs {
 		t.Fatalf("seed scan_result: %v", err)
 	}
 	return models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "t"}, SourcePath: "/m/x.flac",
-		Outdir: "/m", Filename: "x.lrc", ScanResultID: srID}
+		Outdir: "/m", Filename: "x.lrc", ScanResultID: srID, FromScan: true}
 }
 
 // TestWebhookCollisionKeepsWordRecheckRow (#1039 review I1): a Lidarr webhook
