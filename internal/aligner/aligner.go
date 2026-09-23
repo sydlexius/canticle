@@ -1,5 +1,6 @@
 // Package aligner is a Go client for the forced-alignment sidecar in issue
-// #1005 (Demucs vocal separation + WhisperX alignment, deploy/aligner/). It
+// #1005 (Demucs vocal separation + a faster-whisper transcript plus a direct
+// wav2vec2 forced alignment, deploy/aligner/, #1016). It
 // forced-aligns caller-supplied lyric lines to an audio file and returns
 // per-word timestamps plus the sidecar's own transcript, for a caller to
 // gate acceptance with verification.Similarity.

@@ -538,7 +538,7 @@ jobs:
     # deliberately NOT a required branch-protection check (maintainer
     # decision on #1030); if it is ever made required, a paths filter must
     # still never skip it, or it would report as missing (issue #1027). app.py never imports the
-    # ML stack (torch/demucs/whisperx) at module scope and the model layer is
+    # ML stack (torch/demucs/faster-whisper/transformers) at module scope and the model layer is
     # stubbed in tests, so the suite runs on the bare runner via
     # actions/setup-python -- no Docker image needed. ubuntu-latest (24.04)
     # ships no ffmpeg, though, and the decode security tests need a real

@@ -10,16 +10,17 @@ aligning the caller's own lines to the separated vocal stem; `transcript` is
 an independent ASR pass over that stem, a content-gate input only.
 
 Pipeline: Demucs isolates the vocal stem, then the supplied lines are
-forced-aligned against it as ONE CTC sequence (WhisperX's wav2vec2 alignment
-model, not the Whisper decoder) while a Whisper ASR pass over the same stem
-produces the transcript. The model implementations live in
-`_aligner_models.py`; this module holds the pure core, the ffmpeg decode, and
-the HTTP layer.
+forced-aligned against it as ONE CTC sequence (a wav2vec2 alignment model
+loaded directly via torchaudio/transformers, not the Whisper decoder) while a
+faster-whisper ASR pass over the same stem produces the transcript. The model
+implementations live in `_aligner_models.py`; this module holds the pure
+core, the ffmpeg decode, and the HTTP layer.
 
-Heavy ML imports (torch, torchaudio, demucs, whisperx) are NEVER imported at
-module scope -- only inside functions `lifespan()` calls at real startup, so
-test_app.py can import this module and drive the full HTTP contract with the
-model layer stubbed, with none of those packages installed.
+Heavy ML imports (torch, torchaudio, demucs, faster_whisper, transformers)
+are NEVER imported at module scope -- only inside functions `lifespan()`
+calls at real startup, so test_app.py can import this module and drive the
+full HTTP contract with the model layer stubbed, with none of those packages
+installed.
 
 No lyric text is ever logged: only counts, byte lengths, and line indices.
 """
@@ -112,13 +113,23 @@ ALIGN_LANGUAGE = (os.environ.get("ALIGNER_ALIGN_LANGUAGE", "").strip() or DEFAUL
 DEVICE_ENV = os.environ.get("ALIGNER_DEVICE", "").strip().lower() or DEFAULT_DEVICE
 LOG_LEVEL = os.environ.get("ALIGNER_LOG_LEVEL", "").strip().upper() or "INFO"
 
-# Languages whisperx has a DEFAULT align model for, and that model's name.
-# Source: whisperx 3.4.3, whisperx/alignment.py
-# DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF.
-# A static copy so request validation works without whisperx installed (the
-# test venv); lifespan() replaces it with whisperx's own tables at real boot
-# when whisperx is importable, so a whisperx bump cannot silently drift from
-# what is validated.
+# Languages this sidecar has a DEFAULT align model for, and that model's name:
+# a name in torchaudio.pipelines.__all__ (the 5 torch-type languages) is
+# loaded via torchaudio; anything else is a Hugging Face repo id loaded via
+# transformers. See _aligner_models.FasterWhisperAligner._load_align_model.
+#
+# THE SOLE SOURCE OF TRUTH (#1016): this used to be a static copy that
+# lifespan() overwrote at real boot with whisperx's own
+# DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF tables. Now that
+# whisperx is gone there is nothing to sync from, so this table is what both
+# request validation AND the real model load consult -- a language added here
+# must have a real torchaudio bundle or HF repo id, checked by the
+# Dockerfile's build-time smoke check, which imports this module and every
+# entry's torchaudio.pipelines.__all__ membership (the SAME check
+# _aligner_models.FasterWhisperAligner._load_align_model makes at request
+# time) rather than loading any model weights.
+# Original source (informational only, nothing copied): whisperx 3.4.3,
+# whisperx/alignment.py DEFAULT_ALIGN_MODELS_TORCH | DEFAULT_ALIGN_MODELS_HF.
 ALIGN_MODELS = {
     "en": "WAV2VEC2_ASR_BASE_960H",
     "fr": "VOXPOPULI_ASR_BASE_10K_FR",
@@ -162,6 +173,18 @@ ALIGN_MODELS = {
 }
 
 
+def is_torchaudio_align_model(name: str, torchaudio_module) -> bool:
+    """True if `name` is one of torchaudio's own bundled align-model names.
+
+    The ONE membership test shared by the real request-time model load
+    (_aligner_models.FasterWhisperAligner._load_align_model) and the
+    Dockerfile's build-time smoke check, so the two cannot drift: a name in
+    `torchaudio_module.pipelines.__all__` loads via torchaudio, everything
+    else is assumed to be a Hugging Face repo id.
+    """
+    return name in torchaudio_module.pipelines.__all__
+
+
 def validate_config(align_models: dict) -> None:
     """Fails startup loudly on a default language with no align model.
 
@@ -170,7 +193,7 @@ def validate_config(align_models: dict) -> None:
     """
     if ALIGN_LANGUAGE not in align_models:
         raise RuntimeError(
-            f"ALIGNER_ALIGN_LANGUAGE={ALIGN_LANGUAGE!r} has no default whisperx align model; "
+            f"ALIGNER_ALIGN_LANGUAGE={ALIGN_LANGUAGE!r} has no default align model; "
             f"supported: {', '.join(sorted(align_models))}"
         )
 
@@ -308,11 +331,27 @@ def _parse_lines(lyrics: str) -> list[str]:
 
 
 class _BadAudioError(Exception):
-    """Raised by a Separator/Aligner when the upload cannot be decoded/used.
+    """Raised when the CALLER's upload cannot be decoded/used.
 
     The ONLY exception type the pipeline treats as the caller's fault (400).
     Anything else raised by the model layer is a genuine pipeline failure and
-    is left to propagate as a 500.
+    is left to propagate as a 500. Reserved for the original upload; a
+    rejection decoding audio this sidecar generated itself (the separated
+    vocal stem) is _InternalAudioError instead -- see decode_pcm's
+    `reject_error`.
+    """
+
+
+class _InternalAudioError(Exception):
+    """Raised when THIS SIDECAR's own generated audio cannot be decoded.
+
+    Covers a decode rejection on the separated vocal stem (Demucs' own
+    output), inside FasterWhisperAligner.transcribe/align: that file was
+    never the caller's upload, so a decode failure there is a pipeline bug or
+    a broken environment, not the caller's fault, and must propagate as a
+    500 like any other unclassified exception -- never read as the
+    documented 400 "cannot read audio", which would misclassify a server
+    fault as a benign miss the Go client's circuit breaker never counts.
     """
 
 
@@ -323,16 +362,22 @@ class _AudioTooLongError(Exception):
 FFMPEG = "ffmpeg"
 
 
-def decode_pcm(audio_path: str, sample_rate: int, channels: int) -> bytes:
+def decode_pcm(
+    audio_path: str, sample_rate: int, channels: int, *, reject_error: type[Exception] = _BadAudioError
+) -> bytes:
     """Decodes any ffmpeg-readable file to interleaved float32 PCM bytes.
 
     Classification is the point (the Go client treats 4xx as a benign miss
     that never trips its breaker, so a server fault must NOT read as 400):
-    only ffmpeg REJECTING the input (exit code > 0, or no samples) is the
-    caller's fault -> _BadAudioError. A missing/unrunnable ffmpeg (OSError),
-    ffmpeg killed by a signal (exit code < 0, e.g. OOM), or a decode that
-    outlives DECODE_TIMEOUT_SECONDS (subprocess.TimeoutExpired) is an
-    environment fault and propagates as a 500.
+    only ffmpeg REJECTING the input (exit code > 0, or no samples) is
+    caller-classified, raising `reject_error` (default _BadAudioError, for
+    the caller's own upload; callers decoding audio this sidecar generated
+    itself pass `reject_error=_InternalAudioError` so the same ffmpeg
+    rejection reads as a server fault instead). A missing/unrunnable ffmpeg
+    (OSError), ffmpeg killed by a signal (exit code < 0, e.g. OOM), or a
+    decode that outlives DECODE_TIMEOUT_SECONDS (subprocess.TimeoutExpired)
+    is always an environment fault and propagates as a 500, regardless of
+    `reject_error`.
 
     The file reaches ffmpeg as its stdin (`fd:`), never by name, and
     `-protocol_whitelist fd` forbids every other protocol: format detection
@@ -362,7 +407,7 @@ def decode_pcm(audio_path: str, sample_rate: int, channels: int) -> bytes:
     if proc.returncode < 0:
         raise RuntimeError(f"ffmpeg killed by signal {-proc.returncode}")
     if proc.returncode > 0 or not proc.stdout:
-        raise _BadAudioError("cannot decode audio")
+        raise reject_error("cannot decode audio")
     if len(proc.stdout) > MAX_AUDIO_SECONDS * sample_rate * channels * 4:
         raise _AudioTooLongError(f"audio longer than {MAX_AUDIO_SECONDS}s")
     return proc.stdout
@@ -403,10 +448,10 @@ def _build_separator(_device: str) -> Separator:
 
 
 def _build_aligner(_device: str) -> Aligner:
-    """Constructs the real WhisperX-backed aligner; imports whisperx lazily (see above)."""
-    from _aligner_models import WhisperXAligner  # noqa: PLC0415 - deliberate lazy import
+    """Constructs the real faster-whisper/wav2vec2-backed aligner; imports lazily (see above)."""
+    from _aligner_models import FasterWhisperAligner  # noqa: PLC0415 - deliberate lazy import
 
-    return WhisperXAligner(whisper_model=WHISPER_MODEL, device=_device)
+    return FasterWhisperAligner(whisper_model=WHISPER_MODEL, device=_device)
 
 
 _state: dict = {}
@@ -440,16 +485,9 @@ def _configure_logging() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global ALIGN_MODELS  # noqa: PLW0603 - replaced once at boot with whisperx's own tables
     import torch  # noqa: PLC0415 - only the real server boot needs torch present
 
     _configure_logging()
-    try:
-        from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH  # noqa: PLC0415
-    except ImportError:
-        logger.warning("aligner: whisperx not importable at boot, validating languages against the static table")
-    else:
-        ALIGN_MODELS = {**DEFAULT_ALIGN_MODELS_TORCH, **DEFAULT_ALIGN_MODELS_HF}
     validate_config(ALIGN_MODELS)
     device = select_device(DEVICE_ENV, torch.cuda.is_available(), torch.backends.mps.is_available())
     _state["device"] = device
