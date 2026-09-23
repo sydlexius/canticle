@@ -334,6 +334,9 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			return enqueued, cacheHits, fmt.Errorf("scan: build inputs for result %d: %w", res.ID, err)
 		}
 		inputs.DetectInstrumental = &detect
+		// Only this path marks scan origin: ResultInputs (the webhook's
+		// inventory path) also sets ScanResultID but must keep recheck mode.
+		inputs.FromScan = true
 		if _, err := e.Queue.Enqueue(ctx, inputs, e.Priority); err != nil {
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
 				return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)

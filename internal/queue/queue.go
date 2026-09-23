@@ -213,7 +213,9 @@ func (q *DBQueue) SetProvidersVersion(v int) {
 // item with the same normalized artist/title key. When the item carries a
 // scan_result_id, the link is also recorded in work_queue_scan_results so a
 // later Complete writeback can flip every collapsed scan_results row, not just
-// the first one observed.
+// the first one observed. The link is recorded for every caller that carries
+// a scan_result_id (an inventory-matched webhook included); only inputs.FromScan
+// decides whether a word-recheck row is reopened.
 //
 // Priority update semantics on conflict:
 //   - A webhook-priority (>= PriorityWebhook) enqueue always overrides the
@@ -242,6 +244,21 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		return WorkItem{}, fmt.Errorf("queue: begin enqueue tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// A SCAN collision with a word-recheck row (#982, 'deferred'+'queued')
+	// reopens it for an ordinary fetch first (#1039), so the upsert below treats
+	// it as the fresh 'pending' row it now is. Origin is the explicit
+	// inputs.FromScan, set only by the scan enqueuer for a scan_result it just
+	// reserved from 'pending' (sidecar gone, --update, a new copy): the file
+	// wants fetching. ScanResultID is NOT an origin signal: an inventory-matched
+	// webhook carries one too (scan.ResultInputs). A webhook, or any unmarked
+	// caller, says only "this file changed", so it mirrors a 'done' row and keeps
+	// recheck mode and its paths, and the settled .lrc stays safe.
+	if inputs.FromScan {
+		if err := reopenWordRecheckForScan(ctx, tx, inputs, q.now()); err != nil {
+			return WorkItem{}, err
+		}
+	}
 
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
@@ -1608,7 +1625,8 @@ func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, 
              next_attempt_at = ?,
              last_error = '',
              completed_at = NULL,
-             refused_waits = 0
+             refused_waits = 0,
+             ` + ClearWordRecheckQueued + `
          WHERE status = 'unavailable' AND last_error = ?`
 	updateArgs := append([]any{now, missLimitReachedError}, libArgs...)
 	res, err := tx.ExecContext(ctx,
@@ -1742,7 +1760,8 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
          SET status = 'pending',
              attempts = 0,
              next_attempt_at = ?,
-             last_error = ''
+             last_error = '',
+             `+ClearWordRecheckQueued+`
          WHERE id = ?
            AND status = 'failed'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
@@ -2967,7 +2986,8 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
              detector_version = NULL,
              last_error = '',
              refused_waits = 0,
-             next_attempt_at = ?
+             next_attempt_at = ?,
+             `+ClearWordRecheckQueued+`
          WHERE id = ? AND instrumental_result = 1 AND status = 'done'`,
 		now, id,
 	)
@@ -3477,7 +3497,8 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
              priority = ?,
              next_attempt_at = ?,
              refused_waits = 0,
-             last_error = 'instrumental verdict reversed by a tightened vocal gate'
+             last_error = 'instrumental verdict reversed by a tightened vocal gate',
+             `+ClearWordRecheckQueued+`
          WHERE id = ?
            AND status = 'done'
            AND instrumental_result = 1
@@ -3492,6 +3513,47 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
 		return false, fmt.Errorf("queue: unsettle instrumental rows affected: %w", err)
 	}
 	return n > 0, nil
+}
+
+// ClearWordRecheckQueued is the ONE SET-clause fragment every reopen path uses
+// to take a row out of word-recheck mode (#1039). A 'queued' row (#982) takes
+// the worker's recheck path, which writes only a word-carrying result and
+// settles linked scan_results to 'done' either way, so a row reopened for an
+// ordinary fetch that kept 'queued' would be settled with nothing fetched.
+// Only 'queued' changes: a served/absent verdict does not change which worker
+// path runs, and the ordinary completion re-derives or clears it
+// (worker.stampWordTiming). Generation and checked_at are left as they are,
+// matching DeferWordRecheck's un-flip.
+//
+// Paths guarded on a status a recheck row never holds (Retry: 'failed';
+// RecheckRetired: 'unavailable'; ResetInstrumental/UnsettleInstrumental:
+// 'done') carry it too: the recheck path never calls Fail or RetireMiss today,
+// but that is a worker-side invariant, and prune's retire deliberately writes
+// 'done' over a 'queued' row (so the candidate predicate keeps excluding a gone
+// source), so a database holds that shape.
+const ClearWordRecheckQueued = `word_timing_state = CASE WHEN word_timing_state = 'queued' THEN NULL ELSE word_timing_state END`
+
+// reopenWordRecheckForScan reopens the word-recheck row a scan-origin enqueue
+// (inputs.FromScan, never merely a ScanResultID) collides with through
+// ReopenDoneRowTx, so it carries no stale settle columns into the
+// fetch (an outcome_type/lane left on a 'deferred' row makes it an
+// instrumental-backfill candidate). No colliding recheck row is a no-op.
+func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
+	var id int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT id FROM work_queue WHERE artist_key = ? AND title_key = ?
+           AND status = 'deferred' AND word_timing_state = 'queued'`,
+		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName)).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("queue: find word-recheck row for scan enqueue: %w", err)
+	}
+	if _, err := ReopenDoneRowTx(ctx, tx, id, now); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ReopenDoneRowTx reopens a 'done' work_queue row to 'pending' inside a
@@ -3537,10 +3599,20 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
 // can still carry a spent budget. The REOPEN side is therefore what guarantees
 // a fresh one, and every reopen path clears it: this helper, RecheckRetired,
 // ResetInstrumental and UnsettleInstrumental.
+//
+// A word-recheck row (#982: 'deferred' with word_timing_state = 'queued') is a
+// settled 'done' row parked for the worker, so it is reopened too, and leaves
+// recheck mode (ClearWordRecheckQueued, #1039). Kept in recheck mode, a row
+// whose identity was just corrected would never be re-fetched under it: a
+// recheck that finds no words settles it back to 'done' with the wrong-identity
+// .lrc still in place. Its priority goes back to PriorityScan: the flip's
+// PriorityMiss marks a parked recheck, not a miss, and would park the refetch
+// behind all fresh work.
 func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue
          SET status = 'pending',
+             priority = CASE WHEN status = 'deferred' THEN ? ELSE priority END,
              attempts = 0,
              next_attempt_at = ?,
              last_error = '',
@@ -3552,9 +3624,10 @@ func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (
              overrun_magnitude = NULL,
              overrun_ratio = NULL,
              evaluated_at = NULL,
-             refused_waits = 0
-         WHERE id = ? AND status = 'done'`,
-		formatTime(now), id,
+             refused_waits = 0,
+             `+ClearWordRecheckQueued+`
+         WHERE id = ? AND (status = 'done' OR (status = 'deferred' AND word_timing_state = 'queued'))`,
+		PriorityScan, formatTime(now), id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: reopen done row %d: %w", id, err)

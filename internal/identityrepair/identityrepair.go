@@ -458,7 +458,9 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, ch Change, titleKey string,
 		// already exhausted its miss budget, and queue.RecheckRetired is the
 		// designed revival path (see mergeQueueRows' doc comment for the same
 		// reasoning on the merge side).
-		if oldStatus == queue.StatusDone {
+		// A word-recheck row (#982, 'deferred'+'queued') is a settled row too, so
+		// the helper reopens it and clears 'queued' (#1039); its guard decides.
+		if oldStatus == queue.StatusDone || oldStatus == queue.StatusDeferred {
 			if _, err := queue.ReopenDoneRowTx(ctx, tx, oldID, time.Now().UTC()); err != nil {
 				return applyOutcome{}, fmt.Errorf("identityrepair: reopen re-keyed work_queue %d: %w", oldID, err)
 			}
@@ -534,7 +536,10 @@ func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID, keepID int64, keepS
 		`UPDATE work_queue SET output_paths = ? WHERE id = ?`, merged, keepID); err != nil {
 		return fmt.Errorf("identityrepair: union output_paths into work_queue %d: %w", keepID, err)
 	}
-	if keepStatus == queue.StatusDone {
+	// A 'deferred' survivor is reopened only when it is a word-recheck row
+	// (#1039, the helper's guard): the recheck writes only a word result, so the
+	// unioned paths would otherwise never be written.
+	if keepStatus == queue.StatusDone || keepStatus == queue.StatusDeferred {
 		if _, err := queue.ReopenDoneRowTx(ctx, tx, keepID, time.Now().UTC()); err != nil {
 			return fmt.Errorf("identityrepair: reopen merged work_queue %d: %w", keepID, err)
 		}

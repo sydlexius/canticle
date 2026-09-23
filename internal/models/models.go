@@ -327,8 +327,16 @@ type Inputs struct {
 	SourcePath  string
 	OutputPaths []OutputPath
 	// ScanResultID links this work item back to its originating scan_results row.
-	// Zero means the item did not originate from a library scan (e.g. ad-hoc fetch).
+	// Zero means no scan_results row is linked (e.g. ad-hoc fetch). It says
+	// nothing about WHO enqueued: an inventory-matched webhook links one too.
 	ScanResultID int64
+	// FromScan marks an enqueue made by the scan enqueuer for a scan_result it
+	// just reserved from 'pending' (the file wants fetching), as opposed to a
+	// webhook or any other caller. Set ONLY by scan.Enqueuer.EnqueuePending,
+	// never by the shared scan.ResultInputs helper the webhook reuses. The zero
+	// value is the safe side: an unmarked enqueue never reopens a word-recheck
+	// row (#1039). Enqueue-time only; never persisted or serialized.
+	FromScan bool `json:"-"`
 	// DetectInstrumental carries the per-item instrumental-detection decision
 	// resolved at enqueue time (CLI > per-library > global). It is stamped onto the
 	// work_queue row on initial insert. nil means "no decision" -> the worker falls

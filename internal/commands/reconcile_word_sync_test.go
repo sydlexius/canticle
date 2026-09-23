@@ -74,12 +74,34 @@ func setupWordSync(t *testing.T, extra string) (ctx context.Context, cfgPath str
 // dumpTable renders every row of table, every column, as one string.
 func dumpTable(t *testing.T, dbh *sql.DB, table string) string {
 	t.Helper()
+	return dumpTableExcept(t, dbh, table)
+}
+
+// dumpTableExcept renders every row of table as one string, omitting the
+// named columns. Used to drop updated_at from the backup round-trip
+// comparison: a trigger rewrites it to the current instant on every UPDATE,
+// the backup record never captures it (it is bookkeeping, not restorable
+// state), so comparing it makes the round-trip flake on a wall-clock second
+// boundary between seeding and the flip. Every other column, including the
+// ones the backup DOES own, is still compared in full.
+func dumpTableExcept(t *testing.T, dbh *sql.DB, table string, exclude ...string) string {
+	t.Helper()
+	skip := make(map[string]bool, len(exclude))
+	for _, c := range exclude {
+		skip[c] = true
+	}
 	rows, err := dbh.Query("SELECT * FROM " + table + " ORDER BY rowid") //nolint:gosec // reason: G202 -- table is a test literal
 	if err != nil {
 		t.Fatalf("dump %s: %v", table, err)
 	}
 	defer rows.Close() //nolint:errcheck // reason: test cleanup
 	cols, _ := rows.Columns()
+	keep := make([]int, 0, len(cols))
+	for i, c := range cols {
+		if !skip[c] {
+			keep = append(keep, i)
+		}
+	}
 	var b strings.Builder
 	for rows.Next() {
 		vals := make([]any, len(cols))
@@ -90,7 +112,11 @@ func dumpTable(t *testing.T, dbh *sql.DB, table string) string {
 		if err := rows.Scan(ptrs...); err != nil {
 			t.Fatalf("scan %s: %v", table, err)
 		}
-		fmt.Fprintf(&b, "%v\n", vals)
+		kept := make([]any, len(keep))
+		for j, i := range keep {
+			kept[j] = vals[i]
+		}
+		fmt.Fprintf(&b, "%v\n", kept)
 	}
 	return b.String()
 }
@@ -173,7 +199,7 @@ func TestReconcileWordSync_ApplyBackupRoundTrip(t *testing.T) {
 		next_attempt_at = '2025-12-0' || id || 'T00:00:00Z', word_timing_state = 'absent', word_timing_generation = 7`); err != nil {
 		t.Fatalf("seed prior state: %v", err)
 	}
-	before := dumpTable(t, dbh, "work_queue")
+	before := dumpTableExcept(t, dbh, "work_queue", "updated_at")
 	backup := filepath.Join(t.TempDir(), "b.jsonl")
 	code, out := runWS(t, ctx, ScanReconcileWordSyncCmd{ConfigPath: cfgPath, Yes: true, Limit: 3, Backup: backup})
 	if code != 0 {
@@ -217,7 +243,7 @@ func TestReconcileWordSync_ApplyBackupRoundTrip(t *testing.T) {
 	if n != 3 {
 		t.Errorf("backup records = %d; want 3", n)
 	}
-	if after := dumpTable(t, dbh, "work_queue"); after != before {
+	if after := dumpTableExcept(t, dbh, "work_queue", "updated_at"); after != before {
 		t.Errorf("restore did not round-trip:\nbefore %s\nafter  %s", before, after)
 	}
 }
