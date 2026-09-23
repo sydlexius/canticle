@@ -22,6 +22,16 @@ func writeWSRConfig(t *testing.T, body string) string {
 // the sweep is off and the in-flight cap is 100.
 func TestLoad_WordSyncRecheckDefaults(t *testing.T) {
 	isolateEnv(t)
+	// isolateEnv clears XDG_CONFIG_HOME to "" (unset), which makes
+	// xdgConfigPath fall back to os.UserHomeDir() -- the real, unsandboxed
+	// home directory. Load("") then resolves to the real
+	// ~/.config/mxlrcgo-svc/config.toml, so a developer or CI box with a live
+	// config there (any [word_sync_recheck] section, or any [db] path)
+	// silently overrides these "defaults" assertions instead of testing them.
+	// Point XDG_CONFIG_HOME at a fresh temp dir so Load("") resolves to a
+	// path that provably has no config file, making this test hermetic
+	// regardless of the host's real config.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -101,6 +111,9 @@ func TestLoad_WordSyncRecheckInvalidBatchReDefaults(t *testing.T) {
 	}
 	// The ceiling itself is legal on every path.
 	isolateEnv(t)
+	// See the comment in TestLoad_WordSyncRecheckDefaults: Load("") without
+	// this falls through to the real, unsandboxed home directory.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MXLRC_WORD_SYNC_RECHECK_BATCH", strconv.Itoa(wordSyncRecheckBatchMax))
 	cfg, err := Load("")
 	if err != nil {

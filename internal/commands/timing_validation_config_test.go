@@ -214,6 +214,13 @@ func TestConfigWordSyncRecheckGetList(t *testing.T) {
 // and must accept both ends and reject just outside them plus a non-integer,
 // in every case leaving the on-disk file untouched on rejection.
 func TestConfigSetWordSyncRecheckBatchRange(t *testing.T) {
+	// A host env value for MXLRC_WORD_SYNC_RECHECK_BATCH (or _ENABLED) would
+	// override the value this test just wrote to the file when
+	// mustLoadConfigForTest reloads it via config.Load, so the reload
+	// assertion below would silently check the env value instead of the
+	// written one. Clear both so the test is hermetic against the host.
+	t.Setenv("MXLRC_WORD_SYNC_RECHECK_BATCH", "")
+	t.Setenv("MXLRC_WORD_SYNC_RECHECK_ENABLED", "")
 	for _, good := range []string{"1", "1000"} {
 		path := writeConfigTOML(t, "[word_sync_recheck]\nbatch = 100\n")
 		var out bytes.Buffer
