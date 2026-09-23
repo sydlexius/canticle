@@ -540,8 +540,21 @@ func TestWordsLanded(t *testing.T) {
 			}
 		})
 	}
+	// A rooted companion writer must refuse an outdir that escapes its root,
+	// even when an owned companion sits at the far end of the symlink: only the
+	// resolveOutdir guard can reject this, since the file itself is valid.
+	outside := t.TempDir()
+	if err := modeWriter(false, true).WriteLRC(a2Song(), "song.lrc", outside); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
 	root := t.TempDir()
-	if NewLRCWriter(root).WordsLanded(a2Song(), "song.lrc", filepath.Join(root, "missing")) {
-		t.Fatal("WordsLanded = true for an unresolvable outdir")
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	rooted := NewLRCWriter(root)
+	rooted.SetWordSyncCompanion(true)
+	if rooted.WordsLanded(a2Song(), "song.lrc", link) {
+		t.Fatal("WordsLanded = true for an outdir escaping the confinement root")
 	}
 }
