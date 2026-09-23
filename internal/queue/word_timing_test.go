@@ -46,6 +46,7 @@ func TestWordRecheckCandidatePredicates(t *testing.T) {
 		mutate string
 		opts   WordRecheckOptions
 		want   bool
+		shared bool // also link the row to library 2
 	}{
 		{name: "baseline candidate", want: true},
 		{name: "status processing", mutate: `UPDATE work_queue SET status = 'processing'`},
@@ -67,6 +68,9 @@ func TestWordRecheckCandidatePredicates(t *testing.T) {
 		{name: "no completed_at under a cutoff", mutate: `UPDATE work_queue SET completed_at = NULL`, opts: WordRecheckOptions{CompletedBefore: day(11)}},
 		{name: "other library", opts: WordRecheckOptions{LibraryIDs: []int64{99}}},
 		{name: "linked library", opts: WordRecheckOptions{LibraryIDs: []int64{99, 1}}, want: true},
+		{name: "shared row, other library filter", shared: true, opts: WordRecheckOptions{LibraryIDs: []int64{2}}},
+		{name: "shared row, no filter", shared: true, want: true},
+		{name: "shared row, both libraries", shared: true, opts: WordRecheckOptions{LibraryIDs: []int64{1, 2}}, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,6 +81,11 @@ func TestWordRecheckCandidatePredicates(t *testing.T) {
 			mustExec(t, dbh, `INSERT INTO libraries (id, path, name) VALUES (1, '/m', 'lib')`)
 			mustExec(t, dbh, `INSERT INTO scan_results (id, library_id, file_path, status) VALUES (1, 1, '/m/x.flac', 'done')`)
 			mustExec(t, dbh, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, 1)`, id)
+			if tc.shared {
+				mustExec(t, dbh, `INSERT INTO libraries (id, path, name) VALUES (2, '/n', 'lib2')`)
+				mustExec(t, dbh, `INSERT INTO scan_results (id, library_id, file_path, status) VALUES (2, 2, '/n/x.flac', 'done')`)
+				mustExec(t, dbh, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, 2)`, id)
+			}
 			if tc.mutate != "" {
 				mustExec(t, dbh, tc.mutate)
 			}

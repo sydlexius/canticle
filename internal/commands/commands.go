@@ -155,6 +155,19 @@ type ScanCmd struct {
 	ReconcileDetectorStats           *ScanReconcileDetectorStatsCmd           `arg:"subcommand:reconcile-detector-stats" help:"attribute historical audio detections to the detector lane's statistics; reads recorded verdicts only, makes no detector-sidecar requests (issue #537)"`
 	IndexMetadata                    *ScanIndexMetadataCmd                    `arg:"subcommand:index-metadata" help:"walk a library and record the full audio tag set into audio_metadata (issue #646)"`
 	PurgeProvenance                  *ScanPurgeProvenanceCmd                  `arg:"subcommand:purge-provenance" help:"bulk-delete .lrc/.txt sidecars by provenance (--source or --no-source) and requeue for re-fetch (issue #474)"`
+	ReconcileWordSync                *ScanReconcileWordSyncCmd                `arg:"subcommand:reconcile-word-sync" help:"queue settled line-synced tracks for a word-timing re-check by a running serve worker; dry-run prints the count and minimum drain time (issue #982)"`
+}
+
+// ScanReconcileWordSyncCmd queues settled line-synced rows for a serve-worker
+// word-timing re-check (#982). Dry-run unless --yes.
+type ScanReconcileWordSyncCmd struct {
+	CompletedBefore     string   `arg:"--completed-before" help:"only rows completed strictly before this cutoff (a date read as midnight UTC, or an RFC3339 instant)"`
+	RecheckAbsentBefore string   `arg:"--recheck-absent-before" help:"also re-check rows whose no-word-data verdict was reached strictly before this cutoff (same forms)"`
+	Limit               int      `arg:"--limit" help:"queue at most this many rows, oldest completion first (0 = no cap)" default:"0"`
+	Libraries           []string `arg:"--library,separate" help:"limit to a library (name or numeric id); repeat for more than one"`
+	Yes                 bool     `arg:"--yes" help:"actually queue the rows (without it, prints the count and drain estimate only)"`
+	Backup              string   `arg:"--backup" help:"path for the JSONL backup of the queued rows' prior state (default: <db-dir>/reconcile-word-sync-backup-<ts>.jsonl)" default:""`
+	ConfigPath          string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // ScanPurgeProvenanceCmd bulk-deletes .lrc/.txt sidecars matching a provenance
@@ -2370,6 +2383,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runPurgeProvenance(ctx, out, sub)
+	case args.ReconcileWordSync != nil:
+		sub := *args.ReconcileWordSync
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileWordSync(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}

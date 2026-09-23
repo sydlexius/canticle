@@ -40,10 +40,16 @@ type WordRecheckOptions struct {
 	CompletedBefore time.Time
 	// RecheckAbsentBefore re-admits 'absent' rows checked strictly earlier.
 	RecheckAbsentBefore time.Time
-	// LibraryIDs admits only rows linked to one of these libraries.
+	// LibraryIDs admits only rows linked to one of these libraries and to no
+	// library outside them (the candidate predicate; the queued count only
+	// requires a link).
 	LibraryIDs []int64
 	// Limit caps ListWordRecheckCandidates when > 0; the count ignores it.
 	Limit int
+	// BeforeCommit (flip only, optional) runs inside the flip transaction just
+	// before COMMIT when any report ran, e.g. one fsync for the batch's backup
+	// records; an error rolls the batch back.
+	BeforeCommit func() error
 }
 
 // wordRecheckPredicate is the ONE candidate predicate (no leading WHERE/AND)
@@ -73,15 +79,39 @@ func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 		b.WriteString(` AND completed_at < ?`)
 		args = append(args, formatTime(opts.CompletedBefore))
 	}
+	lib, libArgs := wordRecheckLibraryClause(opts.LibraryIDs)
+	b.WriteString(lib)
+	args = append(args, libArgs...)
 	if len(opts.LibraryIDs) > 0 {
-		b.WriteString(` AND id IN (SELECT wqsr.work_queue_id FROM work_queue_scan_results wqsr` +
-			` JOIN scan_results sr ON sr.id = wqsr.scan_result_id WHERE sr.library_id IN (?` +
-			strings.Repeat(`, ?`, len(opts.LibraryIDs)-1) + `))`)
-		for _, id := range opts.LibraryIDs {
-			args = append(args, id)
-		}
+		// Skip a deduplicated row also linked OUTSIDE the set: the recheck
+		// rewrites every linked sidecar, so a scoped run would otherwise touch
+		// a library it was not given. An unscoped run covers such rows.
+		ex, exArgs := libraryLinkClause(opts.LibraryIDs, ` AND id NOT IN`, `NOT IN`)
+		b.WriteString(ex)
+		args = append(args, exArgs...)
 	}
 	return b.String(), args
+}
+
+// wordRecheckLibraryClause scopes a work_queue query to rows linked (through
+// work_queue_scan_results) to one of ids; empty ids scope nothing.
+func wordRecheckLibraryClause(ids []int64) (string, []any) {
+	return libraryLinkClause(ids, ` AND id IN`, `IN`)
+}
+
+// libraryLinkClause renders `<head> (rows linked to a scan_result whose
+// library_id <op> ids)`; empty ids render nothing.
+func libraryLinkClause(ids []int64, head, op string) (string, []any) {
+	if len(ids) == 0 {
+		return "", nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return head + ` (SELECT wqsr.work_queue_id FROM work_queue_scan_results wqsr` +
+		` JOIN scan_results sr ON sr.id = wqsr.scan_result_id WHERE sr.library_id ` + op + ` (?` +
+		strings.Repeat(`, ?`, len(ids)-1) + `))`, args
 }
 
 // CountWordRecheckCandidates is ListWordRecheckCandidates' size, ignoring Limit.
@@ -90,6 +120,19 @@ func (q *DBQueue) CountWordRecheckCandidates(ctx context.Context, opts WordReche
 	var n int
 	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE`+pred, args...).Scan(&n); err != nil { //nolint:gosec // reason: G202 -- pred is built from package-constant fragments with bound parameters only
 		return 0, fmt.Errorf("queue: count word recheck candidates: %w", err)
+	}
+	return n, nil
+}
+
+// CountWordRecheckQueued counts rows already flipped and waiting for the worker
+// (word_timing_state='queued', any status), limited to libraryIDs when set. The
+// reconcile-word-sync CLI reports it beside the candidate count, since those
+// rows are ahead of anything a new run adds. Read-only.
+func (q *DBQueue) CountWordRecheckQueued(ctx context.Context, libraryIDs []int64) (int, error) {
+	lib, args := wordRecheckLibraryClause(libraryIDs)
+	var n int
+	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE word_timing_state = 'queued'`+lib, args...).Scan(&n); err != nil { //nolint:gosec // reason: G202 -- lib is a package-constant fragment with bound parameters only
+		return 0, fmt.Errorf("queue: count word recheck queued: %w", err)
 	}
 	return n, nil
 }
@@ -157,6 +200,7 @@ type WordRecheckPrior struct {
 	NextAttemptAt        string
 	Attempts             int
 	LastError            string
+	RefusedWaits         int
 	WordTimingState      *string
 	WordTimingGeneration *int64
 }
@@ -212,9 +256,9 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, op
 			gen   sql.NullInt64
 		)
 		err := tx.QueryRowContext(ctx,
-			`SELECT id, status, priority, next_attempt_at, attempts, last_error, word_timing_state, word_timing_generation
+			`SELECT id, status, priority, next_attempt_at, attempts, last_error, refused_waits, word_timing_state, word_timing_generation
              FROM work_queue WHERE id = ? AND`+pred, append([]any{id}, predArgs...)...,
-		).Scan(&p.ID, &p.Status, &p.Priority, &p.NextAttemptAt, &p.Attempts, &p.LastError, &state, &gen)
+		).Scan(&p.ID, &p.Status, &p.Priority, &p.NextAttemptAt, &p.Attempts, &p.LastError, &p.RefusedWaits, &state, &gen)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -242,6 +286,11 @@ func (q *DBQueue) markWordRecheckQueuedOnce(ctx context.Context, ids []int64, op
 			return nil, escape(fmt.Errorf("queue: flip word recheck id %d: %w", id, err))
 		}
 		prior = append(prior, p)
+	}
+	if reported && opts.BeforeCommit != nil {
+		if err := opts.BeforeCommit(); err != nil {
+			return nil, db.NotRetryable(fmt.Errorf("queue: word recheck flip pre-commit: %w", err))
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, escape(fmt.Errorf("queue: commit word recheck flip: %w", err))
