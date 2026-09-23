@@ -313,7 +313,7 @@ canticle scan reconcile-word-sync --recheck-absent-before 2026-01-01 --yes
 ```
 
 - **Output is aggregate-only:** `candidates=N selected=M already-queued=K estimated-minimum-drain=<duration>`. No path, artist, or title is printed.
-- **Cutoffs are strict** and take a date (midnight UTC) or an RFC3339 instant, like `--unsynced-before`. `--library` takes a name or numeric id and can be repeated.
+- **Cutoffs are strict** and take a date (midnight UTC) or an RFC3339 instant, like `--unsynced-before`. `--library` takes a name or numeric id and can be repeated. A track shared (deduplicated) with a library outside the filter is skipped, since its re-check rewrites every copy; an unscoped run covers it.
 - **Refused when `output.word_sync_mode = "off"`.** Under `off` a re-check could not write any word timings.
 - **Reversible.** Each row's prior queue state is written as a JSONL line in `<db-dir>/reconcile-word-sync-backup-<timestamp>.jsonl` (or `--backup`, appended to if it exists) and fsynced before its batch commits. If that write fails, the batch is rolled back and the command names how many trailing records belong to it.
 - **Cost.** See [Word-timing re-check cost](USER_GUIDE.md#word-timing-re-check-cost). Read the dry-run count first.

@@ -40,7 +40,9 @@ type WordRecheckOptions struct {
 	CompletedBefore time.Time
 	// RecheckAbsentBefore re-admits 'absent' rows checked strictly earlier.
 	RecheckAbsentBefore time.Time
-	// LibraryIDs admits only rows linked to one of these libraries.
+	// LibraryIDs admits only rows linked to one of these libraries and to no
+	// library outside them (the candidate predicate; the queued count only
+	// requires a link).
 	LibraryIDs []int64
 	// Limit caps ListWordRecheckCandidates when > 0; the count ignores it.
 	Limit int
@@ -79,12 +81,27 @@ func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	}
 	lib, libArgs := wordRecheckLibraryClause(opts.LibraryIDs)
 	b.WriteString(lib)
-	return b.String(), append(args, libArgs...)
+	args = append(args, libArgs...)
+	if len(opts.LibraryIDs) > 0 {
+		// Skip a deduplicated row also linked OUTSIDE the set: the recheck
+		// rewrites every linked sidecar, so a scoped run would otherwise touch
+		// a library it was not given. An unscoped run covers such rows.
+		ex, exArgs := libraryLinkClause(opts.LibraryIDs, ` AND id NOT IN`, `NOT IN`)
+		b.WriteString(ex)
+		args = append(args, exArgs...)
+	}
+	return b.String(), args
 }
 
 // wordRecheckLibraryClause scopes a work_queue query to rows linked (through
 // work_queue_scan_results) to one of ids; empty ids scope nothing.
 func wordRecheckLibraryClause(ids []int64) (string, []any) {
+	return libraryLinkClause(ids, ` AND id IN`, `IN`)
+}
+
+// libraryLinkClause renders `<head> (rows linked to a scan_result whose
+// library_id <op> ids)`; empty ids render nothing.
+func libraryLinkClause(ids []int64, head, op string) (string, []any) {
 	if len(ids) == 0 {
 		return "", nil
 	}
@@ -92,8 +109,8 @@ func wordRecheckLibraryClause(ids []int64) (string, []any) {
 	for i, id := range ids {
 		args[i] = id
 	}
-	return ` AND id IN (SELECT wqsr.work_queue_id FROM work_queue_scan_results wqsr` +
-		` JOIN scan_results sr ON sr.id = wqsr.scan_result_id WHERE sr.library_id IN (?` +
+	return head + ` (SELECT wqsr.work_queue_id FROM work_queue_scan_results wqsr` +
+		` JOIN scan_results sr ON sr.id = wqsr.scan_result_id WHERE sr.library_id ` + op + ` (?` +
 		strings.Repeat(`, ?`, len(ids)-1) + `))`, args
 }
 

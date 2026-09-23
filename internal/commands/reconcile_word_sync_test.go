@@ -78,7 +78,7 @@ func dumpTable(t *testing.T, dbh *sql.DB, table string) string {
 	if err != nil {
 		t.Fatalf("dump %s: %v", table, err)
 	}
-	defer rows.Close() //nolint:errcheck // test cleanup
+	defer rows.Close() //nolint:errcheck // reason: test cleanup
 	cols, _ := rows.Columns()
 	var b strings.Builder
 	for rows.Next() {
@@ -198,7 +198,7 @@ func TestReconcileWordSync_ApplyBackupRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backup: %v", err)
 	}
-	defer f.Close() //nolint:errcheck // test cleanup
+	defer f.Close() //nolint:errcheck // reason: test cleanup
 	n := 0
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {

@@ -16,6 +16,7 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -84,7 +85,7 @@ func runReconcileWordSync(ctx context.Context, out io.Writer, args ScanReconcile
 		slog.Error("failed to open database", "error", err)
 		return 1
 	}
-	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
+	defer sqlDB.Close() //nolint:errcheck // reason: best-effort close on shutdown
 
 	libs := library.New(sqlDB)
 	for _, ref := range args.Libraries {
@@ -140,6 +141,9 @@ func runReconcileWordSync(ctx context.Context, out io.Writer, args ScanReconcile
 					return fmt.Errorf("open reconcile-word-sync backup %q: %w", backupPath, ferr)
 				}
 				backupFile = f
+				// A new directory entry is not durable until its parent is
+				// fsynced; do it before the first batch can commit.
+				lyrics.FsyncDir(filepath.Dir(backupPath))
 			}
 			if err := writeWordSyncBackup(backupFile, p); err != nil {
 				return err
