@@ -1330,3 +1330,56 @@ func TestRunLRCStackedCheck_DegradedCeiling_StackedPlusUnavailableRootFinalAttem
 		t.Errorf("final attempt did not name the remediation command: %s", logged)
 	}
 }
+
+// A stacked finding from an EARLIER degraded boot must reach the give-up line
+// even when the final boot sees none (#922, Copilot review): each startup
+// rebuilds its tally, so only the persisted streak maximum can carry it.
+func TestRunLRCStackedCheck_DegradedCeiling_EarlierStackedFindingSurvivesGiveUp(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	root := filepath.Join(dir, "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, root, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+
+	const earlyStacked = 42
+	boot := 0
+	prevWalk := runStackedWalk
+	t.Cleanup(func() { runStackedWalk = prevWalk })
+	runStackedWalk = func(c context.Context, opts lrcbackfill.Options) (lrcbackfill.Summary, error) {
+		boot++
+		if boot == 1 {
+			return stackedFileDegradedFakeWalk(earlyStacked, 1)(c, opts)
+		}
+		return stackedFileDegradedFakeWalk(0, 1)(c, opts)
+	}
+
+	for i := 1; i < maxDegradedAttempts; i++ {
+		runLRCStackedCheck(ctx, sqlDB)
+	}
+	logBuf := withCapturedLog(t)
+	runLRCStackedCheck(ctx, sqlDB)
+	logged := logBuf.String()
+
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || !done {
+		t.Fatalf("Nth attempt: done=%v err=%v; want stamped once the ceiling is reached", done, derr)
+	}
+	if want := fmt.Sprintf("stacked=%d", earlyStacked); !strings.Contains(logged, want) {
+		t.Errorf("give-up line lost an earlier boot's stacked finding; want %q in: %s", want, logged)
+	}
+	if !strings.Contains(logged, "reconcile-lrc --yes") {
+		t.Errorf("give-up line did not name the remediation command: %s", logged)
+	}
+	if _, present := markerDetailCount(t, ctx, sqlDB, lrcStackedCheckDegradedStackedMarker); present {
+		t.Error("the degraded stacked-count row should be cleared once the check gives up")
+	}
+}

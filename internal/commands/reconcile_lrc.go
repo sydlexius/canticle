@@ -208,6 +208,13 @@ const maxDegradedAttempts = 5
 // completed.
 const lrcStackedCheckDegradedAttemptsMarker = "lrc_stacked_check_470_degraded_attempts"
 
+// lrcStackedCheckDegradedStackedMarker keeps the largest stacked-file count any
+// degraded attempt has seen (#922). Each startup rebuilds its tally from
+// scratch, so without it a finding from an earlier degraded boot would be lost
+// if the final, give-up boot happened not to see it (a root unmounted that
+// time, say), and the stamp then stops the check for good.
+const lrcStackedCheckDegradedStackedMarker = "lrc_stacked_check_470_degraded_stacked"
+
 // lrcStackedCheckGiveUpDetail is the sentinel written to lrcStackedCheckMarker's
 // detail_count when the marker is stamped only because maxDegradedAttempts was
 // exhausted, as opposed to a genuine completion (which records a non-negative
@@ -471,6 +478,9 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 		attempts       int
 		incErr         error
 		isFinalAttempt bool
+		// bestStacked is the largest stacked count across this degraded
+		// streak, this walk included; the give-up report uses it.
+		bestStacked = total.Normalized
 	)
 	if attemptDegraded {
 		attempts, incErr = incrementDegradedAttempts(ctx, sqlDB)
@@ -482,6 +492,14 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 		// errors, rather than guessing.
 		if incErr == nil && attempts >= maxDegradedAttempts {
 			isFinalAttempt = true
+		}
+		if incErr == nil {
+			best, merr := recordDegradedStacked(ctx, sqlDB, total.Normalized)
+			if merr != nil {
+				slog.Warn("lrc check: failed to record the degraded stacked count; the give-up report may undercount", "error", merr)
+			} else {
+				bestStacked = best
+			}
 		}
 	}
 
@@ -583,25 +601,25 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 	// unavailable root is identified by its library id, which is safe to log
 	// (the operator already has that id in their own library configuration).
 	//
-	// total.Normalized carries forward whatever this or an earlier degraded
-	// attempt already found stacked (#922 fix round, C1): the give-up stamp is
-	// the LAST thing this check will ever log on this deployment, so if it
-	// drops the stacked count the operator never learns about it -- exactly
-	// the #470 failure mode this check exists to prevent. When there is a
+	// bestStacked is the largest stacked count any attempt in this degraded
+	// streak saw, not just this walk's (#922): the give-up stamp is the LAST
+	// thing this check will ever log on this deployment, so if it drops a
+	// finding an earlier boot made, the operator never learns about it --
+	// exactly the #470 failure mode this check exists to prevent. When there is a
 	// count to report, the message also names the exact remediation command
 	// (rather than a bare "investigate manually"), since the operator has
 	// nothing else pointing them at it once this line has scrolled past.
 	giveUpMsg := "lrc check: gave up after repeated degraded startup attempts; this check will not run again on this deployment. " +
 		"If a library root above was reported unavailable, fix or remove it (see its library_id in the earlier warning)."
-	if total.Normalized > 0 {
+	if bestStacked > 0 {
 		giveUpMsg += fmt.Sprintf(" %d stacked .lrc file(s) were found (a partial count, since this attempt gave up rather than"+
-			" completing cleanly); run `canticle scan reconcile-lrc --yes` to expand them.", total.Normalized)
+			" completing cleanly); run `canticle scan reconcile-lrc --yes` to expand them.", bestStacked)
 	} else {
 		giveUpMsg += " A persistent file-level problem can be investigated by running `canticle scan reconcile-lrc` manually."
 	}
 	slog.Warn(giveUpMsg,
 		"degraded_attempts", attempts, "max_degraded_attempts", maxDegradedAttempts,
-		"stacked", total.Normalized,
+		"stacked", bestStacked,
 		"errors", total.Errors, "blocked", total.Blocked, "skipped", total.Skipped,
 		"unavailable_root_count", len(unavailableRootIDs), "unavailable_root_ids", unavailableRootIDs)
 
@@ -699,14 +717,34 @@ func incrementDegradedAttempts(ctx context.Context, sqlDB *sql.DB) (int, error) 
 	return attempts, nil
 }
 
-// clearDegradedAttempts removes the degraded-attempt counter row, so a later
+// recordDegradedStacked keeps the largest stacked count seen across the
+// current degraded streak (#922) and returns it, this walk's count included.
+func recordDegradedStacked(ctx context.Context, sqlDB *sql.DB, stacked int) (int, error) {
+	var best int
+	err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO maintenance_markers (name, detail_count)
+         VALUES (?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+             completed_at = excluded.completed_at,
+             detail_count = MAX(COALESCE(maintenance_markers.detail_count, 0), excluded.detail_count)
+         RETURNING detail_count`,
+		lrcStackedCheckDegradedStackedMarker, stacked).Scan(&best)
+	if err != nil {
+		return stacked, fmt.Errorf("record degraded stacked count %q: %w", lrcStackedCheckDegradedStackedMarker, err)
+	}
+	return best, nil
+}
+
+// clearDegradedAttempts removes the degraded-attempt counter row and the
+// degraded stacked-count row, so a later
 // degradation (after a genuine clean/completed run in between) starts counting
 // from zero rather than compounding onto a stale prior streak. A no-op (no
 // error) when the row is already absent -- the common case, since most
 // deployments never degrade at all.
 func clearDegradedAttempts(ctx context.Context, sqlDB *sql.DB) error {
 	if _, err := sqlDB.ExecContext(ctx,
-		`DELETE FROM maintenance_markers WHERE name = ?`, lrcStackedCheckDegradedAttemptsMarker); err != nil {
+		`DELETE FROM maintenance_markers WHERE name IN (?, ?)`,
+		lrcStackedCheckDegradedAttemptsMarker, lrcStackedCheckDegradedStackedMarker); err != nil {
 		return fmt.Errorf("clear degraded-attempt counter %q: %w", lrcStackedCheckDegradedAttemptsMarker, err)
 	}
 	return nil
