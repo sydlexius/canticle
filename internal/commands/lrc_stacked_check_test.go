@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -906,5 +907,426 @@ func TestRunLRCStackedCheck_WalkErrorStillReportsEarlierFinding(t *testing.T) {
 	}
 	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || done {
 		t.Fatalf("degraded walk with a partial finding: done=%v err=%v; want unset so the next startup retries", done, derr)
+	}
+}
+
+// markerDetailCount reads the detail_count column of a maintenance_markers
+// row directly, for tests that need to distinguish a genuine completion from
+// a #922 gave-up stamp (which the marker's mere presence cannot tell apart).
+func markerDetailCount(t *testing.T, ctx context.Context, sqlDB *sql.DB, name string) (count sql.NullInt64, present bool) {
+	t.Helper()
+	err := sqlDB.QueryRowContext(ctx,
+		`SELECT detail_count FROM maintenance_markers WHERE name = ?`, name).Scan(&count)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.NullInt64{}, false
+	}
+	if err != nil {
+		t.Fatalf("query marker %q: %v", name, err)
+	}
+	return count, true
+}
+
+// degradedAttemptsFakeWalk always reports the same walk error, simulating a
+// permanently-unreadable root (#922): every attempt against it is degraded,
+// none is transient, so a correct implementation must eventually give up
+// rather than retry it forever.
+func degradedAttemptsFakeWalk(root string) func(context.Context, lrcbackfill.Options) (lrcbackfill.Summary, error) {
+	return func(context.Context, lrcbackfill.Options) (lrcbackfill.Summary, error) {
+		return lrcbackfill.Summary{}, fmt.Errorf("walk %s: %w", root,
+			&fs.PathError{Op: "lstat", Path: root, Err: fs.ErrPermission})
+	}
+}
+
+// stackedFileDegradedFakeWalk simulates the OTHER shape of permanent
+// degradation (#922 fix round, C1): the walk itself succeeds (nil error) on
+// every boot, but it always finds one unreadable file AND some genuinely
+// stacked ones in the same pass -- the "one bad symlink among hundreds of
+// legitimately stacked .lrc files" scenario the review flagged as the most
+// common real-world trigger for the fileDegraded branch. Every boot reports
+// the same summary, so a correct implementation must eventually give up
+// (fileDegraded, not walkErr), and that give-up report must still carry the
+// stacked count this fake keeps producing.
+func stackedFileDegradedFakeWalk(normalized, errs int) func(context.Context, lrcbackfill.Options) (lrcbackfill.Summary, error) {
+	return func(context.Context, lrcbackfill.Options) (lrcbackfill.Summary, error) {
+		return lrcbackfill.Summary{
+			// MediaEntries must be > 0 so this trips ONLY the fileDegraded
+			// branch, not the separate empty-root/unmounted `degraded` check
+			// (summary.MediaEntries == 0) above it -- conflating the two
+			// degradation shapes would exercise a different code path than
+			// the one C1 is about.
+			Visited:      normalized + errs,
+			MediaEntries: normalized + errs,
+			Scanned:      normalized + errs,
+			Normalized:   normalized,
+			Errors:       errs,
+		}, nil
+	}
+}
+
+// The first maxDegradedAttempts-1 boots against a permanently-degraded root
+// must behave exactly as before #922: retry unconditionally, never stamp.
+// Only the Nth boot may stamp, and it must do so as a GAVE-UP outcome (a
+// negative sentinel detail_count), never as a "clean" completion -- a bare
+// count of 0 would be indistinguishable from a genuinely empty, successfully
+// walked library.
+func TestRunLRCStackedCheck_DegradedCeiling_NMinus1DoNotStampNthGivesUp(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	// A throwaway library, added and removed before the one under test, so
+	// the real library's id is provably not 1 (I1 fix round): "1" already
+	// appears elsewhere in this log line (roots_configured=1,
+	// unavailable_root_count=1), so asserting a bare "1" substring proves
+	// nothing about whether library_id/unavailable_root_ids were actually
+	// logged. A non-1 id makes that assertion meaningful.
+	libRepo := library.New(sqlDB)
+	throwawayDir := filepath.Join(dir, "throwaway")
+	if err := os.MkdirAll(throwawayDir, 0o755); err != nil {
+		t.Fatalf("mkdir throwaway root: %v", err)
+	}
+	throwaway, err := libRepo.Add(ctx, throwawayDir, "throwaway", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("library.Add (throwaway): %v", err)
+	}
+	if err := libRepo.Remove(ctx, throwaway.ID); err != nil {
+		t.Fatalf("library.Remove (throwaway): %v", err)
+	}
+
+	root := filepath.Join(dir, "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	lib, err := libRepo.Add(ctx, root, "lib", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+	if lib.ID == 1 {
+		t.Fatalf("test setup: library id is still 1 despite the throwaway; the id-specificity assertions below would be vacuous")
+	}
+
+	prevWalk := runStackedWalk
+	t.Cleanup(func() { runStackedWalk = prevWalk })
+	runStackedWalk = degradedAttemptsFakeWalk(root)
+
+	for i := 1; i < maxDegradedAttempts; i++ {
+		logBuf := withCapturedLog(t)
+		runLRCStackedCheck(ctx, sqlDB)
+		if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || done {
+			t.Fatalf("attempt %d/%d: done=%v err=%v; want unset (still within the retry budget)", i, maxDegradedAttempts, done, derr)
+		}
+		if strings.Contains(logBuf.String(), "gave up") {
+			t.Fatalf("attempt %d/%d: logged a give-up message before the ceiling was reached: %s", i, maxDegradedAttempts, logBuf.String())
+		}
+		// The library's own root path must never appear in a degraded-retry
+		// log line, matching the existing NeverLogsPaths coverage for other
+		// sites in this file.
+		if strings.Contains(logBuf.String(), root) {
+			t.Fatalf("attempt %d/%d: log leaked the library root path: %s", i, maxDegradedAttempts, logBuf.String())
+		}
+	}
+
+	// The Nth attempt: the ceiling is reached and the marker must stamp, but
+	// as a gave-up outcome.
+	logBuf := withCapturedLog(t)
+	runLRCStackedCheck(ctx, sqlDB)
+	logged := logBuf.String()
+
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || !done {
+		t.Fatalf("Nth attempt: done=%v err=%v; want stamped once the ceiling is reached", done, derr)
+	}
+	if !strings.Contains(logged, "gave up") {
+		t.Errorf("Nth attempt: want a give-up log message; got: %s", logged)
+	}
+	if strings.Contains(logged, "library clean") {
+		t.Errorf("Nth attempt: a gave-up stamp must never be reported as library clean; got: %s", logged)
+	}
+	if strings.Contains(logged, root) {
+		t.Errorf("Nth attempt: give-up log leaked the library root path: %s", logged)
+	}
+	// slog's text handler renders key=value pairs; assert BOTH the key and
+	// the value together (I1 fix round), not a bare digit substring that
+	// "roots_configured=1"/"unavailable_root_count=1" would also satisfy.
+	// The throwaway-library setup above makes lib.ID != 1, so these two
+	// specific forms can only be present if the give-up Warn actually
+	// carries the library_id/unavailable_root_ids attributes.
+	wantLibraryID := fmt.Sprintf("library_id=%d", lib.ID)
+	if !strings.Contains(logged, wantLibraryID) {
+		t.Errorf("give-up log did not identify the unavailable root by library_id; want %q in: %s", wantLibraryID, logged)
+	}
+	wantUnavailableRootIDs := fmt.Sprintf("unavailable_root_ids=[%d]", lib.ID)
+	if !strings.Contains(logged, wantUnavailableRootIDs) {
+		t.Errorf("give-up log did not list the unavailable root id; want %q in: %s", wantUnavailableRootIDs, logged)
+	}
+	// M1 fix round: the Nth attempt must not ALSO log the per-attempt
+	// degraded-roots report ("will retry the unavailable root(s) next
+	// startup") right before the give-up line contradicts it with "will not
+	// run again". The ceiling decision happens before that report, so it
+	// must be suppressed on this, the final, attempt.
+	for _, retry := range []string{"will retry the unavailable root", "retried next startup"} {
+		if strings.Contains(logged, retry) {
+			t.Errorf("Nth attempt logged a contradictory retry message (%q) alongside the give-up line: %s", retry, logged)
+		}
+	}
+
+	count, present := markerDetailCount(t, ctx, sqlDB, lrcStackedCheckMarker)
+	if !present {
+		t.Fatal("gave-up stamp: marker row missing")
+	}
+	if !count.Valid || count.Int64 != lrcStackedCheckGiveUpDetail {
+		t.Errorf("gave-up stamp: detail_count = %+v; want the gave-up sentinel (%d)", count, lrcStackedCheckGiveUpDetail)
+	}
+}
+
+// The give-up stamp must not silently drop a stacked-file finding when the
+// degradation is FILE-level rather than a whole-root walk error (#922 fix
+// round, C1). Reproduces the review's scenario: one unreadable/blocked/
+// symlinked .lrc sitting alongside hundreds of legitimately stacked ones,
+// on every boot, so fileDegraded (not the walkErr branch covered by
+// TestRunLRCStackedCheck_DegradedCeiling_NMinus1DoNotStampNthGivesUp above)
+// drives every attempt including the Nth. Before the fix, the give-up Warn
+// omitted total.Normalized entirely, so the one notification this whole
+// check exists to deliver was permanently lost once the ceiling hit.
+func TestRunLRCStackedCheck_DegradedCeiling_FileDegradedGiveUpReportsStacked(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	root := filepath.Join(dir, "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, root, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+
+	const wantNormalized = 250
+	prevWalk := runStackedWalk
+	t.Cleanup(func() { runStackedWalk = prevWalk })
+	runStackedWalk = stackedFileDegradedFakeWalk(wantNormalized, 1)
+
+	for i := 1; i < maxDegradedAttempts; i++ {
+		runLRCStackedCheck(ctx, sqlDB)
+		if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || done {
+			t.Fatalf("attempt %d/%d: done=%v err=%v; want unset (still within the retry budget)", i, maxDegradedAttempts, done, derr)
+		}
+	}
+
+	logBuf := withCapturedLog(t)
+	runLRCStackedCheck(ctx, sqlDB)
+	logged := logBuf.String()
+
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || !done {
+		t.Fatalf("Nth attempt: done=%v err=%v; want stamped once the ceiling is reached", done, derr)
+	}
+	if !strings.Contains(logged, "gave up") {
+		t.Fatalf("Nth attempt: want a give-up log message; got: %s", logged)
+	}
+	wantStacked := fmt.Sprintf("stacked=%d", wantNormalized)
+	if !strings.Contains(logged, wantStacked) {
+		t.Errorf("give-up log dropped the stacked-file count; want %q in: %s", wantStacked, logged)
+	}
+	if !strings.Contains(logged, "reconcile-lrc --yes") {
+		t.Errorf("give-up log did not name the remediation command; got: %s", logged)
+	}
+	// M1 fix round: the Nth attempt must not ALSO log the per-attempt
+	// fileDegraded report ("will retry on next startup") right before the
+	// give-up line contradicts it with "will not run again". The ceiling
+	// decision happens before that report, so it must be suppressed here.
+	if strings.Contains(logged, "will retry on next startup") {
+		t.Errorf("Nth attempt logged a contradictory retry message alongside the give-up line: %s", logged)
+	}
+}
+
+// A clean walk still stamps exactly as #470 always did, and resets/clears the
+// degraded-attempt counter: a deployment that recovers from a transient
+// degradation (a root remounts, a permission fix lands) must not carry a
+// stale streak into some unrelated FUTURE degradation.
+func TestRunLRCStackedCheck_CleanWalkStampsAndResetsCounter(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	root := filepath.Join(dir, "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, root, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+
+	// Degrade a few times, but stay under the ceiling.
+	prevWalk := runStackedWalk
+	runStackedWalk = degradedAttemptsFakeWalk(root)
+	for i := 0; i < maxDegradedAttempts-2; i++ {
+		runLRCStackedCheck(ctx, sqlDB)
+	}
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || done {
+		t.Fatalf("pre-recovery: done=%v err=%v; want still unset", done, derr)
+	}
+	if _, present := markerDetailCount(t, ctx, sqlDB, lrcStackedCheckDegradedAttemptsMarker); !present {
+		t.Fatal("pre-recovery: want a nonzero degraded-attempt count recorded")
+	}
+
+	// Recover: the root is now genuinely walkable and clean.
+	runStackedWalk = prevWalk
+	if err := os.WriteFile(filepath.Join(root, "clean.lrc"), []byte("[00:10.00]a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logBuf := withCapturedLog(t)
+	runLRCStackedCheck(ctx, sqlDB)
+	logged := logBuf.String()
+
+	if !strings.Contains(logged, "library clean") {
+		t.Errorf("recovered clean walk: want a 'library clean' log line; got: %s", logged)
+	}
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || !done {
+		t.Fatalf("recovered clean walk: done=%v err=%v; want stamped", done, derr)
+	}
+	// A genuine completion via markLRCStackedCheckDone leaves detail_count
+	// NULL (it never sets one) -- the point pinned here is only that it must
+	// never equal the gave-up sentinel, which is the one value a future reader
+	// must be able to rule out to trust a "clean" reading of this row.
+	count, present := markerDetailCount(t, ctx, sqlDB, lrcStackedCheckMarker)
+	if !present || (count.Valid && count.Int64 == lrcStackedCheckGiveUpDetail) {
+		t.Errorf("recovered clean walk: detail_count = %+v (present=%v); must never be the gave-up sentinel", count, present)
+	}
+	if _, present := markerDetailCount(t, ctx, sqlDB, lrcStackedCheckDegradedAttemptsMarker); present {
+		t.Error("recovered clean walk: degraded-attempt counter row was not cleared")
+	}
+}
+
+// The degraded-attempt counter must be durable across a process restart
+// (a fresh *sql.DB handle over the same on-disk file), not merely in-memory
+// state -- otherwise a real server restart would reset the budget on every
+// boot and the ceiling in the test above would never actually bind in
+// production, only in a single long-lived test process.
+func TestRunLRCStackedCheck_DegradedCounterSurvivesReopen(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	root := filepath.Join(dir, "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, root, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+
+	prevWalk := runStackedWalk
+	t.Cleanup(func() { runStackedWalk = prevWalk })
+	runStackedWalk = degradedAttemptsFakeWalk(root)
+
+	// One degraded attempt, then close the database -- simulating a server
+	// process exiting after a failed startup check.
+	runLRCStackedCheck(ctx, sqlDB)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	// Reopen against the same file: a fresh handle, as a real restart would
+	// get, with no in-memory state carried over.
+	sqlDB2, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB2.Close() })
+
+	// Drive the remaining attempts up to, but not including, the ceiling
+	// against the reopened handle.
+	for i := 2; i < maxDegradedAttempts; i++ {
+		runLRCStackedCheck(ctx, sqlDB2)
+		if done, derr := lrcStackedCheckDone(ctx, sqlDB2); derr != nil || done {
+			t.Fatalf("attempt %d/%d after reopen: done=%v err=%v; want unset", i, maxDegradedAttempts, done, derr)
+		}
+	}
+	// The final attempt must reach the ceiling -- provable only if the first
+	// attempt (before the close/reopen) actually persisted.
+	runLRCStackedCheck(ctx, sqlDB2)
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB2); derr != nil || !done {
+		t.Fatalf("final attempt after reopen: done=%v err=%v; want stamped -- the pre-reopen attempt must have persisted", done, derr)
+	}
+}
+
+// The final attempt with stacked files found on one root while another root
+// cannot be walked (#922 round 2, m2): the stacked-found report must not say
+// the check will run again, and the give-up line must still carry the count
+// and the remediation command.
+func TestRunLRCStackedCheck_DegradedCeiling_StackedPlusUnavailableRootFinalAttempt(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	good := filepath.Join(dir, "good")
+	bad := filepath.Join(dir, "bad")
+	for _, r := range []string{good, bad} {
+		if err := os.MkdirAll(r, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", r, err)
+		}
+	}
+	repo := library.New(sqlDB)
+	if _, err := repo.Add(ctx, good, "good", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add good: %v", err)
+	}
+	if _, err := repo.Add(ctx, bad, "bad", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add bad: %v", err)
+	}
+
+	const wantNormalized = 7
+	stacked := stackedFileDegradedFakeWalk(wantNormalized, 0)
+	failing := degradedAttemptsFakeWalk(bad)
+	prevWalk := runStackedWalk
+	t.Cleanup(func() { runStackedWalk = prevWalk })
+	runStackedWalk = func(c context.Context, opts lrcbackfill.Options) (lrcbackfill.Summary, error) {
+		if len(opts.Roots) == 1 && opts.Roots[0] == bad {
+			return failing(c, opts)
+		}
+		return stacked(c, opts)
+	}
+
+	for i := 1; i < maxDegradedAttempts; i++ {
+		runLRCStackedCheck(ctx, sqlDB)
+	}
+	logBuf := withCapturedLog(t)
+	runLRCStackedCheck(ctx, sqlDB)
+	logged := logBuf.String()
+
+	if done, derr := lrcStackedCheckDone(ctx, sqlDB); derr != nil || !done {
+		t.Fatalf("Nth attempt: done=%v err=%v; want stamped once the ceiling is reached", done, derr)
+	}
+	if strings.Contains(logged, "will run again next startup") {
+		t.Errorf("final attempt claimed the check will run again alongside the give-up line: %s", logged)
+	}
+	if want := fmt.Sprintf("stacked=%d", wantNormalized); !strings.Contains(logged, want) {
+		t.Errorf("final attempt dropped the stacked count; want %q in: %s", want, logged)
+	}
+	if !strings.Contains(logged, "reconcile-lrc --yes") {
+		t.Errorf("final attempt did not name the remediation command: %s", logged)
 	}
 }
