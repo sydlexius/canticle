@@ -588,44 +588,21 @@ func sidecarWithinWindow(path string, before time.Time) bool {
 }
 
 // resolvedSidecarPath reports whether stem+ext (or an extension-case variant
-// of it, #989/#1051) exists in dir, and if so the REAL on-disk path.
+// of it, #989/#1051) exists in dir, and if so the REAL on-disk path. listing is
+// scanDir's own os.ReadDir, threaded down rather than re-read per file (#684).
 //
-// listing is the directory's entries, read ONCE by scanDir's own os.ReadDir
-// and threaded down here rather than re-read per file: reading dir again per
-// candidate would reintroduce the once-per-scan-pass repeated-read cost #684
-// exists to remove.
-//
-// The PROBE ORDER mirrors the writer's settledSidecar exactly (os.Stat the
-// exact name first, fall back to sidecar.Listing.Variants only on a miss),
-// and that is load-bearing, not cosmetic: an earlier revision handed the
-// exact name straight to Variants, which resolves it with os.Lstat rather
-// than os.Stat, and the two disagree on exactly the cases that matter here.
-// os.Lstat succeeds on a DANGLING SYMLINK (it stats the link itself, not the
-// missing target), so that revision read a dangling "song.lrc" as settled --
-// the writer's os.Stat-based settledSidecar disagreed, but the scanner never
-// asked it, so the track was silently never fetched again. os.Lstat also
-// EXCLUDES a directory named "song.lrc" from Variants' own exact-match slot
-// (it only accepts a non-directory), so that same revision read a directory
-// there as unsettled while the writer's os.Stat-based check read it as
-// settled -- scanner and writer disagreeing in the other direction. Probing
-// os.Stat first, exactly as settledSidecar does, makes both files resolve the
-// same way in both packages: a directory is present (matching the writer),
-// and a dangling symlink is absent (matching the writer, so the track is
-// re-fetched rather than permanently skipped).
-//
-// A stat error other than not-exist (e.g. a permission error) is treated as
-// PRESENT, mirroring settledSidecar's own reasoning: an unreadable path is
-// assumed occupied rather than assumed free, since guessing wrong the other
-// way risks a fetch overwriting content that is actually there.
-//
-// sidecar.Listing.Variants is still the fallback for an extension-case
-// variant, and it is the same helper the writer uses, so the scanner agrees
-// with the writer on what counts as a variant too: the stem stays
-// byte-identical and only the ASCII extension case folds, so "Intro.lrc" is
-// never treated as a variant of "intro.lrc". A Variants entry equal to
-// candidate itself (the exact name, already known absent above) is skipped,
-// mirroring settledSidecar's "dangling symlink at candidate stays absent"
-// rule.
+// The probe order mirrors the writer's settledSidecar and is load-bearing:
+// os.Stat the exact name first, and fall back to sidecar.Listing.Variants only
+// on a not-exist miss. Variants resolves the exact name with os.Lstat, which
+// disagrees with the writer on exactly the cases that matter: it reads a
+// DANGLING SYMLINK as settled (so the track was never re-fetched) and a
+// DIRECTORY as absent. With os.Stat first, a directory is present and a
+// dangling link absent, as in the writer. Any other stat error (e.g.
+// permission) reads as PRESENT, as in settledSidecar: guessing "free" risks a
+// fetch overwriting content that is there. Variants applies the writer's own
+// variant rule (stem byte-identical, extension ASCII-folded, so "Intro.lrc" is
+// never "intro.lrc"'s), and its entry equal to candidate (already known absent)
+// is skipped.
 func resolvedSidecarPath(dir, stem, ext string, listing sidecar.Listing) (string, bool) {
 	candidate := filepath.Join(dir, stem+ext)
 	if _, err := os.Stat(candidate); err == nil || !os.IsNotExist(err) {

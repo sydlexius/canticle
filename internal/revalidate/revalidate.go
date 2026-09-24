@@ -667,33 +667,22 @@ func (r *Revalidator) misSyncedMove(s site, path, audio string) (realign.Move, b
 		mv.Kind = realign.KindDemote
 		mv.Method = "revalidate-demote"
 	}
-	// The demotion target reuses an existing REAL on-disk .txt variant name
-	// (#989/#1051) rather than always constructing the lowercase spelling: on a
-	// case-sensitive filesystem a track can already carry "song.TXT" (written by
-	// canticle itself under a case-variant path, or synced from a case-
-	// insensitive source), and writing a second, lowercase "song.txt" beside it
-	// would leave two unsynced sidecars for one track instead of demoting onto
-	// the one that is already there. writeDemotedText's O_EXCL create already
-	// treats an existing file at TextPath as "settled content wins" and no-ops,
-	// so resolving the real name here is what makes that no-op land on the
-	// SAME file a case-insensitive check would have found, instead of silently
-	// creating a sibling.
-	// The EXACT-case name is Lstat'ed FIRST and wins whenever it is there,
-	// exactly as the exact-case sidecar lookup above does: a variant is
-	// resolved only when the exact name is confirmed ABSENT (fs.ErrNotExist),
-	// never when it is merely unprobed. Calling resolveSidecarCaseVariant
-	// unconditionally (as an earlier revision did) skips the exact case by
-	// construction (see its own "the exact case; the caller already knows
-	// this one misses" comment) and would prefer some OTHER on-disk variant
-	// over an exact-name file that is sitting right there -- on the rare
-	// directory that somehow holds both "track.txt" and "track.TXT", that
-	// misreads which file is the settled one. A non-not-exist error (a
-	// permission error, say) is treated the same way judgeCandidate treats
-	// one: leave textPath as the exact name rather than guess, since
-	// writeDemotedText's O_EXCL create will surface the real failure.
+	// The demotion target is the exact ".txt" when it RESOLVES TO A REGULAR
+	// file (os.Stat, the scanner's rule), else a real on-disk extension-case
+	// variant ("song.TXT", #989/#1051), so a demotion lands on the sidecar a
+	// case-insensitive check would find rather than creating a sibling. A
+	// dangling exact link is NOT settled (#1057 review): O_EXCL would hit EEXIST
+	// on it, report a no-op, and the .lrc would be moved aside with its words
+	// landing nowhere -- so with no regular variant the demotion is refused as a
+	// retriable error, never written through the link. Any other stat error
+	// keeps the exact name; writeDemotedText's O_EXCL surfaces the failure.
 	textPath := strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
-	if _, err := os.Lstat(textPath); err != nil && errors.Is(err, fs.ErrNotExist) {
-		if variant, _, ok := resolveSidecarCaseVariant(textPath); ok {
+	if xfi, err := os.Stat(textPath); (err == nil && !xfi.Mode().IsRegular()) || errors.Is(err, fs.ErrNotExist) {
+		variant, _, ok := resolveSidecarCaseVariant(textPath)
+		if _, lerr := os.Lstat(textPath); !ok && lerr == nil {
+			return realign.Move{}, false, fmt.Errorf("revalidate: demotion target %q exists but is not a regular file", textPath)
+		}
+		if ok {
 			textPath = variant
 		}
 	}

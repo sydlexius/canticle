@@ -197,3 +197,38 @@ func TestJudgeCandidateStemCaseNeverMatches(t *testing.T) {
 		t.Errorf("Outcome = %q, want no_sidecar -- \"Track.LRC\" must never be treated as \"track\"'s sidecar", got)
 	}
 }
+
+// TestDemotionNeverTargetsADanglingExactTxt (#1057 review): a dangling
+// "track.txt" is not a settled demotion target. With a regular "track.TXT"
+// beside it the demotion lands there; with nothing else it is refused
+// (Errored, retriable), because O_EXCL would read the link as settled and the
+// .lrc would be moved aside with its words written nowhere.
+func TestDemotionNeverTargetsADanglingExactTxt(t *testing.T) {
+	for _, withVariant := range []bool{true, false} {
+		root, lrc := lib(t, overrunBody)
+		dir := filepath.Dir(lrc)
+		if withVariant && !caseSensitiveFS(t, dir) {
+			t.Skip(`filesystem is case-insensitive; "track.txt" and "track.TXT" would collide`)
+		}
+		upperTxt := filepath.Join(dir, "track.TXT")
+		if withVariant {
+			if err := os.WriteFile(upperTxt, []byte("settled words"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(filepath.Join(dir, "missing-target"), filepath.Join(dir, "track.txt")); err != nil {
+			t.Fatal(err)
+		}
+		r, _ := newRevalidator(t, root, fixedDuration(), func(o *Options) { o.MisSyncedAction = ActionDemote })
+		plan, err := r.Plan(context.Background())
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		switch {
+		case withVariant && (len(plan.Moves) != 1 || plan.Moves[0].TextPath != upperTxt):
+			t.Errorf("with a regular variant: Moves = %+v, want one demotion onto %q", plan.Moves, upperTxt)
+		case !withVariant && (len(plan.Moves) != 0 || plan.Counts.Errored != 1):
+			t.Errorf("dangling only: Moves = %d, Errored = %d; want 0 and 1", len(plan.Moves), plan.Counts.Errored)
+		}
+	}
+}
