@@ -153,47 +153,64 @@ const missBackoffCapDefault = 672
 const missBackoffBaseMin = 1
 
 // WordSyncMode is where word-level (Enhanced-LRC "A2") timings go when a
-// provider serves them (#986). The axis is deliberately not a bool: the two
-// destinations -- inline in the .lrc, and a separate companion sidecar -- are
-// independent, so a bool can only ever name two of the four honest
-// combinations.
+// provider serves them (#986, revised #1072). The axis is deliberately not a
+// bool: the two destinations -- inline in the .lrc, and a separate companion
+// sidecar -- are independent, so a bool can only ever name one of them.
 //
-// The default is WordSyncModeSidecar rather than the historical off: word
+// The default is WordSyncModeBoth rather than the historical off: word
 // timings are real data worth keeping, and putting them beside the .lrc keeps
-// the .lrc itself universally playable, which is exactly what inlining cannot
-// promise (A2 support is not universal, and an unsupporting player may render
-// the markers as literal text).
+// the .lrc itself universally playable, which is exactly what inline markers
+// cannot promise (A2 support is not universal, and an unsupporting player may
+// render the markers as literal text).
+//
+// #1072 retired the original four-value set (sidecar/off/inline/both, where
+// "both" meant markers in BOTH the .lrc and the companion) down to three:
+// no consumer ever read the .elrc (#986), so the old "both" was inline plus a
+// redundant copy. "sidecar" and "inline" keep DECODING as deprecated aliases
+// of the new "both" and "replace" (see resolveWordSyncModeAlias); the old
+// "both" spelling cannot warn, since an old and a new config both writing
+// "both" are indistinguishable, so it silently takes the new meaning -- the
+// safe direction, since markers only ever leave the .lrc, never get added.
 type WordSyncMode string
 
 const (
-	// WordSyncModeSidecar writes a clean line-synced .lrc plus a companion
-	// sidecar carrying the word timings. The DEFAULT.
-	WordSyncModeSidecar WordSyncMode = "sidecar"
 	// WordSyncModeOff writes a clean line-synced .lrc and nothing else. Word
 	// timings a provider served are discarded. This is what the historical
 	// word_sync = false did.
 	WordSyncModeOff WordSyncMode = "off"
-	// WordSyncModeInline writes the word markers INTO the .lrc and writes no
-	// companion sidecar. This is what the historical word_sync = true did, and
-	// is why an explicit legacy `true` maps here rather than to sidecar.
-	WordSyncModeInline WordSyncMode = "inline"
-	// WordSyncModeBoth writes the markers inline AND writes the companion
-	// sidecar. "Both" names the two DESTINATIONS for the markers, not two
-	// files: sidecar already writes two files.
+	// WordSyncModeBoth writes a clean line-synced .lrc plus a companion
+	// sidecar (.elrc) carrying the word timings beside it. The DEFAULT
+	// (#1072). This is what the retired "sidecar" value did.
 	WordSyncModeBoth WordSyncMode = "both"
+	// WordSyncModeReplace writes the word markers INTO the .lrc and writes no
+	// companion sidecar. This is what the historical word_sync = true did (and
+	// what the retired "inline" value did), which is why an explicit legacy
+	// `true` maps here rather than to WordSyncModeBoth.
+	WordSyncModeReplace WordSyncMode = "replace"
+
+	// wordSyncModeAliasSidecar and wordSyncModeAliasInline are the RETIRED
+	// (#1072) spellings. They still decode -- an existing deployment carrying
+	// `word_sync_mode = "sidecar"` or `"inline"` must keep booting -- but
+	// resolveWordSyncModeAlias maps them onto WordSyncModeBoth/WordSyncModeReplace
+	// with a warning, and neither is ever returned by wordSyncModes.
+	wordSyncModeAliasSidecar WordSyncMode = "sidecar"
+	wordSyncModeAliasInline  WordSyncMode = "inline"
 )
 
 // wordSyncModes is the accepted value set, and the ONE place it is written
 // down. enumValues (validate.go), the loader's re-default check, and the env
 // arm all read this, so the settings dropdown, ValidateAndSet, and the file and
-// env paths can never disagree about what is legal.
+// env paths can never disagree about what is legal. The retired alias
+// spellings are deliberately absent: they decode (see resolveWordSyncModeAlias)
+// but are never offered as a value to newly choose.
 func wordSyncModes() []WordSyncMode {
-	return []WordSyncMode{WordSyncModeSidecar, WordSyncModeOff, WordSyncModeInline, WordSyncModeBoth}
+	return []WordSyncMode{WordSyncModeOff, WordSyncModeBoth, WordSyncModeReplace}
 }
 
-// validWordSyncMode reports whether v is one of the accepted modes. Case- and
-// space-sensitive by the time it is called: every caller normalizes first, so a
-// config file's stray whitespace is forgiven while a genuinely wrong word is not.
+// validWordSyncMode reports whether v is one of the CURRENT accepted modes
+// (post-alias-resolution). Case- and space-sensitive by the time it is
+// called: every caller normalizes first, so a config file's stray whitespace
+// is forgiven while a genuinely wrong word is not.
 func validWordSyncMode(v WordSyncMode) bool {
 	for _, m := range wordSyncModes() {
 		if v == m {
@@ -203,10 +220,37 @@ func validWordSyncMode(v WordSyncMode) bool {
 	return false
 }
 
-// normalizeWordSyncMode lowercases and trims a raw mode so a file's " Sidecar"
-// and env's "SIDECAR" resolve identically.
+// normalizeWordSyncMode lowercases and trims a raw mode so a file's " Both "
+// and env's "BOTH" resolve identically.
 func normalizeWordSyncMode(v WordSyncMode) WordSyncMode {
 	return WordSyncMode(strings.ToLower(strings.TrimSpace(string(v))))
+}
+
+// ResolveWordSyncModeAlias exposes resolveWordSyncModeAlias to other packages
+// (the `config set` CLI arm), so every tier that decodes a deprecated
+// word_sync_mode spelling shares one resolution table rather than restating
+// it. v must already be normalized by the caller.
+func ResolveWordSyncModeAlias(v WordSyncMode) (resolved WordSyncMode, aliased bool) {
+	return resolveWordSyncModeAlias(v)
+}
+
+// resolveWordSyncModeAlias maps a deprecated word_sync_mode spelling onto its
+// #1072 replacement, reporting whether a mapping was applied so each tier
+// (file/env/`config set`) can warn exactly once, naming the new value. v must
+// already be normalized (normalizeWordSyncMode) by the caller. The retired
+// "both" spelling (markers in both places) is NOT an alias here: it is not
+// distinguishable from the new "both" spelling, so it silently keeps its own
+// name and takes on the new meaning without a warning -- see the WordSyncMode
+// doc comment.
+func resolveWordSyncModeAlias(v WordSyncMode) (resolved WordSyncMode, aliased bool) {
+	switch v {
+	case wordSyncModeAliasSidecar:
+		return WordSyncModeBoth, true
+	case wordSyncModeAliasInline:
+		return WordSyncModeReplace, true
+	default:
+		return v, false
+	}
 }
 
 // OutputConfig holds output-related configuration.
@@ -242,18 +286,19 @@ type OutputConfig struct {
 	// this key's type would stop every deployment carrying `word_sync = false`
 	// from booting. It is consulted only when word_sync_mode is absent, where an
 	// explicit false maps to WordSyncModeOff and an explicit true to
-	// WordSyncModeInline. Mirrors server.scan_interval_seconds ->
+	// WordSyncModeReplace. Mirrors server.scan_interval_seconds ->
 	// [server.scan_schedule]: both keys stay live, the deprecated one warns, the
 	// new one wins.
 	WordSync bool `toml:"word_sync"`
 	// WordSyncMode is where word-level (Enhanced-LRC "A2") timings go when a
-	// provider serves them (#986). One of: sidecar (default; clean .lrc plus a
-	// companion sidecar), off (clean .lrc, timings discarded), inline (markers in
-	// the .lrc, no companion), both (markers inline AND a companion).
+	// provider serves them (#986, revised #1072). One of: both (default; clean
+	// .lrc plus a companion .elrc), off (clean .lrc, timings discarded), replace
+	// (markers in the .lrc, no companion). "sidecar" and "inline" still decode
+	// as deprecated aliases of both/replace (see resolveWordSyncModeAlias).
 	//
 	// Supersedes WordSync. When this is non-blank it WINS outright and WordSync
 	// is not consulted; an unrecognized value resets to the default rather than
-	// falling through to the empty zero value, which is not one of the four.
+	// falling through to the empty zero value, which is not one of the three.
 	// Override: MXLRC_WORD_SYNC_MODE.
 	WordSyncMode WordSyncMode `toml:"word_sync_mode"`
 }
@@ -1037,8 +1082,8 @@ func defaults() Config {
 		},
 		// WordSyncMode is SEEDED here, unlike the bool it supersedes: a bool's
 		// zero value IS its default, while an enum's zero value is "", which is
-		// not one of the four modes.
-		Output:       OutputConfig{Dir: DefaultOutputDir, EmbeddedLyrics: "off", WordSyncMode: WordSyncModeSidecar},
+		// not one of the three modes.
+		Output:       OutputConfig{Dir: DefaultOutputDir, EmbeddedLyrics: "off", WordSyncMode: WordSyncModeBoth},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds, SweepIntervalSeconds: defaultSweepIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch", Mode: providersModeDefault, RaceWaitSeconds: raceWaitSecondsDefault},
@@ -1170,19 +1215,30 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			// bool permanently unreachable.
 			switch {
 			case md.IsDefined("output", "word_sync_mode") && strings.TrimSpace(string(cfg.Output.WordSyncMode)) != "":
-				// An unrecognized mode resets to the default rather than falling
-				// through to the "" zero value, which is not one of the four and
-				// which no consumer has an arm for.
+				normalized := normalizeWordSyncMode(cfg.Output.WordSyncMode)
 				fileSetWordSyncMode = true
-				cfg.Output.WordSyncMode = normalizeWordSyncMode(cfg.Output.WordSyncMode)
+				resolved, aliased := resolveWordSyncModeAlias(normalized)
+				if aliased {
+					// The message interpolates only `resolved` (one of the two
+					// hardcoded constants resolveWordSyncModeAlias can return, never
+					// the raw tainted input), so this carries no log-injection
+					// vector despite the fmt.Sprintf; the raw value is still
+					// captured, untouched, in the structured "value" field below.
+					slog.Warn(fmt.Sprintf("output.word_sync_mode is deprecated; use %s instead (see docs/CONFIGURATION.md)", resolved),
+						"value", normalized, "resolved_mode", resolved)
+				}
+				// An unrecognized mode resets to the default rather than falling
+				// through to the "" zero value, which is not one of the three and
+				// which no consumer has an arm for.
+				cfg.Output.WordSyncMode = resolved
 				if !validWordSyncMode(cfg.Output.WordSyncMode) {
 					cfg.Output.WordSyncMode = d.Output.WordSyncMode
 				}
 			case md.IsDefined("output", "word_sync"):
-				// true maps to inline, NOT sidecar: an operator who wrote true
+				// true maps to replace, NOT both: an operator who wrote true
 				// asked for inline markers and must keep getting them.
 				if cfg.Output.WordSync {
-					cfg.Output.WordSyncMode = WordSyncModeInline
+					cfg.Output.WordSyncMode = WordSyncModeReplace
 				} else {
 					cfg.Output.WordSyncMode = WordSyncModeOff
 				}
@@ -1431,7 +1487,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	if appliedEnv["output.word_sync"] && !appliedEnv["output.word_sync_mode"] && !fileSetWordSyncMode {
 		resolved := WordSyncModeOff
 		if cfg.Output.WordSync {
-			resolved = WordSyncModeInline
+			resolved = WordSyncModeReplace
 		}
 		cfg.Output.WordSyncMode = resolved
 		slog.Warn("MXLRC_WORD_SYNC is deprecated; set MXLRC_WORD_SYNC_MODE instead (see docs/CONFIGURATION.md)",
@@ -1585,7 +1641,20 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		}
 	}
 	if v := os.Getenv("MXLRC_WORD_SYNC_MODE"); v != "" {
-		mode := normalizeWordSyncMode(WordSyncMode(v))
+		normalized := normalizeWordSyncMode(WordSyncMode(v))
+		mode, aliased := resolveWordSyncModeAlias(normalized)
+		if aliased {
+			// Same reasoning as the file-tier arm above: only the resolved
+			// constant is interpolated, never the raw env value. gosec's taint
+			// analysis still flags it because `mode` is the return value of a
+			// function that also returns its (tainted) input on the non-aliased
+			// path; on THIS path (aliased == true) it is always one of the two
+			// hardcoded constants resolveWordSyncModeAlias returns, so there is
+			// no log-injection vector -- the raw value is still captured,
+			// untouched, in the structured "value" field.
+			slog.Warn(fmt.Sprintf("MXLRC_WORD_SYNC_MODE is deprecated; use %s instead (see docs/CONFIGURATION.md)", mode), //nolint:gosec // reason: G706: mode is a hardcoded constant on this path (aliased==true), not the tainted input; see comment above
+				"value", normalized, "resolved_mode", mode)
+		}
 		if !validWordSyncMode(mode) {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_WORD_SYNC_MODE", "value", v, "current", cfg.Output.WordSyncMode) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {

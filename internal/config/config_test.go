@@ -2441,7 +2441,7 @@ func TestLoad_LegacyWordSyncBoolStillBoots(t *testing.T) {
 		want WordSyncMode
 	}{
 		{"explicit false", "[output]\nword_sync = false\n", WordSyncModeOff},
-		{"explicit true", "[output]\nword_sync = true\n", WordSyncModeInline},
+		{"explicit true", "[output]\nword_sync = true\n", WordSyncModeReplace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateEnv(t)
@@ -2475,9 +2475,9 @@ func TestLoad_WordSyncModePrecedence(t *testing.T) {
 		want WordSyncMode
 	}{
 		{"mode wins over the deprecated bool", "[output]\nword_sync = true\nword_sync_mode = \"off\"\n", WordSyncModeOff},
-		{"bool applies when mode is absent", "[output]\nword_sync = true\n", WordSyncModeInline},
-		{"neither key present keeps the default", "[output]\ndir = \"lyrics\"\n", WordSyncModeSidecar},
-		{"an empty mode falls through to the bool", "[output]\nword_sync = true\nword_sync_mode = \"\"\n", WordSyncModeInline},
+		{"bool applies when mode is absent", "[output]\nword_sync = true\n", WordSyncModeReplace},
+		{"neither key present keeps the default", "[output]\ndir = \"lyrics\"\n", WordSyncModeBoth},
+		{"an empty mode falls through to the bool", "[output]\nword_sync = true\nword_sync_mode = \"\"\n", WordSyncModeReplace},
 		{"whitespace and case are normalized", "[output]\nword_sync_mode = \"  BOTH \"\n", WordSyncModeBoth},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2515,8 +2515,59 @@ func TestLoad_UnrecognizedWordSyncModeResetsToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Output.WordSyncMode != WordSyncModeSidecar {
-		t.Errorf("a typo'd mode resolved to %q; want the default %q", cfg.Output.WordSyncMode, WordSyncModeSidecar)
+	if cfg.Output.WordSyncMode != WordSyncModeBoth {
+		t.Errorf("a typo'd mode resolved to %q; want the default %q", cfg.Output.WordSyncMode, WordSyncModeBoth)
+	}
+}
+
+// TestLoad_DeprecatedWordSyncModeAliasesResolve pins the #1072 migration: the
+// retired "sidecar" and "inline" spellings still DECODE (an existing
+// deployment must keep booting) and resolve onto their #1072 replacements,
+// each with a warning naming the new value. The retired "both" spelling is
+// NOT an alias -- it cannot be told apart from the current "both", so it
+// silently keeps its own name and takes on the new meaning, asserted here
+// with NO warning expected.
+func TestLoad_DeprecatedWordSyncModeAliasesResolve(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    string
+		want     WordSyncMode
+		wantWarn bool
+	}{
+		{"sidecar aliases to both, with a warning", "sidecar", WordSyncModeBoth, true},
+		{"inline aliases to replace, with a warning", "inline", WordSyncModeReplace, true},
+		{"both silently keeps its name and new meaning", "both", WordSyncModeBoth, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateEnv(t)
+			cfgFile := filepath.Join(t.TempDir(), "config.toml")
+			body := "[output]\nword_sync_mode = \"" + tc.value + "\"\n"
+			if err := os.WriteFile(cfgFile, []byte(body), 0o600); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			cfg, err := Load(cfgFile)
+			if err != nil {
+				t.Fatalf("a config carrying %q failed to load: %v", tc.value, err)
+			}
+			if cfg.Output.WordSyncMode != tc.want {
+				t.Errorf("word_sync_mode = %q resolved to %q; want %q", tc.value, cfg.Output.WordSyncMode, tc.want)
+			}
+			// The message itself (not just the structured "resolved_mode" field)
+			// must name the new value in plain words, e.g. `use "both" instead`
+			// (#1072 hostile-review finding I1) -- an operator reading a log line
+			// should not have to know to look for a separate field.
+			wantMsg := "output.word_sync_mode is deprecated; use " + string(tc.want) + " instead"
+			gotWarn := strings.Contains(buf.String(), wantMsg)
+			if gotWarn != tc.wantWarn {
+				t.Errorf("deprecation warning (%q) present = %v, want %v; log was:\n%s", wantMsg, gotWarn, tc.wantWarn, buf.String())
+			}
+		})
 	}
 }
 
@@ -2546,15 +2597,42 @@ func TestApplyEnvOverrides_WordSyncMode(t *testing.T) {
 		t.Setenv("MXLRC_WORD_SYNC_MODE", "sidcar")
 
 		cfg := defaults()
-		cfg.Output.WordSyncMode = WordSyncModeInline // a deliberate prior setting
+		cfg.Output.WordSyncMode = WordSyncModeReplace // a deliberate prior setting
 		applied := map[string]bool{}
 		applyEnvOverrides(&cfg, applied)
 
-		if cfg.Output.WordSyncMode != WordSyncModeInline {
-			t.Errorf("an invalid env value overwrote the configured mode: got %q, want %q", cfg.Output.WordSyncMode, WordSyncModeInline)
+		if cfg.Output.WordSyncMode != WordSyncModeReplace {
+			t.Errorf("an invalid env value overwrote the configured mode: got %q, want %q", cfg.Output.WordSyncMode, WordSyncModeReplace)
 		}
 		if applied["output.word_sync_mode"] {
 			t.Error("a rejected env value recorded provenance; callers would annotate it as (env)")
+		}
+	})
+
+	t.Run("deprecated alias applies resolved, with provenance and a warning", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_WORD_SYNC_MODE", "inline")
+
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		cfg := defaults()
+		applied := map[string]bool{}
+		applyEnvOverrides(&cfg, applied)
+
+		if cfg.Output.WordSyncMode != WordSyncModeReplace {
+			t.Errorf("WordSyncMode = %q; want %q (the resolved alias)", cfg.Output.WordSyncMode, WordSyncModeReplace)
+		}
+		if !applied["output.word_sync_mode"] {
+			t.Error("a resolved alias recorded no provenance; the (env) annotation would be missing")
+		}
+		// Same plain-words requirement as the file tier (#1072 finding I1): the
+		// message names the resolved value ("replace"), not just a generic
+		// "deprecated" notice with the new name tucked in a structured field.
+		if !strings.Contains(buf.String(), "MXLRC_WORD_SYNC_MODE is deprecated; use replace instead") {
+			t.Errorf("no deprecation warning naming the resolved value; log was:\n%s", buf.String())
 		}
 	})
 }
@@ -2572,8 +2650,15 @@ func TestWordSyncModeValidatorIsWired(t *testing.T) {
 	}
 	// Normalized, matching the loader: a value the write path rejects here but
 	// the next boot would accept is the symptom ValidateNormalizedEnum exists for.
-	if err := ValidateAndSet("output.word_sync_mode", " Inline "); err != nil {
+	if err := ValidateAndSet("output.word_sync_mode", " Replace "); err != nil {
 		t.Errorf("ValidateAndSet rejected a value the loader normalizes and accepts: %v", err)
+	}
+	// The retired alias spellings are NOT accepted here: ValidateAndSet backs
+	// the settings dropdown, which never offers them (see AllowedValues below),
+	// so only the file/env/`config set` tiers resolve them (see
+	// TestLoad_DeprecatedWordSyncModeAliasesResolve).
+	if err := ValidateAndSet("output.word_sync_mode", "sidecar"); err == nil {
+		t.Error("ValidateAndSet accepted the retired \"sidecar\" alias; the dropdown must never offer it")
 	}
 	// AllowedValues drives the settings dropdown from the same list.
 	if got := AllowedValues("output.word_sync_mode"); len(got) != len(wordSyncModes()) {
@@ -2599,12 +2684,12 @@ func TestEnvLegacyWordSyncBoolMaps(t *testing.T) {
 		file    string
 		want    WordSyncMode
 	}{
-		{"env bool true maps to inline", "true", "", "", WordSyncModeInline},
+		{"env bool true maps to inline", "true", "", "", WordSyncModeReplace},
 		{"env bool false maps to off", "false", "", "", WordSyncModeOff},
 		// The mode env var is MORE SPECIFIC and must win outright.
 		{"env mode beats env bool", "true", "both", "", WordSyncModeBoth},
 		// An env bool still beats a FILE that never mentioned either key.
-		{"env bool over a silent file", "true", "", "[output]\ndir = \"x\"\n", WordSyncModeInline},
+		{"env bool over a silent file", "true", "", "[output]\ndir = \"x\"\n", WordSyncModeReplace},
 		// ...but NOT over a file that set the mode explicitly. The deprecated
 		// key is consulted only when word_sync_mode is unset in EVERY source;
 		// otherwise a mode saved from the settings UI (whose env lock knows
@@ -2612,7 +2697,7 @@ func TestEnvLegacyWordSyncBoolMaps(t *testing.T) {
 		{"explicit file mode beats env bool", "true", "", "[output]\nword_sync_mode = \"off\"\n", WordSyncModeOff},
 		// A file that set only the deprecated bool is still overridden by the
 		// env bool: same key, ordinary env > file precedence.
-		{"env bool beats file bool", "true", "", "[output]\nword_sync = false\n", WordSyncModeInline},
+		{"env bool beats file bool", "true", "", "[output]\nword_sync = false\n", WordSyncModeReplace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateEnv(t)

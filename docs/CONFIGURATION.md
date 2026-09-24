@@ -174,7 +174,7 @@ dir = "lyrics"
 # embedded_lyrics = "off"
 # bilingual_output = false
 # word_sync = false          # deprecated, see word_sync_mode
-# word_sync_mode = "sidecar"
+# word_sync_mode = "both"
 ```
 
 Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`, `MXLRC_WORD_SYNC`, `MXLRC_WORD_SYNC_MODE`; CLI: `--embedded-lyrics`).
@@ -183,20 +183,19 @@ Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`,
 
 `bilingual_output` (default `false`): when `true` and a provider returns a non-empty translation track, the original and translation lines are interleaved under shared timestamps in a single `.lrc`. See `docs/multilingual-output-policy.md`.
 
-`word_sync_mode` (default `"sidecar"`) decides WHERE per-word (Enhanced LRC, "A2") timings go when a provider serves them -- Musixmatch (on most line-synced results) and Petit Lyrics' word-synced tier. With the default, a fetch that carries word timings writes a companion `.elrc` beside the `.lrc`; set `off` to keep the previous one-file output. Changing the mode affects new fetches only: tracks that already have a `.lrc` are not re-fetched on their own. To add word timings to them, run [`canticle scan reconcile-word-sync`](CLI_REFERENCE.md#reconcile-word-sync), which queues them for a paced re-check (read its [cost](USER_GUIDE.md#word-timing-re-check-cost) first). That command refuses to run under `off`. Four values:
+`word_sync_mode` (default `"both"`) decides WHERE per-word (Enhanced LRC, "A2") timings go when a provider serves them -- Musixmatch (on most line-synced results) and Petit Lyrics' word-synced tier. With the default, a fetch that carries word timings writes a companion `.elrc` beside the `.lrc`; set `off` to keep the previous one-file output. Changing the mode affects new fetches only: tracks that already have a `.lrc` are not re-fetched on their own. To add word timings to them, run [`canticle scan reconcile-word-sync`](CLI_REFERENCE.md#reconcile-word-sync), which queues them for a paced re-check (read its [cost](USER_GUIDE.md#word-timing-re-check-cost) first). That command refuses to run under `off`. Three values (#1072):
 
-| value | the `.lrc` | companion sidecar |
+| value | the `.lrc` | companion `.elrc` |
 |---|---|---|
-| `sidecar` (default) | line-synced, clean | written |
+| `both` (default) | line-synced, clean | written |
 | `off` | line-synced, clean | none |
-| `inline` | carries `<MM:SS.cc>` word markers | none |
-| `both` | carries the markers | written |
+| `replace` | carries `<MM:SS.cc>` word markers | none |
 
-`both` names the two DESTINATIONS for the markers, not two files: `sidecar` already writes two. An unrecognized value resets to `sidecar` rather than resolving to nothing.
+`sidecar` and `inline` are deprecated aliases for `both` and `replace`; they still decode, with a deprecation warning naming the new value. An older config that already read `both` (markers in the `.lrc` AND a companion, the pre-#1072 meaning) silently gets the new meaning above instead -- that is the safe direction, since it can only remove markers from a `.lrc` a player might render as literal text, never add them, so it cannot warn (an old and a new config asking for `both` are indistinguishable). An unrecognized value resets to `both` rather than resolving to nothing. This meaning change is config-only: an existing `.lrc` written under the pre-#1072 `both` keeps whatever markers it already has on disk, since nothing rewrites a settled sidecar on its own -- only a re-fetch (or `canticle scan reconcile-word-sync`, above) touches the file.
 
-Before setting `inline` or `both` for a whole library, verify your player actually renders A2 -- see [A2 Player Verification](word-sync-player-verification.md).
+Before setting `replace` for a whole library, verify your player actually renders A2 -- see [A2 Player Verification](word-sync-player-verification.md).
 
-`word_sync` (default `false`) is **deprecated** and superseded by `word_sync_mode`. It still decodes and is still honored, so an existing config keeps booting unchanged, but only when `word_sync_mode` is unset: an explicit `word_sync = false` then resolves to `off` and an explicit `true` resolves to `inline` (not `sidecar` -- someone who wrote `true` asked for inline markers and keeps getting them), with a deprecation warning naming the new key. When `word_sync_mode` is set it wins outright and `word_sync` is not consulted. That holds across sources: a `word_sync_mode` in the file also beats `MXLRC_WORD_SYNC` in the environment (which is logged as ignored), so a mode saved from the settings page is never reverted by a stale env var. This mirrors `server.scan_interval_seconds` -> `[server.scan_schedule]`.
+`word_sync` (default `false`) is **deprecated** and superseded by `word_sync_mode`. It still decodes and is still honored, so an existing config keeps booting unchanged, but only when `word_sync_mode` is unset: an explicit `word_sync = false` then resolves to `off` and an explicit `true` resolves to `replace` (not `both` -- someone who wrote `true` asked for inline markers and keeps getting them), with a deprecation warning naming the new key. When `word_sync_mode` is set it wins outright and `word_sync` is not consulted. That holds across sources: a `word_sync_mode` in the file also beats `MXLRC_WORD_SYNC` in the environment (which is logged as ignored), so a mode saved from the settings page is never reverted by a stale env var. This mirrors `server.scan_interval_seconds` -> `[server.scan_schedule]`.
 
 Historically, `word_sync` (default `false`): when `true` and a provider serves word-level timings (Musixmatch or Petit Lyrics, as above) each cue keeps its normal `[MM:SS.cc]` stamp and gains a `<MM:SS.cc>` marker before each word (Enhanced LRC, "A2"). This is the karaoke-style per-word highlighting some players support.
 

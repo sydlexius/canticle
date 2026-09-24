@@ -2074,13 +2074,13 @@ func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 	}
 }
 
-// configureWriterWordSync maps output.word_sync_mode (#986) onto the LRC
-// writer's two independent switches: inline Enhanced-LRC (A2) markers in the
-// .lrc (#480) for inline/both, and the word-synced companion sidecar for
-// sidecar/both. It reads the RESOLVED mode only; the deprecated word_sync bool
-// was already folded into it by config.LoadWithSources. Same type-assertion
-// shape as the bilingual setter above: a test double that is not
-// *lyrics.LRCWriter is left alone.
+// configureWriterWordSync maps output.word_sync_mode (#986, revised #1072)
+// onto the LRC writer's two independent switches: inline Enhanced-LRC (A2)
+// markers in the .lrc (#480) for replace, and the word-synced companion
+// sidecar for both. It reads the RESOLVED mode only; the deprecated word_sync
+// bool and deprecated mode spellings were already folded into it by
+// config.LoadWithSources. Same type-assertion shape as the bilingual setter
+// above: a test double that is not *lyrics.LRCWriter is left alone.
 func configureWriterWordSync(w lyrics.Writer, cfg config.Config) {
 	if lw, ok := w.(*lyrics.LRCWriter); ok {
 		inline, companion := wordSyncSwitches(cfg.Output.WordSyncMode)
@@ -2091,11 +2091,10 @@ func configureWriterWordSync(w lyrics.Writer, cfg config.Config) {
 
 // wordSyncSwitches is the mode-to-switch table behind configureWriterWordSync,
 // split out so the companion half is testable without a fetch and a file on
-// disk. An unrecognized mode
-// (which LoadWithSources never produces) turns both off.
+// disk. #1072 retired the combination that set both switches together: an
+// unrecognized mode (which LoadWithSources never produces) turns both off.
 func wordSyncSwitches(mode config.WordSyncMode) (inline, companion bool) {
-	return mode == config.WordSyncModeInline || mode == config.WordSyncModeBoth,
-		mode == config.WordSyncModeSidecar || mode == config.WordSyncModeBoth
+	return mode == config.WordSyncModeReplace, mode == config.WordSyncModeBoth
 }
 
 // configureWriterSelfWrites attaches the shared self-write registry to the
@@ -3191,7 +3190,15 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 			slog.Error("failed to close config", "error", err)
 			return 1
 		}
-		_, _ = fmt.Fprintf(out, "%s=%s\n", args.Set.Key, args.Set.Value)
+		// Echo the SAVED value, not the raw input: setConfigValue may normalize
+		// (trim/lowercase) or resolve a deprecated alias (e.g. "sidecar" ->
+		// "both") before writing, and the file on disk is what the next boot
+		// reads. Echoing args.Set.Value verbatim here reported the padding and
+		// the retired spelling the operator typed, not what took effect (#1072
+		// hostile-review finding I1). configValue reads the just-persisted cfg,
+		// so this applies uniformly across every key, not only this one.
+		savedValue, _ := configValue(cfg, args.Set.Key)
+		_, _ = fmt.Fprintf(out, "%s=%s\n", args.Set.Key, savedValue)
 	default:
 		_, _ = fmt.Fprintln(out, "missing config subcommand")
 		return 2
@@ -3416,29 +3423,40 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 		// deprecated key, see exit 0, and get nothing, forever.
 		//
 		// Same legacy mapping as the loader and the env path, kept in the one
-		// shape all three use: true means inline, false means off.
+		// shape all three use: true means replace, false means off.
 		if v {
-			cfg.Output.WordSyncMode = config.WordSyncModeInline
+			cfg.Output.WordSyncMode = config.WordSyncModeReplace
 		} else {
 			cfg.Output.WordSyncMode = config.WordSyncModeOff
 		}
 	case "output.word_sync_mode":
+		// Normalized first because the loader normalizes: accepting " Sidecar"
+		// here and storing it verbatim would write a value the next boot resets.
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		// Deprecated spellings (#1072) are resolved BEFORE validation, using
+		// the same table the file and env tiers read, so `config set
+		// output.word_sync_mode sidecar` keeps working (with a warning) rather
+		// than being rejected outright.
+		resolved, aliased := config.ResolveWordSyncModeAlias(config.WordSyncMode(normalized))
+		if aliased {
+			// Only the resolved constant is interpolated (never the raw input),
+			// matching the file/env tiers in internal/config.
+			slog.Warn(fmt.Sprintf("output.word_sync_mode is deprecated; use %s instead (see docs/CONFIGURATION.md)", resolved),
+				"value", normalized, "resolved_mode", resolved)
+		}
 		// Validation is DELEGATED to the config package rather than restated
 		// here, following the timing-action arms below: config.ValidateAndSet
 		// reads the same enum source the loader, the env path, and the settings
 		// UI read, so a value this CLI accepts is exactly a value the next boot
-		// will keep. Restating the four modes in this switch is how the CLI
+		// will keep. Restating the three modes in this switch is how the CLI
 		// would drift from the loader.
 		//
-		// Normalized first because the loader normalizes: accepting " Sidecar"
-		// here and storing it verbatim would write a value the next boot resets.
-		normalized := strings.ToLower(strings.TrimSpace(value))
 		// Returned UNWRAPPED: the *config.ValidationError already names the path,
 		// the offending value, and the allowed set.
-		if err := config.ValidateAndSet(key, normalized); err != nil {
+		if err := config.ValidateAndSet(key, string(resolved)); err != nil {
 			return err
 		}
-		cfg.Output.WordSyncMode = config.WordSyncMode(normalized)
+		cfg.Output.WordSyncMode = resolved
 	case "db.path":
 		cfg.DB.Path = value
 	case "server.addr":

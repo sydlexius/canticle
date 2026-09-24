@@ -108,25 +108,29 @@ dir = "lyrics"
 #
 # DEPRECATED: superseded by word_sync_mode below. It still works and is still
 # read, but ONLY when word_sync_mode is unset; false then means "off" and true
-# means "inline". Setting word_sync_mode is the way forward.
+# means "replace". Setting word_sync_mode is the way forward.
 # word_sync = false
 
 # word_sync_mode: WHERE per-word timings go when a provider serves them. This
-# supersedes word_sync, which could only say "inline or nothing".
+# supersedes word_sync, which could only say "replace or nothing".
 #
-#   "sidecar" (default) -- the .lrc stays clean, line-synced, and playable in
-#                          every player; the word timings are saved beside it.
+#   "both" (default)    -- the .lrc stays clean, line-synced, and playable in
+#                          every player; the word timings are saved beside it
+#                          in a companion .elrc.
 #   "off"               -- the .lrc stays clean and word timings are discarded.
-#   "inline"            -- word markers go INTO the .lrc, no companion file.
+#   "replace"           -- word markers go INTO the .lrc, no companion file.
 #                          This is the old word_sync = true. See the A2 warning
 #                          above before choosing it.
-#   "both"              -- markers inline AND a companion file. "Both" is about
-#                          the two DESTINATIONS for the markers, not two files:
-#                          "sidecar" already writes two.
+#
+# "sidecar" and "inline" are deprecated aliases for "both" and "replace"
+# (#1072); they still decode, with a warning naming the new value. The old
+# "both" meaning (markers in the .lrc AND a companion) is retired -- a config
+# already reading "both" silently gets the new meaning above, since markers
+# only ever LEAVE the .lrc under this change, never get added to it.
 #
 # An unrecognized value falls back to the default rather than to nothing.
-# Override: MXLRC_WORD_SYNC_MODE. Default "sidecar".
-# word_sync_mode = "sidecar"
+# Override: MXLRC_WORD_SYNC_MODE. Default "both".
+# word_sync_mode = "both"
 
 [db]
 # Path to SQLite database file.

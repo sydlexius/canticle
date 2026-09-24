@@ -115,9 +115,9 @@ func validEnvValue(f FieldSpec) string {
 	case "output.word_sync_mode":
 		// An enum carried as TypeString, so the generic default ("x") would be
 		// rejected by the env arm and leave provenance false. Deliberately NOT
-		// "sidecar": that is the default, so an arm that silently failed to
+		// "both": that is the default, so an arm that silently failed to
 		// assign would still read as applied.
-		return "inline"
+		return "replace"
 	case "timing_validation.on_mis_synced":
 		return "quarantine"
 	case "server.scan_schedule.at":
