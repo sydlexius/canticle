@@ -68,6 +68,14 @@ func newRecheckRig(t *testing.T, primary, secondary *fakeFetcher, ordinary bool)
 		t.Fatalf("enqueue: %v", err)
 	}
 	writer := lyrics.NewLRCWriter(lib)
+	// Every existing recheck scenario represents a row dispatched under a
+	// word_sync_mode that is NOT off (sidecar, the config default): that is
+	// the only state a real queued row can be dispatched under, since both
+	// flip entry points already refuse to queue one under off. Mirror that
+	// here so these tests exercise the real "not off" precondition rather
+	// than the writer's zero value, which TestWordRecheck_ReleasedWhenWordSyncOff
+	// below exercises deliberately.
+	writer.SetWordSyncCompanion(true)
 	settled := fallthroughSong(90, "settled line")
 	settled.AudioDurationSeconds = fallthroughFileSeconds
 	if err := writer.WriteLRC(settled, "track.lrc", lib); err != nil {
@@ -178,6 +186,57 @@ func TestWordRecheck_ServedWritesWordResult(t *testing.T) {
 	}
 	if song, ok := rig.cached(t); !ok || len(song.WordTimings) == 0 {
 		t.Fatalf("cache = %+v, %v; want the word result stored", song, ok)
+	}
+}
+
+// TestWordRecheck_ReleasedWhenWordSyncOff is #1054: a row already flipped into
+// recheck mode (word_timing_state='queued') must be released back to done
+// with no verdict when the worker later runs under output.word_sync_mode =
+// off, rather than dispatching as if word sync were still on. Both flip entry
+// points (MarkWordRecheckQueued's CLI caller and the #1048 sweep) already
+// refuse to QUEUE a new row under off; this is the gap where a row queued
+// before an operator flips the switch off would otherwise keep draining.
+func TestWordRecheck_ReleasedWhenWordSyncOff(t *testing.T) {
+	primary := &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}
+	secondary := &fakeFetcher{err: petitlyrics.ErrNoMatch}
+	rig, w := newRecheckRig(t, primary, secondary, false)
+	// newRecheckRig's writer defaults to the companion sidecar (mirroring the
+	// only mode a real queued row could have been dispatched under); flip it
+	// to off here, simulating the operator's restart-with-off (#1054's
+	// reproduction steps).
+	lw, ok := w.writer.(*lyrics.LRCWriter)
+	if !ok {
+		t.Fatal("writer is not *lyrics.LRCWriter")
+	}
+	lw.SetWordSync(false)
+	lw.SetWordSyncCompanion(false)
+	// An owned word-synced companion from an earlier fetch (made while sync
+	// was still on) must survive untouched, exactly like the no-write cases
+	// in TestWordRecheck_NoWordsNeverDowngrades.
+	elrc := rig.lrc[:len(rig.lrc)-len(".lrc")] + ".elrc"
+	companion := []byte("[by:canticle]\n[00:10.00]<00:10.00>settled <00:11.00>line\n")
+	if err := os.WriteFile(elrc, companion, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if primary.calls != 0 || secondary.calls != 0 {
+		t.Fatalf("primary calls = %d, secondary calls = %d; want no lane dispatched under word_sync_mode off", primary.calls, secondary.calls)
+	}
+	rig.assertUntouched(t)
+	if got, err := os.ReadFile(elrc); err != nil || !bytes.Equal(got, companion) {
+		t.Fatalf("owned .elrc = %q, %v; want untouched", got, err)
+	}
+	row := rig.recheckRow(t)
+	if row.status != "done" || row.state != "" || row.generation != 0 {
+		t.Fatalf("row = %+v; want done with NO verdict (word_timing_state cleared, not served/absent)", row)
+	}
+	if row.missCount != 0 || row.attempts != 0 || row.laneRows != 0 {
+		t.Fatalf("row counters = %+v; a release under word_sync_mode off must move no counter", row)
+	}
+	if song, ok := rig.cached(t); ok {
+		t.Fatalf("cache = %+v; a release under word_sync_mode off must never consult or write the cache", song)
 	}
 }
 
