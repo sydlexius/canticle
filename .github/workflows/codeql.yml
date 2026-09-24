@@ -9,6 +9,10 @@ on:
   # failure mode for any branch outside the pattern. This repo is single-trunk,
   # so every PR reaches main eventually and the filter only ever excludes work
   # that should have been tested.
+  # No paths filter and no per-step skip either: the "Protect main" ruleset's
+  # code_scanning rule requires a CodeQL analysis for every PR, so a PR that
+  # skips the analysis stays BLOCKED waiting for results that never arrive
+  # (#1070 tried skipping on non-Go PRs and blocked #1069).
   pull_request:
   schedule:
     - cron: "17 4 * * 1"
@@ -23,8 +27,6 @@ jobs:
     permissions:
       security-events: write
       contents: read
-      # The paths filter lists a PR's changed files through the pulls API.
-      pull-requests: read
 
     steps:
       - name: Checkout
@@ -32,48 +34,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # Skip the real analysis on a PR that cannot change the Go analysis
-      # result (e.g. #1066, a claude.yml-only bump that still ran a full
-      # ~2min CodeQL pass). This job has NO job-level `if`: it always runs
-      # and always reports the required "Analyze Go" check, even when every
-      # real step below no-ops (job-level `if`/workflow `paths-ignore` would
-      # leave a required check "Expected -- waiting for status to be
-      # reported" forever on a skipped PR -- see the ci.yml `changes` job's
-      # own comment on this failure mode). Only `pull_request` may skip:
-      # push-to-main, the weekly `schedule`, and `workflow_dispatch` always
-      # run the full analysis regardless of this filter, since those are what
-      # keep the default-branch code-scanning baseline current.
-      #
-      # The filter list covers everything that can change what CodeQL
-      # traces: the Go source/module files, the web assets `make generate`
-      # feeds into the traced build (web/** covers input.css and the templ
-      # sources), the Makefile (owns the `generate`/`build` recipe this job
-      # runs), the Tailwind install script, the local CodeQL model pack this
-      # workflow loads (.github/codeql/**), and the workflow file itself.
-      - name: Detect Go-analysis-relevant changes
-        if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        id: filter
-        with:
-          filters: |
-            go:
-              - '**/*.go'
-              - 'go.mod'
-              - 'go.sum'
-              - 'web/**'
-              - 'Makefile'
-              - 'scripts/install-tailwind.sh'
-              - '.github/codeql/**'
-              - '.github/workflows/codeql.yml'
-
       - name: Set up Go
-        if: github.event_name != 'pull_request' || steps.filter.outputs.go == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
       - name: Initialize CodeQL
-        if: github.event_name != 'pull_request' || steps.filter.outputs.go == 'true'
         uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           languages: go
@@ -83,23 +49,15 @@ jobs:
       # generated *_templ.go compile. The build below stays a bare `go build`
       # so CodeQL still traces the real analyzed build.
       - name: Install Tailwind standalone CLI (v4.2.0)
-        if: github.event_name != 'pull_request' || steps.filter.outputs.go == 'true'
         run: bash scripts/install-tailwind.sh "$RUNNER_TEMP/tailwindcss"
 
       - name: Generate web UI assets (make generate)
-        if: github.event_name != 'pull_request' || steps.filter.outputs.go == 'true'
         run: make generate TAILWIND="$RUNNER_TEMP/tailwindcss"
 
       - name: Build
-        if: github.event_name != 'pull_request' || steps.filter.outputs.go == 'true'
         run: go build ./...
 
-      # The separate "CodeQL" check (posted by the github-advanced-security app
-      # when an analysis is uploaded) is not in the required set, so whatever
-      # it shows on a PR that skipped the upload cannot block merge. Its exact
-      # appearance there (absent vs. neutral) is unverified.
       - name: Perform CodeQL Analysis
-        if: github.event_name != 'pull_request' || steps.filter.outputs.go == 'true'
         uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           category: /language:go
