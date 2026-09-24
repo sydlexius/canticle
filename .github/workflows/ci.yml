@@ -595,13 +595,9 @@ jobs:
         if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: pytest deploy/aligner -q
 
-      # #1017's dependabot.yml comment states what is known about how
-      # Dependabot bumps this directory's requirements.in/requirements-test.in
-      # (not the per-arch requirements-linux-*.txt locks, which carry no
-      # pip-compile header for it to recognize) but is NOT verified against a
-      # live run. If that assumption is wrong -- a bump lands on one lock
-      # directly, or on only one of the two arches -- this catches it loudly:
-      # compare package NAMES and VERSIONS only (never hashes, which
+      # Dependabot DOES edit the per-arch requirements-linux-*.txt locks
+      # directly (#1064/#1065; dependabot.yml now excludes them). If a bump
+      # lands on only one of the two arches, this catches it loudly: compare package NAMES and VERSIONS only (never hashes, which
       # legitimately differ per platform, and strip a `+cpu`/`+local` build
       # tag, which legitimately differs between amd64 and arm64 for
       # torch/torchaudio -- see either lock's header) and fail if the two
@@ -708,6 +704,23 @@ jobs:
             exit 1
           fi
           echo "requirements.in's $(printf '%s\n' "$SOURCE_PINS" | wc -l | tr -d ' ') exact pins agree with every generated lock that carries them."
+
+      # The two checks above compare locks with EACH OTHER and with
+      # requirements.in's direct pins, so neither sees a TRANSITIVE bump made
+      # identically in both locks -- which is exactly what #1064
+      # (pydantic-core) and #1065 (antlr4-python3-runtime) did, leaving both
+      # locks unsatisfiable while every check here stayed green. This step
+      # re-resolves all three locks from their sources with the README's
+      # recipe (resolution only, no install, no Docker -- uv cross-resolves
+      # via --python-platform) and fails if any committed lock differs. The
+      # --exclude-newer date comes from each lock's own "# Generated:" header
+      # line, and the hand-written header is ignored in the comparison; see
+      # the script for both rules.
+      - name: Install uv (hash-pinned, matches the README's lock recipe)
+        run: pip install --require-hashes -r .github/aligner-lock-tools.txt
+
+      - name: Verify aligner locks are fresh (re-resolve and compare)
+        run: scripts/check-aligner-locks-fresh.sh deploy/aligner
 
   coverage-floor:
     name: Coverage Floor
