@@ -20,5 +20,14 @@ reviews:
   # top-level `@coderabbitai approve` / `@coderabbitai resolve` commands, which
   # are rejected when it is off.
   request_changes_workflow: true
+  # Skip generated lock files: they are machine output with nothing to review,
+  # and their size drowns the real diff. Mirrored as linguist-generated in
+  # .gitattributes. Hand-written inputs (*.in, dev-requirements.txt, and the
+  # aligner's top-level requirements.txt until its lock lands) stay reviewed.
+  path_filters:
+    - "!go.sum"
+    - "!**/*.lock"
+    - "!deploy/**/requirements-*.txt"
+    - "!deploy/yamnet-detector/requirements.txt"
   auto_review:
     enabled: false
