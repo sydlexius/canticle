@@ -182,6 +182,16 @@ func List(dir string) Listing {
 	return Listing{dir: dir, entries: entries}
 }
 
+// ListEntries wraps directory entries the caller already read (typically its
+// own os.ReadDir(dir)) into a Listing, so Variants can be queried without a
+// second read of the same directory (#1051): a scan that already lists dir to
+// enumerate its files would otherwise pay for that listing twice, once for
+// itself and once more per call to List, which is exactly the repeated-read
+// cost #684 exists to avoid. dir must be the directory entries was read from.
+func ListEntries(dir string, entries []os.DirEntry) Listing {
+	return Listing{dir: dir, entries: entries}
+}
+
 // Variants returns every path on disk that IS candidate's sidecar under a
 // different extension case (#989), exact-case name first, the rest in name
 // order. The rule is deliberately narrow because callers feed the result to

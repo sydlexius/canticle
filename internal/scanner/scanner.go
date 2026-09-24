@@ -587,6 +587,58 @@ func sidecarWithinWindow(path string, before time.Time) bool {
 	return info.ModTime().Before(before)
 }
 
+// resolvedSidecarPath reports whether stem+ext (or an extension-case variant
+// of it, #989/#1051) exists in dir, and if so the REAL on-disk path.
+//
+// listing is the directory's entries, read ONCE by scanDir's own os.ReadDir
+// and threaded down here rather than re-read per file: reading dir again per
+// candidate would reintroduce the once-per-scan-pass repeated-read cost #684
+// exists to remove.
+//
+// The PROBE ORDER mirrors the writer's settledSidecar exactly (os.Stat the
+// exact name first, fall back to sidecar.Listing.Variants only on a miss),
+// and that is load-bearing, not cosmetic: an earlier revision handed the
+// exact name straight to Variants, which resolves it with os.Lstat rather
+// than os.Stat, and the two disagree on exactly the cases that matter here.
+// os.Lstat succeeds on a DANGLING SYMLINK (it stats the link itself, not the
+// missing target), so that revision read a dangling "song.lrc" as settled --
+// the writer's os.Stat-based settledSidecar disagreed, but the scanner never
+// asked it, so the track was silently never fetched again. os.Lstat also
+// EXCLUDES a directory named "song.lrc" from Variants' own exact-match slot
+// (it only accepts a non-directory), so that same revision read a directory
+// there as unsettled while the writer's os.Stat-based check read it as
+// settled -- scanner and writer disagreeing in the other direction. Probing
+// os.Stat first, exactly as settledSidecar does, makes both files resolve the
+// same way in both packages: a directory is present (matching the writer),
+// and a dangling symlink is absent (matching the writer, so the track is
+// re-fetched rather than permanently skipped).
+//
+// A stat error other than not-exist (e.g. a permission error) is treated as
+// PRESENT, mirroring settledSidecar's own reasoning: an unreadable path is
+// assumed occupied rather than assumed free, since guessing wrong the other
+// way risks a fetch overwriting content that is actually there.
+//
+// sidecar.Listing.Variants is still the fallback for an extension-case
+// variant, and it is the same helper the writer uses, so the scanner agrees
+// with the writer on what counts as a variant too: the stem stays
+// byte-identical and only the ASCII extension case folds, so "Intro.lrc" is
+// never treated as a variant of "intro.lrc". A Variants entry equal to
+// candidate itself (the exact name, already known absent above) is skipped,
+// mirroring settledSidecar's "dangling symlink at candidate stays absent"
+// rule.
+func resolvedSidecarPath(dir, stem, ext string, listing sidecar.Listing) (string, bool) {
+	candidate := filepath.Join(dir, stem+ext)
+	if _, err := os.Stat(candidate); err == nil || !os.IsNotExist(err) {
+		return candidate, true
+	}
+	for _, v := range listing.Variants(candidate) {
+		if v != candidate {
+			return v, true
+		}
+	}
+	return candidate, false
+}
+
 // NewScanner creates a new Scanner with the supplied options.
 func NewScanner(opts ...Option) *Scanner {
 	sc := &Scanner{}
@@ -1118,6 +1170,14 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 	// reopen is loop-invariant for this directory scan (opts is fixed), so compute
 	// it once rather than per file.
 	reopen := reopenClassesFor(opts)
+	// listing wraps the ReadDir result already paid for above (#1051): it lets
+	// the settled-sidecar check below resolve a case-variant .lrc/.txt
+	// (sidecar.Listing.Variants, #989's rule -- stem byte-identical, extension
+	// ASCII-folded) for every file in this directory without a second
+	// os.ReadDir. Reading dir twice per scanDir call -- once here, once per
+	// candidate inside the loop -- would reintroduce exactly the repeated-read
+	// cost #684 removed.
+	listing := sidecar.ListEntries(dir, files)
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1157,17 +1217,15 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		//     Re-examining settled tracks for word timings is #982's job, as an
 		//     operator-sized pass, not a side effect of every scan.
 		stem := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
-		lrcFile := stem + sidecar.ExtLineSynced
-		txtFile := stem + sidecar.ExtUnsynced
-
-		lrcExists := false
-		if _, err := os.Stat(filepath.Join(dir, lrcFile)); err == nil {
-			lrcExists = true
-		}
-		txtExists := false
-		if _, err := os.Stat(filepath.Join(dir, txtFile)); err == nil {
-			txtExists = true
-		}
+		// Resolved to the REAL on-disk name, an extension-case variant included
+		// (#1051): a track settled as "song.LRC" must read as settled here exactly
+		// as the writer's own settledSidecar treats it, or a case-sensitive
+		// deployment re-queues and re-fetches it on every scan. lrcPath/txtPath
+		// carry whatever name resolvedSidecarPath found, so every downstream read
+		// below (the instrumental-provenance probe, the repair-window check, the
+		// index) opens the file that is actually there.
+		_, lrcExists := resolvedSidecarPath(dir, stem, sidecar.ExtLineSynced, listing)
+		txtPath, txtExists := resolvedSidecarPath(dir, stem, sidecar.ExtUnsynced, listing)
 
 		switch {
 		case lrcExists && !reopen.Synced:
@@ -1188,11 +1246,11 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
-		case txtExists && !lrcExists && isInstrumentalTxt(filepath.Join(dir, txtFile)):
+		case txtExists && !lrcExists && isInstrumentalTxt(txtPath):
 			// Instrumental markers are re-checkable by provenance (#502): a provider
 			// marker is authoritative (terminal), a detector marker is provisional and
 			// reopens on --upgrade or a detector-version bump.
-			prov, _, provErr := lyrics.ReadInstrumentalProvenance(filepath.Join(dir, txtFile))
+			prov, _, provErr := lyrics.ReadInstrumentalProvenance(txtPath)
 			if provErr != nil {
 				// Treat an unreadable header as terminal: fail conservatively toward terminal so a transient read error never reopens a settled marker.
 				slog.Warn("could not read instrumental provenance; treating marker as terminal", "file", file.Name(), "error", provErr)
@@ -1209,7 +1267,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// Reopen granted. A dated repair run narrows it to the target cohort --
 			// checked HERE, inside the branch that granted the reopen, so a marker
 			// this switch already decided to reconsider cannot escape the window.
-			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+			if !sidecarWithinWindow(txtPath, opts.UnsyncedBefore) {
 				// Still a settled file being skipped, so still index it (#786).
 				// Otherwise a dated repair run leaves precisely the out-of-cohort
 				// files invisible to prune's pool.
@@ -1239,7 +1297,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 				slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
 				continue
 			}
-			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+			if !sidecarWithinWindow(txtPath, opts.UnsyncedBefore) {
 				// Still a settled file being skipped, so still index it (#786).
 				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 				slog.Debug("skipping file, unsynced sidecar outside repair window", "file", file.Name())
