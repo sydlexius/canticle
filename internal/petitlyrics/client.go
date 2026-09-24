@@ -649,8 +649,19 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 //
 // A probe already in flight returns false: another goroutine is asking the same
 // question, and two probes cannot be more informative than one.
+//
+// The threshold is RE-CHECKED under the lock because recordZeroResult's verdict
+// is stale by the time the caller gets here: a concurrent probe or real success
+// may have reset the run, or a transport-failed probe halved it, in between.
+// Without the re-check a caller that saw the threshold would re-probe a run that
+// was already adjudicated, or, with no control on record, report a cold-start
+// outage on a credential that had just returned songs.
 func (c *Client) confirmOutage(ctx context.Context) bool {
 	c.mu.Lock()
+	if c.consecutiveZero < ZeroResultThreshold {
+		c.mu.Unlock()
+		return false
+	}
 	control, have, busy := c.knownGood, c.hasKnownGood, c.probeInFlight
 	if have && !busy {
 		c.probeInFlight = true

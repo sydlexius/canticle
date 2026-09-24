@@ -207,12 +207,15 @@ func TestConcurrentMissesProbeOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	// EXACTLY one, and the exactness is provable rather than a hope about
-	// scheduling. The run sits at ZeroResultThreshold-1, so whichever goroutine
-	// increments first reaches the threshold and wins probeInFlight; every other
-	// goroutine either sees busy (returns false, no probe) or arrives after the
-	// successful probe reset the counter to 0, where 7 remaining misses cannot
-	// reach the threshold again.
+	// EXACTLY one. The run sits at ZeroResultThreshold-1, so all 8 goroutines can
+	// observe a count at or past the threshold before ANY of them reaches
+	// confirmOutage -- the count and the probe decision are separate lock
+	// acquisitions, and an earlier comment here wrongly called exactly-one
+	// "provable" on the in-flight guard alone. A goroutine arriving after the
+	// probe finished sees !busy. What holds it to one is confirmOutage re-reading
+	// the count under the lock: a settled run reads 0 and launches nothing, and 8
+	// misses from a reset cannot reach the threshold again.
+	// TestSettledRunDoesNotReprobe forces that interleaving deterministically.
 	//
 	// The earlier `got > 2` was wrong in the direction that matters: it also
 	// passed on ZERO probes, which is the guard blocking the probe entirely --
@@ -220,6 +223,54 @@ func TestConcurrentMissesProbeOnce(t *testing.T) {
 	if got := probes.Load() - seeded; got != 1 {
 		t.Errorf("probe count = %d for 8 concurrent misses; want exactly 1 "+
 			"(0 means the in-flight guard suppressed the probe entirely, >1 means it failed to collapse them)", got)
+	}
+}
+
+// TestSettledRunDoesNotReprobe forces the interleaving that made
+// TestConcurrentMissesProbeOnce flaky in CI: two misses BOTH see
+// recordZeroResult() == true, then the first finishes a successful probe before
+// the second reaches confirmOutage. The second must not re-probe a run that is
+// already adjudicated.
+func TestSettledRunDoesNotReprobe(t *testing.T) {
+	handler, probes := serveKnownGoodOnly(t)
+	c, _ := newTestClient(t, handler)
+	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Known", ArtistName: "Good"}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	seeded := probes.Load()
+
+	for i := 0; i < ZeroResultThreshold-1; i++ {
+		c.recordZeroResult()
+	}
+	if a, b := c.recordZeroResult(), c.recordZeroResult(); !a || !b {
+		t.Fatalf("recordZeroResult = %v, %v; want both at the threshold", a, b)
+	}
+	if c.confirmOutage(context.Background()) {
+		t.Fatal("first confirmOutage reported an outage on a live credential")
+	}
+	if c.confirmOutage(context.Background()) {
+		t.Error("second confirmOutage reported an outage after the run was settled")
+	}
+	if got := probes.Load() - seeded; got != 1 {
+		t.Errorf("probe count = %d; want exactly 1 (the second caller re-probed a settled run)", got)
+	}
+}
+
+// TestSettledRunWithoutControlIsNotAnOutage is the no-control variant: a success
+// on a track too incomplete to become a control still resets the run, so a miss
+// that saw the threshold before that success must not then take the cold-start
+// path and report an outage on a credential that just returned songs.
+func TestSettledRunWithoutControlIsNotAnOutage(t *testing.T) {
+	c, _ := newTestClient(t, serveEmpty())
+	for i := 0; i < ZeroResultThreshold-1; i++ {
+		c.recordZeroResult()
+	}
+	if !c.recordZeroResult() {
+		t.Fatal("recordZeroResult did not reach the threshold")
+	}
+	c.recordSuccess(models.Track{}) // songs came back, but no usable control
+	if c.confirmOutage(context.Background()) {
+		t.Error("confirmOutage reported a cold-start outage after a success reset the run")
 	}
 }
 
