@@ -550,7 +550,9 @@ jobs:
     # tests, so the suite runs on the bare runner via actions/setup-python.
     # ubuntu-latest ships no ffmpeg and the decode security tests need a real
     # binary, so it is apt-installed below. In-image testing against the real
-    # ML stack is #1059.
+    # ML stack (per-arch hash locks, the Dockerfile's build-time smoke checks,
+    # native amd64/arm64) belongs to the aligner image workflow, aligner.yml
+    # (#1059).
     permissions:
       contents: read
     steps:
@@ -582,7 +584,7 @@ jobs:
       # ubuntu-latest carries no ffmpeg; the decode security tests need a
       # real binary to prove anything. No version pin: the distro package is
       # fine here, since the aligner image (which ships its own ffmpeg) is
-      # what slice 4's image smoke test exercises for version parity.
+      # what aligner.yml's image smoke test exercises for version parity.
       - name: Install ffmpeg (the decode security tests need a real binary)
         if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg

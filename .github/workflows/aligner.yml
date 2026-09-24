@@ -1,0 +1,149 @@
+name: Aligner Sidecar Image
+
+# Builds the forced-alignment sidecar image (deploy/aligner/) natively on
+# amd64 and arm64 and smoke-tests it against the real ML stack (#1059).
+#
+# ci.yml's `aligner-test` job runs test_app.py on a bare ubuntu-latest runner
+# with a stubbed model layer -- fast, but it never installs either per-arch
+# runtime lock (requirements-linux-amd64.txt / requirements-linux-arm64.txt)
+# with --require-hashes, never runs the Dockerfile's build-time ML-stack /
+# decode-hardening smoke checks, and never exercises the real torch/demucs/
+# faster-whisper stack. A broken or stale lock, a missing wheel for one arch,
+# or a bad hash would only surface when someone actually builds the image.
+# This workflow is that build.
+#
+# NOT a required check (unlike aligner-test, #1030/#1027): a broken image
+# build blocks nobody's merge here, it just fails this workflow's own run,
+# so a job-level `if` skipping the whole per-arch job on no relevant change
+# is fine -- there is no required-check-missing failure mode to avoid, unlike
+# aligner-test's always-running wrapper with step-level `if`s.
+#
+# NO QEMU: cross-arch emulation misreports one decode security test as exit
+# 127 (issue #1059 AC). Both jobs run on NATIVE runners instead --
+# ubuntu-latest (amd64) and ubuntu-24.04-arm (arm64) -- so buildx builds for
+# the host platform with no `platforms:` override needed.
+
+on:
+  push:
+    branches: [main]
+  # No base-branch filter: a stacked PR targets its parent branch, not main,
+  # and a base filter would silently skip CI on it -- a PR with no checks
+  # looks much like a PR whose checks passed (same reasoning as ci.yml).
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read # dorny/paths-filter's documented least-privilege scope for PR change detection
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Aligner Changes
+    runs-on: ubuntu-latest
+    outputs:
+      aligner: ${{ steps.filter.outputs.aligner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            aligner:
+              - 'deploy/aligner/**'
+              - '.github/workflows/aligner.yml'
+
+  build-and-smoke:
+    name: Build & Smoke Test (${{ matrix.arch }})
+    needs: [changes]
+    # Job-level `if`, not step-level: this workflow is not a required check
+    # (see the header), so a skipped job costs nothing the way a skipped
+    # required-check job would. Mirrors yamnet.yml's `build` job, which is the
+    # same shape (native-runner image build + smoke test, non-required).
+    if: needs.changes.outputs.aligner == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # No `platforms:` -- the runner IS the target arch (no QEMU), so buildx
+      # builds natively for the host platform and TARGETARCH resolves to it
+      # automatically, selecting the matching per-arch lock in the Dockerfile.
+      - name: Build aligner image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: deploy/aligner
+          file: deploy/aligner/Dockerfile
+          push: false
+          load: true
+          tags: canticle-aligner:smoke-${{ matrix.arch }}
+          # Scoped per arch: amd64 and arm64 build from different per-arch
+          # locks (different layers from the `pip install` step onward), so a
+          # shared scope would have each arch evict the other's layers on
+          # every run (same reasoning as yamnet.yml's scope split).
+          cache-from: type=gha,scope=aligner-${{ matrix.arch }}
+          cache-to: type=gha,scope=aligner-${{ matrix.arch }},mode=min
+
+      # /health is liveness only (models load lazily on first /align, never
+      # at boot -- see app.py's lifespan()), so the container should bind
+      # within seconds; the retry loop just bounds a slow-starting runner.
+      - name: Smoke test (/health)
+        run: |
+          set -euo pipefail
+          docker run -d --name aligner-smoke -p 8080:8080 canticle-aligner:smoke-${{ matrix.arch }}
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health >/tmp/health.json 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          echo "health response:"; cat /tmp/health.json; echo
+          status=$(jq -r '.status' /tmp/health.json)
+          test "$status" = "ok" || { echo "expected status=ok, got $status" >&2; exit 1; }
+          echo "smoke test passed: status=$status"
+
+      - name: Sidecar logs on failure
+        if: failure()
+        run: docker logs aligner-smoke || true
+
+      - name: Stop sidecar
+        if: always()
+        run: docker rm -f aligner-smoke || true
+
+      # requirements-test.txt is deliberately never installed into the shipped
+      # image (it is TEST-only). Install it into a throwaway --rm container
+      # from the image just built, same pattern as yamnet.yml's shape test:
+      # this validates test_app.py against the EXACT hash-pinned per-arch
+      # runtime lock the image ships, rather than a drift-prone runner-side
+      # dep list. CI=1 forces the I1 real-ffmpeg security tests to run
+      # instead of skipping (test_app.py fails loudly if CI is set and no
+      # ffmpeg is found; the image's own apt-installed ffmpeg satisfies it).
+      - name: Run aligner sidecar tests (inside the image)
+        run: |
+          set -euo pipefail
+          docker run --rm --user root -e CI=1 \
+            -v "$PWD/deploy/aligner/test_app.py:/app/test_app.py:ro" \
+            -v "$PWD/deploy/aligner/requirements-test.txt:/app/requirements-test.txt:ro" \
+            --entrypoint sh canticle-aligner:smoke-${{ matrix.arch }} -c \
+            'pip install --no-cache-dir --quiet --require-hashes -r requirements-test.txt && pytest test_app.py -q'
