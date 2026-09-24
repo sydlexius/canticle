@@ -23,6 +23,8 @@ jobs:
     permissions:
       security-events: write
       contents: read
+      # The paths filter lists a PR's changed files through the pulls API.
+      pull-requests: read
 
     steps:
       - name: Checkout
