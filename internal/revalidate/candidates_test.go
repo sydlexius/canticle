@@ -591,11 +591,30 @@ func TestPlanCandidatesReadsNoDirectoryForTheCommonCases(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		audio string
+		// unlistable, when true, makes dir traversable-but-unlistable (0o311)
+		// for the duration of the subtest -- the same mutation-catching shape
+		// case_variant_test.go's TestPlanCandidatesReadsNoDirectoryForAnUppercaseLRC
+		// uses. dirListingCache.Reads() only counts reads made THROUGH the
+		// cache, so it cannot by itself distinguish "no directory read
+		// happened" from "a directory read happened but bypassed the cache" --
+		// only "sidecar already gone" reaches resolveSidecarCaseVariant (the
+		// present case's exact-name Lstat hits first and never falls through
+		// to it), so only that subtest gets the stronger guard.
+		unlistable bool
 	}{
-		{"sidecar already gone", filepath.Join(dir, "vanished.mp3")},
-		{"sidecar and companion present", filepath.Join(dir, "present.mp3")},
+		{name: "sidecar already gone", audio: filepath.Join(dir, "vanished.mp3"), unlistable: true},
+		{name: "sidecar and companion present", audio: filepath.Join(dir, "present.mp3")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.unlistable {
+				if os.Geteuid() == 0 {
+					t.Skip("a root process can list a 0o311 directory, so the fixture cannot deny ReadDir")
+				}
+				if err := os.Chmod(dir, 0o311); err != nil {
+					t.Fatalf("chmod dir traversable-but-unlistable: %v", err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o750) })
+			}
 			cache := newDirListingCache()
 			r, _ := newRevalidator(t, root, fixedDuration(), nil)
 			var plan Plan

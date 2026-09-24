@@ -587,6 +587,35 @@ func sidecarWithinWindow(path string, before time.Time) bool {
 	return info.ModTime().Before(before)
 }
 
+// resolvedSidecarPath reports whether stem+ext (or an extension-case variant
+// of it, #989/#1051) exists in dir, and if so the REAL on-disk path. listing is
+// scanDir's own os.ReadDir, threaded down rather than re-read per file (#684).
+//
+// The probe order mirrors the writer's settledSidecar and is load-bearing:
+// os.Stat the exact name first, and fall back to sidecar.Listing.Variants only
+// on a not-exist miss. Variants resolves the exact name with os.Lstat, which
+// disagrees with the writer on exactly the cases that matter: it reads a
+// DANGLING SYMLINK as settled (so the track was never re-fetched) and a
+// DIRECTORY as absent. With os.Stat first, a directory is present and a
+// dangling link absent, as in the writer. Any other stat error (e.g.
+// permission) reads as PRESENT, as in settledSidecar: guessing "free" risks a
+// fetch overwriting content that is there. Variants applies the writer's own
+// variant rule (stem byte-identical, extension ASCII-folded, so "Intro.lrc" is
+// never "intro.lrc"'s), and its entry equal to candidate (already known absent)
+// is skipped.
+func resolvedSidecarPath(dir, stem, ext string, listing sidecar.Listing) (string, bool) {
+	candidate := filepath.Join(dir, stem+ext)
+	if _, err := os.Stat(candidate); err == nil || !os.IsNotExist(err) {
+		return candidate, true
+	}
+	for _, v := range listing.Variants(candidate) {
+		if v != candidate {
+			return v, true
+		}
+	}
+	return candidate, false
+}
+
 // NewScanner creates a new Scanner with the supplied options.
 func NewScanner(opts ...Option) *Scanner {
 	sc := &Scanner{}
@@ -1118,6 +1147,14 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 	// reopen is loop-invariant for this directory scan (opts is fixed), so compute
 	// it once rather than per file.
 	reopen := reopenClassesFor(opts)
+	// listing wraps the ReadDir result already paid for above (#1051): it lets
+	// the settled-sidecar check below resolve a case-variant .lrc/.txt
+	// (sidecar.Listing.Variants, #989's rule -- stem byte-identical, extension
+	// ASCII-folded) for every file in this directory without a second
+	// os.ReadDir. Reading dir twice per scanDir call -- once here, once per
+	// candidate inside the loop -- would reintroduce exactly the repeated-read
+	// cost #684 removed.
+	listing := sidecar.ListEntries(dir, files)
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1157,17 +1194,15 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		//     Re-examining settled tracks for word timings is #982's job, as an
 		//     operator-sized pass, not a side effect of every scan.
 		stem := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
-		lrcFile := stem + sidecar.ExtLineSynced
-		txtFile := stem + sidecar.ExtUnsynced
-
-		lrcExists := false
-		if _, err := os.Stat(filepath.Join(dir, lrcFile)); err == nil {
-			lrcExists = true
-		}
-		txtExists := false
-		if _, err := os.Stat(filepath.Join(dir, txtFile)); err == nil {
-			txtExists = true
-		}
+		// Resolved to the REAL on-disk name, an extension-case variant included
+		// (#1051): a track settled as "song.LRC" must read as settled here exactly
+		// as the writer's own settledSidecar treats it, or a case-sensitive
+		// deployment re-queues and re-fetches it on every scan. lrcPath/txtPath
+		// carry whatever name resolvedSidecarPath found, so every downstream read
+		// below (the instrumental-provenance probe, the repair-window check, the
+		// index) opens the file that is actually there.
+		_, lrcExists := resolvedSidecarPath(dir, stem, sidecar.ExtLineSynced, listing)
+		txtPath, txtExists := resolvedSidecarPath(dir, stem, sidecar.ExtUnsynced, listing)
 
 		switch {
 		case lrcExists && !reopen.Synced:
@@ -1188,11 +1223,11 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
-		case txtExists && !lrcExists && isInstrumentalTxt(filepath.Join(dir, txtFile)):
+		case txtExists && !lrcExists && isInstrumentalTxt(txtPath):
 			// Instrumental markers are re-checkable by provenance (#502): a provider
 			// marker is authoritative (terminal), a detector marker is provisional and
 			// reopens on --upgrade or a detector-version bump.
-			prov, _, provErr := lyrics.ReadInstrumentalProvenance(filepath.Join(dir, txtFile))
+			prov, _, provErr := lyrics.ReadInstrumentalProvenance(txtPath)
 			if provErr != nil {
 				// Treat an unreadable header as terminal: fail conservatively toward terminal so a transient read error never reopens a settled marker.
 				slog.Warn("could not read instrumental provenance; treating marker as terminal", "file", file.Name(), "error", provErr)
@@ -1209,7 +1244,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// Reopen granted. A dated repair run narrows it to the target cohort --
 			// checked HERE, inside the branch that granted the reopen, so a marker
 			// this switch already decided to reconsider cannot escape the window.
-			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+			if !sidecarWithinWindow(txtPath, opts.UnsyncedBefore) {
 				// Still a settled file being skipped, so still index it (#786).
 				// Otherwise a dated repair run leaves precisely the out-of-cohort
 				// files invisible to prune's pool.
@@ -1239,7 +1274,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 				slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
 				continue
 			}
-			if !sidecarWithinWindow(filepath.Join(dir, txtFile), opts.UnsyncedBefore) {
+			if !sidecarWithinWindow(txtPath, opts.UnsyncedBefore) {
 				// Still a settled file being skipped, so still index it (#786).
 				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 				slog.Debug("skipping file, unsynced sidecar outside repair window", "file", file.Name())

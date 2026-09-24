@@ -29,6 +29,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -326,8 +327,11 @@ func (r *Revalidator) PlanCandidates(ctx context.Context, candidates []Candidate
 // The sidecar is DERIVED from the audio path (stem + ".lrc"), never discovered.
 // That is the same construction the writer used to create it, so the derivation
 // is exact rather than a guess -- and it is why this costs one stat instead of a
-// directory listing. A .LRC spelled in another case is not probed: this pass
-// only ever judges files canticle itself wrote, and it writes ".lrc".
+// directory listing in the common case. An extension-case variant ("song.LRC",
+// #989/#1051) IS resolved when the exact-case name misses, via
+// resolveSidecarCaseVariant's bounded probe -- see that function's comment for
+// why it is up to 7 extra Lstats (never a directory read) for a candidate
+// whose sidecar is absent under its exact-case name.
 func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Plan, cache *dirListingCache, claimed map[string]bool) error {
 	audio := strings.TrimSpace(c.AudioPath)
 	if audio == "" {
@@ -351,6 +355,21 @@ func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Pla
 	// library root. Here it reads as "no sidecar to judge", which stamps the row
 	// and retires it rather than leaving it to be re-examined every cycle.
 	fi, lerr := os.Lstat(path)
+	if lerr != nil && errors.Is(lerr, fs.ErrNotExist) {
+		// An extension-case variant (#989/#1051): a track settled as "song.LRC"
+		// must be judged here exactly as the writer's settledSidecar treats it, or
+		// a case-sensitive deployment reads it as no_sidecar and the row never
+		// leaves the timing backlog. resolveSidecarCaseVariant costs up to 7 more
+		// bounded Lstats (2^n permutations of the extension's n letters, less the
+		// exact case already known to miss), NEVER a directory read -- see its
+		// comment for why that matters: a directory read per candidate here would
+		// reintroduce the exact per-candidate O(N) cost #691/#801 removed from the
+		// sidecar lookup, and an absent sidecar (this branch) is the OVERWHELMING
+		// common case in a timing backlog, not a rare one.
+		if variant, vfi, ok := resolveSidecarCaseVariant(path); ok {
+			path, fi, lerr = variant, vfi, nil
+		}
+	}
 	switch {
 	case lerr != nil && !errors.Is(lerr, fs.ErrNotExist):
 		// THE FILE IS THERE AND WE COULD NOT LOOK AT IT, which is a different
@@ -648,7 +667,26 @@ func (r *Revalidator) misSyncedMove(s site, path, audio string) (realign.Move, b
 		mv.Kind = realign.KindDemote
 		mv.Method = "revalidate-demote"
 	}
-	mv.TextPath = strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
+	// The demotion target is the exact ".txt" when it RESOLVES TO A REGULAR
+	// file (os.Stat, the scanner's rule), else a real on-disk extension-case
+	// variant ("song.TXT", #989/#1051), so a demotion lands on the sidecar a
+	// case-insensitive check would find rather than creating a sibling. A
+	// dangling exact link is NOT settled (#1057 review): O_EXCL would hit EEXIST
+	// on it, report a no-op, and the .lrc would be moved aside with its words
+	// landing nowhere -- so with no regular variant the demotion is refused as a
+	// retriable error, never written through the link. Any other stat error
+	// keeps the exact name; writeDemotedText's O_EXCL surfaces the failure.
+	textPath := strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
+	if xfi, err := os.Stat(textPath); (err == nil && !xfi.Mode().IsRegular()) || errors.Is(err, fs.ErrNotExist) {
+		variant, _, ok := resolveSidecarCaseVariant(textPath)
+		if _, lerr := os.Lstat(textPath); !ok && lerr == nil {
+			return realign.Move{}, false, fmt.Errorf("revalidate: demotion target %q exists but is not a regular file", textPath)
+		}
+		if ok {
+			textPath = variant
+		}
+	}
+	mv.TextPath = textPath
 	mv.TextBody = body
 	return mv, true, nil
 }
@@ -930,6 +968,110 @@ func (c *dirListingCache) list(dir string) ([]os.DirEntry, error) {
 	}
 	c.entries[dir] = entries
 	return entries, nil
+}
+
+// resolveSidecarCaseVariant looks for an extension-case variant of path
+// (#989/#1051) and returns its real on-disk name and Lstat info. The STEM
+// stays byte-identical and only the extension's ASCII letters are permuted --
+// the same rule sidecar.Listing.Variants enforces -- so "Intro.lrc" is never
+// treated as a variant of "intro.lrc", and a Unicode fold (long s, micro sign,
+// final sigma) is never attempted because only ASCII letters are permuted at
+// all.
+//
+// DELIBERATELY NOT sidecar.List/Variants, and that is an I/O-shape choice, not
+// a rule difference: List reads the whole directory, and judgeCandidate's
+// caller reaches this exactly when the exact-case Lstat just missed -- which
+// is the ORDINARY case for a candidate in the timing backlog (the sidecar was
+// moved or deleted by a reorg), not a rare one. Paying a directory read for
+// that population would reintroduce the exact per-candidate O(N) cost
+// #691/#801 already removed from the neighboring companion lookup; see
+// TestPlanCandidatesReadsNoDirectoryForTheCommonCases, which pins zero
+// directory reads for it. Enumerating the extension's own case permutations
+// with bounded Lstat calls (at most 2^n for an n-letter extension --  8 for
+// ".lrc"/".txt", the only two this package ever derives) costs stats, never a
+// listing, and still matches Variants' extension-folding rule exactly since
+// every ASCII-letter permutation is tried.
+//
+// A permutation that stats as a directory or symlink is rejected (mirroring
+// Variants' regular-file-only rule): a directory can never be a sidecar, and
+// following a symlinked one is exactly what judgeCandidate's own Lstat-not-
+// Stat choice avoids for the exact-case name.
+//
+// ORDER MATCHES sidecar.Listing.Variants (#1051 review): when more than one
+// case permutation exists on disk -- an unusual but possible shape, e.g. both
+// "track.LRC" and "track.Lrc" -- this and Variants must agree on which one is
+// THE variant, or the scanner and revalidate can each act on a different real
+// file for the same logical sidecar. Variants reports its non-exact matches in
+// the order os.ReadDir's entries come back in, which is ascending file-name
+// order; caseVariantsOf's own order is an unrelated bitmask sequence, so every
+// matching candidate is collected first and the full set is then sorted by
+// name before the smallest is returned, rather than returning whichever one
+// caseVariantsOf happened to generate first.
+func resolveSidecarCaseVariant(path string) (string, os.FileInfo, bool) {
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(path, ext)
+	var matches []string
+	infos := map[string]os.FileInfo{}
+	for _, variant := range caseVariantsOf(ext) {
+		if variant == ext {
+			continue // the exact case; the caller already knows this one misses
+		}
+		candidate := stem + variant
+		fi, err := os.Lstat(candidate)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		matches = append(matches, candidate)
+		infos[candidate] = fi
+	}
+	if len(matches) == 0 {
+		return "", nil, false
+	}
+	sort.Strings(matches)
+	return matches[0], infos[matches[0]], true
+}
+
+// caseVariantsOf returns every ASCII-case permutation of ext's letters, dot
+// included and unpermuted, in a deterministic order (increasing permutation
+// index) so a run is reproducible. Non-letter bytes (the leading dot) are
+// never flipped. Bounded by construction: canticle's own sidecar extensions
+// are short (".lrc", ".txt"), so this is at most 8 stats, never a scan of
+// arbitrary length.
+func caseVariantsOf(ext string) []string {
+	letterIdx := make([]int, 0, len(ext))
+	for i := 0; i < len(ext); i++ {
+		if c := ext[i]; ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') {
+			letterIdx = append(letterIdx, i)
+		}
+	}
+	n := len(letterIdx)
+	out := make([]string, 0, 1<<uint(n))
+	for mask := 0; mask < (1 << uint(n)); mask++ {
+		b := []byte(ext)
+		for bit, i := range letterIdx {
+			if mask&(1<<uint(bit)) != 0 {
+				b[i] = toUpperASCII(b[i])
+			} else {
+				b[i] = toLowerASCII(b[i])
+			}
+		}
+		out = append(out, string(b))
+	}
+	return out
+}
+
+func toUpperASCII(c byte) byte {
+	if 'a' <= c && c <= 'z' {
+		return c - ('a' - 'A')
+	}
+	return c
+}
+
+func toLowerASCII(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // companionAudioByListing is the pre-#691 lookup, kept as companionAudio's

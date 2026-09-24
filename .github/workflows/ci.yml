@@ -26,6 +26,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       js: ${{ steps.filter.outputs.js }}
+      aligner: ${{ steps.filter.outputs.aligner }}
       # Always emits at least one matrix leg so GitHub can interpolate the job
       # name. Non-code PRs get a single placeholder leg marked skip='true' whose
       # build steps no-op. (An empty matrix, or a job skipped via `if:`, instead
@@ -62,6 +63,12 @@ jobs:
               - 'Dockerfile'
               - 'build/docker/**'
               - 'web/**'
+            # aligner-test's inputs. No workflow files: a CI-only change has
+            # nothing for the aligner suite to test.
+            aligner:
+              - 'deploy/aligner/**'
+              - 'scripts/check-aligner-locks-fresh.sh'
+              - '.github/aligner-lock-tools.txt'
 
       - name: Compute build and test matrices
         id: matrix
@@ -533,21 +540,17 @@ jobs:
   aligner-test:
     name: Aligner Sidecar Tests
     runs-on: ubuntu-latest
-    # Runs unconditionally (not gated on `changes`, mirroring
-    # grype-ignore-expiry above) so every PR reports a result. It is
-    # deliberately NOT a required branch-protection check (maintainer
-    # decision on #1030); if it is ever made required, a paths filter must
-    # still never skip it, or it would report as missing (issue #1027). app.py never imports the
-    # ML stack (torch/demucs/faster-whisper/transformers) at module scope and the model layer is
-    # stubbed in tests, so the suite runs on the bare runner via
-    # actions/setup-python -- no Docker image needed. ubuntu-latest (24.04)
-    # ships no ffmpeg, though, and the decode security tests need a real
-    # binary (a security test asserting an HLS playlist upload can't read a
-    # local file only proves anything against a real decoder), so it is
-    # apt-installed below; the aligner image ships its own ffmpeg, which
-    # slice 4's image smoke test covers separately. In-image testing
-    # against the real ML stack belongs to the aligner image workflow
-    # (#1013 / #1005 slice 4), not here.
+    needs: [changes]
+    # No job-level `if`, so every PR still reports a result (not a required
+    # check, #1030; a skipped job could never satisfy it if promoted, #1027).
+    # The real steps run only when the `changes` job's `aligner` filter
+    # matches (deploy/aligner/** and its lock tooling); a PR like #1066
+    # (claude.yml only) no longer pays for pip, ffmpeg and pytest. app.py never
+    # imports the ML stack at module scope and the model layer is stubbed in
+    # tests, so the suite runs on the bare runner via actions/setup-python.
+    # ubuntu-latest ships no ffmpeg and the decode security tests need a real
+    # binary, so it is apt-installed below. In-image testing against the real
+    # ML stack is #1059.
     permissions:
       contents: read
     steps:
@@ -556,6 +559,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           # Matches the interpreter the lock file was compiled for (see the
@@ -572,6 +576,7 @@ jobs:
       # slices extend requirements-test.in, this keeps working off the
       # regenerated lock with no workflow change.
       - name: Install test dependencies
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: pip install --require-hashes -r deploy/aligner/requirements-test.txt
 
       # ubuntu-latest carries no ffmpeg; the decode security tests need a
@@ -579,12 +584,15 @@ jobs:
       # fine here, since the aligner image (which ships its own ffmpeg) is
       # what slice 4's image smoke test exercises for version parity.
       - name: Install ffmpeg (the decode security tests need a real binary)
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: Report ffmpeg version
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: ffmpeg -version | head -1
 
       - name: Run aligner sidecar tests
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: pytest deploy/aligner -q
 
       # Dependabot DOES edit the per-arch requirements-linux-*.txt locks
@@ -611,6 +619,7 @@ jobs:
       # faster-whisper/transformers are never requested there, so they are
       # correctly absent from that lock, not a check gap).
       - name: Verify aligner per-arch locks agree on package set
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         working-directory: deploy/aligner
         run: |
           normalize() {

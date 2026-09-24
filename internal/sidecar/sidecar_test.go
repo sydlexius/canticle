@@ -314,6 +314,68 @@ func TestVariants_OneFilePerDirectoryEntry(t *testing.T) {
 	}
 }
 
+// countingEntry counts Name() calls: how many entries a lookup examines.
+type countingEntry struct {
+	os.DirEntry
+	n *int
+}
+
+func (c countingEntry) Name() string { *c.n++; return c.DirEntry.Name() }
+
+// TestVariants_IndexMatchesLinearScan (#1057 review): the lazy index returns
+// exactly what the pre-index linear scan did, same paths and order, for every
+// name in a mixed directory; and a post-build lookup examines only its own
+// bucket, since the scanner calls Variants per file (quadratic otherwise).
+func TestVariants_IndexMatchesLinearScan(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; the case variants would alias one file")
+	}
+	for _, n := range []string{"song.lrc", "song.LRC", "song.Lrc", "Song.lrc", "song.txt", "song.TXT",
+		"songs.lrc", "song.lrc.bak", "other.lrc", "x.elr\u212a", "x.ELRK", "noext", "NOEXT"} {
+		touch(t, filepath.Join(dir, n))
+	}
+	if err := os.Mkdir(filepath.Join(dir, "song.lRc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "other.lrc"), filepath.Join(dir, "song.LrC")); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, bases := ListEntries(dir, entries), []string{"absent.lrc", "absent.LRC"}
+	for _, e := range entries {
+		bases = append(bases, e.Name())
+	}
+	for _, base := range bases {
+		var want []string // the pre-index loop body
+		for _, e := range entries {
+			n := e.Name()
+			if n != base && StemOf(n) == StemOf(base) && asciiEqualFold(filepath.Ext(n), filepath.Ext(base)) && e.Type().IsRegular() {
+				want = append(want, filepath.Join(dir, n))
+			}
+		}
+		cand := filepath.Join(dir, base)
+		if got := slices.DeleteFunc(l.Variants(cand), func(p string) bool { return p == cand }); !slices.Equal(got, want) {
+			t.Errorf("Variants(%q) = %q, linear scan = %q", base, got, want)
+		}
+	}
+
+	calls, counted := 0, make([]os.DirEntry, len(entries))
+	for i, e := range entries {
+		counted[i] = countingEntry{e, &calls}
+	}
+	cl := ListEntries(dir, counted)
+	cl.Variants(filepath.Join(dir, "song.lrc")) // pays the one-time build
+	calls = 0
+	cl.Variants(filepath.Join(dir, "other.lrc"))
+	if calls > 2 {
+		t.Errorf("a post-build lookup examined %d entry names; want its own bucket, not all %d", calls, len(entries))
+	}
+}
+
 func TestStemOf(t *testing.T) {
 	tests := []struct {
 		name  string

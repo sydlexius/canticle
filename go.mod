@@ -12,7 +12,7 @@ require (
 	github.com/pressly/goose/v3 v3.28.0
 	github.com/rjeczalik/notify v0.9.3
 	github.com/sydlexius/audioduration v0.9.1
-	github.com/ulikunitz/xz v0.5.16
+	github.com/ulikunitz/xz v0.5.17
 	github.com/valyala/fastjson v1.6.10
 	golang.org/x/crypto v0.57.0
 	golang.org/x/text v0.42.0
