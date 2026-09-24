@@ -234,7 +234,13 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 			tier = queue.SyncTierWord
 		}
 	}
-	w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier)
+	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
+		// Both the stamp and its clear failed: settling now would leave the
+		// row's PRIOR tier describing a file this write may have just
+		// changed. Re-defer it like settleWordRecheck's own failure path, so
+		// it is retried rather than settled with a stale tier.
+		return w.deferWordRecheck(ctx, item, err)
+	}
 	w.consecutiveFailures = 0
 	return w.settleWordRecheck(ctx, item, queue.WordTimingServed)
 }
@@ -399,9 +405,11 @@ func (w *Worker) ordinarySyncTier(item queue.WorkItem, song models.Song) string 
 // stampSyncTier records an ordinary completion's on-disk sync tier before
 // Complete, best-effort like its siblings: a lost stamp leaves the row
 // unclassified (the CLI backfill's candidate set), never a wrong tier. A
-// non-synced outcome clears any tier a reopened row previously carried.
-func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
-	w.stampOrClearSyncTier(ctxNoCancel, item.ID, w.ordinarySyncTier(item, song))
+// non-synced outcome clears any tier a reopened row previously carried. It
+// returns an error only when stampOrClearSyncTier's own clear attempt also
+// failed (see there); the caller must not settle the row on that error.
+func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) error {
+	return w.stampOrClearSyncTier(ctxNoCancel, item.ID, w.ordinarySyncTier(item, song))
 }
 
 // stampOrClearSyncTier records tier, best-effort; on failure it attempts to
@@ -410,16 +418,20 @@ func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem,
 // just been rewritten or replaced by this same completion, so a failed stamp
 // that silently keeps the old value can assert a tier the on-disk file no
 // longer has (a reopened 'word' row that just landed line-only, or vice
-// versa). Both failures log at Warn (id + error only, no paths); if the clear
-// also fails the row keeps its prior tier, a residual-risk case that is at
-// least logged rather than left silent like an ordinary best-effort stamp.
-func (w *Worker) stampOrClearSyncTier(ctxNoCancel context.Context, id int64, tier string) {
+// versa). Both failures log at Warn (id + error only, no paths); a lone
+// stamp failure is non-fatal (nil) once the clear lands. If the clear ALSO
+// fails, the row would otherwise settle carrying its stale prior tier
+// (CodeRabbit thread 4098910896, #1085), so this returns an error instead:
+// the caller retries the row rather than settling it.
+func (w *Worker) stampOrClearSyncTier(ctxNoCancel context.Context, id int64, tier string) error {
 	if err := w.queue.SetSyncTier(ctxNoCancel, id, tier); err != nil {
 		slog.Warn("worker: stamp sync tier failed; clearing to unknown instead of a stale tier", "id", id, "error", err)
 		if clearErr := w.queue.SetSyncTier(ctxNoCancel, id, ""); clearErr != nil {
-			slog.Warn("worker: clear sync tier after failed stamp also failed; row keeps its prior tier", "id", id, "error", clearErr)
+			slog.Warn("worker: clear sync tier after failed stamp also failed; retrying instead of settling", "id", id, "error", clearErr)
+			return fmt.Errorf("worker: stamp and clear sync tier for item %d both failed: %w", id, errors.Join(err, clearErr))
 		}
 	}
+	return nil
 }
 
 // clearSyncTier drops a prior sync tier before a settle that writes no synced

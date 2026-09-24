@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -96,17 +97,24 @@ func (failingSyncTierQueue) SetSyncTier(context.Context, int64, string) error {
 	return errors.New("injected sync tier stamp failure")
 }
 
-// TestOrdinarySyncTier_StampFailureIsNonFatal: a lost stamp must not cost the
-// written result or fail the completion.
-func TestOrdinarySyncTier_StampFailureIsNonFatal(t *testing.T) {
+// TestOrdinarySyncTier_StampAndClearBothFail is CodeRabbit thread 4098910896
+// on #1085: when the stamp AND its clear both fail, the row's PRIOR tier
+// would otherwise describe a file this completion may have just rewritten.
+// The row must NOT reach Complete/done; it settles failed instead, so the
+// wedge is retried rather than silently trusted.
+func TestOrdinarySyncTier_StampAndClearBothFail(t *testing.T) {
 	rig, w := newStampRig(t, &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}, nil, "sidecar", "")
 	w.SetFallbackProviders()
 	w.queue = failingSyncTierQueue{rig.q}
-	if err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := w.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce: want an error when both the stamp and its clear fail")
 	}
-	if row := rig.recheckRow(t); row.status != "done" {
-		t.Fatalf("row status = %q, want done despite the failed sync-tier stamp", row.status)
+	row := rig.recheckRow(t)
+	if row.status == queue.StatusDone {
+		t.Fatalf("row status = %q, want NOT done (Complete must not run) when both writes fail", row.status)
+	}
+	if !strings.Contains(row.lastError, "stamp and clear sync tier") {
+		t.Errorf("last_error = %q, want it to name the double stamp/clear failure", row.lastError)
 	}
 }
 
@@ -159,6 +167,33 @@ func TestWordRecheckWrite_StampFailureClearsPriorTier(t *testing.T) {
 	}
 	if got := readSyncTier(t, rig.db, rig.id); got != "" {
 		t.Errorf("sync_tier = %q, want cleared to NULL after a failed stamp (never the stale prior tier)", got)
+	}
+}
+
+// TestWordRecheckWrite_StampAndClearBothFail is the word-recheck-write twin of
+// TestOrdinarySyncTier_StampAndClearBothFail (CodeRabbit thread 4098910896):
+// a double stamp/clear failure must not settle the row served (its prior
+// tier would then describe a file the write may have just changed) -- it
+// re-defers instead, the same path settleWordRecheck's own failure uses.
+func TestWordRecheckWrite_StampAndClearBothFail(t *testing.T) {
+	primary := &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}
+	rig, w := newRecheckRig(t, primary, nil, false)
+	if err := rig.q.SetSyncTier(context.Background(), rig.id, queue.SyncTierLine); err != nil {
+		t.Fatalf("seed sync tier: %v", err)
+	}
+	w.queue = failingSyncTierQueue{rig.q}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	row := rig.recheckRow(t)
+	if row.state != queue.WordTimingQueued {
+		t.Fatalf("word_timing_state = %q, want still %q (unsettled) when both writes fail", row.state, queue.WordTimingQueued)
+	}
+	if row.status == queue.StatusDone {
+		t.Fatalf("row status = %q, want re-deferred, not done", row.status)
+	}
+	if !strings.Contains(row.lastError, "stamp and clear sync tier") {
+		t.Errorf("last_error = %q, want it to name the double stamp/clear failure", row.lastError)
 	}
 }
 

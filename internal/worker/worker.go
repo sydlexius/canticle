@@ -1650,17 +1650,30 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// so this is the durable record of a decision, not an ignored observation.
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
 	w.stampWordTiming(ctxNoCancel, item, song)
-	w.stampSyncTier(ctxNoCancel, item, song)
+	// A sync-tier stamp+clear double failure (CodeRabbit thread 4098910896,
+	// #1085) must not reach Complete: the row would settle describing a file
+	// this same completion may have just changed. Fail it via the same path
+	// a failed Complete already takes, below.
+	if err := w.stampSyncTier(ctxNoCancel, item, song); err != nil {
+		return w.failStuckItem(ctxNoCancel, item.ID, err)
+	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
-		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
-		w.consecutiveFailures++
-		if _, err := w.queue.Fail(ctxNoCancel, item.ID, cause); err != nil {
-			return fmt.Errorf("worker: complete item %d and mark failed: %w", item.ID, errors.Join(cause, err))
-		}
-		return fmt.Errorf("worker: complete item %d (marked failed): %w", item.ID, cause)
+		return w.failStuckItem(ctxNoCancel, item.ID, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
 	return nil
+}
+
+// failStuckItem marks item failed and returns the resulting error, for a
+// terminal pre-Complete step (Complete itself, or a stamp whose own failure
+// path refused to settle the row) that cannot be retried in place. Shared so
+// both call sites above stay in lockstep.
+func (w *Worker) failStuckItem(ctxNoCancel context.Context, id int64, cause error) error {
+	w.consecutiveFailures++
+	if _, err := w.queue.Fail(ctxNoCancel, id, cause); err != nil {
+		return fmt.Errorf("worker: item %d and mark failed: %w", id, errors.Join(cause, err))
+	}
+	return fmt.Errorf("worker: item %d (marked failed): %w", id, cause)
 }
 
 // errVerificationRejected marks a verifier's rejection (a verdict), as opposed
