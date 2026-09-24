@@ -182,6 +182,48 @@ func (l *lazyBackup) Close() error {
 // deployment, so it is fixed at first commit.
 const lrcStackedCheckMarker = "lrc_stacked_check_470"
 
+// maxDegradedAttempts bounds how many consecutive startups may return a
+// degraded walk before this check gives up and stamps the marker anyway
+// (#922). Without a ceiling, a single permanently-unreadable file (bad
+// permissions, corruption, the 16MB size guard) or a stale/decommissioned
+// library root disables the feature's terminal state forever: the marker
+// never stamps, the full walk re-runs on every boot in perpetuity, and the
+// operator never receives the one notification this check exists to deliver.
+// 5 gives a genuinely transient condition (a NAS not yet mounted at container
+// start, a brief permission hiccup) several restarts to clear on its own,
+// while bounding the cost of a permanent one to a handful of extra walks
+// rather than forever. A const, not config -- see the `timing` package's doc
+// comment for why a threshold like this belongs fixed in code.
+const maxDegradedAttempts = 5
+
+// lrcStackedCheckDegradedAttemptsMarker durably counts consecutive degraded
+// startup attempts (#922). It reuses maintenance_markers' existing
+// detail_count column (migration 048) under a SEPARATE marker name, rather
+// than adding a new column or table -- exactly the reuse that migration's own
+// doc comment anticipated ("a future marker that does have one reuses this
+// column"). It must be a different row than lrcStackedCheckMarker: that
+// marker's mere presence means "done" (migration 027's invariant), so writing
+// an in-progress attempt count under that same name would make
+// lrcStackedCheckDone report done=true before the check has actually
+// completed.
+const lrcStackedCheckDegradedAttemptsMarker = "lrc_stacked_check_470_degraded_attempts"
+
+// lrcStackedCheckDegradedStackedMarker keeps the largest stacked-file count any
+// degraded attempt has seen (#922). Each startup rebuilds its tally from
+// scratch, so without it a finding from an earlier degraded boot would be lost
+// if the final, give-up boot happened not to see it (a root unmounted that
+// time, say), and the stamp then stops the check for good.
+const lrcStackedCheckDegradedStackedMarker = "lrc_stacked_check_470_degraded_stacked"
+
+// lrcStackedCheckGiveUpDetail is the sentinel written to lrcStackedCheckMarker's
+// detail_count when the marker is stamped only because maxDegradedAttempts was
+// exhausted, as opposed to a genuine completion (which records a non-negative
+// count of stacked .lrc files found). Every real count is >= 0, so this value
+// is unambiguous to any future reader of the row: it can always tell "checked
+// and clean/found N" apart from "gave up while degraded" -- the marker must
+// never silently read as an all-clear for a walk that never actually finished.
+const lrcStackedCheckGiveUpDetail = -1
+
 // runStackedWalk is lrcbackfill.Run, indirected so a test can substitute a
 // deterministic fake that blocks until its context is canceled. That lets a
 // test exercise the mid-walk shutdown branch (errors.Is(err, context.Canceled))
@@ -291,6 +333,13 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 	// paths already, so it does not share this hazard.
 	var total lrcbackfill.Summary
 	degraded := false
+	// unavailableRootIDs names, by library id only (never path or name), every
+	// configured root this attempt could not visit at all (a walk error or an
+	// empty/unmounted root). Populated only for those two cases -- never for a
+	// root that walked fine but whose files individually errored/blocked/were
+	// skipped -- so the eventual give-up message (#922) can tell an operator
+	// "these specific roots are the problem" without leaking anything private.
+	var unavailableRootIDs []int64
 	for i, root := range roots {
 		summary, walkErr := runStackedWalk(ctx, lrcbackfill.Options{Roots: []string{root}, Apply: false, Quiet: true})
 		if walkErr != nil {
@@ -314,9 +363,10 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 			// successfully-walked roots already found. `degraded` gates the
 			// STAMP below; the REPORT still runs over whatever total the other
 			// roots contributed.
-			slog.Warn("lrc check: failed to walk a configured library root; that root will be retried next startup",
-				"roots_configured", len(roots), "root_index", i, "cause", classifyWalkError(walkErr))
+			slog.Warn("lrc check: failed to walk a configured library root; that root was not checked this startup",
+				"roots_configured", len(roots), "root_index", i, "library_id", libs[i].ID, "cause", classifyWalkError(walkErr))
 			degraded = true
+			unavailableRootIDs = append(unavailableRootIDs, libs[i].ID)
 			// lrcbackfill.Run returns the Summary it had already accumulated
 			// BEFORE WalkDir hit the error (per-file errors never abort the
 			// walk, so a root can legitimately find a stacked file and THEN
@@ -361,9 +411,10 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 		// the walk-error branch above: this root's problem must not swallow a
 		// real finding already collected from an earlier root in this loop.
 		if summary.MediaEntries == 0 {
-			slog.Warn("lrc check: a configured library root appears empty or not mounted yet; that root will be retried next startup",
-				"roots_configured", len(roots), "root_index", i)
+			slog.Warn("lrc check: a configured library root appears empty or not mounted yet; that root was not checked this startup",
+				"roots_configured", len(roots), "root_index", i, "library_id", libs[i].ID)
 			degraded = true
+			unavailableRootIDs = append(unavailableRootIDs, libs[i].ID)
 			// Same shape as the walk-error branch above: accumulate whatever
 			// this root's summary holds (near-empty by construction here,
 			// since MediaEntries==0 -- but consistent, and harmless, to fold
@@ -399,49 +450,185 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 	// the walkErr != nil case above, but the governing invariant is the same:
 	// never stamp on a degraded walk. Retrying costs one more startup walk;
 	// wrongly stamping costs the operator this notification forever.
-	if total.Errors > 0 || total.Blocked > 0 || total.Skipped > 0 {
-		slog.Warn("lrc check: walk completed but some .lrc files could not be judged; will retry on next startup",
-			"scanned", total.Scanned, "errors", total.Errors, "blocked", total.Blocked, "skipped", total.Skipped, "partial", degraded)
-		return
-	}
+	// fileDegraded mirrors the walk-error/empty-root `degraded` flag above, but
+	// for problems discovered WITHIN an otherwise-successful walk: a file that
+	// individually errored, was blocked by a pre-existing .orig, or was
+	// skipped (unjudged) entirely. Named separately from `degraded` because
+	// the two are logged differently below, but both feed the same
+	// bounded-retry decision (#922) afterward.
+	fileDegraded := total.Errors > 0 || total.Blocked > 0 || total.Skipped > 0
 
-	switch {
-	case total.Normalized > 0:
-		// Reported regardless of `degraded` (issue #470 round 4, Critical 1):
-		// a stacked file found on a root that WAS successfully walked must
-		// reach the operator even if some other configured root could not be
-		// checked this startup. "partial" tells the operator this tally may
-		// be an undercount, not the whole library.
-		msg := "lrc check: stacked .lrc file(s) found; these render incorrectly in simple players. Run `canticle scan reconcile-lrc --yes` to expand them."
-		if !degraded {
-			msg += " This check runs once."
-		} else {
-			msg += " One or more other configured roots were not available this startup, so this is a partial count; the check will run again next startup."
+	// GOVERNING INVARIANT (unchanged from #470): never stamp on a degraded
+	// walk as if it were clean. What #922 adds is a bounded CEILING on how
+	// many consecutive degraded attempts get an unconditional retry -- past
+	// that ceiling the marker is still stamped, but honestly, recording that
+	// the check gave up rather than that it found a clean library.
+	//
+	// The ceiling is decided HERE, before the per-attempt report below, not
+	// after it (#922 fix round, M1): reporting "will retry next startup" and
+	// then immediately following it with "gave up ... will not run again"
+	// reads as an outright contradiction on the very same attempt. Deciding
+	// first lets the report below drop the retry wording -- and, on the
+	// walk-completed-with-file-problems / roots-unavailable branches, skip
+	// its own line entirely -- when this IS the attempt that gives up, since
+	// the give-up line further down already carries every count those lines
+	// would have reported.
+	attemptDegraded := degraded || fileDegraded
+	var (
+		attempts       int
+		incErr         error
+		isFinalAttempt bool
+		// bestStacked is the largest stacked count across this degraded
+		// streak, this walk included; the give-up report uses it.
+		bestStacked = total.Normalized
+	)
+	if attemptDegraded {
+		attempts, incErr = incrementDegradedAttempts(ctx, sqlDB)
+		// incErr is handled after the report below (never here): the report
+		// describes what THIS walk found, which is knowable regardless of
+		// whether the counter could be persisted. On incErr != nil,
+		// isFinalAttempt stays false -- fail open on the ceiling decision the
+		// same way the rest of this function fails open on infrastructure
+		// errors, rather than guessing.
+		if incErr == nil && attempts >= maxDegradedAttempts {
+			isFinalAttempt = true
 		}
-		slog.Info(msg, "stacked", total.Normalized, "scanned", total.Scanned, "partial", degraded)
-	case degraded:
-		// Nothing stacked was found among the roots that COULD be checked,
-		// but at least one configured root was unavailable this startup --
-		// this is not a real all-clear (there is no such thing as "clean" on
-		// partial data), so this branch is deliberately worded to avoid
-		// claiming the library is clean.
-		slog.Warn("lrc check: one or more configured library roots were not available this startup; no stacked .lrc files found among the roots checked; will retry the unavailable root(s) next startup",
-			"scanned", total.Scanned, "partial", true)
-		return
-	default:
-		slog.Info("lrc check: library clean, no stacked .lrc files found. This check runs once.", "scanned", total.Scanned)
+		if incErr == nil {
+			best, merr := recordDegradedStacked(ctx, sqlDB, total.Normalized)
+			if merr != nil {
+				slog.Warn("lrc check: failed to record the degraded stacked count; the give-up report may undercount", "error", merr)
+			} else {
+				bestStacked = best
+			}
+		}
 	}
 
-	if degraded {
-		// GOVERNING INVARIANT: never stamp on a degraded walk. The report
-		// above is complete for the roots that were checked, but the marker
-		// is a one-way, whole-deployment stamp -- it must only be written
-		// once EVERY configured root has actually been walked successfully.
+	if fileDegraded {
+		// Errors/Blocked/Skipped make this walk's tally untrustworthy as an
+		// all-clear: an unreadable file might be stacked, StatusBlocked is
+		// specifically the tally that means "still stacked, needs an operator"
+		// (issue #487), and a Skipped file (e.g. a symlinked .lrc) was never judged
+		// at all (issue #470 round 2, Important 2) -- a stacked file behind a
+		// symlink would otherwise read as "library clean". None of these is the walk
+		// itself failing (WalkDir returned nil), so this branches separately from
+		// the walkErr != nil case above.
+		// total.Normalized is reported here too (#922 fix round, C1): a
+		// file-level degradation (a bad/blocked/skipped file among otherwise-
+		// successfully-walked ones) must not silently swallow a stacked-file
+		// finding that the SAME walk already collected on this or an earlier
+		// root. Without this, a single permanently-unreadable file sitting
+		// alongside hundreds of legitimately stacked ones would age the
+		// stacked count out of every log line once the ceiling is reached,
+		// defeating the #470 invariant this whole check exists to serve.
+		//
+		// Suppressed on the final attempt (M1 above): the give-up line below
+		// already carries scanned/stacked/errors/blocked/skipped, so this
+		// would only add a "will retry" claim the give-up line then refutes.
+		if !isFinalAttempt {
+			slog.Warn("lrc check: walk completed but some .lrc files could not be judged; will retry on next startup",
+				"scanned", total.Scanned, "stacked", total.Normalized, "errors", total.Errors, "blocked", total.Blocked, "skipped", total.Skipped, "partial", degraded)
+		}
+	} else {
+		switch {
+		case total.Normalized > 0:
+			// Reported regardless of `degraded` (issue #470 round 4, Critical 1):
+			// a stacked file found on a root that WAS successfully walked must
+			// reach the operator even if some other configured root could not be
+			// checked this startup. "partial" tells the operator this tally may
+			// be an undercount, not the whole library.
+			msg := "lrc check: stacked .lrc file(s) found; these render incorrectly in simple players. Run `canticle scan reconcile-lrc --yes` to expand them."
+			switch {
+			case isFinalAttempt:
+				// The give-up line below is this deployment's terminal
+				// statement about this check; do not also claim it will run
+				// again next startup.
+				msg += " One or more other configured roots were not available this startup, so this is a partial count."
+			case !degraded:
+				msg += " This check runs once."
+			default:
+				msg += " One or more other configured roots were not available this startup, so this is a partial count; the check will run again next startup."
+			}
+			slog.Info(msg, "stacked", total.Normalized, "scanned", total.Scanned, "partial", degraded)
+		case degraded:
+			// Nothing stacked was found among the roots that COULD be checked,
+			// but at least one configured root was unavailable this startup --
+			// this is not a real all-clear (there is no such thing as "clean" on
+			// partial data), so this branch is deliberately worded to avoid
+			// claiming the library is clean.
+			//
+			// Suppressed on the final attempt (M1 above), same reasoning as
+			// the fileDegraded branch: the give-up line is the terminal
+			// statement and already names the unavailable roots.
+			if !isFinalAttempt {
+				slog.Warn("lrc check: one or more configured library roots were not available this startup; no stacked .lrc files found among the roots checked; will retry the unavailable root(s) next startup",
+					"scanned", total.Scanned, "partial", true)
+			}
+		default:
+			slog.Info("lrc check: library clean, no stacked .lrc files found. This check runs once.", "scanned", total.Scanned)
+		}
+	}
+
+	if !attemptDegraded {
+		// A genuinely clean/completed attempt resets the counter: a deployment
+		// that recovers from a transient blip (a root remounts, a permission
+		// fix lands) must not carry a stale degraded-attempt count into some
+		// unrelated future degradation.
+		if cerr := clearDegradedAttempts(ctx, sqlDB); cerr != nil {
+			slog.Warn("lrc check: completed but failed to clear the degraded-attempt counter", "error", cerr)
+		}
+		if err := markLRCStackedCheckDone(ctx, sqlDB); err != nil {
+			slog.Warn("lrc check: completed but failed to record marker; it may re-run next startup", "error", err)
+		}
 		return
 	}
 
-	if err := markLRCStackedCheckDone(ctx, sqlDB); err != nil {
-		slog.Warn("lrc check: completed but failed to record marker; it may re-run next startup", "error", err)
+	if incErr != nil {
+		// The counter itself is unavailable; fail open the same way the
+		// marker-check/library-list failures above do -- retry next startup,
+		// without a ceiling decision this time, rather than either stamping
+		// on unreliable state or panicking.
+		slog.Warn("lrc check: failed to record the degraded-attempt count; will retry next startup", "error", incErr)
+		return
+	}
+	if !isFinalAttempt {
+		// Still within the bounded-retry budget: behave exactly as #470 did
+		// before this ceiling existed, and leave the marker unset.
+		return
+	}
+
+	// Ceiling reached (#922): stop retrying, but the stamp records a GAVE-UP
+	// outcome, never a clean one. Counts only, no path/artist/title -- an
+	// unavailable root is identified by its library id, which is safe to log
+	// (the operator already has that id in their own library configuration).
+	//
+	// bestStacked is the largest stacked count any attempt in this degraded
+	// streak saw, not just this walk's (#922): the give-up stamp is the LAST
+	// thing this check will ever log on this deployment, so if it drops a
+	// finding an earlier boot made, the operator never learns about it --
+	// exactly the #470 failure mode this check exists to prevent. When there is a
+	// count to report, the message also names the exact remediation command
+	// (rather than a bare "investigate manually"), since the operator has
+	// nothing else pointing them at it once this line has scrolled past.
+	giveUpMsg := "lrc check: gave up after repeated degraded startup attempts; this check will not run again on this deployment. " +
+		"If a library root above was reported unavailable, fix or remove it (see its library_id in the earlier warning)."
+	if bestStacked > 0 {
+		giveUpMsg += fmt.Sprintf(" %d stacked .lrc file(s) were found (a partial count, since this attempt gave up rather than"+
+			" completing cleanly); run `canticle scan reconcile-lrc --yes` to expand them.", bestStacked)
+	} else {
+		giveUpMsg += " A persistent file-level problem can be investigated by running `canticle scan reconcile-lrc` manually."
+	}
+	slog.Warn(giveUpMsg,
+		"degraded_attempts", attempts, "max_degraded_attempts", maxDegradedAttempts,
+		"stacked", bestStacked,
+		"errors", total.Errors, "blocked", total.Blocked, "skipped", total.Skipped,
+		"unavailable_root_count", len(unavailableRootIDs), "unavailable_root_ids", unavailableRootIDs)
+
+	if err := markLRCStackedCheckGaveUp(ctx, sqlDB); err != nil {
+		slog.Warn("lrc check: gave up but failed to record the marker; will retry next startup", "error", err)
+		return
+	}
+	if cerr := clearDegradedAttempts(ctx, sqlDB); cerr != nil {
+		slog.Warn("lrc check: gave-up marker recorded but failed to clear the degraded-attempt counter", "error", cerr)
 	}
 }
 
@@ -485,6 +672,80 @@ func markLRCStackedCheckDone(ctx context.Context, sqlDB *sql.DB) error {
 	if _, err := sqlDB.ExecContext(ctx,
 		`INSERT OR IGNORE INTO maintenance_markers (name) VALUES (?)`, lrcStackedCheckMarker); err != nil {
 		return fmt.Errorf("record maintenance marker %q: %w", lrcStackedCheckMarker, err)
+	}
+	return nil
+}
+
+// markLRCStackedCheckGaveUp stamps lrcStackedCheckMarker the same way
+// markLRCStackedCheckDone does (so the gate above skips every later startup),
+// but additionally records lrcStackedCheckGiveUpDetail in detail_count (#922)
+// so the row is honestly distinguishable from a genuine clean completion,
+// which never writes a detail_count at all. INSERT OR IGNORE would silently
+// no-op if the marker somehow already existed (it cannot on the code path
+// that calls this -- lrcStackedCheckDone already gated entry -- but the
+// ON CONFLICT keeps this correct even so, matching markLRCNormalizeApply's
+// UPSERT shape).
+func markLRCStackedCheckGaveUp(ctx context.Context, sqlDB *sql.DB) error {
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO maintenance_markers (name, detail_count)
+         VALUES (?, ?)
+         ON CONFLICT(name) DO UPDATE SET completed_at = excluded.completed_at, detail_count = excluded.detail_count`,
+		lrcStackedCheckMarker, lrcStackedCheckGiveUpDetail); err != nil {
+		return fmt.Errorf("record maintenance marker %q as gave-up: %w", lrcStackedCheckMarker, err)
+	}
+	return nil
+}
+
+// incrementDegradedAttempts records one more consecutive degraded startup
+// attempt (#922) and returns the new total. It reuses maintenance_markers
+// (migration 027) under lrcStackedCheckDegradedAttemptsMarker -- a distinct
+// row from lrcStackedCheckMarker, whose mere PRESENCE means "done" -- so an
+// in-progress attempt count never gets read as a completed check.
+func incrementDegradedAttempts(ctx context.Context, sqlDB *sql.DB) (int, error) {
+	var attempts int
+	err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO maintenance_markers (name, detail_count)
+         VALUES (?, 1)
+         ON CONFLICT(name) DO UPDATE SET
+             completed_at = excluded.completed_at,
+             detail_count = COALESCE(maintenance_markers.detail_count, 0) + 1
+         RETURNING detail_count`,
+		lrcStackedCheckDegradedAttemptsMarker).Scan(&attempts)
+	if err != nil {
+		return 0, fmt.Errorf("increment degraded-attempt counter %q: %w", lrcStackedCheckDegradedAttemptsMarker, err)
+	}
+	return attempts, nil
+}
+
+// recordDegradedStacked keeps the largest stacked count seen across the
+// current degraded streak (#922) and returns it, this walk's count included.
+func recordDegradedStacked(ctx context.Context, sqlDB *sql.DB, stacked int) (int, error) {
+	var best int
+	err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO maintenance_markers (name, detail_count)
+         VALUES (?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+             completed_at = excluded.completed_at,
+             detail_count = MAX(COALESCE(maintenance_markers.detail_count, 0), excluded.detail_count)
+         RETURNING detail_count`,
+		lrcStackedCheckDegradedStackedMarker, stacked).Scan(&best)
+	if err != nil {
+		return stacked, fmt.Errorf("record degraded stacked count %q: %w", lrcStackedCheckDegradedStackedMarker, err)
+	}
+	return best, nil
+}
+
+// clearDegradedAttempts removes the degraded-attempt counter row and the
+// degraded stacked-count row, so a later
+// degradation (after a genuine clean/completed run in between) starts counting
+// from zero rather than compounding onto a stale prior streak. A no-op (no
+// error) when the row is already absent -- the common case, since most
+// deployments never degrade at all.
+func clearDegradedAttempts(ctx context.Context, sqlDB *sql.DB) error {
+	if _, err := sqlDB.ExecContext(ctx,
+		`DELETE FROM maintenance_markers WHERE name IN (?, ?)`,
+		lrcStackedCheckDegradedAttemptsMarker, lrcStackedCheckDegradedStackedMarker); err != nil {
+		return fmt.Errorf("clear degraded-attempt counter %q: %w", lrcStackedCheckDegradedAttemptsMarker, err)
 	}
 	return nil
 }
