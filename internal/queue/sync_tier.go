@@ -27,12 +27,28 @@ const (
 	SyncTierUnsynced = "unsynced"
 )
 
+// validSyncTier reports whether tier is a recognized SyncTier* value or ""
+// (clear to NULL). Shared by every writer of work_queue.sync_tier, matching
+// SetWordTimingState's own validation.
+func validSyncTier(tier string) bool {
+	switch tier {
+	case "", SyncTierWord, SyncTierLine, SyncTierUnsynced:
+		return true
+	default:
+		return false
+	}
+}
+
 // SetSyncTier records the on-disk sync tier for id (#1075): 'word', 'line',
 // 'unsynced', or "" to clear it back to NULL (a completion that wrote no
 // synced sidecar, or a reopened row). Unconditional on status, matching
 // SetOutcomeType -- the worker calls this before Complete while the row is
-// still 'processing', and a no-op for a missing id is benign.
+// still 'processing', and a no-op for a missing id is benign. An
+// unrecognized tier is refused before the UPDATE runs.
 func (q *DBQueue) SetSyncTier(ctx context.Context, id int64, tier string) error {
+	if !validSyncTier(tier) {
+		return fmt.Errorf("queue: set sync tier for id %d: invalid tier %q", id, tier)
+	}
 	_, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue SET sync_tier = ? WHERE id = ?`,
 		nullIfEmpty(tier), id,

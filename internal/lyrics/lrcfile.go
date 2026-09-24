@@ -121,17 +121,30 @@ func ClassifySynced(synced models.Synced) SyncTier {
 // STALE companion nothing has pruned -- the file itself carries no timing
 // evidence, so it is not word-synced no matter what sits beside it.
 //
-// An os.ReadFile failure (missing, unreadable, a directory) is returned
-// verbatim so the caller can count it and leave the row unclassified rather
-// than guessing.
+// An os.ReadFile failure reading lrcPath itself (missing, unreadable, a
+// directory) is returned verbatim so the caller can count it and leave the
+// row unclassified rather than guessing.
+//
+// The companion check uses ownedCompanionOfErr, not OwnedCompanionOf: the
+// latter fail-closes doubt to "no companion", which would silently
+// misclassify a word-synced file as Line when its .elrc is merely unreadable
+// rather than absent or genuinely foreign (neither of which is an error
+// here). Only a genuine read failure propagates, so this caller counts the
+// row as unreadable and leaves it NULL rather than guessing Line.
 func ClassifyLRCFile(lrcPath string) (SyncTier, error) {
 	synced, err := ReadSyncedLRC(lrcPath)
 	if err != nil {
 		return "", err
 	}
 	tier := ClassifySynced(synced)
-	if tier == TierLine && OwnedCompanionOf(lrcPath) != "" {
-		tier = TierWord
+	if tier == TierLine {
+		companion, err := ownedCompanionOfErr(lrcPath)
+		if err != nil {
+			return "", err
+		}
+		if companion != "" {
+			tier = TierWord
+		}
 	}
 	return tier, nil
 }

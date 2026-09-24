@@ -61,6 +61,27 @@ func TestSetSyncTier(t *testing.T) {
 	}
 }
 
+// TestSetSyncTier_InvalidTier (#1075 hostile-review, Copilot 4097431615):
+// an invalid tier must be refused before the UPDATE runs, leaving the column
+// unchanged, matching SetWordTimingState's enum guard.
+func TestSetSyncTier_InvalidTier(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+
+	id := insertSyncTierRow(t, dbh, "invalid")
+	if err := q.SetSyncTier(ctx, id, SyncTierLine); err != nil {
+		t.Fatalf("seed SetSyncTier: %v", err)
+	}
+
+	if err := q.SetSyncTier(ctx, id, "bogus"); err == nil {
+		t.Fatal("SetSyncTier(bogus): want an error for an unrecognized tier, got nil")
+	}
+	if got := readSyncTier(t, dbh, id); !got.Valid || got.String != SyncTierLine {
+		t.Errorf("sync_tier = %+v, want unchanged %q after a rejected write", got, SyncTierLine)
+	}
+}
+
 // TestSetSyncTier_DoesNotTouchWordTimingState is the design-constraint proof
 // (#1075 AC): stamping the on-disk sync tier must NEVER write
 // word_timing_state, which means something entirely different (a provider

@@ -273,6 +273,31 @@ func TestClassifyLRCFile_Companion(t *testing.T) {
 	}
 }
 
+// TestClassifyLRCFile_UnreadableCompanion (#1075 hostile-review, CodeRabbit
+// 4097477384): a merely-unreadable .elrc must error, not silently read as "no
+// companion" (TierLine). Absent/foreign companions are covered by
+// TestClassifyLRCFile's "line only" and TestClassifyLRCFile_Companion's
+// "foreign never upgrades" cases, both TierLine/nil.
+func TestClassifyLRCFile_UnreadableCompanion(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("skipping: running as root, file permission restrictions do not apply")
+	}
+	dir := t.TempDir()
+	lrc := filepath.Join(dir, "fixture.lrc")
+	if err := os.WriteFile(lrc, []byte("[00:01.00]alpha\n[00:02.00]beta\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	companion := filepath.Join(dir, "fixture.elrc")
+	if err := os.WriteFile(companion, []byte("[by:canticle]\n[00:01.00]<00:01.00>alpha\n"), 0o000); err != nil {
+		t.Fatalf("write companion: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(companion, 0o600) })
+
+	if _, err := ClassifyLRCFile(lrc); err == nil {
+		t.Fatal("ClassifyLRCFile: want an error for an unreadable companion, got nil")
+	}
+}
+
 // TestPlainBody_StripsWordMarkers is the C2 fix (#480 prerequisite): PlainBody
 // flattens cues read back off disk, so an A2-marked cue must not persist
 // timestamp garbage into the user's plain-lyrics .txt.
