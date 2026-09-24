@@ -15,6 +15,12 @@ type DashboardView struct {
 	ProviderTiles []StatTile
 	// InstrumentalCount is the formatted count of audio-detected instrumental tracks.
 	InstrumentalCount string
+	// SyncTierTiles holds the three synced-result tier tiles (#627): word-synced
+	// (terminal, #553), line-synced (upgrade-eligible), and synced-tier-unknown
+	// (legacy/unrecorded). Always exactly these three, never merged into one
+	// "Synced" tile, so the dashboard cannot misrepresent how much of the
+	// library is actually done.
+	SyncTierTiles []StatTile
 	// QueueChart holds the work-queue status distribution for the doughnut chart
 	// (#318). It complements the queue tiles; it is omitted when every count is
 	// zero (HasData false), so an empty queue does not render a blank chart.

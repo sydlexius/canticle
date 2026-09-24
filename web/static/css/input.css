@@ -611,6 +611,49 @@ body {
   color: var(--mx-content-text-secondary);
 }
 
+/* Result tier badge (#627): distinguishes word-synced (terminal, #553) from
+   line-synced (upgrade-eligible) and from a synced row with no recorded tier,
+   in the Recent Outcomes table on both the Dashboard and the Reports
+   workspace. Lives here rather than in dashboard.css (a page-scoped
+   stylesheet, see layout.templ's pageCSS) because the Reports page renders
+   the same badge with no dashboard.css loaded. Mirrors the Up-next panel's
+   .mx-upnext-tier pill (dashboard.css) so the two badge families read as one
+   system; not merged into one shared class because they live in different
+   stylesheets with different load scopes. */
+.mx-result-tier {
+  display: inline-block;
+  font-family: var(--mx-font-sans);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--mx-radius-sm);
+  border: 1px solid var(--mx-surface-border);
+}
+
+/* Word-synced: the #553 terminal rung. Green, matching the "success" hue
+   dashboard.css already uses for Done in the queue chart (--mx-chart-done is
+   page-scoped there, so the value is repeated here rather than shared). */
+.mx-result-tier-word {
+  color: #22c55e; /* green-500: matches --mx-chart-done's success hue */
+  background: rgba(34, 197, 94, 0.12);
+}
+
+/* Line-synced: still upgrade-eligible, so it gets the same blue accent as an
+   active/in-progress state rather than a completed one. */
+.mx-result-tier-line {
+  color: var(--mx-accent);
+  background: var(--mx-accent-glow);
+}
+
+/* Synced, tier not recorded: a legacy row or one mid recheck. Muted grey so it
+   reads as "unknown", not as a third finished state competing with word/line. */
+.mx-result-tier-unknown {
+  color: var(--mx-content-text-secondary);
+  background: var(--mx-surface-border);
+}
+
 /* Musixmatch attribution required by API Terms clause 2.1.5 (see
    docs/provider-terms.md). Sits at the end of the content column on every page.
 

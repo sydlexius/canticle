@@ -154,7 +154,13 @@ templ tableRecentOutcomes(rows []RecentOutcomeRow) {
 							<td>{ r.Artist }</td>
 							<td>{ r.Title }</td>
 							<td>{ r.Album }</td>
-							<td class="mx-cell-mono">{ r.Result }</td>
+							<td class="mx-cell-mono">
+								if r.ResultTierClass != "" {
+									<span class={ r.ResultTierClass }>{ r.Result }</span>
+								} else {
+									{ r.Result }
+								}
+							</td>
 							<td class="mx-cell-mono">{ r.Detail }</td>
 							<td class="mx-cell-mono">@laneCell(r.Lane, r.LaneMark)</td>
 							<td class="mx-cell-mono">{ r.CompletedAt }</td>

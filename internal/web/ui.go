@@ -458,14 +458,15 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 		v.RecentRows = make([]templates.RecentOutcomeRow, 0, len(rows))
 		for _, o := range rows {
 			v.RecentRows = append(v.RecentRows, templates.RecentOutcomeRow{
-				Artist:      o.Artist,
-				Title:       o.Title,
-				Album:       o.Album,
-				Result:      string(o.Result),
-				Detail:      detailOrDash(o.Detail),
-				Lane:        laneLabel(o.ProviderLane),
-				LaneMark:    laneMark(o.ProviderLane),
-				CompletedAt: formatReportTime(o.CompletedAt, serverLoc),
+				Artist:          o.Artist,
+				Title:           o.Title,
+				Album:           o.Album,
+				Result:          resultLabel(o.Result),
+				ResultTierClass: resultTierClass(o.Result),
+				Detail:          detailOrDash(o.Detail),
+				Lane:            laneLabel(o.ProviderLane),
+				LaneMark:        laneMark(o.ProviderLane),
+				CompletedAt:     formatReportTime(o.CompletedAt, serverLoc),
 			})
 		}
 	case "provider-effectiveness":

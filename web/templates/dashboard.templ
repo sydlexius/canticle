@@ -29,6 +29,7 @@ templ dashboardContent(view DashboardView) {
 			</p>
 		</div>
 		@dashQueueTiles(view.QueueTiles, view.InstrumentalCount, view.QueueChart)
+		@dashSyncTierTiles(view.SyncTierTiles)
 		@dashProviderTiles(view.ProviderTiles)
 		@dashUpNext(view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
 		@dashRecentOutcomes(view.RecentRows)
@@ -112,6 +113,44 @@ templ dashQueueTiles(tiles []StatTile, instrumentalCount string, chart ChartData
 			@dashChart("mx-dash-queue-chart", "doughnut", "Work queue status distribution", "", chart)
 		}
 	</section>
+}
+
+// dashSyncTierTiles renders the word-synced / line-synced / tier-unknown tile
+// row (#627). These are deliberately their OWN section rather than tiles
+// folded into dashQueueTiles: they classify the terminal-vs-upgradeable split
+// within "Done" (#553), a different axis than queue status, and merging them
+// into the Work Queue tiles would make that row over-count (a synced track is
+// already counted once in Done there).
+templ dashSyncTierTiles(tiles []StatTile) {
+	<section
+		class="mx-dash-section"
+		aria-labelledby="mx-dash-synctier-heading"
+		title="How much of the completed library is word-synced (terminal, nothing further to gain) versus line-synced (still upgrade-eligible) versus a row with no recorded tier."
+	>
+		<h2 class="mx-dash-section-title" id="mx-dash-synctier-heading">Sync Tier</h2>
+		<div class="mx-dash-tiles" role="list">
+			for _, t := range tiles {
+				<div class="mx-dash-tile" role="listitem" title={ dashSyncTierTooltip(t.Label) }>
+					<span class="mx-dash-tile-label">{ t.Label }</span>
+					<span class="mx-dash-tile-value">{ t.Value }</span>
+				</div>
+			}
+		</div>
+	</section>
+}
+
+// dashSyncTierTooltip returns the hover description for a sync-tier tile.
+func dashSyncTierTooltip(label string) string {
+	switch label {
+	case "Word-synced":
+		return "Synced lyrics with word-level timing on disk. Terminal: nothing further to gain from a re-fetch or word-sync recheck."
+	case "Line-synced":
+		return "Synced lyrics with line-level timing only; every word-capable source checked found no word data. Still upgrade-eligible."
+	case "Synced (tier unknown)":
+		return "A synced .lrc with no recorded tier: a row from before tier tracking, served from cache or a lane with no word data (e.g. innertube), fetched under word_sync_mode=off, or awaiting a word-sync recheck. Issue #1075 will classify most of these from the file itself. Shown honestly, not guessed."
+	default:
+		return ""
+	}
 }
 
 // dashProviderTiles renders the per-lyrics-source tile row. Each tile carries
@@ -212,7 +251,13 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 							<tr>
 								<td>{ row.Artist }</td>
 								<td>{ row.Title }</td>
-								<td>{ row.Result }</td>
+								<td>
+									if row.ResultTierClass != "" {
+										<span class={ row.ResultTierClass }>{ row.Result }</span>
+									} else {
+										{ row.Result }
+									}
+								</td>
 								<td>@laneCell(row.Lane, row.LaneMark)</td>
 								<td class="mx-table-mono">
 									if row.CompletedAtISO != "" {

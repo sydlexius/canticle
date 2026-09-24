@@ -60,6 +60,25 @@ func insertDone(t *testing.T, sqlDB *sql.DB, title, lane, outputPaths, completed
 	}
 }
 
+// insertDoneWithWordTiming is insertDone plus an explicit word_timing_state
+// (#627): "served", "absent", or "" for NULL (not examined). Used by the
+// word/line-sync tier tests, which need control over the tier column that
+// insertDone's outcome_type-from-filename inference does not derive. lane is
+// always "musixmatch" at every current call site (word_timing_state does not
+// vary by lane), so it is not a parameter here -- add one back if a future
+// test needs to vary it.
+func insertDoneWithWordTiming(t *testing.T, sqlDB *sql.DB, title, outputPaths, completedAt, wordTimingState string) {
+	t.Helper()
+	insertDone(t, sqlDB, title, "musixmatch", outputPaths, completedAt)
+	if wordTimingState == "" {
+		return
+	}
+	if _, err := sqlDB.ExecContext(context.Background(),
+		`UPDATE work_queue SET word_timing_state = ? WHERE title = ?`, wordTimingState, title); err != nil {
+		t.Fatalf("set word_timing_state: %v", err)
+	}
+}
+
 // insertUnavailable seeds a work_queue row retired by RetireMiss (#477):
 // status='unavailable' with the miss-limit sentinel, no sidecar written.
 func insertUnavailable(t *testing.T, sqlDB *sql.DB, title string) {
