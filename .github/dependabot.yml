@@ -86,35 +86,27 @@ updates:
           - "pytest*"
           - "httpx"
 
-  # The aligner sidecar's Python deps, now that its generated locks
-  # (requirements-linux-amd64.txt / requirements-linux-arm64.txt /
-  # requirements-test.txt) are fully hash-pinned (issue #1017, mirroring the
-  # yamnet entry above). requirements.in/requirements-test.in themselves carry
-  # exact-version pins, not hashes -- the hashes live only in the generated
-  # locks those files compile to.
+  # The aligner sidecar's Python deps. requirements.in / requirements-test.in
+  # carry the exact top-level pins; the generated, fully hash-pinned locks
+  # (requirements-linux-amd64.txt / -arm64.txt / requirements-test.txt, #1017)
+  # are regenerated from them per deploy/aligner/README.md.
   #
-  # What is actually known: Dependabot's pip ecosystem understands
-  # pip-compile-style constraint files, so it should bump requirements.in /
-  # requirements-test.in and leave the per-arch requirements-linux-*.txt lock
-  # outputs alone (they carry no pip-compile header identifying them as
-  # compiled artifacts of requirements.in, unlike yamnet's single portable
-  # lock). This has NOT been observed against a live Dependabot run for this
-  # directory -- it is not verified that Dependabot won't instead open a PR
-  # bumping a requirements-linux-*.txt file directly against PyPI, or bump
-  # amd64's lock without arm64's.
+  # OBSERVED, no longer hypothetical: Dependabot edited the per-arch locks
+  # directly, bumping TRANSITIVE packages to versions their parents forbid
+  # (#1064 pydantic-core past pydantic's ==pin, #1065 antlr4-python3-runtime
+  # past omegaconf's ==4.9.*), leaving both locks unsatisfiable. Cause
+  # (dependabot-core PipCompileFileMatcher): a .txt counts as a compiled lock
+  # -- its entries indirect -- only if it names itself via --output-file or has
+  # a same-basename .in. requirements-linux-*.txt has neither, so every
+  # transitive in it parsed as a DIRECT dependency of a plain requirements file.
   #
-  # The failure mode if that assumption is wrong is LOUD, not silent: the
-  # `aligner-lock-agreement` check below (ci.yml) fails a PR that leaves the
-  # two per-arch locks disagreeing on package/version, and the Dockerfile's
-  # `--require-hashes` install fails outright if a lock is hand-edited or
-  # partially bumped without regenerating its hash set. A torch/torchaudio
-  # bump specifically would also risk resolving PyPI's CUDA wheel rather than
-  # the pinned `+cpu` build from the PyTorch CPU index --require-hashes was
-  # pinning against, which --require-hashes rejects rather than silently
-  # installing.
-  #
-  # Regenerating the hash-pinned locks after a genuine requirements.in /
-  # requirements-test.in bump is a follow-up commit, same as yamnet's.
+  # Two controls: `exclude-paths` hides the per-arch locks from Dependabot (the
+  # load-bearing one -- `allow: direct` alone cannot help while those entries
+  # parse as direct), and `allow: direct` confines bumps to packages named in
+  # requirements.in / requirements-test.in (requirements-test.txt matches its
+  # .in by basename, so its transitives are correctly indirect). On any such
+  # bump, regenerating the locks is a follow-up commit; the ci.yml
+  # "Verify aligner locks are fresh" step fails the PR until that lands.
   - package-ecosystem: pip
     directory: /deploy/aligner
     schedule:
@@ -125,6 +117,10 @@ updates:
     labels:
       - dependencies
     open-pull-requests-limit: 5
+    exclude-paths:
+      - "**/requirements-linux-*.txt"
+    allow:
+      - dependency-type: direct
     groups:
       # Same rationale as yamnet-test-deps: these never ship in the image, so
       # one PR per week beats several that each re-trigger the sidecar build.

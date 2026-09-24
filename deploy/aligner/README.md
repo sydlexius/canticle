@@ -371,6 +371,18 @@ that date in sync with whatever you pass on the command line, and re-verify
 (regenerate, then diff against the committed file) before trusting a new
 date.
 
+That header line (`# Generated: --exclude-newer <timestamp>`) is also the
+one place CI reads the date from: `scripts/check-aligner-locks-fresh.sh`
+(ci.yml's "Verify aligner locks are fresh" step) re-resolves each lock with
+the recipe above at that lock's own recorded date and fails if the committed
+requirement lines differ, so bumping the date is a header edit plus a
+regeneration, with no workflow change. The comparison skips the leading
+comment/blank block (the hand-written header) and compares everything from
+the first requirement line on. Run the script locally with uv 0.9.7 on PATH
+(or `UV=/path/to/uv`) before pushing a lock change. Dependabot is configured
+to leave the per-arch locks alone (`.github/dependabot.yml`), so a Dependabot
+bump of a pin in `requirements.in` needs a regeneration follow-up commit.
+
 ## Known limitations and follow-ups
 
 - **No GPU Docker variant yet** -- CPU-only image; the CUDA variant is
