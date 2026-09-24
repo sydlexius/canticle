@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/lrcnormalize"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/timing"
 )
@@ -163,18 +164,118 @@ func TestPlainBody_AllDecorativeIsEmpty(t *testing.T) {
 	}
 }
 
-// TestPlainBody_StripsWordMarkers is the C2 fix (#480 prerequisite).
-//
-// PlainBody flattens cues read back OFF DISK, so once canticle writes A2 word
-// markers those cues carry them. Without stripping, a demotion persists
-// timestamp garbage into the user's plain-lyrics .txt -- and that is not
-// recoverable from the .txt afterwards.
-//
-// This is independent of what triggers the demotion: any A2 file that demotes
-// for any legitimate reason (a genuine overrun) hits it. Only the disk-read
-// path is affected -- the accept-time demotion flattens song.Subtitles, which
-// is unmarked -- and the disk-read path is the one that runs over the whole
-// library.
+// TestClassifySynced covers the pure cue-based classification (#1075): word
+// markers win, then line cues, then unsynced for no cues at all.
+func TestClassifySynced(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want SyncTier
+	}{
+		{"word markers", "[00:01.00]<00:01.00>alpha <00:01.50>beta\n", TierWord},
+		{"line only", "[00:01.00]alpha beta\n[00:02.00]gamma\n", TierLine},
+		{"no timestamps", "just plain words\nand more\n", TierUnsynced},
+		{"empty", "", TierUnsynced},
+		// Documented edge cases (#1075 hostile-review finding 6), pinned as
+		// characterization tests rather than fixed: canticle's own A2 grammar
+		// is exactly 2 fractional digits (timing.wordMarkerRe), so a 3-digit-ms
+		// marker does not match and reads as plain (unstripped) text -> Line.
+		{"three-digit-ms marker does not match the A2 grammar: reads line", "[00:01.00]<00:01.000>alpha\n", TierLine},
+		// A cue that is only a marker plus a decorative character still reads
+		// Word: ClassifySynced asks whether stripping the marker changed the
+		// text, not whether what remains is meaningful lyric content (that is
+		// timing.IsDecorative, a different predicate used for what a demotion
+		// persists).
+		{"marker plus decorative-only text still reads word", "[00:01.00]<00:01.00>♪\n", TierWord},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := lrcnormalize.ParseBody(tc.body)
+			if got := ClassifySynced(models.Synced{Lines: doc.Cues}); got != tc.want {
+				t.Errorf("ClassifySynced(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClassifyLRCFile covers the disk-reading wrapper: plain cue tiers (no
+// companion involved) plus the error passthrough for a missing file.
+func TestClassifyLRCFile(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want SyncTier
+	}{
+		{"line only", "[00:01.00]alpha\n[00:02.00]beta\n", TierLine},
+		{"word markers", "[00:01.00]<00:01.00>alpha <00:01.50>beta\n", TierWord},
+		{"no timestamps", "just some plain words\nand more of them\n", TierUnsynced},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ClassifyLRCFile(writeLRCFixture(t, tc.body))
+			if err != nil {
+				t.Fatalf("ClassifyLRCFile: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("tier = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	t.Run("missing file errors", func(t *testing.T) {
+		if _, err := ClassifyLRCFile(filepath.Join(t.TempDir(), "absent.lrc")); err == nil {
+			t.Fatal("want an error for a missing file")
+		}
+	})
+}
+
+// TestClassifyLRCFile_Companion covers the .elrc companion upgrade: only an
+// OWNED companion ([by:canticle]) upgrades a plain line-synced .lrc to Word;
+// a foreign one (matching OwnedCompanionOf's own foreign-file rule) never
+// does. lrcBody lets a case override the default line-synced fixture --
+// "unsynced .lrc, owned companion" (#1075 hostile-review finding 5) proves
+// the upgrade is scoped to Line only: a .lrc with NO timestamps at all stays
+// Unsynced even beside an owned companion, because a live write can never
+// produce that pair (planCompanion only writes a fresh companion for a
+// synced write with a qualifying line, and removes an owned one on any
+// unsynced settle) -- so an unsynced .lrc paired with one on disk is a stale
+// companion nothing has pruned, not evidence the file is word-synced.
+func TestClassifyLRCFile_Companion(t *testing.T) {
+	for _, tc := range []struct {
+		name, lrcBody, companionBody string
+		want                         SyncTier
+	}{
+		{"owned upgrades line to word", "", "[by:canticle]\n[00:01.00]<00:01.00>alpha\n", TierWord},
+		{"foreign never upgrades", "", "[00:01.00]<00:01.00>alpha\n", TierLine},
+		{"owned companion never upgrades an unsynced lrc", "just plain words\nno timestamps\n",
+			"[by:canticle]\n[00:01.00]<00:01.00>alpha\n", TierUnsynced},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			lrc := filepath.Join(dir, "fixture.lrc")
+			body := tc.lrcBody
+			if body == "" {
+				body = "[00:01.00]alpha\n[00:02.00]beta\n"
+			}
+			if err := os.WriteFile(lrc, []byte(body), 0o600); err != nil {
+				t.Fatalf("write lrc: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "fixture.elrc"), []byte(tc.companionBody), 0o600); err != nil {
+				t.Fatalf("write companion: %v", err)
+			}
+			got, err := ClassifyLRCFile(lrc)
+			if err != nil {
+				t.Fatalf("ClassifyLRCFile: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("tier = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPlainBody_StripsWordMarkers is the C2 fix (#480 prerequisite): PlainBody
+// flattens cues read back off disk, so an A2-marked cue must not persist
+// timestamp garbage into the user's plain-lyrics .txt.
 func TestPlainBody_StripsWordMarkers(t *testing.T) {
 	got := PlainBody(models.Synced{Lines: []models.Lines{
 		{Text: "<00:01.50>alpha <00:02.00>beta"},
