@@ -394,7 +394,16 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		if !song.FetchedAt.IsZero() {
 			tags = append(tags, fmt.Sprintf("[fetched:%s]", song.FetchedAt.Format(time.RFC3339)))
 		}
-		tags = append(tags, fmt.Sprintf("[ve:%s]", version.Version))
+		// [re:] is the LRC-standard "editor/tool that created the file" tag,
+		// paired with [ve:] right after it (#483): together they unambiguously
+		// attribute both tool and version, using tags every LRC parser already
+		// understands, unlike a bare [ve:x.y.z] (which any tool could have
+		// written) or a non-standard namespaced key. Written in lockstep with
+		// [ve:] -- same branch, same tags slice, immediately adjacent -- so the
+		// two can never appear one without the other, and the retroactive
+		// backfill (InjectEditorTag) inserts at this exact position so a
+		// backfilled file's header is byte-identical in shape to a fresh one.
+		tags = append(tags, "[re:canticle]", fmt.Sprintf("[ve:%s]", version.Version))
 		if song.Track.ISRC != "" {
 			tags = append(tags, fmt.Sprintf("[isrc:%s]", song.Track.ISRC))
 		}
