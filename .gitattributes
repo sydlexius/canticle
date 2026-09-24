@@ -14,3 +14,10 @@ LICENSE text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf
 .golangci.yml text eol=lf
+
+# Generated lock files: collapsed in diffs and skipped by reviewers. Keep in
+# step with reviews.path_filters in .coderabbit.yaml.
+go.sum linguist-generated=true
+*.lock linguist-generated=true
+deploy/**/requirements-*.txt linguist-generated=true
+deploy/yamnet-detector/requirements.txt linguist-generated=true
