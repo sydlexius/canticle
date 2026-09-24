@@ -717,9 +717,11 @@ jobs:
       # line, and the hand-written header is ignored in the comparison; see
       # the script for both rules.
       - name: Install uv (hash-pinned, matches the README's lock recipe)
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: pip install --require-hashes -r .github/aligner-lock-tools.txt
 
       - name: Verify aligner locks are fresh (re-resolve and compare)
+        if: github.event_name != 'pull_request' || needs.changes.outputs.aligner == 'true'
         run: scripts/check-aligner-locks-fresh.sh deploy/aligner
 
   coverage-floor:
