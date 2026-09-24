@@ -31,7 +31,7 @@ func resultLabel(rc reports.ResultClass) string {
 // non-synced class (miss, unsynced, instrumental, rejected, unknown) renders
 // as plain text, exactly as it did before this issue.
 //
-// ResultSynced (word_timing_state NULL/unrecorded) gets its own muted class
+// ResultSynced (sync_tier NULL/unrecorded, #1075) gets its own muted class
 // rather than reusing markNone/no-badge, so "synced, tier not recorded" reads
 // as a distinct, honest state rather than as the absence of a class -- the
 // same "shown honestly, not guessed" requirement #627's AC states for legacy

@@ -60,22 +60,22 @@ func insertDone(t *testing.T, sqlDB *sql.DB, title, lane, outputPaths, completed
 	}
 }
 
-// insertDoneWithWordTiming is insertDone plus an explicit word_timing_state
-// (#627): "served", "absent", or "" for NULL (not examined). Used by the
-// word/line-sync tier tests, which need control over the tier column that
-// insertDone's outcome_type-from-filename inference does not derive. lane is
-// always "musixmatch" at every current call site (word_timing_state does not
-// vary by lane), so it is not a parameter here -- add one back if a future
-// test needs to vary it.
-func insertDoneWithWordTiming(t *testing.T, sqlDB *sql.DB, title, outputPaths, completedAt, wordTimingState string) {
+// insertDoneWithSyncTier is insertDone plus an explicit sync_tier (#1075):
+// "word", "line", or "" for NULL (not classified). Used by the word/line-sync
+// tier tests, which need control over the tier column that insertDone's
+// outcome_type-from-filename inference does not derive. lane is always
+// "musixmatch" at every current call site (sync_tier does not vary by lane),
+// so it is not a parameter here -- add one back if a future test needs to
+// vary it.
+func insertDoneWithSyncTier(t *testing.T, sqlDB *sql.DB, title, outputPaths, completedAt, syncTier string) {
 	t.Helper()
 	insertDone(t, sqlDB, title, "musixmatch", outputPaths, completedAt)
-	if wordTimingState == "" {
+	if syncTier == "" {
 		return
 	}
 	if _, err := sqlDB.ExecContext(context.Background(),
-		`UPDATE work_queue SET word_timing_state = ? WHERE title = ?`, wordTimingState, title); err != nil {
-		t.Fatalf("set word_timing_state: %v", err)
+		`UPDATE work_queue SET sync_tier = ? WHERE title = ?`, syncTier, title); err != nil {
+		t.Fatalf("set sync_tier: %v", err)
 	}
 }
 

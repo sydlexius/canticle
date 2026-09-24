@@ -577,7 +577,11 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
 	// recheck mode, or its settle would write scan_results back to done and the
 	// purged track would never be re-fetched; and a served/absent verdict judged
 	// the file being deleted, so keeping it would exclude the refetched lyric
-	// from ever being rechecked.
+	// from ever being rechecked. sync_tier (#1075) is cleared alongside it for
+	// the same reason: it describes the .lrc this purge is about to delete, and
+	// a row that later settles 'done' without a fresh completion (e.g.
+	// prune.retireUnresolvable, source gone) must not keep reporting a tier for
+	// a file that no longer exists.
 	for _, id := range workItemIDs {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE work_queue
@@ -588,7 +592,8 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
                  last_error = '',
                  word_timing_state = NULL,
                  word_timing_generation = NULL,
-                 word_timing_checked_at = NULL
+                 word_timing_checked_at = NULL,
+                 sync_tier = NULL
              WHERE id = ? AND status != 'processing'`,
 			now, id)
 		if err != nil {

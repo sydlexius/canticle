@@ -280,6 +280,38 @@ func TestRun_ApplyDeletesAndRequeues(t *testing.T) {
 	}
 }
 
+// TestRun_ApplyClearsSyncTier: the reset must NULL sync_tier alongside
+// word_timing_state (#1075 hostile-review finding 2), or a row a later pass
+// settles 'done' without a fresh completion (e.g. prune.retireUnresolvable on
+// a confirmed-gone source) keeps reporting a stale tier for the sidecar this
+// purge just deleted.
+func TestRun_ApplyClearsSyncTier(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	dirA := filepath.Join(root, "ArtistA")
+	path := filepath.Join(dirA, "one.lrc")
+	writeSidecar(t, path, "musixmatch")
+	_, wq1 := seedTrack(t, ctx, sqlDB, libID, dirA, "one.lrc", "done")
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET sync_tier = 'word' WHERE id = ?`, wq1); err != nil {
+		t.Fatalf("seed sync_tier: %v", err)
+	}
+
+	p := New(sqlDB)
+	if _, err := p.Run(ctx, Options{
+		Roots: []string{root}, Filter: Filter{Source: "musixmatch"}, LibraryID: &libID,
+		Report: func(Record) error { return nil },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var tier sql.NullString
+	if err := sqlDB.QueryRowContext(ctx, `SELECT sync_tier FROM work_queue WHERE id = ?`, wq1).Scan(&tier); err != nil {
+		t.Fatalf("read sync_tier: %v", err)
+	}
+	if tier.Valid {
+		t.Errorf("sync_tier = %q, want NULL after the purge reset", tier.String)
+	}
+}
+
 // TestRun_DryRunReportErrorIsCountedButHarmless: in a dry run, a Report error
 // is counted as an Errors tally entry but the run continues (nothing to
 // protect, since dry-run deletes nothing regardless).

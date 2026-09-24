@@ -45,11 +45,17 @@ type workItem struct {
 	// 'categorical'/'degenerate' value on a NULL outcomeType is the row that
 	// renders Result='unknown' with its reason one column over.
 	timingOutcome any // string or nil
-	// wordTimingState is work_queue.word_timing_state (#982/#627): nil => NULL
-	// (not examined -- every row predating #982, and the RecentOutcomes/
-	// SyncTierCounts "tier unknown" bucket), "served" => word-synced, "absent"
-	// => line-synced.
+	// wordTimingState is work_queue.word_timing_state (#982): nil => NULL (not
+	// examined). Drives ONLY the recheck sweep and the SyncTierCounts
+	// 'queued' OR-clause now (#1075 switched the word/line tier source to
+	// syncTier below); "served"/"absent" no longer affect ResultClass.
 	wordTimingState any // string or nil
+	// syncTier is work_queue.sync_tier (#1075): nil => NULL (not yet
+	// classified -- every row predating the column, and the RecentOutcomes/
+	// SyncTierCounts "tier unknown" bucket), "word" => word-synced, "line" =>
+	// line-synced, "unsynced" => a corrupted/hand-placed .lrc (also tier
+	// unknown). THIS is the #627 report split's tier source as of #1075.
+	syncTier any // string or nil
 	// overrunMagnitude/overrunRatio/evaluatedAt are migration 034's remaining
 	// timing columns (#629's ReviewQueue report). nil => NULL, matching every
 	// other nullable field on this struct.
@@ -81,11 +87,11 @@ func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
 		`INSERT INTO work_queue
             (artist, title, artist_key, title_key, album, status, last_error, output_paths,
              completed_at, provider_lane, instrumental_result, detect_instrumental, outcome_type,
-             outcome_detail, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at, word_timing_state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             outcome_detail, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at, word_timing_state, sync_tier)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.artist, w.title, w.artist, w.title, w.album, w.status, w.lastError, w.outputPaths,
 		w.completedAt, w.providerLane, w.instrumentalResult, w.detectInstrumental, w.outcomeType,
-		w.outcomeDetail, w.timingOutcome, w.overrunMagnitude, w.overrunRatio, w.evaluatedAt, w.wordTimingState)
+		w.outcomeDetail, w.timingOutcome, w.overrunMagnitude, w.overrunRatio, w.evaluatedAt, w.wordTimingState, w.syncTier)
 	if err != nil {
 		t.Fatalf("insert work_queue: %v", err)
 	}
@@ -398,10 +404,10 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	}
 }
 
-// TestRecentOutcomesWordLineSyncTiers asserts the #627 three-way split of the
-// synced bucket: a synced row with word_timing_state='served' classifies as
-// ResultWordSynced, 'absent' as ResultLineSynced, and NULL (or any other
-// value, e.g. mid-recheck 'queued') falls back to plain ResultSynced -- shown
+// TestRecentOutcomesWordLineSyncTiers asserts the #1075 three-way split of the
+// synced bucket: a synced row with sync_tier='word' classifies as
+// ResultWordSynced, 'line' as ResultLineSynced, and NULL (or 'unsynced', or a
+// row still mid word-sync recheck) falls back to plain ResultSynced -- shown
 // honestly as "tier unknown" rather than guessed, per the issue's AC.
 func TestRecentOutcomesWordLineSyncTiers(t *testing.T) {
 	ctx := context.Background()
@@ -410,26 +416,26 @@ func TestRecentOutcomesWordLineSyncTiers(t *testing.T) {
 
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "WordSynced", title: "W", status: "done",
-		completedAt: "2026-06-10T10:00:00Z", outcomeType: "synced", wordTimingState: "served",
+		completedAt: "2026-06-10T10:00:00Z", outcomeType: "synced", syncTier: "word",
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "LineSynced", title: "L", status: "done",
-		completedAt: "2026-06-11T10:00:00Z", outcomeType: "synced", wordTimingState: "absent",
+		completedAt: "2026-06-11T10:00:00Z", outcomeType: "synced", syncTier: "line",
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "TierUnknownLegacy", title: "TU1", status: "done",
-		completedAt: "2026-06-12T10:00:00Z", outcomeType: "synced", // wordTimingState nil
+		completedAt: "2026-06-12T10:00:00Z", outcomeType: "synced", // syncTier nil
 	})
 	insertWorkItem(t, sqlDB, workItem{
-		artist: "TierUnknownQueued", title: "TU2", status: "done",
-		completedAt: "2026-06-13T10:00:00Z", outcomeType: "synced", wordTimingState: "queued",
+		artist: "TierUnknownUnsynced", title: "TU2", status: "done",
+		completedAt: "2026-06-13T10:00:00Z", outcomeType: "synced", syncTier: "unsynced",
 	})
-	// A non-synced outcome must never pick up a tier even if word_timing_state
-	// somehow carries a value (defensive: the worker only stamps served/absent
-	// for a synced outcome, but the classifier must not trust that from SQL).
+	// A non-synced outcome must never pick up a tier even if sync_tier somehow
+	// carries a value (defensive: the worker only stamps a tier for a synced
+	// outcome, but the classifier must not trust that from SQL).
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "UnsyncedWithState", title: "UWS", status: "done",
-		completedAt: "2026-06-14T10:00:00Z", outcomeType: "unsynced", wordTimingState: "served",
+		completedAt: "2026-06-14T10:00:00Z", outcomeType: "unsynced", syncTier: "word",
 	})
 
 	got, err := repo.RecentOutcomes(ctx, 10)
@@ -440,11 +446,11 @@ func TestRecentOutcomesWordLineSyncTiers(t *testing.T) {
 		t.Fatalf("got %d outcomes, want 5: %+v", len(got), got)
 	}
 	want := map[string]reports.ResultClass{
-		"WordSynced":        reports.ResultWordSynced,
-		"LineSynced":        reports.ResultLineSynced,
-		"TierUnknownLegacy": reports.ResultSynced,
-		"TierUnknownQueued": reports.ResultSynced,
-		"UnsyncedWithState": reports.ResultUnsynced,
+		"WordSynced":          reports.ResultWordSynced,
+		"LineSynced":          reports.ResultLineSynced,
+		"TierUnknownLegacy":   reports.ResultSynced,
+		"TierUnknownUnsynced": reports.ResultSynced,
+		"UnsyncedWithState":   reports.ResultUnsynced,
 	}
 	for _, o := range got {
 		wantResult, ok := want[o.Artist]
@@ -459,19 +465,19 @@ func TestRecentOutcomesWordLineSyncTiers(t *testing.T) {
 
 // TestSyncTierCounts asserts the dashboard tier-count query splits the same
 // three ways as RecentOutcomes' classification, and that a non-synced row
-// (with or without a word_timing_state) never counts toward any tier.
+// (with or without a sync_tier) never counts toward any tier.
 func TestSyncTierCounts(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
-	insertWorkItem(t, sqlDB, workItem{artist: "A1", title: "T1", status: "done", outcomeType: "synced", wordTimingState: "served"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A2", title: "T2", status: "done", outcomeType: "synced", wordTimingState: "served"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A3", title: "T3", status: "done", outcomeType: "synced", wordTimingState: "absent"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A1", title: "T1", status: "done", outcomeType: "synced", syncTier: "word"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A2", title: "T2", status: "done", outcomeType: "synced", syncTier: "word"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A3", title: "T3", status: "done", outcomeType: "synced", syncTier: "line"})
 	insertWorkItem(t, sqlDB, workItem{artist: "A4", title: "T4", status: "done", outcomeType: "synced"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A5", title: "T5", status: "done", outcomeType: "synced", wordTimingState: "queued"})
-	// Not synced: must not contribute to any tier, even carrying a state.
-	insertWorkItem(t, sqlDB, workItem{artist: "A6", title: "T6", status: "done", outcomeType: "unsynced", wordTimingState: "served"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A5", title: "T5", status: "done", outcomeType: "synced", syncTier: "unsynced"})
+	// Not synced: must not contribute to any tier, even carrying a tier.
+	insertWorkItem(t, sqlDB, workItem{artist: "A6", title: "T6", status: "done", outcomeType: "unsynced", syncTier: "word"})
 
 	got, err := repo.SyncTierCounts(ctx)
 	if err != nil {
@@ -518,17 +524,18 @@ func TestSyncTierCountsExcludesStaleSyncedStatuses(t *testing.T) {
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
-	insertWorkItem(t, sqlDB, workItem{artist: "OK", title: "T0", status: "done", outcomeType: "synced", wordTimingState: "served"})
+	insertWorkItem(t, sqlDB, workItem{artist: "OK", title: "T0", status: "done", outcomeType: "synced", syncTier: "word"})
 	// purgeprovenance.resetRows shape: 'deferred', outcome_type left 'synced',
-	// word_timing_state cleared to NULL by the reset itself.
+	// sync_tier untouched by the reset itself (a pre-existing gap; excluded
+	// here by status='done' regardless).
 	insertWorkItem(t, sqlDB, workItem{artist: "Purged", title: "T1", status: "deferred", outcomeType: "synced"})
 	// A hard-failed row that never got its outcome_type cleared.
-	insertWorkItem(t, sqlDB, workItem{artist: "Failed", title: "T2", status: "failed", outcomeType: "synced", wordTimingState: "served", lastError: "boom"})
+	insertWorkItem(t, sqlDB, workItem{artist: "Failed", title: "T2", status: "failed", outcomeType: "synced", syncTier: "word", lastError: "boom"})
 	// RetireMiss shape: 'unavailable', outcome_type untouched from a prior
 	// completion (RetireMiss's UPDATE never writes outcome_type).
-	insertWorkItem(t, sqlDB, workItem{artist: "Retired", title: "T3", status: "unavailable", outcomeType: "synced", wordTimingState: "absent", lastError: "miss limit reached"})
+	insertWorkItem(t, sqlDB, workItem{artist: "Retired", title: "T3", status: "unavailable", outcomeType: "synced", syncTier: "line", lastError: "miss limit reached"})
 	// Never completed at all.
-	insertWorkItem(t, sqlDB, workItem{artist: "Pending", title: "T4", status: "pending", outcomeType: "synced", wordTimingState: "served"})
+	insertWorkItem(t, sqlDB, workItem{artist: "Pending", title: "T4", status: "pending", outcomeType: "synced", syncTier: "word"})
 
 	got, err := repo.SyncTierCounts(ctx)
 	if err != nil {
@@ -562,12 +569,40 @@ func TestSyncTierCountsIncludesMidRecheckQueued(t *testing.T) {
 	}
 }
 
+// TestSyncTierCountsQueuedRowKeepsStaleTierAsUnknown is the #1085 review's
+// finding 1: a row admitted by the word_timing_state='queued' OR-clause can
+// carry a NON-NULL sync_tier left over from BEFORE its recheck started (an
+// upgrade candidate re-litigating an already-tiered file). That stale tier
+// must not count toward WordSynced/LineSynced -- only Unknown -- until the
+// recheck resettles it, matching TestSyncTierCountsIncludesMidRecheckQueued's
+// contract for the NULL-tier case.
+func TestSyncTierCountsQueuedRowKeepsStaleTierAsUnknown(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Requeued", title: "T0", status: "deferred", outcomeType: "synced",
+		syncTier: "word", wordTimingState: "queued",
+	})
+
+	got, err := repo.SyncTierCounts(ctx)
+	if err != nil {
+		t.Fatalf("SyncTierCounts: %v", err)
+	}
+	want := reports.SyncTierCounts{WordSynced: 0, LineSynced: 0, Unknown: 1}
+	if got != want {
+		t.Errorf("SyncTierCounts = %+v, want %+v (queued row's stale tier must not count)", got, want)
+	}
+}
+
 // TestSyncTierCountsExcludesRemediatedRows is the #627 hostile review's I3
-// fix: a row the timing guard later remediated (quarantined or demoted, #442/
-// #443) must not keep asserting its stale tier, since the remediation may have
-// moved or downgraded the very sidecar the tier was stamped against. Neither
-// remediation path clears word_timing_state today, so without this exclusion
-// a quarantined 'word_synced' row would still read "terminal: nothing further
+// fix, still enforced under #1075's sync_tier source: a row the timing guard
+// later remediated (quarantined or demoted, #442/#443) must not keep
+// asserting its stale tier, since the remediation may have moved or
+// downgraded the very sidecar the tier was stamped against. Neither
+// remediation path clears sync_tier today, so without this exclusion a
+// quarantined 'word_synced' row would still read "terminal: nothing further
 // to gain" and a demoted 'line_synced' row would still read "upgrade-eligible"
 // even though wordRecheckPredicate (internal/queue/word_timing.go) permanently
 // excludes both timing_outcome values from ever being rechecked.
@@ -576,14 +611,14 @@ func TestSyncTierCountsExcludesRemediatedRows(t *testing.T) {
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
-	insertWorkItem(t, sqlDB, workItem{artist: "OK", title: "T0", status: "done", outcomeType: "synced", wordTimingState: "served"})
+	insertWorkItem(t, sqlDB, workItem{artist: "OK", title: "T0", status: "done", outcomeType: "synced", syncTier: "word"})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Quarantined", title: "T1", status: "done", outcomeType: "synced",
-		wordTimingState: "served", timingOutcome: "categorical",
+		syncTier: "word", timingOutcome: "categorical",
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Demoted", title: "T2", status: "done", outcomeType: "synced",
-		wordTimingState: "absent", timingOutcome: "mis_synced",
+		syncTier: "line", timingOutcome: "mis_synced",
 	})
 
 	got, err := repo.SyncTierCounts(ctx)
@@ -607,11 +642,11 @@ func TestRecentOutcomesExcludesRemediatedTier(t *testing.T) {
 
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Quarantined", title: "T1", status: "done", outcomeType: "synced",
-		wordTimingState: "served", timingOutcome: "categorical", completedAt: "2026-06-20T10:00:00Z",
+		syncTier: "word", timingOutcome: "categorical", completedAt: "2026-06-20T10:00:00Z",
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Demoted", title: "T2", status: "done", outcomeType: "synced",
-		wordTimingState: "absent", timingOutcome: "mis_synced", completedAt: "2026-06-21T10:00:00Z",
+		syncTier: "line", timingOutcome: "mis_synced", completedAt: "2026-06-21T10:00:00Z",
 	})
 
 	got, err := repo.RecentOutcomes(ctx, 10)
@@ -625,6 +660,35 @@ func TestRecentOutcomesExcludesRemediatedTier(t *testing.T) {
 		if o.Result != reports.ResultSynced {
 			t.Errorf("%s: Result = %q, want %q (remediated row must not keep its stale tier)", o.Artist, o.Result, reports.ResultSynced)
 		}
+	}
+}
+
+// TestRecentOutcomesQueuedRowKeepsStaleTierAsSynced is the #1085 review's
+// finding 1 applied to RecentOutcomes: prune.retireUnresolvable's retired row
+// (status='done', word_timing_state='queued' kept per #1039) can carry a
+// NON-NULL sync_tier from before the recheck it interrupted. It must classify
+// as plain ResultSynced, not ResultWordSynced/ResultLineSynced, exactly like a
+// timing-remediated row (TestRecentOutcomesExcludesRemediatedTier).
+func TestRecentOutcomesQueuedRowKeepsStaleTierAsSynced(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Retired", title: "T0", status: "done", outcomeType: "synced",
+		syncTier: "word", wordTimingState: "queued", lastError: "source file gone",
+		completedAt: "2026-06-20T10:00:00Z",
+	})
+
+	got, err := repo.RecentOutcomes(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentOutcomes: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d outcomes, want 1: %+v", len(got), got)
+	}
+	if got[0].Result != reports.ResultSynced {
+		t.Errorf("Result = %q, want %q (queued row must not keep its stale tier)", got[0].Result, reports.ResultSynced)
 	}
 }
 
