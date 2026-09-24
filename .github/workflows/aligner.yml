@@ -66,7 +66,9 @@ jobs:
     # (see the header), so a skipped job costs nothing the way a skipped
     # required-check job would. Mirrors yamnet.yml's `build` job, which is the
     # same shape (native-runner image build + smoke test, non-required).
-    if: needs.changes.outputs.aligner == 'true'
+    # A manual dispatch always builds: it exists to force a validation, and the
+    # paths filter can read false for it (last-commit detection on main).
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.aligner == 'true'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
