@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // Kind is the flavor of lyric content a sidecar extension carries.
@@ -172,6 +173,40 @@ func StemOf(path string) string {
 type Listing struct {
 	dir     string
 	entries []os.DirEntry
+	idx     *variantIndex
+}
+
+// variantIndex maps Variants' match key (byte-identical stem, ASCII-folded
+// extension) to entry positions in name order. Built lazily on the first
+// lookup, so asking about every file in a directory costs O(N) in total, not
+// O(N) per lookup (#1057 review). A pointer, so Listing copies share one build.
+type variantIndex struct {
+	once    sync.Once
+	byKey   map[string][]int
+	entries []os.DirEntry
+}
+
+// variantKey folds the extension byte-wise over ASCII only; strings.Map would
+// rewrite invalid UTF-8 to U+FFFD and alias distinct non-ASCII extensions.
+func variantKey(name string) string {
+	ext := []byte(filepath.Ext(name))
+	for i, c := range ext {
+		if 'A' <= c && c <= 'Z' {
+			ext[i] = c + ('a' - 'A')
+		}
+	}
+	return StemOf(name) + "\x00" + string(ext)
+}
+
+func (x *variantIndex) lookup(base string) []int {
+	x.once.Do(func() {
+		x.byKey = make(map[string][]int, len(x.entries))
+		for i, e := range x.entries {
+			k := variantKey(e.Name())
+			x.byKey[k] = append(x.byKey[k], i)
+		}
+	})
+	return x.byKey[variantKey(base)]
 }
 
 // List reads dir once. An unreadable directory yields an empty Listing, so
@@ -179,7 +214,17 @@ type Listing struct {
 // candidate name is still honored by Variants.
 func List(dir string) Listing {
 	entries, _ := os.ReadDir(dir)
-	return Listing{dir: dir, entries: entries}
+	return ListEntries(dir, entries)
+}
+
+// ListEntries wraps directory entries the caller already read (typically its
+// own os.ReadDir(dir)) into a Listing, so Variants can be queried without a
+// second read of the same directory (#1051): a scan that already lists dir to
+// enumerate its files would otherwise pay for that listing twice, once for
+// itself and once more per call to List, which is exactly the repeated-read
+// cost #684 exists to avoid. dir must be the directory entries was read from.
+func ListEntries(dir string, entries []os.DirEntry) Listing {
+	return Listing{dir: dir, entries: entries, idx: &variantIndex{entries: entries}}
 }
 
 // Variants returns every path on disk that IS candidate's sidecar under a
@@ -212,13 +257,18 @@ func (l Listing) Variants(candidate string) []string {
 	if filepath.Clean(dir) != filepath.Clean(l.dir) {
 		return out
 	}
-	stem, ext := StemOf(base), filepath.Ext(base)
-	if slices.ContainsFunc(l.entries, func(e os.DirEntry) bool { return e.Name() == base }) {
+	idx := l.idx
+	if idx == nil { // a zero Listing: index on the fly, uncached
+		idx = &variantIndex{entries: l.entries}
+	}
+	bucket := idx.lookup(base)
+	if slices.ContainsFunc(bucket, func(i int) bool { return l.entries[i].Name() == base }) {
 		exact = nil // listed under its own name: a same-file entry is a hard link, not an alias
 	}
-	for _, e := range l.entries {
+	for _, i := range bucket {
+		e := l.entries[i]
 		name := e.Name()
-		if name == base || StemOf(name) != stem || !asciiEqualFold(filepath.Ext(name), ext) || !e.Type().IsRegular() {
+		if name == base || !e.Type().IsRegular() {
 			continue
 		}
 		p := filepath.Join(dir, name)
