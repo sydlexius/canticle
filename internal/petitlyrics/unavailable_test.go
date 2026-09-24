@@ -1,11 +1,14 @@
 package petitlyrics
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -195,6 +198,68 @@ func TestZeroResultLatchIsExactlyOnceUnderConcurrency(t *testing.T) {
 	if n != ZeroResultThreshold+1 {
 		t.Errorf("%d calls reported reached; want %d (every call at or past the "+
 			"threshold reports, and none before it)", n, ZeroResultThreshold+1)
+	}
+}
+
+// TestConfirmedOutage_SuccessBetweenStepsWindow defends the fix for the window
+// Copilot found on canticle PR #1081 (client.go:664): confirmOutage re-checks
+// the threshold at its own top under c.mu, but c.mu is released before the
+// caller reaches reportConfirmedOutage, which re-takes the lock to latch and
+// log. A concurrent recordSuccess can land in exactly that window -- even one
+// carrying an unusable track (no artist/title), which resets consecutiveZero
+// without storing a control. Before this fix, reportConfirmedOutage trusted
+// the caller's now-stale evidence and latched an outage anyway: the same false
+// cold-start outage #767 set out to close, just moved one line later. The
+// probe-returned-empty path has the identical window: a real lookup that
+// succeeded while the probe was in flight resets the run the same way.
+//
+// reportConfirmedOutage now re-validates c.consecutiveZero under its own lock
+// immediately before latching, so a run a concurrent success already cleared
+// is reported as healthy instead of as a confirmed outage.
+func TestConfirmedOutage_SuccessBetweenStepsWindow(t *testing.T) {
+	cases := []struct {
+		name   string
+		probed bool
+	}{
+		{"cold-start no-control path", false},
+		{"probe-returned-empty path", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewClient()
+
+			for i := 0; i < ZeroResultThreshold; i++ {
+				c.recordZeroResult()
+			}
+
+			// The window: a success lands after the caller gathered its evidence
+			// but before it reported it. An unusable track still clears the run,
+			// just without storing a control (see recordSuccess).
+			c.recordSuccess(models.Track{})
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			if got := c.reportConfirmedOutage(tc.probed); got {
+				t.Error("reportConfirmedOutage returned true for a run a concurrent " +
+					"success already cleared; the caller's evidence was stale")
+			}
+
+			c.mu.Lock()
+			latched := c.zeroReported
+			c.mu.Unlock()
+			if latched {
+				t.Error("zeroReported was latched for a run a concurrent success " +
+					"already cleared")
+			}
+
+			if strings.Contains(buf.String(), "may have been revoked") {
+				t.Errorf("an outage was logged for a run a concurrent success already "+
+					"cleared: %s", buf.String())
+			}
+		})
 	}
 }
 
