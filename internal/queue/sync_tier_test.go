@@ -82,6 +82,89 @@ func TestSetSyncTier_InvalidTier(t *testing.T) {
 	}
 }
 
+// TestSetSyncTierIfPending: the guarded backfill write (#1075 finding 3)
+// applies only if the row raced (reopened/refetched/resettled/missing) since
+// ListSyncTierPending listed it; SetSyncTier has no such guard. Also shares
+// SetSyncTier's invalid-tier guard (Copilot 4097431615).
+func TestSetSyncTierIfPending(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	word, line, none := sql.NullString{String: SyncTierWord, Valid: true}, sql.NullString{String: SyncTierLine, Valid: true}, sql.NullString{}
+	pending := insertSyncTierRow(t, dbh, "pending")
+	alreadyWord := insertSyncTierRow(t, dbh, "already-word")
+	_ = q.SetSyncTier(ctx, alreadyWord, SyncTierWord)
+	reopened := insertSyncTierRow(t, dbh, "reopened")
+	_, _ = dbh.Exec(`UPDATE work_queue SET status = 'pending' WHERE id = ?`, reopened)
+	for _, tc := range []struct {
+		name        string
+		id          int64
+		wantApplied bool
+		wantTier    sql.NullString
+	}{
+		{"pending row applies", pending, true, line},
+		{"already-classified: skipped, kept", alreadyWord, false, word},
+		{"reopened (status != done): skipped", reopened, false, none},
+		{"missing id: no-op", 999999, false, none},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			applied, err := q.SetSyncTierIfPending(ctx, tc.id, SyncTierLine)
+			if err != nil || applied != tc.wantApplied {
+				t.Fatalf("applied=%v err=%v, want %v/nil", applied, err, tc.wantApplied)
+			}
+			if tc.id != 999999 {
+				if got := readSyncTier(t, dbh, tc.id); got != tc.wantTier {
+					t.Errorf("sync_tier = %+v, want %+v", got, tc.wantTier)
+				}
+			}
+		})
+	}
+}
+
+// TestListSyncTierPending mirrors migration 052's partial index predicate
+// exactly (outcome_type='synced' AND status='done' AND sync_tier IS NULL):
+// only the row satisfying all three is returned, with its source_path.
+func TestListSyncTierPending(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+
+	seed := func(key, status, outcome string, tier any) int64 {
+		var id int64
+		if err := dbh.QueryRow(
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, source_path, status, outcome_type, sync_tier)
+             VALUES ('A', ?, 'a', ?, ?, ?, ?, ?) RETURNING id`,
+			key, key, "/m/"+key+".flac", status, outcome, tier).Scan(&id); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+		return id
+	}
+	pendingID := seed("pending", "done", "synced", nil)
+	seed("wrong-status", "processing", "synced", nil)
+	seed("wrong-outcome", "done", "unsynced", nil)
+	seed("already-tiered", "done", "synced", "line")
+
+	got, err := q.ListSyncTierPending(ctx)
+	if err != nil {
+		t.Fatalf("ListSyncTierPending: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != pendingID || got[0].AudioPath != "/m/pending.flac" {
+		t.Errorf("ListSyncTierPending = %+v, want exactly the one true candidate", got)
+	}
+}
+
+// TestListSyncTierPending_Empty: no candidates is an empty slice, not an error.
+func TestListSyncTierPending_Empty(t *testing.T) {
+	ctx := context.Background()
+	got, err := NewDBQueue(openQueueTestDB(t)).ListSyncTierPending(ctx)
+	if err != nil {
+		t.Fatalf("ListSyncTierPending: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListSyncTierPending on empty db = %+v, want empty", got)
+	}
+}
+
 // TestSetSyncTier_DoesNotTouchWordTimingState is the design-constraint proof
 // (#1075 AC): stamping the on-disk sync tier must NEVER write
 // word_timing_state, which means something entirely different (a provider

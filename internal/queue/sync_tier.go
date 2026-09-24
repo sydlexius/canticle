@@ -58,3 +58,59 @@ func (q *DBQueue) SetSyncTier(ctx context.Context, id int64, tier string) error 
 	}
 	return nil
 }
+
+// SetSyncTierIfPending is the backfill's guarded writer (#1075 finding 3):
+// unlike SetSyncTier, it applies only if the row still matches
+// ListSyncTierPending's predicate, so a raced row is never overwritten. Same
+// invalid-tier guard as SetSyncTier (hostile-review, Copilot 4097431615).
+func (q *DBQueue) SetSyncTierIfPending(ctx context.Context, id int64, tier string) (bool, error) {
+	if !validSyncTier(tier) {
+		return false, fmt.Errorf("queue: set sync tier if pending for id %d: invalid tier %q", id, tier)
+	}
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET sync_tier = ?
+         WHERE id = ? AND outcome_type = 'synced' AND status = 'done' AND sync_tier IS NULL`,
+		nullIfEmpty(tier), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: set sync tier if pending for id %d: %w", id, err)
+	}
+	n, rerr := res.RowsAffected()
+	return n > 0, rerr
+}
+
+// SyncTierCandidate is one row the `scan reconcile-sync-tier` backfill (#1075)
+// must classify: its id and the audio path the sidecar is derived from.
+type SyncTierCandidate struct {
+	ID        int64
+	AudioPath string
+}
+
+// ListSyncTierPending returns every completed synced row with no recorded
+// sync_tier (outcome_type='synced' AND status='done' AND sync_tier IS NULL).
+// NOT index-covered: migration 052's partial index over this predicate was
+// dropped after EXPLAIN QUERY PLAN showed SQLite preferring
+// idx_work_queue_dequeue instead (#1075 finding 7; see that migration).
+// Loaded fully into memory: a one-time backfill over a bounded population.
+func (q *DBQueue) ListSyncTierPending(ctx context.Context) ([]SyncTierCandidate, error) {
+	rows, err := q.db.QueryContext(ctx,
+		`SELECT id, COALESCE(source_path, '') FROM work_queue
+         WHERE outcome_type = 'synced' AND status = 'done' AND sync_tier IS NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list sync tier pending: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SyncTierCandidate
+	for rows.Next() {
+		var c SyncTierCandidate
+		if err := rows.Scan(&c.ID, &c.AudioPath); err != nil {
+			return nil, fmt.Errorf("queue: scan sync tier candidate: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list sync tier pending rows: %w", err)
+	}
+	return out, nil
+}

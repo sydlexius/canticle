@@ -113,6 +113,7 @@ func TestScanSubcommandSelected(t *testing.T) {
 		{"reconcile-detector-stats", ScanCmd{ReconcileDetectorStats: &ScanReconcileDetectorStatsCmd{}}},
 		{"index-metadata", ScanCmd{IndexMetadata: &ScanIndexMetadataCmd{}}},
 		{"reconcile-word-sync", ScanCmd{ReconcileWordSync: &ScanReconcileWordSyncCmd{}}},
+		{"reconcile-sync-tier", ScanCmd{ReconcileSyncTier: &ScanReconcileSyncTierCmd{}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
