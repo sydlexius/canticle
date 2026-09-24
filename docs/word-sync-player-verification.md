@@ -40,7 +40,10 @@ fallback path is part of what this procedure is verifying.
 ## 2. Play it in your target player and classify the result
 
 Copy the `.lrc` (and its audio) to wherever your player reads from, play the
-track, and watch the lyric display. There are exactly three outcomes:
+track, and watch the lyric display. First confirm the player shows lyrics at
+all for an ordinary line-synced `.lrc`. If no lyrics appear, the test is
+inconclusive: fix how the player finds the file before judging A2 support.
+Once lyrics load, there are exactly three outcomes:
 
 - **Highlights per word.** The player understands A2. This is the intent of
   `inline`/`both`, and you can enable it for that player's library.
