@@ -83,6 +83,7 @@ nav:
   - User Guide: USER_GUIDE.md
   - CLI Reference: CLI_REFERENCE.md
   - Configuration: CONFIGURATION.md
+  - A2 Player Verification: word-sync-player-verification.md
   - Instrumental Detection: instrumental-detection.md
   - LRC Normalization: lrc-normalization.md
   - Developer Guide:
