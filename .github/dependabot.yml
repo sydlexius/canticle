@@ -85,3 +85,63 @@ updates:
         patterns:
           - "pytest*"
           - "httpx"
+
+  # The aligner sidecar's Python deps, now that its generated locks
+  # (requirements-linux-amd64.txt / requirements-linux-arm64.txt /
+  # requirements-test.txt) are fully hash-pinned (issue #1017, mirroring the
+  # yamnet entry above). requirements.in/requirements-test.in themselves carry
+  # exact-version pins, not hashes -- the hashes live only in the generated
+  # locks those files compile to.
+  #
+  # What is actually known: Dependabot's pip ecosystem understands
+  # pip-compile-style constraint files, so it should bump requirements.in /
+  # requirements-test.in and leave the per-arch requirements-linux-*.txt lock
+  # outputs alone (they carry no pip-compile header identifying them as
+  # compiled artifacts of requirements.in, unlike yamnet's single portable
+  # lock). This has NOT been observed against a live Dependabot run for this
+  # directory -- it is not verified that Dependabot won't instead open a PR
+  # bumping a requirements-linux-*.txt file directly against PyPI, or bump
+  # amd64's lock without arm64's.
+  #
+  # The failure mode if that assumption is wrong is LOUD, not silent: the
+  # `aligner-lock-agreement` check below (ci.yml) fails a PR that leaves the
+  # two per-arch locks disagreeing on package/version, and the Dockerfile's
+  # `--require-hashes` install fails outright if a lock is hand-edited or
+  # partially bumped without regenerating its hash set. A torch/torchaudio
+  # bump specifically would also risk resolving PyPI's CUDA wheel rather than
+  # the pinned `+cpu` build from the PyTorch CPU index --require-hashes was
+  # pinning against, which --require-hashes rejects rather than silently
+  # installing.
+  #
+  # Regenerating the hash-pinned locks after a genuine requirements.in /
+  # requirements-test.in bump is a follow-up commit, same as yamnet's.
+  - package-ecosystem: pip
+    directory: /deploy/aligner
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+    groups:
+      # Same rationale as yamnet-test-deps: these never ship in the image, so
+      # one PR per week beats several that each re-trigger the sidecar build.
+      aligner-test-deps:
+        patterns:
+          - "pytest*"
+          - "httpx"
+    ignore:
+      # Deliberate hold, not a stale pin: torchaudio 2.9 moves load/save onto
+      # TorchCodec (its matching 0.8.x has no linux/arm64 wheel) and removes
+      # list_audio_backends / torchaudio.functional.forced_align and
+      # merge_tokens, which this sidecar's own forced-alignment code calls
+      # directly. See requirements.in's own comment on the torch/torchaudio
+      # pins for the full rationale. Suppress Dependabot bump PRs for the
+      # version this sidecar cannot yet move to, rather than declining the
+      # same PR every week.
+      - dependency-name: "torch"
+        versions: [">=2.9"]
+      - dependency-name: "torchaudio"
+        versions: [">=2.9"]
