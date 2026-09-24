@@ -234,9 +234,7 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 			tier = queue.SyncTierWord
 		}
 	}
-	if err := w.queue.SetSyncTier(ctxNoCancel, item.ID, tier); err != nil {
-		slog.Warn("worker: stamp sync tier failed after word recheck write; continuing", "id", item.ID, "error", err)
-	}
+	w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier)
 	w.consecutiveFailures = 0
 	return w.settleWordRecheck(ctx, item, queue.WordTimingServed)
 }
@@ -403,9 +401,24 @@ func (w *Worker) ordinarySyncTier(item queue.WorkItem, song models.Song) string 
 // unclassified (the CLI backfill's candidate set), never a wrong tier. A
 // non-synced outcome clears any tier a reopened row previously carried.
 func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
-	tier := w.ordinarySyncTier(item, song)
-	if err := w.queue.SetSyncTier(ctxNoCancel, item.ID, tier); err != nil {
-		slog.Warn("worker: stamp sync tier failed; continuing", "id", item.ID, "error", err)
+	w.stampOrClearSyncTier(ctxNoCancel, item.ID, w.ordinarySyncTier(item, song))
+}
+
+// stampOrClearSyncTier records tier, best-effort; on failure it attempts to
+// CLEAR the tier to NULL rather than leaving the row's PRIOR value in place
+// (#1085 review finding 2). The sidecar the prior tier described may have
+// just been rewritten or replaced by this same completion, so a failed stamp
+// that silently keeps the old value can assert a tier the on-disk file no
+// longer has (a reopened 'word' row that just landed line-only, or vice
+// versa). Both failures log at Warn (id + error only, no paths); if the clear
+// also fails the row keeps its prior tier, a residual-risk case that is at
+// least logged rather than left silent like an ordinary best-effort stamp.
+func (w *Worker) stampOrClearSyncTier(ctxNoCancel context.Context, id int64, tier string) {
+	if err := w.queue.SetSyncTier(ctxNoCancel, id, tier); err != nil {
+		slog.Warn("worker: stamp sync tier failed; clearing to unknown instead of a stale tier", "id", id, "error", err)
+		if clearErr := w.queue.SetSyncTier(ctxNoCancel, id, ""); clearErr != nil {
+			slog.Warn("worker: clear sync tier after failed stamp also failed; row keeps its prior tier", "id", id, "error", clearErr)
+		}
 	}
 }
 

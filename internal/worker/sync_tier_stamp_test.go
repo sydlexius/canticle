@@ -110,6 +110,58 @@ func TestOrdinarySyncTier_StampFailureIsNonFatal(t *testing.T) {
 	}
 }
 
+// failingSyncTierStampQueue fails SetSyncTier only when stamping a REAL tier
+// (mirroring a stamp failure right after a sidecar just landed or was
+// rewritten); the clear call (tier="") is passed through to the real
+// DBQueue, so stampOrClearSyncTier's failure-triggered clear attempt can
+// actually land -- #1085 review finding 2.
+type failingSyncTierStampQueue struct{ *queue.DBQueue }
+
+func (q failingSyncTierStampQueue) SetSyncTier(ctx context.Context, id int64, tier string) error {
+	if tier == "" {
+		return q.DBQueue.SetSyncTier(ctx, id, tier)
+	}
+	return errors.New("injected sync tier stamp failure")
+}
+
+// TestOrdinarySyncTier_StampFailureClearsPriorTier is #1085 review finding 2:
+// a reopened row seeded with a PRIOR tier ('line') whose ordinary completion
+// would stamp 'word' must not keep asserting the stale 'line' when the stamp
+// fails -- it must fall back to NULL (unknown) via the clear attempt.
+func TestOrdinarySyncTier_StampFailureClearsPriorTier(t *testing.T) {
+	rig, w := newStampRig(t, &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}, nil, "sidecar", "")
+	w.SetFallbackProviders()
+	if err := rig.q.SetSyncTier(context.Background(), rig.id, queue.SyncTierLine); err != nil {
+		t.Fatalf("seed sync tier: %v", err)
+	}
+	w.queue = failingSyncTierStampQueue{rig.q}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := readSyncTier(t, rig.db, rig.id); got != "" {
+		t.Errorf("sync_tier = %q, want cleared to NULL after a failed stamp (never the stale prior tier)", got)
+	}
+}
+
+// TestWordRecheckWrite_StampFailureClearsPriorTier is the word-recheck-write
+// twin of the above (#1085 review finding 2): seeded 'line' (an upgrade
+// candidate) whose recheck write lands qualifying words -- the stamp would be
+// 'word', but it fails, so the row must end NULL, never the stale 'line'.
+func TestWordRecheckWrite_StampFailureClearsPriorTier(t *testing.T) {
+	primary := &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}
+	rig, w := newRecheckRig(t, primary, nil, false)
+	if err := rig.q.SetSyncTier(context.Background(), rig.id, queue.SyncTierLine); err != nil {
+		t.Fatalf("seed sync tier: %v", err)
+	}
+	w.queue = failingSyncTierStampQueue{rig.q}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := readSyncTier(t, rig.db, rig.id); got != "" {
+		t.Errorf("sync_tier = %q, want cleared to NULL after a failed stamp (never the stale prior tier)", got)
+	}
+}
+
 // TestWordRecheckWrite_StampsSyncTierWord: seeded 'line' first (the upgrade
 // path). "foreign companion" pins #1075 finding 1: a pre-existing, foreign
 // .elrc blocks planCompanion's write despite qualifying words, so the

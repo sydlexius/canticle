@@ -236,8 +236,11 @@ type RecentOutcome struct {
 // so it is invisible to Recent Outcomes for the whole time it is queued --
 // unlike the sync-tier tiles below, which include it deliberately (see
 // SyncTierCounts). The one 'done'+'queued' shape reachable here is
-// prune.retireUnresolvable's retired row (#1039), which this classifier still
-// resolves correctly to ResultSynced.
+// prune.retireUnresolvable's retired row (#1039), which carries whatever
+// sync_tier it had BEFORE the recheck that was still in flight when it
+// retired; the word_timing_state <> 'queued' guard on the word_synced/
+// line_synced arms below (#1085 review) is what makes this classifier resolve
+// it to ResultSynced rather than asserting that stale tier.
 //
 // #1075 changed the tier source from word_timing_state to sync_tier (see
 // ResultWordSynced/ResultLineSynced); word_timing_state itself still drives
@@ -270,9 +273,11 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
             CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
                 WHEN outcome_type = 'synced' AND sync_tier = 'word'
-                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 'word_synced'
+                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                     AND COALESCE(word_timing_state, '') <> 'queued' THEN 'word_synced'
                 WHEN outcome_type = 'synced' AND sync_tier = 'line'
-                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 'line_synced'
+                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                     AND COALESCE(word_timing_state, '') <> 'queued' THEN 'line_synced'
                 WHEN outcome_type = 'synced' THEN 'synced'
                 WHEN outcome_type = 'unsynced' THEN 'unsynced'
                 WHEN outcome_type = 'instrumental' THEN 'instrumental'
@@ -496,6 +501,14 @@ type SyncTierCounts struct {
 // so a quarantined or demoted row would otherwise keep asserting a stale
 // tier; see ResultLineSynced/ResultSynced.
 //
+// ALSO EXCLUDED, for the SAME reason (#1085 review): a row admitted by the
+// word_timing_state='queued' OR-clause above. sync_tier still holds whatever
+// it was BEFORE the recheck started (the column the recheck may yet change),
+// so counting it toward word/line here would assert a tier the row is mid-way
+// through re-litigating; it counts in Unknown until the recheck resettles,
+// matching RecentOutcomes' own handling of the one reachable done+queued shape
+// (prune.retireUnresolvable's retired row, see that doc comment).
+//
 // TIER SOURCE (#1075): sync_tier, not word_timing_state -- see
 // ResultWordSynced/ResultLineSynced. sync_tier NULL (unclassified) or
 // 'unsynced' (a corrupted/hand-placed .lrc) both route to Unknown.
@@ -507,12 +520,15 @@ func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT
              SUM(CASE WHEN sync_tier = 'word'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 1 ELSE 0 END),
+                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
              SUM(CASE WHEN sync_tier = 'line'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 1 ELSE 0 END),
+                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
              SUM(CASE WHEN sync_tier IS NULL
                       OR sync_tier NOT IN ('word', 'line')
-                      OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced') THEN 1 ELSE 0 END)
+                      OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced')
+                      OR word_timing_state = 'queued' THEN 1 ELSE 0 END)
          FROM work_queue
          WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,
 	).Scan(&wordSynced, &lineSynced, &unknown); err != nil {

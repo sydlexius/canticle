@@ -569,6 +569,33 @@ func TestSyncTierCountsIncludesMidRecheckQueued(t *testing.T) {
 	}
 }
 
+// TestSyncTierCountsQueuedRowKeepsStaleTierAsUnknown is the #1085 review's
+// finding 1: a row admitted by the word_timing_state='queued' OR-clause can
+// carry a NON-NULL sync_tier left over from BEFORE its recheck started (an
+// upgrade candidate re-litigating an already-tiered file). That stale tier
+// must not count toward WordSynced/LineSynced -- only Unknown -- until the
+// recheck resettles it, matching TestSyncTierCountsIncludesMidRecheckQueued's
+// contract for the NULL-tier case.
+func TestSyncTierCountsQueuedRowKeepsStaleTierAsUnknown(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Requeued", title: "T0", status: "deferred", outcomeType: "synced",
+		syncTier: "word", wordTimingState: "queued",
+	})
+
+	got, err := repo.SyncTierCounts(ctx)
+	if err != nil {
+		t.Fatalf("SyncTierCounts: %v", err)
+	}
+	want := reports.SyncTierCounts{WordSynced: 0, LineSynced: 0, Unknown: 1}
+	if got != want {
+		t.Errorf("SyncTierCounts = %+v, want %+v (queued row's stale tier must not count)", got, want)
+	}
+}
+
 // TestSyncTierCountsExcludesRemediatedRows is the #627 hostile review's I3
 // fix, still enforced under #1075's sync_tier source: a row the timing guard
 // later remediated (quarantined or demoted, #442/#443) must not keep
@@ -633,6 +660,35 @@ func TestRecentOutcomesExcludesRemediatedTier(t *testing.T) {
 		if o.Result != reports.ResultSynced {
 			t.Errorf("%s: Result = %q, want %q (remediated row must not keep its stale tier)", o.Artist, o.Result, reports.ResultSynced)
 		}
+	}
+}
+
+// TestRecentOutcomesQueuedRowKeepsStaleTierAsSynced is the #1085 review's
+// finding 1 applied to RecentOutcomes: prune.retireUnresolvable's retired row
+// (status='done', word_timing_state='queued' kept per #1039) can carry a
+// NON-NULL sync_tier from before the recheck it interrupted. It must classify
+// as plain ResultSynced, not ResultWordSynced/ResultLineSynced, exactly like a
+// timing-remediated row (TestRecentOutcomesExcludesRemediatedTier).
+func TestRecentOutcomesQueuedRowKeepsStaleTierAsSynced(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Retired", title: "T0", status: "done", outcomeType: "synced",
+		syncTier: "word", wordTimingState: "queued", lastError: "source file gone",
+		completedAt: "2026-06-20T10:00:00Z",
+	})
+
+	got, err := repo.RecentOutcomes(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentOutcomes: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d outcomes, want 1: %+v", len(got), got)
+	}
+	if got[0].Result != reports.ResultSynced {
+		t.Errorf("Result = %q, want %q (queued row must not keep its stale tier)", got[0].Result, reports.ResultSynced)
 	}
 }
 
