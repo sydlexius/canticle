@@ -82,6 +82,12 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	}
 	view.InstrumentalCount = strconv.FormatInt(instrumental, 10)
 
+	syncTiers, err := u.reports.SyncTierCounts(ctx)
+	if err != nil {
+		return templates.DashboardView{}, fmt.Errorf("dashboard: sync tier counts: %w", err)
+	}
+	view.SyncTierTiles = buildSyncTierTiles(syncTiers)
+
 	recent, err := u.reports.RecentOutcomes(ctx, dashboardRecentLimit)
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: recent outcomes: %w", err)
@@ -249,6 +255,21 @@ func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 	}
 }
 
+// buildSyncTierTiles shapes SyncTierCounts into the dashboard's sync-tier
+// tiles (#627). The three tiles are kept SEPARATE, never summed into one
+// "Synced" number, so an operator can read the terminal-vs-upgradeable split
+// (#553) directly off the dashboard. "Synced (tier unknown)" is always shown,
+// even at zero, matching buildQueueTiles' convention of never omitting a
+// populated status -- a fresh install where every synced row already carries a
+// tier is a real, checkable state, not a rendering gap.
+func buildSyncTierTiles(c reports.SyncTierCounts) []templates.StatTile {
+	return []templates.StatTile{
+		{Label: "Word-synced", Value: strconv.FormatInt(c.WordSynced, 10)},
+		{Label: "Line-synced", Value: strconv.FormatInt(c.LineSynced, 10)},
+		{Label: "Synced (tier unknown)", Value: strconv.FormatInt(c.Unknown, 10)},
+	}
+}
+
 // buildQueueChart shapes a QueueSummary into the work-queue doughnut chart
 // series (#318). The label order is fixed and matches the queue tiles so the
 // chart-init color map (keyed by label) stays in sync. Total is intentionally
@@ -315,7 +336,8 @@ func buildRecentRows(recent []reports.RecentOutcome, serverLoc *time.Location) [
 			Artist:               o.Artist,
 			Title:                o.Title,
 			Album:                o.Album,
-			Result:               string(o.Result),
+			Result:               resultLabel(o.Result),
+			ResultTierClass:      resultTierClass(o.Result),
 			Lane:                 laneLabel(o.ProviderLane),
 			LaneMark:             laneMark(o.ProviderLane),
 			CompletedAt:          display,

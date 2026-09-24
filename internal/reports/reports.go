@@ -94,7 +94,87 @@ func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
 type ResultClass string
 
 const (
-	// ResultSynced means a synced .lrc file was written (outcome_type='synced').
+	// ResultWordSynced means a synced .lrc file was written AND the recorded
+	// work_queue.word_timing_state is 'served' -- a word-capable lane's word
+	// timings actually landed on disk, never merely "the lane answered". The
+	// two writers reach that guarantee differently: internal/worker's ordinary
+	// completion (stampWordTiming) checks LRCWriter.WordsLanded directly; the
+	// recheck path (writeWordRecheck) settles 'served' after HasQualifyingWords
+	// passed upstream, word_sync_mode is not off, and WriteLRC itself
+	// succeeded -- functionally equivalent, but through lyrics.WriteLRC's own
+	// promotion gate rather than a second WordsLanded call. This is the #553
+	// terminal rung: nothing further to gain from a re-fetch or a word-sync
+	// recheck.
+	ResultWordSynced ResultClass = "word_synced"
+	// ResultLineSynced means a synced .lrc file was written AND
+	// word_timing_state is 'absent' -- every word-capable lane that was asked
+	// answered with no usable word data for this track (the recheck sweep's
+	// aggregate no-match, not merely "not tried"). This is the #553
+	// upgrade-eligible rung: a later word-sync recheck can still promote it.
+	//
+	// EXCLUDES a row the timing guard later remediated (timing_outcome
+	// 'categorical' or 'mis_synced', #442/#443): a quarantine or demotion can
+	// remove or downgrade the very sidecar this verdict was stamped against,
+	// and neither remediation path clears word_timing_state (a pre-existing
+	// gap this issue does not fix -- see SyncTierCounts). Such a row reads
+	// ResultSynced (tier unknown) instead of asserting a tier the file may no
+	// longer support.
+	ResultLineSynced ResultClass = "line_synced"
+	// ResultSynced means a synced .lrc file was written but its word/line tier
+	// is NOT RECORDED: word_timing_state is NULL (or any value other than
+	// 'served'/'absent', e.g. 'queued' mid-recheck), OR the row WAS tiered but
+	// was since remediated (timing_outcome IN ('categorical', 'mis_synced')) --
+	// see ResultLineSynced above. Shown honestly as plain "synced" rather than
+	// guessed -- see the source-of-truth decision below.
+	//
+	// THIS IS NOT ONLY "LEGACY" -- a NEW completion lands here too, and on a
+	// default install it is the common case, not the exception, because the
+	// word-sync recheck that would resolve most of them ([word_sync_recheck])
+	// is off by default. NULL/unrecorded reaches this class for any of:
+	//   - a row from before #982 started stamping the column at all;
+	//   - a cache hit: WinningLane is empty on a hit (json:"-"), so
+	//     providers.WordCapable("") is false and ordinaryWordVerdict returns ""
+	//     even when the cached result DID land word markers on disk;
+	//   - a result served by a non-word-capable lane (e.g. innertube);
+	//   - a completion under output.word_sync_mode = "off";
+	//   - a completion where no word-capable lane answered the dispatch;
+	//   - a row currently mid word-sync recheck (word_timing_state='queued').
+	// Issue #1075 (classify existing .lrc files by sync tier from the file
+	// itself) is expected to resolve most of this bucket without requiring the
+	// recheck sweep to run.
+	//
+	// SOURCE OF TRUTH (#627): the recorded work_queue.word_timing_state column,
+	// NOT re-reading the .lrc off disk to detect word-level (A2/Enhanced LRC)
+	// tags. Three reasons this follows the existing outcome_type precedent
+	// rather than artifact inspection:
+	//   1. Cost: RecentOutcomes and this tier count run on every dashboard page
+	//      load. A recorded column is one full scan of work_queue with a GROUP
+	//      BY/SUM done in SQLite (EXPLAIN QUERY PLAN shows SCAN work_queue --
+	//      SyncTierCounts' status='done' OR word_timing_state='queued' clause
+	//      spans two columns no single index covers, and the schema deliberately
+	//      has none built for this report, matching CountInstrumental's existing
+	//      full scan above). That is still cheap in absolute terms -- migration
+	//      051's comment measured a few ms at 14k rows for the equivalent
+	//      unindexed count -- just not literally indexed. Inspecting every
+	//      completed row's sidecar would mean opening and parsing a file per
+	//      row, per render, for a value that changes only when the row is
+	//      (re)completed -- categorically more expensive regardless of which
+	//      SQL plan the recorded-column query gets.
+	//   2. Precedent: outcome_type/timing_outcome/overrun_* are ALL recorded-
+	//      at-completion columns, not filesystem re-derivations (#379, #438).
+	//      Matching that pattern keeps one mental model for "how does a report
+	//      know what happened" across this package.
+	//   3. Staleness is not actually avoided by inspection either: an operator
+	//      can hand-edit or replace a sidecar after canticle wrote it, which
+	//      would fool a same-request artifact read exactly as it would a
+	//      recorded column -- inspection's usual advantage (a header claim can
+	//      go stale, but the file's real content cannot lie about itself)
+	//      doesn't hold once the row-file link is this indirect. The one thing
+	//      it changes is HOW a legacy row could be classified: an unstamped
+	//      pre-#982 row (or a hand-placed .lrc) truly could be inspected to
+	//      backfill a verdict, but this issue's AC says show legacy rows
+	//      honestly rather than guess, so that reconciliation is deliberately
+	//      not built here.
 	ResultSynced ResultClass = "synced"
 	// ResultUnsynced means an unsynced .txt lyrics file was written
 	// (outcome_type='unsynced').
@@ -186,13 +266,27 @@ type RecentOutcome struct {
 //
 // The result classification is computed in SQL from the recorded outcome_type
 // (stamped at completion, #379), NOT the output_paths filename:
-// last_error='miss limit reached' -> miss; otherwise outcome_type
-// 'synced'/'unsynced'/'instrumental'/'rejected' map to the matching
-// ResultClass; a NULL outcome_type -> unknown. An 'unavailable' row always has
-// a NULL outcome_type (RetireMiss never stamps one) and the miss sentinel, so
-// it always classifies as 'miss', never 'unknown'. output_paths is no longer
-// consulted -- it holds the stale enqueue-time .lrc plan, which is what made
-// every completed row read as synced before this fix.
+// last_error='miss limit reached' -> miss; otherwise outcome_type 'synced'
+// SPLITS further on the recorded word_timing_state (#627, see ResultWordSynced/
+// ResultLineSynced/ResultSynced's doc comments for the three-way split and its
+// source-of-truth rationale) -- EXCLUDING a row the timing guard later
+// remediated (timing_outcome 'categorical'/'mis_synced'), which reads
+// ResultSynced regardless of its stale word_timing_state, per ResultLineSynced's
+// doc comment; 'unsynced'/'instrumental'/'rejected' map to the matching
+// ResultClass unchanged; a NULL outcome_type -> unknown. An 'unavailable' row
+// always has a NULL outcome_type (RetireMiss never stamps one) and the miss
+// sentinel, so it always classifies as 'miss', never 'unknown'. output_paths is
+// no longer consulted -- it holds the stale enqueue-time .lrc plan, which is
+// what made every completed row read as synced before this fix.
+//
+// A row mid word-sync recheck (word_timing_state='queued') practically never
+// appears here at all: the flip (queue.MarkWordRecheckQueued) moves the row to
+// status='deferred', and this query's WHERE admits only 'done'/'unavailable',
+// so it is invisible to Recent Outcomes for the whole time it is queued --
+// unlike the sync-tier tiles below, which include it deliberately (see
+// SyncTierCounts). The one 'done'+'queued' shape reachable here is
+// prune.retireUnresolvable's retired row (#1039), which this classifier still
+// resolves correctly to ResultSynced.
 //
 // This comment previously said a NULL outcome_type meant "a legacy row predating
 // the column". That was FALSE, and its being false is #655: the guard-rejection
@@ -220,6 +314,10 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
             ) AS detail,
             CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
+                WHEN outcome_type = 'synced' AND word_timing_state = 'served'
+                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 'word_synced'
+                WHEN outcome_type = 'synced' AND word_timing_state = 'absent'
+                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 'line_synced'
                 WHEN outcome_type = 'synced' THEN 'synced'
                 WHEN outcome_type = 'unsynced' THEN 'unsynced'
                 WHEN outcome_type = 'instrumental' THEN 'instrumental'
@@ -395,6 +493,83 @@ func (r *Repo) CountInstrumental(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("reports: count instrumental: %w", err)
 	}
 	return n, nil
+}
+
+// SyncTierCounts splits the completed-synced population into its three tiers
+// (#627): WordSynced ('served', the #553 terminal rung), LineSynced ('absent',
+// still upgrade-eligible), and Unknown (word_timing_state NULL or any other
+// value, OR a tiered row the timing guard later remediated -- see
+// ResultSynced's doc comment for the full list of how a row lands NULL/
+// unrecorded, which is NOT mostly "legacy": a cache hit, an innertube result,
+// word_sync_mode=off, and a completion where no word-capable lane answered all
+// produce it today, on every build). The three always sum to the ROW
+// POPULATION this query admits (see SyncTierCounts' doc comment for exactly
+// which rows that is); there is no fourth bucket, so a dashboard counter built
+// from this can never silently merge two tiers into one number the way a
+// single ResultSynced count would.
+type SyncTierCounts struct {
+	WordSynced int64
+	LineSynced int64
+	Unknown    int64
+}
+
+// SyncTierCounts returns the tier split described above, sourced from
+// outcome_type='synced' rows with status='done' OR word_timing_state='queued'
+// (#627 hostile review I1). Matches RecentOutcomes' 'word_synced'/
+// 'line_synced'/'synced' classification population, WITH ONE DELIBERATE
+// DIFFERENCE: RecentOutcomes' WHERE (status IN ('done','unavailable')) can
+// never observe a 'queued' row, because the recheck flip
+// (queue.MarkWordRecheckQueued) always moves status to 'deferred' in the same
+// transaction that stamps 'queued' -- so on RecentOutcomes' own admission
+// criterion, 'queued' rows are already excluded by construction, not by an
+// added predicate. This query is admitting them ON PURPOSE via the OR clause,
+// so a sweep in progress does not make the total (Word+Line+Unknown) dip
+// mid-cycle: a row that leaves the tiles here still counts, in Unknown, until
+// its recheck resettles. Both queries therefore agree on every row
+// RecentOutcomes CAN show; this one additionally counts the in-flight rows
+// RecentOutcomes structurally cannot.
+//
+// WITHOUT THE STATUS FILTER, a row that is no longer settled but still carries
+// a stale outcome_type='synced' would count here while never appearing in
+// Recent Outcomes: purgeprovenance's reset (status='deferred', word_timing_state
+// cleared to NULL) and RetireMiss (status='unavailable') both leave
+// outcome_type untouched, so a purged or exhausted-miss row would silently
+// inflate "Synced (tier unknown)" forever. status='done' excludes every such
+// row; the word_timing_state='queued' OR-clause is needed because a recheck
+// candidate is deliberately flipped OFF 'done' (to 'deferred') for the
+// duration of the recheck, and would otherwise vanish from both this count and
+// Recent Outcomes for that whole window.
+//
+// ALSO EXCLUDED FROM WORD_SYNCED/LINE_SYNCED (routed to Unknown instead): a row
+// the timing guard later remediated (timing_outcome IN ('categorical',
+// 'mis_synced'), #442/#443's serve-mode sweep or the revalidate CLI). Neither
+// remediation path clears word_timing_state or outcome_type today (a
+// pre-existing gap, not introduced here), so a quarantined or demoted row would
+// otherwise still assert "word-synced, terminal" or "line-synced,
+// upgrade-eligible" about a sidecar that was moved away or downgraded. Routing
+// it to Unknown keeps the tiles honest without touching the remediation paths
+// themselves; see the ResultLineSynced/ResultSynced doc comments for the same
+// exclusion in RecentOutcomes' classifier.
+func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
+	// SUM over zero matching rows is NULL in SQLite (no synced rows exist yet on
+	// a fresh install), so each total is scanned through sql.NullInt64 and
+	// defaults to 0, matching the QueueEligibility convention above.
+	var wordSynced, lineSynced, unknown sql.NullInt64
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT
+             SUM(CASE WHEN word_timing_state = 'served'
+                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 1 ELSE 0 END),
+             SUM(CASE WHEN word_timing_state = 'absent'
+                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced') THEN 1 ELSE 0 END),
+             SUM(CASE WHEN word_timing_state IS NULL
+                      OR word_timing_state NOT IN ('served', 'absent')
+                      OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced') THEN 1 ELSE 0 END)
+         FROM work_queue
+         WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,
+	).Scan(&wordSynced, &lineSynced, &unknown); err != nil {
+		return SyncTierCounts{}, fmt.Errorf("reports: sync tier counts: %w", err)
+	}
+	return SyncTierCounts{WordSynced: wordSynced.Int64, LineSynced: lineSynced.Int64, Unknown: unknown.Int64}, nil
 }
 
 // FailureGroup is a count of failed/deferred work_queue rows sharing one status
