@@ -157,6 +157,7 @@ type ScanCmd struct {
 	PurgeProvenance                  *ScanPurgeProvenanceCmd                  `arg:"subcommand:purge-provenance" help:"bulk-delete .lrc/.txt sidecars by provenance (--source or --no-source) and requeue for re-fetch (issue #474)"`
 	ReconcileWordSync                *ScanReconcileWordSyncCmd                `arg:"subcommand:reconcile-word-sync" help:"queue settled line-synced tracks for a word-timing re-check by a running serve worker; dry-run prints the count and minimum drain time (issue #982)"`
 	ReconcileSyncTier                *ScanReconcileSyncTierCmd                `arg:"subcommand:reconcile-sync-tier" help:"classify existing .lrc sidecars by on-disk sync tier (word/line/unsynced) and record it, resolving 'tier unknown' rows on the dashboard (issue #1075)"`
+	ReconcileEditorTag               *ScanReconcileEditorTagCmd               `arg:"subcommand:reconcile-editor-tag" help:"backfill [re:canticle] onto existing canticle-written .lrc/.elrc files (issue #483)"`
 }
 
 // ScanReconcileSyncTierCmd classifies every completed synced row's sidecar
@@ -228,6 +229,19 @@ type ScanReconcileMarkerProvenanceCmd struct {
 	Yes        bool   `arg:"--yes" help:"actually stamp markers (without it, prints what would change)"`
 	Limit      int    `arg:"--limit" help:"cap the number of detector rows considered (0 = no cap)" default:"0"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of stamped markers (default: <db-dir>/reconcile-marker-provenance-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// ScanReconcileEditorTagCmd walks the configured library roots and backfills
+// [re:canticle] onto every .lrc/.elrc already carrying a canticle-written
+// [ve:] (lyrics.canticleWrittenTags): idempotent, never touches a file that
+// already has [re:] or lacks the [by:canticle] pairing. Dry-run unless --yes.
+// Stdout is aggregate counts only, matching the `revalidate` CLI's privacy
+// convention (a sidecar path is private library metadata).
+type ScanReconcileEditorTagCmd struct {
+	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
+	Yes        bool   `arg:"--yes" help:"actually stamp files (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of stamped files (default: <db-dir>/reconcile-editor-tag-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -931,6 +945,15 @@ func lyricPreview(song models.Song, n int) string {
 	return strings.Join(lines, "\n")
 }
 
+// serveStartupOrderHook, non-nil only in tests, is called with a named
+// checkpoint at fixed points in runServe's startup sequence. It lets a test
+// observe relative ordering between two sequential steps (#483 finding 3b:
+// the editor-tag backfill must complete before the worker goroutine is
+// launched) without depending on goroutine-scheduling timing -- both calls
+// happen on runServe's own execution path, in program order, so the
+// checkpoints they record are exactly as ordered as the source is.
+var serveStartupOrderHook func(checkpoint string)
+
 func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
 	cfg, envSrc, err := config.LoadWithSources(args.ConfigPath)
 	if err != nil {
@@ -1234,6 +1257,28 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		wordRecheck, _ = newWordRecheckSweepJob(sqlDB, cfg, w)
 	}
 
+	// One-shot [re:canticle] editor-tag backfill (#483) runs SYNCHRONOUSLY here,
+	// before the worker (and every other in-process writer of a .lrc file: the
+	// scheduler-fed worker, the word-recheck sweep, the timing-revalidation
+	// sweep) starts, so nothing races its rewrite while it runs. #470's own
+	// stacked-.lrc startup check (runLRCStackedCheck) does NOT do this -- it
+	// launches as a goroutine alongside the worker's, so today nothing in serve
+	// startup runs synchronously ahead of the worker; this pass is the first to
+	// need that ordering, because unlike the report-only #470 check, it writes
+	// files unattended (Copilot 4100857291 / CodeRabbit 4100866202, #483 finding
+	// 3b). The pass is marker-gated (runs at most once per database, #483) and
+	// bounded by its own degraded-attempt ceiling (#1084), so this adds a
+	// one-time startup delay only on the boot that actually performs the
+	// backfill -- every later boot returns immediately on the marker lookup.
+	// The separate-process CLI, `scan reconcile-editor-tag --yes`, has no such
+	// ordering guarantee: it relies on the same best-effort pre-rename guard
+	// (lyrics.InjectEditorTag's doc comment) as this pass, so it should be run
+	// only while serve is stopped or idle.
+	runEditorTagBackfill(ctx, sqlDB, selfWrites)
+	if serveStartupOrderHook != nil {
+		serveStartupOrderHook("editor_tag_backfill_done")
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	// Start the worker and scheduler only when a lyrics provider is active. When
@@ -1243,6 +1288,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// nothing left to fetch. The web server, watcher, and session sweeper still
 	// start so the UI is reachable to add the token.
 	if !lyricsDisabled {
+		if serveStartupOrderHook != nil {
+			serveStartupOrderHook("worker_starting")
+		}
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
@@ -2391,6 +2439,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileMarkerProvenance(ctx, out, sub)
+	case args.ReconcileEditorTag != nil:
+		sub := *args.ReconcileEditorTag
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileEditorTag(ctx, out, sub)
 	case args.ReconcileDetectorStats != nil:
 		sub := *args.ReconcileDetectorStats
 		if sub.ConfigPath == "" {

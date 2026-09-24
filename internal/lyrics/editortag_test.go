@@ -281,6 +281,12 @@ func TestInjectEditorTag_PreservesFileMode(t *testing.T) {
 	if err := os.WriteFile(path, []byte(canticleLRCBody(nil)), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	// WriteFile's mode is narrowed by the process umask, so set it explicitly:
+	// the assertion must check preservation of a KNOWN 0644, not whatever the
+	// umask left (CodeRabbit 4100866192 follow-up).
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
 
 	injected, err := InjectEditorTag(path)
 	if err != nil {
