@@ -99,9 +99,9 @@ func TestBuildSyncTierTilesNeverMerges(t *testing.T) {
 // tests on buildSyncTierTiles still pass in isolation.
 func TestDashboardShowsSyncTierTiles(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
-	insertDoneWithWordTiming(t, sqlDB, "WS", pathsJSONWeb("ws.lrc"), "2026-06-17T10:00:00Z", "served")
-	insertDoneWithWordTiming(t, sqlDB, "LS", pathsJSONWeb("ls.lrc"), "2026-06-17T11:00:00Z", "absent")
-	insertDoneWithWordTiming(t, sqlDB, "TU", pathsJSONWeb("tu.lrc"), "2026-06-17T12:00:00Z", "")
+	insertDoneWithSyncTier(t, sqlDB, "WS", pathsJSONWeb("ws.lrc"), "2026-06-17T10:00:00Z", "word")
+	insertDoneWithSyncTier(t, sqlDB, "LS", pathsJSONWeb("ls.lrc"), "2026-06-17T11:00:00Z", "line")
+	insertDoneWithSyncTier(t, sqlDB, "TU", pathsJSONWeb("tu.lrc"), "2026-06-17T12:00:00Z", "")
 	mux := newReportsUIServer(t, sqlDB)
 
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
@@ -149,9 +149,9 @@ func TestDashboardShowsSyncTierTiles(t *testing.T) {
 // buildRecentRows) that could drift.
 func TestReportsRecentOutcomesShowsSyncTiers(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
-	insertDoneWithWordTiming(t, sqlDB, "WS", pathsJSONWeb("ws.lrc"), "2026-06-17T10:00:00Z", "served")
-	insertDoneWithWordTiming(t, sqlDB, "LS", pathsJSONWeb("ls.lrc"), "2026-06-17T11:00:00Z", "absent")
-	insertDoneWithWordTiming(t, sqlDB, "TU", pathsJSONWeb("tu.lrc"), "2026-06-17T12:00:00Z", "")
+	insertDoneWithSyncTier(t, sqlDB, "WS", pathsJSONWeb("ws.lrc"), "2026-06-17T10:00:00Z", "word")
+	insertDoneWithSyncTier(t, sqlDB, "LS", pathsJSONWeb("ls.lrc"), "2026-06-17T11:00:00Z", "line")
+	insertDoneWithSyncTier(t, sqlDB, "TU", pathsJSONWeb("tu.lrc"), "2026-06-17T12:00:00Z", "")
 	mux := newReportsUIServer(t, sqlDB)
 
 	body := getFragment(t, mux, "recent-outcomes").Body.String()

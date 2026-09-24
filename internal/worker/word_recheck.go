@@ -221,6 +221,22 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	}
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
+	// HasQualifyingWords (wordRecheckWritable's gate) is necessary but not
+	// sufficient for landing (a FOREIGN .elrc blocks the write, #1075 finding
+	// 1), so check disk truth instead of assuming success.
+	tier := queue.SyncTierLine
+	if lw, ok := w.writer.(wordLandingWriter); ok {
+		landed := true
+		for _, p := range outputPaths(item.Inputs) {
+			landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
+		}
+		if landed {
+			tier = queue.SyncTierWord
+		}
+	}
+	if err := w.queue.SetSyncTier(ctxNoCancel, item.ID, tier); err != nil {
+		slog.Warn("worker: stamp sync tier failed after word recheck write; continuing", "id", item.ID, "error", err)
+	}
 	w.consecutiveFailures = 0
 	return w.settleWordRecheck(ctx, item, queue.WordTimingServed)
 }
@@ -352,5 +368,52 @@ func (w *Worker) clearWordTiming(ctxNoCancel context.Context, item queue.WorkIte
 	}
 	if err := w.queue.ClearWordTimingState(ctxNoCancel, item.ID); err != nil {
 		slog.Warn("worker: clear word timing state failed; continuing", "id", item.ID, "error", err)
+	}
+}
+
+// ordinarySyncTier is an ORDINARY completion's on-disk sync tier (#1075), or
+// "" for a non-synced outcome. INDEPENDENT of ordinaryWordVerdict/
+// word_timing_state -- a line-synced .lrc under word_sync_mode=off, from a
+// non-word-capable lane, or served from cache all classify correctly here
+// even though ordinaryWordVerdict returns "" for all three.
+//
+// REBUT (#1075 finding 8): duplicates ordinaryWordVerdict's own WordsLanded
+// loop (a second Lstat+header-parse per path, no shared state). Left as-is:
+// deduping needs a shared, memoized landed func() threaded through 4 call
+// sites, risking this slice's size cap for one bounded, non-hot-path read.
+func (w *Worker) ordinarySyncTier(item queue.WorkItem, song models.Song) string {
+	if outcomeTypeFromSong(song) != outcomeTypeSynced {
+		return ""
+	}
+	lw, ok := w.writer.(wordLandingWriter)
+	if ok {
+		landed := true
+		for _, p := range outputPaths(item.Inputs) {
+			landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
+		}
+		if landed {
+			return queue.SyncTierWord
+		}
+	}
+	return queue.SyncTierLine
+}
+
+// stampSyncTier records an ordinary completion's on-disk sync tier before
+// Complete, best-effort like its siblings: a lost stamp leaves the row
+// unclassified (the CLI backfill's candidate set), never a wrong tier. A
+// non-synced outcome clears any tier a reopened row previously carried.
+func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
+	tier := w.ordinarySyncTier(item, song)
+	if err := w.queue.SetSyncTier(ctxNoCancel, item.ID, tier); err != nil {
+		slog.Warn("worker: stamp sync tier failed; continuing", "id", item.ID, "error", err)
+	}
+}
+
+// clearSyncTier drops a prior sync tier before a settle that writes no synced
+// sidecar (detector-instrumental, guard rejection): neither writes a .lrc, so
+// an earlier tier would describe a file the settle just replaced or removed.
+func (w *Worker) clearSyncTier(ctxNoCancel context.Context, item queue.WorkItem) {
+	if err := w.queue.SetSyncTier(ctxNoCancel, item.ID, ""); err != nil {
+		slog.Warn("worker: clear sync tier failed; continuing", "id", item.ID, "error", err)
 	}
 }

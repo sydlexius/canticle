@@ -151,6 +151,8 @@ type fakeQueue struct {
 	providerLaneStamps []int64
 	wordTimingStates   map[int64]string
 	wordTimingErr      error
+	syncTiers          map[int64]string
+	syncTierErr        error
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -222,6 +224,24 @@ func (q *fakeQueue) SetWordTimingState(_ context.Context, id int64, state string
 func (q *fakeQueue) ClearWordTimingState(_ context.Context, id int64) error {
 	delete(q.wordTimingStates, id)
 	return q.wordTimingErr
+}
+
+// SetSyncTier records the on-disk sync tier (#1075); tier="" mirrors the real
+// UPDATE's NULL-clear by removing the map entry, so a test can assert absence
+// the same way it would read a NULL column.
+func (q *fakeQueue) SetSyncTier(_ context.Context, id int64, tier string) error {
+	if q.syncTierErr != nil {
+		return q.syncTierErr
+	}
+	if tier == "" {
+		delete(q.syncTiers, id)
+		return nil
+	}
+	if q.syncTiers == nil {
+		q.syncTiers = make(map[int64]string)
+	}
+	q.syncTiers[id] = tier
+	return nil
 }
 
 // DeferRefused is exercised end to end over the real DBQueue

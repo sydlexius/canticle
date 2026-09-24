@@ -111,6 +111,9 @@ type Queue interface {
 	SetWordTimingState(ctx context.Context, id int64, state string, generation int64, checkedAt time.Time) error
 	// ClearWordTimingState drops a prior served/absent verdict; 'queued' is kept.
 	ClearWordTimingState(ctx context.Context, id int64) error
+	// SetSyncTier records a completion's on-disk sync tier (#1075): 'word',
+	// 'line', 'unsynced', or "" to clear it.
+	SetSyncTier(ctx context.Context, id int64, tier string) error
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -1571,6 +1574,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// deterministically, so a retry costs one provider round-trip and
 			// cannot loop forever on a row that would otherwise settle unlabeled.
 			w.clearWordTiming(ctxNoCancel, item)
+			w.clearSyncTier(ctxNoCancel, item)
 			outcome, settleErr := w.queue.SettleGuardRejected(ctxNoCancel, item.ID, reason)
 			if settleErr != nil {
 				return w.fail(ctx, item, fmt.Errorf("worker: settle guard-rejected item %d: %w", item.ID, settleErr))
@@ -1646,6 +1650,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// so this is the durable record of a decision, not an ignored observation.
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
 	w.stampWordTiming(ctxNoCancel, item, song)
+	w.stampSyncTier(ctxNoCancel, item, song)
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++
@@ -2025,6 +2030,7 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// detector telemetry, so nothing is lost by not inventing one here.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
 	w.clearWordTiming(ctxNoCancel, item)
+	w.clearSyncTier(ctxNoCancel, item)
 	// Settle only AFTER the marker write succeeded (a failed WriteLRC above
 	// requeues and returns before here), so a transient write error never leaves a
 	// row tagged instrumental with stale telemetry.
