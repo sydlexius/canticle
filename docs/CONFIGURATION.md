@@ -194,11 +194,13 @@ Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`,
 
 `both` names the two DESTINATIONS for the markers, not two files: `sidecar` already writes two. An unrecognized value resets to `sidecar` rather than resolving to nothing.
 
+Before setting `inline` or `both` for a whole library, verify your player actually renders A2 -- see [A2 Player Verification](word-sync-player-verification.md).
+
 `word_sync` (default `false`) is **deprecated** and superseded by `word_sync_mode`. It still decodes and is still honored, so an existing config keeps booting unchanged, but only when `word_sync_mode` is unset: an explicit `word_sync = false` then resolves to `off` and an explicit `true` resolves to `inline` (not `sidecar` -- someone who wrote `true` asked for inline markers and keeps getting them), with a deprecation warning naming the new key. When `word_sync_mode` is set it wins outright and `word_sync` is not consulted. That holds across sources: a `word_sync_mode` in the file also beats `MXLRC_WORD_SYNC` in the environment (which is logged as ignored), so a mode saved from the settings page is never reverted by a stale env var. This mirrors `server.scan_interval_seconds` -> `[server.scan_schedule]`.
 
 Historically, `word_sync` (default `false`): when `true` and a provider serves word-level timings (Musixmatch or Petit Lyrics, as above) each cue keeps its normal `[MM:SS.cc]` stamp and gains a `<MM:SS.cc>` marker before each word (Enhanced LRC, "A2"). This is the karaoke-style per-word highlighting some players support.
 
-**Leave this off unless you know your player handles A2.** Support is not universal and there are three outcomes, only one of which is obviously wrong: the player highlights each word (the intent), silently ignores the markers (harmless), or renders them as literal text mixed into the lyrics (visibly broken). Music Assistant does not support A2; Symfonium ships marker stripping. Verify against one album before enabling library-wide.
+**Leave this off unless you know your player handles A2.** Support is not universal and there are three outcomes, only one of which is obviously wrong: the player highlights each word (the intent), silently ignores the markers (harmless), or renders them as literal text mixed into the lyrics (visibly broken). Music Assistant does not support A2; Symfonium ships marker stripping. Verify against one album before enabling library-wide -- see [A2 Player Verification](word-sync-player-verification.md) for the procedure.
 
 Word markers are emitted per line and only when they are trustworthy. A line whose timings do not reconstruct its text, whose words all share one timestamp, or whose text would break the line format falls back to a normal line-level cue -- so a partially-timed track degrades line by line rather than losing its words. Enabling this does not rewrite existing sidecars; a track gains markers on its next fetch.
 
