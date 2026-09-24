@@ -2,8 +2,16 @@
 # readability; Docker resolves by the digest. Update both together -- use the
 # multi-arch manifest-list (index) digest, NOT a local arch-specific one, so
 # the pin resolves on any build arch:
-#   docker buildx imagetools inspect python:3.11-slim --format '{{.Manifest.Digest}}'
-FROM python:3.11-slim@sha256:cdbd05fb6f457ca275ff51ce00d93d865ca0b6a25f5ffb08262d94f6835771e5
+#   docker buildx imagetools inspect python:3.13-slim --format '{{.Manifest.Digest}}'
+#
+# 3.13, the latest mainline CPython every package in this closure ships a
+# linux/amd64 + linux/arm64 wheel for (#1017; torch 2.8.0, torchaudio 2.8.0,
+# and ctranslate2 4.8.2 all publish cp313 manylinux wheels on both arches).
+# 3.14 is NOT possible yet: torch 2.8.0 has no cp314 wheel on any platform.
+# Both 3.11-slim (the prior base) and 3.13-slim resolve to Debian trixie
+# (glibc 2.41), so the amd64 execstack analysis below is unaffected by this
+# bump.
+FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0
 
 # ffmpeg decodes every upload (app.decode_pcm is the sidecar's ONE audio
 # decode path, #1016), so any container Canticle's library holds is accepted;
@@ -30,27 +38,52 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 
 WORKDIR /app
 
-COPY requirements.txt .
+# One full transitive lock PER ARCHITECTURE (#1017), not requirements.txt's
+# former top-level-only pins: torch/torchaudio resolve to arch-specific
+# `+cpu` wheels from the PyTorch CPU index
+# (https://download.pytorch.org/whl/cpu), so amd64 and arm64 need separate
+# hash sets even where the package/version string agrees. Both files are
+# COPYed in (the image is tiny either way) and TARGETARCH -- set
+# automatically by buildx, not hand-passed -- selects which one this build
+# actually installs.
+ARG TARGETARCH
+COPY requirements-linux-amd64.txt requirements-linux-arm64.txt ./
 
-# NOT --require-hashes here, unlike deploy/yamnet-detector's Dockerfile:
-# requirements.txt pins the TOP-LEVEL packages only (transitive deps resolve
-# at build time). The full transitive lock with hashes is issue #1017.
-#
-# torch/torchaudio come from the PyTorch CPU index FIRST, at the versions
-# requirements.txt pins (read from it, so the pin has one home). On x86_64,
-# PyPI's torch wheel is the CUDA build and drags in every nvidia-*-cu12
-# library (~5 GB this CPU-only image never uses); the CPU index's build does
-# not. --index-url (not --extra-index-url) so nothing else resolves from that
-# index. The second install then sees torch==2.8.0 already satisfied (a
-# `2.8.0+cpu` local version matches an unqualified `==2.8.0` pin) and leaves
-# it alone. On aarch64 both indexes carry a CPU build, so this is a no-op
-# there. The CUDA variant is issue #1013's, not this image's.
-RUN grep -E '^(torch|torchaudio)==' requirements.txt > /tmp/torch-cpu.txt \
-    && test "$(wc -l < /tmp/torch-cpu.txt)" -eq 2 \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-        -r /tmp/torch-cpu.txt \
-    && pip install --no-cache-dir -r requirements.txt \
-    && rm /tmp/torch-cpu.txt
+# --require-hashes (Scorecard Pinned-Dependencies), matching
+# deploy/yamnet-detector's Dockerfile. --extra-index-url, not --index-url:
+# the CPU index mirrors more than torch/torchaudio (numpy, jinja2,
+# markupsafe, filelock, fsspec, networkx, pillow, sympy, typing-extensions,
+# and others also resolve from it), so it must ADD to PyPI rather than
+# replace it -- --index-url would drop everything else in the lock that only
+# PyPI carries. This is still CUDA-safe regardless of which index actually
+# serves a given package: --require-hashes checks EVERY pin in the lock
+# (not just torch/torchaudio) against the exact sha256 recorded when the
+# lock was generated against the CPU index resolution, so a same-name,
+# same-version artifact from the wrong index (or a future PyPI release)
+# fails the hash check rather than installing silently. torch/torchaudio
+# specifically pin `torch==2.8.0+cpu` (or, on aarch64, `torchaudio==2.8.0`
+# where the CPU index and PyPI happen to publish the identical wheel) -- an
+# exact version string pip cannot satisfy from PyPI's `2.8.0` CUDA build, so
+# it is forced to the CPU index regardless of search order. The CUDA variant
+# is issue #1013's, not this image's.
+# Quoted with a `:-` default (not bare "$TARGETARCH"): this script runs
+# under `set -u`, and an unset TARGETARCH -- buildx always sets it, but a
+# plain `docker build` without buildx, or `docker build .` on an older
+# Docker default builder, may not -- would otherwise make the shell itself
+# fail on the unbound-variable reference ("parameter not set") before the
+# case statement's own `*)` branch ever runs, losing the descriptive FATAL
+# line below. Verified: a bare `$TARGETARCH` under `set -u` with
+# DOCKER_BUILDKIT=0 dies with the shell's own "parameter not set" (exit 2);
+# `${TARGETARCH:-}` reaches `*)` and prints the FATAL message (exit 1).
+RUN set -eu; \
+    case "${TARGETARCH:-}" in \
+        amd64) lock=requirements-linux-amd64.txt ;; \
+        arm64) lock=requirements-linux-arm64.txt ;; \
+        *) echo "FATAL: no hash lock for TARGETARCH=${TARGETARCH:-<unset>} (only amd64/arm64 are locked)" >&2; exit 1 ;; \
+    esac; \
+    pip install --no-cache-dir --require-hashes \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        -r "$lock"
 
 # HISTORICAL (#1016 dropped whisperx): whisperx 3.4.3 pinned
 # ctranslate2<4.5.0, which resolved 4.4.0, whose x86_64 wheel bundled

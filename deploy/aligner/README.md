@@ -169,15 +169,16 @@ be swapped in later behind the same seam.
 | `ALIGNER_MAX_PENDING` | `2` | `/align` requests admitted at once (one running, the rest queued); one more gets `429` |
 | `ALIGNER_LOG_LEVEL` | `INFO` | level for the `canticle.*` loggers (per-request INFO lines go to stderr) |
 
-GPU support: this image is **CPU-only**. The Dockerfile installs
-`torch`/`torchaudio` (pinned to 2.8.0, see `requirements.txt`) from the
-PyTorch CPU index (`https://download.pytorch.org/whl/cpu`) before the rest of
-`requirements.txt`, because PyPI's x86_64 `torch` wheel is the CUDA build and
-would add ~5 GB of unused `nvidia-*-cu12` libraries. A build-time check fails
-the build if a CUDA `torch`, any `nvidia-*` package, or `triton` is present.
-The CUDA variant is issue
-[#1013](https://github.com/sydlexius/canticle/issues/1013)'s, not this
-image's. `ALIGNER_DEVICE` and the `select_device` seam are already
+GPU support: this image is **CPU-only**. The Dockerfile installs from one of
+`requirements-linux-amd64.txt` / `requirements-linux-arm64.txt` (picked by
+`TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to 2.8.0,
+see `requirements.in`) resolve against the PyTorch CPU index
+(`https://download.pytorch.org/whl/cpu`, passed as `--extra-index-url`),
+because PyPI's x86_64 `torch` wheel is the CUDA build and would add ~5 GB of
+unused `nvidia-*-cu12` libraries. A build-time check fails the build if a
+CUDA `torch`, any `nvidia-*` package, or `triton` is present. The CUDA
+variant is issue [#1013](https://github.com/sydlexius/canticle/issues/1013)'s,
+not this image's. `ALIGNER_DEVICE` and the `select_device` seam are already
 GPU-ready; only the installed `torch` wheel and base image need to change.
 
 ### amd64: ctranslate2's executable-stack flag (historical, now a no-op guard)
@@ -281,30 +282,94 @@ pattern `deploy/yamnet-detector/test_app.py` uses to stub the YAMNet model.
 implementations) is exercised by the suite only for its model-load locking
 (with the ML packages faked); inference runs only in a container.
 
-## Deviation from yamnet's lock convention
+## Dependency lock: one file per architecture
 
-`deploy/yamnet-detector/requirements.txt` is fully hash-pinned by resolving
-`requirements.in` inside a `linux/amd64` container with
-`uv pip compile --generate-hashes`. This sidecar's `requirements.txt` pins **top-level packages only**:
-transitive dependencies resolve at build time, and nothing is hash-pinned.
-The full transitive lock with hashes (resolving `torch`/`torchaudio` against
-the PyTorch CPU index the Dockerfile installs them from, so the hashes match
-the `+cpu` wheels), and the switch to `--require-hashes`, is issue
-[#1017](https://github.com/sydlexius/canticle/issues/1017).
+Every installed package -- not just the 8 top-level ones in
+`requirements.in` -- is pinned by exact version and sha256 hash for BOTH
+`linux/amd64` and `linux/arm64` (issue
+[#1017](https://github.com/sydlexius/canticle/issues/1017)), the same
+`uv pip compile --generate-hashes` approach
+`deploy/yamnet-detector/requirements.txt` uses, with one difference: this
+sidecar locks **per architecture** rather than one portable file.
+`requirements-linux-amd64.txt` and `requirements-linux-arm64.txt` are that
+pair; the Dockerfile picks between them with `TARGETARCH` (set automatically
+by buildx) and installs with `--require-hashes`.
 
-`requirements-test.txt` **is** hash-pinned, generated the same way as
-yamnet's. It carries `fastapi` and `python-multipart` (the HTTP layer the
-tests drive) at the versions `requirements.txt` pins: `requirements-test.in`
-lists them unpinned under `-c requirements.txt`, so the runtime file stays
-their one pin home. A constraint pins only what is requested, so the test
-lock never pulls in `torch`/`demucs`/`faster-whisper`/`transformers`. Regenerate it after
-changing either file:
+**Why per-architecture, unlike yamnet's single lock:** `torch`/`torchaudio`
+resolve against the PyTorch CPU index
+(`https://download.pytorch.org/whl/cpu`) to their arch-specific `+cpu`
+wheels, and a hash lock only covers the wheel `uv` actually resolved for the
+platform it was compiled against -- not every wheel the same version could
+produce elsewhere. Everything else in the closure (`demucs`'s tree,
+`faster-whisper`, `transformers`, ...) is pure-Python or ships a manylinux
+wheel on both arches, so the two files are identical except for hashes and
+the `torch`/`torchaudio` build tag; only a native-extension package can
+legitimately differ further. yamnet has no such package, hence its one
+portable file.
+
+To regenerate BOTH lock files after editing `requirements.in` (never edit
+`requirements-linux-*.txt` by hand -- always regenerate both together, since
+a stale lock on only one arch is exactly the drift #1017 closes out).
+`--exclude-newer` pins resolution to a fixed point in time so the run is
+reproducible (see "Reproducibility" below) -- update the date to today (UTC)
+when you actually intend to pick up newer releases, and record the new date
+in both files' headers:
 
 ```bash
-cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.11-slim \
-  bash -c 'pip install -q uv==0.5.31 && uv pip compile --generate-hashes \
-    --no-header --no-emit-index-url requirements-test.in -o requirements-test.txt'
+cd deploy/aligner
+for arch in amd64 arm64; do
+  case "$arch" in
+    amd64) platform=x86_64-manylinux_2_28 ;;
+    arm64) platform=aarch64-manylinux_2_28 ;;
+  esac
+  docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.13-slim \
+    bash -c "pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
+      --python-version 3.13 --python-platform $platform \
+      --extra-index-url https://download.pytorch.org/whl/cpu \
+      --index-strategy unsafe-best-match --no-header --no-emit-index-url \
+      --exclude-newer 2026-09-23T12:00:00Z \
+      requirements.in -o requirements-linux-$arch.txt"
+done
 ```
+
+(`--platform linux/amd64` on `docker run` is the HOST container running the
+resolver, not the target -- `uv`'s `--python-platform` cross-resolves
+without needing to execute on that architecture, which is also how CI, an
+`ubuntu-latest` amd64 runner, can regenerate the arm64 lock.
+`--index-strategy unsafe-best-match` is required: without it `uv` refuses to
+mix `torch`/`torchaudio` from the CPU index with every other package from
+PyPI's default index.) Re-add each file's header block by hand afterward
+(`uv --no-header` strips it).
+
+`requirements-test.txt` is hash-pinned the same way, but portable (a single
+file, no `--python-platform`): it carries `fastapi` and `python-multipart`
+(the HTTP layer the tests drive) at the versions `requirements.in` pins --
+`requirements-test.in` lists them unpinned under `-c requirements.in`, so the
+runtime file stays their one pin home. A constraint pins only what is
+requested, so the test lock never pulls in
+`torch`/`demucs`/`faster-whisper`/`transformers`. Regenerate it after
+changing either file (same `--exclude-newer` reproducibility note applies):
+
+```bash
+cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.13-slim \
+  bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
+    --python-version 3.13 --no-header --no-emit-index-url \
+    --exclude-newer 2026-09-23T12:00:00Z \
+    requirements-test.in -o requirements-test.txt'
+```
+
+### Reproducibility
+
+Every regeneration command above pins `--exclude-newer <RFC3339 timestamp>`
+so re-running it resolves the same versions rather than whatever the CPU
+index/PyPI happen to serve that day -- without it, a routine re-run for an
+unrelated edit can silently pick up an unrequested transitive bump (measured
+here: a same-day re-resolution without `--exclude-newer` picked up
+`filelock` 4.0.3 over the committed 4.0.1). Each lock file's own header
+records the exact date its content was verified to reproduce against; keep
+that date in sync with whatever you pass on the command line, and re-verify
+(regenerate, then diff against the committed file) before trusting a new
+date.
 
 ## Known limitations and follow-ups
 
@@ -316,8 +381,6 @@ cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w p
   `HF_HOME`/`TORCH_HOME`). Mount `/data` as a persistent volume in
   production. No single checksum to pin here, since the align-model set
   varies per requested language.
-- **`requirements.txt` pins top-level packages only** -- the transitive
-  hash lock is #1017.
 - **No image workflow.** `deploy/yamnet-detector` has
   `.github/workflows/yamnet.yml`; nothing builds or publishes this image
   yet. That workflow (GHCR, plus the CUDA variant) is #1013. CI's

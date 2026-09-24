@@ -559,9 +559,9 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           # Matches the interpreter the lock file was compiled for (see the
-          # header of deploy/aligner/requirements-test.txt: python:3.11-slim)
-          # and what the aligner image ships.
-          python-version: '3.11'
+          # header of deploy/aligner/requirements-test.txt: python:3.13-slim)
+          # and what the aligner image ships (#1017).
+          python-version: '3.13'
           cache: pip
           cache-dependency-path: deploy/aligner/requirements-test.txt
 
@@ -586,6 +586,119 @@ jobs:
 
       - name: Run aligner sidecar tests
         run: pytest deploy/aligner -q
+
+      # #1017's dependabot.yml comment states what is known about how
+      # Dependabot bumps this directory's requirements.in/requirements-test.in
+      # (not the per-arch requirements-linux-*.txt locks, which carry no
+      # pip-compile header for it to recognize) but is NOT verified against a
+      # live run. If that assumption is wrong -- a bump lands on one lock
+      # directly, or on only one of the two arches -- this catches it loudly:
+      # compare package NAMES and VERSIONS only (never hashes, which
+      # legitimately differ per platform, and strip a `+cpu`/`+local` build
+      # tag, which legitimately differs between amd64 and arm64 for
+      # torch/torchaudio -- see either lock's header) and fail if the two
+      # locks disagree on the resulting set.
+      #
+      # That check alone leaves a gap a Dependabot PR can hit directly: it
+      # bumps requirements.in (the source it is configured to track) while
+      # leaving both requirements-linux-*.txt locks untouched -- the two
+      # locks still agree with EACH OTHER, so the check above passes, but the
+      # Dockerfile installs only those stale locks, so the shipped image
+      # silently keeps the old dependency set (Copilot review, PR #1056).
+      # verify_source_lock_pins closes that: every exact `name==version` pin
+      # in requirements.in must appear with the SAME version in both arch
+      # locks (a `+cpu`/local suffix is stripped first, since that legitimately
+      # differs between arches for torch/torchaudio -- see either lock's
+      # header) and, where a name is also present, in requirements-test.txt
+      # (which only carries fastapi/python-multipart via the `-c
+      # requirements.in` constraint in requirements-test.in -- torch/demucs/
+      # faster-whisper/transformers are never requested there, so they are
+      # correctly absent from that lock, not a check gap).
+      - name: Verify aligner per-arch locks agree on package set
+        working-directory: deploy/aligner
+        run: |
+          normalize() {
+            grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==[^ ]+ \\$' "$1" \
+              | sed -E 's/^([A-Za-z0-9][A-Za-z0-9._-]*)==([^+ ]+)(\+[A-Za-z0-9.]+)? \\$/\1==\2/' \
+              | sort
+          }
+          normalize requirements-linux-amd64.txt > /tmp/amd64-pkgs.txt
+          normalize requirements-linux-arm64.txt > /tmp/arm64-pkgs.txt
+          if [ ! -s /tmp/amd64-pkgs.txt ] || [ ! -s /tmp/arm64-pkgs.txt ]; then
+            echo "::error::normalized package list is empty -- the lock format changed or the parse regex no longer matches"
+            exit 1
+          fi
+          if ! diff -u /tmp/amd64-pkgs.txt /tmp/arm64-pkgs.txt; then
+            echo "::error::requirements-linux-amd64.txt and requirements-linux-arm64.txt disagree on package name/version (see diff above). Regenerate BOTH locks together from requirements.in -- see either file's header for the exact command."
+            exit 1
+          fi
+          echo "Aligner per-arch locks agree on $(wc -l < /tmp/amd64-pkgs.txt) packages."
+
+          # Neither of the two locks agreeing with EACH OTHER proves either one
+          # still agrees with the SOURCE: a Dependabot PR bumping requirements.in
+          # (the file it is configured to track) while leaving both
+          # requirements-linux-*.txt locks untouched would pass the check above
+          # and still ship the old dependency set, since the Dockerfile installs
+          # only those stale locks. Require every exact `name==version` pin in
+          # requirements.in (extras like uvicorn[standard] stripped, name
+          # normalized per PEP 503) to appear with the SAME version in both arch
+          # locks (a `+cpu`/local suffix stripped first, same as the agreement
+          # check above -- see either lock's header) and, where the name is also
+          # present, in requirements-test.txt (which only ever carries
+          # fastapi/python-multipart via requirements-test.in's `-c
+          # requirements.in` constraint -- torch/demucs/faster-whisper/
+          # transformers are never requested there, so their absence from that
+          # lock is correct, not a gap this misses).
+          extract_source_pins() {
+            grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*(\[[^]]*\])?==[^[:space:]]+$' "$1" \
+              | sed -E 's/\[[^]]*\]//' \
+              | awk -F'==' '{name=tolower($1); gsub(/[_.]+/, "-", name); print name" "$2}' \
+              | sort -u
+          }
+          extract_lock_versions() {
+            grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==[^ ]+ \\$' "$1" \
+              | sed -E 's/^([A-Za-z0-9][A-Za-z0-9._-]*)==([^+ ]+)(\+[A-Za-z0-9.]+)? \\$/\1 \2/' \
+              | awk '{name=tolower($1); gsub(/[_.]+/, "-", name); print name" "$2}' \
+              | sort -u
+          }
+
+          SOURCE_PINS="$(extract_source_pins requirements.in)"
+          if [ -z "$SOURCE_PINS" ]; then
+            echo "::error::no exact pins parsed from requirements.in -- the format changed or the parse regex no longer matches"
+            exit 1
+          fi
+
+          FAILED=0
+          check_against_lock() {
+            lock_file="$1"
+            require_present="$2" # true: a source pin missing from this lock is also an error
+            lock_versions="$(extract_lock_versions "$lock_file")"
+            while IFS=' ' read -r name pinned; do
+              actual="$(printf '%s\n' "$lock_versions" | awk -v n="$name" '$1==n{print $2; exit}')"
+              if [ -z "$actual" ]; then
+                if [ "$require_present" = "true" ]; then
+                  echo "::error::${name}==${pinned} from requirements.in is missing from ${lock_file} -- regenerate BOTH arch locks from requirements.in (source/lock drift)"
+                  FAILED=1
+                fi
+              elif [ "$actual" != "$pinned" ]; then
+                if [ "$require_present" = "true" ]; then
+                  echo "::error::requirements.in pins ${name}==${pinned} but ${lock_file} has ${name}==${actual} -- regenerate BOTH arch locks from requirements.in (source/lock drift)"
+                else
+                  echo "::error::requirements.in pins ${name}==${pinned} but ${lock_file} has ${name}==${actual} -- regenerate ${lock_file} (constraint drift)"
+                fi
+                FAILED=1
+              fi
+            done <<< "$SOURCE_PINS"
+          }
+
+          check_against_lock requirements-linux-amd64.txt true
+          check_against_lock requirements-linux-arm64.txt true
+          check_against_lock requirements-test.txt false
+
+          if [ "$FAILED" -ne 0 ]; then
+            exit 1
+          fi
+          echo "requirements.in's $(printf '%s\n' "$SOURCE_PINS" | wc -l | tr -d ' ') exact pins agree with every generated lock that carries them."
 
   coverage-floor:
     name: Coverage Floor
