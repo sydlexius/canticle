@@ -619,50 +619,87 @@ func IsOwnedCompanion(path string) bool {
 // filesystem). Every caller moves or removes the returned path, so it is the
 // exact name that exists; variants are consulted only when the exact name is
 // absent, first owned one in name order.
+//
+// Fail-closed by design: shares its lookup with ownedCompanionOfErr (below)
+// but discards the error, so "cannot tell" and "definitively foreign" both
+// read as "" -- right for every MUTATION caller (realign, purgeprovenance,
+// planCompanion), where doubt means "never touch it". ClassifyLRCFile (#1075)
+// needs the two kept apart, so it calls ownedCompanionOfErr directly.
 func OwnedCompanionOf(lrc string) string {
+	c, _ := ownedCompanionOfErr(lrc)
+	return c
+}
+
+// ownedCompanionOfErr is OwnedCompanionOf's lookup, one place so the two
+// cannot drift, but reporting a genuine read failure as an error instead of
+// collapsing it into "no companion".
+func ownedCompanionOfErr(lrc string) (string, error) {
 	if !sidecar.Active(sidecar.KindWordSynced) || sidecar.KindOf(lrc) != sidecar.KindLineSynced {
-		return ""
+		return "", nil
 	}
 	c := sidecar.StemOf(lrc) + sidecar.ExtWordSynced
 	if _, err := os.Lstat(c); !os.IsNotExist(err) {
 		// Exact name present (or unknowable): it alone decides, and the common
 		// case costs no directory read.
-		if IsOwnedCompanion(c) {
-			return c
+		own, oerr := companionOwnershipOfErr(c)
+		if oerr != nil {
+			return "", oerr
 		}
-		return ""
+		if own == companionOwned {
+			return c, nil
+		}
+		return "", nil
 	}
 	for _, v := range sidecar.List(filepath.Dir(c)).Variants(c) {
-		if IsOwnedCompanion(v) {
-			return v
+		own, oerr := companionOwnershipOfErr(v)
+		if oerr != nil {
+			return "", oerr
+		}
+		if own == companionOwned {
+			return v, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
-// companionOwnershipOf classifies path WITHOUT following it. Lstat comes first
-// so a symlink, FIFO, or device is never opened: opening a FIFO blocks until a
-// writer appears, which would hang the fetch. Any error other than not-exist,
-// and a regular file whose header cannot be read, count as foreign, so doubt
-// always resolves to leaving the file alone.
+// companionOwnershipOf classifies path WITHOUT following it, discarding
+// companionOwnershipOfErr's error -- doubt resolves to companionForeign here
+// exactly as it always has, so every existing caller (planCompanion,
+// IsOwnedCompanion) keeps its fail-closed behavior byte-for-byte.
 func companionOwnershipOf(path string) companionOwnership {
+	own, _ := companionOwnershipOfErr(path)
+	return own
+}
+
+// companionOwnershipOfErr is the shared lookup behind companionOwnershipOf.
+// Lstat comes first so a symlink, FIFO, or device is never opened (opening a
+// FIFO blocks until a writer appears). A non-regular file is a DEFINITIVE
+// foreign, not doubt -- canticle only ever writes a companion as a regular
+// file. Doubt is reserved for what only means "could not tell": an Lstat
+// error other than not-exist, and a header that could not be read; both
+// return companionForeign AND a non-nil error, so companionOwnershipOf's old
+// callers see no change while ownedCompanionOfErr can refuse to guess.
+func companionOwnershipOfErr(path string) (companionOwnership, error) {
 	fi, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return companionAbsent
+		return companionAbsent, nil
 	}
-	if err != nil || !fi.Mode().IsRegular() {
-		return companionForeign
+	if err != nil {
+		return companionForeign, fmt.Errorf("stat companion %q: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return companionForeign, nil
 	}
 	tags, _, err := parseLRCHeader(path)
 	if err != nil {
-		return companionForeign
+		return companionForeign, fmt.Errorf("read companion header %q: %w", path, err)
 	}
 	for _, t := range tags {
 		if strings.EqualFold(t.key, "by") && strings.TrimSpace(t.value) == "canticle" {
-			return companionOwned
+			return companionOwned, nil
 		}
 	}
-	return companionForeign
+	return companionForeign, nil
 }
 
 // resolveOutdir re-resolves and re-confines outdir when it falls under a

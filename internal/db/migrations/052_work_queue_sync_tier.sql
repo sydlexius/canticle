@@ -1,0 +1,40 @@
+-- +goose Up
+-- +goose StatementBegin
+-- On-disk sync tier for a completed synced row (#1075): 'word' (A2 inline
+-- markers, or an owned .elrc companion), 'line' (line-level cues only), or
+-- 'unsynced' (no timestamps at all -- a corrupted or hand-placed .lrc). NULL =
+-- not yet classified: every row from before this column existed, or one the
+-- backfill scan could not read (missing/unreadable sidecar).
+--
+-- DELIBERATELY SEPARATE from word_timing_state (migration 051). That column
+-- means "was a word-capable provider lane ASKED, and what did it answer";
+-- this one means "what tier is the FILE actually", independent of whether any
+-- lane was ever asked -- a line-synced file written under
+-- output.word_sync_mode=off, by a non-word-capable lane, or served from
+-- cache, all read the correct tier here even though word_timing_state is
+-- NULL for every one of them. #1075's classifier (internal/lyrics.
+-- ClassifyLRCFile) backfills existing rows; new writes stamp it at
+-- completion. #627's dashboard/report split (PR #1078) switches to reading
+-- this column.
+--
+-- No CHECK constraint, matching the word_timing_state precedent (034/044/
+-- 050/051 -- a rebuild would be needed to add one). NO INDEX AT ALL, not even
+-- a partial one: this migration originally shipped a partial index
+-- (WHERE outcome_type = 'synced' AND status = 'done' AND sync_tier IS NULL)
+-- meant to cover the backfill CLI's own "what's left to classify" query
+-- (queue.ListSyncTierPending), but EXPLAIN QUERY PLAN on that exact query
+-- shows SQLite's planner picks idx_work_queue_dequeue's leading `status`
+-- column instead (#1075 hostile-review finding 7) -- the partial index was
+-- dead weight from the day it shipped. Matching SyncTierCounts' existing full
+-- scan (migration 051 measured a few ms at 14k rows for the analogous
+-- unindexed count), the backfill is a one-time pass over a bounded
+-- population, not a hot path worth a forced INDEXED BY (no precedent
+-- anywhere else in this codebase) to make the planner honor an index it does
+-- not think it needs.
+ALTER TABLE work_queue ADD COLUMN sync_tier TEXT;
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+ALTER TABLE work_queue DROP COLUMN sync_tier;
+-- +goose StatementEnd

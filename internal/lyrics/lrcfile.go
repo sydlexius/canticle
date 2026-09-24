@@ -59,6 +59,96 @@ func EvaluateLRCFile(path string, durationSeconds int) (timing.TimingOutcome, ti
 	return outcome, mag, len(synced.Lines), nil
 }
 
+// SyncTier is the on-disk sync tier of a .lrc sidecar (#1075), matching
+// internal/queue's SyncTier* column values.
+type SyncTier string
+
+const (
+	// TierWord means at least one cue carries an A2 inline word marker, or an
+	// owned .elrc companion sits beside the file.
+	TierWord SyncTier = "word"
+	// TierLine means line-level timestamps only, no word markers or companion.
+	TierLine SyncTier = "line"
+	// TierUnsynced means no timestamps at all -- a corrupted or hand-placed
+	// .lrc that never carried synced cues.
+	TierUnsynced SyncTier = "unsynced"
+)
+
+// ClassifySynced classifies an already-parsed Synced's on-disk sync tier
+// (#1075) from its cues alone, ignoring any companion file. It owns no
+// parsing of its own: word-marker detection is timing.StripWordMarkers,
+// shared with the accept-time guard so a marked-up cue is recognized here
+// exactly as it is there.
+//
+// Two edge cases follow directly from reusing that shared predicate rather
+// than writing a second one, and are accepted as-is (no behavior change):
+//
+//   - A THREE-DIGIT-MILLISECOND marker (`<00:01.000>`) reads as Line, not
+//     Word. Canticle's own A2 grammar is exactly two fractional digits
+//     (timing.wordMarkerRe: `\d{2}`, no variable width), so a marker in that
+//     shape -- hand-crafted or from a foreign tool -- does not match and is
+//     never stripped; the cue's text is unchanged and falls through to Line.
+//   - A cue whose only content is a marker plus a decorative character (no
+//     real word text) still reads Word: this classifier only asks "did
+//     stripping the marker change the text", not whether what is left is
+//     meaningful lyric text (that stronger check is timing.IsDecorative,
+//     used elsewhere for a different question -- what a demotion persists).
+func ClassifySynced(synced models.Synced) SyncTier {
+	if len(synced.Lines) == 0 {
+		return TierUnsynced
+	}
+	for _, l := range synced.Lines {
+		if timing.StripWordMarkers(l.Text) != l.Text {
+			return TierWord
+		}
+	}
+	return TierLine
+}
+
+// ClassifyLRCFile reads lrcPath and classifies its on-disk sync tier (#1075),
+// upgrading a Line verdict to Word when an owned .elrc companion sits beside
+// it -- companion-only mode carries no inline markers in the .lrc itself, so
+// ClassifySynced alone would misclassify it as Line. Reuses ReadSyncedLRC
+// (BOM strip + lrcnormalize.ParseBody) and OwnedCompanionOf rather than a
+// second parser or a second companion check.
+//
+// The upgrade is deliberately scoped to Line ONLY, never Unsynced: the writer
+// (planCompanion) writes a fresh companion only for a synced write with at
+// least one qualifying line, and removes any owned companion whenever a
+// completion settles unsynced/.txt, so a live write can never pair
+// TierUnsynced with an owned companion. A .lrc with no timestamps at all
+// found paired with one on disk is a hand-edited or corrupted .lrc beside a
+// STALE companion nothing has pruned -- the file itself carries no timing
+// evidence, so it is not word-synced no matter what sits beside it.
+//
+// An os.ReadFile failure reading lrcPath itself (missing, unreadable, a
+// directory) is returned verbatim so the caller can count it and leave the
+// row unclassified rather than guessing.
+//
+// The companion check uses ownedCompanionOfErr, not OwnedCompanionOf: the
+// latter fail-closes doubt to "no companion", which would silently
+// misclassify a word-synced file as Line when its .elrc is merely unreadable
+// rather than absent or genuinely foreign (neither of which is an error
+// here). Only a genuine read failure propagates, so this caller counts the
+// row as unreadable and leaves it NULL rather than guessing Line.
+func ClassifyLRCFile(lrcPath string) (SyncTier, error) {
+	synced, err := ReadSyncedLRC(lrcPath)
+	if err != nil {
+		return "", err
+	}
+	tier := ClassifySynced(synced)
+	if tier == TierLine {
+		companion, err := ownedCompanionOfErr(lrcPath)
+		if err != nil {
+			return "", err
+		}
+		if companion != "" {
+			tier = TierWord
+		}
+	}
+	return tier, nil
+}
+
 // PlainBody flattens synced cues to the plain words a demotion persists as
 // .txt, dropping decorative cues via timing.IsDecorative.
 //
