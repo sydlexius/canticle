@@ -17,7 +17,7 @@ func TestResultLabel(t *testing.T) {
 	}{
 		{"word-synced gets a hyphenated label", reports.ResultWordSynced, "word-synced"},
 		{"line-synced gets a hyphenated label", reports.ResultLineSynced, "line-synced"},
-		{"plain synced passes through unchanged", reports.ResultSynced, "synced"},
+		{"tier-unknown synced says so in text, not only color", reports.ResultSynced, "synced (tier unknown)"},
 		{"unsynced passes through unchanged", reports.ResultUnsynced, "unsynced"},
 		{"unknown passes through unchanged", reports.ResultUnknown, "unknown"},
 	}

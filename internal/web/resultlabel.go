@@ -6,13 +6,19 @@ import "github.com/sydlexius/canticle/internal/reports"
 // in the Recent Outcomes tables (#627). Word-synced and line-synced get a
 // readable hyphenated label distinct from the underscored persisted value
 // ("word_synced" -> "word-synced"); every other class renders as its raw
-// string, unchanged from before this issue split the synced bucket.
+// string, unchanged from before this issue split the synced bucket, except
+// tier-unknown synced, which spells the tier out.
 func resultLabel(rc reports.ResultClass) string {
 	switch rc {
 	case reports.ResultWordSynced:
 		return "word-synced"
 	case reports.ResultLineSynced:
 		return "line-synced"
+	case reports.ResultSynced:
+		// The text, not only the muted color, must say the tier is unknown,
+		// so it reads for screen readers and color-blind users too, and
+		// matches the dashboard tile's "Synced (tier unknown)".
+		return "synced (tier unknown)"
 	default:
 		return string(rc)
 	}
