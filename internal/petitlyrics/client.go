@@ -142,13 +142,32 @@ func (c *Client) recordZeroResult() bool {
 // reportConfirmedOutage latches and logs an outage the caller has CONFIRMED,
 // either by a failed liveness probe or by the no-control count fallback.
 //
+// It RE-VALIDATES the run under its own lock before latching: confirmOutage's
+// own re-check happens earlier in the same call, but c.mu is released between
+// that check and here (a probe result has to be fetched, or the no-control
+// branch has nothing left to wait on), and a concurrent recordSuccess can land
+// in that window -- an unusable-track success resets the run without storing a
+// control, so the count can drop below the threshold before the caller's
+// evidence is reported. Reporting on stale evidence is exactly the false
+// cold-start outage #767 exists to close, just moved one line later. Every
+// outage decision is therefore re-validated in the SAME critical section that
+// latches it: below the threshold this returns false without latching or
+// logging, so the caller's confirmed evidence is discarded.
+//
 // The latch makes this log once per outage rather than on every request past the
 // threshold, and the emission sits outside the critical section: slog handlers
 // can block on I/O and take locks of their own, and this mutex also paces every
 // outbound request, so logging under it would serialize concurrent lookups at
 // exactly the moment an outage fires. pace() follows the same shape.
-func (c *Client) reportConfirmedOutage(probed bool) {
+func (c *Client) reportConfirmedOutage(probed bool) bool {
 	c.mu.Lock()
+	if c.consecutiveZero < ZeroResultThreshold {
+		// A concurrent success (recordSuccess) reset the run after the caller
+		// gathered its evidence but before it could report it. The run is no
+		// longer an outage; do not latch or log.
+		c.mu.Unlock()
+		return false
+	}
 	count := c.consecutiveZero
 	first := !c.zeroReported
 	c.zeroReported = true
@@ -158,6 +177,7 @@ func (c *Client) reportConfirmedOutage(probed bool) {
 		slog.Warn("petitlyrics: provider returned no results for a sustained run and a liveness check did not clear it; the application id may have been revoked",
 			"consecutive", count, "threshold", ZeroResultThreshold, "liveness_probed", probed)
 	}
+	return true
 }
 
 // recordSuccess clears the outage run and records the track as the control for a
@@ -656,6 +676,15 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 // Without the re-check a caller that saw the threshold would re-probe a run that
 // was already adjudicated, or, with no control on record, report a cold-start
 // outage on a credential that had just returned songs.
+//
+// That re-check only covers the window before this point. Both branches below
+// release c.mu again before deciding the verdict is confirmed -- the no-control
+// branch has nothing left to wait on, and the probed branch has to make a
+// network call -- so a second success can land in between and go unseen here.
+// reportConfirmedOutage re-validates the run a second time in the SAME critical
+// section that latches it, which is what makes the decision sound rather than
+// this comment's promise: every outage this function reports was re-validated
+// immediately before it was recorded, not merely checked once on entry.
 func (c *Client) confirmOutage(ctx context.Context) bool {
 	c.mu.Lock()
 	if c.consecutiveZero < ZeroResultThreshold {
@@ -672,8 +701,7 @@ func (c *Client) confirmOutage(ctx context.Context) bool {
 		// Never had a hit on this credential, so there is nothing to test against
 		// and no way to do better than the count. This is the cold-start revoked
 		// credential #607 exists to catch.
-		c.reportConfirmedOutage(false)
-		return true
+		return c.reportConfirmedOutage(false)
 	}
 	if busy {
 		// Another goroutine is already probing. Do not claim an outage on no
@@ -717,8 +745,7 @@ func (c *Client) confirmOutage(ctx context.Context) bool {
 		return false
 	}
 	// The provider served this track before and does not now. That is evidence.
-	c.reportConfirmedOutage(true)
-	return true
+	return c.reportConfirmedOutage(true)
 }
 
 // backOffProbe halves the miss run after a probe that could not reach the API, so
