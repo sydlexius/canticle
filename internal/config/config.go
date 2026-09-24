@@ -953,7 +953,7 @@ type TimingValidationConfig struct {
 // cap drains in about 100 minutes, so the cap bounds how far rechecks
 // interleave with fresh work rather than throttling the recheck itself.
 //
-// The ceiling exists because a cycle is planned to flip its admissions in ONE
+// The ceiling exists because a cycle flips its admissions in ONE
 // write transaction (queue.MarkWordRecheckQueued), which the worker and the
 // scanner wait behind, and because at 60s a cap of 1000 is already ~16.7h of
 // serial drain: a larger cap no longer bounds anything a day-scale operator
@@ -968,10 +968,7 @@ const (
 // (#1048): the steady-state feed that re-examines newly settled line-synced
 // tracks for word timings, the unattended counterpart of
 // `canticle scan reconcile-word-sync` (#1046). Dark by default.
-//
-// NOT DEAD CODE: nothing reads this section YET. Its consumer, the serve-mode
-// sweep, is #1048 slice 7; this slice lands the key surface first so the sweep
-// ships against a settled, never-retyped schema. Until then both keys are inert.
+// Its consumer is commands.newWordRecheckSweepJob, started from runServe.
 type WordSyncRecheckConfig struct {
 	// Enabled turns the sweep on. Default false. The reconcile-word-sync CLI
 	// runs regardless of this flag.

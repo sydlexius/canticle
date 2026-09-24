@@ -190,7 +190,7 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("on_categorical = %s%s\n", cfg.TimingValidation.OnCategorical, ann("timing_validation.on_categorical"))
 	p("\n")
 
-	// [word_sync_recheck] -- no consumer yet (#1048 slice 7).
+	// [word_sync_recheck] -- the serve-mode word-timing recheck sweep (#1048).
 	p("[word_sync_recheck]\n")
 	p("enabled = %t%s\n", cfg.WordSyncRecheck.Enabled, ann("word_sync_recheck.enabled"))
 	p("batch = %d%s\n", cfg.WordSyncRecheck.Batch, ann("word_sync_recheck.batch"))

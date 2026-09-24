@@ -137,7 +137,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | Sidecars judged per sweep cycle; values below 1 reset to the default. |
 | `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a lyric whose cues overrun the audio: `demote`, `quarantine`, `purge`, `off`. |
 | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
-| `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode word-timing re-check sweep. Not yet used: the sweep lands in a later release. |
+| `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode word-timing re-check sweep. |
 | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | Most rows in word-recheck mode at once (1-1000); out-of-range values are ignored. |
 | `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | EXPERIMENTAL: master switch for the word-sync generate lane (forced alignment via an external sidecar). The reference sidecar is CPU-only and slow; leave this off unless you run a dedicated aligner. No production caller yet. |
 | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
@@ -501,9 +501,9 @@ enabled = false
 batch = 100
 ```
 
-The unattended counterpart of [`canticle scan reconcile-word-sync`](CLI_REFERENCE.md#reconcile-word-sync). That command re-examines the tracks that are settled when you run it; this sweep will keep feeding newly settled line-synced tracks into the same word-timing re-check, so a library does not depend on someone re-running the command. Each re-checked track costs at least one provider request at the worker's pace; read [Word-timing re-check cost](USER_GUIDE.md#word-timing-re-check-cost) before enabling it.
+The unattended counterpart of [`canticle scan reconcile-word-sync`](CLI_REFERENCE.md#reconcile-word-sync). That command re-examines the tracks that are settled when you run it; this sweep keeps feeding newly settled line-synced tracks into the same word-timing re-check, so a library does not depend on someone re-running the command. Each re-checked track costs at least one provider request at the worker's pace; read [Word-timing re-check cost](USER_GUIDE.md#word-timing-re-check-cost) before enabling it.
 
-**Not yet used.** The keys are accepted and shown, but nothing reads them until the serve-mode sweep ships in a later release. Like the CLI, the sweep will do nothing while `output.word_sync_mode` is `off`.
+The sweep runs at startup and then on the scan interval (every 6 hours in scan-once mode). It fetches nothing itself: it flips candidates into the same re-check mode the CLI uses, and the worker drains them behind fresh work. While they wait they count as deferred rows. Like the CLI, the sweep does nothing while `output.word_sync_mode` is `off` (it logs that once at startup). A track that comes back without a verdict, because its word lane never answered within the worker's wait budget or a rescan reopened it for an ordinary fetch, is held out for a week before the sweep queues it again, so an unavailable provider does not cost a wait budget per track per cycle. The CLI is not held by that week.
 
 | Key | Env | Default | Meaning |
 |---|---|---|---|

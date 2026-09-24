@@ -63,6 +63,10 @@ func TestWordRecheckCandidatePredicates(t *testing.T) {
 		{name: "absent current gen checked before recheck cutoff", mutate: absentChecked("2026-01-05"), opts: WordRecheckOptions{RecheckAbsentBefore: day(6)}, want: true},
 		{name: "absent current gen checked at recheck cutoff (strict)", mutate: absentChecked("2026-01-06"), opts: WordRecheckOptions{RecheckAbsentBefore: day(6)}},
 		{name: "recheck cutoff never re-admits served", mutate: `UPDATE work_queue SET word_timing_state = 'served', word_timing_generation = 7, word_timing_checked_at = '2026-01-01T00:00:00Z'`, opts: WordRecheckOptions{RecheckAbsentBefore: day(6)}},
+		{name: "unexamined, never checked, under a cooldown", opts: WordRecheckOptions{UnexaminedCheckedBefore: day(6)}, want: true},
+		{name: "unexamined, checked before cooldown", mutate: `UPDATE work_queue SET word_timing_checked_at = '2026-01-05T00:00:00Z'`, opts: WordRecheckOptions{UnexaminedCheckedBefore: day(6)}, want: true},
+		{name: "unexamined, checked at cooldown (strict)", mutate: `UPDATE work_queue SET word_timing_checked_at = '2026-01-06T00:00:00Z'`, opts: WordRecheckOptions{UnexaminedCheckedBefore: day(6)}},
+		{name: "cooldown never holds a stale absent", mutate: `UPDATE work_queue SET word_timing_state = 'absent', word_timing_generation = 6, word_timing_checked_at = '2026-01-06T00:00:00Z'`, opts: WordRecheckOptions{UnexaminedCheckedBefore: day(6)}, want: true},
 		{name: "completed before cutoff", opts: WordRecheckOptions{CompletedBefore: day(11)}, want: true},
 		{name: "completed at cutoff (strict)", opts: WordRecheckOptions{CompletedBefore: day(10)}},
 		{name: "no completed_at under a cutoff", mutate: `UPDATE work_queue SET completed_at = NULL`, opts: WordRecheckOptions{CompletedBefore: day(11)}},
@@ -744,5 +748,51 @@ func TestClearWordTimingState(t *testing.T) {
 	_ = dbh.Close()
 	if err := q.ClearWordTimingState(ctx, served); err == nil {
 		t.Fatal("ClearWordTimingState on a closed db returned nil")
+	}
+}
+
+// TestCountWordRecheckInFlightExcludesPruneRetiredRow is I1 (hostile review,
+// #1048 slice 7): prune.retireUnresolvable retires a row whose source file
+// vanished to status='done' while deliberately LEAVING word_timing_state =
+// 'queued' (#1039, so the candidate predicate -- which only re-admits NULL or
+// 'absent' -- never re-flips a row it already knows is gone). That row can
+// never be dequeued or settled again, so it must not consume a slot in the
+// sweep's cap: CountWordRecheckInFlight (status <> 'done') must exclude it,
+// while CountWordRecheckQueued (any status, the CLI's "already queued" figure)
+// must still count it, since it genuinely is a queued row from an operator's
+// point of view.
+func TestCountWordRecheckInFlightExcludesPruneRetiredRow(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+
+	// A real drainable row: flipped and still deferred.
+	drainable := seedWordCandidate(t, dbh, "drainable")
+	if _, err := q.MarkWordRecheckQueued(ctx, []int64{drainable}, WordRecheckOptions{}, nil); err != nil {
+		t.Fatalf("flip drainable: %v", err)
+	}
+
+	// A prune-retired row: exactly what retireUnresolvableSQL leaves behind --
+	// status='done', word_timing_state still 'queued', no generation stamped.
+	retired := seedWordCandidate(t, dbh, "retired")
+	if _, err := q.MarkWordRecheckQueued(ctx, []int64{retired}, WordRecheckOptions{}, nil); err != nil {
+		t.Fatalf("flip retired: %v", err)
+	}
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'done', last_error = 'source file no longer exists' WHERE id = ?`, retired)
+
+	inFlight, err := q.CountWordRecheckInFlight(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountWordRecheckInFlight: %v", err)
+	}
+	if inFlight != 1 {
+		t.Fatalf("in-flight = %d; want 1 (the prune-retired row must not consume a slot)", inFlight)
+	}
+
+	queued, err := q.CountWordRecheckQueued(ctx, nil)
+	if err != nil {
+		t.Fatalf("CountWordRecheckQueued: %v", err)
+	}
+	if queued != 2 {
+		t.Fatalf("queued (any status) = %d; want 2 (the CLI's figure still counts the retired row)", queued)
 	}
 }

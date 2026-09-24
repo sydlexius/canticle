@@ -62,6 +62,12 @@ func (w *Worker) wordOrchestrator() *orchestrator.Orchestrator {
 	return orch
 }
 
+// WordGeneration exposes the generation this worker stamps, so the serve-mode
+// recheck sweep (#1048) selects stale 'absent' verdicts against the lanes serve
+// actually built rather than re-deriving them from config. Read it after the
+// lane setters and before the worker loop starts: w.lanes is not synchronized.
+func (w *Worker) WordGeneration() int64 { return w.wordGeneration() }
+
 // wordGeneration is the word-capability generation of the configured lanes,
 // stamped with every recheck verdict.
 func (w *Worker) wordGeneration() int64 {
@@ -93,6 +99,19 @@ func (w *Worker) wordGeneration() int64 {
 // ordinary per-track hit history (#282), e.g. flip a Musixmatch hit to a miss
 // when only its words were missing, and would count hits with no matching miss.
 func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track models.Track) error {
+	// Rows can be flipped into recheck mode (MarkWordRecheckQueued /
+	// scan reconcile-word-sync, or the #1048 sweep) and then outlive a serve
+	// restart into output.word_sync_mode = off (#1054): both entry points
+	// refuse to flip a NEW row under off, but a row already queued has no
+	// such guard. Under off the writer has nowhere to land word timings and
+	// WriteLRC removes an owned .elrc, so dispatching would contact a
+	// provider, and possibly stamp served/write nothing, for no reachable
+	// benefit. Release it untouched instead: no lane, no cache, no write, no
+	// verdict.
+	if w.wordSyncOff() {
+		w.consecutiveFailures = 0
+		return w.releaseWordRecheckOff(ctx, item)
+	}
 	orch := w.wordOrchestrator()
 	if orch == nil {
 		// No lane can ever answer under this configuration, so the provider path
@@ -136,6 +155,42 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 	}
 	// Some word lane did not answer (plan 2.4 row 4): retry, never absent.
 	return w.deferWordRecheck(ctx, item, errNoWordAnswer)
+}
+
+// wordSyncOff reports whether the configured writer has nowhere to land word
+// timings right now (output.word_sync_mode = off, #1054). It reuses the exact
+// signal stampWordTiming already consults (wordLandingWriter.WordSyncEnabled,
+// "inline markers, the companion, or both") rather than re-plumbing the config
+// value into the worker: WordSyncEnabled is false under off and only under
+// off. A writer that does not implement the interface (a test double with no
+// stake in this gate) is treated as NOT off, preserving the pre-#1054
+// dispatch behavior for those tests.
+func (w *Worker) wordSyncOff() bool {
+	lw, ok := w.writer.(wordLandingWriter)
+	return ok && !lw.WordSyncEnabled()
+}
+
+// releaseWordRecheckOff un-flips a queued recheck row back to 'done' with no
+// verdict under word_sync_mode = off (#1054), reusing DeferWordRecheck's own
+// wait-budget-exhausted un-flip SQL (maxWaits=0 forces it on the very first
+// call: refused_waits starts at 0, which is already >= 0) rather than
+// inventing a second state transition. No lane is asked, no cache or store is
+// touched, and the row's miss_count/attempts/lane_attempts/provider_outcomes
+// are untouched -- DeferWordRecheck moves none of them either. A settle
+// failure (row no longer a processing recheck row) is silently accepted, same
+// as SettleWordRecheck's sql.ErrNoRows handling: the row is not this worker's
+// to fix up.
+func (w *Worker) releaseWordRecheckOff(ctx context.Context, item queue.WorkItem) error {
+	released, err := w.queue.DeferWordRecheck(context.WithoutCancel(ctx), item.ID, 0, 0, "worker: word recheck: output.word_sync_mode is off")
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("worker: release word recheck %d under word_sync_mode off: %w", item.ID, err)
+	}
+	if released {
+		slog.Info("worker word recheck: released with no verdict; output.word_sync_mode is off", "id", item.ID)
+	} else {
+		slog.Warn("worker word recheck: expected an immediate release under word_sync_mode off but the row stayed queued; will retry", "id", item.ID)
+	}
+	return nil
 }
 
 // errNoWordAnswer is a healthy round-trip that left the word question open. It

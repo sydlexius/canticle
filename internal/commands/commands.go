@@ -1216,6 +1216,14 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		redirectLn = ln
 	}
 
+	// Word-sync recheck sweep (#1048): built here, before any goroutine starts,
+	// because it reads the worker's lane set for the word generation. Only with
+	// a live provider, since the flipped rows need the worker to drain them.
+	var wordRecheck *wordRecheckSweepJob
+	if !lyricsDisabled {
+		wordRecheck, _ = newWordRecheckSweepJob(sqlDB, cfg, w)
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	// Start the worker and scheduler only when a lyrics provider is active. When
@@ -1319,6 +1327,14 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		defer wg.Done()
 		runTimingValidationSweep(runCtx, sqlDB, cfg, serveScanInterval(cfg, args))
 	}()
+	// Same cadence as the timing sweep (scan interval, 6h in scan-once mode).
+	if wordRecheck != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runWordRecheckSweepLoop(runCtx, wordRecheck, resolveTimingSweepInterval(serveScanInterval(cfg, args)))
+		}()
+	}
 	// Background session sweeper: periodically delete expired/revoked sessions,
 	// mirroring the worker/scheduler goroutine + context-cancel pattern. Only
 	// runs when the authenticated UI is mounted (there are no sessions otherwise).
