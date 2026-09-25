@@ -3,6 +3,8 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lrcbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
@@ -20,6 +24,18 @@ import (
 )
 
 const canticleLRCFixture = "[by:canticle]\n[ar:A]\n[ti:T]\n[ve:1.14.0]\n[00:01.00]hello\n"
+
+// loadCfgT loads cfgPath, failing the test on error. runEditorTagBackfill
+// needs a config.Config (not just the open *sql.DB) to derive its startup
+// backup path beside the database.
+func loadCfgT(t *testing.T, cfgPath string) config.Config {
+	t.Helper()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg
+}
 
 // chmodT chmods path to 0 and restores it to restore on cleanup, failing the
 // test on either error.
@@ -117,9 +133,10 @@ func TestRunEditorTagBackfill_MarkerGatedStartupPass(t *testing.T) {
 	target := filepath.Join(root, "song.lrc")
 	mustWrite(t, target, canticleLRCFixture)
 	sqlDB := openDBFromConfig(t, cfgPath)
+	cfg := loadCfgT(t, cfgPath)
 	ctx := context.Background()
 	reg := selfwrite.New(0)
-	runEditorTagBackfill(ctx, sqlDB, reg)
+	runEditorTagBackfill(ctx, sqlDB, cfg, reg)
 
 	if got := readFile(t, target); !strings.Contains(got, "[re:canticle]") {
 		t.Fatalf("startup pass did not stamp the file: %q", got)
@@ -136,7 +153,7 @@ func TestRunEditorTagBackfill_MarkerGatedStartupPass(t *testing.T) {
 	// left untouched (the gate is the marker, not per-file idempotency).
 	other := filepath.Join(root, "other.lrc")
 	mustWrite(t, other, canticleLRCFixture)
-	runEditorTagBackfill(ctx, sqlDB, reg)
+	runEditorTagBackfill(ctx, sqlDB, cfg, reg)
 	if got := readFile(t, other); strings.Contains(got, "[re:") {
 		t.Errorf("a second, marker-gated run must not touch a new file: %q", got)
 	}
@@ -159,15 +176,16 @@ func TestDegradedSubdir(t *testing.T) {
 		mustWrite(t, filepath.Join(dirB, "other.lrc"), canticleLRCFixture)
 		chmodT(t, dirB, 0o755)
 		var visited []string
-		scanned, stamped, errored, degraded, err := walkEditorTagRoot(context.Background(), root, func(path string) (bool, error) {
+		res, err := walkEditorTagRoot(context.Background(), root, func(path string) (bool, bool, error) {
 			visited = append(visited, path)
 			return injectEditorTag(path)
 		})
 		if err != nil {
 			t.Fatalf("an unreadable subdir must not abort the whole walk: %v", err)
 		}
-		if degraded != 1 || scanned != 1 || stamped != 1 || errored != 0 {
-			t.Errorf("scanned=%d stamped=%d errored=%d degraded=%d; want 1,1,0,1", scanned, stamped, errored, degraded)
+		if res.Degraded != 1 || res.Scanned != 1 || res.Stamped != 1 || res.Errored != 0 || res.Changed != 0 {
+			t.Errorf("scanned=%d stamped=%d changed=%d errored=%d degraded=%d; want 1,1,0,0,1",
+				res.Scanned, res.Stamped, res.Changed, res.Errored, res.Degraded)
 		}
 		if len(visited) != 1 || filepath.Base(visited[0]) != "song.lrc" {
 			t.Errorf("fn called for %v; want only dirA's song.lrc", visited)
@@ -218,12 +236,13 @@ func TestRunEditorTagBackfill_LeavesMarkerUnset(t *testing.T) {
 		target := filepath.Join(root, "song.lrc")
 		mustWrite(t, target, canticleLRCFixture)
 		sqlDB := openDBFromConfig(t, cfgPath)
+		cfg := loadCfgT(t, cfgPath)
 		ctx := context.Background()
 		emptyRoot := t.TempDir()
 		if _, err := library.New(sqlDB).Add(ctx, emptyRoot, "empty", models.LibrarySettings{}); err != nil {
 			t.Fatalf("library.Add: %v", err)
 		}
-		runEditorTagBackfill(ctx, sqlDB, selfwrite.New(0))
+		runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
 		if done, err := editorTagBackfillDone(ctx, sqlDB); err != nil || done {
 			t.Errorf("done=%v err=%v; want unset for a retry", done, err)
 		}
@@ -238,8 +257,9 @@ func TestRunEditorTagBackfill_LeavesMarkerUnset(t *testing.T) {
 		mustWrite(t, target, canticleLRCFixture)
 		chmodT(t, target, 0o644)
 		sqlDB := openDBFromConfig(t, cfgPath)
+		cfg := loadCfgT(t, cfgPath)
 		ctx := context.Background()
-		runEditorTagBackfill(ctx, sqlDB, selfwrite.New(0))
+		runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
 		if done, err := editorTagBackfillDone(ctx, sqlDB); err != nil || done {
 			t.Errorf("done=%v err=%v; want unset for a retry", done, err)
 		}
@@ -263,11 +283,12 @@ func TestRunEditorTagBackfill_DegradedCeiling_BoundedRetryThenGivesUp(t *testing
 	// rather than a transient blip.
 	chmodT(t, target, 0o644)
 	sqlDB := openDBFromConfig(t, cfgPath)
+	cfg := loadCfgT(t, cfgPath)
 	ctx := context.Background()
 	reg := selfwrite.New(0)
 
 	for i := 1; i < maxDegradedAttempts; i++ {
-		runEditorTagBackfill(ctx, sqlDB, reg)
+		runEditorTagBackfill(ctx, sqlDB, cfg, reg)
 		if done, err := editorTagBackfillDone(ctx, sqlDB); err != nil || done {
 			t.Fatalf("attempt %d/%d: done=%v err=%v; want unset (still within the retry budget)", i, maxDegradedAttempts, done, err)
 		}
@@ -275,7 +296,7 @@ func TestRunEditorTagBackfill_DegradedCeiling_BoundedRetryThenGivesUp(t *testing
 
 	// The maxDegradedAttempts-th consecutive degraded startup: ceiling
 	// reached, must give up and stamp rather than retry forever.
-	runEditorTagBackfill(ctx, sqlDB, reg)
+	runEditorTagBackfill(ctx, sqlDB, cfg, reg)
 	done, err := editorTagBackfillDone(ctx, sqlDB)
 	if err != nil {
 		t.Fatalf("marker query: %v", err)
@@ -293,6 +314,7 @@ func TestRunEditorTagBackfill_CleanRunClearsDegradedCounter(t *testing.T) {
 	target := filepath.Join(root, "song.lrc")
 	mustWrite(t, target, canticleLRCFixture)
 	sqlDB := openDBFromConfig(t, cfgPath)
+	cfg := loadCfgT(t, cfgPath)
 	ctx := context.Background()
 
 	// Seed the counter as if an earlier boot had degraded.
@@ -303,7 +325,7 @@ func TestRunEditorTagBackfill_CleanRunClearsDegradedCounter(t *testing.T) {
 		t.Fatal("setup: expected the seeded degraded counter row to be present")
 	}
 
-	runEditorTagBackfill(ctx, sqlDB, selfwrite.New(0))
+	runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
 
 	if done, err := editorTagBackfillDone(ctx, sqlDB); err != nil || !done {
 		t.Fatalf("done=%v err=%v; want stamped after a clean run", done, err)
@@ -327,9 +349,10 @@ func TestRunEditorTagBackfill_DegradedCounterIndependentOf470(t *testing.T) {
 	mustWrite(t, target, canticleLRCFixture)
 	chmodT(t, target, 0o644)
 	sqlDB := openDBFromConfig(t, cfgPath)
+	cfg := loadCfgT(t, cfgPath)
 	ctx := context.Background()
 
-	runEditorTagBackfill(ctx, sqlDB, selfwrite.New(0))
+	runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
 
 	if _, present := markerDetailCount(t, ctx, sqlDB, editorTagBackfillDegradedAttemptsMarker); !present {
 		t.Fatal("expected the editor-tag degraded-attempt counter to be recorded")
@@ -442,5 +465,241 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 
 	if got := readFile(t, target); !strings.Contains(got, "[re:canticle]") {
 		t.Errorf("editor-tag backfill did not stamp the file before the worker started: %q", got)
+	}
+}
+
+// readEditorTagBackupRecord reads the single-line JSONL backup file at path
+// and unmarshals its one record, failing the test on error.
+func readEditorTagBackupRecord(t *testing.T, path string) editorTagBackupRecord {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // reason: test-generated path
+	if err != nil {
+		t.Fatalf("read backup %s: %v", path, err)
+	}
+	line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
+	var rec editorTagBackupRecord
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("unmarshal backup record %q: %v", line, err)
+	}
+	return rec
+}
+
+// TestRunReconcileEditorTag_BackupIsRestorable pins finding 1 (CodeRabbit
+// 4101188299, Copilot 4101172972) on the CLI path: the backup record must
+// carry the file's exact pre-mutation bytes, not just its path, and those
+// bytes must actually restore the file byte-for-byte.
+func TestRunReconcileEditorTag_BackupIsRestorable(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	target := filepath.Join(root, "song.lrc")
+	mustWrite(t, target, canticleLRCFixture)
+	before := readFile(t, target)
+	backupPath := filepath.Join(root, "backup.jsonl")
+
+	var buf bytes.Buffer
+	if rc := runReconcileEditorTag(context.Background(), &buf, ScanReconcileEditorTagCmd{ConfigPath: cfgPath, Yes: true, Backup: backupPath}); rc != 0 {
+		t.Fatalf("apply rc=%d out=%s", rc, buf.String())
+	}
+	if got := readFile(t, target); !strings.Contains(got, "[re:canticle]") {
+		t.Fatalf("apply did not stamp the file: %q", got)
+	}
+
+	rec := readEditorTagBackupRecord(t, backupPath)
+	// walkEditorTagRoot canonicalizes the root (pathutil.CanonicalRoot,
+	// symlink-resolved) before walking, so the recorded path may differ from
+	// the pre-resolution target on a platform where the temp dir itself sits
+	// behind a symlink (e.g. macOS /var -> /private/var); resolve target the
+	// same way before comparing.
+	wantPath, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("resolve target: %v", err)
+	}
+	if rec.FilePath != wantPath {
+		t.Errorf("backup file_path = %q; want %q", rec.FilePath, wantPath)
+	}
+	orig, err := base64.StdEncoding.DecodeString(rec.Original)
+	if err != nil {
+		t.Fatalf("decode backup original: %v", err)
+	}
+	if string(orig) != before {
+		t.Errorf("backup original = %q; want the pre-mutation bytes %q", orig, before)
+	}
+
+	// Prove the record actually restores the file, not merely that the bytes
+	// happen to match: write them back and re-compare.
+	if err := os.WriteFile(target, orig, 0o644); err != nil { //nolint:gosec // reason: test file
+		t.Fatalf("restore from backup: %v", err)
+	}
+	if got := readFile(t, target); got != before {
+		t.Errorf("file restored from backup does not match the original byte-for-byte:\nrestored:\n%s\nwant:\n%s", got, before)
+	}
+}
+
+// TestRunEditorTagBackfill_BackupIsRestorable pins finding 1 on the
+// unattended serve-startup path: prior to this fix, that path wrote NO
+// backup at all before rewriting a user's sidecar. It must now write the
+// same restorable JSONL record as the CLI, to a file beside the database
+// (see runEditorTagBackfill's backupPath comment for why that location).
+func TestRunEditorTagBackfill_BackupIsRestorable(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	target := filepath.Join(root, "song.lrc")
+	mustWrite(t, target, canticleLRCFixture)
+	before := readFile(t, target)
+	cfg := loadCfgT(t, cfgPath)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	ctx := context.Background()
+
+	runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
+
+	got := readFile(t, target)
+	if !strings.Contains(got, "[re:canticle]") {
+		t.Fatalf("startup pass did not stamp the file: %q", got)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(cfg.DB.Path), "editor-tag-backfill-startup-backup-*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob startup backup file: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("startup backup file(s) = %v; want exactly one beside the database", matches)
+	}
+
+	rec := readEditorTagBackupRecord(t, matches[0])
+	wantPath, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("resolve target: %v", err)
+	}
+	if rec.FilePath != wantPath {
+		t.Errorf("backup file_path = %q; want %q", rec.FilePath, wantPath)
+	}
+	orig, err := base64.StdEncoding.DecodeString(rec.Original)
+	if err != nil {
+		t.Fatalf("decode backup original: %v", err)
+	}
+	if string(orig) != before {
+		t.Errorf("backup original = %q; want the pre-mutation bytes %q", orig, before)
+	}
+	if err := os.WriteFile(target, orig, 0o644); err != nil { //nolint:gosec // reason: test file
+		t.Fatalf("restore from backup: %v", err)
+	}
+	if got := readFile(t, target); got != before {
+		t.Errorf("file restored from the startup backup does not match the original byte-for-byte:\nrestored:\n%s\nwant:\n%s", got, before)
+	}
+}
+
+// TestInjectEditorTag_RaceMapsToChanged pins finding 2 (Copilot 4101172948)
+// at the unit level: ErrChangedDuringRewrite from the underlying rewrite
+// must surface as changed=true, stamped=false, err=nil -- never collapsed
+// to a plain (false, nil) that reads identically to "nothing to do".
+// lyricsInjectEditorTag is faked here because the real race seam
+// (lyrics.injectEditorTagPreRenameHook) is unexported in a different
+// package and unreachable from this one.
+func TestInjectEditorTag_RaceMapsToChanged(t *testing.T) {
+	orig := lyricsInjectEditorTag
+	t.Cleanup(func() { lyricsInjectEditorTag = orig })
+	lyricsInjectEditorTag = func(string) (bool, error) {
+		return false, lyrics.ErrChangedDuringRewrite
+	}
+
+	stamped, changed, err := injectEditorTag("irrelevant")
+	if err != nil || stamped || !changed {
+		t.Errorf("stamped=%v changed=%v err=%v; want false,true,nil", stamped, changed, err)
+	}
+}
+
+// TestRunEditorTagBackfill_RacedFileLeavesMarkerUnset pins finding 2
+// (Copilot 4101172948) end to end: a file whose rewrite lost a concurrency
+// race must be left untouched AND must leave the one-shot startup
+// done-marker unset, so the next boot retries it. Before this fix,
+// injectEditorTag folded the race into (false, nil) -- indistinguishable
+// from "nothing to do" -- so the pass reported a clean, fully-covered run
+// and stamped done even though this file was never tagged.
+func TestRunEditorTagBackfill_RacedFileLeavesMarkerUnset(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	target := filepath.Join(root, "song.lrc")
+	mustWrite(t, target, canticleLRCFixture)
+	cfg := loadCfgT(t, cfgPath)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	ctx := context.Background()
+
+	orig := lyricsInjectEditorTag
+	t.Cleanup(func() { lyricsInjectEditorTag = orig })
+	lyricsInjectEditorTag = func(string) (bool, error) {
+		return false, lyrics.ErrChangedDuringRewrite
+	}
+
+	runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
+
+	if got := readFile(t, target); strings.Contains(got, "[re:") {
+		t.Errorf("a raced file must never be stamped: %q", got)
+	}
+	done, err := editorTagBackfillDone(ctx, sqlDB)
+	if err != nil {
+		t.Fatalf("marker query: %v", err)
+	}
+	if done {
+		t.Fatal("a raced file must leave the startup done-marker unset so it is retried next boot")
+	}
+}
+
+// TestRunEditorTagBackfill_ElrcOnlyRootIsAvailable pins findings 3 and 4
+// (Copilot 4101172998, CodeRabbit 4101188315): a root holding only an
+// eligible .elrc sidecar (no .lrc, no audio) must be treated as available
+// and get tagged. Before this fix, the startup pass derived its
+// root-availability signal from a separate lrcbackfill.Run preflight walk
+// whose own MediaEntries counter never recognizes ".elrc" -- so this exact
+// root read as empty/unmounted and the real tagging walk was never even
+// invoked for it.
+func TestRunEditorTagBackfill_ElrcOnlyRootIsAvailable(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	target := filepath.Join(root, "song.elrc")
+	mustWrite(t, target, canticleLRCFixture)
+	cfg := loadCfgT(t, cfgPath)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	ctx := context.Background()
+
+	runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
+
+	if got := readFile(t, target); !strings.Contains(got, "[re:canticle]") {
+		t.Fatalf(".elrc-only root was not tagged: %q", got)
+	}
+	done, err := editorTagBackfillDone(ctx, sqlDB)
+	if err != nil {
+		t.Fatalf("marker query: %v", err)
+	}
+	if !done {
+		t.Fatal("a clean .elrc-only run must stamp the done-marker")
+	}
+}
+
+// TestRunEditorTagBackfill_SingleWalkNoLRCBackfillPreflight pins findings 3
+// and 4's other half: the startup pass must not run a separate lrcbackfill
+// preflight walk at all. runStackedWalk is the exact package var
+// reconcile_editor_tag.go's earlier preflight called (shared with #470's
+// runLRCStackedCheck, in reconcile_lrc.go); overriding it here and asserting
+// zero calls proves the media-presence signal is now derived from
+// walkEditorTagRoot's own single walk.
+func TestRunEditorTagBackfill_SingleWalkNoLRCBackfillPreflight(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	target := filepath.Join(root, "song.lrc")
+	mustWrite(t, target, canticleLRCFixture)
+	cfg := loadCfgT(t, cfgPath)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	ctx := context.Background()
+
+	orig := runStackedWalk
+	t.Cleanup(func() { runStackedWalk = orig })
+	var calls int
+	runStackedWalk = func(ctx context.Context, opts lrcbackfill.Options) (lrcbackfill.Summary, error) {
+		calls++
+		return orig(ctx, opts)
+	}
+
+	runEditorTagBackfill(ctx, sqlDB, cfg, selfwrite.New(0))
+
+	if calls != 0 {
+		t.Errorf("editor-tag backfill invoked the lrcbackfill preflight (runStackedWalk) %d time(s); want 0 -- media presence must come from walkEditorTagRoot's own walk", calls)
+	}
+	if got := readFile(t, target); !strings.Contains(got, "[re:canticle]") {
+		t.Fatalf("startup pass did not stamp the file: %q", got)
 	}
 }

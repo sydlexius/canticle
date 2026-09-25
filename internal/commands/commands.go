@@ -240,7 +240,7 @@ type ScanReconcileMarkerProvenanceCmd struct {
 // convention (a sidecar path is private library metadata).
 type ScanReconcileEditorTagCmd struct {
 	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default reconciles every library"`
-	Yes        bool   `arg:"--yes" help:"actually stamp files (without it, prints what would change)"`
+	Yes        bool   `arg:"--yes" help:"actually stamp files (without it, prints what would change); run only while serve is stopped or idle, since the concurrency guard against its in-process writers is best-effort, not a lock -- a race is recoverable from the JSONL backup, but not prevented"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of stamped files (default: <db-dir>/reconcile-editor-tag-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
@@ -1274,7 +1274,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// ordering guarantee: it relies on the same best-effort pre-rename guard
 	// (lyrics.InjectEditorTag's doc comment) as this pass, so it should be run
 	// only while serve is stopped or idle.
-	runEditorTagBackfill(ctx, sqlDB, selfWrites)
+	runEditorTagBackfill(ctx, sqlDB, cfg, selfWrites)
 	if serveStartupOrderHook != nil {
 		serveStartupOrderHook("editor_tag_backfill_done")
 	}
