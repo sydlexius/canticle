@@ -18,6 +18,10 @@ import (
 // would apply its result -- a concurrent writer (the worker, a revalidate
 // demotion/quarantine) won the race. A caller treats this as "skipped, retry
 // next run", never as an error and never as stamped done (#483 finding 3).
+// This is a BEST-EFFORT detection, not a guarantee: it only catches a change
+// the pre-rename re-check (identity/size/mtime) can observe, and that check
+// itself runs strictly before the rename, never atomically with it (Copilot
+// 4100857291, CodeRabbit 4100866202) -- see InjectEditorTag's doc comment.
 var ErrChangedDuringRewrite = errors.New("lyrics: file changed during editor-tag rewrite")
 
 // injectEditorTagPreRenameHook, non-nil only in tests, runs immediately
@@ -105,6 +109,16 @@ func EditorTagEligible(path string) (bool, error) {
 // followed. The rewrite is atomic (temp file, fsync, rename), mirroring
 // InjectProvenance in parser.go. injected=false with a nil error means
 // "nothing to do".
+//
+// CONCURRENCY IS BEST-EFFORT, NOT GUARANTEED (Copilot 4100857291, CodeRabbit
+// 4100866202): the pre-rename identity/size/mtime re-check (see preRename
+// below) narrows the window between this call's initial read and its rename,
+// it does not close it. A writer that changes or removes path strictly
+// between that re-check and the os.Rename can still lose its write, and a
+// same-file, same-size rewrite that lands within the same mtime tick is
+// invisible to the check entirely. A caller that needs a hard guarantee must
+// not run InjectEditorTag concurrently with any other writer of the same
+// path (see ErrChangedDuringRewrite and preRename's doc comments).
 func InjectEditorTag(path string) (injected bool, err error) {
 	if k := sidecar.KindOf(path); k != sidecar.KindLineSynced && k != sidecar.KindWordSynced {
 		return false, fmt.Errorf("not an LRC file: %s", path)
@@ -154,7 +168,14 @@ func InjectEditorTag(path string) (injected bool, err error) {
 	// preRename guards the unattended backfill racing the worker's own
 	// atomic write or a revalidate demotion/quarantine (#483 finding 3):
 	// identity/size/mtime must still match what this call started from, or
-	// another writer touched (or removed) the target in the window.
+	// another writer touched (or removed) the target in the window. This is
+	// a BEST-EFFORT narrowing of that window, not a closure of it (Copilot
+	// 4100857291, CodeRabbit 4100866202): the check and the os.Rename below
+	// are still two separate operations, so a writer landing strictly between
+	// them is still unobserved, and a same-file/same-size write that lands
+	// within the same mtime tick as the original is invisible to this check
+	// by construction. A caller needing a real guarantee must keep other
+	// writers of path from running concurrently with this call.
 	preRename := func() error {
 		if injectEditorTagPreRenameHook != nil {
 			injectEditorTagPreRenameHook(path)

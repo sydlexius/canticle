@@ -198,6 +198,107 @@ func TestInjectEditorTag_SkipsSymlink(t *testing.T) {
 	}
 }
 
+// TestInjectEditorTag_PureCRLFNoDoubledCR pins Copilot 4100857260: on a pure-
+// CRLF file, parseLRCHeader's bufio.Scanner (default ScanLines split) could in
+// principle leave the scanner's trailing "\r" on every returned line while eol
+// is detected as "\r\n", so atomicWriteLines would append a second "\r\n" and
+// the rewritten file would end up "\r\r\n" everywhere. bufio.ScanLines already
+// calls dropCR internally, so this is expected to NOT reproduce -- this test
+// pins that expectation as a regression guard.
+func TestInjectEditorTag_PureCRLFNoDoubledCR(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "track.lrc")
+	body := "[by:canticle]\r\n[ar:Test Artist]\r\n[ti:Test Track]\r\n[ve:1.14.0]\r\n[00:01.00]hello\r\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	injected, err := InjectEditorTag(path)
+	if err != nil {
+		t.Fatalf("InjectEditorTag: %v", err)
+	}
+	if !injected {
+		t.Fatal("injected = false; want true")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(data)
+
+	if strings.Contains(got, "\r\r\n") {
+		t.Errorf("doubled CR (\\r\\r\\n) in output:\n%q", got)
+	}
+	// Every line must be CRLF-terminated: splitting on "\r\n" must leave no
+	// fragment containing a bare "\n" (the final fragment, after the last
+	// "\r\n", is the empty string here since the source ended with one).
+	for _, frag := range strings.Split(got, "\r\n") {
+		if strings.Contains(frag, "\n") {
+			t.Errorf("bare LF outside a CRLF pair in output:\n%q", got)
+		}
+	}
+	want := "[by:canticle]\r\n[ar:Test Artist]\r\n[ti:Test Track]\r\n[re:canticle]\r\n[ve:1.14.0]\r\n[00:01.00]hello\r\n"
+	if got != want {
+		t.Errorf("got:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestInjectEditorTag_PreservesNoTrailingNewline pins CodeRabbit 4100866192:
+// a source file with no trailing newline must stay that way -- the rewrite
+// must not append one to the last body line.
+func TestInjectEditorTag_PreservesNoTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "track.lrc")
+	body := "[by:canticle]\n[ar:A]\n[ti:T]\n[ve:1.14.0]\n[00:01.00]hello"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	injected, err := InjectEditorTag(path)
+	if err != nil {
+		t.Fatalf("InjectEditorTag: %v", err)
+	}
+	if !injected {
+		t.Fatal("injected = false; want true")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := "[by:canticle]\n[ar:A]\n[ti:T]\n[re:canticle]\n[ve:1.14.0]\n[00:01.00]hello"
+	if string(data) != want {
+		t.Errorf("got:\n%q\nwant:\n%q (no newline appended after the last body line)", data, want)
+	}
+}
+
+// TestInjectEditorTag_PreservesFileMode pins CodeRabbit 4100866192: the
+// rewritten file must keep the original file's exact permission bits.
+func TestInjectEditorTag_PreservesFileMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "track.lrc")
+	if err := os.WriteFile(path, []byte(canticleLRCBody(nil)), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	injected, err := InjectEditorTag(path)
+	if err != nil {
+		t.Fatalf("InjectEditorTag: %v", err)
+	}
+	if !injected {
+		t.Fatal("injected = false; want true")
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %o; want 0644 preserved from the original file", fi.Mode().Perm())
+	}
+}
+
 // TestInjectEditorTag_ChangedDuringRewrite pins #483 hostile-review finding 3:
 // a concurrent writer (the worker's own atomic write, a revalidate demotion)
 // that touches path between InjectEditorTag's read and its rename must win --
