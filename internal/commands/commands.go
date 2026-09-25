@@ -156,6 +156,16 @@ type ScanCmd struct {
 	IndexMetadata                    *ScanIndexMetadataCmd                    `arg:"subcommand:index-metadata" help:"walk a library and record the full audio tag set into audio_metadata (issue #646)"`
 	PurgeProvenance                  *ScanPurgeProvenanceCmd                  `arg:"subcommand:purge-provenance" help:"bulk-delete .lrc/.txt sidecars by provenance (--source or --no-source) and requeue for re-fetch (issue #474)"`
 	ReconcileWordSync                *ScanReconcileWordSyncCmd                `arg:"subcommand:reconcile-word-sync" help:"queue settled line-synced tracks for a word-timing re-check by a running serve worker; dry-run prints the count and minimum drain time (issue #982)"`
+	ReconcileSyncTier                *ScanReconcileSyncTierCmd                `arg:"subcommand:reconcile-sync-tier" help:"classify existing .lrc sidecars by on-disk sync tier (word/line/unsynced) and record it, resolving 'tier unknown' rows on the dashboard (issue #1075)"`
+}
+
+// ScanReconcileSyncTierCmd classifies every completed synced row's sidecar
+// from its content and records the on-disk sync tier (#1075). Dry-run unless
+// --yes; a one-time backfill, since a fresh completion stamps its own tier.
+type ScanReconcileSyncTierCmd struct {
+	Yes        bool   `arg:"--yes" help:"actually record the classified tier (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of classified rows (default: <db-dir>/reconcile-sync-tier-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
 // ScanReconcileWordSyncCmd queues settled line-synced rows for a serve-worker
@@ -2405,6 +2415,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileWordSync(ctx, out, sub)
+	case args.ReconcileSyncTier != nil:
+		sub := *args.ReconcileSyncTier
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileSyncTier(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}

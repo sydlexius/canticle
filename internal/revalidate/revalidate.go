@@ -329,7 +329,7 @@ func (r *Revalidator) PlanCandidates(ctx context.Context, candidates []Candidate
 // is exact rather than a guess -- and it is why this costs one stat instead of a
 // directory listing in the common case. An extension-case variant ("song.LRC",
 // #989/#1051) IS resolved when the exact-case name misses, via
-// resolveSidecarCaseVariant's bounded probe -- see that function's comment for
+// ResolveSidecarCaseVariant's bounded probe -- see that function's comment for
 // why it is up to 7 extra Lstats (never a directory read) for a candidate
 // whose sidecar is absent under its exact-case name.
 func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Plan, cache *dirListingCache, claimed map[string]bool) error {
@@ -359,14 +359,14 @@ func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Pla
 		// An extension-case variant (#989/#1051): a track settled as "song.LRC"
 		// must be judged here exactly as the writer's settledSidecar treats it, or
 		// a case-sensitive deployment reads it as no_sidecar and the row never
-		// leaves the timing backlog. resolveSidecarCaseVariant costs up to 7 more
+		// leaves the timing backlog. ResolveSidecarCaseVariant costs up to 7 more
 		// bounded Lstats (2^n permutations of the extension's n letters, less the
 		// exact case already known to miss), NEVER a directory read -- see its
 		// comment for why that matters: a directory read per candidate here would
 		// reintroduce the exact per-candidate O(N) cost #691/#801 removed from the
 		// sidecar lookup, and an absent sidecar (this branch) is the OVERWHELMING
 		// common case in a timing backlog, not a rare one.
-		if variant, vfi, ok := resolveSidecarCaseVariant(path); ok {
+		if variant, vfi, ok := ResolveSidecarCaseVariant(path); ok {
 			path, fi, lerr = variant, vfi, nil
 		}
 	}
@@ -678,7 +678,7 @@ func (r *Revalidator) misSyncedMove(s site, path, audio string) (realign.Move, b
 	// keeps the exact name; writeDemotedText's O_EXCL surfaces the failure.
 	textPath := strings.TrimSuffix(audio, filepath.Ext(audio)) + ".txt"
 	if xfi, err := os.Stat(textPath); (err == nil && !xfi.Mode().IsRegular()) || errors.Is(err, fs.ErrNotExist) {
-		variant, _, ok := resolveSidecarCaseVariant(textPath)
+		variant, _, ok := ResolveSidecarCaseVariant(textPath)
 		if _, lerr := os.Lstat(textPath); !ok && lerr == nil {
 			return realign.Move{}, false, fmt.Errorf("revalidate: demotion target %q exists but is not a regular file", textPath)
 		}
@@ -970,7 +970,7 @@ func (c *dirListingCache) list(dir string) ([]os.DirEntry, error) {
 	return entries, nil
 }
 
-// resolveSidecarCaseVariant looks for an extension-case variant of path
+// ResolveSidecarCaseVariant looks for an extension-case variant of path
 // (#989/#1051) and returns its real on-disk name and Lstat info. The STEM
 // stays byte-identical and only the extension's ASCII letters are permuted --
 // the same rule sidecar.Listing.Variants enforces -- so "Intro.lrc" is never
@@ -1007,7 +1007,7 @@ func (c *dirListingCache) list(dir string) ([]os.DirEntry, error) {
 // matching candidate is collected first and the full set is then sorted by
 // name before the smallest is returned, rather than returning whichever one
 // caseVariantsOf happened to generate first.
-func resolveSidecarCaseVariant(path string) (string, os.FileInfo, bool) {
+func ResolveSidecarCaseVariant(path string) (string, os.FileInfo, bool) {
 	ext := filepath.Ext(path)
 	stem := strings.TrimSuffix(path, ext)
 	var matches []string

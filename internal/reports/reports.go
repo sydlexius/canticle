@@ -126,6 +126,11 @@ const (
 	// new parser) or stamped at completion (internal/worker.stampSyncTier),
 	// never re-read from disk on every render. See migration 052 for the
 	// schema rationale.
+	//
+	// LABEL DECISION (#1075 finding 4, "keep and document"): NULL and
+	// 'unsynced' deliberately share "tier unknown" though 'unsynced' WAS read
+	// -- both need investigation, and the population is nearly empty by
+	// construction (a live write can never produce it, see SyncTierUnsynced).
 	ResultSynced ResultClass = "synced"
 	// ResultUnsynced means an unsynced .txt lyrics file was written
 	// (outcome_type='unsynced').

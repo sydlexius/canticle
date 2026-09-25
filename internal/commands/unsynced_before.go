@@ -52,7 +52,8 @@ func scanSubcommandSelected(args ScanCmd) bool {
 		args.ReconcileDetectorStats != nil ||
 		args.IndexMetadata != nil ||
 		args.PurgeProvenance != nil ||
-		args.ReconcileWordSync != nil
+		args.ReconcileWordSync != nil ||
+		args.ReconcileSyncTier != nil
 }
 
 // resolveUnsyncedBefore parses the scan --unsynced-before cutoff into the
