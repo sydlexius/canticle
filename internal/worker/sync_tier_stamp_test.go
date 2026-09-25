@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -96,17 +97,27 @@ func (failingSyncTierQueue) SetSyncTier(context.Context, int64, string) error {
 	return errors.New("injected sync tier stamp failure")
 }
 
-// TestOrdinarySyncTier_StampFailureIsNonFatal: a lost stamp must not cost the
-// written result or fail the completion.
-func TestOrdinarySyncTier_StampFailureIsNonFatal(t *testing.T) {
+// TestOrdinarySyncTier_StampAndClearBothFail is CodeRabbit thread 4098910896
+// on #1085 (tightened per CodeRabbit 4099568322, #1086: asserting only
+// "not done" also passes with the row stuck in StatusProcessing, which is
+// itself a wedge worth catching): when the stamp AND its clear both fail, the
+// row's PRIOR tier would otherwise describe a file this completion may have
+// just rewritten. The row must NOT reach Complete/done; it settles failed
+// (failStuckItem -> queue.Fail) instead, so the wedge is retried rather than
+// silently trusted.
+func TestOrdinarySyncTier_StampAndClearBothFail(t *testing.T) {
 	rig, w := newStampRig(t, &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}, nil, "sidecar", "")
 	w.SetFallbackProviders()
 	w.queue = failingSyncTierQueue{rig.q}
-	if err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := w.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce: want an error when both the stamp and its clear fail")
 	}
-	if row := rig.recheckRow(t); row.status != "done" {
-		t.Fatalf("row status = %q, want done despite the failed sync-tier stamp", row.status)
+	row := rig.recheckRow(t)
+	if row.status != queue.StatusFailed {
+		t.Fatalf("row status = %q, want exactly %q (failStuckItem) when both writes fail", row.status, queue.StatusFailed)
+	}
+	if !strings.Contains(row.lastError, "stamp and clear sync tier") {
+		t.Errorf("last_error = %q, want it to name the double stamp/clear failure", row.lastError)
 	}
 }
 
@@ -159,6 +170,74 @@ func TestWordRecheckWrite_StampFailureClearsPriorTier(t *testing.T) {
 	}
 	if got := readSyncTier(t, rig.db, rig.id); got != "" {
 		t.Errorf("sync_tier = %q, want cleared to NULL after a failed stamp (never the stale prior tier)", got)
+	}
+}
+
+// TestWordRecheckWrite_StampAndClearBothFail is the word-recheck-write twin of
+// TestOrdinarySyncTier_StampAndClearBothFail (CodeRabbit thread 4098910896),
+// tightened per CodeRabbit 4099568322 (#1086) to the EXACT status the fix for
+// Copilot 4099503120 / CodeRabbit 4099568354 leaves: a double stamp/clear
+// failure must not settle the row served (its prior tier would then describe
+// a file the write may have just changed), so it re-parks via
+// queue.RetryWordRecheckWrite -- status='deferred', word_timing_state left
+// 'queued' -- rather than deferWordRecheck/DeferWordRecheck, whose own wait
+// budget could otherwise release the row on this cause (see the test below).
+func TestWordRecheckWrite_StampAndClearBothFail(t *testing.T) {
+	primary := &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}
+	rig, w := newRecheckRig(t, primary, nil, false)
+	if err := rig.q.SetSyncTier(context.Background(), rig.id, queue.SyncTierLine); err != nil {
+		t.Fatalf("seed sync tier: %v", err)
+	}
+	w.queue = failingSyncTierQueue{rig.q}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	row := rig.recheckRow(t)
+	if row.status != queue.StatusDeferred || row.state != queue.WordTimingQueued {
+		t.Fatalf("row = %+v, want exactly deferred + still %q (unsettled) when both writes fail", row, queue.WordTimingQueued)
+	}
+	if !strings.Contains(row.lastError, "stamp and clear sync tier") {
+		t.Errorf("last_error = %q, want it to name the double stamp/clear failure", row.lastError)
+	}
+}
+
+// TestWordRecheckWrite_DoubleFailureNeverReleasesWithStaleTier is Copilot
+// 4099503120 / CodeRabbit 4099568354 on #1086: routing the double stamp/clear
+// failure through deferWordRecheck reused DeferWordRecheck's refused_waits
+// wait budget (#950's contract, scoped to "a lane did not answer"), which can
+// release the row on ITS OWN once spent -- status='done', word_timing_state
+// NULL -- while leaving sync_tier at its STALE prior value, which this write
+// may have already invalidated: the exact settle #1086 exists to prevent.
+// queue.RetryWordRecheckWrite (the fix) shares none of that budget, so
+// seeding refused_waits at the wait-budget limit must NOT release the row on
+// this cause: it stays deferred/queued, refused_waits does not move, and the
+// row never reaches done, so the stale tier is never read as truth.
+func TestWordRecheckWrite_DoubleFailureNeverReleasesWithStaleTier(t *testing.T) {
+	primary := &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}
+	rig, w := newRecheckRig(t, primary, nil, false)
+	if err := rig.q.SetSyncTier(context.Background(), rig.id, queue.SyncTierLine); err != nil {
+		t.Fatalf("seed sync tier: %v", err)
+	}
+	if _, err := rig.db.Exec(`UPDATE work_queue SET refused_waits = ? WHERE id = ?`, maxWordRecheckWaits, rig.id); err != nil {
+		t.Fatalf("seed refused_waits at the wait-budget limit: %v", err)
+	}
+	w.queue = failingSyncTierQueue{rig.q}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	row := rig.recheckRow(t)
+	if row.status != queue.StatusDeferred || row.state != queue.WordTimingQueued {
+		t.Fatalf("row = %+v; want re-parked (deferred, still queued), never released", row)
+	}
+	var waits int
+	if err := rig.db.QueryRow(`SELECT refused_waits FROM work_queue WHERE id = ?`, rig.id).Scan(&waits); err != nil {
+		t.Fatal(err)
+	}
+	if waits != maxWordRecheckWaits {
+		t.Errorf("refused_waits = %d, want unchanged %d: this failure must not spend that budget", waits, maxWordRecheckWaits)
+	}
+	if got := readSyncTier(t, rig.db, rig.id); got != queue.SyncTierLine {
+		t.Errorf("sync_tier = %q; want the untouched prior %q while the row is not done (never read as truth until it is)", got, queue.SyncTierLine)
 	}
 }
 

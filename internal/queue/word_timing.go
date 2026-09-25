@@ -462,6 +462,11 @@ func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string,
 // UN-FLIPPED the row instead: back to 'done' with word_timing_state NULL,
 // completed_at untouched, so it stops rechecking and stays a candidate for a
 // later run. Never absent: an unanswered lane has not said "no words".
+//
+// refused_waits is scoped to exactly this "a lane did not answer" question
+// (#950's contract); a caller with a DIFFERENT reason to re-park (a post-write
+// bookkeeping failure, #1086) must not spend it here -- see
+// RetryWordRecheckWrite below, which shares none of this budget.
 func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (released bool, err error) {
 	// Retried like Settle: a lost write strands the row in 'processing', which
 	// nothing reclaims.
@@ -494,4 +499,36 @@ func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter tim
 		return tx.Commit()
 	})
 	return released, err
+}
+
+// RetryWordRecheckWrite re-parks a word-recheck row after a POST-WRITE
+// bookkeeping failure -- the sync_tier stamp AND its own clear-to-NULL both
+// failed after writeWordRecheck already landed the file (#1086, Copilot
+// 4099503120 / CodeRabbit 4099568354). It deliberately does NOT go through
+// DeferWordRecheck: that function's release spends refused_waits, a budget
+// scoped to "a lane did not answer" (#950); a DB write failure is neither an
+// unanswered lane nor a "no words" verdict, and spending the same counter
+// risks releasing the row -- settled done, with sync_tier stamped from BEFORE
+// this write -- on a cause interleaved with real unanswered-lane waits. This
+// keeps the row 'deferred' + word_timing_state='queued' every time, with no
+// release and no cap: because the row never reaches 'done' until a retry's
+// stamp or clear finally lands, sync_tier's stale prior value is never read
+// as truth in the meantime (every caller of it is scoped to status='done'
+// rows). attempts, miss_count, lane_attempts, provider_outcomes, refused_waits
+// and sync_tier are all left exactly as they were; only status, next_attempt_at
+// and last_error move. sql.ErrNoRows (row no longer a processing recheck row)
+// is returned to the caller, the same convention DeferWordRecheck and
+// SettleWordRecheck use.
+func (q *DBQueue) RetryWordRecheckWrite(ctx context.Context, id int64, retryAfter time.Duration, cause string) error {
+	return db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		next := formatTime(q.now().Add(retryAfter))
+		res, err := q.db.ExecContext(ctx,
+			`UPDATE work_queue SET status = 'deferred', next_attempt_at = ?, last_error = ?`+wordRecheckOwned,
+			next, cause, id,
+		)
+		if err != nil {
+			return fmt.Errorf("queue: retry word recheck write %d: %w", id, err)
+		}
+		return requireAffected(res, "queue: retry word recheck write")
+	})
 }

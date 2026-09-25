@@ -234,7 +234,22 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 			tier = queue.SyncTierWord
 		}
 	}
-	w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier)
+	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
+		// Both the stamp and its clear failed: settling now would leave the
+		// row's PRIOR tier describing a file this write may have just
+		// changed (Copilot 4099503120 / CodeRabbit 4099568354, #1086). This is
+		// NOT an unanswered-lane wait, so it must not go through
+		// deferWordRecheck/DeferWordRecheck: that function's release spends
+		// refused_waits, the budget #950 scopes to "a lane did not answer",
+		// and reusing it here risks releasing the row -- settled done, tier
+		// stamped from before this write -- on a cause interleaved with real
+		// unanswered-lane waits. RetryWordRecheckWrite re-parks it instead
+		// without touching that budget or any counter, and never releases: the
+		// row stays 'deferred' + still 'queued' until a retry's stamp or clear
+		// finally lands, so the stale tier is never read as truth in the
+		// meantime (every tier reader is scoped to status='done').
+		return w.retryWordRecheckWrite(ctx, item, err)
+	}
 	w.consecutiveFailures = 0
 	return w.settleWordRecheck(ctx, item, queue.WordTimingServed)
 }
@@ -251,6 +266,29 @@ func (w *Worker) settleWordRecheck(ctx context.Context, item queue.WorkItem, sta
 		return nil
 	}
 	return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: settle word recheck %s: %w", state, err))
+}
+
+// retryWordRecheckWrite re-parks writeWordRecheck's post-write sync-tier
+// stamp/clear double failure (#1086) via queue.RetryWordRecheckWrite, never
+// deferWordRecheck/DeferWordRecheck (see the call site above for why). It
+// shares deferWordRecheck's shutdown release and failure-classification tail
+// so the worker's own backoff bookkeeping (consecutiveFailures) stays
+// consistent between the two paths; only the QUEUE-side effect differs.
+func (w *Worker) retryWordRecheckWrite(ctx context.Context, item queue.WorkItem, cause error) error {
+	noCancel := context.WithoutCancel(ctx)
+	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(cause, context.Canceled) {
+		if err := w.queue.Release(noCancel, item.ID); err != nil {
+			return fmt.Errorf("worker: release word recheck %d after shutdown: %w", item.ID, err)
+		}
+		return nil
+	}
+	err := w.queue.RetryWordRecheckWrite(noCancel, item.ID, w.circuitOpenDuration, cause.Error())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("worker: retry word recheck write %d after %v: %w", item.ID, cause, err)
+	}
+	slog.Warn("worker word recheck: sync tier stamp and clear both failed after the write; row re-deferred without spending the wait budget",
+		"id", item.ID, "retry_after", w.circuitOpenDuration, "cause", cause)
+	return w.classifyWordRecheckFailure(cause)
 }
 
 // deferWordRecheck re-parks a recheck row whose word question went unanswered.
@@ -276,6 +314,13 @@ func (w *Worker) deferWordRecheck(ctx context.Context, item queue.WorkItem, caus
 	} else {
 		slog.Debug("worker word recheck: unanswered; re-deferred", "id", item.ID, "retry_after", w.circuitOpenDuration, "cause", cause)
 	}
+	return w.classifyWordRecheckFailure(cause)
+}
+
+// classifyWordRecheckFailure is deferWordRecheck's and retryWordRecheckWrite's
+// shared tail: it resets or feeds the worker's consecutiveFailures backoff
+// from cause, exactly as deferWordRecheck alone used to.
+func (w *Worker) classifyWordRecheckFailure(cause error) error {
 	if errors.Is(cause, errNoWordAnswer) {
 		w.consecutiveFailures = 0
 		return nil
@@ -399,9 +444,11 @@ func (w *Worker) ordinarySyncTier(item queue.WorkItem, song models.Song) string 
 // stampSyncTier records an ordinary completion's on-disk sync tier before
 // Complete, best-effort like its siblings: a lost stamp leaves the row
 // unclassified (the CLI backfill's candidate set), never a wrong tier. A
-// non-synced outcome clears any tier a reopened row previously carried.
-func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
-	w.stampOrClearSyncTier(ctxNoCancel, item.ID, w.ordinarySyncTier(item, song))
+// non-synced outcome clears any tier a reopened row previously carried. It
+// returns an error only when stampOrClearSyncTier's own clear attempt also
+// failed (see there); the caller must not settle the row on that error.
+func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) error {
+	return w.stampOrClearSyncTier(ctxNoCancel, item.ID, w.ordinarySyncTier(item, song))
 }
 
 // stampOrClearSyncTier records tier, best-effort; on failure it attempts to
@@ -410,16 +457,20 @@ func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem,
 // just been rewritten or replaced by this same completion, so a failed stamp
 // that silently keeps the old value can assert a tier the on-disk file no
 // longer has (a reopened 'word' row that just landed line-only, or vice
-// versa). Both failures log at Warn (id + error only, no paths); if the clear
-// also fails the row keeps its prior tier, a residual-risk case that is at
-// least logged rather than left silent like an ordinary best-effort stamp.
-func (w *Worker) stampOrClearSyncTier(ctxNoCancel context.Context, id int64, tier string) {
+// versa). Both failures log at Warn (id + error only, no paths); a lone
+// stamp failure is non-fatal (nil) once the clear lands. If the clear ALSO
+// fails, the row would otherwise settle carrying its stale prior tier
+// (CodeRabbit thread 4098910896, #1085), so this returns an error instead:
+// the caller retries the row rather than settling it.
+func (w *Worker) stampOrClearSyncTier(ctxNoCancel context.Context, id int64, tier string) error {
 	if err := w.queue.SetSyncTier(ctxNoCancel, id, tier); err != nil {
 		slog.Warn("worker: stamp sync tier failed; clearing to unknown instead of a stale tier", "id", id, "error", err)
 		if clearErr := w.queue.SetSyncTier(ctxNoCancel, id, ""); clearErr != nil {
-			slog.Warn("worker: clear sync tier after failed stamp also failed; row keeps its prior tier", "id", id, "error", clearErr)
+			slog.Warn("worker: clear sync tier after failed stamp also failed; retrying instead of settling", "id", id, "error", clearErr)
+			return fmt.Errorf("worker: stamp and clear sync tier for item %d both failed: %w", id, errors.Join(err, clearErr))
 		}
 	}
+	return nil
 }
 
 // clearSyncTier drops a prior sync tier before a settle that writes no synced

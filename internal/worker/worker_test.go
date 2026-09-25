@@ -208,6 +208,10 @@ func (q *fakeQueue) DeferWordRecheck(context.Context, int64, time.Duration, int,
 	return false, errors.New("fakeQueue: DeferWordRecheck not modeled")
 }
 
+func (q *fakeQueue) RetryWordRecheckWrite(context.Context, int64, time.Duration, string) error {
+	return errors.New("fakeQueue: RetryWordRecheckWrite not modeled")
+}
+
 // SetWordTimingState records ordinary-completion word verdicts (#982 slice 4);
 // wordTimingErr injects the non-fatal stamp failure.
 func (q *fakeQueue) SetWordTimingState(_ context.Context, id int64, state string, _ int64, _ time.Time) error {
