@@ -1,18 +1,19 @@
 # A2 Player Verification
 
 `output.word_sync_mode` can put per-word ("A2" / Enhanced LRC) timing markers into
-a `.lrc` file (`inline` and `both`; see [Configuration](CONFIGURATION.md#output)).
+a `.lrc` file (`replace`; see [Configuration](CONFIGURATION.md#output)).
 Support for those markers is not universal, and the failure mode is three-way,
 not two-way: a player can render them, silently ignore them, or display them as
 literal text mixed into the lyrics. Only the third is visibly broken. This page
 is the procedure for finding out which of the three your player does, before you
-turn `inline` or `both` on for a whole library.
+turn `replace` on for a whole library.
 
 If you only want word timings kept without touching the `.lrc` at all, use the
-default `sidecar` mode instead: it writes the markers to a companion `.elrc`
+default `both` mode instead: it writes the markers to a companion `.elrc`
 file and leaves every `.lrc` exactly as it would be with word sync off. Nothing
-in this procedure applies to `sidecar` or `off` -- there is nothing in the `.lrc`
-for a player to misinterpret.
+in this procedure applies to `both` or `off` -- there is nothing in the `.lrc`
+for a player to misinterpret. (`sidecar` and `inline` are deprecated aliases
+for `both` and `replace`, #1072.)
 
 ## 1. Get a word-synced track
 
@@ -23,8 +24,7 @@ picking a track at random from your library and getting no markers at all does
 not mean anything is broken -- it may simply mean neither lane served word data
 for that track.
 
-Set `output.word_sync_mode` to `inline` (or `both`, if you also want to keep the
-`.elrc`), then fetch or re-fetch a single album. Confirm at least one resulting
+Set `output.word_sync_mode` to `replace`, then fetch or re-fetch a single album. Confirm at least one resulting
 `.lrc` actually carries `<mm:ss.cc>` markers before moving on -- that is your
 positive sample.
 
@@ -46,14 +46,14 @@ inconclusive: fix how the player finds the file before judging A2 support.
 Once lyrics load, there are exactly three outcomes:
 
 - **Highlights per word.** The player understands A2. This is the intent of
-  `inline`/`both`, and you can enable it for that player's library.
+  `replace`, and you can enable it for that player's library.
 - **Markers silently absent, plain line-sync shown.** The player does not
-  understand A2 but degrades gracefully. Harmless: `inline`/`both` cost you
-  nothing extra here, but they also do not do anything the default `sidecar`
-  mode's clean `.lrc` did not already do. You may as well use `sidecar`.
+  understand A2 but degrades gracefully. Harmless: `replace` costs you
+  nothing extra here, but it also does not do anything the default `both`
+  mode's clean `.lrc` did not already do. You may as well use `both`.
 - **Markers rendered as literal text**, e.g. `<00:12.34>word` showing up in the
-  displayed lyric line. Visibly broken. Do not enable `inline`/`both` for this
-  player. Use `sidecar` or `off` instead.
+  displayed lyric line. Visibly broken. Do not enable `replace` for this
+  player. Use `both` or `off` instead.
 
 ## 3. Optional pre-check: lrcsong.com
 

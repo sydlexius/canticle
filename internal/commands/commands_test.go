@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -3252,17 +3253,18 @@ func TestWordSyncValidatorMatchesCLI(t *testing.T) {
 }
 
 // TestWordSyncSwitches pins the output.word_sync_mode -> writer switch table
-// (#986). The on-disk result of each mode is covered in internal/lyrics
-// (TestWriteLRC_WordSyncModes_FileSet); this pins the mapping that feeds it.
+// (#986, revised #1072). The on-disk result of each mode is covered in
+// internal/lyrics (TestWriteLRC_WordSyncModes_FileSet); this pins the mapping
+// that feeds it. #1072 retired the combination that set both switches
+// together, so no mode maps to (true, true) any more.
 func TestWordSyncSwitches(t *testing.T) {
 	cases := []struct {
 		mode              config.WordSyncMode
 		inline, companion bool
 	}{
-		{config.WordSyncModeSidecar, false, true},
+		{config.WordSyncModeBoth, false, true},
 		{config.WordSyncModeOff, false, false},
-		{config.WordSyncModeInline, true, false},
-		{config.WordSyncModeBoth, true, true},
+		{config.WordSyncModeReplace, true, false},
 		{"", false, false},
 	}
 	for _, tc := range cases {
@@ -3281,7 +3283,7 @@ func TestWordSyncSwitches(t *testing.T) {
 // the RESOLVED mode, never the deprecated bool, which LoadWithSources folds in.
 func TestConfigureWriterWordSync(t *testing.T) {
 	w := lyrics.NewLRCWriter()
-	configureWriterWordSync(w, config.Config{Output: config.OutputConfig{WordSyncMode: config.WordSyncModeInline}})
+	configureWriterWordSync(w, config.Config{Output: config.OutputConfig{WordSyncMode: config.WordSyncModeReplace}})
 
 	dir := t.TempDir()
 	song := models.Song{
@@ -3310,15 +3312,14 @@ func TestConfigureWriterWordSync(t *testing.T) {
 }
 
 // TestConfigureWriterWordSyncCompanion covers the companion half of the mode
-// wiring, read back from the writer: without it, sidecar mode could be wired to
+// wiring, read back from the writer: without it, both mode could be wired to
 // nothing here and still pass, because the on-disk result is covered in
 // internal/lyrics (TestWriteLRC_ShippedGateFollowsMode), not through this path.
 func TestConfigureWriterWordSyncCompanion(t *testing.T) {
 	for mode, want := range map[config.WordSyncMode]bool{
-		config.WordSyncModeSidecar: true,
 		config.WordSyncModeBoth:    true,
 		config.WordSyncModeOff:     false,
-		config.WordSyncModeInline:  false,
+		config.WordSyncModeReplace: false,
 	} {
 		w := lyrics.NewLRCWriter()
 		configureWriterWordSync(w, config.Config{Output: config.OutputConfig{WordSyncMode: mode}})
@@ -3682,24 +3683,27 @@ func TestInnerTubeCooldownValidatorMatchesCLI(t *testing.T) {
 
 // TestWordSyncModeCLIMatchesWebValidator pins the CLI `config set` arm and the
 // registry-driven web save path to the SAME rule for output.word_sync_mode
-// (#986), the way TestWordSyncValidatorMatchesCLI does for the bool it
-// supersedes. The CLI arm DELEGATES to config.ValidateAndSet rather than
-// restating the four modes, so this test's job is to prove the delegation is
-// actually there: a hand-rolled switch is exactly how the two surfaces would
-// drift.
+// on CURRENT (non-deprecated) values (#986), the way
+// TestWordSyncValidatorMatchesCLI does for the bool it supersedes. The CLI arm
+// DELEGATES to config.ValidateAndSet rather than restating the three modes, so
+// this test's job is to prove the delegation is actually there: a hand-rolled
+// switch is exactly how the two surfaces would drift.
+//
+// Deprecated aliases ("sidecar"/"inline") are DELIBERATELY excluded (#1072):
+// see TestSetConfigValueWordSyncModeResolvesDeprecatedAliases below for why
+// the two surfaces are SUPPOSED to disagree on those.
 func TestWordSyncModeCLIMatchesWebValidator(t *testing.T) {
 	const path = "output.word_sync_mode"
 	for _, tc := range []struct {
 		value string
 		valid bool
 	}{
-		{"sidecar", true},
 		{"off", true},
-		{"inline", true},
 		{"both", true},
+		{"replace", true},
 		// Normalized by both surfaces, so it must be accepted by both.
 		{" Both ", true},
-		{"sidecarr", false},
+		{"bothh", false},
 		{"true", false},
 		{"", false},
 	} {
@@ -3718,6 +3722,85 @@ func TestWordSyncModeCLIMatchesWebValidator(t *testing.T) {
 		if cliErr == nil && cfg.Output.WordSyncMode != config.WordSyncMode(strings.ToLower(strings.TrimSpace(tc.value))) {
 			t.Errorf("value %q stored as %q; want it normalized", tc.value, cfg.Output.WordSyncMode)
 		}
+	}
+}
+
+// TestSetConfigValueWordSyncModeResolvesDeprecatedAliases pins the CLI-only
+// half of the #1072 migration: `config set output.word_sync_mode sidecar` (or
+// `inline`) must keep working, storing the RESOLVED value, because an
+// operator's existing scripts/muscle memory should not break. The web
+// settings dropdown never offers these spellings (config.AllowedValues
+// excludes them, per TestWordSyncModeOptionsExcludeDeprecatedAliases in
+// internal/web), so config.ValidateAndSet alone rejects them -- that is why
+// this is a CLI-only test rather than an extension of the parity test above.
+func TestSetConfigValueWordSyncModeResolvesDeprecatedAliases(t *testing.T) {
+	for _, tc := range []struct {
+		alias string
+		want  config.WordSyncMode
+	}{
+		{"sidecar", config.WordSyncModeBoth},
+		{"inline", config.WordSyncModeReplace},
+		{" SIDECAR ", config.WordSyncModeBoth},
+	} {
+		cfg := config.Config{}
+		if err := setConfigValue(&cfg, "output.word_sync_mode", tc.alias); err != nil {
+			t.Fatalf("setConfigValue(%q): %v", tc.alias, err)
+		}
+		if cfg.Output.WordSyncMode != tc.want {
+			t.Errorf("setConfigValue(%q) stored %q; want the resolved %q", tc.alias, cfg.Output.WordSyncMode, tc.want)
+		}
+	}
+}
+
+// TestConfigSetEchoesSavedValueNotRawInput pins hostile-review finding I1
+// (#1072): `config set` must echo the value it PERSISTED, not the raw string
+// the operator typed. Two ways those can differ for output.word_sync_mode --
+// a deprecated alias resolving to its replacement, and stray whitespace being
+// trimmed -- and the same accessor (configValue) that runConfig now reads is
+// asserted here to cover every key going forward, not just this one.
+func TestConfigSetEchoesSavedValueNotRawInput(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"deprecated alias resolves to its replacement", "sidecar", "both"},
+		{"padded input is echoed trimmed", " SIDECAR ", "both"},
+		{"current value passes through unchanged", "replace", "replace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigTOML(t, "")
+			var out bytes.Buffer
+			code := runConfig(&out, ConfigCmd{Set: &ConfigSetCmd{
+				Key: "output.word_sync_mode", Value: tc.input, ConfigPath: path,
+			}})
+			if code != 0 {
+				t.Fatalf("exit code = %d; want 0 (output: %q)", code, out.String())
+			}
+			want := "output.word_sync_mode=" + tc.want + "\n"
+			if out.String() != want {
+				t.Errorf("stdout = %q; want %q (input %q echoed as typed instead of the saved value)", out.String(), want, tc.input)
+			}
+		})
+	}
+}
+
+// TestConfigSetWordSyncModeAliasWarningNamesNewValue pins the CLI-tier half of
+// hostile-review finding I1 (#1072): the deprecation warning's MESSAGE (not
+// just its structured "resolved_mode" field) must name the replacement value
+// in plain words, matching the file and env tiers.
+func TestConfigSetWordSyncModeAliasWarningNamesNewValue(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cfg := config.Config{}
+	if err := setConfigValue(&cfg, "output.word_sync_mode", "sidecar"); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	if !strings.Contains(buf.String(), "output.word_sync_mode is deprecated; use both instead") {
+		t.Errorf("warning does not name the new value in plain words; log was:\n%s", buf.String())
 	}
 }
 
@@ -3755,12 +3838,12 @@ func TestSetConfigValueWordSyncBoolMovesTheMode(t *testing.T) {
 		set   string
 		want  config.WordSyncMode
 	}{
-		// The dangerous direction: a previously-resolved inline must not survive
+		// The dangerous direction: a previously-resolved replace must not survive
 		// the operator turning the bool off.
-		{"false from a resolved inline", config.WordSyncModeInline, "false", config.WordSyncModeOff},
-		{"true from a resolved off", config.WordSyncModeOff, "true", config.WordSyncModeInline},
-		{"true from the new default", config.WordSyncModeSidecar, "true", config.WordSyncModeInline},
-		{"false from the new default", config.WordSyncModeSidecar, "false", config.WordSyncModeOff},
+		{"false from a resolved replace", config.WordSyncModeReplace, "false", config.WordSyncModeOff},
+		{"true from a resolved off", config.WordSyncModeOff, "true", config.WordSyncModeReplace},
+		{"true from the new default", config.WordSyncModeBoth, "true", config.WordSyncModeReplace},
+		{"false from the new default", config.WordSyncModeBoth, "false", config.WordSyncModeOff},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{}

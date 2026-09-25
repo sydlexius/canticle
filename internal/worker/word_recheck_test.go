@@ -69,7 +69,7 @@ func newRecheckRig(t *testing.T, primary, secondary *fakeFetcher, ordinary bool)
 	}
 	writer := lyrics.NewLRCWriter(lib)
 	// Every existing recheck scenario represents a row dispatched under a
-	// word_sync_mode that is NOT off (sidecar, the config default): that is
+	// word_sync_mode that is NOT off (both, the config default): that is
 	// the only state a real queued row can be dispatched under, since both
 	// flip entry points already refuse to queue one under off. Mirror that
 	// here so these tests exercise the real "not off" precondition rather

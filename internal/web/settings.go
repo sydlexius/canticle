@@ -466,22 +466,24 @@ var modeOptionLabels = map[string]string{
 //
 // Both arms share this map; on_categorical simply never offers "demote".
 // wordSyncModeLabels gives the word-sync destination dropdown plain-language
-// labels (#986). Without it the control renders four bare tokens -- "sidecar",
-// "off", "inline", "both" -- which say nothing about what an operator is
-// choosing between, and "both" in particular reads as "both files" when it
-// actually means "the markers go to both destinations".
+// labels (#986, revised #1072). Without it the control renders bare tokens --
+// "off", "both", "replace" -- which say nothing about what an operator is
+// choosing between.
 //
-// The inline label is the one that must carry a warning: Enhanced-LRC (A2)
+// The replace label is the one that must carry a warning: Enhanced-LRC (A2)
 // support is not universal, and an unsupporting player may render the timing
 // codes as literal text in the lyrics. That caveat otherwise lives only in the
 // TOML comment, the docs, and the registry Description, none of which appear
 // per option -- the same gap TestTimingActionOptionsWarnAboutIrreversibility
 // exists to close for the remediation dropdowns next door.
+//
+// The dropdown never offers "sidecar"/"inline": config.AllowedValues excludes
+// the retired aliases (they still decode on the file/env/`config set` tiers,
+// with a warning, but are not something to newly choose from a menu).
 var wordSyncModeLabels = map[string]string{
-	"sidecar": "Save them in a separate file (lyric file stays playable everywhere)",
 	"off":     "Don't save per-word timings at all",
-	"inline":  "Put them in the lyric file (some players show the codes as text)",
-	"both":    "Put them in the lyric file AND save a separate file",
+	"both":    "Save them in a separate file (lyric file stays playable everywhere)",
+	"replace": "Put them in the lyric file (some players show the codes as text)",
 }
 
 var timingActionLabels = map[string]string{

@@ -163,7 +163,7 @@ func (w *LRCWriter) WordSyncEnabled() bool {
 // the writer's own HasQualifyingWords holds AND the words went inline into the
 // .lrc, or a canticle-owned companion now sits beside it. The companion is
 // checked on disk rather than inferred, because planCompanion skips a FOREIGN
-// file: qualifying words under sidecar mode do not by themselves mean landed.
+// file: qualifying words under both mode do not by themselves mean landed.
 func (w *LRCWriter) WordsLanded(song models.Song, filename, outdir string) bool {
 	if !HasQualifyingWords(song) {
 		return false

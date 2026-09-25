@@ -902,22 +902,21 @@ func TestRawConfigValueInnerTubeCooldown(t *testing.T) {
 // box: no <option> matches, the browser silently selects the first one, and
 // saving any unrelated field on the page writes that first option as the mode.
 func TestRawConfigValueWordSyncMode(t *testing.T) {
-	if got := rawConfigValue(config.Config{Output: config.OutputConfig{WordSyncMode: config.WordSyncModeInline}}, "output.word_sync_mode"); got != "inline" {
-		t.Errorf("rawConfigValue(word_sync_mode=inline) = %q; want %q (a missing arm renders blank)", got, "inline")
+	if got := rawConfigValue(config.Config{Output: config.OutputConfig{WordSyncMode: config.WordSyncModeReplace}}, "output.word_sync_mode"); got != "replace" {
+		t.Errorf("rawConfigValue(word_sync_mode=replace) = %q; want %q (a missing arm renders blank)", got, "replace")
 	}
 }
 
 // TestWordSyncModeOptionsAreLabeled pins that the mode dropdown renders
-// plain-language labels rather than the four bare tokens. Two of them are
-// actively misleading unlabeled: "both" reads as "both files" when it means
-// "both destinations for the markers", and "inline" gives no hint that a player
-// without Enhanced-LRC support may render the timing codes as literal text in
-// the lyrics -- a caveat that otherwise lives only in the TOML comment, the
-// docs, and the registry Description, none of which render per option.
+// plain-language labels rather than bare tokens. "replace" in particular gives
+// no hint unlabeled that a player without Enhanced-LRC support may render the
+// timing codes as literal text in the lyrics -- a caveat that otherwise lives
+// only in the TOML comment, the docs, and the registry Description, none of
+// which render per option.
 //
 // This is the sibling of TestTimingActionOptionsWarnAboutIrreversibility.
 func TestWordSyncModeOptionsAreLabeled(t *testing.T) {
-	opts := selectOptions("output.word_sync_mode", string(config.WordSyncModeSidecar))
+	opts := selectOptions("output.word_sync_mode", string(config.WordSyncModeBoth))
 	if len(opts) != len(config.AllowedValues("output.word_sync_mode")) {
 		t.Fatalf("selectOptions returned %d options; want one per allowed value", len(opts))
 	}
@@ -926,18 +925,31 @@ func TestWordSyncModeOptionsAreLabeled(t *testing.T) {
 		if o.Label == o.Value {
 			t.Errorf("option %q renders as a bare token; it needs a plain-language label", o.Value)
 		}
-		if o.Value == "inline" && !strings.Contains(strings.ToLower(o.Label), "player") {
-			t.Errorf("the inline option reads %q, which does not warn about player support", o.Label)
+		if o.Value == "replace" && !strings.Contains(strings.ToLower(o.Label), "player") {
+			t.Errorf("the replace option reads %q, which does not warn about player support", o.Label)
 		}
 		if o.Selected {
 			sawSelected = true
-			if o.Value != string(config.WordSyncModeSidecar) {
+			if o.Value != string(config.WordSyncModeBoth) {
 				t.Errorf("selected option is %q; want the effective value", o.Value)
 			}
 		}
 	}
 	if !sawSelected {
 		t.Error("no option was marked selected; the browser would silently pick the first one")
+	}
+}
+
+// TestWordSyncModeOptionsExcludeDeprecatedAliases pins that the dropdown never
+// offers the retired "sidecar"/"inline" spellings (#1072): they still decode
+// on the file/env/`config set` tiers, with a warning, but AllowedValues (and
+// therefore this dropdown) must not let an operator newly choose them.
+func TestWordSyncModeOptionsExcludeDeprecatedAliases(t *testing.T) {
+	opts := selectOptions("output.word_sync_mode", string(config.WordSyncModeBoth))
+	for _, o := range opts {
+		if o.Value == "sidecar" || o.Value == "inline" {
+			t.Errorf("dropdown offers the retired alias %q; it must only decode, not be newly chosen", o.Value)
+		}
 	}
 }
 

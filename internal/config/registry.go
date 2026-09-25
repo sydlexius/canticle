@@ -92,7 +92,7 @@ var fields = []FieldSpec{
 	// TypeString, not a (nonexistent) TypeEnum: an enum here is TypeString PLUS
 	// an enumValues entry, which is what drives both the validator and the
 	// settings dropdown.
-	{Path: "output.word_sync_mode", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_WORD_SYNC_MODE"}, Criticality: Safe, Editable: true, Description: "Where per-word karaoke timings go. sidecar (default) keeps the lyric file playable everywhere and saves the timings beside it; off discards them; inline puts them in the lyric file (not all players support that, some show the timing codes as text); both does inline and beside."},
+	{Path: "output.word_sync_mode", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_WORD_SYNC_MODE"}, Criticality: Safe, Editable: true, Description: "Where per-word karaoke timings go. both (default) keeps the lyric file playable everywhere and saves the timings in a companion file beside it; off discards them; replace puts them in the lyric file itself (not all players support that, some show the timing codes as text)."},
 
 	// [db]
 	{Path: "db.path", Section: "db", Type: TypeString, EnvVars: []string{"MXLRC_DB_PATH"}, Criticality: Caution, Editable: true, Description: "SQLite database file path."},

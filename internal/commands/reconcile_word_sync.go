@@ -54,7 +54,7 @@ func runReconcileWordSync(ctx context.Context, out io.Writer, args ScanReconcile
 	// timings (and removes an owned .elrc), so a recheck would buy nothing and
 	// stamp served on files without markers.
 	if cfg.Output.WordSyncMode == config.WordSyncModeOff {
-		_, _ = fmt.Fprintln(out, "reconcile-word-sync: output.word_sync_mode is off, so a re-check could not write any word timings; set it to sidecar, inline or both first")
+		_, _ = fmt.Fprintln(out, "reconcile-word-sync: output.word_sync_mode is off, so a re-check could not write any word timings; set it to both or replace first")
 		return 1
 	}
 	gen, err := configuredWordGeneration(cfg)

@@ -38,8 +38,13 @@ func dirFiles(t *testing.T, dir string) []string {
 	return names
 }
 
-// TestWriteLRC_WordSyncModes_FileSet pins the exact output of each of the four
-// modes (#986): which files exist, and which of them carry inline markers.
+// TestWriteLRC_WordSyncModes_FileSet pins the exact output of each writer
+// switch combination: which files exist, and which of them carry inline
+// markers. The first three rows are exactly what commands.wordSyncSwitches
+// maps output.word_sync_mode's off/both/replace onto (#986, revised #1072);
+// the fourth (both switches on) is a writer-level capability no current
+// config value reaches -- #1072 retired the mode that combined them -- kept
+// here because the writer itself still supports it independently.
 func TestWriteLRC_WordSyncModes_FileSet(t *testing.T) {
 	cases := []struct {
 		name              string
@@ -47,10 +52,10 @@ func TestWriteLRC_WordSyncModes_FileSet(t *testing.T) {
 		want              []string
 		lrcMarked         bool
 	}{
-		{"sidecar", false, true, []string{"song.elrc", "song.lrc"}, false},
+		{"both (companion only, no inline markers)", false, true, []string{"song.elrc", "song.lrc"}, false},
 		{"off", false, false, []string{"song.lrc"}, false},
-		{"inline", true, false, []string{"song.lrc"}, true},
-		{"both", true, true, []string{"song.elrc", "song.lrc"}, true},
+		{"replace (inline markers, no companion)", true, false, []string{"song.lrc"}, true},
+		{"inline+companion (writer capability, unreachable via config since #1072)", true, true, []string{"song.elrc", "song.lrc"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,7 +123,7 @@ func TestWriteLRC_CompanionSkippedWhenNoLineQualifies(t *testing.T) {
 // TestWriteLRC_ShippedGateFollowsMode pins the SHIPPED state: with
 // sidecar.KindWordSynced active (#986) the companion switch alone decides.
 // Companion on writes the .elrc beside an unmarked .lrc; companion off --
-// word_sync_mode "off" or "inline" -- writes no .elrc at all.
+// word_sync_mode "off" or "replace" -- writes no .elrc at all.
 func TestWriteLRC_ShippedGateFollowsMode(t *testing.T) {
 	if !sidecar.Active(sidecar.KindWordSynced) {
 		t.Fatal("KindWordSynced is inactive: the shipped writer can never write a companion")
@@ -509,12 +514,12 @@ func TestWordsLanded(t *testing.T) {
 		foreign, badName  bool
 		want              bool
 	}{
-		{"inline", true, false, a2Song(), false, false, true},
-		{"sidecar", false, true, a2Song(), false, false, true},
-		{"sidecar, foreign companion", false, true, a2Song(), true, false, false},
-		{"sidecar, unsafe filename", false, true, a2Song(), false, true, false},
-		{"off", false, false, a2Song(), false, false, false},
-		{"inline, words a2 refuses", true, false, refused, false, false, false},
+		{"replace mode (inline markers)", true, false, a2Song(), false, false, true},
+		{"both mode (companion .elrc)", false, true, a2Song(), false, false, true},
+		{"both mode, foreign companion", false, true, a2Song(), true, false, false},
+		{"both mode, unsafe filename", false, true, a2Song(), false, true, false},
+		{"off mode", false, false, a2Song(), false, false, false},
+		{"replace mode, words a2 refuses", true, false, refused, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

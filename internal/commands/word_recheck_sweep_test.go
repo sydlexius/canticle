@@ -44,7 +44,7 @@ func wordSweepDB(t *testing.T, n int) *sql.DB {
 
 func wordSweepCfg(enabled bool, batch int) config.Config {
 	cfg := config.Config{}
-	cfg.Output.WordSyncMode = config.WordSyncModeSidecar
+	cfg.Output.WordSyncMode = config.WordSyncModeBoth
 	cfg.WordSyncRecheck.Enabled = enabled
 	cfg.WordSyncRecheck.Batch = batch
 	return cfg
