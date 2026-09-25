@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // seedSyncTierCandidate builds a config + DB with one library and one
@@ -207,6 +209,57 @@ func TestReconcileSyncTier_ReachableThroughRun(t *testing.T) {
 	}
 	if got := readSyncTierCol(t, ctx, dbPath, id); !got.Valid || got.String != "line" {
 		t.Errorf("sync_tier = %+v, want \"line\" (real argv reached --yes)", got)
+	}
+}
+
+// TestRunReconcileSyncTier_BadBackupPathStopsWithZeroWrites (#1087 review):
+// an unopenable --backup target must stop the run before any row is stamped.
+func TestRunReconcileSyncTier_BadBackupPathStopsWithZeroWrites(t *testing.T) {
+	ctx, cfgPath, dbPath, dir, id := seedSyncTierCandidate(t)
+	if err := os.WriteFile(filepath.Join(dir, "track.lrc"), []byte("[00:01.00]alpha\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	var buf bytes.Buffer
+	// dir is itself a directory, not a file: OpenFile(O_CREATE|O_WRONLY) fails.
+	code := runReconcileSyncTier(ctx, &buf, ScanReconcileSyncTierCmd{ConfigPath: cfgPath, Yes: true, Backup: dir})
+	if code == 0 {
+		t.Fatalf("exit=0, want non-zero for an unopenable backup path; out=%s", buf.String())
+	}
+	if got := readSyncTierCol(t, ctx, dbPath, id); got.Valid {
+		t.Errorf("sync_tier = %q, want untouched NULL when the backup file could not be opened", got.String)
+	}
+}
+
+// fakeSyncTierStamper always fails the guarded write, exercising the
+// write-failure path without a real database.
+type fakeSyncTierStamper struct{ err error }
+
+func (f fakeSyncTierStamper) SetSyncTierIfPending(context.Context, int64, string, func() error) (bool, error) {
+	return false, f.err
+}
+
+// TestRunReconcileSyncTierCore_WriteFailureCountedSeparately (#1087 review):
+// a SetSyncTierIfPending error counts as write_failed, never unreadable, and
+// fails the run's exit code.
+func TestRunReconcileSyncTierCore_WriteFailureCountedSeparately(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "track.lrc"), []byte("[00:01.00]alpha\n[00:02.00]beta\n"), 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	candidates := []queue.SyncTierCandidate{{ID: 1, AudioPath: filepath.Join(dir, "track.flac")}}
+
+	var buf bytes.Buffer
+	code := runReconcileSyncTierCore(context.Background(), &buf,
+		fakeSyncTierStamper{err: errors.New("db write failed")}, candidates, true, filepath.Join(dir, "backup.jsonl"))
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 on a write failure; out=%s", code, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "write_failed=1") {
+		t.Errorf("want write_failed=1; got: %s", out)
+	}
+	if strings.Contains(out, "unreadable=1") {
+		t.Errorf("write failure miscounted as unreadable: %s", out)
 	}
 }
 

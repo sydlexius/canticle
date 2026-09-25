@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 )
 
@@ -108,7 +109,7 @@ func TestSetSyncTierIfPending(t *testing.T) {
 		{"missing id: no-op", 999999, false, none},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			applied, err := q.SetSyncTierIfPending(ctx, tc.id, SyncTierLine)
+			applied, err := q.SetSyncTierIfPending(ctx, tc.id, SyncTierLine, nil)
 			if err != nil || applied != tc.wantApplied {
 				t.Fatalf("applied=%v err=%v, want %v/nil", applied, err, tc.wantApplied)
 			}
@@ -118,6 +119,25 @@ func TestSetSyncTierIfPending(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSetSyncTierIfPending_BackupFailureRollsBackStamp (#1087 review): a
+// backup failure must prevent the commit, or a bad write could leave the row
+// stamped with no restorable record.
+func TestSetSyncTierIfPending_BackupFailureRollsBackStamp(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	id := insertSyncTierRow(t, dbh, "backup-fails")
+
+	wantErr := errors.New("disk full")
+	_, err := q.SetSyncTierIfPending(ctx, id, SyncTierLine, func() error { return wantErr })
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("SetSyncTierIfPending: err=%v, want wrapping %v", err, wantErr)
+	}
+	if got := readSyncTier(t, dbh, id); got.Valid {
+		t.Errorf("sync_tier = %q, want unchanged NULL after a rolled-back backup failure", got.String)
 	}
 }
 

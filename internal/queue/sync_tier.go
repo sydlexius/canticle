@@ -63,11 +63,24 @@ func (q *DBQueue) SetSyncTier(ctx context.Context, id int64, tier string) error 
 // unlike SetSyncTier, it applies only if the row still matches
 // ListSyncTierPending's predicate, so a raced row is never overwritten. Same
 // invalid-tier guard as SetSyncTier (hostile-review, Copilot 4097431615).
-func (q *DBQueue) SetSyncTierIfPending(ctx context.Context, id int64, tier string) (bool, error) {
+//
+// backup, if non-nil, runs INSIDE this transaction -- only once RowsAffected
+// confirms the row applied, and BEFORE commit (identityrepair.apply's
+// backup-first contract; #1087 review, Copilot 4100243142 / CodeRabbit
+// 4100264748): the record is durable before the stamp commits, a backup
+// failure rolls the stamp back, and a raced row (RowsAffected == 0) never
+// calls backup, so no record is written for a change that did not happen.
+func (q *DBQueue) SetSyncTierIfPending(ctx context.Context, id int64, tier string, backup func() error) (bool, error) {
 	if !validSyncTier(tier) {
 		return false, fmt.Errorf("queue: set sync tier if pending for id %d: invalid tier %q", id, tier)
 	}
-	res, err := q.db.ExecContext(ctx,
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("queue: set sync tier if pending for id %d: begin tx: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op once committed
+
+	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue SET sync_tier = ?
          WHERE id = ? AND outcome_type = 'synced' AND status = 'done' AND sync_tier IS NULL`,
 		nullIfEmpty(tier), id,
@@ -76,7 +89,21 @@ func (q *DBQueue) SetSyncTierIfPending(ctx context.Context, id int64, tier strin
 		return false, fmt.Errorf("queue: set sync tier if pending for id %d: %w", id, err)
 	}
 	n, rerr := res.RowsAffected()
-	return n > 0, rerr
+	if rerr != nil {
+		return false, fmt.Errorf("queue: set sync tier if pending for id %d: rows affected: %w", id, rerr)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if backup != nil {
+		if berr := backup(); berr != nil {
+			return false, fmt.Errorf("queue: set sync tier if pending for id %d: backup failed, stamp rolled back: %w", id, berr)
+		}
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return false, fmt.Errorf("queue: set sync tier if pending for id %d: commit: %w", id, cerr)
+	}
+	return true, nil
 }
 
 // SyncTierCandidate is one row the `scan reconcile-sync-tier` backfill (#1075)
