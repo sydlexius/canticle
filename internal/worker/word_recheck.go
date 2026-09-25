@@ -237,9 +237,18 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
 		// Both the stamp and its clear failed: settling now would leave the
 		// row's PRIOR tier describing a file this write may have just
-		// changed. Re-defer it like settleWordRecheck's own failure path, so
-		// it is retried rather than settled with a stale tier.
-		return w.deferWordRecheck(ctx, item, err)
+		// changed (Copilot 4099503120 / CodeRabbit 4099568354, #1086). This is
+		// NOT an unanswered-lane wait, so it must not go through
+		// deferWordRecheck/DeferWordRecheck: that function's release spends
+		// refused_waits, the budget #950 scopes to "a lane did not answer",
+		// and reusing it here risks releasing the row -- settled done, tier
+		// stamped from before this write -- on a cause interleaved with real
+		// unanswered-lane waits. RetryWordRecheckWrite re-parks it instead
+		// without touching that budget or any counter, and never releases: the
+		// row stays 'deferred' + still 'queued' until a retry's stamp or clear
+		// finally lands, so the stale tier is never read as truth in the
+		// meantime (every tier reader is scoped to status='done').
+		return w.retryWordRecheckWrite(ctx, item, err)
 	}
 	w.consecutiveFailures = 0
 	return w.settleWordRecheck(ctx, item, queue.WordTimingServed)
@@ -257,6 +266,29 @@ func (w *Worker) settleWordRecheck(ctx context.Context, item queue.WorkItem, sta
 		return nil
 	}
 	return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: settle word recheck %s: %w", state, err))
+}
+
+// retryWordRecheckWrite re-parks writeWordRecheck's post-write sync-tier
+// stamp/clear double failure (#1086) via queue.RetryWordRecheckWrite, never
+// deferWordRecheck/DeferWordRecheck (see the call site above for why). It
+// shares deferWordRecheck's shutdown release and failure-classification tail
+// so the worker's own backoff bookkeeping (consecutiveFailures) stays
+// consistent between the two paths; only the QUEUE-side effect differs.
+func (w *Worker) retryWordRecheckWrite(ctx context.Context, item queue.WorkItem, cause error) error {
+	noCancel := context.WithoutCancel(ctx)
+	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(cause, context.Canceled) {
+		if err := w.queue.Release(noCancel, item.ID); err != nil {
+			return fmt.Errorf("worker: release word recheck %d after shutdown: %w", item.ID, err)
+		}
+		return nil
+	}
+	err := w.queue.RetryWordRecheckWrite(noCancel, item.ID, w.circuitOpenDuration, cause.Error())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("worker: retry word recheck write %d after %v: %w", item.ID, cause, err)
+	}
+	slog.Warn("worker word recheck: sync tier stamp and clear both failed after the write; row re-deferred without spending the wait budget",
+		"id", item.ID, "retry_after", w.circuitOpenDuration, "cause", cause)
+	return w.classifyWordRecheckFailure(cause)
 }
 
 // deferWordRecheck re-parks a recheck row whose word question went unanswered.
@@ -282,6 +314,13 @@ func (w *Worker) deferWordRecheck(ctx context.Context, item queue.WorkItem, caus
 	} else {
 		slog.Debug("worker word recheck: unanswered; re-deferred", "id", item.ID, "retry_after", w.circuitOpenDuration, "cause", cause)
 	}
+	return w.classifyWordRecheckFailure(cause)
+}
+
+// classifyWordRecheckFailure is deferWordRecheck's and retryWordRecheckWrite's
+// shared tail: it resets or feeds the worker's consecutiveFailures backoff
+// from cause, exactly as deferWordRecheck alone used to.
+func (w *Worker) classifyWordRecheckFailure(cause error) error {
 	if errors.Is(cause, errNoWordAnswer) {
 		w.consecutiveFailures = 0
 		return nil

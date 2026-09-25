@@ -716,6 +716,69 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	}
 }
 
+// TestRetryWordRecheckWrite is #1086 (Copilot 4099503120 / CodeRabbit
+// 4099568354): a post-write bookkeeping failure re-parks via a DEDICATED path
+// that shares none of DeferWordRecheck's refused_waits budget, unlike this
+// same package's DeferWordRecheck-past-cap case above (which releases the row
+// done). Direct queue-level exercise, since a worker-package test calling
+// through a real DBQueue does not attribute coverage to this package.
+func TestRetryWordRecheckWrite(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+	id := seedWordCandidate(t, dbh, "r")
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing', word_timing_state = ?,
+        miss_count = 3, attempts = 1, refused_waits = ?, sync_tier = 'line' WHERE id = ?`,
+		WordTimingQueued, maxWordRecheckWaitsForTest, id)
+
+	if err := q.RetryWordRecheckWrite(ctx, id, time.Hour, "stamp and clear both failed"); err != nil {
+		t.Fatalf("RetryWordRecheckWrite: %v", err)
+	}
+	var status, state, tier, lastErr, next string
+	var missCount, attempts, waits int
+	if err := dbh.QueryRow(`SELECT status, COALESCE(word_timing_state, ''), COALESCE(sync_tier, ''),
+        last_error, next_attempt_at, miss_count, attempts, refused_waits FROM work_queue WHERE id = ?`, id).
+		Scan(&status, &state, &tier, &lastErr, &next, &missCount, &attempts, &waits); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusDeferred || state != WordTimingQueued {
+		t.Fatalf("status=%q state=%q; want deferred, still queued (never released)", status, state)
+	}
+	if tier != "line" || missCount != 3 || attempts != 1 || waits != maxWordRecheckWaitsForTest {
+		t.Fatalf("sync_tier=%q miss_count=%d attempts=%d refused_waits=%d; want all untouched", tier, missCount, attempts, waits)
+	}
+	if lastErr != "stamp and clear both failed" || next != formatTime(now.Add(time.Hour)) {
+		t.Fatalf("last_error=%q next_attempt_at=%q; want the cause and now+1h", lastErr, next)
+	}
+
+	// A second call at the same "wait budget exhausted" refused_waits must
+	// re-park again, never release: this counter is DeferWordRecheck's alone.
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, id)
+	if err := q.RetryWordRecheckWrite(ctx, id, time.Hour, "again"); err != nil {
+		t.Fatalf("RetryWordRecheckWrite (2nd): %v", err)
+	}
+	if err := dbh.QueryRow(`SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusDeferred {
+		t.Fatalf("status = %q after a second failure; want still deferred, no release", status)
+	}
+
+	// Not a processing recheck row (status/state guard, wordRecheckOwned): no-op.
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'done' WHERE id = ?`, id)
+	if err := q.RetryWordRecheckWrite(ctx, id, time.Hour, "x"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("RetryWordRecheckWrite on a done row = %v; want sql.ErrNoRows", err)
+	}
+}
+
+// maxWordRecheckWaitsForTest mirrors internal/worker's maxWordRecheckWaits
+// (3): RetryWordRecheckWrite must never spend or read refused_waits, so its
+// exact value is immaterial here -- it is seeded AT the worker's cap purely to
+// document that this path ignores that budget entirely.
+const maxWordRecheckWaitsForTest = 3
+
 // TestClearWordTimingState (#982 slice 4): a served/absent verdict is dropped
 // with its generation and checked_at; 'queued' and an unexamined row are not
 // touched.

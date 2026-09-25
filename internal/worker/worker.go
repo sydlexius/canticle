@@ -106,6 +106,10 @@ type Queue interface {
 	// still 'queued', touching no miss or failure counter; past maxWaits it
 	// un-flips the row to done with no verdict and reports released.
 	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (bool, error)
+	// RetryWordRecheckWrite re-parks a recheck row after a post-write
+	// bookkeeping failure (#1086), without spending DeferWordRecheck's
+	// refused_waits budget: status='deferred' + word_timing_state='queued' only.
+	RetryWordRecheckWrite(ctx context.Context, id int64, retryAfter time.Duration, cause string) error
 	// SetWordTimingState stamps an ordinary completion's word verdict (served or
 	// absent) and generation (#982 slice 4); zero checkedAt means now.
 	SetWordTimingState(ctx context.Context, id int64, state string, generation int64, checkedAt time.Time) error
