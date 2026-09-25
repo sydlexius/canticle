@@ -1383,3 +1383,110 @@ func TestRunLRCStackedCheck_DegradedCeiling_EarlierStackedFindingSurvivesGiveUp(
 		t.Error("the degraded stacked-count row should be cleared once the check gives up")
 	}
 }
+
+// TestDegradedAttempts_IndependentCountersUnderDifferentMarkers proves the
+// #1084 generalization: incrementDegradedAttempts/clearDegradedAttempts key
+// entirely off the marker name argument, so a second startup pass (the #483
+// editor-tag backfill) can keep its own bounded-retry counter under its own
+// marker name without perturbing the #470 stacked-check's counter, and vice
+// versa. This could not even be expressed against the pre-#1084 signatures
+// (incrementDegradedAttempts(ctx, sqlDB) and clearDegradedAttempts(ctx,
+// sqlDB) took no marker argument at all, hard-wired to the #470 markers), so
+// the proof that it fails to compile there stands in for a red run.
+func TestDegradedAttempts_IndependentCountersUnderDifferentMarkers(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openBackfillDB(t)
+
+	const (
+		markerA = "test_degraded_attempts_a"
+		markerB = "test_degraded_attempts_b"
+	)
+
+	if _, err := incrementDegradedAttempts(ctx, sqlDB, markerA); err != nil {
+		t.Fatalf("increment A (1st): %v", err)
+	}
+	attemptsA, err := incrementDegradedAttempts(ctx, sqlDB, markerA)
+	if err != nil {
+		t.Fatalf("increment A (2nd): %v", err)
+	}
+	attemptsB, err := incrementDegradedAttempts(ctx, sqlDB, markerB)
+	if err != nil {
+		t.Fatalf("increment B (1st): %v", err)
+	}
+
+	if attemptsA != 2 {
+		t.Errorf("marker A: attempts = %d, want 2 (incremented twice)", attemptsA)
+	}
+	if attemptsB != 1 {
+		t.Errorf("marker B: attempts = %d, want 1 (incremented once)", attemptsB)
+	}
+
+	if err := clearDegradedAttempts(ctx, sqlDB, markerA); err != nil {
+		t.Fatalf("clear A: %v", err)
+	}
+
+	if _, present := markerDetailCount(t, ctx, sqlDB, markerA); present {
+		t.Error("marker A row should be gone after clearDegradedAttempts(markerA)")
+	}
+	countB, present := markerDetailCount(t, ctx, sqlDB, markerB)
+	if !present {
+		t.Fatal("marker B row should survive clearing marker A")
+	}
+	if !countB.Valid || countB.Int64 != 1 {
+		t.Errorf("marker B count after clearing A = %v, want 1 (untouched)", countB)
+	}
+}
+
+// TestClearDegradedAttempts_AllOrNothingOnPartialFailure proves the #1084
+// review fix: clearDegradedAttempts runs its per-marker DELETE statements inside one
+// transaction, so a later marker's DELETE failing rolls back an earlier
+// marker's DELETE too, rather than leaving it permanently gone while the
+// failed marker's stale, inflated row survives (the #470 degraded-stacked
+// count that recordDegradedStacked's MAX() reads would otherwise carry a
+// stale streak forward). A BEFORE DELETE trigger makes the second marker's
+// delete fail deterministically and immediately -- no lock contention or
+// timing involved -- which stands in for "a later DELETE fails" without
+// needing a fault-injecting driver.
+func TestClearDegradedAttempts_AllOrNothingOnPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openBackfillDB(t)
+
+	const (
+		markerOK   = "test_clear_atomic_ok"
+		markerFail = "test_clear_atomic_fail"
+	)
+
+	if _, err := incrementDegradedAttempts(ctx, sqlDB, markerOK); err != nil {
+		t.Fatalf("seed markerOK: %v", err)
+	}
+	if _, err := incrementDegradedAttempts(ctx, sqlDB, markerFail); err != nil {
+		t.Fatalf("seed markerFail: %v", err)
+	}
+
+	// Reject any delete of markerFail's row, simulating a mid-clear failure
+	// after markerOK's delete has already run (but not yet committed) inside
+	// the same transaction.
+	if _, err := sqlDB.ExecContext(ctx, fmt.Sprintf(`
+        CREATE TRIGGER test_reject_marker_fail_delete
+        BEFORE DELETE ON maintenance_markers
+        WHEN OLD.name = %q
+        BEGIN
+            SELECT RAISE(ABORT, 'simulated delete failure');
+        END`, markerFail)); err != nil {
+		t.Fatalf("create failing trigger: %v", err)
+	}
+
+	if err := clearDegradedAttempts(ctx, sqlDB, markerOK, markerFail); err == nil {
+		t.Fatal("clearDegradedAttempts with a failing marker delete: want an error, got nil")
+	}
+
+	countOK, present := markerDetailCount(t, ctx, sqlDB, markerOK)
+	if !present {
+		t.Error("markerOK's row was deleted despite the transaction failing on markerFail -- clear is not atomic")
+	} else if !countOK.Valid || countOK.Int64 != 1 {
+		t.Errorf("markerOK count after failed clear = %v, want 1 (untouched)", countOK)
+	}
+	if _, present := markerDetailCount(t, ctx, sqlDB, markerFail); !present {
+		t.Error("markerFail's row is gone despite its own delete being the one that failed")
+	}
+}

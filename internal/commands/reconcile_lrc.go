@@ -483,7 +483,7 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 		bestStacked = total.Normalized
 	)
 	if attemptDegraded {
-		attempts, incErr = incrementDegradedAttempts(ctx, sqlDB)
+		attempts, incErr = incrementDegradedAttempts(ctx, sqlDB, lrcStackedCheckDegradedAttemptsMarker)
 		// incErr is handled after the report below (never here): the report
 		// describes what THIS walk found, which is knowable regardless of
 		// whether the counter could be persisted. On incErr != nil,
@@ -573,7 +573,7 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 		// that recovers from a transient blip (a root remounts, a permission
 		// fix lands) must not carry a stale degraded-attempt count into some
 		// unrelated future degradation.
-		if cerr := clearDegradedAttempts(ctx, sqlDB); cerr != nil {
+		if cerr := clearDegradedAttempts(ctx, sqlDB, lrcStackedCheckDegradedAttemptsMarker, lrcStackedCheckDegradedStackedMarker); cerr != nil {
 			slog.Warn("lrc check: completed but failed to clear the degraded-attempt counter", "error", cerr)
 		}
 		if err := markLRCStackedCheckDone(ctx, sqlDB); err != nil {
@@ -627,7 +627,7 @@ func runLRCStackedCheck(ctx context.Context, sqlDB *sql.DB) {
 		slog.Warn("lrc check: gave up but failed to record the marker; will retry next startup", "error", err)
 		return
 	}
-	if cerr := clearDegradedAttempts(ctx, sqlDB); cerr != nil {
+	if cerr := clearDegradedAttempts(ctx, sqlDB, lrcStackedCheckDegradedAttemptsMarker, lrcStackedCheckDegradedStackedMarker); cerr != nil {
 		slog.Warn("lrc check: gave-up marker recorded but failed to clear the degraded-attempt counter", "error", cerr)
 	}
 }
@@ -697,11 +697,19 @@ func markLRCStackedCheckGaveUp(ctx context.Context, sqlDB *sql.DB) error {
 }
 
 // incrementDegradedAttempts records one more consecutive degraded startup
-// attempt (#922) and returns the new total. It reuses maintenance_markers
-// (migration 027) under lrcStackedCheckDegradedAttemptsMarker -- a distinct
-// row from lrcStackedCheckMarker, whose mere PRESENCE means "done" -- so an
-// in-progress attempt count never gets read as a completed check.
-func incrementDegradedAttempts(ctx context.Context, sqlDB *sql.DB) (int, error) {
+// attempt (#922) under the given counter marker and returns the new total. It
+// reuses maintenance_markers (migration 027) under that marker name -- a
+// distinct row from whatever "done" marker gates the pass calling this, whose
+// mere PRESENCE means "done" -- so an in-progress attempt count never gets
+// read as a completed check.
+//
+// The marker name is a parameter (#1084), not a package const baked into the
+// query, so a second startup pass with its own bounded-retry ceiling (the
+// #483 editor-tag backfill) can keep an INDEPENDENT counter under its own
+// marker name while sharing this one implementation and the same
+// maxDegradedAttempts policy. The #470 stacked-check call site is unchanged
+// in behavior: it still passes lrcStackedCheckDegradedAttemptsMarker.
+func incrementDegradedAttempts(ctx context.Context, sqlDB *sql.DB, marker string) (int, error) {
 	var attempts int
 	err := sqlDB.QueryRowContext(ctx,
 		`INSERT INTO maintenance_markers (name, detail_count)
@@ -710,9 +718,9 @@ func incrementDegradedAttempts(ctx context.Context, sqlDB *sql.DB) (int, error) 
              completed_at = excluded.completed_at,
              detail_count = COALESCE(maintenance_markers.detail_count, 0) + 1
          RETURNING detail_count`,
-		lrcStackedCheckDegradedAttemptsMarker).Scan(&attempts)
+		marker).Scan(&attempts)
 	if err != nil {
-		return 0, fmt.Errorf("increment degraded-attempt counter %q: %w", lrcStackedCheckDegradedAttemptsMarker, err)
+		return 0, fmt.Errorf("increment degraded-attempt counter %q: %w", marker, err)
 	}
 	return attempts, nil
 }
@@ -735,17 +743,53 @@ func recordDegradedStacked(ctx context.Context, sqlDB *sql.DB, stacked int) (int
 	return best, nil
 }
 
-// clearDegradedAttempts removes the degraded-attempt counter row and the
-// degraded stacked-count row, so a later
-// degradation (after a genuine clean/completed run in between) starts counting
-// from zero rather than compounding onto a stale prior streak. A no-op (no
-// error) when the row is already absent -- the common case, since most
-// deployments never degrade at all.
-func clearDegradedAttempts(ctx context.Context, sqlDB *sql.DB) error {
-	if _, err := sqlDB.ExecContext(ctx,
-		`DELETE FROM maintenance_markers WHERE name IN (?, ?)`,
-		lrcStackedCheckDegradedAttemptsMarker, lrcStackedCheckDegradedStackedMarker); err != nil {
-		return fmt.Errorf("clear degraded-attempt counter %q: %w", lrcStackedCheckDegradedAttemptsMarker, err)
+// clearDegradedAttempts removes the given degraded-attempt counter marker
+// row(s), so a later degradation (after a genuine clean/completed run in
+// between) starts counting from zero rather than compounding onto a stale
+// prior streak. A no-op (no error, no query) when the row is already absent
+// or no markers are given -- the common case, since most deployments never
+// degrade at all.
+//
+// The marker names are parameters (#1084), not package consts baked into the
+// query, for the same reason as incrementDegradedAttempts above: a second
+// startup pass (the #483 editor-tag backfill) clears its own counter
+// marker(s) through this one implementation instead of a second copy of the
+// DELETE. The #470 stacked-check call sites are unchanged in behavior: they
+// still pass both lrcStackedCheckDegradedAttemptsMarker and
+// lrcStackedCheckDegradedStackedMarker together, clearing the same two rows
+// as before.
+func clearDegradedAttempts(ctx context.Context, sqlDB *sql.DB, markers ...string) error {
+	if len(markers) == 0 {
+		return nil
+	}
+
+	// One DELETE per marker rather than a single IN (...) built by
+	// concatenating a variable number of placeholders -- this dodges gosec's
+	// G202 (SQL string concatenation) even though nothing here is
+	// attacker-influenced (only fixed, code-defined marker-name consts ever
+	// reach this parameter), and clearing two small rows one at a time on a
+	// non-hot startup path costs nothing worth trading the lint suppression
+	// for. The per-marker DELETE statements run inside ONE transaction so the clear
+	// stays all-or-nothing: without it, a later DELETE failing after an
+	// earlier one succeeded would leave that earlier marker gone while the
+	// rest survive, and the #470 degraded-stacked row (read via
+	// recordDegradedStacked's MAX()) could then carry a stale, inflated count
+	// into the next streak.
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin clear degraded-attempt counters: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
+
+	for _, m := range markers {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM maintenance_markers WHERE name = ?`, m); err != nil {
+			return fmt.Errorf("clear degraded-attempt counter %q: %w", m, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit clear degraded-attempt counters: %w", err)
 	}
 	return nil
 }
