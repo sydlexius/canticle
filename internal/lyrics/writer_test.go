@@ -539,6 +539,68 @@ func TestWriteLRC_Synced(t *testing.T) {
 	}
 }
 
+// TestWriteLRC_EditorTagPairing pins issue #483: every synced write pairs
+// [re:canticle] immediately before [ve:x.y.z], and [re:] otherwise follows
+// [ve:]'s own scope exactly -- neither an unsynced nor an instrumental write
+// (which never carries [ve:] either) gets [re:] as a byproduct.
+func TestWriteLRC_EditorTagPairing(t *testing.T) {
+	w := NewLRCWriter()
+
+	t.Run("synced pairs re before ve", func(t *testing.T) {
+		dir := t.TempDir()
+		song := models.Song{
+			Track: models.Track{ArtistName: "A", TrackName: "T"},
+			Subtitles: models.Synced{Lines: []models.Lines{
+				{Text: "hi", Time: models.Time{Minutes: 0, Seconds: 1, Hundredths: 0}},
+			}},
+		}
+		if err := w.WriteLRC(song, "", dir); err != nil {
+			t.Fatalf("WriteLRC: %v", err)
+		}
+		fp := filepath.Join(dir, Slugify("A - T")+".lrc")
+		data, err := os.ReadFile(fp) //nolint:gosec // test path constructed from known test data
+		if err != nil {
+			t.Fatalf("read %s: %v", fp, err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "[ve:") || !strings.Contains(content, "[re:canticle]") {
+			t.Fatalf("expected both [re:] and [ve:] tags, got:\n%s", content)
+		}
+		// #483 hostile-review finding 8: assert ADJACENCY, not just ordering --
+		// a mutation that moved [re:] earlier in the header (still before
+		// [ve:], just no longer the immediately preceding line) previously
+		// passed this test and was caught only by a separate app_test.go check.
+		if !strings.Contains(content, "[re:canticle]\n[ve:") {
+			t.Errorf("[re:canticle] must be the line immediately before [ve:], got:\n%s", content)
+		}
+	})
+
+	t.Run("unsynced carries no re tag", func(t *testing.T) {
+		dir := t.TempDir()
+		song := models.Song{
+			Track:  models.Track{ArtistName: "A", TrackName: "T"},
+			Lyrics: models.Lyrics{LyricsBody: "plain words"},
+		}
+		if err := w.WriteLRC(song, "", dir); err != nil {
+			t.Fatalf("WriteLRC: %v", err)
+		}
+		if got := readOnlyTxt(t, dir); strings.Contains(got, "[re:") {
+			t.Errorf("unsynced .txt must not carry [re:], got:\n%s", got)
+		}
+	})
+
+	t.Run("instrumental carries no re tag", func(t *testing.T) {
+		dir := t.TempDir()
+		song := models.Song{Track: models.Track{ArtistName: "A", TrackName: "T", Instrumental: 1}}
+		if err := w.WriteLRC(song, "", dir); err != nil {
+			t.Fatalf("WriteLRC: %v", err)
+		}
+		if got := readOnlyTxt(t, dir); strings.Contains(got, "[re:") {
+			t.Errorf("instrumental marker must not carry [re:], got:\n%s", got)
+		}
+	})
+}
+
 func TestWriteLRC_InstrumentalDetectorProvenance(t *testing.T) {
 	dir := t.TempDir()
 	w := NewLRCWriter()
