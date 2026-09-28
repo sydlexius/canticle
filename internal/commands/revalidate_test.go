@@ -598,17 +598,101 @@ func TestStampRemediatedRowsSkipsAudioWithAnyFailedSidecar(t *testing.T) {
 	}
 
 	failed := map[string]struct{}{"/x/Track.LRC": {}}
-	if n := stampRemediatedRows(t.Context(), q, findings, failed); n != 0 {
+	if n, _ := stampRemediatedRows(t.Context(), q, findings, failed); n != 0 {
 		t.Errorf("stamped %d row(s) despite a failed sibling sidecar, want 0", n)
 	}
 	if got := revalidateRowOutcome(t, q); got != "" {
 		t.Errorf("timing_outcome = %q after a partial failure, want unstamped", got)
 	}
 
-	if n := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{}); n == 0 {
+	if n, _ := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{}); n == 0 {
 		t.Errorf("stamped 0 rows with no failure, want the row stamped")
 	}
 	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
 		t.Errorf("timing_outcome = %q with no failure, want %q", got, timing.MisSynced)
+	}
+}
+
+// TestStampRemediatedRowsStampsEachRowOnceMostSevereWins is the #1082 review
+// (id 4126893714): two findings on one audio resolve to one row, which is
+// stamped and counted once, and the verdict is the most severe regardless of
+// finding order.
+func TestStampRemediatedRowsStampsEachRowOnceMostSevereWins(t *testing.T) {
+	orders := map[string][]timing.TimingOutcome{
+		"categorical-first": {timing.Categorical, timing.MisSynced},
+		"missynced-first":   {timing.MisSynced, timing.Categorical},
+	}
+	for name, outcomes := range orders {
+		t.Run(name, func(t *testing.T) {
+			cfgPath, _, lrc := revalidateFixture(t, "[00:10.00]alpha\n")
+			audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+			q := seedRevalidateRow(t, cfgPath, audio)
+			findings := []revalidate.Finding{
+				{Path: "/x/Track.lrc", AudioPath: audio, Outcome: outcomes[0], Action: "quarantine"},
+				{Path: "/x/Track.LRC", AudioPath: audio, Outcome: outcomes[1], Action: "quarantine"},
+			}
+			stamped, failed := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{})
+			if stamped != 1 || failed != 0 {
+				t.Errorf("stamped=%d failed=%d, want 1 and 0", stamped, failed)
+			}
+			if got := revalidateRowOutcome(t, q); got != string(timing.Categorical) {
+				t.Errorf("timing_outcome = %q, want the most severe (%q)", got, timing.Categorical)
+			}
+		})
+	}
+}
+
+// TestRevalidateApplyStampFailureExitsNonZero is the #1082 review (id
+// 4126893724): a stamp that cannot be written must fail the run, since the
+// sidecar is already remediated and a re-run cannot find it again. A trigger
+// makes the UPDATE fail while leaving lookups and the remediation intact.
+func TestRevalidateApplyStampFailureExitsNonZero(t *testing.T) {
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[02:30.00]beta\n")
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	q := seedRevalidateRow(t, cfgPath, audio)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if _, err := sqlDB.ExecContext(t.Context(), `CREATE TRIGGER fail_stamp BEFORE UPDATE OF timing_outcome ON work_queue BEGIN SELECT RAISE(ABORT, 'stamp blocked'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, Apply: true, QuarantineDir: filepath.Join(t.TempDir(), "q")})
+	if code == 0 {
+		t.Fatalf("exit = 0 despite a failed stamp: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "1 work-queue stamp(s) FAILED") {
+		t.Errorf("no aggregate stamp-failure line: %s", out.String())
+	}
+	if _, err := os.Stat(lrc); !os.IsNotExist(err) {
+		t.Errorf("the remediation itself should have happened: %v", err)
+	}
+	if strings.Contains(out.String(), root) {
+		t.Errorf("stdout leaked a path: %s", out.String())
+	}
+	if got := revalidateRowOutcome(t, q); got != "" {
+		t.Errorf("row stamped despite the blocked trigger: %q", got)
+	}
+}
+
+// TestRevalidateApplyStampsRowWithMixedCaseExtension is the #1082 review (id
+// 4126893732): the row's source_path carries an extension casing (.Mp3) outside
+// the lower/upper pair; the row must still be found and stamped.
+func TestRevalidateApplyStampsRowWithMixedCaseExtension(t *testing.T) {
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[02:30.00]beta\n")
+	q := seedRevalidateRow(t, cfgPath, strings.TrimSuffix(lrc, ".lrc")+".Mp3")
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, Apply: true, QuarantineDir: filepath.Join(t.TempDir(), "q")}); code != 0 {
+		t.Fatalf("apply exit = %d: %s", code, out.String())
+	}
+	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
+		t.Errorf("timing_outcome = %q for a mixed-case-extension row, want %q", got, timing.MisSynced)
 	}
 }

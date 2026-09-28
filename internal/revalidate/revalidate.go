@@ -935,19 +935,23 @@ func companionAudio(lrcPath string, cache *dirListingCache) (string, bool) {
 }
 
 // SiblingAudioPaths returns every same-stem audio path for audio: the stem plus
-// each extension scanner.SupportedAudioExtensions names, lower and upper case
-// (the same two spellings companionAudio probes). It does NOT touch the
-// filesystem. A work_queue row is unique on artist+title, so when a directory
-// holds Track.flac and Track.mp3 beside one Track.lrc the row may name either
-// copy, and a caller resolving file to row must look for all of them (#1082).
+// each extension scanner.SupportedAudioExtensions names, in EVERY ASCII case
+// permutation (caseVariantsOf). That is the set companionAudio can resolve: its
+// stat probe covers lower and upper, and its listing fallback accepts any
+// casing scanner.IsAudioFile does (Track.Mp3 included), so a row's source_path
+// may carry any of them. It does NOT touch the filesystem. A work_queue row is
+// unique on artist+title, so when a directory holds Track.flac and Track.mp3
+// beside one Track.lrc the row may name either copy, and a caller resolving
+// file to row must look for all of them (#1082).
+//
+// Size: the sum of 2^letters over the supported extensions (currently 68
+// candidates), well inside SQLite's bound-parameter limit.
 func SiblingAudioPaths(audio string) []string {
 	stem := strings.TrimSuffix(audio, filepath.Ext(audio))
-	exts := scanner.SupportedAudioExtensions()
-	out := make([]string, 0, 2*len(exts))
-	for _, ext := range exts {
-		out = append(out, stem+ext)
-		if upper := strings.ToUpper(ext); upper != ext {
-			out = append(out, stem+upper)
+	var out []string
+	for _, ext := range scanner.SupportedAudioExtensions() {
+		for _, variant := range caseVariantsOf(ext) {
+			out = append(out, stem+variant)
 		}
 	}
 	return out
