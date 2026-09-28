@@ -171,8 +171,8 @@ be swapped in later behind the same seam.
 
 GPU support: this image is **CPU-only**. The Dockerfile installs from one of
 `requirements-linux-amd64.txt` / `requirements-linux-arm64.txt` (picked by
-`TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to 2.8.0,
-see `requirements.in`) resolve against the PyTorch CPU index
+`TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to
+2.14.0/2.11.0, #1068, see `requirements.in`) resolve against the PyTorch CPU index
 (`https://download.pytorch.org/whl/cpu`, passed as `--extra-index-url`),
 because PyPI's x86_64 `torch` wheel is the CUDA build and would add ~5 GB of
 unused `nvidia-*-cu12` libraries. A build-time check fails the build if a
@@ -322,9 +322,9 @@ for arch in amd64 arm64; do
     amd64) platform=x86_64-manylinux_2_28 ;;
     arm64) platform=aarch64-manylinux_2_28 ;;
   esac
-  docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.13-slim \
+  docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
     bash -c "pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
-      --python-version 3.13 --python-platform $platform \
+      --python-version 3.14 --python-platform $platform \
       --extra-index-url https://download.pytorch.org/whl/cpu \
       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
       --exclude-newer 2026-09-23T12:00:00Z \
@@ -351,9 +351,9 @@ requested, so the test lock never pulls in
 changing either file (same `--exclude-newer` reproducibility note applies):
 
 ```bash
-cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.13-slim \
+cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
   bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
-    --python-version 3.13 --no-header --no-emit-index-url \
+    --python-version 3.14 --no-header --no-emit-index-url \
     --exclude-newer 2026-09-23T12:00:00Z \
     requirements-test.in -o requirements-test.txt'
 ```
