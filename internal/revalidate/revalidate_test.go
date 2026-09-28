@@ -880,3 +880,21 @@ func TestGenuinelySyncedIsNotDemotedAsDegenerate(t *testing.T) {
 		t.Errorf("the synced .lrc must be left alone: %v", err)
 	}
 }
+
+// TestSiblingAudioPathsCoversEveryExtensionCasing pins the #1082 review (id
+// 4126893732): the candidate set holds every case permutation companionAudio
+// can resolve, not only lower and upper.
+func TestSiblingAudioPathsCoversEveryExtensionCasing(t *testing.T) {
+	got := map[string]bool{}
+	for _, p := range SiblingAudioPaths("/m/Track.flac") {
+		got[p] = true
+	}
+	for _, want := range []string{"/m/Track.mp3", "/m/Track.MP3", "/m/Track.Mp3", "/m/Track.mP3", "/m/Track.FlAc", "/m/Track.dsf", "/m/Track.OGG"} {
+		if !got[want] {
+			t.Errorf("SiblingAudioPaths missing %q", want)
+		}
+	}
+	if len(got) > 100 {
+		t.Errorf("candidate set unexpectedly large: %d", len(got))
+	}
+}
