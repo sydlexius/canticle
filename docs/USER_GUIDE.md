@@ -319,7 +319,7 @@ The Dashboard (`/dashboard`) is the default landing page after you sign in - the
 ![Canticle Dashboard: work-queue tiles and chart, per-provider hit-rate bars, and a recent-outcomes table classified as synced, unsynced, or instrumental](img/canticle-dashboard.png)
 
 
-- **Work queue tiles and chart.** Counts of work queue items by status (pending, processing, done, failed, deferred), with a doughnut chart of the same segments.
+- **Work queue tiles and chart.** Counts of work queue items by status (pending, processing, finished, settled (upgradable), failed, deferred, unavailable), with a doughnut chart of the status segments. Completed tracks are split in two, because only word-synced output is a terminal state: **Finished** counts completed tracks whose lyrics carry word-level timing on disk (the same rows as the word-synced tile below), and **Settled (upgradable)** counts every other completed track - line-synced, unsynced, instrumental (whatever wrote the marker), or a synced file whose tier is not yet recorded. Each is the track's current best result, not treated as finished (word-synced is the only finished state); being counted here does not mean an upgrade will be attempted automatically. The two always add up to the chart's single "done" segment. A track with no recorded tier counts as upgradable until `canticle scan reconcile-sync-tier` classifies it, so Finished never overstates.
 - **Sync tier tiles.** Three separate counts splitting the completed-synced population: **word-synced** (word-level timing landed on disk - the terminal tier, nothing further to gain), **line-synced** (line-level timing only, still eligible for a future word-sync upgrade), and **synced (tier unknown)** (a synced `.lrc` whose tier was never recorded). Tier unknown is not just old rows: it also covers a cache hit, a result from a lane with no word data (e.g. innertube), a fetch under `word_sync_mode = off`, a completion where no word-capable lane answered, and a row currently mid word-sync recheck - on a default install (recheck is off), that is the common case for new completions, not a shrinking backlog. These are never merged into one "synced" number, so you can tell how much of the library is actually finished versus still improvable.
 - **Per-provider effectiveness tiles.** One tile per provider lane showing `hits/attempts` and an inline hit-rate bar (the percent is `hits / (hits + misses)`, where a hit means the lane served the winning result).
 - **Instrumental count.** The number of tracks marked instrumental.
@@ -759,7 +759,7 @@ The web UI exposes five read-only report views under the Reports section. Every 
 
 ### Queue summary
 
-Shows the count of work queue items grouped by status: pending, processing, done, failed, deferred, and total. Use this as a quick health check - a rising `failed` count warrants a look at the Failure analysis report; a large `deferred` count is normal (those are benign misses awaiting their next retry).
+Shows the count of work queue items grouped by status: pending, processing, finished, settled (upgradable), failed, deferred, unavailable, and total. Finished and settled (upgradable) are the two halves of completed work - see the Dashboard section above. Use this as a quick health check - a rising `failed` count warrants a look at the Failure analysis report; a large `deferred` count is normal (those are benign misses awaiting their next retry).
 
 ### Recent outcomes
 

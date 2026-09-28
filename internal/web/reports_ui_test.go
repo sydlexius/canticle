@@ -142,7 +142,8 @@ func TestReportFragmentQueueSummary(t *testing.T) {
 	}
 	body := rec.Body.String()
 
-	for _, want := range []string{"Status", "Count", "Done", "Total", "Refresh"} {
+	// Done renders as its two halves (#553): untiered rows are Settled.
+	for _, want := range []string{"Status", "Count", "Finished", "Settled (upgradable)", "Total", "Refresh"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("queue-summary fragment missing %q", want)
 		}

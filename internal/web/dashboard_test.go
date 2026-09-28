@@ -112,8 +112,10 @@ func TestHandleDashboard_QueueTiles(t *testing.T) {
 		t.Fatalf("GET /dashboard status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, label := range []string{"Pending", "Processing", "Done", "Failed", "Deferred", "Unavailable"} {
-		if !strings.Contains(body, label) {
+	// Done renders as Finished + Settled (upgradable) (#553); the chart keeps
+	// a "Done" segment, so match the tile label markup, not a bare substring.
+	for _, label := range []string{"Pending", "Processing", "Finished", "Settled (upgradable)", "Failed", "Deferred", "Unavailable"} {
+		if !strings.Contains(body, `<span class="mx-dash-tile-label">`+label+`</span>`) {
 			t.Errorf("dashboard missing queue tile label %q", label)
 		}
 	}
