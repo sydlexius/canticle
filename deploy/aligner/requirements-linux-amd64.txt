@@ -25,11 +25,11 @@
 #       --python-version 3.14 --python-platform x86_64-manylinux_2_28 \
 #       --extra-index-url https://download.pytorch.org/whl/cpu \
 #       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
-#       --exclude-newer 2026-09-23T12:00:00Z \
+#       --exclude-newer 2026-09-25T07:00:00Z \
 #       requirements.in -o requirements-linux-amd64.txt'
 #   (then re-add this header block)
 #
-# Generated: --exclude-newer 2026-09-23T12:00:00Z (verified to reproduce this
+# Generated: --exclude-newer 2026-09-25T07:00:00Z (verified to reproduce this
 # exact lock, including filelock==4.0.1, byte-for-byte).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
@@ -41,9 +41,6 @@ annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
     # via pydantic
-antlr4-python3-runtime==4.9.3 \
-    --hash=sha256:f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b
-    # via omegaconf
 anyio==4.15.1 \
     --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101 \
     --hash=sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94
@@ -84,10 +81,6 @@ click==8.5.0 \
     # via
     #   huggingface-hub
     #   uvicorn
-cloudpickle==3.1.2 \
-    --hash=sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414 \
-    --hash=sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a
-    # via submitit
 ctranslate2==4.8.2 \
     --hash=sha256:00bc9f44172d05bd2becefe757d2397ab3292fad1695169f9ebb9c16eb497ce2 \
     --hash=sha256:077e96d0c9c7308b989538b6f9955e9c42e87b65cb4c7005817f938ba497b6d4 \
@@ -125,27 +118,24 @@ ctranslate2==4.8.2 \
     --hash=sha256:f6f0b576c247984d3fc299a372ccc9319b668d6d25b0539f3c861beba15d0504 \
     --hash=sha256:fedda669421a57f8164568ee86ea265727016988d310fcc2e24ca30e9ec457cd
     # via faster-whisper
-demucs==4.0.1 \
-    --hash=sha256:e45a5a788bae79767c37bbf6e69aae03862ddcca05550fb79b926346a177d713
+demucs==4.1.0 \
+    --hash=sha256:4916a804702033ce934a6cdfa7e38dde03f7a7a6e85f41d0120eefe9e2966758 \
+    --hash=sha256:d94c4f7dac886595b66af405c0fd1756fa00c297183f1cf021fd2eeedeeb67b2
     # via -r requirements.in
-dora-search==0.1.13 \
-    --hash=sha256:2b440ab095d3dd715367bf680e64c94d9abe1a3950006224badecad9ff8240a5 \
-    --hash=sha256:ac490e48706640a2ae08b67b36db18174b969459a13a9831c21423575a194a87
-    # via demucs
 einops==0.8.2 \
     --hash=sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193 \
     --hash=sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827
     # via demucs
-fastapi==0.138.0 \
-    --hash=sha256:b6f54fd1bd72c80b0f899f172c61a600f6f7af9b43d4d772a018f35624048cb0 \
-    --hash=sha256:d445a4877636ad191e7053e08c9bf98cb921a6756776848400bb773d1740c061
+fastapi==0.141.1 \
+    --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3 \
+    --hash=sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1
     # via -r requirements.in
 faster-whisper==1.2.1 \
     --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
     # via -r requirements.in
-filelock==4.0.1 \
-    --hash=sha256:481a321a27bef441e23c53371c6abc8d7d16e26b97090074ba44f7538a3fd55a \
-    --hash=sha256:fdefc3f3e87716d855ae2b732c1cfd521dd99799ef2b4d00e8c0d4dcdc7cc94b
+filelock==4.0.3 \
+    --hash=sha256:30cd166e2aee2c7534ce2c33c6367c4cd051b8368e20e2c4eb0c34f699bacfab \
+    --hash=sha256:87296d60478e14204fd9406e79831400fef76693bae2895deec236c98e87a8aa
     # via
     #   huggingface-hub
     #   torch
@@ -243,10 +233,11 @@ httpx==0.28.1 \
     --hash=sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
     # via huggingface-hub
-huggingface-hub==1.32.0 \
-    --hash=sha256:b0c7c80561969d9cdacdd55fce67ba9584cca0b9d4ea80957a3a5c1445fac5c8 \
-    --hash=sha256:ed70a45498abe86039df7c2f4e5f7575de524be908d3840e8f828d5525eafd6a
+huggingface-hub==1.33.0 \
+    --hash=sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899 \
+    --hash=sha256:367be21a201db9523eddf8aeac7048f2602c1b308691c97640d5e72ed188007e
     # via
+    #   demucs
     #   faster-whisper
     #   tokenizers
     #   transformers
@@ -429,12 +420,7 @@ numpy==2.5.3 \
     # via
     #   ctranslate2
     #   onnxruntime
-    #   openunmix
     #   transformers
-omegaconf==2.3.1 \
-    --hash=sha256:3d701d14e9a8828f1edd28bb70b725908b34277cdd72cf7d6a83f94dadc6b6a0 \
-    --hash=sha256:e5e7de64aeebeddaf8e6d3f7a783b32ac2a01c0fbd9c878012caecb891a1f42a
-    # via dora-search
 onnxruntime==1.30.0 \
     --hash=sha256:001ed726c9bd5e2bc92faade7d37d889e9606a350b7d5529f0227df2e3bb57fd \
     --hash=sha256:05e4fc41711d1f4abd19a9124b5be7a65a506cb2670a7f14b16162ef13c58134 \
@@ -461,10 +447,6 @@ onnxruntime==1.30.0 \
     --hash=sha256:fa688e7891a6aa206636fe7372e27ee75fd17713289f6b4fc7b190e0a7de9328 \
     --hash=sha256:fd54b314ea385bcecac69ab431f020ba503e3878dad4ebb645fec5a24b041242
     # via faster-whisper
-openunmix==1.3.0 \
-    --hash=sha256:cc9245ce728700f5d0b72c67f01be4162777e617cdc47f9b035963afac180fc8 \
-    --hash=sha256:e893ae22c5b8001a6107022499c2587b70d5c2e4777cc7c9ed6272b68a69534e
-    # via demucs
 packaging==26.3 \
     --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
@@ -698,7 +680,6 @@ pyyaml==6.0.3 \
     #   ctranslate2
     #   demucs
     #   huggingface-hub
-    #   omegaconf
     #   transformers
     #   uvicorn
 regex==2026.9.10 \
@@ -833,10 +814,6 @@ regex==2026.9.10 \
     --hash=sha256:ff6b3267318661dfddf6b3628663e00e5946bd0a5c8fa678537a1401f0388f91 \
     --hash=sha256:ffc2da104e43db716ce30cef9f28049a1faa6aca385dd8771b033268d0730b07
     # via transformers
-retrying==1.4.2 \
-    --hash=sha256:bbc004aeb542a74f3569aeddf42a2516efefcdaff90df0eb38fbfbf19f179f59 \
-    --hash=sha256:d102e75d53d8d30b88562d45361d6c6c934da06fab31bd81c0420acb97a8ba39
-    # via dora-search
 rich==15.0.0 \
     --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb \
     --hash=sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36
@@ -859,7 +836,9 @@ safetensors==0.8.0 \
     --hash=sha256:fabaf3e0f18a6618d9b36560682562157f77c2b71fcffc7b432be2baed9d753d \
     --hash=sha256:fcdd41ec4628fee5799f807c73c353629130fbd942aa23d83c623dd6c9d52d78 \
     --hash=sha256:fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774
-    # via transformers
+    # via
+    #   demucs
+    #   transformers
 setuptools==84.0.0 \
     --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670 \
     --hash=sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73
@@ -868,14 +847,28 @@ shellingham==1.5.4 \
     --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686 \
     --hash=sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de
     # via typer
+sphn==0.2.1 \
+    --hash=sha256:045bd18f2892dc686352b4cefe78f09204ee655c3b3604f91b346289b1686b9f \
+    --hash=sha256:051458b6ab24a0c39d53b3ffe2ea83f675ae9fcc443591570caad3552fae4a78 \
+    --hash=sha256:27527d82ae2db9fbd8b7cbd787160e5d8002d385c785d217bd1c6fed32c37b06 \
+    --hash=sha256:3b19b1fece67d979d84080458bed545d1f55ddc5abac6ca5deae2672a184c7fe \
+    --hash=sha256:5d5c715216f36f070115b69de220e918cd7da25f01a02e20a3dc0517d4942101 \
+    --hash=sha256:6fc651ba2875f609b0d8d0c4af37e60c94baa21a3b52145ef018fd3cd1384f9f \
+    --hash=sha256:8903d581e0bf93efd777e042e414a364c7ea804f9864692d3af6599c315ff192 \
+    --hash=sha256:89f6bf23116b800597b6675ce42ded47634f7478b7f73ed9aa3e402ca6d706d7 \
+    --hash=sha256:8d599963b95f091fd68fbb46596ac27ef3e54f8dbbce88bd2bb25c8b078a9f06 \
+    --hash=sha256:9a95d6c546555d30a15ed3f733abaee02575296313e7fa4b9d2dda24422ecc12 \
+    --hash=sha256:a2238bcb66c21322ddc4a9308d7fbd4903175951ee4357cad8056c5e371e447f \
+    --hash=sha256:a793040472e4039fd05ae4d33c75c3f51eea75f94cafc9e54a4ea4cf6df480d7 \
+    --hash=sha256:ce0caa7858a5e41cd66fcfae7a034877512f12fbb838d3b54662020b97895569 \
+    --hash=sha256:ced0ed1b8fb05643d04166707bfb27521d9642b191e1fec75a4c7f6d279aa137 \
+    --hash=sha256:f2a574447760f5fd32e4764654350d9c5a67cfd4cd6e390b298a8f854dbc3d23 \
+    --hash=sha256:fb9b2fab6a89df7e7d8be733bc656a00a99e550ac01fa7c877a3154b2bd891b9
+    # via demucs
 starlette==1.7.0 \
     --hash=sha256:67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e \
     --hash=sha256:c79f74ea63cff761804fbbfb182f1e0b440c2d07b164d24700c5a1bab5d6ff5d
     # via fastapi
-submitit==1.5.4 \
-    --hash=sha256:7100848bd1cdda79c7196e54ee830793ae75fd7adde0c5bef738d72360a07508 \
-    --hash=sha256:c26f3a7c8d4150eaf70b1da71e2023e9e9936c93e8342ed7db910f29158561c5
-    # via dora-search
 sympy==1.14.0 \
     --hash=sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517 \
     --hash=sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
@@ -938,9 +931,7 @@ torch==2.14.0+cpu \
     # via
     #   -r requirements.in
     #   demucs
-    #   dora-search
     #   julius
-    #   openunmix
 torchaudio==2.11.0+cpu \
     --hash=sha256:18818a326b779abc7bfd5cfb9fe88501916dde144cb1944fc9e7b4fb6208dfc7 \
     --hash=sha256:2354248848d06a9ae1e7a12165f800f0dda7df60ecac9fca892322b722b922c0 \
@@ -963,10 +954,7 @@ torchaudio==2.11.0+cpu \
     --hash=sha256:be19f467eb7a173264653369426e7ecc4745e28d15f9c52eea2ad5316ec685eb \
     --hash=sha256:fa0c22f58f60c3537b7d28ed2501e0995acb2a65d9af2708f21edaad67186cd8 \
     --hash=sha256:fae220128cbfe060c663fbb2a1967b88c605f9eb49b535903cca694011662534
-    # via
-    #   -r requirements.in
-    #   demucs
-    #   openunmix
+    # via -r requirements.in
 tqdm==4.70.1 \
     --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73 \
     --hash=sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4
@@ -974,16 +962,11 @@ tqdm==4.70.1 \
     #   demucs
     #   faster-whisper
     #   huggingface-hub
-    #   openunmix
     #   transformers
 transformers==5.17.0 \
     --hash=sha256:78ec1ce21579b38dfb83950a0658cd119f87212a2fcfdff478096ce9d6c03801 \
     --hash=sha256:a153be279169b55b92d8000bf4af294aed684503d091cca7804da2dd8a9de000
     # via -r requirements.in
-treetable==0.2.6 \
-    --hash=sha256:7e1d62dbce503fbf24561aee1461b8fbcc2c232ff45661c3b9d0c2081c795bdf \
-    --hash=sha256:fa7dfa0297d2bbc5882191edd2e15f79a5e883e352f489e2acadb221db565adf
-    # via dora-search
 typer==0.27.2 \
     --hash=sha256:269b7eb9d3c202ca84b4bc9618cb04ebb43d3d4d1e567e4c768607232c05f945 \
     --hash=sha256:b3a5fc4342d5fc8fda8fc3010b1cf117e9249aab7fae800c2eff62fd3842d97d
@@ -997,7 +980,6 @@ typing-extensions==4.16.0 \
     #   huggingface-hub
     #   pydantic
     #   pydantic-core
-    #   submitit
     #   torch
     #   typing-inspection
 typing-inspection==0.4.4 \
@@ -1006,9 +988,9 @@ typing-inspection==0.4.4 \
     # via
     #   fastapi
     #   pydantic
-uvicorn==0.49.0 \
-    --hash=sha256:ba3d14c3ee7e41c6c654c46c9eb489d33213cdd30aa1696eab1374337c13f68f \
-    --hash=sha256:ebf4271aa580d9de97f93192d4595176df6e91f9aae919ca73e4fc07df1e66a3
+uvicorn==0.54.0 \
+    --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf \
+    --hash=sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620
     # via -r requirements.in
 uvloop==0.22.1 \
     --hash=sha256:017bd46f9e7b78e81606329d07141d3da446f8798c6baeec124260e22c262772 \

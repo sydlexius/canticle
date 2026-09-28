@@ -327,7 +327,7 @@ for arch in amd64 arm64; do
       --python-version 3.14 --python-platform $platform \
       --extra-index-url https://download.pytorch.org/whl/cpu \
       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
-      --exclude-newer 2026-09-23T12:00:00Z \
+      --exclude-newer 2026-09-25T07:00:00Z \
       requirements.in -o requirements-linux-$arch.txt"
 done
 ```
@@ -354,7 +354,7 @@ changing either file (same `--exclude-newer` reproducibility note applies):
 cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
   bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
     --python-version 3.14 --no-header --no-emit-index-url \
-    --exclude-newer 2026-09-23T12:00:00Z \
+    --exclude-newer 2026-09-25T07:00:00Z \
     requirements-test.in -o requirements-test.txt'
 ```
 
