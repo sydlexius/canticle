@@ -12,6 +12,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/realign"
 	"github.com/sydlexius/canticle/internal/revalidate"
 	"github.com/sydlexius/canticle/internal/scanner"
@@ -454,5 +455,160 @@ func TestPrintRevalidateCountsIncludesDegenerate(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary lost %q; got %q", want, got)
 		}
+	}
+}
+
+// seedRevalidateRow enqueues a done, synced work_queue row for audio (the
+// coupled row the CLI must stamp, #1082) in the fixture's database.
+func seedRevalidateRow(t *testing.T, cfgPath, audio string) *queue.DBQueue {
+	t.Helper()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	q := queue.NewDBQueue(sqlDB)
+	seedBacklogRow(t, q, audio, "Some Artist", "Some Title")
+	return q
+}
+
+func revalidateRowOutcome(t *testing.T, q *queue.DBQueue) string {
+	t.Helper()
+	outcome, _, _, err := q.LookupTiming(t.Context(), "Some Artist", "Some Title")
+	if err != nil {
+		t.Fatalf("lookup timing: %v", err)
+	}
+	return outcome
+}
+
+// TestRevalidateApplyStampsTheCoupledRow is the #1082 core: after --apply
+// remediates a sidecar, the linked row carries the verdict (so the reports'
+// remediation guard excludes it), stdout stays aggregate-only, and a dry run
+// stamps nothing.
+func TestRevalidateApplyStampsTheCoupledRow(t *testing.T) {
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[02:30.00]beta\n")
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	q := seedRevalidateRow(t, cfgPath, audio)
+	quarantine := filepath.Join(t.TempDir(), "q")
+
+	var dry bytes.Buffer
+	if code := runRevalidate(t.Context(), &dry, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, QuarantineDir: quarantine}); code != 0 {
+		t.Fatalf("dry run exit = %d: %s", code, dry.String())
+	}
+	if got := revalidateRowOutcome(t, q); got != "" {
+		t.Fatalf("a dry run stamped the row: timing_outcome = %q", got)
+	}
+
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, Apply: true, QuarantineDir: quarantine}); code != 0 {
+		t.Fatalf("apply exit = %d: %s", code, out.String())
+	}
+	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
+		t.Errorf("timing_outcome = %q after a remediating apply, want %q", got, timing.MisSynced)
+	}
+	if !strings.Contains(out.String(), "1 work-queue row(s) stamped") {
+		t.Errorf("no aggregate stamp count in the report: %s", out.String())
+	}
+	for _, forbidden := range []string{secretishTrackName, secretishAlbumDir, root} {
+		if strings.Contains(out.String(), forbidden) {
+			t.Errorf("stdout leaked %q: %s", forbidden, out.String())
+		}
+	}
+}
+
+// TestRevalidateApplyFailedRemediationLeavesRowUnstamped is the apply-before-
+// stamp rail: when the action fails the row must stay retriable.
+func TestRevalidateApplyFailedRemediationLeavesRowUnstamped(t *testing.T) {
+	// A categorical lyric is quarantined; the quarantine root is a regular file,
+	// so the move cannot land and the action fails.
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[05:00.00]beta\n")
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	q := seedRevalidateRow(t, cfgPath, audio)
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	var out bytes.Buffer
+	code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, Apply: true, QuarantineDir: blocker})
+	if code == 0 {
+		t.Fatalf("expected a failing exit for a failed remediation: %s", out.String())
+	}
+	if got := revalidateRowOutcome(t, q); got != "" {
+		t.Errorf("a failed remediation stamped the row: timing_outcome = %q", got)
+	}
+}
+
+// TestRevalidateApplyWithNoCoupledRowStillRemediates: a file with no row is
+// skipped by the stamp, not an error.
+func TestRevalidateApplyWithNoCoupledRowStillRemediates(t *testing.T) {
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[02:30.00]beta\n")
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, Apply: true, QuarantineDir: filepath.Join(t.TempDir(), "q")}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if _, err := os.Stat(lrc); !os.IsNotExist(err) {
+		t.Errorf("the .lrc was not remediated: %v", err)
+	}
+	if !strings.Contains(out.String(), "0 work-queue row(s) stamped") {
+		t.Errorf("expected a zero stamp count: %s", out.String())
+	}
+}
+
+// TestRevalidateApplyStampsRowNamingASiblingCopy is the #1082 review F1: the
+// directory holds Track.flac AND Track.mp3 beside one Track.lrc, the resolver
+// judges against the alphabetically-first copy (.flac), but the single
+// work_queue row names the .mp3. The row must still be stamped.
+func TestRevalidateApplyStampsRowNamingASiblingCopy(t *testing.T) {
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[02:30.00]beta\n")
+	stem := strings.TrimSuffix(lrc, ".lrc")
+	flac := stem + ".flac"
+	if err := os.WriteFile(flac, []byte("stub"), 0o600); err != nil {
+		t.Fatalf("write flac: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	primeDuration(t, cfg.DB.Path, flac, fixtureDurationSeconds)
+	q := seedRevalidateRow(t, cfgPath, stem+".mp3")
+
+	var out bytes.Buffer
+	if code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, Apply: true, QuarantineDir: filepath.Join(t.TempDir(), "q")}); code != 0 {
+		t.Fatalf("apply exit = %d: %s", code, out.String())
+	}
+	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
+		t.Errorf("timing_outcome = %q for a row naming the sibling copy, want %q", got, timing.MisSynced)
+	}
+}
+
+// TestStampRemediatedRowsSkipsAudioWithAnyFailedSidecar is the #1082 review F3:
+// two case-variant sidecars share one audio file; when one failed the row must
+// stay unstamped, and with no failure it is stamped.
+func TestStampRemediatedRowsSkipsAudioWithAnyFailedSidecar(t *testing.T) {
+	cfgPath, _, lrc := revalidateFixture(t, "[00:10.00]alpha\n")
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	q := seedRevalidateRow(t, cfgPath, audio)
+	findings := []revalidate.Finding{
+		{Path: "/x/Track.lrc", AudioPath: audio, Outcome: timing.MisSynced, Action: "demote"},
+		{Path: "/x/Track.LRC", AudioPath: audio, Outcome: timing.MisSynced, Action: "demote"},
+	}
+
+	failed := map[string]struct{}{"/x/Track.LRC": {}}
+	if n := stampRemediatedRows(t.Context(), q, findings, failed); n != 0 {
+		t.Errorf("stamped %d row(s) despite a failed sibling sidecar, want 0", n)
+	}
+	if got := revalidateRowOutcome(t, q); got != "" {
+		t.Errorf("timing_outcome = %q after a partial failure, want unstamped", got)
+	}
+
+	if n := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{}); n == 0 {
+		t.Errorf("stamped 0 rows with no failure, want the row stamped")
+	}
+	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
+		t.Errorf("timing_outcome = %q with no failure, want %q", got, timing.MisSynced)
 	}
 }

@@ -620,12 +620,18 @@ func TestSyncTierCountsExcludesRemediatedRows(t *testing.T) {
 		artist: "Demoted", title: "T2", status: "done", outcomeType: "synced",
 		syncTier: "line", timingOutcome: "mis_synced",
 	})
+	// A degenerate verdict demotes too (#1082: the revalidate CLI stamps it
+	// without touching outcome_type), so it must route to Unknown as well.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Degenerate", title: "T3", status: "done", outcomeType: "synced",
+		syncTier: "line", timingOutcome: "degenerate",
+	})
 
 	got, err := repo.SyncTierCounts(ctx)
 	if err != nil {
 		t.Fatalf("SyncTierCounts: %v", err)
 	}
-	want := reports.SyncTierCounts{WordSynced: 1, LineSynced: 0, Unknown: 2}
+	want := reports.SyncTierCounts{WordSynced: 1, LineSynced: 0, Unknown: 3}
 	if got != want {
 		t.Errorf("SyncTierCounts = %+v, want %+v (remediated rows route to Unknown)", got, want)
 	}
@@ -648,13 +654,17 @@ func TestRecentOutcomesExcludesRemediatedTier(t *testing.T) {
 		artist: "Demoted", title: "T2", status: "done", outcomeType: "synced",
 		syncTier: "line", timingOutcome: "mis_synced", completedAt: "2026-06-21T10:00:00Z",
 	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Degenerate", title: "T3", status: "done", outcomeType: "synced",
+		syncTier: "word", timingOutcome: "degenerate", completedAt: "2026-06-22T10:00:00Z",
+	})
 
 	got, err := repo.RecentOutcomes(ctx, 10)
 	if err != nil {
 		t.Fatalf("RecentOutcomes: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d outcomes, want 2: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("got %d outcomes, want 3: %+v", len(got), got)
 	}
 	for _, o := range got {
 		if o.Result != reports.ResultSynced {

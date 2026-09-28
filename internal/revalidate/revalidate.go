@@ -161,6 +161,11 @@ type Finding struct {
 	// watermark by this id, which is what retires the row from the backlog
 	// query and makes the pass converge.
 	ID int64
+	// AudioPath is the companion audio file the sidecar was judged against, set
+	// whenever one was resolved. It is what lets a walk-mode caller (the CLI)
+	// find the coupled work_queue row, which is keyed by its audio source_path
+	// rather than by the sidecar. Never printed to stdout.
+	AudioPath string
 }
 
 // Counts is the aggregate report. It is the ONLY thing safe to print.
@@ -551,7 +556,7 @@ func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, pla
 		plan.Counts.Errored++
 		return nil
 	}
-	f := Finding{Path: path, Outcome: outcome, Duration: duration, Overrun: mag.OverrunSeconds, Ratio: mag.Ratio}
+	f := Finding{Path: path, Outcome: outcome, Duration: duration, Overrun: mag.OverrunSeconds, Ratio: mag.Ratio, AudioPath: audio}
 
 	switch outcome {
 	case timing.Ok:
@@ -927,6 +932,25 @@ func companionAudio(lrcPath string, cache *dirListingCache) (string, bool) {
 		return best, true
 	}
 	return companionAudioByListing(lrcPath, stem, cache)
+}
+
+// SiblingAudioPaths returns every same-stem audio path for audio: the stem plus
+// each extension scanner.SupportedAudioExtensions names, lower and upper case
+// (the same two spellings companionAudio probes). It does NOT touch the
+// filesystem. A work_queue row is unique on artist+title, so when a directory
+// holds Track.flac and Track.mp3 beside one Track.lrc the row may name either
+// copy, and a caller resolving file to row must look for all of them (#1082).
+func SiblingAudioPaths(audio string) []string {
+	stem := strings.TrimSuffix(audio, filepath.Ext(audio))
+	exts := scanner.SupportedAudioExtensions()
+	out := make([]string, 0, 2*len(exts))
+	for _, ext := range exts {
+		out = append(out, stem+ext)
+		if upper := strings.ToUpper(ext); upper != ext {
+			out = append(out, stem+upper)
+		}
+	}
+	return out
 }
 
 // dirListingCache remembers each directory's os.ReadDir result for the

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/backoff"
@@ -2144,6 +2145,48 @@ func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType stri
 		return fmt.Errorf("queue: set outcome type for id %d: %w", id, err)
 	}
 	return nil
+}
+
+// IDsBySourcePaths returns the ids of the settled rows whose source_path is any
+// of the given audio files, oldest first and de-duplicated. It is the
+// file-to-row seam for a caller that walks the filesystem (the revalidate CLI)
+// yet must leave the coupled row describing what is on disk (#1082). The caller
+// passes every same-stem audio sibling because work_queue is unique on
+// (artist_key, title_key), not on source_path: a directory holding Track.flac
+// and Track.mp3 has ONE row that may name either copy. A path with no row
+// contributes nothing, which is not an error. 'processing' rows are excluded for
+// the same reason ListTimingBacklog excludes them: the worker may be mid-write
+// on that very sidecar and will stamp its own verdict. The IN list is bounded by
+// the caller's (small, fixed) candidate set and served by idx_work_queue_source_path.
+func (q *DBQueue) IDsBySourcePaths(ctx context.Context, sourcePaths []string) (ids []int64, retErr error) {
+	if len(sourcePaths) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(sourcePaths))
+	for i, p := range sourcePaths {
+		args[i] = p
+	}
+	query := `SELECT id FROM work_queue WHERE source_path IN (?` + strings.Repeat(",?", len(sourcePaths)-1) + `) AND status <> 'processing' ORDER BY id` //nolint:gosec // reason: G202: the only built fragment is a run of "?" placeholders sized by len(sourcePaths); every path value is a bound parameter
+	rows, err := q.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("queue: ids by source path: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close ids by source path: %w", cerr)
+		}
+	}()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("queue: scan ids by source path: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: iterate ids by source path: %w", err)
+	}
+	return ids, nil
 }
 
 // TimingRecord carries a row's timing verdict and, when one was actually

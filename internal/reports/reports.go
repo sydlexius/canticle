@@ -110,7 +110,7 @@ const (
 	// upgrade-eligible rung.
 	//
 	// EXCLUDES a row the timing guard later remediated (timing_outcome
-	// 'categorical'/'mis_synced', #442/#443): neither remediation path clears
+	// 'categorical'/'mis_synced'/'degenerate', #442/#443/#1082): neither remediation path clears
 	// sync_tier, so such a row reads ResultSynced instead of asserting a stale
 	// tier (see SyncTierCounts).
 	ResultLineSynced ResultClass = "line_synced"
@@ -226,7 +226,7 @@ type RecentOutcome struct {
 // SPLITS further on the recorded sync_tier (#1075, see ResultWordSynced/
 // ResultLineSynced/ResultSynced's doc comments for the three-way split and its
 // source-of-truth rationale) -- EXCLUDING a row the timing guard later
-// remediated (timing_outcome 'categorical'/'mis_synced'), which reads
+// remediated (timing_outcome 'categorical'/'mis_synced'/'degenerate'), which reads
 // ResultSynced regardless of its stale sync_tier, per ResultLineSynced's
 // doc comment; 'unsynced'/'instrumental'/'rejected' map to the matching
 // ResultClass unchanged; a NULL outcome_type -> unknown. An 'unavailable' row
@@ -278,10 +278,10 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
             CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
                 WHEN outcome_type = 'synced' AND sync_tier = 'word'
-                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 'word_synced'
                 WHEN outcome_type = 'synced' AND sync_tier = 'line'
-                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                     AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 'line_synced'
                 WHEN outcome_type = 'synced' THEN 'synced'
                 WHEN outcome_type = 'unsynced' THEN 'unsynced'
@@ -502,7 +502,7 @@ type SyncTierCounts struct {
 //
 // ALSO EXCLUDED FROM WORD_SYNCED/LINE_SYNCED (routed to Unknown instead): a row
 // the timing guard later remediated (timing_outcome IN ('categorical',
-// 'mis_synced'), #442/#443). Neither remediation path clears sync_tier today,
+// 'mis_synced', 'degenerate'), #442/#443/#1082). Neither remediation path clears sync_tier today,
 // so a quarantined or demoted row would otherwise keep asserting a stale
 // tier; see ResultLineSynced/ResultSynced.
 //
@@ -525,14 +525,14 @@ func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT
              SUM(CASE WHEN sync_tier = 'word'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
              SUM(CASE WHEN sync_tier = 'line'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
              SUM(CASE WHEN sync_tier IS NULL
                       OR sync_tier NOT IN ('word', 'line')
-                      OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced')
+                      OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate')
                       OR word_timing_state = 'queued' THEN 1 ELSE 0 END)
          FROM work_queue
          WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,

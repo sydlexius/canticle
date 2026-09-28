@@ -53,6 +53,7 @@ func TestWordRecheckCandidatePredicates(t *testing.T) {
 		{name: "outcome unsynced", mutate: `UPDATE work_queue SET outcome_type = 'unsynced'`},
 		{name: "timing categorical", mutate: `UPDATE work_queue SET timing_outcome = 'categorical'`},
 		{name: "timing mis_synced", mutate: `UPDATE work_queue SET timing_outcome = 'mis_synced'`},
+		{name: "timing degenerate", mutate: `UPDATE work_queue SET timing_outcome = 'degenerate'`},
 		{name: "timing null still admitted", mutate: `UPDATE work_queue SET timing_outcome = NULL`, want: true},
 		{name: "blank source_path", mutate: `UPDATE work_queue SET source_path = '  '`},
 		{name: "state queued", mutate: `UPDATE work_queue SET word_timing_state = 'queued'`},
