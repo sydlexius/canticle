@@ -54,7 +54,7 @@ check() {
   fi
 
   if ! (cd "$ALIGNER_DIR" && "$UV" pip compile --quiet --generate-hashes \
-      --python-version 3.13 --no-header --no-emit-index-url \
+      --python-version 3.14 --no-header --no-emit-index-url \
       --exclude-newer "$date" "$@" "$src" -o "$tmp/$lock"); then
     echo "::error file=$committed::uv could not resolve $src (exclude-newer $date) -- see output above"
     failed=1
