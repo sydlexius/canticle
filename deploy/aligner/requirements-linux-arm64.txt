@@ -6,11 +6,15 @@
 # torchaudio resolve to arch-specific `+cpu` wheels from the PyTorch CPU
 # index (https://download.pytorch.org/whl/cpu), and uv's hash set covers
 # only the wheel it actually resolved for the target platform, not every
-# wheel the sdist could produce elsewhere. Everything else in this closure
-# (demucs's tree, faster-whisper, transformers, ...) is pure-Python or ships
-# a manylinux wheel on both arches, so those entries are identical between
-# the two files except for hashes; only torch/torchaudio (and anything that
-# vendors a native torch extension) can legitimately differ.
+# wheel the sdist could produce elsewhere. Every package in this closure
+# ships a wheel for BOTH arches except demucs and antlr4-python3-runtime,
+# which are pure-Python and sdist-only (built at image build time; both
+# are named --no-binary below). The recipe passes --only-binary :all: so a
+# dependency with no wheel for a target arch fails at resolve time instead
+# of at image build (demucs 4.1.0's sphn has no aarch64 wheel, #1102). Entries
+# are identical between the two files except for hashes; only
+# torch/torchaudio (and anything that vendors a native torch extension) can
+# legitimately differ.
 #
 # Regenerate BOTH files together after any requirements.in edit -- a stale
 # lock on only one arch is exactly the drift #1017 closes out. Resolved
@@ -25,12 +29,14 @@
 #       --python-version 3.14 --python-platform aarch64-manylinux_2_28 \
 #       --extra-index-url https://download.pytorch.org/whl/cpu \
 #       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
-#       --exclude-newer 2026-09-23T12:00:00Z \
+#       --only-binary :all: --no-binary demucs \
+#       --no-binary antlr4-python3-runtime \
+#       --exclude-newer 2026-09-25T07:00:00Z \
 #       requirements.in -o requirements-linux-arm64.txt'
 #   (then re-add this header block)
 #
-# Generated: --exclude-newer 2026-09-23T12:00:00Z (verified to reproduce this
-# exact lock, including filelock==4.0.1, byte-for-byte).
+# Generated: --exclude-newer 2026-09-25T07:00:00Z (verified to reproduce this
+# exact lock, including filelock==4.0.3, byte-for-byte).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
     --hash=sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb
@@ -136,16 +142,16 @@ einops==0.8.2 \
     --hash=sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193 \
     --hash=sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827
     # via demucs
-fastapi==0.138.0 \
-    --hash=sha256:b6f54fd1bd72c80b0f899f172c61a600f6f7af9b43d4d772a018f35624048cb0 \
-    --hash=sha256:d445a4877636ad191e7053e08c9bf98cb921a6756776848400bb773d1740c061
+fastapi==0.141.1 \
+    --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3 \
+    --hash=sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1
     # via -r requirements.in
 faster-whisper==1.2.1 \
     --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
     # via -r requirements.in
-filelock==4.0.1 \
-    --hash=sha256:481a321a27bef441e23c53371c6abc8d7d16e26b97090074ba44f7538a3fd55a \
-    --hash=sha256:fdefc3f3e87716d855ae2b732c1cfd521dd99799ef2b4d00e8c0d4dcdc7cc94b
+filelock==4.0.3 \
+    --hash=sha256:30cd166e2aee2c7534ce2c33c6367c4cd051b8368e20e2c4eb0c34f699bacfab \
+    --hash=sha256:87296d60478e14204fd9406e79831400fef76693bae2895deec236c98e87a8aa
     # via
     #   huggingface-hub
     #   torch
@@ -243,9 +249,9 @@ httpx==0.28.1 \
     --hash=sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
     # via huggingface-hub
-huggingface-hub==1.32.0 \
-    --hash=sha256:b0c7c80561969d9cdacdd55fce67ba9584cca0b9d4ea80957a3a5c1445fac5c8 \
-    --hash=sha256:ed70a45498abe86039df7c2f4e5f7575de524be908d3840e8f828d5525eafd6a
+huggingface-hub==1.33.0 \
+    --hash=sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899 \
+    --hash=sha256:367be21a201db9523eddf8aeac7048f2602c1b308691c97640d5e72ed188007e
     # via
     #   faster-whisper
     #   tokenizers
@@ -1006,9 +1012,9 @@ typing-inspection==0.4.4 \
     # via
     #   fastapi
     #   pydantic
-uvicorn==0.49.0 \
-    --hash=sha256:ba3d14c3ee7e41c6c654c46c9eb489d33213cdd30aa1696eab1374337c13f68f \
-    --hash=sha256:ebf4271aa580d9de97f93192d4595176df6e91f9aae919ca73e4fc07df1e66a3
+uvicorn==0.54.0 \
+    --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf \
+    --hash=sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620
     # via -r requirements.in
 uvloop==0.22.1 \
     --hash=sha256:017bd46f9e7b78e81606329d07141d3da446f8798c6baeec124260e22c262772 \

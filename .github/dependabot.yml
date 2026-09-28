@@ -128,6 +128,12 @@ updates:
         patterns:
           - "pytest*"
           - "httpx"
+    # demucs 4.1.0 needs sphn>=0.1.12, which has no linux-aarch64 wheel, so
+    # the arm64 image build fails (no compiler in the base image). Held at
+    # 4.0.1 until #1102 resolves; patch releases of 4.0.x stay allowed.
+    ignore:
+      - dependency-name: "demucs"
+        versions: [">=4.1"]
     # No torch/torchaudio ignore: the 2.8.0 hold ended with #1068. A torch
     # bump from here needs no code change (torchaudio 2.11 is stable-ABI and
     # the Dockerfile's build-time forced_align call proves the pairing), only

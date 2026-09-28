@@ -8,7 +8,8 @@
 # ships a linux/amd64 + linux/arm64 wheel for (#1068: torch 2.14.0,
 # torchaudio 2.11.0, ctranslate2 4.8.2, onnxruntime 1.30.0, av, numpy,
 # tokenizers, ... all publish cp314 manylinux wheels on both arches; the
-# sdist-only demucs and antlr4-python3-runtime are pure Python). 3.13 was the
+# lock's --only-binary recipe enforces that, with demucs and
+# antlr4-python3-runtime the two pure-Python sdist-only exceptions). 3.13 was the
 # ceiling while torch was held at 2.8.0, which has no cp314 wheel (#1017).
 # 3.11-slim, 3.13-slim and 3.14-slim all resolve to Debian trixie (glibc
 # 2.41), so the amd64 execstack analysis below is unaffected by the bump.
