@@ -944,7 +944,7 @@ func companionAudio(lrcPath string, cache *dirListingCache) (string, bool) {
 // beside one Track.lrc the row may name either copy, and a caller resolving
 // file to row must look for all of them (#1082).
 //
-// Size: the sum of 2^letters over the supported extensions (currently 68
+// Size: the sum of 2^letters over the supported extensions (a few dozen
 // candidates), well inside SQLite's bound-parameter limit.
 func SiblingAudioPaths(audio string) []string {
 	stem := strings.TrimSuffix(audio, filepath.Ext(audio))

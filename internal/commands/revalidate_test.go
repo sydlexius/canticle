@@ -2,6 +2,8 @@ package commands
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -598,14 +600,14 @@ func TestStampRemediatedRowsSkipsAudioWithAnyFailedSidecar(t *testing.T) {
 	}
 
 	failed := map[string]struct{}{"/x/Track.LRC": {}}
-	if n, _ := stampRemediatedRows(t.Context(), q, findings, failed); n != 0 {
+	if n, _, _ := stampRemediatedRows(t.Context(), q, findings, failed); n != 0 {
 		t.Errorf("stamped %d row(s) despite a failed sibling sidecar, want 0", n)
 	}
 	if got := revalidateRowOutcome(t, q); got != "" {
 		t.Errorf("timing_outcome = %q after a partial failure, want unstamped", got)
 	}
 
-	if n, _ := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{}); n == 0 {
+	if n, _, _ := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{}); n == 0 {
 		t.Errorf("stamped 0 rows with no failure, want the row stamped")
 	}
 	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
@@ -631,9 +633,9 @@ func TestStampRemediatedRowsStampsEachRowOnceMostSevereWins(t *testing.T) {
 				{Path: "/x/Track.lrc", AudioPath: audio, Outcome: outcomes[0], Action: "quarantine"},
 				{Path: "/x/Track.LRC", AudioPath: audio, Outcome: outcomes[1], Action: "quarantine"},
 			}
-			stamped, failed := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{})
-			if stamped != 1 || failed != 0 {
-				t.Errorf("stamped=%d failed=%d, want 1 and 0", stamped, failed)
+			stamped, inFlight, failed := stampRemediatedRows(t.Context(), q, findings, map[string]struct{}{})
+			if stamped != 1 || inFlight != 0 || failed != 0 {
+				t.Errorf("stamped=%d inFlight=%d failed=%d, want 1, 0 and 0", stamped, inFlight, failed)
 			}
 			if got := revalidateRowOutcome(t, q); got != string(timing.Categorical) {
 				t.Errorf("timing_outcome = %q, want the most severe (%q)", got, timing.Categorical)
@@ -668,7 +670,7 @@ func TestRevalidateApplyStampFailureExitsNonZero(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("exit = 0 despite a failed stamp: %s", out.String())
 	}
-	if !strings.Contains(out.String(), "1 work-queue stamp(s) FAILED") {
+	if !strings.Contains(out.String(), "1 work-queue lookup/stamp operation(s) FAILED") {
 		t.Errorf("no aggregate stamp-failure line: %s", out.String())
 	}
 	if _, err := os.Stat(lrc); !os.IsNotExist(err) {
@@ -694,5 +696,78 @@ func TestRevalidateApplyStampsRowWithMixedCaseExtension(t *testing.T) {
 	}
 	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
 		t.Errorf("timing_outcome = %q for a mixed-case-extension row, want %q", got, timing.MisSynced)
+	}
+}
+
+// claimAfterLookup wraps the real queue and flips every row to 'processing'
+// right after the lookup returns, modeling the worker claiming a row between
+// IDsBySourcePaths and the stamp.
+type claimAfterLookup struct {
+	*queue.DBQueue
+	sqlDB *sql.DB
+}
+
+func (c claimAfterLookup) IDsBySourcePaths(ctx context.Context, paths []string) ([]int64, error) {
+	ids, err := c.DBQueue.IDsBySourcePaths(ctx, paths)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.sqlDB.ExecContext(ctx, `UPDATE work_queue SET status = 'processing'`); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// TestStampRemediatedRowsInFlightRowIsNotStamped is the #1082 review guard: a
+// row the worker claims after the lookup is not stamped, is counted in flight,
+// and is not a failure (so the run's exit stays 0).
+func TestStampRemediatedRowsInFlightRowIsNotStamped(t *testing.T) {
+	cfgPath, _, lrc := revalidateFixture(t, "[00:10.00]alpha\n")
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	q := seedRevalidateRow(t, cfgPath, audio)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	findings := []revalidate.Finding{{Path: "/x/Track.lrc", AudioPath: audio, Outcome: timing.Categorical, Action: "quarantine"}}
+
+	stamped, inFlight, failed := stampRemediatedRows(t.Context(), claimAfterLookup{q, sqlDB}, findings, map[string]struct{}{})
+	if stamped != 0 || inFlight != 1 || failed != 0 {
+		t.Errorf("stamped=%d inFlight=%d failed=%d, want 0, 1 and 0", stamped, inFlight, failed)
+	}
+	if got := revalidateRowOutcome(t, q); got != "" {
+		t.Errorf("an in-flight row was stamped: timing_outcome = %q", got)
+	}
+}
+
+// TestRevalidateApplyLookupFailureExitsNonZero: when the row lookup itself fails
+// (work_queue gone after the plan), the run counts it and exits 1.
+func TestRevalidateApplyLookupFailureExitsNonZero(t *testing.T) {
+	cfgPath, root, lrc := revalidateFixture(t, "[00:10.00]alpha\n[02:30.00]beta\n")
+	_ = seedRevalidateRow(t, cfgPath, strings.TrimSuffix(lrc, ".lrc")+".mp3")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if _, err := sqlDB.ExecContext(t.Context(), `DROP TABLE work_queue`); err != nil {
+		t.Fatalf("drop work_queue: %v", err)
+	}
+	var out bytes.Buffer
+	code := runRevalidate(t.Context(), &out, RevalidateCmd{Roots: []string{root}, ConfigPath: cfgPath, Apply: true, QuarantineDir: filepath.Join(t.TempDir(), "q")})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "1 work-queue lookup/stamp operation(s) FAILED") {
+		t.Errorf("no aggregate failure line: %s", out.String())
 	}
 }

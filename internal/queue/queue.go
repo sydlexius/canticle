@@ -2147,8 +2147,9 @@ func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType stri
 	return nil
 }
 
-// IDsBySourcePaths returns the ids of the settled rows whose source_path is any
-// of the given audio files, oldest first and de-duplicated. It is the
+// IDsBySourcePaths returns the ids of the rows (every status EXCEPT
+// 'processing') whose source_path is any of the given audio files, ascending by
+// id, so oldest first, and without duplicates. It is the
 // file-to-row seam for a caller that walks the filesystem (the revalidate CLI)
 // yet must leave the coupled row describing what is on disk (#1082). The caller
 // passes every same-stem audio sibling because work_queue is unique on
@@ -2254,6 +2255,47 @@ func (q *DBQueue) SetTimingOutcome(ctx context.Context, id int64, rec TimingReco
 		return fmt.Errorf("queue: set timing outcome for id %d: %w", id, err)
 	}
 	return nil
+}
+
+// SetTimingOutcomeIfIdle is SetTimingOutcome guarded with status <> 'processing'
+// and reports whether a row was actually written (#1082). It exists for the
+// revalidate CLI, which resolves a file to its row and stamps later: between the
+// two the worker may claim the row, and a stale verdict landing on a row the
+// worker is rewriting would outlive it (the worker's own stampTimingOutcome
+// returns early for non-synced outcomes and word-recheck never stamps
+// timing_outcome). false with a nil error means the row is in flight (or gone);
+// the worker's own write supersedes the caller's, so this is not a failure. An
+// empty rec.Outcome writes nothing and returns false.
+func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec TimingRecord) (bool, error) {
+	if rec.Outcome == "" {
+		return false, nil
+	}
+	var magnitude, ratio any
+	if rec.Measured {
+		magnitude = rec.Magnitude
+		ratio = rec.Ratio
+	}
+	var evaluatedAt any
+	if !rec.EvaluatedAt.IsZero() {
+		evaluatedAt = formatTime(rec.EvaluatedAt)
+	}
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET timing_outcome = ?,
+             overrun_magnitude = ?,
+             overrun_ratio = ?,
+             evaluated_at = ?
+         WHERE id = ? AND status <> 'processing'`,
+		rec.Outcome, magnitude, ratio, evaluatedAt, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: set timing outcome (guarded) for id %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: rows affected for id %d: %w", id, err)
+	}
+	return n > 0, nil
 }
 
 // LookupTiming returns the timing verdict recorded for a track, keyed the same

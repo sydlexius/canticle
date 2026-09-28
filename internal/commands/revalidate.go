@@ -190,10 +190,13 @@ func applyRevalidate(ctx context.Context, out io.Writer, cfg config.Config, sqlD
 		}
 	}
 	_, _ = fmt.Fprintf(out, "revalidate applied: demoted=%d quarantined=%d purged=%d failed=%d\n", demoted, quarantined, purged, failed)
-	stamped, stampFailed := stampRemediatedRows(ctx, queue.NewDBQueue(sqlDB), plan.Findings, notDone)
+	stamped, inFlight, stampFailed := stampRemediatedRows(ctx, queue.NewDBQueue(sqlDB), plan.Findings, notDone)
 	_, _ = fmt.Fprintf(out, "revalidate: %d work-queue row(s) stamped to match the remediated files\n", stamped)
+	if inFlight > 0 {
+		_, _ = fmt.Fprintf(out, "revalidate: %d work-queue row(s) in flight, left for the worker's own verdict\n", inFlight)
+	}
 	if stampFailed > 0 {
-		_, _ = fmt.Fprintf(out, "revalidate: %d work-queue stamp(s) FAILED; the remediated files are already changed and a re-run cannot retry them (see the log for row ids)\n", stampFailed)
+		_, _ = fmt.Fprintf(out, "revalidate: %d work-queue lookup/stamp operation(s) FAILED; the remediated files are already changed and a re-run cannot retry them (see the log)\n", stampFailed)
 	}
 	_, _ = fmt.Fprintf(out, "backup of applied actions written to %s\n", backupPath)
 	if failed > 0 || stampFailed > 0 {
@@ -204,12 +207,12 @@ func applyRevalidate(ctx context.Context, out io.Writer, cfg config.Config, sqlD
 
 // stampRemediatedRows leaves each remediated file's coupled work_queue row
 // reflecting disk (#1082), through the SAME record the serve-mode sweep writes
-// (timingRecordFor + SetTimingOutcome), so the reports' remediation guard
+// (timingRecordFor + a guarded SetTimingOutcomeIfIdle), so the reports' remediation guard
 // (timing_outcome IN categorical/mis_synced/degenerate) excludes the row exactly
 // as it does after a sweep. Every stamped verdict is one of those three (the
 // remediable ones), so the guard does exclude each row this stamps; it is NOT a
-// claim about every timing_outcome value. It returns how many rows were stamped
-// and how many stamps FAILED.
+// claim about every timing_outcome value. It returns how many rows were stamped,
+// how many were IN FLIGHT, and how many lookup/stamp operations FAILED.
 //
 // APPLY BEFORE STAMP: notDone holds the sidecar paths whose action failed or was
 // gated-skipped; those stay unstamped so a later run retries them. A row is also
@@ -226,12 +229,21 @@ func applyRevalidate(ctx context.Context, out io.Writer, cfg config.Config, sqlD
 // MOST SEVERE outcome wins (categorical > mis_synced > degenerate; see
 // outcomeSeverity), so the persisted verdict never depends on finding order.
 //
+// IN FLIGHT: IDsBySourcePaths excludes 'processing' rows, but the worker can
+// claim a row between that lookup and the stamp. The stamp is therefore guarded
+// (status <> 'processing') and a 0-rows-affected result is counted as in flight,
+// NOT as a failure: the worker is rewriting that very sidecar and stamps its own
+// verdict, which supersedes ours, while an unguarded write could leave our stale
+// categorical/mis_synced verdict on a row describing a file the worker just
+// rewrote (its stampTimingOutcome returns early for non-synced outcomes and
+// word-recheck never stamps timing_outcome). The exit code is unchanged.
+//
 // A failure is returned as a count, not swallowed: the file is already
 // remediated and a later CLI run cannot rediscover it (the sidecar is gone), so
 // the caller must exit non-zero rather than report a success that silently lost
 // the row. The detail is logged (the row id is safe, the path is not); stdout
 // carries only the aggregate.
-func stampRemediatedRows(ctx context.Context, q *queue.DBQueue, findings []revalidate.Finding, notDone map[string]struct{}) (stamped, failed int) {
+func stampRemediatedRows(ctx context.Context, q rowStamper, findings []revalidate.Finding, notDone map[string]struct{}) (stamped, inFlight, failed int) {
 	badAudio := map[string]struct{}{}
 	for _, f := range findings {
 		if _, bad := notDone[f.Path]; bad && f.AudioPath != "" {
@@ -264,14 +276,27 @@ func stampRemediatedRows(ctx context.Context, q *queue.DBQueue, findings []reval
 		}
 	}
 	for _, id := range order {
-		if serr := q.SetTimingOutcome(ctx, id, timingRecordFor(byRow[id])); serr != nil {
+		ok, serr := q.SetTimingOutcomeIfIdle(ctx, id, timingRecordFor(byRow[id]))
+		if serr != nil {
 			slog.Error("revalidate: could not stamp a remediated row", "id", id, "error", serr)
 			failed++
 			continue
 		}
+		if !ok {
+			slog.Info("revalidate: row went in flight before the stamp; the worker's verdict supersedes", "id", id)
+			inFlight++
+			continue
+		}
 		stamped++
 	}
-	return stamped, failed
+	return stamped, inFlight, failed
+}
+
+// rowStamper is the queue surface stampRemediatedRows needs; *queue.DBQueue
+// satisfies it, and a test can interpose between lookup and stamp.
+type rowStamper interface {
+	IDsBySourcePaths(ctx context.Context, sourcePaths []string) ([]int64, error)
+	SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec queue.TimingRecord) (bool, error)
 }
 
 // outcomeSeverity ranks the remediable verdicts for stampRemediatedRows when
