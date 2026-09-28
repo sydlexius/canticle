@@ -29,7 +29,11 @@ python-multipart==0.0.32
 # regeneration command resolves against.
 torch==2.14.0
 torchaudio==2.11.0
-demucs==4.1.0
+# demucs is held at 4.0.1 (#1102 tracks 4.1.0): 4.1.0 requires sphn>=0.1.12,
+# which publishes no linux-aarch64 wheel (sdist only), and python:3.14-slim has
+# no compiler, so the arm64 image build fails. Revisit once sphn ships an
+# aarch64 wheel; Dependabot skips demucs >= 4.1 (.github/dependabot.yml).
+demucs==4.0.1
 # faster-whisper: the transcript pass (#1016, replaces whisperx, which only
 # wrapped this same library plus its own bundled pyannote VAD). transformers:
 # the Hugging Face wav2vec2 forced-alignment models for the non-torchaudio
