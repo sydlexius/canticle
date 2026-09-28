@@ -4,7 +4,7 @@
 # per-architecture: requirements-linux-amd64.txt / requirements-linux-arm64.txt
 # (see either file's header for the exact regeneration command).
 fastapi==0.141.1
-uvicorn[standard]==0.49.0
+uvicorn[standard]==0.54.0
 python-multipart==0.0.32
 # torch 2.14.0 / torchaudio 2.11.0 (#1068; previously held at 2.8.0).
 # torch must be >= 2.13.0, the highest first-patched version among the torch
