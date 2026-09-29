@@ -2977,8 +2977,8 @@ type InstrumentalMarkerRow struct {
 // and stored detector_version, so the marker-provenance backfill (#502) can stamp
 // [source:canticle-detector]/[dv:] onto the ones still lacking a header. Provider-
 // written instrumentals (outcome_type='instrumental' with instrumental_result
-// NULL) are excluded: a bare provider marker is already authoritative to the
-// scanner and the DB does not record which provider wrote it.
+// NULL) are excluded: a bare provider marker needs no detector attribution and
+// the DB does not record which provider wrote it.
 //
 // Read-only.
 func (q *DBQueue) ListDetectorInstrumentalMarkers(ctx context.Context, opts ListInstrumentalMarkersOptions) (out []InstrumentalMarkerRow, retErr error) {

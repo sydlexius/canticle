@@ -12,8 +12,8 @@ import (
 // models.Song.WinningLane against lyrics.DetectorLaneName. That value is set
 // here, by this package. A silent disagreement would label every detector
 // marker with [source:detector] instead of [source:canticle-detector], so
-// IsDetector() would read false and the scanner would treat a provisional
-// detector verdict as editorially terminal -- never re-checkable by --upgrade.
+// IsDetector() would read false: a detector-version bump would never re-check
+// the verdict and recalibration could never reverse it.
 //
 // lyrics cannot import orchestrator (orchestrator depends on lyrics), so the
 // constant is duplicated by necessity. This test is what makes that duplication

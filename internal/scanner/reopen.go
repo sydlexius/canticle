@@ -1,51 +1,62 @@
 package scanner
 
-import "github.com/sydlexius/canticle/internal/lyrics"
+import (
+	"log/slog"
+
+	"github.com/sydlexius/canticle/internal/lyrics"
+)
 
 // reopenClasses is the set of settled lyric states a scan is willing to
-// reconsider. Modeling re-check eligibility as classes (not a single bool) keeps
-// the instrumental-provenance distinction expressible: a provider marker is
-// authoritative and a detector marker is provisional, and only the requested
-// classes are reopened. See #502.
+// reconsider.
 //
-// Synced covers a settled .lrc, the one class that is not a .txt state. Only a
-// full --update reopens it: --upgrade exists to promote a track toward synced,
-// so it has nothing to do for a track that is already there. See #575.
+// Unsynced covers every settled .txt: unsynced lyrics AND an instrumental
+// marker, whoever wrote it (#553). Neither carries word timing, so neither is
+// terminal, and provenance no longer decides eligibility: a provider can be
+// wrong about a track being instrumental exactly as the detector can. The
+// writer's no-downgrade guard (lyrics.ErrKeptBetter) is what makes reopening
+// safe: a re-fetch that comes back worse never replaces what is on disk.
+//
+// Synced covers a settled .lrc. Only a full --update reopens it; a line-synced
+// .lrc's path to word sync is the queue-driven word recheck (#982/#1048), not
+// a per-scan reopen (the #684 disk-wake constraint).
 type reopenClasses struct {
-	Unsynced                  bool
-	ProvisionalInstrumental   bool
-	AuthoritativeInstrumental bool
-	Synced                    bool
+	Unsynced bool
+	Synced   bool
 }
 
-// reopenClassesFor derives the reopen set from the scan flags. --update is a full
-// re-fetch (reopens every class); --upgrade reopens unsynced .txt and provisional
-// (detector-written) instrumental markers, but not authoritative provider markers
-// and not a settled .lrc.
+// reopenClassesFor derives the reopen set from the scan flags. --update is a
+// full re-fetch (reopens every class); --upgrade reopens every .txt.
 func reopenClassesFor(opts ScanOptions) reopenClasses {
 	switch {
 	case opts.Update:
-		return reopenClasses{Unsynced: true, ProvisionalInstrumental: true, AuthoritativeInstrumental: true, Synced: true}
+		return reopenClasses{Unsynced: true, Synced: true}
 	case opts.Upgrade:
-		return reopenClasses{Unsynced: true, ProvisionalInstrumental: true}
+		return reopenClasses{Unsynced: true}
 	default:
 		return reopenClasses{}
 	}
 }
 
-// instrumentalReopenable reports whether a settled instrumental .txt should be
-// reconsidered. A detector-written (provisional) marker reopens when the
-// ProvisionalInstrumental class is requested, or when the detector version has
-// moved on since the marker was written (version invalidation, mirroring
-// providers_version cache retirement) -- but only when both the current and the
-// stored versions are known. A provider-written or legacy bare marker
-// (authoritative) reopens only on a full --update.
-func instrumentalReopenable(prov lyrics.InstrumentalProvenance, r reopenClasses, currentDetectorVersion string) bool {
-	if prov.IsDetector() {
-		if r.ProvisionalInstrumental {
-			return true
-		}
-		return currentDetectorVersion != "" && prov.DetectorVersion != "" && prov.DetectorVersion != currentDetectorVersion
+// readInstrumentalProvenance is the header read detectorVersionMoved makes. A
+// package variable only so a test can count calls: the scanner promises to read
+// a marker's header only when no flag already granted the reopen, and that
+// promise has no other observable effect to assert on.
+var readInstrumentalProvenance = lyrics.ReadInstrumentalProvenance
+
+// detectorVersionMoved reports whether a detector-written marker at path was
+// decided by a detector version other than current (version invalidation,
+// mirroring providers_version cache retirement). It is the one reopen a scan
+// grants with no flag set. It reads the marker's header only when a current
+// version is known, and an unreadable header just means no version reopen:
+// the marker is never pinned by it, since --upgrade still reopens it.
+func detectorVersionMoved(path, current string) bool {
+	if current == "" {
+		return false
 	}
-	return r.AuthoritativeInstrumental
+	prov, _, err := readInstrumentalProvenance(path)
+	if err != nil {
+		slog.Debug("could not read instrumental provenance; skipping the detector-version check", "path", path, "error", err)
+		return false
+	}
+	return prov.IsDetector() && prov.DetectorVersion != "" && prov.DetectorVersion != current
 }

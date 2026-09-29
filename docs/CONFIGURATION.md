@@ -44,7 +44,7 @@ Override any path explicitly with `MXLRC_DB_PATH`, `MXLRC_OUTPUT_DIR`, or the `-
 
 ### Instrumental tracks and `--upgrade`
 
-Instrumental tracks always write a `.txt` marker file. These files are intentionally excluded from `--upgrade` promotion: re-fetching an instrumental would simply produce the same marker. Use `--update` (full re-fetch) if you want to force a re-check of an instrumental marker after a catalog change.
+Instrumental tracks write a `.txt` marker file. A marker is not a final state: `--upgrade` re-checks every instrumental marker, whether a provider or the audio detector wrote it, and replaces it when a provider now returns lyrics. A re-check never writes a worse result over what is on disk, so it cannot turn lyrics into a marker; only `--update` (full re-fetch) may do that. Each re-check costs a lookup per marker per run (a provider request or more on a cache miss) - see the [CLI Reference](CLI_REFERENCE.md#directory-mode-recursive) for narrowing a run.
 
 ## Environment variables
 

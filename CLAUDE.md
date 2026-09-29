@@ -70,7 +70,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `lrcnormalize` -- pure transform (`ParseBody`, `Expand`) that expands compressed multi-timestamp LRC lines (`[t1][t2]text`) into one cue per timestamp and classifies `[key:value]` ID-tag lines distinctly from cues; no I/O. The shared foundation for the LRC-text parse lanes, the write/backfill path (#470), and the upgrade scorer (#472). Wired into the `petitlyrics` parse lane, so stacked timestamps expand at parse time and every downstream write is one-cue-per-line; `lrcbackfill` drives the `.lrc` rewrite path. Not yet consumed by #472.
 - `normalize` -- NFKC cache-key normalization, duration bucketing, fuzzy-match confidence, album-artist resolution.
 - `langguard` -- Unicode-script classification/filtering of lyric text against a configured language allowlist.
-- `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`).
+- `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`). An instrumental marker of any provenance reopens on `--upgrade` like any `.txt` (#553); the only provenance read left is the detector-version-bump reopen, made only when no flag already granted one.
 - `app` -- one-shot `fetch`-mode orchestration loop over the in-memory `InputsQueue`; depends on the `Fetcher`/`Writer` interfaces.
 
 **Persistence and stateful services**
@@ -116,7 +116,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 
 ## CLI usage and input modes
 
-See `README.md` for flags and examples. Worth flagging: directory mode overrides `--outdir` (writes the output next to the audio file; the extension depends on lyric type - `.lrc` when synced lyrics are found, `.txt` when only unsynced lyrics or an instrumental marker is written), and `--upgrade` re-fetches songs that previously got `.txt` (unsynced) to promote them when synced lyrics become available.
+See `README.md` for flags and examples. Worth flagging: directory mode overrides `--outdir` (writes the output next to the audio file; the extension depends on lyric type - `.lrc` when synced lyrics are found, `.txt` when only unsynced lyrics or an instrumental marker is written), and `--upgrade` re-fetches songs that previously got `.txt` (unsynced lyrics or an instrumental marker, any provenance) to promote them when better lyrics become available, at a lookup per `.txt` per run (a provider request or more on a cache miss).
 
 ## Quality gating and CI
 
