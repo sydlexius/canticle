@@ -308,7 +308,10 @@ func TestWriteLRC_StaleSidecarCleanup(t *testing.T) {
 			t.Fatalf("creating stale .lrc: %v", err)
 		}
 
+		// A .txt write replacing a .lrc is a downgrade (#553): it happens only
+		// under an explicit --update.
 		w := NewLRCWriter()
+		w.SetForceOverwrite(true)
 		if err := w.WriteLRC(unsyncedSong, "song.lrc", dir); err != nil {
 			t.Fatalf("WriteLRC: %v", err)
 		}

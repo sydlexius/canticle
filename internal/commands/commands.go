@@ -83,7 +83,7 @@ type LegacyArgs struct {
 	Outdir     *string  `arg:"-o,--outdir" help:"output directory (default: from config or 'lyrics')"`
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
-	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
+	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files, even with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced) to promote to .lrc if synced lyrics are now available; implied by --update"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Serve      bool     `arg:"--serve" help:"run HTTP server mode"`
@@ -98,7 +98,7 @@ type FetchCmd struct {
 	Outdir     *string  `arg:"-o,--outdir" help:"output directory (default: from config or 'lyrics')"`
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
-	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
+	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files, even with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt lyrics to promote to .lrc"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Token      string   `arg:"-t,--token" help:"musixmatch token" default:""`
@@ -117,7 +117,7 @@ type ServeCmd struct {
 	Token          string  `arg:"-t,--token" help:"musixmatch token" default:""`
 	ConfigPath     string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth          int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
-	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
+	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files and may overwrite them with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt lyrics to promote them"`
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
 	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
@@ -132,7 +132,7 @@ type ServeCmd struct {
 type ScanCmd struct {
 	ConfigPath           string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth                int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
-	Update               bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
+	Update               bool     `arg:"-u,--update" help:"queue existing .lrc files for re-fetch; the serve worker keeps a better sidecar already on disk unless serve itself runs with --update (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
 	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
 	BFS                  bool     `arg:"--bfs" help:"use breadth-first traversal"`
 	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
@@ -874,6 +874,7 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 	writer := newWriter()
 	configureWriterBilingual(writer, cfg)
 	configureWriterWordSync(writer, cfg)
+	configureWriterForce(writer, args.Update)
 	application := newApp(fetcher, writer, inputs, cooldown, mode)
 	if err := application.Run(ctx); err != nil {
 		slog.Error("application error", "error", err)
@@ -1137,6 +1138,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	writer := newWriter(allowedRoots...)
 	configureWriterBilingual(writer, cfg)
 	configureWriterWordSync(writer, cfg)
+	configureWriterForce(writer, args.Update)
 	// One registry shared by the writer and the watcher, so the watcher can drop
 	// the filesystem events canticle's own sidecar writes generate instead of
 	// rescanning the directory it just wrote to (#685). Both live in this one
@@ -2143,6 +2145,16 @@ func configureWriterWordSync(w lyrics.Writer, cfg config.Config) {
 // unrecognized mode (which LoadWithSources never produces) turns both off.
 func wordSyncSwitches(mode config.WordSyncMode) (inline, companion bool) {
 	return mode == config.WordSyncModeReplace, mode == config.WordSyncModeBoth
+}
+
+// configureWriterForce carries --update to the writer as its explicit
+// permission to replace a better sidecar with a lower-rung result (#553).
+// Without it the writer refuses every downgrade. Same type-assertion shape as
+// the setters above.
+func configureWriterForce(w lyrics.Writer, update bool) {
+	if lw, ok := w.(*lyrics.LRCWriter); ok {
+		lw.SetForceOverwrite(update)
+	}
 }
 
 // configureWriterSelfWrites attaches the shared self-write registry to the

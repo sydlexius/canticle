@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -83,7 +84,10 @@ func (a *App) Run(ctx context.Context) error {
 			// timed against and comparing to it would be near-circular. Zero
 			// (song mode, or a file with no duration tag) fails open.
 			song.AudioDurationSeconds = cur.Track.TrackLength
-			if writeErr := a.writer.WriteLRC(song, cur.Filename, cur.Outdir); writeErr != nil {
+			if writeErr := a.writer.WriteLRC(song, cur.Filename, cur.Outdir); errors.Is(writeErr, lyrics.ErrKeptBetter) {
+				// A better sidecar is already on disk (#553): kept, not a failure.
+				slog.Info("kept better lyrics already on disk", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName)
+			} else if writeErr != nil {
 				slog.Error("failed to save lyrics", "error", writeErr)
 				a.failed.Push(cur)
 			}

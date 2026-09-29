@@ -250,3 +250,29 @@ func TestRunUsesFileDurationForTheTimingGuard(t *testing.T) {
 			"against a 100s file, but %d file(s) were written: %v", len(entries), entries)
 	}
 }
+
+// TestRunKeepsBetterSidecarIsNotAFailure: a fetch whose result the writer
+// refuses as a downgrade (#553) leaves the settled .lrc and is not reported
+// in the failed bucket, since nothing went wrong.
+func TestRunKeepsBetterSidecarIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	outdir := t.TempDir()
+	lrc := filepath.Join(outdir, "song.lrc")
+	if err := os.WriteFile(lrc, []byte("[00:01.00]settled\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	track := models.Track{ArtistName: "A", TrackName: "T"}
+	inputs := queue.NewInputsQueue()
+	inputs.Push(models.Inputs{Track: track, Outdir: outdir, Filename: "song.lrc"})
+	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "plain"}}}
+	a := NewApp(fetcher, lyrics.NewLRCWriter(), inputs, 0, "dir") // dir mode keeps the failed bucket and writes no failed-list file
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if a.failed.Len() != 0 {
+		t.Errorf("failed bucket = %d; want 0 for a kept sidecar", a.failed.Len())
+	}
+	if got, _ := os.ReadFile(lrc); string(got) != "[00:01.00]settled\n" { //nolint:gosec // reason: test path from t.TempDir
+		t.Errorf(".lrc changed: %q", got)
+	}
+}

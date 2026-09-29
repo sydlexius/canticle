@@ -154,8 +154,8 @@ func runReconcileInstrumental(ctx context.Context, out io.Writer, args ScanRecon
 	// a changed verdict.
 	_, _ = fmt.Fprintf(out, "reconcile-instrumental verdicts: checked=%d instrumental=%d not-instrumental=%d\n",
 		res.Checked, res.Instrumental, res.NotInstrumental)
-	_, _ = fmt.Fprintf(out, "reconcile-instrumental done: markers-written=%d rows-settled=%d rows-stamped=%d skipped(detect-off=%d,no-source=%d,worker-claimed=%d,peer-settled=%d) errors=%d\n",
-		res.MarkersWritten, res.RowsSettled, res.RowsStamped, res.SkippedDetectOff, res.SkippedNoSource, res.SkippedClaimed, res.SkippedAlreadySettled, res.Errors)
+	_, _ = fmt.Fprintf(out, "reconcile-instrumental done: markers-written=%d rows-settled=%d rows-stamped=%d skipped(detect-off=%d,no-source=%d,worker-claimed=%d,peer-settled=%d) kept-on-disk=%d errors=%d\n",
+		res.MarkersWritten, res.RowsSettled, res.RowsStamped, res.SkippedDetectOff, res.SkippedNoSource, res.SkippedClaimed, res.SkippedAlreadySettled, res.KeptOnDisk, res.Errors)
 	if args.Yes && (res.RowsSettled > 0 || res.RowsStamped > 0) {
 		_, _ = fmt.Fprintf(out, "backup of classified rows written to %s\n", backupPath)
 	}

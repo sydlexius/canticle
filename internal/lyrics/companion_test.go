@@ -490,6 +490,7 @@ func TestWriteLRC_FailedCompanionRemovalAbortsBeforeLRC(t *testing.T) {
 	}
 	seedCompanion(t, dir)
 	w := modeWriter(false, false)
+	w.SetForceOverwrite(true) // the removal path is reached only by a forced word->line rewrite (#553)
 	w.companionRemove = func(string) error { return errors.New("injected") }
 
 	err := w.WriteLRC(a2Song(), "song.lrc", dir)

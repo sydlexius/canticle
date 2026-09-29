@@ -446,12 +446,13 @@ func TestWordRecheck_WaitBudgetUnflips(t *testing.T) {
 
 // TestWordRecheck_OrdinaryRowUnchanged characterizes the ordinary path, which
 // recheck mode must not alter: a row that was never flipped still takes the
-// ordinary write (an unsynced result replaces the .lrc, the pinned writer
-// contract) and never gains a word verdict.
+// ordinary write (under --update an unsynced result replaces the .lrc, the
+// pinned writer contract) and never gains a word verdict.
 func TestWordRecheck_OrdinaryRowUnchanged(t *testing.T) {
 	primary := &fakeFetcher{song: models.Song{Track: models.Track{ArtistName: "Synthetic Artist"},
 		Lyrics: models.Lyrics{LyricsBody: "plain words"}, WordAnswer: models.WordAnswerAbsent}}
 	rig, w := newRecheckRig(t, primary, &fakeFetcher{err: petitlyrics.ErrNoMatch}, true)
+	w.writer.(*lyrics.LRCWriter).SetForceOverwrite(true)
 	// An ordinary done row is never dequeued; requeue it as a scan would.
 	if _, err := rig.db.Exec(`UPDATE work_queue SET status = 'pending' WHERE id = ?`, rig.id); err != nil {
 		t.Fatal(err)

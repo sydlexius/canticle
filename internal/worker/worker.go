@@ -942,6 +942,20 @@ func (w *Worker) recordHit(ctx context.Context, id int64, lane string) {
 		return
 	}
 	w.recordHitCounter(ctx, lane)
+	w.stampLane(ctx, id, lane)
+}
+
+// stampLane is recordHit's per-track half: it stamps lane onto the row,
+// non-fatally. RunOnce calls it only once the lane's result has a standing to
+// be named on the row -- after a write landed, or on a verify/guard exit that
+// records which lane was rejected -- and never for a result the writer refused
+// as a downgrade (#553): purgeprovenance.provenanceAgrees compares a sidecar's
+// [source:] against this column, so naming the refused lane on a row whose
+// kept file came from another lane would misattribute that file.
+func (w *Worker) stampLane(ctx context.Context, id int64, lane string) {
+	if lane == "" {
+		return
+	}
 	if err := w.queue.SetProviderLane(ctx, id, lane); err != nil {
 		slog.Warn("worker: stamp provider lane failed", "id", id, "lane", lane, "error", err)
 	}
@@ -1528,11 +1542,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if !cacheHit {
 		// Stamp the fetch time once, shared across all output paths.
 		song.FetchedAt = w.now()
-		// A non-cache provider fetch succeeded: record the hit and stamp the winning
-		// lane on the queue row before any downstream step so the counter and the
-		// per-track provenance are always written when the provider round-trip
-		// succeeds, even if verify/guard/store fails later.
-		w.recordHit(context.WithoutCancel(ctx), item.ID, song.WinningLane)
+		// A non-cache provider fetch succeeded: record the hit before any
+		// downstream step so the counter is always written when the provider
+		// round-trip succeeds. The per-track lane is NOT stamped here (#553): a
+		// write the no-downgrade guard refuses must leave the row naming the lane
+		// that wrote the kept file, so the lane is stamped at each exit that has
+		// standing to name it (verify/guard below, and after a write landed).
+		w.recordHitCounter(context.WithoutCancel(ctx), song.WinningLane)
 		// Persist the per-track attribution (winning lane hit, every other attempted
 		// lane a miss) for the true per-track hit-rate (#282), alongside the
 		// attempt-weighted provider_outcomes counter recorded above.
@@ -1542,6 +1558,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// rather than a dead token.
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
+			w.stampLane(context.WithoutCancel(ctx), item.ID, song.WinningLane)
 			return w.fail(ctx, item, err)
 		}
 		// Language/script guard runs only on the non-cache-hit path: cache hits are
@@ -1557,6 +1574,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// not retried.
 			slog.Warn("worker guard rejected lyrics", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", reason)
 			ctxNoCancel := context.WithoutCancel(ctx)
+			w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
 			// Record WHY this row settled with nothing on disk, before Complete
 			// while the row is still 'processing' (#655).
 			//
@@ -1602,18 +1620,6 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			w.consecutiveFailures = 0
 			return nil
 		}
-		// A result the timing guard refuses writes nothing (#950), so it must not
-		// be cached: a cached copy would satisfy the next lookup for this key as
-		// though it were a good hit. One arrives here only when no lane produced
-		// anything better: after every lane answered, or after the bounded wait on
-		// a lane that did not (deferRefusedUntried). The row then settles terminal
-		// done below with timing_outcome=categorical, NOT miss-backoff.
-		if !lyrics.RefusedByTimingGuard(song, resolvedTrack.TrackLength) {
-			if err := w.store(ctx, resolvedTrack, song); err != nil {
-				slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
-				return w.fail(ctx, item, err)
-			}
-		}
 	}
 
 	// Hand the writer the AUDIO FILE's duration so the accept-time timing guard
@@ -1623,15 +1629,61 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// is near-circular and biases every verdict toward ok. resolvedTrack carries
 	// what refreshRecordingIdentity re-read from the file's own tags.
 	song.AudioDurationSeconds = resolvedTrack.TrackLength
-	for _, p := range outputPaths(item.Inputs) {
-		if err := w.writer.WriteLRC(song, p.Filename, p.Outdir); err != nil {
+	paths := outputPaths(item.Inputs)
+	var kept []*lyrics.KeptError
+	for _, p := range paths {
+		err := w.writer.WriteLRC(song, p.Filename, p.Outdir)
+		if errors.Is(err, lyrics.ErrKeptBetter) {
+			kept = append(kept, keptErrorOf(err))
+			continue
+		}
+		if err != nil {
 			err = fmt.Errorf("worker: write item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, err)
 			slog.Warn("worker write failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "outdir", p.Outdir, "filename", p.Filename, "error", err)
 			return w.fail(ctx, item, err)
 		}
 	}
+	if len(kept) == len(paths) {
+		// Every output already holds a better lyric (#553): nothing landed, so
+		// the content stamps below would describe a file that is not there, the
+		// lane is left naming whatever wrote the kept file, and the result is not
+		// cached (see the store below).
+		return w.completeKept(ctx, item, kept)
+	}
+	// PARTIAL KEEP (some output paths kept, at least one written) is stamped
+	// from the WRITTEN result below: the row has one outcome_type/sync_tier/
+	// provider_lane, and it describes the paths this completion changed. A kept
+	// path may hold a better sidecar than the row then says. Known limitation;
+	// multi-path rows are the minority and the kept file itself is intact.
 
 	ctxNoCancel := context.WithoutCancel(ctx)
+	if !cacheHit {
+		w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
+		// Cached only AFTER a write landed (#553). cache consumers are the
+		// worker's own lookup (a hit re-runs the writer and settles without a
+		// lane) and scan.Enqueuer.EnqueuePending (a hit marks the scan row done
+		// with no enqueue at all). A result the no-downgrade guard refused
+		// everywhere never reaches here (completeKept above returns first), so
+		// it can never be served later as though it were what is on disk; the
+		// entry that wrote the kept file, if any, stays the key's cache entry.
+		//
+		// A result the timing guard refuses writes nothing (#950), so it must not
+		// be cached either: a cached copy would satisfy the next lookup for this
+		// key as though it were a good hit. One arrives here only when no lane
+		// produced anything better: after every lane answered, or after the
+		// bounded wait on a lane that did not (deferRefusedUntried). The row then
+		// settles terminal done below with timing_outcome=categorical, NOT
+		// miss-backoff.
+		//
+		// A store failure fails the row AFTER the write: the retry re-fetches and
+		// rewrites the same sidecar, which is idempotent.
+		if !lyrics.RefusedByTimingGuard(song, resolvedTrack.TrackLength) {
+			if err := w.store(ctx, resolvedTrack, song); err != nil {
+				slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
+				return w.fail(ctx, item, err)
+			}
+		}
+	}
 	// Record what was actually written (synced/unsynced/instrumental) before
 	// Complete so reports classify by the real outcome instead of the
 	// enqueue-time .lrc plan (#379). outcomeTypeFromSong mirrors WriteLRC's
@@ -1663,6 +1715,79 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		return w.failStuckItem(ctxNoCancel, item.ID, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
+	}
+	w.consecutiveFailures = 0
+	return nil
+}
+
+// keptErrorOf returns the *lyrics.KeptError inside err, or an unjudged one for
+// a bare ErrKeptBetter (a test double's): the rung is then unknown, and
+// keptStamps stamps nothing it cannot read.
+func keptErrorOf(err error) *lyrics.KeptError {
+	var ke *lyrics.KeptError
+	if errors.As(err, &ke) {
+		return ke
+	}
+	return &lyrics.KeptError{}
+}
+
+// keptStamps maps the kept sidecar (the lowest rung among the kept paths, so
+// an upgrade reader never sees a row claiming more than its weakest file) to
+// the outcome_type and sync_tier that describe it. An unreadable .lrc stamps
+// outcome synced with an unknown tier, matching scan reconcile-sync-tier's
+// "leave unreadable NULL rather than guess".
+func keptStamps(kept []*lyrics.KeptError) (outcome, tier string) {
+	low := kept[0]
+	for _, k := range kept[1:] {
+		if k.OnDisk < low.OnDisk {
+			low = k
+		}
+	}
+	switch {
+	case low.OnDisk == lyrics.RungNone:
+		return "", ""
+	case low.Synced && !low.Judged:
+		return outcomeTypeSynced, ""
+	case low.Synced && low.OnDisk == lyrics.RungWord:
+		return outcomeTypeSynced, queue.SyncTierWord
+	case low.Synced && low.OnDisk == lyrics.RungLine:
+		return outcomeTypeSynced, queue.SyncTierLine
+	case low.Synced:
+		// A .lrc with no timestamps: the file is a .lrc, tiered unsynced (#1075).
+		return outcomeTypeSynced, queue.SyncTierUnsynced
+	case low.OnDisk == lyrics.RungInstrumental:
+		return outcomeTypeInstrumental, ""
+	default:
+		return outcomeTypeUnsynced, ""
+	}
+}
+
+// completeKept settles a row whose candidate the writer refused as a downgrade
+// (lyrics.ErrKeptBetter, #553). Nothing was written, so every stamp comes from
+// the kept FILE, never the refused result: outcome_type and sync_tier are
+// re-derived from what the guard read on disk, because a reopen
+// (queue.ReopenDoneRowTx: identity repair, the word-recheck scan reopen) has
+// already cleared them and settling without them is the #655 NULL-outcome
+// state. provider_lane is not touched: it still names the lane that wrote the
+// kept file, or is NULL after a reopen (an unknown lane, which
+// provenanceAgrees reads as no disagreement). timing_outcome is not touched
+// either: no verdict was reached here, so it is NULL after a reopen (and a
+// synced row then re-enters ListTimingBacklog, whose sweep judges exactly the
+// kept file) or the verdict stamped when that same file was written.
+func (w *Worker) completeKept(ctx context.Context, item queue.WorkItem, kept []*lyrics.KeptError) error {
+	slog.Info("worker kept better lyrics already on disk", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName)
+	ctxNoCancel := context.WithoutCancel(ctx)
+	outcome, tier := keptStamps(kept)
+	if outcome != "" {
+		if err := w.queue.SetOutcomeType(ctxNoCancel, item.ID, outcome); err != nil {
+			slog.Warn("worker: stamp kept outcome type failed; continuing", "id", item.ID, "error", err)
+		}
+	}
+	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
+		return w.failStuckItem(ctxNoCancel, item.ID, err)
+	}
+	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
+		return w.failStuckItem(ctxNoCancel, item.ID, fmt.Errorf("worker: complete kept item %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
 	return nil
@@ -2002,8 +2127,12 @@ func (w *Worker) settleDetectorInstrumental(ctxNoCancel context.Context, item qu
 // hand-built literal.
 func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.WorkItem, song models.Song) error {
 	slog.Info("worker audio detector: instrumental track confirmed; writing marker", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "kind", "instrumental")
-	for _, p := range outputPaths(item.Inputs) {
-		if writeErr := w.writer.WriteLRC(song, p.Filename, p.Outdir); writeErr != nil {
+	paths := outputPaths(item.Inputs)
+	var kept []*lyrics.KeptError
+	for _, p := range paths {
+		if writeErr := w.writer.WriteLRC(song, p.Filename, p.Outdir); errors.Is(writeErr, lyrics.ErrKeptBetter) {
+			kept = append(kept, keptErrorOf(writeErr))
+		} else if writeErr != nil {
 			writeErr = fmt.Errorf("worker: write instrumental item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, writeErr)
 			slog.Warn("worker instrumental detection: write failed; treating as miss", "id", item.ID, "error", writeErr)
 			if derr := w.requeueDeferred(ctx, item, writeErr); derr != nil {
@@ -2012,6 +2141,11 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 			w.consecutiveFailures = 0
 			return nil
 		}
+	}
+	if len(kept) == len(paths) {
+		// Real lyrics are already on disk everywhere (#553): no marker landed,
+		// so recording an instrumental verdict would contradict the files.
+		return w.completeKept(ctx, item, kept)
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)
 	// A detector-sourced instrumental is deliberately NOT cache-stored. Every

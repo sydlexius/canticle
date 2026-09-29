@@ -132,7 +132,11 @@ type Result struct {
 	MarkersWritten int // marker sidecars written and still on disk
 	ResetStale     int // rows reset to never-classified (cross-version pass)
 	SkippedClaimed int // rows a serve-mode worker claimed mid-recalibration
-	Errors         int // non-fatal per-row failures
+	// KeptOnDisk counts passing rows whose marker the writer refused because
+	// better lyrics are already on disk (#553). Not an error: the row keeps
+	// its not-instrumental verdict, which is what the file says.
+	KeptOnDisk int
+	Errors     int // non-fatal per-row failures
 
 	// MaxExaminedID is the highest work_queue id this run looked at (0 if no
 	// candidates). Feed it back as the next run's AfterID to resume past the rows
@@ -300,6 +304,23 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 
 		written, werr := r.writeMarkers(row)
 		res.MarkersWritten += len(written)
+		if errors.Is(werr, lyrics.ErrKeptBetter) {
+			// Better lyrics are already on disk (#553): no marker landed, and the
+			// row must not settle instrumental against them. It is left exactly
+			// as it is -- instrumental_result=0, deferred, telemetry intact --
+			// because that not-instrumental verdict is already the terminal one
+			// the file agrees with, and every other existing stamp is wrong here:
+			// ResetInstrumentalToUnclassified would hand it back to the backfill
+			// for a fresh inference every cycle (#684), and SettleInstrumental
+			// would claim a marker that is not there. The row stays listable by
+			// ListVocalGateRejections (the set is defined by instrumental_result
+			// = 0), but that re-examination is this package's own arithmetic plus
+			// one refused write, never a detector request, and the AfterID cursor
+			// moves past it. Counted as KeptOnDisk, not an error.
+			res.KeptOnDisk++
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeSkipped})
+			continue
+		}
 		if werr != nil {
 			res.Errors++
 			// Never settle a verdict whose marker did not fully land.
