@@ -118,6 +118,10 @@ type Queue interface {
 	// SetSyncTier records a completion's on-disk sync tier (#1075): 'word',
 	// 'line', 'unsynced', or "" to clear it.
 	SetSyncTier(ctx context.Context, id int64, tier string) error
+	// SettleUpgradeTrip settles a processing upgrade re-fetch (#553) that
+	// landed nothing back to done, file record untouched; false means the row
+	// is not an upgrade trip.
+	SettleUpgradeTrip(ctx context.Context, id int64) (bool, error)
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -1361,7 +1365,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// was enqueued under means a cached result (if any) predates the current
 	// provider set: bypass the cache so the orchestrator revalidates the track
 	// against today's lanes (Gap 1 of docs/multi-provider-orchestration.md).
-	bypassCache := w.providersVersion != 0 && item.ProvidersVersion != w.providersVersion
+	// An upgrade trip (#553) always asks a provider: the key's cache entry is
+	// what wrote the file being upgraded.
+	bypassCache := item.UpgradeQueued || (w.providersVersion != 0 && item.ProvidersVersion != w.providersVersion)
 	// detectorPath is the audio path handed to every lane via FindLyrics. It is
 	// deliberately empty when instrumental detection is disabled for this item
 	// (see detectorPathFor): the detector lane treats an empty path as a benign
@@ -1558,7 +1564,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// rather than a dead token.
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
-			w.stampLane(context.WithoutCancel(ctx), item.ID, song.WinningLane)
+			if !item.UpgradeQueued {
+				w.stampLane(context.WithoutCancel(ctx), item.ID, song.WinningLane)
+			}
 			return w.fail(ctx, item, err)
 		}
 		// Language/script guard runs only on the non-cache-hit path: cache hits are
@@ -1573,6 +1581,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// just finalize the policy rejection: neither cached nor written, and
 			// not retried.
 			slog.Warn("worker guard rejected lyrics", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", reason)
+			if item.UpgradeQueued {
+				// Nothing lands, so the row keeps describing the file (#553).
+				return w.settleUpgradeTrip(ctx, item)
+			}
 			ctxNoCancel := context.WithoutCancel(ctx)
 			w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
 			// Record WHY this row settled with nothing on disk, before Complete
@@ -1629,10 +1641,28 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// is near-circular and biases every verdict toward ok. resolvedTrack carries
 	// what refreshRecordingIdentity re-read from the file's own tags.
 	song.AudioDurationSeconds = resolvedTrack.TrackLength
+	if item.UpgradeQueued {
+		// The writer returns nil without writing on a quarantine, and on a
+		// demotion whenever a sidecar is settled, which an upgrade trip's always
+		// is (#553). Settle before stamping that verdict onto the kept file's row.
+		//
+		// A MISSING sidecar also reads as unsettled to the writer, so there a
+		// mis-synced/degenerate candidate would have written the demoted .txt;
+		// settling instead is safe (the row's file record is untouched) and
+		// forgoes only that small gain.
+		if decision, _, _ := lyrics.DecidePromotion(song); decision != lyrics.PromoteAsIs {
+			return w.settleUpgradeTrip(ctx, item)
+		}
+	}
 	paths := outputPaths(item.Inputs)
 	var kept []*lyrics.KeptError
+	write := w.writeFor(item)
+	// landed records whether any output was written this pass: after one is,
+	// a failure must never settle an upgrade trip back onto the OLD file
+	// record (R2-M1), so it takes the ordinary fail/retry instead.
+	landed := false
 	for _, p := range paths {
-		err := w.writer.WriteLRC(song, p.Filename, p.Outdir)
+		err := write(song, p.Filename, p.Outdir)
 		if errors.Is(err, lyrics.ErrKeptBetter) {
 			kept = append(kept, keptErrorOf(err))
 			continue
@@ -1640,8 +1670,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err != nil {
 			err = fmt.Errorf("worker: write item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, err)
 			slog.Warn("worker write failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "outdir", p.Outdir, "filename", p.Filename, "error", err)
-			return w.fail(ctx, item, err)
+			return w.failPass(ctx, item, err, landed)
 		}
+		landed = true
 	}
 	if len(kept) == len(paths) {
 		// Every output already holds a better lyric (#553): nothing landed, so
@@ -1680,7 +1711,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if !lyrics.RefusedByTimingGuard(song, resolvedTrack.TrackLength) {
 			if err := w.store(ctx, resolvedTrack, song); err != nil {
 				slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
-				return w.fail(ctx, item, err)
+				return w.failPass(ctx, item, err, landed)
 			}
 		}
 	}
@@ -2133,8 +2164,9 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	slog.Info("worker audio detector: instrumental track confirmed; writing marker", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "kind", "instrumental")
 	paths := outputPaths(item.Inputs)
 	var kept []*lyrics.KeptError
+	write := w.writeFor(item)
 	for _, p := range paths {
-		if writeErr := w.writer.WriteLRC(song, p.Filename, p.Outdir); errors.Is(writeErr, lyrics.ErrKeptBetter) {
+		if writeErr := write(song, p.Filename, p.Outdir); errors.Is(writeErr, lyrics.ErrKeptBetter) {
 			kept = append(kept, keptErrorOf(writeErr))
 		} else if writeErr != nil {
 			writeErr = fmt.Errorf("worker: write instrumental item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, writeErr)
@@ -2411,6 +2443,13 @@ func (w *Worker) releaseAfterThrottle(ctx context.Context, item queue.WorkItem) 
 //     as one. Keying on the error alone would swallow every provider timeout --
 //     a far worse bug than the cosmetic one this fixes.
 func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) error {
+	return w.failPass(ctx, item, cause, false)
+}
+
+// failPass is fail with the pass's write state: landed means an output was
+// already written this pass, so an upgrade trip must not be settled back onto
+// the old file record (#553 R2-M1) and takes the ordinary fail/retry.
+func (w *Worker) failPass(ctx context.Context, item queue.WorkItem, cause error, landed bool) error {
 	// errors.Is(ctx.Err(), context.Canceled), NOT ctx.Err() != nil. The looser
 	// form admits a parent that expired by DEADLINE, which is a timeout rather
 	// than a shutdown: a caller that ever wraps the worker context in a
@@ -2429,6 +2468,15 @@ func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) err
 		slog.Info("worker: released in-flight item on shutdown", "id", item.ID)
 		return nil
 	}
+	if item.UpgradeQueued && !landed && (errors.Is(cause, errVerificationRejected) || item.Attempts+1 >= upgradeMaxAttempts) {
+		// A verifier verdict will not change on retry, and a settled file does
+		// not need an hourly retry forever: settle the trip, file untouched (#553).
+		// A settle error falls through to Fail, so the row never wedges.
+		slog.Info("worker: upgrade re-fetch failed; keeping the file on disk", "id", item.ID, "attempts", item.Attempts+1, "error", cause)
+		if settled, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID); err == nil && settled {
+			return nil
+		}
+	}
 	w.consecutiveFailures++
 	w.lastFailID = item.ID
 	w.lastFailArtist = item.Inputs.Track.ArtistName
@@ -2436,6 +2484,36 @@ func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) err
 	if _, err := w.queue.Fail(context.WithoutCancel(ctx), item.ID, cause); err != nil {
 		return fmt.Errorf("worker: fail item %d after %v: %w", item.ID, cause, err)
 	}
+	return nil
+}
+
+// upgradeMaxAttempts caps an upgrade trip's failed attempts (#553): the third
+// failure settles it back to done instead of retrying.
+const upgradeMaxAttempts = 3
+
+// writeFor returns the write an item's completion uses: never forced on an
+// upgrade trip (#553), so serve --update cannot let one replace a better file.
+func (w *Worker) writeFor(item queue.WorkItem) func(models.Song, string, string) error {
+	if guarded, ok := w.writer.(interface {
+		WriteLRCNoDowngrade(models.Song, string, string) error
+	}); ok && item.UpgradeQueued {
+		return guarded.WriteLRCNoDowngrade
+	}
+	if item.UpgradeQueued {
+		// Loud, never silent: a forced writer (serve --update) could then let
+		// this trip replace a better file.
+		slog.Error("worker: writer lacks WriteLRCNoDowngrade; upgrade trip falls back to WriteLRC", "id", item.ID)
+	}
+	return w.writer.WriteLRC
+}
+
+// settleUpgradeTrip settles an upgrade trip that landed nothing back to done
+// with the row still describing the file on disk (queue.SettleUpgradeTrip).
+func (w *Worker) settleUpgradeTrip(ctx context.Context, item queue.WorkItem) error {
+	if _, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID); err != nil {
+		return w.fail(ctx, item, fmt.Errorf("worker: settle upgrade trip %d: %w", item.ID, err))
+	}
+	w.consecutiveFailures = 0
 	return nil
 }
 
@@ -2454,6 +2532,10 @@ func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) err
 // 'processing' because it was canceled or re-dequeued out from under us (a lost
 // race). Log at debug and return nil so the run loop stays quiet.
 func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause error) error {
+	if item.UpgradeQueued {
+		// No miss_count for a track that already has lyrics on disk (#553).
+		return w.settleUpgradeTrip(ctx, item)
+	}
 	nextMissCount := item.MissCount + 1
 	noCancel := context.WithoutCancel(ctx)
 

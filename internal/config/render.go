@@ -195,6 +195,11 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("enabled = %t%s\n", cfg.WordSyncRecheck.Enabled, ann("word_sync_recheck.enabled"))
 	p("batch = %d%s\n", cfg.WordSyncRecheck.Batch, ann("word_sync_recheck.batch"))
 	p("\n")
+	// [upgrade_sweep] -- the serve-mode upgrade sweep (#553).
+	p("[upgrade_sweep]\n")
+	p("enabled = %t%s\n", cfg.UpgradeSweep.Enabled, ann("upgrade_sweep.enabled"))
+	p("batch = %d%s\n", cfg.UpgradeSweep.Batch, ann("upgrade_sweep.batch"))
+	p("\n")
 
 	// [watcher]
 	p("[watcher]\n")
@@ -439,6 +444,10 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 		group("word_sync_recheck",
 			boolAttr("enabled", "word_sync_recheck.enabled", cfg.WordSyncRecheck.Enabled),
 			intAttr("batch", "word_sync_recheck.batch", cfg.WordSyncRecheck.Batch),
+		),
+		group("upgrade_sweep",
+			boolAttr("enabled", "upgrade_sweep.enabled", cfg.UpgradeSweep.Enabled),
+			intAttr("batch", "upgrade_sweep.batch", cfg.UpgradeSweep.Batch),
 		),
 		group("watcher",
 			boolAttr("enabled", "watcher.enabled", cfg.Watcher.Enabled),
