@@ -1,8 +1,10 @@
 package worker
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/scanner"
@@ -126,11 +128,59 @@ func TestRunOnce_StampsAudioDurationForTheGuard(t *testing.T) {
 // durationCapturingWriter records the AudioDurationSeconds the worker stamped.
 type durationCapturingWriter struct {
 	seen int
+	path string // AudioPath the worker stamped (#505)
 }
 
 func (d *durationCapturingWriter) WriteLRC(song models.Song, _ string, _ string) error {
 	d.seen = song.AudioDurationSeconds
+	d.path = song.AudioPath
 	return nil
+}
+
+// TestRunOnce_StampsAudioPathForTheMtimeBump pins the #505 wiring: the writer
+// can only bump the audio file's mtime if the worker names the file.
+func TestRunOnce_StampsAudioPathForTheMtimeBump(t *testing.T) {
+	song := models.Song{
+		Track:     models.Track{ArtistName: "A", TrackName: "T"},
+		Subtitles: models.Synced{Lines: []models.Lines{guardLine(10, "a")}},
+	}
+	q := &fakeQueue{items: []queue.WorkItem{queuedItem("/library/track.flac")}}
+	dw := &durationCapturingWriter{}
+	w := New(q, &fakeCache{}, &fakeFetcher{song: song}, dw)
+	if err := w.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if dw.path != "/library/track.flac" {
+		t.Fatalf("writer saw AudioPath = %q; want the item's source path", dw.path)
+	}
+}
+
+// TestWordRecheck_StampsAudioPathForTheMtimeBump: the recheck write names the
+// audio file too, so a replace-mode word correction can bump it (#505).
+func TestWordRecheck_StampsAudioPathForTheMtimeBump(t *testing.T) {
+	primary := &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}
+	rig, w := newRecheckRig(t, primary, nil, false)
+	dw := &durationCapturingWriter{}
+	// The rig's real writer stays in place for seeding; swap only the write.
+	w.writer = &wordRecheckPathWriter{LRCWriter: w.writer.(*lyrics.LRCWriter), rec: dw}
+	if err := w.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if want := filepath.Join(filepath.Dir(rig.lrc), "track.flac"); dw.path != want {
+		t.Fatalf("recheck writer saw AudioPath = %q; want %q", dw.path, want)
+	}
+}
+
+// wordRecheckPathWriter embeds the real writer (the recheck path type-asserts
+// and calls its other methods) and records the AudioPath of each WriteLRC.
+type wordRecheckPathWriter struct {
+	*lyrics.LRCWriter
+	rec *durationCapturingWriter
+}
+
+func (p *wordRecheckPathWriter) WriteLRC(song models.Song, name, dir string) error {
+	_ = p.rec.WriteLRC(song, name, dir)
+	return p.LRCWriter.WriteLRC(song, name, dir)
 }
 
 // TestRunOnce_StampedOutcomeUsesTheGuardFallbackDuration pins that the durable
