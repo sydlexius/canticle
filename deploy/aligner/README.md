@@ -361,19 +361,19 @@ portable file.
 The CUDA lock, `requirements-linux-amd64-cuda.txt` (#1013), is a third file
 of the same recipe with `--python-platform x86_64-manylinux_2_28` and
 `--extra-index-url https://download.pytorch.org/whl/cu126` (the exact command is
-in its header). It is regenerated together with the two above; it differs from
+in its header). It is regenerated together with the two above (the loop below has a separate CUDA step); it differs from
 `requirements-linux-amd64.txt` only by torch's `+cu126` tag and the added
 `nvidia-*`, `cuda-*` and `triton` pins. `scripts/check-aligner-locks-fresh.sh`
 re-resolves it and ci.yml's package-set step checks the non-CUDA pins against
 the CPU amd64 lock, so it cannot drift.
 
-To regenerate BOTH lock files after editing `requirements.in` (never edit
-`requirements-linux-*.txt` by hand -- always regenerate both together, since
+To regenerate ALL THREE per-arch lock files after editing `requirements.in` (never edit
+`requirements-linux-*.txt` by hand -- always regenerate all three together, since
 a stale lock on only one arch is exactly the drift #1017 closes out).
 `--exclude-newer` pins resolution to a fixed point in time so the run is
 reproducible (see "Reproducibility" below) -- update the date to today (UTC)
 when you actually intend to pick up newer releases, and record the new date
-in both files' headers:
+in all three files' headers:
 
 ```bash
 cd deploy/aligner
@@ -392,6 +392,17 @@ for arch in amd64 arm64; do
       --exclude-newer 2026-09-25T07:00:00Z \
       requirements.in -o requirements-linux-$arch.txt"
 done
+
+# CUDA lock (amd64 only): same recipe, cu126 index, its own output file.
+docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
+  bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
+    --python-version 3.14 --python-platform x86_64-manylinux_2_28 \
+    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    --index-strategy unsafe-best-match --no-header --no-emit-index-url \
+    --only-binary :all: --no-binary demucs \
+    --no-binary antlr4-python3-runtime \
+    --exclude-newer 2026-09-25T07:00:00Z \
+    requirements.in -o requirements-linux-amd64-cuda.txt'
 ```
 
 (`--platform linux/amd64` on `docker run` is the HOST container running the

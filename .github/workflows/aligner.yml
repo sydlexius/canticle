@@ -203,9 +203,11 @@ jobs:
     timeout-minutes: 30
     runs-on: ${{ matrix.runner }}
     needs: [build-and-smoke]
-    # Never publish from a PR or a fork; only push-to-main and release tags.
+    # Never publish from a PR, a fork, or a manual workflow_dispatch (that
+    # trigger exists to force VALIDATION only); only push-to-main and release
+    # tags.
     if: >-
-      github.event_name != 'pull_request' &&
+      github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     permissions:
       contents: read
@@ -273,6 +275,10 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     needs: [publish-cpu]
+    # Redundant with publish-cpu's gate via needs; kept as defense in depth.
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     permissions:
       contents: read
       packages: write
@@ -331,9 +337,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     needs: [build-and-smoke]
-    # Never publish from a PR or a fork; only push-to-main and release tags.
+    # Never publish from a PR, a fork, or a manual workflow_dispatch (that
+    # trigger exists to force VALIDATION only); only push-to-main and release
+    # tags.
     if: >-
-      github.event_name != 'pull_request' &&
+      github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     permissions:
       contents: read
