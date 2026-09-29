@@ -593,7 +593,9 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
                  word_timing_state = NULL,
                  word_timing_generation = NULL,
                  word_timing_checked_at = NULL,
-                 sync_tier = NULL
+                 sync_tier = NULL,
+                 upgrade_checked_at = NULL,
+                 upgrade_queued = 0
              WHERE id = ? AND status != 'processing'`,
 			now, id)
 		if err != nil {

@@ -38,7 +38,9 @@ const (
 // 'deferred' row as a provider miss (instrumental backfill/recalib, timing
 // sweep, library/webhook cancel): it is a settled synced row whose .lrc is
 // on disk, parked for the worker only. Dequeue deliberately does NOT use it.
-const notWordRecheckQueued = ` AND COALESCE(word_timing_state, '') <> 'queued'`
+// An upgrade trip (#553, upgrade_queued) is the same shape, a settled file
+// re-queued, so it is excluded too.
+const notWordRecheckQueued = ` AND COALESCE(word_timing_state, '') <> 'queued' AND upgrade_queued = 0`
 
 // WordRecheckOptions narrows the candidate set. Optional fields only SUBTRACT
 // scope, except RecheckAbsentBefore, which re-admits old 'absent' verdicts.
