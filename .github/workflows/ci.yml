@@ -63,6 +63,9 @@ jobs:
               - 'Dockerfile'
               - 'build/docker/**'
               - 'web/**'
+              # Owns the test-shard map: a shard-only change must still run
+              # Lint, whose `ci-shards.sh verify` step is the only CI check of it.
+              - 'scripts/ci-shards.sh'
             # aligner-test's inputs. No workflow files: a CI-only change has
             # nothing for the aligner suite to test.
             aligner:
@@ -80,8 +83,9 @@ jobs:
           # in the map but missing from the matrix has its packages excluded from
           # the dynamic `rest` remainder and therefore run by nobody -- nothing
           # fails, those packages simply stop being tested. One source, no drift.
-          # `ci-shards.sh verify` (in the Go Cache Primer job, and in make gate)
-          # asserts exactly-once coverage before any shard runs.
+          # `ci-shards.sh verify` (in the required Lint job, and in make gate)
+          # asserts exactly-once coverage; scripts/ci-shards.sh is in the `code`
+          # filter above so a shard-map-only change still runs it.
           #
           # Non-code diffs get a single representative `rest` shard so the
           # (skipped) job still has a syntactically valid matrix.

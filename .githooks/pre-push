@@ -1,13 +1,42 @@
 #!/usr/bin/env bash
-# pre-push hook: run the full deterministic gate before any push so a broken
-# build, failing test, lint/vuln finding, workflow-lint error, or unresolved
-# conflict marker is caught locally instead of in CI.
+# pre-push hook: the FAST push path. The full gate is `make gate`; CI's required
+# checks (Lint, Test, Build, Coverage Floor, Analyze Go) are the source of truth.
+#
+# Order:
+#   1. Gate receipt. If /prep-pr's gate-runner.py already gated this exact tree
+#      (a passing gate-receipt/v1 whose tree_sha matches EVERY pushed ref, on a
+#      clean working tree), exit 0 at once rather than re-run the same gate.
+#      scripts/check-push-receipt.sh owns the check and fails closed.
+#   2. Otherwise run `scripts/pre-push-gate.sh --hook`: conflict markers, product
+#      name, gofmt, generate + build, golangci-lint, diff-scoped tests + patch
+#      coverage, actionlint only when a workflow changed, and govulncheck only
+#      when go.mod/go.sum changed. The race suite, coverage floor, shard verify
+#      and codecov dry-run are left to CI (`make gate` runs shard verify;
+#      RUN_RACE=1 adds the rest; see docs/DEVELOPER.md).
 #
 # Wire with: make hooks  (sets core.hooksPath=.githooks, so every worktree
 # inherits both this hook and .githooks/pre-commit).
 #
-# Skip with: git push --no-verify  (use sparingly).
+# Override (stricter only):
+#   PUSH_GATE=full git push ...   run the full `make gate` chain, ignoring any receipt
+# There is deliberately NO skip value: a skip would be an un-floored twin of
+# `--no-verify`. Any value other than empty or `full` fails the push (exit 2).
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-exec bash "$REPO_ROOT/scripts/pre-push-gate.sh"
+
+case "${PUSH_GATE:-}" in
+  "") ;;
+  full) exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" </dev/null ;;
+  *)
+    echo "pre-push: unknown PUSH_GATE='${PUSH_GATE}' (expected empty or full)" >&2
+    exit 2
+    ;;
+esac
+
+# stdin carries the ref lines; the receipt check consumes it, and the fast gate
+# does not need it (it checks HEAD's worktree, as the gate always has).
+if bash "$REPO_ROOT/scripts/check-push-receipt.sh"; then
+  exit 0
+fi
+exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" --hook </dev/null

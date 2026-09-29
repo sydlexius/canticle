@@ -6,6 +6,21 @@
 # mirrors Codecov's patch check. Run this before opening or updating a PR
 # so a coverage regression is caught locally instead of on the next push.
 #
+# Two modes:
+#   (no args)  FULL: every check below. This is `make gate`, and what .gates.toml
+#              [prep_pr] delegates to, so /prep-pr's receipt always means "full".
+#   --hook     FAST: what .githooks/pre-push runs when no gate receipt covers the
+#              push. Additionally skips shard verify (CI's required Lint job
+#              covers it), actionlint unless a workflow changed, and govulncheck
+#              unless go.mod/go.sum changed.
+#
+# Tests (both modes): a NON-race run of the packages changed since the merge base
+# (scripts/hook-test-pkgs.sh, fail-closed to ./...), which feeds patch coverage.
+# The race suite and the coverage floor are CI-authoritative (required Test and
+# Coverage Floor jobs). RUN_RACE=1 opts in to the full `go test -race ./...` run
+# plus the local coverage floor and codecov dry-run, which need its whole-module
+# profile (mirrors stillwater #2230).
+#
 # Exit status:
 #   0  all checks passed
 #   1  a check failed (build, test, lint, vuln, or patch coverage)
@@ -17,6 +32,29 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 fail() { printf 'FAIL: %b\n' "$1" >&2; exit 1; }
+
+MODE=full
+case "${1:-}" in
+  "") ;;
+  --hook) MODE=hook ;;
+  *) echo "usage: $0 [--hook]" >&2; exit 2 ;;
+esac
+
+# Merge base for the diff-scoped hook steps. Fail CLOSED: when no base resolves,
+# CHANGED_ALL=1 widens every scoped step to the whole module rather than to nothing.
+BASE=""
+for ref in origin/main main; do
+  BASE="$(git merge-base "$ref" HEAD 2>/dev/null)" && break
+  BASE=""
+done
+CHANGED_ALL=0
+[ -n "$BASE" ] || CHANGED_ALL=1
+changed() { # changed [pathspec...] -> files changed since BASE (committed or not)
+  # D and --no-renames: a deleted file, and BOTH sides of a rename, are changes
+  # too. Without them a package that lost a file (or had one moved out) is never
+  # selected for testing.
+  git diff --name-only --diff-filter=ACMRD --no-renames "$BASE" -- "$@" 2>/dev/null
+}
 
 # Per-worktree run lock + artifact dir. The mkdir is atomic, so two gate runs in
 # the SAME worktree cannot clobber each other's coverage profile; the key is the
@@ -97,11 +135,40 @@ fi
 echo "==> go build"
 go build ./... || fail "build"
 
-echo "==> go test (race + coverage)"
 # Coverage profile lives inside the locked per-worktree run dir (cleaned by the
 # EXIT trap set above), so concurrent runs never share a path.
 COVER_OUT="$RUN_DIR/coverage.out"
-go test -race -count=1 -coverprofile="$COVER_OUT" ./... || fail "tests"
+# RUN_RACE=1 is the escape hatch to the full CI-equivalent run: `-race ./...`
+# with a whole-module profile (which is also what the coverage floor and codecov
+# dry-run below need). The default, in BOTH modes, is the changed packages only,
+# non-race: CI's required Test job is the authoritative race suite.
+PKGS=()
+if [ "${RUN_RACE:-0}" = 1 ]; then
+  echo "==> go test (full race + coverage; RUN_RACE=1)"
+  go test -race -count=1 -coverprofile="$COVER_OUT" ./... || fail "tests"
+else
+  # EXACT changed packages, not ./dir/... subtrees (the stillwater #2983 lesson:
+  # patch coverage reads only changed files, so a subtree buys nothing local).
+  # scripts/hook-test-pkgs.sh owns the path -> package mapping and fails CLOSED
+  # to ./... (go.mod/go.sum, .templ, embedded assets, migrations, a package left
+  # with no .go file); a missing merge base widens here too.
+  echo "==> go test (changed packages, non-race + coverage; CI runs the race suite, RUN_RACE=1 for it)"
+  if [ "$CHANGED_ALL" -eq 1 ]; then
+    PKGS=(./...)
+  else
+    CHANGED_LIST="$(changed)" || fail "cannot list the files changed since $BASE"
+    PKG_LIST="$(printf '%s\n' "$CHANGED_LIST" | bash scripts/hook-test-pkgs.sh)" ||
+      fail "hook-test-pkgs.sh could not map the changed paths"
+    while IFS= read -r d; do
+      [ -n "$d" ] && PKGS+=("$d")
+    done <<<"$PKG_LIST"
+  fi
+  if [ "${#PKGS[@]}" -gt 0 ]; then
+    go test -coverprofile="$COVER_OUT" "${PKGS[@]}" || fail "tests"
+  else
+    echo "    no Go-relevant path changed since $BASE; no packages to test"
+  fi
+fi
 
 echo "==> patch coverage (Codecov parity, conservative lower bound)"
 # OPTIONAL local enhancement. The estimator lives in claude-kit
@@ -114,7 +181,12 @@ echo "==> patch coverage (Codecov parity, conservative lower bound)"
 # Overridable so the exit-code branches below can be exercised against a stub,
 # following the TAILWIND_BIN convention above. Unset -> the real estimator.
 HELPER="${PATCH_COVERAGE_HELPER:-$HOME/.claude/scripts/patch-coverage.sh}"
-if [ -x "$HELPER" ]; then
+if [ "${RUN_RACE:-0}" != 1 ] && [ "${#PKGS[@]}" -eq 0 ]; then
+  # Fail-closed: skip ONLY when no package was selected. If packages ran but
+  # produced no profile, fall through so the estimator errors (exit 2) rather
+  # than false-passing.
+  echo "    no changed Go packages, so no profile to measure; skipping"
+elif [ -x "$HELPER" ]; then
   # BRANCH ON THE EXIT CODE, never a bare `||` (#768). The estimator defines four
   # codes whose remedies DIFFER, and two of them are OPPOSITE: exit 1 means write
   # tests, exit 3 means commit what you already wrote. A bare `||` collapsed all of
@@ -163,6 +235,7 @@ else
   echo "    (install claude-kit for the local check)"
 fi
 
+if [ "${RUN_RACE:-0}" = 1 ]; then
 echo "==> coverage floor (per-package ratchet -- informational; CI enforces)"
 # CI-only enforcement (#399): the *enforced* gate is the required "Coverage Floor"
 # CI job, which runs on a clean runner. Locally this is INFORMATIONAL only -- a
@@ -211,6 +284,10 @@ else
   echo "    codecovcli not installed; skipping (CI uploads coverage)."
   echo "    (pipx install codecov-cli for the local check)"
 fi
+else
+  echo "==> coverage floor + codecov report validation"
+  echo "    skipped: they need a whole-module profile; CI's Coverage Floor and Upload Coverage jobs are authoritative (RUN_RACE=1 runs them locally)"
+fi # RUN_RACE=1: coverage floor + codecov dry-run (a partial profile would misread both)
 
 echo "==> golangci-lint"
 # A REMOVED WORKTREE POISONS THE SHARED LINT CACHE (#669). golangci-lint's cache
@@ -259,7 +336,9 @@ fi
 golangci-lint run ./... || fail "lint"
 
 echo "==> actionlint (workflow lint)"
-if command -v actionlint >/dev/null 2>&1; then
+if [ "$MODE" = hook ] && [ "$CHANGED_ALL" -eq 0 ] && [ -z "$(changed '.github/workflows/*')" ]; then
+  echo "    no workflow changed since $BASE; skipping"
+elif command -v actionlint >/dev/null 2>&1; then
   actionlint || fail "actionlint"
 else
   echo "    actionlint not installed; skipping (CI still lints workflows)"
@@ -272,17 +351,27 @@ fi
 # Needs Bash 4+ (declare -A); stock macOS /bin/bash is 3.2, so skip rather than
 # fail when only an old shell is available -- CI runs it on ubuntu-latest.
 echo "==> ci-shards (test-shard split integrity)"
-if bash -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null; then
+if [ "$MODE" = hook ]; then
+  echo "    skipped in the push hook; CI's required Lint job verifies it (ci.yml runs Lint when scripts/ci-shards.sh changes)"
+elif bash -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null; then
   bash scripts/ci-shards.sh verify || fail "ci-shards verify"
 else
   echo "    bash 4+ not available; skipping (CI still verifies the shard split)"
 fi
 
 echo "==> govulncheck"
-if command -v govulncheck >/dev/null 2>&1; then
+# No CI job runs govulncheck, and pre-commit does NOT cover every case: it never
+# runs for a merge, rebase, cherry-pick or `git commit --no-verify`. So the hook
+# runs it whenever the dependency set changed since the merge base (go.mod or
+# go.sum, the likeliest way a new vulnerable module arrives, e.g. a merge from
+# main). A vuln-DB update against unchanged deps is still only caught by
+# `make gate` / `make vulncheck`.
+if [ "$MODE" = hook ] && [ "$CHANGED_ALL" -eq 0 ] && [ -z "$(changed go.mod go.sum)" ]; then
+  echo "    go.mod/go.sum unchanged since $BASE; skipping (make gate / make vulncheck run it)"
+elif command -v govulncheck >/dev/null 2>&1; then
   govulncheck ./... || fail "govulncheck"
 else
-  echo "    govulncheck not installed; skipping (CI still enforces it)"
+  echo "    govulncheck not installed; skipping (no CI job runs it; install it or run make vulncheck)"
 fi
 
-echo "OK: all pre-push checks passed"
+echo "OK: all pre-push checks passed ($MODE)"
