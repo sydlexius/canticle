@@ -277,6 +277,12 @@ type Song struct {
 	// zero here and the caller re-stamps it from the live file, which is correct
 	// -- the duration belongs to the file on disk, not to the cached lyrics.
 	AudioDurationSeconds int `json:"-"`
+	// AudioPath is the AUDIO FILE this song's sidecar belongs to, stamped by the
+	// caller that knows it (serve worker, fetch-mode directory input). Empty
+	// means unknown, and the writer then never bumps an audio mtime (#505).
+	// Transient like AudioDurationSeconds: the path belongs to the live file,
+	// never to cached lyrics.
+	AudioPath string `json:"-"`
 	// WordAnswer is what the serving lane said about WORD-level timing for this
 	// track (#982): served, absent (the lane affirmatively has none), or unknown
 	// (the zero value: the lane did not say, or could not be read). It is a

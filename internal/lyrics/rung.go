@@ -212,7 +212,7 @@ var errNotRegular = errors.New("not a regular file")
 // (openNoFollow), and the fstat of the opened handle must report a regular
 // file, so an entry swapped in between the Lstat and the open is refused
 // rather than read. Any error means "could not judge": callers keep the file.
-func readRegularNoFollow(path string) ([]byte, error) {
+func readRegularNoFollow(path string, limit ...int64) ([]byte, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -232,5 +232,16 @@ func readRegularNoFollow(path string) ([]byte, error) {
 	if !hfi.Mode().IsRegular() || !os.SameFile(fi, hfi) {
 		return nil, errNotRegular
 	}
+	if len(limit) > 0 {
+		// One byte past the cap tells "exactly at" from "over".
+		b, err := io.ReadAll(io.LimitReader(f, limit[0]+1))
+		if err == nil && int64(len(b)) > limit[0] {
+			return nil, errTooLarge
+		}
+		return b, err
+	}
 	return io.ReadAll(f)
 }
+
+// errTooLarge is readRegularNoFollow's refusal of a file over its optional cap.
+var errTooLarge = errors.New("file over size cap")

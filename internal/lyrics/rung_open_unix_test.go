@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestReadRegularNoFollow_HandleIsJudged: the open itself refuses a symlink
@@ -40,5 +41,37 @@ func TestReadRegularNoFollow_HandleIsJudged(t *testing.T) {
 		if _, err := readRegularNoFollow(p); err == nil {
 			t.Errorf("readRegularNoFollow(%s) read a non-regular entry", filepath.Base(p))
 		}
+	}
+}
+
+// TestReadCapped_SafeRead: the bump's prior-body read shares readRegularNoFollow,
+// so a FIFO at the sidecar path cannot hang it and a symlink is not followed.
+func TestReadCapped_SafeRead(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo.lrc")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	done := make(chan bool, 1)
+	go func() { _, ok := readCapped(fifo); done <- ok }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Error("readCapped read a FIFO")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readCapped blocked on a FIFO")
+	}
+	target := filepath.Join(dir, "target")
+	seed(t, target, "x")
+	link := filepath.Join(dir, "link.lrc")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if _, ok := readCapped(link); ok {
+		t.Error("readCapped followed a symlink")
+	}
+	if b, ok := readCapped(target); !ok || string(b) != "x" {
+		t.Errorf("readCapped(regular) = %q, %v", b, ok)
 	}
 }
