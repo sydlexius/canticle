@@ -89,6 +89,16 @@ dir = "lyrics"
 # translation track is present), only the original track is written.
 # bilingual_output = false
 
+# Audio mtime bump (env: MXLRC_OUTPUT_BUMP_AUDIO_MTIME). Default false.
+# WARNING: when true, canticle WRITES TO YOUR AUDIO FILES (modified time only,
+# never their content) after it replaces an existing sidecar with different
+# lyrics. It exists for Music Assistant, which detects changes by audio mtime and
+# never re-reads a rewritten sidecar; Emby does not need it. Every tool keyed on
+# audio mtime reacts: Lidarr may re-import, Emby/Jellyfin may refresh the item,
+# tdarr may re-evaluate or re-transcode, and mtime-keyed backups re-copy the file.
+# See docs/CONFIGURATION.md.
+# bump_audio_mtime = false
+
 # Enhanced-LRC (A2) word markers, a.k.a. karaoke-style per-word timing.
 # Default false. When true AND a provider serves word-level timings (Musixmatch
 # or Petit Lyrics' word-synced tier), each cue keeps its normal [MM:SS.cc] stamp and

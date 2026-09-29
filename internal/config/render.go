@@ -65,6 +65,7 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("dir = %s%s\n", cfg.Output.Dir, ann("output.dir"))
 	p("embedded_lyrics = %s%s\n", cfg.Output.EmbeddedLyrics, ann("output.embedded_lyrics"))
 	p("bilingual_output = %t%s\n", cfg.Output.BilingualOutput, ann("output.bilingual_output"))
+	p("bump_audio_mtime = %t%s\n", cfg.Output.BumpAudioMtime, ann("output.bump_audio_mtime"))
 	p("word_sync = %t%s\n", cfg.Output.WordSync, ann("output.word_sync"))
 	p("word_sync_mode = %s%s\n", cfg.Output.WordSyncMode, ann("output.word_sync_mode"))
 	p("\n")
@@ -356,6 +357,7 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			strAttr("dir", "output.dir", cfg.Output.Dir),
 			strAttr("embedded_lyrics", "output.embedded_lyrics", cfg.Output.EmbeddedLyrics),
 			boolAttr("bilingual_output", "output.bilingual_output", cfg.Output.BilingualOutput),
+			boolAttr("bump_audio_mtime", "output.bump_audio_mtime", cfg.Output.BumpAudioMtime),
 			boolAttr("word_sync", "output.word_sync", cfg.Output.WordSync),
 			strAttr("word_sync_mode", "output.word_sync_mode", string(cfg.Output.WordSyncMode)),
 		),

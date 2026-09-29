@@ -66,6 +66,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_OUTPUT_DIR` | XDG / `/music` | Output directory for `fetch` mode. **Ignored in `serve` mode** (lyrics are written next to the audio file; the metadata-only webhook fallback uses the internal default). |
 | `MXLRC_EMBEDDED_LYRICS` | `off` | Embedded lyrics handling. `off` - ignore (default); `respect` - skip fetching when embedded lyrics exist; `extract` - write embedded lyrics to a sidecar, then skip fetching. A timestamped Vorbis `SYNCEDLYRICS` comment is written as a synced `.lrc` (preferred); unsynced lyrics become `.txt`. ID3 `SYLT` / MP4 atoms are not handled. |
 | `MXLRC_BILINGUAL_OUTPUT` | `false` | When `true` and a provider returns a translation track, interleave original and translated lines under shared timestamps in a single `.lrc`. |
+| `MXLRC_OUTPUT_BUMP_AUDIO_MTIME` | `false` | **Writes to your audio files** (modified time only). When `true`, Canticle bumps the audio file's mtime after it replaces an existing sidecar with different lyrics. See [`bump_audio_mtime`](#output). |
 | `MXLRC_DB_PATH` | XDG / `/config/mxlrcgo.db` | SQLite database path. |
 | `MXLRC_DOCKER` | `false` | When `true`, storage defaults resolve under `/config`. Set automatically in the images. |
 | `MXLRC_MASTER_KEY` | (none) | Optional. Base64 of 32 random bytes; overrides the auto-generated key file as the master key for encrypted-at-rest secrets. When set, no key file is read or written. Use for key/data separation (recommended Docker hardening when the threat model includes whole-volume theft). Generate with `openssl rand -base64 32`. See the [Encrypted secrets](USER_GUIDE.md#encrypted-secrets) guide. |
@@ -175,11 +176,22 @@ Request cooldown, the worker circuit-breaker window, and miss re-check backoff (
 dir = "lyrics"
 # embedded_lyrics = "off"
 # bilingual_output = false
+# bump_audio_mtime = false   # WRITES TO AUDIO FILES, see below
 # word_sync = false          # deprecated, see word_sync_mode
 # word_sync_mode = "both"
 ```
 
-Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`, `MXLRC_WORD_SYNC`, `MXLRC_WORD_SYNC_MODE`; CLI: `--embedded-lyrics`).
+Fallback output directory and per-file output controls (env: `MXLRC_OUTPUT_DIR`, `MXLRC_EMBEDDED_LYRICS`, `MXLRC_BILINGUAL_OUTPUT`, `MXLRC_OUTPUT_BUMP_AUDIO_MTIME`, `MXLRC_WORD_SYNC`, `MXLRC_WORD_SYNC_MODE`; CLI: `--embedded-lyrics`).
+
+`bump_audio_mtime` (default `false`): **enabling this makes Canticle write to your audio files, not only its own sidecars.** Only the file's modified time changes (via `os.Chtimes`; the content is never opened and the access time is left alone), and only right after Canticle replaces an existing sidecar with different lyrics: a `.txt` promoted to `.lrc`, or an `.lrc` replaced by better or corrected content, by a directory-mode fetch (song and text-file mode never bump), `--upgrade`/`--update`, the serve upgrade sweep, or a word-sync recheck under `word_sync_mode = replace` (under the default `both` only the `.elrc` companion changes, so nothing bumps). Only the sidecar that sits beside the audio file and shares its name bumps that file. A symlinked audio file has its target bumped. A first-ever sidecar write, a refused write (a better sidecar is already on disk), and a rewrite whose lyrics are unchanged never bump. It exists for **Music Assistant**, which detects changes by audio mtime and never re-reads a rewritten sidecar. **Emby** re-reads sidecars on its own library scan and does not need it. A failed bump logs a warning and never undoes or fails the sidecar write. The blast radius is every tool that keys on audio mtime, so weigh it before turning this on:
+
+- Lidarr may re-import or re-evaluate the file.
+- Emby and Jellyfin may refresh the library item.
+- tdarr may re-evaluate the file and potentially re-transcode it.
+- Any other watcher keyed on audio mtime will fire.
+- Backup tooling keyed on mtime will re-copy the file.
+
+Canticle itself does not react to its own bump: the watcher ignores the event, no track is re-queued, and each mtime-keyed cache (duration, metadata, scan-failure store) re-reads the file once. Not covered: the first sidecar for a track, and sidecar changes made by `realign`, `revalidate`, `scan reconcile-editor-tag`, the LRC backfill, the instrumental backfill or its recalibrate command.
 
 `embedded_lyrics` controls how lyrics already embedded in the audio file's tags are handled. `off` (default) ignores them and always fetches from providers. `respect` skips fetching for files that already carry embedded lyrics. `extract` writes the embedded lyrics to a sidecar (never overwriting an existing one) and then skips fetching: a Vorbis `SYNCEDLYRICS` comment carrying timestamped LRC text is written as a synced `.lrc` and takes precedence over unsynced lyrics, which are written as `.txt`. ID3 `SYLT` and MP4 synced-lyric atoms are intentionally not handled.
 

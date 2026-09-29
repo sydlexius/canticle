@@ -416,6 +416,7 @@ func settingsInputType(spec config.FieldSpec) string {
 // choices (on-label, off-label), so the page never renders a bare true/false.
 var boolLabels = map[string][2]string{
 	"output.bilingual_output":               {"Save original and translation together", "Save one language only"},
+	"output.bump_audio_mtime":               {"Touch the audio file's modified time after a correction", "Leave audio files alone"},
 	"output.word_sync":                      {"Highlight each word as it is sung", "Highlight whole lines only"},
 	"verification.enabled":                  {"Verify lyrics against the audio", "Don't verify"},
 	"instrumental_detector.enabled":         {"Detect instrumental tracks", "Don't detect"},
@@ -1046,6 +1047,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return cfg.Output.EmbeddedLyrics
 	case "output.bilingual_output":
 		return strconv.FormatBool(cfg.Output.BilingualOutput)
+	case "output.bump_audio_mtime":
+		return strconv.FormatBool(cfg.Output.BumpAudioMtime)
 	case "output.word_sync":
 		return strconv.FormatBool(cfg.Output.WordSync)
 	case "output.word_sync_mode":
@@ -1305,6 +1308,7 @@ var settingsLabels = map[string]string{
 	"output.dir":                     "Where to save lyrics",
 	"output.embedded_lyrics":         "What to do with lyrics already in the file",
 	"output.bilingual_output":        "Save the original and the translation together",
+	"output.bump_audio_mtime":        "Bump the audio file's modified time after a lyric correction",
 	"output.word_sync":               "Highlight each word as it is sung (karaoke style)",
 	"output.word_sync_mode":          "Where per-word karaoke timings are saved",
 	"providers.primary":              "Main lyrics source",

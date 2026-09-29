@@ -1200,6 +1200,22 @@ func TestConfigInstrumentalDetectorOrderingGetSetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigBumpAudioMtimeGetSet(t *testing.T) {
+	cfg := config.Config{}
+	if got, ok := configValue(cfg, "output.bump_audio_mtime"); !ok || got != "false" {
+		t.Fatalf("configValue = %q, %v; want false, true", got, ok)
+	}
+	if !slices.Contains(configKeys(), "output.bump_audio_mtime") {
+		t.Fatal("configKeys missing output.bump_audio_mtime")
+	}
+	if err := setConfigValue(&cfg, "output.bump_audio_mtime", "true"); err != nil || !cfg.Output.BumpAudioMtime {
+		t.Fatalf("set true: err=%v value=%v", err, cfg.Output.BumpAudioMtime)
+	}
+	if err := setConfigValue(&cfg, "output.bump_audio_mtime", "maybe"); err == nil {
+		t.Fatal("accepted a non-boolean")
+	}
+}
+
 func TestConfigBilingualOutputGetSetRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		Output: config.OutputConfig{BilingualOutput: true},
@@ -3328,6 +3344,42 @@ func TestConfigureWriterForce(t *testing.T) {
 		}
 	}
 	configureWriterForce(fakeWriter{}, true) // a non-LRCWriter is left alone
+}
+
+// TestConfigureWriterAudioMtimeBump: output.bump_audio_mtime reaches the writer
+// (#505). Driven through one in-place correction, since the flag is unexported.
+func TestConfigureWriterAudioMtimeBump(t *testing.T) {
+	old := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, on := range []bool{false, true} {
+		dir := t.TempDir()
+		audio := filepath.Join(dir, "s.flac")
+		for _, f := range []string{audio, filepath.Join(dir, "s.txt")} {
+			if err := os.WriteFile(f, []byte("old\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chtimes(audio, old, old); err != nil {
+			t.Fatal(err)
+		}
+		w := lyrics.NewLRCWriter()
+		configureWriterAudioMtimeBump(w, config.Config{Output: config.OutputConfig{BumpAudioMtime: on}})
+		song := models.Song{
+			Track:     models.Track{ArtistName: "A", TrackName: "T"},
+			Subtitles: models.Synced{Lines: []models.Lines{{Text: "x", Time: models.Time{Seconds: 1}}}},
+			AudioPath: audio,
+		}
+		if err := w.WriteLRC(song, "s.flac", dir); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := os.Stat(audio)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bumped := !fi.ModTime().Equal(old); bumped != on {
+			t.Errorf("bump_audio_mtime=%v: audio mtime bumped=%v", on, bumped)
+		}
+	}
+	configureWriterAudioMtimeBump(fakeWriter{}, config.Config{}) // a non-LRCWriter is left alone
 }
 
 // TestConfigureWriterWordSyncCompanion covers the companion half of the mode
