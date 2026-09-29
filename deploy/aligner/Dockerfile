@@ -2,16 +2,18 @@
 # readability; Docker resolves by the digest. Update both together -- use the
 # multi-arch manifest-list (index) digest, NOT a local arch-specific one, so
 # the pin resolves on any build arch:
-#   docker buildx imagetools inspect python:3.13-slim --format '{{.Manifest.Digest}}'
+#   docker buildx imagetools inspect python:3.14-slim --format '{{.Manifest.Digest}}'
 #
-# 3.13, the latest mainline CPython every package in this closure ships a
-# linux/amd64 + linux/arm64 wheel for (#1017; torch 2.8.0, torchaudio 2.8.0,
-# and ctranslate2 4.8.2 all publish cp313 manylinux wheels on both arches).
-# 3.14 is NOT possible yet: torch 2.8.0 has no cp314 wheel on any platform.
-# Both 3.11-slim (the prior base) and 3.13-slim resolve to Debian trixie
-# (glibc 2.41), so the amd64 execstack analysis below is unaffected by this
-# bump.
-FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0
+# 3.14, the latest mainline CPython every native package in this closure
+# ships a linux/amd64 + linux/arm64 wheel for (#1068: torch 2.14.0,
+# torchaudio 2.11.0, ctranslate2 4.8.2, onnxruntime 1.30.0, av, numpy,
+# tokenizers, ... all publish cp314 manylinux wheels on both arches; the
+# lock's --only-binary recipe enforces that, with demucs and
+# antlr4-python3-runtime the two pure-Python sdist-only exceptions). 3.13 was the
+# ceiling while torch was held at 2.8.0, which has no cp314 wheel (#1017).
+# 3.11-slim, 3.13-slim and 3.14-slim all resolve to Debian trixie (glibc
+# 2.41), so the amd64 execstack analysis below is unaffected by the bump.
+FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
 
 # ffmpeg decodes every upload (app.decode_pcm is the sidecar's ONE audio
 # decode path, #1016), so any container Canticle's library holds is accepted;
@@ -61,10 +63,11 @@ COPY requirements-linux-amd64.txt requirements-linux-arm64.txt ./
 # lock was generated against the CPU index resolution, so a same-name,
 # same-version artifact from the wrong index (or a future PyPI release)
 # fails the hash check rather than installing silently. torch/torchaudio
-# specifically pin `torch==2.8.0+cpu` (or, on aarch64, `torchaudio==2.8.0`
-# where the CPU index and PyPI happen to publish the identical wheel) -- an
-# exact version string pip cannot satisfy from PyPI's `2.8.0` CUDA build, so
-# it is forced to the CPU index regardless of search order. The CUDA variant
+# specifically pin `torch==2.14.0+cpu` / `torchaudio==2.11.0+cpu` on both
+# arches -- an exact version string pip cannot satisfy from PyPI's `2.14.0`
+# CUDA build, so it is forced to the CPU index regardless of search order.
+# (torchaudio 2.11 declares no torch dependency at all; its extension is
+# built against torch's stable ABI, see requirements.in.) The CUDA variant
 # is issue #1013's, not this image's.
 # Quoted with a `:-` default (not bare "$TARGETARCH"): this script runs
 # under `set -u`, and an unset TARGETARCH -- buildx always sets it, but a
@@ -132,6 +135,20 @@ COPY app.py _aligner_models.py smoke_decode.py .
 # table here rather than at request time. Model WEIGHTS are not downloaded
 # here (no network, no baked weights -- see README "Known limitations"), only
 # the torchaudio.pipelines bundle NAME is checked to exist.
+# forced_align/merge_tokens are CALLED, not just imported (#1068): torchaudio
+# 2.11 is a stable-ABI extension paired with a newer torch, and an import
+# succeeds even when the compiled op is missing or will not bind (the
+# decorator only fails at call time). The 4-frame, 2-token emission below has
+# one best Viterbi path by a wide margin (1,1,blank,2), so the asserted spans
+# are exact, not a tolerance.
+RUN python -c "\
+import torch; \
+from torchaudio.functional import forced_align, merge_tokens; \
+em = torch.log(torch.tensor([[[0.1, 0.8, 0.1], [0.1, 0.8, 0.1], [0.8, 0.1, 0.1], [0.1, 0.1, 0.8]]])); \
+path, scores = forced_align(em, torch.tensor([[1, 2]], dtype=torch.int32), blank=0); \
+spans = [(s.token, s.start, s.end) for s in merge_tokens(path[0], scores[0].exp(), blank=0)]; \
+assert spans == [(1, 0, 2), (2, 3, 4)], 'forced_align/merge_tokens returned %r' % spans; \
+print('forced_align ok:', spans)"
 RUN python -c "\
 import ctranslate2, faster_whisper, torchaudio, torch, transformers; \
 import demucs.pretrained, demucs.apply; \

@@ -16,6 +16,7 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/realign"
 	"github.com/sydlexius/canticle/internal/revalidate"
 	"github.com/sydlexius/canticle/internal/scanner"
@@ -116,7 +117,7 @@ func runRevalidate(ctx context.Context, out io.Writer, args RevalidateCmd) int {
 		_, _ = fmt.Fprintf(out, "revalidate: %d file(s) would be remediated%s\n", len(plan.Moves), suffixRevalidateDryRun(args.Apply))
 		return 0
 	}
-	return applyRevalidate(out, cfg, args, plan)
+	return applyRevalidate(ctx, out, cfg, sqlDB, args, plan)
 }
 
 // revalidateRoots resolves the roots to walk: explicit positionals win, then a
@@ -152,7 +153,7 @@ func revalidateRoots(ctx context.Context, out io.Writer, sqlDB *sql.DB, args Rev
 
 // applyRevalidate runs the planned actions through realign.Apply and prints the
 // aggregate outcome.
-func applyRevalidate(out io.Writer, cfg config.Config, args RevalidateCmd, plan revalidate.Plan) int {
+func applyRevalidate(ctx context.Context, out io.Writer, cfg config.Config, sqlDB *sql.DB, args RevalidateCmd, plan revalidate.Plan) int {
 	if len(plan.Moves) == 0 {
 		_, _ = fmt.Fprintln(out, "revalidate: nothing to remediate")
 		return 0
@@ -168,7 +169,11 @@ func applyRevalidate(out io.Writer, cfg config.Config, args RevalidateCmd, plan 
 	}
 
 	var demoted, quarantined, purged, failed int
+	notDone := map[string]struct{}{}
 	for _, a := range applied {
+		if a.Err != nil || a.GatedSkipped {
+			notDone[a.Move.Orphan] = struct{}{}
+		}
 		if a.Err != nil {
 			failed++
 			// Per-file detail goes to the structured log, never to stdout.
@@ -185,8 +190,126 @@ func applyRevalidate(out io.Writer, cfg config.Config, args RevalidateCmd, plan 
 		}
 	}
 	_, _ = fmt.Fprintf(out, "revalidate applied: demoted=%d quarantined=%d purged=%d failed=%d\n", demoted, quarantined, purged, failed)
+	stamped, inFlight, stampFailed := stampRemediatedRows(ctx, queue.NewDBQueue(sqlDB), plan.Findings, notDone)
+	_, _ = fmt.Fprintf(out, "revalidate: %d work-queue row(s) stamped to match the remediated files\n", stamped)
+	if inFlight > 0 {
+		_, _ = fmt.Fprintf(out, "revalidate: %d work-queue row(s) in flight, left for the worker's own verdict\n", inFlight)
+	}
+	if stampFailed > 0 {
+		_, _ = fmt.Fprintf(out, "revalidate: %d work-queue lookup/stamp operation(s) FAILED; the remediated files are already changed and a re-run cannot retry them (see the log)\n", stampFailed)
+	}
 	_, _ = fmt.Fprintf(out, "backup of applied actions written to %s\n", backupPath)
-	if failed > 0 {
+	if failed > 0 || stampFailed > 0 {
+		return 1
+	}
+	return 0
+}
+
+// stampRemediatedRows leaves each remediated file's coupled work_queue row
+// reflecting disk (#1082), through the SAME record the serve-mode sweep writes
+// (timingRecordFor + a guarded SetTimingOutcomeIfIdle), so the reports' remediation guard
+// (timing_outcome IN categorical/mis_synced/degenerate) excludes the row exactly
+// as it does after a sweep. Every stamped verdict is one of those three (the
+// remediable ones), so the guard does exclude each row this stamps; it is NOT a
+// claim about every timing_outcome value. It returns how many rows were stamped,
+// how many were IN FLIGHT, and how many lookup/stamp operations FAILED.
+//
+// APPLY BEFORE STAMP: notDone holds the sidecar paths whose action failed or was
+// gated-skipped; those stay unstamped so a later run retries them. A row is also
+// left unstamped when ANY sidecar sharing its audio file failed (case-variant
+// Track.lrc + Track.LRC judge against one audio; stamping on a partial failure
+// would retire the row while a sidecar is still on disk). The row is found by
+// EVERY same-stem audio sibling, since it may name a different copy than the
+// one the resolver judged against. Only findings that planned a remediation are
+// stamped; a file with no row is skipped.
+//
+// ONE STAMP PER ROW: findings are first aggregated by resolved row id, so two
+// findings that resolve to the same row (case-variant sidecars, or several
+// audio copies of one track) write and count it once. When they disagree the
+// MOST SEVERE outcome wins (categorical > mis_synced > degenerate; see
+// outcomeSeverity), so the persisted verdict never depends on finding order.
+//
+// IN FLIGHT: IDsBySourcePaths excludes 'processing' rows, but the worker can
+// claim a row between that lookup and the stamp. The stamp is therefore guarded
+// (status <> 'processing') and a 0-rows-affected result is counted as in flight,
+// NOT as a failure: the worker is rewriting that very sidecar and stamps its own
+// verdict, which supersedes ours, while an unguarded write could leave our stale
+// categorical/mis_synced verdict on a row describing a file the worker just
+// rewrote (its stampTimingOutcome returns early for non-synced outcomes and
+// word-recheck never stamps timing_outcome). The exit code is unchanged.
+//
+// A failure is returned as a count, not swallowed: the file is already
+// remediated and a later CLI run cannot rediscover it (the sidecar is gone), so
+// the caller must exit non-zero rather than report a success that silently lost
+// the row. The detail is logged (the row id is safe, the path is not); stdout
+// carries only the aggregate.
+func stampRemediatedRows(ctx context.Context, q rowStamper, findings []revalidate.Finding, notDone map[string]struct{}) (stamped, inFlight, failed int) {
+	badAudio := map[string]struct{}{}
+	for _, f := range findings {
+		if _, bad := notDone[f.Path]; bad && f.AudioPath != "" {
+			badAudio[f.AudioPath] = struct{}{}
+		}
+	}
+	byRow := map[int64]revalidate.Finding{}
+	var order []int64
+	for _, f := range findings {
+		if f.Action == "" || f.AudioPath == "" {
+			continue
+		}
+		if _, bad := badAudio[f.AudioPath]; bad {
+			continue
+		}
+		ids, err := q.IDsBySourcePaths(ctx, revalidate.SiblingAudioPaths(f.AudioPath))
+		if err != nil {
+			slog.Error("revalidate: could not resolve a remediated file to its work-queue row", "error", err)
+			failed++
+			continue
+		}
+		for _, id := range ids {
+			prev, seen := byRow[id]
+			if !seen {
+				order = append(order, id)
+			}
+			if !seen || outcomeSeverity(f.Outcome) > outcomeSeverity(prev.Outcome) {
+				byRow[id] = f
+			}
+		}
+	}
+	for _, id := range order {
+		ok, serr := q.SetTimingOutcomeIfIdle(ctx, id, timingRecordFor(byRow[id]))
+		if serr != nil {
+			slog.Error("revalidate: could not stamp a remediated row", "id", id, "error", serr)
+			failed++
+			continue
+		}
+		if !ok {
+			slog.Info("revalidate: row went in flight before the stamp; the worker's verdict supersedes", "id", id)
+			inFlight++
+			continue
+		}
+		stamped++
+	}
+	return stamped, inFlight, failed
+}
+
+// rowStamper is the queue surface stampRemediatedRows needs; *queue.DBQueue
+// satisfies it, and a test can interpose between lookup and stamp.
+type rowStamper interface {
+	IDsBySourcePaths(ctx context.Context, sourcePaths []string) ([]int64, error)
+	SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec queue.TimingRecord) (bool, error)
+}
+
+// outcomeSeverity ranks the remediable verdicts for stampRemediatedRows when
+// findings disagree about one row: categorical (another song's words) is worse
+// than mis_synced (right words, wrong timing), which is worse than degenerate
+// (not synced at all). Anything else ranks 0.
+func outcomeSeverity(o timing.TimingOutcome) int {
+	switch o {
+	case timing.Categorical:
+		return 3
+	case timing.MisSynced:
+		return 2
+	case timing.Degenerate:
 		return 1
 	}
 	return 0

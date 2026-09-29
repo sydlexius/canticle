@@ -3,26 +3,36 @@
 # top-level-only requirements.txt). The full transitive hash lock is
 # per-architecture: requirements-linux-amd64.txt / requirements-linux-arm64.txt
 # (see either file's header for the exact regeneration command).
-fastapi==0.138.0
-uvicorn[standard]==0.49.0
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
 python-multipart==0.0.32
-# torch/torchaudio held at 2.8.0: torchaudio 2.9 moves load/save onto
-# TorchCodec (its matching 0.8.x has no linux/arm64 wheel), and removes
-# list_audio_backends and torchaudio.functional.forced_align/merge_tokens,
-# which this sidecar's own forced-alignment code calls directly (#1016
-# dropped whisperx, which is the only thing that called list_audio_backends;
-# forced_align/merge_tokens are still this sidecar's own dependency). 2.8.0
-# ships cp313 manylinux wheels for both aarch64 and x86_64 (#1017 moved the
-# base image to Python 3.13; 2.8.0 shipped cp311 wheels too, when this
-# comment was written against 3.11).
+# torch 2.14.0 / torchaudio 2.11.0 (#1068; previously held at 2.8.0).
+# torch must be >= 2.13.0, the highest first-patched version among the torch
+# advisories open against the 2.8.0 pin. torchaudio 2.11.0 is its LAST
+# release, and it is built against torch's stable C ABI (abi3 extension, no
+# torch pin in its metadata) so it runs on later torch; 2.9/2.10 pin
+# torch==<same version> and cannot pair with a patched torch.
+# The old hold's reasons, re-checked against the 2.11.0 wheel:
+#   - torchaudio.functional.forced_align / merge_tokens (this sidecar's
+#     forced-alignment core) are still present and still compiled in; a
+#     build-time step in the Dockerfile CALLS both on a tiny emission.
+#   - load/save moved onto TorchCodec, but this sidecar never calls them: every
+#     decode goes through ffmpeg (app.decode_pcm) and the stem is written with
+#     the stdlib wave module (#1016), so TorchCodec is NOT installed.
+#   - list_audio_backends is gone, but only whisperx called it (#1016).
+# Both ship cp314 manylinux wheels for aarch64 and x86_64 (see Dockerfile).
 # The Dockerfile installs from the arch-specific requirements-linux-*.txt
 # lock, whose torch/torchaudio entries resolve against the PyTorch CPU index
 # (https://download.pytorch.org/whl/cpu) via --extra-index-url: PyPI's
 # x86_64 torch is the CUDA build and pulls ~5 GB of nvidia-*-cu12 libraries.
 # Keep the pins in exactly this `name==version` form -- it is what the lock
 # regeneration command resolves against.
-torch==2.8.0
-torchaudio==2.8.0
+torch==2.14.0
+torchaudio==2.11.0
+# demucs is held at 4.0.1 (#1102 tracks 4.1.0): 4.1.0 requires sphn>=0.1.12,
+# which publishes no linux-aarch64 wheel (sdist only), and python:3.14-slim has
+# no compiler, so the arm64 image build fails. Revisit once sphn ships an
+# aarch64 wheel; Dependabot skips demucs >= 4.1 (.github/dependabot.yml).
 demucs==4.0.1
 # faster-whisper: the transcript pass (#1016, replaces whisperx, which only
 # wrapped this same library plus its own bundled pyannote VAD). transformers:

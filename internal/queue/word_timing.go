@@ -85,14 +85,14 @@ type WordRecheckOptions struct {
 // so a dry-run count can never describe a different population than the rows
 // an apply flips. status='done' excludes 'processing' (the worker owns
 // it) and non-settled rows (fetched anyway); timing-rejected rows are never
-// re-examined (mis_synced is #1007's retime source); source_path is required
+// re-examined (mis_synced is #1007's retime source; degenerate is a demotion too, #1082); source_path is required
 // because the sidecar is derived from it.
 func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	var b strings.Builder
 	var args []any
 	b.WriteString(` status = 'done'
    AND outcome_type = 'synced'
-   AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced')
+   AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
    AND TRIM(COALESCE(source_path, '')) <> ''
    AND ((word_timing_state IS NULL`)
 	if !opts.UnexaminedCheckedBefore.IsZero() {

@@ -161,6 +161,11 @@ type Finding struct {
 	// watermark by this id, which is what retires the row from the backlog
 	// query and makes the pass converge.
 	ID int64
+	// AudioPath is the companion audio file the sidecar was judged against, set
+	// whenever one was resolved. It is what lets a walk-mode caller (the CLI)
+	// find the coupled work_queue row, which is keyed by its audio source_path
+	// rather than by the sidecar. Never printed to stdout.
+	AudioPath string
 }
 
 // Counts is the aggregate report. It is the ONLY thing safe to print.
@@ -551,7 +556,7 @@ func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, pla
 		plan.Counts.Errored++
 		return nil
 	}
-	f := Finding{Path: path, Outcome: outcome, Duration: duration, Overrun: mag.OverrunSeconds, Ratio: mag.Ratio}
+	f := Finding{Path: path, Outcome: outcome, Duration: duration, Overrun: mag.OverrunSeconds, Ratio: mag.Ratio, AudioPath: audio}
 
 	switch outcome {
 	case timing.Ok:
@@ -927,6 +932,29 @@ func companionAudio(lrcPath string, cache *dirListingCache) (string, bool) {
 		return best, true
 	}
 	return companionAudioByListing(lrcPath, stem, cache)
+}
+
+// SiblingAudioPaths returns every same-stem audio path for audio: the stem plus
+// each extension scanner.SupportedAudioExtensions names, in EVERY ASCII case
+// permutation (caseVariantsOf). That is the set companionAudio can resolve: its
+// stat probe covers lower and upper, and its listing fallback accepts any
+// casing scanner.IsAudioFile does (Track.Mp3 included), so a row's source_path
+// may carry any of them. It does NOT touch the filesystem. A work_queue row is
+// unique on artist+title, so when a directory holds Track.flac and Track.mp3
+// beside one Track.lrc the row may name either copy, and a caller resolving
+// file to row must look for all of them (#1082).
+//
+// Size: the sum of 2^letters over the supported extensions (a few dozen
+// candidates), well inside SQLite's bound-parameter limit.
+func SiblingAudioPaths(audio string) []string {
+	stem := strings.TrimSuffix(audio, filepath.Ext(audio))
+	var out []string
+	for _, ext := range scanner.SupportedAudioExtensions() {
+		for _, variant := range caseVariantsOf(ext) {
+			out = append(out, stem+variant)
+		}
+	}
+	return out
 }
 
 // dirListingCache remembers each directory's os.ReadDir result for the

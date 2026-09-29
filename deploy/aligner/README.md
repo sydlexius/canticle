@@ -171,8 +171,8 @@ be swapped in later behind the same seam.
 
 GPU support: this image is **CPU-only**. The Dockerfile installs from one of
 `requirements-linux-amd64.txt` / `requirements-linux-arm64.txt` (picked by
-`TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to 2.8.0,
-see `requirements.in`) resolve against the PyTorch CPU index
+`TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to
+2.14.0/2.11.0, #1068, see `requirements.in`) resolve against the PyTorch CPU index
 (`https://download.pytorch.org/whl/cpu`, passed as `--extra-index-url`),
 because PyPI's x86_64 `torch` wheel is the CUDA build and would add ~5 GB of
 unused `nvidia-*-cu12` libraries. A build-time check fails the build if a
@@ -301,8 +301,11 @@ resolve against the PyTorch CPU index
 wheels, and a hash lock only covers the wheel `uv` actually resolved for the
 platform it was compiled against -- not every wheel the same version could
 produce elsewhere. Everything else in the closure (`demucs`'s tree,
-`faster-whisper`, `transformers`, ...) is pure-Python or ships a manylinux
-wheel on both arches, so the two files are identical except for hashes and
+`faster-whisper`, `transformers`, ...) ships a wheel for both arches
+(the two exceptions, `demucs` and `antlr4-python3-runtime`, are pure-Python
+sdists), and the recipe's `--only-binary :all:` makes a missing per-arch
+wheel fail at resolve time (#1102: demucs 4.1.0's `sphn` has no aarch64
+wheel), so the two files are identical except for hashes and
 the `torch`/`torchaudio` build tag; only a native-extension package can
 legitimately differ further. yamnet has no such package, hence its one
 portable file.
@@ -322,12 +325,14 @@ for arch in amd64 arm64; do
     amd64) platform=x86_64-manylinux_2_28 ;;
     arm64) platform=aarch64-manylinux_2_28 ;;
   esac
-  docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.13-slim \
+  docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
     bash -c "pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
-      --python-version 3.13 --python-platform $platform \
+      --python-version 3.14 --python-platform $platform \
       --extra-index-url https://download.pytorch.org/whl/cpu \
       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
-      --exclude-newer 2026-09-23T12:00:00Z \
+      --only-binary :all: --no-binary demucs \
+      --no-binary antlr4-python3-runtime \
+      --exclude-newer 2026-09-25T07:00:00Z \
       requirements.in -o requirements-linux-$arch.txt"
 done
 ```
@@ -351,10 +356,10 @@ requested, so the test lock never pulls in
 changing either file (same `--exclude-newer` reproducibility note applies):
 
 ```bash
-cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.13-slim \
+cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
   bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
-    --python-version 3.13 --no-header --no-emit-index-url \
-    --exclude-newer 2026-09-23T12:00:00Z \
+    --python-version 3.14 --no-header --no-emit-index-url \
+    --exclude-newer 2026-09-25T07:00:00Z \
     requirements-test.in -o requirements-test.txt'
 ```
 
@@ -365,7 +370,7 @@ so re-running it resolves the same versions rather than whatever the CPU
 index/PyPI happen to serve that day -- without it, a routine re-run for an
 unrelated edit can silently pick up an unrequested transitive bump (measured
 here: a same-day re-resolution without `--exclude-newer` picked up
-`filelock` 4.0.3 over the committed 4.0.1). Each lock file's own header
+`filelock` 4.0.3 over an older committed 4.0.1). Each lock file's own header
 records the exact date its content was verified to reproduce against; keep
 that date in sync with whatever you pass on the command line, and re-verify
 (regenerate, then diff against the committed file) before trusting a new

@@ -13,14 +13,14 @@
 # resolution to this lock's generation time (recorded below) for a
 # reproducible re-run -- see requirements-linux-amd64.txt's header for why
 # this matters:
-#   cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.13-slim \
+#   cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
 #     bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
-#       --python-version 3.13 --no-header --no-emit-index-url \
-#       --exclude-newer 2026-09-23T12:00:00Z \
+#       --python-version 3.14 --no-header --no-emit-index-url \
+#       --exclude-newer 2026-09-25T07:00:00Z \
 #       requirements-test.in -o requirements-test.txt'
 #   (then re-add this header block)
 #
-# Generated: --exclude-newer 2026-09-23T12:00:00Z (verified to reproduce this
+# Generated: --exclude-newer 2026-09-25T07:00:00Z (verified to reproduce this
 # exact lock byte-for-byte).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
@@ -42,9 +42,9 @@ certifi==2026.7.22 \
     # via
     #   httpcore
     #   httpx
-fastapi==0.138.0 \
-    --hash=sha256:b6f54fd1bd72c80b0f899f172c61a600f6f7af9b43d4d772a018f35624048cb0 \
-    --hash=sha256:d445a4877636ad191e7053e08c9bf98cb921a6756776848400bb773d1740c061
+fastapi==0.141.1 \
+    --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3 \
+    --hash=sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1
     # via
     #   -c requirements.in
     #   -r requirements-test.in

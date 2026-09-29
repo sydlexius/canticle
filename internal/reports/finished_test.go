@@ -27,6 +27,8 @@ func seedFinishedSplit(t *testing.T) (repo *reports.Repo, wantDone, wantFinished
 		// A word tier the timing guard later remediated is stale, not finished.
 		{artist: "A", title: "quarantined", status: "done", outcomeType: "synced", syncTier: "word", timingOutcome: "categorical"},
 		{artist: "A", title: "demoted", status: "done", outcomeType: "synced", syncTier: "word", timingOutcome: "mis_synced"},
+		// #1082: a degenerate verdict demotes too, so its word tier is stale.
+		{artist: "A", title: "degenerate", status: "done", outcomeType: "synced", syncTier: "word", timingOutcome: "degenerate"},
 		// prune's retired done+queued shape: mid-recheck, tier not re-litigated.
 		{artist: "A", title: "retired-queued", status: "done", outcomeType: "synced", syncTier: "word", wordTimingState: "queued"},
 		// A non-done word row is not settled at all, so it is neither counter.
@@ -37,7 +39,7 @@ func seedFinishedSplit(t *testing.T) (repo *reports.Repo, wantDone, wantFinished
 	for _, w := range rows {
 		insertWorkItem(t, sqlDB, w)
 	}
-	return reports.New(sqlDB), 11, 2
+	return reports.New(sqlDB), 12, 2
 }
 
 // TestQueueSummaryFinishedSplit pins the 2026-09-24 decision on #553: Done

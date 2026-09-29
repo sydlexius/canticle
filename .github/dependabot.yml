@@ -128,16 +128,13 @@ updates:
         patterns:
           - "pytest*"
           - "httpx"
+    # demucs 4.1.0 needs sphn>=0.1.12, which has no linux-aarch64 wheel, so
+    # the arm64 image build fails (no compiler in the base image). Held at
+    # 4.0.1 until #1102 resolves; patch releases of 4.0.x stay allowed.
     ignore:
-      # Deliberate hold, not a stale pin: torchaudio 2.9 moves load/save onto
-      # TorchCodec (its matching 0.8.x has no linux/arm64 wheel) and removes
-      # list_audio_backends / torchaudio.functional.forced_align and
-      # merge_tokens, which this sidecar's own forced-alignment code calls
-      # directly. See requirements.in's own comment on the torch/torchaudio
-      # pins for the full rationale. Suppress Dependabot bump PRs for the
-      # version this sidecar cannot yet move to, rather than declining the
-      # same PR every week.
-      - dependency-name: "torch"
-        versions: [">=2.9"]
-      - dependency-name: "torchaudio"
-        versions: [">=2.9"]
+      - dependency-name: "demucs"
+        versions: [">=4.1"]
+    # No torch/torchaudio ignore: the 2.8.0 hold ended with #1068. A torch
+    # bump from here needs no code change (torchaudio 2.11 is stable-ABI and
+    # the Dockerfile's build-time forced_align call proves the pairing), only
+    # the usual lock regeneration follow-up described above.

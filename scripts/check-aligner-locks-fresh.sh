@@ -28,6 +28,11 @@ set -euo pipefail
 ALIGNER_DIR="${1:-deploy/aligner}"
 UV="${UV:-uv}"
 CPU_INDEX="https://download.pytorch.org/whl/cpu"
+# Per-arch locks refuse sdist-only resolutions so a dependency with no wheel
+# for a target arch fails here, not at image build (#1101/#1102: demucs
+# 4.1.0's sphn has no aarch64 wheel). demucs and antlr4-python3-runtime are the
+# closure's two pure-Python sdist-only packages, built at image build time.
+ONLY_BINARY=(--only-binary :all: --no-binary demucs --no-binary antlr4-python3-runtime)
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -54,7 +59,7 @@ check() {
   fi
 
   if ! (cd "$ALIGNER_DIR" && "$UV" pip compile --quiet --generate-hashes \
-      --python-version 3.13 --no-header --no-emit-index-url \
+      --python-version 3.14 --no-header --no-emit-index-url \
       --exclude-newer "$date" "$@" "$src" -o "$tmp/$lock"); then
     echo "::error file=$committed::uv could not resolve $src (exclude-newer $date) -- see output above"
     failed=1
@@ -87,10 +92,12 @@ check() {
 
 check requirements-linux-amd64.txt requirements.in \
   --python-platform x86_64-manylinux_2_28 \
-  --extra-index-url "$CPU_INDEX" --index-strategy unsafe-best-match
+  --extra-index-url "$CPU_INDEX" --index-strategy unsafe-best-match \
+  "${ONLY_BINARY[@]}"
 check requirements-linux-arm64.txt requirements.in \
   --python-platform aarch64-manylinux_2_28 \
-  --extra-index-url "$CPU_INDEX" --index-strategy unsafe-best-match
+  --extra-index-url "$CPU_INDEX" --index-strategy unsafe-best-match \
+  "${ONLY_BINARY[@]}"
 check requirements-test.txt requirements-test.in
 
 exit "$failed"

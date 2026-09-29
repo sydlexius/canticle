@@ -113,3 +113,39 @@ func TestLookupTimingAbsentTrackIsNotAnError(t *testing.T) {
 		t.Fatal("found = true for a track that was never enqueued; want false")
 	}
 }
+
+// SetTimingOutcomeIfIdle must not write a row that is 'processing' (the worker
+// owns it and stamps its own verdict), and must report a write on an idle row.
+func TestSetTimingOutcomeIfIdleSkipsProcessingRow(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:    models.Track{ArtistName: "Artist", TrackName: "Song"},
+		Outdir:   "out",
+		Filename: "a.lrc",
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	rec := TimingRecord{Outcome: "categorical"}
+	ok, err := q.SetTimingOutcomeIfIdle(ctx, item.ID, rec)
+	if err != nil || ok {
+		t.Fatalf("processing row: ok=%v err=%v, want false, nil", ok, err)
+	}
+	if outcome, _, _, _ := q.LookupTiming(ctx, "Artist", "Song"); outcome != "" {
+		t.Errorf("processing row was stamped: %q", outcome)
+	}
+	if err := q.Complete(ctx, item.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	ok, err = q.SetTimingOutcomeIfIdle(ctx, item.ID, rec)
+	if err != nil || !ok {
+		t.Fatalf("idle row: ok=%v err=%v, want true, nil", ok, err)
+	}
+	if outcome, _, _, _ := q.LookupTiming(ctx, "Artist", "Song"); outcome != "categorical" {
+		t.Errorf("idle row not stamped: %q", outcome)
+	}
+}
