@@ -39,7 +39,7 @@
 //	any other 4xx       Trip (unknown means misconfigured, the conservative read)
 //	5xx                 pipeline failure, Trip
 //
-// The reference sidecar image is CPU-only (a CUDA build is #1013).
+// The reference sidecar image has a CPU and a CUDA variant (#1013).
 //
 // The sidecar also accepts an optional "language" form field (an ISO 639-1
 // hint that skips its own language detection); this client does not send

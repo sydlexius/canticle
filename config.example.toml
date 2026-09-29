@@ -506,8 +506,8 @@ min_similarity = 0.35
 # "generate" counterpart to provider word-sync coverage (petitlyrics,
 # Musixmatch richsync); it never overrides a provider-supplied word timing.
 #
-# The reference sidecar image ships CPU-only today (a CUDA build is tracked
-# separately, #1013) and forced alignment is far heavier per track than any
+# The reference sidecar image ships as a CPU variant and a CUDA (NVIDIA GPU)
+# variant (see docs/INSTALL.md) and forced alignment is far heavier per track than any
 # other sidecar in this file -- one call can take minutes, longer on a cold
 # start while models load lazily on first use. Leave this disabled unless you
 # run a dedicated aligner sidecar (see deploy/aligner) with hardware and time

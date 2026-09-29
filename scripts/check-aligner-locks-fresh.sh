@@ -28,6 +28,10 @@ set -euo pipefail
 ALIGNER_DIR="${1:-deploy/aligner}"
 UV="${UV:-uv}"
 CPU_INDEX="https://download.pytorch.org/whl/cpu"
+# The CUDA lock (#1013) resolves torch against this index instead. cu126, not
+# a newer one: ctranslate2 dlopens libcublas.so.12, and torch 2.14 has cp314
+# wheels only for cu126 and cu130 (see the lock's header).
+CUDA_INDEX="https://download.pytorch.org/whl/cu126"
 # Per-arch locks refuse sdist-only resolutions so a dependency with no wheel
 # for a target arch fails here, not at image build (#1101/#1102: demucs
 # 4.1.0's sphn has no aarch64 wheel). demucs and antlr4-python3-runtime are the
@@ -97,6 +101,10 @@ check requirements-linux-amd64.txt requirements.in \
 check requirements-linux-arm64.txt requirements.in \
   --python-platform aarch64-manylinux_2_28 \
   --extra-index-url "$CPU_INDEX" --index-strategy unsafe-best-match \
+  "${ONLY_BINARY[@]}"
+check requirements-linux-amd64-cuda.txt requirements.in \
+  --python-platform x86_64-manylinux_2_28 \
+  --extra-index-url "$CUDA_INDEX" --index-strategy unsafe-best-match \
   "${ONLY_BINARY[@]}"
 check requirements-test.txt requirements-test.in
 

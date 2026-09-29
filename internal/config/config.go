@@ -649,8 +649,8 @@ type InstrumentalBackfillConfig struct {
 // sweep cycle spends aligner calls on. Deliberately small: forced alignment
 // (Demucs vocal separation, then Whisper transcription and wav2vec2 forced
 // alignment) costs one to two orders of magnitude more per item than the
-// timing sweep's file read. The reference sidecar (deploy/aligner) ships
-// CPU-only today (a CUDA build is tracked separately, #1013), so one call can
+// timing sweep's file read. The reference sidecar (deploy/aligner) ships a
+// CPU variant and a CUDA variant (#1013); on CPU one call can
 // take minutes -- longer on a cold start while models load lazily (#482).
 const wordSyncGenerateBudgetDefault = 10
 
@@ -669,8 +669,8 @@ const wordSyncGenerateConcurrencyDefault = 1
 // -- it never overrides provider-supplied word timings.
 //
 // EXPERIMENTAL AND OPT-IN. Enabled defaults to false and MUST stay false by
-// default: the reference sidecar image (deploy/aligner) ships CPU-only today
-// (a CUDA build is tracked separately, #1013) and forced alignment is
+// default: the reference sidecar image (deploy/aligner) ships CPU and CUDA
+// variants (#1013) and forced alignment is
 // meaningfully heavy compute regardless -- one call can take minutes. This
 // mirrors verification.enabled and instrumental_detector.enabled, which are
 // also dormant until an operator opts in.
