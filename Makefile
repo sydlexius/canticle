@@ -1,4 +1,4 @@
-.PHONY: build run test test-js test-shuffle test-cover patch-cover gate scan vulncheck \
+.PHONY: build run test test-js test-shuffle test-cover patch-cover gate hooks-test scan vulncheck \
         doctor sync-tool-versions coverage-floor smoke smoke-fixtures lint fmt hooks clean help \
         docs docs-serve docs-deps templ tailwind ui ui-check ui-validate generate
 
@@ -60,9 +60,14 @@ patch-cover:
 		echo "skipping; Codecov enforces patch coverage in CI. Install claude-kit for the local check."; \
 	fi
 
-## gate: Run the full deterministic pre-push gate (build, test, patch coverage, lint, vuln)
+## gate: Run the full local gate (changed-package tests, patch coverage, lint, vuln); RUN_RACE=1 adds the full race suite; the pre-push hook runs a fast subset
 gate:
 	bash scripts/pre-push-gate.sh
+
+## hooks-test: Run the hermetic tests for the pre-push hook, receipt check and package mapping
+hooks-test:
+	bash scripts/test-check-push-receipt.sh
+	bash scripts/test-hook-test-pkgs.sh
 
 ## scan: Build the Docker image and scan it for HIGH+ CVEs with grype
 scan:

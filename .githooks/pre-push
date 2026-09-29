@@ -1,13 +1,61 @@
 #!/usr/bin/env bash
-# pre-push hook: run the full deterministic gate before any push so a broken
-# build, failing test, lint/vuln finding, workflow-lint error, or unresolved
-# conflict marker is caught locally instead of in CI.
+# pre-push hook: the FAST push path. The full gate is `make gate`; CI's required
+# checks (Lint, Test, Build, Coverage Floor, Analyze Go) are the source of truth.
+#
+# Order:
+#   1. Gate receipt. If /prep-pr's gate-runner.py already gated this exact tree
+#      (a passing gate-receipt/v1 whose tree_sha matches EVERY pushed ref, on a
+#      clean working tree), exit 0 at once rather than re-run the same gate.
+#      scripts/check-push-receipt.sh owns the check and fails closed.
+#   2. Otherwise run `scripts/pre-push-gate.sh --hook`: conflict markers, product
+#      name, gofmt, generate + build, golangci-lint, diff-scoped tests + patch
+#      coverage, actionlint only when a workflow changed, and govulncheck only
+#      when go.mod/go.sum changed. The race suite, coverage floor, shard verify
+#      and codecov dry-run are left to CI (`make gate` runs shard verify;
+#      RUN_RACE=1 adds the rest; see docs/DEVELOPER.md).
 #
 # Wire with: make hooks  (sets core.hooksPath=.githooks, so every worktree
 # inherits both this hook and .githooks/pre-commit).
 #
-# Skip with: git push --no-verify  (use sparingly).
+# Override (stricter only):
+#   PUSH_GATE=full git push ...   run the full `make gate` chain, ignoring any receipt
+# There is deliberately NO skip value: a skip would be an un-floored twin of
+# `--no-verify`. Any value other than empty or `full` fails the push (exit 2).
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-exec bash "$REPO_ROOT/scripts/pre-push-gate.sh"
+
+case "${PUSH_GATE:-}" in
+  "") ;;
+  full) exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" </dev/null ;;
+  *)
+    echo "pre-push: unknown PUSH_GATE='${PUSH_GATE}' (expected empty or full)" >&2
+    exit 2
+    ;;
+esac
+
+# stdin carries the ref lines. Capture it once: the receipt check consumes it, and
+# the fallback gate must know whether HEAD is the only thing being pushed. The fast
+# gate diffs HEAD against the merge base, so a multi-ref push, or a ref that is not
+# HEAD, could carry changes it never looks at; those widen every scoped step
+# (./... tests, actionlint, govulncheck) rather than build a union-of-refs diff.
+REFS="$(cat)"
+if printf '%s\n' "$REFS" | bash "$REPO_ROOT/scripts/check-push-receipt.sh"; then
+  exit 0
+fi
+
+head_sha="$(git rev-parse HEAD)"
+nref=0
+widen=0
+while read -r _ lsha _ _; do
+  [ -n "${lsha:-}" ] || continue
+  [[ "$lsha" =~ ^(0{40}|0{64})$ ]] && continue # delete: sends nothing
+  nref=$((nref + 1))
+  [ "$lsha" = "$head_sha" ] || widen=1
+done <<<"$REFS"
+[ "$nref" -le 1 ] || widen=1
+if [ "$widen" -eq 1 ]; then
+  echo "pre-push: multi-ref push or a ref other than HEAD; widening the gate to the whole module." >&2
+  exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" --hook-all </dev/null
+fi
+exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" --hook </dev/null

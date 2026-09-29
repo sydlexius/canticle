@@ -26,8 +26,9 @@ Closes #
 ## Test plan
 
 - [ ] `make gate` passes locally. It runs, in order: conflict markers, gofmt, `make ui`,
-      `go build`, `go test -race` + coverage, patch coverage (Codecov parity), coverage-floor
-      ratchet, codecov report validation, golangci-lint, actionlint, govulncheck.
+      `go build`, `go test` of the changed packages (CI runs the race suite; `RUN_RACE=1` for it
+      locally) + coverage, patch coverage (Codecov parity), golangci-lint, actionlint,
+      shard-split check, govulncheck.
 - [ ] New tests were confirmed to **fail against unfixed code** before the fix was written.
       Tests that only ever passed are regression guards -- label them as such rather than
       presenting them as proof the fix works.
