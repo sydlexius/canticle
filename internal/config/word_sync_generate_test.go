@@ -7,7 +7,7 @@ import (
 )
 
 // TestLoad_WordSyncGenerateDefaults verifies the [word_sync_generate] section
-// defaults: the feature is OFF (the reference sidecar is CPU-only and heavy
+// defaults: the feature is OFF (forced alignment is heavy
 // compute), a modest budget, serialized concurrency, and no URL/model
 // configured.
 func TestLoad_WordSyncGenerateDefaults(t *testing.T) {

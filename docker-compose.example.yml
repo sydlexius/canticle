@@ -1,3 +1,34 @@
+# Forced-alignment sidecar settings shared by the CPU and GPU services below
+# (one anchor, so the two cannot drift). Only the image/build variant and the
+# NVIDIA device reservation differ.
+x-aligner-common: &aligner-common
+  restart: unless-stopped
+  # No published port: the endpoint is unauthenticated. Canticle reaches it at
+  # http://aligner:8080 through the shared network alias below.
+  expose:
+    - "8080"
+  networks:
+    default:
+      # BOTH services answer to this one name; only one runs at a time (the two
+      # profiles are alternatives), so MXLRC_WORD_SYNC_GENERATE_URL never changes.
+      aliases:
+        - aligner
+  volumes:
+    # Demucs / faster-whisper / wav2vec2 weights download here on first use.
+    # The image runs as uid 1000; a named volume inherits that ownership.
+    - aligner-data:/data
+  # Requests run one at a time; this bounds a burst, not throughput.
+  cpus: "4"
+  mem_limit: 8g
+  healthcheck:
+    # The slim image has no curl/wget; /health is liveness only (models load
+    # lazily on the first /align).
+    test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=4)"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+
 services:
   canticle:
     image: ghcr.io/sydlexius/canticle:latest
@@ -96,5 +127,53 @@ services:
       # The model is loaded at startup, so the first probe must not race it.
       start_period: 60s
 
+  # Optional word-sync forced-alignment sidecar (deploy/aligner, issue #1005),
+  # EXPERIMENTAL and off unless Canticle's [word_sync_generate] is configured
+  # (MXLRC_WORD_SYNC_GENERATE_ENABLED plus MXLRC_WORD_SYNC_GENERATE_URL:
+  # "http://aligner:8080"). Pick ONE profile; do not start both:
+  #   docker compose --profile aligner up -d       # CPU (amd64 or arm64)
+  #   docker compose --profile aligner-gpu up -d   # NVIDIA GPU (amd64 only)
+  # Profiled services never start under a plain `docker compose up`.
+  # Like the yamnet service, both build from the vendored source under
+  # deploy/aligner and tag the result locally (canticle-aligner:local and
+  # :local-cuda), so a local build never overwrites a ghcr tag. Sizes: CPU is
+  # ~0.65 GB compressed / ~2.8 GB unpacked; the CUDA image adds ~3.5 GB to pull
+  # and ~9.3 GB on disk.
+  # Published images (ghcr.io/sydlexius/canticle-aligner:latest and :latest-cuda)
+  # exist only once a release tag has been pushed AND the GHCR package has been
+  # made public (see deploy/aligner/README.md); until then, build locally. Once
+  # available, swap the `image:` line for the ghcr tag and run
+  # `docker compose pull` instead of `build`.
+  aligner:
+    <<: *aligner-common
+    profiles: ["aligner"]
+    build:
+      context: ./deploy/aligner
+    image: canticle-aligner:local
+    container_name: canticle-aligner
+
+  # GPU variant: same sidecar built with VARIANT=cuda (see the sizes above). Needs an
+  # NVIDIA driver and the NVIDIA Container Toolkit on the Docker host (Linux
+  # only; Docker Desktop on macOS has no GPU passthrough). ALIGNER_DEVICE stays
+  # "auto", so a host without a usable GPU falls back to CPU instead of failing;
+  # confirm with: curl http://<container-ip>:8080/health  ("device": "cuda").
+  aligner-gpu:
+    <<: *aligner-common
+    profiles: ["aligner-gpu"]
+    build:
+      context: ./deploy/aligner
+      args:
+        VARIANT: cuda
+    image: canticle-aligner:local-cuda
+    container_name: canticle-aligner-gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
 volumes:
   canticle-config:
+  aligner-data:

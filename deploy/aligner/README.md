@@ -169,17 +169,64 @@ be swapped in later behind the same seam.
 | `ALIGNER_MAX_PENDING` | `2` | `/align` requests admitted at once (one running, the rest queued); one more gets `429` |
 | `ALIGNER_LOG_LEVEL` | `INFO` | level for the `canticle.*` loggers (per-request INFO lines go to stderr) |
 
-GPU support: this image is **CPU-only**. The Dockerfile installs from one of
+### GPU support: the CUDA variant (#1013)
+
+`--build-arg VARIANT=cuda` (default `cpu`) builds an amd64-only CUDA image from
+the same Dockerfile: torch/torchaudio come from the PyTorch **cu126** index
+(`requirements-linux-amd64-cuda.txt`), with cuBLAS 12 and cuDNN 9 as pip
+`nvidia-*` packages on the same slim base (no CUDA base image). Everything
+else, including the app and every CPU smoke step, is shared.
+
+```bash
+docker build --platform linux/amd64 --build-arg VARIANT=cuda -t canticle-aligner:cuda deploy/aligner
+docker run --rm --gpus all -p 8080:8080 -v aligner-data:/data canticle-aligner:cuda
+curl -s localhost:8080/health   # "device": "cuda" on a GPU host, "cpu" otherwise
+```
+
+Why cu126: ctranslate2 4.8.2 (faster-whisper's engine) links CUDA 12 cuBLAS
+(`libcublas.so.12`) and, with a static CUDA runtime, needs **no cuDNN at all**;
+torch 2.14 publishes cp314 wheels only for cu126 and cu130, and cu130 would
+ship cuBLAS 13. The old cuDNN 8 workaround (needed for ctranslate2 4.4.0 under
+whisperx) is gone, along with the execstack patch's purpose (kept as a guard).
+The Dockerfile registers the pip cuBLAS directory with `ldconfig` because
+nothing else points ctranslate2's loader at it.
+
+The CUDA build runs `smoke_cuda.py`, an inverted check: torch must be a CUDA-12
+build with cuDNN, and every shared library under `torch/lib` and
+`site-packages/nvidia/*/lib` (plus `libcublas.so.12` by soname) must
+`ctypes.CDLL`-load, so a missing library fails the build instead of segfaulting
+the first `/align`. Only the optional nvshmem/cufile cluster plugins are
+skipped. There is no GPU at build time, so on-GPU behavior is verified by
+hand: run the container with `--gpus all` and check `/health` reports
+`cuda`, then POST a real `/align` request.
+
+Host: NVIDIA driver 525.60+ and the NVIDIA Container Toolkit (Linux only;
+macOS Docker has no GPU). `docker-compose.example.yml` has the `aligner` and
+`aligner-gpu` profiles (one shared anchor and network alias). CI publishes both
+images under `ghcr.io/sydlexius/canticle-aligner`: CPU as `dev`, `nightly`,
+`nightly-YYYYMMDD`, `X.Y.Z`, `X.Y`, `latest` (amd64 + arm64), and CUDA with a
+`-cuda` suffix on every one of those (`latest-cuda`, `X.Y.Z-cuda`, ...; amd64
+only). The tag sets are disjoint.
+
+One-time release step: GHCR creates a new package PRIVATE, so after the first
+release tag publishes `canticle-aligner`, set the package visibility to public
+(GitHub > the repo owner's Packages > canticle-aligner > Package settings >
+Change visibility). Until then anonymous pulls fail (404) and the compose
+profiles must build locally. `docker buildx imagetools inspect
+ghcr.io/sydlexius/canticle-aligner:latest` without logging in confirms it. Sizes: CUDA is ~4.1 GB compressed / ~12.1 GB
+unpacked against ~0.65 GB / ~2.8 GB for CPU (+~3.5 GB to pull, +~9.3 GB on disk).
+
+### CPU image
+
+The CPU variant installs from one of
 `requirements-linux-amd64.txt` / `requirements-linux-arm64.txt` (picked by
 `TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to
 2.14.0/2.11.0, #1068, see `requirements.in`) resolve against the PyTorch CPU index
 (`https://download.pytorch.org/whl/cpu`, passed as `--extra-index-url`),
 because PyPI's x86_64 `torch` wheel is the CUDA build and would add ~5 GB of
 unused `nvidia-*-cu12` libraries. A build-time check fails the build if a
-CUDA `torch`, any `nvidia-*` package, or `triton` is present. The CUDA
-variant is issue [#1013](https://github.com/sydlexius/canticle/issues/1013)'s,
-not this image's. `ALIGNER_DEVICE` and the `select_device` seam are already
-GPU-ready; only the installed `torch` wheel and base image need to change.
+CUDA `torch`, any `nvidia-*` package, or `triton` is present (CPU variant
+only; the CUDA variant asserts the opposite in `smoke_cuda.py`).
 
 ### amd64: ctranslate2's executable-stack flag (historical, now a no-op guard)
 
@@ -227,8 +274,9 @@ Rerun the decode check against a built image with
 docker build --platform linux/amd64 -t canticle-aligner deploy/aligner
 ```
 
-Both `linux/amd64` and `linux/arm64` build. No workflow builds or publishes
-this image yet: the GHCR publish workflow and the CUDA variant are #1013.
+Both `linux/amd64` and `linux/arm64` build (CUDA: amd64 only).
+`.github/workflows/aligner.yml` builds and smoke-tests every variant natively
+and publishes both (see above).
 
 ## Opt-in, dark by default
 
@@ -310,13 +358,22 @@ the `torch`/`torchaudio` build tag; only a native-extension package can
 legitimately differ further. yamnet has no such package, hence its one
 portable file.
 
-To regenerate BOTH lock files after editing `requirements.in` (never edit
-`requirements-linux-*.txt` by hand -- always regenerate both together, since
+The CUDA lock, `requirements-linux-amd64-cuda.txt` (#1013), is a third file
+of the same recipe with `--python-platform x86_64-manylinux_2_28` and
+`--extra-index-url https://download.pytorch.org/whl/cu126` (the exact command is
+in its header). It is regenerated together with the two above (the loop below has a separate CUDA step); it differs from
+`requirements-linux-amd64.txt` only by torch's `+cu126` tag and the added
+`nvidia-*`, `cuda-*` and `triton` pins. `scripts/check-aligner-locks-fresh.sh`
+re-resolves it and ci.yml's package-set step checks the non-CUDA pins against
+the CPU amd64 lock, so it cannot drift.
+
+To regenerate ALL THREE per-arch lock files after editing `requirements.in` (never edit
+`requirements-linux-*.txt` by hand -- always regenerate all three together, since
 a stale lock on only one arch is exactly the drift #1017 closes out).
 `--exclude-newer` pins resolution to a fixed point in time so the run is
 reproducible (see "Reproducibility" below) -- update the date to today (UTC)
 when you actually intend to pick up newer releases, and record the new date
-in both files' headers:
+in all three files' headers:
 
 ```bash
 cd deploy/aligner
@@ -335,6 +392,17 @@ for arch in amd64 arm64; do
       --exclude-newer 2026-09-25T07:00:00Z \
       requirements.in -o requirements-linux-$arch.txt"
 done
+
+# CUDA lock (amd64 only): same recipe, cu126 index, its own output file.
+docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
+  bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
+    --python-version 3.14 --python-platform x86_64-manylinux_2_28 \
+    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    --index-strategy unsafe-best-match --no-header --no-emit-index-url \
+    --only-binary :all: --no-binary demucs \
+    --no-binary antlr4-python3-runtime \
+    --exclude-newer 2026-09-25T07:00:00Z \
+    requirements.in -o requirements-linux-amd64-cuda.txt'
 ```
 
 (`--platform linux/amd64` on `docker run` is the HOST container running the
@@ -390,21 +458,23 @@ bump of a pin in `requirements.in` needs a regeneration follow-up commit.
 
 ## Known limitations and follow-ups
 
-- **No GPU Docker variant yet** -- CPU-only image; the CUDA variant is
-  tracked in #1013.
+- **The CUDA image is unverified on a GPU in CI** -- hosted runners have no
+  GPU, so its smoke covers the build and the cpu fallback only (#1013).
 - **No baked-in model weights.** Unlike YAMNet's checksum-pinned bake, Demucs,
   faster-whisper, and the forced-alignment models pull weights from their
   normal hubs on first use, cached under `/data` (see the Dockerfile's
   `HF_HOME`/`TORCH_HOME`). Mount `/data` as a persistent volume in
   production. No single checksum to pin here, since the align-model set
   varies per requested language.
-- **No image workflow.** `deploy/yamnet-detector` has
-  `.github/workflows/yamnet.yml`; nothing builds or publishes this image
-  yet. That workflow (GHCR, plus the CUDA variant) is #1013. CI's
-  `aligner-test` job runs only the stubbed test suite, not the image.
+- **Published images are not the images that were smoke-tested, and none is
+  GPU-tested.** `build-and-smoke` builds and smokes each variant, but the
+  publish jobs rebuild from the same source and push that rebuild (the CPU
+  legs reuse the smoke's layer cache; the CUDA leg has none), so the pushed
+  digest is not the smoked one. CI's `aligner-test` job runs only the stubbed
+  test suite, not the image.
 - **Alignment emissions are computed in non-overlapping 30-second windows**,
   so a character sung across a window boundary is scored from two
   context-truncated halves; the alignment itself still runs once over the
   concatenated emissions.
-- **Not deployed anywhere yet** -- no published image or Unraid wiring; gated
-  on the CI workflow above and on the epic reaching a slice that calls it.
+- **Not deployed anywhere yet** -- no Unraid wiring; gated on the epic
+  reaching a slice that calls it.

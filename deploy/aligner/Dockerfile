@@ -49,7 +49,12 @@ WORKDIR /app
 # automatically by buildx, not hand-passed -- selects which one this build
 # actually installs.
 ARG TARGETARCH
-COPY requirements-linux-amd64.txt requirements-linux-arm64.txt ./
+# VARIANT selects the torch build (#1013): `cpu` (default, amd64 + arm64) or
+# `cuda` (amd64 only, torch +cu126 with pip-provided nvidia-* libraries; no
+# CUDA base image is needed, the host's NVIDIA container toolkit injects
+# libcuda). Everything else in the file is shared by both variants.
+ARG VARIANT=cpu
+COPY requirements-linux-amd64.txt requirements-linux-amd64-cuda.txt requirements-linux-arm64.txt ./
 
 # --require-hashes (Scorecard Pinned-Dependencies), matching
 # deploy/yamnet-detector's Dockerfile. --extra-index-url, not --index-url:
@@ -67,8 +72,8 @@ COPY requirements-linux-amd64.txt requirements-linux-arm64.txt ./
 # arches -- an exact version string pip cannot satisfy from PyPI's `2.14.0`
 # CUDA build, so it is forced to the CPU index regardless of search order.
 # (torchaudio 2.11 declares no torch dependency at all; its extension is
-# built against torch's stable ABI, see requirements.in.) The CUDA variant
-# is issue #1013's, not this image's.
+# built against torch's stable ABI, see requirements.in.)
+# The CUDA variant (VARIANT=cuda, #1013) installs its own lock from cu126.
 # Quoted with a `:-` default (not bare "$TARGETARCH"): this script runs
 # under `set -u`, and an unset TARGETARCH -- buildx always sets it, but a
 # plain `docker build` without buildx, or `docker build .` on an older
@@ -79,13 +84,14 @@ COPY requirements-linux-amd64.txt requirements-linux-arm64.txt ./
 # DOCKER_BUILDKIT=0 dies with the shell's own "parameter not set" (exit 2);
 # `${TARGETARCH:-}` reaches `*)` and prints the FATAL message (exit 1).
 RUN set -eu; \
-    case "${TARGETARCH:-}" in \
-        amd64) lock=requirements-linux-amd64.txt ;; \
-        arm64) lock=requirements-linux-arm64.txt ;; \
-        *) echo "FATAL: no hash lock for TARGETARCH=${TARGETARCH:-<unset>} (only amd64/arm64 are locked)" >&2; exit 1 ;; \
+    case "${VARIANT}-${TARGETARCH:-}" in \
+        cpu-amd64) lock=requirements-linux-amd64.txt; index=cpu ;; \
+        cpu-arm64) lock=requirements-linux-arm64.txt; index=cpu ;; \
+        cuda-amd64) lock=requirements-linux-amd64-cuda.txt; index=cu126 ;; \
+        *) echo "FATAL: no hash lock for VARIANT=${VARIANT} TARGETARCH=${TARGETARCH:-<unset>} (cpu: amd64/arm64, cuda: amd64)" >&2; exit 1 ;; \
     esac; \
     pip install --no-cache-dir --require-hashes \
-        --extra-index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url "https://download.pytorch.org/whl/$index" \
         -r "$lock"
 
 # HISTORICAL (#1016 dropped whisperx): whisperx 3.4.3 pinned
@@ -120,7 +126,19 @@ RUN set -eu; \
         [ "$state" = "execstack: -" ] || { echo "FATAL: execstack still set on $lib" >&2; exit 1; }; \
     done
 
-COPY app.py _aligner_models.py smoke_decode.py .
+# CUDA variant only: ctranslate2 dlopens libcublas.so.12 by SONAME, and (unlike
+# torch, whose own RUNPATH finds its libraries) nothing points the loader at
+# the pip-installed cuBLAS. Register its directory with ldconfig rather than
+# setting LD_LIBRARY_PATH, so the fix also holds for `docker exec`/child
+# processes. ctranslate2 4.8.2 needs no cuDNN at all (its CUDA runtime is
+# static, so the cuDNN 8 workaround the 4.4.0 build needed is gone).
+RUN if [ "$VARIANT" = cuda ]; then \
+        site="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+        echo "$site/nvidia/cublas/lib" > /etc/ld.so.conf.d/nvidia-cublas.conf; \
+        ldconfig; \
+    fi
+
+COPY app.py _aligner_models.py smoke_decode.py smoke_cuda.py .
 
 # Build-time smoke check: fail the BUILD if the ML stack cannot load, since
 # /health is liveness only and models load lazily, so a broken native import
@@ -150,15 +168,16 @@ spans = [(s.token, s.start, s.end) for s in merge_tokens(path[0], scores[0].exp(
 assert spans == [(1, 0, 2), (2, 3, 4)], 'forced_align/merge_tokens returned %r' % spans; \
 print('forced_align ok:', spans)"
 RUN python -c "\
-import ctranslate2, faster_whisper, torchaudio, torch, transformers; \
+import os, ctranslate2, faster_whisper, torchaudio, torch, transformers; \
 import demucs.pretrained, demucs.apply; \
 from torchaudio.functional import forced_align, merge_tokens; \
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor; \
 from importlib.metadata import distributions; \
 gpu = sorted(d.metadata['Name'] for d in distributions() \
     if d.metadata['Name'].lower().startswith(('nvidia-', 'triton'))); \
-assert torch.version.cuda is None, 'CUDA torch build installed: %s' % torch.__version__; \
-assert not gpu, 'GPU distributions installed: %s' % gpu; \
+cpu = os.environ['VARIANT'] == 'cpu'; \
+assert not cpu or torch.version.cuda is None, 'CUDA torch build installed: %s' % torch.__version__; \
+assert not cpu or not gpu, 'GPU distributions installed: %s' % gpu; \
 import app, _aligner_models; \
 torch_langs = [lang for lang, name in app.ALIGN_MODELS.items() \
     if app.is_torchaudio_align_model(name, torchaudio)]; \
@@ -168,6 +187,11 @@ bad = [(lang, name) for lang, name in app.ALIGN_MODELS.items() \
 assert not bad, 'ALIGN_MODELS entries neither a torchaudio bundle nor a HF repo id: %r' % bad; \
 print('smoke ok: torch', torch.__version__, 'ctranslate2', ctranslate2.__version__, \
     'faster_whisper', faster_whisper.__version__, 'torch-type langs', sorted(torch_langs))"
+
+# CUDA variant only: the inverted check (#1013). No GPU exists at build time,
+# so this proves the LIBRARIES resolve, which is what otherwise fails as a
+# runtime segfault on the first /align. See smoke_cuda.py.
+RUN if [ "$VARIANT" = cuda ]; then python smoke_cuda.py; fi
 
 # Build-time decode smoke check against THIS image's ffmpeg (the CI test job
 # uses the runner's apt ffmpeg, a different build): a synthetic concat

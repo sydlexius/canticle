@@ -641,6 +641,22 @@ jobs:
           fi
           echo "Aligner per-arch locks agree on $(wc -l < /tmp/amd64-pkgs.txt) packages."
 
+          # The CUDA lock (#1013) is amd64's twin plus the CUDA runtime: drop
+          # the nvidia-*/cuda-*/triton pins torch's +cu126 wheels add and the
+          # remainder must equal the CPU amd64 set, or a bump landed in one
+          # amd64 lock only.
+          normalize requirements-linux-amd64-cuda.txt \
+            | grep -v -E '^(nvidia-|cuda-|triton==)' > /tmp/cuda-pkgs.txt || true
+          if [ ! -s /tmp/cuda-pkgs.txt ]; then
+            echo "::error::normalized CUDA package list is empty -- the lock format changed or the parse regex no longer matches"
+            exit 1
+          fi
+          if ! diff -u /tmp/amd64-pkgs.txt /tmp/cuda-pkgs.txt; then
+            echo "::error::requirements-linux-amd64-cuda.txt disagrees with requirements-linux-amd64.txt beyond the CUDA-only nvidia-*/cuda-*/triton pins (see diff above). Regenerate ALL locks together from requirements.in."
+            exit 1
+          fi
+          echo "CUDA lock agrees with amd64 on $(wc -l < /tmp/cuda-pkgs.txt) non-CUDA packages."
+
           # Neither of the two locks agreeing with EACH OTHER proves either one
           # still agrees with the SOURCE: a Dependabot PR bumping requirements.in
           # (the file it is configured to track) while leaving both
@@ -700,6 +716,7 @@ jobs:
 
           check_against_lock requirements-linux-amd64.txt true
           check_against_lock requirements-linux-arm64.txt true
+          check_against_lock requirements-linux-amd64-cuda.txt true
           check_against_lock requirements-test.txt false
 
           if [ "$FAILED" -ne 0 ]; then

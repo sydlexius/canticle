@@ -124,6 +124,31 @@ key, adjust the music volume, and run `docker compose up -d`.
 See the [User Guide](USER_GUIDE.md#docker) for the full Docker and Unraid
 setup.
 
+### GPU host requirements (optional word-sync aligner sidecar)
+
+Only the experimental forced-alignment sidecar (`deploy/aligner`) can use a
+GPU; Canticle itself never does. The `aligner-gpu` compose profile (the
+`VARIANT=cuda` image) needs:
+
+- A Linux Docker host with an NVIDIA GPU of roughly compute capability 6.0
+  (Pascal) through 9.0 (Hopper); a Quadro T600 (7.5) is supported. The CUDA
+  build's ctranslate2 ships SASS for sm_53 to sm_86 plus PTX for 8.6, and its
+  torch (cu126) ships sm_50 to sm_90 with no PTX. Hopper therefore relies on
+  PTX JIT, which needs an R570 or newer driver (the JIT consumes CUDA 12.8
+  PTX; the 525.60 floor does not cover it). Blackwell (10.x and
+  12.x) is NOT supported by this torch build.
+- The NVIDIA driver on the host (525.60 or newer for CUDA 12.6), and the
+  [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  registered with Docker. The image carries the CUDA libraries itself; the
+  toolkit injects the driver library at start.
+- About 3.5 GB more to pull (~4.1 GB compressed against ~0.65 GB for CPU) and
+  ~9.3 GB more on disk (~12.1 GB unpacked against ~2.8 GB), plus roughly 2 GB
+  of GPU memory.
+
+Docker Desktop on macOS has no GPU passthrough: use the CPU `aligner` profile
+there. A host without a usable GPU running the CUDA image falls back to CPU
+(`/health` reports `"device": "cpu"`). See `deploy/aligner/README.md`.
+
 ---
 
 ## Homebrew (macOS / Linuxbrew)
