@@ -34,9 +34,11 @@ cd "$REPO_ROOT"
 fail() { printf 'FAIL: %b\n' "$1" >&2; exit 1; }
 
 MODE=full
+WIDEN=0
 case "${1:-}" in
   "") ;;
   --hook) MODE=hook ;;
+  --hook-all) MODE=hook; WIDEN=1 ;; # hook mode, every scoped step widened (fail closed)
   *) echo "usage: $0 [--hook]" >&2; exit 2 ;;
 esac
 
@@ -49,10 +51,13 @@ for ref in origin/main main; do
 done
 CHANGED_ALL=0
 [ -n "$BASE" ] || CHANGED_ALL=1
+[ "$WIDEN" -eq 0 ] || CHANGED_ALL=1
 changed() { # changed [pathspec...] -> files changed since BASE (committed or not)
   # D and --no-renames: a deleted file, and BOTH sides of a rename, are changes
   # too. Without them a package that lost a file (or had one moved out) is never
   # selected for testing.
+  # A git failure returns non-zero. Callers that SKIP a step on an empty result
+  # must treat that as "changed" (run the step); the tests step already fails.
   git diff --name-only --diff-filter=ACMRD --no-renames "$BASE" -- "$@" 2>/dev/null
 }
 
@@ -336,7 +341,8 @@ fi
 golangci-lint run ./... || fail "lint"
 
 echo "==> actionlint (workflow lint)"
-if [ "$MODE" = hook ] && [ "$CHANGED_ALL" -eq 0 ] && [ -z "$(changed '.github/workflows/*')" ]; then
+if [ "$MODE" = hook ] && [ "$CHANGED_ALL" -eq 0 ] &&
+  wf_changed="$(changed '.github/workflows/*')" && [ -z "$wf_changed" ]; then
   echo "    no workflow changed since $BASE; skipping"
 elif command -v actionlint >/dev/null 2>&1; then
   actionlint || fail "actionlint"
@@ -366,7 +372,8 @@ echo "==> govulncheck"
 # go.sum, the likeliest way a new vulnerable module arrives, e.g. a merge from
 # main). A vuln-DB update against unchanged deps is still only caught by
 # `make gate` / `make vulncheck`.
-if [ "$MODE" = hook ] && [ "$CHANGED_ALL" -eq 0 ] && [ -z "$(changed go.mod go.sum)" ]; then
+if [ "$MODE" = hook ] && [ "$CHANGED_ALL" -eq 0 ] &&
+  dep_changed="$(changed go.mod go.sum)" && [ -z "$dep_changed" ]; then
   echo "    go.mod/go.sum unchanged since $BASE; skipping (make gate / make vulncheck run it)"
 elif command -v govulncheck >/dev/null 2>&1; then
   govulncheck ./... || fail "govulncheck"

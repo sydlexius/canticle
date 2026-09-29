@@ -66,6 +66,9 @@ jobs:
               # Owns the test-shard map: a shard-only change must still run
               # Lint, whose `ci-shards.sh verify` step is the only CI check of it.
               - 'scripts/ci-shards.sh'
+              # Inputs of the required Coverage Floor job.
+              - 'scripts/coverage-floor.sh'
+              - 'scripts/coverage-floor.json'
             # aligner-test's inputs. No workflow files: a CI-only change has
             # nothing for the aligner suite to test.
             aligner:

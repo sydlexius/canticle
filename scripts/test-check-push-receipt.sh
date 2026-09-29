@@ -110,5 +110,23 @@ h "unknown PUSH_GATE is rejected" 2 ""            bogus
 rm -f "$R"
 h "no receipt runs --hook gate"   0 "gate:--hook "
 
+# Widening: multi-ref pushes and non-HEAD refs must fail closed to --hook-all.
+hs() { # hs <name> <want-gate-log> <stdin lines...>
+  local name="$1" want="$2" log out got=0; shift 2
+  rm -f "$T/gate.log"
+  out=$(printf '%s\n' "$@" | env -u PUSH_GATE bash "$HOOK" 2>&1) || got=$?
+  log=$(cat "$T/gate.log" 2>/dev/null | tr '\n' ' ')
+  if [ "$got" = 0 ] && [ "$log" = "$want" ]; then
+    passed=$((passed + 1)); echo "ok   hook: $name -> gate=[$log]"
+  else
+    failed=$((failed + 1)); echo "FAIL hook: $name: want gate=[$want], got $got gate=[$log] | $out"
+  fi
+}
+PREV=$C1 # a valid sha that is not the hook repo HEAD
+hs "single HEAD ref stays scoped"     "gate:--hook "     "$(L "$HC")"
+hs "two refs widen"                   "gate:--hook-all " "$(L "$HC")" "$(L "$HC")"
+hs "non-HEAD ref widens"              "gate:--hook-all " "$(L "$PREV")"
+hs "delete + HEAD stays scoped"       "gate:--hook "     "$(L "$HC")" "refs/heads/x 0000000000000000000000000000000000000000 refs/heads/x $HC"
+
 echo "passed=$passed failed=$failed"
 [ "$failed" -eq 0 ]

@@ -34,9 +34,28 @@ case "${PUSH_GATE:-}" in
     ;;
 esac
 
-# stdin carries the ref lines; the receipt check consumes it, and the fast gate
-# does not need it (it checks HEAD's worktree, as the gate always has).
-if bash "$REPO_ROOT/scripts/check-push-receipt.sh"; then
+# stdin carries the ref lines. Capture it once: the receipt check consumes it, and
+# the fallback gate must know whether HEAD is the only thing being pushed. The fast
+# gate diffs HEAD against the merge base, so a multi-ref push, or a ref that is not
+# HEAD, could carry changes it never looks at; those widen every scoped step
+# (./... tests, actionlint, govulncheck) rather than build a union-of-refs diff.
+REFS="$(cat)"
+if printf '%s\n' "$REFS" | bash "$REPO_ROOT/scripts/check-push-receipt.sh"; then
   exit 0
+fi
+
+head_sha="$(git rev-parse HEAD)"
+nref=0
+widen=0
+while read -r _ lsha _ _; do
+  [ -n "${lsha:-}" ] || continue
+  [[ "$lsha" =~ ^(0{40}|0{64})$ ]] && continue # delete: sends nothing
+  nref=$((nref + 1))
+  [ "$lsha" = "$head_sha" ] || widen=1
+done <<<"$REFS"
+[ "$nref" -le 1 ] || widen=1
+if [ "$widen" -eq 1 ]; then
+  echo "pre-push: multi-ref push or a ref other than HEAD; widening the gate to the whole module." >&2
+  exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" --hook-all </dev/null
 fi
 exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" --hook </dev/null
