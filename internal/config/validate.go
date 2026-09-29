@@ -405,7 +405,7 @@ func validatorFor(f FieldSpec) Validator {
 		// Strictly positive, matching the env and file rules: a batch of 0
 		// drains nothing while the ticker still fires.
 		return ValidatePositiveInt()
-	case "word_sync_recheck.batch":
+	case "word_sync_recheck.batch", "upgrade_sweep.batch":
 		// Bounded both ways, by the same predicate the file and env paths
 		// use, so the settings page cannot save a value the next boot
 		// resets FOR RANGE. This does not cover the literal TOML written:

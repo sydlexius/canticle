@@ -568,6 +568,15 @@ func (w *LRCWriter) SetForceOverwrite(enabled bool) {
 	w.force = enabled
 }
 
+// WriteLRCNoDowngrade is WriteLRC with the no-downgrade guard always on, even
+// on a writer SetForceOverwrite forced: the serve upgrade sweep's re-fetch
+// (#553) must never replace a file with a worse one, --update or not.
+func (w *LRCWriter) WriteLRCNoDowngrade(song models.Song, filename string, outdir string) error {
+	guarded := *w
+	guarded.force = false
+	return guarded.WriteLRC(song, filename, outdir)
+}
+
 // companionPlan is planCompanion's verdict. removes are the existing
 // canticle-owned companions (every extension-case variant, #989) deleted before
 // the .lrc/.txt is replaced; when write is set, a fresh one is written at path
