@@ -213,7 +213,8 @@ func TestQueueSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueueSummary: %v", err)
 	}
-	want := reports.QueueSummary{Pending: 2, Processing: 1, Done: 3, Failed: 1, Deferred: 2, Unavailable: 1, Total: 10}
+	// The 3 done rows carry no sync_tier, so all 3 are settled-upgradable (#553).
+	want := reports.QueueSummary{Pending: 2, Processing: 1, Done: 3, Failed: 1, Deferred: 2, Unavailable: 1, Total: 10, SettledUpgradable: 3}
 	if got != want {
 		t.Errorf("QueueSummary = %+v, want %+v", got, want)
 	}

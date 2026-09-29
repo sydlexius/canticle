@@ -46,17 +46,52 @@ type QueueSummary struct {
 	// unavailable row never wrote a lyrics sidecar.
 	Unavailable int64
 	Total       int64
+
+	// Finished and SettledUpgradable split Done (#553, maintainer decision
+	// 2026-09-24): once word-synced output is the only terminal state, most
+	// 'done' rows are a snapshot of the current best rung, not an endpoint.
+	// Finished counts the 'done' rows at the top rung (finishedPredicate);
+	// SettledUpgradable is every other 'done' row -- line-synced, tier
+	// unknown, unsynced, instrumental (provider- and detector-written alike),
+	// rejected, legacy. The pair ALWAYS sums to Done, because
+	// SettledUpgradable is derived as Done - Finished from the same scan, so a
+	// dashboard built from them can neither double-count nor drop a row.
+	//
+	// A row with no recorded sync_tier (NULL, before `scan reconcile-sync-tier`
+	// runs) counts as SettledUpgradable: nothing proves it terminal, and the
+	// counter must never overstate what is finished.
+	Finished          int64
+	SettledUpgradable int64
 }
+
+// wordTierPredicate is the ONE definition of "this synced row is at the
+// word-synced (terminal) rung" (#553), shared by QueueSummary.Finished and
+// SyncTierCounts.WordSynced so the two dashboard rows cannot disagree. It is
+// decided from sync_tier -- what the FILE on disk is (#1075, stamped from
+// lyrics.WordsLanded or backfilled by lyrics.ClassifyLRCFile) -- never from a
+// provenance header. A tier the timing guard later remediated is stale
+// (neither remediation clears sync_tier), and a row mid word-recheck is
+// re-litigating its tier, so both read as not terminal. No leading AND/WHERE.
+const wordTierPredicate = `sync_tier = 'word'
+                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
+                      AND COALESCE(word_timing_state, '') <> 'queued'`
+
+// finishedPredicate is wordTierPredicate restricted to settled synced rows:
+// the rows QueueSummary counts as Finished.
+const finishedPredicate = `status = 'done' AND outcome_type = 'synced' AND ` + wordTierPredicate
 
 // QueueSummary returns the count of work_queue rows grouped by status.
 //
 // Source: work_queue.status (CHECK-constrained to pending/processing/done/
 // failed/deferred/unavailable by migrations 001, 012, 049). Zero-count
-// statuses are reported as 0 rather than omitted.
+// statuses are reported as 0 rather than omitted. Finished is counted in the
+// same scan (finishedPredicate), so it can never describe a different
+// population than Done.
 func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
 	var s QueueSummary
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT status, COUNT(*) FROM work_queue GROUP BY status`)
+		`SELECT status, COUNT(*), SUM(CASE WHEN `+finishedPredicate+` THEN 1 ELSE 0 END)
+         FROM work_queue GROUP BY status`)
 	if err != nil {
 		return QueueSummary{}, fmt.Errorf("reports: queue summary: %w", err)
 	}
@@ -64,8 +99,8 @@ func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
 
 	for rows.Next() {
 		var status string
-		var count int64
-		if err := rows.Scan(&status, &count); err != nil {
+		var count, finished int64
+		if err := rows.Scan(&status, &count, &finished); err != nil {
 			return QueueSummary{}, fmt.Errorf("reports: scan queue summary: %w", err)
 		}
 		switch status {
@@ -75,6 +110,8 @@ func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
 			s.Processing = count
 		case queue.StatusDone:
 			s.Done = count
+			s.Finished = finished
+			s.SettledUpgradable = count - finished
 		case queue.StatusFailed:
 			s.Failed = count
 		case queue.StatusDeferred:
@@ -524,9 +561,7 @@ func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
 	var wordSynced, lineSynced, unknown sql.NullInt64
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT
-             SUM(CASE WHEN sync_tier = 'word'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
-                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN `+wordTierPredicate+` THEN 1 ELSE 0 END),
              SUM(CASE WHEN sync_tier = 'line'
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),

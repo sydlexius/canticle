@@ -241,11 +241,19 @@ func formatWaited(since, now time.Time) string {
 }
 
 // buildQueueTiles shapes a QueueSummary into the dashboard's queue stat tiles.
+//
+// Done is shown as its two halves, Finished and Settled (upgradable), never
+// beside them (#553, maintainer decision 2026-09-24): with word-synced output
+// the only terminal state, a bare "Done" reads as "finished" while most of it
+// is a current-best snapshot, not a finished one. Replacing rather than
+// adding keeps the row one status axis that sums to Total. The doughnut
+// (buildQueueChart) keeps a single status-level "Done" segment.
 func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 	return []templates.StatTile{
 		{Label: "Pending", Value: strconv.FormatInt(qs.Pending, 10)},
 		{Label: "Processing", Value: strconv.FormatInt(qs.Processing, 10)},
-		{Label: "Done", Value: strconv.FormatInt(qs.Done, 10)},
+		{Label: "Finished", Value: strconv.FormatInt(qs.Finished, 10)},
+		{Label: "Settled (upgradable)", Value: strconv.FormatInt(qs.SettledUpgradable, 10)},
 		{Label: "Failed", Value: strconv.FormatInt(qs.Failed, 10)},
 		{Label: "Deferred", Value: strconv.FormatInt(qs.Deferred, 10)},
 		// Unavailable (#477): an exhausted benign miss, distinct from Done (which

@@ -442,7 +442,9 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 		v.QueueRows = []templates.QueueSummaryRow{
 			{Status: "Pending", Count: strconv.FormatInt(s.Pending, 10)},
 			{Status: "Processing", Count: strconv.FormatInt(s.Processing, 10)},
-			{Status: "Done", Count: strconv.FormatInt(s.Done, 10)},
+			// Done split into its two halves (#553); see buildQueueTiles.
+			{Status: "Finished", Count: strconv.FormatInt(s.Finished, 10)},
+			{Status: "Settled (upgradable)", Count: strconv.FormatInt(s.SettledUpgradable, 10)},
 			{Status: "Failed", Count: strconv.FormatInt(s.Failed, 10)},
 			{Status: "Deferred", Count: strconv.FormatInt(s.Deferred, 10)},
 			// Unavailable (#477): an exhausted benign miss, retired distinctly
