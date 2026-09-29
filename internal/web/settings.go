@@ -1386,7 +1386,7 @@ var settingsLabels = map[string]string{
 	"timing_validation.on_categorical":                "What to do when the lyrics belong to a different song",
 	"word_sync_recheck.enabled":                       "Re-check synced tracks for word timings in the background",
 	"word_sync_recheck.batch":                         "Most tracks waiting for a word-timing re-check at once",
-	"upgrade_sweep.enabled":                           "Re-fetch tracks below line sync in the background (no effect until the serve-mode sweep ships)",
+	"upgrade_sweep.enabled":                           "Re-fetch tracks below line sync in the background",
 	"upgrade_sweep.batch":                             "Most tracks waiting for an upgrade re-fetch at once",
 	"guard.accepted_scripts":                          "Writing systems to accept without asking",
 	"guard.script_guard_threshold":                    "Foreign-script sensitivity (0-1)",

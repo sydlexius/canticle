@@ -208,6 +208,29 @@ func TestConfigWordSyncRecheckGetList(t *testing.T) {
 	}
 }
 
+// TestConfigSetUpgradeSweep round-trips both [upgrade_sweep] keys; rejects bad values.
+func TestConfigSetUpgradeSweep(t *testing.T) {
+	t.Setenv("MXLRC_UPGRADE_SWEEP_ENABLED", "")
+	t.Setenv("MXLRC_UPGRADE_SWEEP_BATCH", "")
+	path := writeConfigTOML(t, "[upgrade_sweep]\nbatch = 100\n")
+	set := func(key, val string) int {
+		return runConfig(&bytes.Buffer{}, ConfigCmd{Set: &ConfigSetCmd{Key: key, Value: val, ConfigPath: path}})
+	}
+	for key, val := range map[string]string{"upgrade_sweep.enabled": "true", "upgrade_sweep.batch": "7"} {
+		if code := set(key, val); code != 0 {
+			t.Fatalf("set %s=%s: exit %d", key, val, code)
+		}
+		if got, ok := configValue(mustLoadConfigForTest(t, path), key); !ok || got != val {
+			t.Errorf("%s reloaded = %q, %v; want %q", key, got, ok, val)
+		}
+	}
+	for key, bad := range map[string]string{"upgrade_sweep.enabled": "maybe", "upgrade_sweep.batch": "1001"} {
+		if code := set(key, bad); code != 2 {
+			t.Errorf("set %s=%s: exit %d; want 2", key, bad, code)
+		}
+	}
+}
+
 // TestConfigSetWordSyncRecheckBatchRange drives `config set` through runConfig
 // end to end (not just setConfigValue) so the shared validator, the write, and
 // the rejection path are all exercised together: the batch bound is 1..1000
