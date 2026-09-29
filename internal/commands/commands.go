@@ -84,7 +84,7 @@ type LegacyArgs struct {
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
 	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files, even with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs one provider request per .txt (markers included) on every run, paced by --cooldown; implied by --update"`
+	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs a lookup per .txt (markers included) on every run, a provider request or more on a cache miss, paced by --cooldown; implied by --update"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Serve      bool     `arg:"--serve" help:"run HTTP server mode"`
 	Listen     *string  `arg:"--listen" help:"HTTP listen address (default: from config or 127.0.0.1:3876)"`
@@ -99,7 +99,7 @@ type FetchCmd struct {
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
 	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files, even with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs one provider request per .txt (markers included) on every run, paced by --cooldown"`
+	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs a lookup per .txt (markers included) on every run, a provider request or more on a cache miss, paced by --cooldown"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Token      string   `arg:"-t,--token" help:"musixmatch token" default:""`
 	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
@@ -118,7 +118,7 @@ type ServeCmd struct {
 	ConfigPath     string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth          int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
 	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files and may overwrite them with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk"`
+	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; a sidecar whose queue row is already done is not re-queued yet (#553)"`
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
 	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
 	ScanInterval   *int    `arg:"--scan-interval" help:"DEPRECATED scheduler interval in seconds; prefer [server.scan_schedule] (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
@@ -133,7 +133,7 @@ type ScanCmd struct {
 	ConfigPath           string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth                int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
 	Update               bool     `arg:"-u,--update" help:"queue existing .lrc files for re-fetch; the serve worker keeps a better sidecar already on disk unless serve itself runs with --update (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs one provider request per .txt (markers included) on every run; narrow with --unsynced-before"`
+	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs a lookup per .txt (markers included) on every run, a provider request or more on a cache miss; a sidecar whose queue row is already done is not re-queued yet (#553); narrow with --unsynced-before (fetch mode)"`
 	BFS                  bool     `arg:"--bfs" help:"use breadth-first traversal"`
 	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
 	Enrich               bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`

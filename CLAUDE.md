@@ -116,7 +116,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 
 ## CLI usage and input modes
 
-See `README.md` for flags and examples. Worth flagging: directory mode overrides `--outdir` (writes the output next to the audio file; the extension depends on lyric type - `.lrc` when synced lyrics are found, `.txt` when only unsynced lyrics or an instrumental marker is written), and `--upgrade` re-fetches songs that previously got `.txt` (unsynced lyrics or an instrumental marker, any provenance) to promote them when better lyrics become available, at one provider request per `.txt` per run.
+See `README.md` for flags and examples. Worth flagging: directory mode overrides `--outdir` (writes the output next to the audio file; the extension depends on lyric type - `.lrc` when synced lyrics are found, `.txt` when only unsynced lyrics or an instrumental marker is written), and `--upgrade` re-fetches songs that previously got `.txt` (unsynced lyrics or an instrumental marker, any provenance) to promote them when better lyrics become available, at a lookup per `.txt` per run (a provider request or more on a cache miss).
 
 ## Quality gating and CI
 

@@ -66,7 +66,7 @@ Notes:
 
 - The lyric file is written **next to each audio file**, so `-o/--outdir` is ignored in directory mode.
 - `-d/--depth` limits recursion depth (default `100`); `-d 0` scans only the given directory.
-- `--upgrade` re-fetches tracks that previously produced a `.txt` (unsynced lyrics or an instrumental marker), to promote them once better lyrics become available. A worse result never replaces what is on disk. Each run costs one provider request per `.txt`, so expect a long run on a library with many of them.
+- `--upgrade` re-fetches tracks that previously produced a `.txt` (unsynced lyrics or an instrumental marker), to promote them once better lyrics become available. A worse result never replaces what is on disk. Each run costs a lookup per `.txt` (a provider request or more on a cache miss), so expect a long run on a library with many of them.
 - When audio files contain ISRC, MusicBrainz recording ID, or duration tags, the scanner reads them automatically and passes them to Musixmatch to improve match precision - especially useful for albums with tracks that share the same title. See [Recording enrichment](USER_GUIDE.md#recording-enrichment) for controls.
 
 A bare argument that matches an existing directory triggers a recursive scan. That means `canticle "Dream Theater"` scans a folder named `Dream Theater`; it is not interpreted as a song query. Use the `artist,title` form for one-shot fetches.

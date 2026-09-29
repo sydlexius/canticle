@@ -55,7 +55,7 @@ func detectorVersionMoved(path, current string) bool {
 	}
 	prov, _, err := readInstrumentalProvenance(path)
 	if err != nil {
-		slog.Warn("could not read instrumental provenance; skipping the detector-version check", "path", path, "error", err)
+		slog.Debug("could not read instrumental provenance; skipping the detector-version check", "path", path, "error", err)
 		return false
 	}
 	return prov.IsDetector() && prov.DetectorVersion != "" && prov.DetectorVersion != current
