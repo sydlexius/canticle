@@ -94,3 +94,76 @@ func TestRun_KeptBetterLyricsLeaveTheBacklog(t *testing.T) {
 		t.Fatalf("row = %s/%v; want deferred with instrumental_result=0", status, result)
 	}
 }
+
+// partialThenKeptWriter writes a real marker for the first path, then swaps it
+// for a non-empty directory (so removing it fails on every platform and for
+// root), and refuses the second path with ErrKeptBetter.
+type partialThenKeptWriter struct{ calls int }
+
+func (w *partialThenKeptWriter) WriteLRC(song models.Song, filename, outdir string) error {
+	w.calls++
+	if w.calls > 1 {
+		return lyrics.ErrKeptBetter
+	}
+	name, err := lyrics.SidecarName(song.Track.ArtistName, song.Track.TrackName, filename, false)
+	if err != nil {
+		return err
+	}
+	p := filepath.Join(outdir, name)
+	if err := os.MkdirAll(filepath.Join(p, "child"), 0o750); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TestRun_KeptBetterWithFailedRollbackDoesNotStamp: when an earlier output path's
+// marker cannot be taken back, the row must not be stamped not-instrumental
+// beside the surviving marker; it stays unclassified for the next cycle.
+func TestRun_KeptBetterWithFailedRollbackDoesNotStamp(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	q := queue.NewDBQueue(sqlDB)
+	lib1, lib2 := t.TempDir(), t.TempDir()
+	it, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Synthetic Artist", TrackName: "Synthetic Title"},
+		OutputPaths: []models.OutputPath{
+			{Outdir: lib1, Filename: "track.lrc"},
+			{Outdir: lib2, Filename: "track.lrc"},
+		},
+		SourcePath: filepath.Join(lib1, "track.flac"),
+	}, queue.PriorityScan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Defer(ctx, it.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatal(err)
+	}
+
+	det := &countingDetector{res: detector.Result{Instrumental: true, Confidence: 0.95, Version: "v1"}}
+	var outcomes []Outcome
+	bf := New(q, det, &partialThenKeptWriter{})
+	res, err := bf.Run(ctx, Options{GlobalDetectDefault: true, Outcome: func(o Outcome) error { outcomes = append(outcomes, o); return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Errors != 1 || res.RowsStamped != 0 || res.KeptOnDisk != 0 {
+		t.Fatalf("result = %+v; want 1 error, nothing stamped, nothing kept", res)
+	}
+	if len(outcomes) != 1 || outcomes[0].Status != OutcomeFailed {
+		t.Fatalf("outcomes = %+v; want one OutcomeFailed", outcomes)
+	}
+	var result sql.NullInt64
+	if err := sqlDB.QueryRow(`SELECT instrumental_result FROM work_queue WHERE id = ?`, it.ID).Scan(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid {
+		t.Fatalf("instrumental_result = %d; the row must stay unclassified beside a surviving marker", result.Int64)
+	}
+}

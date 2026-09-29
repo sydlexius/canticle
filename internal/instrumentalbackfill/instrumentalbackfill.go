@@ -300,9 +300,18 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			// it, and the stored telemetry is the detector's real scores (so the
 			// recalibrator's threshold re-decision still sees what it heard).
 			//
-			// Any marker an earlier output path wrote is taken back first, so the
-			// row is never stamped not-instrumental beside a marker.
-			res.MarkersWritten -= b.rollback(written, &res)
+			// RULE: the row is never stamped not-instrumental beside a marker. Any
+			// marker an earlier output path wrote is taken back first; if that
+			// rollback is incomplete (a removal failed, already counted in Errors),
+			// the row is NOT stamped: it stays unclassified and the next cycle
+			// retries. KeptOnDisk still counts only on the clean path, since it
+			// documents rows that leave the backlog with a stamp.
+			removed := b.rollback(written, &res)
+			res.MarkersWritten -= removed
+			if removed != len(written) {
+				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
+				continue
+			}
 			res.KeptOnDisk++
 			// The positive change's mutation (marker + settle) did not happen.
 			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeSkipped})
