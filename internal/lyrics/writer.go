@@ -489,8 +489,10 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// overwrite, the opposite-sidecar removal (a .txt write deletes a settled
 	// .lrc) and the companion removal all destroy what is on disk, so a
 	// candidate on a lower rung than that is refused unless forced (--update).
+	// It judges exactly that removal set (staleSidecars and companion.removes,
+	// the same values the mutations below consume), nothing the write leaves.
 	if !w.force {
-		if have, got := classifyOnDisk(fp, listing), w.candidateRung(song, companion); got < have.OnDisk {
+		if have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion); got < have.OnDisk {
 			slog.Debug("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),
 				"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 			return &have
@@ -622,16 +624,28 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool, l si
 	if foreign {
 		slog.Info("leaving a word-synced companion canticle did not write", "path", path)
 	}
-	var plan companionPlan
-	for _, v := range l.Variants(path) {
-		if companionOwnershipOf(v) == companionOwned {
-			plan.removes = append(plan.removes, v)
-		}
-	}
+	plan := companionPlan{removes: ownedCompanions(fp, l)}
 	if !foreign && synced && w.wordSyncCompanion && HasQualifyingWords(song) {
 		plan.path, plan.write = path, true
 	}
 	return plan
+}
+
+// ownedCompanions is every canticle-owned word-synced companion variant beside
+// fp (#989), under its real name: exactly what a write to fp removes. It is
+// the one definition shared by planCompanion (which removes them) and the
+// no-downgrade guard (which judges them, #553), so the two cannot drift.
+func ownedCompanions(fp string, l sidecar.Listing) []string {
+	if !sidecar.Active(sidecar.KindWordSynced) {
+		return nil
+	}
+	var out []string
+	for _, v := range l.Variants(sidecar.StemOf(fp) + sidecar.ExtWordSynced) {
+		if companionOwnershipOf(v) == companionOwned {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // IsOwnedCompanion reports whether path is a word-synced companion canticle

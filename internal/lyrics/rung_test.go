@@ -251,3 +251,51 @@ func TestRungOnDisk_SymlinkNeverFollowed(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteLRC_NoDowngrade_SameExtensionVariantNotJudged: the guard judges
+// exactly what the write removes. A line write to "song.lrc" overwrites
+// song.lrc and removes .txt variants, never "song.LRC", so a word-synced
+// song.LRC must neither block the refresh nor be touched by it.
+func TestWriteLRC_NoDowngrade_SameExtensionVariantNotJudged(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.lrc and song.LRC are one file there")
+	}
+	_, _, line := rungSongs()
+	target, variant := filepath.Join(dir, "song.lrc"), filepath.Join(dir, "song.LRC")
+	wordBody := "[00:01.00]<00:01.00>alpha <00:02.00>beta\n"
+	seed(t, target, "[00:01.00]old\n")
+	seed(t, variant, wordBody)
+	if err := NewLRCWriter().WriteLRC(line, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC err = %v, want nil (song.LRC is not in the removal set)", err)
+	}
+	if got := readFileString(t, target); !strings.Contains(got, "new line") {
+		t.Errorf("song.lrc not rewritten: %q", got)
+	}
+	if got := readFileString(t, variant); got != wordBody {
+		t.Errorf("song.LRC changed: %q", got)
+	}
+}
+
+// TestWriteLRC_NoDowngrade_CompanionOfSurvivingVariant: a same-extension
+// variant is not judged as a file, but when the write removes the owned
+// companion that makes it word-synced ("song.elrc" beside a line "song.LRC"),
+// that removal is a downgrade of the variant, and it is refused.
+func TestWriteLRC_NoDowngrade_CompanionOfSurvivingVariant(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.lrc and song.LRC are one file there")
+	}
+	if !sidecar.Active(sidecar.KindWordSynced) {
+		t.Skip("companion inactive")
+	}
+	_, _, line := rungSongs()
+	elrc := filepath.Join(dir, "song.elrc")
+	seed(t, filepath.Join(dir, "song.LRC"), "[00:01.00]line\n")
+	seed(t, elrc, "[by:canticle]\n[00:01.00]<00:01.00>line\n")
+	if err := NewLRCWriter().WriteLRC(line, "song.lrc", dir); !errors.Is(err, ErrKeptBetter) {
+		t.Fatalf("WriteLRC err = %v, want ErrKeptBetter (the companion removal downgrades song.LRC)", err)
+	}
+	mustExist(t, elrc)
+	mustNotExist(t, filepath.Join(dir, "song.lrc"))
+}

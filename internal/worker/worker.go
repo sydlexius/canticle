@@ -1775,9 +1775,11 @@ func keptStamps(kept []*lyrics.KeptError) (outcome, tier string) {
 // synced row then re-enters ListTimingBacklog, whose sweep judges exactly the
 // kept file) or the verdict stamped when that same file was written.
 func (w *Worker) completeKept(ctx context.Context, item queue.WorkItem, kept []*lyrics.KeptError) error {
-	// Library metadata stays at Debug on this unattended path; the id is enough at Info.
+	// One Info record, id only: library metadata stays off Info on this
+	// unattended path. The artist/title/path for the same event is already the
+	// writer's own Debug record ("keeping better lyrics already on disk"), the
+	// only producer of a KeptError, so repeating it here would log it twice.
 	slog.Info("worker kept better lyrics already on disk", "id", item.ID)
-	slog.Debug("worker kept better lyrics already on disk", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName)
 	ctxNoCancel := context.WithoutCancel(ctx)
 	outcome, tier := keptStamps(kept)
 	if outcome != "" {
