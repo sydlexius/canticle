@@ -1039,9 +1039,8 @@ func validWordSyncRecheckBatch(n int) bool {
 
 // UpgradeSweepConfig governs the serve-mode upgrade sweep (#553): it re-queues
 // settled tracks below the line rung (unsynced, instrumental marker, untimed
-// .lrc) for a paced re-fetch, each at most once a week. Dark by default. The
-// serve-mode sweep that consumes it lands in the next #553 slice; until then
-// this section has no runtime effect.
+// .lrc) for a paced re-fetch, each at most once a week. Dark by default. Its
+// consumer is commands.newUpgradeSweepJob, started from runServe.
 type UpgradeSweepConfig struct {
 	// Enabled turns the sweep on. Default false.
 	// Override: MXLRC_UPGRADE_SWEEP_ENABLED.

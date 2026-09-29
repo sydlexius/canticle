@@ -139,6 +139,8 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
 | `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode word-timing re-check sweep. |
 | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | Most rows in word-recheck mode at once (1-1000); out-of-range values are ignored. |
+| `MXLRC_UPGRADE_SWEEP_ENABLED` | `false` | Master switch for the serve-mode upgrade sweep. |
+| `MXLRC_UPGRADE_SWEEP_BATCH` | `100` | Most rows waiting for an upgrade re-fetch at once (1-1000); out-of-range values are ignored. |
 | `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | EXPERIMENTAL: master switch for the word-sync generate lane (forced alignment via an external sidecar). The reference sidecar is slow on CPU (a CUDA image is available, see `deploy/aligner/README.md`); leave this off unless you run a dedicated aligner. No production caller yet. |
 | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
 | `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | Tracks aligned per sweep cycle; values below 1 reset to the default. |
@@ -510,6 +512,15 @@ The sweep runs at startup and then on the scan interval (every 6 hours in scan-o
 |---|---|---|---|
 | `enabled` | `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode sweep. The `scan reconcile-word-sync` command runs regardless. |
 | `batch` | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | The most rows the serve sweep keeps in word-recheck mode at once, across cycles: each cycle admits only `batch` minus the rows still waiting, so re-checks never pile up behind themselves. `scan reconcile-word-sync --limit` queues independently of this cap, so the true in-flight count can exceed it. Range `1`-`1000`; a file value outside it resets to the default, and an out-of-range environment variable is ignored (the file or default value stands). For a one-time bulk pass larger than that, use the CLI's `--limit`. |
+
+### `[upgrade_sweep]`
+
+The serve-mode counterpart of `--upgrade`, which never re-queues a track whose queue row is already done. On the same cadence as `[word_sync_recheck]`, it re-queues settled tracks below line sync (unsynced lyrics, instrumental markers, a `.lrc` with no timestamps) for a re-fetch behind fresh work, each at most once a week. A worse result never replaces what is on disk, even under `serve --update`. A re-fetch that lands nothing (no match, a result refused for its timing or rejected by the script guard or verification, or three failed attempts) keeps the file, leaves the track's record as it was, and does not count toward `max_miss_attempts`. A scan or webhook for the same track while it waits does not cancel it. Line-synced tracks are left to `[word_sync_recheck]`. Each re-fetch costs at least one provider request at the worker's pace.
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `MXLRC_UPGRADE_SWEEP_ENABLED` | `false` | Master switch. |
+| `batch` | `MXLRC_UPGRADE_SWEEP_BATCH` | `100` | The most tracks waiting for a re-fetch at once; each cycle admits only `batch` minus the tracks still waiting. Range `1`-`1000`, validated like `word_sync_recheck.batch`. |
 
 ### ffmpeg resolution
 

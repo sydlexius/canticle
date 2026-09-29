@@ -118,7 +118,7 @@ type ServeCmd struct {
 	ConfigPath     string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth          int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
 	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files and may overwrite them with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; a sidecar whose queue row is already done is not re-queued yet (#553)"`
+	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; a done queue row is re-queued only by [upgrade_sweep]"`
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
 	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
 	ScanInterval   *int    `arg:"--scan-interval" help:"DEPRECATED scheduler interval in seconds; prefer [server.scan_schedule] (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
@@ -133,7 +133,7 @@ type ScanCmd struct {
 	ConfigPath           string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth                int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
 	Update               bool     `arg:"-u,--update" help:"queue existing .lrc files for re-fetch; the serve worker keeps a better sidecar already on disk unless serve itself runs with --update (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs a lookup per .txt (markers included) on every run, a provider request or more on a cache miss; a sidecar whose queue row is already done is not re-queued yet (#553); narrow with --unsynced-before (fetch mode)"`
+	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs a lookup per .txt (markers included) on every run, a provider request or more on a cache miss; a done queue row is re-queued only by [upgrade_sweep]; narrow with --unsynced-before (fetch mode)"`
 	BFS                  bool     `arg:"--bfs" help:"use breadth-first traversal"`
 	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
 	Enrich               bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`
@@ -1258,6 +1258,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if !lyricsDisabled {
 		wordRecheck, _ = newWordRecheckSweepJob(sqlDB, cfg, w)
 	}
+	// Upgrade sweep (#553): likewise only with a live provider to drain it.
+	var upgradeSweep *upgradeSweepJob
+	if !lyricsDisabled {
+		upgradeSweep, _ = newUpgradeSweepJob(sqlDB, cfg)
+	}
 
 	// One-shot [re:canticle] editor-tag backfill (#483) runs SYNCHRONOUSLY here,
 	// before the worker (and every other in-process writer of a .lrc file: the
@@ -1393,6 +1398,13 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		go func() {
 			defer wg.Done()
 			runWordRecheckSweepLoop(runCtx, wordRecheck, resolveTimingSweepInterval(serveScanInterval(cfg, args)))
+		}()
+	}
+	if upgradeSweep != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runUpgradeSweepLoop(runCtx, upgradeSweep, resolveTimingSweepInterval(serveScanInterval(cfg, args)))
 		}()
 	}
 	// Background session sweeper: periodically delete expired/revoked sessions,
@@ -3329,6 +3341,8 @@ func configKeys() []string {
 		"timing_validation.on_categorical",
 		"word_sync_recheck.enabled",
 		"word_sync_recheck.batch",
+		"upgrade_sweep.enabled",
+		"upgrade_sweep.batch",
 		"guard.accepted_scripts",
 		"guard.script_guard_threshold",
 	}
@@ -3418,6 +3432,10 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.FormatBool(cfg.WordSyncRecheck.Enabled), true
 	case "word_sync_recheck.batch":
 		return strconv.Itoa(cfg.WordSyncRecheck.Batch), true
+	case "upgrade_sweep.enabled":
+		return strconv.FormatBool(cfg.UpgradeSweep.Enabled), true
+	case "upgrade_sweep.batch":
+		return strconv.Itoa(cfg.UpgradeSweep.Batch), true
 	case "guard.accepted_scripts":
 		return strings.Join(cfg.Guard.AcceptedScripts, ","), true
 	case "guard.script_guard_threshold":
@@ -3717,6 +3735,21 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("word_sync_recheck.batch must be an integer: %w", err)
 		}
 		cfg.WordSyncRecheck.Batch = n
+	case "upgrade_sweep.enabled":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("upgrade_sweep.enabled must be a boolean: %w", err)
+		}
+		cfg.UpgradeSweep.Enabled = b
+	case "upgrade_sweep.batch":
+		if err := config.ValidateAndSet(key, value); err != nil {
+			return err
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("upgrade_sweep.batch must be an integer: %w", err)
+		}
+		cfg.UpgradeSweep.Batch = n
 	case "guard.accepted_scripts":
 		// An empty value is valid: it clears the allowlist and disables the guard.
 		cfg.Guard.AcceptedScripts = splitCSV(value)
