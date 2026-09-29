@@ -145,6 +145,8 @@ type WorkItem struct {
 	// WordTimingState is the #982 re-examination state (WordTiming*); empty
 	// means NULL, never examined. The worker reads it to spot a flipped row.
 	WordTimingState string
+	// UpgradeQueued: this trip is an upgrade re-fetch of a settled file (#553).
+	UpgradeQueued bool
 }
 
 // DBQueue is a SQLite-backed queue for durable lyrics work.
@@ -270,41 +272,49 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
              artist = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.artist
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.artist
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.artist
                  ELSE excluded.artist
              END,
              title = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.title
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.title
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.title
                  ELSE excluded.title
              END,
              album = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.album
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.album
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.album
                  ELSE excluded.album
              END,
              album_artist = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.album_artist
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.album_artist
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.album_artist
                  ELSE excluded.album_artist
              END,
              outdir = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.outdir
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.outdir
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.outdir
                  ELSE excluded.outdir
              END,
              filename = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.filename
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.filename
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.filename
                  ELSE excluded.filename
              END,
              source_path = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.source_path
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.source_path
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.source_path
                  ELSE excluded.source_path
              END,
              output_paths = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.output_paths
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.output_paths
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.output_paths
                  ELSE excluded.output_paths
              END,
              scan_result_id = COALESCE(work_queue.scan_result_id, excluded.scan_result_id),
@@ -336,10 +346,11 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
              completed_at = CASE
                  WHEN work_queue.status IN ('done', 'unavailable') THEN work_queue.completed_at
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.completed_at
+                 WHEN work_queue.upgrade_queued = 1 THEN work_queue.completed_at -- #553: the file on disk
                  ELSE NULL
              END
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`,
 		inputs.Track.ArtistName,
 		inputs.Track.TrackName,
 		inputs.Track.AlbumName,
@@ -410,7 +421,7 @@ const dequeueRandomizedSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`
 
 // dequeueDeterministicSQL claims the next ready item in stable FIFO order within
 // a priority tier (created_at, then id). Clears batch_seq for the same reason as
@@ -428,7 +439,7 @@ const dequeueDeterministicSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`
 
 // dequeueBatchedClaimSQL claims the eligible buffered row with the lowest
 // batch_seq and clears its batch_seq in the same atomic statement, so a claimed
@@ -453,7 +464,7 @@ const dequeueBatchedClaimSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`
 
 // refillBufferSQL stamps batch_seq = offset + 1 .. offset + N on the next N
 // eligible unbuffered rows, randomizing composition and intra-tier order while
@@ -1224,7 +1235,7 @@ func (q *DBQueue) failOnce(ctx context.Context, id int64, cause error) (WorkItem
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`,
 		nextAttempts,
 		nextAttemptAt,
 		lastError,
@@ -1291,7 +1302,7 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`,
 		nextAttemptAt,
 		lastError,
 		id,
@@ -1423,7 +1434,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`,
 		now,
 		missLimitReachedError,
 		id,
@@ -1700,7 +1711,7 @@ type ListFilter struct {
 // optionally filtered by status and capped by limit.
 func (q *DBQueue) List(ctx context.Context, filter ListFilter) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued
                        FROM work_queue`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	const limitClause = ` LIMIT ?`
@@ -1766,7 +1777,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'failed'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued`,
 		now,
 		id,
 	)
@@ -2582,7 +2593,7 @@ type TimingBacklogOptions struct {
 // stamp its own verdict and may still be writing that very sidecar. Read-only.
 func (q *DBQueue) ListTimingBacklog(ctx context.Context, opts TimingBacklogOptions) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued
                        FROM work_queue
                        WHERE timing_outcome IS NULL
                          AND outcome_type = 'synced'
@@ -2681,7 +2692,7 @@ func detectEligibleClause(globalDefault bool) (clause string, args []any) {
 // detector). Read-only.
 func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOptions) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued
                        FROM work_queue
                        WHERE instrumental_result IS NULL
                          AND status = 'deferred'
@@ -2761,7 +2772,7 @@ func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOpt
 	// instrumental_result = 1 just before Complete, so a still-'processing' row could
 	// otherwise be picked up and cleared mid-write.
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued
                        FROM work_queue WHERE instrumental_result = 1 AND status = 'done'`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	query := baseQuery
@@ -3198,6 +3209,7 @@ func cancelByLibrary(ctx context.Context, tx *sql.Tx, libraryID int64, dryRun bo
          WHERE sr.library_id = ?
            AND wq.status IN ('pending', 'failed', 'deferred')
            AND COALESCE(wq.word_timing_state, '') <> 'queued'
+           AND wq.upgrade_queued = 0
          ORDER BY wq.id ASC`,
 		libraryID,
 	)
@@ -3382,6 +3394,7 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&vocalClass,
 		&detectorVersion,
 		&wordTimingState,
+		&item.UpgradeQueued,
 	)
 	if err != nil {
 		return WorkItem{}, err
