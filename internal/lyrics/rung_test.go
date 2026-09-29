@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -165,6 +166,87 @@ func TestWriteLRC_NoDowngrade_AllowsEqualOrHigher(t *testing.T) {
 			}
 			if tc.gone != "" {
 				mustNotExist(t, filepath.Join(dir, tc.gone))
+			}
+		})
+	}
+}
+
+// TestWriteLRC_NoDowngrade_JudgesEveryCaseVariant: on a case-sensitive
+// filesystem a .txt write removes EVERY .lrc variant, so the guard must judge
+// every one, not only the first. An untimed "song.lrc" ties an unsynced
+// candidate; the word-synced "song.LRC" beside it must still block the write.
+func TestWriteLRC_NoDowngrade_JudgesEveryCaseVariant(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.lrc and song.LRC are one file there")
+	}
+	_, unsynced, _ := rungSongs()
+	untimed, word := filepath.Join(dir, "song.lrc"), filepath.Join(dir, "song.LRC")
+	seed(t, untimed, "plain words\n")
+	seed(t, word, "[00:01.00]<00:01.00>alpha <00:02.00>beta\n")
+	if got := RungOnDisk(filepath.Join(dir, "song.txt"), sidecar.List(dir)); got != RungWord {
+		t.Errorf("RungOnDisk = %d, want RungWord (the best variant)", got)
+	}
+	if err := NewLRCWriter().WriteLRC(unsynced, "song.lrc", dir); !errors.Is(err, ErrKeptBetter) {
+		t.Fatalf("WriteLRC err = %v, want ErrKeptBetter", err)
+	}
+	mustExist(t, untimed)
+	mustExist(t, word)
+	mustNotExist(t, filepath.Join(dir, "song.txt"))
+}
+
+// TestWriteLRC_NoDowngrade_CaseVariantOfSameRungProceeds: judging every
+// variant must not turn a stale case variant into a blocker for a legitimate
+// same-rung refresh or an upgrade (the guard refuses strictly lower only).
+func TestWriteLRC_NoDowngrade_CaseVariantOfSameRungProceeds(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; the variants alias one file")
+	}
+	_, unsynced, line := rungSongs()
+	seed(t, filepath.Join(dir, "song.lrc"), "[00:01.00]old\n")
+	seed(t, filepath.Join(dir, "song.LRC"), "[00:01.00]stale variant\n")
+	if err := NewLRCWriter().WriteLRC(line, "song.lrc", dir); err != nil {
+		t.Fatalf("line refresh beside a line variant: %v", err)
+	}
+	if got := readFileString(t, filepath.Join(dir, "song.lrc")); !strings.Contains(got, "new line") {
+		t.Errorf("song.lrc not rewritten: %q", got)
+	}
+
+	dir = t.TempDir()
+	seed(t, filepath.Join(dir, "song.txt"), "old words\n")
+	seed(t, filepath.Join(dir, "song.TXT"), "stale words\n")
+	if err := NewLRCWriter().WriteLRC(unsynced, "song.lrc", dir); err != nil {
+		t.Fatalf("unsynced refresh beside an unsynced variant: %v", err)
+	}
+}
+
+// TestRungOnDisk_SymlinkNeverFollowed: an exact-name symlink (which
+// Listing.Variants reports) is never followed; it is kept as high as its
+// extension allows, whatever its target says.
+func TestRungOnDisk_SymlinkNeverFollowed(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	lrcTarget, txtTarget := filepath.Join(outside, "t.lrc"), filepath.Join(outside, "t.txt")
+	seed(t, lrcTarget, "plain words\n")         // RungUnsynced if followed
+	seed(t, txtTarget, InstrumentalMarker+"\n") // RungInstrumental if followed
+	cases := []struct {
+		name, link, target string
+		want               Rung
+	}{
+		{"lrc", "song.lrc", lrcTarget, RungWord},
+		{"txt", "song.txt", txtTarget, RungUnsynced},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := filepath.Join(dir, tc.name)
+			if err := os.Mkdir(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(tc.target, filepath.Join(d, tc.link)); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+			if got := RungOnDisk(filepath.Join(d, "song.txt"), sidecar.List(d)); got != tc.want {
+				t.Errorf("RungOnDisk = %d, want %d (symlink kept unjudged, not followed)", got, tc.want)
 			}
 		})
 	}

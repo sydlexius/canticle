@@ -80,26 +80,57 @@ func RungOfSong(song models.Song) Rung {
 }
 
 // RungOnDisk classifies what is on disk for fp's stem, by inspecting the files
-// themselves rather than any provenance header. A .lrc (any extension-case
-// variant, #989) wins over a .txt, mirroring the scanner's settle order.
+// themselves rather than any provenance header. EVERY extension-case variant
+// (#989) of the .lrc and the .txt is judged and the highest rung wins: the
+// writer removes every variant of the opposite sidecar, so on a case-sensitive
+// filesystem judging only the first (an untimed "song.lrc") would let a write
+// delete a better one beside it ("song.LRC", word-synced). On a tie a .lrc
+// wins over a .txt, mirroring the scanner's settle order.
 //
-// A sidecar that exists but cannot be read is ranked as high as its extension
-// allows (RungWord for a .lrc, RungUnsynced for a .txt): the guard's job is to
-// never destroy a file it could not judge, so doubt keeps the file.
+// A sidecar that exists but cannot be judged is ranked as high as its
+// extension allows (RungWord for a .lrc, RungUnsynced for a .txt): the guard's
+// job is to never destroy a file it could not judge, so doubt keeps the file.
+// That covers an unreadable file and any non-regular entry (a symlink, FIFO or
+// device at the exact name, which Listing.Variants deliberately reports): such
+// an entry is Lstat'ed and never opened, so the guard neither follows a link
+// out of the library nor blocks reading a FIFO.
 func RungOnDisk(fp string, l sidecar.Listing) Rung {
 	return classifyOnDisk(fp, l).OnDisk
 }
 
 // classifyOnDisk is RungOnDisk plus the facts a kept completion stamps from
-// (KeptError): whether the sidecar is a .lrc, and whether it was readable.
+// (KeptError): whether the kept sidecar is a .lrc, and whether it was judged.
 func classifyOnDisk(fp string, l sidecar.Listing) KeptError {
 	stem := sidecar.StemOf(fp)
-	if v := l.Variants(stem + sidecar.ExtLineSynced); len(v) > 0 {
-		tier, err := ClassifyLRCFile(v[0])
+	best := KeptError{OnDisk: RungNone, Judged: true}
+	for _, ext := range []string{sidecar.ExtLineSynced, sidecar.ExtUnsynced} {
+		for _, v := range l.Variants(stem + ext) {
+			// Strictly greater: on a tie the earlier (.lrc, exact case) wins.
+			if k := classifySidecar(v, ext == sidecar.ExtLineSynced); k.OnDisk > best.OnDisk {
+				best = k
+			}
+		}
+	}
+	return best
+}
+
+// classifySidecar judges one on-disk sidecar. Only a regular file is opened.
+func classifySidecar(path string, synced bool) KeptError {
+	keep := KeptError{OnDisk: RungUnsynced, Synced: synced} // unjudged: as high as the extension allows
+	if synced {
+		keep.OnDisk = RungWord
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		slog.Debug("could not inspect existing sidecar; keeping it", "path", path, "error", err)
+		return keep
+	}
+	if synced {
+		tier, err := ClassifyLRCFile(path)
 		switch {
 		case err != nil:
-			slog.Warn("could not classify existing .lrc; keeping it", "path", v[0], "error", err)
-			return KeptError{OnDisk: RungWord, Synced: true}
+			slog.Debug("could not classify existing .lrc; keeping it", "path", path, "error", err)
+			return keep
 		case tier == TierWord:
 			return KeptError{OnDisk: RungWord, Synced: true, Judged: true}
 		case tier == TierLine:
@@ -108,15 +139,13 @@ func classifyOnDisk(fp string, l sidecar.Listing) KeptError {
 			return KeptError{OnDisk: RungUnsynced, Synced: true, Judged: true}
 		}
 	}
-	if v := l.Variants(stem + sidecar.ExtUnsynced); len(v) > 0 {
-		data, err := os.ReadFile(v[0]) //nolint:gosec // reason: path is the writer's own resolved sidecar target
-		if err != nil {
-			return KeptError{OnDisk: RungUnsynced}
-		}
-		if strings.Contains(string(data), InstrumentalMarker) {
-			return KeptError{OnDisk: RungInstrumental, Judged: true}
-		}
-		return KeptError{OnDisk: RungUnsynced, Judged: true}
+	data, err := os.ReadFile(path) //nolint:gosec // reason: path is a Listing.Variants sidecar of the writer's own target, Lstat'ed regular above
+	if err != nil {
+		slog.Debug("could not read existing .txt; keeping it", "path", path, "error", err)
+		return keep
 	}
-	return KeptError{OnDisk: RungNone, Judged: true}
+	if strings.Contains(string(data), InstrumentalMarker) {
+		return KeptError{OnDisk: RungInstrumental, Judged: true}
+	}
+	return KeptError{OnDisk: RungUnsynced, Judged: true}
 }

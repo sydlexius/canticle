@@ -491,7 +491,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// candidate on a lower rung than that is refused unless forced (--update).
 	if !w.force {
 		if have, got := classifyOnDisk(fp, listing), w.candidateRung(song, companion); got < have.OnDisk {
-			slog.Info("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),
+			slog.Debug("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),
 				"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 			return &have
 		}
