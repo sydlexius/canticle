@@ -84,7 +84,7 @@ type LegacyArgs struct {
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
 	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files, even with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced) to promote to .lrc if synced lyrics are now available; implied by --update"`
+	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs one provider request per .txt (markers included) on every run, paced by --cooldown; implied by --update"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Serve      bool     `arg:"--serve" help:"run HTTP server mode"`
 	Listen     *string  `arg:"--listen" help:"HTTP listen address (default: from config or 127.0.0.1:3876)"`
@@ -99,7 +99,7 @@ type FetchCmd struct {
 	Cooldown   *int     `arg:"-c,--cooldown" help:"cooldown time in seconds (default: from config or 15)"`
 	Depth      int      `arg:"-d,--depth" help:"(directory mode) maximum recursion depth" default:"100"`
 	Update     bool     `arg:"-u,--update" help:"(directory mode) re-fetch and overwrite existing .lrc files, even with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt lyrics to promote to .lrc"`
+	Upgrade    bool     `arg:"--upgrade" help:"(directory mode) re-fetch songs with .txt (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs one provider request per .txt (markers included) on every run, paced by --cooldown"`
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Token      string   `arg:"-t,--token" help:"musixmatch token" default:""`
 	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
@@ -118,7 +118,7 @@ type ServeCmd struct {
 	ConfigPath     string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth          int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
 	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files and may overwrite them with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt lyrics to promote them"`
+	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk"`
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
 	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
 	ScanInterval   *int    `arg:"--scan-interval" help:"DEPRECATED scheduler interval in seconds; prefer [server.scan_schedule] (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
@@ -133,7 +133,7 @@ type ScanCmd struct {
 	ConfigPath           string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth                int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
 	Update               bool     `arg:"-u,--update" help:"queue existing .lrc files for re-fetch; the serve worker keeps a better sidecar already on disk unless serve itself runs with --update (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
+	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs one provider request per .txt (markers included) on every run; narrow with --unsynced-before"`
 	BFS                  bool     `arg:"--bfs" help:"use breadth-first traversal"`
 	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
 	Enrich               bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`
@@ -141,7 +141,7 @@ type ScanCmd struct {
 	DetectInstrumental   bool     `arg:"--detect-instrumental" help:"force instrumental detection on for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --no-detect-instrumental"`
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
-	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade, reopen only .txt sidecars (unsynced lyrics and provisional instrumental markers) last modified before this cutoff; for a one-time repair of a historical cohort (issue #617). Refused with --update, which re-fetches every settled .lrc regardless of the cutoff. Accepts a date (2026-04-01, read as midnight UTC) or an RFC3339 instant; the comparison is strict, so a sidecar stamped exactly at the cutoff is excluded"`
+	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade, reopen only .txt sidecars (unsynced lyrics and instrumental markers) last modified before this cutoff; for a one-time repair of a historical cohort (issue #617). Refused with --update, which re-fetches every settled .lrc regardless of the cutoff. Accepts a date (2026-04-01, read as midnight UTC) or an RFC3339 instant; the comparison is strict, so a sidecar stamped exactly at the cutoff is excluded"`
 
 	Results                          *ScanResultsCmd                          `arg:"subcommand:results" help:"list persisted scan_results rows"`
 	Clear                            *ScanClearCmd                            `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
@@ -2187,8 +2187,9 @@ const selfWriteDebounceMultiple = 3
 
 // detectorScanVersion returns the version identifying detector output, for
 // detector-marker version invalidation (#502), or "" when the audio detector is
-// disabled -- so a disabled detector never reopens provisional markers on a
-// version bump.
+// disabled -- so a disabled detector never reopens detector-written markers on
+// a version bump. (--upgrade reopens every marker regardless, #553; this only
+// governs the flagless version reopen.)
 //
 // This is the SIDECAR MODEL version, matching what the detector stamps onto every
 // Result and what the worker persists as work_queue.detector_version (#684). It

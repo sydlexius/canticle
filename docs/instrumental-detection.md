@@ -22,9 +22,10 @@ Two rules bound when it can act:
   has come back empty. If a provider returns lyrics, the track is never
   classified - the audio model never overrides provider-supplied data.
 - **Never destructive.** It only writes a marker where there would otherwise be a
-  miss. Instrumental markers are excluded from `--upgrade` (re-fetching an
-  instrumental just reproduces the marker); force a re-check with `--update`
-  (full re-fetch) after a catalog change.
+  miss. A marker is not a final state: `--upgrade` re-checks every instrumental
+  marker, provider- or detector-written alike, and a result better than the
+  marker replaces it. A worse result never replaces anything on disk, so a
+  re-check cannot turn lyrics into a marker (only `--update` may go down).
 
 ## The decision model (the core)
 
@@ -364,8 +365,9 @@ verdict, so you can see *why* a track was or was not marked.
   telemetry* below.
 - **Re-classifying / clearing stale markers.** After changing thresholds or
   fixing the sidecar, re-validate existing markers with `scan reconcile` (see
-  below) rather than a blanket `--update`. Instrumental markers are otherwise
-  sticky - `--upgrade` skips them by design.
+  below) rather than a blanket `--update`. `--upgrade` also re-checks every
+  marker (one provider request per marker per run), and a better result
+  replaces it; a worse one never does (#553).
 
 ### Decision telemetry on `work_queue`
 

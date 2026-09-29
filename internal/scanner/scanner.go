@@ -530,15 +530,15 @@ type ScanOptions struct {
 	// always-on behavior must set it true explicitly.
 	EnrichRecording bool
 	// DetectorVersion is the current audio-detector version. When set (serve mode
-	// with the detector enabled), a provisional (detector-written) instrumental
-	// marker whose stored [dv:] differs is invalidated and re-checked, mirroring
+	// with the detector enabled), a detector-written instrumental marker whose
+	// stored [dv:] differs is re-checked with no flag set, mirroring
 	// providers_version cache retirement. Empty (dir/CLI mode, or detector off)
-	// disables version invalidation. See #502.
+	// disables version invalidation.
 	DetectorVersion string
 	// UnsyncedBefore narrows a .txt-sidecar reopen to sidecars last modified before
 	// this instant, for a one-time repair of a historical cohort (#617). It applies
-	// to BOTH .txt classes a scan can reopen -- a settled unsynced sidecar and a
-	// provisional (detector-written) instrumental marker -- because a dated run
+	// to BOTH .txt classes a scan can reopen -- a settled unsynced sidecar and an
+	// instrumental marker of any provenance -- because a dated run
 	// that rewrote recent markers would destroy the same mtime evidence the cutoff
 	// depends on. It does NOT apply to a settled .lrc: --update reopens those, and
 	// a synced file is not part of any unsynced-repair cohort.
@@ -1224,21 +1224,17 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
 		case txtExists && !lrcExists && isInstrumentalTxt(txtPath):
-			// Instrumental markers are re-checkable by provenance (#502): a provider
-			// marker is authoritative (terminal), a detector marker is provisional and
-			// reopens on --upgrade or a detector-version bump.
-			prov, _, provErr := lyrics.ReadInstrumentalProvenance(txtPath)
-			if provErr != nil {
-				// Treat an unreadable header as terminal: fail conservatively toward terminal so a transient read error never reopens a settled marker.
-				slog.Warn("could not read instrumental provenance; treating marker as terminal", "file", file.Name(), "error", provErr)
-			}
-			if !instrumentalReopenable(prov, reopen, opts.DetectorVersion) {
+			// An instrumental marker is not terminal whoever wrote it (#553): it
+			// reopens on --upgrade like any .txt, or on a detector-version bump.
+			// The header is read only for the version check, and only when no
+			// flag already granted the reopen.
+			if !reopen.Unsynced && !detectorVersionMoved(txtPath, opts.DetectorVersion) {
 				// Index it if the scan index has never seen this path (#786). In
 				// serve mode this is the FIRST branch a lone .txt matches, so
 				// leaving it unwired would keep every moved instrumental track
 				// invisible to the index.
 				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
-				slog.Debug("skipping file, instrumental marker (terminal)", "file", file.Name())
+				slog.Debug("skipping file, instrumental marker settled", "file", file.Name())
 				continue
 			}
 			// Reopen granted. A dated repair run narrows it to the target cohort --
@@ -1252,7 +1248,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 				slog.Debug("skipping file, instrumental marker outside repair window", "file", file.Name())
 				continue
 			}
-			// Provisional marker eligible for re-check: fall through to enqueue.
+			// Marker eligible for re-check: fall through to enqueue.
 		case txtExists && !lrcExists:
 			// A settled unsynced .txt. Reopen it only when the Unsynced class was
 			// requested, and then only when a dated repair run (#617) has not scoped

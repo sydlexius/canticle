@@ -50,7 +50,7 @@ On success, a lyric file is written to the current directory (or to the director
 - **`.lrc`** - synced lyrics, with per-line `[MM:SS.cc]` timestamps. This is the goal.
 - **`.txt`** - unsynced (plain) lyrics, or an instrumental marker (`♪ Instrumental ♪`) when the track has no words.
 
-A `.txt` result is not a failure. It means synced lyrics were not available, so the best available content was written instead. If synced lyrics appear later, you can promote the file (see `--upgrade` below). Note: if the file is an instrumental marker (`♪ Instrumental ♪`), it is excluded from `--upgrade` promotion - `--update` is the only flag that forces a re-fetch of instrumental markers.
+A `.txt` result is not a failure. It means synced lyrics were not available, so the best available content was written instead. If synced lyrics appear later, you can promote the file (see `--upgrade` below). An instrumental marker (`♪ Instrumental ♪`) is re-checked by `--upgrade` too, and is replaced if a provider now has lyrics for the track.
 
 For multiple songs, a text-file batch, and every flag, see the [CLI Reference](CLI_REFERENCE.md#fetch).
 
@@ -66,7 +66,7 @@ Notes:
 
 - The lyric file is written **next to each audio file**, so `-o/--outdir` is ignored in directory mode.
 - `-d/--depth` limits recursion depth (default `100`); `-d 0` scans only the given directory.
-- `--upgrade` re-fetches tracks that previously produced a `.txt` (unsynced) file, to promote them to `.lrc` once synced lyrics become available. **Instrumental `.txt` files are excluded from upgrade**; use `--update` to force a re-fetch of those.
+- `--upgrade` re-fetches tracks that previously produced a `.txt` (unsynced lyrics or an instrumental marker), to promote them once better lyrics become available. A worse result never replaces what is on disk. Each run costs one provider request per `.txt`, so expect a long run on a library with many of them.
 - When audio files contain ISRC, MusicBrainz recording ID, or duration tags, the scanner reads them automatically and passes them to Musixmatch to improve match precision - especially useful for albums with tracks that share the same title. See [Recording enrichment](USER_GUIDE.md#recording-enrichment) for controls.
 
 A bare argument that matches an existing directory triggers a recursive scan. That means `canticle "Dream Theater"` scans a folder named `Dream Theater`; it is not interpreted as a song query. Use the `artist,title` form for one-shot fetches.

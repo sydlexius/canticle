@@ -115,11 +115,13 @@ func TestGetSongDir_SkipLogic(t *testing.T) {
 		{name: "upgrade_lrc_only", update: false, upgrade: true, lrcExists: true, txtExists: false, wantQueue: false},
 		{name: "upgrade_txt_only", update: false, upgrade: true, lrcExists: false, txtExists: true, wantQueue: true},
 		{name: "upgrade_both", update: false, upgrade: true, lrcExists: true, txtExists: true, wantQueue: false},
-		// Instrumental .txt markers are terminal -- must not be re-queued even with --upgrade.
-		{name: "upgrade_txt_only_instrumental", update: false, upgrade: true, lrcExists: false, txtExists: true, txtIsInstrumental: true, wantQueue: false},
+		// Instrumental .txt markers are not terminal (#553): --upgrade reopens them.
+		{name: "upgrade_txt_only_instrumental", update: false, upgrade: true, lrcExists: false, txtExists: true, txtIsInstrumental: true, wantQueue: true},
 		// Files renamed from .lrc carry LRC tag headers before the marker line --
-		// substring match must still detect them as instrumental and skip.
-		{name: "upgrade_txt_renamed_lrc_instrumental", update: false, upgrade: true, lrcExists: false, txtExists: true, txtIsRenamedLRC: true, wantQueue: false},
+		// substring match must still detect them as instrumental (and reopen).
+		{name: "upgrade_txt_renamed_lrc_instrumental", update: false, upgrade: true, lrcExists: false, txtExists: true, txtIsRenamedLRC: true, wantQueue: true},
+		// Without a flag a marker stays settled like any .txt.
+		{name: "no_flags_txt_only_instrumental", update: false, upgrade: false, lrcExists: false, txtExists: true, txtIsInstrumental: true, wantQueue: false},
 
 		// update=true, upgrade=false
 		{name: "update_no_files", update: true, upgrade: false, lrcExists: false, txtExists: false, wantQueue: true},
@@ -271,10 +273,10 @@ func writeMarkerWithHeader(t *testing.T, dir, name, source, dv string) {
 	}
 }
 
-// TestScanLibrary_InstrumentalProvenanceReopen verifies provenance-aware
-// re-check eligibility (#502): a detector marker is provisional (reopens on
-// --upgrade or a detector-version bump), a provider/legacy marker is terminal
-// (reopens only on --update).
+// TestScanLibrary_InstrumentalProvenanceReopen verifies that provenance no
+// longer decides re-check eligibility (#553, superseding #502): every marker
+// reopens on --upgrade or --update, and a detector marker additionally reopens
+// on its own on a detector-version bump.
 func TestScanLibrary_InstrumentalProvenanceReopen(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -287,9 +289,10 @@ func TestScanLibrary_InstrumentalProvenanceReopen(t *testing.T) {
 		{"detector_no_flags_terminal", lyrics.SourceDetector, "1.0", ScanOptions{}, false},
 		{"detector_version_bump_reopens", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "2.0"}, true},
 		{"detector_same_version_terminal", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "1.0"}, false},
-		{"provider_upgrade_terminal", "musixmatch", "", ScanOptions{Upgrade: true}, false},
+		{"provider_upgrade_reopens", "musixmatch", "", ScanOptions{Upgrade: true}, true},
 		{"provider_update_reopens", "musixmatch", "", ScanOptions{Update: true}, true},
-		{"legacy_bare_upgrade_terminal", "", "", ScanOptions{Upgrade: true}, false},
+		{"provider_no_flags_settled", "musixmatch", "", ScanOptions{DetectorVersion: "2.0"}, false},
+		{"legacy_bare_upgrade_reopens", "", "", ScanOptions{Upgrade: true}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,12 +425,9 @@ func TestSidecarWithinWindow(t *testing.T) {
 }
 
 // TestScanLibrary_UnsyncedBefore_InstrumentalMarkers covers the repair window's
-// effect on provisional (detector-written) instrumental markers. A dated run must
-// narrow these too: rewriting a recent marker bumps its mtime and destroys the
-// same evidence the cutoff depends on.
-//
-// An authoritative (provider or legacy bare) marker stays terminal under --upgrade
-// regardless of the window, so the cutoff must not resurrect one.
+// effect on instrumental markers. A dated run must narrow these too: rewriting a
+// recent marker bumps its mtime and destroys the same evidence the cutoff
+// depends on. Provider and detector markers are treated alike (#553).
 func TestScanLibrary_UnsyncedBefore_InstrumentalMarkers(t *testing.T) {
 	cutoff := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	old := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
@@ -441,17 +441,19 @@ func TestScanLibrary_UnsyncedBefore_InstrumentalMarkers(t *testing.T) {
 		wantEnqueue bool
 	}{
 		// The gap this test was written for: without the window check inside the
-		// instrumental branch, a recent provisional marker is reopened by a dated
+		// instrumental branch, a recent marker is reopened by a dated
 		// run and rewritten, destroying its mtime.
-		{"provisional_recent_outside_window_skipped", lyrics.SourceDetector, recent,
+		{"detector_recent_outside_window_skipped", lyrics.SourceDetector, recent,
 			ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, false},
-		{"provisional_old_within_window_reopens", lyrics.SourceDetector, old,
+		{"detector_old_within_window_reopens", lyrics.SourceDetector, old,
 			ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, true},
 		// Zero value stays inert for markers too.
-		{"provisional_recent_no_cutoff_reopens", lyrics.SourceDetector, recent,
+		{"detector_recent_no_cutoff_reopens", lyrics.SourceDetector, recent,
 			ScanOptions{Upgrade: true}, true},
-		// The window must never resurrect a terminal class.
-		{"authoritative_old_within_window_stays_terminal", "musixmatch", old,
+		// Provider markers are narrowed by the same window (#553).
+		{"provider_old_within_window_reopens", "musixmatch", old,
+			ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, true},
+		{"provider_recent_outside_window_skipped", "musixmatch", recent,
 			ScanOptions{Upgrade: true, UnsyncedBefore: cutoff}, false},
 	}
 	for _, tc := range cases {

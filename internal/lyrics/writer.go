@@ -419,9 +419,8 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		// EITHER signal marks a detector-written marker. This used to key on
 		// DetectorVersion alone, which meant an unknown model version silently
 		// wrote [source:<lane>] instead of [source:canticle-detector]: IsDetector()
-		// then read false and scanner.instrumentalReopenable treated a provisional
-		// detector verdict as editorially terminal -- reopenable only by a full
-		// --update, never by --upgrade.
+		// then read false and the scanner (before #553 retired provenance-based
+		// terminality) treated a detector verdict as editorially terminal.
 		//
 		// That was structurally unreachable while DetectorVersion was the app
 		// version (a build constant, never empty). Keying it to the sidecar model

@@ -252,14 +252,14 @@ func TestScanLibrary_SettledOutsideRepairWindowIsStillIndexed(t *testing.T) {
 		}
 	})
 
-	t.Run("provisional instrumental marker", func(t *testing.T) {
+	t.Run("instrumental marker outside repair window", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := testutil.WriteFLACFileWithComments(dir, "song.flac", 44100, 44100*30,
 			map[string]string{"ARTIST": testArtist, "TITLE": testTitle}); err != nil {
 			t.Fatalf("write fixture: %v", err)
 		}
-		// A DETECTOR-written marker is provisional, so --upgrade grants the reopen
-		// and the window check is what stops it -- the branch under test.
+		// --upgrade grants the reopen for any marker (#553), so the window
+		// check is what stops it -- the branch under test.
 		marker := "[source:" + lyrics.SourceDetector + "]\n[dv:v1]\n" + lyrics.InstrumentalMarker
 		if err := os.WriteFile(filepath.Join(dir, "song.txt"), []byte(marker), 0o600); err != nil {
 			t.Fatalf("write marker: %v", err)

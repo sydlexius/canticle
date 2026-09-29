@@ -123,7 +123,7 @@ func runBackfillCycle(ctx context.Context, bf backfiller, bounds backfillSweepBo
 		// bulk mutation and may want to reverse it. This sweep is incremental and
 		// continuous, so a backup file would grow without bound and describe a
 		// change nobody asked for. The mutations are individually recoverable --
-		// a marker is provisional (reopened by --upgrade and by a model-version
+		// a marker is not final (reopened by --upgrade and by a model-version
 		// change) and a not-instrumental stamp only fills the verdict cache.
 	})
 	if err != nil {
