@@ -28,6 +28,10 @@ func newStampRig(t *testing.T, primary, secondary *fakeFetcher, mode, prior stri
 	lw := w.writer.(*lyrics.LRCWriter)
 	lw.SetWordSync(mode == "inline" || mode == "both")
 	lw.SetWordSyncCompanion(mode == "sidecar" || mode == "both")
+	// The rig's row already has a settled .lrc, so a .txt or marker result
+	// reaches disk only as a forced (--update) rewrite (#553). These tests pin
+	// the stamps of what landed; the kept path has its own (kept_test.go).
+	lw.SetForceOverwrite(true)
 	if prior != "" {
 		if err := rig.q.SetWordTimingState(context.Background(), rig.id, prior, 1, time.Time{}); err != nil {
 			t.Fatal(err)

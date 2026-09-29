@@ -124,6 +124,8 @@ type LRCWriter struct {
 	// filesystem watcher can drop the events its own writes generate (#685).
 	// Nil (the default, and every non-serve caller) is a no-op.
 	selfWrites *selfwrite.Registry
+	// force disables the no-downgrade guard (#553); set from --update only.
+	force bool
 }
 
 // SetWordSync enables or disables Enhanced-LRC (A2) word markers on synced
@@ -483,6 +485,19 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// the same watcher reason, but ONLY when this write touches it: recording
 	// an untouched path would make the watcher drop a third party's change.
 	companion := w.planCompanion(song, fp, synced, listing)
+	// No-downgrade guard (#553), before the first mutation below: the target
+	// overwrite, the opposite-sidecar removal (a .txt write deletes a settled
+	// .lrc) and the companion removal all destroy what is on disk, so a
+	// candidate on a lower rung than that is refused unless forced (--update).
+	// It judges exactly that removal set (staleSidecars and companion.removes,
+	// the same values the mutations below consume), nothing the write leaves.
+	if !w.force {
+		if have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion); got < have.OnDisk {
+			slog.Debug("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),
+				"artist", song.Track.ArtistName, "track", song.Track.TrackName)
+			return &have
+		}
+	}
 	stale := staleSidecars(fp, listing)
 	w.selfWrites.Record(append(append([]string{fp, oppositeSidecar(fp), companion.path}, stale...), companion.removes...)...)
 
@@ -533,6 +548,25 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 			"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 	}
 	return nil
+}
+
+// candidateRung is the rung this write would put on disk: word timings count
+// only where they land (inline markers, or a companion this write will
+// actually write). A demotion needs no case here: it reaches the guard only
+// when no sidecar is settled, so it can never be refused.
+func (w *LRCWriter) candidateRung(song models.Song, companion companionPlan) Rung {
+	r := RungOfSong(song)
+	if r == RungWord && !w.wordSync && !companion.write {
+		return RungLine
+	}
+	return r
+}
+
+// SetForceOverwrite lets every write replace what is on disk even when it sits
+// on a lower rung (#553). It carries --update explicitly; the writer never
+// infers it. Not goroutine-safe; call before sharing the writer.
+func (w *LRCWriter) SetForceOverwrite(enabled bool) {
+	w.force = enabled
 }
 
 // companionPlan is planCompanion's verdict. removes are the existing
@@ -590,16 +624,28 @@ func (w *LRCWriter) planCompanion(song models.Song, fp string, synced bool, l si
 	if foreign {
 		slog.Info("leaving a word-synced companion canticle did not write", "path", path)
 	}
-	var plan companionPlan
-	for _, v := range l.Variants(path) {
-		if companionOwnershipOf(v) == companionOwned {
-			plan.removes = append(plan.removes, v)
-		}
-	}
+	plan := companionPlan{removes: ownedCompanions(fp, l)}
 	if !foreign && synced && w.wordSyncCompanion && HasQualifyingWords(song) {
 		plan.path, plan.write = path, true
 	}
 	return plan
+}
+
+// ownedCompanions is every canticle-owned word-synced companion variant beside
+// fp (#989), under its real name: exactly what a write to fp removes. It is
+// the one definition shared by planCompanion (which removes them) and the
+// no-downgrade guard (which judges them, #553), so the two cannot drift.
+func ownedCompanions(fp string, l sidecar.Listing) []string {
+	if !sidecar.Active(sidecar.KindWordSynced) {
+		return nil
+	}
+	var out []string
+	for _, v := range l.Variants(sidecar.StemOf(fp) + sidecar.ExtWordSynced) {
+		if companionOwnershipOf(v) == companionOwned {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // IsOwnedCompanion reports whether path is a word-synced companion canticle

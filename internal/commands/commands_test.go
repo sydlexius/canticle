@@ -3311,6 +3311,25 @@ func TestConfigureWriterWordSync(t *testing.T) {
 	}
 }
 
+// TestConfigureWriterForce: --update reaches the writer as its permission to
+// replace a better sidecar (#553); without it the downgrade is refused.
+func TestConfigureWriterForce(t *testing.T) {
+	for _, update := range []bool{false, true} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "s.lrc"), []byte("[00:01.00]settled\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w := lyrics.NewLRCWriter()
+		configureWriterForce(w, update)
+		song := models.Song{Track: models.Track{ArtistName: "A", TrackName: "T"}, Lyrics: models.Lyrics{LyricsBody: "plain"}}
+		err := w.WriteLRC(song, "s.lrc", dir)
+		if kept := errors.Is(err, lyrics.ErrKeptBetter); kept == update {
+			t.Errorf("update=%v: WriteLRC err = %v, want kept=%v", update, err, !update)
+		}
+	}
+	configureWriterForce(fakeWriter{}, true) // a non-LRCWriter is left alone
+}
+
 // TestConfigureWriterWordSyncCompanion covers the companion half of the mode
 // wiring, read back from the writer: without it, both mode could be wired to
 // nothing here and still pass, because the on-disk result is covered in

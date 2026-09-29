@@ -490,6 +490,7 @@ func TestWriteLRC_FailedCompanionRemovalAbortsBeforeLRC(t *testing.T) {
 	}
 	seedCompanion(t, dir)
 	w := modeWriter(false, false)
+	w.SetForceOverwrite(true) // the removal path is reached only by a forced word->line rewrite (#553)
 	w.companionRemove = func(string) error { return errors.New("injected") }
 
 	err := w.WriteLRC(a2Song(), "song.lrc", dir)
@@ -738,6 +739,9 @@ func TestWriteLRC_RemovesEveryStaleCaseVariant(t *testing.T) {
 	reg := selfwrite.New(time.Minute)
 	w := modeWriter(false, true)
 	w.SetSelfWriteRegistry(reg)
+	// Every seeded .lrc variant is word-synced (inline markers), so an unsynced
+	// write removing them is a downgrade (#553): only an explicit --update does it.
+	w.SetForceOverwrite(true)
 	// An unsynced write (a demotion would keep the settled .lrc instead).
 	song := models.Song{Track: models.Track{ArtistName: "a", TrackName: "t"}, Lyrics: models.Lyrics{LyricsBody: "words"}}
 	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {

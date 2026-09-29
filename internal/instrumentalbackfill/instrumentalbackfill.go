@@ -16,6 +16,7 @@ package instrumentalbackfill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -127,7 +128,11 @@ type Result struct {
 	SkippedNoSource       int // rows with no readable source path
 	SkippedClaimed        int // rows a serve-mode worker claimed mid-classification
 	SkippedAlreadySettled int // rows a PEER BACKFILL settled first (marker preserved)
-	Errors                int // non-fatal per-row failures
+	// KeptOnDisk counts instrumental verdicts whose marker the writer refused
+	// because better lyrics are already on disk (#553). Each is stamped
+	// not-instrumental (and counted in RowsStamped), so it leaves the backlog.
+	KeptOnDisk int
+	Errors     int // non-fatal per-row failures
 }
 
 // Options controls a Run.
@@ -255,35 +260,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			if opts.DryRun {
 				continue
 			}
-			// A negative verdict is a MUTATION too: it stamps instrumental_result=0,
-			// which removes the row from every future backfill's candidate set. So it
-			// gets the same backup-first treatment as a positive one -- otherwise --yes
-			// could quietly retire rows with no recoverable record of having done so.
-			if opts.Report != nil {
-				if err := opts.Report(change); err != nil {
-					res.Errors++
-					b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
-					continue
-				}
-			}
-			// The row stays deferred: a provider may still find lyrics for it.
-			stamped, err := b.store.StampUnclassifiedMiss(ctx, item.ID, tel)
-			if err != nil {
-				res.Errors++
-				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
-				continue
-			}
-			if !stamped {
-				res.SkippedClaimed++
-				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeSkipped})
-				continue
-			}
-			res.RowsStamped++
-			// Recorded only after the stamp APPLIED: a row a worker claimed mid-flight
-			// was not classified by this run, so attributing an attempt to it would
-			// credit the detector with work it did not land.
-			b.recordAttempt(ctx, item.ID, false)
-			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeApplied})
+			b.stampNotInstrumental(ctx, opts, change, &res)
 			continue
 		}
 
@@ -311,6 +288,39 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 		// one failed) must not leave its successful siblings behind.
 		written, err := b.writeMarkers(item)
 		res.MarkersWritten += len(written)
+		if errors.Is(err, lyrics.ErrKeptBetter) {
+			// Better lyrics are already on disk (#553), so no marker can land and
+			// the row must not settle instrumental. It must not stay unclassified
+			// either: ListUnclassified is deterministically ordered, so the row
+			// would be re-detected (audio read + ffmpeg + inference, a disk wake,
+			// #684) on every cycle forever and, under a batch cap, starve the rows
+			// behind it. Retire it with the not-instrumental stamp instead: the
+			// verdict that stands for this row is "the file on disk is real
+			// lyrics", the row stays deferred exactly as a negative verdict leaves
+			// it, and the stored telemetry is the detector's real scores (so the
+			// recalibrator's threshold re-decision still sees what it heard).
+			//
+			// RULE: the row is never stamped not-instrumental beside a marker. Any
+			// marker an earlier output path wrote is taken back first; if that
+			// rollback is incomplete (a removal failed, already counted in Errors),
+			// the row is NOT stamped: it stays unclassified and the next cycle
+			// retries. KeptOnDisk still counts only on the clean path, since it
+			// documents rows that leave the backlog with a stamp.
+			removed := b.rollback(written, &res)
+			res.MarkersWritten -= removed
+			if removed != len(written) {
+				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
+				continue
+			}
+			res.KeptOnDisk++
+			// The positive change's mutation (marker + settle) did not happen.
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeSkipped})
+			neg := change
+			neg.Instrumental = false
+			neg.MarkerPaths = nil
+			b.stampNotInstrumental(ctx, opts, neg, &res)
+			continue
+		}
 		if err != nil {
 			res.Errors++
 			// Never stamp a verdict whose marker did not fully land, or the row would
@@ -375,6 +385,41 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	return res, nil
+}
+
+// stampNotInstrumental applies a not-instrumental change: backup record first,
+// then instrumental_result=0 on the still-deferred row, then its outcome.
+//
+// A negative verdict is a MUTATION too: it stamps instrumental_result=0, which
+// removes the row from every future backfill's candidate set. So it gets the
+// same backup-first treatment as a positive one -- otherwise --yes could
+// quietly retire rows with no recoverable record of having done so.
+func (b *Backfiller) stampNotInstrumental(ctx context.Context, opts Options, change Change, res *Result) {
+	if opts.Report != nil {
+		if err := opts.Report(change); err != nil {
+			res.Errors++
+			b.reportOutcome(opts, Outcome{QueueID: change.QueueID, Status: OutcomeFailed})
+			return
+		}
+	}
+	// The row stays deferred: a provider may still find lyrics for it.
+	stamped, err := b.store.StampUnclassifiedMiss(ctx, change.QueueID, change.Telemetry)
+	if err != nil {
+		res.Errors++
+		b.reportOutcome(opts, Outcome{QueueID: change.QueueID, Status: OutcomeFailed})
+		return
+	}
+	if !stamped {
+		res.SkippedClaimed++
+		b.reportOutcome(opts, Outcome{QueueID: change.QueueID, Status: OutcomeSkipped})
+		return
+	}
+	res.RowsStamped++
+	// Recorded only after the stamp APPLIED: a row a worker claimed mid-flight
+	// was not classified by this run, so attributing an attempt to it would
+	// credit the detector with work it did not land.
+	b.recordAttempt(ctx, change.QueueID, false)
+	b.reportOutcome(opts, Outcome{QueueID: change.QueueID, Status: OutcomeApplied})
 }
 
 // reportOutcome hands a realized Outcome to Options.Outcome when set. An error

@@ -35,8 +35,15 @@ func ReadSyncedLRC(path string) (models.Synced, error) {
 	if err != nil {
 		return models.Synced{}, fmt.Errorf("read lrc %q: %w", path, err)
 	}
+	return parseSyncedLRC(b), nil
+}
+
+// parseSyncedLRC is ReadSyncedLRC's parse over bytes already read, so a caller
+// that read the file from its own handle (the no-downgrade guard's
+// O_NOFOLLOW open, #553) judges it with the same parse.
+func parseSyncedLRC(b []byte) models.Synced {
 	doc := lrcnormalize.ParseBody(strings.TrimPrefix(string(b), utf8BOM))
-	return models.Synced{Lines: doc.Cues}, nil
+	return models.Synced{Lines: doc.Cues}
 }
 
 // EvaluateLRCFile reads the .lrc at path and classifies its timing against
@@ -136,6 +143,12 @@ func ClassifyLRCFile(lrcPath string) (SyncTier, error) {
 	if err != nil {
 		return "", err
 	}
+	return classifyLRCContent(lrcPath, synced)
+}
+
+// classifyLRCContent is ClassifyLRCFile over cues already read from lrcPath:
+// the cue tier, upgraded to Word by an owned companion beside lrcPath.
+func classifyLRCContent(lrcPath string, synced models.Synced) (SyncTier, error) {
 	tier := ClassifySynced(synced)
 	if tier == TierLine {
 		companion, err := ownedCompanionOfErr(lrcPath)

@@ -216,8 +216,8 @@ func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, arg
 		_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate done: reversed=%d markers-removed=%d skipped(provider-owned=%d worker-claimed=%d) errors=%d\n",
 			res.Reversed, res.MarkersRemoved, res.SkippedProviderOwned, res.SkippedClaimed, res.Errors)
 	} else {
-		_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate done: settled=%d markers-written=%d reset-stale=%d skipped(worker-claimed=%d) errors=%d\n",
-			res.Settled, res.MarkersWritten, res.ResetStale, res.SkippedClaimed, res.Errors)
+		_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate done: settled=%d markers-written=%d reset-stale=%d skipped(worker-claimed=%d) kept-on-disk=%d errors=%d\n",
+			res.Settled, res.MarkersWritten, res.ResetStale, res.SkippedClaimed, res.KeptOnDisk, res.Errors)
 	}
 	if args.Yes && (res.Settled > 0 || res.ResetStale > 0 || res.Reversed > 0) {
 		_, _ = fmt.Fprintf(out, "backup of changed rows written to %s\n", backupPath)
