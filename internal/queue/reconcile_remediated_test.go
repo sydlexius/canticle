@@ -58,6 +58,67 @@ func TestApplyRemediated_ResetClearsStampsAndCache(t *testing.T) {
 	if got, _ := cache.New(dbh).Lookup(ctx, "A", "reset", 200); got != "" {
 		t.Errorf("cache still serves %q after reset", got)
 	}
+	var outcome sql.NullString
+	if err := dbh.QueryRow(`SELECT outcome_type FROM work_queue WHERE id = ?`, c.ID).Scan(&outcome); err != nil || outcome.Valid {
+		t.Errorf("outcome_type = %+v (%v) after reset; want NULL", outcome, err)
+	}
+}
+
+// A scan row linked only through work_queue.scan_result_id (no join-table row)
+// must still return to pending on reset.
+func TestApplyRemediated_ResetDirectScanLink(t *testing.T) {
+	dbh := openQueueTestDB(t)
+	c := remediatedRow(t, dbh, "direct", "")
+	mustExec(t, dbh, `DELETE FROM work_queue_scan_results WHERE work_queue_id = ?`, c.ID)
+	mustExec(t, dbh, `UPDATE work_queue SET scan_result_id = ? WHERE id = ?`, c.ID, c.ID)
+	if ok, err := NewDBQueue(dbh).ApplyRemediated(context.Background(), c, RemediatedReset, "", nil); err != nil || !ok {
+		t.Fatalf("apply = %v, %v", ok, err)
+	}
+	if _, _, _, _, scan := remediatedState(t, dbh, c.ID); scan != "pending" {
+		t.Errorf("scan status = %s; want pending via scan_result_id", scan)
+	}
+}
+
+// A row prune retired (audio gone) is listed as Retired and refused by reset:
+// resetting it would only have prune re-retire it into tier-unknown again.
+func TestApplyRemediated_RetiredRowRefused(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	c := remediatedRow(t, dbh, "gone", "")
+	mustExec(t, dbh, `UPDATE work_queue SET last_error = ? WHERE id = ?`, UnresolvableGoneError, c.ID)
+	got, err := q.ListRemediatedCandidates(ctx, `(sync_tier IS NULL OR timing_outcome = 'mis_synced')`)
+	if err != nil || len(got) != 1 || !got[0].Retired {
+		t.Fatalf("list = %+v, %v; want one Retired candidate", got, err)
+	}
+	calls := 0
+	ok, err := q.ApplyRemediated(ctx, c, RemediatedReset, "", func() error { calls++; return nil })
+	if err != nil || ok || calls != 0 {
+		t.Errorf("reset of retired row = %v, %v, backup calls %d; want refused", ok, err, calls)
+	}
+	if status, _, _, _, scan := remediatedState(t, dbh, c.ID); status != "done" || scan != "done" {
+		t.Errorf("retired row changed: %s scan=%s", status, scan)
+	}
+}
+
+// A row re-described between list and apply (outcome_type already 'unsynced')
+// is untouched by the unsynced and tier actions.
+func TestApplyRemediated_RacedRedescribedRowUntouched(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	for _, action := range []string{RemediatedUnsynced, RemediatedTier} {
+		c := remediatedRow(t, dbh, "raced-"+action, "")
+		mustExec(t, dbh, `UPDATE work_queue SET outcome_type = 'unsynced', sync_tier = NULL WHERE id = ?`, c.ID)
+		calls := 0
+		ok, err := q.ApplyRemediated(ctx, c, action, SyncTierLine, func() error { calls++; return nil })
+		if err != nil || ok || calls != 0 {
+			t.Errorf("%s: apply = %v, %v, backup calls %d; want untouched", action, ok, err, calls)
+		}
+		if _, outcome, tier, _, _ := remediatedState(t, dbh, c.ID); outcome != "unsynced" || tier.Valid {
+			t.Errorf("%s: raced row changed: %s %+v", action, outcome, tier)
+		}
+	}
 }
 
 func TestApplyRemediated_UnsyncedAndTier(t *testing.T) {

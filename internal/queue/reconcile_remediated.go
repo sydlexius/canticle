@@ -26,12 +26,16 @@ type RemediatedCandidate struct {
 	Artist, Title, AudioPath, Status         string
 	PriorOutcome, PriorSyncTier, PriorTiming string
 	WordQueued, UpgradeArmed                 bool
+	// Retired is set for a row prune retired as UnresolvableGoneError (its
+	// audio is gone): reset refuses it, so the caller counts it as skipped.
+	Retired bool
 }
 
 const (
 	remediatedSelect = `SELECT id, COALESCE(source_path,''), artist, title, status,
                 COALESCE(outcome_type,''), COALESCE(sync_tier,''), COALESCE(timing_outcome,''),
-                COALESCE(word_timing_state,'') = 'queued', upgrade_queued <> 0
+                COALESCE(word_timing_state,'') = 'queued', upgrade_queued <> 0,
+                last_error = ?
            FROM work_queue
           WHERE outcome_type = 'synced' AND `
 	remediatedTail = `
@@ -45,7 +49,7 @@ const (
 // count them as skipped.
 func (q *DBQueue) ListRemediatedCandidates(ctx context.Context, tierUnknown string) ([]RemediatedCandidate, error) {
 	query := remediatedSelect + tierUnknown + remediatedTail //nolint:gosec // reason: G202 -- tierUnknown is reports.TierUnknownPredicate, a compile-time constant
-	rows, err := q.db.QueryContext(ctx, query)
+	rows, err := q.db.QueryContext(ctx, query, UnresolvableGoneError)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list remediated candidates: %w", err)
 	}
@@ -54,7 +58,7 @@ func (q *DBQueue) ListRemediatedCandidates(ctx context.Context, tierUnknown stri
 	for rows.Next() {
 		var c RemediatedCandidate
 		if err := rows.Scan(&c.ID, &c.AudioPath, &c.Artist, &c.Title, &c.Status, &c.PriorOutcome,
-			&c.PriorSyncTier, &c.PriorTiming, &c.WordQueued, &c.UpgradeArmed); err != nil {
+			&c.PriorSyncTier, &c.PriorTiming, &c.WordQueued, &c.UpgradeArmed, &c.Retired); err != nil {
 			return nil, fmt.Errorf("queue: scan remediated candidate: %w", err)
 		}
 		out = append(out, c)
@@ -84,13 +88,18 @@ func (q *DBQueue) ApplyRemediated(ctx context.Context, c RemediatedCandidate, ac
 	var res interface{ RowsAffected() (int64, error) }
 	switch action {
 	case RemediatedReset:
+		// A row retired with a last_error sentinel (prune's gone-audio retire)
+		// is refused: prune would re-retire it as done+synced+NULL tier, putting
+		// it back in tier-unknown every run. outcome_type = NULL matches what
+		// SetRemediatedFileState writes when no sidecar remains (#1130).
 		res, err = tx.ExecContext(ctx,
-			`UPDATE work_queue SET status = 'deferred', priority = -100, attempts = 0,
+			`UPDATE work_queue SET status = 'deferred', priority = -100, attempts = 0, outcome_type = NULL,
                  next_attempt_at = ?, last_error = '', sync_tier = NULL,
                  word_timing_state = NULL, word_timing_generation = NULL, word_timing_checked_at = NULL,
                  upgrade_checked_at = NULL, upgrade_queued = 0, timing_outcome = NULL,
                  overrun_magnitude = NULL, overrun_ratio = NULL, evaluated_at = NULL,
-                 timing_stamp_source = NULL, missync_recheck_generation = NULL`+guard,
+                 timing_stamp_source = NULL, missync_recheck_generation = NULL`+guard+
+				` AND COALESCE(last_error,'') = ''`,
 			formatTime(time.Now().UTC()), c.ID)
 	case RemediatedUnsynced:
 		res, err = tx.ExecContext(ctx, `UPDATE work_queue SET outcome_type = 'unsynced', sync_tier = NULL`+guard, c.ID)
