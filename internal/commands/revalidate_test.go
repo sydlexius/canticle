@@ -512,6 +512,19 @@ func TestRevalidateApplyStampsTheCoupledRow(t *testing.T) {
 	if got := revalidateRowOutcome(t, q); got != string(timing.MisSynced) {
 		t.Errorf("timing_outcome = %q after a remediating apply, want %q", got, timing.MisSynced)
 	}
+	// A post-settle stamp (#1120): the row is owed one provider pass.
+	if cfg, err := config.Load(cfgPath); err != nil {
+		t.Fatal(err)
+	} else if sqlDB, err := db.Open(t.Context(), cfg.DB.Path); err != nil {
+		t.Fatal(err)
+	} else {
+		var src sql.NullString
+		err := sqlDB.QueryRow(`SELECT timing_stamp_source FROM work_queue`).Scan(&src)
+		_ = sqlDB.Close()
+		if err != nil || src.String != queue.TimingSourceRevalidate {
+			t.Errorf("timing_stamp_source = %+v, %v; want %q", src, err, queue.TimingSourceRevalidate)
+		}
+	}
 	if !strings.Contains(out.String(), "1 work-queue row(s) stamped") {
 		t.Errorf("no aggregate stamp count in the report: %s", out.String())
 	}

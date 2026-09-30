@@ -197,3 +197,51 @@ func TestUpgradeTripSurvivesCollisionAndCancel(t *testing.T) {
 		}
 	}
 }
+
+// missyncedRow seeds a settled mis_synced row (a kept .lrc, so outcome_type is
+// not an upgrade-arm one) and applies set to vary one term of the #1120 arm.
+func missyncedRow(t *testing.T, dbh *sql.DB, key, set string) int64 {
+	t.Helper()
+	base := "outcome_type = 'synced', sync_tier = 'line', timing_outcome = 'mis_synced', timing_stamp_source = 'sweep'"
+	if set != "" {
+		base += ", " + set
+	}
+	return seedUpgradeRow(t, dbh, key, base)
+}
+
+// TestTimingStampSource (#1120 review M3): each method records the source it
+// is given; an empty one is NULL, which reads as post-settle (the row gets a
+// provider pass, never skips one), and an unknown one is rejected.
+func TestTimingStampSource(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	q.SetProvidersVersion(9)
+	id := missyncedRow(t, dbh, "m", "missync_recheck_generation = 9")
+	source := func() sql.NullString {
+		var s sql.NullString
+		if err := dbh.QueryRow(`SELECT timing_stamp_source FROM work_queue WHERE id = ?`, id).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, src := range []string{TimingSourceFetch, TimingSourceSweep, TimingSourceRevalidate} {
+		if err := q.SetTimingOutcome(ctx, id, TimingRecord{Outcome: "mis_synced", Source: src}); err != nil || source().String != src {
+			t.Fatalf("SetTimingOutcome(%q) = %v, stored %+v", src, err, source())
+		}
+		if ok, err := q.SetTimingOutcomeIfIdle(ctx, id, TimingRecord{Outcome: "mis_synced", Source: src}); err != nil || !ok || source().String != src {
+			t.Fatalf("SetTimingOutcomeIfIdle(%q) = %v, %v, stored %+v", src, ok, err, source())
+		}
+	}
+	if err := q.SetTimingOutcome(ctx, id, TimingRecord{Outcome: "mis_synced"}); err != nil || source().Valid {
+		t.Fatalf("empty source = %v, stored %+v; want NULL", err, source())
+	}
+	if ok, err := q.SetTimingOutcomeIfIdle(ctx, id, TimingRecord{Outcome: "mis_synced"}); err != nil || !ok || source().Valid {
+		t.Fatalf("IfIdle empty source = %v, %v, stored %+v; want NULL", ok, err, source())
+	}
+	if err := q.SetTimingOutcome(ctx, id, TimingRecord{Outcome: "ok", Source: "fetched"}); err == nil {
+		t.Fatal("unknown source accepted")
+	}
+	if _, err := q.SetTimingOutcomeIfIdle(ctx, id, TimingRecord{Outcome: "ok", Source: "fetched"}); err == nil {
+		t.Fatal("IfIdle unknown source accepted")
+	}
+}

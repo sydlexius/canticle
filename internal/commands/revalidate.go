@@ -276,7 +276,9 @@ func stampRemediatedRows(ctx context.Context, q rowStamper, findings []revalidat
 		}
 	}
 	for _, id := range order {
-		ok, serr := q.SetTimingOutcomeIfIdle(ctx, id, timingRecordFor(byRow[id]))
+		rec := timingRecordFor(byRow[id])
+		rec.Source = queue.TimingSourceRevalidate // post-settle stamp (#1120)
+		ok, serr := q.SetTimingOutcomeIfIdle(ctx, id, rec)
 		if serr != nil {
 			slog.Error("revalidate: could not stamp a remediated row", "id", id, "error", serr)
 			failed++

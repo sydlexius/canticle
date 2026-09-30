@@ -1134,6 +1134,7 @@ func timingRecordFromSong(song models.Song, durationSeconds int, now time.Time) 
 		// fake measured 0 corrupts any aggregate over the column.
 		Measured:    mag.Measured,
 		EvaluatedAt: now,
+		Source:      queue.TimingSourceFetch, // every lane already answered (#1120)
 	}
 }
 
