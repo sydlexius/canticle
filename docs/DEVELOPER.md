@@ -23,7 +23,7 @@ make hooks      # enable the pre-commit + pre-push hooks
 make doctor     # verify the hooks are wired and tool-version pins agree
 ```
 
-`make gate` runs the full local gate: conflict markers, product name, gofmt, web asset generation, build, non-race tests of the changed packages, patch coverage, golangci-lint, actionlint, the test-shard split check, and govulncheck. The race suite, coverage floor and codecov dry-run are CI-authoritative and run locally only under `RUN_RACE=1 make gate` (full `go test -race ./...`). `/prep-pr` runs this same chain through `.gates.toml` and records a gate receipt. Run it on demand before a PR. The git hooks do not run all of it.
+`make gate` runs the full local gate: conflict markers, product name, gofmt, web asset generation, build, non-race tests of the changed packages, patch coverage, golangci-lint, actionlint, the PR-trigger scope check, the test-shard split check, and govulncheck. The race suite, coverage floor and codecov dry-run are CI-authoritative and run locally only under `RUN_RACE=1 make gate` (full `go test -race ./...`). `/prep-pr` runs this same chain through `.gates.toml` and records a gate receipt. Run it on demand before a PR. The git hooks do not run all of it.
 
 `.githooks/pre-push` is the fast push path:
 
@@ -43,6 +43,7 @@ make doctor     # verify the hooks are wired and tool-version pins agree
 | codecov dry-run | no | no | only with `RUN_RACE=1` | Upload Coverage (not required) |
 | golangci-lint | yes | yes | yes | Lint (required) |
 | actionlint | no | only when a workflow changed | yes | none |
+| PR-trigger scope | no | yes | yes | Lint (required; runs on any workflow change) |
 | test-shard split | no | no | bash 4+ | Lint (required; runs whenever `scripts/ci-shards.sh` changes) |
 | govulncheck | yes | only when `go.mod`/`go.sum` changed | yes | none (`make vulncheck` on demand) |
 
@@ -52,7 +53,7 @@ The hook's test list comes from `scripts/hook-test-pkgs.sh`, which maps every pa
 
 govulncheck runs in the hook when `go.mod` or `go.sum` changed since the merge base. Pre-commit does run it, but pre-commit never runs for a merge, rebase, cherry-pick or `git commit --no-verify`, so a dependency bump arriving that way would otherwise reach the remote unchecked, and no CI job runs govulncheck. A vulnerability-database update against unchanged dependencies is caught only by `make gate` or `make vulncheck`.
 
-`PUSH_GATE=full git push ...` runs the full `make gate` chain and ignores any receipt. It is the only override, and it only makes the push stricter: there is no skip value, and any other `PUSH_GATE` value fails the push with exit 2. Never use `git push --no-verify`. `make hooks-test` runs the hermetic tests for the hook, the receipt check and the package mapping.
+`PUSH_GATE=full git push ...` runs the full `make gate` chain and ignores any receipt. It is the only override, and it only makes the push stricter: there is no skip value, and any other `PUSH_GATE` value fails the push with exit 2. Never use `git push --no-verify`. `make hooks-test` runs the hermetic tests for the hook, the receipt check, the package mapping and the PR-trigger guard.
 
 `make scan` requires [grype](https://github.com/anchore/grype) at the version pinned in `.github/workflows/ci.yml` (the `grype-version` input on the Image Scan job). That file is the single source of truth -- `scripts/check-tool-versions.sh` parses the pin out of it rather than carrying its own copy, so this page deliberately does not restate the number. Install that version and `make doctor` will verify the local binary matches. CI runs grype with `only-fixed: true` to suppress CVEs that have no released fix, reducing flakes from transient vuln-DB churn that cannot be actioned.
 
@@ -101,6 +102,10 @@ iso go run ./cmd/mxlrcgo-svc serve
 - Each real track gets an `.lrc` next to it carrying `[source:musixmatch]` (a `.txt` for a song with only unsynced lyrics).
 - The negative control ends as a miss (no `.lrc`/`.txt`, queue status deferred, `unavailable` once retired). A lyric for it is the decoy-payload failure fixed in #939.
 - Stop and restart serve once: it must reuse the stored token (no new bootstrap line in the log).
+
+### Stacked PRs and workflow triggers
+
+Every workflow with a `pull_request` or `pull_request_target` trigger runs with no `branches:` filter, so a PR whose base is another feature branch (a stacked PR) runs the same checks, labels and milestone automation as a PR to `main`; `push` triggers stay restricted to `main`. A filtered trigger would skip the workflow on a stacked PR, and a PR with no checks reads much like a PR whose checks passed. `scripts/check-pr-trigger-scope.sh` enforces this default-deny: it scans every workflow (`.yml` and `.yaml`) and fails on a `branches`/`branches-ignore` filter (block or flow form) unless the file is on its `EXEMPT` list (`dependabot-auto-approve.yml`, an approval and auto-merge path that must only act on PRs to `main`; `pages.yml`, a docs-site build that is not a required check), and fails if `ci.yml` or `codeql.yml` (the required checks) loses its `pull_request` trigger. It runs in `make gate`, in the push hook, and in the required `Lint` CI job (which now also runs on any workflow change), with mutation tests in `make hooks-test`. When a stacked PR's base merges and GitHub retargets it to `main`, trigger a NEW CI run before merging (push a commit, e.g. by updating the branch from `main`) and confirm that run tested the new merge commit: the retarget alone fires no run, and re-running an existing run replays its original commit and payload, so either way the green on the PR was earned against the old base.
 
 ### CI test sharding
 

@@ -20,7 +20,8 @@ name: PR Labels
 on:
   pull_request_target:
     types: [opened, reopened, edited, synchronize]
-    branches: [main]
+    # No base-branch filter: a stacked PR targets its parent branch, not main, and a
+    # filter would skip this on it. Guarded by scripts/check-pr-trigger-scope.sh.
 
 permissions: {}
 

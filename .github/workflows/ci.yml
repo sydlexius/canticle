@@ -66,6 +66,11 @@ jobs:
               # Owns the test-shard map: a shard-only change must still run
               # Lint, whose `ci-shards.sh verify` step is the only CI check of it.
               - 'scripts/ci-shards.sh'
+              # The PR-trigger guard scans every workflow, so an edit to any
+              # workflow (or to the guard) must run the Lint job that hosts it.
+              - '.github/workflows/**'
+              - 'scripts/check-pr-trigger-scope.sh'
+              - 'scripts/test-check-pr-trigger-scope.sh'
               # Inputs of the required Coverage Floor job.
               - 'scripts/coverage-floor.sh'
               - 'scripts/coverage-floor.json'
@@ -145,6 +150,15 @@ jobs:
       # is a required check, so a drifted split still blocks the merge.
       - name: Verify test-shard split integrity
         run: bash scripts/ci-shards.sh verify
+
+      # Every pull_request workflow must run on a PR to ANY base (stacked PRs),
+      # and ci.yml/codeql.yml must keep their trigger. Runs in the required Lint
+      # job so it cannot be skipped and adds no new required check.
+      - name: Check PR workflows run on any base branch
+        run: bash scripts/check-pr-trigger-scope.sh
+
+      - name: PR trigger guard self-test
+        run: bash scripts/test-check-pr-trigger-scope.sh
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
