@@ -157,6 +157,7 @@ type ScanCmd struct {
 	PurgeProvenance                  *ScanPurgeProvenanceCmd                  `arg:"subcommand:purge-provenance" help:"bulk-delete .lrc/.txt sidecars by provenance (--source or --no-source) and requeue for re-fetch (issue #474)"`
 	ReconcileWordSync                *ScanReconcileWordSyncCmd                `arg:"subcommand:reconcile-word-sync" help:"queue settled line-synced tracks for a word-timing re-check by a running serve worker; dry-run prints the count and minimum drain time (issue #982)"`
 	ReconcileSyncTier                *ScanReconcileSyncTierCmd                `arg:"subcommand:reconcile-sync-tier" help:"classify existing .lrc sidecars by on-disk sync tier (word/line/unsynced) and record it, resolving 'tier unknown' rows on the dashboard (issue #1075)"`
+	ReconcileRemediated              *ScanReconcileRemediatedCmd              `arg:"subcommand:reconcile-remediated" help:"re-describe synced rows whose sidecar is gone or demoted (reset for re-fetch, unsynced, or record tier), draining 'tier unknown' (issue #1143)"`
 	ReconcileEditorTag               *ScanReconcileEditorTagCmd               `arg:"subcommand:reconcile-editor-tag" help:"backfill [re:canticle] onto existing canticle-written .lrc/.elrc files (issue #483)"`
 }
 
@@ -166,6 +167,15 @@ type ScanCmd struct {
 type ScanReconcileSyncTierCmd struct {
 	Yes        bool   `arg:"--yes" help:"actually record the classified tier (without it, prints what would change)"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of classified rows (default: <db-dir>/reconcile-sync-tier-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// ScanReconcileRemediatedCmd re-describes synced rows the dashboard counts as
+// tier unknown from the files actually on disk (#1143). Dry-run unless --yes.
+// A busy database row is reported as write_failed and never retried; rerun.
+type ScanReconcileRemediatedCmd struct {
+	Yes        bool   `arg:"--yes" help:"actually apply the changes (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of changed rows (default: <db-dir>/reconcile-remediated-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -2543,6 +2553,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileSyncTier(ctx, out, sub)
+	case args.ReconcileRemediated != nil:
+		sub := *args.ReconcileRemediated
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileRemediated(ctx, out, sub)
 	default:
 		return runScan(ctx, out, args)
 	}
