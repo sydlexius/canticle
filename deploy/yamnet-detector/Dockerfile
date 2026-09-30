@@ -12,6 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Silence TensorFlow's C++ INFO/WARNING startup noise (#683), chiefly the
+# cpu_feature_guard "optimized to use available CPU instructions" notice that
+# reads like a fault but is not. Level 2, NOT 3: level 3 would also hide TF
+# ERROR lines, which are the signal for a broken model load. It must be in the
+# environment before the Python process starts (the C++ layer reads it once at
+# init), so it is set here and never from app.py.
+ENV TF_CPP_MIN_LOG_LEVEL=2
+
 WORKDIR /app
 
 COPY requirements.txt .

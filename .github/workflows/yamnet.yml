@@ -141,14 +141,54 @@ jobs:
             exit 1
           }
           echo "provenance labels verified against the running image: classes=$label_classes sha=${label_sha:0:12}..."
+
+          # TF log level (#683). Two properties, both guarded here:
+          #  1. The level is pinned to exactly 2. Level 2 drops INFO/WARNING
+          #     (the cpu_feature_guard notice) but keeps ERROR; level 3 would
+          #     hide errors too. A deterministic C++ ERROR trigger does not
+          #     exist (a broken model raises a Python OSError, which the level
+          #     does not touch), so the pinned value itself is what is asserted.
+          env_lines=$(docker image inspect canticle-yamnet:smoke \
+            --format '{{range .Config.Env}}{{println .}}{{end}}')
+          echo "$env_lines" | grep -qx 'TF_CPP_MIN_LOG_LEVEL=2' || {
+            echo "expected exactly TF_CPP_MIN_LOG_LEVEL=2 in the image env" >&2
+            exit 1
+          }
+
+          #  2. Normal startup omits the cpu_feature_guard notice. The absence
+          #     check only means something if the runner CAN emit it, so a
+          #     control container at level 0 must show it; otherwise fail loudly
+          #     rather than pass vacuously.
+          if docker logs yamnet-smoke 2>&1 | grep -q cpu_feature_guard; then
+            echo "cpu_feature_guard notice present at the default log level" >&2
+            exit 1
+          fi
+          docker run -d --name yamnet-smoke-control -e TF_CPP_MIN_LOG_LEVEL=0 canticle-yamnet:smoke
+          seen=false
+          for _ in $(seq 1 30); do
+            if docker logs yamnet-smoke-control 2>&1 | grep -q cpu_feature_guard; then
+              seen=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$seen" != true ]; then
+            echo "control (TF_CPP_MIN_LOG_LEVEL=0) never showed cpu_feature_guard within ~60s" >&2
+            echo "this runner does not emit the notice, so the absence check above proves nothing" >&2
+            docker logs yamnet-smoke-control >&2 || true
+            exit 1
+          fi
+          echo "log level verified: level=2 pinned, notice absent by default, present at level 0"
         # Always dump logs on failure so a broken start is diagnosable in CI.
       - name: Sidecar logs on failure
         if: failure()
-        run: docker logs yamnet-smoke || true
+        run: |
+          docker logs yamnet-smoke || true
+          docker logs yamnet-smoke-control || true
 
       - name: Stop sidecar
         if: always()
-        run: docker rm -f yamnet-smoke || true
+        run: docker rm -f yamnet-smoke yamnet-smoke-control || true
 
       # The /classify shape test (test_app.py) stubs the model, so it needs no
       # download and runs in seconds -- it belongs in CI (its former "not in CI"
