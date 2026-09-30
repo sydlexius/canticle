@@ -218,3 +218,99 @@ func TestUpgradeTrip_FailureAfterWriteNeverSettlesOldRecord(t *testing.T) {
 		t.Fatalf("row = %q, want failed and still armed (not settled onto the old .txt record)", got)
 	}
 }
+
+// postSettleMissynced turns the rig's armed trip into one over a row the #443
+// sweep demoted (track.txt holds the demoted words, timing_outcome mis_synced
+// stamped after settle) (#1120).
+func (r *upgradeRig) postSettleMissynced(t *testing.T) {
+	t.Helper()
+	if _, err := r.db.Exec(`UPDATE work_queue SET timing_outcome = 'mis_synced', timing_stamp_source = 'sweep',
+	      evaluated_at = '2099-01-01T00:00:00Z' WHERE id = ?`, r.id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpgradeTrip_MissyncedNeedsAudioDuration (#1120 review I1): the pass may
+// replace a file judged mis_synced against the audio only with a result judged
+// exactly ok against the AUDIO FILE's own duration. The same bad lyric judged
+// against the provider's catalog length (enrichment off) or against nothing
+// (the metadata read failed), or a result with no timing, settles the trip:
+// nothing written, still mis_synced.
+func TestUpgradeTrip_MissyncedNeedsAudioDuration(t *testing.T) {
+	badAtCatalog := fallthroughSong(120, "same bad lyric")
+	badAtCatalog.Track.TrackLength = 125 // the catalog length the lyric was timed against
+	for _, c := range []struct {
+		name  string
+		song  models.Song
+		setup func(*Worker)
+	}{
+		{"enrichment off, catalog length", badAtCatalog, func(w *Worker) { w.SetRecordingEnrichmentDefault(false) }},
+		{"metadata read failed, unknown duration", fallthroughSong(120, "same bad lyric"), func(w *Worker) {
+			w.SetMetadataReader((&fakeMetadataReader{err: errors.New("read failed")}).read)
+		}},
+		{"enrichment off, good lyric", fallthroughSong(90, "correctly timed"), func(w *Worker) { w.SetRecordingEnrichmentDefault(false) }},
+		// No timing to judge at all: not an ok verdict, so the demoted words stay.
+		{"unsynced-only result", models.Song{Track: models.Track{ArtistName: "A", TrackName: "T"}, Lyrics: models.Lyrics{LyricsBody: "other plain words"}}, func(*Worker) {}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newUpgradeRig(t, &fakeFetcher{song: c.song})
+			c.setup(r.w)
+			r.postSettleMissynced(t)
+			r.run(t)
+			if r.fetch.calls != 1 {
+				t.Fatalf("provider calls = %d, want 1", r.fetch.calls)
+			}
+			if got, want := r.row(t), "done outcome=unsynced timing=mis_synced lane= misses=14 armed=0"; got != want {
+				t.Fatalf("row = %q, want %q", got, want)
+			}
+			if b, err := os.ReadFile(r.txt); err != nil || string(b) != upgradeOldWords {
+				t.Fatalf("track.txt = %q, %v; want the demoted words untouched", b, err)
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(r.txt), "track.lrc")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("track.lrc stat = %v, want not written", err)
+			}
+		})
+	}
+}
+
+// TestUpgradeTrip_OrdinaryTripsIgnoreTheAudioGuard (#1120 review M1): the
+// audio-duration guard binds only a mis_synced row's trip. An ordinary #553
+// trip with enrichment off still lands its synced result (judged unknown
+// against no audio duration), and a trip over an instrumental marker still
+// lands an unsynced result (no timing verdict at all).
+func TestUpgradeTrip_OrdinaryTripsIgnoreTheAudioGuard(t *testing.T) {
+	t.Run("enrichment off lands a synced result", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+		r.w.SetRecordingEnrichmentDefault(false)
+		r.run(t)
+		if got, want := r.row(t), "done outcome=synced timing=unknown_duration lane=musixmatch misses=14 armed=0"; got != want {
+			t.Fatalf("row = %q, want %q", got, want)
+		}
+		var src sql.NullString
+		if err := r.db.QueryRow(`SELECT timing_stamp_source FROM work_queue WHERE id = ?`, r.id).Scan(&src); err != nil || src.String != queue.TimingSourceFetch {
+			t.Fatalf("timing_stamp_source = %+v, %v; want %q", src, err, queue.TimingSourceFetch)
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(r.txt), "track.lrc")); err != nil {
+			t.Fatalf("track.lrc not written: %v", err)
+		}
+	})
+	t.Run("unsynced result replaces an instrumental marker", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: models.Song{Track: models.Track{ArtistName: "A", TrackName: "T"}, Lyrics: models.Lyrics{LyricsBody: "new plain words"}}})
+		if err := os.Remove(r.txt); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.lw.WriteLRC(models.Song{Track: models.Track{ArtistName: "A", TrackName: "T", Instrumental: 1}}, "track.lrc", filepath.Dir(r.txt)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.db.Exec(`UPDATE work_queue SET outcome_type = 'instrumental' WHERE id = ?`, r.id); err != nil {
+			t.Fatal(err)
+		}
+		r.run(t)
+		if got, want := r.row(t), "done outcome=unsynced timing= lane=musixmatch misses=14 armed=0"; got != want {
+			t.Fatalf("row = %q, want %q", got, want)
+		}
+		if b, err := os.ReadFile(r.txt); err != nil || string(b) != "new plain words" {
+			t.Fatalf("track.txt = %q, %v; want the new words over the marker", b, err)
+		}
+	})
+}

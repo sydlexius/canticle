@@ -1653,7 +1653,16 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// mis-synced/degenerate candidate would have written the demoted .txt;
 		// settling instead is safe (the row's file record is untouched) and
 		// forgoes only that small gain.
-		if decision, _, _ := lyrics.DecidePromotion(song); decision != lyrics.PromoteAsIs {
+		decision, verdict, _ := lyrics.DecidePromotion(song)
+		if decision != lyrics.PromoteAsIs {
+			return w.settleUpgradeTrip(ctx, item)
+		}
+		// A mis_synced row's file was judged against the audio's exact duration
+		// (#1120). Only a synced result measured against the FILE's own duration
+		// and found exactly ok may undo that: a catalog-length or unknown-duration
+		// verdict fails open, and the row it stamps is never re-judged.
+		if item.TimingOutcome == string(timing.MisSynced) && (resolvedTrack.TrackLength <= 0 || verdict != timing.Ok) {
+			slog.Info("worker: mis_synced re-fetch not judged ok against the audio file; keeping the file", "id", item.ID, "audio_seconds", resolvedTrack.TrackLength, "verdict", verdict)
 			return w.settleUpgradeTrip(ctx, item)
 		}
 	}
