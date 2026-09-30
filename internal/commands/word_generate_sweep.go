@@ -32,6 +32,33 @@ type wordGenerateSweepJob struct {
 	gen     wordSyncGenerator
 	budget  int
 	wordGen int64
+	// noProviderPass: no upgrade sweep runs, so the #1120 pass never comes.
+	noProviderPass bool
+}
+
+// newPassSweeps builds serve's upgrade and word-generate sweeps together (nil
+// when not started), so neither exists without the #1120 wiring: both queues
+// are keyed on the lane-set generation, and without a running upgrade sweep
+// (disabled, or no lanes) no post-settle mis_synced pass can happen, so
+// generation admits those rows instead of stranding them, and says so once.
+func newPassSweeps(sqlDB *sql.DB, cfg config.Config, words wordGenerationSource, generator wordSyncGenerator, providersGen int, lyricsDisabled bool) (*upgradeSweepJob, *wordGenerateSweepJob) {
+	var upgrade *upgradeSweepJob
+	if !lyricsDisabled { // only with a live provider to drain it (#553)
+		upgrade, _ = newUpgradeSweepJob(sqlDB, cfg)
+	}
+	if upgrade != nil {
+		upgrade.q.SetProvidersVersion(providersGen)
+	}
+	generate, _ := newWordGenerateSweepJob(sqlDB, cfg, words, generator)
+	if generate == nil {
+		return upgrade, nil
+	}
+	generate.q.SetProvidersVersion(providersGen)
+	if upgrade == nil {
+		generate.noProviderPass = true
+		slog.Info("word-sync generate sweep: the upgrade sweep is not running, so mis_synced tracks judged after they settled are retimed without a provider re-fetch first")
+	}
+	return upgrade, generate
 }
 
 // newWordGenerateSweepJob reports whether the sweep runs at all: only with
@@ -64,7 +91,7 @@ func newWordGenerateSweepJob(sqlDB *sql.DB, cfg config.Config, words wordGenerat
 func (j *wordGenerateSweepJob) runCycle(ctx context.Context) (int, error) {
 	version := j.gen.Version()
 	ids, err := j.q.ListWordGenerateCandidates(ctx, queue.WordGenerateOptions{
-		GeneratorVersion: version, WordGeneration: j.wordGen, Limit: j.budget,
+		GeneratorVersion: version, WordGeneration: j.wordGen, Limit: j.budget, NoProviderPass: j.noProviderPass,
 	})
 	if err != nil || len(ids) == 0 {
 		return 0, err

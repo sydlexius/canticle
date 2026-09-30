@@ -15,6 +15,11 @@ type WordGenerateOptions struct {
 	WordGeneration int64
 	// Limit caps the list when > 0.
 	Limit int
+	// NoProviderPass says no #1120 provider pass can happen in this process
+	// (the upgrade sweep is not running), so the retime arm admits a
+	// post-settle mis_synced row as if its pass were recorded instead of
+	// stranding it. The zero value keeps the wait for the pass.
+	NoProviderPass bool
 }
 
 // wordGenerateCommon holds the terms both arms share (one bound arg, the
@@ -41,12 +46,18 @@ const wordGenerateLineArm = ` AND outcome_type = 'synced'
    AND word_timing_generation = ?
    AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')`
 
-// wordGenerateRetimeArm: known words whose timing overran the audio (#440),
-// as a .txt or a kept/demoted/quarantined .lrc (read what is on disk). No #982
-// verdict is required: the recheck never examines mis_synced. A row held by the
-// accept-time guard had every lane tried; one marked by the timing sweep or
-// revalidate --apply was NOT re-asked of current lanes, and nothing here does.
-const wordGenerateRetimeArm = ` AND timing_outcome = 'mis_synced'`
+// wordGenerateRetimeArm (two bound args, the providers generation and
+// NoProviderPass): known words
+// whose timing overran the audio (#440), as a .txt or a kept/demoted/quarantined
+// .lrc (read what is on disk). No #982 verdict is required: the recheck never
+// examines mis_synced. A row stamped by the accept-time guard had every lane
+// tried and is admitted as is. One stamped after settle (the timing sweep,
+// revalidate --apply, or a pre-055 stamp) is admitted only once the upgrade
+// sweep's one provider pass has been recorded under the CURRENT providers
+// generation (#1120), so a newer lane gets its chance before local compute,
+// unless no pass can happen here (NoProviderPass), when waiting would strand it.
+const wordGenerateRetimeArm = ` AND timing_outcome = 'mis_synced'
+   AND (timing_stamp_source = 'fetch' OR missync_recheck_generation = ? OR ?)`
 
 // ListWordGenerateCandidates returns up to opts.Limit candidate ids, least
 // recently offered first (never offered leads), then oldest completion. The
@@ -55,7 +66,7 @@ func (q *DBQueue) ListWordGenerateCandidates(ctx context.Context, opts WordGener
 	const cols = `SELECT id, word_generate_at, completed_at FROM work_queue WHERE`
 	query := cols + wordGenerateCommon + wordGenerateLineArm + ` UNION ALL ` + cols + wordGenerateCommon + wordGenerateRetimeArm //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
 	query = `SELECT id FROM (` + query + `) ORDER BY word_generate_at ASC, completed_at ASC, id ASC`
-	args := []any{opts.GeneratorVersion, opts.WordGeneration, opts.GeneratorVersion}
+	args := []any{opts.GeneratorVersion, opts.WordGeneration, opts.GeneratorVersion, q.providersVersion, opts.NoProviderPass}
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)
