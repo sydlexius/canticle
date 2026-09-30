@@ -201,6 +201,42 @@ func TestBump_OnlyTheSidecarsOwnAudio(t *testing.T) {
 	})
 }
 
+// TestBump_LibraryReachedThroughSymlink: the audio path keeps the symlinked
+// library root while the writer resolves the sidecar directory, so the two
+// differ textually; a correction must still bump.
+func TestBump_LibraryReachedThroughSymlink(t *testing.T) {
+	_, _, line := rungSongs()
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	audio := filepath.Join(link, "song.flac")
+	seed(t, audio, "not really audio")
+	if err := os.Chtimes(audio, bumpOld, bumpOld); err != nil {
+		t.Fatal(err)
+	}
+	seed(t, filepath.Join(link, "song.txt"), "old\n")
+	w := NewLRCWriter(link)
+	w.SetAudioMtimeBump(true)
+	song := line
+	song.AudioPath = audio
+	if err := w.WriteLRC(song, "song.flac", link); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(audio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.ModTime().Equal(bumpOld) {
+		t.Error("audio mtime not bumped when the library root is reached through a symlink")
+	}
+}
+
 // TestLyricBody_BracketInHeaderValue: an ID-tag value containing ']' is still a
 // header, so a header-only change is not a lyric correction.
 func TestLyricBody_BracketInHeaderValue(t *testing.T) {

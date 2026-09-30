@@ -119,7 +119,7 @@ func (w *LRCWriter) bumpIfCorrected(audio, fp string, p priorSidecar) {
 // sidecarBelongsTo reports whether sidecar sits in audio's directory and shares
 // its stem (extension excluded, case-insensitive).
 func sidecarBelongsTo(audio, sidecar string) bool {
-	if filepath.Clean(filepath.Dir(audio)) != filepath.Clean(filepath.Dir(sidecar)) {
+	if !sameDir(filepath.Dir(audio), filepath.Dir(sidecar)) {
 		return false
 	}
 	stem := func(p string) string {
@@ -127,6 +127,21 @@ func sidecarBelongsTo(audio, sidecar string) bool {
 		return strings.ToLower(strings.TrimSuffix(b, filepath.Ext(b)))
 	}
 	return stem(audio) == stem(sidecar)
+}
+
+// sameDir reports whether two directories are the same place. The writer hands
+// over a sidecar path whose directory has had symlinks resolved, while the
+// audio path is as the library registered it, so a library reached through a
+// symlink (macOS /tmp, a symlinked mount) differs textually. Both sides are
+// resolved; when either fails to resolve the literal cleaned comparison is kept.
+func sameDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if a == b {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
 }
 
 // readCapped reads a regular, non-symlink file through readRegularNoFollow (no
