@@ -437,6 +437,15 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 		return m
 	}
 	serveStartupOrderHook = func(checkpoint string) {
+		// Every checkpoint-specific field is written BEFORE the checkpoint is
+		// published under the mutex, so the poller that stops on the last
+		// checkpoint (and reads afterStatus under the same mutex) never races.
+		if checkpoint == "writers_starting" {
+			st := getStatus()
+			mu.Lock()
+			afterStatus = st
+			mu.Unlock()
+		}
 		mu.Lock()
 		order = append(order, checkpoint)
 		mu.Unlock()
@@ -450,9 +459,6 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 			}
 			stampedEarly = strings.Contains(readFile(t, target), "[re:canticle]")
 			midPassStatus = getStatus()
-		}
-		if checkpoint == "writers_starting" {
-			afterStatus = getStatus()
 		}
 	}
 	t.Cleanup(func() { serveStartupOrderHook = nil })
@@ -494,6 +500,7 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 
 	mu.Lock()
 	got := append([]string(nil), order...)
+	finalStatus := afterStatus
 	mu.Unlock()
 	// #1138: the listener is up BEFORE the pass (so /healthz and the UI answer
 	// while it runs); every lyric-file writer starts AFTER it.
@@ -511,9 +518,9 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 	if midPassStatus["startup_backfill"] != "running" {
 		t.Errorf("/api/v1/status during the backfill = %v; want startup_backfill=running", midPassStatus)
 	}
-	if afterStatus == nil || afterStatus["status"] != "ok" {
-		t.Errorf("/api/v1/status after the backfill = %v; want a status answer", afterStatus)
-	} else if v, ok := afterStatus["startup_backfill"]; ok {
+	if finalStatus == nil || finalStatus["status"] != "ok" {
+		t.Errorf("/api/v1/status after the backfill = %v; want a status answer", finalStatus)
+	} else if v, ok := finalStatus["startup_backfill"]; ok {
 		t.Errorf("startup_backfill = %v after the backfill; want the gate released", v)
 	}
 

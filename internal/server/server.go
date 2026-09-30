@@ -105,6 +105,12 @@ type Handler struct {
 	// delays the webhook response; the WaitGroup lets a shutdown drain in-flight
 	// passes (and lets tests wait deterministically for them to finish).
 	bgRealign sync.WaitGroup
+
+	// shutdown is closed by Close (once) to tell held and future realign
+	// passes to stand down (#1138): a pass released by the startup gate during
+	// shutdown must not race the database close.
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 // Option configures optional Handler dependencies.
@@ -312,6 +318,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		pathChecker: defaultPathChecker,
 		trusted:     trustnet.LoopbackOnly(),
 		mux:         http.NewServeMux(),
+		shutdown:    make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -548,12 +555,35 @@ func (h *Handler) dispatchRealign(ctx context.Context, event string, payload lid
 		defer h.bgRealign.Done()
 		// Realign renames and moves lyric files, so it must not overlap the
 		// startup rewrite pass (#1138). A nil gate blocks forever on nothing, so
-		// guard it.
+		// guard it; shutdown ends the wait (the pass is dropped, see below).
 		if h.startupGate != nil {
-			<-h.startupGate
+			select {
+			case <-h.startupGate:
+			case <-h.shutdown:
+			}
+		}
+		// Re-check after the gate: a select with both channels ready picks one
+		// at random, and a realign must never start once shutdown has begun.
+		select {
+		case <-h.shutdown:
+			// Not an error: realign is idempotent and the next scan or watcher
+			// event covers whatever this pass would have moved.
+			slog.Info("dropping reactive realign: shutting down", "event", event)
+			return
+		default:
 		}
 		h.reactiveRealign(bg, event, payload)
 	}()
+}
+
+// Close signals shutdown to reactive realign passes (held ones are dropped,
+// not run) and waits for every in-flight pass to finish. Call it after the
+// HTTP server has stopped accepting requests and before closing the database
+// the realigner uses (#1138). The wait is unbounded: a running pass is bounded
+// work and cannot be canceled mid-move (its context is detached). Idempotent.
+func (h *Handler) Close() {
+	h.shutdownOnce.Do(func() { close(h.shutdown) })
+	h.bgRealign.Wait()
 }
 
 func (h *Handler) reactiveRealign(ctx context.Context, event string, payload lidarrWebhook) {

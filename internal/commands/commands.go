@@ -1326,9 +1326,15 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			server.WithMusixmatchServing(musixmatchServing),
 		)
 	}
+	apiHandler := server.NewHandler(authSvc, workQ, outdir, handlerOpts...)
+	// httpDrained closes once the HTTP server has stopped AND every reactive
+	// realign pass has been dropped or finished, so the database is never closed
+	// under a realign (#1138). Handler.Close waits without a bound: a running
+	// pass is bounded work and cannot be canceled mid-move.
+	httpDrained := make(chan struct{})
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewHandler(authSvc, workQ, outdir, handlerOpts...),
+		Handler:           apiHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -1338,12 +1344,14 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		srv.TLSConfig = servetls.TLSConfig(certMgr)
 	}
 	go func() {
+		defer close(httpDrained)
 		<-runCtx.Done()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(runCtx), 10*time.Second)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Warn("HTTP server shutdown failed", "error", err)
 		}
+		apiHandler.Close()
 	}()
 
 	// Optional plain-HTTP redirect listener (#204, lane 5): listener already bound
@@ -1572,6 +1580,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	}
 	cancel()
 	wg.Wait()
+	<-httpDrained
 	if err := sqlDB.Close(); err != nil {
 		slog.Warn("failed to close database", "error", err)
 	}
