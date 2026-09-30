@@ -42,17 +42,24 @@ status=0
 for f in "$DIR"/*.yml "$DIR"/*.yaml; do
   [ -f "$f" ] || continue
   w=$(basename "$f")
-  if ! grep -qE '^  pull_request(_target)?:' "$f" && ! grep -qE '^on:.*pull_request' "$f"; then
-    case " $MUST_TRIGGER " in
-      *" $w "*)
+  # A required check needs pull_request itself; pull_request_target is a
+  # different event and does not produce it.
+  case " $MUST_TRIGGER " in
+    *" $w "*)
+      if ! grep -qE '^  pull_request:' "$f" && ! grep -qE '^("on"|on):.*pull_request([^_]|$)' "$f"; then
         echo "FAIL: $w has no pull_request trigger but produces a required check"
-        status=1 ;;
-    esac
+        status=1
+        continue
+      fi ;;
+  esac
+  if ! grep -qE '^  pull_request(_target)?:' "$f" && ! grep -qE '^("on"|on):.*pull_request' "$f"; then
     continue
   fi
   case "$EXEMPT" in *" $w "*) continue ;; esac
   bad=$(awk '
     { line = $0; sub(/[[:space:]]*#.*/, "", line) }
+    # An inline on: mapping carries its filters on the same line.
+    /^("on"|on):/ && line ~ /pull_request/ && line ~ /branches/ { print NR ": " $0 }
     /^[^[:space:]#]/ { inon = (line ~ /^("on"|on):/); inpr = 0; next }
     !inon { next }
     /^  pull_request(_target)?:/ { inpr = 1; if (line ~ /branches/) print NR ": " $0; next }

@@ -72,6 +72,18 @@ fixture "$TMP/jobs"
 printf 'name: x\non:\n  pull_request:\njobs:\n  a:\n    strategy:\n      branches: [main]\n' > "$TMP/jobs/ci.yml"
 expect 0 "a branches key outside on: is ignored" "$TMP/jobs"
 
+for w in ci codeql; do
+  fixture "$TMP/tgtonly-$w"; put "$TMP/tgtonly-$w" "$w" "$PUSH  pull_request_target:\n"
+  expect 1 "$w with only pull_request_target fails (not the required event)" "$TMP/tgtonly-$w"
+done
+
+fixture "$TMP/inline"
+printf 'name: x\non: {pull_request: {branches: [main]}}\n' > "$TMP/inline/extra.yml"
+expect 1 "inline on: mapping with a branch filter fails" "$TMP/inline"
+fixture "$TMP/inline-ok"
+printf 'name: x\non: {pull_request: {types: [opened]}}\n' > "$TMP/inline-ok/extra.yml"
+expect 0 "inline on: mapping without a filter passes" "$TMP/inline-ok"
+
 fixture "$TMP/missing"; rm "$TMP/missing/codeql.yml"
 expect 2 "missing MUST_TRIGGER workflow is a setup error" "$TMP/missing"
 
