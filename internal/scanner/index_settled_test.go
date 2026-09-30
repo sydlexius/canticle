@@ -269,7 +269,7 @@ func TestScanLibrary_SettledOutsideRepairWindowIsStillIndexed(t *testing.T) {
 		sc := NewScanner(WithIndexStore(store))
 
 		res, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{
-			MaxDepth: 1, Upgrade: true, UnsyncedBefore: past, DetectorVersion: "v1",
+			MaxDepth: 1, Upgrade: true, UnsyncedBefore: past,
 		})
 		if err != nil {
 			t.Fatalf("ScanLibrary: %v", err)

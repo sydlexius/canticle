@@ -2214,30 +2214,6 @@ func selfWriteTTL(debounce time.Duration) time.Duration {
 // the deaf-to-external-change window at a few seconds under the default.
 const selfWriteDebounceMultiple = 3
 
-// detectorScanVersion returns the version identifying detector output, for
-// detector-marker version invalidation (#502), or "" when the audio detector is
-// disabled -- so a disabled detector never reopens detector-written markers on
-// a version bump. (--upgrade reopens every marker regardless, #553; this only
-// governs the flagless version reopen.)
-//
-// This is the SIDECAR MODEL version, matching what the detector stamps onto every
-// Result and what the worker persists as work_queue.detector_version (#684). It
-// used to be the app version, which meant every canticle release invalidated
-// every stored verdict AND reopened every on-disk [dv:] marker even though the
-// classifier had not changed.
-//
-// A "" return also covers an unknown model version (an old sidecar that does not
-// report one, or one not reachable right now). That is the safe direction here:
-// reopen.go treats an empty current version as "do not reopen", so an unknown
-// version leaves existing markers alone rather than invalidating the whole
-// library on a transient probe failure.
-func detectorScanVersion(ctx context.Context, cfg config.Config) string {
-	if !cfg.InstrumentalDetector.Enabled {
-		return ""
-	}
-	return currentDetectorModelVersion(ctx, cfg)
-}
-
 // currentDetectorModelVersion resolves the model version the configured sidecar
 // is currently serving, or "" when it cannot be determined (no classifier
 // configured, construction failed, or the sidecar is unreachable / too old to
@@ -2264,12 +2240,11 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 	// Periodic scans realign only when realign.enabled AND realign.on_scan.
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
 	s := scheduler(sqlDB, scanner.ScanOptions{
-		Update:          args.Update,
-		Upgrade:         args.Upgrade,
-		MaxDepth:        args.Depth,
-		BFS:             args.BFS,
-		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-		DetectorVersion: detectorScanVersion(ctx, cfg),
+		Update:         args.Update,
+		Upgrade:        args.Upgrade,
+		MaxDepth:       args.Depth,
+		BFS:            args.BFS,
+		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion)
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
@@ -2363,12 +2338,11 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 	// on_scan, which governs full periodic/manual scans).
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, false)
 	sched := scheduler(sqlDB, scanner.ScanOptions{
-		Update:          args.Update,
-		Upgrade:         args.Upgrade,
-		MaxDepth:        args.Depth,
-		BFS:             args.BFS,
-		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-		DetectorVersion: detectorScanVersion(ctx, cfg),
+		Update:         args.Update,
+		Upgrade:        args.Upgrade,
+		MaxDepth:       args.Depth,
+		BFS:            args.BFS,
+		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
@@ -2560,13 +2534,12 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 	// off by default, so no behavior change unless opted in).
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
 	s := scheduler(sqlDB, scanner.ScanOptions{
-		Update:          args.Update,
-		Upgrade:         args.Upgrade,
-		MaxDepth:        args.Depth,
-		BFS:             args.BFS,
-		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-		DetectorVersion: detectorScanVersion(ctx, cfg),
-		UnsyncedBefore:  unsyncedBefore,
+		Update:         args.Update,
+		Upgrade:        args.Upgrade,
+		MaxDepth:       args.Depth,
+		BFS:            args.BFS,
+		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		UnsyncedBefore: unsyncedBefore,
 		// providersVersion 0: a one-shot `scan` constructs no provider set, so it
 		// has no generation to compare a stored verdict against. Zero never
 		// suppresses, so the CLI keeps its pre-#679 behavior exactly.

@@ -1,11 +1,5 @@
 package scanner
 
-import (
-	"log/slog"
-
-	"github.com/sydlexius/canticle/internal/lyrics"
-)
-
 // reopenClasses is the set of settled lyric states a scan is willing to
 // reconsider.
 //
@@ -35,28 +29,4 @@ func reopenClassesFor(opts ScanOptions) reopenClasses {
 	default:
 		return reopenClasses{}
 	}
-}
-
-// readInstrumentalProvenance is the header read detectorVersionMoved makes. A
-// package variable only so a test can count calls: the scanner promises to read
-// a marker's header only when no flag already granted the reopen, and that
-// promise has no other observable effect to assert on.
-var readInstrumentalProvenance = lyrics.ReadInstrumentalProvenance
-
-// detectorVersionMoved reports whether a detector-written marker at path was
-// decided by a detector version other than current (version invalidation,
-// mirroring providers_version cache retirement). It is the one reopen a scan
-// grants with no flag set. It reads the marker's header only when a current
-// version is known, and an unreadable header just means no version reopen:
-// the marker is never pinned by it, since --upgrade still reopens it.
-func detectorVersionMoved(path, current string) bool {
-	if current == "" {
-		return false
-	}
-	prov, _, err := readInstrumentalProvenance(path)
-	if err != nil {
-		slog.Debug("could not read instrumental provenance; skipping the detector-version check", "path", path, "error", err)
-		return false
-	}
-	return prov.IsDetector() && prov.DetectorVersion != "" && prov.DetectorVersion != current
 }
