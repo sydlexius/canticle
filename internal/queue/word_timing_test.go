@@ -307,23 +307,20 @@ func TestWordRecheckQueuedHiddenFromDeferredSweeps(t *testing.T) {
 	}
 }
 
-// TestSetWordTimingStateRoundTrip covers the settle stamp, the #1007 reader's
-// generation match, and the vocabulary guard.
+// TestSetWordTimingStateRoundTrip covers the settle stamp and the vocabulary
+// guard.
 func TestSetWordTimingStateRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	dbh := openQueueTestDB(t)
 	q := NewDBQueue(dbh)
 	absent := seedWordCandidate(t, dbh, "absent")
-	stale := seedWordCandidate(t, dbh, "stale")
 	served := seedWordCandidate(t, dbh, "served")
-	inflight := seedWordCandidate(t, dbh, "inflight")
-	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, inflight)
 	at := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	for _, s := range []struct {
 		id    int64
 		state string
 		gen   int64
-	}{{absent, WordTimingAbsent, 9}, {stale, WordTimingAbsent, 8}, {served, WordTimingServed, 9}, {inflight, WordTimingAbsent, 9}} {
+	}{{absent, WordTimingAbsent, 9}, {served, WordTimingServed, 9}} {
 		if err := q.SetWordTimingState(ctx, s.id, s.state, s.gen, at); err != nil {
 			t.Fatalf("settle %d: %v", s.id, err)
 		}
@@ -336,13 +333,6 @@ func TestSetWordTimingStateRoundTrip(t *testing.T) {
 	}
 	if state != WordTimingServed || gen != 9 || checked != formatTime(at) {
 		t.Fatalf("served row = (%s, %d, %s)", state, gen, checked)
-	}
-	ids, err := q.ListWordTimingAbsent(ctx, 9, 0)
-	if err != nil {
-		t.Fatalf("absent list: %v", err)
-	}
-	if len(ids) != 1 || ids[0] != absent {
-		t.Fatalf("absent ids = %v; want [%d]", ids, absent)
 	}
 	if err := q.SetWordTimingState(ctx, absent, WordTimingQueued, 9, at); err == nil {
 		t.Fatal("SetWordTimingState accepted 'queued'; only served/absent are verdicts")

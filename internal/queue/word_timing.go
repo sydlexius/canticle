@@ -217,23 +217,6 @@ func (q *DBQueue) ListWordRecheckCandidates(ctx context.Context, opts WordRechec
 	return q.queryIDs(ctx, "list word recheck candidates", query, args...)
 }
 
-// ListWordTimingAbsent returns the ids of rows whose provider path is
-// exhausted under generation (#1007's selection contract): 'absent' stamped
-// with exactly that generation. NULL, 'queued', 'served' and a stale-generation
-// 'absent' are excluded, as is any non-synced (#1007 retimes .lrc only) or
-// non-done row (absent is stamped before Complete); both match the index.
-// Limit caps it when > 0. Read-only.
-func (q *DBQueue) ListWordTimingAbsent(ctx context.Context, generation int64, limit int) ([]int64, error) {
-	query := `SELECT id FROM work_queue WHERE outcome_type = 'synced' AND status = 'done' AND word_timing_state = 'absent'
-         AND word_timing_generation = ? ORDER BY id ASC`
-	args := []any{generation}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	return q.queryIDs(ctx, "list word timing absent", query, args...)
-}
-
 func (q *DBQueue) queryIDs(ctx context.Context, op, query string, args ...any) (ids []int64, retErr error) {
 	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
