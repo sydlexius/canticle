@@ -20,8 +20,12 @@ import (
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
-// remediatedBackupRecord is one JSONL line: the row's prior state and the
-// action applied, enough to restore it by hand. No artist, title or path.
+// remediatedBackupRecord is one JSONL line: the row's prior description and the
+// action applied. No artist, title or path. For unsynced and tier it is enough
+// to restore the row by hand. For reset it is an AUDIT record only: reset clears
+// the word-timing, upgrade and timing-stamp columns it does not save, and
+// restoring the pre-reset state would re-create what reset exists to remove, a
+// row claiming a synced file that is not on disk.
 type remediatedBackupRecord struct {
 	ID            int64  `json:"id"`
 	Action        string `json:"action"`
