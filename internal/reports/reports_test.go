@@ -263,14 +263,13 @@ func TestRecentOutcomesDetail(t *testing.T) {
 		artist: "A", title: "plain-synced", status: "done",
 		completedAt: "2026-08-16T03:00:00Z", outcomeType: "synced", timingOutcome: "ok",
 	})
-	// DEGENERATE IS NOT A REFUSAL, and this row is why the CASE names 'categorical'
-	// alone. DecidePromotion maps Degenerate to DemoteToUnsynced (#673): the words
-	// ARE written, as .txt, so the row carries outcome_type='unsynced' and never
-	// reaches 'unknown'. Labeling it "timing refused" would be false -- it was
-	// demoted, not refused -- and timing_outcome already records the nuance for a
-	// reader who wants it. An earlier cut of this query listed both verdicts; a
-	// mutation that removed the NULL-outcome_type guard did not fail any test,
-	// which is what surfaced the mistake.
+	// A DEMOTED degenerate row is not a refusal: the words were written as .txt,
+	// so it carries outcome_type='unsynced' and never reaches 'unknown'. Only a
+	// NULL outcome_type (quarantined/purged) earns the detail (#1130).
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "missynced-quarantined", status: "done",
+		completedAt: "2026-08-16T02:45:00Z", timingOutcome: "mis_synced",
+	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "A", title: "degenerate-demoted", status: "done",
 		completedAt: "2026-08-16T02:30:00Z", outcomeType: "unsynced", timingOutcome: "degenerate",
@@ -298,6 +297,7 @@ func TestRecentOutcomesDetail(t *testing.T) {
 	}{
 		{"guard-rejected", reports.ResultRejected, "foreign-script share 1.00 exceeds 0.05"},
 		{"timing-quarantined", reports.ResultUnknown, "timing refused: categorical"},
+		{"missynced-quarantined", reports.ResultUnknown, "timing refused: mis_synced"},
 		{"plain-synced", reports.ResultSynced, ""},
 		{"degenerate-demoted", reports.ResultUnsynced, ""},
 		{"legacy-unknown", reports.ResultUnknown, ""},

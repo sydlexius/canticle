@@ -211,3 +211,51 @@ func TestSetSyncTier_DoesNotTouchWordTimingState(t *testing.T) {
 		t.Errorf("word_timing_state/generation = %+v/%+v, want unchanged 'absent'/3", state, gen)
 	}
 }
+
+// TestSetRemediatedFileState covers #1130: a done row is re-described and its
+// tier cleared, an empty outcome stores NULL, and a processing row is left alone.
+func TestSetRemediatedFileState(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	state := func(id int64) (outcome, tier sql.NullString) {
+		t.Helper()
+		if err := dbh.QueryRow(`SELECT outcome_type, sync_tier FROM work_queue WHERE id = ?`, id).Scan(&outcome, &tier); err != nil {
+			t.Fatalf("read state: %v", err)
+		}
+		return outcome, tier
+	}
+
+	id := insertSyncTierRow(t, dbh, "demote")
+	if err := q.SetSyncTier(ctx, id, SyncTierWord); err != nil {
+		t.Fatalf("SetSyncTier: %v", err)
+	}
+	if ok, err := q.SetRemediatedFileState(ctx, id, "unsynced"); err != nil || !ok {
+		t.Fatalf("SetRemediatedFileState = %v, %v; want true, nil", ok, err)
+	}
+	if o, tr := state(id); o.String != "unsynced" || tr.Valid {
+		t.Errorf("after demote: outcome=%+v tier=%+v; want unsynced and NULL", o, tr)
+	}
+
+	id = insertSyncTierRow(t, dbh, "removed")
+	if ok, err := q.SetRemediatedFileState(ctx, id, ""); err != nil || !ok {
+		t.Fatalf("SetRemediatedFileState(empty) = %v, %v; want true, nil", ok, err)
+	}
+	if o, _ := state(id); o.Valid {
+		t.Errorf("empty outcome stored %q, want NULL", o.String)
+	}
+
+	id = insertSyncTierRow(t, dbh, "busy")
+	if err := q.SetSyncTier(ctx, id, SyncTierWord); err != nil {
+		t.Fatalf("SetSyncTier: %v", err)
+	}
+	if _, err := dbh.Exec(`UPDATE work_queue SET status = 'processing' WHERE id = ?`, id); err != nil {
+		t.Fatalf("mark processing: %v", err)
+	}
+	if ok, err := q.SetRemediatedFileState(ctx, id, "unsynced"); err != nil || ok {
+		t.Fatalf("processing row: SetRemediatedFileState = %v, %v; want false, nil", ok, err)
+	}
+	if o, tr := state(id); o.String != "synced" || tr.String != SyncTierWord {
+		t.Errorf("processing row was touched: outcome=%+v tier=%+v", o, tr)
+	}
+}

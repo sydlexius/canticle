@@ -2168,6 +2168,28 @@ func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType stri
 	return nil
 }
 
+// SetRemediatedFileState re-describes a row after a timing remediation (#1130)
+// changed the file it points at: outcome_type becomes outcomeType (empty stores
+// NULL, for a sidecar that was removed) and sync_tier is cleared, since no
+// synced sidecar remains to tier. Guarded like SetTimingOutcomeIfIdle: a
+// 'processing' row is the worker's to describe, so it reports false and is left
+// alone. The caller stamps only for an action that SUCCEEDED.
+func (q *DBQueue) SetRemediatedFileState(ctx context.Context, id int64, outcomeType string) (bool, error) {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET outcome_type = ?, sync_tier = NULL
+         WHERE id = ? AND status <> 'processing'`,
+		nullIfEmpty(outcomeType), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: set remediated file state for id %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: set remediated file state for id %d: rows affected: %w", id, err)
+	}
+	return n > 0, nil
+}
+
 // IDsBySourcePaths returns the ids of the rows (every status EXCEPT
 // 'processing') whose source_path is any of the given audio files, ascending by
 // id, so oldest first, and without duplicates. It is the
@@ -3727,9 +3749,10 @@ func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 // detector -- identityrepair's re-key and merge paths are the first such
 // callers -- must not leave a done-era outcome_type/timing_outcome/lane
 // behind. That is precisely the stale-vs-NULL ambiguity #655 and #773 were
-// filed to remove: a NULL outcome_type must mean "not yet evaluated", never
-// "evaluated once, under a since-corrected identity, and never touched
-// again".
+// filed to remove: a NULL outcome_type must mean "not yet evaluated" or "a
+// remediation removed the sidecar" (#1130, as the worker's categorical path
+// does), never "evaluated once, under a since-corrected identity, and never
+// touched again".
 //
 // Guarded on status = 'done', so calling this on a row in any other status
 // is a safe no-op (returns false, nil) rather than fabricating a status --
