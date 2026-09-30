@@ -76,6 +76,15 @@ const wordTierPredicate = `sync_tier = 'word'
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued'`
 
+// TierUnknownPredicate is the ONE definition of the dashboard's "Synced (tier
+// unknown)" rows (#1143): the Unknown arm of SyncTierCounts, exported so the
+// `scan reconcile-remediated` backfill selects exactly what the tile counts.
+// No leading AND/WHERE.
+const TierUnknownPredicate = `(sync_tier IS NULL
+                      OR sync_tier NOT IN ('word', 'line')
+                      OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate')
+                      OR word_timing_state = 'queued')`
+
 // finishedPredicate is wordTierPredicate restricted to settled synced rows:
 // the rows QueueSummary counts as Finished.
 const finishedPredicate = `status = 'done' AND outcome_type = 'synced' AND ` + wordTierPredicate
@@ -563,10 +572,7 @@ func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
              SUM(CASE WHEN sync_tier = 'line'
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
-             SUM(CASE WHEN sync_tier IS NULL
-                      OR sync_tier NOT IN ('word', 'line')
-                      OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate')
-                      OR word_timing_state = 'queued' THEN 1 ELSE 0 END)
+             SUM(CASE WHEN `+TierUnknownPredicate+` THEN 1 ELSE 0 END)
          FROM work_queue
          WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,
 	).Scan(&wordSynced, &lineSynced, &unknown); err != nil {
