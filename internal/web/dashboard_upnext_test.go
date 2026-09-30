@@ -125,6 +125,7 @@ func TestHandleDashboard_UpNextPanel(t *testing.T) {
 	insertBuffered(t, sqlDB, "Test Artist 3", "Track Gamma", "Album Three", "pending", 0, 3)
 	insertBuffered(t, sqlDB, "Test Artist 1", "Track Alpha", "Album One", "failed", -100, 1)
 	insertBuffered(t, sqlDB, "Test Artist 2", "Track Beta", "Album Two", "deferred", 0, 2)
+	insertBuffered(t, sqlDB, "Test Artist 4", "Track Delta", "Album Four", "pending", -50, 4) // upgrade trip (#1151)
 
 	mux := newReportsUIServer(t, sqlDB)
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
@@ -139,7 +140,7 @@ func TestHandleDashboard_UpNextPanel(t *testing.T) {
 	if !strings.Contains(body, "Up Next") {
 		t.Error("dashboard missing Up Next heading")
 	}
-	if !strings.Contains(body, "3 buffered of 3 eligible") {
+	if !strings.Contains(body, "4 buffered of 4 eligible") {
 		t.Errorf("dashboard missing buffered/eligible header; body has: %s", excerptAround(body, "buffered"))
 	}
 	// Rows appear in batch_seq order: Alpha (1) < Beta (2) < Gamma (3).
@@ -171,6 +172,10 @@ func TestHandleDashboard_UpNextPanel(t *testing.T) {
 	// The miss-tier badge renders for the deferred benign-miss row.
 	if !strings.Contains(body, "mx-upnext-tier-miss") {
 		t.Error("dashboard missing miss-tier badge class")
+	}
+	// The upgrade-trip row gets its own badge, not the fresh fallback (#1151).
+	if !strings.Contains(body, `mx-upnext-tier mx-upnext-tier-upgrade">upgrade<`) {
+		t.Errorf("dashboard missing upgrade-tier badge; body has: %s", excerptAround(body, "Track Delta"))
 	}
 }
 

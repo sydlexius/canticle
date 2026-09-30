@@ -174,9 +174,10 @@
 }
 
 /* Tier badge: a small pill echoing the queue chart's semantic hues. "fresh"
- * uses the blue accent (new scan/webhook work); "miss" uses the amber deferred
- * hue muted, matching --mx-chart-deferred, so a long run of misses reads as the
- * rate-limited backlog it is. */
+ * uses the blue accent (new scan/webhook work); "upgrade" is neutral (an
+ * upgrade-sweep trip, behind new work and ahead of misses, #1151); "miss" uses
+ * the amber deferred hue muted, matching --mx-chart-deferred, so a long run of
+ * misses reads as the rate-limited backlog it is. */
 .mx-upnext-tier {
   display: inline-block;
   font-family: var(--mx-font-sans);
