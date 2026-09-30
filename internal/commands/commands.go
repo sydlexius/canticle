@@ -1265,6 +1265,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if !lyricsDisabled {
 		upgradeSweep, _ = newUpgradeSweepJob(sqlDB, cfg)
 	}
+	// Word-sync generate sweep (#1007): no generator until #1008, so enabled it
+	// logs once and starts nothing. Not gated on lyricsDisabled: it aligns words
+	// already on disk (no lane needed); with no lanes only mis_synced rows match.
+	wordGenerate, _ := newWordGenerateSweepJob(sqlDB, cfg, w, nil)
 
 	// One-shot [re:canticle] editor-tag backfill (#483) runs SYNCHRONOUSLY here,
 	// before the worker (and every other in-process writer of a .lrc file: the
@@ -1407,6 +1411,13 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		go func() {
 			defer wg.Done()
 			runUpgradeSweepLoop(runCtx, upgradeSweep, resolveTimingSweepInterval(serveScanInterval(cfg, args)))
+		}()
+	}
+	if wordGenerate != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runWordGenerateSweepLoop(runCtx, wordGenerate, resolveTimingSweepInterval(serveScanInterval(cfg, args)))
 		}()
 	}
 	// Background session sweeper: periodically delete expired/revoked sessions,
