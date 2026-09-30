@@ -54,7 +54,7 @@ func TestUpgradeCandidates_EachArm(t *testing.T) {
 		{"unknown", "outcome_type = NULL"},
 		{"pending", "status = 'pending'"},
 		{"unavailable", "status = 'unavailable'"},
-		{"mis-synced", "timing_outcome = 'mis_synced'"},
+		{"mis-synced-at-fetch", "timing_outcome = 'mis_synced', timing_stamp_source = 'fetch'"},
 		{"categorical", "timing_outcome = 'categorical'"},
 		{"degenerate", "timing_outcome = 'degenerate'"},
 		{"word-recheck", "word_timing_state = 'queued'"},
@@ -131,7 +131,7 @@ func TestSettleUpgradeTrip(t *testing.T) {
 		id   int64
 		want bool
 	}{{up, true}, {plain, false}, {queued, false}} {
-		got, err := q.SettleUpgradeTrip(ctx, c.id)
+		got, err := q.SettleUpgradeTrip(ctx, c.id, true)
 		if err != nil || got != c.want {
 			t.Fatalf("SettleUpgradeTrip(%d) = %v, %v; want %v", c.id, got, err, c.want)
 		}
@@ -209,6 +209,119 @@ func missyncedRow(t *testing.T, dbh *sql.DB, key, set string) int64 {
 	return seedUpgradeRow(t, dbh, key, base)
 }
 
+// TestUpgradeCandidates_MissyncedArm (#1120): one row per inclusion and one per
+// exclusion, each differing from a full candidate in exactly one term, under
+// providers generation 9.
+func TestUpgradeCandidates_MissyncedArm(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	q.SetProvidersVersion(9)
+	want := []int64{
+		missyncedRow(t, dbh, "sweep", ""),
+		missyncedRow(t, dbh, "revalidate", "timing_stamp_source = 'revalidate'"),
+		missyncedRow(t, dbh, "pre-055-unknown-source", "timing_stamp_source = NULL"),
+		missyncedRow(t, dbh, "lane-set-changed", "missync_recheck_generation = 8"),
+		// Recently settled and admitted, but judged since: a first pass under this verdict has no hold.
+		missyncedRow(t, dbh, "fresh", "completed_at = '2026-09-28T00:00:00Z', upgrade_checked_at = '2026-09-28T00:00:00Z', evaluated_at = '2026-09-28T01:00:00Z'"),
+		// A re-admission under the same verdict waits out the week hold.
+		missyncedRow(t, dbh, "readmit-after-hold", "upgrade_checked_at = '2026-08-02T00:00:00Z', evaluated_at = '2026-08-01T00:00:00Z'"),
+	}
+	for _, c := range []struct{ key, set string }{
+		{"fetch-guard", "timing_stamp_source = 'fetch'"},
+		{"already-passed", "missync_recheck_generation = 9"},
+		{"readmit-within-hold", "upgrade_checked_at = '2026-09-28T00:00:00Z', evaluated_at = '2026-09-27T00:00:00Z'"},
+		{"ok", "timing_outcome = 'ok'"},
+		{"categorical", "timing_outcome = 'categorical'"},
+		{"pending", "status = 'pending'"},
+		{"word-recheck", "word_timing_state = 'queued'"},
+		{"no-source", "source_path = ' '"},
+		{"retired-gone", "last_error = 'source file is gone'"},
+	} {
+		missyncedRow(t, dbh, c.key, c.set)
+	}
+	got, err := q.ListUpgradeCandidates(ctx, upgradeNow.Add(-7*24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("candidates = %v, want %v", got, want)
+	}
+}
+
+// TestMarkUpgradeQueued_MissyncedPassMarker (#1120): admission records no
+// pass; a settle the lanes answered records it under the providers generation
+// (not re-offered under it), one they did not answer leaves it unrecorded and
+// re-offers the row after the week hold, and a lane-set change re-opens it.
+func TestMarkUpgradeQueued_MissyncedPassMarker(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	q.SetProvidersVersion(9)
+	hold := upgradeNow.Add(-7 * 24 * time.Hour)
+	afterHold := upgradeNow.Add(8 * 24 * time.Hour)
+	id := missyncedRow(t, dbh, "m", "")
+	fetch := missyncedRow(t, dbh, "f", "timing_stamp_source = 'fetch'")
+	marker := func() sql.NullInt64 {
+		var g sql.NullInt64
+		if err := dbh.QueryRow(`SELECT missync_recheck_generation FROM work_queue WHERE id = ?`, id).Scan(&g); err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	trip := func(answered bool) {
+		t.Helper()
+		flipped, err := q.MarkUpgradeQueued(ctx, []int64{id, fetch}, hold)
+		if err != nil || !slices.Equal(flipped, []int64{id}) {
+			t.Fatalf("flip = %v, %v; want only the post-settle row %d (a fetch-stamped row is never re-asked)", flipped, err, id)
+		}
+		if g := marker(); g.Valid {
+			t.Fatalf("admission recorded the pass: %+v", g)
+		}
+		mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, id)
+		if ok, err := q.SettleUpgradeTrip(ctx, id, answered); err != nil || !ok {
+			t.Fatalf("settle = %v, %v", ok, err)
+		}
+	}
+	trip(false)
+	if g := marker(); g.Valid {
+		t.Fatalf("an unanswered trip recorded the pass: %+v", g)
+	}
+	if got, _ := q.ListUpgradeCandidates(ctx, hold, 10); len(got) != 0 {
+		t.Fatalf("unanswered trip re-offered within the hold: %v", got)
+	}
+	if got, _ := q.ListUpgradeCandidates(ctx, afterHold, 10); !slices.Equal(got, []int64{id}) {
+		t.Fatalf("unanswered trip after the hold = %v, want [%d]", got, id)
+	}
+	mustExec(t, dbh, `UPDATE work_queue SET upgrade_checked_at = NULL WHERE id = ?`, id)
+	trip(true)
+	if g := marker(); !g.Valid || g.Int64 != 9 {
+		t.Fatalf("marker after an answered trip = %+v, want 9", g)
+	}
+	if got, _ := q.ListUpgradeCandidates(ctx, afterHold, 10); len(got) != 0 {
+		t.Fatalf("passed row re-offered: %v", got)
+	}
+	q.SetProvidersVersion(10)
+	if got, _ := q.ListUpgradeCandidates(ctx, afterHold, 10); !slices.Equal(got, []int64{id}) {
+		t.Fatalf("after a lane-set change = %v, want [%d]", got, id)
+	}
+	q.SetProvidersVersion(9)
+	// Stamps: a fetch stamp keeps the marker; a post-settle one clears it.
+	rec := TimingRecord{Outcome: "mis_synced", EvaluatedAt: upgradeNow, Source: TimingSourceFetch}
+	if err := q.SetTimingOutcome(ctx, id, rec); err != nil {
+		t.Fatal(err)
+	}
+	if g := marker(); g.Int64 != 9 {
+		t.Fatalf("fetch stamp changed the marker to %+v", g)
+	}
+	rec.Source = TimingSourceSweep
+	if err := q.SetTimingOutcome(ctx, id, rec); err != nil {
+		t.Fatal(err)
+	}
+	if g := marker(); g.Valid {
+		t.Fatalf("sweep stamp left marker %+v", g)
+	}
+}
+
 // TestTimingStampSource (#1120 review M3): each method records the source it
 // is given; an empty one is NULL, which reads as post-settle (the row gets a
 // provider pass, never skips one), and an unknown one is rejected.
@@ -237,6 +350,9 @@ func TestTimingStampSource(t *testing.T) {
 	}
 	if ok, err := q.SetTimingOutcomeIfIdle(ctx, id, TimingRecord{Outcome: "mis_synced"}); err != nil || !ok || source().Valid {
 		t.Fatalf("IfIdle empty source = %v, %v, stored %+v; want NULL", ok, err, source())
+	}
+	if got, _ := q.ListUpgradeCandidates(ctx, upgradeNow, 10); !slices.Equal(got, []int64{id}) {
+		t.Fatalf("empty-source mis_synced row candidates = %v, want [%d] (fails toward a pass)", got, id)
 	}
 	if err := q.SetTimingOutcome(ctx, id, TimingRecord{Outcome: "ok", Source: "fetched"}); err == nil {
 		t.Fatal("unknown source accepted")

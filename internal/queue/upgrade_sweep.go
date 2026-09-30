@@ -22,12 +22,38 @@ const upgradeCandidatePredicate = ` status = 'done'
    AND completed_at < ?
    AND COALESCE(upgrade_checked_at, '') < ?`
 
-// ListUpgradeCandidates returns up to limit ids settled and last admitted
-// before holdBefore, never-admitted first, then longest-held. Read-only.
+// upgradeMissyncedPredicate is the second
+// population (#1120): a settled row marked mis_synced AFTER its fetch (the #443
+// sweep, `revalidate --apply`, or a pre-055 stamp of unknown source), never
+// re-asked of the current lanes. A fetch-stamped row is excluded: the
+// orchestrator already tried every lane. missync_recheck_generation is the one-pass
+// marker, so a row is re-asked only when the lane set (the generation) changed.
+// Disjoint from upgradeCandidatePredicate (which excludes mis_synced), from the
+// word recheck (same exclusion) and, being 'done', from an armed trip. No hold
+// window for a row not admitted since its verdict (evaluated_at); a
+// re-admission under the same verdict (a lane-set change, or a trip no lane
+// answered, which SettleUpgradeTrip leaves unmarked) waits out the other arm's
+// week hold, so an unreachable provider cannot re-spend a trip every cycle.
+// Two args: the generation, then the hold cut.
+const upgradeMissyncedPredicate = ` status = 'done'
+   AND timing_outcome = 'mis_synced'
+   AND COALESCE(timing_stamp_source, '') <> 'fetch'
+   AND (missync_recheck_generation IS NULL OR missync_recheck_generation <> ?)
+   AND (COALESCE(upgrade_checked_at, '') < ? OR upgrade_checked_at < COALESCE(evaluated_at, ''))
+   AND COALESCE(word_timing_state, '') <> 'queued'
+   AND TRIM(COALESCE(source_path, '')) <> ''
+   AND COALESCE(last_error, '') = ''`
+
+// ListUpgradeCandidates returns up to limit ids from both populations: settled
+// and last admitted before holdBefore (below the line rung), and post-settle
+// mis_synced rows not yet passed under the current providers generation
+// (SetProvidersVersion, #1120). Never-admitted first, then longest-held. Read-only.
 func (q *DBQueue) ListUpgradeCandidates(ctx context.Context, holdBefore time.Time, limit int) ([]int64, error) {
 	cut := formatTime(holdBefore)
-	return q.queryIDs(ctx, "list upgrade candidates", `SELECT id FROM work_queue WHERE`+upgradeCandidatePredicate+ //nolint:gosec // reason: G202 -- package-constant fragment, bound parameters only
-		` ORDER BY upgrade_checked_at ASC, completed_at ASC, id ASC LIMIT ?`, cut, cut, limit)
+	const cols = `SELECT id, upgrade_checked_at, completed_at FROM work_queue WHERE`
+	return q.queryIDs(ctx, "list upgrade candidates", `SELECT id FROM (`+cols+upgradeCandidatePredicate+ //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
+		` UNION ALL `+cols+upgradeMissyncedPredicate+`) ORDER BY upgrade_checked_at ASC, completed_at ASC, id ASC LIMIT ?`,
+		cut, cut, q.providersVersion, cut, limit)
 }
 
 // CountUpgradeInFlight counts upgrade trips not yet settled. The 053 trigger
@@ -45,7 +71,10 @@ func (q *DBQueue) CountUpgradeInFlight(ctx context.Context) (int, error) {
 // at PriorityMiss, due now, attempts/last_error/refused_waits cleared, armed
 // (upgrade_queued) and stamped. outcome_type, sync_tier, lane, completed_at and
 // miss_count are kept: they describe the file on disk. The cache is left alone:
-// the worker bypasses it on an upgrade trip.
+// the worker bypasses it on an upgrade trip. A mis_synced row's (#1120)
+// one-pass marker is recorded only when the trip settles on an answer
+// (SettleUpgradeTrip), never here, so a trip that never reached a lane is not
+// a pass. A landed trip re-stamps the row at fetch, which leaves the arm.
 func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore time.Time) ([]int64, error) {
 	var flipped []int64
 	err := db.RetryBatchTx(ctx, "upgrade flip", func() error {
@@ -59,8 +88,8 @@ func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore
 		for _, id := range ids {
 			res, err := tx.ExecContext(ctx, `UPDATE work_queue SET status = 'pending', priority = ?, next_attempt_at = ?, attempts = 0,
                  last_error = '', refused_waits = 0, upgrade_queued = 1, upgrade_checked_at = ?
-             WHERE id = ? AND`+upgradeCandidatePredicate, //nolint:gosec // reason: G202 -- package-constant fragment, bound parameters only
-				PriorityMiss, now, now, id, cut, cut)
+             WHERE id = ? AND (`+upgradeCandidatePredicate+` OR `+upgradeMissyncedPredicate+`)`, //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
+				PriorityMiss, now, now, id, cut, cut, q.providersVersion, cut)
 			if err != nil {
 				return fmt.Errorf("queue: flip upgrade id %d: %w", id, err)
 			}
@@ -86,10 +115,17 @@ func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore
 // cap) back to 'done' with the file record untouched: outcome_type, sync_tier,
 // timing_outcome, lane, completed_at and miss_count still describe the file on
 // disk. false = the row is not a processing upgrade trip.
-func (q *DBQueue) SettleUpgradeTrip(ctx context.Context, id int64) (settled bool, err error) {
+//
+// answered says the lanes answered (a miss, a result judged and refused, a
+// guard or verifier verdict). Only then does a mis_synced row (#1120) record
+// its one provider pass under the current generation; a trip that never
+// reached a lane (transport failures to the cap, a verifier error) is not a
+// pass and is re-offered after the week hold.
+func (q *DBQueue) SettleUpgradeTrip(ctx context.Context, id int64, answered bool) (settled bool, err error) {
 	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
-		res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done', last_error = '', refused_waits = 0, attempts = 0
-             WHERE id = ? AND status = 'processing' AND upgrade_queued = 1`, id)
+		res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done', last_error = '', refused_waits = 0, attempts = 0,
+                 missync_recheck_generation = CASE WHEN ? AND timing_outcome = 'mis_synced' THEN ? ELSE missync_recheck_generation END
+             WHERE id = ? AND status = 'processing' AND upgrade_queued = 1`, answered, q.providersVersion, id)
 		if err != nil {
 			return fmt.Errorf("queue: settle upgrade trip id %d: %w", id, err)
 		}

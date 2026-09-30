@@ -180,6 +180,20 @@ func TestUpgradeTrip_FailuresSettle(t *testing.T) {
 		r.run(t)
 		r.kept(t)
 	})
+	// #1120 review M2: a verifier verdict is an answer, so a post-settle
+	// mis_synced row records its pass.
+	t.Run("verification reject records the mis_synced pass", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "wrong words")})
+		r.w.EnableVerification(&fakeVerifier{results: []verificationResult{{accepted: false}}}, 2.0)
+		r.postSettleMissynced(t)
+		r.run(t)
+		if got, want := r.row(t), "done outcome=unsynced timing=mis_synced lane= misses=14 armed=0"; got != want {
+			t.Fatalf("row = %q, want %q", got, want)
+		}
+		if g := r.marker(t); !g.Valid || g.Int64 != 5 {
+			t.Fatalf("pass marker = %+v, want 5 (the verifier answered)", g)
+		}
+	})
 	t.Run("transport cap", func(t *testing.T) {
 		r := newUpgradeRig(t, &fakeFetcher{err: errors.New("dial tcp: connection refused")})
 		for pass := 1; pass < upgradeMaxAttempts; pass++ {
@@ -219,15 +233,68 @@ func TestUpgradeTrip_FailureAfterWriteNeverSettlesOldRecord(t *testing.T) {
 	}
 }
 
-// postSettleMissynced turns the rig's armed trip into one over a row the #443
-// sweep demoted (track.txt holds the demoted words, timing_outcome mis_synced
-// stamped after settle) (#1120).
+// postSettleMissynced turns the rig's row into one the #443 sweep demoted
+// (track.txt holds the demoted words, timing_outcome mis_synced stamped after
+// settle, no provider pass yet) and admits it through the sweep's own flip under
+// providers generation 5 (#1120).
 func (r *upgradeRig) postSettleMissynced(t *testing.T) {
 	t.Helper()
-	if _, err := r.db.Exec(`UPDATE work_queue SET timing_outcome = 'mis_synced', timing_stamp_source = 'sweep',
+	r.q.SetProvidersVersion(5)
+	// The sweep judged it after the rig's own admission, so no hold applies.
+	if _, err := r.db.Exec(`UPDATE work_queue SET status = 'done', timing_outcome = 'mis_synced', timing_stamp_source = 'sweep',
 	      evaluated_at = '2099-01-01T00:00:00Z' WHERE id = ?`, r.id); err != nil {
 		t.Fatal(err)
 	}
+	if flipped, err := r.q.MarkUpgradeQueued(context.Background(), []int64{r.id}, time.Now().Add(-7*24*time.Hour)); err != nil || len(flipped) != 1 {
+		t.Fatalf("mis_synced flip = %v, %v", flipped, err)
+	}
+}
+
+// TestUpgradeTrip_PostSettleMissyncedPass (#1120): the one provider pass over a
+// post-settle mis_synced row. A result that promotes as-is replaces the demoted
+// .txt and the ordinary stamp clears mis_synced (now a fetch-time verdict); one
+// that does not settles the row back untouched with the pass recorded, which is
+// what admits it to the generation sweep's retime arm.
+func TestUpgradeTrip_PostSettleMissyncedPass(t *testing.T) {
+	t.Run("promoting result lands and clears mis_synced", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "correctly timed")})
+		r.postSettleMissynced(t)
+		r.run(t)
+		if got := r.row(t); got != "done outcome=synced timing=ok lane=musixmatch misses=14 armed=0" {
+			t.Fatalf("row = %q, want the promoted synced record with mis_synced cleared", got)
+		}
+		var src sql.NullString
+		if err := r.db.QueryRow(`SELECT timing_stamp_source FROM work_queue WHERE id = ?`, r.id).Scan(&src); err != nil || src.String != queue.TimingSourceFetch {
+			t.Fatalf("timing_stamp_source = %+v, %v; want the worker's explicit %q", src, err, queue.TimingSourceFetch)
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(r.txt), "track.lrc")); err != nil {
+			t.Fatalf("track.lrc not written over the demoted .txt: %v", err)
+		}
+	})
+	t.Run("still mis_synced settles, records the pass, admits generation", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(120, "right song bad timing")})
+		r.postSettleMissynced(t)
+		r.run(t)
+		if got, want := r.row(t), "done outcome=unsynced timing=mis_synced lane= misses=14 armed=0"; got != want {
+			t.Fatalf("row = %q, want %q", got, want)
+		}
+		if b, err := os.ReadFile(r.txt); err != nil || string(b) != upgradeOldWords {
+			t.Fatalf("track.txt = %q, %v; want the demoted words untouched", b, err)
+		}
+		if got, _ := r.q.ListUpgradeCandidates(context.Background(), time.Now().Add(-7*24*time.Hour), 10); len(got) != 0 {
+			t.Fatalf("passed row re-offered to the upgrade sweep: %v", got)
+		}
+	})
+}
+
+// marker is the row's #1120 pass marker (missync_recheck_generation).
+func (r *upgradeRig) marker(t *testing.T) sql.NullInt64 {
+	t.Helper()
+	var g sql.NullInt64
+	if err := r.db.QueryRow(`SELECT missync_recheck_generation FROM work_queue WHERE id = ?`, r.id).Scan(&g); err != nil {
+		t.Fatal(err)
+	}
+	return g
 }
 
 // TestUpgradeTrip_MissyncedNeedsAudioDuration (#1120 review I1): the pass may
@@ -269,7 +336,30 @@ func TestUpgradeTrip_MissyncedNeedsAudioDuration(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(filepath.Dir(r.txt), "track.lrc")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("track.lrc stat = %v, want not written", err)
 			}
+			if g := r.marker(t); !g.Valid || g.Int64 != 5 {
+				t.Fatalf("pass marker = %+v, want 5 (the lanes answered)", g)
+			}
 		})
+	}
+}
+
+// TestUpgradeTrip_MissyncedTransportCapIsNoPass (#1120 review M2): a trip that
+// never reached a lane settles at the attempt cap with no pass recorded, so
+// generation still waits for it and the upgrade sweep re-offers it later.
+func TestUpgradeTrip_MissyncedTransportCapIsNoPass(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{err: errors.New("dial tcp: connection refused")})
+	r.postSettleMissynced(t)
+	for pass := 0; pass < upgradeMaxAttempts; pass++ {
+		r.run(t)
+	}
+	if got, want := r.row(t), "done outcome=unsynced timing=mis_synced lane= misses=14 armed=0"; got != want {
+		t.Fatalf("row = %q, want %q", got, want)
+	}
+	if g := r.marker(t); g.Valid {
+		t.Fatalf("pass marker = %+v, want none (no lane answered)", g)
+	}
+	if got, _ := r.q.ListUpgradeCandidates(context.Background(), time.Now().Add(8*24*time.Hour), 10); len(got) != 1 {
+		t.Fatalf("upgrade candidates after the hold = %v, want the row re-offered", got)
 	}
 }
 
@@ -313,4 +403,38 @@ func TestUpgradeTrip_OrdinaryTripsIgnoreTheAudioGuard(t *testing.T) {
 			t.Fatalf("track.txt = %q, %v; want the new words over the marker", b, err)
 		}
 	})
+}
+
+// TestUpgradeTrip_MissyncedKeptRecordsPass (#1120 review N1): a pass whose
+// result the no-downgrade writer KEEPS out (a word-synced file judged
+// mis_synced, left on disk under on_mis_synced=off, against a correctly timed
+// line result) was answered by the lanes, so it records the pass marker and
+// is not re-offered to the upgrade sweep after the hold.
+func TestUpgradeTrip_MissyncedKeptRecordsPass(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "correctly timed")})
+	dir := filepath.Dir(r.txt)
+	if err := os.Remove(r.txt); err != nil {
+		t.Fatal(err)
+	}
+	word := "[00:10.00]<00:10.00>kept <00:11.00>word <00:12.00>line\n[02:00.00]<02:00.00>past <02:01.00>the <02:02.00>end\n"
+	if err := os.WriteFile(filepath.Join(dir, "track.lrc"), []byte(word), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.db.Exec(`UPDATE work_queue SET outcome_type = 'synced', sync_tier = 'word' WHERE id = ?`, r.id); err != nil {
+		t.Fatal(err)
+	}
+	r.postSettleMissynced(t)
+	r.run(t)
+	if got, want := r.row(t), "done outcome=synced timing=mis_synced lane= misses=14 armed=0"; got != want {
+		t.Fatalf("row = %q, want %q (kept, still mis_synced)", got, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "track.lrc")); err != nil || string(b) != word {
+		t.Fatalf("track.lrc = %q, %v; want the word-synced file kept", b, err)
+	}
+	if g := r.marker(t); !g.Valid || g.Int64 != 5 {
+		t.Fatalf("pass marker = %+v, want 5 (a kept result is an answer)", g)
+	}
+	if got, _ := r.q.ListUpgradeCandidates(context.Background(), time.Now().Add(8*24*time.Hour), 10); len(got) != 0 {
+		t.Fatalf("kept pass re-offered after the hold: %v", got)
+	}
 }

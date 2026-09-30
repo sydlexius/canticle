@@ -1265,6 +1265,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if !lyricsDisabled {
 		upgradeSweep, _ = newUpgradeSweepJob(sqlDB, cfg)
 	}
+	if upgradeSweep != nil {
+		// The #1120 mis_synced pass is keyed on the lane-set generation.
+		upgradeSweep.q.SetProvidersVersion(gen)
+	}
 	// Word-sync generate sweep (#1007): no generator until #1008, so enabled it
 	// logs once and starts nothing. Not gated on lyricsDisabled: it aligns words
 	// already on disk (no lane needed); with no lanes only mis_synced rows match.

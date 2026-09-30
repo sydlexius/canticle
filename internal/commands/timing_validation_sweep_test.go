@@ -991,3 +991,17 @@ func TestLibraryRootsDropsABlankPath(t *testing.T) {
 		}
 	}
 }
+
+// TestRunCycleStampsPostSettleSource (#1120): the sweep's mis_synced verdict is
+// a post-settle stamp, so the upgrade sweep's one provider pass picks the row up.
+func TestRunCycleStampsPostSettleSource(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, _ := sweepFixture(t, nil)
+	if _, err := job.runCycle(ctx); err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	ids, err := q.ListUpgradeCandidates(ctx, time.Now().Add(-7*24*time.Hour), 10)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("upgrade candidates after the sweep stamped mis_synced = %v, %v; want the one row (source %q)", ids, err, queue.TimingSourceSweep)
+	}
+}
