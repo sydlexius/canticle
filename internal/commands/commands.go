@@ -1352,6 +1352,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			slog.Warn("HTTP server shutdown failed", "error", err)
 		}
 		apiHandler.Close()
+		if serveStartupOrderHook != nil {
+			serveStartupOrderHook("http_drained")
+		}
 	}()
 
 	// Optional plain-HTTP redirect listener (#204, lane 5): listener already bound
@@ -1387,6 +1390,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		if redirectLn != nil {
 			_ = redirectLn.Close()
 		}
+		// The shutdown goroutine is already running (cancel released it); wait
+		// for it so it never outlives runServe.
+		<-httpDrained
 		_ = sqlDB.Close()
 		slog.Error("HTTP listener failed to bind; aborting startup", "addr", addr, "error", listenErr)
 		return 1
@@ -1581,6 +1587,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	cancel()
 	wg.Wait()
 	<-httpDrained
+	if serveStartupOrderHook != nil {
+		serveStartupOrderHook("db_closing")
+	}
 	if err := sqlDB.Close(); err != nil {
 		slog.Warn("failed to close database", "error", err)
 	}

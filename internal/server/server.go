@@ -111,6 +111,12 @@ type Handler struct {
 	// shutdown must not race the database close.
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
+
+	// closeMu guards closed, so dispatchRealign's bgRealign.Add and Close's
+	// Wait never run concurrently from a zero count (a WaitGroup misuse): once
+	// Close has set closed, no new pass is added (#1142 review).
+	closeMu sync.Mutex
+	closed  bool
 }
 
 // Option configures optional Handler dependencies.
@@ -550,7 +556,14 @@ func (h *Handler) dispatchRealign(ctx context.Context, event string, payload lid
 		return
 	}
 	bg := context.WithoutCancel(ctx)
+	h.closeMu.Lock()
+	if h.closed {
+		h.closeMu.Unlock()
+		slog.Info("dropping reactive realign: shutting down", "event", event)
+		return
+	}
 	h.bgRealign.Add(1)
+	h.closeMu.Unlock()
 	go func() {
 		defer h.bgRealign.Done()
 		// Realign renames and moves lyric files, so it must not overlap the
@@ -582,7 +595,10 @@ func (h *Handler) dispatchRealign(ctx context.Context, event string, payload lid
 // the realigner uses (#1138). The wait is unbounded: a running pass is bounded
 // work and cannot be canceled mid-move (its context is detached). Idempotent.
 func (h *Handler) Close() {
+	h.closeMu.Lock()
+	h.closed = true
 	h.shutdownOnce.Do(func() { close(h.shutdown) })
+	h.closeMu.Unlock()
 	h.bgRealign.Wait()
 }
 

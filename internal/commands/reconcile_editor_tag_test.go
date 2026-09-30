@@ -446,6 +446,11 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 			afterStatus = st
 			mu.Unlock()
 		}
+		if checkpoint == "http_drained" {
+			// Delay the drain signal so runServe, were it not waiting on
+			// httpDrained, would reach db_closing first (#1142 review F1).
+			time.Sleep(200 * time.Millisecond)
+		}
 		mu.Lock()
 		order = append(order, checkpoint)
 		mu.Unlock()
@@ -481,6 +486,15 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 		case <-done:
 		case <-time.After(10 * time.Second):
 			t.Error("runServe did not return after cancel")
+			return
+		}
+		// The database closes only after the HTTP server and every reactive
+		// realign have drained (#1138).
+		mu.Lock()
+		defer mu.Unlock()
+		drained, closing := slices.Index(order, "http_drained"), slices.Index(order, "db_closing")
+		if drained < 0 || closing < 0 || drained > closing {
+			t.Errorf("shutdown order = %v; want http_drained before db_closing", order)
 		}
 	})
 
@@ -553,7 +567,14 @@ func TestRunServe_ListenerBindFailureFailsFast(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var fired []string
-	serveStartupOrderHook = func(c string) { mu.Lock(); fired = append(fired, c); mu.Unlock() }
+	serveStartupOrderHook = func(c string) {
+		if c == "http_drained" { // a shutdown checkpoint, not a startup one
+			return
+		}
+		mu.Lock()
+		fired = append(fired, c)
+		mu.Unlock()
+	}
 	t.Cleanup(func() { serveStartupOrderHook = nil })
 
 	var out bytes.Buffer
