@@ -1411,6 +1411,11 @@ func (q *DBQueue) deferRefusedOnce(ctx context.Context, id int64, retryAfter tim
 // bind, the tests, and any log/inspection of the sentinel cannot drift.
 const missLimitReachedError = "miss limit reached"
 
+// UnresolvableGoneError is the last_error value prune writes when it retires a
+// row to 'done' whose source file is gone and which carries no ISRC or MBID.
+// Owned here (prune aliases it) so queue can recognize a retired row.
+const UnresolvableGoneError = "source file is gone and the row carries no ISRC or MBID, so it can never be relinked; retired as unactionable"
+
 // RetireMiss permanently closes a processing row that has exceeded the
 // configured miss-attempt cap. It runs a transaction that mirrors Complete's
 // scan_results writeback: work_queue is set to status='unavailable' (#477;

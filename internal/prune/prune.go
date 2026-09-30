@@ -165,8 +165,9 @@ type RetainedRow struct {
 // queue.missLimitReachedError, whose retire-to-'done' pattern this mirrors.
 //
 // The text is written for someone reading it six months from now with no context:
-// it states the mechanism, not a verdict.
-const unresolvableGoneError = "source file is gone and the row carries no ISRC or MBID, so it can never be relinked; retired as unactionable"
+// it states the mechanism, not a verdict. The literal lives in queue so the
+// reconcile-remediated guard (#1143) recognizes a retired row without a copy.
+const unresolvableGoneError = queue.UnresolvableGoneError
 
 // Result reports the totals and per-row detail of a prune (or, in dry-run, what
 // would happen).
