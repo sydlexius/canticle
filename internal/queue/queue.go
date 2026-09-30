@@ -2226,7 +2226,40 @@ type TimingRecord struct {
 	// EvaluatedAt is when the verdict was reached. Recorded even when the
 	// verdict is unmeasured, so the sweep watermark advances either way.
 	EvaluatedAt time.Time
+	// Source names the stamper (#1120): TimingSourceFetch for the worker's own
+	// fetch-time stamp (every lane tried), TimingSourceSweep or
+	// TimingSourceRevalidate for a verdict reached AFTER the row settled (never
+	// re-asked of the current lanes). Empty stores NULL, which every reader
+	// treats as post-settle: a forgotten source fails toward a provider pass,
+	// never toward skipping one. Any other value is rejected.
+	Source string
 }
+
+// Timing stamp sources (work_queue.timing_stamp_source, migration 055).
+const (
+	TimingSourceFetch      = "fetch"
+	TimingSourceSweep      = "sweep"
+	TimingSourceRevalidate = "revalidate"
+)
+
+// stampSource is the value bound for timing_stamp_source: NULL for an empty
+// Source (read as post-settle), an error for an unrecognized one.
+func (r TimingRecord) stampSource() (any, error) {
+	switch r.Source {
+	case "":
+		return nil, nil
+	case TimingSourceFetch, TimingSourceSweep, TimingSourceRevalidate:
+		return r.Source, nil
+	}
+	return nil, fmt.Errorf("queue: unknown timing stamp source %q", r.Source)
+}
+
+// timingSourceSet (two args, both the source) records the stamper and drops the
+// row's post-settle provider-pass marker on any non-fetch stamp: a new
+// post-settle verdict describes the file as it is now, so an earlier pass
+// (about an earlier file) must not hide it.
+const timingSourceSet = `timing_stamp_source = ?,
+             missync_recheck_generation = CASE WHEN COALESCE(?, '') = 'fetch' THEN missync_recheck_generation ELSE NULL END`
 
 // SetTimingOutcome records how a row's synced lyric compared against the audio
 // duration (#440). The worker calls this before Complete while the row is still
@@ -2240,6 +2273,10 @@ func (q *DBQueue) SetTimingOutcome(ctx context.Context, id int64, rec TimingReco
 	if rec.Outcome == "" {
 		return nil
 	}
+	src, err := rec.stampSource()
+	if err != nil {
+		return err
+	}
 	var magnitude, ratio any
 	if rec.Measured {
 		magnitude = rec.Magnitude
@@ -2249,17 +2286,19 @@ func (q *DBQueue) SetTimingOutcome(ctx context.Context, id int64, rec TimingReco
 	if !rec.EvaluatedAt.IsZero() {
 		evaluatedAt = formatTime(rec.EvaluatedAt)
 	}
-	_, err := q.db.ExecContext(ctx,
+	_, err = q.db.ExecContext(ctx,
 		`UPDATE work_queue
          SET timing_outcome = ?,
              overrun_magnitude = ?,
              overrun_ratio = ?,
-             evaluated_at = ?
+             evaluated_at = ?,
+             `+timingSourceSet+`
          WHERE id = ?`,
 		rec.Outcome,
 		magnitude,
 		ratio,
 		evaluatedAt,
+		src, src,
 		id,
 	)
 	if err != nil {
@@ -2281,6 +2320,10 @@ func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec Timi
 	if rec.Outcome == "" {
 		return false, nil
 	}
+	src, err := rec.stampSource()
+	if err != nil {
+		return false, err
+	}
 	var magnitude, ratio any
 	if rec.Measured {
 		magnitude = rec.Magnitude
@@ -2295,9 +2338,10 @@ func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec Timi
          SET timing_outcome = ?,
              overrun_magnitude = ?,
              overrun_ratio = ?,
-             evaluated_at = ?
+             evaluated_at = ?,
+             `+timingSourceSet+`
          WHERE id = ? AND status <> 'processing'`,
-		rec.Outcome, magnitude, ratio, evaluatedAt, id,
+		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: set timing outcome (guarded) for id %d: %w", id, err)

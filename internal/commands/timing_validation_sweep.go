@@ -369,7 +369,9 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 			// settled facts about the file.
 			continue
 		}
-		if serr := j.q.SetTimingOutcome(ctx, f.ID, timingRecordFor(f)); serr != nil {
+		rec := timingRecordFor(f)
+		rec.Source = queue.TimingSourceSweep // post-settle stamp (#1120): the upgrade sweep gives it one provider pass
+		if serr := j.q.SetTimingOutcome(ctx, f.ID, rec); serr != nil {
 			// Non-fatal per row: the file is already remediated, and an unstamped
 			// row is merely re-judged next cycle, which is idempotent.
 			slog.Warn("timing validation sweep: could not stamp a judged row", "id", f.ID, "error", serr)
