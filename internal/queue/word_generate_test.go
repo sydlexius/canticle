@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"slices"
 	"testing"
+	"time"
 )
 
 const (
@@ -51,7 +52,8 @@ func TestWordGenerateCandidates_EachRule(t *testing.T) {
 		seedGenerateRow(t, dbh, "missynced-guard-txt", missynced),
 		// Matches both arms' other terms: listed once, the arms are disjoint.
 		seedGenerateRow(t, dbh, "missynced-sweep-lrc", "timing_outcome = 'mis_synced'"),
-		seedGenerateRow(t, dbh, "old-version", "word_generate_version = 2, word_generate_at = '2026-09-01T00:00:00Z'"),
+		// The OLDEST completion, so only the word_generate_at key can sort it last.
+		seedGenerateRow(t, dbh, "old-version", "word_generate_version = 2, word_generate_at = '2026-09-01T00:00:00Z', completed_at = '2026-07-01T00:00:00Z'"),
 	}
 	for _, c := range []struct{ key, set string }{
 		{"not-examined", "word_timing_state = NULL"},
@@ -94,33 +96,64 @@ func TestWordGenerateCandidates_EachRule(t *testing.T) {
 	}
 }
 
-// TestWordGenerateMarker: a stamped row is skipped under its version and a
-// version bump re-admits it; a row that left 'done' is not stamped.
+// TestWordGenerateMarker: a stamped row is skipped under its version; a row
+// that left 'done', or (review F1, F2) was re-completed, even in the same
+// second, is not stamped, and a re-completion re-admits it at the same version.
 func TestWordGenerateMarker(t *testing.T) {
 	ctx := context.Background()
 	q, dbh := upgradeQueue(t)
 	a := seedGenerateRow(t, dbh, "a", "")
 	b := seedGenerateRow(t, dbh, "b", "timing_outcome = 'mis_synced', word_timing_state = NULL")
 	taken := seedGenerateRow(t, dbh, "taken", "")
+	stamp := func(ids ...int64) []int64 {
+		st, err := q.StampWordGenerateAttempt(ctx, ids, genTestVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	if err := q.MarkWordGenerateOffered(ctx, []int64{a, b, taken}); err != nil {
+		t.Fatal(err)
+	}
 	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, taken)
-
-	stamped, err := q.StampWordGenerateAttempt(ctx, []int64{a, b, taken}, genTestVersion)
-	if err != nil {
-		t.Fatalf("stamp: %v", err)
-	}
-	if !slices.Equal(stamped, []int64{a, b}) {
-		t.Fatalf("stamped = %v, want [%d %d] (not the processing row)", stamped, a, b)
-	}
-	var at sql.NullString
-	if err := dbh.QueryRow(`SELECT word_generate_at FROM work_queue WHERE id = ?`, a).Scan(&at); err != nil || at.String != formatTime(upgradeNow) {
-		t.Fatalf("word_generate_at = %v, %v; want %s", at, err, formatTime(upgradeNow))
+	if st := stamp(a, b, taken); !slices.Equal(st, []int64{a, b}) {
+		t.Fatalf("stamped = %v, want [%d %d] (not the processing row)", st, a, b)
 	}
 	if got := listGenerate(t, q, genTestVersion, 0); len(got) != 0 {
 		t.Fatalf("after stamp at v%d: %v, want none", genTestVersion, got)
 	}
-	got := listGenerate(t, q, genTestVersion+1, 0)
-	slices.Sort(got)
-	if !slices.Equal(got, []int64{a, b}) {
-		t.Fatalf("after version bump: %v, want [%d %d]", got, a, b)
+	if got := listGenerate(t, q, genTestVersion+1, 0); len(got) != 2 {
+		t.Fatalf("after version bump: %v, want both", got)
+	}
+	// A scan reopen, then the worker re-fetches and settles a new file.
+	tx, err := dbh.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := ReopenDoneRowTx(ctx, tx, a, upgradeNow); err != nil || !ok {
+		t.Fatalf("reopen = %v, %v", ok, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing', outcome_type = 'synced' WHERE id = ?`, a)
+	if err := q.Complete(ctx, a); err != nil { // same second as the stamp
+		t.Fatalf("complete: %v", err)
+	}
+	if got := listGenerate(t, q, genTestVersion, 0); !slices.Equal(got, []int64{a}) {
+		t.Fatalf("after re-fetch: %v, want [%d] (the marker judged the old file)", got, a)
+	}
+	// Offered and unhandled it stays a candidate; re-completed before the
+	// generator reports, it is not stamped.
+	q.now = func() time.Time { return upgradeNow.Add(time.Hour) }
+	if err := q.MarkWordGenerateOffered(ctx, []int64{a}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listGenerate(t, q, genTestVersion, 0); !slices.Equal(got, []int64{a}) {
+		t.Fatalf("after an unhandled offer: %v, want [%d]", got, a)
+	}
+	mustExec(t, dbh, `UPDATE work_queue SET completed_at = ? WHERE id = ?`, formatTime(upgradeNow.Add(time.Hour)), a)
+	if st := stamp(a); len(st) != 0 {
+		t.Fatalf("stale stamp = %v; want nothing stamped", st)
 	}
 }

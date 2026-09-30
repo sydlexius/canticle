@@ -7,13 +7,11 @@ import (
 
 // WordGenerateOptions scopes the word-sync generation candidate set (#1007).
 type WordGenerateOptions struct {
-	// GeneratorVersion is the running generator's version: a row whose
-	// word_generate_version equals it was already handled and is skipped, and
-	// any other value (a version bump) re-opens it.
+	// GeneratorVersion is the running generator's version: a row stamped with
+	// it was already handled and is skipped; a version bump re-opens it.
 	GeneratorVersion int64
-	// WordGeneration is the worker's live word-capability generation (the
-	// word-recheck sweep's). Only an 'absent' verdict under exactly this
-	// generation counts as "the provider path had its chance".
+	// WordGeneration is the worker's live word-capability generation; only an
+	// 'absent' verdict under exactly it means the provider path had its chance.
 	WordGeneration int64
 	// Limit caps the list when > 0.
 	Limit int
@@ -22,11 +20,14 @@ type WordGenerateOptions struct {
 // wordGenerateCommon holds the terms both arms share (one bound arg, the
 // generator version): settled, a source path to derive the sidecar from, not
 // prune's retire-as-gone sentinel, not held by the word-recheck or upgrade
-// sweep, and not yet handled by this generator version.
+// sweep, and not handled by this generator version since its last completion:
+// a re-settle (re-fetch, purge reset, served recheck) moves completed_at, so a
+// verdict on an earlier file never hides a new one.
 const wordGenerateCommon = ` status = 'done'
    AND TRIM(COALESCE(source_path, '')) <> ''
    AND COALESCE(last_error, '') = ''` + notWordRecheckQueued + `
-   AND (word_generate_version IS NULL OR word_generate_version <> ?)`
+   AND (word_generate_version IS NULL OR word_generate_version <> ?
+        OR word_generate_at <= completed_at)`
 
 // wordGenerateLineArm (one bound arg, the word generation): a line-synced
 // .lrc on disk (sync_tier, #1075) whose provider re-examination (#982)
@@ -40,22 +41,19 @@ const wordGenerateLineArm = ` AND outcome_type = 'synced'
    AND word_timing_generation = ?
    AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')`
 
-// wordGenerateRetimeArm: known words whose timing overran the audio (#440). The
-// accept-time guard settled these as a .txt (outcome unsynced); the timing
-// sweep leaves outcome_type describing the old .lrc and demoted, quarantined
-// or kept the file per on_mis_synced, so the generator must read what is on
-// disk. No #982 verdict is required: the recheck never examines mis_synced
-// rows, and a provider re-fetch returns the same catalog timing. Categorical
-// (another song's words) and degenerate are not candidates.
+// wordGenerateRetimeArm: known words whose timing overran the audio (#440),
+// as a .txt or a kept/demoted/quarantined .lrc (read what is on disk). No #982
+// verdict is required: the recheck never examines mis_synced. A row held by the
+// accept-time guard had every lane tried; one marked by the timing sweep or
+// revalidate --apply was NOT re-asked of current lanes, and nothing here does.
 const wordGenerateRetimeArm = ` AND timing_outcome = 'mis_synced'`
 
-// ListWordGenerateCandidates returns up to opts.Limit ids for word-sync
-// generation, never-handled first, then oldest completion. The two arms are
-// disjoint (the line arm excludes mis_synced) and each is its own indexed
-// SELECT, so a cycle never scans the library. Read-only.
+// ListWordGenerateCandidates returns up to opts.Limit candidate ids, least
+// recently offered first (never offered leads), then oldest completion. The
+// arms are disjoint and each is its own indexed SELECT. Read-only.
 func (q *DBQueue) ListWordGenerateCandidates(ctx context.Context, opts WordGenerateOptions) ([]int64, error) {
-	query := `SELECT id, word_generate_at, completed_at FROM work_queue WHERE` + wordGenerateCommon + wordGenerateLineArm + //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
-		` UNION ALL SELECT id, word_generate_at, completed_at FROM work_queue WHERE` + wordGenerateCommon + wordGenerateRetimeArm
+	const cols = `SELECT id, word_generate_at, completed_at FROM work_queue WHERE`
+	query := cols + wordGenerateCommon + wordGenerateLineArm + ` UNION ALL ` + cols + wordGenerateCommon + wordGenerateRetimeArm //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
 	query = `SELECT id FROM (` + query + `) ORDER BY word_generate_at ASC, completed_at ASC, id ASC`
 	args := []any{opts.GeneratorVersion, opts.WordGeneration, opts.GeneratorVersion}
 	if opts.Limit > 0 {
@@ -65,21 +63,34 @@ func (q *DBQueue) ListWordGenerateCandidates(ctx context.Context, opts WordGener
 	return q.queryIDs(ctx, "list word generate candidates", query, args...)
 }
 
+// MarkWordGenerateOffered stamps the offer time before the generator sees ids,
+// so a row it keeps leaving unhandled rotates behind never-offered rows. It
+// clears the version (already void on a candidate; kept beside a fresh time it
+// would hide a re-settled row). StampWordGenerateAttempt requires the offer.
+func (q *DBQueue) MarkWordGenerateOffered(ctx context.Context, ids []int64) error {
+	now := formatTime(q.now())
+	for _, id := range ids {
+		if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET word_generate_at = ?, word_generate_version = NULL
+             WHERE id = ? AND status = 'done'`, now, id); err != nil {
+			return fmt.Errorf("queue: mark word generate offered id %d: %w", id, err)
+		}
+	}
+	return nil
+}
+
 // StampWordGenerateAttempt records that the generator at version handled ids
 // (whatever it decided: wrote, rejected at a gate, or found nothing to align),
-// so the next cycle skips them until the version changes. Call it ONLY for
-// rows a generator actually processed; stamping a merely selected row would
-// hide it from real generation forever. Keyed on id and status = 'done' (a
-// row the worker took back in the meantime is not stamped); not revalidated
-// against the candidate predicate, because a successful generation itself
-// changes the row (a new sync tier) and the marker must still land. Returns
-// the ids stamped.
+// so they are skipped until the version or the completion changes. Call it
+// ONLY for rows a generator processed. It lands only on a done row offered
+// strictly after its last completion, so a row re-settled since the offer
+// (the generator judged the old file) is not stamped; the generator must not
+// move completed_at itself. Returns the ids stamped.
 func (q *DBQueue) StampWordGenerateAttempt(ctx context.Context, ids []int64, version int64) ([]int64, error) {
 	var stamped []int64
 	now := formatTime(q.now())
 	for _, id := range ids {
 		res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET word_generate_version = ?, word_generate_at = ?
-             WHERE id = ? AND status = 'done'`, version, now, id)
+             WHERE id = ? AND status = 'done' AND word_generate_at > COALESCE(completed_at, '')`, version, now, id)
 		if err != nil {
 			return stamped, fmt.Errorf("queue: stamp word generate id %d: %w", id, err)
 		}

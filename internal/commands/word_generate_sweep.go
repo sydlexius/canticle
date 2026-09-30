@@ -15,10 +15,10 @@ import (
 // wordSyncGenerator is the seam slice 4 (#1008) implements: it gates and
 // writes generated word timings for the rows it is handed. It must return
 // every id it HANDLED, whatever the outcome (written, rejected at a gate,
-// nothing on disk to align); those, and only those, are stamped with Version
-// so they are not offered again until the version changes. An id left out
-// (a transport failure, a busy sidecar) is offered again next cycle. It must
-// re-read each row and its sidecar before writing: selection is a snapshot.
+// nothing on disk to align); those, and only those, are stamped with Version.
+// An id left out (a transport failure, a busy sidecar) is offered again,
+// behind rows not yet offered. It must re-read each row and its sidecar
+// before writing (selection is a snapshot) and must not move completed_at.
 type wordSyncGenerator interface {
 	Version() int64
 	Generate(ctx context.Context, ids []int64) (handled []int64, err error)
@@ -35,11 +35,9 @@ type wordGenerateSweepJob struct {
 }
 
 // newWordGenerateSweepJob reports whether the sweep runs at all: only with
-// word_sync_generate.enabled, a URL (blank means unconfigured, per the config
-// doc), and a generator. Until #1008 wires one, serve passes nil and this logs
-// once that generation has no consumer, so no candidate is ever selected and
-// no marker is stamped for rows nothing processed. The aligner is never
-// contacted here, so an unreachable URL cannot affect startup.
+// word_sync_generate.enabled, a non-blank URL, and a generator. Until #1008
+// wires one, serve passes nil and this logs once that generation has no
+// consumer, so nothing is selected or stamped. The aligner is never contacted.
 func newWordGenerateSweepJob(sqlDB *sql.DB, cfg config.Config, words wordGenerationSource, gen wordSyncGenerator) (*wordGenerateSweepJob, bool) {
 	wg := cfg.WordSyncGenerate
 	switch {
@@ -60,16 +58,18 @@ func newWordGenerateSweepJob(sqlDB *sql.DB, cfg config.Config, words wordGenerat
 	return &wordGenerateSweepJob{q: queue.NewDBQueue(sqlDB), gen: gen, budget: budget, wordGen: words.WordGeneration()}, true
 }
 
-// runCycle selects up to budget candidates, hands them to the generator, and
-// stamps the ones it reports handled; returns how many were stamped. Handled
-// rows are stamped even when Generate also returns an error or ctx ended, so
-// finished work is never repeated.
+// runCycle offers up to budget candidates to the generator and stamps the ones
+// it reports handled, even beside a Generate error or an ended ctx, so
+// finished work is never repeated; returns how many were stamped.
 func (j *wordGenerateSweepJob) runCycle(ctx context.Context) (int, error) {
 	version := j.gen.Version()
 	ids, err := j.q.ListWordGenerateCandidates(ctx, queue.WordGenerateOptions{
 		GeneratorVersion: version, WordGeneration: j.wordGen, Limit: j.budget,
 	})
 	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	if err := j.q.MarkWordGenerateOffered(ctx, ids); err != nil {
 		return 0, err
 	}
 	handled, genErr := j.gen.Generate(ctx, ids)
