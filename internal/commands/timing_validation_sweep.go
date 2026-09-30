@@ -371,6 +371,7 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 		}
 		rec := timingRecordFor(f)
 		rec.Source = queue.TimingSourceSweep // post-settle stamp (#1120): the upgrade sweep gives it one provider pass
+		rec.FileState = fileStateFor(f)      // same UPDATE as the verdict (#1130): both land or neither
 		if serr := j.q.SetTimingOutcome(ctx, f.ID, rec); serr != nil {
 			// Non-fatal per row: the file is already remediated, and an unstamped
 			// row is merely re-judged next cycle, which is idempotent.
@@ -516,6 +517,27 @@ func timingRecordFor(f revalidate.Finding) queue.TimingRecord {
 		rec.Measured = false
 	}
 	return rec
+}
+
+// fileStateFor maps a finding to the file state its remediation left on disk
+// (#1130), carried on the timing record so the verdict and the file state are
+// one write. nil means no change (Action empty: off, or a verdict that does not
+// remediate). Whenever the words were kept as a .txt (KeptText: a demote,
+// including a demote under purge, whose Action is purge) the outcome is
+// unsynced; a quarantine or a plain purge leaves no sidecar, so the outcome is
+// cleared (""). Either way sync_tier is cleared by the queue.
+func fileStateFor(f revalidate.Finding) *string {
+	outcome := ""
+	switch {
+	case f.KeptText:
+		outcome = "unsynced"
+	case f.Action == realign.KindDemote:
+		outcome = "unsynced"
+	case f.Action == realign.KindQuarantine, f.Action == realign.KindPurge:
+	default:
+		return nil
+	}
+	return &outcome
 }
 
 // runTimingSweepCycle runs one cycle and logs it. A failure is logged and

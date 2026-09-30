@@ -156,6 +156,10 @@ type Finding struct {
 	Ratio    float64
 	// Action is the remediation planned for this finding, or "" when none is.
 	Action string
+	// KeptText is true when the planned remediation leaves the words behind as
+	// a .txt (a demote, including a demote under --purge, whose Action is
+	// purge). The caller uses it to describe the file now on disk (#1130).
+	KeptText bool
 	// ID is the work_queue row this finding came from in candidate mode, or 0
 	// when the finding came from a filesystem walk. The sweep stamps the timing
 	// watermark by this id, which is what retires the row from the backlog
@@ -579,6 +583,7 @@ func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, pla
 		}
 		if mok {
 			f.Action = mv.Kind
+			f.KeptText = mv.TextPath != ""
 			plan.Moves = append(plan.Moves, mv)
 		}
 	case timing.Degenerate:
@@ -602,6 +607,7 @@ func (r *Revalidator) judge(ctx context.Context, s site, path, audio string, pla
 		}
 		if mok {
 			f.Action = mv.Kind
+			f.KeptText = mv.TextPath != ""
 			plan.Moves = append(plan.Moves, mv)
 		}
 	case timing.Categorical:

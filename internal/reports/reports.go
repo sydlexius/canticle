@@ -69,9 +69,9 @@ type QueueSummary struct {
 // SyncTierCounts.WordSynced so the two dashboard rows cannot disagree. It is
 // decided from sync_tier -- what the FILE on disk is (#1075, stamped from
 // lyrics.WordsLanded or backfilled by lyrics.ClassifyLRCFile) -- never from a
-// provenance header. A tier the timing guard later remediated is stale
-// (neither remediation clears sync_tier), and a row mid word-recheck is
-// re-litigating its tier, so both read as not terminal. No leading AND/WHERE.
+// provenance header. A remediation now clears sync_tier (#1130), but
+// a row stamped before that still holds a stale tier, and a row mid
+// word-recheck is re-litigating its tier, so both read as not terminal. No leading AND/WHERE.
 const wordTierPredicate = `sync_tier = 'word'
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued'`
@@ -301,15 +301,13 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 		`SELECT artist, title, album, completed_at, provider_lane,
             COALESCE(
                 NULLIF(outcome_detail, ''),
-                -- outcome_type IS NULL is DEFENSIVE, not load-bearing: Categorical
-                -- always quarantines (nothing written), so such a row is already
-                -- NULL and no reachable state has both set. It states the intent --
-                -- explain the rows that render 'unknown' -- and would stop a future
-                -- writer that began stamping an outcome on a quarantined row from
-                -- silently relabeling a successful outcome. Removing it fails no
-                -- test, by construction rather than by omission.
-                CASE WHEN outcome_type IS NULL AND timing_outcome = 'categorical'
-                     THEN 'timing refused: categorical'
+                -- outcome_type IS NULL explains the rows that render 'unknown': a
+                -- categorical row is quarantined (nothing written), and a
+                -- quarantined or purged mis_synced/degenerate row is NULLed by
+                -- the remediation restamp (#1130). A demoted one is 'unsynced'.
+                CASE WHEN outcome_type IS NULL
+                          AND timing_outcome IN ('categorical', 'mis_synced', 'degenerate')
+                     THEN 'timing refused: ' || timing_outcome
                 END
             ) AS detail,
             CASE
@@ -539,8 +537,8 @@ type SyncTierCounts struct {
 //
 // ALSO EXCLUDED FROM WORD_SYNCED/LINE_SYNCED (routed to Unknown instead): a row
 // the timing guard later remediated (timing_outcome IN ('categorical',
-// 'mis_synced', 'degenerate'), #442/#443/#1082). Neither remediation path clears sync_tier today,
-// so a quarantined or demoted row would otherwise keep asserting a stale
+// 'mis_synced', 'degenerate'), #442/#443/#1082). Remediation clears sync_tier now (#1130), but a
+// row remediated by an older build would otherwise keep asserting a stale
 // tier; see ResultLineSynced/ResultSynced.
 //
 // ALSO EXCLUDED, for the SAME reason (#1085 review): a row admitted by the
