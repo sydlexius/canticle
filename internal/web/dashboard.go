@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
 )
@@ -207,10 +208,14 @@ func groupThousands(n int64) string {
 }
 
 // tierLabel maps a raw work_queue.priority to the panel's tier label. Negative
-// priorities are the deferred benign-miss tier (queue.PriorityMiss = -100);
-// everything at or above the scan baseline (0) reads as "fresh". Kept in the
-// handler so relabeling never touches the query or template.
+// priorities are the deferred benign-miss tier (queue.PriorityMiss = -100),
+// except exactly queue.PriorityUpgrade (-50), the upgrade-sweep tier, which has
+// its own label; everything at or above the scan baseline (0) reads as "fresh".
+// Kept in the handler so relabeling never touches the query or template.
 func tierLabel(priority int) string {
+	if priority == queue.PriorityUpgrade {
+		return "upgrade"
+	}
 	if priority < 0 {
 		return "miss"
 	}

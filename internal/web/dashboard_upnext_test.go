@@ -14,12 +14,13 @@ import (
 )
 
 func TestTierLabel(t *testing.T) {
-	// PriorityMiss=-100 -> miss; PriorityScan=0 and PriorityWebhook=10 -> fresh.
+	// PriorityMiss=-100 -> miss; PriorityUpgrade=-50 -> upgrade; PriorityScan=0 and PriorityWebhook=10 -> fresh.
 	tests := []struct {
 		priority int
 		want     string
 	}{
 		{-100, "miss"},
+		{-50, "upgrade"},
 		{-1, "miss"},
 		{0, "fresh"},
 		{10, "fresh"},

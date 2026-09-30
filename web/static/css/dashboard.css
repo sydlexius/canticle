@@ -199,6 +199,11 @@
   background: rgba(245, 158, 11, 0.12); /* amber-500 @ 12%; no alpha token exists */
 }
 
+.mx-upnext-tier-upgrade {
+  color: var(--mx-content-text-secondary); /* neutral: re-fetch of a settled track, not new work or a miss */
+  background: transparent;
+}
+
 /* -- Maintenance summary note ----------------------------------------------- */
 /* Shares the metrics footer note's muted, small-text treatment (#929) so the
    two read as one system, but carries its own top border/margin rather than

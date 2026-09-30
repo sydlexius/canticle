@@ -98,7 +98,7 @@ func TestMarkUpgradeQueued_FlipStampAndHold(t *testing.T) {
 		Scan(&status, &prio, &attempts, &misses, &waits, &checked, &outcome, &armed); err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if status != StatusPending || prio != PriorityMiss || attempts != 0 || waits != 0 || misses != 3 ||
+	if status != StatusPending || prio != PriorityUpgrade || attempts != 0 || waits != 0 || misses != 3 ||
 		checked.String != formatTime(upgradeNow) || outcome != "unsynced" || armed != 1 {
 		t.Fatalf("flipped row = %s prio=%d attempts=%d misses=%d waits=%d checked=%s outcome=%s armed=%d",
 			status, prio, attempts, misses, waits, checked.String, outcome, armed)
@@ -359,5 +359,57 @@ func TestTimingStampSource(t *testing.T) {
 	}
 	if _, err := q.SetTimingOutcomeIfIdle(ctx, id, TimingRecord{Outcome: "ok", Source: "fetched"}); err == nil {
 		t.Fatal("IfIdle unknown source accepted")
+	}
+}
+
+// TestDequeueTierOrder (#1151): with one due row at each tier, the worker draws
+// webhook, scan, the upgrade trip, then the deferred miss. One row per tier, so
+// RANDOM() within a tier cannot affect the order.
+func TestDequeueTierOrder(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	seed := func(key string, prio int, set string) {
+		id := seedUpgradeRow(t, dbh, key, set)
+		if _, err := dbh.Exec(`UPDATE work_queue SET status = 'pending', priority = ?, completed_at = NULL, next_attempt_at = ? WHERE id = ?`,
+			prio, formatTime(upgradeNow.Add(-time.Minute)), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Insert lowest-first so insertion order cannot explain a pass.
+	seed("miss", PriorityMiss, "")
+	seed("upgrade", PriorityUpgrade, "upgrade_queued = 1")
+	seed("scan", PriorityScan, "")
+	seed("webhook", PriorityWebhook, "")
+	for _, want := range []string{"webhook", "scan", "upgrade", "miss"} {
+		item, err := q.Dequeue(ctx)
+		if err != nil {
+			t.Fatalf("dequeue (want %s): %v", want, err)
+		}
+		if item.Inputs.Track.TrackName != want {
+			t.Fatalf("dequeued %q, want %q", item.Inputs.Track.TrackName, want)
+		}
+	}
+}
+
+// TestEnqueueScanLiftsArmedUpgradeTrip (#1151): a scan enqueue colliding with a
+// pending armed trip lifts it to scan priority and leaves it armed.
+func TestEnqueueScanLiftsArmedUpgradeTrip(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	id := seedUpgradeRow(t, dbh, "t", "")
+	if _, err := q.MarkUpgradeQueued(ctx, []int64{id}, upgradeNow.Add(-7*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	in := models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "t"}, SourcePath: "/m/x.flac", FromScan: true}
+	if _, err := q.Enqueue(ctx, in, PriorityScan); err != nil {
+		t.Fatal(err)
+	}
+	var prio, armed int
+	var status string
+	if err := dbh.QueryRow(`SELECT priority, upgrade_queued, status FROM work_queue WHERE id = ?`, id).Scan(&prio, &armed, &status); err != nil {
+		t.Fatal(err)
+	}
+	if prio != PriorityScan || armed != 1 || status != StatusPending {
+		t.Fatalf("after scan collision: priority=%d armed=%d status=%s; want %d, 1, pending", prio, armed, status, PriorityScan)
 	}
 }
