@@ -41,7 +41,8 @@
   var QUEUE_COLOR_VARS = {
     Pending: '--mx-chart-pending',
     Processing: '--mx-chart-processing',
-    Done: '--mx-chart-done',
+    Finished: '--mx-chart-finished',
+    'Settled (upgradable)': '--mx-chart-settled',
     Failed: '--mx-chart-failed',
     Deferred: '--mx-chart-deferred',
     Unavailable: '--mx-chart-unavailable',
