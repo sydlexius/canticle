@@ -873,6 +873,7 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 
 	writer := newWriter()
 	configureWriterBilingual(writer, cfg)
+	configureWriterAudioMtimeBump(writer, cfg)
 	configureWriterWordSync(writer, cfg)
 	configureWriterForce(writer, args.Update)
 	application := newApp(fetcher, writer, inputs, cooldown, mode)
@@ -1137,6 +1138,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	allowedRoots := webhookAllowedRoots(ctx, sqlDB)
 	writer := newWriter(allowedRoots...)
 	configureWriterBilingual(writer, cfg)
+	configureWriterAudioMtimeBump(writer, cfg)
 	configureWriterWordSync(writer, cfg)
 	configureWriterForce(writer, args.Update)
 	// One registry shared by the writer and the watcher, so the watcher can drop
@@ -2133,6 +2135,14 @@ func configureWorkerProviderRecorder(w *worker.Worker, r worker.ProviderRecorder
 func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 	if lw, ok := w.(*lyrics.LRCWriter); ok {
 		lw.SetBilingual(cfg.Output.BilingualOutput)
+	}
+}
+
+// configureWriterAudioMtimeBump carries output.bump_audio_mtime (#505) to the
+// concrete LRC writer. Same type-assertion shape as the setters around it.
+func configureWriterAudioMtimeBump(w lyrics.Writer, cfg config.Config) {
+	if lw, ok := w.(*lyrics.LRCWriter); ok {
+		lw.SetAudioMtimeBump(cfg.Output.BumpAudioMtime)
 	}
 }
 
@@ -3309,6 +3319,7 @@ func configKeys() []string {
 		"output.dir",
 		"output.embedded_lyrics",
 		"output.bilingual_output",
+		"output.bump_audio_mtime",
 		"output.word_sync",
 		"output.word_sync_mode",
 		"db.path",
@@ -3368,6 +3379,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return cfg.Output.EmbeddedLyrics, true
 	case "output.bilingual_output":
 		return strconv.FormatBool(cfg.Output.BilingualOutput), true
+	case "output.bump_audio_mtime":
+		return strconv.FormatBool(cfg.Output.BumpAudioMtime), true
 	case "output.word_sync":
 		return strconv.FormatBool(cfg.Output.WordSync), true
 	case "output.word_sync_mode":
@@ -3494,6 +3507,12 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("output.bilingual_output must be a boolean: %w", err)
 		}
 		cfg.Output.BilingualOutput = v
+	case "output.bump_audio_mtime":
+		v, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("output.bump_audio_mtime must be a boolean: %w", err)
+		}
+		cfg.Output.BumpAudioMtime = v
 	case "output.word_sync":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
