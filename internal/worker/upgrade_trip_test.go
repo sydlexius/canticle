@@ -250,6 +250,16 @@ func (r *upgradeRig) postSettleMissynced(t *testing.T) {
 	}
 }
 
+// generationCandidates lists the word-generate sweep's candidates.
+func (r *upgradeRig) generationCandidates(t *testing.T) []int64 {
+	t.Helper()
+	got, err := r.q.ListWordGenerateCandidates(context.Background(), queue.WordGenerateOptions{GeneratorVersion: 1, WordGeneration: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 // TestUpgradeTrip_PostSettleMissyncedPass (#1120): the one provider pass over a
 // post-settle mis_synced row. A result that promotes as-is replaces the demoted
 // .txt and the ordinary stamp clears mis_synced (now a fetch-time verdict); one
@@ -270,16 +280,25 @@ func TestUpgradeTrip_PostSettleMissyncedPass(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(filepath.Dir(r.txt), "track.lrc")); err != nil {
 			t.Fatalf("track.lrc not written over the demoted .txt: %v", err)
 		}
+		if got := r.generationCandidates(t); len(got) != 0 {
+			t.Fatalf("a cleared row is a generation candidate: %v", got)
+		}
 	})
 	t.Run("still mis_synced settles, records the pass, admits generation", func(t *testing.T) {
 		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(120, "right song bad timing")})
 		r.postSettleMissynced(t)
+		if got := r.generationCandidates(t); len(got) != 0 {
+			t.Fatalf("generation candidates before the pass = %v, want none", got)
+		}
 		r.run(t)
 		if got, want := r.row(t), "done outcome=unsynced timing=mis_synced lane= misses=14 armed=0"; got != want {
 			t.Fatalf("row = %q, want %q", got, want)
 		}
 		if b, err := os.ReadFile(r.txt); err != nil || string(b) != upgradeOldWords {
 			t.Fatalf("track.txt = %q, %v; want the demoted words untouched", b, err)
+		}
+		if got := r.generationCandidates(t); len(got) != 1 || got[0] != r.id {
+			t.Fatalf("generation candidates after the pass = %v, want [%d]", got, r.id)
 		}
 		if got, _ := r.q.ListUpgradeCandidates(context.Background(), time.Now().Add(-7*24*time.Hour), 10); len(got) != 0 {
 			t.Fatalf("passed row re-offered to the upgrade sweep: %v", got)
@@ -358,6 +377,9 @@ func TestUpgradeTrip_MissyncedTransportCapIsNoPass(t *testing.T) {
 	if g := r.marker(t); g.Valid {
 		t.Fatalf("pass marker = %+v, want none (no lane answered)", g)
 	}
+	if got := r.generationCandidates(t); len(got) != 0 {
+		t.Fatalf("generation candidates = %v, want none before a real pass", got)
+	}
 	if got, _ := r.q.ListUpgradeCandidates(context.Background(), time.Now().Add(8*24*time.Hour), 10); len(got) != 1 {
 		t.Fatalf("upgrade candidates after the hold = %v, want the row re-offered", got)
 	}
@@ -433,6 +455,9 @@ func TestUpgradeTrip_MissyncedKeptRecordsPass(t *testing.T) {
 	}
 	if g := r.marker(t); !g.Valid || g.Int64 != 5 {
 		t.Fatalf("pass marker = %+v, want 5 (a kept result is an answer)", g)
+	}
+	if got := r.generationCandidates(t); len(got) != 1 || got[0] != r.id {
+		t.Fatalf("generation candidates after a kept pass = %v, want [%d]", got, r.id)
 	}
 	if got, _ := r.q.ListUpgradeCandidates(context.Background(), time.Now().Add(8*24*time.Hour), 10); len(got) != 0 {
 		t.Fatalf("kept pass re-offered after the hold: %v", got)

@@ -1260,19 +1260,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if !lyricsDisabled {
 		wordRecheck, _ = newWordRecheckSweepJob(sqlDB, cfg, w)
 	}
-	// Upgrade sweep (#553): likewise only with a live provider to drain it.
-	var upgradeSweep *upgradeSweepJob
-	if !lyricsDisabled {
-		upgradeSweep, _ = newUpgradeSweepJob(sqlDB, cfg)
-	}
-	if upgradeSweep != nil {
-		// The #1120 mis_synced pass is keyed on the lane-set generation.
-		upgradeSweep.q.SetProvidersVersion(gen)
-	}
-	// Word-sync generate sweep (#1007): no generator until #1008, so enabled it
-	// logs once and starts nothing. Not gated on lyricsDisabled: it aligns words
-	// already on disk (no lane needed); with no lanes only mis_synced rows match.
-	wordGenerate, _ := newWordGenerateSweepJob(sqlDB, cfg, w, nil)
+	// Upgrade sweep (#553, only with a live provider to drain it) and word-sync
+	// generate sweep (#1007: no generator until #1008, so enabled it logs once
+	// and starts nothing; not gated on lyricsDisabled, since it aligns words
+	// already on disk). Built together for the #1120 mis_synced pass wiring.
+	upgradeSweep, wordGenerate := newPassSweeps(sqlDB, cfg, w, nil, gen, lyricsDisabled)
 
 	// One-shot [re:canticle] editor-tag backfill (#483) runs SYNCHRONOUSLY here,
 	// before the worker (and every other in-process writer of a .lrc file: the

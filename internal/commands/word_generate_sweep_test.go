@@ -142,3 +142,62 @@ func TestRunWordGenerateSweepLoop(t *testing.T) {
 		t.Fatalf("startup cycle stamped %d rows; want 2 despite the cancel", got)
 	}
 }
+
+// TestNewPassSweeps (#1120 review M1, I2): serve's constructor keys BOTH sweeps'
+// queues on the lane-set generation, and with no upgrade sweep the generate
+// sweep admits post-settle mis_synced rows (their pass can never come) and
+// says so once. Row 1 is unpassed, row 2 passed under generation 9.
+func TestNewPassSweeps(t *testing.T) {
+	ctx := context.Background()
+	const gen = 9
+	seed := func(t *testing.T) *sql.DB {
+		dbh := genSweepDB(t, 0)
+		for i, marker := range []any{nil, gen} {
+			if _, err := dbh.Exec(`INSERT INTO work_queue (id, artist, title, artist_key, title_key, source_path, status, outcome_type,
+			      timing_outcome, timing_stamp_source, missync_recheck_generation, completed_at)
+			      VALUES (?, 'a', ?, 'a', ?, '/m/x.flac', 'done', 'unsynced', 'mis_synced', 'sweep', ?, '2026-01-01T00:00:00Z')`,
+				i+1, fmt.Sprint(i), fmt.Sprint(i), marker); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dbh
+	}
+	start := func(t *testing.T, dbh *sql.DB, upgradeOn bool) (*upgradeSweepJob, *wordGenerateSweepJob, *fakeGenerator) {
+		cfg := genSweepCfg(10)
+		cfg.UpgradeSweep.Enabled, cfg.UpgradeSweep.Batch = true, 10
+		g := &fakeGenerator{version: 1, handle: func(ids []int64) []int64 { return ids }}
+		// upgradeOn=false disables the upgrade sweep by lyrics-disabled here;
+		// the config-disabled shape is the same nil job.
+		up, wg := newPassSweeps(dbh, cfg, fixedGen(genSweepWordGen), g, gen, !upgradeOn)
+		if wg == nil || (up != nil) != upgradeOn {
+			t.Fatalf("sweeps = %v, %v; want generate started and upgrade started=%v", up, wg, upgradeOn)
+		}
+		return up, wg, g
+	}
+	t.Run("upgrade sweep running", func(t *testing.T) {
+		dbh := seed(t)
+		buf := captureSlog(t)
+		up, wg, g := start(t, dbh, true)
+		ids, err := up.q.ListUpgradeCandidates(ctx, time.Now().Add(-7*24*time.Hour), 10)
+		if err != nil || !slices.Equal(ids, []int64{1}) {
+			t.Fatalf("upgrade candidates = %v, %v; want [1] (row 2 passed under the wired generation)", ids, err)
+		}
+		if _, err := wg.runCycle(ctx); err != nil || len(g.offered) != 1 || !slices.Equal(g.offered[0], []int64{2}) {
+			t.Fatalf("generate offered %v, %v; want [[2]] (only the row passed under the wired generation)", g.offered, err)
+		}
+		if strings.Contains(buf.String(), "upgrade sweep is not running") {
+			t.Fatalf("no-pass line logged with the upgrade sweep running: %q", buf.String())
+		}
+	})
+	t.Run("no upgrade sweep", func(t *testing.T) {
+		dbh := seed(t)
+		buf := captureSlog(t)
+		_, wg, g := start(t, dbh, false)
+		if _, err := wg.runCycle(ctx); err != nil || len(g.offered) != 1 || !slices.Equal(g.offered[0], []int64{1, 2}) {
+			t.Fatalf("generate offered %v, %v; want [[1 2]] (no pass can come, so neither waits)", g.offered, err)
+		}
+		if n := strings.Count(buf.String(), "upgrade sweep is not running"); n != 1 {
+			t.Fatalf("no-pass startup line logged %d times, want 1: %q", n, buf.String())
+		}
+	})
+}

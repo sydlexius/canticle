@@ -46,12 +46,15 @@ func listGenerate(t *testing.T, q *DBQueue, version int64, limit int) []int64 {
 // exclusion, each differing from a full candidate in exactly one term.
 func TestWordGenerateCandidates_EachRule(t *testing.T) {
 	q, dbh := upgradeQueue(t)
-	missynced := `outcome_type = 'unsynced', sync_tier = NULL, word_timing_state = NULL, word_timing_generation = NULL, timing_outcome = 'mis_synced'`
+	missynced := `outcome_type = 'unsynced', sync_tier = NULL, word_timing_state = NULL, word_timing_generation = NULL, timing_outcome = 'mis_synced', timing_stamp_source = 'fetch'`
+	q.SetProvidersVersion(9)
 	want := []int64{
 		seedGenerateRow(t, dbh, "line-absent", ""),
 		seedGenerateRow(t, dbh, "missynced-guard-txt", missynced),
 		// Matches both arms' other terms: listed once, the arms are disjoint.
-		seedGenerateRow(t, dbh, "missynced-sweep-lrc", "timing_outcome = 'mis_synced'"),
+		seedGenerateRow(t, dbh, "missynced-guard-lrc", "timing_outcome = 'mis_synced', timing_stamp_source = 'fetch'"),
+		// Post-settle stamp, its one provider pass recorded under the CURRENT generation (#1120).
+		seedGenerateRow(t, dbh, "missynced-sweep-passed", "timing_outcome = 'mis_synced', timing_stamp_source = 'sweep', missync_recheck_generation = 9"),
 		// The OLDEST completion, so only the word_generate_at key can sort it last.
 		seedGenerateRow(t, dbh, "old-version", "word_generate_version = 2, word_generate_at = '2026-09-01T00:00:00Z', completed_at = '2026-07-01T00:00:00Z'"),
 	}
@@ -72,6 +75,10 @@ func TestWordGenerateCandidates_EachRule(t *testing.T) {
 		{"retired-gone", "last_error = 'source file is gone'"},
 		{"upgrade-armed", "upgrade_queued = 1"},
 		{"handled", "word_generate_version = 3"},
+		// #1120: a post-settle stamp is not retimed before its provider pass.
+		{"missynced-sweep-unpassed", "timing_outcome = 'mis_synced', timing_stamp_source = 'sweep'"},
+		{"missynced-legacy-unpassed", "timing_outcome = 'mis_synced', timing_stamp_source = NULL"},
+		{"missynced-pass-stale-generation", "timing_outcome = 'mis_synced', timing_stamp_source = 'revalidate', missync_recheck_generation = 8"},
 		{"missynced-handled", missynced + ", word_generate_version = 3"},
 		{"missynced-recheck-queued", missynced + ", word_timing_state = 'queued'"},
 		{"missynced-upgrade-armed", missynced + ", upgrade_queued = 1"},
@@ -88,11 +95,44 @@ func TestWordGenerateCandidates_EachRule(t *testing.T) {
 		t.Fatalf("candidates = %v, want %v", sorted, want)
 	}
 	// Never-handled first: the old-version row (handled once) sorts last.
-	if got[len(got)-1] != want[3] {
-		t.Fatalf("order = %v, want the previously handled row %d last", got, want[3])
+	if got[len(got)-1] != want[len(want)-1] {
+		t.Fatalf("order = %v, want the previously handled row %d last", got, want[len(want)-1])
 	}
 	if got := listGenerate(t, q, genTestVersion, 1); !slices.Equal(got, want[:1]) {
 		t.Fatalf("limit 1 = %v, want %v", got, want[:1])
+	}
+}
+
+// TestWordGenerateCandidates_NoProviderPass (#1120 review I2): with no
+// upgrade sweep running, a post-settle mis_synced row whose pass can never
+// come is admitted; otherwise it waits. Every other term still applies.
+func TestWordGenerateCandidates_NoProviderPass(t *testing.T) {
+	q, dbh := upgradeQueue(t)
+	q.SetProvidersVersion(9)
+	missynced := "timing_outcome = 'mis_synced', "
+	fetch := seedGenerateRow(t, dbh, "fetch", missynced+"timing_stamp_source = 'fetch'")
+	unpassed := []int64{
+		seedGenerateRow(t, dbh, "sweep", missynced+"timing_stamp_source = 'sweep'"),
+		seedGenerateRow(t, dbh, "legacy", missynced+"timing_stamp_source = NULL"),
+		seedGenerateRow(t, dbh, "stale-pass", missynced+"timing_stamp_source = 'revalidate', missync_recheck_generation = 8"),
+	}
+	seedGenerateRow(t, dbh, "sweep-handled", missynced+"timing_stamp_source = 'sweep', word_generate_version = 3")
+	seedGenerateRow(t, dbh, "sweep-armed", missynced+"timing_stamp_source = 'sweep', upgrade_queued = 1")
+	list := func(noPass bool) []int64 {
+		got, err := q.ListWordGenerateCandidates(context.Background(), WordGenerateOptions{
+			GeneratorVersion: genTestVersion, WordGeneration: genTestWordGen + 1, NoProviderPass: noPass,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(got)
+		return got
+	}
+	if got := list(false); !slices.Equal(got, []int64{fetch}) {
+		t.Fatalf("with a provider pass available = %v, want only the fetch-stamped row [%d]", got, fetch)
+	}
+	if got, want := list(true), append([]int64{fetch}, unpassed...); !slices.Equal(got, want) {
+		t.Fatalf("with no provider pass = %v, want %v", got, want)
 	}
 }
 
@@ -103,7 +143,7 @@ func TestWordGenerateMarker(t *testing.T) {
 	ctx := context.Background()
 	q, dbh := upgradeQueue(t)
 	a := seedGenerateRow(t, dbh, "a", "")
-	b := seedGenerateRow(t, dbh, "b", "timing_outcome = 'mis_synced', word_timing_state = NULL")
+	b := seedGenerateRow(t, dbh, "b", "timing_outcome = 'mis_synced', timing_stamp_source = 'fetch', word_timing_state = NULL")
 	taken := seedGenerateRow(t, dbh, "taken", "")
 	stamp := func(ids ...int64) []int64 {
 		st, err := q.StampWordGenerateAttempt(ctx, ids, genTestVersion)
