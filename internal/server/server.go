@@ -87,6 +87,7 @@ type Handler struct {
 	inventory          Inventory
 	realigner          Realigner
 	allowedRoots       []string
+	startupGate        <-chan struct{}
 	pathChecker        func(string) error
 	webui              *web.UI
 	onboarding         *web.Onboarding
@@ -104,6 +105,18 @@ type Handler struct {
 	// delays the webhook response; the WaitGroup lets a shutdown drain in-flight
 	// passes (and lets tests wait deterministically for them to finish).
 	bgRealign sync.WaitGroup
+
+	// shutdown is closed by Close (once) to tell held and future realign
+	// passes to stand down (#1138): a pass released by the startup gate during
+	// shutdown must not race the database close.
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
+
+	// closeMu guards closed, so dispatchRealign's bgRealign.Add and Close's
+	// Wait never run concurrently from a zero count (a WaitGroup misuse): once
+	// Close has set closed, no new pass is added (#1142 review).
+	closeMu sync.Mutex
+	closed  bool
 }
 
 // Option configures optional Handler dependencies.
@@ -155,6 +168,31 @@ func WithAllowedRoots(roots []string) Option {
 // scoped, confined, backup-first realign to dir and returns any error.
 type Realigner interface {
 	RealignDir(ctx context.Context, dir string) error
+}
+
+// WithStartupGate names a channel the composition root closes once the
+// one-time startup pass that rewrites lyric files (the #483 editor-tag
+// backfill) has finished (#1138). Until it is closed, anything a handler would
+// start that writes lyric files is DEFERRED, never dropped: the Lidarr
+// webhook's reactive realign waits for it in its existing detached goroutine,
+// so the request still answers and enqueues at once (a queue row writes no
+// lyric file, and the worker is not running yet). /api/v1/status reports the
+// pass as running. A nil channel means no gate (every non-serve caller).
+func WithStartupGate(done <-chan struct{}) Option {
+	return func(h *Handler) { h.startupGate = done }
+}
+
+// startupBackfillRunning reports whether the gate is set and still open.
+func (h *Handler) startupBackfillRunning() bool {
+	if h.startupGate == nil {
+		return false
+	}
+	select {
+	case <-h.startupGate:
+		return false
+	default:
+		return true
+	}
 }
 
 // WithRealigner wires reactive realign triggered by Lidarr rename/import/upgrade
@@ -286,6 +324,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		pathChecker: defaultPathChecker,
 		trusted:     trustnet.LoopbackOnly(),
 		mux:         http.NewServeMux(),
+		shutdown:    make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -377,6 +416,9 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{"status": "ok"}
+	if h.startupBackfillRunning() {
+		resp["startup_backfill"] = "running"
+	}
 	if h.stats != nil {
 		counts, err := h.stats.CountByStatus(r.Context())
 		if err != nil {
@@ -514,11 +556,50 @@ func (h *Handler) dispatchRealign(ctx context.Context, event string, payload lid
 		return
 	}
 	bg := context.WithoutCancel(ctx)
+	h.closeMu.Lock()
+	if h.closed {
+		h.closeMu.Unlock()
+		slog.Info("dropping reactive realign: shutting down", "event", event)
+		return
+	}
 	h.bgRealign.Add(1)
+	h.closeMu.Unlock()
 	go func() {
 		defer h.bgRealign.Done()
+		// Realign renames and moves lyric files, so it must not overlap the
+		// startup rewrite pass (#1138). A nil gate blocks forever on nothing, so
+		// guard it; shutdown ends the wait (the pass is dropped, see below).
+		if h.startupGate != nil {
+			select {
+			case <-h.startupGate:
+			case <-h.shutdown:
+			}
+		}
+		// Re-check after the gate: a select with both channels ready picks one
+		// at random, and a realign must never start once shutdown has begun.
+		select {
+		case <-h.shutdown:
+			// Not an error: realign is idempotent and the next scan or watcher
+			// event covers whatever this pass would have moved.
+			slog.Info("dropping reactive realign: shutting down", "event", event)
+			return
+		default:
+		}
 		h.reactiveRealign(bg, event, payload)
 	}()
+}
+
+// Close signals shutdown to reactive realign passes (held ones are dropped,
+// not run) and waits for every in-flight pass to finish. Call it after the
+// HTTP server has stopped accepting requests and before closing the database
+// the realigner uses (#1138). The wait is unbounded: a running pass is bounded
+// work and cannot be canceled mid-move (its context is detached). Idempotent.
+func (h *Handler) Close() {
+	h.closeMu.Lock()
+	h.closed = true
+	h.shutdownOnce.Do(func() { close(h.shutdown) })
+	h.closeMu.Unlock()
+	h.bgRealign.Wait()
 }
 
 func (h *Handler) reactiveRealign(ctx context.Context, event string, payload lidarrWebhook) {
