@@ -28,7 +28,7 @@ func remediatedRow(t *testing.T, dbh *sql.DB, key, extra string) RemediatedCandi
 	if err := cache.New(dbh).Store(context.Background(), "A", key, 200, "lyrics"); err != nil {
 		t.Fatalf("store cache: %v", err)
 	}
-	return RemediatedCandidate{ID: id, Artist: "A", Title: key}
+	return RemediatedCandidate{ID: id, Artist: "A", Title: key, PriorSyncTier: "line", PriorTiming: "mis_synced"}
 }
 
 func remediatedState(t *testing.T, dbh *sql.DB, id int64) (status, outcome string, tier, timing sql.NullString, scanStatus string) {
@@ -136,14 +136,62 @@ func TestApplyRemediated_UnsyncedAndTier(t *testing.T) {
 	}
 
 	c = remediatedRow(t, dbh, "present", "sync_tier = NULL")
+	c.PriorSyncTier = ""
+	// Only word and line leave tier-unknown; "" and unsynced would report
+	// success while the row stayed counted there.
+	for _, bad := range []string{"", SyncTierUnsynced, "bogus"} {
+		if _, err := q.ApplyRemediated(ctx, c, RemediatedTier, bad, nil); err == nil {
+			t.Errorf("tier %q accepted", bad)
+		}
+	}
 	if ok, err := q.ApplyRemediated(ctx, c, RemediatedTier, SyncTierWord, nil); err != nil || !ok {
 		t.Fatalf("tier = %v, %v", ok, err)
 	}
-	if _, outcome, tier, _, _ := remediatedState(t, dbh, c.ID); outcome != "synced" || tier.String != SyncTierWord {
-		t.Errorf("tier state = %s %+v", outcome, tier)
+	if _, outcome, tier, timing, _ := remediatedState(t, dbh, c.ID); outcome != "synced" || tier.String != SyncTierWord || timing.String != "mis_synced" {
+		t.Errorf("tier state = %s %+v timing=%+v; the verdict must survive", outcome, tier, timing)
 	}
-	if _, err := q.ApplyRemediated(ctx, c, RemediatedTier, "bogus", nil); err == nil {
-		t.Error("invalid tier accepted")
+}
+
+// A row re-stamped between list and apply (tier, timing verdict, or identity)
+// is left alone, so neither action overwrites newer state nor invalidates a
+// stale cache key.
+func TestApplyRemediated_StaleSnapshotUntouched(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	for _, restamp := range []string{"sync_tier = 'word'", "timing_outcome = 'ok'", "artist = 'B'"} {
+		c := remediatedRow(t, dbh, "stale-"+restamp[:4], "")
+		mustExec(t, dbh, `UPDATE work_queue SET `+restamp+` WHERE id = ?`, c.ID)
+		calls := 0
+		ok, err := q.ApplyRemediated(ctx, c, RemediatedReset, "", func() error { calls++; return nil })
+		if err != nil || ok || calls != 0 {
+			t.Errorf("%s: apply = %v, %v, backup calls %d; want untouched", restamp, ok, err, calls)
+		}
+		if status, _, _, _, scan := remediatedState(t, dbh, c.ID); status != "done" || scan != "done" {
+			t.Errorf("%s: row changed: %s scan=%s", restamp, status, scan)
+		}
+	}
+}
+
+// Reset clears refused_waits with the other retry counters, and never drops the
+// reservation of a scan result another claim holds.
+func TestApplyRemediated_ResetClearsRefusedWaitsSparesProcessingScan(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	c := remediatedRow(t, dbh, "waits", "refused_waits = 3")
+	mustExec(t, dbh, `UPDATE scan_results SET status = 'processing' WHERE id = ?`, c.ID)
+	if ok, err := q.ApplyRemediated(ctx, c, RemediatedReset, "", nil); err != nil || !ok {
+		t.Fatalf("apply = %v, %v", ok, err)
+	}
+	var waits int
+	var scan string
+	if err := dbh.QueryRow(`SELECT refused_waits, (SELECT status FROM scan_results WHERE id = ?) FROM work_queue WHERE id = ?`,
+		c.ID, c.ID).Scan(&waits, &scan); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if waits != 0 || scan != "processing" {
+		t.Errorf("refused_waits = %d, scan = %s; want 0, processing", waits, scan)
 	}
 }
 
