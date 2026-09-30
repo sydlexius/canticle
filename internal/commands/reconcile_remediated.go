@@ -18,7 +18,6 @@ import (
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
-	"github.com/sydlexius/canticle/internal/revalidate"
 )
 
 // remediatedBackupRecord is one JSONL line: the row's prior state and the
@@ -118,11 +117,11 @@ func runReconcileRemediated(ctx context.Context, out io.Writer, args ScanReconci
 	// dashboard's tier-unknown tile.
 	_, _ = fmt.Fprintf(out, "reconcile-remediated: scanned %d candidate row(s) (a superset of the dashboard tier-unknown count); %s reset %d for re-fetch, %s re-describe %d as unsynced, %s record tier for %d%s\n",
 		len(candidates), verb, counts[queue.RemediatedReset], verb, counts[queue.RemediatedUnsynced], verb, counts[queue.RemediatedTier], suffixDryRun(args.Yes))
-	_, _ = fmt.Fprintf(out, "skipped: already_recorded=%d kept_remediation_verdict=%d unsynced_lrc=%d retired=%d processing=%d word_recheck=%d upgrade_armed=%d no_audio=%d unreadable=%d raced=%d write_failed=%d\n",
+	_, _ = fmt.Fprintf(out, "skipped: already_recorded=%d kept_remediation_verdict=%d unsynced_lrc=%d retired=%d processing=%d word_recheck=%d upgrade_armed=%d no_audio=%d audio_gone=%d unreadable=%d raced=%d write_failed=%d\n",
 		counts[remAlreadyRecorded], counts[remKeptVerdict], counts[remUnsyncedLRC], counts["retired"], counts["processing"], counts["word_recheck"],
-		counts["upgrade_armed"], counts["no_audio"], counts["errored"], counts["raced"], writeFailed)
+		counts["upgrade_armed"], counts["no_audio"], counts["audio_gone"], counts["errored"], counts["raced"], writeFailed)
 	if applied > 0 {
-		_, _ = fmt.Fprintf(out, "backup of changed rows written to %s\n", backupPath)
+		_, _ = fmt.Fprintf(out, "backup of %d changed row(s) written to %s\n", applied, backupPath)
 	}
 	if writeFailed > 0 {
 		return 1
@@ -167,19 +166,30 @@ func planRemediated(c queue.RemediatedCandidate) (action, tier, outcome string) 
 	case o != "no_sidecar":
 		return "", "", o // no_audio or errored
 	}
-	base := strings.TrimSuffix(strings.TrimSpace(c.AudioPath), filepath.Ext(strings.TrimSpace(c.AudioPath)))
+	audio := strings.TrimSpace(c.AudioPath)
+	// A row whose audio moved (but kept an ISRC/MBID, so prune never retired
+	// it) must not be reset: that would refetch and orphan a sidecar.
+	if _, err := os.Lstat(audio); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", "", "audio_gone"
+		}
+		return "", "", "errored"
+	}
+	base := strings.TrimSuffix(audio, filepath.Ext(audio))
 	// classifySyncTierCandidate reports a symlinked .lrc as no_sidecar too; a
-	// present entry of any kind must never be reset over.
+	// present entry of any kind must never be reset over, and only a regular
+	// .txt counts as the unsynced sidecar.
 	for _, ext := range []string{".lrc", ".txt"} {
-		present, err := sidecarPresent(base + ext)
+		fi, err := sidecarInfo(base + ext)
 		switch {
 		case err != nil:
 			return "", "", "errored"
-		case present && ext == ".lrc":
+		case fi == nil:
+			continue
+		case ext == ".lrc" || !fi.Mode().IsRegular():
 			return "", "", "errored"
-		case present:
-			return queue.RemediatedUnsynced, "", queue.RemediatedUnsynced
 		}
+		return queue.RemediatedUnsynced, "", queue.RemediatedUnsynced
 	}
 	return queue.RemediatedReset, "", queue.RemediatedReset
 }
@@ -190,17 +200,38 @@ func isRemediationVerdict(timing string) bool {
 	return timing == "categorical" || timing == "mis_synced" || timing == "degenerate"
 }
 
-// sidecarPresent reports whether path (or an extension-case variant) exists.
-func sidecarPresent(path string) (bool, error) {
-	_, err := os.Lstat(path)
+// sidecarInfo Lstats path, else any extension-case variant in its directory
+// (revalidate.ResolveSidecarCaseVariant skips symlinks and directories, which
+// this command must still see); nil, nil if absent. A regular variant wins.
+func sidecarInfo(path string) (os.FileInfo, error) {
+	fi, err := os.Lstat(path)
 	if err == nil {
-		return true, nil
+		return fi, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
-		return false, err
+		return nil, err
 	}
-	_, _, ok := revalidate.ResolveSidecarCaseVariant(path)
-	return ok, nil
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	var found os.FileInfo
+	for _, e := range entries {
+		if !strings.EqualFold(e.Name(), filepath.Base(path)) {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			return nil, ierr
+		}
+		if info.Mode().IsRegular() {
+			return info, nil
+		}
+		if found == nil {
+			found = info
+		}
+	}
+	return found, nil
 }
 
 // appendRemediatedBackup writes and fsyncs one record, write-ahead from inside

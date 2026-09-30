@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,6 +21,7 @@ const remArtist = "SecretArtist"
 type remRow struct {
 	name, files, extra string
 	lrc                string
+	mode               string // "", "symlink", "dir" (sidecar kind) or "noaudio"
 }
 
 // seedRemediated builds a DB with one tier-unknown synced row per shape and a
@@ -46,6 +49,12 @@ func seedRemediated(t *testing.T) (ctx context.Context, cfgPath, dbPath, dir str
 		{name: "retired", extra: ", last_error = '" + queue.UnresolvableGoneError + "'"},
 		{name: "inflight", extra: ", status = 'processing'"},
 		{name: "wordq", files: ".lrc", lrc: line, extra: ", word_timing_state = 'queued'"},
+		{name: "txtupper", files: ".TXT"},
+		{name: "audiogone", mode: "noaudio"},
+		{name: "symlrc", files: ".lrc", mode: "symlink"},
+		{name: "symupper", files: ".LRC", mode: "symlink"},
+		{name: "dirlrc", files: ".lrc", mode: "dir"},
+		{name: "dirtxt", files: ".txt", mode: "dir"},
 	}
 	ids = map[string]int64{}
 	for _, r := range rows {
@@ -60,10 +69,22 @@ func seedRemediated(t *testing.T) (ctx context.Context, cfgPath, dbPath, dir str
 				t.Fatalf("extra %s: %v", r.name, err)
 			}
 		}
-		if r.files != "" {
-			if err := os.WriteFile(filepath.Join(dir, r.name+r.files), []byte(r.lrc), 0o600); err != nil {
-				t.Fatalf("write %s: %v", r.name, err)
-			}
+		var err error
+		if r.mode != "noaudio" {
+			err = os.WriteFile(filepath.Join(dir, r.name+".flac"), nil, 0o600)
+		}
+		sc := filepath.Join(dir, r.name+r.files)
+		switch {
+		case err != nil || r.files == "":
+		case r.mode == "symlink":
+			err = os.Symlink(filepath.Join(dir, "haslrc.lrc"), sc)
+		case r.mode == "dir":
+			err = os.Mkdir(sc, 0o700)
+		default:
+			err = os.WriteFile(sc, []byte(r.lrc), 0o600)
+		}
+		if err != nil {
+			t.Fatalf("files %s: %v", r.name, err)
 		}
 		if err := cache.New(sqlDB).Store(ctx, remArtist, r.name, 200, "cached"); err != nil {
 			t.Fatalf("cache %s: %v", r.name, err)
@@ -109,11 +130,22 @@ func TestRunReconcileRemediated_DryRunWritesNothingAndIsAggregateOnly(t *testing
 		t.Fatalf("exit=%d out=%s", code, buf.String())
 	}
 	out := buf.String()
-	for _, want := range []string{"scanned 9 candidate row(s)", "would reset 1 for re-fetch", "would re-describe 1 as unsynced", "would record tier for 2", "[dry run; pass --yes to apply]",
-		"kept_remediation_verdict=1", "unsynced_lrc=1", "retired=1", "processing=1", "word_recheck=1"} {
+	for _, want := range []string{"scanned 15 candidate row(s)", "would reset 1 for re-fetch", "would re-describe 2 as unsynced", "would record tier for 2", "[dry run; pass --yes to apply]",
+		"kept_remediation_verdict=1", "unsynced_lrc=1", "retired=1", "processing=1", "word_recheck=1", "audio_gone=1", "unreadable=4"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+	// Every candidate lands in exactly one bucket: the parts sum to scanned.
+	total := 0
+	for _, m := range regexp.MustCompile(`(\d+) for re-fetch|(\d+) as unsynced|tier for (\d+)|\w+=(\d+)`).FindAllStringSubmatch(out, -1) {
+		for _, g := range m[1:] {
+			n, _ := strconv.Atoi(g)
+			total += n
+		}
+	}
+	if total != 15 {
+		t.Errorf("buckets sum to %d, want scanned 15:\n%s", total, out)
 	}
 	for _, leak := range []string{remArtist, dir, "missing", "txtonly", "haslrc", "alpha"} {
 		if strings.Contains(out, leak) {
@@ -135,22 +167,24 @@ func TestRunReconcileRemediated_ApplyEachAction(t *testing.T) {
 	if code := runReconcileRemediated(ctx, &buf, ScanReconcileRemediatedCmd{ConfigPath: cfgPath, Yes: true, Backup: backup}); code != 0 {
 		t.Fatalf("exit=%d out=%s", code, buf.String())
 	}
-	if !strings.Contains(buf.String(), "did reset 1 for re-fetch, did re-describe 1 as unsynced, did record tier for 2") {
+	if !strings.Contains(buf.String(), "did reset 1 for re-fetch, did re-describe 2 as unsynced, did record tier for 2") {
 		t.Errorf("summary: %s", buf.String())
 	}
 	if st, o, _ := remRowState(t, ctx, dbPath, ids["missing"]); st != "deferred" || o.Valid {
 		t.Errorf("missing: status=%s outcome=%+v, want deferred/NULL", st, o)
 	}
-	if _, o, _ := remRowState(t, ctx, dbPath, ids["txtonly"]); o.String != "unsynced" {
-		t.Errorf("txtonly outcome = %+v", o)
+	for _, n := range []string{"txtonly", "txtupper"} {
+		if st, o, _ := remRowState(t, ctx, dbPath, ids[n]); o.String != "unsynced" || st != "done" {
+			t.Errorf("%s status=%s outcome=%+v, want done/unsynced", n, st, o)
+		}
 	}
 	for _, n := range []string{"haslrc", "upperlrc", "keptverdict"} {
 		if _, _, tier := remRowState(t, ctx, dbPath, ids[n]); tier.String != "line" {
 			t.Errorf("%s tier = %+v, want line", n, tier)
 		}
 	}
-	for _, n := range []string{"retired", "inflight", "wordq", "plainlrc"} {
-		if _, o, tier := remRowState(t, ctx, dbPath, ids[n]); tier.Valid || o.String != "synced" {
+	for _, n := range []string{"retired", "inflight", "wordq", "plainlrc", "audiogone", "symlrc", "symupper", "dirlrc", "dirtxt"} {
+		if st, o, tier := remRowState(t, ctx, dbPath, ids[n]); tier.Valid || o.String != "synced" || st == "deferred" {
 			t.Errorf("%s was changed: outcome=%+v tier=%+v", n, o, tier)
 		}
 	}
@@ -166,8 +200,8 @@ func TestRunReconcileRemediated_ApplyEachAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read backup: %v", err)
 	}
-	if n := strings.Count(string(b), "\n"); n != 5 {
-		t.Errorf("want 5 backup records, got %d: %s", n, b)
+	if n := strings.Count(string(b), "\n"); n != 6 {
+		t.Errorf("want 6 backup records, got %d: %s", n, b)
 	}
 	if strings.Contains(string(b), remArtist) || strings.Contains(string(b), dir) {
 		t.Errorf("backup leaks identity: %s", b)

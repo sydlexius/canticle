@@ -334,7 +334,7 @@ canticle scan reconcile-remediated --yes
 - **No `.lrc` and no `.txt`:** the row is reset for re-fetch and its cache entry is dropped in the same transaction, so the next fetch is real, not served from cache.
 - **Only a `.txt`:** the row becomes `unsynced` (the upgrade sweep can then offer it).
 - **An `.lrc` (or case variant) is present:** a word or line tier is recorded. An `.lrc` that classifies as unsynced is left untouched and counted as `unsynced_lrc`.
-- **Left unchanged and counted on the `skipped:` line:** `kept_remediation_verdict` (a timing verdict beside a present `.lrc` is history, so the row stays tier-unknown even though its tier is recorded), `retired` (audio gone), in-flight rows (`processing`, `word_recheck`, `upgrade_armed`), `already_recorded`, `no_audio`, `unreadable` and `raced`. `scanned` is a superset of the dashboard count because it includes in-flight rows.
+- **Left unchanged and counted on the `skipped:` line:** `kept_remediation_verdict` (a timing verdict beside a present `.lrc` is history, so the row stays tier-unknown even though its tier is recorded), `retired` (audio gone), in-flight rows (`processing`, `word_recheck`, `upgrade_armed`), `already_recorded`, `no_audio`, `audio_gone` (audio moved; left to prune), `unreadable` and `raced`. `scanned` is a superset of the dashboard count because it includes in-flight rows.
 - **Aggregate-only output,** and each applied row's prior state is written to `<db-dir>/reconcile-remediated-backup-<timestamp>.jsonl` (or `--backup`) and fsynced before the row commits.
 - **Busy database:** a row that hits `SQLITE_BUSY` is counted as `write_failed` (exit 1) and is not retried, so the backup never gets a duplicate record; rerun the command, which is idempotent.
 
