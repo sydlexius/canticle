@@ -204,9 +204,25 @@ func TestBump_OnlyTheSidecarsOwnAudio(t *testing.T) {
 // TestLyricBody_BracketInHeaderValue: an ID-tag value containing ']' is still a
 // header, so a header-only change is not a lyric correction.
 func TestLyricBody_BracketInHeaderValue(t *testing.T) {
-	a := lyricBody([]byte("[al:Album [Deluxe]]\n[00:01.00]same\n"))
-	b := lyricBody([]byte("[al:Album [Deluxe Edition]]\n[00:01.00]same\n"))
+	a := lyricBody("s.lrc", []byte("[al:Album [Deluxe]]\n[00:01.00]same\n"))
+	b := lyricBody("s.lrc", []byte("[al:Album [Deluxe Edition]]\n[00:01.00]same\n"))
 	if a != b || a != "[00:01.00]same" {
 		t.Errorf("bodies %q vs %q; want header stripped and equal", a, b)
+	}
+}
+
+// TestLyricBody_TxtKeepsSectionAnnotations: in a .txt a bracketed annotation is
+// lyric text, so changing it is a correction, while the writer's own
+// provenance headers are still stripped.
+func TestLyricBody_TxtKeepsSectionAnnotations(t *testing.T) {
+	a := lyricBody("s.txt", []byte("[Chorus: A]\nwords\n"))
+	b := lyricBody("s.txt", []byte("[Chorus: B]\nwords\n"))
+	if a == b {
+		t.Errorf("section annotation change read as unchanged: %q", a)
+	}
+	m1 := lyricBody("s.TXT", []byte("[by:canticle]\n[source:canticle-detector]\n[dv:1]\nInstrumental\n"))
+	m2 := lyricBody("s.TXT", []byte("[by:canticle]\n[source:canticle-detector]\n[dv:2]\nInstrumental\n"))
+	if m1 != m2 || m1 != "Instrumental" {
+		t.Errorf("marker headers not stripped: %q vs %q", m1, m2)
 	}
 }

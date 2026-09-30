@@ -29,7 +29,17 @@ const maxPriorSidecarBytes = 4 << 20
 // ([al:Album [Deluxe]]), so it runs greedily to the line's final bracket.
 // lrcnormalize.ParseBody is not reused: it drops plain-text lines, which a
 // .txt sidecar's whole body consists of.
-var idTagLine = regexp.MustCompile(`^\[[A-Za-z][A-Za-z0-9_-]*:.*\]\s*$`)
+var idTagLine = regexp.MustCompile(`^\[([A-Za-z][A-Za-z0-9_-]*):.*\]\s*$`)
+
+// txtHeaderKeys are the ID tags the writer puts on a .txt (instrumental marker
+// provenance). In a .txt only these are headers: any other bracketed line, such
+// as a "[Chorus: X]" annotation, is lyric text and a change to it is a
+// correction. A .lrc strips every tag-shaped line, since its lyrics are cues.
+var txtHeaderKeys = map[string]bool{
+	"by": true, "source": true, "upstream": true, "dv": true, "fetched": true,
+	"re": true, "ve": true, "ar": true, "ti": true, "al": true, "length": true,
+	"isrc": true, "mbid": true,
+}
 
 // SetAudioMtimeBump enables the #505 audio mtime bump. Not goroutine-safe; call
 // before sharing the writer.
@@ -57,7 +67,7 @@ func (w *LRCWriter) snapshotPrior(song models.Song, fp string, stale []string) p
 		p.existed = true
 		if err == nil && fi.Mode().IsRegular() {
 			if b, ok := readCapped(fp); ok {
-				p.bodyKnown, p.body = true, lyricBody(b)
+				p.bodyKnown, p.body = true, lyricBody(fp, b)
 			}
 		}
 	}
@@ -82,7 +92,7 @@ func (w *LRCWriter) bumpIfCorrected(audio, fp string, p priorSidecar) {
 	changed := p.replacedOther
 	if !changed {
 		nb, ok := readCapped(fp)
-		changed = !p.bodyKnown || !ok || lyricBody(nb) != p.body
+		changed = !p.bodyKnown || !ok || lyricBody(fp, nb) != p.body
 	}
 	if !changed {
 		return
@@ -127,11 +137,14 @@ func readCapped(path string) ([]byte, bool) {
 }
 
 // lyricBody is a sidecar's content minus its ID-tag headers, so a rewrite that
-// only refreshes [fetched:]/[ve:] is a no-op rather than a correction.
-func lyricBody(b []byte) string {
+// only refreshes [fetched:]/[ve:] is a no-op rather than a correction. path
+// selects the rule: a .txt drops only txtHeaderKeys (see there).
+func lyricBody(path string, b []byte) string {
+	txt := strings.EqualFold(filepath.Ext(path), ".txt")
 	var out []string
 	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
-		if !idTagLine.MatchString(line) {
+		m := idTagLine.FindStringSubmatch(line)
+		if m == nil || (txt && !txtHeaderKeys[strings.ToLower(m[1])]) {
 			out = append(out, strings.TrimRight(line, " \t"))
 		}
 	}
