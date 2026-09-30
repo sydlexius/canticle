@@ -284,6 +284,11 @@ addr = "127.0.0.1:3876"
 # key_file  = "/config/tls/server.key"
 # self_signed = true
 #
+# Extra hostnames and IP literals to include as Subject Alternative Names in the
+# self-signed certificate. Default empty. Env: MXLRC_TLS_SELF_SIGNED_HOSTS
+# (comma-separated).
+# self_signed_hosts = ["canticle.lan", "192.168.1.10"]
+#
 # Optional plain-HTTP listen address that 301-redirects every request to the
 # HTTPS address. Empty (the default) means no redirect listener. Only honored
 # when TLS is enabled.
@@ -405,6 +410,12 @@ min_similarity = 0.35
 # misses and never overrides provider-supplied data. Disabled by default.
 # Env: MXLRC_INSTRUMENTAL_DETECTOR_ENABLED.
 # enabled = false
+
+# Detector lane ordering: "demoted" (the default) consults the detector only
+# after a provider miss; "front" settles a high-confidence instrumental before
+# any provider lane runs and requires providers.mode = "ordered".
+# Env: MXLRC_INSTRUMENTAL_DETECTOR_ORDERING.
+# ordering = "demoted"
 
 # Base URL of the AudioSet classifier sidecar (e.g. "http://yamnet:8080").
 # Required when enabled is true. Env: MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL.
@@ -715,6 +726,20 @@ enabled = false
 # count back up to this. Default 100, range 1-1000.
 # Env: MXLRC_WORD_SYNC_RECHECK_BATCH.
 batch = 100
+
+[upgrade_sweep]
+# Serve-mode upgrade sweep: re-fetches settled tracks below line sync (unsynced
+# lyrics, instrumental markers), each at most once a week, at the worker's pace.
+# A worse result never replaces the file on disk. Off by default.
+
+# Master switch. Default false.
+# Env: MXLRC_UPGRADE_SWEEP_ENABLED.
+# enabled = false
+
+# The most tracks waiting for a re-fetch at once; each cycle tops the count back
+# up to this. Default 100, range 1-1000.
+# Env: MXLRC_UPGRADE_SWEEP_BATCH.
+# batch = 100
 
 [guard]
 # Optional language/script guard. It rejects fetched lyrics whose body is
