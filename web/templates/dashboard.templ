@@ -337,11 +337,15 @@ func dashUpNextTitle(empty bool) string {
 }
 
 // dashUpNextTierClass returns the badge classes for an Up-next tier label. The
-// miss tier (deferred benign-miss backlog) gets a muted variant so a long run of
-// misses is visually distinct from fresh scan/webhook work at a glance.
+// miss tier (deferred benign-miss backlog) gets a muted amber variant and the
+// upgrade tier (upgrade-sweep trips, #1151) a neutral one, so both read as
+// distinct from fresh scan/webhook work at a glance.
 func dashUpNextTierClass(tier string) string {
-	if tier == "miss" {
+	switch tier {
+	case "miss":
 		return "mx-upnext-tier mx-upnext-tier-miss"
+	case "upgrade":
+		return "mx-upnext-tier mx-upnext-tier-upgrade"
 	}
 	return "mx-upnext-tier mx-upnext-tier-fresh"
 }

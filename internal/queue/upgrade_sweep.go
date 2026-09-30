@@ -68,7 +68,7 @@ func (q *DBQueue) CountUpgradeInFlight(ctx context.Context) (int, error) {
 
 // MarkUpgradeQueued re-queues candidates in ONE statement, each revalidated
 // against the predicate: 'pending' (several sweeps read 'deferred' as a miss)
-// at PriorityMiss, due now, attempts/last_error/refused_waits cleared, armed
+// at PriorityUpgrade (behind fresh work, ahead of deferred misses), due now, attempts/last_error/refused_waits cleared, armed
 // (upgrade_queued) and stamped. outcome_type, sync_tier, lane, completed_at and
 // miss_count are kept: they describe the file on disk. The cache is left alone:
 // the worker bypasses it on an upgrade trip. A mis_synced row's (#1120)
@@ -89,7 +89,7 @@ func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore
 			res, err := tx.ExecContext(ctx, `UPDATE work_queue SET status = 'pending', priority = ?, next_attempt_at = ?, attempts = 0,
                  last_error = '', refused_waits = 0, upgrade_queued = 1, upgrade_checked_at = ?
              WHERE id = ? AND (`+upgradeCandidatePredicate+` OR `+upgradeMissyncedPredicate+`)`, //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
-				PriorityMiss, now, now, id, cut, cut, q.providersVersion, cut)
+				PriorityUpgrade, now, now, id, cut, cut, q.providersVersion, cut)
 			if err != nil {
 				return fmt.Errorf("queue: flip upgrade id %d: %w", id, err)
 			}
