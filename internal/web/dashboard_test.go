@@ -112,8 +112,8 @@ func TestHandleDashboard_QueueTiles(t *testing.T) {
 		t.Fatalf("GET /dashboard status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	// Done renders as Finished + Settled (upgradable) (#553); the chart keeps
-	// a "Done" segment, so match the tile label markup, not a bare substring.
+	// Done renders as Finished + Settled (upgradable) (#553); the chart carries
+	// the same labels (#1139), so match the tile label markup, not a bare substring.
 	for _, label := range []string{"Pending", "Processing", "Finished", "Settled (upgradable)", "Failed", "Deferred", "Unavailable"} {
 		if !strings.Contains(body, `<span class="mx-dash-tile-label">`+label+`</span>`) {
 			t.Errorf("dashboard missing queue tile label %q", label)
@@ -285,9 +285,9 @@ func TestHandleDashboard_AsyncCopy(t *testing.T) {
 // corresponding counts, excluding Total.
 func TestBuildQueueChart(t *testing.T) {
 	c := buildQueueChart(reports.QueueSummary{
-		Pending: 1, Processing: 2, Done: 3, Failed: 4, Deferred: 5, Unavailable: 6, Total: 21,
+		Pending: 1, Processing: 2, Done: 7, Finished: 3, SettledUpgradable: 4, Failed: 5, Deferred: 6, Unavailable: 7, Total: 27,
 	})
-	wantLabels := []string{"Pending", "Processing", "Done", "Failed", "Deferred", "Unavailable"}
+	wantLabels := []string{"Pending", "Processing", "Finished", "Settled (upgradable)", "Failed", "Deferred", "Unavailable"}
 	if len(c.Labels) != len(wantLabels) {
 		t.Fatalf("Labels len = %d, want %d", len(c.Labels), len(wantLabels))
 	}
@@ -296,7 +296,7 @@ func TestBuildQueueChart(t *testing.T) {
 			t.Errorf("Labels[%d] = %q, want %q", i, c.Labels[i], l)
 		}
 	}
-	wantValues := []float64{1, 2, 3, 4, 5, 6}
+	wantValues := []float64{1, 2, 3, 4, 5, 6, 7}
 	for i, v := range wantValues {
 		if c.Values[i] != v {
 			t.Errorf("Values[%d] = %v, want %v", i, c.Values[i], v)
@@ -358,7 +358,7 @@ func TestHandleDashboard_Charts(t *testing.T) {
 	// data-chart-labels JSON attribute, not merely appear somewhere in the body
 	// (a loose Contains would also match the stat-tile label text). templ
 	// HTML-escapes the JSON quotes to &#34; inside the attribute value.
-	const wantQueueLabelsAttr = `data-chart-labels="[&#34;Pending&#34;,&#34;Processing&#34;,&#34;Done&#34;,&#34;Failed&#34;,&#34;Deferred&#34;,&#34;Unavailable&#34;]"`
+	const wantQueueLabelsAttr = `data-chart-labels="[&#34;Pending&#34;,&#34;Processing&#34;,&#34;Finished&#34;,&#34;Settled (upgradable)&#34;,&#34;Failed&#34;,&#34;Deferred&#34;,&#34;Unavailable&#34;]"`
 	if !strings.Contains(body, wantQueueLabelsAttr) {
 		t.Errorf("dashboard charts: work-queue canvas missing serialized labels attribute %q", wantQueueLabelsAttr)
 	}

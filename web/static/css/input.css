@@ -633,10 +633,10 @@ body {
 }
 
 /* Word-synced: the #553 terminal rung. Green, matching the "success" hue
-   dashboard.css already uses for Done in the queue chart (--mx-chart-done is
+   dashboard.css already uses for Finished in the queue chart (--mx-chart-finished is
    page-scoped there, so the value is repeated here rather than shared). */
 .mx-result-tier-word {
-  color: #22c55e; /* green-500: matches --mx-chart-done's success hue */
+  color: #22c55e; /* green-500: matches --mx-chart-finished's success hue */
   background: rgba(34, 197, 94, 0.12);
 }
 
