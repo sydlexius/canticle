@@ -87,6 +87,7 @@ type Handler struct {
 	inventory          Inventory
 	realigner          Realigner
 	allowedRoots       []string
+	startupGate        <-chan struct{}
 	pathChecker        func(string) error
 	webui              *web.UI
 	onboarding         *web.Onboarding
@@ -155,6 +156,31 @@ func WithAllowedRoots(roots []string) Option {
 // scoped, confined, backup-first realign to dir and returns any error.
 type Realigner interface {
 	RealignDir(ctx context.Context, dir string) error
+}
+
+// WithStartupGate names a channel the composition root closes once the
+// one-time startup pass that rewrites lyric files (the #483 editor-tag
+// backfill) has finished (#1138). Until it is closed, anything a handler would
+// start that writes lyric files is DEFERRED, never dropped: the Lidarr
+// webhook's reactive realign waits for it in its existing detached goroutine,
+// so the request still answers and enqueues at once (a queue row writes no
+// lyric file, and the worker is not running yet). /api/v1/status reports the
+// pass as running. A nil channel means no gate (every non-serve caller).
+func WithStartupGate(done <-chan struct{}) Option {
+	return func(h *Handler) { h.startupGate = done }
+}
+
+// startupBackfillRunning reports whether the gate is set and still open.
+func (h *Handler) startupBackfillRunning() bool {
+	if h.startupGate == nil {
+		return false
+	}
+	select {
+	case <-h.startupGate:
+		return false
+	default:
+		return true
+	}
 }
 
 // WithRealigner wires reactive realign triggered by Lidarr rename/import/upgrade
@@ -377,6 +403,9 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{"status": "ok"}
+	if h.startupBackfillRunning() {
+		resp["startup_backfill"] = "running"
+	}
 	if h.stats != nil {
 		counts, err := h.stats.CountByStatus(r.Context())
 		if err != nil {
@@ -517,6 +546,12 @@ func (h *Handler) dispatchRealign(ctx context.Context, event string, payload lid
 	h.bgRealign.Add(1)
 	go func() {
 		defer h.bgRealign.Done()
+		// Realign renames and moves lyric files, so it must not overlap the
+		// startup rewrite pass (#1138). A nil gate blocks forever on nothing, so
+		// guard it.
+		if h.startupGate != nil {
+			<-h.startupGate
+		}
 		h.reactiveRealign(bg, event, payload)
 	}()
 }

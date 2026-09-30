@@ -1266,6 +1266,136 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// already on disk). Built together for the #1120 mis_synced pass wiring.
 	upgradeSweep, wordGenerate := newPassSweeps(sqlDB, cfg, w, nil, gen, lyricsDisabled)
 
+	runCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	// Closed once the one-time startup pass that rewrites lyric files has
+	// finished (#1138); handlers that would start a lyric writer wait on it.
+	backfillDone := make(chan struct{})
+
+	handlerOpts := []server.Option{
+		server.WithReadiness(sqlDB),
+		server.WithStatusReporter(workQ),
+		// WithMetricsReporter is required: omitting it causes GET /metrics to return 500.
+		// Decorate the queue reporter with the shared cache repo so /metrics also
+		// exposes the lyrics-cache hit/lookup counters (#308).
+		server.WithMetricsReporter(server.WithCacheStats(workQ, cacheRepo)),
+		// GET /metrics is gated by the trusted-network allowlist (loopback
+		// implicitly trusted); no API key or session is required (#204, S3).
+		server.WithTrustedNetworks(trustPolicy),
+		server.WithInventory(scan.New(sqlDB)),
+		server.WithAllowedRoots(allowedRoots),
+		// Defer the webhook's lyric-writing realign until the one-time backfill
+		// has finished (#1138).
+		server.WithStartupGate(backfillDone),
+	}
+	// Reactive realign on Lidarr rename/import/upgrade webhooks (#450), gated by
+	// realign.enabled. Self-heals a sidecar stranded by a rename/move without a
+	// manual `realign` run; confined to the payload's directories.
+	if cfg.Realign.Enabled {
+		handlerOpts = append(handlerOpts, server.WithRealigner(serverRealigner{
+			realigner:  realign.New(library.New(sqlDB), cfg.Realign),
+			backupPath: realignServeBackupPath(cfg),
+		}))
+	}
+	if cfg.Server.WebUIEnabled {
+		// Mount the authenticated web UI (#204, lane 4): session login gates the
+		// page routes, and onboarding redirects them to /setup until an admin
+		// exists. bannerCfg is the effective config snapshot (resolved
+		// token/webhook keys/outdir/addr) so the Config view matches the startup
+		// banner. Default is OFF (the #210 gate is unchanged).
+		handlerOpts = append(handlerOpts,
+			server.WithWebUIAuth(bannerCfg, version, webAuth),
+			server.WithOnboarding(onboarding),
+			// Back the Reports workspace with the same DB the rest of serve mode
+			// uses; the handler builds a read-only reports.Repo from it (#211).
+			server.WithReportsDB(sqlDB),
+			// Enable the settings write path (#288 Phase 2): writes go to the
+			// RESOLVED config file (never ""), and secret-field saves route to the
+			// encrypted store rather than the TOML.
+			server.WithSettingsWriter(config.ResolveConfigPath(args.ConfigPath), store),
+			// Back the webhook key management page (#300) with the same managed key
+			// service that authenticates webhook calls, so keys created in the UI are
+			// immediately usable for webhook auth.
+			server.WithKeyManagerUI(authSvc),
+			// Surface the tokenless-Musixmatch banner on every authenticated shell
+			// page when serve started without a usable Musixmatch token (#385).
+			server.WithMusixmatchInactive(musixmatchInactive),
+			// Render the Musixmatch attribution credit required by API Terms
+			// clause 2.1.5, but only when Musixmatch is the provider actually
+			// serving lyrics (#600).
+			server.WithMusixmatchServing(musixmatchServing),
+		)
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           server.NewHandler(authSvc, workQ, outdir, handlerOpts...),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if certMgr != nil {
+		srv.TLSConfig = servetls.TLSConfig(certMgr)
+	}
+	go func() {
+		<-runCtx.Done()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(runCtx), 10*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("HTTP server shutdown failed", "error", err)
+		}
+	}()
+
+	// Optional plain-HTTP redirect listener (#204, lane 5): listener already bound
+	// above (fail-fast on error); here we just start serving on it.
+	if redirectLn != nil {
+		redirectSrv := buildRedirectServer(cfg.Server.TLS.RedirectHTTP, addr)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			go func() {
+				<-runCtx.Done()
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(runCtx), 10*time.Second)
+				defer shutdownCancel()
+				if err := redirectSrv.Shutdown(shutdownCtx); err != nil {
+					slog.Warn("HTTP redirect server shutdown failed", "error", err)
+				}
+			}()
+			slog.Info("starting HTTP->HTTPS redirect listener", "addr", redirectSrv.Addr, "target", addr)
+			if err := redirectSrv.Serve(redirectLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("HTTP redirect server failed", "error", err)
+			}
+		}()
+	}
+
+	// Bind the listener NOW, before the one-time backfill, so a bind failure is
+	// still a clean fail-fast startup error and /healthz answers for the whole
+	// pass (#1138). Serving runs in its own goroutine; its result is collected
+	// after the writers are started.
+	var lc net.ListenConfig
+	httpLn, listenErr := lc.Listen(ctx, "tcp", addr)
+	if listenErr != nil {
+		cancel()
+		if redirectLn != nil {
+			_ = redirectLn.Close()
+		}
+		_ = sqlDB.Close()
+		slog.Error("HTTP listener failed to bind; aborting startup", "addr", addr, "error", listenErr)
+		return 1
+	}
+	serveErr := make(chan error, 1)
+	if certMgr != nil {
+		slog.Info("starting HTTPS server", "addr", addr)
+		// Empty cert/key paths: the certificate is supplied via TLSConfig.GetCertificate.
+		go func() { serveErr <- srv.ServeTLS(httpLn, "", "") }()
+	} else {
+		slog.Info("starting HTTP server", "addr", addr)
+		go func() { serveErr <- srv.Serve(httpLn) }()
+	}
+	if serveStartupOrderHook != nil {
+		serveStartupOrderHook("http_listening")
+	}
+
 	// One-shot [re:canticle] editor-tag backfill (#483) runs SYNCHRONOUSLY here,
 	// before the worker (and every other in-process writer of a .lrc file: the
 	// scheduler-fed worker, the word-recheck sweep, the timing-revalidation
@@ -1283,13 +1413,21 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// ordering guarantee: it relies on the same best-effort pre-rename guard
 	// (lyrics.InjectEditorTag's doc comment) as this pass, so it should be run
 	// only while serve is stopped or idle.
+	//
+	// The HTTP listener is ALREADY up at this point (#1138: a multi-minute pass
+	// must not take /healthz and the web UI down). That is safe because the
+	// listener writes no lyric files; the one handler path that does (the
+	// Lidarr webhook's reactive realign) is deferred on backfillDone below.
+	if serveStartupOrderHook != nil {
+		serveStartupOrderHook("editor_tag_backfill_starting")
+	}
 	runEditorTagBackfill(ctx, sqlDB, cfg, selfWrites)
+	close(backfillDone)
 	if serveStartupOrderHook != nil {
 		serveStartupOrderHook("editor_tag_backfill_done")
+		serveStartupOrderHook("writers_starting")
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	var wg sync.WaitGroup
 	// Start the worker and scheduler only when a lyrics provider is active. When
 	// lyricsDisabled (Musixmatch primary, no token, no fallback; #385) the queue
 	// must stay untouched: starting the worker would retry every track and retire
@@ -1427,113 +1565,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		}()
 	}
 
-	handlerOpts := []server.Option{
-		server.WithReadiness(sqlDB),
-		server.WithStatusReporter(workQ),
-		// WithMetricsReporter is required: omitting it causes GET /metrics to return 500.
-		// Decorate the queue reporter with the shared cache repo so /metrics also
-		// exposes the lyrics-cache hit/lookup counters (#308).
-		server.WithMetricsReporter(server.WithCacheStats(workQ, cacheRepo)),
-		// GET /metrics is gated by the trusted-network allowlist (loopback
-		// implicitly trusted); no API key or session is required (#204, S3).
-		server.WithTrustedNetworks(trustPolicy),
-		server.WithInventory(scan.New(sqlDB)),
-		server.WithAllowedRoots(allowedRoots),
-	}
-	// Reactive realign on Lidarr rename/import/upgrade webhooks (#450), gated by
-	// realign.enabled. Self-heals a sidecar stranded by a rename/move without a
-	// manual `realign` run; confined to the payload's directories.
-	if cfg.Realign.Enabled {
-		handlerOpts = append(handlerOpts, server.WithRealigner(serverRealigner{
-			realigner:  realign.New(library.New(sqlDB), cfg.Realign),
-			backupPath: realignServeBackupPath(cfg),
-		}))
-	}
-	if cfg.Server.WebUIEnabled {
-		// Mount the authenticated web UI (#204, lane 4): session login gates the
-		// page routes, and onboarding redirects them to /setup until an admin
-		// exists. bannerCfg is the effective config snapshot (resolved
-		// token/webhook keys/outdir/addr) so the Config view matches the startup
-		// banner. Default is OFF (the #210 gate is unchanged).
-		handlerOpts = append(handlerOpts,
-			server.WithWebUIAuth(bannerCfg, version, webAuth),
-			server.WithOnboarding(onboarding),
-			// Back the Reports workspace with the same DB the rest of serve mode
-			// uses; the handler builds a read-only reports.Repo from it (#211).
-			server.WithReportsDB(sqlDB),
-			// Enable the settings write path (#288 Phase 2): writes go to the
-			// RESOLVED config file (never ""), and secret-field saves route to the
-			// encrypted store rather than the TOML.
-			server.WithSettingsWriter(config.ResolveConfigPath(args.ConfigPath), store),
-			// Back the webhook key management page (#300) with the same managed key
-			// service that authenticates webhook calls, so keys created in the UI are
-			// immediately usable for webhook auth.
-			server.WithKeyManagerUI(authSvc),
-			// Surface the tokenless-Musixmatch banner on every authenticated shell
-			// page when serve started without a usable Musixmatch token (#385).
-			server.WithMusixmatchInactive(musixmatchInactive),
-			// Render the Musixmatch attribution credit required by API Terms
-			// clause 2.1.5, but only when Musixmatch is the provider actually
-			// serving lyrics (#600).
-			server.WithMusixmatchServing(musixmatchServing),
-		)
-	}
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           server.NewHandler(authSvc, workQ, outdir, handlerOpts...),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-	if certMgr != nil {
-		srv.TLSConfig = servetls.TLSConfig(certMgr)
-	}
-	go func() {
-		<-runCtx.Done()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(runCtx), 10*time.Second)
-		defer shutdownCancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("HTTP server shutdown failed", "error", err)
-		}
-	}()
-
-	// Optional plain-HTTP redirect listener (#204, lane 5): listener already bound
-	// above (fail-fast on error); here we just start serving on it.
-	if redirectLn != nil {
-		redirectSrv := buildRedirectServer(cfg.Server.TLS.RedirectHTTP, addr)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			go func() {
-				<-runCtx.Done()
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(runCtx), 10*time.Second)
-				defer shutdownCancel()
-				if err := redirectSrv.Shutdown(shutdownCtx); err != nil {
-					slog.Warn("HTTP redirect server shutdown failed", "error", err)
-				}
-			}()
-			slog.Info("starting HTTP->HTTPS redirect listener", "addr", redirectSrv.Addr, "target", addr)
-			if err := redirectSrv.Serve(redirectLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("HTTP redirect server failed", "error", err)
-			}
-		}()
-	}
-
 	code := 0
-	if certMgr != nil {
-		slog.Info("starting HTTPS server", "addr", addr)
-		// Empty cert/key paths: the certificate is supplied via TLSConfig.GetCertificate.
-		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("HTTPS server failed", "error", err)
-			code = 1
-		}
-	} else {
-		slog.Info("starting HTTP server", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("HTTP server failed", "error", err)
-			code = 1
-		}
+	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("HTTP server failed", "error", err)
+		code = 1
 	}
 	cancel()
 	wg.Wait()

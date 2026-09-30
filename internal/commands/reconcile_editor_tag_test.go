@@ -6,13 +6,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
@@ -397,6 +401,10 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 	if _, err := library.New(sqlDB).Add(ctx, root, "lib", models.LibrarySettings{}); err != nil {
 		t.Fatalf("library.Add: %v", err)
 	}
+	adminKey, err := auth.NewService(auth.NewSQLStore(sqlDB)).CreateKey(ctx, "gate-test", []auth.Scope{auth.ScopeAdmin})
+	if err != nil {
+		t.Fatalf("create admin key: %v", err)
+	}
 	if err := sqlDB.Close(); err != nil {
 		t.Fatalf("db.Close: %v", err)
 	}
@@ -413,10 +421,39 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 
 	var mu sync.Mutex
 	var order []string
+	midPassHealth := 0
+	var stampedEarly bool
+	var midPassStatus, afterStatus map[string]any
+	getStatus := func() map[string]any {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+httpsAddr+"/api/v1/status", http.NoBody)
+		req.Header.Set("Authorization", "Bearer "+adminKey.Raw)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var m map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return m
+	}
 	serveStartupOrderHook = func(checkpoint string) {
 		mu.Lock()
-		defer mu.Unlock()
 		order = append(order, checkpoint)
+		mu.Unlock()
+		if checkpoint == "editor_tag_backfill_starting" {
+			// Runs on runServe's own goroutine, immediately before the pass:
+			// the listener must already answer (#1138).
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+httpsAddr+"/healthz", http.NoBody)
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				midPassHealth = resp.StatusCode
+				_ = resp.Body.Close()
+			}
+			stampedEarly = strings.Contains(readFile(t, target), "[re:canticle]")
+			midPassStatus = getStatus()
+		}
+		if checkpoint == "writers_starting" {
+			afterStatus = getStatus()
+		}
 	}
 	t.Cleanup(func() { serveStartupOrderHook = nil })
 
@@ -446,7 +483,7 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 		mu.Lock()
 		n := len(order)
 		mu.Unlock()
-		if n >= 2 {
+		if n >= 5 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -458,13 +495,113 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 	mu.Lock()
 	got := append([]string(nil), order...)
 	mu.Unlock()
-	want := []string{"editor_tag_backfill_done", "worker_starting"}
-	if len(got) < 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("startup order = %v; want %v (backfill must complete before the worker starts)", got, want)
+	// #1138: the listener is up BEFORE the pass (so /healthz and the UI answer
+	// while it runs); every lyric-file writer starts AFTER it.
+	want := []string{"http_listening", "editor_tag_backfill_starting", "editor_tag_backfill_done", "writers_starting", "worker_starting"}
+	if len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
+		t.Fatalf("startup order = %v; want %v (listener before the backfill, every writer after it)", got, want)
+	}
+	if midPassHealth != http.StatusOK {
+		t.Errorf("/healthz during the backfill = %d; want 200", midPassHealth)
+	}
+
+	if stampedEarly {
+		t.Error("file already stamped at editor_tag_backfill_starting: the pass ran before the listener")
+	}
+	if midPassStatus["startup_backfill"] != "running" {
+		t.Errorf("/api/v1/status during the backfill = %v; want startup_backfill=running", midPassStatus)
+	}
+	if afterStatus == nil || afterStatus["status"] != "ok" {
+		t.Errorf("/api/v1/status after the backfill = %v; want a status answer", afterStatus)
+	} else if v, ok := afterStatus["startup_backfill"]; ok {
+		t.Errorf("startup_backfill = %v after the backfill; want the gate released", v)
 	}
 
 	if got := readFile(t, target); !strings.Contains(got, "[re:canticle]") {
 		t.Errorf("editor-tag backfill did not stamp the file before the worker started: %q", got)
+	}
+}
+
+// TestRunServe_ListenerBindFailureFailsFast pins the #1138 fail-fast: the
+// listener is bound before the backfill, so a taken port is a clean startup
+// error (exit 1) and no startup checkpoint fires.
+func TestRunServe_ListenerBindFailureFailsFast(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Setenv("MXLRC_DOCKER", "")
+	t.Setenv("MUSIXMATCH_TOKEN", "tok")
+	t.Setenv("MXLRC_SECRETS_KEY_FILE", filepath.Join(t.TempDir(), "test.key"))
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold port: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := "[db]\npath = " + tomlString(filepath.Join(dir, "serve.db")) + "\n\n[providers]\nprimary = \"musixmatch\"\n\n[server]\naddr = " + tomlString(held.Addr().String()) + "\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var mu sync.Mutex
+	var fired []string
+	serveStartupOrderHook = func(c string) { mu.Lock(); fired = append(fired, c); mu.Unlock() }
+	t.Cleanup(func() { serveStartupOrderHook = nil })
+
+	var out bytes.Buffer
+	code := runServe(context.Background(), &out, ServeCmd{ConfigPath: cfgPath},
+		func(string) musixmatch.Fetcher { return fakeFetcher{} },
+		func(...string) lyrics.Writer { return fakeWriter{} })
+	mu.Lock()
+	defer mu.Unlock()
+	if code != 1 {
+		t.Errorf("runServe code = %d; want 1 on a bind failure", code)
+	}
+	if len(fired) != 0 {
+		t.Errorf("startup checkpoints fired %v despite the bind failure; want none", fired)
+	}
+}
+
+// TestRunServe_CancelDuringBackfillReturnsCleanly cancels runServe from inside
+// the backfill window (listener up, pass not yet run) and requires a prompt
+// exit code 0.
+func TestRunServe_CancelDuringBackfillReturnsCleanly(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Setenv("MXLRC_DOCKER", "")
+	t.Setenv("MUSIXMATCH_TOKEN", "tok")
+	t.Setenv("MXLRC_SECRETS_KEY_FILE", filepath.Join(t.TempDir(), "test.key"))
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := "[db]\npath = " + tomlString(filepath.Join(dir, "serve.db")) + "\n\n[providers]\nprimary = \"musixmatch\"\n\n[server]\naddr = " + tomlString(freePort(t)) + "\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveStartupOrderHook = func(c string) {
+		if c == "editor_tag_backfill_starting" {
+			cancel()
+		}
+	}
+	t.Cleanup(func() { serveStartupOrderHook = nil })
+
+	done := make(chan int, 1)
+	var out bytes.Buffer
+	go func() {
+		done <- runServe(runCtx, &out, ServeCmd{ConfigPath: cfgPath},
+			func(string) musixmatch.Fetcher { return fakeFetcher{} },
+			func(...string) lyrics.Writer { return fakeWriter{} })
+	}()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("runServe code = %d after a mid-backfill cancel; want 0", code)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("runServe did not return after a mid-backfill cancel")
 	}
 }
 
