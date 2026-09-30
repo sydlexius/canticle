@@ -529,12 +529,6 @@ type ScanOptions struct {
 	// The zero value is false, so direct callers that want the historical
 	// always-on behavior must set it true explicitly.
 	EnrichRecording bool
-	// DetectorVersion is the current audio-detector version. When set (serve mode
-	// with the detector enabled), a detector-written instrumental marker whose
-	// stored [dv:] differs is re-checked with no flag set, mirroring
-	// providers_version cache retirement. Empty (dir/CLI mode, or detector off)
-	// disables version invalidation.
-	DetectorVersion string
 	// UnsyncedBefore narrows a .txt-sidecar reopen to sidecars last modified before
 	// this instant, for a one-time repair of a historical cohort (#617). It applies
 	// to BOTH .txt classes a scan can reopen -- a settled unsynced sidecar and an
@@ -1225,10 +1219,19 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			continue
 		case txtExists && !lrcExists && isInstrumentalTxt(txtPath):
 			// An instrumental marker is not terminal whoever wrote it (#553): it
-			// reopens on --upgrade like any .txt, or on a detector-version bump.
-			// The header is read only for the version check, and only when no
-			// flag already granted the reopen.
-			if !reopen.Unsynced && !detectorVersionMoved(txtPath, opts.DetectorVersion) {
+			// reopens on --upgrade like any .txt, and on nothing else. A detector
+			// version bump deliberately does NOT reopen it here (#1106): for a
+			// marker whose 'done' work_queue row exists, the scan index keeps the
+			// row done and the durable queue never reopens a done row on an
+			// Enqueue collision, so an emitted marker re-detected nothing and only
+			// cost an audio tag read on every scan (the #684 class). A marker with
+			// NO queue row (a rebuilt database over an existing library) did get
+			// re-queued by the old reopen; it is now reached only by scan
+			// --upgrade. Re-detection under a new model for a done row is the
+			// [upgrade_sweep] (serve mode, off by default; it bypasses the cache
+			// and the detector refuses telemetry from an older model version, so
+			// inference runs again) or scan reconcile, not a scan side effect.
+			if !reopen.Unsynced {
 				// Index it if the scan index has never seen this path (#786). In
 				// serve mode this is the FIRST branch a lone .txt matches, so
 				// leaving it unwired would keep every moved instrumental track

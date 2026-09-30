@@ -275,8 +275,8 @@ func writeMarkerWithHeader(t *testing.T, dir, name, source, dv string) {
 
 // TestScanLibrary_InstrumentalProvenanceReopen verifies that provenance no
 // longer decides re-check eligibility (#553, superseding #502): every marker
-// reopens on --upgrade or --update, and a detector marker additionally reopens
-// on its own on a detector-version bump.
+// reopens on --upgrade or --update and on nothing else (a detector-version
+// bump does not, #1106).
 func TestScanLibrary_InstrumentalProvenanceReopen(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -287,11 +287,9 @@ func TestScanLibrary_InstrumentalProvenanceReopen(t *testing.T) {
 	}{
 		{"detector_upgrade_reopens", lyrics.SourceDetector, "1.0", ScanOptions{Upgrade: true}, true},
 		{"detector_no_flags_terminal", lyrics.SourceDetector, "1.0", ScanOptions{}, false},
-		{"detector_version_bump_reopens", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "2.0"}, true},
-		{"detector_same_version_terminal", lyrics.SourceDetector, "1.0", ScanOptions{DetectorVersion: "1.0"}, false},
 		{"provider_upgrade_reopens", "musixmatch", "", ScanOptions{Upgrade: true}, true},
 		{"provider_update_reopens", "musixmatch", "", ScanOptions{Update: true}, true},
-		{"provider_no_flags_settled", "musixmatch", "", ScanOptions{DetectorVersion: "2.0"}, false},
+		{"provider_no_flags_settled", "musixmatch", "", ScanOptions{}, false},
 		{"legacy_bare_upgrade_reopens", "", "", ScanOptions{Upgrade: true}, true},
 	}
 	for _, tc := range cases {

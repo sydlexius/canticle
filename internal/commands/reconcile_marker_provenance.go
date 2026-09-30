@@ -45,9 +45,9 @@ func dvNote(dv string) string {
 
 // runReconcileMarkerProvenance backfills [source:canticle-detector]/[dv:] headers
 // onto bare detector-written instrumental markers (#502), so a marker is
-// attributed to the detector on disk and a detector-version bump can re-check
-// it with no flag set. (Since #553 --upgrade reopens every marker whatever its
-// provenance; the header no longer decides that.) Dry-run by default;
+// attributed to the detector on disk, which the recalibration reverse path
+// requires before it may remove one. (Since #553 --upgrade reopens every marker
+// whatever its provenance; the header no longer decides that.) Dry-run by default;
 // --yes applies and appends a JSONL backup of each stamped file.
 func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanReconcileMarkerProvenanceCmd) int {
 	env, code := openQueueEnv(ctx, out, args.ConfigPath, args.Library, args.Yes)

@@ -16,9 +16,9 @@ import (
 // version writes a marker indistinguishable from a PROVIDER one. Before #553
 // the scanner treated a provider marker as editorially terminal, so the
 // detector's verdict froze on disk under a provider's authority. --upgrade now
-// reopens every marker, but the attribution still gates the detector-version
-// reopen and the recalibration reverse path (which never deletes a provider
-// marker), so a misattributed verdict is still stranded there.
+// reopens every marker, but the attribution still gates the recalibration
+// reverse path (which never deletes a provider marker), so a misattributed
+// verdict is still stranded there.
 //
 // This was structurally unreachable while DetectorVersion was the app version (a
 // build constant that is never empty). Keying it to the sidecar model (#684)
@@ -51,7 +51,7 @@ func TestWriteInstrumental_DetectorLaneIsIdentifiableWithoutAModelVersion(t *tes
 		body, _ := os.ReadFile(path) //nolint:errcheck // reason: diagnostic only, the assertion has already failed
 		t.Fatalf("IsDetector() = false for a marker the DETECTOR wrote (source=%q).\n"+
 			"An unknown model version must not disguise a detector verdict as a provider one: "+
-			"a detector-version bump can then never re-check it, and recalibration can never reverse it.\nmarker:\n%s",
+			"recalibration can then never reverse it.\nmarker:\n%s",
 			prov.Source, body)
 	}
 }

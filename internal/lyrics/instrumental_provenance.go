@@ -10,7 +10,7 @@ import (
 // SourceDetector is the [source:] token stamped into an instrumental marker that
 // the audio detector wrote. Any other source token (a provider lane name) marks
 // a provider-written instrumental. Provenance attributes a marker and gates the
-// detector-version reopen and the recalibration reverse path; it no longer
+// recalibration reverse path; it no longer
 // decides --upgrade eligibility (#553). Kept here so the
 // writer and the scanner agree on one spelling.
 const SourceDetector = "canticle-detector"
@@ -35,7 +35,7 @@ type InstrumentalProvenance struct {
 
 // IsDetector reports whether the marker was written by the audio detector. It
 // no longer decides re-check eligibility (#553); it attributes the marker and
-// gates the detector-version reopen.
+// gates the recalibration reverse path.
 func (p InstrumentalProvenance) IsDetector() bool {
 	return p.Source == SourceDetector
 }
