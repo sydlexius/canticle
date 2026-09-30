@@ -250,7 +250,7 @@ func (q *fakeQueue) SetSyncTier(_ context.Context, id int64, tier string) error 
 
 // SettleUpgradeTrip: no fake row is an upgrade trip; trips run over the real
 // DBQueue (upgrade_trip_test.go).
-func (q *fakeQueue) SettleUpgradeTrip(context.Context, int64) (bool, error) { return false, nil }
+func (q *fakeQueue) SettleUpgradeTrip(context.Context, int64, bool) (bool, error) { return false, nil }
 
 // DeferRefused is exercised end to end over the real DBQueue
 // (timing_fallthrough_test.go); the fake adds deferRefusedErr injection.

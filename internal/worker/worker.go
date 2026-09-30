@@ -120,8 +120,9 @@ type Queue interface {
 	SetSyncTier(ctx context.Context, id int64, tier string) error
 	// SettleUpgradeTrip settles a processing upgrade re-fetch (#553) that
 	// landed nothing back to done, file record untouched; false means the row
-	// is not an upgrade trip.
-	SettleUpgradeTrip(ctx context.Context, id int64) (bool, error)
+	// is not an upgrade trip. answered: the lanes answered, so a mis_synced
+	// row's one provider pass is recorded (#1120).
+	SettleUpgradeTrip(ctx context.Context, id int64, answered bool) (bool, error)
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -2485,7 +2486,9 @@ func (w *Worker) failPass(ctx context.Context, item queue.WorkItem, cause error,
 		// not need an hourly retry forever: settle the trip, file untouched (#553).
 		// A settle error falls through to Fail, so the row never wedges.
 		slog.Info("worker: upgrade re-fetch failed; keeping the file on disk", "id", item.ID, "attempts", item.Attempts+1, "error", cause)
-		if settled, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID); err == nil && settled {
+		// Only a verifier verdict is an answer; the cap is transport failures.
+		answered := errors.Is(cause, errVerificationRejected)
+		if settled, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID, answered); err == nil && settled {
 			return nil
 		}
 	}
@@ -2521,8 +2524,9 @@ func (w *Worker) writeFor(item queue.WorkItem) func(models.Song, string, string)
 
 // settleUpgradeTrip settles an upgrade trip that landed nothing back to done
 // with the row still describing the file on disk (queue.SettleUpgradeTrip).
+// Every caller settles on an answer (a miss, a refused result, a guard verdict).
 func (w *Worker) settleUpgradeTrip(ctx context.Context, item queue.WorkItem) error {
-	if _, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID); err != nil {
+	if _, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID, true); err != nil {
 		return w.fail(ctx, item, fmt.Errorf("worker: settle upgrade trip %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0

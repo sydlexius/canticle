@@ -667,16 +667,23 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
 	defer func() { _ = tx.Rollback() }()
 
 	// refused_waits is zeroed on settle so a row later reopened from done gets a
-	// fresh DeferRefused wait budget (#950).
+	// fresh DeferRefused wait budget (#950). An upgrade trip over a mis_synced
+	// row that completes still mis_synced (the writer KEPT a better file on
+	// every path, #553) was answered by the lanes, so it records its #1120 pass
+	// here; a landed trip was already re-stamped at fetch and is unaffected.
+	// upgrade_queued is read before the 053 trigger disarms it (AFTER UPDATE).
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue
          SET status = 'done',
              completed_at = ?,
              last_error = '',
-             refused_waits = 0
+             refused_waits = 0,
+             missync_recheck_generation = CASE WHEN upgrade_queued = 1 AND timing_outcome = 'mis_synced'
+                 THEN ? ELSE missync_recheck_generation END
          WHERE id = ?
            AND status = 'processing'`,
 		now,
+		q.providersVersion,
 		id,
 	)
 	if err != nil {
