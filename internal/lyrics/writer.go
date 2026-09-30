@@ -126,6 +126,10 @@ type LRCWriter struct {
 	selfWrites *selfwrite.Registry
 	// force disables the no-downgrade guard (#553); set from --update only.
 	force bool
+	// bumpAudioMtime opts into the #505 audio mtime bump (see mtimebump.go).
+	bumpAudioMtime bool
+	// chtimes, when non-nil, replaces os.Chtimes. TEST-ONLY, to fail the bump.
+	chtimes func(name string, atime, mtime time.Time) error
 }
 
 // SetWordSync enables or disables Enhanced-LRC (A2) word markers on synced
@@ -498,6 +502,9 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		}
 	}
 	stale := staleSidecars(fp, listing)
+	// Snapshot what is about to be replaced (#505). A zero value, and no I/O at
+	// all, unless the bump is enabled AND the caller named the audio file.
+	prior := w.snapshotPrior(song, fp, stale)
 	w.selfWrites.Record(append(append([]string{fp, oppositeSidecar(fp), companion.path}, stale...), companion.removes...)...)
 
 	// Any existing companion is removed BEFORE the .lrc/.txt is replaced, even
@@ -530,6 +537,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	}
 	slog.Info("lyrics saved", "path", fp, "kind", kind,
 		"artist", song.Track.ArtistName, "track", song.Track.TrackName)
+	w.bumpIfCorrected(song.AudioPath, fp, prior)
 
 	// Companion LAST, strictly after the .lrc/.txt is durable, so it can never
 	// sit beside a missing or stale .lrc. The old one is already gone (above).
