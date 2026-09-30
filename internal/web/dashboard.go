@@ -247,7 +247,7 @@ func formatWaited(since, now time.Time) string {
 // the only terminal state, a bare "Done" reads as "finished" while most of it
 // is a current-best snapshot, not a finished one. Replacing rather than
 // adding keeps the row one status axis that sums to Total. The doughnut
-// (buildQueueChart) keeps a single status-level "Done" segment.
+// (buildQueueChart) splits Done the same way (#1139).
 func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 	return []templates.StatTile{
 		{Label: "Pending", Value: strconv.FormatInt(qs.Pending, 10)},
@@ -279,16 +279,18 @@ func buildSyncTierTiles(c reports.SyncTierCounts) []templates.StatTile {
 }
 
 // buildQueueChart shapes a QueueSummary into the work-queue doughnut chart
-// series (#318). The label order is fixed and matches the queue tiles so the
-// chart-init color map (keyed by label) stays in sync. Total is intentionally
+// series (#318). The label order is fixed and matches the queue tiles (Done is
+// split into Finished and Settled (upgradable), #1139) so the chart-init color
+// map (keyed by label) stays in sync. Total is intentionally
 // excluded -- it is the sum of the segments, not a segment.
 func buildQueueChart(qs reports.QueueSummary) templates.ChartData {
 	return templates.ChartData{
-		Labels: []string{"Pending", "Processing", "Done", "Failed", "Deferred", "Unavailable"},
+		Labels: []string{"Pending", "Processing", "Finished", "Settled (upgradable)", "Failed", "Deferred", "Unavailable"},
 		Values: []float64{
 			float64(qs.Pending),
 			float64(qs.Processing),
-			float64(qs.Done),
+			float64(qs.Finished),
+			float64(qs.SettledUpgradable),
 			float64(qs.Failed),
 			float64(qs.Deferred),
 			float64(qs.Unavailable),
