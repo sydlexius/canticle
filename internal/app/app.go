@@ -84,6 +84,9 @@ func (a *App) Run(ctx context.Context) error {
 			// timed against and comparing to it would be near-circular. Zero
 			// (song mode, or a file with no duration tag) fails open.
 			song.AudioDurationSeconds = cur.Track.TrackLength
+			// Directory mode only (empty in song mode): the audio file, for the
+			// opt-in mtime bump after an in-place correction (#505).
+			song.AudioPath = cur.SourcePath
 			if writeErr := a.writer.WriteLRC(song, cur.Filename, cur.Outdir); errors.Is(writeErr, lyrics.ErrKeptBetter) {
 				// A better sidecar is already on disk (#553): kept, not a failure.
 				slog.Info("kept better lyrics already on disk", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName)

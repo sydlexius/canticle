@@ -1641,6 +1641,8 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// is near-circular and biases every verdict toward ok. resolvedTrack carries
 	// what refreshRecordingIdentity re-read from the file's own tags.
 	song.AudioDurationSeconds = resolvedTrack.TrackLength
+	// The audio file, for the opt-in mtime bump after an in-place correction (#505).
+	song.AudioPath = item.Inputs.SourcePath
 	if item.UpgradeQueued {
 		// The writer returns nil without writing on a quarantine, and on a
 		// demotion whenever a sidecar is settled, which an upgrade trip's always

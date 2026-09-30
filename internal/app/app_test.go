@@ -276,3 +276,33 @@ func TestRunKeepsBetterSidecarIsNotAFailure(t *testing.T) {
 		t.Errorf(".lrc changed: %q", got)
 	}
 }
+
+// audioPathWriter records the AudioPath the app stamped on the song (#505).
+type audioPathWriter struct{ paths []string }
+
+func (w *audioPathWriter) WriteLRC(song models.Song, _, _ string) error {
+	w.paths = append(w.paths, song.AudioPath)
+	return nil
+}
+
+// TestRunStampsAudioPathForTheMtimeBump: directory mode names the audio file so
+// the writer can bump its mtime after an in-place correction; song mode has none.
+func TestRunStampsAudioPathForTheMtimeBump(t *testing.T) {
+	for _, tc := range []struct{ name, source string }{
+		{"directory mode", "/library/a/track.flac"},
+		{"song mode", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := queue.NewInputsQueue()
+			inputs.Push(models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}, Outdir: t.TempDir(), Filename: "t.lrc", SourcePath: tc.source})
+			fetcher := &fakeFetcher{song: models.Song{Subtitles: models.Synced{Lines: []models.Lines{{Text: "x"}}}}}
+			w := &audioPathWriter{}
+			if err := NewApp(fetcher, w, inputs, 0, "dir").Run(context.Background()); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(w.paths) != 1 || w.paths[0] != tc.source {
+				t.Fatalf("writer saw AudioPath %q; want [%q]", w.paths, tc.source)
+			}
+		})
+	}
+}
