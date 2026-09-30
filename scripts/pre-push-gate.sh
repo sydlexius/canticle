@@ -350,6 +350,12 @@ else
   echo "    actionlint not installed; skipping (CI still lints workflows)"
 fi
 
+# A `pull_request: branches: [main]` filter makes a stacked PR run none of that
+# workflow. Static and sub-second, so it runs in both modes; CI's Lint job repeats
+# it for the --no-verify path.
+echo "==> pr-trigger-scope (workflows run on any PR base)"
+bash scripts/check-pr-trigger-scope.sh || fail "pr-trigger-scope"
+
 # The CI test-shard split (issue #662) fails SILENTLY when it drifts: a package
 # claimed by no shard is simply never tested, and nothing goes red. Assert here
 # that every package in `go list ./...` lands in exactly one shard, and that each

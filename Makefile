@@ -64,10 +64,11 @@ patch-cover:
 gate:
 	bash scripts/pre-push-gate.sh
 
-## hooks-test: Run the hermetic tests for the pre-push hook, receipt check and package mapping
+## hooks-test: Run the hermetic tests for the pre-push hook, receipt check, package mapping and PR-trigger guard
 hooks-test:
 	bash scripts/test-check-push-receipt.sh
 	bash scripts/test-hook-test-pkgs.sh
+	bash scripts/test-check-pr-trigger-scope.sh
 
 ## scan: Build the Docker image and scan it for HIGH+ CVEs with grype
 scan:
