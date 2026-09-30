@@ -371,6 +371,7 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 		}
 		rec := timingRecordFor(f)
 		rec.Source = queue.TimingSourceSweep // post-settle stamp (#1120): the upgrade sweep gives it one provider pass
+		rec.FileState = fileStateFor(f)      // same UPDATE as the verdict (#1130): both land or neither
 		if serr := j.q.SetTimingOutcome(ctx, f.ID, rec); serr != nil {
 			// Non-fatal per row: the file is already remediated, and an unstamped
 			// row is merely re-judged next cycle, which is idempotent.
@@ -378,9 +379,6 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 			continue
 		}
 		res.Stamped++
-		if _, serr := restampFileState(ctx, j.q, f); serr != nil {
-			slog.Warn("timing validation sweep: could not update a remediated row's file state", "id", f.ID, "error", serr)
-		}
 	}
 
 	remaining, cerr := j.q.CountTimingBacklog(ctx)
@@ -521,21 +519,14 @@ func timingRecordFor(f revalidate.Finding) queue.TimingRecord {
 	return rec
 }
 
-// fileStateSetter is the queue surface restampFileState needs.
-type fileStateSetter interface {
-	SetRemediatedFileState(ctx context.Context, id int64, outcomeType string) (bool, error)
-}
-
-// restampFileState leaves a remediated row describing what is now on disk
-// (#1130), so the reports and the upgrade sweep stop counting a synced file that
-// is gone. It writes nothing for a finding with no remediation (Action empty:
-// off, or a verdict that does not remediate); callers invoke it only for an
-// action that succeeded. Whenever the words were kept as a .txt (KeptText: a
-// demote, including a demote under purge, whose Action is purge) the outcome is
+// fileStateFor maps a finding to the file state its remediation left on disk
+// (#1130), carried on the timing record so the verdict and the file state are
+// one write. nil means no change (Action empty: off, or a verdict that does not
+// remediate). Whenever the words were kept as a .txt (KeptText: a demote,
+// including a demote under purge, whose Action is purge) the outcome is
 // unsynced; a quarantine or a plain purge leaves no sidecar, so the outcome is
-// cleared. Either way sync_tier is cleared. The bool is false when the row was
-// in flight.
-func restampFileState(ctx context.Context, q fileStateSetter, f revalidate.Finding) (bool, error) {
+// cleared (""). Either way sync_tier is cleared by the queue.
+func fileStateFor(f revalidate.Finding) *string {
 	outcome := ""
 	switch {
 	case f.KeptText:
@@ -544,9 +535,9 @@ func restampFileState(ctx context.Context, q fileStateSetter, f revalidate.Findi
 		outcome = "unsynced"
 	case f.Action == realign.KindQuarantine, f.Action == realign.KindPurge:
 	default:
-		return false, nil
+		return nil
 	}
-	return q.SetRemediatedFileState(ctx, f.ID, outcome)
+	return &outcome
 }
 
 // runTimingSweepCycle runs one cycle and logs it. A failure is logged and

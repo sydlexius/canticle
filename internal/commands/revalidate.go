@@ -221,9 +221,9 @@ func applyRevalidate(ctx context.Context, out io.Writer, cfg config.Config, sqlD
 // would retire the row while a sidecar is still on disk). The row is found by
 // EVERY same-stem audio sibling, since it may name a different copy than the
 // one the resolver judged against. Only findings that planned a remediation are
-// stamped; a file with no row is skipped. After the timing stamp it also
-// re-describes the file now on disk via restampFileState (#1130); a failure
-// there counts as failed.
+// stamped; a file with no row is skipped. The same write also
+// re-describes the file now on disk via fileStateFor (#1130), so the verdict and
+// the file state land together or the row counts as failed.
 //
 // ONE STAMP PER ROW: findings are first aggregated by resolved row id, so two
 // findings that resolve to the same row (case-variant sidecars, or several
@@ -280,6 +280,7 @@ func stampRemediatedRows(ctx context.Context, q rowStamper, findings []revalidat
 	for _, id := range order {
 		rec := timingRecordFor(byRow[id])
 		rec.Source = queue.TimingSourceRevalidate // post-settle stamp (#1120)
+		rec.FileState = fileStateFor(byRow[id])   // same UPDATE as the verdict (#1130)
 		ok, serr := q.SetTimingOutcomeIfIdle(ctx, id, rec)
 		if serr != nil {
 			slog.Error("revalidate: could not stamp a remediated row", "id", id, "error", serr)
@@ -292,12 +293,6 @@ func stampRemediatedRows(ctx context.Context, q rowStamper, findings []revalidat
 			continue
 		}
 		stamped++
-		f := byRow[id]
-		f.ID = id
-		if _, ferr := restampFileState(ctx, q, f); ferr != nil {
-			slog.Error("revalidate: could not update a remediated row's file state", "id", id, "error", ferr)
-			failed++
-		}
 	}
 	return stamped, inFlight, failed
 }
@@ -307,7 +302,6 @@ func stampRemediatedRows(ctx context.Context, q rowStamper, findings []revalidat
 type rowStamper interface {
 	IDsBySourcePaths(ctx context.Context, sourcePaths []string) ([]int64, error)
 	SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec queue.TimingRecord) (bool, error)
-	fileStateSetter
 }
 
 // outcomeSeverity ranks the remediable verdicts for stampRemediatedRows when

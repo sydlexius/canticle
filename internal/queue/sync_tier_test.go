@@ -212,9 +212,11 @@ func TestSetSyncTier_DoesNotTouchWordTimingState(t *testing.T) {
 	}
 }
 
-// TestSetRemediatedFileState covers #1130: a done row is re-described and its
-// tier cleared, an empty outcome stores NULL, and a processing row is left alone.
-func TestSetRemediatedFileState(t *testing.T) {
+// TestTimingRecordFileState covers #1130: the file state rides in the verdict's
+// own UPDATE. A done row is re-described and its tier cleared, an empty outcome
+// stores NULL, a nil FileState leaves the file alone, and a processing row keeps
+// its file state.
+func TestTimingRecordFileState(t *testing.T) {
 	ctx := context.Background()
 	dbh := openQueueTestDB(t)
 	q := NewDBQueue(dbh)
@@ -225,21 +227,29 @@ func TestSetRemediatedFileState(t *testing.T) {
 		}
 		return outcome, tier
 	}
+	str := func(s string) *string { return &s }
+	rec := func(fs *string) TimingRecord { return TimingRecord{Outcome: "mis_synced", FileState: fs} }
 
 	id := insertSyncTierRow(t, dbh, "demote")
 	if err := q.SetSyncTier(ctx, id, SyncTierWord); err != nil {
 		t.Fatalf("SetSyncTier: %v", err)
 	}
-	if ok, err := q.SetRemediatedFileState(ctx, id, "unsynced"); err != nil || !ok {
-		t.Fatalf("SetRemediatedFileState = %v, %v; want true, nil", ok, err)
+	if ok, err := q.SetTimingOutcomeIfIdle(ctx, id, rec(nil)); err != nil || !ok {
+		t.Fatalf("nil FileState = %v, %v", ok, err)
+	}
+	if o, tr := state(id); o.String != "synced" || tr.String != SyncTierWord {
+		t.Errorf("nil FileState touched the file state: %+v %+v", o, tr)
+	}
+	if ok, err := q.SetTimingOutcomeIfIdle(ctx, id, rec(str("unsynced"))); err != nil || !ok {
+		t.Fatalf("FileState = %v, %v; want true, nil", ok, err)
 	}
 	if o, tr := state(id); o.String != "unsynced" || tr.Valid {
 		t.Errorf("after demote: outcome=%+v tier=%+v; want unsynced and NULL", o, tr)
 	}
 
 	id = insertSyncTierRow(t, dbh, "removed")
-	if ok, err := q.SetRemediatedFileState(ctx, id, ""); err != nil || !ok {
-		t.Fatalf("SetRemediatedFileState(empty) = %v, %v; want true, nil", ok, err)
+	if err := q.SetTimingOutcome(ctx, id, rec(str(""))); err != nil {
+		t.Fatalf("SetTimingOutcome(empty): %v", err)
 	}
 	if o, _ := state(id); o.Valid {
 		t.Errorf("empty outcome stored %q, want NULL", o.String)
@@ -252,10 +262,10 @@ func TestSetRemediatedFileState(t *testing.T) {
 	if _, err := dbh.Exec(`UPDATE work_queue SET status = 'processing' WHERE id = ?`, id); err != nil {
 		t.Fatalf("mark processing: %v", err)
 	}
-	if ok, err := q.SetRemediatedFileState(ctx, id, "unsynced"); err != nil || ok {
-		t.Fatalf("processing row: SetRemediatedFileState = %v, %v; want false, nil", ok, err)
+	if err := q.SetTimingOutcome(ctx, id, rec(str("unsynced"))); err != nil {
+		t.Fatalf("processing row: %v", err)
 	}
 	if o, tr := state(id); o.String != "synced" || tr.String != SyncTierWord {
-		t.Errorf("processing row was touched: outcome=%+v tier=%+v", o, tr)
+		t.Errorf("processing row's file state was touched: outcome=%+v tier=%+v", o, tr)
 	}
 }

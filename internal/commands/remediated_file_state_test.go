@@ -112,11 +112,52 @@ func TestRevalidateApplyRestampsTheFileStateAfterEachAction(t *testing.T) {
 	}
 }
 
-// TestRestampFileStateLeavesANonRemediatedRowAlone: a finding with no action
+// TestFileStateForLeavesANonRemediatedRowAlone: a finding with no action
 // (off, or a verdict that does not remediate) must not touch the row.
-func TestRestampFileStateLeavesANonRemediatedRowAlone(t *testing.T) {
-	ok, err := restampFileState(context.Background(), nil, revalidate.Finding{ID: 1})
-	if ok || err != nil {
-		t.Errorf("restampFileState with no action = %v, %v; want false, nil (and no queue call)", ok, err)
+func TestFileStateForLeavesANonRemediatedRowAlone(t *testing.T) {
+	if got := fileStateFor(revalidate.Finding{ID: 1}); got != nil {
+		t.Errorf("fileStateFor with no action = %q; want nil", *got)
+	}
+}
+
+// TestSweepVerdictAndFileStateAreOneWrite: when the combined write fails, NEITHER
+// the verdict nor the file state lands and the row stays in the timing backlog.
+func TestSweepVerdictAndFileStateAreOneWrite(t *testing.T) {
+	ctx := context.Background()
+	job, _, root, lrc := sweepFixture(t, nil)
+	dbPath := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(lrc))), "sweep.db")
+	writeFile(t, lrc, lateCueBody)
+	tierTheRow(t, dbPath)
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	// Fail only a write that sets outcome_type to 'unsynced' (the combined write).
+	if _, err := sqlDB.Exec(`CREATE TRIGGER fail_restamp BEFORE UPDATE OF timing_outcome ON work_queue
+		WHEN NEW.outcome_type = 'unsynced' BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	job.rev = revalidate.New(
+		func(context.Context, string, int64, int64) (int, bool, error) { return 120, true, nil },
+		revalidate.Options{Roots: []string{root}, MisSyncedAction: revalidate.ActionDemote,
+			CategoricalAction: revalidate.ActionDemote, QuarantineDir: filepath.Join(t.TempDir(), "quarantine")},
+	)
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Stamped != 0 {
+		t.Errorf("Stamped = %d, want 0 when the write failed", res.Stamped)
+	}
+	var verdict, outcome sql.NullString
+	if err := sqlDB.QueryRow(`SELECT timing_outcome, outcome_type FROM work_queue`).Scan(&verdict, &outcome); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if verdict.Valid || outcome.String != "synced" {
+		t.Errorf("partial write: timing_outcome=%+v outcome_type=%+v; want NULL and synced", verdict, outcome)
+	}
+	if n, err := job.q.CountTimingBacklog(ctx); err != nil || n != 1 {
+		t.Errorf("backlog = %d, %v; want the row still queued", n, err)
 	}
 }

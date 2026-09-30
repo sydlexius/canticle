@@ -2168,28 +2168,6 @@ func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType stri
 	return nil
 }
 
-// SetRemediatedFileState re-describes a row after a timing remediation (#1130)
-// changed the file it points at: outcome_type becomes outcomeType (empty stores
-// NULL, for a sidecar that was removed) and sync_tier is cleared, since no
-// synced sidecar remains to tier. Guarded like SetTimingOutcomeIfIdle: a
-// 'processing' row is the worker's to describe, so it reports false and is left
-// alone. The caller stamps only for an action that SUCCEEDED.
-func (q *DBQueue) SetRemediatedFileState(ctx context.Context, id int64, outcomeType string) (bool, error) {
-	res, err := q.db.ExecContext(ctx,
-		`UPDATE work_queue SET outcome_type = ?, sync_tier = NULL
-         WHERE id = ? AND status <> 'processing'`,
-		nullIfEmpty(outcomeType), id,
-	)
-	if err != nil {
-		return false, fmt.Errorf("queue: set remediated file state for id %d: %w", id, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("queue: set remediated file state for id %d: rows affected: %w", id, err)
-	}
-	return n > 0, nil
-}
-
 // IDsBySourcePaths returns the ids of the rows (every status EXCEPT
 // 'processing') whose source_path is any of the given audio files, ascending by
 // id, so oldest first, and without duplicates. It is the
@@ -2265,6 +2243,14 @@ type TimingRecord struct {
 	// treats as post-settle: a forgotten source fails toward a provider pass,
 	// never toward skipping one. Any other value is rejected.
 	Source string
+	// FileState, when non-nil, re-describes the file in the SAME UPDATE as the
+	// verdict (#1130), so the two succeed or fail together: a verdict without its
+	// file state would retire the row from the timing backlog while
+	// outcome_type/sync_tier still describe a sidecar that is gone. The value is
+	// the new outcome_type ("" stores NULL, for a removed sidecar) and sync_tier
+	// is cleared. A 'processing' row keeps its file state (the worker's to
+	// describe) while the verdict is written as before. nil changes neither.
+	FileState *string
 }
 
 // Timing stamp sources (work_queue.timing_stamp_source, migration 055).
@@ -2293,6 +2279,23 @@ func (r TimingRecord) stampSource() (any, error) {
 const timingSourceSet = `timing_stamp_source = ?,
              missync_recheck_generation = CASE WHEN COALESCE(?, '') = 'fetch' THEN missync_recheck_generation ELSE NULL END`
 
+// fileStateArgs returns the (apply, outcome_type) bind pair for fileStateSQL:
+// apply is 0 when rec.FileState is nil, so the same statement leaves the file
+// state alone.
+func (r TimingRecord) fileStateArgs() (apply int, outcome any) {
+	if r.FileState == nil {
+		return 0, nil
+	}
+	return 1, nullIfEmpty(*r.FileState)
+}
+
+// fileStateSQL is the constant tail of the timing UPDATE's SET list (two binds,
+// see fileStateArgs): it re-describes the file only when asked and only for a
+// row the worker is not processing.
+const fileStateSQL = `,
+             outcome_type = CASE WHEN ? = 1 AND status <> 'processing' THEN ? ELSE outcome_type END,
+             sync_tier = CASE WHEN ? = 1 AND status <> 'processing' THEN NULL ELSE sync_tier END`
+
 // SetTimingOutcome records how a row's synced lyric compared against the audio
 // duration (#440). The worker calls this before Complete while the row is still
 // in 'processing'; the UPDATE keys on id alone (no status guard, matching
@@ -2318,20 +2321,16 @@ func (q *DBQueue) SetTimingOutcome(ctx context.Context, id int64, rec TimingReco
 	if !rec.EvaluatedAt.IsZero() {
 		evaluatedAt = formatTime(rec.EvaluatedAt)
 	}
+	fsApply, fsOutcome := rec.fileStateArgs()
 	_, err = q.db.ExecContext(ctx,
 		`UPDATE work_queue
          SET timing_outcome = ?,
              overrun_magnitude = ?,
              overrun_ratio = ?,
              evaluated_at = ?,
-             `+timingSourceSet+`
+             `+timingSourceSet+fileStateSQL+`
          WHERE id = ?`,
-		rec.Outcome,
-		magnitude,
-		ratio,
-		evaluatedAt,
-		src, src,
-		id,
+		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, fsApply, fsOutcome, fsApply, id,
 	)
 	if err != nil {
 		return fmt.Errorf("queue: set timing outcome for id %d: %w", id, err)
@@ -2365,15 +2364,16 @@ func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec Timi
 	if !rec.EvaluatedAt.IsZero() {
 		evaluatedAt = formatTime(rec.EvaluatedAt)
 	}
+	fsApply, fsOutcome := rec.fileStateArgs()
 	res, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue
          SET timing_outcome = ?,
              overrun_magnitude = ?,
              overrun_ratio = ?,
              evaluated_at = ?,
-             `+timingSourceSet+`
+             `+timingSourceSet+fileStateSQL+`
          WHERE id = ? AND status <> 'processing'`,
-		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, id,
+		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, fsApply, fsOutcome, fsApply, id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: set timing outcome (guarded) for id %d: %w", id, err)
