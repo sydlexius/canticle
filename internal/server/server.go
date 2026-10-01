@@ -866,6 +866,10 @@ type statusRecorder struct {
 	status int
 }
 
+// Unwrap exposes the underlying writer to http.NewResponseController, so a
+// handler can extend its own write deadline (the preview audio stream, #481).
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/reports"
@@ -93,6 +96,9 @@ func TestPreviewAudioServesBytesWithHeaders(t *testing.T) {
 	if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
 		t.Errorf("Accept-Ranges = %q, want bytes", got)
 	}
+	if got := rec.Header().Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
+		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", got)
+	}
 }
 
 func TestPreviewAudioRange(t *testing.T) {
@@ -153,6 +159,9 @@ func TestPreviewAudioRefusals(t *testing.T) {
 			}
 			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+			if got := rec.Header().Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
+				t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", got)
 			}
 		})
 	}
@@ -256,6 +265,150 @@ func TestPreviewContentType(t *testing.T) {
 	} {
 		if got := previewContentType(path); got != want {
 			t.Errorf("previewContentType(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// TestPreviewAudioIntermediateSwapEscapes pins F1 of the #481 review: root/Album
+// was a real directory when the row was written and is a symlink to an outside
+// directory at open time. Confinement happens AT the open (os.Root), not in an
+// earlier check, so this post-swap state is exactly what the open sees; it must
+// 404 and never serve the outside file.
+func TestPreviewAudioIntermediateSwapEscapes(t *testing.T) {
+	f := newPreviewFixture(t)
+	secret := []byte("SECRET-OUTSIDE-CONTENT")
+	if err := os.WriteFile(filepath.Join(f.outside, "song.flac"), secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	album := filepath.Join(f.root, "Album")
+	if err := os.Mkdir(album, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := strconv.FormatInt(f.row(t, f.writeFile(t, album, "song.flac")), 10)
+	if rec := f.get(id); rec.Code != http.StatusOK {
+		t.Fatalf("before swap: status = %d, want 200", rec.Code)
+	}
+	if err := os.RemoveAll(album); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(f.outside, album); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	rec := f.get(id)
+	if bytes.Contains(rec.Body.Bytes(), secret) {
+		t.Fatal("served an out-of-root file through a swapped intermediate directory")
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("after swap: status = %d, want 404", rec.Code)
+	}
+}
+
+// TestPreviewAudioSymlinkedRoot pins F3: a root configured through a symlink
+// serves a row stored in either spelling, since the Lidarr webhook stores the
+// resolved path while the scanner stores the configured one.
+func TestPreviewAudioSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "music")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	f := &previewFixture{root: link, outside: t.TempDir(), db: openReportsTestDB(t)}
+	if _, err := f.db.ExecContext(context.Background(),
+		`INSERT INTO libraries (path, name) VALUES (?, 'lib')`, link); err != nil {
+		t.Fatal(err)
+	}
+	f.mux = newReportsUIServer(t, f.db)
+	resolved, err := filepath.EvalSymlinks(f.writeFile(t, real, "song.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, src := range map[string]string{
+		"configured spelling": filepath.Join(link, "song.flac"),
+		"resolved spelling":   resolved,
+	} {
+		rec := f.get(strconv.FormatInt(f.row(t, src), 10))
+		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), previewBytes) {
+			t.Errorf("%s: status = %d, want 200 with the bytes", name, rec.Code)
+		}
+	}
+}
+
+// TestPreviewAudioOutlivesServerWriteTimeout pins F2: the server-wide
+// WriteTimeout (15s in production, scaled down here) must not cut a slowly
+// consumed audio stream, which a buffering <audio> element always is.
+func TestPreviewAudioOutlivesServerWriteTimeout(t *testing.T) {
+	f := newPreviewFixture(t)
+	big := bytes.Repeat([]byte{0x5a}, 8<<20)
+	p := filepath.Join(f.root, "big.flac")
+	if err := os.WriteFile(p, big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := strconv.FormatInt(f.row(t, p), 10)
+	srv := httptest.NewUnstartedServer(f.mux)
+	srv.Config.WriteTimeout = 200 * time.Millisecond
+	srv.Start()
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/preview/"+id+"/audio", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=0-")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	buf := make([]byte, 512<<10)
+	var n int
+	start := time.Now()
+	for {
+		k, rerr := resp.Body.Read(buf)
+		n += k
+		if rerr != nil {
+			if !errors.Is(rerr, io.EOF) {
+				t.Fatalf("stream cut after %d of %d bytes in %v: %v", n, len(big), time.Since(start), rerr)
+			}
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if n != len(big) {
+		t.Fatalf("read %d bytes, want %d", n, len(big))
+	}
+	if time.Since(start) < srv.Config.WriteTimeout {
+		t.Fatalf("stream finished in %v, under the %v WriteTimeout; the test proves nothing", time.Since(start), srv.Config.WriteTimeout)
+	}
+}
+
+func TestOpenPreviewAudioRootMatching(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "song.flac")
+	if err := os.WriteFile(p, previewBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		roots []string
+		path  string
+		ok    bool
+	}{
+		"blank root skipped":  {[]string{"", root}, p, true},
+		"relative path":       {[]string{root}, "song.flac", false},
+		"no roots":            {nil, p, false},
+		"root is a file":      {[]string{p}, p, false},
+		"root itself":         {[]string{root}, root, false},
+		"sibling with prefix": {[]string{root}, root + "x/song.flac", false},
+	} {
+		f, _, ok := openPreviewAudio(tc.roots, tc.path)
+		if f != nil {
+			_ = f.Close()
+		}
+		if ok != tc.ok {
+			t.Errorf("%s: ok = %v, want %v", name, ok, tc.ok)
 		}
 	}
 }

@@ -109,6 +109,22 @@ func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, erro
 	return t, nil
 }
 
+// PreviewAudioPath returns only the trimmed source_path of work_queue row id,
+// for the audio route, which a browser hits once per Range request: it touches
+// no file, so seeking does not repeat PreviewSource's sidecar Lstats. A missing
+// row yields ErrPreviewNotFound; a blank path yields "".
+func (r *Repo) PreviewAudioPath(ctx context.Context, id int64) (string, error) {
+	var p string
+	err := r.db.QueryRowContext(ctx, `SELECT source_path FROM work_queue WHERE id = ?`, id).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrPreviewNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("preview audio path %d: %w", id, err)
+	}
+	return strings.TrimSpace(p), nil
+}
+
 // resolveRegular returns exact when it is a regular file (Lstat, so a symlink
 // is not one), else the extension-case variant sidecar.ResolveCaseVariant
 // finds (bounded Lstats, no directory read), else "".
@@ -144,9 +160,8 @@ func elrcCandidate(exact string) string {
 // libraries table on each call so a root added or removed while serving takes
 // effect without a restart. Ordered by id for determinism. It is the input a
 // caller's path confinement checks against, but the paths are stored as given
-// (not cleaned, symlinks unresolved), so a consumer must confine with
-// pathutil.ResolveWithinRoot (never the lexical WithinRoot) and open with
-// O_NOFOLLOW.
+// (not cleaned, symlinks unresolved), so a consumer must never trust a lexical
+// match alone: open through an os.Root on the root so no component can escape.
 func (r *Repo) LibraryRoots(ctx context.Context) ([]string, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT path FROM libraries ORDER BY id`)
 	if err != nil {

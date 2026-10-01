@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/reports"
@@ -46,13 +48,72 @@ func previewContentType(path string) string {
 	return "application/octet-stream"
 }
 
+// previewWriteBound replaces the server-wide 15s WriteTimeout for one audio
+// response. A browser reads a media stream with backpressure (it stops reading
+// once it has buffered ahead, and while paused), so a whole-track stream
+// legitimately outlives 15s by minutes. 30 minutes covers a long track played
+// or paused end to end, while still bounding how long a stalled client can pin
+// a goroutine and an open file; a stream cut at the bound is resumed by the
+// browser with a fresh Range request from where it stopped.
+const previewWriteBound = 30 * time.Minute
+
+// openPreviewAudio opens p through an os.Root on the library root it lies
+// under, so no component of the path, intermediate or final, can resolve
+// outside that root at open time, whatever was swapped after the row was
+// written. A root matches by its configured spelling or its symlink-resolved
+// spelling, since a row may store either. The handle is fstat'ed regular.
+func openPreviewAudio(roots []string, p string) (*os.File, fs.FileInfo, bool) {
+	if !filepath.IsAbs(p) {
+		return nil, nil, false
+	}
+	p = filepath.Clean(p)
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		abs, canon := pathutil.CanonicalRoot(root)
+		for _, spelling := range []string{abs, canon} {
+			rel, err := filepath.Rel(spelling, p)
+			if err != nil || !filepath.IsLocal(rel) {
+				continue
+			}
+			if f, fi, ok := openInRoot(canon, rel); ok {
+				return f, fi, true
+			}
+		}
+	}
+	return nil, nil, false
+}
+
+// openInRoot opens rel read-only beneath dir via os.Root (which refuses any
+// escaping component on every platform) and returns it only if it is a
+// regular file. previewOpenFlags keeps a FIFO from blocking the open.
+func openInRoot(dir, rel string) (*os.File, fs.FileInfo, bool) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, false
+	}
+	defer func() { _ = root.Close() }()
+	f, err := root.OpenFile(rel, os.O_RDONLY|previewOpenFlags, 0)
+	if err != nil {
+		return nil, nil, false
+	}
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, nil, false
+	}
+	return f, fi, true
+}
+
 // handlePreviewAudio streams the audio file of one work_queue row with Range
-// support. The path comes from a database column, so it is confined to the LIVE
-// library roots (symlink-resolved on both sides) and opened without following a
-// symlink. Every refusal is the same bare 404: it never says which check failed
-// and never carries a path. The path is never logged, only the row id.
+// support. The path comes from a database column, so it is opened only through
+// an os.Root on one of the LIVE library roots (see openPreviewAudio). Every
+// refusal is the same bare 404: it never says which check failed and never
+// carries a path. The path is never logged, only the row id.
 func (u *UI) handlePreviewAudio(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
 		http.NotFound(w, r)
@@ -63,7 +124,7 @@ func (u *UI) handlePreviewAudio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview data source unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	target, err := u.reports.PreviewSource(r.Context(), id)
+	audioPath, err := u.reports.PreviewAudioPath(r.Context(), id)
 	if errors.Is(err, reports.ErrPreviewNotFound) {
 		http.NotFound(w, r)
 		return
@@ -79,37 +140,16 @@ func (u *UI) handlePreviewAudio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
 		return
 	}
-	resolved := ""
-	for _, root := range roots {
-		if p, ok := pathutil.ResolveWithinRoot(root, target.AudioPath); ok {
-			resolved = p
-			break
-		}
-	}
-	if resolved == "" {
-		slog.Warn("preview audio refused: not under a library root", "id", id)
-		http.NotFound(w, r)
-		return
-	}
-	f, err := openPreviewAudio(resolved)
-	if err != nil {
-		slog.Warn("preview audio open failed", "id", id)
+	f, fi, ok := openPreviewAudio(roots, audioPath)
+	if !ok {
+		slog.Warn("preview audio refused: not a regular file under a library root", "id", id)
 		http.NotFound(w, r)
 		return
 	}
 	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() {
-		http.NotFound(w, r)
-		return
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(previewWriteBound)); err != nil {
+		slog.Error("preview audio: cannot extend the write deadline; long streams will be cut", "id", id, "error", err)
 	}
-	// The handle must be the file the confined path names right now, not
-	// something swapped in between the resolve and the open.
-	if li, err := os.Lstat(resolved); err != nil || !os.SameFile(fi, li) {
-		slog.Warn("preview audio refused: path changed during open", "id", id)
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", previewContentType(resolved))
+	w.Header().Set("Content-Type", previewContentType(audioPath))
 	http.ServeContent(w, r, "", fi.ModTime(), f)
 }

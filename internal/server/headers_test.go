@@ -53,3 +53,14 @@ func TestSecurityHeadersOnEveryResponse(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusRecorderUnwraps pins that a handler behind Handler.ServeHTTP can
+// still reach the connection's write deadline: the preview audio stream extends
+// it past the server-wide WriteTimeout (#481), and without Unwrap the
+// ResponseController call fails with ErrNotSupported.
+func TestStatusRecorderUnwraps(t *testing.T) {
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	if err := http.NewResponseController(rec).Flush(); err != nil {
+		t.Fatalf("Flush through statusRecorder: %v, want nil", err)
+	}
+}

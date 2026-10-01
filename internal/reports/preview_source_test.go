@@ -319,3 +319,26 @@ func TestLibraryRootsLive(t *testing.T) {
 		t.Fatalf("after delete got %v", got)
 	}
 }
+
+func TestPreviewAudioPath(t *testing.T) {
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	ctx := context.Background()
+	id := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "T", status: "done"})
+	if got, err := repo.PreviewAudioPath(ctx, id); err != nil || got != "" {
+		t.Fatalf("blank: got %q, %v", got, err)
+	}
+	setSourcePath(t, sqlDB, id, "  /music/a/song.flac \n")
+	if got, err := repo.PreviewAudioPath(ctx, id); err != nil || got != "/music/a/song.flac" {
+		t.Fatalf("got %q, %v, want the trimmed path", got, err)
+	}
+	if _, err := repo.PreviewAudioPath(ctx, id+999); !errors.Is(err, reports.ErrPreviewNotFound) {
+		t.Fatalf("missing row: err = %v, want ErrPreviewNotFound", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.PreviewAudioPath(ctx, id); err == nil || errors.Is(err, reports.ErrPreviewNotFound) {
+		t.Fatalf("closed db: err = %v, want a wrapped query error", err)
+	}
+}
