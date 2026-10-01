@@ -19,7 +19,7 @@ const SHELL_JS = join(dirname(fileURLToPath(import.meta.url)), "..", "shell.js")
 const BODY = `
   <header><button type="button" class="mx-nav-toggle" aria-expanded="false" aria-controls="mx-sidebar">Menu</button></header>
   <aside id="mx-sidebar"><a id="navlink" href="/queue">Queue</a><div id="empty-space">spacer</div></aside>
-  <main><button type="button" id="content-btn">Content</button><p id="content-text">text</p></main>`;
+  <main><div id="mx-main"><button type="button" id="content-btn">Content</button><p id="content-text">text</p></div></main>`;
 
 function load({ phoneMatches = true } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`, {
@@ -106,6 +106,43 @@ describe("phone sidebar toggle", () => {
     expect(isOpen(h)).toBe(true);
     h.el("content-text").click();
     expect(isOpen(h)).toBe(false);
+  });
+
+  it("moves focus out of the closed drawer after an htmx link swap settles", () => {
+    const h = load();
+    h.toggle().click();
+    const link = h.el("navlink");
+    link.addEventListener("click", (e) => e.preventDefault());
+    link.focus();
+    link.click();
+    expect(isOpen(h)).toBe(false);
+
+    const main = h.el("mx-main");
+    main.dispatchEvent(
+      new h.window.CustomEvent("htmx:afterSettle", { bubbles: true, detail: { target: main } }),
+    );
+    const active = h.doc.activeElement;
+    expect(h.nav().contains(active)).toBe(false);
+    expect(active).toBe(main);
+
+    // No permanent tab stop: tabindex is dropped once focus leaves.
+    h.focus(h.toggle());
+    expect(main.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("falls back to the toggle when #mx-main is absent after the swap", () => {
+    const h = load();
+    h.toggle().click();
+    const link = h.el("navlink");
+    link.addEventListener("click", (e) => e.preventDefault());
+    link.focus();
+    link.click();
+    const main = h.el("mx-main");
+    main.remove();
+    h.doc.dispatchEvent(
+      new h.window.CustomEvent("htmx:afterSettle", { bubbles: true, detail: { target: main } }),
+    );
+    expect(h.doc.activeElement).toBe(h.toggle());
   });
 
   it("closes on Escape and returns focus to the toggle", () => {

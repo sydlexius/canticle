@@ -59,7 +59,43 @@
     }
   }
 
+  // Set when a drawer link closes the phone drawer; consumed by the next
+  // htmx:afterSettle on #mx-main (see focusMain).
+  var focusAfterSwap = false;
+
+  // Moves focus to the swapped content region, or to the Menu toggle when
+  // #mx-main is absent. tabindex="-1" is added only for the focus call and
+  // dropped on blur, so the region never becomes a permanent tab stop.
+  function focusMain() {
+    var main = document.getElementById('mx-main');
+    if (main) {
+      main.setAttribute('tabindex', '-1');
+      main.addEventListener('blur', function () {
+        main.removeAttribute('tabindex');
+      }, { once: true });
+      main.focus();
+      return;
+    }
+    var p = parts();
+    if (p) {
+      p.button.focus();
+    }
+  }
+
+  document.addEventListener('htmx:afterSettle', function (ev) {
+    if (!focusAfterSwap) {
+      return;
+    }
+    var t = (ev.detail && ev.detail.target) || ev.target;
+    if (!(t instanceof Element) || t.id !== 'mx-main') {
+      return;
+    }
+    focusAfterSwap = false;
+    focusMain();
+  });
+
   document.addEventListener('click', function (ev) {
+    focusAfterSwap = false;
     var target = ev.target;
     if (!(target instanceof Element)) {
       return;
@@ -79,6 +115,11 @@
       // Picking a link closes the drawer; a click on its empty space does not.
       if (target.closest('a')) {
         setOpen(p, false, false);
+        // An htmx report link swaps only #mx-main, so the clicked anchor stays
+        // the active element and the closed drawer hides it. Remember to move
+        // focus to the swapped content once the swap settles. A full-page link
+        // reloads and needs nothing.
+        focusAfterSwap = phone.matches;
       }
       return;
     }
