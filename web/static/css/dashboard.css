@@ -82,6 +82,33 @@
   min-width: 7rem;
 }
 
+/* A drillable tile (#598): the anchor fills the whole tile (negative margin
+ * cancels the tile padding) so the entire card is the hit target and the focus
+ * ring traces the card edge. */
+.mx-dash-tile-link {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  margin: -0.875rem -1.125rem;
+  padding: 0.875rem 1.125rem;
+  border-radius: var(--mx-radius-md);
+  color: inherit;
+  text-decoration: none;
+}
+
+.mx-dash-tile:has(> .mx-dash-tile-link):hover {
+  border-color: var(--mx-sidebar-active-text);
+}
+
+.mx-dash-tile-link:hover .mx-dash-tile-value {
+  color: var(--mx-sidebar-active-text);
+}
+
+.mx-dash-tile-link:focus-visible {
+  outline: 2px solid var(--mx-sidebar-active-text);
+  outline-offset: 2px;
+}
+
 .mx-dash-tile-label {
   font-family: var(--mx-font-sans);
   font-size: 0.6875rem;
