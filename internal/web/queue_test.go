@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -243,8 +244,27 @@ func TestFormatQueueTime(t *testing.T) {
 	if got := formatQueueTime("not a time"); got != "not a time" {
 		t.Errorf("unparsable = %q, want verbatim", got)
 	}
-	if got := formatQueueTime("2026-06-17T10:00:00Z"); !strings.Contains(got, "2026-06-17") && !strings.Contains(got, "2026-06-16") {
-		t.Errorf("rfc3339 = %q, want a formatted date", got)
+	const raw = "2026-06-17T10:00:00Z"
+	instant := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+
+	// TZ unset: the same UTC rendering every other report produces.
+	t.Setenv("TZ", "")
+	if got, want := formatQueueTime(raw), formatReportTime(instant, nil); got != want {
+		t.Errorf("TZ unset = %q, want %q (UTC)", got, want)
+	}
+
+	// TZ valid: formatted in that zone, not the host's local zone.
+	t.Setenv("TZ", "Pacific/Kiritimati")
+	loc, err := time.LoadLocation("Pacific/Kiritimati")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	got, want := formatQueueTime(raw), formatReportTime(instant, loc)
+	if got != want {
+		t.Errorf("TZ set = %q, want %q", got, want)
+	}
+	if got == formatReportTime(instant, nil) {
+		t.Errorf("TZ set rendered identically to UTC: %q", got)
 	}
 }
 

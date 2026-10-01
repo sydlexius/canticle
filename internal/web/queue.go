@@ -129,8 +129,8 @@ func buildQueueRow(row reports.BucketRow) templates.QueueRow {
 	}
 }
 
-// formatQueueTime renders a stored timestamp in the server's local zone like
-// the other report timestamps. An empty value is "-"; a value in an
+// formatQueueTime renders a stored timestamp in the same display zone as the
+// other reports (serverDisplayLocation: TZ when valid, else UTC). An empty value is "-"; a value in an
 // unrecognized layout is shown verbatim rather than dropped.
 func formatQueueTime(raw string) string {
 	if raw == "" {
@@ -143,7 +143,7 @@ func formatQueueTime(raw string) string {
 				// 1969/1970 would read as a real, ancient retry time.
 				return "-"
 			}
-			return t.In(time.Local).Format(reportTimeFormat)
+			return formatReportTime(t, serverDisplayLocation())
 		}
 	}
 	return raw
