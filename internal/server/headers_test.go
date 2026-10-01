@@ -3,7 +3,9 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
 )
@@ -44,6 +46,42 @@ func TestSecurityHeadersOnEveryResponse(t *testing.T) {
 			if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
 				t.Errorf("Content-Security-Policy = %q, want %q", got, wantCSP)
 			}
+			// Literal, so a refactor of the constant cannot silently drop it:
+			// the preview player's <audio> needs it (#481).
+			if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "media-src 'self'") {
+				t.Errorf("Content-Security-Policy = %q, want it to contain media-src 'self'", got)
+			}
 		})
+	}
+}
+
+// TestStatusRecorderUnwraps pins that a handler behind Handler.ServeHTTP can
+// still reach the connection's write deadline: the preview audio stream extends
+// it past the server-wide WriteTimeout (#481), and without Unwrap the
+// ResponseController call fails with ErrNotSupported.
+func TestStatusRecorderUnwraps(t *testing.T) {
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	if err := http.NewResponseController(rec).Flush(); err != nil {
+		t.Fatalf("Flush through statusRecorder: %v, want nil", err)
+	}
+}
+
+// TestHandlerLetsAHandlerExtendItsWriteDeadline: on a real connection behind
+// Handler, SetWriteDeadline succeeds (the #481 preview stream relies on it).
+func TestHandlerLetsAHandlerExtendItsWriteDeadline(t *testing.T) {
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics")
+	errc := make(chan error, 1)
+	h.mux.HandleFunc("GET /deadline-probe", func(w http.ResponseWriter, _ *http.Request) {
+		errc <- http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Minute))
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := srv.Client().Get(srv.URL + "/deadline-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if err := <-errc; err != nil {
+		t.Fatalf("SetWriteDeadline through Handler: %v, want nil", err)
 	}
 }

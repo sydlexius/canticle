@@ -22,11 +22,12 @@ var ErrPreviewNotFound = errors.New("reports: work_queue row not found")
 // This is PURE DATA. Nothing here opens, serves, or confines a path: every
 // path comes straight from a database column (source_path) or is derived from
 // it, so a caller that serves file content MUST confine each path to the
-// configured library roots (see LibraryRoots) and open it without following
-// symlinks before reading a byte (O_NOFOLLOW). Confinement is deliberately not
-// done here, and a consumer must use pathutil.ResolveWithinRoot, which cleans
-// and resolves both sides, never the lexical pathutil.WithinRoot: stored roots
-// are neither cleaned nor symlink-resolved.
+// configured library roots (see LibraryRoots) before reading a byte, by
+// opening it through an os.Root on the matching root (as the web layer's
+// openPreviewAudio does), so no component can resolve outside the root AT
+// the open. Confinement is deliberately not done here, and a lexical check
+// (pathutil.WithinRoot) is never enough: stored roots are neither cleaned nor
+// symlink-resolved, and a check-then-open races a swapped directory.
 type PreviewTarget struct {
 	ID       int64
 	Artist   string
@@ -56,9 +57,9 @@ type PreviewTarget struct {
 	// extension-case variant (sidecar.ResolveCaseVariant, no directory read)
 	// reported. Empty when there is no LRCPath or no such regular file.
 	//
-	// A consumer MUST, before using it: confine it with
-	// pathutil.ResolveWithinRoot against LibraryRoots, open it with O_NOFOLLOW
-	// (never following a symlink swapped in after the Lstat), and confirm
+	// A consumer MUST, before using it: open it through an os.Root on the
+	// matching LibraryRoots entry (confinement at the open, so a symlink
+	// swapped in after the Lstat cannot escape), and confirm
 	// canticle owns it (lyrics.IsOwnedCompanion semantics) with a BOUNDED
 	// header read, treating a foreign or unreadable file as no companion. One
 	// known divergence the consumer inherits: when several variants exist and
@@ -86,6 +87,8 @@ type PreviewTarget struct {
 // to stream from the same disk). It must NEVER be called per row of a list
 // view: the stats wake disks and cost O(rows), the exact
 // shape #684 removed from the scan path.
+//
+// No production caller yet: its consumer is slice 481-5 (the player page, #481).
 func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, error) {
 	t := PreviewTarget{ID: id}
 	err := r.db.QueryRowContext(ctx,
@@ -107,6 +110,22 @@ func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, erro
 		t.ELRCCandidate = elrcCandidate(sidecar.StemOf(t.LRCPath) + sidecar.ExtWordSynced)
 	}
 	return t, nil
+}
+
+// PreviewAudioPath returns only the trimmed source_path of work_queue row id,
+// for the audio route, which a browser hits once per Range request: it touches
+// no file, so seeking does not repeat PreviewSource's sidecar Lstats. A missing
+// row yields ErrPreviewNotFound; a blank path yields "".
+func (r *Repo) PreviewAudioPath(ctx context.Context, id int64) (string, error) {
+	var p string
+	err := r.db.QueryRowContext(ctx, `SELECT source_path FROM work_queue WHERE id = ?`, id).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrPreviewNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("preview audio path %d: %w", id, err)
+	}
+	return strings.TrimSpace(p), nil
 }
 
 // resolveRegular returns exact when it is a regular file (Lstat, so a symlink
@@ -144,9 +163,8 @@ func elrcCandidate(exact string) string {
 // libraries table on each call so a root added or removed while serving takes
 // effect without a restart. Ordered by id for determinism. It is the input a
 // caller's path confinement checks against, but the paths are stored as given
-// (not cleaned, symlinks unresolved), so a consumer must confine with
-// pathutil.ResolveWithinRoot (never the lexical WithinRoot) and open with
-// O_NOFOLLOW.
+// (not cleaned, symlinks unresolved), so a consumer must never trust a lexical
+// match alone: open through an os.Root on the root so no component can escape.
 func (r *Repo) LibraryRoots(ctx context.Context) ([]string, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT path FROM libraries ORDER BY id`)
 	if err != nil {
