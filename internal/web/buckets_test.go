@@ -59,6 +59,21 @@ func TestQueueBucketSurfacesAgree(t *testing.T) {
 	}
 }
 
+// TestQueueBucketPageHeadingsMatchLabels keeps the /queue/{bucket} drill-down
+// on the same name as the tile that links to it (#599: one name per bucket).
+func TestQueueBucketPageHeadingsMatchLabels(t *testing.T) {
+	for _, b := range queueBuckets {
+		info, ok := queueBucketInfo[b.Key]
+		if !ok {
+			t.Errorf("bucket %q has no drill-down page info", b.Label)
+			continue
+		}
+		if info[0] != b.Label {
+			t.Errorf("bucket %q: drill-down heading is %q", b.Label, info[0])
+		}
+	}
+}
+
 // TestQueueBucketTooltips asserts every bucket has its own non-empty tooltip,
 // and keeps the #477 Given up guard that used to sit on the templ switch:
 // it must not reuse Errored's copy and must name the manual revival command,

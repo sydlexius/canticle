@@ -42,10 +42,10 @@ func (u *UI) registerQueueRoutes(reg routeReg) {
 var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketPending:     {"Queued", "Tracks waiting for their first lyrics lookup."},
 	reports.BucketProcessing:  {"Processing", "Tracks a worker has claimed and is working on now."},
-	reports.BucketDeferred:    {"Retrying", "Tracks with no lyrics found yet, waiting to be retried."},
+	reports.BucketDeferred:    {"Retrying", "Tracks waiting for the worker to try again: lookups that found nothing yet, and word-sync rechecks."},
 	reports.BucketFailed:      {"Errored", "Tracks whose last lookup hit an error; they are retried automatically."},
 	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, the best result there is."},
-	reports.BucketSettled:     {"Settled", "Tracks with lyrics that could still be upgraded to word sync."},
+	reports.BucketSettled:     {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to word sync."},
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
 }
 

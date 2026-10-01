@@ -36,7 +36,7 @@ var queueBuckets = []queueBucket{
 	{
 		Key:     reports.BucketDeferred,
 		Label:   "Retrying",
-		Tooltip: "No lyrics found yet; the worker will look again after a delay.",
+		Tooltip: "Tracks waiting for the worker to try again after a delay: lookups that found nothing yet, and word-sync rechecks.",
 		Value:   func(s reports.QueueSummary) int64 { return s.Deferred },
 	},
 	{
