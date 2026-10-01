@@ -93,17 +93,11 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		view.ProviderTiles = buildProviderTiles(pe)
 	}
 
-	instrumental, err := u.reports.CountInstrumental(ctx)
+	results, err := u.reports.ResultsBreakdown(ctx)
 	if err != nil {
-		return templates.DashboardView{}, fmt.Errorf("dashboard: count instrumental: %w", err)
+		return templates.DashboardView{}, fmt.Errorf("dashboard: results breakdown: %w", err)
 	}
-	view.InstrumentalCount = strconv.FormatInt(instrumental, 10)
-
-	syncTiers, err := u.reports.SyncTierCounts(ctx)
-	if err != nil {
-		return templates.DashboardView{}, fmt.Errorf("dashboard: sync tier counts: %w", err)
-	}
-	view.SyncTierTiles = buildSyncTierTiles(syncTiers)
+	view.ResultsTiles = buildResultsTiles(results)
 
 	recent, err := u.reports.RecentOutcomes(ctx, dashboardRecentLimit)
 	if err != nil {
@@ -270,8 +264,7 @@ func formatWaited(since, now time.Time) string {
 
 // buildQueueTiles shapes a QueueSummary into the dashboard's queue stat tiles,
 // one per queueBuckets entry (#599), so label, tooltip, value and drill-down
-// href (#598) all come from the one bucket definition. The Instrumental tile
-// is rendered by the template, has no bucket, and stays a plain tile.
+// href (#598) all come from the one bucket definition.
 func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 	tiles := make([]templates.StatTile, 0, len(queueBuckets))
 	for _, b := range queueBuckets {
@@ -289,19 +282,20 @@ func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 // inverse of the route registerQueueRoutes serves.
 func queueBucketHref(b reports.Bucket) string { return "/queue/" + string(b) }
 
-// buildSyncTierTiles shapes SyncTierCounts into the dashboard's sync-tier
-// tiles (#627). The three tiles are kept SEPARATE, never summed into one
-// "Synced" number, so an operator can read the terminal-vs-upgradeable split
-// (#553) directly off the dashboard. "Synced (tier unknown)" is always shown,
-// even at zero, matching buildQueueTiles' convention of never omitting a
-// populated status -- a fresh install where every synced row already carries a
-// tier is a real, checkable state, not a rendering gap.
-func buildSyncTierTiles(c reports.SyncTierCounts) []templates.StatTile {
-	return []templates.StatTile{
-		{Label: "Word-synced", Value: strconv.FormatInt(c.WordSynced, 10)},
-		{Label: "Line-synced", Value: strconv.FormatInt(c.LineSynced, 10)},
-		{Label: "Synced (tier unknown)", Value: strconv.FormatInt(c.Unknown, 10)},
+// buildResultsTiles shapes a ResultsBreakdown into the dashboard Results tiles
+// (#599), one per resultBuckets entry. Every tile is always present, zero
+// included, so the row is a checkable sum of the completed population; the
+// word/line/tier-unknown tiles stay separate (#553, #627), never one "Synced".
+func buildResultsTiles(b reports.ResultsBreakdown) []templates.StatTile {
+	tiles := make([]templates.StatTile, 0, len(resultBuckets))
+	for _, rb := range resultBuckets {
+		tiles = append(tiles, templates.StatTile{
+			Label:   rb.Label,
+			Value:   strconv.FormatInt(rb.Value(b), 10),
+			Tooltip: rb.Tooltip,
+		})
 	}
+	return tiles
 }
 
 // buildQueueChart shapes a QueueSummary into the work-queue doughnut chart
