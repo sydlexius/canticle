@@ -27,6 +27,9 @@ import (
 // not a query budget: the report shows the most recent N completed tracks.
 const recentOutcomesLimit = 50
 
+// needsAttentionLimit caps the Needs attention report (#654 AC2).
+const needsAttentionLimit = 25
+
 // reportTimeFormat renders run and completion timestamps in the server's local
 // timezone with a zone abbreviation, so an operator reads the value in whatever
 // zone the daemon runs in (typically UTC in a container) rather than a silently
@@ -44,6 +47,7 @@ type reportDef struct {
 var reportDefs = []reportDef{
 	{"queue-summary", "Queue summary", "Work-queue rows grouped by status."},
 	{"recent-outcomes", "Recent outcomes", "The most recently completed tracks and their derived result."},
+	{"needs-attention", "Needs attention", "Failed tracks, then deferred ones, with their reason and last attempt."},
 	{"provider-effectiveness", "Provider effectiveness", "Per-lane hits, misses, and true per-track hit-rate."},
 	{"instrumental-inventory", "Instrumental inventory", "Tracks confirmed instrumental by the Instrumental Detector."},
 	{"failure-analysis", "Failure analysis", "Failed tracks grouped by reason."},
@@ -494,6 +498,12 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				CompletedAt:     formatReportTime(o.CompletedAt, serverLoc),
 			})
 		}
+	case "needs-attention":
+		items, err := u.reports.NeedsAttention(ctx, needsAttentionLimit)
+		if err != nil {
+			return templates.ReportView{}, err
+		}
+		v.AttentionRows = buildAttentionRows(items, serverLoc)
 	case "provider-effectiveness":
 		rows, err := u.reports.ProviderEffectiveness(ctx)
 		if err != nil {

@@ -41,6 +41,7 @@ type ReportView struct {
 	InstrumentalRows []InstrumentalRow
 	FailureRows      []FailureRow
 	ReviewQueueRows  []ReviewQueueRow
+	AttentionRows    []AttentionRow
 }
 
 // QueueSummaryRow is one status/count pair. IsTotal marks the summary total row
@@ -80,6 +81,20 @@ type RecentOutcomeRow struct {
 	// CompletedAtTZApplied is true when the server formatted CompletedAt using the
 	// TZ env var, signaling that JS should not reformat it.
 	CompletedAtTZApplied bool
+}
+
+// AttentionRow is one failed or deferred track (#654 AC2). State is the pill
+// text ("failed (transient)", "failed (persistent)", "deferred"), StateClass
+// its pill class. Reason is the failsig-normalized signature, never raw
+// last_error. LastAttempt is updated_at, the row's last write: never labeled a
+// completion, since nothing completed.
+type AttentionRow struct {
+	Artist      string
+	Title       string
+	State       string
+	StateClass  string
+	Reason      string
+	LastAttempt string
 }
 
 // ProviderRow is one provider lane's hit/miss tally and true per-track hit-rate.

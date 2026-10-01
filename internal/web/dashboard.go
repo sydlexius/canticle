@@ -20,6 +20,10 @@ import (
 // Kept lower than the canned report (50) to keep the page scannable.
 const dashboardRecentLimit = 20
 
+// dashboardAttentionLimit caps the Needs attention section (#654 AC2), kept
+// small so failed and deferred rows never crowd the page.
+const dashboardAttentionLimit = 10
+
 // dashboardUpNextLimit caps the "Up next" panel (#572). The lookahead buffer is
 // DB-bounded by queue.batch_size (default 10), so a cap comfortably above any
 // realistic batch size means the panel shows the whole buffer and the "N
@@ -106,6 +110,13 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		return templates.DashboardView{}, fmt.Errorf("dashboard: recent outcomes: %w", err)
 	}
 	view.RecentRows = buildRecentRows(recent, serverLoc)
+
+	attention, err := u.reports.NeedsAttention(ctx, dashboardAttentionLimit)
+	if err != nil {
+		return templates.DashboardView{}, fmt.Errorf("dashboard: needs attention: %w", err)
+	}
+	view.AttentionRows = buildAttentionRows(attention, serverLoc)
+	view.AttentionLimit = dashboardAttentionLimit
 
 	upNext, err := u.reports.UpNext(ctx, dashboardUpNextLimit)
 	if err != nil {
@@ -517,4 +528,26 @@ func formatDashboardTime(t time.Time, loc *time.Location) (display, iso string, 
 		return t.In(loc).Format("2006-01-02 15:04 MST"), iso, true
 	}
 	return t.UTC().Format("2006-01-02 15:04 UTC"), iso, false
+}
+
+// buildAttentionRows shapes reports.NeedsAttention rows for the dashboard and
+// Reports (#654 AC2). A failed row names its failsig class in text, so the
+// state never rests on color alone; a deferred row is not classified.
+// updated_at is RFC3339 (the trigger's format); an unparsable or empty value
+// renders "-", like a NULL completion time.
+func buildAttentionRows(items []reports.FailureItem, loc *time.Location) []templates.AttentionRow {
+	rows := make([]templates.AttentionRow, 0, len(items))
+	for _, it := range items {
+		state, class := "deferred", "mx-result-tier mx-result-tier-deferred"
+		if it.Status == "failed" {
+			state, class = "failed ("+it.Class.String()+")", "mx-result-tier mx-result-tier-failed"
+		}
+		at, _ := time.Parse(time.RFC3339, it.UpdatedAt)
+		rows = append(rows, templates.AttentionRow{
+			Artist: it.Artist, Title: it.Title,
+			State: state, StateClass: class, Reason: it.Reason,
+			LastAttempt: formatReportTime(at, loc),
+		})
+	}
+	return rows
 }

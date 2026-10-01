@@ -5,13 +5,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
 // TestRecentOutcomesUnrecordedBlanksLaneAndExplains pins #654: a row whose
 // outcome was never recorded (ResultUnknown) shows NO provider lane, and its
-// Detail coalesces stored detail > timing verdict > the legacy literal.
-// last_error is never surfaced (#1167 tracks hardening the normalizer first). Rows with a recorded outcome keep their lane, and a miss
+// Detail coalesces stored detail > timing verdict > failsig-normalized
+// last_error > the legacy literal (#654 AC4: a last_error that explains the
+// row's state is reachable from the UI, and only ever normalized). A blank or
+// whitespace-only last_error explains nothing and falls through to the
+// literal. Rows with a recorded outcome keep their lane, and a miss
 // does not echo its own sentinel as a reason. A row with a recorded timing
 // verdict (categorical, remediated mis_synced) KEEPS its lane.
 func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
@@ -31,6 +35,13 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 		artist: "A", title: "legacy-error", status: "done",
 		completedAt: "2026-08-16T04:40:00Z", providerLane: "petitlyrics",
 		lastError: `output dir "/data/library/private": permission denied`,
+	})
+	// prune.retireUnresolvable's shape: settled done, no outcome, the sentinel
+	// as last_error.
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "prune-retired", status: "done",
+		completedAt: "2026-08-16T04:35:00Z", providerLane: "musixmatch",
+		lastError: queue.UnresolvableGoneError,
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "A", title: "quarantined", status: "done",
@@ -69,7 +80,8 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 	}{
 		{"legacy-stale-lane", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
 		{"legacy-whitespace-error", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
-		{"legacy-error", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
+		{"legacy-error", reports.ResultUnknown, "", `output dir "<path>": permission denied`},
+		{"prune-retired", reports.ResultUnknown, "", queue.UnresolvableGoneError},
 		{"quarantined", reports.ResultUnknown, "musixmatch", "timing refused: categorical"},
 		{"remediated", reports.ResultUnknown, "petitlyrics", "timing refused: mis_synced"},
 		{"synced", reports.ResultSynced, "musixmatch", ""},
@@ -79,8 +91,9 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 		if !ok {
 			t.Fatalf("row %q missing from results", tc.title)
 		}
-		if strings.Contains(o.Detail, "/data/library") || strings.Contains(o.Detail, "permission denied") {
-			t.Errorf("%s: Detail %q leaks last_error", tc.title, o.Detail)
+		if strings.Contains(o.Detail, "/data/library") || strings.Contains(o.Detail, "ignored in favor") ||
+			strings.Contains(o.Detail, "stale error") {
+			t.Errorf("%s: Detail %q leaks raw or out-ranked last_error", tc.title, o.Detail)
 		}
 		if o.Result != tc.wantResult || o.ProviderLane != tc.wantLane || o.Detail != tc.wantDetail {
 			t.Errorf("%s: got result=%q lane=%q detail=%q; want result=%q lane=%q detail=%q",

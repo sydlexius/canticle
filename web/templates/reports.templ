@@ -85,6 +85,8 @@ templ reportView(v ReportView) {
 			@tableQueueSummary(v.QueueRows)
 		case "recent-outcomes":
 			@tableRecentOutcomes(v.RecentRows)
+		case "needs-attention":
+			@attentionTable(v.AttentionRows, "Nothing failed or deferred.")
 		case "provider-effectiveness":
 			@tableProviders(v.ProviderRows)
 		case "instrumental-inventory":
