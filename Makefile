@@ -181,18 +181,19 @@ ui-validate:
 			exit 1; \
 		fi; \
 	done
-	@# Size band: output.css should stay within 7000-21000 bytes.
+	@# Size band: output.css should stay within 7000-40000 bytes.
 	@# Too small = a @source glob is too narrow (classes dropped silently).
 	@# Too large = Go vocabulary may be leaking back into output.css.
-	@# If an intentional change moves the size outside this band, update both bounds here.
-	@# Upper bound raised to 20000 for the #288 settings page (guided controls add CSS),
-	@# then to 21000 for the #385 tokenless-Musixmatch notice banner, then to 23000
-	@# for the #837 provider order list (draggable rows, rank badges, move buttons).
+	@# The upper bound is a leak detector, not a style budget. It was bumped in
+	@# ~1-2 KB steps per feature (20000 #288, 21000 #385, 23000 #837), which made
+	@# every new UI surface fail the gate on legitimate CSS. At 40000 (#1094) it
+	@# leaves room for the Dashboard & Web UI milestone while a leak, which emits
+	@# classes for whole swaths of Go identifiers, still blows well past it.
 	@# Only the UPPER bound moves: the lower bound guards a different failure (a
-	@# @source glob too narrow to emit the classes), which this change does not touch.
+	@# @source glob too narrow to emit the classes).
 	@size=$$(wc -c < web/static/css/output.css | awk '{print $$1}'); \
-	if [ "$$size" -lt 7000 ] || [ "$$size" -gt 23000 ]; then \
-		echo "ui-validate: output.css is $$size B, outside the expected 7000-23000 B band."; \
+	if [ "$$size" -lt 7000 ] || [ "$$size" -gt 40000 ]; then \
+		echo "ui-validate: output.css is $$size B, outside the expected 7000-40000 B band."; \
 		echo "  Update the band in the Makefile ui-validate target if the change is intentional."; \
 		exit 1; \
 	fi
