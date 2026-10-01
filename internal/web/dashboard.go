@@ -268,33 +268,21 @@ func formatWaited(since, now time.Time) string {
 	}
 }
 
-// buildQueueTiles shapes a QueueSummary into the dashboard's queue stat tiles.
-//
-// Done is shown as its two halves, Finished and Settled (upgradable), never
-// beside them (#553, maintainer decision 2026-09-24): with word-synced output
-// the only terminal state, a bare "Done" reads as "finished" while most of it
-// is a current-best snapshot, not a finished one. Replacing rather than
-// adding keeps the row one status axis that sums to Total. The doughnut
-// (buildQueueChart) splits Done the same way (#1139).
+// buildQueueTiles shapes a QueueSummary into the dashboard's queue stat tiles,
+// one per queueBuckets entry (#599), so label, tooltip, value and drill-down
+// href (#598) all come from the one bucket definition. The Instrumental tile
+// is rendered by the template, has no bucket, and stays a plain tile.
 func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
-	// Every tile here is one reports.Bucket, so its drill-down href comes from
-	// the bucket registry (#598), never a hand-typed key. The Instrumental tile
-	// is rendered by the template, has no bucket, and stays a plain tile.
-	tile := func(label string, b reports.Bucket, n int64) templates.StatTile {
-		return templates.StatTile{Label: label, Value: strconv.FormatInt(n, 10), Href: queueBucketHref(b)}
+	tiles := make([]templates.StatTile, 0, len(queueBuckets))
+	for _, b := range queueBuckets {
+		tiles = append(tiles, templates.StatTile{
+			Label:   b.Label,
+			Value:   strconv.FormatInt(b.Value(qs), 10),
+			Href:    queueBucketHref(b.Key),
+			Tooltip: b.Tooltip,
+		})
 	}
-	return []templates.StatTile{
-		tile("Pending", reports.BucketPending, qs.Pending),
-		tile("Processing", reports.BucketProcessing, qs.Processing),
-		tile("Finished", reports.BucketFinished, qs.Finished),
-		tile("Settled (upgradable)", reports.BucketSettled, qs.SettledUpgradable),
-		tile("Failed", reports.BucketFailed, qs.Failed),
-		tile("Deferred", reports.BucketDeferred, qs.Deferred),
-		// Unavailable (#477): an exhausted benign miss, distinct from Done (which
-		// implies a written sidecar) and from Failed/Deferred (which are still
-		// active or retrying).
-		tile("Unavailable", reports.BucketUnavailable, qs.Unavailable),
-	}
+	return tiles
 }
 
 // queueBucketHref is the /queue/{bucket} drill-down URL for a bucket, the
@@ -317,23 +305,19 @@ func buildSyncTierTiles(c reports.SyncTierCounts) []templates.StatTile {
 }
 
 // buildQueueChart shapes a QueueSummary into the work-queue doughnut chart
-// series (#318). The label order is fixed and matches the queue tiles (Done is
-// split into Finished and Settled (upgradable), #1139) so the chart-init color
-// map (keyed by label) stays in sync. Total is intentionally
-// excluded -- it is the sum of the segments, not a segment.
+// series (#318), one segment per queueBuckets entry in the same order as the
+// tiles, so the chart-init color map (keyed by label) stays in sync. Total is
+// intentionally excluded -- it is the sum of the segments, not a segment.
 func buildQueueChart(qs reports.QueueSummary) templates.ChartData {
-	return templates.ChartData{
-		Labels: []string{"Pending", "Processing", "Finished", "Settled (upgradable)", "Failed", "Deferred", "Unavailable"},
-		Values: []float64{
-			float64(qs.Pending),
-			float64(qs.Processing),
-			float64(qs.Finished),
-			float64(qs.SettledUpgradable),
-			float64(qs.Failed),
-			float64(qs.Deferred),
-			float64(qs.Unavailable),
-		},
+	c := templates.ChartData{
+		Labels: make([]string, 0, len(queueBuckets)),
+		Values: make([]float64, 0, len(queueBuckets)),
 	}
+	for _, b := range queueBuckets {
+		c.Labels = append(c.Labels, b.Label)
+		c.Values = append(c.Values, float64(b.Value(qs)))
+	}
+	return c
 }
 
 // hitRatePct rounds a 0-1 hit rate to an integer percent (0-100). It is the

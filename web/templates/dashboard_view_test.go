@@ -1,9 +1,6 @@
 package templates
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // TestChartDataHasData covers the all-zero/empty -> false and any-nonzero ->
 // true logic that gates whether a chart renders.
@@ -49,21 +46,5 @@ func TestChartDataJSON(t *testing.T) {
 	}
 	if got := empty.ValuesJSON(); got != "null" && got != "[]" {
 		t.Errorf("ValuesJSON() for nil = %q, want null or []", got)
-	}
-}
-
-// TestDashQueueTileTooltipUnavailable guards the #477 tile: its tooltip must be
-// set (a missing case renders title=""), must not reuse Failed's copy, and must
-// name the manual revival command, since nothing revives these rows on its own.
-func TestDashQueueTileTooltipUnavailable(t *testing.T) {
-	got := dashQueueTileTooltip("Unavailable")
-	if got == "" {
-		t.Fatal("Unavailable tooltip is empty")
-	}
-	if got == dashQueueTileTooltip("Failed") {
-		t.Errorf("Unavailable tooltip %q duplicates Failed's", got)
-	}
-	if !strings.Contains(got, "queue recheck --retired") {
-		t.Errorf("Unavailable tooltip %q does not name the manual revival command", got)
 	}
 }

@@ -3,7 +3,7 @@ package templates
 // PreviewPage renders the preview player (#481): an audio element sourcing the
 // row's audio route plus the server-rendered lyric lines. Every line carries
 // data-start-ms, and a line with A2 word timing wraps each word in a span with
-// its own data-start-ms, so the highlighter (a later slice) needs no parsing.
+// its own data-start-ms, so preview.js highlights and seeks without parsing.
 templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
 	@Layout("Preview", "", version, reports, "/static/css/preview.css", musixmatchInactive, musixmatchServing) {
 		<h1 class="mx-page-title">{ view.Title }</h1>
@@ -30,5 +30,7 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 				}
 			}
 		</ol>
+		// preview.js (#481) adds the sync; served from /static under script-src 'self'.
+		<script src="/static/js/preview.js" defer></script>
 	}
 }
