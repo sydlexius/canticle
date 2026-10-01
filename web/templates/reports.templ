@@ -264,15 +264,17 @@ templ tableFailures(rows []FailureRow, emptyMsg string) {
 							</td>
 							<td class="mx-cell-mono">{ r.Count }</td>
 							<td>
-								<a
-									class="mx-run-button"
-									href={ templ.SafeURL(FailureGroupHref(r.Status, r.Reason)) }
+								<button
+									type="button"
+									class="mx-run-button mx-fg-toggle"
+									aria-expanded="false"
+									aria-controls={ FailureDetailID(i) }
 									hx-get={ FailureGroupHref(r.Status, r.Reason) }
 									hx-target={ "#" + FailureDetailID(i) }
 									hx-swap="innerHTML"
 								>
 									Show rows
-								</a>
+								</button>
 							</td>
 						</tr>
 						<tr class="mx-fg-detail">

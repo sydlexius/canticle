@@ -592,9 +592,9 @@ body {
   white-space: nowrap;
 }
 
-/* "Run now" re-runs the selected report. Styled to match the primary button
-   token; it is an anchor (not a button) so it degrades to a real navigation when
-   JS is unavailable. */
+/* "Run now" and the failure-group expander share the primary button token.
+   "Run now" is an anchor that degrades to a real navigation without JS; the
+   expander is a button with no non-htmx path. */
 .mx-run-button {
   font-family: var(--mx-font-sans);
   font-size: 0.8rem;
@@ -629,11 +629,11 @@ body {
 }
 
 .mx-class-transient {
-  color: #f59e0b;
+  color: var(--mx-status-deferred);
 }
 
 .mx-class-persistent {
-  color: #f87171;
+  color: var(--mx-status-failed);
 }
 
 .mx-text-link {

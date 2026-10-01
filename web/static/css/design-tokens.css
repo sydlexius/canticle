@@ -45,6 +45,11 @@
   --mx-accent: #3b82f6;         /* blue-500: active highlights                */
   --mx-accent-glow: rgba(59, 130, 246, 0.3);
 
+  /* -- Status hues (shared: dashboard charts alias these; Reports badges use
+        them directly, since dashboard.css is not loaded on the Reports page) -- */
+  --mx-status-failed: #ef4444;   /* red-500: failure                          */
+  --mx-status-deferred: #f59e0b; /* amber-500: no lyrics yet, re-checked later */
+
   /* -- Sidebar ------------------------------------------------------------- */
   --mx-sidebar-bg: #0f172a;     /* slate-900                                  */
   --mx-sidebar-text: #94a3b8;   /* slate-400                                  */

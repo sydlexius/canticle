@@ -39,6 +39,11 @@ func TestFailureGroupFragmentListsOnlyItsRows(t *testing.T) {
 	exec := func(q string, a ...any) error { _, err := sqlDB.ExecContext(context.Background(), q, a...); return err }
 	seedFailureRow(t, "Alpha One", "failed", "worker: write item 1: permission denied", exec)
 	seedFailureRow(t, "Beta Two", "failed", "musixmatch: unexpected matcher status_code 500", exec)
+	// Distinct sentinel values so a cell dropped from the fragment cannot hide
+	// behind a coincidental default (miss_count seeds as 1, next_attempt_at as epoch).
+	if err := exec(`UPDATE work_queue SET miss_count = 7, attempts = 4, next_attempt_at = '2031-04-05T06:07:08Z' WHERE title = 'Beta Two'`); err != nil {
+		t.Fatalf("set sentinels: %v", err)
+	}
 	mux := newReportsUIServer(t, sqlDB)
 
 	rec := getFailureGroup(t, mux, "failed", "musixmatch: unexpected matcher status_code 500")
@@ -54,6 +59,15 @@ func TestFailureGroupFragmentListsOnlyItsRows(t *testing.T) {
 	}
 	if strings.Contains(body, "<html") {
 		t.Error("fragment must not render the full layout")
+	}
+	for _, want := range []string{
+		`<td class="mx-cell-mono">7</td>`,                                               // miss_count
+		`<td class="mx-cell-mono">4</td>`,                                               // attempts
+		`<td class="mx-cell-mono">` + formatQueueTime("2031-04-05T06:07:08Z") + `</td>`, // next_attempt_at
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fragment missing %q; body: %s", want, body)
+		}
 	}
 }
 
@@ -159,11 +173,19 @@ func TestFailureReportRendersBadgeLinkAndExpander(t *testing.T) {
 		`href="/queue/unavailable"`,
 		`hx-get="/reports/failure-group?signature=musixmatch%3a+unexpected+matcher+status_code+500&amp;status=failed"`,
 		`id="mx-fg-0"`,
-		`hx-target="#mx-fg-0"`,
+		`hx-target="#mx-fg-0" hx-swap="innerHTML"`, // adjacent: other controls also carry innerHTML
+		`<button type="button" class="mx-run-button mx-fg-toggle"`,
+		`aria-expanded="false"`,
+		`aria-controls="mx-fg-0"`,
 	} {
 		if !strings.Contains(strings.ToLower(failed), strings.ToLower(want)) {
 			t.Errorf("failure-analysis missing %q; body: %s", want, failed)
 		}
+	}
+	// No non-htmx navigation: the expander is a button, never an anchor to the
+	// bare fragment URL (a middle-click would open an unstyled fragment).
+	if strings.Contains(failed, `href="/reports/failure-group`) {
+		t.Errorf("expander must not carry an href to the fragment URL; body: %s", failed)
 	}
 	deferred := getFragment(t, mux, "deferred-misses").Body.String()
 	if strings.Contains(deferred, "mx-class-badge") {
