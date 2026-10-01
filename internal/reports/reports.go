@@ -65,6 +65,12 @@ type QueueSummary struct {
 	SettledUpgradable int64
 }
 
+// retiredPredicate matches a row prune retired as unresolvable (status='done',
+// last_error = queue.UnresolvableGoneError, outcome/tier left as they were).
+// The sentinel is inlined as a literal so the fragment joins at compile time;
+// TestRetiredPredicateLiteral pins that it contains no quote.
+const retiredPredicate = `COALESCE(last_error, '') = '` + queue.UnresolvableGoneError + `'`
+
 // wordTierPredicate is the ONE definition of "this synced row is at the
 // word-synced (terminal) rung" (#553), shared by QueueSummary.Finished and
 // SyncTierCounts.WordSynced so the two dashboard rows cannot disagree. It is
@@ -73,7 +79,11 @@ type QueueSummary struct {
 // provenance header. A remediation now clears sync_tier (#1130), but
 // a row stamped before that still holds a stale tier, and a row mid
 // word-recheck is re-litigating its tier, so both read as not terminal. No leading AND/WHERE.
+//
+// A prune-retired row (retiredPredicate) is excluded: it keeps the stale
+// tier it had, but its source is gone and it is not a finished result.
 const wordTierPredicate = `sync_tier = 'word'
+                      AND NOT ` + retiredPredicate + `
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued'`
 
@@ -617,9 +627,7 @@ func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT
              SUM(CASE WHEN `+wordTierPredicate+` THEN 1 ELSE 0 END),
-             SUM(CASE WHEN sync_tier = 'line'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
-                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN `+lineTierPredicate+` THEN 1 ELSE 0 END),
              SUM(CASE WHEN `+TierUnknownPredicate+` THEN 1 ELSE 0 END)
          FROM work_queue
          WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,
