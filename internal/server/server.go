@@ -340,6 +340,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.reportsDB != nil {
 			h.webui.AttachReports(reports.New(h.reportsDB))
+			h.webui.AttachQueueActions(queue.NewDBQueue(h.reportsDB))
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)

@@ -51,3 +51,37 @@
   outline: 2px solid var(--mx-sidebar-active-text);
   outline-offset: -2px;
 }
+
+/* Revive page (#598-5). */
+.mx-revive-note,
+.mx-revive-result,
+.mx-revive-error {
+  font-family: var(--mx-font-sans);
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+  margin: 0.75rem 0;
+  overflow-wrap: anywhere;
+}
+
+.mx-revive-result {
+  color: var(--mx-content-text);
+}
+
+.mx-revive-error {
+  color: #fca5a5;
+}
+
+.mx-revive-picker,
+.mx-revive-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 1rem 0;
+  font-size: 0.8125rem;
+  color: var(--mx-content-text);
+}
+
+.mx-revive-picker select {
+  max-width: 100%;
+}
