@@ -211,3 +211,47 @@ func TestApplyEditRefusesWordTimedLines(t *testing.T) {
 		t.Errorf("file changed on refusal:\n%s", got)
 	}
 }
+
+// A .orig that exists but is not a regular file is no usable original: both
+// reading the original and editing refuse, rather than silently treating the
+// current .lrc as the original or skipping the backup.
+func TestUnusableOrigRefused(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, "[00:01.00]one\n")
+	if err := os.Mkdir(p+".orig", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := OriginalLines(p, []string{root}); !errors.Is(err, ErrEditRefused) {
+		t.Errorf("OriginalLines err = %v, want ErrEditRefused", err)
+	}
+	if _, err := ApplyEdit(p, []TimedLine{{StartMS: 1500, Text: "one"}}, nil, EditOptions{Roots: []string{root}, DurationSeconds: 30}); !errors.Is(err, ErrEditRefused) {
+		t.Errorf("ApplyEdit err = %v, want ErrEditRefused", err)
+	}
+	if got := readFile(t, p); got != "[00:01.00]one\n" {
+		t.Errorf("file changed on refusal:\n%s", got)
+	}
+}
+
+// The backup is recorded with selfwrite and leaves no temp file behind.
+func TestApplyEditRecordsOrigAndCleansTemp(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, "[00:01.00]one\n")
+	reg := selfwrite.New(time.Minute)
+	if _, err := ApplyEdit(p, []TimedLine{{StartMS: 1200, Text: "one"}}, nil, EditOptions{Roots: []string{root}, DurationSeconds: 30, SelfWrites: reg}); err != nil {
+		t.Fatal(err)
+	}
+	if !reg.Suppress(p + ".orig") {
+		t.Error(".orig write not recorded with selfwrite")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}

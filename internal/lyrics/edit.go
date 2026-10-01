@@ -1,7 +1,9 @@
 package lyrics
 
 import (
-	"bufio"
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -136,8 +138,16 @@ func OriginalLines(path string, roots []string) ([]TimedLine, []string, error) {
 		return nil, nil, refuseOrWrap(err)
 	}
 	src, srcFI := rel, cur
-	if ofi, oerr := lstatRegular(root, rel+".orig"); oerr == nil {
+	ofi, oerr := lstatRegular(root, rel+".orig")
+	switch {
+	case oerr == nil:
 		src, srcFI = rel+".orig", ofi
+	case errors.Is(oerr, fs.ErrNotExist):
+		// No backup yet: the current file is the original.
+	default:
+		// A .orig that exists but is not a regular file (symlink, directory,
+		// FIFO) is not a usable original; never silently edit the .lrc instead.
+		return nil, nil, refuseOrWrap(oerr)
 	}
 	body, err := readRegular(root, src, srcFI)
 	if err != nil {
@@ -196,41 +206,38 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 		return EditResult{}, fmt.Errorf("%w: %v", ErrEditTiming, out)
 	}
 
-	dir := filepath.Join(canon, filepath.Dir(rel))
-	base := filepath.Base(rel)
 	var res EditResult
-	if _, oerr := root.Lstat(rel + ".orig"); errors.Is(oerr, fs.ErrNotExist) {
+	switch _, oerr := lstatRegular(root, rel+".orig"); {
+	case errors.Is(oerr, fs.ErrNotExist):
 		cur, rerr := readRegular(root, rel, fi)
 		if rerr != nil {
 			return EditResult{}, rerr
 		}
-		if werr := writeAtomic(dir, base+".orig", nil, func(w *bufio.Writer) error {
-			if _, e := w.Write(cur); e != nil {
-				return e
-			}
-			return w.Flush()
-		}); werr != nil {
+		// Recorded BEFORE the write so the watcher drops the create event.
+		opts.SelfWrites.Record(path + ".orig")
+		if werr := rootWriteAtomic(root, rel+".orig", cur); werr != nil {
 			return EditResult{}, fmt.Errorf("writing .orig backup: %w", werr)
 		}
 		res.CreatedOrig = true
-		opts.SelfWrites.Record(path + ".orig")
-	} else if oerr != nil {
-		return EditResult{}, fmt.Errorf("checking .orig backup: %w", oerr)
+	case oerr != nil:
+		// Present but not a regular file: no usable backup exists, so refuse
+		// rather than rewrite the only copy of the original.
+		return EditResult{}, refuseOrWrap(oerr)
 	}
 
-	opts.SelfWrites.Record(path)
-	if err := writeAtomic(dir, base, headerTags, func(w *bufio.Writer) error {
-		for _, l := range song.Subtitles.Lines {
-			text := l.Text
-			if text == "" {
-				text = "♪"
-			}
-			if _, e := w.WriteString("[" + l.Time.Stamp() + "]" + text + "\n"); e != nil {
-				return e
-			}
+	var body bytes.Buffer
+	for _, tag := range headerTags {
+		body.WriteString(tag + "\n")
+	}
+	for _, l := range song.Subtitles.Lines {
+		text := l.Text
+		if text == "" {
+			text = "♪"
 		}
-		return w.Flush()
-	}); err != nil {
+		body.WriteString("[" + l.Time.Stamp() + "]" + text + "\n")
+	}
+	opts.SelfWrites.Record(path)
+	if err := rootWriteAtomic(root, rel, body.Bytes()); err != nil {
 		return EditResult{}, fmt.Errorf("writing edited lyrics: %w", err)
 	}
 	nfi, err := root.Lstat(rel)
@@ -239,4 +246,44 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 	}
 	res.NewMTime = nfi.ModTime()
 	return res, nil
+}
+
+// rootWriteAtomic writes data to rel through root: a sibling temp file named
+// "<name>.<random>.tmp" (the shape selfwrite already suppresses), synced before
+// it is renamed over rel, then the parent directory is synced. Every step goes
+// through the os.Root, so a directory swapped for a symlink after validation
+// cannot redirect the write outside the library root.
+func rootWriteAtomic(root *os.Root, rel string, data []byte) (retErr error) {
+	var rnd [6]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return fmt.Errorf("temp name: %w", err)
+	}
+	tmp := rel + "." + hex.EncodeToString(rnd[:]) + selfwrite.TempExt
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666) //nolint:gosec // reason: G302 -- matches the lyrics writer's output mode (0666 before umask)
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = f.Close()
+			_ = root.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("syncing temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := root.Rename(tmp, rel); err != nil {
+		return fmt.Errorf("renaming temp file: %w", err)
+	}
+	if d, err := root.Open(filepath.Dir(rel)); err == nil {
+		_ = d.Sync() // durability only; the rename already happened
+		_ = d.Close()
+	}
+	return nil
 }
