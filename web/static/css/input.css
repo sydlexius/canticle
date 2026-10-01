@@ -195,6 +195,10 @@ body {
 /* -- Content area ---------------------------------------------------------- */
 .mx-content {
   flex: 1;
+  /* A flex item defaults to min-width:auto (its min-content), so a wide table
+     inside a .mx-table-wrap stretched this column past the viewport instead of
+     scrolling in the wrapper's own overflow:auto. */
+  min-width: 0;
   margin-inline-start: var(--mx-sidebar-width);
   padding: 2rem 2.5rem;
   max-width: var(--mx-content-max-width);
@@ -742,6 +746,10 @@ body {
    stylesheets with different load scopes. */
 .mx-result-tier {
   display: inline-block;
+  /* A pill is one unit: without this the hyphen in "word-synced" (and the
+     spaces in "failed (persistent)") are legal break points, so a narrow
+     table cell wraps the longer labels to two or three lines. */
+  white-space: nowrap;
   font-family: var(--mx-font-sans);
   font-size: 0.6875rem;
   font-weight: 600;
