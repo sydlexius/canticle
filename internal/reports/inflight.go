@@ -21,9 +21,10 @@ type InFlightItem struct {
 }
 
 // InFlight returns every row with status='processing', oldest claim first (id
-// breaks ties). It never assumes one row: a worker pool claims several at once,
-// and a crash leaves an orphan that stays 'processing' until startup recovery,
-// so a caller tells a live claim from an orphan by ClaimedAt age, not by count.
+// breaks ties). It never assumes one row: the worker is a single loop, but a
+// crash leaves an orphan that stays 'processing' until startup recovery and so
+// can coexist with the live claim, so a caller tells a live claim from an
+// orphan by ClaimedAt age, not by count.
 //
 // ClaimedAt reads work_queue.claimed_at (migration 057, stamped by the claim
 // statements), falling back to updated_at for a row claimed before that
