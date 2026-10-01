@@ -402,6 +402,22 @@ func TestReportFragmentReviewQueueEmptyState(t *testing.T) {
 	}
 }
 
+// TestRecentOutcomesUnknownPillAria pins the accessible name and role of the
+// unrecorded-outcome pill on the Reports recent-outcomes fragment (#654).
+func TestRecentOutcomesUnknownPillAria(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertDone(t, sqlDB, "Unrecorded Song", "", "", "2026-08-16T05:00:00Z")
+	mux := newReportsUIServer(t, sqlDB)
+
+	body := getFragment(t, mux, "recent-outcomes").Body.String()
+	if !strings.Contains(body, "Unrecorded Song") {
+		t.Fatalf("row missing; body:\n%s", body)
+	}
+	if !strings.Contains(body, `role="img"`) || !strings.Contains(body, `aria-label="no outcome recorded"`) {
+		t.Errorf("unknown pill missing role=img / aria-label; body:\n%s", body)
+	}
+}
+
 // TestRecentOutcomeNullCompletedAt covers the null-timestamp render path: a done
 // row with no completed_at shows an em-dash, not a bogus epoch.
 func TestRecentOutcomeNullCompletedAt(t *testing.T) {

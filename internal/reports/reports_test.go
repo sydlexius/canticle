@@ -300,7 +300,7 @@ func TestRecentOutcomesDetail(t *testing.T) {
 		{"missynced-quarantined", reports.ResultUnknown, "timing refused: mis_synced"},
 		{"plain-synced", reports.ResultSynced, ""},
 		{"degenerate-demoted", reports.ResultUnsynced, ""},
-		{"legacy-unknown", reports.ResultUnknown, ""},
+		{"legacy-unknown", reports.ResultUnknown, reports.LegacyNoOutcomeDetail},
 	} {
 		o, ok := byTitle[tc.title]
 		if !ok {

@@ -353,6 +353,8 @@ func buildRecentRows(recent []reports.RecentOutcome, serverLoc *time.Location) [
 			Album:                o.Album,
 			Result:               resultLabel(o.Result),
 			ResultTierClass:      resultTierClass(o.Result),
+			ResultAria:           resultAria(o.Result),
+			Detail:               o.Detail,
 			Lane:                 laneLabel(o.ProviderLane),
 			LaneMark:             laneMark(o.ProviderLane),
 			CompletedAt:          display,
