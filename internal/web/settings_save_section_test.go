@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,12 @@ import (
 // to the path, matching the wire format settings.js builds for a save group.
 func postSection(t *testing.T, h http.Handler, pairs [][2]string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postSectionAccept(t, h, pairs, "")
+}
+
+// postSectionAccept is postSection with an Accept header, for the JSON error shape.
+func postSectionAccept(t *testing.T, h http.Handler, pairs [][2]string, accept string) *httptest.ResponseRecorder {
+	t.Helper()
 	form := url.Values{}
 	form.Set("csrf_token", testCSRFToken)
 	for _, p := range pairs {
@@ -28,6 +35,9 @@ func postSection(t *testing.T, h http.Handler, pairs [][2]string) *httptest.Resp
 	req := httptest.NewRequest(http.MethodPost, "/settings/section", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: testCSRFToken})
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -406,5 +416,119 @@ func TestSaveSectionReportsAppliedPerPath(t *testing.T) {
 	want := map[string]string{"server.tls.cert_file": "restart", "server.tls.key_file": "restart"}
 	if got.Status != "saved" || !maps.Equal(got.Applied, want) {
 		t.Errorf("response = %+v, want status saved applied %v", got, want)
+	}
+}
+
+// postRejectedBatch posts a batch expected to be rejected, asking for JSON, and
+// returns the decoded per-field errors after asserting the file is byte-identical.
+func postRejectedBatch(t *testing.T, pairs [][2]string) sectionErrorResponse {
+	t.Helper()
+	h, cfgPath := writableTestUI(t, newFakeSecretStore())
+	before, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	rec := postSectionAccept(t, h, pairs, "application/json")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	after, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	if !bytes.Equal(before, after) {
+		t.Errorf("config mutated on a rejected batch:\n%s", after)
+	}
+	var got sectionErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
+	}
+	if got.Status != "error" {
+		t.Errorf("status field = %q, want error", got.Status)
+	}
+	return got
+}
+
+func TestSaveSectionBatchCollectsEveryFieldError(t *testing.T) {
+	got := postRejectedBatch(t, [][2]string{
+		{"logging.level", "loud"},
+		{"providers.mode", "bogus"},
+	})
+	for _, p := range []string{"logging.level", "providers.mode"} {
+		if got.Errors[p] == "" {
+			t.Errorf("no error for %s; errors=%v", p, got.Errors)
+		}
+	}
+	if len(got.Errors) != 2 {
+		t.Errorf("errors = %v, want exactly the two invalid fields", got.Errors)
+	}
+}
+
+func TestSaveSectionBatchValidPlusInvalidWritesNothing(t *testing.T) {
+	got := postRejectedBatch(t, [][2]string{
+		{"logging.level", "debug"},
+		{"providers.mode", "bogus"},
+	})
+	if got.Errors["providers.mode"] == "" || got.Errors["logging.level"] != "" {
+		t.Errorf("errors = %v, want only providers.mode", got.Errors)
+	}
+}
+
+func TestSaveSectionBatchCrossFieldViolationRejectsEverything(t *testing.T) {
+	// frequency=daily without "at" is individually valid but incomplete together;
+	// the unrelated valid logging.level must not land either.
+	got := postRejectedBatch(t, [][2]string{
+		{"logging.level", "debug"},
+		{"server.scan_schedule.frequency", "daily"},
+	})
+	if got.Errors["server.scan_schedule.frequency"] == "" {
+		t.Errorf("errors = %v, want the schedule field flagged", got.Errors)
+	}
+	if got.Errors["logging.level"] != "" {
+		t.Errorf("valid unrelated field flagged: %v", got.Errors)
+	}
+}
+
+func TestSaveSectionBatchHalfFailedPairNotDoubleReported(t *testing.T) {
+	// A cert path that fails field validation must not also produce a misleading
+	// "set together" error on the key.
+	got := postRejectedBatch(t, [][2]string{
+		{"server.tls.cert_file", "/nonexistent/c.pem"},
+		{"server.tls.key_file", "/nonexistent/k.key"},
+	})
+	if len(got.Errors) == 0 {
+		t.Fatal("no errors reported for nonexistent TLS paths")
+	}
+	for p, m := range got.Errors {
+		if strings.Contains(m, "together") {
+			t.Errorf("%s: pair-invariant error on a field-level failure: %q", p, m)
+		}
+	}
+}
+
+func TestSaveSectionBatchAllValidWritesAllInOneSave(t *testing.T) {
+	h, cfgPath := writableTestUI(t, newFakeSecretStore())
+	rec := postSection(t, h, [][2]string{
+		{"logging.level", "debug"},
+		{"providers.mode", "parallel"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Logging.Level != "debug" || cfg.Providers.Mode != "parallel" {
+		t.Errorf("level/mode = %q/%q, want debug/parallel", cfg.Logging.Level, cfg.Providers.Mode)
+	}
+	if got := decodeSaveResponse(t, rec); len(got.Applied) != 2 {
+		t.Errorf("applied = %v, want both paths", got.Applied)
+	}
+}
+
+func TestSaveSectionRejectionPlainTextWithoutAccept(t *testing.T) {
+	// Today's settings.js sends no Accept header and renders the body verbatim.
+	h, _ := writableTestUI(t, newFakeSecretStore())
+	rec := postSection(t, h, [][2]string{{"providers.mode", "bogus"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain for a client not asking for JSON", ct)
 	}
 }
