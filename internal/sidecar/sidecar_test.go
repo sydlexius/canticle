@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -401,4 +402,155 @@ func TestStemOf(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCaseVariants(t *testing.T) {
+	got := CaseVariants(".lrc")
+	if len(got) != 8 {
+		t.Fatalf("CaseVariants(.lrc) len = %d, want 8: %q", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, v := range got {
+		if v[0] != '.' {
+			t.Fatalf("variant %q lost its leading dot", v)
+		}
+		seen[v] = true
+	}
+	for _, want := range []string{".lrc", ".LRC", ".Lrc", ".lRc"} {
+		if !seen[want] {
+			t.Errorf("CaseVariants(.lrc) missing %q", want)
+		}
+	}
+	if got := CaseVariants(""); !slices.Equal(got, []string{""}) {
+		t.Fatalf("CaseVariants(\"\") = %q, want one empty entry", got)
+	}
+}
+
+func TestResolveCaseVariant(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("case-insensitive filesystem cannot hold case-variant siblings")
+	}
+	p := filepath.Join(dir, "song.lrc")
+	if _, _, ok := ResolveCaseVariant(p); ok {
+		t.Fatal("resolved a variant in an empty directory")
+	}
+	touch(t, filepath.Join(dir, "song.LRC"))
+	touch(t, filepath.Join(dir, "song.Lrc"))
+	got, fi, ok := ResolveCaseVariant(p)
+	if !ok || fi == nil {
+		t.Fatal("did not resolve an existing variant")
+	}
+	// Sorted by name: "song.LRC" precedes "song.Lrc".
+	if want := filepath.Join(dir, "song.LRC"); got != want {
+		t.Fatalf("ResolveCaseVariant = %q, want %q", got, want)
+	}
+}
+
+func TestCaseVariants_Shapes(t *testing.T) {
+	cases := []struct {
+		ext  string
+		want int
+	}{
+		{"", 1},
+		{".", 1},
+		{".a", 2},
+		{".lrc", 8},
+		{".elrc", 16},
+		{".LrC", 8},
+		{".m4a", 4}, // the digit is never flipped
+		{".éa", 2},  // non-ASCII bytes are never permuted
+		{".ßß", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ext, func(t *testing.T) {
+			got := CaseVariants(tc.ext)
+			if len(got) != tc.want {
+				t.Fatalf("CaseVariants(%q) len = %d, want %d: %q", tc.ext, len(got), tc.want, got)
+			}
+			seen := map[string]bool{}
+			for _, v := range got {
+				if seen[v] {
+					t.Fatalf("CaseVariants(%q) repeated %q", tc.ext, v)
+				}
+				seen[v] = true
+				if len(v) != len(tc.ext) {
+					t.Fatalf("variant %q changed byte length of %q", v, tc.ext)
+				}
+				for i := 0; i < len(v); i++ {
+					if c := tc.ext[i]; c >= 0x80 || c == '.' || ('0' <= c && c <= '9') {
+						if v[i] != c {
+							t.Fatalf("variant %q altered non-letter byte %d of %q", v, i, tc.ext)
+						}
+					}
+				}
+			}
+			// Input case is irrelevant: the set is the same for any casing.
+			if other := CaseVariants(strings.ToUpper(tc.ext)); len(other) != len(got) {
+				t.Fatalf("variant count depends on input case: %d vs %d", len(other), len(got))
+			}
+		})
+	}
+	if got := CaseVariants(".lrc"); got[0] != ".lrc" || got[len(got)-1] != ".LRC" {
+		t.Fatalf("order not increasing permutation index: %q", got)
+	}
+}
+
+func TestResolveCaseVariant_Portable(t *testing.T) {
+	t.Run("all miss", func(t *testing.T) {
+		dir := t.TempDir()
+		got, fi, ok := ResolveCaseVariant(filepath.Join(dir, "song.lrc"))
+		if ok || got != "" || fi != nil {
+			t.Fatalf("empty dir resolved (%q, %v, %v)", got, fi, ok)
+		}
+	})
+	t.Run("no extension has no variants", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "song"))
+		if _, _, ok := ResolveCaseVariant(filepath.Join(dir, "song")); ok {
+			t.Fatal("an extensionless path resolved a variant")
+		}
+	})
+	t.Run("hit returns the real name and its info", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "song.LRC")
+		touch(t, real)
+		got, fi, ok := ResolveCaseVariant(filepath.Join(dir, "song.lrc"))
+		if !ok || fi == nil || !fi.Mode().IsRegular() {
+			t.Fatalf("did not resolve a regular variant: (%q, %v, %v)", got, fi, ok)
+		}
+		if got != real {
+			t.Fatalf("got %q, want %q", got, real)
+		}
+	})
+	t.Run("directory is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "song.LRC"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got, _, ok := ResolveCaseVariant(filepath.Join(dir, "song.lrc")); ok {
+			t.Fatalf("accepted a directory as a sidecar: %q", got)
+		}
+	})
+	t.Run("symlink is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "elsewhere.dat")
+		touch(t, target)
+		if err := os.Symlink(target, filepath.Join(dir, "song.LRC")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got, _, ok := ResolveCaseVariant(filepath.Join(dir, "song.lrc")); ok {
+			t.Fatalf("followed a symlink as a sidecar: %q", got)
+		}
+	})
+	t.Run("stem is never case-folded", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "Song.LRC"))
+		got, _, ok := ResolveCaseVariant(filepath.Join(dir, "song.lrc"))
+		// A case-sensitive FS must miss; a case-insensitive one resolves the
+		// same file, and the returned name keeps the CALLER's stem bytes.
+		if ok && got != filepath.Join(dir, "song.LRC") {
+			t.Fatalf("returned name altered the stem: %q", got)
+		}
+	})
 }
