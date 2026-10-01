@@ -123,6 +123,35 @@ func TestPetitLyricsProviderUnavailableTripsBreaker(t *testing.T) {
 	}
 }
 
+// TestPetitLyricsOutageLatchedHoldsTheRamp: a miss while the client's outage is
+// latched (#1195) must neither trip (the half-open ratchet) nor reset the ramp
+// (the F1 regression, where a revoked lane sat at trips=1 forever), nor ratchet
+// the pacer. The breaker stays half-open with its ramp position intact.
+func TestPetitLyricsOutageLatchedHoldsTheRamp(t *testing.T) {
+	p := &pacingStub{stubProvider: stubProvider{name: "petitlyrics", err: petitlyrics.ErrOutageLatched}}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	now := time.Now()
+	cb.SetClock(func() time.Time { return now })
+	l := NewProviderLane(p, cb)
+	cb.Trip()
+	cb.Trip()
+	now = now.Add(time.Hour) // the window elapsed: the next call is the half-open probe
+
+	_, err := l.FindLyrics(context.Background(), models.Track{}, "")
+	if !errors.Is(err, petitlyrics.ErrOutageLatched) {
+		t.Fatalf("err = %v; want ErrOutageLatched preserved for ranking", err)
+	}
+	if got := cb.Trips(); got != 2 {
+		t.Errorf("trips = %d; want 2 (a latched miss holds the ramp position)", got)
+	}
+	if st := cb.Snapshot().State; st != circuit.StateHalfOpen {
+		t.Errorf("state = %v; want half-open (neither re-opened nor closed as recovered)", st)
+	}
+	if p.throttles != 0 {
+		t.Errorf("pacer ratcheted %d time(s); a dead credential is not a throttle", p.throttles)
+	}
+}
+
 // pacingStub is a stubProvider that also satisfies providers.AdaptivePacer, so a
 // test can observe whether the lane ratcheted the pacer. stubProvider itself does
 // not implement the optional interface, and NewProviderLane type-asserts for it,
@@ -201,6 +230,11 @@ func TestClassifyOutcome_PetitLyricsSentinels(t *testing.T) {
 			"sustained zero results", petitlyrics.ErrProviderUnavailable, OutcomeAuthRateLimit,
 			"a revoked application id reached through the zero-result path is the same " +
 				"OUTCOME as one reached through a 401, however differently it was detected",
+		},
+		{
+			"miss while the outage is latched", petitlyrics.ErrOutageLatched, OutcomeAuthRateLimit,
+			"a miss on a credential already judged dead must release the row without charging it " +
+				"a miss toward retirement, exactly as ErrProviderUnavailable does (#1195)",
 		},
 	}
 
