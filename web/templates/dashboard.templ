@@ -324,7 +324,7 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-upnext-heading"
-		title={ dashUpNextTitle(len(rows)+len(inFlight) == 0) }
+		title={ dashUpNextTitle(len(rows)+len(inFlight) == 0, len(inFlight) > 0) }
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-upnext-heading">Up Next</h2>
 		if len(rows)+len(inFlight) == 0 {
@@ -332,7 +332,7 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 		} else {
 			<p class="mx-dash-section-sub">{ header }</p>
 			<div class="mx-table-wrap">
-				<table class="mx-table" aria-label="Upcoming queue work">
+				<table class="mx-table" aria-label={ dashUpNextTableLabel(len(inFlight) > 0) }>
 					<thead>
 						<tr>
 							<th class="mx-upnext-pos">#</th>
@@ -378,12 +378,25 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 
 // dashUpNextTitle returns the section tooltip. Only the populated panel asserts
 // claim ORDER; the empty state has no ordered list, so it must not imply one
-// (#572 CR).
-func dashUpNextTitle(empty bool) string {
+// (#572 CR). When rows are already claimed (#599) the table opens with them, so
+// the text names both groups rather than calling everything upcoming.
+func dashUpNextTitle(empty, inFlight bool) string {
 	if empty {
 		return "Buffered upcoming work. Nothing is buffered right now; showing the eligible and cooldown counts. Refresh to update."
 	}
+	if inFlight {
+		return "Rows the background worker is processing now, then buffered upcoming work in the order it will claim it. Composed once per batch; refresh to update."
+	}
 	return "Buffered upcoming work in the order the background worker will claim it. Composed once per batch; refresh to update."
+}
+
+// dashUpNextTableLabel names the Up Next table for assistive tech, matching
+// dashUpNextTitle: in-flight rows are current work, not upcoming work (#599).
+func dashUpNextTableLabel(inFlight bool) string {
+	if inFlight {
+		return "Queue work in progress and upcoming"
+	}
+	return "Upcoming queue work"
 }
 
 // dashUpNextTierClass returns the badge classes for an Up-next tier label. The

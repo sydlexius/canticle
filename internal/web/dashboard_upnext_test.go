@@ -144,6 +144,10 @@ func TestHandleDashboard_UpNextPanel(t *testing.T) {
 	if !strings.Contains(body, "4 buffered of 4 eligible") {
 		t.Errorf("dashboard missing buffered/eligible header; body has: %s", excerptAround(body, "buffered"))
 	}
+	// Nothing claimed: the table keeps its upcoming-only label and tooltip.
+	if !strings.Contains(body, `aria-label="Upcoming queue work"`) || strings.Contains(body, "processing now") {
+		t.Error("buffered-only table must keep the upcoming-work label and tooltip")
+	}
 	// Rows appear in batch_seq order: Alpha (1) < Beta (2) < Gamma (3).
 	iAlpha := strings.Index(body, "Track Alpha")
 	iBeta := strings.Index(body, "Track Beta")
@@ -227,7 +231,7 @@ func TestHandleDashboard_UpNextEmpty(t *testing.T) {
 		t.Errorf("empty state missing counts-only line; got: %s", excerptAround(body, "Up Next"))
 	}
 	// No ordered table when the buffer is empty.
-	if strings.Contains(body, `aria-label="Upcoming queue work"`) {
+	if strings.Contains(body, `class="mx-table" aria-label=`) {
 		t.Error("empty state must not render the ordered table")
 	}
 }
@@ -288,6 +292,14 @@ func TestHandleDashboard_UpNextInFlightClaimed(t *testing.T) {
 	}
 	if strings.Contains(body, "stuck?") {
 		t.Error("a just-claimed row must not carry the stuck badge")
+	}
+	// With a claimed row on top, the table and tooltip must not call it all
+	// upcoming work (#1205 review).
+	if !strings.Contains(body, `aria-label="Queue work in progress and upcoming"`) {
+		t.Errorf("in-flight table label not updated: %s", excerptAround(body, "mx-table"))
+	}
+	if !strings.Contains(body, "Rows the background worker is processing now") {
+		t.Error("in-flight section tooltip does not name the claimed rows")
 	}
 }
 
