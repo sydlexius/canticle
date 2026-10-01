@@ -13,7 +13,7 @@ package templates
 // the standalone nav links. The report rows highlight from RailItem.Active.
 // reports is the report-nav model in design-doc order.
 templ Sidebar(active string, version string, reports []RailItem) {
-	<nav class="mx-sidebar" id="mx-sidebar" tabindex="-1" aria-label="Main navigation">
+	<nav class="mx-sidebar" id="mx-sidebar" aria-label="Main navigation">
 		<div class="mx-sidebar-header">
 			<img class="mx-sidebar-wordmark-svg" src="/static/img/canticle-wordmark.svg" alt="Canticle" width="116" height="32"/>
 			<span class="mx-sidebar-version">{ version }</span>
