@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
@@ -24,6 +25,12 @@ const dashboardRecentLimit = 20
 // buffered" header equals the rendered row count. An operator running a larger
 // batch_size sees the first N; the buffer never lists more than batch_size rows.
 const dashboardUpNextLimit = 50
+
+// AttachLaneHealth wires the per-lane circuit-state source onto the dashboard
+// (#488). Pass a method value on the owner (worker.LaneHealth), never a captured
+// orchestrator: it is called on every dashboard request and must see the
+// current lanes after a rebuild.
+func (u *UI) AttachLaneHealth(fn func() []orchestrator.LaneState) { u.laneHealth = fn }
 
 // handleDashboard renders the read-only observability dashboard. It is gated
 // by the same auth guard as the other UI routes and is never cached (it exposes
@@ -76,6 +83,9 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		return templates.DashboardView{}, fmt.Errorf("dashboard: provider effectiveness: %w", err)
 	}
 	view.ProviderTiles = buildProviderTiles(pe)
+	if u.laneHealth != nil {
+		applyLaneHealth(view.ProviderTiles, pe, u.laneHealth(), time.Now())
+	}
 
 	instrumental, err := u.reports.CountInstrumental(ctx)
 	if err != nil {
@@ -349,6 +359,63 @@ func buildProviderTiles(pe []reports.ProviderEffectiveness) []templates.StatTile
 		})
 	}
 	return tiles
+}
+
+// Lane status tokens carried on StatTile.Status; they are CSS class suffixes.
+const (
+	laneStatusHealthy   = "healthy"
+	laneStatusProbing   = "probing"
+	laneStatusThrottled = "throttled"
+)
+
+// applyLaneHealth stamps a status onto each provider tile whose lane appears in
+// health (matched by lane name; tiles and pe are index-aligned). A lane with no
+// health entry keeps its tile unchanged. Half-open is "probing", reported apart
+// from open ("throttled"): the lane takes its next request even though it
+// recently tripped. The text states the status; color only reinforces it.
+func applyLaneHealth(tiles []templates.StatTile, pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, now time.Time) {
+	byLane := make(map[string]orchestrator.LaneState, len(health))
+	for _, h := range health {
+		byLane[h.Provider] = h
+	}
+	for i := range tiles {
+		h, ok := byLane[pe[i].Lane]
+		if !ok {
+			continue
+		}
+		switch h.State {
+		case orchestrator.LaneStateOpen:
+			tiles[i].Status = laneStatusThrottled
+			tiles[i].StatusText = "Throttled, " + retryIn(h.OpenUntil, now)
+		case orchestrator.LaneStateHalfOpen:
+			tiles[i].Status = laneStatusProbing
+			tiles[i].StatusText = "Probing"
+		default:
+			tiles[i].Status = laneStatusHealthy
+			tiles[i].StatusText = "Healthy"
+		}
+	}
+}
+
+// retryIn renders the relative countdown to until: "retry in 4m", "retry in
+// 1h 5m", "retry in <1m", or "retry shortly" once the window has already
+// passed (a snapshot can read open a moment after OpenUntil).
+func retryIn(until, now time.Time) string {
+	d := until.Sub(now)
+	if d <= 0 {
+		return "retry shortly"
+	}
+	if d < time.Minute {
+		return "retry in <1m"
+	}
+	m := int(d.Round(time.Minute) / time.Minute)
+	if m >= 60 {
+		if r := m % 60; r != 0 {
+			return fmt.Sprintf("retry in %dh %dm", m/60, r)
+		}
+		return fmt.Sprintf("retry in %dh", m/60)
+	}
+	return fmt.Sprintf("retry in %dm", m)
 }
 
 // buildRecentRows shapes recent outcomes into table rows, formatting each

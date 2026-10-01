@@ -130,4 +130,10 @@ type StatTile struct {
 	BarPct string
 	// BarLabel is the title/aria text for the mini-bar, e.g. "Hit rate 75%".
 	BarLabel string
+	// Status is the lane circuit state class suffix (#488): "healthy", "probing"
+	// or "throttled"; empty when no lane-health source is wired, which renders
+	// no status line. StatusText is the visible words, so the state never rests
+	// on color alone.
+	Status     string
+	StatusText string
 }

@@ -359,6 +359,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		if h.keyManager != nil {
 			h.webui.AttachKeyManager(h.keyManager)
 		}
+		if h.laneHealth != nil {
+			h.webui.AttachLaneHealth(h.laneHealth)
+		}
 		h.webui.AttachMusixmatchInactive(h.musixmatchInactive)
 		h.webui.AttachMusixmatchServing(h.musixmatchServing)
 		h.webui.Register(h.mux)
