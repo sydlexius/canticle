@@ -82,9 +82,10 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: provider effectiveness: %w", err)
 	}
-	view.ProviderTiles = buildProviderTiles(pe)
 	if u.laneHealth != nil {
-		applyLaneHealth(view.ProviderTiles, pe, u.laneHealth(), time.Now())
+		view.ProviderTiles = providerTilesWithHealth(pe, u.laneHealth(), time.Now())
+	} else {
+		view.ProviderTiles = buildProviderTiles(pe)
 	}
 
 	instrumental, err := u.reports.CountInstrumental(ctx)
@@ -346,69 +347,116 @@ func hitRateBarFields(rate float64) (sub, barPct, barLabel string) {
 func buildProviderTiles(pe []reports.ProviderEffectiveness) []templates.StatTile {
 	tiles := make([]templates.StatTile, 0, len(pe))
 	for _, p := range pe {
-		attempts := p.Hits + p.Misses
-		sub, barPct, barLabel := hitRateBarFields(p.HitRate)
-		tiles = append(tiles, templates.StatTile{
-			Label:     laneLabel(p.Lane),
-			LabelMark: laneMark(p.Lane),
-			Value:     fmt.Sprintf("%d/%d", p.Hits, attempts),
-			Sub:       sub,
-			ShowBar:   true,
-			BarPct:    barPct,
-			BarLabel:  barLabel,
-		})
+		tiles = append(tiles, buildProviderTile(p))
 	}
 	return tiles
+}
+
+// buildProviderTile shapes one lane's effectiveness row into its stat tile.
+func buildProviderTile(p reports.ProviderEffectiveness) templates.StatTile {
+	sub, barPct, barLabel := hitRateBarFields(p.HitRate)
+	return templates.StatTile{
+		Label:     laneLabel(p.Lane),
+		LabelMark: laneMark(p.Lane),
+		Value:     fmt.Sprintf("%d/%d", p.Hits, p.Hits+p.Misses),
+		Sub:       sub,
+		ShowBar:   true,
+		BarPct:    barPct,
+		BarLabel:  barLabel,
+	}
 }
 
 // Lane status tokens carried on StatTile.Status; they are CSS class suffixes.
 const (
 	laneStatusHealthy   = "healthy"
+	laneStatusReady     = "ready"
 	laneStatusProbing   = "probing"
 	laneStatusThrottled = "throttled"
+	laneStatusFailing   = "failing"
+	laneStatusInactive  = "inactive"
 )
 
-// applyLaneHealth stamps a status onto each provider tile whose lane appears in
-// health (matched by lane name; tiles and pe are index-aligned). A lane with no
-// health entry keeps its tile unchanged. Half-open is "probing", reported apart
-// from open ("throttled"): the lane takes its next request even though it
-// recently tripped. The text states the status; color only reinforces it.
-func applyLaneHealth(tiles []templates.StatTile, pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, now time.Time) {
-	byLane := make(map[string]orchestrator.LaneState, len(health))
-	for _, h := range health {
-		byLane[h.Provider] = h
+// providerTilesWithHealth builds the Lyrics Sources tiles when a lane-health
+// source is attached (#488). The tile set is the UNION of the configured lanes
+// (health, in priority order) and the lanes with recorded attempts (pe, then
+// appended in pe order), so a lane whose breaker opened before it ever scored a
+// hit or miss still gets a tile: that is the fresh-install bad-token case the
+// status exists for. A health-only lane renders zero counts ("0/0", 0%), the
+// same markup a recorded-but-empty lane gets. A Local lane (the detector) is
+// not a lyrics source: it gets no status line, and no tile at all unless it has
+// recorded attempts. A lane with attempts but absent from health is no longer
+// configured and reads "Not active".
+func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, now time.Time) []templates.StatTile {
+	byLane := make(map[string]reports.ProviderEffectiveness, len(pe))
+	for _, p := range pe {
+		byLane[p.Lane] = p
 	}
-	for i := range tiles {
-		h, ok := byLane[pe[i].Lane]
-		if !ok {
+	seen := make(map[string]bool, len(health)+len(pe))
+	tiles := make([]templates.StatTile, 0, len(health)+len(pe))
+	for _, h := range health {
+		p, recorded := byLane[h.Provider]
+		if seen[h.Provider] || (h.Local && !recorded) {
 			continue
 		}
-		switch h.State {
-		case orchestrator.LaneStateOpen:
-			tiles[i].Status = laneStatusThrottled
-			tiles[i].StatusText = "Throttled, " + retryIn(h.OpenUntil, now)
-		case orchestrator.LaneStateHalfOpen:
-			tiles[i].Status = laneStatusProbing
-			tiles[i].StatusText = "Probing"
-		default:
-			tiles[i].Status = laneStatusHealthy
-			tiles[i].StatusText = "Healthy"
+		seen[h.Provider] = true
+		if !recorded {
+			p = reports.ProviderEffectiveness{Lane: h.Provider}
 		}
+		t := buildProviderTile(p)
+		if !h.Local {
+			t.Status, t.StatusText = laneStatus(h, now)
+		}
+		tiles = append(tiles, t)
+	}
+	for _, p := range pe {
+		if seen[p.Lane] {
+			continue
+		}
+		seen[p.Lane] = true
+		t := buildProviderTile(p)
+		t.Status, t.StatusText = laneStatusInactive, "Not active"
+		tiles = append(tiles, t)
+	}
+	return tiles
+}
+
+// laneStatus maps one lane's breaker snapshot to its status class and words.
+// Half-open is "probing", reported apart from open: the lane takes its next
+// request even though it recently tripped. An open lane that has NEVER
+// succeeded this session is "failing", not "throttled": that is the
+// verify-your-token case (orchestrator resolve), and calling it throttling
+// would send the operator waiting instead of fixing config. A closed lane that
+// has not succeeded yet reads "Ready, no success yet" rather than "Healthy",
+// because nothing has proven it healthy. The text states the status; color
+// only reinforces it.
+func laneStatus(h orchestrator.LaneState, now time.Time) (status, text string) {
+	switch h.State {
+	case orchestrator.LaneStateOpen:
+		if !h.EverSucceeded {
+			return laneStatusFailing, "Failing, no success yet - check token/config (" + retryIn(h.OpenUntil, now) + ")"
+		}
+		return laneStatusThrottled, "Throttled, " + retryIn(h.OpenUntil, now)
+	case orchestrator.LaneStateHalfOpen:
+		return laneStatusProbing, "Probing"
+	default:
+		if !h.EverSucceeded {
+			return laneStatusReady, "Ready, no success yet"
+		}
+		return laneStatusHealthy, "Healthy"
 	}
 }
 
 // retryIn renders the relative countdown to until: "retry in 4m", "retry in
-// 1h 5m", "retry in <1m", or "retry shortly" once the window has already
-// passed (a snapshot can read open a moment after OpenUntil).
+// 1h 5m", or "retry shortly" once the window has already passed (a snapshot can
+// read open a moment after OpenUntil). Minutes round UP (ceiling): a "retry in"
+// must never promise a retry sooner than the window allows, so 61s reads "2m"
+// and 59m31s reads "1h".
 func retryIn(until, now time.Time) string {
 	d := until.Sub(now)
 	if d <= 0 {
 		return "retry shortly"
 	}
-	if d < time.Minute {
-		return "retry in <1m"
-	}
-	m := int(d.Round(time.Minute) / time.Minute)
+	m := int((d + time.Minute - 1) / time.Minute)
 	if m >= 60 {
 		if r := m % 60; r != 0 {
 			return fmt.Sprintf("retry in %dh %dm", m/60, r)

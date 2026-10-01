@@ -43,7 +43,7 @@ type LaneState struct {
 // Safe for concurrent use with dispatch.
 //
 // Production caller: /metrics through worker.LaneHealth (#488 slice 2); the
-// the dashboard's Lyrics Sources tiles (slice 3) consume it too.
+// dashboard's Lyrics Sources tiles (slice 3) consume it too.
 func (o *Orchestrator) LaneHealth() []LaneState {
 	out := make([]LaneState, 0, len(o.lanes))
 	for _, l := range o.lanes {

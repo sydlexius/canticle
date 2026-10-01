@@ -175,6 +175,15 @@
   color: var(--mx-chart-deferred);
 }
 
+.mx-dash-tile-status-failing {
+  color: var(--mx-chart-failed);
+}
+
+.mx-dash-tile-status-ready,
+.mx-dash-tile-status-inactive {
+  color: var(--mx-chart-pending);
+}
+
 /* -- Charts (#318) --------------------------------------------------------- */
 /* The chart palette lives here as CSS custom properties so chart-init.js reads
  * them via getComputedStyle; a future token swap re-themes the charts with no JS
