@@ -39,17 +39,28 @@ var statusRe = regexp.MustCompile(`\b(?:status_code|status|http)\s+(\d{3})\b`)
 // "exit status 503" is shaped like an HTTP status but is not one.
 var exitStatusRe = regexp.MustCompile(`exit status \S+`)
 
-// transientMarkers are lower-case substrings of the signatures that mean "try
-// again later". They are matched against a signature Normalize already
-// produced, so no path, port, or address can hide or fake one.
+// transientMarkers are lower-case phrases of the signatures that mean "try
+// again later". A marker counts only when it OPENS a segment of the signature
+// (see segments), never when it merely appears somewhere inside one. Matching
+// anywhere would let text the writer does not control fake a verdict: a path
+// ("read /mnt/Timeout Band permission denied") or an artist/title carried in a
+// writer error ("nothing to save for Timeout - Song"). Go and the providers
+// build their errors as "context: cause", so the diagnostic phrase starts its
+// own ": "-delimited segment; a path or a name sits in the middle of one.
+// Segment-start was chosen over "last segment only" because several real
+// signatures carry the marker mid-chain ("musixmatch: transport error:
+// proxyconnect tcp: ..."), where a tail-only rule would lose it. It is not proof
+// against a title that itself contains ": timeout"; no text rule can be.
 //
 // Deliberately NOT here: a bare "unavailable" (an "ffmpeg unavailable at ..."
 // is a misconfiguration, not an outage) and a bare "refused" (a "refusing to
-// write" is a deterministic write guard).
+// write" is a deterministic write guard). petitlyrics' "application id
+// revoked?" is deliberately persistent: a revoked app id will not recover.
 var transientMarkers = []string{
 	"transport error",
 	"connection refused",
 	"connection reset",
+	"connection timed out",
 	"broken pipe",
 	"unexpected eof",
 	"dial tcp",
@@ -60,28 +71,84 @@ var transientMarkers = []string{
 	"i/o timeout",
 	"timeout",
 	"timed out",
+	"operation timed out",
 	"deadline exceeded",
+	"context deadline exceeded",
 	"context canceled",
 	"rate limited",
 	"throttled",
 	"circuit open",
+	"lane unavailable",
 	"classifier unavailable",
 	"temporarily unavailable",
+	"server sent goaway",
+	"database is locked",
+	"sqlite_busy",
+	// A network share that drops out: transient for the same reason a refused
+	// connection is. Both clear when the host or mount comes back.
+	"host is down",
+	"stale nfs file handle",
 }
 
-// Classify buckets a signature produced by Normalize. Order:
+// transientExact are markers that must be a WHOLE segment, because as a prefix
+// they would match unrelated words. "eof" is how Go prints a bare io.EOF after a
+// request ("Post \"...\": EOF").
+var transientExact = []string{"eof"}
+
+// segments splits a signature into its ": "-delimited parts, trimmed, with a
+// parenthesized note ("... (circuit open)", "... (rate limited)") promoted to a
+// segment of its own so a marker inside parentheses still opens one.
+func segments(s string) []string {
+	s = strings.ReplaceAll(s, " (", ": ")
+	parts := strings.Split(s, ": ")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+// musixmatchThrottle reports the two Musixmatch shapes that orchestrator.
+// ClassifyOutcome files under OutcomeAuthRateLimit (ErrUnauthorized and
+// ErrTokenRenewalRequired) and that the worker treats as throttling: a bare 401
+// there is observed to be an egress IP throttle, not a dead credential
+// (worker.go, "a later bare 401 is correctly read as throttling"). The status
+// branch would call the 401 Persistent, so this rule runs first.
+func musixmatchThrottle(segs []string) bool {
+	for i := 1; i < len(segs); i++ {
+		if segs[i-1] != "musixmatch" {
+			continue
+		}
+		if strings.HasPrefix(segs[i], "unauthorized") || strings.HasPrefix(segs[i], "token renewal required") {
+			return true
+		}
+	}
+	return false
+}
+
+// Classify buckets a signature produced by Normalize. It classifies FAILED rows
+// (status=failed) only. Deferred misses and retired (unavailable) rows have their
+// own states and are out of scope here, so there is deliberately no third class
+// for #478's "unavailable". Order:
 //
-//  1. An HTTP status decides first when one is present: 408 and 429 (a request
+//  1. The Musixmatch 401/token-renewal shapes are Transient (see
+//     musixmatchThrottle), to agree with orchestrator.ClassifyOutcome and the
+//     worker.
+//  2. An HTTP status decides next when one is present: 408 and 429 (a request
 //     timeout and a rate limit) and every 5xx are Transient; any other 4xx is
 //     Persistent. Other numbers (2xx/3xx) carry no verdict.
-//  2. Otherwise a transport/timeout/DNS/cancellation marker is Transient.
-//  3. Everything else, including write and permission errors and every
+//  3. Otherwise a transport/timeout/DNS/cancellation marker opening a segment is
+//     Transient.
+//  4. Everything else, including write and permission errors and every
 //     unrecognized signature, is Persistent.
 //
 // Write and permission failures need no rule of their own: they fall through to
-// step 3 by design, and TestClassifyPersistentShapes pins that they do.
+// step 4 by design, and TestClassifyPersistentShapes pins that they do.
 func Classify(sig string) Class {
 	s := strings.ToLower(sig)
+	segs := segments(s)
+	if musixmatchThrottle(segs) {
+		return Transient
+	}
 	if m := statusRe.FindStringSubmatch(exitStatusRe.ReplaceAllString(s, "")); m != nil {
 		code := m[1]
 		switch {
@@ -93,9 +160,16 @@ func Classify(sig string) Class {
 			return Persistent
 		}
 	}
-	for _, mk := range transientMarkers {
-		if strings.Contains(s, mk) {
-			return Transient
+	for _, seg := range segs {
+		for _, mk := range transientMarkers {
+			if strings.HasPrefix(seg, mk) {
+				return Transient
+			}
+		}
+		for _, mk := range transientExact {
+			if seg == mk {
+				return Transient
+			}
 		}
 	}
 	return Persistent

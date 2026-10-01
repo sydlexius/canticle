@@ -2,10 +2,12 @@ package failsig
 
 import "testing"
 
-// Every input below is a raw last_error shape produced by the code today (or
-// quoted in failsig_test.go), run through Normalize first: the classifier's
-// contract is that it reads the normalized signature, so the test exercises the
-// same pipeline a caller will.
+// The shape tables below use strings modeled on what the code emits (the
+// producers were grepped: internal/musixmatch/client.go, petitlyrics and
+// innertube "request: %w" wraps, worker write errors) with invented names; a few
+// are paraphrases of OS or library text. They run through Normalize first: the
+// classifier reads the normalized signature, so the test exercises the same
+// pipeline a caller will.
 
 func TestClassifyTransientShapes(t *testing.T) {
 	for _, raw := range []string{
@@ -25,6 +27,8 @@ func TestClassifyTransientShapes(t *testing.T) {
 		"musixmatch: token mint refused (rate limited)",
 		"orchestrator: lane unavailable (circuit open)",
 		"musixmatch: inner status_code 408",
+		"musixmatch: unauthorized: HTTP 401 (token rejected or, per observed behavior, egress IP throttled)",
+		"lane musixmatch: find lyrics: musixmatch: token renewal required",
 	} {
 		if got := Classify(Normalize(raw)); got != Transient {
 			t.Errorf("Classify(%q) = %s, want transient", raw, got)
@@ -38,10 +42,10 @@ func TestClassifyPersistentShapes(t *testing.T) {
 		"read /mnt/a permission denied",
 		"worker: write item 5 output /mnt/a/b.lrc: open /mnt/a/b.lrc.tmp: read-only file system",
 		"worker: write item 5 output /mnt/a/b.lrc: no space left on device",
-		"musixmatch: matcher HTTP 401: token rejected",
+		"musixmatch: matcher rejected the request (client error): inner status_code 404",
 		"innertube: HTTP 403: forbidden",
 		"innertube: HTTP 400: client version",
-		"musixmatch: ErrMatcherClientError: inner status_code 404",
+		"petitlyrics: application id revoked?",
 		"musixmatch API error: status 400, body: bad",
 		"detector: audio file is missing",
 		"detector: sample audio with ffmpeg: exit status 69: [mp3float @ 0x14e1cf868a80] Header missing",
@@ -85,5 +89,73 @@ func TestClassifyNonErrorStatusFallsThrough(t *testing.T) {
 func TestClassString(t *testing.T) {
 	if Transient.String() != "transient" || Persistent.String() != "persistent" {
 		t.Errorf("class names changed: %q %q", Transient, Persistent)
+	}
+}
+
+// One input per marker, each carrying NO other marker, so deleting a marker
+// reddens exactly its own row.
+func TestClassifyEachMarkerAlone(t *testing.T) {
+	for _, tc := range []struct{ name, sig string }{
+		{"transport error", "lane a: transport error"},
+		{"connection refused", "lane a: connection refused"},
+		{"connection reset", "lane a: read: connection reset by peer"},
+		{"connection timed out", "lane a: connection timed out"},
+		{"broken pipe", "lane a: write: broken pipe"},
+		{"unexpected eof", `lane a: Get "https://x.example/y": unexpected EOF`},
+		{"dial tcp", "lane a: dial tcp <addr>"},
+		{"proxyconnect", "lane a: proxyconnect tcp"},
+		{"tls handshake", "lane a: tls handshake failure"},
+		{"network is unreachable", "lane a: connect: network is unreachable"},
+		{"no such host", "lane a: lookup x.example: no such host"},
+		{"i/o timeout", "lane a: read: i/o timeout"},
+		{"timeout", "lane a: timeout awaiting headers"},
+		{"timed out", "lane a: timed out waiting"},
+		{"operation timed out", "lane a: connect: operation timed out"},
+		{"deadline exceeded", "lane a: rpc: deadline exceeded"},
+		{"context deadline exceeded", "lane a: context deadline exceeded"},
+		{"context canceled", "lane a: context canceled"},
+		{"rate limited", "lane a: rate limited"},
+		{"throttled", "lane a: throttled"},
+		{"circuit open", "lane a: circuit open"},
+		{"lane unavailable", "lane a: lane unavailable"},
+		{"classifier unavailable", "detector: classifier unavailable"},
+		{"temporarily unavailable", "lane a: temporarily unavailable"},
+		{"server sent goaway", "lane a: http2: server sent GOAWAY and closed the connection"},
+		{"database is locked", "queue: database is locked"},
+		{"sqlite_busy", "queue: step failed (SQLITE_BUSY)"},
+		{"host is down", "read /mnt/share/a.mp3: host is down"},
+		{"stale nfs file handle", "read /mnt/share/a.mp3: stale NFS file handle"},
+		{"eof (whole segment)", `petitlyrics: request: Post "https://x.example/y": EOF`},
+		{"parenthesized", "lane a: lane (circuit open)"},
+	} {
+		if got := Classify(Normalize(tc.sig)); got != Transient {
+			t.Errorf("%s: Classify(%q) = %s, want transient", tc.name, tc.sig, got)
+		}
+	}
+}
+
+// Text the writer does not control must not fake a marker. Names are invented.
+func TestClassifyMarkersCannotBeFaked(t *testing.T) {
+	for _, sig := range []string{
+		"read /mnt/Timeout Band permission denied",
+		"worker: write item 9 output /mnt/Throttled Records/a.lrc: permission denied",
+		"lyrics: nothing to save for Timeout - Some Song",
+		"lyrics: nothing to save for Rate Limited - Connection Refused",
+		"lyrics: nothing to save for Broken Pipe Orchestra - Eof",
+	} {
+		if got := Classify(Normalize(sig)); got != Persistent {
+			t.Errorf("Classify(%q) = %s, want persistent (marker faked by a name or path)", sig, got)
+		}
+	}
+}
+
+// A non-decimal exit code is consumed whole, so an HTTP status after it is
+// still read.
+func TestClassifyExitStatusThenHTTPStatus(t *testing.T) {
+	if got := Classify("worker: ffmpeg: exit status 0xC0000005, then HTTP 503"); got != Transient {
+		t.Errorf("hex exit status then HTTP 503 = %s, want transient", got)
+	}
+	if got := Classify("worker: ffmpeg: exit status 0xC0000005, then HTTP 403"); got != Persistent {
+		t.Errorf("hex exit status then HTTP 403 = %s, want persistent", got)
 	}
 }
