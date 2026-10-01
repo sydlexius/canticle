@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
@@ -43,29 +42,49 @@ type PreviewTarget struct {
 	AudioPath string
 	// LRCPath is the line-synced sidecar that exists beside the audio: the
 	// exact stem+".lrc" name, else the first extension-case variant on disk
-	// (sidecar.ResolveCaseVariant, the same resolver revalidate uses). Empty when no regular .lrc exists. A symlink is never reported.
+	// (sidecar.ResolveCaseVariant, the same resolver revalidate uses). Empty
+	// when no regular .lrc exists. A symlink is never reported.
 	LRCPath string
-	// ELRCPath is the word-synced companion canticle OWNS beside LRCPath: the
-	// exact stem+".elrc" or an extension-case variant, kept only when
-	// lyrics.IsOwnedCompanion (the writer's own ownership predicate) agrees.
-	// Empty when there is no LRCPath, no companion, or the companion is foreign.
+	// ELRCCandidate is the word-synced companion NAME beside LRCPath that the
+	// writer's exact-name rule would pair (lyrics.OwnedCompanionOf), found with
+	// Lstat only. It is a CANDIDATE, not a claim: PreviewSource never opens it,
+	// so it makes NO ownership statement. If stem+".elrc" exists in any form
+	// (Lstat reports anything but not-exist), that exact name alone decides: it
+	// is the candidate when it is a regular file, and otherwise there is none
+	// and no extension-case variant is consulted, exactly as the writer would
+	// never pair one. Only when the exact name is absent is the first regular
+	// extension-case variant (sidecar.ResolveCaseVariant, no directory read)
+	// reported. Empty when there is no LRCPath or no such regular file.
+	//
+	// A consumer MUST, before using it: confine it with
+	// pathutil.ResolveWithinRoot against LibraryRoots, open it with O_NOFOLLOW
+	// (never following a symlink swapped in after the Lstat), and confirm
+	// canticle owns it (lyrics.IsOwnedCompanion semantics) with a BOUNDED
+	// header read, treating a foreign or unreadable file as no companion. One
+	// known divergence the consumer inherits: when several variants exist and
+	// the first in name order is foreign while a later one is owned, the writer
+	// would pair the later one; the preview reports only the first and so shows
+	// none. That shape needs two case-variant companions side by side and is
+	// left to the consumer's ownership check to fail closed on.
 	//
 	// An I/O error (EACCES, EIO, an unavailable mount) reads as ABSENT for both
-	// paths: this is a read-only preview and does not distinguish "no lyrics"
-	// from "could not tell".
-	ELRCPath string
+	// paths (an unstatable exact .elrc still blocks the variants): this is a read-only preview and does not distinguish "no
+	// lyrics" from "could not tell".
+	ELRCCandidate string
 }
 
 // PreviewSource loads the preview description of work_queue row id. It reads
 // one row, Lstats the .lrc name and, when that misses, up to 7 extension-case
-// variants; with a .lrc found it does the same for the .elrc (up to 15
-// variants) and, if one exists, OPENS it to read its header for the ownership
-// check (lyrics.IsOwnedCompanion). It never lists a directory. A missing row
-// yields ErrPreviewNotFound.
+// variants; with a .lrc found it Lstats the exact .elrc name and, only when
+// that name is absent, up to 15 variants. It is Lstat-ONLY: it never opens,
+// reads, or lists anything on disk, so a DB-derived path cannot make it read
+// an out-of-root or arbitrarily large file (confinement and ownership are the
+// consumer's job, see PreviewTarget.ELRCCandidate). A missing row yields
+// ErrPreviewNotFound.
 //
 // This is a single-row, user-triggered call (one click, with the audio about
 // to stream from the same disk). It must NEVER be called per row of a list
-// view: the stats and the header read wake disks and cost O(rows), the exact
+// view: the stats wake disks and cost O(rows), the exact
 // shape #684 removed from the scan path.
 func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, error) {
 	t := PreviewTarget{ID: id}
@@ -85,9 +104,7 @@ func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, erro
 	}
 	t.LRCPath = resolveRegular(sidecar.StemOf(t.AudioPath) + sidecar.ExtLineSynced)
 	if t.LRCPath != "" && sidecar.Active(sidecar.KindWordSynced) {
-		if c := resolveRegular(sidecar.StemOf(t.LRCPath) + sidecar.ExtWordSynced); c != "" && lyrics.IsOwnedCompanion(c) {
-			t.ELRCPath = c
-		}
+		t.ELRCCandidate = elrcCandidate(sidecar.StemOf(t.LRCPath) + sidecar.ExtWordSynced)
 	}
 	return t, nil
 }
@@ -98,6 +115,24 @@ func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, erro
 func resolveRegular(exact string) string {
 	if fi, err := os.Lstat(exact); err == nil && fi.Mode().IsRegular() {
 		return exact
+	}
+	if variant, _, ok := sidecar.ResolveCaseVariant(exact); ok {
+		return variant
+	}
+	return ""
+}
+
+// elrcCandidate applies the writer's exact-name rule (lyrics.ownedCompanionOfErr)
+// with Lstat only: an exact name that exists in ANY form (regular, symlink,
+// directory, or unstatable) alone decides and is reported only when regular;
+// variants are probed only when the exact name does not exist. Opens nothing.
+func elrcCandidate(exact string) string {
+	fi, err := os.Lstat(exact)
+	if !os.IsNotExist(err) {
+		if err == nil && fi.Mode().IsRegular() {
+			return exact
+		}
+		return ""
 	}
 	if variant, _, ok := sidecar.ResolveCaseVariant(exact); ok {
 		return variant

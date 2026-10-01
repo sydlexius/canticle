@@ -46,16 +46,19 @@ func TestPreviewSourceSidecars(t *testing.T) {
 	}
 	want := reports.PreviewTarget{
 		ID: id, Artist: "Ar", Title: "Ti", Album: "Al", Status: "done", SyncTier: "word",
-		AudioPath: audio,
-		LRCPath:   filepath.Join(dir, "song.lrc"),
-		ELRCPath:  filepath.Join(dir, "song.elrc"),
+		AudioPath:     audio,
+		LRCPath:       filepath.Join(dir, "song.lrc"),
+		ELRCCandidate: filepath.Join(dir, "song.elrc"),
 	}
 	if got != want {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
 }
 
-func TestPreviewSourceForeignCompanionNotReported(t *testing.T) {
+// A foreign companion is still the CANDIDATE: PreviewSource never opens the
+// file, so it makes no ownership claim; the consumer's bounded header read
+// is what rejects it.
+func TestPreviewSourceForeignCompanionIsStillCandidate(t *testing.T) {
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 	dir := t.TempDir()
@@ -69,8 +72,8 @@ func TestPreviewSourceForeignCompanionNotReported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.LRCPath == "" || got.ELRCPath != "" {
-		t.Fatalf("lrc=%q elrc=%q: want lrc set, foreign elrc empty", got.LRCPath, got.ELRCPath)
+	if want := filepath.Join(dir, "song.elrc"); got.LRCPath == "" || got.ELRCCandidate != want {
+		t.Fatalf("lrc=%q elrc=%q: want lrc set, candidate %q", got.LRCPath, got.ELRCCandidate, want)
 	}
 	if got.SyncTier != "" {
 		t.Fatalf("SyncTier = %q, want empty for NULL", got.SyncTier)
@@ -94,7 +97,7 @@ func TestPreviewSourceMissingSidecarsAndSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AudioPath != audio || got.LRCPath != "" || got.ELRCPath != "" {
+	if got.AudioPath != audio || got.LRCPath != "" || got.ELRCCandidate != "" {
 		t.Fatalf("got %+v: symlinked .lrc must not be reported", got)
 	}
 }
@@ -106,7 +109,7 @@ func TestPreviewSourceNoSourcePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AudioPath != "" || got.LRCPath != "" || got.ELRCPath != "" || got.Status != "pending" {
+	if got.AudioPath != "" || got.LRCPath != "" || got.ELRCCandidate != "" || got.Status != "pending" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -133,6 +136,139 @@ func TestPreviewSourceCaseVariantLRC(t *testing.T) {
 	}
 }
 
+// caseSensitive reports whether dir's filesystem keeps case-variant names
+// distinct (false on default APFS, where the exact Lstat hides a variant).
+func caseSensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "Probe.X")
+	writeFile(t, probe, "x")
+	defer func() { _ = os.Remove(probe) }()
+	_, err := os.Lstat(filepath.Join(dir, "probe.x"))
+	return err != nil
+}
+
+// previewELRC seeds song.flac + song.lrc in a fresh dir, lets seed shape the
+// .elrc names, and returns the dir and the row's ELRCCandidate.
+func previewELRC(t *testing.T, dir string, seed func(dir string)) string {
+	t.Helper()
+	sqlDB := openTestDB(t)
+	audio := filepath.Join(dir, "song.flac")
+	writeFile(t, audio, "a")
+	writeFile(t, filepath.Join(dir, "song.lrc"), "[00:01.00]hi\n")
+	seed(dir)
+	id := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "T", status: "done"})
+	setSourcePath(t, sqlDB, id, audio)
+	got, err := reports.New(sqlDB).PreviewSource(context.Background(), id)
+	if err != nil {
+		t.Fatalf("PreviewSource: %v", err)
+	}
+	if got.LRCPath == "" {
+		t.Fatalf("LRCPath empty; the .elrc probe never ran")
+	}
+	return got.ELRCCandidate
+}
+
+// The writer's exact-name rule (lyrics.OwnedCompanionOf): an exact stem.elrc
+// that exists in any non-regular form decides on its own, so no variant is
+// ever reported beside it.
+func TestPreviewSourceExactELRCNameDecides(t *testing.T) {
+	owned := "[by:canticle]\n[00:01.00]hi\n"
+
+	t.Run("directory at exact name, no variant", func(t *testing.T) {
+		got := previewELRC(t, t.TempDir(), func(dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "song.elrc"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if got != "" {
+			t.Fatalf("ELRCCandidate = %q, want none for a directory", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		mk   func(t *testing.T, exact string)
+	}{
+		{"directory at exact name", func(t *testing.T, exact string) {
+			if err := os.Mkdir(exact, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"dangling symlink at exact name", func(t *testing.T, exact string) {
+			if err := os.Symlink(filepath.Join(filepath.Dir(exact), "missing"), exact); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name+" beside an owned variant", func(t *testing.T) {
+			dir := t.TempDir()
+			if !caseSensitive(t, dir) {
+				t.Skip("case-insensitive filesystem: song.elrc and song.ELRC cannot coexist (runs on Linux/CI only)")
+			}
+			got := previewELRC(t, dir, func(dir string) {
+				tc.mk(t, filepath.Join(dir, "song.elrc"))
+				writeFile(t, filepath.Join(dir, "song.ELRC"), owned)
+			})
+			if got != "" {
+				t.Fatalf("ELRCCandidate = %q: the writer never pairs a variant beside an existing exact name", got)
+			}
+		})
+	}
+
+	t.Run("exact absent, variant reported", func(t *testing.T) {
+		dir := t.TempDir()
+		if !caseSensitive(t, dir) {
+			t.Skip("case-insensitive filesystem: the exact Lstat hides the variant path (runs on Linux/CI only)")
+		}
+		got := previewELRC(t, dir, func(dir string) {
+			writeFile(t, filepath.Join(dir, "song.ELRC"), owned)
+		})
+		if want := filepath.Join(dir, "song.ELRC"); got != want {
+			t.Fatalf("ELRCCandidate = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no elrc at all", func(t *testing.T) {
+		if got := previewELRC(t, t.TempDir(), func(string) {}); got != "" {
+			t.Fatalf("ELRCCandidate = %q, want none", got)
+		}
+	})
+}
+
+// PreviewSource opens nothing: an exact .elrc that would block an open (a
+// FIFO) or refuse one (mode 0000) is still reported, with no error and no
+// hang, because only Lstat ever touches it.
+func TestPreviewSourceOpensNoSidecar(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses mode 0000")
+	}
+	t.Run("unreadable", func(t *testing.T) {
+		got := previewELRC(t, t.TempDir(), func(dir string) {
+			p := filepath.Join(dir, "song.elrc")
+			writeFile(t, p, "[by:canticle]\n")
+			if err := os.Chmod(p, 0); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if filepath.Base(got) != "song.elrc" {
+			t.Fatalf("ELRCCandidate = %q, want the unreadable exact name", got)
+		}
+	})
+	t.Run("fifo", func(t *testing.T) {
+		dir := t.TempDir()
+		got := previewELRC(t, dir, func(dir string) {
+			if err := mkfifo(filepath.Join(dir, "song.elrc")); err != nil {
+				t.Skipf("mkfifo unsupported: %v", err)
+			}
+		})
+		// A FIFO is not a regular file, so the exact-name rule reports no
+		// candidate; reaching this line at all proves nothing opened it.
+		if got != "" {
+			t.Fatalf("ELRCCandidate = %q, want none for a FIFO", got)
+		}
+	})
+}
+
 func TestPreviewSourceRelativeSourcePathProbesNothing(t *testing.T) {
 	sqlDB := openTestDB(t)
 	dir := t.TempDir()
@@ -145,7 +281,7 @@ func TestPreviewSourceRelativeSourcePathProbesNothing(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.LRCPath != "" || got.ELRCPath != "" {
+		if got.LRCPath != "" || got.ELRCCandidate != "" {
 			t.Fatalf("source_path %q: got %+v, want no sidecars", p, got)
 		}
 	}
