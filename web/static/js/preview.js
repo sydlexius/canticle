@@ -6,14 +6,20 @@
 // controls); this only adds the sync. CSP-safe: external file, class toggles
 // only (no inline styles, no eval). A missing element fails loudly.
 //
-// Current line/word = the LAST item whose data-start-ms <= currentTime, and
-// none before the first. Words are only marked inside the current line.
+// Current line = the LAST line whose data-start-ms <= currentTime (lines are
+// time-sorted by the server), none before the first. Current word = the word
+// with the GREATEST start <= currentTime inside the current line; word starts
+// are in source order and may be non-monotonic, so they are scanned, not
+// bisected.
 //
 // Auto-scroll rule: the current line is scrolled to the centre whenever it
 // changes, EXCEPT after the user scrolled by hand (wheel, touch drag, or a
 // scroll key). That pauses following so the page never fights the reader; it
 // resumes on the next seek (clicking a line, or the audio's own seeked event)
-// or on play. Motion is instant under prefers-reduced-motion, smooth otherwise.
+// or on play, and resuming scrolls the current line back into view once. A
+// scroll event the script did not cause (e.g. dragging the scrollbar) also
+// pauses following; scrolls caused by scrollIntoView are told apart by a short
+// "programmatic" window that lasts until scroll events go quiet. Motion is instant under prefers-reduced-motion, smooth otherwise.
 (function () {
   "use strict";
 
@@ -23,8 +29,20 @@
     return Number(el.getAttribute("data-start-ms"));
   }
 
+  // maxAtOrBefore returns the index of the item with the greatest start <= ms
+  // (the later one on a tie), or -1. Order-independent.
+  function maxAtOrBefore(starts, ms) {
+    var found = -1;
+    for (var i = 0; i < starts.length; i++) {
+      if (starts[i] <= ms && (found < 0 || starts[i] >= starts[found])) {
+        found = i;
+      }
+    }
+    return found;
+  }
+
   // lastAtOrBefore returns the index of the last item with start <= ms, or -1.
-  // Items are in document order, which the server renders in time order.
+  // Only valid for sorted input (the line list).
   function lastAtOrBefore(starts, ms) {
     var lo = 0;
     var hi = starts.length - 1;
@@ -62,7 +80,26 @@
     var curLine = -1;
     var curWord = -1;
     var following = true;
+    var needScroll = false;
+    var programmatic = false;
+    var settleTimer = 0;
     var raf = 0;
+
+    // markProgrammatic opens the window in which scroll events are the
+    // script's own; it closes once they have been quiet for SETTLE_MS.
+    var SETTLE_MS = 150;
+    function markProgrammatic() {
+      programmatic = true;
+      window.clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(function () {
+        programmatic = false;
+      }, SETTLE_MS);
+    }
+
+    function resumeFollowing() {
+      following = true;
+      needScroll = true;
+    }
 
     function setCurrent(els, idx, prev) {
       if (prev === idx) {
@@ -91,13 +128,16 @@
         curWord = -1;
         setCurrent(lines, li, curLine);
         curLine = li;
-        if (li >= 0 && following) {
-          lines[li].scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" });
-        }
+        needScroll = true;
+      }
+      if (needScroll && following && curLine >= 0) {
+        needScroll = false;
+        markProgrammatic();
+        lines[curLine].scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" });
       }
       if (curLine >= 0) {
         var w = lineWords[curLine];
-        var wi = lastAtOrBefore(w.starts, ms);
+        var wi = maxAtOrBefore(w.starts, ms);
         setCurrent(w.words, wi, curWord);
         curWord = wi;
       }
@@ -116,12 +156,13 @@
 
     function seekTo(li) {
       audio.currentTime = lineStarts[li] / 1000;
-      following = true;
+      resumeFollowing();
       update();
     }
 
     lines.forEach(function (li, i) {
       li.setAttribute("tabindex", "0");
+      li.setAttribute("role", "button");
       li.setAttribute("title", "Play from here");
       li.addEventListener("click", function () {
         seekTo(i);
@@ -137,6 +178,13 @@
     function pauseFollowing() {
       following = false;
     }
+    window.addEventListener("scroll", function () {
+      if (!programmatic) {
+        pauseFollowing();
+        return;
+      }
+      markProgrammatic(); // still scrolling on our behalf: extend the window
+    });
     window.addEventListener("wheel", pauseFollowing, { passive: true });
     window.addEventListener("touchmove", pauseFollowing, { passive: true });
     window.addEventListener("keydown", function (ev) {
@@ -148,11 +196,11 @@
 
     audio.addEventListener("timeupdate", update);
     audio.addEventListener("seeked", function () {
-      following = true;
+      resumeFollowing();
       update();
     });
     audio.addEventListener("play", function () {
-      following = true;
+      resumeFollowing();
       startLoop();
     });
     audio.addEventListener("pause", update);

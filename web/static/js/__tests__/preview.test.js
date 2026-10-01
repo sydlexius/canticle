@@ -64,6 +64,16 @@ describe("preview.js highlighting", () => {
     expect(p.current(".mx-preview-word")).toEqual([]);
   });
 
+  it("picks the greatest word start when word timestamps are out of order", () => {
+    const html = `<body><audio id="mx-preview-audio"></audio><ol id="mx-preview-lyrics">
+      <li class="mx-preview-line" data-start-ms="1000"><span class="mx-preview-word" data-start-ms="1500">late</span> <span class="mx-preview-word" data-start-ms="1000">early</span></li></ol></body>`;
+    const p = load({ html });
+    p.at(1.6);
+    expect(p.current(".mx-preview-word")).toEqual(["late"]);
+    p.at(1.2);
+    expect(p.current(".mx-preview-word")).toEqual(["early"]);
+  });
+
   it("clears the highlight when seeking back before the first line", () => {
     const p = load();
     p.at(4);
@@ -108,6 +118,32 @@ describe("preview.js scrolling", () => {
     expect(p.scrolls).toHaveLength(1);
     p.audio.dispatchEvent(new p.win.Event("seeked"));
     p.at(5.1);
+    expect(p.scrolls).toHaveLength(3); // initial, resume on seeked, then the line change
+  });
+
+  it("scrolls the current line back into view when following resumes within it", () => {
+    const p = load();
+    p.at(1.1);
+    p.win.dispatchEvent(new p.win.Event("wheel"));
+    p.at(1.3); // same line, still paused: no scroll
+    expect(p.scrolls).toHaveLength(1);
+    p.at(1.4);
+    p.audio.dispatchEvent(new p.win.Event("seeked")); // seek within the same line
+    expect(p.scrolls).toHaveLength(2);
+    expect(p.scrolls[1].text).toBe("a b");
+    p.at(1.5); // once, not every frame
+    expect(p.scrolls).toHaveLength(2);
+  });
+
+  it("pauses following on a scroll the script did not cause, not on its own", async () => {
+    const p = load();
+    p.at(1.1); // auto-scroll opens the programmatic window
+    p.win.dispatchEvent(new p.win.Event("scroll")); // its own smooth scroll
+    p.at(3.1);
+    expect(p.scrolls).toHaveLength(2);
+    await new Promise((r) => setTimeout(r, 300));
+    p.win.dispatchEvent(new p.win.Event("scroll")); // scrollbar drag
+    p.at(5.1);
     expect(p.scrolls).toHaveLength(2);
   });
 
@@ -129,6 +165,11 @@ describe("preview.js seeking", () => {
     p.doc.querySelectorAll(".mx-preview-line")[1].click();
     expect(p.time()).toBe(3);
     expect(p.current(".mx-preview-line")).toEqual(["second"]);
+  });
+
+  it("marks lines as buttons for assistive tech", () => {
+    const p = load();
+    expect(p.doc.querySelectorAll('.mx-preview-line[role="button"]')).toHaveLength(3);
   });
 
   it("makes lines focusable and seeks on Enter, ignoring other keys", () => {
