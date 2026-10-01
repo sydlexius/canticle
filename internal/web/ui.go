@@ -116,6 +116,16 @@ type UI struct {
 	// is a bug to fix, while a credit on the wrong provider is a misattribution
 	// published to users.
 	musixmatchServing bool
+
+	// queueActions backs the write actions on the /queue/{bucket} pages (#598).
+	// Nil (the default) renders no action UI at all; 598-5 supplies the revive
+	// implementation.
+	queueActions QueueActions
+
+	// guardedRoutes records every pattern Register put behind the session guard
+	// (empty when auth is not configured). It exists so a test can enumerate the
+	// guarded surface instead of hand-picking routes.
+	guardedRoutes []string
 }
 
 // KeyManager is the subset of *auth.Service the webhook key management page
@@ -128,6 +138,10 @@ type KeyManager interface {
 	CreateKey(ctx context.Context, name string, scopes []auth.Scope) (auth.CreatedKey, error)
 	RevokeKeyByID(ctx context.Context, id string) (auth.Key, error)
 }
+
+// routeReg registers one page route, applying the session guard when auth is
+// configured. Register builds it; each feature file registers through it.
+type routeReg func(pattern string, h http.HandlerFunc)
 
 // UIOption customizes a UI.
 type UIOption func(*UI)
@@ -292,6 +306,12 @@ func NewUI(cfg config.Config, version string, opts ...UIOption) *UI {
 // assets and the login endpoints themselves stay public.
 func (u *UI) Register(mux *http.ServeMux) {
 	mux.Handle("GET "+staticPrefix, StaticHandler())
+	// reg registers one page route. With auth configured it wraps the handler in
+	// the session guard (and records the pattern in guardedRoutes so a test can
+	// enumerate every guarded route); without auth the route is public (#210).
+	// Every page route goes through reg, so a future feature adds its routes
+	// from its own file with one call line here and cannot forget the guard.
+	var reg routeReg = func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, h) }
 	if u.auth != nil {
 		mux.HandleFunc("GET /login", u.auth.handleLoginForm)
 		mux.HandleFunc("POST /login", u.auth.handleLogin)
@@ -310,30 +330,23 @@ func (u *UI) Register(mux *http.ServeMux) {
 			}
 			return sess
 		}
-		mux.Handle("GET /{$}", guard(http.HandlerFunc(u.handleRoot)))
-		mux.Handle("GET /dashboard", guard(http.HandlerFunc(u.handleDashboard)))
-		mux.Handle("GET /reports", guard(http.HandlerFunc(u.handleReports)))
-		mux.Handle("GET /reports/{key}", guard(http.HandlerFunc(u.handleReportFragment)))
-		mux.Handle("GET /config", guard(http.HandlerFunc(u.handleConfig)))
-		mux.Handle("GET /settings", guard(http.HandlerFunc(u.handleSettings)))
-		mux.Handle("POST /settings/field", guard(http.HandlerFunc(u.handleSaveField)))
-		mux.Handle("POST /settings/section", guard(http.HandlerFunc(u.handleSaveSection)))
-		mux.Handle("GET /settings/keys", guard(http.HandlerFunc(u.handleWebhookKeys)))
-		mux.Handle("POST /settings/keys", guard(http.HandlerFunc(u.handleCreateWebhookKey)))
-		mux.Handle("POST /settings/keys/revoke", guard(http.HandlerFunc(u.handleRevokeWebhookKey)))
-		return
+		reg = func(pattern string, h http.HandlerFunc) {
+			u.guardedRoutes = append(u.guardedRoutes, pattern)
+			mux.Handle(pattern, guard(h))
+		}
 	}
-	mux.HandleFunc("GET /{$}", u.handleRoot)
-	mux.HandleFunc("GET /dashboard", u.handleDashboard)
-	mux.HandleFunc("GET /reports", u.handleReports)
-	mux.HandleFunc("GET /reports/{key}", u.handleReportFragment)
-	mux.HandleFunc("GET /config", u.handleConfig)
-	mux.HandleFunc("GET /settings", u.handleSettings)
-	mux.HandleFunc("POST /settings/field", u.handleSaveField)
-	mux.HandleFunc("POST /settings/section", u.handleSaveSection)
-	mux.HandleFunc("GET /settings/keys", u.handleWebhookKeys)
-	mux.HandleFunc("POST /settings/keys", u.handleCreateWebhookKey)
-	mux.HandleFunc("POST /settings/keys/revoke", u.handleRevokeWebhookKey)
+	reg("GET /{$}", u.handleRoot)
+	reg("GET /dashboard", u.handleDashboard)
+	reg("GET /reports", u.handleReports)
+	reg("GET /reports/{key}", u.handleReportFragment)
+	reg("GET /config", u.handleConfig)
+	reg("GET /settings", u.handleSettings)
+	reg("POST /settings/field", u.handleSaveField)
+	reg("POST /settings/section", u.handleSaveSection)
+	reg("GET /settings/keys", u.handleWebhookKeys)
+	reg("POST /settings/keys", u.handleCreateWebhookKey)
+	reg("POST /settings/keys/revoke", u.handleRevokeWebhookKey)
+	u.registerQueueRoutes(reg)
 }
 
 // settingsPath is the single config destination. Settings replaced the old

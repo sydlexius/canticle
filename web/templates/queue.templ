@@ -1,0 +1,92 @@
+package templates
+
+// QueuePage is the full /queue/{bucket} drill-down page (#598): the rows behind
+// one dashboard queue counter, in id order, with a keyset "Show more". It ships
+// its own small stylesheet through Layout's pageCSS slot so the shared CSS is
+// untouched.
+templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout(view.Title+" queue", "/dashboard", version, reports, "/static/css/queue.css", musixmatchInactive, musixmatchServing) {
+		// queue.js restores focus after a "Show more" swap replaces its own row.
+		<script src="/static/js/queue.js" defer></script>
+		<h1 class="mx-page-title">{ view.Title }</h1>
+		<p class="mx-page-subtitle">{ view.Blurb }</p>
+		<p class="mx-queue-nav">
+			<a class="mx-queue-link" href="/dashboard">Back to dashboard</a>
+			if view.After > 0 {
+				<a class="mx-queue-link" href={ templ.SafeURL("/queue/" + view.Key) }>Back to start of list</a>
+			}
+		</p>
+		if len(view.Rows) == 0 {
+			if view.After > 0 {
+				<p class="mx-dash-empty">No more rows.</p>
+			} else {
+				<p class="mx-dash-empty">No rows in this bucket.</p>
+			}
+		} else {
+			<div class="mx-table-wrap mx-queue-wrap">
+				<table class="mx-table" aria-label={ view.Title + " rows" }>
+					<thead>
+						<tr>
+							<th>Artist</th>
+							<th>Title</th>
+							<th>Album</th>
+							<th>Status</th>
+							<th>Reason</th>
+							<th>Next attempt</th>
+							<th>Misses</th>
+							<th>Attempts</th>
+							<th>Updated</th>
+							<th>Libraries</th>
+						</tr>
+					</thead>
+					<tbody id="mx-queue-body">
+						@QueueRows(view)
+					</tbody>
+				</table>
+			</div>
+		}
+	}
+}
+
+// QueueRows is the htmx "Show more" fragment and the tbody content of the full
+// page: the page's rows, then (when more remain) a final row holding the Show
+// more control. The control targets its own row with an outerHTML swap, so the
+// response replaces it with the next rows and, if any remain, a fresh control;
+// no out-of-band swap is needed. The href mirrors hx-get so it degrades to a
+// plain navigation without JS.
+templ QueueRows(view QueueView) {
+	for i, row := range view.Rows {
+		// The first row of each batch is the focus target for queue.js.
+		<tr
+			if i == 0 {
+				data-queue-batch="first"
+			}
+		>
+			<td>{ row.Artist }</td>
+			<td>{ row.Title }</td>
+			<td>{ row.Album }</td>
+			<td>{ row.Status }</td>
+			<td>{ row.Reason }</td>
+			<td class="mx-cell-mono">{ row.NextAttemptAt }</td>
+			<td class="mx-cell-mono">{ row.MissCount }</td>
+			<td class="mx-cell-mono">{ row.Attempts }</td>
+			<td class="mx-cell-mono">{ row.UpdatedAt }</td>
+			<td>{ row.Libraries }</td>
+		</tr>
+	}
+	if view.NextCursor > 0 {
+		<tr class="mx-queue-more-row">
+			<td colspan="10">
+				<a
+					class="mx-run-button mx-queue-more"
+					href={ templ.SafeURL(QueueMoreHref(view.Key, view.NextCursor)) }
+					hx-get={ QueueMoreHref(view.Key, view.NextCursor) }
+					hx-target="closest tr"
+					hx-swap="outerHTML"
+				>
+					Show more
+				</a>
+			</td>
+		</tr>
+	}
+}

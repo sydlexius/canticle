@@ -1,0 +1,53 @@
+/* Queue drill-down page (#598). Served as a per-page stylesheet (issue #322
+ * pattern) so it ships only on /queue/{bucket}. The table itself reuses the
+ * shared .mx-table styles. */
+
+.mx-queue-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0 0 1rem;
+  font-size: 0.8125rem;
+}
+
+.mx-queue-link {
+  color: var(--mx-sidebar-active-text);
+  text-decoration: none;
+}
+
+.mx-queue-link:hover,
+.mx-queue-link:focus-visible {
+  text-decoration: underline;
+}
+
+/* Keep the wide table scrolling inside its own wrapper, never the page. The
+ * shell's .mx-content is a flex item (flex: 1) whose automatic min-width is its
+ * content width, so a wide table would otherwise stretch the whole page past the
+ * viewport; min-width: 0 lets it shrink to the viewport so .mx-table-wrap's own
+ * overflow: auto scrolls instead. This sheet loads only on /queue/{bucket}. */
+.mx-content {
+  min-width: 0;
+}
+
+.mx-queue-wrap {
+  max-width: 100%;
+}
+
+.mx-queue-more-row td {
+  text-align: center;
+  padding: 0.75rem;
+}
+
+/* Same tokens as the dashboard's empty state (dashboard.css is not loaded here). */
+.mx-dash-empty {
+  font-family: var(--mx-font-sans);
+  font-size: 0.8125rem;
+  color: var(--mx-content-text-secondary);
+  padding: 0.5rem 0;
+}
+
+/* Focus ring on the first new row after "Show more". */
+.mx-table tr[data-queue-batch]:focus-visible {
+  outline: 2px solid var(--mx-sidebar-active-text);
+  outline-offset: -2px;
+}
