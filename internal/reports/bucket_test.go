@@ -248,3 +248,55 @@ func TestListBucketUnknownBucket(t *testing.T) {
 		t.Errorf("ParseBucket(finished) = %q, %v", b, err)
 	}
 }
+
+func TestParseBucketRoundTrip(t *testing.T) {
+	for _, b := range reports.Buckets() {
+		got, err := reports.ParseBucket(string(b))
+		if err != nil || got != b {
+			t.Errorf("ParseBucket(%q) = %q, %v; want %q, nil", b, got, err, b)
+		}
+	}
+	if _, err := reports.ParseBucket("nope"); err == nil {
+		t.Error("ParseBucket(unknown) returned nil error")
+	}
+}
+
+func TestListBucketEmptyAndUnlinked(t *testing.T) {
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	rows, err := repo.ListBucket(context.Background(), reports.BucketPending, 0, 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("empty bucket = %v, %v; want no rows, nil", rows, err)
+	}
+	// A CLI-enqueued row with no scan link.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "solo", status: "pending"})
+	rows, err = repo.ListBucket(context.Background(), reports.BucketPending, 0, 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListBucket = %v, %v; want 1 row", rows, err)
+	}
+	if len(rows[0].Libraries) != 0 {
+		t.Errorf("row = %+v; want no libraries", rows[0])
+	}
+}
+
+func TestListBucketQueryErrorsPropagate(t *testing.T) {
+	sqlDB := openTestDB(t)
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "x", status: "pending"})
+	repo := reports.New(sqlDB)
+
+	// The library lookup fails after the page query succeeded.
+	if _, err := sqlDB.Exec(`DROP TABLE work_queue_scan_results`); err != nil {
+		t.Fatalf("drop junction: %v", err)
+	}
+	if _, err := repo.ListBucket(context.Background(), reports.BucketPending, 0, 10); err == nil {
+		t.Error("expected library lookup error")
+	}
+
+	// The page query itself fails on a closed database.
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := repo.ListBucket(context.Background(), reports.BucketPending, 0, 10); err == nil {
+		t.Error("expected page query error on closed DB")
+	}
+}
