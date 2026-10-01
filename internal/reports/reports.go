@@ -687,12 +687,28 @@ func (r *Repo) groupedReasons(ctx context.Context, status string) ([]FailureGrou
 	if status != "failed" && status != "deferred" {
 		return nil, fmt.Errorf("reports: grouped reasons: unsupported status %q", status)
 	}
+	// 'deferred' is shared with non-miss writers, so the deferred report keeps
+	// only genuine provider misses (queue.Defer). Excluded, each parked for the
+	// worker rather than waiting on a catalog miss:
+	//   - word recheck (word_timing_state='queued', #982) and upgrade trips
+	//     (upgrade_queued=1, #553): via queue.NotParkedRecheckSQL, the same
+	//     predicate every miss sweep uses;
+	//   - refused waits (queue.DeferRefused, #950): a lane did not answer, so no
+	//     miss happened; marked by refused_waits > 0 (DeferRefused is its only
+	//     incrementer, and every settle zeroes it). A row refused and later a
+	//     real miss keeps refused_waits until it settles and is hidden too.
+	// 'failed' is a hard error from queue.Fail, never a parked non-miss, so it
+	// is left unfiltered.
+	extra := ""
+	if status == "deferred" {
+		extra = queue.NotParkedRecheckSQL + ` AND refused_waits = 0`
+	}
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT status, COALESCE(NULLIF(last_error, ''), ?) AS reason, COUNT(*) AS n
          FROM work_queue
          WHERE status = ?
            AND NOT (last_error = ''
-                    AND CASE status WHEN 'failed' THEN attempts ELSE miss_count END = 0)
+                    AND CASE status WHEN 'failed' THEN attempts ELSE miss_count END = 0)`+extra+`
          GROUP BY status, reason
          ORDER BY n DESC, status, reason`,
 		queue.NoReasonRecorded, status)

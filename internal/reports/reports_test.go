@@ -1502,3 +1502,45 @@ func TestFailureAnalysisKeepsZeroAttemptsRowWithAnErrorMessage(t *testing.T) {
 		t.Errorf("Reason = %q, want %q", got[0].Reason, "some recorded reason")
 	}
 }
+
+// Deferred misses lists genuine provider misses only (#638): a refused wait
+// (DeferRefused, #950), a queued word recheck (#982) and an armed upgrade trip
+// (#553) all park a row as 'deferred' without any miss having happened.
+func TestDeferredMissesExcludesNonMissDeferrals(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "real-miss", status: "deferred", lastError: "no match", missCount: 1})
+
+	refused := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "refused", status: "deferred", lastError: "lane not ready"})
+	setWorkItemColumn(t, sqlDB, refused, "refused_waits", true, 1)
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "recheck", status: "deferred", lastError: "lane throttled", wordTimingState: "queued"})
+	upgrade := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "upgrade", status: "deferred", lastError: "upgrade note"})
+	setWorkItemColumn(t, sqlDB, upgrade, "upgrade_queued", true, 1)
+
+	got, err := repo.DeferredMisses(ctx)
+	if err != nil {
+		t.Fatalf("DeferredMisses: %v", err)
+	}
+	if len(got) != 1 || got[0].Reason != "no match" || got[0].Count != 1 {
+		t.Errorf("DeferredMisses = %+v, want only the one real miss (reason %q, count 1)", got, "no match")
+	}
+}
+
+// Groups with equal counts order by reason, so the report is stable across runs.
+func TestDeferredMissesTiesOrderByReason(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "z", status: "deferred", lastError: "zebra", missCount: 1})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "a", status: "deferred", lastError: "apple", missCount: 1})
+
+	got, err := repo.DeferredMisses(ctx)
+	if err != nil {
+		t.Fatalf("DeferredMisses: %v", err)
+	}
+	if len(got) != 2 || got[0].Reason != "apple" || got[1].Reason != "zebra" {
+		t.Errorf("DeferredMisses = %+v, want apple then zebra", got)
+	}
+}
