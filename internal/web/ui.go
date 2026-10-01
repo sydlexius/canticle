@@ -45,7 +45,8 @@ var reportDefs = []reportDef{
 	{"recent-outcomes", "Recent outcomes", "The most recently completed tracks and their derived result."},
 	{"provider-effectiveness", "Provider effectiveness", "Per-lane hits, misses, and true per-track hit-rate."},
 	{"instrumental-inventory", "Instrumental inventory", "Tracks confirmed instrumental by the Instrumental Detector."},
-	{"failure-analysis", "Failure analysis", "Failed and deferred tracks grouped by reason."},
+	{"failure-analysis", "Failure analysis", "Failed tracks grouped by reason."},
+	{"deferred-misses", "Deferred misses", "Benign misses waiting for a retry, grouped by reason."},
 	{"review-queue", "Review queue", "Synced lyrics the timing guard flagged for a look: demoted or quarantined."},
 }
 
@@ -501,8 +502,12 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				DetectRequested: detectRequestedLabel(t.DetectRequested),
 			})
 		}
-	case "failure-analysis":
-		rows, err := u.reports.FailureAnalysis(ctx)
+	case "failure-analysis", "deferred-misses":
+		fetch := u.reports.FailureAnalysis
+		if def.key == "deferred-misses" {
+			fetch = u.reports.DeferredMisses
+		}
+		rows, err := fetch(ctx)
 		if err != nil {
 			return templates.ReportView{}, err
 		}

@@ -501,6 +501,7 @@ func TestBuildRailEncodesKeyPath(t *testing.T) {
 		"provider-effectiveness",
 		"instrumental-inventory",
 		"failure-analysis",
+		"deferred-misses",
 		"review-queue",
 	}
 	if len(rail) != len(wantKeys) {
@@ -613,5 +614,47 @@ func TestReportFragmentRendersLaneMarks(t *testing.T) {
 	// placeholder-box change fails here rather than shipping a fake mark.
 	if n := strings.Count(body, "mx-lane-mark"); n != 2 {
 		t.Errorf("expected exactly 2 lane marks across 3 rows (petitlyrics has none), got %d", n)
+	}
+}
+
+// TestFailureAndDeferredReportsAreSeparate renders both reports against one
+// database holding a failed and a deferred row, and asserts each lists only its
+// own status (#638): Failure analysis matches the dashboard "failed" counter,
+// Deferred misses carries the rest.
+func TestFailureAndDeferredReportsAreSeparate(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	mux := newReportsUIServer(t, sqlDB)
+	for _, r := range []struct{ title, status, reason string }{
+		{"f1", "failed", "hard error reason"},
+		{"d1", "deferred", "benign miss reason"},
+	} {
+		if _, err := sqlDB.ExecContext(context.Background(),
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, status, last_error, attempts, miss_count)
+             VALUES ('A', ?, 'a', ?, ?, ?, 1, 1)`, r.title, r.title, r.status, r.reason); err != nil {
+			t.Fatalf("insert %s: %v", r.status, err)
+		}
+	}
+
+	failed := getFragment(t, mux, "failure-analysis").Body.String()
+	if !strings.Contains(failed, "hard error reason") || strings.Contains(failed, "benign miss reason") {
+		t.Errorf("failure-analysis must list only the failed row; body: %s", failed)
+	}
+	deferred := getFragment(t, mux, "deferred-misses").Body.String()
+	if !strings.Contains(deferred, "benign miss reason") || strings.Contains(deferred, "hard error reason") {
+		t.Errorf("deferred-misses must list only the deferred row; body: %s", deferred)
+	}
+}
+
+// TestFailureReportsEmptyStates asserts each failure-shaped report renders its
+// own empty-state message on an empty database (#638).
+func TestFailureReportsEmptyStates(t *testing.T) {
+	mux := newReportsUIServer(t, openReportsTestDB(t))
+	for key, want := range map[string]string{
+		"failure-analysis": "No failed tracks.",
+		"deferred-misses":  "No deferred misses.",
+	} {
+		if body := getFragment(t, mux, key).Body.String(); !strings.Contains(body, want) {
+			t.Errorf("%s empty state missing %q; body: %s", key, want, body)
+		}
 	}
 }
