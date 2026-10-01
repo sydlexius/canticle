@@ -96,9 +96,9 @@ templ dashQueueTiles(tiles []StatTile, instrumentalCount string, chart ChartData
 				<p class="mx-dash-empty">No queue data available.</p>
 			}
 			for _, t := range tiles {
-				<div class="mx-dash-tile" role="listitem" title={ dashQueueTileTooltip(t.Label) }>
+				<div class="mx-dash-tile" role="listitem" title={ t.Tooltip }>
 					if t.Href != "" {
-						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title={ dashQueueTileTooltip(t.Label) }>
+						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title={ t.Tooltip }>
 							<span class="mx-dash-tile-label">{ t.Label }</span>
 							<span class="mx-dash-tile-value">{ t.Value }</span>
 						</a>
@@ -406,30 +406,6 @@ func dashUpNextTierClass(tier string) string {
 		return "mx-upnext-tier mx-upnext-tier-upgrade"
 	}
 	return "mx-upnext-tier mx-upnext-tier-fresh"
-}
-
-// dashQueueTileTooltip returns the hover description for a queue-status tile.
-func dashQueueTileTooltip(label string) string {
-	switch label {
-	case "Pending":
-		return "Tracks waiting to be picked up by the background worker."
-	case "Processing":
-		return "Tracks currently being fetched by the worker."
-	case "Finished":
-		return "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain."
-	case "Settled (upgradable)":
-		return "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state."
-	case "Failed":
-		return "Tracks that hit an error; retried after a backoff delay."
-	case "Deferred":
-		return "No lyrics found yet; re-checked later."
-	case "Unavailable":
-		// Revival is manual only: RecheckRetired's sole production caller is
-		// `queue recheck --retired`; a provider-set change does not revive.
-		return "Tracks retired after every lyrics source repeatedly found nothing; revived by 'queue recheck --retired'."
-	default:
-		return ""
-	}
 }
 
 // iconDashboard is the grid glyph for the Dashboard sidebar nav item.
