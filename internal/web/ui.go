@@ -353,6 +353,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 	reg("POST /settings/keys", u.handleCreateWebhookKey)
 	reg("POST /settings/keys/revoke", u.handleRevokeWebhookKey)
 	u.registerQueueRoutes(reg)
+	u.registerFailureGroupRoutes(reg)
 	u.registerPreviewRoutes(reg)
 }
 
@@ -538,6 +539,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Status: g.Status,
 				Reason: g.Reason,
 				Count:  strconv.FormatInt(g.Count, 10),
+				Class:  string(groupClass(g.Status, g.Reason)),
 			})
 		}
 	case "review-queue":

@@ -592,9 +592,9 @@ body {
   white-space: nowrap;
 }
 
-/* "Run now" re-runs the selected report. Styled to match the primary button
-   token; it is an anchor (not a button) so it degrades to a real navigation when
-   JS is unavailable. */
+/* "Run now" and the failure-group expander share the primary button token.
+   "Run now" is an anchor that degrades to a real navigation without JS; the
+   expander is a button with no non-htmx path. */
 .mx-run-button {
   font-family: var(--mx-font-sans);
   font-size: 0.8rem;
@@ -611,6 +611,51 @@ body {
 
 .mx-run-button:hover {
   background-color: var(--mx-accent);
+}
+
+/* Failure Analysis (#478): class badge, text link, and the per-group expansion
+   cell. Badge hues are semantic (amber: will retry, red: needs a person) and
+   always carry the class name as text, never color alone. */
+.mx-class-badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0 0.4rem;
+  border: 1px solid currentColor;
+  border-radius: var(--mx-radius-sm);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mx-class-transient {
+  color: var(--mx-status-deferred);
+}
+
+.mx-class-persistent {
+  color: var(--mx-status-failed);
+}
+
+.mx-text-link {
+  color: var(--mx-sidebar-active-text);
+  text-decoration: none;
+}
+
+.mx-text-link:hover,
+.mx-text-link:focus-visible {
+  text-decoration: underline;
+}
+
+/* The expansion cell is empty until a group is expanded; collapse it fully so
+   the idle table has no stray padding or border rows. */
+.mx-fg-detail td:empty {
+  padding: 0;
+  border: 0;
+}
+
+/* Doubled class: .mx-table-wrap (68vh) is declared later at equal specificity. */
+.mx-table-wrap.mx-fg-wrap {
+  max-height: 40vh;
 }
 
 .mx-approx {

@@ -62,6 +62,10 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 			// shell.js wires the phone-width sidebar toggle (#1094). It is a
 			// progressive enhancement: without it the sidebar stays a static block.
 			<script src="/static/js/shell.js" defer></script>
+			// failure-group.js toggles a Reports failure group's expanded rows
+			// without refetching. Loaded here (not on the Reports page) because the
+			// Reports pane is swapped in by htmx from other pages.
+			<script src="/static/js/failure-group.js" defer></script>
 		</head>
 		<body>
 			<div class="mx-shell">
