@@ -1,0 +1,34 @@
+package templates
+
+// PreviewPage renders the preview player (#481): an audio element sourcing the
+// row's audio route plus the server-rendered lyric lines. Every line carries
+// data-start-ms, and a line with A2 word timing wraps each word in a span with
+// its own data-start-ms, so the highlighter (a later slice) needs no parsing.
+templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout("Preview", "", version, reports, "/static/css/preview.css", musixmatchInactive, musixmatchServing) {
+		<h1 class="mx-page-title">{ view.Title }</h1>
+		<p class="mx-page-subtitle">
+			{ view.Artist }
+			if view.Album != "" {
+				<span>- { view.Album }</span>
+			}
+		</p>
+		<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc }></audio>
+		if view.Truncated {
+			<p class="mx-preview-notice" role="status">This lyric file is larger than the preview limit; only its first lines are shown.</p>
+		}
+		<ol id="mx-preview-lyrics" class="mx-preview-lyrics" data-has-words?={ view.HasWords }>
+			for _, l := range view.Lines {
+				if l.Decorative {
+					<li class="mx-preview-line mx-preview-line-decorative" data-start-ms={ l.StartMS }>{ l.Text }</li>
+				} else if len(l.Words) > 0 {
+					<li class="mx-preview-line" data-start-ms={ l.StartMS }>
+						@previewWords(l)
+					</li>
+				} else {
+					<li class="mx-preview-line" data-start-ms={ l.StartMS }>{ l.Text }</li>
+				}
+			}
+		</ol>
+	}
+}
