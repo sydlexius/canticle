@@ -1289,6 +1289,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		// Decorate the queue reporter with the shared cache repo so /metrics also
 		// exposes the lyrics-cache hit/lookup counters (#308).
 		server.WithMetricsReporter(server.WithCacheStats(workQ, cacheRepo)),
+		// Per-lane circuit state on /metrics (#488). The method value re-reads the
+		// worker's CURRENT orchestrator under its lock on every scrape, so a
+		// rebuild is never served stale; this is LaneHealth's production caller.
+		server.WithLaneHealth(w.LaneHealth),
 		// GET /metrics is gated by the trusted-network allowlist (loopback
 		// implicitly trusted); no API key or session is required (#204, S3).
 		server.WithTrustedNetworks(trustPolicy),

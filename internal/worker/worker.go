@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/backoff"
@@ -257,7 +258,12 @@ type Worker struct {
 	// circuit interaction (open gate, half-open probe, trip, success/benign-miss
 	// reset, throttle classification and logging); the worker maps the
 	// orchestrator's outcome onto its queue side-effects.
-	orch *orchestrator.Orchestrator
+	//
+	// orchMu guards the orch pointer: rebuildOrchestrator swaps it while the
+	// /metrics scrape goroutine reads it through LaneHealth. Every read goes
+	// through currentOrch; never capture the pointer.
+	orch   *orchestrator.Orchestrator
+	orchMu sync.RWMutex
 	// lane is the primary (Musixmatch) lane held by orch. The worker keeps a
 	// direct reference so the throttle queue side-effects (release, stale-failure
 	// reset) can read the primary lane's breaker outcome; it shares w.circuit.
@@ -621,8 +627,26 @@ func (w *Worker) rebuildOrchestrator() error {
 	if len(lanes) > 1 && w.scriptGuard != nil {
 		orch.SetGuard(w.scriptGuard)
 	}
+	w.orchMu.Lock()
 	w.orch = orch
+	w.orchMu.Unlock()
 	return nil
+}
+
+// currentOrch returns the live orchestrator under the read lock. Callers must
+// not cache the result across a rebuild.
+func (w *Worker) currentOrch() *orchestrator.Orchestrator {
+	w.orchMu.RLock()
+	defer w.orchMu.RUnlock()
+	return w.orch
+}
+
+// LaneHealth reports every lane's circuit state from the CURRENT orchestrator.
+// It is the seam /metrics reads through (#488): it re-reads the pointer on every
+// call, so a rebuild (provider set, mode, detector) is reflected on the next
+// scrape and a stale orchestrator is never observed.
+func (w *Worker) LaneHealth() []orchestrator.LaneState {
+	return w.currentOrch().LaneHealth()
 }
 
 // SetProvidersMode selects the orchestrator dispatch strategy and rebuilds the
@@ -989,7 +1013,7 @@ func (w *Worker) recordMisses(ctx context.Context) {
 	if w.providerRecorder == nil {
 		return
 	}
-	for _, name := range w.orch.LaneNames() {
+	for _, name := range w.currentOrch().LaneNames() {
 		if err := w.providerRecorder.RecordProviderMiss(ctx, name); err != nil {
 			slog.Warn("worker: record provider miss failed", "lane", name, "error", err)
 		}
@@ -2338,7 +2362,7 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 	// The orchestrator returns the best-available result (possibly instrumental)
 	// when no lane is suitable, so the worker still writes the instrumental marker
 	// fallback exactly as before.
-	song, err := w.orch.FindLyrics(ctx, track, sourcePath)
+	song, err := w.currentOrch().FindLyrics(ctx, track, sourcePath)
 	if err != nil {
 		// Propagate the orchestrator's song even on error: on the benign-miss path
 		// it carries song.LaneAttempts (every attempted lane missed this track),

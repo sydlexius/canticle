@@ -3382,11 +3382,11 @@ func TestRebuildOrchestrator_DetectorOrdering(t *testing.T) {
 	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
 	w.EnableAudioDetector(&fakeDetector{})
 	w.SetDetectorOrdering("front")
-	if got := w.orch.LaneNames(); len(got) == 0 || got[0] != "detector" {
+	if got := w.currentOrch().LaneNames(); len(got) == 0 || got[0] != "detector" {
 		t.Fatalf("front ordering: lanes = %v, want detector first", got)
 	}
 	w.SetDetectorOrdering("demoted")
-	if last := w.orch.LaneNames(); len(last) == 0 || last[len(last)-1] != "detector" {
+	if last := w.currentOrch().LaneNames(); len(last) == 0 || last[len(last)-1] != "detector" {
 		t.Fatalf("demoted ordering: lanes = %v, want detector last", last)
 	}
 }
@@ -4044,7 +4044,7 @@ func TestLaneAttemptsCreditTheServingProvider(t *testing.T) {
 	}
 	w := New(&fakeQueue{}, &fakeCache{}, fetcher, &fakeWriter{})
 
-	song, err := w.orch.FindLyrics(context.Background(),
+	song, err := w.currentOrch().FindLyrics(context.Background(),
 		models.Track{ArtistName: "Artist", TrackName: "Title"}, "")
 	if err != nil {
 		t.Fatalf("FindLyrics: %v", err)
