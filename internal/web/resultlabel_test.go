@@ -19,7 +19,7 @@ func TestResultLabel(t *testing.T) {
 		{"line-synced gets a hyphenated label", reports.ResultLineSynced, "line-synced"},
 		{"tier-unknown synced says so in text, not only color", reports.ResultSynced, "synced (tier unknown)"},
 		{"unsynced passes through unchanged", reports.ResultUnsynced, "unsynced"},
-		{"unknown passes through unchanged", reports.ResultUnknown, "unknown"},
+		{"unknown renders a dash, not a fourth class word", reports.ResultUnknown, "-"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -43,7 +43,7 @@ func TestResultTierClass(t *testing.T) {
 		{"instrumental has no tier badge", reports.ResultInstrumental, ""},
 		{"miss has no tier badge", reports.ResultMiss, ""},
 		{"rejected has no tier badge", reports.ResultRejected, ""},
-		{"unknown has no tier badge", reports.ResultUnknown, ""},
+		{"unknown gets the muted pill", reports.ResultUnknown, "mx-result-tier mx-result-tier-unknown"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

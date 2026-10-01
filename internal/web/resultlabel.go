@@ -19,6 +19,10 @@ func resultLabel(rc reports.ResultClass) string {
 		// so it reads for screen readers and color-blind users too, and
 		// matches the dashboard tile's "Synced (tier unknown)".
 		return "synced (tier unknown)"
+	case reports.ResultUnknown:
+		// No outcome was recorded (#654): a dash, with the reason in Detail,
+		// rather than a word that reads like a fourth result class.
+		return "-"
 	default:
 		return string(rc)
 	}
@@ -28,7 +32,7 @@ func resultLabel(rc reports.ResultClass) string {
 // (#627), reusing the pill-badge idiom the Up-next panel introduced for its
 // tier column (mx-upnext-tier-*, #572) so the two read as one system rather
 // than inventing a second badge language. Empty means "no badge" -- every
-// non-synced class (miss, unsynced, instrumental, rejected, unknown) renders
+// non-synced class (miss, unsynced, instrumental, rejected) renders
 // as plain text, exactly as it did before this issue.
 //
 // ResultSynced (sync_tier NULL/unrecorded, #1075) gets its own muted class
@@ -43,6 +47,9 @@ func resultTierClass(rc reports.ResultClass) string {
 	case reports.ResultLineSynced:
 		return "mx-result-tier mx-result-tier-line"
 	case reports.ResultSynced:
+		return "mx-result-tier mx-result-tier-unknown"
+	case reports.ResultUnknown:
+		// The "-" placeholder reuses the muted pill rather than plain text.
 		return "mx-result-tier mx-result-tier-unknown"
 	default:
 		return ""
