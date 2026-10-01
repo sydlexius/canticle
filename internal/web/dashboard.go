@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
@@ -384,9 +385,11 @@ const (
 // status exists for. A health-only lane renders zero counts ("0/0", 0%), the
 // same markup a recorded-but-empty lane gets. A Local lane (the detector) is
 // not a lyrics source: it gets no status line, and no tile at all unless it has
-// recorded attempts, so in parallel mode, or with the detector off, detector
-// history reads "Not active" (absent from health). A lane with attempts but
-// absent from health is no longer configured and reads "Not active". When
+// recorded attempts. In parallel mode, or with the detector off, it is absent
+// from health but its history still renders a tile, identified by its
+// persisted lane name (detectorbackfill.LaneName), still with no status line.
+// Any other lane with attempts but absent from health is no longer configured
+// and reads "Not active". When
 // musixmatchInactive is set (no token: the worker never starts, the banner
 // shows) the musixmatch tile reads inactive instead of its breaker state,
 // which would otherwise say "Ready" for a lane that cannot run.
@@ -422,7 +425,9 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 		}
 		seen[p.Lane] = true
 		t := buildProviderTile(p)
-		t.Status, t.StatusText = laneStatusInactive, "Not active"
+		if p.Lane != detectorbackfill.LaneName {
+			t.Status, t.StatusText = laneStatusInactive, "Not active"
+		}
 		tiles = append(tiles, t)
 	}
 	return tiles

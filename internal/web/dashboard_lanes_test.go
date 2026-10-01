@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/reports"
 )
@@ -166,6 +167,28 @@ func TestDashboard_UnconfiguredLaneNotActive(t *testing.T) {
 	}
 	if strings.Index(body, statusSpan("healthy", "Healthy")) > strings.Index(body, statusSpan("inactive", "Not active")) {
 		t.Error("configured lanes must come before unconfigured ones")
+	}
+}
+
+// TestDashboard_DetectorHistoryWithoutHealth: with the detector off or in
+// parallel mode there is no detector health entry, but its recorded history
+// still renders a tile, and that tile gets no status line (it is not a lyrics
+// source). A history-only provider lane in the same render still reads
+// "Not active".
+func TestDashboard_DetectorHistoryWithoutHealth(t *testing.T) {
+	health := []orchestrator.LaneState{
+		{Provider: "innertube", State: orchestrator.LaneStateClosed, EverSucceeded: true},
+	}
+	body := getDashboard(t, laneHealthTestUI(t, []string{detectorbackfill.LaneName, "petitlyrics", "innertube"},
+		func() []orchestrator.LaneState { return health }))
+	if !strings.Contains(body, "Instrumental Detector") {
+		t.Fatal("detector history must still render a tile")
+	}
+	if got := strings.Count(body, statusSpan("inactive", "Not active")); got != 1 {
+		t.Errorf("Not active lines = %d, want 1 (petitlyrics only, never the detector)", got)
+	}
+	if got := strings.Count(body, `class="mx-dash-tile-status `); got != 2 {
+		t.Errorf("status lines = %d, want 2 (innertube, petitlyrics; detector has none)", got)
 	}
 }
 
