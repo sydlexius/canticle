@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -22,6 +23,10 @@ import (
 // MaxEditOffsetMS bounds a hand-entered offset (10 minutes). A larger value
 // is a typo, never a timing correction; callers refuse it before writing.
 const MaxEditOffsetMS = 600_000
+
+// maxEditFileSize caps what the editor reads (16 MiB, the lrcbackfill bound):
+// a request-triggered read must never pull an arbitrarily large file into memory.
+const maxEditFileSize = 16 * 1024 * 1024
 
 // ShiftLines returns a copy of lines with offsetMS added to every line start
 // (#481 Stage 2). A start shifted below zero clamps to zero: intro lines pin to
@@ -101,7 +106,8 @@ func lstatRegular(root *os.Root, rel string) (fs.FileInfo, error) {
 }
 
 // readRegular reads rel through root, verifying the opened handle is the file
-// Lstat saw (a swap between the two is refused).
+// Lstat saw (a swap between the two is refused). A file over maxEditFileSize is
+// refused before anything parses it.
 func readRegular(root *os.Root, rel string, want fs.FileInfo) ([]byte, error) {
 	f, err := root.Open(rel)
 	if err != nil {
@@ -112,9 +118,12 @@ func readRegular(root *os.Root, rel string, want fs.FileInfo) ([]byte, error) {
 	if err != nil || !os.SameFile(fi, want) {
 		return nil, ErrEditRefused
 	}
-	b, err := io.ReadAll(f)
+	b, err := io.ReadAll(io.LimitReader(f, maxEditFileSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading lyrics file: %w", err)
+	}
+	if len(b) > maxEditFileSize {
+		return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrEditRefused, maxEditFileSize)
 	}
 	return b, nil
 }
@@ -215,10 +224,20 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 		}
 		// Recorded BEFORE the write so the watcher drops the create event.
 		opts.SelfWrites.Record(path + ".orig")
-		if werr := rootWriteAtomic(root, rel+".orig", cur); werr != nil {
+		werr := rootWriteAtomic(root, rel+".orig", cur, fi.Mode().Perm(), true)
+		switch {
+		case werr == nil:
+			res.CreatedOrig = true
+		case errors.Is(werr, fs.ErrExist):
+			// A .orig appeared since the Lstat. A regular one IS the original by
+			// spec (it was written before any edit), so keep it and proceed; any
+			// other kind is no usable backup, so refuse.
+			if _, err := lstatRegular(root, rel+".orig"); err != nil {
+				return EditResult{}, refuseOrWrap(err)
+			}
+		default:
 			return EditResult{}, fmt.Errorf("writing .orig backup: %w", werr)
 		}
-		res.CreatedOrig = true
 	case oerr != nil:
 		// Present but not a regular file: no usable backup exists, so refuse
 		// rather than rewrite the only copy of the original.
@@ -237,7 +256,7 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 		body.WriteString("[" + l.Time.Stamp() + "]" + text + "\n")
 	}
 	opts.SelfWrites.Record(path)
-	if err := rootWriteAtomic(root, rel, body.Bytes()); err != nil {
+	if err := rootWriteAtomic(root, rel, body.Bytes(), fi.Mode().Perm(), false); err != nil {
 		return EditResult{}, fmt.Errorf("writing edited lyrics: %w", err)
 	}
 	nfi, err := root.Lstat(rel)
@@ -249,26 +268,38 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 }
 
 // rootWriteAtomic writes data to rel through root: a sibling temp file named
-// "<name>.<random>.tmp" (the shape selfwrite already suppresses), synced before
-// it is renamed over rel, then the parent directory is synced. Every step goes
-// through the os.Root, so a directory swapped for a symlink after validation
-// cannot redirect the write outside the library root.
-func rootWriteAtomic(root *os.Root, rel string, data []byte) (retErr error) {
+// "<name>.<random>.tmp" (the shape selfwrite already suppresses), given perm
+// and synced before it is published at rel, then the parent directory is
+// synced. Every step goes through the os.Root, so a directory swapped for a
+// symlink after validation cannot redirect the write outside the library root.
+//
+// exclusive publishes with a hard link, which fails with fs.ErrExist rather
+// than ever replacing rel (the .orig backup); a filesystem without hard links
+// fails the write instead of falling back to an overwriting rename. Otherwise
+// the temp is renamed over rel, removing rel first on Windows, where a rename
+// cannot replace an existing file.
+func rootWriteAtomic(root *os.Root, rel string, data []byte, perm fs.FileMode, exclusive bool) (retErr error) {
 	var rnd [6]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
 		return fmt.Errorf("temp name: %w", err)
 	}
 	tmp := rel + "." + hex.EncodeToString(rnd[:]) + selfwrite.TempExt
-	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666) //nolint:gosec // reason: G302 -- matches the lyrics writer's output mode (0666 before umask)
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
+	published := false
 	defer func() {
 		if retErr != nil {
 			_ = f.Close()
+		}
+		if !published {
 			_ = root.Remove(tmp)
 		}
 	}()
+	if err := f.Chmod(perm); err != nil {
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("writing temp file: %w", err)
 	}
@@ -278,8 +309,21 @@ func rootWriteAtomic(root *os.Root, rel string, data []byte) (retErr error) {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("closing temp file: %w", err)
 	}
-	if err := root.Rename(tmp, rel); err != nil {
-		return fmt.Errorf("renaming temp file: %w", err)
+	if exclusive {
+		if err := root.Link(tmp, rel); err != nil {
+			return fmt.Errorf("publishing temp file: %w", err)
+		}
+		// The temp name is removed by the deferred cleanup; rel stays.
+	} else {
+		if runtime.GOOS == "windows" {
+			if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("removing existing file: %w", err)
+			}
+		}
+		if err := root.Rename(tmp, rel); err != nil {
+			return fmt.Errorf("renaming temp file: %w", err)
+		}
+		published = true
 	}
 	if d, err := root.Open(filepath.Dir(rel)); err == nil {
 		_ = d.Sync() // durability only; the rename already happened

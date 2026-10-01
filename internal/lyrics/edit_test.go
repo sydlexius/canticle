@@ -2,9 +2,11 @@ package lyrics
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -253,5 +255,79 @@ func TestApplyEditRecordsOrigAndCleansTemp(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("temp file left behind: %s", e.Name())
 		}
+	}
+}
+
+// An over-cap file is refused before parsing, from either source, and an edit
+// that would have to back it up writes nothing.
+func TestEditRefusesOversizedFile(t *testing.T) {
+	big := "[00:01.00]one\n" + strings.Repeat("x", maxEditFileSize)
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, big)
+	if _, _, err := OriginalLines(p, []string{root}); !errors.Is(err, ErrEditRefused) {
+		t.Errorf("OriginalLines(.lrc) err = %v, want ErrEditRefused", err)
+	}
+	if _, err := ApplyEdit(p, []TimedLine{{StartMS: 1500, Text: "one"}}, nil, EditOptions{Roots: []string{root}, DurationSeconds: 30}); !errors.Is(err, ErrEditRefused) {
+		t.Errorf("ApplyEdit err = %v, want ErrEditRefused", err)
+	}
+	assertNoOrig(t, p)
+	if got := readFile(t, p); got != big {
+		t.Error("oversized .lrc changed on refusal")
+	}
+	q := filepath.Join(root, "u.lrc")
+	writeFixture(t, q, "[00:01.00]one\n")
+	writeFixture(t, q+".orig", big)
+	if _, _, err := OriginalLines(q, []string{root}); !errors.Is(err, ErrEditRefused) {
+		t.Errorf("OriginalLines(.orig) err = %v, want ErrEditRefused", err)
+	}
+}
+
+// A restrictive source mode survives the edit, on both the rewrite and the backup.
+func TestApplyEditKeepsFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits")
+	}
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, "[00:01.00]one\n")
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyEdit(p, []TimedLine{{StartMS: 1200, Text: "one"}}, nil, EditOptions{Roots: []string{root}, DurationSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{p, p + ".orig"} {
+		fi, err := os.Lstat(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode = %o, want 600", filepath.Base(f), got)
+		}
+	}
+}
+
+// An exclusive publish never replaces an existing destination and cleans its temp.
+func TestRootWriteAtomicExclusiveKeepsExisting(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, filepath.Join(dir, "t.lrc.orig"), "keep\n")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := rootWriteAtomic(root, "t.lrc.orig", []byte("new\n"), 0o644, true); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("err = %v, want fs.ErrExist", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "t.lrc.orig")); got != "keep\n" {
+		t.Errorf("destination overwritten: %q", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("entries = %d, want only the destination (temp left behind?)", len(entries))
 	}
 }
