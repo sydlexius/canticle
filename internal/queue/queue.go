@@ -1618,7 +1618,7 @@ func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, 
 	// scan_results writeback can target exactly those rows.
 	selectArgs := append([]any{missLimitReachedError}, libArgs...)
 	idRows, err := tx.QueryContext(ctx,
-		`SELECT id FROM work_queue WHERE `+recheckRetiredWhere+libClause, //nolint:gosec // G202: recheckRetiredWhere is a package constant and libClause a hardcoded constant from recheckLibraryClause, never user input
+		`SELECT id FROM work_queue WHERE `+recheckRetiredWhere+libClause, //nolint:gosec // reason: G202: recheckRetiredWhere is a package constant and libClause a hardcoded constant from recheckLibraryClause, never user input
 		selectArgs...,
 	)
 	if err != nil {
@@ -1657,7 +1657,7 @@ func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, 
          WHERE ` + recheckRetiredWhere
 	updateArgs := append([]any{now, missLimitReachedError}, libArgs...)
 	res, err := tx.ExecContext(ctx,
-		retireUpdateBase+libClause, //nolint:gosec // G202: libClause is a fixed constant from recheckLibraryClause, not user input
+		retireUpdateBase+libClause, //nolint:gosec // reason: G202: libClause is a fixed constant from recheckLibraryClause, not user input
 		updateArgs...,
 	)
 	if err != nil {
@@ -1705,7 +1705,7 @@ func (q *DBQueue) CountRecheckRetired(ctx context.Context, libraryID *int64) (in
 	args := append([]any{missLimitReachedError}, libArgs...)
 	var count int64
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE `+recheckRetiredWhere+libClause, //nolint:gosec // G202: recheckRetiredWhere is a package constant and libClause a hardcoded constant from recheckLibraryClause, never user input
+		`SELECT COUNT(*) FROM work_queue WHERE `+recheckRetiredWhere+libClause, //nolint:gosec // reason: G202: recheckRetiredWhere is a package constant and libClause a hardcoded constant from recheckLibraryClause, never user input
 		args...,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("queue: count recheck retired: %w", err)
