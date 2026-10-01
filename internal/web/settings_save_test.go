@@ -1138,6 +1138,29 @@ func TestSaveFieldBlankSecretReportsNothingApplied(t *testing.T) {
 	}
 }
 
+func TestSaveFieldBlankWebhookKeyReportsNothingApplied(t *testing.T) {
+	h, _ := writableTestUI(t, newFakeSecretStore())
+	rec := postField(t, h, url.Values{"path": {"server.webhook_api_keys"}, "value": {""}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeSaveResponse(t, rec); len(got.Applied) != 0 {
+		t.Errorf("applied = %v, want empty for a blank webhook-key no-op", got.Applied)
+	}
+}
+
+func TestSaveFieldTokenReportsAppliedRestart(t *testing.T) {
+	h, _ := writableTestUI(t, newFakeSecretStore())
+	rec := postField(t, h, url.Values{"path": {"api.token"}, "value": {"new_store_token"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	want := map[string]string{"api.token": "restart"}
+	if got := decodeSaveResponse(t, rec); !maps.Equal(got.Applied, want) {
+		t.Errorf("applied = %v, want %v", got.Applied, want)
+	}
+}
+
 func TestApplyModeOf(t *testing.T) {
 	if got := applyModeOf(config.FieldSpec{AppliesLive: true}); got != "live" {
 		t.Errorf("AppliesLive=true -> %q, want live", got)

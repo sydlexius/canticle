@@ -73,6 +73,9 @@ type FieldSpec struct {
 	// added without thought can never advertise a live apply the code does not
 	// perform (#836). Nothing hot-applies today, so every entry is false;
 	// TestRegistryNothingAppliesLive pins that until a key is flipped deliberately.
+	// Flipping a key to live must also update its Description (drop any "Takes
+	// effect on restart" text) and the Criticality type comment's global
+	// "no change takes effect until restart" rule, or they contradict it.
 	AppliesLive bool
 }
 
