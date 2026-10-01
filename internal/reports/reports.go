@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/failsig"
@@ -64,6 +65,12 @@ type QueueSummary struct {
 	SettledUpgradable int64
 }
 
+// retiredPredicate matches a row prune retired as unresolvable (status='done',
+// last_error = queue.UnresolvableGoneError, outcome/tier left as they were).
+// The sentinel is inlined as a literal so the fragment joins at compile time;
+// TestRetiredPredicateLiteral pins that it contains no quote.
+const retiredPredicate = `COALESCE(last_error, '') = '` + queue.UnresolvableGoneError + `'`
+
 // wordTierPredicate is the ONE definition of "this synced row is at the
 // word-synced (terminal) rung" (#553), shared by QueueSummary.Finished and
 // SyncTierCounts.WordSynced so the two dashboard rows cannot disagree. It is
@@ -72,7 +79,11 @@ type QueueSummary struct {
 // provenance header. A remediation now clears sync_tier (#1130), but
 // a row stamped before that still holds a stale tier, and a row mid
 // word-recheck is re-litigating its tier, so both read as not terminal. No leading AND/WHERE.
+//
+// A prune-retired row (retiredPredicate) is excluded: it keeps the stale
+// tier it had, but its source is gone and it is not a finished result.
 const wordTierPredicate = `sync_tier = 'word'
+                      AND NOT ` + retiredPredicate + `
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued'`
 
@@ -248,22 +259,34 @@ type RecentOutcome struct {
 	// row settles as unknown TODAY, with the reason sitting one column over,
 	// unread. Those rows are the reason this coalesce exists.
 	//
-	// For ResultUnknown the coalesce continues past the timing verdict to
-	// LegacyNoOutcomeDetail, so an unknown row is never blank (#654). last_error
-	// is deliberately NOT surfaced: failsig.Normalize is a grouping normalizer,
-	// not redaction, and surfacing it waits on #1167. Empty therefore remains only for outcomes that
-	// need no detail beyond their class (a plain synced write) and rejections
-	// settled before #773, whose reason went to a log line and is unrecoverable.
-	// None is rendered as a verdict.
+	// For ResultUnknown the coalesce continues past the timing verdict to the
+	// row's failsig-normalized last_error, then to LegacyNoOutcomeDetail, so an
+	// unknown row is never blank (#654 AC4: where last_error explains a row's
+	// state, it is reachable from the UI). On a settled row last_error is the
+	// CURRENT reason, never a leftover: every path that settles a row to done
+	// clears it or writes the reason it settled for (e.g. prune's
+	// queue.UnresolvableGoneError on a retired row whose file vanished). Rows
+	// still in flight (failed, deferred) are NeedsAttention's, with the same
+	// normalization. Empty therefore remains only for outcomes that need no
+	// detail beyond their class (a plain synced write) and rejections settled
+	// before #773, whose reason went to a log line and is unrecoverable. None is
+	// rendered as a verdict.
 	//
-	// Carries no lyric text, artist, title, or path -- only ratios and a fixed
-	// phrase -- so it is safe to render without redaction.
+	// Carries no lyric text: a ratio, a fixed phrase, or a failsig-normalized
+	// error. failsig strips paths and endpoints but is NOT redaction, so a
+	// last_error-derived Detail is for the session-gated UI, which already shows
+	// the row's artist and title, never an off-host surface such as a metric.
 	Detail string
 }
 
 // RecentOutcomes returns the most recently completed or retired
 // (status IN ('done','unavailable')) tracks, newest first by completed_at
 // (NULLs sorted last), capped at limit.
+//
+// Failed and deferred rows are excluded ON PURPOSE (#654 AC1: this list holds
+// lyric classifications only); NeedsAttention lists them. completed_at, not
+// updated_at, orders the list: the updated_at trigger restamps on every write,
+// so a retried row would otherwise pose as the newest outcome.
 //
 // Source: work_queue rows where status='done' OR status='unavailable' (#477).
 // 'unavailable' is included so an exhausted-miss row (RetireMiss's terminal
@@ -315,7 +338,7 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 		return nil, nil
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT artist, title, album, completed_at, provider_lane,
+		`SELECT artist, title, album, completed_at, provider_lane, COALESCE(last_error, ''),
             COALESCE(
                 NULLIF(outcome_detail, ''),
                 -- outcome_type IS NULL explains the rows that render 'unknown': a
@@ -360,10 +383,11 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 			completedAt   sql.NullString
 			providerLane  sql.NullString
 			detail        sql.NullString
+			lastError     string
 			timingVerdict bool
 			result        string
 		)
-		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &detail, &timingVerdict, &result); err != nil {
+		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &lastError, &detail, &timingVerdict, &result); err != nil {
 			return nil, fmt.Errorf("reports: scan recent outcome: %w", err)
 		}
 		if completedAt.Valid && completedAt.String != "" {
@@ -385,6 +409,12 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 			// attribution, not stale data.
 			if !timingVerdict {
 				o.ProviderLane = ""
+			}
+			// failsig runs in Go (SQLite has no regex), after the SQL coalesce
+			// above, so a stored detail or timing verdict still wins. A blank or
+			// whitespace-only last_error explains nothing and falls through.
+			if o.Detail == "" && strings.TrimSpace(lastError) != "" {
+				o.Detail = normalizedReason(lastError)
 			}
 			if o.Detail == "" {
 				o.Detail = LegacyNoOutcomeDetail
@@ -597,9 +627,7 @@ func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT
              SUM(CASE WHEN `+wordTierPredicate+` THEN 1 ELSE 0 END),
-             SUM(CASE WHEN sync_tier = 'line'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
-                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN `+lineTierPredicate+` THEN 1 ELSE 0 END),
              SUM(CASE WHEN `+TierUnknownPredicate+` THEN 1 ELSE 0 END)
          FROM work_queue
          WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,

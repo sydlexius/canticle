@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/failsig"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/web/templates"
 )
 
 // openReportsTestDB opens a temp-file SQLite with every migration applied, the
@@ -514,6 +517,7 @@ func TestBuildRailEncodesKeyPath(t *testing.T) {
 	wantKeys := []string{
 		"queue-summary",
 		"recent-outcomes",
+		"needs-attention",
 		"provider-effectiveness",
 		"instrumental-inventory",
 		"failure-analysis",
@@ -672,5 +676,115 @@ func TestFailureReportsEmptyStates(t *testing.T) {
 		if body := getFragment(t, mux, key).Body.String(); !strings.Contains(body, want) {
 			t.Errorf("%s empty state missing %q; body: %s", key, want, body)
 		}
+	}
+}
+
+// TestNeedsAttentionSectionRendersApartFromOutcomes pins #654 AC1/AC2 on the
+// dashboard: failed and deferred rows render in their own section with a state
+// pill, the normalized reason and a "Last attempt" time (never "Completed"),
+// while the Recent Outcomes table carries no failed/deferred pill.
+func TestNeedsAttentionSectionRendersApartFromOutcomes(t *testing.T) {
+	rows := buildAttentionRows([]reports.FailureItem{
+		{Title: "f", Status: "failed", Class: failsig.Transient, Reason: "lane x: transport error: <url>", UpdatedAt: "2026-09-01T10:00:00Z"},
+		{Title: "d", Status: "deferred", Reason: "orchestrator: lane benign miss (no result)", UpdatedAt: "bogus"},
+	}, nil)
+	if rows[0].State != "failed (transient)" || rows[1].State != "deferred" {
+		t.Fatalf("states = %q, %q", rows[0].State, rows[1].State)
+	}
+	if rows[0].LastAttempt != "2026-09-01 10:00:00 UTC" || rows[1].LastAttempt != "-" {
+		t.Errorf("last attempt = %q, %q", rows[0].LastAttempt, rows[1].LastAttempt)
+	}
+	view := templates.DashboardView{
+		RecentRows:    buildRecentRows([]reports.RecentOutcome{{Title: "s", Result: reports.ResultSynced}}, nil),
+		AttentionRows: rows,
+		// Not the dashboard's own cap, so a hardcoded tooltip number fails.
+		AttentionLimit: 7,
+	}
+	var sb strings.Builder
+	if err := templates.DashboardPage("test", nil, view, false, false).Render(context.Background(), &sb); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := sb.String()
+	outcomes, attention, ok := strings.Cut(html, `id="mx-dash-attention-heading"`)
+	if !ok {
+		t.Fatal("dashboard has no Needs Attention section")
+	}
+	for _, want := range []string{
+		"mx-result-tier-failed", "mx-result-tier-deferred", "Last attempt",
+		"lane x: transport error: &lt;url&gt;", "orchestrator: lane benign miss (no result)",
+	} {
+		if !strings.Contains(attention, want) {
+			t.Errorf("Needs Attention section missing %s", want)
+		}
+	}
+	if !strings.Contains(html, "Up to 7 rows") {
+		t.Error("Needs Attention tooltip does not state the view's AttentionLimit")
+	}
+	if strings.Contains(attention, "Completed") {
+		t.Error("Needs Attention labels its time column Completed")
+	}
+	if strings.Contains(outcomes, "mx-result-tier-failed") || strings.Contains(outcomes, "mx-result-tier-deferred") {
+		t.Error("a failed/deferred pill rendered in Recent Outcomes")
+	}
+}
+
+// TestReportsNeedsAttentionFragment wires the Reports view end to end over a
+// real database: the failed row renders with its normalized reason.
+func TestReportsNeedsAttentionFragment(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	if _, err := sqlDB.ExecContext(context.Background(),
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, last_error, attempts)
+         VALUES ('A', 'T', 'a', 't', 'B', 'failed', 'write /srv/Synthetic Artist/x.lrc: permission denied', 1)`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	body := getFragment(t, newReportsUIServer(t, sqlDB), "needs-attention").Body.String()
+	for _, want := range []string{"failed (persistent)", "write &lt;path&gt;: permission denied", "Last attempt"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("needs-attention fragment missing %q", want)
+		}
+	}
+	if strings.Contains(body, "Synthetic Artist") {
+		t.Error("raw last_error path reached the page")
+	}
+}
+
+// TestHandleDashboard_NeedsAttentionOverRealDB drives GET /dashboard over a
+// real database: a failed row reaches the Needs Attention section with its
+// normalized reason, the section holds at most dashboardAttentionLimit rows,
+// and its tooltip names that same cap. All values are synthetic.
+func TestHandleDashboard_NeedsAttentionOverRealDB(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	for i := range dashboardAttentionLimit + 2 {
+		if _, err := sqlDB.ExecContext(context.Background(),
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, status, last_error, attempts)
+             VALUES ('A', ?, 'a', ?, 'failed', 'write /srv/Synthetic Artist/x.lrc: permission denied', 1)`,
+			fmt.Sprintf("Attention Title %02d", i), fmt.Sprintf("t%02d", i)); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	rec := httptest.NewRecorder()
+	newReportsUIServer(t, sqlDB).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard status = %d", rec.Code)
+	}
+	_, section, ok := strings.Cut(rec.Body.String(), `id="mx-dash-attention-heading"`)
+	if !ok {
+		t.Fatal("dashboard has no Needs Attention section")
+	}
+	section, _, _ = strings.Cut(section, "</section>")
+	if got := strings.Count(section, "Attention Title"); got != dashboardAttentionLimit {
+		t.Errorf("Needs Attention lists %d rows; want the cap %d", got, dashboardAttentionLimit)
+	}
+	for _, want := range []string{"failed (persistent)", "write &lt;path&gt;: permission denied"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("Needs Attention section missing %q", want)
+		}
+	}
+	if strings.Contains(section, "Synthetic Artist") {
+		t.Error("raw last_error path reached the dashboard")
+	}
+	if tip := fmt.Sprintf("Up to %d rows", dashboardAttentionLimit); !strings.Contains(rec.Body.String(), tip) {
+		t.Errorf("Needs Attention tooltip does not name the cap: want %q", tip)
 	}
 }

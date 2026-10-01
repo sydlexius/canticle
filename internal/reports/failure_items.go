@@ -2,6 +2,7 @@ package reports
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/sydlexius/canticle/internal/failsig"
@@ -51,19 +52,10 @@ func (r *Repo) FailureGroupItems(ctx context.Context, status, signature string, 
 	if !ok {
 		return nil, fmt.Errorf("reports: failure group items: unsupported status %q", status)
 	}
-	if limit < 1 {
-		limit = 1
-	}
-	if limit > MaxFailureItemsLimit {
-		limit = MaxFailureItemsLimit
-	}
+	limit = clampFailureLimit(limit)
 	// where comes from the constant failureRowFilters map, never caller input.
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, artist, title, album, status,
-                COALESCE(NULLIF(last_error, ''), ?),
-                COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, '')
-         FROM work_queue
-         WHERE `+where+`
+		failureItemSelect+where+`
          ORDER BY updated_at DESC, id DESC`,
 		queue.NoReasonRecorded, status)
 	if err != nil {
@@ -73,22 +65,92 @@ func (r *Repo) FailureGroupItems(ctx context.Context, status, signature string, 
 
 	var out []FailureItem
 	for len(out) < limit && rows.Next() {
-		var it FailureItem
-		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
-			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("reports: scan failure item: %w", err)
+		it, err := scanFailureItem(rows)
+		if err != nil {
+			return nil, err
 		}
-		it.Reason = normalizedReason(it.Reason)
 		if it.Reason != signature {
 			continue
-		}
-		if it.Status == "failed" {
-			it.Class = failsig.Classify(it.Reason)
 		}
 		out = append(out, it)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reports: failure item rows: %w", err)
+	}
+	return out, nil
+}
+
+// clampFailureLimit bounds a per-row listing's limit to [1, MaxFailureItemsLimit].
+func clampFailureLimit(limit int) int {
+	return min(max(limit, 1), MaxFailureItemsLimit)
+}
+
+// failureItemSelect is the column list scanFailureItem reads, ending in WHERE;
+// it binds one argument, the no-reason sentinel. Shared with NeedsAttention.
+const failureItemSelect = `SELECT id, artist, title, album, status,
+                COALESCE(NULLIF(last_error, ''), ?),
+                COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, '')
+         FROM work_queue
+         WHERE `
+
+// scanFailureItem scans one failureItemSelect row, normalizing its reason and
+// classifying it when (and only when) the row is failed.
+func scanFailureItem(rows *sql.Rows) (FailureItem, error) {
+	var it FailureItem
+	if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
+		&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt); err != nil {
+		return FailureItem{}, fmt.Errorf("reports: scan failure item: %w", err)
+	}
+	it.Reason = normalizedReason(it.Reason)
+	if it.Status == "failed" {
+		it.Class = failsig.Classify(it.Reason)
+	}
+	return it, nil
+}
+
+// NeedsAttention returns up to limit failed and deferred rows, the work that has
+// NOT produced a lyric outcome (#654 AC2). They are a separate axis from Recent
+// Outcomes, which lists lyric classifications only, so they get their own list
+// rather than a pill in the outcome column.
+//
+// ORDER: every failed row before any deferred row, then newest updated_at first
+// (id DESC breaks ties). Failed first because a hard error needs a person and a
+// deferred miss is already on a retry schedule. updated_at is the right column
+// HERE and only here: the work_queue trigger restamps it on every write, so it
+// reads "last attempt", which is what this list shows (and labels). Recent
+// Outcomes keeps completed_at for the same reason in reverse: a retry restamp
+// must never pose as a newer outcome.
+//
+// Membership is failureRowFilters, the same filters Failure Analysis and
+// Deferred misses count, so a row is listed here exactly when those reports
+// count it (the #789 never-attempted guard, and the parked/refused exclusions
+// for deferred). Reason is the failsig-normalized signature, never raw
+// last_error; Class is set for failed rows only. Read-only; per-row
+// artist/title feeds the session-gated UI, as for FailureGroupItems. limit is
+// clamped to [1, MaxFailureItemsLimit], as for FailureGroupItems: a negative
+// LIMIT means "no limit" to SQLite, which would list every failed and deferred
+// row.
+func (r *Repo) NeedsAttention(ctx context.Context, limit int) ([]FailureItem, error) {
+	limit = clampFailureLimit(limit)
+	rows, err := r.db.QueryContext(ctx,
+		failureItemSelect+`(`+failureRowFilters["failed"]+`) OR (`+failureRowFilters["deferred"]+`)
+         ORDER BY status = 'deferred', updated_at DESC, id DESC
+         LIMIT ?`,
+		queue.NoReasonRecorded, "failed", "deferred", limit)
+	if err != nil {
+		return nil, fmt.Errorf("reports: needs attention: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []FailureItem
+	for rows.Next() {
+		it, err := scanFailureItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reports: needs attention rows: %w", err)
 	}
 	return out, nil
 }

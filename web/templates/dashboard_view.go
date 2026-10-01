@@ -1,6 +1,9 @@
 package templates
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strconv"
+)
 
 // Presentation model for the /dashboard observability page (#186). Like the
 // reports view models, every field is pre-formatted by the handler; the template
@@ -28,6 +31,12 @@ type DashboardView struct {
 	// RecentRows holds the most recently completed tracks (newest first, capped at 20).
 	// Uses the shared RecentOutcomeRow type from reports_view.go.
 	RecentRows []RecentOutcomeRow
+	// AttentionRows holds failed then deferred rows (#654 AC2), capped at 10:
+	// work with no lyric outcome, kept OUT of RecentRows' outcome column.
+	AttentionRows []AttentionRow
+	// AttentionLimit is the cap the handler applied to AttentionRows, carried
+	// so the section's tooltip states the real number rather than a copy of it.
+	AttentionLimit int
 	// UpNextRows holds the buffered upcoming work in worker-claim order (#572).
 	// Empty when the lookahead buffer is empty or batching is disabled, which
 	// drives the panel's counts-only empty state.
@@ -136,4 +145,10 @@ type StatTile struct {
 	// StatusText is the visible words, so the state never rests on color alone.
 	Status     string
 	StatusText string
+}
+
+// attentionTooltip is the Needs Attention section's hover text, naming the cap
+// the handler actually applied.
+func attentionTooltip(limit int) string {
+	return "Up to " + strconv.Itoa(limit) + " rows: failed tracks first, then deferred ones, each newest attempt first."
 }

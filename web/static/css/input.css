@@ -776,6 +776,29 @@ body {
   background: var(--mx-surface-border);
 }
 
+/* Needs attention (#654 AC2): failed and deferred rows, which have no lyric
+   outcome, get their own hues (the dashboard chart's failed red and deferred
+   amber). The pill text names the state, so color is never the only signal.
+   The failed TEXT is red-400, one step lighter than the chart's red-500 (which
+   the tint keeps): red-500 text measured 4.27:1 on the Reports surface, under
+   WCAG AA's 4.5:1. */
+.mx-result-tier-failed {
+  color: #f87171; /* red-400; the tint below is --mx-chart-failed red-500 */
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.mx-result-tier-deferred {
+  color: #f59e0b; /* amber-500: matches --mx-chart-deferred */
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.mx-attention-reason {
+  min-width: 12rem;
+  font-size: 0.75rem;
+  color: var(--mx-content-text-secondary);
+  overflow-wrap: anywhere;
+}
+
 /* Musixmatch attribution required by API Terms clause 2.1.5 (see
    docs/provider-terms.md). Sits at the end of the content column on every page.
 

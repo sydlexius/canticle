@@ -33,6 +33,7 @@ templ dashboardContent(view DashboardView) {
 		@dashProviderTiles(view.ProviderTiles)
 		@dashUpNext(view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
 		@dashRecentOutcomes(view.RecentRows)
+		@dashNeedsAttention(view.AttentionRows, view.AttentionLimit)
 		<p class="mx-dash-maintenance-note" title="Stacked (multi-timestamp) .lrc sidecars render incorrectly in simple players; reconcile-lrc expands them to one cue per line.">
 			{ view.LRCNormalizeSummary }
 			<a class="mx-dash-maintenance-link" href="https://sydlexius.github.io/canticle/lrc-normalization/" target="_blank" rel="noopener noreferrer" aria-label="About LRC normalization (opens in a new tab)">What is this?</a>
@@ -287,6 +288,53 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 			</div>
 		}
 	</section>
+}
+
+// dashNeedsAttention renders failed then deferred rows (#654 AC2), apart from
+// Recent Outcomes so its Result column holds lyric classifications only.
+templ dashNeedsAttention(rows []AttentionRow, limit int) {
+	<section
+		class="mx-dash-section"
+		aria-labelledby="mx-dash-attention-heading"
+		title={ attentionTooltip(limit) }
+	>
+		<h2 class="mx-dash-section-title" id="mx-dash-attention-heading">Needs Attention</h2>
+		<p class="mx-dash-section-sub">Failed and deferred tracks have no lyric outcome yet. Failed rows come first.</p>
+		@attentionTable(rows, "Nothing failed or deferred.")
+	</section>
+}
+
+// attentionTable is the Needs attention table, shared by the dashboard section
+// and the Reports view so the two cannot drift.
+templ attentionTable(rows []AttentionRow, emptyMsg string) {
+	if len(rows) == 0 {
+		<div class="mx-report-empty"><span>{ emptyMsg }</span></div>
+	} else {
+		<div class="mx-table-wrap">
+			<table class="mx-table" aria-label="Failed and deferred tracks">
+				<thead>
+					<tr>
+						<th scope="col">Artist</th>
+						<th scope="col">Title</th>
+						<th scope="col">State</th>
+						<th scope="col">Reason</th>
+						<th scope="col">Last attempt</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, r := range rows {
+						<tr>
+							<td>{ r.Artist }</td>
+							<td>{ r.Title }</td>
+							<td><span class={ r.StateClass }>{ r.State }</span></td>
+							<td class="mx-attention-reason">{ r.Reason }</td>
+							<td class="mx-table-mono">{ r.LastAttempt }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	}
 }
 
 // dashUpNext renders the "Up next" panel (#572): the buffered work the worker
