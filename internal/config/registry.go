@@ -67,6 +67,16 @@ type FieldSpec struct {
 	// lives on the registry (not in internal/web) so the config package can read
 	// it on the write path without importing internal/web (#291).
 	Description string
+	// AppliesLive reports whether a saved change to this key takes effect in the
+	// running daemon without a restart. It defaults to false on purpose: the
+	// zero value must claim the conservative "needs a restart", so a future entry
+	// added without thought can never advertise a live apply the code does not
+	// perform (#836). Nothing hot-applies today, so every entry is false;
+	// TestRegistryNothingAppliesLive pins that until a key is flipped deliberately.
+	// Flipping a key to live must also update its Description (drop any "Takes
+	// effect on restart" text) and the Criticality type comment's global
+	// "no change takes effect until restart" rule, or they contradict it.
+	AppliesLive bool
 }
 
 // fields is the canonical registry. Every entry's Path MUST appear in

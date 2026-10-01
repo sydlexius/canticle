@@ -125,7 +125,11 @@ func (u *UI) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write config", http.StatusInternalServerError)
 		return
 	}
-	writeSaveOK(w)
+	written := make([]string, 0, len(changes))
+	for p := range changes {
+		written = append(written, p)
+	}
+	writeSaveOK(w, written...)
 }
 
 // checkTLSInvariantChanges folds the TLS-related entries of a section save onto

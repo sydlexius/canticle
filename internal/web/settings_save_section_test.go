@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -380,5 +381,30 @@ func TestSaveSectionSettingsFieldCarriesSaveGroup(t *testing.T) {
 	}
 	if len(groups) != 2 {
 		t.Errorf("unexpected fields carry a save group: %v", groups)
+	}
+}
+
+func TestSaveSectionReportsAppliedPerPath(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := pemFile(t, dir, "c.pem"), pemFile(t, dir, "k.key")
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[server]\naddr = \"127.0.0.1:3876\"\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	u := NewUI(config.Config{}, "v0", WithConfigPath(cfgPath), WithSecretStore(newFakeSecretStore()))
+	mux := http.NewServeMux()
+	u.Register(mux)
+
+	rec := postSection(t, mux, [][2]string{
+		{"server.tls.cert_file", cert},
+		{"server.tls.key_file", key},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeSaveResponse(t, rec)
+	want := map[string]string{"server.tls.cert_file": "restart", "server.tls.key_file": "restart"}
+	if got.Status != "saved" || !maps.Equal(got.Applied, want) {
+		t.Errorf("response = %+v, want status saved applied %v", got, want)
 	}
 }

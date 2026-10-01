@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -116,7 +117,7 @@ func (u *UI) handleSaveField(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write config", http.StatusInternalServerError)
 		return
 	}
-	writeSaveOK(w)
+	writeSaveOK(w, path)
 }
 
 // checkProviderInvariant validates the cross-field provider selection that would
@@ -264,7 +265,7 @@ func (u *UI) saveSecretToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token saved to the store but clearing the config file failed; check logs", http.StatusInternalServerError)
 		return
 	}
-	writeSaveOK(w)
+	writeSaveOK(w, "api.token")
 }
 
 // formValueForField derives the canonical string value to validate and store
@@ -374,11 +375,47 @@ func validationMessage(err error) string {
 	return "invalid value"
 }
 
-// writeSaveOK writes the success response for a save. The body is a short plain
-// confirmation; settings.js keys off the 2xx status and surfaces the
-// restart-to-apply notice.
-func writeSaveOK(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+// Apply modes reported per saved path in the save response (#836).
+const (
+	appliedLive    = "live"
+	appliedRestart = "restart"
+)
+
+// saveResponse is the JSON body of a successful save. Status is the old plain
+// "saved" confirmation; Applied maps every path actually written to how it takes
+// effect, derived from FieldSpec.AppliesLive (a missing spec reads as restart,
+// the conservative answer).
+type saveResponse struct {
+	Status  string            `json:"status"`
+	Applied map[string]string `json:"applied"`
+}
+
+// appliedMode is the apply mode for one path, from the registry's AppliesLive.
+func appliedMode(path string) string {
+	spec, _ := config.FieldByPath(path) // unknown path: zero spec, reads as restart
+	return applyModeOf(spec)
+}
+
+// applyModeOf maps a spec's AppliesLive flag to its apply mode.
+func applyModeOf(spec config.FieldSpec) string {
+	if spec.AppliesLive {
+		return appliedLive
+	}
+	return appliedRestart
+}
+
+// writeSaveOK writes the success response for a save: JSON carrying the status
+// and a per-path apply mode for each path written (none for a no-op save).
+// settings.js still keys off the 2xx status alone and surfaces the
+// restart-to-apply notice; it does not read this body yet.
+func writeSaveOK(w http.ResponseWriter, paths ...string) {
+	resp := saveResponse{Status: "saved", Applied: make(map[string]string, len(paths))}
+	for _, p := range paths {
+		resp.Applied[p] = appliedMode(p)
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("saved"))
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Error("settings: write save response failed", "error", err)
+	}
 }
