@@ -5540,3 +5540,42 @@ func TestReopenDoneRowTx_NoOpOnNonDoneStatus(t *testing.T) {
 		t.Errorf("row = (%q, %q, miss_count=%d); want unchanged (unavailable, miss limit reached, 15)", status, lastError, missCount)
 	}
 }
+
+// Every claim path stamps claimed_at (migration 057). The knobs select the
+// statement: randomized+batchSize>0 is the batched claim (the NewDBQueue
+// default), randomized+batchSize<=0 the per-item random claim, and
+// randomized=false the deterministic FIFO claim.
+func TestDBQueue_DequeueStampsClaimedAtOnEveryPath(t *testing.T) {
+	cases := []struct {
+		name       string
+		randomized bool
+		batchSize  int
+	}{
+		{"batched", true, 10},
+		{"randomized single", true, 0},
+		{"deterministic", false, 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			sqlDB := openQueueTestDB(t)
+			q := NewDBQueue(sqlDB)
+			q.SetRandomized(tc.randomized)
+			q.SetBatchSize(tc.batchSize)
+			if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			item, err := q.Dequeue(ctx)
+			if err != nil {
+				t.Fatalf("Dequeue: %v", err)
+			}
+			var claimed sql.NullString
+			if err := sqlDB.QueryRowContext(ctx, `SELECT claimed_at FROM work_queue WHERE id = ?`, item.ID).Scan(&claimed); err != nil {
+				t.Fatalf("read claimed_at: %v", err)
+			}
+			if !claimed.Valid || claimed.String == "" {
+				t.Fatalf("%s claim did not stamp claimed_at", tc.name)
+			}
+		})
+	}
+}
