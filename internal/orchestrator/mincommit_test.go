@@ -147,6 +147,7 @@ func TestMinCommit_OnlyAGenuineNoMatchAnswers(t *testing.T) {
 		{"unparsable subtitle body", musixmatch.ErrUnparsableSubtitleBody, models.WordAnswerUnknown},
 		{"petitlyrics decode failure", fmt.Errorf("decode: %w", petitlyrics.ErrNotFound), models.WordAnswerUnknown},
 		{"petitlyrics outage", petitlyrics.ErrProviderUnavailable, models.WordAnswerUnknown},
+		{"petitlyrics latched outage", petitlyrics.ErrOutageLatched, models.WordAnswerUnknown},
 		{"breaker open", ErrLaneUnavailable, models.WordAnswerUnknown},
 		{"transport 5xx", errors.New("musixmatch API error: status 503"), models.WordAnswerUnknown},
 		{"throttled", musixmatch.ErrUnauthorized, models.WordAnswerUnknown},

@@ -110,6 +110,24 @@ func providerClassifier(l *Lane, err error) error {
 			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
 		return err
 
+	// ALSO ABOVE THE MISS ARM, for the same wrapping reason (#1195): a zero-result
+	// answer while a confirmed outage is unresolved. The client rearmed its
+	// counter so one half-open miss cannot re-confirm the outage; that rearm is
+	// only sound if these misses do not ALSO reset the ramp. Read as benign, each
+	// one closed the breaker and zeroed consecutiveTrips, so a revoked credential
+	// sat at trips=1 forever, its backoff never grew, and every 20th lookup logged
+	// a false "recovered".
+	//
+	// The breaker is deliberately LEFT AS IT IS -- no trip, no reset, no new
+	// breaker method. It is half-open (the window that followed the confirming
+	// trip elapsed), which is the honest state: the lane is being probed under a
+	// confirmed outage. The ramp keeps its position, so the next confirmed run
+	// trips one step higher; a hit closes it through RecordSuccess, logging the
+	// one genuine recovery. Tripping here instead would be the #1195 ratchet
+	// again (a healthy lane with no control re-opened on every half-open miss).
+	case errors.Is(err, petitlyrics.ErrOutageLatched):
+		return err
+
 	case errors.Is(err, petitlyrics.ErrUnauthorized):
 		res := l.breaker.Trip()
 		slog.Warn("lane circuit opened: provider rejected the client application id; the lane is down until it is restored",

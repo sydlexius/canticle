@@ -153,6 +153,11 @@ func ClassifyOutcome(err error) OutcomeClass {
 		// rotation fixes it; bucketing it here would repeat the #495
 		// misdiagnosis. It falls to OutcomeTransport, which is correct.
 		errors.Is(err, petitlyrics.ErrProviderUnavailable),
+		// A miss while that outage is still latched (#1195) is the same OUTCOME
+		// for the row: the credential is judged dead, so the catalog answer is
+		// unknown and the row is released without a miss rather than charged one
+		// toward retirement. Same wrapping hazard, so it also sits up here.
+		errors.Is(err, petitlyrics.ErrOutageLatched),
 		errors.Is(err, petitlyrics.ErrUnauthorized),
 		errors.Is(err, petitlyrics.ErrRateLimited),
 		// innertube equivalents (#856/#870). Same shape as petitlyrics:

@@ -100,6 +100,7 @@ func classifiedSentinels() map[string]error {
 		"petitlyrics.ErrNotFound":              petitlyrics.ErrNotFound,
 		"petitlyrics.ErrNoMatch":               petitlyrics.ErrNoMatch,
 		"petitlyrics.ErrProviderUnavailable":   petitlyrics.ErrProviderUnavailable,
+		"petitlyrics.ErrOutageLatched":         petitlyrics.ErrOutageLatched,
 		"innertube.ErrUnauthorized":            innertube.ErrUnauthorized,
 		"innertube.ErrRateLimited":             innertube.ErrRateLimited,
 		"innertube.ErrForbidden":               innertube.ErrForbidden,
