@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -323,9 +324,25 @@ func (c *Client) PacerStats() PacerStats {
 	level, _ := decayedLevel(c.adaptiveLevel, c.lastLevelChange, c.now())
 	s := PacerStats{Level: level, LastThrottle: c.lastThrottle}
 	if c.minInterval > 0 {
-		s.EffectiveInterval = c.minInterval << level
+		s.EffectiveInterval = effectiveInterval(c.minInterval, level)
 	}
 	return s
+}
+
+// effectiveInterval scales the configured floor by the adaptive level
+// (min << level), saturating at math.MaxInt64 instead of overflowing. The
+// config clamp can hand the pacer the largest representable Duration; a plain
+// shift or multiply would wrap negative, which pace() reads as "no pacing", so
+// an enormous cooldown would silently become an unpaced lane at level >= 1.
+// pace and PacerStats both use this so they cannot drift.
+func effectiveInterval(minInterval time.Duration, level int) time.Duration {
+	if minInterval <= 0 || level <= 0 {
+		return minInterval
+	}
+	if minInterval > time.Duration(math.MaxInt64)>>uint(level) {
+		return time.Duration(math.MaxInt64)
+	}
+	return minInterval << uint(level)
 }
 
 // SetTokenRenewer installs the renewer consulted when the API signals
@@ -447,14 +464,14 @@ func (c *Client) pace(ctx context.Context) error {
 	adaptiveLevel := c.adaptiveLevel
 	effectiveMultiplier := 1 << adaptiveLevel
 	baseInterval := c.minInterval
-	effectiveInterval := baseInterval * time.Duration(effectiveMultiplier)
+	interval := effectiveInterval(baseInterval, adaptiveLevel)
 	// Reserve this caller's slot under the lock. The earliest the next request
 	// may proceed is one effective interval after the previously reserved slot;
 	// if that is already in the past, the slot is now. Advancing lastRequest to
 	// the reserved slot means the next caller computes its own later slot, so
 	// concurrent callers serialize instead of all sleeping the same wait.
 	prev := c.lastRequest
-	next := prev.Add(effectiveInterval)
+	next := prev.Add(interval)
 	if next.Before(now) {
 		next = now
 	}
@@ -465,7 +482,7 @@ func (c *Client) pace(ctx context.Context) error {
 	if adaptiveLevel > 0 {
 		slog.Debug("musixmatch pacer: adaptive interval in effect",
 			"level", adaptiveLevel, "multiplier", effectiveMultiplier,
-			"effective_interval", effectiveInterval, "base_interval", baseInterval)
+			"effective_interval", interval, "base_interval", baseInterval)
 	}
 
 	if wait > 0 {
