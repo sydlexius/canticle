@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
@@ -84,6 +85,7 @@ type Handler struct {
 	ready              Readiness
 	stats              StatusReporter
 	metrics            MetricsReporter
+	laneHealth         func() []orchestrator.LaneState
 	inventory          Inventory
 	realigner          Realigner
 	allowedRoots       []string
@@ -130,6 +132,14 @@ func WithReadiness(r Readiness) Option {
 // WithStatusReporter wires a queue summary source used by GET /api/v1/status.
 func WithStatusReporter(s StatusReporter) Option {
 	return func(h *Handler) { h.stats = s }
+}
+
+// WithLaneHealth wires the per-lane circuit-state source read by GET /metrics
+// (#488). fn is called on every scrape and must return the CURRENT lanes (pass a
+// method value on the owner, never a captured orchestrator, which goes stale on
+// a rebuild). Unset, /metrics omits the lane families.
+func WithLaneHealth(fn func() []orchestrator.LaneState) Option {
+	return func(h *Handler) { h.laneHealth = fn }
 }
 
 // WithMetricsReporter wires a metrics source used by GET /metrics.
