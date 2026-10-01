@@ -2,8 +2,10 @@ package reports_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
@@ -25,6 +27,11 @@ func TestResultsBreakdownSumsToDone(t *testing.T) {
 		{artist: "A", title: "quarantined", status: "done", outcomeType: "synced", syncTier: "word", timingOutcome: "categorical"},
 		{artist: "A", title: "demoted-line", status: "done", outcomeType: "synced", syncTier: "line", timingOutcome: "mis_synced"},
 		{artist: "A", title: "retired-queued", status: "done", outcomeType: "synced", syncTier: "word", wordTimingState: "queued"},
+		// prune's retired row keeps its stale outcome/tier but is not a result.
+		{artist: "A", title: "retired-stale", status: "done", outcomeType: "synced", syncTier: "word", lastError: queue.UnresolvableGoneError},
+		{artist: "A", title: "retired-line", status: "done", outcomeType: "synced", syncTier: "line", lastError: queue.UnresolvableGoneError},
+		// No tier: only the explicit retirement arm keeps this out of tier-unknown.
+		{artist: "A", title: "retired-untiered", status: "done", outcomeType: "synced", lastError: queue.UnresolvableGoneError},
 		{artist: "A", title: "txt", status: "done", outcomeType: "unsynced"},
 		// A stray word tier on a non-synced row does not make it word-synced.
 		{artist: "A", title: "stray", status: "done", outcomeType: "unsynced", syncTier: "word"},
@@ -49,7 +56,7 @@ func TestResultsBreakdownSumsToDone(t *testing.T) {
 	}
 	want := reports.ResultsBreakdown{
 		WordSynced: 2, LineSynced: 1, SyncedTierUnknown: 5,
-		Unsynced: 2, Instrumental: 2, Other: 2,
+		Unsynced: 2, Instrumental: 2, Other: 5,
 	}
 	if got != want {
 		t.Errorf("ResultsBreakdown = %+v, want %+v", got, want)
@@ -85,5 +92,13 @@ func TestResultsBreakdownEmptyAndClosed(t *testing.T) {
 	}
 	if _, err := repo.ResultsBreakdown(context.Background()); err == nil {
 		t.Error("ResultsBreakdown on closed DB: want error")
+	}
+}
+
+// TestRetiredSentinelHasNoQuote guards the inlined retiredPredicate literal:
+// a quote in the sentinel would break (or inject into) every query using it.
+func TestRetiredSentinelHasNoQuote(t *testing.T) {
+	if strings.ContainsAny(queue.UnresolvableGoneError, "'\"") {
+		t.Fatalf("queue.UnresolvableGoneError contains a quote; retiredPredicate inlines it")
 	}
 }

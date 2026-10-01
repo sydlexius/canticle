@@ -11,6 +11,7 @@ import (
 // word-recheck is re-litigating its tier). Shared by SyncTierCounts and
 // ResultsBreakdown so the two cannot disagree. No leading AND/WHERE.
 const lineTierPredicate = `sync_tier = 'line'
+                      AND NOT ` + retiredPredicate + `
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
                       AND COALESCE(word_timing_state, '') <> 'queued'`
 
@@ -37,7 +38,9 @@ type ResultsBreakdown struct {
 	// recorded tier, an 'unsynced' tier on a .lrc, a timing-remediated tier,
 	// or a row mid word-recheck).
 	SyncedTierUnknown int64
-	// Other: every remaining done row -- outcome_type='rejected' (refused by
+	// Other: every remaining done row -- a prune-retired row
+	// (last_error = queue.UnresolvableGoneError, whatever stale outcome it
+	// kept), outcome_type='rejected' (refused by
 	// the language guard, nothing written) or NULL (settled before outcomes
 	// were recorded). Exists so no completed row is ever dropped from the sum.
 	Other int64
@@ -57,11 +60,17 @@ func (b ResultsBreakdown) Total() int64 {
 // sum to Done exactly. The one reachable done+queued shape (prune's retired
 // row) is still done, and lands in SyncedTierUnknown via TierUnknownPredicate.
 //
+// A row prune retired as unresolvable (last_error = queue.UnresolvableGoneError)
+// is status='done' but keeps whatever outcome_type/sync_tier it had before, so
+// its stale synced data must not count as a result: the first arm sends it to
+// Other, still inside the total.
+//
 // The classification is a single CASE chain, so a row matching no named arm
 // falls to Other rather than vanishing, and no row can match two arms.
 func (r *Repo) ResultsBreakdown(ctx context.Context) (ResultsBreakdown, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT CASE
+                  WHEN `+retiredPredicate+` THEN 'other'
                   WHEN outcome_type = 'synced' AND `+wordTierPredicate+` THEN 'word'
                   WHEN outcome_type = 'synced' AND `+lineTierPredicate+` THEN 'line'
                   WHEN outcome_type = 'synced' AND `+TierUnknownPredicate+` THEN 'tier_unknown'
