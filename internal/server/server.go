@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/models"
@@ -24,6 +25,7 @@ import (
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/internal/scan"
 	"github.com/sydlexius/canticle/internal/secrets"
+	"github.com/sydlexius/canticle/internal/selfwrite"
 	"github.com/sydlexius/canticle/internal/sidecar"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/web"
@@ -94,6 +96,8 @@ type Handler struct {
 	webui              *web.UI
 	onboarding         *web.Onboarding
 	reportsDB          *sql.DB
+	editDurations      *audiodur.Store
+	editSelfWrites     *selfwrite.Registry
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
@@ -273,6 +277,15 @@ func WithReportsDB(db *sql.DB) Option {
 	return func(h *Handler) { h.reportsDB = db }
 }
 
+// WithLyricEditDeps supplies the lyric offset editor (#481 Stage 2) with the
+// audio duration store its timing guard judges against and the selfwrite
+// registry its rewrites are recorded in, so the watcher drops them. The editor
+// itself mounts with WithReportsDB; either value may be nil (unknown duration
+// fails open; a nil registry records nothing).
+func WithLyricEditDeps(durations *audiodur.Store, selfWrites *selfwrite.Registry) Option {
+	return func(h *Handler) { h.editDurations, h.editSelfWrites = durations, selfWrites }
+}
+
 // WithSettingsWriter enables the settings page write path (#288 Phase 2): the
 // resolved config file path the save handlers write through config.ApplyChanges,
 // and the encrypted secret store that absorbs secret-field saves (the Musixmatch
@@ -352,6 +365,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		if h.reportsDB != nil {
 			h.webui.AttachReports(reports.New(h.reportsDB))
 			h.webui.AttachQueueActions(queue.NewDBQueue(h.reportsDB))
+			h.webui.AttachLyricEditor(web.EditDeps{
+				Queue: queue.NewDBQueue(h.reportsDB), Durations: h.editDurations, SelfWrites: h.editSelfWrites,
+			})
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)
