@@ -653,7 +653,8 @@ body {
   border: 0;
 }
 
-.mx-fg-wrap {
+/* Doubled class: .mx-table-wrap (68vh) is declared later at equal specificity. */
+.mx-table-wrap.mx-fg-wrap {
   max-height: 40vh;
 }
 

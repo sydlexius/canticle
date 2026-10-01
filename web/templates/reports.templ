@@ -272,12 +272,13 @@ templ tableFailures(rows []FailureRow, emptyMsg string) {
 									hx-get={ FailureGroupHref(r.Status, r.Reason) }
 									hx-target={ "#" + FailureDetailID(i) }
 									hx-swap="innerHTML"
+									hx-sync="this:drop"
 								>
 									Show rows
 								</button>
 							</td>
 						</tr>
-						<tr class="mx-fg-detail">
+						<tr class="mx-fg-detail" hidden>
 							<td colspan="4" id={ FailureDetailID(i) }></td>
 						</tr>
 					}

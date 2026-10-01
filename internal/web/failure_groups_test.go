@@ -177,6 +177,8 @@ func TestFailureReportRendersBadgeLinkAndExpander(t *testing.T) {
 		`<button type="button" class="mx-run-button mx-fg-toggle"`,
 		`aria-expanded="false"`,
 		`aria-controls="mx-fg-0"`,
+		`hx-sync="this:drop"`,
+		`<tr class="mx-fg-detail" hidden>`, // collapsed until the toggle says otherwise
 	} {
 		if !strings.Contains(strings.ToLower(failed), strings.ToLower(want)) {
 			t.Errorf("failure-analysis missing %q; body: %s", want, failed)
