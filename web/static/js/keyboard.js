@@ -23,8 +23,9 @@
 
   var isMac = detectMac(window.navigator);
   var MODIFIERS = { Mod: 1, Shift: 1, Alt: 1, Control: 1, Meta: 1 };
-  // Shifted punctuation reports a different e.key ("}" for "]"), so these
-  // match by physical code as well.
+  // A modified bracket reports a different e.key: Shift gives "}" for "]", and
+  // on macOS Option gives a typographic quote. These match by physical code
+  // whenever Shift or Alt is part of the chord.
   var CODES = { "[": "BracketLeft", "]": "BracketRight" };
   var entries = [];
 
@@ -78,7 +79,7 @@
     if (isLetter) {
       return e.key.toLowerCase() === k.toLowerCase();
     }
-    return e.key === k || (w.shift && CODES[k] !== undefined && e.code === CODES[k]);
+    return e.key === k || ((w.shift || w.alt) && CODES[k] !== undefined && e.code === CODES[k]);
   }
 
   function isTyping(el) {

@@ -104,6 +104,18 @@ describe("keyboard.js", () => {
     expect(plain).not.toHaveBeenCalled();
   });
 
+  it("matches Option+bracket on macOS by physical code", () => {
+    const win = load("MacIntel");
+    const fine = vi.fn();
+    const plain = vi.fn();
+    win.mxKeyboard.register({ keys: ["Alt", "]"], label: "+0.01 s", handler: fine });
+    win.mxKeyboard.register({ keys: ["]"], label: "+0.1 s", handler: plain });
+    // macOS Option+] reports a typographic quote as e.key, not "]".
+    press(win, { key: "\u2018", code: "BracketRight", altKey: true });
+    expect(fine).toHaveBeenCalledOnce();
+    expect(plain).not.toHaveBeenCalled();
+  });
+
   it("renders a legend matching the registry", () => {
     const win = load("Linux x86_64");
     const kb = win.mxKeyboard;
