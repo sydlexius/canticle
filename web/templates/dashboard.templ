@@ -185,6 +185,9 @@ templ dashProviderTiles(tiles []StatTile) {
 						<span class="mx-dash-tile-sub">{ t.Sub }</span>
 					}
 					@dashTileHitBar(t)
+					if t.Status != "" {
+						<span class={ "mx-dash-tile-status mx-dash-tile-status-" + t.Status }>{ t.StatusText }</span>
+					}
 				</div>
 			}
 		</div>

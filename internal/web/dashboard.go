@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/detectorbackfill"
+	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
@@ -24,6 +26,12 @@ const dashboardRecentLimit = 20
 // buffered" header equals the rendered row count. An operator running a larger
 // batch_size sees the first N; the buffer never lists more than batch_size rows.
 const dashboardUpNextLimit = 50
+
+// AttachLaneHealth wires the per-lane circuit-state source onto the dashboard
+// (#488). Pass a method value on the owner (worker.LaneHealth), never a captured
+// orchestrator: it is called on every dashboard request and must see the
+// current lanes after a rebuild.
+func (u *UI) AttachLaneHealth(fn func() []orchestrator.LaneState) { u.laneHealth = fn }
 
 // handleDashboard renders the read-only observability dashboard. It is gated
 // by the same auth guard as the other UI routes and is never cached (it exposes
@@ -75,7 +83,11 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: provider effectiveness: %w", err)
 	}
-	view.ProviderTiles = buildProviderTiles(pe)
+	if u.laneHealth != nil {
+		view.ProviderTiles = providerTilesWithHealth(pe, u.laneHealth(), u.musixmatchInactive, time.Now())
+	} else {
+		view.ProviderTiles = buildProviderTiles(pe)
+	}
 
 	instrumental, err := u.reports.CountInstrumental(ctx)
 	if err != nil {
@@ -336,19 +348,135 @@ func hitRateBarFields(rate float64) (sub, barPct, barLabel string) {
 func buildProviderTiles(pe []reports.ProviderEffectiveness) []templates.StatTile {
 	tiles := make([]templates.StatTile, 0, len(pe))
 	for _, p := range pe {
-		attempts := p.Hits + p.Misses
-		sub, barPct, barLabel := hitRateBarFields(p.HitRate)
-		tiles = append(tiles, templates.StatTile{
-			Label:     laneLabel(p.Lane),
-			LabelMark: laneMark(p.Lane),
-			Value:     fmt.Sprintf("%d/%d", p.Hits, attempts),
-			Sub:       sub,
-			ShowBar:   true,
-			BarPct:    barPct,
-			BarLabel:  barLabel,
-		})
+		tiles = append(tiles, buildProviderTile(p))
 	}
 	return tiles
+}
+
+// buildProviderTile shapes one lane's effectiveness row into its stat tile.
+func buildProviderTile(p reports.ProviderEffectiveness) templates.StatTile {
+	sub, barPct, barLabel := hitRateBarFields(p.HitRate)
+	return templates.StatTile{
+		Label:     laneLabel(p.Lane),
+		LabelMark: laneMark(p.Lane),
+		Value:     fmt.Sprintf("%d/%d", p.Hits, p.Hits+p.Misses),
+		Sub:       sub,
+		ShowBar:   true,
+		BarPct:    barPct,
+		BarLabel:  barLabel,
+	}
+}
+
+// Lane status tokens carried on StatTile.Status; they are CSS class suffixes.
+const (
+	laneStatusHealthy   = "healthy"
+	laneStatusReady     = "ready"
+	laneStatusProbing   = "probing"
+	laneStatusThrottled = "throttled"
+	laneStatusFailing   = "failing"
+	laneStatusInactive  = "inactive"
+)
+
+// providerTilesWithHealth builds the Lyrics Sources tiles when a lane-health
+// source is attached (#488). The tile set is the UNION of the configured lanes
+// (health, in priority order) and the lanes with recorded attempts (pe, then
+// appended in pe order), so a lane whose breaker opened before it ever scored a
+// hit or miss still gets a tile: that is the fresh-install bad-token case the
+// status exists for. A health-only lane renders zero counts ("0/0", 0%), the
+// same markup a recorded-but-empty lane gets. A Local lane (the detector) is
+// not a lyrics source: it gets no status line, and no tile at all unless it has
+// recorded attempts. In parallel mode, or with the detector off, it is absent
+// from health but its history still renders a tile, identified by its
+// persisted lane name (detectorbackfill.LaneName), still with no status line.
+// Any other lane with attempts but absent from health is no longer configured
+// and reads "Not active". When
+// musixmatchInactive is set (no token: the worker never starts, the banner
+// shows) the musixmatch tile reads inactive instead of its breaker state,
+// which would otherwise say "Ready" for a lane that cannot run.
+func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, musixmatchInactive bool, now time.Time) []templates.StatTile {
+	byLane := make(map[string]reports.ProviderEffectiveness, len(pe))
+	for _, p := range pe {
+		byLane[p.Lane] = p
+	}
+	seen := make(map[string]bool, len(health)+len(pe))
+	tiles := make([]templates.StatTile, 0, len(health)+len(pe))
+	for _, h := range health {
+		p, recorded := byLane[h.Provider]
+		if h.Local && !recorded {
+			continue
+		}
+		seen[h.Provider] = true
+		if !recorded {
+			p = reports.ProviderEffectiveness{Lane: h.Provider}
+		}
+		t := buildProviderTile(p)
+		switch {
+		case h.Local:
+		case musixmatchInactive && h.Provider == markMusixmatch:
+			t.Status, t.StatusText = laneStatusInactive, "Inactive - add an API token"
+		default:
+			t.Status, t.StatusText = laneStatus(h, now)
+		}
+		tiles = append(tiles, t)
+	}
+	for _, p := range pe {
+		if seen[p.Lane] {
+			continue
+		}
+		seen[p.Lane] = true
+		t := buildProviderTile(p)
+		if p.Lane != detectorbackfill.LaneName {
+			t.Status, t.StatusText = laneStatusInactive, "Not active"
+		}
+		tiles = append(tiles, t)
+	}
+	return tiles
+}
+
+// laneStatus maps one lane's breaker snapshot to its status class and words.
+// Half-open is "probing", reported apart from open: the lane takes its next
+// request even though it recently tripped. An open lane that has NEVER
+// succeeded this session is "failing", not "throttled": that is the
+// verify-your-token case (orchestrator resolve), and calling it throttling
+// would send the operator waiting instead of fixing config. A closed lane that
+// has not succeeded yet reads "Ready, no success this session" rather than "Healthy",
+// because nothing has proven it healthy. The text states the status; color
+// only reinforces it.
+func laneStatus(h orchestrator.LaneState, now time.Time) (status, text string) {
+	switch h.State {
+	case orchestrator.LaneStateOpen:
+		if !h.EverSucceeded {
+			return laneStatusFailing, "Failing, no success this session - check token/config (" + retryIn(h.OpenUntil, now) + ")"
+		}
+		return laneStatusThrottled, "Throttled, " + retryIn(h.OpenUntil, now)
+	case orchestrator.LaneStateHalfOpen:
+		return laneStatusProbing, "Probing"
+	default:
+		if !h.EverSucceeded {
+			return laneStatusReady, "Ready, no success this session"
+		}
+		return laneStatusHealthy, "Healthy"
+	}
+}
+
+// retryIn renders the relative countdown to until: "retry in 4m", "retry in
+// 1h 5m", or "retry shortly" once the window has already passed (a snapshot can
+// read open a moment after OpenUntil). Minutes round UP (ceiling): a "retry in"
+// must never promise a retry sooner than the window allows, so 61s reads "2m"
+// and 59m31s reads "1h".
+func retryIn(until, now time.Time) string {
+	d := until.Sub(now)
+	if d <= 0 {
+		return "retry shortly"
+	}
+	m := int((d + time.Minute - 1) / time.Minute)
+	if m >= 60 {
+		if r := m % 60; r != 0 {
+			return fmt.Sprintf("retry in %dh %dm", m/60, r)
+		}
+		return fmt.Sprintf("retry in %dh", m/60)
+	}
+	return fmt.Sprintf("retry in %dm", m)
 }
 
 // buildRecentRows shapes recent outcomes into table rows, formatting each

@@ -17,6 +17,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/internal/secrets"
 	"github.com/sydlexius/canticle/web/templates"
@@ -73,6 +74,11 @@ type UI struct {
 	// It is nil when the UI is built without a database seam (e.g. some tests);
 	// the report-fragment handler degrades to a 503 rather than panicking.
 	reports *reports.Repo
+	// laneHealth is the per-lane circuit-state source behind the dashboard's
+	// Lyrics Sources status (#488). Nil leaves the tiles without a status line.
+	// It is a func, not an orchestrator, so every request re-reads the CURRENT
+	// lanes (a rebuild swaps the orchestrator under it).
+	laneHealth func() []orchestrator.LaneState
 
 	// --- settings write path (#288 Phase 2) ---
 	// configPath is the RESOLVED config file path the save handlers write through

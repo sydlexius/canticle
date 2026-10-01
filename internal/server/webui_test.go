@@ -10,6 +10,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/orchestrator"
 )
 
 // TestWithWebUIServesPages verifies that mounting the web UI registers its
@@ -154,5 +155,32 @@ func TestWithWebUIIfDisabled(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("GET %s with WithWebUIIf(false) status = %d, want 404", path, rec.Code)
 		}
+	}
+}
+
+// TestWithLaneHealthReachesDashboard pins the production wiring of the lane
+// health seam onto the web UI (#488): NewHandler must hand WithLaneHealth's
+// source to the dashboard, or the tiles silently lose their status line.
+func TestWithLaneHealthReachesDashboard(t *testing.T) {
+	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithWebUI(config.Config{}, "vtest"),
+		WithReportsDB(sqlDB),
+		WithLaneHealth(func() []orchestrator.LaneState {
+			return []orchestrator.LaneState{{Provider: "musixmatch", State: orchestrator.LaneStateHalfOpen}}
+		}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `mx-dash-tile-status-probing">Probing<`) {
+		t.Error("dashboard missing the lane status line; WithLaneHealth did not reach the web UI")
 	}
 }
