@@ -100,7 +100,9 @@ func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	b.WriteString(` status = 'done'
    AND outcome_type = 'synced'
    AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
-   AND TRIM(COALESCE(source_path, '')) <> ''
+   AND TRIM(COALESCE(source_path, '')) <> ''`)
+	b.WriteString(notLyricEdited)
+	b.WriteString(`
    AND ((word_timing_state IS NULL`)
 	if !opts.UnexaminedCheckedBefore.IsZero() {
 		b.WriteString(` AND COALESCE(word_timing_checked_at, '') < ?`)
