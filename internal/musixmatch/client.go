@@ -290,6 +290,42 @@ type Client struct {
 	// occurred, since there is nothing to decay from and no meaningful elapsed
 	// window to measure.
 	lastLevelChange time.Time
+	// lastThrottle is the time of the most recent OnThrottle call, guarded by
+	// mu. Unlike lastLevelChange it is NOT touched by step-downs, so it answers
+	// "when was this provider last throttled". The zero value means never.
+	lastThrottle time.Time
+}
+
+// PacerStats is a point-in-time snapshot of the adaptive pacer's state.
+type PacerStats struct {
+	// Level is the adaptive ratcheting level the next request would use
+	// (0..adaptiveMaxLevel), i.e. after any time decay already due.
+	Level int
+	// EffectiveInterval is the configured floor scaled by the level
+	// (minInterval << Level). Zero when pacing is disabled.
+	EffectiveInterval time.Duration
+	// LastThrottle is the time of the most recent throttle notification, or the
+	// zero time if the pacer has never been throttled.
+	LastThrottle time.Time
+}
+
+// PacerStats returns a snapshot of the adaptive pacer taken under the pacer
+// lock; the lock is released before returning and nothing is called out while
+// it is held. Read-only: the lazy time decay is evaluated on copies (via
+// decayedLevel) and never written back, so an idle pacer, an open breaker or an
+// inactive provider still reports the level a request made now would use, and
+// the snapshot mutates nothing (including consecutiveSuccesses).
+//
+// No caller exists yet; the live settings pacing block wires it later (#559).
+func (c *Client) PacerStats() PacerStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	level, _ := decayedLevel(c.adaptiveLevel, c.lastLevelChange, c.now())
+	s := PacerStats{Level: level, LastThrottle: c.lastThrottle}
+	if c.minInterval > 0 {
+		s.EffectiveInterval = c.minInterval << level
+	}
+	return s
 }
 
 // SetTokenRenewer installs the renewer consulted when the API signals
@@ -471,6 +507,7 @@ func (c *Client) OnThrottle() {
 	}
 	c.consecutiveSuccesses = 0
 	c.lastLevelChange = c.now()
+	c.lastThrottle = c.lastLevelChange
 }
 
 // OnSuccess implements the providers.AdaptivePacer interface. It records a
@@ -509,11 +546,23 @@ func (c *Client) OnSuccess() {
 // interval before the next throttle re-ratchets (an intentional, bounded cost
 // per the design constraints, not a bug).
 func (c *Client) decayLocked(now time.Time) {
-	for c.adaptiveLevel > 0 && !c.lastLevelChange.IsZero() && now.Sub(c.lastLevelChange) >= adaptiveDecayInterval {
-		c.adaptiveLevel--
+	level, last := decayedLevel(c.adaptiveLevel, c.lastLevelChange, now)
+	if level != c.adaptiveLevel {
 		c.consecutiveSuccesses = 0
-		c.lastLevelChange = c.lastLevelChange.Add(adaptiveDecayInterval)
 	}
+	c.adaptiveLevel, c.lastLevelChange = level, last
+}
+
+// decayedLevel is the pure time-decay arithmetic shared by decayLocked (which
+// applies it) and PacerStats (which only reports it): one level per full
+// adaptiveDecayInterval elapsed since last, never below 0, and never when last
+// is the zero time. It returns the decayed level and the advanced decay clock.
+func decayedLevel(level int, last, now time.Time) (int, time.Time) {
+	for level > 0 && !last.IsZero() && now.Sub(last) >= adaptiveDecayInterval {
+		level--
+		last = last.Add(adaptiveDecayInterval)
+	}
+	return level, last
 }
 
 // Name returns the provider name.
