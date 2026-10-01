@@ -261,7 +261,11 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		kind = "unsynced"
 		writeContent = func(buf *bufio.Writer) error { return writeUnsyncedLRC(song, buf) }
 	default:
-		return fmt.Errorf("nothing to save for %s - %s", song.Track.ArtistName, song.Track.TrackName)
+		// %q, not %s: the quotes give internal/failsig an unambiguous boundary,
+		// so the whole artist/title is stripped from the failure signature even
+		// when a title contains ": " (#1167). Go-quoting also escapes any quote
+		// inside a name, so the closing quote is always the field's end.
+		return fmt.Errorf("nothing to save for %q - %q", song.Track.ArtistName, song.Track.TrackName)
 	}
 
 	// Accept-time timing guard (#439). A synced result is promoted to .lrc only
