@@ -35,6 +35,7 @@ A sidecar path, artist, title, or lyric line is private library metadata. Flag n
 ## Tests
 
 - **Reachability.** A new exported function, endpoint, report, or config key needs a caller outside `_test.go` files. Code with no production caller passes its own tests and ships dead.
+  - **Sliced delivery exception.** A foundation slice may land its API before its consumer when the PR body names the consuming slice and the open issue that tracks it (for example "Part of #598; consumed by the `/queue/{bucket}` view in the next slice"). Do not flag the missing caller on such a PR. Flag it when the PR body names no consumer or no open tracking issue, or when the named issue is closed without the consumer having landed.
 - **Log-only arms.** If a branch's only effect is a log line, its test must capture `slog` output. Otherwise the branch is untested, however high the coverage number.
 - **Coincidental assertions.** A `strings.Contains` that matches for an unrelated reason (such as a weekday name containing "day") proves nothing. Check that the asserted substring comes from the path under test.
 - Integration tests use real SQLite (in-memory or a temp file), not a mocked database. Unit tests may fake a repository interface at the boundary (for example the worker's queue seam).
