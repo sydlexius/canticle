@@ -81,6 +81,9 @@ type QueueRow struct {
 	// Libraries is the comma-joined names of every library the row is linked to
 	// ("-" when none).
 	Libraries string
+	// PreviewHref is the /preview/{id} player link, set only for a row with a
+	// synced .lrc; empty renders no link.
+	PreviewHref string
 }
 
 // QueueMoreHref is the "Show more" target for a bucket and cursor.

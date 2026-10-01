@@ -81,6 +81,12 @@ type BucketRow struct {
 	Attempts      int64
 	UpdatedAt     string
 	Libraries     []BucketLibrary
+	// Previewable reports a settled synced row whose tier is current: the same
+	// wordTierPredicate/lineTierPredicate the dashboard counts, so a
+	// timing-remediated, recheck-queued or prune-retired row (whose stamped
+	// tier may be stale) is not offered to the player. Decided in SQL from the
+	// row's recorded state, never by touching the disk.
+	Previewable bool
 }
 
 // MaxBucketLimit caps one page so a caller cannot ask for the whole table.
@@ -110,7 +116,9 @@ func (r *Repo) ListBucket(ctx context.Context, bucket Bucket, afterID int64, lim
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, artist, title, album, status,
                 COALESCE(NULLIF(last_error, ''), ?),
-                COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, '')
+                COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, ''),
+                COALESCE(status = 'done' AND outcome_type = 'synced'
+                 AND ((`+wordTierPredicate+`) OR (`+lineTierPredicate+`)), 0)
          FROM work_queue
          WHERE id > ? AND (`+pred+`)
          ORDER BY id ASC
@@ -124,7 +132,7 @@ func (r *Repo) ListBucket(ctx context.Context, bucket Bucket, afterID int64, lim
 	for rows.Next() {
 		var it BucketRow
 		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
-			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt); err != nil {
+			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable); err != nil {
 			return nil, fmt.Errorf("reports: scan bucket row: %w", err)
 		}
 		it.Reason = normalizedReason(it.Reason)

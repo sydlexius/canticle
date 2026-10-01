@@ -300,3 +300,33 @@ func TestListBucketQueryErrorsPropagate(t *testing.T) {
 		t.Error("expected page query error on closed DB")
 	}
 }
+
+// TestListBucketPreviewable pins the Preview-link eligibility to the
+// dashboard's own tier predicates: a current word/line tier qualifies; a
+// stale one (timing-remediated, recheck-queued, prune-retired) does not.
+func TestListBucketPreviewable(t *testing.T) {
+	sqlDB := openTestDB(t)
+	for _, w := range []workItem{
+		{artist: "A", title: "line", status: "done", outcomeType: "synced", syncTier: "line"},
+		{artist: "A", title: "word", status: "done", outcomeType: "synced", syncTier: "word"},
+		{artist: "A", title: "none", status: "done", outcomeType: "unsynced"},
+		{artist: "A", title: "remediated", status: "done", outcomeType: "synced", syncTier: "line", timingOutcome: "mis_synced"},
+		{artist: "A", title: "recheck", status: "done", outcomeType: "synced", syncTier: "line", wordTimingState: "queued"},
+		{artist: "A", title: "retired", status: "done", outcomeType: "synced", syncTier: "line", lastError: queue.UnresolvableGoneError},
+	} {
+		insertWorkItem(t, sqlDB, w)
+	}
+	got := map[string]bool{}
+	repo := reports.New(sqlDB)
+	for _, b := range []reports.Bucket{reports.BucketSettled, reports.BucketFinished} {
+		for _, r := range listAll(t, repo, b) {
+			got[r.Title] = r.Previewable
+		}
+	}
+	want := map[string]bool{"line": true, "word": true, "none": false, "remediated": false, "recheck": false, "retired": false}
+	for title, w := range want {
+		if g, ok := got[title]; !ok || g != w {
+			t.Errorf("%s: previewable=%v (listed=%v), want %v", title, g, ok, w)
+		}
+	}
+}
