@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/failsig"
@@ -249,9 +248,10 @@ type RecentOutcome struct {
 	// row settles as unknown TODAY, with the reason sitting one column over,
 	// unread. Those rows are the reason this coalesce exists.
 	//
-	// For ResultUnknown the coalesce continues past the timing verdict to the
-	// failsig-normalized last_error (the Detail then carries that normalized text), then to LegacyNoOutcomeDetail, so an unknown
-	// row is never blank (#654). Empty therefore remains only for outcomes that
+	// For ResultUnknown the coalesce continues past the timing verdict to
+	// LegacyNoOutcomeDetail, so an unknown row is never blank (#654). last_error
+	// is deliberately NOT surfaced: failsig.Normalize is a grouping normalizer,
+	// not redaction, and surfacing it waits on #1167. Empty therefore remains only for outcomes that
 	// need no detail beyond their class (a plain synced write) and rejections
 	// settled before #773, whose reason went to a log line and is unrecoverable.
 	// None is rendered as a verdict.
@@ -327,10 +327,6 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
                      THEN 'timing refused: ' || timing_outcome
                 END
             ) AS detail,
-            -- The raw reason behind a NULL-outcome row. Normalized in Go through
-            -- normalizedReason, the one failsig path, never a second normalizer.
-            -- Only read for ResultUnknown (a miss-sentinel row classifies as miss).
-            CASE WHEN outcome_type IS NULL THEN last_error END AS reason,
             COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate') AS timing_verdict,
             CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
@@ -364,11 +360,10 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 			completedAt   sql.NullString
 			providerLane  sql.NullString
 			detail        sql.NullString
-			reason        sql.NullString
 			timingVerdict bool
 			result        string
 		)
-		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &detail, &reason, &timingVerdict, &result); err != nil {
+		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &detail, &timingVerdict, &result); err != nil {
 			return nil, fmt.Errorf("reports: scan recent outcome: %w", err)
 		}
 		if completedAt.Valid && completedAt.String != "" {
@@ -392,7 +387,7 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 				o.ProviderLane = ""
 			}
 			if o.Detail == "" {
-				o.Detail = unrecordedDetail(reason.String)
+				o.Detail = LegacyNoOutcomeDetail
 			}
 		}
 		out = append(out, o)
@@ -406,15 +401,6 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 // LegacyNoOutcomeDetail is the Detail shown for an unrecorded-outcome row that
 // carries no other recoverable reason.
 const LegacyNoOutcomeDetail = "legacy row: no outcome recorded"
-
-// unrecordedDetail is the last link of the Detail coalesce for an unknown row:
-// the failsig-normalized last_error when there is one, else the legacy literal.
-func unrecordedDetail(lastError string) string {
-	if strings.TrimSpace(lastError) != "" {
-		return normalizedReason(lastError)
-	}
-	return LegacyNoOutcomeDetail
-}
 
 // ProviderEffectiveness is the hit/miss tally and derived hit-rate for one
 // provider lane.

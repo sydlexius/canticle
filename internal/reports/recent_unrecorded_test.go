@@ -2,6 +2,7 @@ package reports_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/reports"
@@ -9,8 +10,8 @@ import (
 
 // TestRecentOutcomesUnrecordedBlanksLaneAndExplains pins #654: a row whose
 // outcome was never recorded (ResultUnknown) shows NO provider lane, and its
-// Detail coalesces stored detail > timing verdict > normalized last_error >
-// the legacy literal. Rows with a recorded outcome keep their lane, and a miss
+// Detail coalesces stored detail > timing verdict > the legacy literal.
+// last_error is never surfaced (#1167 tracks hardening the normalizer first). Rows with a recorded outcome keep their lane, and a miss
 // does not echo its own sentinel as a reason. A row with a recorded timing
 // verdict (categorical, remediated mis_synced) KEEPS its lane.
 func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
@@ -68,7 +69,7 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 	}{
 		{"legacy-stale-lane", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
 		{"legacy-whitespace-error", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
-		{"legacy-error", reports.ResultUnknown, "", `output dir "<path>": permission denied`},
+		{"legacy-error", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
 		{"quarantined", reports.ResultUnknown, "musixmatch", "timing refused: categorical"},
 		{"remediated", reports.ResultUnknown, "petitlyrics", "timing refused: mis_synced"},
 		{"synced", reports.ResultSynced, "musixmatch", ""},
@@ -77,6 +78,9 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 		o, ok := byTitle[tc.title]
 		if !ok {
 			t.Fatalf("row %q missing from results", tc.title)
+		}
+		if strings.Contains(o.Detail, "/data/library") || strings.Contains(o.Detail, "permission denied") {
+			t.Errorf("%s: Detail %q leaks last_error", tc.title, o.Detail)
 		}
 		if o.Result != tc.wantResult || o.ProviderLane != tc.wantLane || o.Detail != tc.wantDetail {
 			t.Errorf("%s: got result=%q lane=%q detail=%q; want result=%q lane=%q detail=%q",
