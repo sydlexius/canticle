@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/sydlexius/canticle/internal/orchestrator"
 )
 
 // MetricsReporter provides aggregate queue data for the GET /metrics endpoint.
@@ -122,6 +124,10 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		hits, lookups := cs.CacheStats()
 		writeCacheMetrics(w, hits, lookups)
 	}
+	// Per-lane circuit state (#488) is optional: no seam, no families.
+	if h.laneHealth != nil {
+		writeLaneMetrics(w, h.laneHealth())
+	}
 }
 
 // writeMetrics serializes all metric families in Prometheus text-exposition
@@ -191,6 +197,42 @@ func writeCacheMetrics(w io.Writer, hits, lookups int64) {
 	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_cache_lookups_total Total lyrics-cache lookups attempted since process start.")
 	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_cache_lookups_total counter")
 	_, _ = fmt.Fprintf(w, "mxlrcgo_cache_lookups_total %d\n", lookups)
+}
+
+// writeLaneMetrics serializes the per-lane circuit-breaker families (#488).
+// The only label is the lane name (a provider identifier, never library
+// content). State is one-hot: each lane emits all three states, exactly one of
+// them 1, so a scraper can alert on state="open" without string handling.
+// open_until is unix seconds, 0 unless the lane is open. Trips is the
+// consecutive-trip ramp position, which resets on success, hence a gauge.
+func writeLaneMetrics(w io.Writer, lanes []orchestrator.LaneState) {
+	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_state Circuit state of each provider lane (1 for the current state, else 0).")
+	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_state gauge")
+	for _, l := range lanes {
+		for _, st := range []string{orchestrator.LaneStateClosed, orchestrator.LaneStateOpen, orchestrator.LaneStateHalfOpen} {
+			v := 0
+			if l.State == st {
+				v = 1
+			}
+			_, _ = fmt.Fprintf(w, "mxlrcgo_lane_state{lane=\"%s\",state=\"%s\"} %d\n", promEscape(l.Provider), st, v)
+		}
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_open_until_seconds Unix time the lane's open window ends; 0 when not open.")
+	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_open_until_seconds gauge")
+	for _, l := range lanes {
+		var until int64
+		if l.State == orchestrator.LaneStateOpen && !l.OpenUntil.IsZero() {
+			until = l.OpenUntil.Unix()
+		}
+		_, _ = fmt.Fprintf(w, "mxlrcgo_lane_open_until_seconds{lane=\"%s\"} %d\n", promEscape(l.Provider), until)
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_trips Consecutive circuit trips on the lane (throttle ramp position).")
+	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_trips gauge")
+	for _, l := range lanes {
+		_, _ = fmt.Fprintf(w, "mxlrcgo_lane_trips{lane=\"%s\"} %d\n", promEscape(l.Provider), l.Trips)
+	}
 }
 
 // sortedKeys returns the keys of m in ascending lexicographic order.
