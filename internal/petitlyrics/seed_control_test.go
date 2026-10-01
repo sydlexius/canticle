@@ -9,7 +9,8 @@ import (
 )
 
 // This file guards #1195: the #767 liveness control was memory-only, so every
-// restart dropped the lane onto the count fallback.
+// restart dropped the lane onto the count fallback, and a reported count-only
+// run then re-latched on each single half-open miss.
 
 // TestSeededControlAdjudicatesMissRunAfterRestart: a FRESH client (a restart)
 // seeded from a prior win must answer a threshold-length miss run with the
@@ -37,8 +38,7 @@ func TestSeededControlAdjudicatesMissRunAfterRestart(t *testing.T) {
 // seed's probe misses; that miss is not evidence (the row may name a track this
 // lane never served), so the seed is dropped and the run is judged by the count,
 // which still confirms the outage. Past it the lane has no control, so the next
-// miss makes ONE request (no probe) and is judged by the count, as an unseeded
-// lane's is.
+// miss makes ONE request (no probe) and reads as latched, not as a fresh outage.
 func TestSeededControlStillConfirmsRealOutage(t *testing.T) {
 	handler, calls := serveHitThenEmpty(t, 0)
 	c, _ := newTestClient(t, handler)
@@ -59,17 +59,17 @@ func TestSeededControlStillConfirmsRealOutage(t *testing.T) {
 	}
 	before := calls.Load()
 	_, err = c.FindLyrics(context.Background(), models.Track{TrackName: "Obscure", ArtistName: "Artist"})
-	if got := calls.Load() - before; got != 1 || !errors.Is(err, ErrProviderUnavailable) {
-		t.Errorf("next miss made %d requests, err = %v; want 1 (no control left to probe) and the count-confirmed outage", got, err)
+	if got := calls.Load() - before; got != 1 || !errors.Is(err, ErrOutageLatched) {
+		t.Errorf("next miss made %d requests, err = %v; want 1 (no control left to probe) and ErrOutageLatched", got, err)
 	}
 }
 
 // TestSeededControlMissIsNotProbedEvidence is F2(b): a seed naming a track the
 // provider does NOT serve (a purged/retired row that kept its provider_lane) on
 // a HEALTHY lane. The probe on it misses; that must drop the seed rather than be
-// reported as a probed outage; the run is judged by the count, exactly as an
-// unseeded lane's is. The first hit then recovers the lane and earns a real
-// control, which IS evidence from then on.
+// reported as a probed outage, and the run must be rearmed like an unseeded one
+// so a single later miss does not re-confirm. The first hit then recovers the
+// lane and earns a real control, which IS evidence from then on.
 func TestSeededControlMissIsNotProbedEvidence(t *testing.T) {
 	handler, _ := serveKnownGoodOnly(t) // serves "Known" only
 	c, _ := newTestClient(t, handler)
@@ -79,10 +79,14 @@ func TestSeededControlMissIsNotProbedEvidence(t *testing.T) {
 		_, _ = c.FindLyrics(context.Background(), models.Track{TrackName: "Obscure", ArtistName: "Artist"})
 	}
 	c.mu.Lock()
-	have, seeded := c.hasKnownGood, c.knownGoodSeeded
+	run, have, seeded := c.consecutiveZero, c.hasKnownGood, c.knownGoodSeeded
 	c.mu.Unlock()
 	if have || seeded {
 		t.Fatalf("hasKnownGood=%v seeded=%v after the seed missed its probe; want it dropped", have, seeded)
+	}
+	if run != 0 {
+		t.Errorf("miss run = %d after the seed missed; want 0 (judged as an unseeded count run, which rearms). "+
+			"A non-zero run is the probed path, where every further miss re-confirms", run)
 	}
 
 	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Known", ArtistName: "Good"}); err != nil {
@@ -119,6 +123,66 @@ func TestSeedDoesNotTouchTheRun(t *testing.T) {
 	}
 	if !haveAfter {
 		t.Error("a usable track was not accepted as a control")
+	}
+}
+
+// TestUnseededReportedRunDoesNotRelatchOnOneMiss is the ratchet: after a
+// count-confirmed outage (no control, #607), ONE further miss -- the breaker's
+// half-open request -- must not re-confirm the outage on its own. A full new
+// run must, so a genuinely revoked credential is still re-detected.
+func TestUnseededReportedRunDoesNotRelatchOnOneMiss(t *testing.T) {
+	c, _ := newTestClient(t, serveEmpty())
+	miss := func() error {
+		_, err := c.FindLyrics(context.Background(), models.Track{TrackName: "t", ArtistName: "a"})
+		return err
+	}
+
+	var err error
+	for i := 0; i < ZeroResultThreshold; i++ {
+		err = miss()
+	}
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("an unseeded fresh client did not escalate after %d misses (#607 regressed): %v", ZeroResultThreshold, err)
+	}
+
+	if err := miss(); errors.Is(err, ErrProviderUnavailable) {
+		t.Fatal("a single miss after a reported count-only run re-confirmed the outage with no new evidence; " +
+			"this is the half-open ratchet that kept the lane latched (#1195)")
+	}
+
+	for i := 1; i < ZeroResultThreshold; i++ {
+		err = miss()
+	}
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Errorf("a full fresh run on a dead credential did not re-escalate: %v; rearming must not disable #607", err)
+	}
+}
+
+// TestLatchedMissIsNotANoMatch: between a count-confirmed outage and the next
+// hit, a zero-result answer is ErrOutageLatched, never the plain no-match
+// (#1195 review F1). It still wraps ErrNotFound, never ErrNoMatch, so it does not
+// answer the word question; a hit clears it.
+func TestLatchedMissIsNotANoMatch(t *testing.T) {
+	handler, _ := serveKnownGoodOnly(t)
+	c, _ := newTestClient(t, handler)
+	miss := func() error {
+		_, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Obscure", ArtistName: "Artist"})
+		return err
+	}
+	for i := 0; i < ZeroResultThreshold; i++ {
+		_ = miss()
+	}
+	for i := 1; i < ZeroResultThreshold; i++ {
+		err := miss()
+		if !errors.Is(err, ErrOutageLatched) || IsNoMatch(err) || !errors.Is(err, ErrNotFound) {
+			t.Fatalf("latched miss %d: err = %v; want ErrOutageLatched (wrapping ErrNotFound, not ErrNoMatch)", i, err)
+		}
+	}
+	if _, err := c.FindLyrics(context.Background(), models.Track{TrackName: "Known", ArtistName: "Good"}); err != nil {
+		t.Fatalf("hit: %v", err)
+	}
+	if err := miss(); !IsNoMatch(err) {
+		t.Errorf("miss after recovery: err = %v; want a plain no-match once a hit cleared the latch", err)
 	}
 }
 

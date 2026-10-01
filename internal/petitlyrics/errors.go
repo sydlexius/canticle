@@ -55,6 +55,26 @@ var ErrProviderUnavailable = fmt.Errorf(
 	"petitlyrics: provider returned no results for %d consecutive lookups (application id revoked?): %w",
 	ZeroResultThreshold, ErrNotFound)
 
+// ErrOutageLatched is a zero-result answer while a CONFIRMED outage is still
+// unresolved: ErrProviderUnavailable was reported, the miss counter was rearmed
+// (#1195), and no response carrying songs has arrived since.
+//
+// It is not a no-match. A count-confirmed outage rearms rather than re-confirming
+// on every miss (which ratcheted the breaker open on a healthy lane), so the next
+// threshold's worth of misses would otherwise read as ordinary misses: each one
+// would reset the breaker's ramp and charge the row a benign miss toward
+// retirement, on a credential already judged dead -- the exact silent degradation
+// #607 exists to end. So the classifier leaves the breaker as it is (the ramp
+// keeps its position and the next full run re-trips one step higher), and the
+// worker releases the row without a miss, as it does for ErrProviderUnavailable.
+//
+// Like ErrProviderUnavailable it wraps ErrNotFound, so case ORDER is
+// load-bearing in every errors.Is switch: test it before the benign-miss case.
+// It does NOT wrap ErrNoMatch, so it never answers the word question (#982).
+var ErrOutageLatched = fmt.Errorf(
+	"petitlyrics: no results while a confirmed outage is unresolved (application id revoked?): %w",
+	ErrNotFound)
+
 // ZeroResultThreshold is how many CONSECUTIVE zero-result lookups escalate to
 // ErrProviderUnavailable.
 //
@@ -71,11 +91,16 @@ var ErrProviderUnavailable = fmt.Errorf(
 // scan should expect to trip this occasionally without any provider fault.
 //
 // That is tolerable because recovery is HIT-DRIVEN, not count-driven: the first
-// non-zero response clears the counter and the latch outright. But note the
-// counter keeps climbing past the threshold, so every further zero-result
-// re-trips the breaker and ramps its geometric backoff toward the 30-minute cap.
-// A long genuine dry spell therefore escalates to a real lane pause, which is
-// the correct behavior for an actual outage and merely conservative for a dry
+// non-zero response clears the counter and the latch outright. What happens
+// past the threshold depends on how the outage was confirmed. A PROBED outage
+// (a liveness control exists and missed, #767) leaves the counter at the
+// threshold, so every further miss re-asks the control and a miss there
+// re-trips the breaker. A COUNT-confirmed outage (no control) REARMS the
+// counter (#1195), so one half-open miss cannot re-confirm it; the misses of
+// the next run return ErrOutageLatched, which holds the breaker's ramp
+// position, and the run's end re-trips it one step higher. Either way a long
+// genuine dry spell escalates the geometric backoff toward the 30-minute cap,
+// which is correct for an actual outage and merely conservative for a dry
 // spell -- the lane is returning nothing either way.
 //
 // The counter is CONSECUTIVE, never cumulative: any single non-zero response

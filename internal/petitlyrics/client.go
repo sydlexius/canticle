@@ -146,6 +146,14 @@ func (c *Client) recordZeroResult() bool {
 	return c.consecutiveZero >= ZeroResultThreshold
 }
 
+// outageLatched reports whether a confirmed outage is still unresolved: it was
+// reported and no response carrying songs has arrived since (#1195).
+func (c *Client) outageLatched() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.zeroReported
+}
+
 // reportConfirmedOutage latches and logs an outage the caller has CONFIRMED,
 // either by a failed liveness probe or by the no-control count fallback.
 //
@@ -178,6 +186,25 @@ func (c *Client) reportConfirmedOutage(probed bool) bool {
 	count := c.consecutiveZero
 	first := !c.zeroReported
 	c.zeroReported = true
+	if !probed {
+		// REARM a count-confirmed run (#1195). Left at the threshold, the run
+		// re-confirms on the very next miss with no new evidence: the breaker's
+		// single half-open request misses (the normal outcome on fallback
+		// material), recordZeroResult says "still at the threshold", and the
+		// no-control branch reports again, so the lane ratchets open with a
+		// growing backoff and never gets a fair run. Zeroing demands a FULL new
+		// run before the count can speak again, which is the same evidence that
+		// confirmed the first one, so a genuinely revoked credential (#607) is
+		// still re-detected every run. The latch stays set so the outage logs
+		// once; recordSuccess clears both. While it is set, the rearmed run's
+		// misses return ErrOutageLatched rather than the plain no-match, so they
+		// neither reset the breaker's ramp nor charge the row a miss (#1195
+		// review): the rearm stops the re-confirmation, not the outage.
+		//
+		// A PROBED confirmation is left alone: past the threshold every further
+		// miss re-asks the control, and a probe miss is fresh evidence each time.
+		c.consecutiveZero = 0
+	}
 	c.mu.Unlock()
 
 	if first {
@@ -665,11 +692,13 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 		// obscure-material population looks like, so the count alone cannot decide.
 		// When the run reaches the threshold, ASK the provider a question it can
 		// only answer one way.
-		if !c.recordZeroResult() {
-			return nil, ErrNoMatch
-		}
-		if c.confirmOutage(ctx) {
+		if c.recordZeroResult() && c.confirmOutage(ctx) {
 			return nil, ErrProviderUnavailable
+		}
+		// Read the latch AFTER confirmOutage: a probe hit inside it clears the
+		// latch, and then this really is an ordinary no-match.
+		if c.outageLatched() {
+			return nil, ErrOutageLatched
 		}
 		return nil, ErrNoMatch
 	}
