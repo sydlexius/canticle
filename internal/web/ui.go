@@ -465,19 +465,8 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 		if err != nil {
 			return templates.ReportView{}, err
 		}
-		v.QueueRows = []templates.QueueSummaryRow{
-			{Status: "Pending", Count: strconv.FormatInt(s.Pending, 10)},
-			{Status: "Processing", Count: strconv.FormatInt(s.Processing, 10)},
-			// Done split into its two halves (#553); see buildQueueTiles.
-			{Status: "Finished", Count: strconv.FormatInt(s.Finished, 10)},
-			{Status: "Settled (upgradable)", Count: strconv.FormatInt(s.SettledUpgradable, 10)},
-			{Status: "Failed", Count: strconv.FormatInt(s.Failed, 10)},
-			{Status: "Deferred", Count: strconv.FormatInt(s.Deferred, 10)},
-			// Unavailable (#477): an exhausted benign miss, retired distinctly
-			// from Done since no sidecar was ever written.
-			{Status: "Unavailable", Count: strconv.FormatInt(s.Unavailable, 10)},
-			{Status: "Total", Count: strconv.FormatInt(s.Total, 10), IsTotal: true},
-		}
+		// Same bucket definition as the dashboard tiles and chart (#599).
+		v.QueueRows = queueSummaryRows(s)
 	case "recent-outcomes":
 		rows, err := u.reports.RecentOutcomes(ctx, recentOutcomesLimit)
 		if err != nil {
