@@ -23,7 +23,7 @@ const queuePageSize = 50
 // satisfies it (wired in the server layer).
 type QueueActions interface {
 	RecheckRetiredPreview(ctx context.Context) (queue.RecheckRetiredPreview, error)
-	RecheckRetired(ctx context.Context, libraryID *int64) (int64, error)
+	RecheckRetiredExpect(ctx context.Context, libraryID *int64, expected int64) (int64, error)
 }
 
 // AttachQueueActions wires the queue action backend onto an already-constructed

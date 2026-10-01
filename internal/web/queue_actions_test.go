@@ -171,7 +171,7 @@ func TestRevivePreview(t *testing.T) {
 	if body := f.get(t, revivePath+"?library="+strconv.FormatInt(f.libA, 10)).Body.String(); !strings.Contains(body, `name="expected" value="3"`) {
 		t.Errorf("confirm form lacks the previewed count: %s", body)
 	}
-	for _, lib := range []string{"abc", "-1", "0"} {
+	for _, lib := range []string{"abc", "-1", "0", ""} {
 		if rec := f.get(t, revivePath+"?library="+lib); rec.Code != http.StatusBadRequest {
 			t.Errorf("library=%s status = %d, want 400", lib, rec.Code)
 		}
@@ -208,6 +208,7 @@ func TestRevivePostRefusals(t *testing.T) {
 		{"cross-site", "all", "4", token, cookie, map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
 		{"cross-origin header", "all", "4", token, cookie, map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
 		{"bad library", "nope", "4", token, cookie, nil, http.StatusBadRequest},
+		{"empty library", "", "4", token, cookie, nil, http.StatusBadRequest},
 		{"zero library", "0", "4", token, cookie, nil, http.StatusBadRequest},
 		{"empty expected", "all", "", token, cookie, nil, http.StatusBadRequest},
 		{"non-numeric expected", "all", "x", token, cookie, nil, http.StatusBadRequest},
@@ -323,12 +324,32 @@ type busyOnce struct {
 	calls int
 }
 
-func (b *busyOnce) RecheckRetired(ctx context.Context, id *int64) (int64, error) {
+func (b *busyOnce) RecheckRetiredExpect(ctx context.Context, id *int64, expected int64) (int64, error) {
 	b.calls++
 	if b.calls == 1 {
 		return 0, b.busy
 	}
-	return b.QueueActions.RecheckRetired(ctx, id)
+	return b.QueueActions.RecheckRetiredExpect(ctx, id, expected)
+}
+
+// countChanged simulates the population moving between the handler's pre-check
+// and the in-transaction recount.
+type countChanged struct{ QueueActions }
+
+func (countChanged) RecheckRetiredExpect(context.Context, *int64, int64) (int64, error) {
+	return 0, queue.ErrRecheckRetiredCountChanged
+}
+
+func TestReviveCountChangedInTxShowsNotice(t *testing.T) {
+	f := seedRevive(t)
+	f.mux = reviveMux(f.sqlDB, countChanged{queue.NewDBQueue(f.sqlDB)})
+	token, cookie := reviveToken(t, f, revivePath)
+	rec := postRevive(f, "all", "4", token, cookie, nil)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, "The counts changed since you loaded this page") || strings.Contains(body, "Revived ") {
+		t.Fatalf("stale notice missing (status %d): %s", rec.Code, body)
+	}
+	f.assertStatuses(t, "unavailable", f.rowA1, f.rowA2, f.rowShared, f.rowB1)
 }
 
 // realBusy forces a genuine SQLITE_BUSY (the same recipe as the db package's own
@@ -376,6 +397,6 @@ func TestReviveRetriesOnSQLiteBusy(t *testing.T) {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
 	if flaky.calls != 2 {
-		t.Errorf("RecheckRetired calls = %d, want 2 (one busy, one retry)", flaky.calls)
+		t.Errorf("RecheckRetiredExpect calls = %d, want 2 (one busy, one retry)", flaky.calls)
 	}
 }

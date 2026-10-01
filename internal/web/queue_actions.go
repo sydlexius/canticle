@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -33,9 +34,11 @@ func (u *UI) handleReviveRetiredPreview(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "queue actions unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	scope := r.URL.Query().Get("library")
-	if scope == "" {
-		scope = reviveScopeAll
+	// Default to "all" only when the key is absent: an explicitly empty value is
+	// malformed and must reach parseReviveScope, not widen to every library.
+	scope := reviveScopeAll
+	if q := r.URL.Query(); q.Has("library") {
+		scope = q.Get("library")
 	}
 	view, ok := u.buildReviveView(w, r, scope)
 	if !ok {
@@ -59,7 +62,12 @@ func (u *UI) handleReviveRetiredConfirm(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "queue actions unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	scope := r.PostFormValue("library")
+	// A missing field defaults to "all"; an explicitly empty one is malformed.
+	_ = r.ParseForm()
+	scope := reviveScopeAll
+	if r.PostForm.Has("library") {
+		scope = r.PostForm.Get("library")
+	}
 	libraryID, ok := parseReviveScope(scope)
 	if !ok {
 		http.Error(w, "invalid library", http.StatusBadRequest)
@@ -100,9 +108,20 @@ func (u *UI) handleReviveRetiredConfirm(w http.ResponseWriter, r *http.Request) 
 	var revived int64
 	err = db.RetryOnBusy(r.Context(), reviveMaxAttempts, func() error {
 		var rerr error
-		revived, rerr = u.queueActions.RecheckRetired(r.Context(), libraryID)
+		revived, rerr = u.queueActions.RecheckRetiredExpect(r.Context(), libraryID, expected)
 		return rerr
 	})
+	if errors.Is(err, queue.ErrRecheckRetiredCountChanged) {
+		// The count moved between the pre-check and the write (or across a busy
+		// retry): re-read the live numbers and ask again.
+		fresh, ok := u.buildReviveView(w, r, scope)
+		if !ok {
+			return
+		}
+		fresh.Error = reviveStaleNotice
+		u.renderRevive(w, r, fresh)
+		return
+	}
 	if err != nil {
 		slog.Error("queue: revive retired failed", "scope", scope, "error", err)
 		http.Error(w, "revive failed", http.StatusInternalServerError)
@@ -119,7 +138,7 @@ func (u *UI) handleReviveRetiredConfirm(w http.ResponseWriter, r *http.Request) 
 	u.renderRevive(w, r, view)
 }
 
-// parseReviveScope maps the library form value to RecheckRetired's argument:
+// parseReviveScope maps the library form value to RecheckRetiredExpect's argument:
 // nil for "all", else a positive library id. ok is false for anything else.
 func parseReviveScope(scope string) (libraryID *int64, ok bool) {
 	if scope == reviveScopeAll {
