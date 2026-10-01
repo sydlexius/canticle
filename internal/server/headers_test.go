@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
@@ -43,6 +44,11 @@ func TestSecurityHeadersOnEveryResponse(t *testing.T) {
 			}
 			if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
 				t.Errorf("Content-Security-Policy = %q, want %q", got, wantCSP)
+			}
+			// Literal, so a refactor of the constant cannot silently drop it:
+			// the preview player's <audio> needs it (#481).
+			if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "media-src 'self'") {
+				t.Errorf("Content-Security-Policy = %q, want it to contain media-src 'self'", got)
 			}
 		})
 	}

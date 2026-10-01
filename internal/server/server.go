@@ -437,8 +437,9 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 // which runs before paint to localize timestamps; a stricter script-src would
 // break that page. Future hardening: replace 'unsafe-inline' with a per-request
 // nonce or a precomputed hash for that one inline block. There are no inline
-// styles, so style-src stays at 'self'.
-const contentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
+// styles, so style-src stays at 'self'. media-src 'self' lets the preview
+// player's <audio> element load same-origin audio from /preview/{id}/audio (#481).
+const contentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self'; font-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
 
 // setSecurityHeaders applies a conservative baseline of security headers to
 // every serve-mode response (static assets and pages alike). It must be called
