@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -12,14 +13,131 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/web/templates"
 )
 
 // registerPreviewRoutes registers the read-only preview player routes (#481)
 // through reg, so they are guarded exactly like every other page route.
 func (u *UI) registerPreviewRoutes(reg routeReg) {
+	reg("GET /preview/{id}", u.handlePreviewPage)
 	reg("GET /preview/{id}/audio", u.handlePreviewAudio)
+}
+
+// previewSidecarMax bounds how much of a lyric sidecar the page reads; a real
+// .lrc or .elrc is a few KiB, so anything larger is truncated, not buffered.
+const previewSidecarMax = 2 << 20
+
+// readPreviewSidecar reads a sidecar through the same os.Root confinement as
+// the audio route (the path is DB-derived), bounded to previewSidecarMax.
+func readPreviewSidecar(roots []string, p string) (string, bool) {
+	if p == "" {
+		return "", false
+	}
+	f, _, ok := openPreviewAudio(roots, p)
+	if !ok {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, previewSidecarMax))
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+// previewLines parses the line-synced body and, when an owned word-synced
+// companion body is given, attaches its A2 words to the line with the same
+// start. Inline words in the .lrc itself are kept. A companion that is not
+// canticle's own ([by:canticle]) is ignored, as every other consumer does.
+func previewLines(lrc, elrc string) ([]templates.PreviewLine, bool) {
+	parsed := lyrics.ParseTimedLRC(lrc)
+	words := map[int][]lyrics.TimedWord{}
+	if elrc != "" {
+		comp := lyrics.ParseTimedLRC(elrc)
+		owned := false
+		for _, t := range comp.Tags {
+			if strings.EqualFold(t.Key, "by") && strings.TrimSpace(t.Value) == "canticle" {
+				owned = true
+			}
+		}
+		if owned {
+			for _, l := range comp.Lines {
+				if len(l.Words) > 0 {
+					words[l.StartMS] = l.Words
+				}
+			}
+		}
+	}
+	out := make([]templates.PreviewLine, 0, len(parsed.Lines))
+	hasWords := false
+	for _, l := range parsed.Lines {
+		ws := l.Words
+		if len(ws) == 0 && !l.Decorative {
+			ws = words[l.StartMS]
+		}
+		pl := templates.PreviewLine{StartMS: strconv.Itoa(l.StartMS), Text: l.Text, Decorative: l.Decorative}
+		for _, w := range ws {
+			pl.Words = append(pl.Words, templates.PreviewWord{StartMS: strconv.Itoa(w.StartMS), Text: w.Text})
+		}
+		if len(pl.Words) > 0 {
+			hasWords = true
+		}
+		out = append(out, pl)
+	}
+	return out, hasWords
+}
+
+// handlePreviewPage renders the player page for one work_queue row (#481). It
+// is session-guarded and no-store (it shows library content). An unknown id, a
+// row with no readable .lrc sidecar, or one outside every library root is the
+// same bare 404 the audio route gives. Only the id is ever logged.
+func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if u.reports == nil {
+		slog.Error("reports repo not wired; cannot serve preview page", "id", id)
+		http.Error(w, "preview data source unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	t, err := u.reports.PreviewSource(r.Context(), id)
+	if errors.Is(err, reports.ErrPreviewNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		slog.Error("preview source lookup failed", "id", id, "error", err)
+		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+		return
+	}
+	roots, err := u.reports.LibraryRoots(r.Context())
+	if err != nil {
+		slog.Error("preview library roots lookup failed", "id", id, "error", err)
+		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+		return
+	}
+	lrc, ok := readPreviewSidecar(roots, t.LRCPath)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	elrc, _ := readPreviewSidecar(roots, t.ELRCCandidate)
+	lines, hasWords := previewLines(lrc, elrc)
+	view := templates.PreviewView{
+		Artist:   t.Artist,
+		Title:    t.Title,
+		Album:    t.Album,
+		AudioSrc: "/preview/" + strconv.FormatInt(id, 10) + "/audio",
+		Lines:    lines,
+		HasWords: hasWords,
+	}
+	render(w, r, templates.PreviewPage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
 }
 
 // previewAudioTypes maps a lowercase audio extension to its Content-Type. The
