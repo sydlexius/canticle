@@ -33,7 +33,7 @@ func TestMetricsLaneFamilies(t *testing.T) {
 	body := scrapeMetrics(t, WithLaneHealth(func() []orchestrator.LaneState {
 		return []orchestrator.LaneState{
 			{Provider: "musixmatch", State: orchestrator.LaneStateOpen, OpenUntil: until, Trips: 3},
-			{Provider: "petitlyrics", State: orchestrator.LaneStateClosed, EverSucceeded: true},
+			{Provider: "petitlyrics", State: orchestrator.LaneStateClosed},
 		}
 	}))
 	for _, want := range []string{
@@ -47,9 +47,6 @@ func TestMetricsLaneFamilies(t *testing.T) {
 		`mxlrcgo_lane_open_until_timestamp_seconds{lane="petitlyrics"} 0`,
 		`mxlrcgo_lane_trips{lane="musixmatch"} 3`,
 		`mxlrcgo_lane_trips{lane="petitlyrics"} 0`,
-		"# TYPE mxlrcgo_lane_ever_succeeded gauge\n",
-		`mxlrcgo_lane_ever_succeeded{lane="musixmatch"} 0`,
-		`mxlrcgo_lane_ever_succeeded{lane="petitlyrics"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics missing %q\n%s", want, body)

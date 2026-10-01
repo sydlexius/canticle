@@ -92,7 +92,6 @@ Example Docker healthcheck: `curl -fsS http://127.0.0.1:3876/readyz`.
 | `mxlrcgo_lane_state{lane="...",state="..."}` | gauge | Per-lane circuit state, one-hot over `closed`, `open`, `half-open`. `lane="detector"` appears in ordered mode when the detector is on. |
 | `mxlrcgo_lane_open_until_timestamp_seconds{lane="..."}` | gauge | Unix seconds when the lane's open window ends; 0 unless the lane is open. |
 | `mxlrcgo_lane_trips{lane="..."}` | gauge | Consecutive circuit trips for the lane; resets on success. |
-| `mxlrcgo_lane_ever_succeeded{lane="..."}` | gauge | 1 once the lane has resolved successfully since startup, else 0. For a provider lane, an open lane at 0 is failing (check its token or config), not throttled. |
 
 **Lane-attribution caveat (from v1.7.0).** On a deployment whose `[providers].primary` was set to something other than `musixmatch`, the two `mxlrcgo_provider_*_total` families credited the wrong lane. The worker named its primary lane from a hardcoded constant rather than from the provider it had actually been given, so every hit and miss the primary provider earned was tallied under the `lane="musixmatch"` label. The window opens at v1.7.0, the release that introduced these counters (a non-musixmatch primary had been selectable since v1.4.0, but no counter existed to be skewed before v1.7.0), and closes with the release carrying the fix (v1.35.1 is the last release known to be affected). Deployments that left `primary` at its `musixmatch` default are unaffected.
 

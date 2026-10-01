@@ -205,8 +205,6 @@ func writeCacheMetrics(w io.Writer, hits, lookups int64) {
 // them 1, so a scraper can alert on state="open" without string handling.
 // open_until is unix seconds, 0 unless the lane is open. Trips is the
 // consecutive-trip ramp position, which resets on success, hence a gauge.
-// ever_succeeded separates an open never-succeeded lane (bad token or config)
-// from a throttled one.
 func writeLaneMetrics(w io.Writer, lanes []orchestrator.LaneState) {
 	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_state Circuit state of each provider lane (1 for the current state, else 0).")
 	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_state gauge")
@@ -234,16 +232,6 @@ func writeLaneMetrics(w io.Writer, lanes []orchestrator.LaneState) {
 	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_trips gauge")
 	for _, l := range lanes {
 		_, _ = fmt.Fprintf(w, "mxlrcgo_lane_trips{lane=\"%s\"} %d\n", promEscape(l.Provider), l.Trips)
-	}
-
-	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_ever_succeeded 1 once the lane has resolved successfully this session, else 0.")
-	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_ever_succeeded gauge")
-	for _, l := range lanes {
-		v := 0
-		if l.EverSucceeded {
-			v = 1
-		}
-		_, _ = fmt.Fprintf(w, "mxlrcgo_lane_ever_succeeded{lane=\"%s\"} %d\n", promEscape(l.Provider), v)
 	}
 }
 
