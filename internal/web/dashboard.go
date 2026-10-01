@@ -83,7 +83,7 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		return templates.DashboardView{}, fmt.Errorf("dashboard: provider effectiveness: %w", err)
 	}
 	if u.laneHealth != nil {
-		view.ProviderTiles = providerTilesWithHealth(pe, u.laneHealth(), time.Now())
+		view.ProviderTiles = providerTilesWithHealth(pe, u.laneHealth(), u.musixmatchInactive, time.Now())
 	} else {
 		view.ProviderTiles = buildProviderTiles(pe)
 	}
@@ -384,9 +384,13 @@ const (
 // status exists for. A health-only lane renders zero counts ("0/0", 0%), the
 // same markup a recorded-but-empty lane gets. A Local lane (the detector) is
 // not a lyrics source: it gets no status line, and no tile at all unless it has
-// recorded attempts. A lane with attempts but absent from health is no longer
-// configured and reads "Not active".
-func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, now time.Time) []templates.StatTile {
+// recorded attempts, so in parallel mode, or with the detector off, detector
+// history reads "Not active" (absent from health). A lane with attempts but
+// absent from health is no longer configured and reads "Not active". When
+// musixmatchInactive is set (no token: the worker never starts, the banner
+// shows) the musixmatch tile reads inactive instead of its breaker state,
+// which would otherwise say "Ready" for a lane that cannot run.
+func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, musixmatchInactive bool, now time.Time) []templates.StatTile {
 	byLane := make(map[string]reports.ProviderEffectiveness, len(pe))
 	for _, p := range pe {
 		byLane[p.Lane] = p
@@ -395,7 +399,7 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 	tiles := make([]templates.StatTile, 0, len(health)+len(pe))
 	for _, h := range health {
 		p, recorded := byLane[h.Provider]
-		if seen[h.Provider] || (h.Local && !recorded) {
+		if h.Local && !recorded {
 			continue
 		}
 		seen[h.Provider] = true
@@ -403,7 +407,11 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 			p = reports.ProviderEffectiveness{Lane: h.Provider}
 		}
 		t := buildProviderTile(p)
-		if !h.Local {
+		switch {
+		case h.Local:
+		case musixmatchInactive && h.Provider == markMusixmatch:
+			t.Status, t.StatusText = laneStatusInactive, "Inactive - add an API token"
+		default:
 			t.Status, t.StatusText = laneStatus(h, now)
 		}
 		tiles = append(tiles, t)
@@ -426,21 +434,21 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 // succeeded this session is "failing", not "throttled": that is the
 // verify-your-token case (orchestrator resolve), and calling it throttling
 // would send the operator waiting instead of fixing config. A closed lane that
-// has not succeeded yet reads "Ready, no success yet" rather than "Healthy",
+// has not succeeded yet reads "Ready, no success this session" rather than "Healthy",
 // because nothing has proven it healthy. The text states the status; color
 // only reinforces it.
 func laneStatus(h orchestrator.LaneState, now time.Time) (status, text string) {
 	switch h.State {
 	case orchestrator.LaneStateOpen:
 		if !h.EverSucceeded {
-			return laneStatusFailing, "Failing, no success yet - check token/config (" + retryIn(h.OpenUntil, now) + ")"
+			return laneStatusFailing, "Failing, no success this session - check token/config (" + retryIn(h.OpenUntil, now) + ")"
 		}
 		return laneStatusThrottled, "Throttled, " + retryIn(h.OpenUntil, now)
 	case orchestrator.LaneStateHalfOpen:
 		return laneStatusProbing, "Probing"
 	default:
 		if !h.EverSucceeded {
-			return laneStatusReady, "Ready, no success yet"
+			return laneStatusReady, "Ready, no success this session"
 		}
 		return laneStatusHealthy, "Healthy"
 	}

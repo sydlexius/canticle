@@ -69,7 +69,7 @@ func TestDashboard_LaneStatus(t *testing.T) {
 }
 
 // TestDashboard_NeverSucceededLanes covers the lanes that have not resolved
-// once this session: closed reads "Ready, no success yet" (nothing has proven
+// once this session: closed reads "Ready, no success this session" (nothing has proven
 // it healthy) and open reads "Failing ... check token/config", never
 // "Throttled" -- the verify-your-token case.
 func TestDashboard_NeverSucceededLanes(t *testing.T) {
@@ -79,8 +79,8 @@ func TestDashboard_NeverSucceededLanes(t *testing.T) {
 	}
 	body := getDashboard(t, laneHealthTestUI(t, threeLanes, func() []orchestrator.LaneState { return health }))
 	for _, want := range []string{
-		statusSpan("failing", "Failing, no success yet - check token/config (retry in 10m)"),
-		statusSpan("ready", "Ready, no success yet"),
+		statusSpan("failing", "Failing, no success this session - check token/config (retry in 10m)"),
+		statusSpan("ready", "Ready, no success this session"),
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dashboard missing %q", want)
@@ -103,7 +103,7 @@ func TestDashboard_HealthOnlyLaneGetsTile(t *testing.T) {
 	if strings.Contains(body, "No lyrics source data yet") {
 		t.Error("a configured lane must suppress the empty state")
 	}
-	if !strings.Contains(body, statusSpan("failing", "Failing, no success yet - check token/config (retry in 10m)")) {
+	if !strings.Contains(body, statusSpan("failing", "Failing, no success this session - check token/config (retry in 10m)")) {
 		t.Error("health-only lane missing its status line")
 	}
 	if !strings.Contains(body, `mx-dash-tile-value">0/0<`) {
@@ -111,6 +111,31 @@ func TestDashboard_HealthOnlyLaneGetsTile(t *testing.T) {
 	}
 	if got := strings.Count(body, `class="mx-dash-tile-status `); got != 1 {
 		t.Errorf("status lines = %d, want 1 (the Local detector lane gets none)", got)
+	}
+	// The Local detector has no history here, so it must get no tile at all.
+	if strings.Contains(body, "Instrumental Detector") {
+		t.Error("a Local lane with no recorded attempts must not get a tile")
+	}
+}
+
+// TestDashboard_MusixmatchInactiveTile: with no token the worker never starts,
+// so a closed never-succeeded musixmatch lane must read inactive, not Ready.
+func TestDashboard_MusixmatchInactiveTile(t *testing.T) {
+	health := []orchestrator.LaneState{
+		{Provider: "musixmatch", State: orchestrator.LaneStateClosed},
+	}
+	sqlDB := openReportsTestDB(t)
+	mux := http.NewServeMux()
+	ui := NewUI(config.Config{}, "v-test", WithReports(reports.New(sqlDB)))
+	ui.AttachLaneHealth(func() []orchestrator.LaneState { return health })
+	ui.AttachMusixmatchInactive(true)
+	ui.Register(mux)
+	body := getDashboard(t, mux)
+	if !strings.Contains(body, statusSpan("inactive", "Inactive - add an API token")) {
+		t.Error("inactive musixmatch tile missing its inactive status")
+	}
+	if strings.Contains(body, "Ready") {
+		t.Error("an inactive musixmatch lane must not read Ready")
 	}
 }
 
