@@ -452,7 +452,7 @@ var (
 
 // TestHandleDashboard_QueueTilesLinkToBuckets: every bucket-backed tile is an
 // anchor whose href is a registered /queue route answering 200, covering every
-// registered bucket; the Instrumental tile (no bucket) renders no anchor.
+// registered bucket; the Results tiles (no bucket) render no anchor.
 func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 	mux := newReportsUIServer(t, openReportsTestDB(t))
 	rec := getQueue(t, mux, "/dashboard", false)
@@ -476,11 +476,9 @@ func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 			t.Errorf("no tile links to bucket %q", b)
 		}
 	}
-	if !strings.Contains(body, `<span class="mx-dash-tile-label">Instrumental</span>`) {
-		t.Error("Instrumental tile missing")
-	}
+	// Results tiles (Instrumental among them) have no bucket: never links.
 	if dashInstrAnchorRE.MatchString(body) {
-		t.Error("Instrumental tile must not be a link")
+		t.Error("Instrumental Results tile must not be a link")
 	}
 }
 

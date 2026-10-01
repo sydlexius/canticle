@@ -12,18 +12,13 @@ import (
 // DashboardView is the view model for the read-only observability dashboard.
 type DashboardView struct {
 	// QueueTiles holds one tile per work-queue status
-	// (pending, processing, done, failed, deferred) plus Instrumental.
+	// (pending, processing, done, failed, deferred); statuses only (#599).
 	QueueTiles []StatTile
 	// ProviderTiles holds one tile per provider lane showing hit count + hit rate.
 	ProviderTiles []StatTile
-	// InstrumentalCount is the formatted count of audio-detected instrumental tracks.
-	InstrumentalCount string
-	// SyncTierTiles holds the three synced-result tier tiles (#627): word-synced
-	// (terminal, #553), line-synced (upgrade-eligible), and synced-tier-unknown
-	// (legacy/unrecorded). Always exactly these three, never merged into one
-	// "Synced" tile, so the dashboard cannot misrepresent how much of the
-	// library is actually done.
-	SyncTierTiles []StatTile
+	// ResultsTiles holds the Results row (#599): completed tracks split by
+	// result type. Always every bucket, so the tiles sum to Done.
+	ResultsTiles []StatTile
 	// QueueChart holds the work-queue status distribution for the doughnut chart
 	// (#318). It complements the queue tiles; it is omitted when every count is
 	// zero (HasData false), so an empty queue does not render a blank chart.
