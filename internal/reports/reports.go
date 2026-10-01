@@ -707,38 +707,63 @@ func (r *Repo) DeferredMisses(ctx context.Context) ([]FailureGroup, error) {
 	return r.groupedReasons(ctx, "deferred")
 }
 
+// failureRowFilters is the ONE definition of which work_queue rows the Failure
+// Analysis and Deferred misses reports count for a status ('failed' or
+// 'deferred'): a map from status to a constant WHERE fragment (no leading
+// WHERE) binding exactly one argument, the status. A map, not a function, so the
+// callers' query strings stay compile-time-constant pieces for gosec (as with
+// bucketPredicates). FailureGroupItems reads it so a group's expanded rows
+// can never disagree with its count.
+// Why 'deferred' carries extra clauses:
+// 'deferred' is shared with non-miss writers, so the deferred report keeps
+// only genuine provider misses (queue.Defer). Excluded, each parked for the
+// worker rather than waiting on a catalog miss:
+//   - word recheck (word_timing_state='queued', #982) and upgrade trips
+//     (upgrade_queued=1, #553): via queue.NotParkedRecheckSQL, the same
+//     predicate every miss sweep uses;
+//   - refused waits (queue.DeferRefused, #950): a lane did not answer, so no
+//     miss happened; marked by refused_waits > 0 (DeferRefused is its only
+//     incrementer, and every settle zeroes it). A row refused and later a
+//     real miss keeps refused_waits until it settles and is hidden too.
+//
+// 'failed' is a hard error from queue.Fail, never a parked non-miss, so it
+// is left unfiltered.
+var failureRowFilters = map[string]string{
+	"failed":   failureBaseFilter,
+	"deferred": failureDeferredFilter,
+}
+
+const failureDeferredFilter = failureBaseFilter + queue.NotParkedRecheckSQL + ` AND refused_waits = 0`
+
+// groupedReasonsSQL is the grouping query per status, concatenated from the
+// constant filters at compile time.
+var groupedReasonsSQL = map[string]string{
+	"failed":   groupedReasonsSelect + failureBaseFilter + groupedReasonsTail,
+	"deferred": groupedReasonsSelect + failureDeferredFilter + groupedReasonsTail,
+}
+
+const groupedReasonsSelect = `SELECT status, COALESCE(NULLIF(last_error, ''), ?) AS reason, COUNT(*) AS n
+         FROM work_queue
+         WHERE `
+
+const groupedReasonsTail = `
+         GROUP BY status, reason
+         ORDER BY n DESC, status, reason`
+
+const failureBaseFilter = `status = ?
+           AND NOT (last_error = ''
+                    AND CASE status WHEN 'failed' THEN attempts ELSE miss_count END = 0)`
+
 // groupedReasons groups the work_queue rows of ONE status ('failed' or
 // 'deferred') by normalized last_error. The #789 guard is keyed per status: a
 // failed row is a non-fetch write at attempts=0, a deferred one at miss_count=0,
 // each only when last_error is also empty.
 func (r *Repo) groupedReasons(ctx context.Context, status string) ([]FailureGroup, error) {
-	if status != "failed" && status != "deferred" {
+	query, ok := groupedReasonsSQL[status]
+	if !ok {
 		return nil, fmt.Errorf("reports: grouped reasons: unsupported status %q", status)
 	}
-	// 'deferred' is shared with non-miss writers, so the deferred report keeps
-	// only genuine provider misses (queue.Defer). Excluded, each parked for the
-	// worker rather than waiting on a catalog miss:
-	//   - word recheck (word_timing_state='queued', #982) and upgrade trips
-	//     (upgrade_queued=1, #553): via queue.NotParkedRecheckSQL, the same
-	//     predicate every miss sweep uses;
-	//   - refused waits (queue.DeferRefused, #950): a lane did not answer, so no
-	//     miss happened; marked by refused_waits > 0 (DeferRefused is its only
-	//     incrementer, and every settle zeroes it). A row refused and later a
-	//     real miss keeps refused_waits until it settles and is hidden too.
-	// 'failed' is a hard error from queue.Fail, never a parked non-miss, so it
-	// is left unfiltered.
-	extra := ""
-	if status == "deferred" {
-		extra = queue.NotParkedRecheckSQL + ` AND refused_waits = 0`
-	}
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT status, COALESCE(NULLIF(last_error, ''), ?) AS reason, COUNT(*) AS n
-         FROM work_queue
-         WHERE status = ?
-           AND NOT (last_error = ''
-                    AND CASE status WHEN 'failed' THEN attempts ELSE miss_count END = 0)`+extra+`
-         GROUP BY status, reason
-         ORDER BY n DESC, status, reason`,
+	rows, err := r.db.QueryContext(ctx, query,
 		queue.NoReasonRecorded, status)
 	if err != nil {
 		return nil, fmt.Errorf("reports: grouped reasons (%s): %w", status, err)
