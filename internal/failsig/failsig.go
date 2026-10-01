@@ -78,7 +78,14 @@ var replacements = []struct {
 	// extension: the extension proves the path IS the tail, as in the POSIX
 	// tail rule below (see mediaExt for why it is an allowlist).
 	{regexp.MustCompile(`(?:\b[A-Za-z]:\\|\\\\[^\\\s"]+\\)[^"\t\n]*` + mediaExt + `$`), `<path>`},
-	// Free-text track identity (#1167, #1164). Anchored to the one real emitter,
+	// Quoted track identity (#1167): lyrics.LRCWriter now emits
+	// `nothing to save for "<artist>" - "<title>"` with Go quoting, so each
+	// field ends at its first unescaped quote and a title's own ": " can no
+	// longer pass for a cause boundary. Whatever follows the closing quote (a
+	// Go-convention ": cause") is kept. Runs before the legacy rule below, which
+	// stays for rows written by older builds.
+	{regexp.MustCompile(`\bnothing to save for "(?:[^"\\\n]|\\.)*" - "(?:[^"\\\n]|\\.)*"`), `nothing to save for <track>`},
+	// Free-text track identity (#1167, #1164), LEGACY unquoted form. Anchored to the one real emitter,
 	// lyrics.LRCWriter's "nothing to save for <artist> - <title>"; no other
 	// emitter in internal/ prints a track after a fixed phrase. Deliberately NOT
 	// a generic "no results for": petitlyrics.ErrProviderUnavailable's "no
@@ -188,7 +195,9 @@ var replacements = []struct {
 // 3.0" merged, as did "... in v1.2" and "... via host.com", and Musixmatch's
 // own "Cannot GET /ws/1.1/track.get" error body merged with ".../macro.get".
 // That is the over-normalization this package exists to prevent.
-const mediaExt = `\.(?i:flac|mp3|m4a|mp4|ogg|oga|opus|wav|aac|wma|ape|wv|dsf|dff|aif|aiff|alac|lrc|elrc|txt|tmp)`
+// It must cover every extension scanner.supportedFileTypes accepts (a test pins
+// that), or a supported format's library path survives into the signature.
+const mediaExt = `\.(?i:flac|mp3|m4a|m4b|m4p|mp4|ogg|oga|opus|wav|aac|wma|ape|wv|dsf|dff|aif|aiff|alac|lrc|elrc|txt|tmp)`
 
 // Normalize returns a stable grouping key for one last_error value.
 //

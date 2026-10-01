@@ -33,6 +33,11 @@ func TestNormalizeStripsTrailingPathsURLsAndTrackText(t *testing.T) {
 		{"nothing to save, title with colon", "writer: nothing to save for Some Artist - Song: Part Two", "writer: nothing to save for <track>", "Part Two"},
 		{"nothing to save, title with feat", "writer: nothing to save for Some Artist - Song (feat. Other Artist)", "writer: nothing to save for <track>", "Other Artist"},
 		{"nothing to save inside a join", "nothing to save for Some Artist - Song\nsecond error", "nothing to save for <track>\nsecond error", "Some Artist"},
+		{"quoted, title with lower-case colon", `writer: nothing to save for "Some Artist" - "Song: private reprise"`, "writer: nothing to save for <track>", "private reprise"},
+		{"quoted keeps its cause", `nothing to save for "Some Artist" - "Song: private reprise": context deadline exceeded`, "nothing to save for <track>: context deadline exceeded", "private reprise"},
+		{"quoted, escaped quote in title", `nothing to save for "Some Artist" - "Say \"private\" twice"`, "nothing to save for <track>", "private"},
+		{"m4b audiobook path, no verb", "/srv/Some Artist/book.m4b", "<path>", "Some Artist"},
+		{"m4p protected path, no verb", "/srv/Some Artist/track.M4P", "<path>", "Some Artist"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Normalize(tc.in)
@@ -57,6 +62,7 @@ func TestNormalizeNewRulesKeepDistinctFailures(t *testing.T) {
 		{"unc path, two prose causes", `open \\nas\m\x.flac permission denied`, `open \\nas\m\x.flac checksum mismatch`},
 		{"posix verb path, two prose causes", "stat /mnt/a permission denied", "stat /mnt/a checksum mismatch"},
 		{"nothing to save, two causes", "nothing to save for A - B: context deadline exceeded", "nothing to save for A - B: permission denied"},
+		{"quoted nothing to save, two causes", `nothing to save for "A" - "B: x": context deadline exceeded`, `nothing to save for "A" - "B: x": permission denied`},
 		{"url, two causes", `Get "http://h.invalid/x?a=1": EOF`, `Get "http://h.invalid/x?a=1": connection refused`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
