@@ -28,6 +28,15 @@ func resultLabel(rc reports.ResultClass) string {
 	}
 }
 
+// resultAria is the accessible name for the Result pill. Only the unknown
+// pill needs one: its visible text is a bare dash (#654).
+func resultAria(rc reports.ResultClass) string {
+	if rc == reports.ResultUnknown {
+		return "no outcome recorded"
+	}
+	return ""
+}
+
 // resultTierClass returns the CSS class(es) for the Result cell's tier badge
 // (#627), reusing the pill-badge idiom the Up-next panel introduced for its
 // tier column (mx-upnext-tier-*, #572) so the two read as one system rather
@@ -35,11 +44,12 @@ func resultLabel(rc reports.ResultClass) string {
 // non-synced class (miss, unsynced, instrumental, rejected) renders
 // as plain text, exactly as it did before this issue.
 //
-// ResultSynced (sync_tier NULL/unrecorded, #1075) gets its own muted class
-// rather than reusing markNone/no-badge, so "synced, tier not recorded" reads
-// as a distinct, honest state rather than as the absence of a class -- the
-// same "shown honestly, not guessed" requirement #627's AC states for legacy
-// rows.
+// ResultSynced (sync_tier NULL/unrecorded, #1075) gets the muted
+// mx-result-tier-unknown class rather than reusing markNone/no-badge, so
+// "synced, tier not recorded" reads as a distinct, honest state rather than as
+// the absence of a class -- the same "shown honestly, not guessed" requirement
+// #627's AC states for legacy rows. ResultUnknown (#654) shares that muted
+// class for its "-" pill.
 func resultTierClass(rc reports.ResultClass) string {
 	switch rc {
 	case reports.ResultWordSynced:

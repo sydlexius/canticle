@@ -647,8 +647,10 @@ body {
   background: var(--mx-accent-glow);
 }
 
-/* Synced, tier not recorded: a legacy row or one mid recheck. Muted grey so it
-   reads as "unknown", not as a third finished state competing with word/line. */
+/* Muted pill shared by two states: synced with the tier not recorded (a legacy
+   row or one mid recheck) and the "-" pill for an unrecorded outcome (#654).
+   Muted grey so it reads as "unknown", not as a finished state competing with
+   word/line. */
 .mx-result-tier-unknown {
   color: var(--mx-content-text-secondary);
   background: var(--mx-surface-border);

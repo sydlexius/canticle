@@ -253,7 +253,7 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 								<td>{ row.Title }</td>
 								<td>
 									if row.ResultTierClass != "" {
-										<span class={ row.ResultTierClass }>{ row.Result }</span>
+										<span class={ row.ResultTierClass } if row.Detail != "" { title={ row.Detail } } if row.ResultAria != "" { role="img" aria-label={ row.ResultAria } }>{ row.Result }</span>
 									} else {
 										{ row.Result }
 									}

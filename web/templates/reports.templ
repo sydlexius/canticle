@@ -158,7 +158,7 @@ templ tableRecentOutcomes(rows []RecentOutcomeRow) {
 							<td>{ r.Album }</td>
 							<td class="mx-cell-mono">
 								if r.ResultTierClass != "" {
-									<span class={ r.ResultTierClass }>{ r.Result }</span>
+									<span class={ r.ResultTierClass } if r.ResultAria != "" { role="img" aria-label={ r.ResultAria } }>{ r.Result }</span>
 								} else {
 									{ r.Result }
 								}

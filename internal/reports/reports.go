@@ -198,8 +198,10 @@ const (
 	// re-fetching yields the same wrong-script result. Counting it as coverage
 	// would overstate what the library actually has.
 	ResultRejected ResultClass = "rejected"
-	// ResultUnknown means the row could not be classified: a legacy row that
-	// predates the outcome_type column (NULL outcome_type) and is not a miss.
+	// ResultUnknown means the row could not be classified: a NULL outcome_type
+	// that is not a miss. That is a legacy row that predates the column, a row
+	// the timing guard quarantined or remediation retired (Detail carries
+	// "timing refused: ..."), or a row a prune retired.
 	//
 	// NARROWER THAN IT USED TO BE, and the change is the point of #655. Guard
 	// rejections also left outcome_type NULL, so this class silently covered two
@@ -220,8 +222,11 @@ type RecentOutcome struct {
 	// NULL (such rows sort last).
 	CompletedAt time.Time
 	// ProviderLane is the winning provider lane recorded at completion; empty
-	// when NULL (not recorded, or a miss with no winning provider) and ALWAYS
-	// empty for ResultUnknown, whose stored lane is not trusted (#654).
+	// when NULL (not recorded, or a miss with no winning provider) and empty for
+	// a ResultUnknown row with no recorded timing verdict, whose stored lane is
+	// not trusted (#654). A timing-refused row keeps its lane: the worker stamps
+	// the actual winning lane (categorical) or the lane that wrote the removed
+	// file (remediated mis_synced).
 	ProviderLane string
 	// Result is the classification derived from last_error / outcome_type.
 	// NOT output_paths: that column holds the enqueue-time .lrc plan and is never
@@ -245,7 +250,7 @@ type RecentOutcome struct {
 	// unread. Those rows are the reason this coalesce exists.
 	//
 	// For ResultUnknown the coalesce continues past the timing verdict to the
-	// failsig-normalized last_error, then to LegacyNoOutcomeDetail, so an unknown
+	// failsig-normalized last_error (the Detail then carries that normalized text), then to LegacyNoOutcomeDetail, so an unknown
 	// row is never blank (#654). Empty therefore remains only for outcomes that
 	// need no detail beyond their class (a plain synced write) and rejections
 	// settled before #773, whose reason went to a log line and is unrecoverable.
@@ -322,13 +327,11 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
                      THEN 'timing refused: ' || timing_outcome
                 END
             ) AS detail,
-            -- The raw reason behind a NULL-outcome row that is not an exhausted
-            -- miss (whose own class already says it). Normalized in Go through
+            -- The raw reason behind a NULL-outcome row. Normalized in Go through
             -- normalizedReason, the one failsig path, never a second normalizer.
-            CASE WHEN outcome_type IS NULL
-                      AND COALESCE(last_error, '') <> 'miss limit reached'
-                 THEN last_error
-            END AS reason,
+            -- Only read for ResultUnknown (a miss-sentinel row classifies as miss).
+            CASE WHEN outcome_type IS NULL THEN last_error END AS reason,
+            COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate') AS timing_verdict,
             CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
                 WHEN outcome_type = 'synced' AND sync_tier = 'word'
@@ -357,14 +360,15 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 	var out []RecentOutcome
 	for rows.Next() {
 		var (
-			o            RecentOutcome
-			completedAt  sql.NullString
-			providerLane sql.NullString
-			detail       sql.NullString
-			reason       sql.NullString
-			result       string
+			o             RecentOutcome
+			completedAt   sql.NullString
+			providerLane  sql.NullString
+			detail        sql.NullString
+			reason        sql.NullString
+			timingVerdict bool
+			result        string
 		)
-		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &detail, &reason, &result); err != nil {
+		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &detail, &reason, &timingVerdict, &result); err != nil {
 			return nil, fmt.Errorf("reports: scan recent outcome: %w", err)
 		}
 		if completedAt.Valid && completedAt.String != "" {
@@ -381,8 +385,12 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 			// An unrecorded outcome has no trustworthy winning lane: a legacy
 			// row's lane column may be stale, and pairing it with a blank
 			// outcome reads as a result nobody recorded (#654). Blanking here,
-			// not per surface, makes the dashboard and Reports inherit it.
-			o.ProviderLane = ""
+			// not per surface, makes the dashboard and Reports inherit it. A row
+			// with a recorded timing verdict keeps its lane: that is real
+			// attribution, not stale data.
+			if !timingVerdict {
+				o.ProviderLane = ""
+			}
 			if o.Detail == "" {
 				o.Detail = unrecordedDetail(reason.String)
 			}
@@ -403,9 +411,7 @@ const LegacyNoOutcomeDetail = "legacy row: no outcome recorded"
 // the failsig-normalized last_error when there is one, else the legacy literal.
 func unrecordedDetail(lastError string) string {
 	if strings.TrimSpace(lastError) != "" {
-		if n := normalizedReason(lastError); n != queue.NoReasonRecorded {
-			return n
-		}
+		return normalizedReason(lastError)
 	}
 	return LegacyNoOutcomeDetail
 }

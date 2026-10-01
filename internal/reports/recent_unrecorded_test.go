@@ -11,7 +11,8 @@ import (
 // outcome was never recorded (ResultUnknown) shows NO provider lane, and its
 // Detail coalesces stored detail > timing verdict > normalized last_error >
 // the legacy literal. Rows with a recorded outcome keep their lane, and a miss
-// does not echo its own sentinel as a reason.
+// does not echo its own sentinel as a reason. A row with a recorded timing
+// verdict (categorical, remediated mis_synced) KEEPS its lane.
 func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
@@ -34,6 +35,11 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 		artist: "A", title: "quarantined", status: "done",
 		completedAt: "2026-08-16T04:30:00Z", providerLane: "musixmatch",
 		timingOutcome: "categorical", lastError: "ignored in favor of timing verdict",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "remediated", status: "done",
+		completedAt: "2026-08-16T04:25:00Z", providerLane: "petitlyrics",
+		timingOutcome: "mis_synced",
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "A", title: "synced", status: "done",
@@ -63,7 +69,8 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 		{"legacy-stale-lane", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
 		{"legacy-whitespace-error", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
 		{"legacy-error", reports.ResultUnknown, "", `output dir "<path>": permission denied`},
-		{"quarantined", reports.ResultUnknown, "", "timing refused: categorical"},
+		{"quarantined", reports.ResultUnknown, "musixmatch", "timing refused: categorical"},
+		{"remediated", reports.ResultUnknown, "petitlyrics", "timing refused: mis_synced"},
 		{"synced", reports.ResultSynced, "musixmatch", ""},
 		{"exhausted-miss", reports.ResultMiss, "musixmatch", ""},
 	} {

@@ -466,6 +466,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 				Album:           o.Album,
 				Result:          resultLabel(o.Result),
 				ResultTierClass: resultTierClass(o.Result),
+				ResultAria:      resultAria(o.Result),
 				Detail:          detailOrDash(o.Detail),
 				Lane:            laneLabel(o.ProviderLane),
 				LaneMark:        laneMark(o.ProviderLane),

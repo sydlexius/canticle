@@ -56,6 +56,9 @@ type RecentOutcomeRow struct {
 	// badge (#627), empty for every non-synced-with-a-known-tier result (no
 	// badge rendered). See internal/web.resultTierClass.
 	ResultTierClass string
+	// ResultAria is the accessible name for the Result pill when its visible
+	// text ("-") carries no meaning on its own (#654); empty otherwise.
+	ResultAria string
 	// Detail is the recorded reason within Result (#773) -- today the script
 	// guard's verdict on a 'rejected' row. Empty renders an em dash rather than a
 	// blank cell, so "no reason recorded" reads as deliberate rather than as a
