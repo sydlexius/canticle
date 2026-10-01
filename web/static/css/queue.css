@@ -58,18 +58,19 @@
 .mx-revive-error {
   font-family: var(--mx-font-sans);
   font-size: 0.8125rem;
-  color: var(--mx-content-text-secondary);
   margin: 0.75rem 0;
   overflow-wrap: anywhere;
+}
+
+.mx-revive-note {
+  color: var(--mx-content-text-secondary);
 }
 
 .mx-revive-result {
   color: var(--mx-content-text);
 }
 
-.mx-revive-error {
-  color: #fca5a5;
-}
+/* The error color comes from the shared .mx-status-error class the template adds. */
 
 .mx-revive-picker,
 .mx-revive-confirm {

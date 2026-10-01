@@ -17,7 +17,7 @@ templ ReviveRetiredPage(version string, view ReviveView, reports []RailItem, mus
 			<a class="mx-queue-link" href="/dashboard">Back to dashboard</a>
 		</p>
 		if view.Error != "" {
-			<p class="mx-revive-error" role="alert">{ view.Error }</p>
+			<p class="mx-revive-error mx-status-error" role="alert">{ view.Error }</p>
 		}
 		if view.Result != nil {
 			<p class="mx-revive-result" role="status">
@@ -67,6 +67,7 @@ templ ReviveRetiredPage(version string, view ReviveView, reports []RailItem, mus
 				<form class="mx-revive-confirm" method="post" action="/queue/unavailable/revive">
 					<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
 					<input type="hidden" name="library" value={ view.Selected }/>
+					<input type="hidden" name="expected" value={ itoa64(view.ScopeCount) }/>
 					<p class="mx-revive-note">
 						This will revive { itoa64(view.ScopeCount) } tracks for { view.ScopeLabel },
 						{ itoa64(view.ScopeShared) } of them shared with another library.

@@ -5,12 +5,22 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/web/templates"
 )
 
 // reviveScopeAll is the library form value meaning every library.
 const reviveScopeAll = "all"
+
+// reviveMaxAttempts bounds the SQLITE_BUSY retries around the revive write.
+// It mirrors the queue package's own attempt budget for serve-side writes.
+const reviveMaxAttempts = 5
+
+const (
+	reviveStaleNotice   = "The counts changed since you loaded this page. Review the numbers below and confirm again."
+	reviveNoLibraryText = "That library has no retired tracks left; the list has been refreshed."
+)
 
 // handleReviveRetiredPreview renders the revive blast radius (#598): per-library
 // counts, the shared-row note, a library picker, and the confirm form for the
@@ -56,15 +66,43 @@ func (u *UI) handleReviveRetiredConfirm(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Name the scope from the pre-revive preview: afterwards the library has no
-	// retired rows left and would drop out of the listing.
+	// Read the live scope fresh. A library the preview no longer lists (for
+	// example a refresh after a successful revive) re-renders the page with a
+	// notice rather than failing.
 	before, ok := u.buildReviveView(w, r, scope)
 	if !ok {
 		return
 	}
+	if before.Error != "" {
+		u.renderRevive(w, r, before)
+		return
+	}
+	// The confirm is bound to the count the operator saw. If the population
+	// moved since the page loaded, show the new numbers instead of reviving.
+	expected, err := strconv.ParseInt(r.PostFormValue("expected"), 10, 64)
+	if err != nil || expected < 0 {
+		http.Error(w, "invalid expected count", http.StatusBadRequest)
+		return
+	}
+	if expected != before.ScopeCount {
+		before.Error = reviveStaleNotice
+		u.renderRevive(w, r, before)
+		return
+	}
+	// Name the scope from the pre-revive preview: afterwards the library has no
+	// retired rows left and would drop out of the listing.
 	label := before.ScopeLabel
 
-	revived, err := u.queueActions.RecheckRetired(r.Context(), libraryID)
+	// RecheckRetired runs a deferred transaction on serve's read-write handle; a
+	// concurrent commit can fail the lock upgrade with SQLITE_BUSY at once
+	// (#978), which busy_timeout cannot cure. The transaction rolls back whole on
+	// error, so a retry re-runs it from a clean slate.
+	var revived int64
+	err = db.RetryOnBusy(r.Context(), reviveMaxAttempts, func() error {
+		var rerr error
+		revived, rerr = u.queueActions.RecheckRetired(r.Context(), libraryID)
+		return rerr
+	})
 	if err != nil {
 		slog.Error("queue: revive retired failed", "scope", scope, "error", err)
 		http.Error(w, "revive failed", http.StatusInternalServerError)
@@ -95,8 +133,9 @@ func parseReviveScope(scope string) (libraryID *int64, ok bool) {
 }
 
 // buildReviveView assembles the page model for a scope, reading the live
-// preview. It writes the error response and returns ok=false on a bad scope or
-// a failed read.
+// preview. It writes the error response and returns ok=false on a malformed
+// scope or a failed read. A well-formed library id the preview does not list
+// yields the all-libraries view with Error set (and ok=true).
 func (u *UI) buildReviveView(w http.ResponseWriter, r *http.Request, scope string) (templates.ReviveView, bool) {
 	var view templates.ReviveView
 	if _, ok := parseReviveScope(scope); !ok {
@@ -111,9 +150,7 @@ func (u *UI) buildReviveView(w http.ResponseWriter, r *http.Request, scope strin
 	}
 	view = reviveViewFromPreview(p, scope)
 	if view.Selected != scope {
-		// A library id the preview does not list has nothing to revive.
-		http.Error(w, "unknown library", http.StatusBadRequest)
-		return view, false
+		view.Error = reviveNoLibraryText
 	}
 	return view, true
 }
@@ -147,10 +184,8 @@ func (u *UI) renderRevive(w http.ResponseWriter, r *http.Request, view templates
 	if err != nil {
 		slog.Error("queue: CSRF token generation failed; revive form disabled", "error", err)
 	} else {
-		view.Manageable = view.ScopeCount > 0
+		view.Manageable = true
 		view.CSRFToken = token
 	}
 	render(w, r, templates.ReviveRetiredPage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
 }
-
-var _ QueueActions = (*queue.DBQueue)(nil)
