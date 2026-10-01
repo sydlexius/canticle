@@ -43,6 +43,10 @@ type DashboardView struct {
 	// (including thousands grouping) is done in the handler.
 	UpNextHeader string
 	UpNextEmpty  string
+	// InFlightRows holds the claimed (processing) rows shown above the buffered
+	// rows in the Up Next panel (#599). Several may coexist (a live claim and a
+	// crash orphan).
+	InFlightRows []InFlightRow
 	// AsOf is the formatted timestamp of this render, for the "as of" annotation.
 	AsOf string
 	// LRCNormalizeSummary is the pre-formatted "last LRC normalization" line
@@ -69,6 +73,17 @@ type UpNextRow struct {
 	Tier string
 	// Waited is the compact single-unit age of the item (e.g. "2m", "6d").
 	Waited string
+}
+
+// InFlightRow is one claimed work item in the Up Next panel (#599). Elapsed is
+// pre-formatted ("2m", or "unknown" when the claim time is not recorded); Stuck
+// drives the "stuck?" badge.
+type InFlightRow struct {
+	Artist  string
+	Title   string
+	Album   string
+	Elapsed string
+	Stuck   bool
 }
 
 // ChartData is the label/value series for one dashboard chart (#318). The
