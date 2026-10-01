@@ -361,11 +361,8 @@ func TestQueuePreviewHref(t *testing.T) {
 		row  reports.BucketRow
 		want string
 	}{
-		{"word tier", reports.BucketRow{ID: 7, Status: queue.StatusDone, SyncTier: "word"}, "/preview/7"},
-		{"line tier", reports.BucketRow{ID: 8, Status: queue.StatusDone, SyncTier: "line"}, "/preview/8"},
-		{"unsynced tier", reports.BucketRow{ID: 9, Status: queue.StatusDone, SyncTier: "unsynced"}, ""},
-		{"unclassified", reports.BucketRow{ID: 10, Status: queue.StatusDone}, ""},
-		{"not settled", reports.BucketRow{ID: 11, Status: queue.StatusPending, SyncTier: "line"}, ""},
+		{"previewable", reports.BucketRow{ID: 7, Status: queue.StatusDone, Previewable: true}, "/preview/7"},
+		{"not previewable", reports.BucketRow{ID: 9, Status: queue.StatusDone}, ""},
 	} {
 		if got := queuePreviewHref(tc.row); got != tc.want {
 			t.Errorf("%s: href = %q, want %q", tc.name, got, tc.want)

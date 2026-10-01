@@ -139,12 +139,11 @@ func buildQueueRow(row reports.BucketRow) templates.QueueRow {
 // queuePreviewHref is the player link for a row whose sidecar is a synced
 // .lrc, or "" for every other row. The preview page 404s unless a regular .lrc
 // sits beside the audio, but a list view must not stat per row (that wakes
-// disks, the #684 shape), so the condition is the row's recorded state: a
-// settled row whose sync_tier is word or line IS a synced .lrc (the tier is
-// stamped from the file's own cues at write time). A sidecar deleted since is
-// the one case that still 404s, the same bare 404 an unknown id gets.
+// disks, the #684 shape), so eligibility is the row's recorded state
+// (BucketRow.Previewable, the dashboard's own tier predicates). A sidecar
+// removed since its tier was stamped is the one case that still 404s.
 func queuePreviewHref(row reports.BucketRow) string {
-	if row.Status != queue.StatusDone || (row.SyncTier != "word" && row.SyncTier != "line") {
+	if !row.Previewable {
 		return ""
 	}
 	return "/preview/" + strconv.FormatInt(row.ID, 10)
