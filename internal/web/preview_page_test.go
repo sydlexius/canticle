@@ -55,6 +55,7 @@ func TestPreviewPageRendersLinesAndWords(t *testing.T) {
 		`<span class="mx-preview-word" data-start-ms="1500">there</span>`,
 		`Second line`,
 		`/static/css/preview.css`,
+		`<script src="/static/js/preview.js" defer></script>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q", want)
