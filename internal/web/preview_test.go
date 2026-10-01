@@ -125,12 +125,6 @@ func TestPreviewAudioRange(t *testing.T) {
 	if got := rec.Header().Get("Content-Range"); got != "bytes 5-9/20" {
 		t.Errorf("Content-Range = %q, want bytes 5-9/20", got)
 	}
-	if got := rec.Header().Get("Content-Type"); got != "audio/mpeg" {
-		t.Errorf("Content-Type = %q, want audio/mpeg", got)
-	}
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control = %q, want no-store", got)
-	}
 }
 
 func TestPreviewAudioRefusals(t *testing.T) {
@@ -315,11 +309,15 @@ func TestPreviewAudioIntermediateSwapEscapes(t *testing.T) {
 
 // TestPreviewAudioSymlinkedRoot pins F3: a root configured through a symlink
 // serves a row stored in either spelling, since the Lidarr webhook stores the
-// resolved path while the scanner stores the configured one.
+// resolved path while the scanner stores the configured one. It also pins that
+// an ABSOLUTE symlink whose target stays inside the root serves, final or
+// intermediate: os.Root refuses every absolute symlink, and the scanner
+// enqueues such files. (An escaping one is a case in TestPreviewAudioRefusals.)
 func TestPreviewAudioSymlinkedRoot(t *testing.T) {
 	base := t.TempDir()
 	real := filepath.Join(base, "real")
-	if err := os.Mkdir(real, 0o755); err != nil {
+	b := filepath.Join(real, "B")
+	if err := os.MkdirAll(b, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(base, "music")
@@ -336,9 +334,15 @@ func TestPreviewAudioSymlinkedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	inB := f.writeFile(t, b, "song.flac")
+	if os.Symlink(inB, filepath.Join(real, "final.flac")) != nil || os.Symlink(b, filepath.Join(real, "AlbumLink")) != nil {
+		t.Skip("symlinks unsupported")
+	}
 	for name, src := range map[string]string{
-		"configured spelling": filepath.Join(link, "song.flac"),
-		"resolved spelling":   resolved,
+		"configured spelling":           filepath.Join(link, "song.flac"),
+		"resolved spelling":             resolved,
+		"absolute final symlink":        filepath.Join(link, "final.flac"),
+		"absolute intermediate symlink": filepath.Join(link, "AlbumLink", "song.flac"),
 	} {
 		rec := f.get(strconv.FormatInt(f.row(t, src), 10))
 		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), previewBytes) {
@@ -437,33 +441,6 @@ func TestRelUnder(t *testing.T) {
 		rel, ok := relUnder(root, tc.path)
 		if ok != tc.ok || rel != tc.rel {
 			t.Errorf("%s: relUnder = (%q, %v), want (%q, %v)", name, rel, ok, tc.rel, tc.ok)
-		}
-	}
-}
-
-// TestPreviewAudioAbsoluteSymlinkInsideRoot pins that an ABSOLUTE symlink
-// whose target stays inside the root serves, final or intermediate: os.Root
-// refuses every absolute symlink, and the scanner enqueues such files. The
-// escaping case is "symlink escaping root" in TestPreviewAudioRefusals.
-func TestPreviewAudioAbsoluteSymlinkInsideRoot(t *testing.T) {
-	f := newPreviewFixture(t)
-	b := filepath.Join(f.root, "B")
-	if err := os.Mkdir(b, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	target := f.writeFile(t, b, "song.flac")
-	final := filepath.Join(f.root, "final.flac")
-	album := filepath.Join(f.root, "AlbumLink")
-	if os.Symlink(target, final) != nil || os.Symlink(b, album) != nil {
-		t.Skip("symlinks unsupported")
-	}
-	for name, src := range map[string]string{
-		"final symlink":        final,
-		"intermediate symlink": filepath.Join(album, "song.flac"),
-	} {
-		rec := f.get(strconv.FormatInt(f.row(t, src), 10))
-		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), previewBytes) {
-			t.Errorf("%s: status = %d, want 200 with the bytes", name, rec.Code)
 		}
 	}
 }

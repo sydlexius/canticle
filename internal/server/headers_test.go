@@ -66,9 +66,8 @@ func TestStatusRecorderUnwraps(t *testing.T) {
 	}
 }
 
-// TestHandlerLetsAHandlerExtendItsWriteDeadline serves through Handler on a
-// real connection and asserts SetWriteDeadline succeeds, as the preview audio
-// stream (#481) needs to outlive the server-wide WriteTimeout.
+// TestHandlerLetsAHandlerExtendItsWriteDeadline: on a real connection behind
+// Handler, SetWriteDeadline succeeds (the #481 preview stream relies on it).
 func TestHandlerLetsAHandlerExtendItsWriteDeadline(t *testing.T) {
 	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics")
 	errc := make(chan error, 1)

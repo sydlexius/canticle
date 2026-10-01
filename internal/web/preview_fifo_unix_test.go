@@ -4,7 +4,6 @@ package web
 
 import (
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -30,10 +29,6 @@ func TestPreviewAudioFIFORefusedWithoutBlocking(t *testing.T) {
 			t.Fatalf("status = %d, want 404", code)
 		}
 	case <-time.After(3 * time.Second):
-		// Unblock the stuck open so the goroutine does not outlive the test.
-		if w, err := os.OpenFile(p, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
-			_ = w.Close()
-		}
 		t.Fatal("opening a FIFO at the audio path blocked the request")
 	}
 }
