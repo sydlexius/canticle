@@ -37,13 +37,21 @@ func TestEditedRowSkipsUpgradeUnsyncedArm(t *testing.T) {
 	q, dbh := upgradeQueue(t)
 	hold := upgradeNow.Add(-7 * 24 * time.Hour)
 	id := seedUpgradeRow(t, dbh, "unsynced", "")
-	if ids, _ := q.ListUpgradeCandidates(ctx, hold, 10); !slices.Contains(ids, id) {
+	ids, err := q.ListUpgradeCandidates(ctx, hold, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ids, id) {
 		t.Fatalf("precondition: candidates %v lack %d", ids, id)
 	}
 	if err := q.SetLyricEdit(ctx, id, 300); err != nil {
 		t.Fatal(err)
 	}
-	if ids, _ := q.ListUpgradeCandidates(ctx, hold, 10); slices.Contains(ids, id) {
+	ids, err = q.ListUpgradeCandidates(ctx, hold, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(ids, id) {
 		t.Errorf("edited row %d offered to the upgrade sweep (unsynced arm)", id)
 	}
 	if flipped, err := q.MarkUpgradeQueued(ctx, []int64{id}, hold); err != nil || len(flipped) != 0 {
@@ -57,13 +65,21 @@ func TestEditedRowSkipsUpgradeMissyncedArm(t *testing.T) {
 	hold := upgradeNow.Add(-7 * 24 * time.Hour)
 	id := seedUpgradeRow(t, dbh, "missynced",
 		"outcome_type = 'synced', sync_tier = 'line', timing_outcome = 'mis_synced', timing_stamp_source = 'sweep'")
-	if ids, _ := q.ListUpgradeCandidates(ctx, hold, 10); !slices.Contains(ids, id) {
+	ids, err := q.ListUpgradeCandidates(ctx, hold, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ids, id) {
 		t.Fatalf("precondition: candidates %v lack %d", ids, id)
 	}
 	if err := q.SetLyricEdit(ctx, id, 300); err != nil {
 		t.Fatal(err)
 	}
-	if ids, _ := q.ListUpgradeCandidates(ctx, hold, 10); slices.Contains(ids, id) {
+	ids, err = q.ListUpgradeCandidates(ctx, hold, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(ids, id) {
 		t.Errorf("edited row %d offered to the upgrade sweep (mis_synced arm)", id)
 	}
 	if flipped, err := q.MarkUpgradeQueued(ctx, []int64{id}, hold); err != nil || len(flipped) != 0 {
@@ -77,16 +93,38 @@ func TestEditedRowSkipsWordRecheck(t *testing.T) {
 	q := NewDBQueue(dbh)
 	id := seedWordCandidate(t, dbh, "line")
 	opts := WordRecheckOptions{}
-	if ids, _ := q.ListWordRecheckCandidates(ctx, opts); !slices.Contains(ids, id) {
+	ids, err := q.ListWordRecheckCandidates(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ids, id) {
 		t.Fatalf("precondition: candidates %v lack %d", ids, id)
 	}
 	if err := q.SetLyricEdit(ctx, id, 300); err != nil {
 		t.Fatal(err)
 	}
-	if ids, _ := q.ListWordRecheckCandidates(ctx, opts); slices.Contains(ids, id) {
+	ids, err = q.ListWordRecheckCandidates(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(ids, id) {
 		t.Errorf("edited row %d offered to the word recheck", id)
 	}
-	if n, _ := q.CountWordRecheckCandidates(ctx, opts); n != 0 {
+	var n int
+	n, err = q.CountWordRecheckCandidates(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
 		t.Errorf("recheck count = %d, want 0", n)
+	}
+	// The flip is the path that actually arms the worker; it revalidates with
+	// the same predicate, so an edited row must not flip either.
+	flipped, err := q.MarkWordRecheckQueued(ctx, []int64{id}, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flipped) != 0 {
+		t.Errorf("edited row flipped to the word recheck: %v", flipped)
 	}
 }
