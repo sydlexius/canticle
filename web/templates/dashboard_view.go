@@ -126,6 +126,10 @@ type StatTile struct {
 	// Href, when set, makes the tile a link to that drill-down page (#598); empty
 	// renders a plain tile.
 	Href string
+	// Tooltip is the hover text for a work-queue tile, carried from the one
+	// bucket definition (internal/web queueBuckets, #599). Other tile rows
+	// leave it empty.
+	Tooltip string
 	// LabelMark is the lane mark token shown beside Label (#601), empty when the
 	// tile has no mark. The work-queue tiles leave it empty -- they are not lanes.
 	LabelMark string
