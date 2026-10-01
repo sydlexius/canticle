@@ -138,6 +138,19 @@ func TestFailureGroupItemsClassAndOrder(t *testing.T) {
 	}
 }
 
+func TestFailureGroupItemsDeferredHaveNoClass(t *testing.T) {
+	repo := seedFailureItems(t)
+	items, err := repo.FailureGroupItems(context.Background(), "deferred", "no match", 10)
+	if err != nil || len(items) == 0 {
+		t.Fatalf("deferred items=%d err=%v", len(items), err)
+	}
+	for _, it := range items {
+		if it.Class != "" {
+			t.Errorf("deferred item %q class = %q, want empty", it.Title, it.Class)
+		}
+	}
+}
+
 func TestFailureGroupItemsLimitAndFilters(t *testing.T) {
 	repo := seedFailureItems(t)
 	ctx := context.Background()

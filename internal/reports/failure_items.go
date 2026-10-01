@@ -14,7 +14,10 @@ const MaxFailureItemsLimit = 500
 
 // FailureItem is one work_queue row inside a Failure Analysis / Deferred misses
 // group. Reason is the group's normalized signature (the same value as
-// FailureGroup.Reason), Class its failsig verdict.
+// FailureGroup.Reason), Class its failsig verdict. Class is set only for
+// failed rows; it is empty for deferred rows, which are provider misses the
+// worker already retries on a schedule (failsig.Classify reads failed-row error
+// signatures and would label them persistent).
 type FailureItem struct {
 	ID            int64
 	Artist        string
@@ -79,7 +82,9 @@ func (r *Repo) FailureGroupItems(ctx context.Context, status, signature string, 
 		if it.Reason != signature {
 			continue
 		}
-		it.Class = failsig.Classify(it.Reason)
+		if it.Status == "failed" {
+			it.Class = failsig.Classify(it.Reason)
+		}
 		out = append(out, it)
 	}
 	if err := rows.Err(); err != nil {
