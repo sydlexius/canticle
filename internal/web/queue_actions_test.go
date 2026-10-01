@@ -22,117 +22,119 @@ import (
 
 const reviveSentinel = "miss limit reached"
 
+const revivePath = "/queue/unavailable/revive"
+
 type reviveFixture struct {
 	sqlDB      *sql.DB
 	mux        *http.ServeMux
 	libA, libB int64
-	// retiredA is two A-only rows plus the shared one; retiredB is the B-only row.
-	rowA1, rowA2, rowShared, rowB1 int64
-	// plainDeferred is a non-retired row that must never be touched.
-	plainDeferred int64
+	// Retired rows: A-only, shared (A and B), B-only; plainDeferred is never touched.
+	rowA1, rowA2, rowShared, rowB1, plainDeferred int64
+	n                                             int
 }
 
-func seedRevive(t *testing.T) reviveFixture {
-	t.Helper()
-	ctx := context.Background()
-	sqlDB := openReportsTestDB(t)
-	f := reviveFixture{sqlDB: sqlDB}
-	mustScan := func(q string, args ...any) int64 {
-		t.Helper()
-		var id int64
-		if err := sqlDB.QueryRowContext(ctx, q+" RETURNING id", args...).Scan(&id); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-		return id
-	}
-	f.libA = mustScan(`INSERT INTO libraries (path, name) VALUES ('/lib-a', 'Alpha')`)
-	f.libB = mustScan(`INSERT INTO libraries (path, name) VALUES ('/lib-b', 'Bravo')`)
-	n := 0
-	row := func(status, lastErr string, libs ...int64) int64 {
-		t.Helper()
-		n++
-		key := "k" + strconv.Itoa(n)
-		id := mustScan(`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, last_error)
-		                VALUES ('Secret Artist', 'Secret Title '||?, ?, ?, 'Album', ?, ?)`, key, key, key, status, lastErr)
-		for _, lib := range libs {
-			sr := mustScan(`INSERT INTO scan_results (library_id, artist, title, file_path, outdir, filename, status)
-			                VALUES (?, 'Secret Artist', 'Secret Title', ?, 'out', 'song.lrc', 'done')`,
-				lib, "/secret/path/"+key+"-"+strconv.FormatInt(lib, 10)+".flac")
-			if _, err := sqlDB.ExecContext(ctx,
-				`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, sr); err != nil {
-				t.Fatalf("link: %v", err)
-			}
-		}
-		return id
-	}
-	f.rowA1 = row("unavailable", reviveSentinel, f.libA)
-	f.rowA2 = row("unavailable", reviveSentinel, f.libA)
-	f.rowShared = row("unavailable", reviveSentinel, f.libA, f.libB)
-	f.rowB1 = row("unavailable", reviveSentinel, f.libB)
-	f.plainDeferred = row("deferred", "", f.libA)
-
-	f.mux = http.NewServeMux()
+// reviveMux serves the UI with the given queue actions attached.
+func reviveMux(sqlDB *sql.DB, qa QueueActions) *http.ServeMux {
+	mux := http.NewServeMux()
 	ui := NewUI(config.Config{}, "v-test", WithReports(reports.New(sqlDB)))
-	ui.AttachQueueActions(queue.NewDBQueue(sqlDB))
-	ui.Register(f.mux)
+	ui.AttachQueueActions(qa)
+	ui.Register(mux)
+	return mux
+}
+
+func (f *reviveFixture) insert(t *testing.T, q string, args ...any) int64 {
+	t.Helper()
+	var id int64
+	if err := f.sqlDB.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return id
+}
+
+// addRow inserts a work_queue row linked to one scan_result per library.
+func (f *reviveFixture) addRow(t *testing.T, status, lastErr string, libs ...int64) int64 {
+	t.Helper()
+	f.n++
+	key := "k" + strconv.Itoa(f.n)
+	id := f.insert(t, `INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, last_error)
+	                VALUES ('Secret Artist', 'Secret Title '||?, ?, ?, 'Album', ?, ?)`, key, key, key, status, lastErr)
+	for _, lib := range libs {
+		sr := f.insert(t, `INSERT INTO scan_results (library_id, artist, title, file_path, outdir, filename, status)
+		                VALUES (?, 'Secret Artist', 'Secret Title', ?, 'out', 'song.lrc', 'done')`,
+			lib, "/secret/path/"+key+"-"+strconv.FormatInt(lib, 10)+".flac")
+		if _, err := f.sqlDB.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, sr); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+	}
+	return id
+}
+
+func seedRevive(t *testing.T) *reviveFixture {
+	t.Helper()
+	f := &reviveFixture{sqlDB: openReportsTestDB(t)}
+	f.libA = f.insert(t, `INSERT INTO libraries (path, name) VALUES ('/lib-a', 'Alpha')`)
+	f.libB = f.insert(t, `INSERT INTO libraries (path, name) VALUES ('/lib-b', 'Bravo')`)
+	f.rowA1 = f.addRow(t, "unavailable", reviveSentinel, f.libA)
+	f.rowA2 = f.addRow(t, "unavailable", reviveSentinel, f.libA)
+	f.rowShared = f.addRow(t, "unavailable", reviveSentinel, f.libA, f.libB)
+	f.rowB1 = f.addRow(t, "unavailable", reviveSentinel, f.libB)
+	f.plainDeferred = f.addRow(t, "deferred", "", f.libA)
+	f.mux = reviveMux(f.sqlDB, queue.NewDBQueue(f.sqlDB))
 	return f
 }
 
-func (f reviveFixture) status(t *testing.T, id int64) string {
+// assertStatuses fails unless every id has the wanted work_queue status.
+func (f *reviveFixture) assertStatuses(t *testing.T, want string, ids ...int64) {
 	t.Helper()
-	var s string
-	if err := f.sqlDB.QueryRow(`SELECT status FROM work_queue WHERE id = ?`, id).Scan(&s); err != nil {
-		t.Fatalf("status of %d: %v", id, err)
+	for _, id := range ids {
+		var s string
+		if err := f.sqlDB.QueryRow(`SELECT status FROM work_queue WHERE id = ?`, id).Scan(&s); err != nil {
+			t.Fatalf("status of %d: %v", id, err)
+		}
+		if s != want {
+			t.Errorf("row %d status = %q, want %q", id, s, want)
+		}
 	}
-	return s
 }
 
-func (f reviveFixture) scanStatuses(t *testing.T, lib int64) (pending, done int) {
+// pendingScans counts a library's scan_results reset to pending.
+func (f *reviveFixture) pendingScans(t *testing.T, lib int64) int {
 	t.Helper()
-	rows, err := f.sqlDB.Query(`SELECT status FROM scan_results WHERE library_id = ?`, lib)
-	if err != nil {
+	var n int
+	q := `SELECT COUNT(*) FROM scan_results WHERE library_id = ? AND status = 'pending'`
+	if err := f.sqlDB.QueryRow(q, lib).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			t.Fatal(err)
-		}
-		if s == "pending" {
-			pending++
-		} else {
-			done++
-		}
-	}
-	return pending, done
+	return n
+}
+
+func (f *reviveFixture) get(t *testing.T, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	return getQueue(t, f.mux, target, false)
 }
 
 var csrfFieldRE = regexp.MustCompile(`name="csrf_token" value="([0-9a-f]{64})"`)
 
 // reviveToken GETs the preview and returns the form's token and cookie.
-func reviveToken(t *testing.T, f reviveFixture, target string) (string, *http.Cookie) {
+func reviveToken(t *testing.T, f *reviveFixture, target string) (string, *http.Cookie) {
 	t.Helper()
-	rec := getQueue(t, f.mux, target, false)
+	rec := f.get(t, target)
 	m := csrfFieldRE.FindStringSubmatch(rec.Body.String())
-	if m == nil {
-		t.Fatalf("no csrf field in preview: %s", rec.Body.String())
-	}
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == CSRFCookieName {
+		if c.Name == CSRFCookieName && m != nil {
 			return m[1], c
 		}
 	}
-	t.Fatal("no csrf cookie set")
+	t.Fatalf("no csrf field or cookie in preview: %s", rec.Body.String())
 	return "", nil
 }
 
-func postRevive(f reviveFixture, library, expected, token string, cookie *http.Cookie, hdr map[string]string) *httptest.ResponseRecorder {
+func postRevive(f *reviveFixture, library, expected, token string, cookie *http.Cookie, hdr map[string]string) *httptest.ResponseRecorder {
 	form := url.Values{"library": {library}, "expected": {expected}}
 	if token != "" {
 		form.Set("csrf_token", token)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/queue/unavailable/revive", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest(http.MethodPost, revivePath, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if cookie != nil {
 		req.AddCookie(cookie)
@@ -145,98 +147,83 @@ func postRevive(f reviveFixture, library, expected, token string, cookie *http.C
 	return rec
 }
 
-func TestRevivePreviewCountsMatchSeed(t *testing.T) {
+func TestRevivePreview(t *testing.T) {
 	f := seedRevive(t)
-	rec := getQueue(t, f.mux, "/queue/unavailable/revive", false)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
+	rec := f.get(t, revivePath)
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status = %d, Cache-Control = %q", rec.Code, rec.Header().Get("Cache-Control"))
 	}
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control = %q", got)
-	}
-	body := rec.Body.String()
 	for _, want := range []string{
 		"All libraries: 4 tracks, 1 shared by more than one",
 		"0 not linked",
 		"This will revive 4 tracks for all libraries",
 		"<td>Alpha</td>", "<td>Bravo</td>",
 	} {
-		if !strings.Contains(body, want) {
+		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("preview missing %q", want)
 		}
 	}
 	// Alpha holds 3 (one shared); Bravo holds 2 (the same shared one).
-	rec = getQueue(t, f.mux, "/queue/unavailable/revive?library="+strconv.FormatInt(f.libB, 10), false)
-	if !strings.Contains(rec.Body.String(), "This will revive 2 tracks for Bravo, 1 of them shared") {
-		t.Errorf("library scope text missing: %s", rec.Body.String())
+	if body := f.get(t, revivePath+"?library="+strconv.FormatInt(f.libB, 10)).Body.String(); !strings.Contains(body, "This will revive 2 tracks for Bravo, 1 of them shared") {
+		t.Errorf("library scope text missing: %s", body)
 	}
-}
-
-func TestRevivePreviewRejectsBadLibrary(t *testing.T) {
-	f := seedRevive(t)
+	// The confirm form carries the previewed count.
+	if body := f.get(t, revivePath+"?library="+strconv.FormatInt(f.libA, 10)).Body.String(); !strings.Contains(body, `name="expected" value="3"`) {
+		t.Errorf("confirm form lacks the previewed count: %s", body)
+	}
 	for _, lib := range []string{"abc", "-1", "0"} {
-		if rec := getQueue(t, f.mux, "/queue/unavailable/revive?library="+lib, false); rec.Code != http.StatusBadRequest {
+		if rec := f.get(t, revivePath+"?library="+lib); rec.Code != http.StatusBadRequest {
 			t.Errorf("library=%s status = %d, want 400", lib, rec.Code)
 		}
 	}
-}
-
-func TestReviveGetNeverMutates(t *testing.T) {
-	f := seedRevive(t)
-	getQueue(t, f.mux, "/queue/unavailable/revive", false)
-	getQueue(t, f.mux, "/queue/unavailable/revive?library="+strconv.FormatInt(f.libA, 10), false)
-	if s := f.status(t, f.rowA1); s != "unavailable" {
-		t.Errorf("GET changed row status to %q", s)
-	}
-	if p, _ := f.scanStatuses(t, f.libA); p != 0 {
+	f.assertStatuses(t, "unavailable", f.rowA1, f.rowA2, f.rowShared, f.rowB1) // GET never mutates
+	if p := f.pendingScans(t, f.libA); p != 0 {
 		t.Errorf("GET reset %d scan_results", p)
 	}
 }
 
 func TestReviveLinkOnlyOnUnavailable(t *testing.T) {
 	f := seedRevive(t)
-	if !strings.Contains(getQueue(t, f.mux, "/queue/unavailable", false).Body.String(), `href="/queue/unavailable/revive"`) {
-		t.Error("unavailable view lacks the revive link")
-	}
-	for _, b := range []string{"failed", "deferred", "pending"} {
-		if strings.Contains(getQueue(t, f.mux, "/queue/"+b, false).Body.String(), "/revive") {
-			t.Errorf("%s view offers revive", b)
+	for b, want := range map[string]bool{"unavailable": true, "failed": false, "deferred": false, "pending": false} {
+		if got := strings.Contains(f.get(t, "/queue/"+b).Body.String(), `href="`+revivePath+`"`); got != want {
+			t.Errorf("%s view revive link = %v, want %v", b, got, want)
 		}
 	}
 }
 
 func TestRevivePostRefusals(t *testing.T) {
 	f := seedRevive(t)
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive")
-
+	token, cookie := reviveToken(t, f, revivePath)
 	cases := []struct {
-		name   string
-		rec    *httptest.ResponseRecorder
-		wantSt int
+		name            string
+		library, expect string
+		token           string
+		cookie          *http.Cookie
+		hdr             map[string]string
+		want            int
 	}{
-		{"no token and no cookie", postRevive(f, "all", "4", "", nil, nil), http.StatusForbidden},
-		{"cookie but no field", postRevive(f, "all", "4", "", cookie, nil), http.StatusForbidden},
-		{"mismatched token", postRevive(f, "all", "4", strings.Repeat("a", 64), cookie, nil), http.StatusForbidden},
-		{"cross-site", postRevive(f, "all", "4", token, cookie, map[string]string{"Sec-Fetch-Site": "cross-site"}), http.StatusForbidden},
-		{"cross-origin header", postRevive(f, "all", "4", token, cookie, map[string]string{"Origin": "https://evil.example"}), http.StatusForbidden},
-		{"bad library", postRevive(f, "nope", "4", token, cookie, nil), http.StatusBadRequest},
-		{"zero library", postRevive(f, "0", "4", token, cookie, nil), http.StatusBadRequest},
+		{"no token and no cookie", "all", "4", "", nil, nil, http.StatusForbidden},
+		{"cookie but no field", "all", "4", "", cookie, nil, http.StatusForbidden},
+		{"mismatched token", "all", "4", strings.Repeat("a", 64), cookie, nil, http.StatusForbidden},
+		{"cross-site", "all", "4", token, cookie, map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+		{"cross-origin header", "all", "4", token, cookie, map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
+		{"bad library", "nope", "4", token, cookie, nil, http.StatusBadRequest},
+		{"zero library", "0", "4", token, cookie, nil, http.StatusBadRequest},
+		{"empty expected", "all", "", token, cookie, nil, http.StatusBadRequest},
+		{"non-numeric expected", "all", "x", token, cookie, nil, http.StatusBadRequest},
+		{"negative expected", "all", "-1", token, cookie, nil, http.StatusBadRequest},
 	}
 	for _, c := range cases {
-		if c.rec.Code != c.wantSt {
-			t.Errorf("%s: status = %d, want %d", c.name, c.rec.Code, c.wantSt)
+		if rec := postRevive(f, c.library, c.expect, c.token, c.cookie, c.hdr); rec.Code != c.want {
+			t.Errorf("%s: status = %d, want %d", c.name, rec.Code, c.want)
 		}
 	}
-	for _, id := range []int64{f.rowA1, f.rowA2, f.rowShared, f.rowB1} {
-		if s := f.status(t, id); s != "unavailable" {
-			t.Errorf("refused POST mutated row %d to %q", id, s)
-		}
-	}
+	f.assertStatuses(t, "unavailable", f.rowA1, f.rowA2, f.rowShared, f.rowB1)
 }
 
 func TestRevivePostScopedToLibrary(t *testing.T) {
 	f := seedRevive(t)
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive")
+	token, cookie := reviveToken(t, f, revivePath)
 
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -244,26 +231,13 @@ func TestRevivePostScopedToLibrary(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	rec := postRevive(f, strconv.FormatInt(f.libA, 10), "3", token, cookie, map[string]string{"Sec-Fetch-Site": "same-origin"})
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Revived 3 tracks (Alpha)") {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "Revived 3 tracks (Alpha)") {
-		t.Errorf("result line missing: %s", rec.Body.String())
-	}
-	for _, id := range []int64{f.rowA1, f.rowA2, f.rowShared} {
-		if s := f.status(t, id); s != "deferred" {
-			t.Errorf("library A row %d status = %q, want deferred", id, s)
-		}
-	}
-	if s := f.status(t, f.rowB1); s != "unavailable" {
-		t.Errorf("B-only row status = %q, want untouched", s)
-	}
-	if s := f.status(t, f.plainDeferred); s != "deferred" {
-		t.Errorf("plain deferred row status = %q", s)
-	}
-	// Library B's scan_results stay done, including the shared row's B copy.
-	if p, d := f.scanStatuses(t, f.libB); p != 0 || d != 2 {
-		t.Errorf("library B scan_results pending=%d done=%d, want 0/2", p, d)
+	f.assertStatuses(t, "deferred", f.rowA1, f.rowA2, f.rowShared, f.plainDeferred)
+	f.assertStatuses(t, "unavailable", f.rowB1)
+	if p := f.pendingScans(t, f.libB); p != 0 { // the shared row's B copy stays done
+		t.Errorf("library B has %d pending scan_results, want 0", p)
 	}
 
 	audit := buf.String()
@@ -279,66 +253,36 @@ func TestRevivePostScopedToLibrary(t *testing.T) {
 
 func TestRevivePostAllRevivesEverything(t *testing.T) {
 	f := seedRevive(t)
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive")
+	token, cookie := reviveToken(t, f, revivePath)
 	rec := postRevive(f, "all", "4", token, cookie, nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Revived 4 tracks (all libraries)") {
 		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
 	}
-	for _, id := range []int64{f.rowA1, f.rowA2, f.rowShared, f.rowB1} {
-		if s := f.status(t, id); s != "deferred" {
-			t.Errorf("row %d status = %q", id, s)
-		}
-	}
+	f.assertStatuses(t, "deferred", f.rowA1, f.rowA2, f.rowShared, f.rowB1)
 	if !strings.Contains(rec.Body.String(), "No retired tracks to revive") {
 		t.Error("post-revive page should show the empty state")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("POST Cache-Control = %q, want no-store", got)
 	}
 }
 
 func TestReviveUnwiredIs503(t *testing.T) {
-	sqlDB := openReportsTestDB(t)
-	mux := newReportsUIServer(t, sqlDB)
-	if rec := getQueue(t, mux, "/queue/unavailable/revive", false); rec.Code != http.StatusServiceUnavailable {
+	rec := getQueue(t, newReportsUIServer(t, openReportsTestDB(t)), revivePath, false)
+	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("GET status = %d, want 503", rec.Code)
-	}
-}
-
-func (f reviveFixture) retireMore(t *testing.T) {
-	t.Helper()
-	// A fifth retired row in library A, so the scoped count moves from 3 to 4.
-	var id int64
-	if err := f.sqlDB.QueryRow(`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, last_error)
-	    VALUES ('X', 'Y', 'kx', 'ky', 'Z', 'unavailable', ?) RETURNING id`, reviveSentinel).Scan(&id); err != nil {
-		t.Fatal(err)
-	}
-	var sr int64
-	if err := f.sqlDB.QueryRow(`INSERT INTO scan_results (library_id, artist, title, file_path, outdir, filename, status)
-	    VALUES (?, 'X', 'Y', '/late.flac', 'out', 'late.lrc', 'done') RETURNING id`, f.libA).Scan(&sr); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.sqlDB.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, sr); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestReviveConfirmCarriesPreviewedCount(t *testing.T) {
-	f := seedRevive(t)
-	rec := getQueue(t, f.mux, "/queue/unavailable/revive?library="+strconv.FormatInt(f.libA, 10), false)
-	if !strings.Contains(rec.Body.String(), `name="expected" value="3"`) {
-		t.Errorf("confirm form lacks the previewed count: %s", rec.Body.String())
 	}
 }
 
 func TestReviveStaleCountDoesNotRevive(t *testing.T) {
 	f := seedRevive(t)
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive?library="+strconv.FormatInt(f.libA, 10))
-	f.retireMore(t) // population changes between GET and POST
-	rec := postRevive(f, strconv.FormatInt(f.libA, 10), "3", token, cookie, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
+	lib := strconv.FormatInt(f.libA, 10)
+	token, cookie := reviveToken(t, f, revivePath+"?library="+lib)
+	f.addRow(t, "unavailable", reviveSentinel, f.libA) // population moves after the GET
+	rec := postRevive(f, lib, "3", token, cookie, nil)
 	body := rec.Body.String()
-	if !strings.Contains(body, "The counts changed since you loaded this page") {
-		t.Errorf("stale notice missing: %s", body)
+	if rec.Code != http.StatusOK || !strings.Contains(body, "The counts changed since you loaded this page") {
+		t.Fatalf("stale notice missing (status %d): %s", rec.Code, body)
 	}
 	if strings.Contains(body, "Revived ") {
 		t.Error("stale POST reported a revive")
@@ -346,62 +290,29 @@ func TestReviveStaleCountDoesNotRevive(t *testing.T) {
 	if !strings.Contains(body, "This will revive 4 tracks for Alpha") {
 		t.Errorf("fresh count not shown: %s", body)
 	}
-	for _, id := range []int64{f.rowA1, f.rowA2, f.rowShared} {
-		if s := f.status(t, id); s != "unavailable" {
-			t.Errorf("stale POST revived row %d (%q)", id, s)
-		}
-	}
-}
-
-func TestReviveMalformedExpectedIs400(t *testing.T) {
-	f := seedRevive(t)
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive")
-	for _, e := range []string{"", "x", "-1"} {
-		if rec := postRevive(f, "all", e, token, cookie, nil); rec.Code != http.StatusBadRequest {
-			t.Errorf("expected=%q status = %d, want 400", e, rec.Code)
-		}
-	}
-	if s := f.status(t, f.rowA1); s != "unavailable" {
-		t.Errorf("row status = %q", s)
-	}
+	f.assertStatuses(t, "unavailable", f.rowA1, f.rowA2, f.rowShared)
 }
 
 func TestReviveUnlistedLibraryRerendersWithNotice(t *testing.T) {
 	f := seedRevive(t)
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive")
-	// Revive Alpha, then replay the same confirm (a browser refresh): Alpha has
-	// no retired rows left and drops out of the listing.
+	token, cookie := reviveToken(t, f, revivePath)
+	// Revive Alpha, then replay the confirm: Alpha drops out of the listing.
 	lib := strconv.FormatInt(f.libA, 10)
 	if rec := postRevive(f, lib, "3", token, cookie, nil); rec.Code != http.StatusOK {
 		t.Fatalf("first revive status = %d", rec.Code)
 	}
 	for name, rec := range map[string]*httptest.ResponseRecorder{
 		"POST": postRevive(f, lib, "3", token, cookie, nil),
-		"GET":  getQueue(t, f.mux, "/queue/unavailable/revive?library="+lib, false),
+		"GET":  f.get(t, revivePath+"?library="+lib),
 	} {
-		if rec.Code != http.StatusOK {
-			t.Errorf("%s status = %d, want 200", name, rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "That library has no retired tracks left; the list has been refreshed.") {
-			t.Errorf("%s: notice missing: %s", name, rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), "mx-status-error") {
-			t.Errorf("%s: notice not styled with the shared error class", name)
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK ||
+			!strings.Contains(body, "That library has no retired tracks left; the list has been refreshed.") ||
+			!strings.Contains(body, "mx-status-error") {
+			t.Errorf("%s: status %d, notice or error class missing: %s", name, rec.Code, body)
 		}
 	}
-	// Bravo's B-only row is untouched by the replay.
-	if s := f.status(t, f.rowB1); s != "unavailable" {
-		t.Errorf("B-only row status = %q", s)
-	}
-}
-
-func TestRevivePostIsNoStore(t *testing.T) {
-	f := seedRevive(t)
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive")
-	rec := postRevive(f, "all", "4", token, cookie, nil)
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("POST Cache-Control = %q, want no-store", got)
-	}
+	f.assertStatuses(t, "unavailable", f.rowB1)
 }
 
 // busyOnce fails the first RecheckRetired with a real SQLITE_BUSY, then defers
@@ -425,18 +336,16 @@ func (b *busyOnce) RecheckRetired(ctx context.Context, id *int64) (int64, error)
 func realBusy(t *testing.T) error {
 	t.Helper()
 	dsn := filepath.Join(t.TempDir(), "busy.db") + "?_pragma=busy_timeout(0)"
-	a, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatal(err)
+	open1 := func() *sql.DB {
+		d, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = d.Close() })
+		d.SetMaxOpenConns(1)
+		return d
 	}
-	t.Cleanup(func() { _ = a.Close() })
-	a.SetMaxOpenConns(1)
-	b, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = b.Close() })
-	b.SetMaxOpenConns(1)
+	a, b := open1(), open1()
 	ctx := context.Background()
 	if _, err := a.ExecContext(ctx, "CREATE TABLE t (id INTEGER)"); err != nil {
 		t.Fatal(err)
@@ -459,13 +368,9 @@ func realBusy(t *testing.T) error {
 func TestReviveRetriesOnSQLiteBusy(t *testing.T) {
 	f := seedRevive(t)
 	flaky := &busyOnce{QueueActions: queue.NewDBQueue(f.sqlDB), busy: realBusy(t)}
-	mux := http.NewServeMux()
-	ui := NewUI(config.Config{}, "v-test", WithReports(reports.New(f.sqlDB)))
-	ui.AttachQueueActions(flaky)
-	ui.Register(mux)
-	f.mux = mux
+	f.mux = reviveMux(f.sqlDB, flaky)
 
-	token, cookie := reviveToken(t, f, "/queue/unavailable/revive")
+	token, cookie := reviveToken(t, f, revivePath)
 	rec := postRevive(f, "all", "4", token, cookie, nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Revived 4 tracks") {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
