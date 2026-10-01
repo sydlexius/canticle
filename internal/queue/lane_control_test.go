@@ -75,4 +75,16 @@ func TestLatestServedTrack(t *testing.T) {
 	if _, found, err := q.LatestServedTrack(ctx, "innertube"); err != nil || found {
 		t.Errorf("lane with no rows: found=%v err=%v; want none", found, err)
 	}
+
+	// The seed carries the stored identity untrimmed, exactly as the worker
+	// queries it (ResolveArtist returns the track-artist fallback as-is), or a
+	// padded tag makes the probe ask for a track the lane never served.
+	add(" Padded ", "", "Padded Win ", "petitlyrics", "2026-09-30T06:00:00Z")
+	got, found, err = q.LatestServedTrack(ctx, "petitlyrics")
+	if err != nil || !found {
+		t.Fatalf("padded: found=%v err=%v; want a row", found, err)
+	}
+	if got.ArtistName != " Padded " || got.TrackName != "Padded Win " {
+		t.Errorf("padded: got artist %q title %q; want the stored values untrimmed", got.ArtistName, got.TrackName)
+	}
 }

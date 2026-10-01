@@ -57,13 +57,16 @@ func (q *DBQueue) LatestServedTrack(ctx context.Context, lane string) (track mod
 		if err := rows.Scan(&artist, &albumArtist, &title, &album); err != nil {
 			return models.Track{}, false, fmt.Errorf("queue: scan latest served track: %w", err)
 		}
-		resolved := strings.TrimSpace(normalize.ResolveArtist(albumArtist, artist))
-		if resolved == "" {
+		// Trim only to judge usability: the worker queries with the stored
+		// values as-is (ResolveArtist returns the track-artist fallback
+		// untrimmed), so the seed must carry the same identity.
+		resolved := normalize.ResolveArtist(albumArtist, artist)
+		if strings.TrimSpace(resolved) == "" {
 			continue
 		}
 		return models.Track{
 			ArtistName:  resolved,
-			TrackName:   strings.TrimSpace(title),
+			TrackName:   title,
 			AlbumName:   album,
 			AlbumArtist: albumArtist,
 		}, true, nil
