@@ -20,7 +20,7 @@ const upgradeCandidatePredicate = ` status = 'done'
    AND TRIM(COALESCE(source_path, '')) <> ''
    AND COALESCE(last_error, '') = ''
    AND completed_at < ?
-   AND COALESCE(upgrade_checked_at, '') < ?`
+   AND COALESCE(upgrade_checked_at, '') < ?` + notLyricEdited
 
 // upgradeMissyncedPredicate is the second
 // population (#1120): a settled row marked mis_synced AFTER its fetch (the #443
@@ -42,7 +42,7 @@ const upgradeMissyncedPredicate = ` status = 'done'
    AND (COALESCE(upgrade_checked_at, '') < ? OR upgrade_checked_at < COALESCE(evaluated_at, ''))
    AND COALESCE(word_timing_state, '') <> 'queued'
    AND TRIM(COALESCE(source_path, '')) <> ''
-   AND COALESCE(last_error, '') = ''`
+   AND COALESCE(last_error, '') = ''` + notLyricEdited
 
 // ListUpgradeCandidates returns up to limit ids from both populations: settled
 // and last admitted before holdBefore (below the line rung), and post-settle
