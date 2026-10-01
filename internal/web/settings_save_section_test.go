@@ -484,19 +484,55 @@ func TestSaveSectionBatchCrossFieldViolationRejectsEverything(t *testing.T) {
 }
 
 func TestSaveSectionBatchHalfFailedPairNotDoubleReported(t *testing.T) {
-	// A cert path that fails field validation must not also produce a misleading
-	// "set together" error on the key.
+	// The cert is valid and survives field validation; the key fails it. The pair
+	// check must be skipped, so the key carries only its own error and the
+	// surviving cert is not flagged with a misleading "set together" message.
+	cert := pemFile(t, t.TempDir(), "c.pem")
 	got := postRejectedBatch(t, [][2]string{
-		{"server.tls.cert_file", "/nonexistent/c.pem"},
+		{"server.tls.cert_file", cert},
 		{"server.tls.key_file", "/nonexistent/k.key"},
 	})
-	if len(got.Errors) == 0 {
-		t.Fatal("no errors reported for nonexistent TLS paths")
+	if len(got.Errors) != 1 || got.Errors["server.tls.key_file"] == "" {
+		t.Fatalf("errors = %v, want exactly one entry keyed server.tls.key_file", got.Errors)
 	}
-	for p, m := range got.Errors {
-		if strings.Contains(m, "together") {
-			t.Errorf("%s: pair-invariant error on a field-level failure: %q", p, m)
+	if _, ok := got.Errors["server.tls.cert_file"]; ok {
+		t.Errorf("valid cert_file flagged: %v", got.Errors)
+	}
+	if strings.Contains(got.Errors["server.tls.key_file"], "together") {
+		t.Errorf("pair-invariant error on a field-level failure: %q", got.Errors["server.tls.key_file"])
+	}
+}
+
+func TestSaveSectionBatchConflictWinsRegardlessOfOrder(t *testing.T) {
+	orders := [][][2]string{
+		{{"providers.mode", "bogus"}, {"secrets.key_file", "/tmp/x.key"}},
+		{{"secrets.key_file", "/tmp/x.key"}, {"providers.mode", "bogus"}},
+	}
+	for _, pairs := range orders {
+		h, _ := writableTestUI(t, newFakeSecretStore())
+		rec := postSectionAccept(t, h, pairs, "application/json")
+		if rec.Code != http.StatusConflict {
+			t.Errorf("order %v: status = %d, want 409; body=%s", pairs, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestSaveSectionPlainSummaryDedupesSharedMessage(t *testing.T) {
+	// self_signed with a cert/key pair is one cross-field conflict reported on
+	// every member; the plain-text summary states the message once.
+	dir := t.TempDir()
+	cert, key := pemFile(t, dir, "c.pem"), pemFile(t, dir, "k.key")
+	h, _ := writableTestUI(t, newFakeSecretStore())
+	rec := postSection(t, h, [][2]string{
+		{"server.tls.self_signed", "true"},
+		{"server.tls.cert_file", cert},
+		{"server.tls.key_file", key},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if n := strings.Count(rec.Body.String(), "mutually exclusive"); n != 1 {
+		t.Errorf("shared message appears %d times, want 1; body=%s", n, rec.Body.String())
 	}
 }
 

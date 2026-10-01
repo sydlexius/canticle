@@ -69,9 +69,6 @@ func (u *UI) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 			errs.add(path, http.StatusBadRequest, "duplicate field in save")
 			continue
 		}
-		if _, failed := errs.byPath[path]; failed {
-			continue // a repeated path whose first occurrence already failed
-		}
 		// Each field's value is sent under a form key equal to its path. The section
 		// save carries canonical values directly (it is the cert/key path pair and
 		// other plain string fields); the unit/list/provider-inversion transforms of
@@ -113,7 +110,8 @@ func (u *UI) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		// 400; anything else is a write failure.
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
-			http.Error(w, validationMessage(err), http.StatusBadRequest)
+			errs.add(ve.Path, http.StatusBadRequest, validationMessage(err))
+			errs.write(w, r)
 			return
 		}
 		slog.Error("settings: section config write failed", "count", len(paths), "error", err)
@@ -166,7 +164,7 @@ func (u *UI) crossFieldGroups() []crossFieldGroup {
 }
 
 // sectionErrors accumulates per-field errors for one batch, keyed by path, and
-// remembers the HTTP status to answer with (the first error's).
+// remembers the HTTP status to answer with (409 if any error is a 409, else the first error's).
 type sectionErrors struct {
 	byPath map[string]string
 	order  []string
@@ -182,7 +180,9 @@ func (e *sectionErrors) add(path string, status int, msg string) {
 	}
 	e.byPath[path] = msg
 	e.order = append(e.order, path)
-	if e.status == 0 {
+	// 409 (read-only / env-locked) wins over 400 so the batch status does not
+	// depend on field order.
+	if e.status == 0 || (status == http.StatusConflict && e.status != http.StatusConflict) {
 		e.status = status
 	}
 }
@@ -219,9 +219,17 @@ type sectionErrorResponse struct {
 func (e *sectionErrors) write(w http.ResponseWriter, r *http.Request) {
 	summary := e.byPath[e.order[0]]
 	if len(e.order) > 1 {
+		// A cross-field conflict repeats one message across its members; list each
+		// distinct message once. The JSON map keeps an entry per path.
 		parts := make([]string, 0, len(e.order))
+		seen := map[string]bool{}
 		for _, p := range e.order {
-			parts = append(parts, p+": "+e.byPath[p])
+			m := e.byPath[p]
+			if seen[m] {
+				continue
+			}
+			seen[m] = true
+			parts = append(parts, p+": "+m)
 		}
 		summary = strings.Join(parts, "; ")
 	}
