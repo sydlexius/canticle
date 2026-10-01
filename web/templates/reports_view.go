@@ -1,5 +1,10 @@
 package templates
 
+import (
+	"net/url"
+	"strconv"
+)
+
 // Presentation models for the Reports workspace (#211). The handler maps the
 // read-only reports.Repo return types onto these string-bearing view structs so
 // the templ files stay free of formatting and database concerns. Every value is
@@ -96,11 +101,47 @@ type InstrumentalRow struct {
 	DetectRequested string
 }
 
-// FailureRow is one failed/deferred group: status, reason, and count.
+// FailureRow is one failed/deferred group: status, reason, and count. Class is
+// "transient" or "persistent" for a failed group and empty for a deferred one,
+// which gets no badge.
 type FailureRow struct {
 	Status string
 	Reason string
 	Count  string
+	Class  string
+}
+
+// FailureItemRow is one expanded row of a failure group.
+type FailureItemRow struct {
+	Artist        string
+	Title         string
+	Album         string
+	NextAttemptAt string
+	MissCount     string
+	Attempts      string
+	UpdatedAt     string
+}
+
+// FailureGroupView is the expanded-group fragment. Truncated says the group
+// holds more rows than Rows shows.
+type FailureGroupView struct {
+	Rows      []FailureItemRow
+	Truncated bool
+}
+
+// FailureGroupHref is the fragment URL for one group. The signature travels as a
+// query value, not a path segment, because it is arbitrary text.
+func FailureGroupHref(status, signature string) string {
+	q := url.Values{"status": {status}, "signature": {signature}}
+	return "/reports/failure-group?" + q.Encode()
+}
+
+// FailureDetailID is the element id of group i's expansion cell.
+func FailureDetailID(i int) string { return "mx-fg-" + strconv.Itoa(i) }
+
+// FailureTruncatedNote tells the operator the expansion is capped.
+func FailureTruncatedNote(shown int) string {
+	return "Showing the newest " + strconv.Itoa(shown) + " rows of this group."
 }
 
 // ReviewQueueRow is one synced-lyric track the timing guard flagged for an

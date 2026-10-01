@@ -235,6 +235,10 @@ templ tableInstrumentals(rows []InstrumentalRow) {
 }
 
 templ tableFailures(rows []FailureRow, emptyMsg string) {
+	<p class="mx-approx">
+		Tracks given up on after repeated misses are listed under
+		<a class="mx-text-link" href="/queue/unavailable">Unavailable</a>.
+	</p>
 	if len(rows) == 0 {
 		@reportEmpty(emptyMsg)
 	} else {
@@ -245,19 +249,80 @@ templ tableFailures(rows []FailureRow, emptyMsg string) {
 						<th scope="col">Status</th>
 						<th scope="col">Reason</th>
 						<th scope="col">Count</th>
+						<th scope="col">Rows</th>
 					</tr>
 				</thead>
 				<tbody>
-					for _, r := range rows {
+					for i, r := range rows {
 						<tr>
 							<td class="mx-cell-mono">{ r.Status }</td>
-							<td>{ r.Reason }</td>
+							<td>
+								{ r.Reason }
+								if r.Class != "" {
+									<span class={ "mx-class-badge mx-class-" + r.Class }>{ r.Class }</span>
+								}
+							</td>
 							<td class="mx-cell-mono">{ r.Count }</td>
+							<td>
+								<a
+									class="mx-run-button"
+									href={ templ.SafeURL(FailureGroupHref(r.Status, r.Reason)) }
+									hx-get={ FailureGroupHref(r.Status, r.Reason) }
+									hx-target={ "#" + FailureDetailID(i) }
+									hx-swap="innerHTML"
+								>
+									Show rows
+								</a>
+							</td>
+						</tr>
+						<tr class="mx-fg-detail">
+							<td colspan="4" id={ FailureDetailID(i) }></td>
 						</tr>
 					}
 				</tbody>
 			</table>
 		</div>
+	}
+}
+
+// FailureGroupRows is the htmx fragment behind a group's "Show rows" control:
+// the newest rows of one failure group, or an empty-state line for a signature
+// that matches nothing.
+templ FailureGroupRows(view FailureGroupView) {
+	if len(view.Rows) == 0 {
+		<p class="mx-dash-empty">No rows in this group.</p>
+	} else {
+		<div class="mx-table-wrap mx-fg-wrap">
+			<table class="mx-table" aria-label="Rows in this failure group">
+				<thead>
+					<tr>
+						<th scope="col">Artist</th>
+						<th scope="col">Title</th>
+						<th scope="col">Album</th>
+						<th scope="col">Next attempt</th>
+						<th scope="col">Misses</th>
+						<th scope="col">Attempts</th>
+						<th scope="col">Updated</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, r := range view.Rows {
+						<tr>
+							<td>{ r.Artist }</td>
+							<td>{ r.Title }</td>
+							<td>{ r.Album }</td>
+							<td class="mx-cell-mono">{ r.NextAttemptAt }</td>
+							<td class="mx-cell-mono">{ r.MissCount }</td>
+							<td class="mx-cell-mono">{ r.Attempts }</td>
+							<td class="mx-cell-mono">{ r.UpdatedAt }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+		if view.Truncated {
+			<p class="mx-approx">{ FailureTruncatedNote(len(view.Rows)) }</p>
+		}
 	}
 }
 

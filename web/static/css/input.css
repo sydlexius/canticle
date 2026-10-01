@@ -613,6 +613,50 @@ body {
   background-color: var(--mx-accent);
 }
 
+/* Failure Analysis (#478): class badge, text link, and the per-group expansion
+   cell. Badge hues are semantic (amber: will retry, red: needs a person) and
+   always carry the class name as text, never color alone. */
+.mx-class-badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0 0.4rem;
+  border: 1px solid currentColor;
+  border-radius: var(--mx-radius-sm);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mx-class-transient {
+  color: #f59e0b;
+}
+
+.mx-class-persistent {
+  color: #f87171;
+}
+
+.mx-text-link {
+  color: var(--mx-sidebar-active-text);
+  text-decoration: none;
+}
+
+.mx-text-link:hover,
+.mx-text-link:focus-visible {
+  text-decoration: underline;
+}
+
+/* The expansion cell is empty until a group is expanded; collapse it fully so
+   the idle table has no stray padding or border rows. */
+.mx-fg-detail td:empty {
+  padding: 0;
+  border: 0;
+}
+
+.mx-fg-wrap {
+  max-height: 40vh;
+}
+
 .mx-approx {
   font-size: 0.75rem;
   color: var(--mx-content-text-secondary);
