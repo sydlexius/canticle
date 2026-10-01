@@ -1188,6 +1188,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// inherit the configured window via the worker's stored parameters.
 	fallbacks := fallbackProviders(cfg, token, fetcher.Name(), newFetcher)
 	w.SetFallbackProviders(fallbacks...)
+	// Restore each lane's liveness control from its last recorded win, so a
+	// restart does not reopen the #767 false outage (#1195).
+	seedLaneControlsFn(ctx, workQ, append([]providers.LyricsProvider{fetcher}, fallbacks...)...)
 	gen := providerGeneration(fetcher.Name(), fallbacks)
 	workQ.SetProvidersVersion(gen)
 	w.SetProvidersVersion(gen)

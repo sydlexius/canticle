@@ -116,6 +116,13 @@ type Client struct {
 	// that could itself be retired from the catalog.
 	knownGood    models.Track
 	hasKnownGood bool
+	// knownGoodSeeded marks a control installed by SeedKnownGood from the
+	// database rather than earned by a hit in this process (#1195). It is
+	// UNVERIFIED: the row it came from may be one this lane never actually
+	// served, so a probe miss on it is not evidence of an outage. confirmOutage
+	// drops such a control on a miss and falls back to the count; any hit in
+	// this process (recordSuccess) clears the flag.
+	knownGoodSeeded bool
 	// probeInFlight stops a burst of concurrent misses from each launching their
 	// own liveness probe. One probe answers the question for all of them.
 	probeInFlight bool
@@ -205,6 +212,7 @@ func (c *Client) recordSuccess(track models.Track) {
 	if usable {
 		c.knownGood = track
 		c.hasKnownGood = true
+		c.knownGoodSeeded = false
 	}
 	c.mu.Unlock()
 
@@ -212,6 +220,38 @@ func (c *Client) recordSuccess(track models.Track) {
 		slog.Info("petitlyrics: provider returned results again; the sustained zero-result run has ended",
 			"after", after)
 	}
+}
+
+// SeedKnownGood installs track as the liveness control before this process has
+// earned one of its own (#1195), so a restart does not drop the lane back onto
+// the no-control count fallback.
+//
+// The control lives only in memory, and a restart wiped it: every boot then
+// adjudicated its first long miss run by count alone, which is the false
+// positive #767 measured at P=0.74 on fallback material. Serve passes the most
+// recent track this provider demonstrably served (a work_queue row it was
+// stamped onto), which is the same evidence recordSuccess would have recorded.
+//
+// A seeded control is UNVERIFIED (knownGoodSeeded): the first probe that misses
+// on it drops it and the run is judged by the count, as if unseeded, rather than
+// reported as a probed outage. A stale or wrong seed therefore costs at most the
+// pre-#1195 behavior, never a lane latched on a control it never had.
+//
+// It sets the control ONLY. The miss run, the latch, and the in-flight guard are
+// untouched, because a seed is not a response: it proves nothing about the
+// credential NOW, and clearing the run here would hide a run that is in
+// progress. An unusable track (no artist or title) is ignored, matching
+// recordSuccess. A control the process earns later replaces it. Nothing is
+// logged: the track is library metadata.
+func (c *Client) SeedKnownGood(track models.Track) {
+	if track.TrackName == "" || track.ArtistName == "" {
+		return
+	}
+	c.mu.Lock()
+	c.knownGood = track
+	c.hasKnownGood = true
+	c.knownGoodSeeded = true
+	c.mu.Unlock()
 }
 
 // NewClient creates a new Petit Lyrics client.
@@ -691,7 +731,7 @@ func (c *Client) confirmOutage(ctx context.Context) bool {
 		c.mu.Unlock()
 		return false
 	}
-	control, have, busy := c.knownGood, c.hasKnownGood, c.probeInFlight
+	control, have, busy, seeded := c.knownGood, c.hasKnownGood, c.probeInFlight, c.knownGoodSeeded
 	if have && !busy {
 		c.probeInFlight = true
 	}
@@ -744,8 +784,32 @@ func (c *Client) confirmOutage(ctx context.Context) bool {
 		slog.Debug("petitlyrics: liveness probe succeeded; sustained miss run is material, not a credential outage")
 		return false
 	}
+	if seeded && c.dropSeededControl(control) {
+		// The control came from the database, not from a hit in this process, and
+		// it missed. That is not evidence: the row may name a track this lane
+		// never served (a purged or retired row can keep its provider_lane). Drop
+		// it and judge the run as an unseeded lane would, by the count.
+		slog.Debug("petitlyrics: seeded liveness control missed; dropping it and falling back to the miss count")
+		return c.reportConfirmedOutage(false)
+	}
 	// The provider served this track before and does not now. That is evidence.
 	return c.reportConfirmedOutage(true)
+}
+
+// dropSeededControl forgets control if it is still the unverified seed, and
+// reports whether it was (#1195). Re-checked under the lock: a concurrent hit
+// may have replaced the control with an earned one while the probe was out, and
+// that one must survive.
+func (c *Client) dropSeededControl(control models.Track) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hasKnownGood || !c.knownGoodSeeded || c.knownGood != control {
+		return false
+	}
+	c.hasKnownGood = false
+	c.knownGoodSeeded = false
+	c.knownGood = models.Track{}
+	return true
 }
 
 // backOffProbe halves the miss run after a probe that could not reach the API, so
