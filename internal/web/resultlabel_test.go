@@ -206,3 +206,22 @@ func TestReportsRecentOutcomesShowsSyncTiers(t *testing.T) {
 func pathsJSONWeb(filename string) string {
 	return `[{"outdir":"/out","filename":"` + filename + `"}]`
 }
+
+// TestLineSyncedTooltipMakesNoSourceClaim pins the #1201 review fix: the worker
+// stamps the line tier under word_sync_mode=off, for non-word-capable lanes and
+// for cache-served results, so the tooltip may only describe the file on disk.
+func TestLineSyncedTooltipMakesNoSourceClaim(t *testing.T) {
+	for _, tile := range buildResultsTiles(reports.ResultsBreakdown{}) {
+		if tile.Label != "Line-synced" {
+			continue
+		}
+		if strings.Contains(tile.Tooltip, "every word-capable source") {
+			t.Errorf("Line-synced tooltip claims all word sources were checked: %q", tile.Tooltip)
+		}
+		if !strings.Contains(tile.Tooltip, "no word timing") {
+			t.Errorf("Line-synced tooltip must state the file has no word timing: %q", tile.Tooltip)
+		}
+		return
+	}
+	t.Fatal("no Line-synced tile")
+}

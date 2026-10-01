@@ -112,12 +112,12 @@ var resultBuckets = []resultBucket{
 	},
 	{
 		Label:   "Line-synced",
-		Tooltip: "Synced lyrics with line-level timing only; every word-capable source checked found no word data. Still upgrade-eligible.",
+		Tooltip: "The .lrc on disk has line-level timing and no word timing. It may still be upgraded.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
 	},
 	{
 		Label:   "Unsynced",
-		Tooltip: "Plain-text lyrics only (a .txt); no timing available from any source yet.",
+		Tooltip: "Plain-text lyrics only (a .txt), with no timing on disk.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.Unsynced },
 	},
 	{
@@ -127,7 +127,7 @@ var resultBuckets = []resultBucket{
 	},
 	{
 		Label:   "Tier unknown",
-		Tooltip: "A synced .lrc with no recorded tier: completed before tier tracking, served from cache or a lane with no word data, or later demoted by the timing guard. 'canticle scan reconcile-sync-tier' classifies most from the file itself.",
+		Tooltip: "A synced .lrc with no recorded tier: completed before tier tracking, served from cache, or later demoted by the timing guard. 'canticle scan reconcile-sync-tier' classifies most from the file itself.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.SyncedTierUnknown },
 	},
 	{
