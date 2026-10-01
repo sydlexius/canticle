@@ -42,6 +42,11 @@ const (
 // re-queued, so it is excluded too.
 const notWordRecheckQueued = ` AND COALESCE(word_timing_state, '') <> 'queued' AND upgrade_queued = 0`
 
+// NotParkedRecheckSQL is notWordRecheckQueued exported for read-only reports
+// (#638), so a report that must treat 'deferred' as "provider miss" excludes
+// the same non-miss rows the sweeps do rather than keeping a divergent copy.
+const NotParkedRecheckSQL = notWordRecheckQueued
+
 // WordRecheckOptions narrows the candidate set. Optional fields only SUBTRACT
 // scope, except RecheckAbsentBefore, which re-admits old 'absent' verdicts.
 type WordRecheckOptions struct {

@@ -325,7 +325,7 @@ The Dashboard (`/dashboard`) is the default landing page after you sign in - the
 - **Instrumental count.** The number of tracks marked instrumental.
 - **Recent outcomes.** The 20 most recently completed tracks (artist, title, album, result class, the provider lane that served it, and the completion time in the server's timezone when `TZ` is set, otherwise UTC). A synced result carries a colored tier badge: word-synced (green) or line-synced (blue) reads as such in the badge text; a tier-unknown synced result gets a muted grey badge reading "synced (tier unknown)", so the tier is stated in text, not by color alone.
 
-The Dashboard requires the web UI to be enabled and an admin session (or a trusted-network request), the same as the other UI pages. For the deeper per-report views (queue summary, recent outcomes, provider effectiveness, instrumental inventory, failure analysis), see the [Reports workspace](#reports-workspace) below.
+The Dashboard requires the web UI to be enabled and an admin session (or a trusted-network request), the same as the other UI pages. For the deeper per-report views (queue summary, recent outcomes, provider effectiveness, instrumental inventory, failure analysis, deferred misses), see the [Reports workspace](#reports-workspace) below.
 
 ## Web UI: Settings page
 
@@ -755,11 +755,11 @@ These are floors. Re-checks wait behind all fresh work and due retries. While th
 
 ## Reports workspace
 
-The web UI exposes five read-only report views under the Reports section. Every report runs a live database query at request time; there is no pre-aggregation or caching. The reports require the web UI to be enabled (`web_ui_enabled = true`).
+The web UI exposes read-only report views under the Reports section. Every report runs a live database query at request time; there is no pre-aggregation or caching. The reports require the web UI to be enabled (`web_ui_enabled = true`).
 
 ### Queue summary
 
-Shows the count of work queue items grouped by status: pending, processing, finished, settled (upgradable), failed, deferred, unavailable, and total. Finished and settled (upgradable) are the two halves of completed work - see the Dashboard section above. Use this as a quick health check - a rising `failed` count warrants a look at the Failure analysis report; a large `deferred` count is normal (those are benign misses awaiting their next retry).
+Shows the count of work queue items grouped by status: pending, processing, finished, settled (upgradable), failed, deferred, unavailable, and total. Finished and settled (upgradable) are the two halves of completed work - see the Dashboard section above. Use this as a quick health check - a rising `failed` count warrants a look at the Failure analysis report; a large `deferred` count is normal (those are benign misses awaiting their next retry, listed in Deferred misses).
 
 ### Recent outcomes
 
@@ -799,4 +799,8 @@ Use this to audit which tracks the detector marked instrumental and whether they
 
 ### Failure analysis
 
-Lists failed and deferred work queue items grouped by status and error reason, with a count per group, ordered most-frequent first. "Failed" rows hit a hard error; "deferred" rows are benign misses waiting for a retry. Grouping keeps the two separate because they require different responses - deferred rows self-resolve on their retry schedule, while failed rows may need manual intervention (`canticle queue retry <id>`).
+Lists FAILED work queue items grouped by error reason, with a count per group, ordered most-frequent first. This lists the rows behind the dashboard "failed" count, except legacy non-fetch rows (empty reason, zero attempts), which are excluded per #789, so the totals can differ by those rows. These rows hit a hard error and may need manual intervention (`canticle queue retry <id>`). Benign misses are a separate report, below.
+
+### Deferred misses
+
+Lists DEFERRED work queue items grouped by reason, most-frequent first. A deferred row is a benign miss (the providers had nothing yet) waiting on its retry schedule, so it self-resolves and needs no action; the report shows where catalog coverage is thin. It is deliberately not part of Failure analysis, so the failed count there stays small and meaningful.

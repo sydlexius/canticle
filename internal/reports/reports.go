@@ -595,13 +595,14 @@ type FailureGroup struct {
 	Count  int64
 }
 
-// FailureAnalysis returns failed and deferred work_queue rows grouped by reason
-// (last_error), with a count per group, ordered most-frequent first.
+// FailureAnalysis returns FAILED work_queue rows grouped by reason (last_error),
+// with a count per group, ordered most-frequent first. It covers status='failed'
+// only, so it lists the rows behind the dashboard "failed" counter (#638), except
+// legacy non-fetch rows (empty reason, zero attempts) excluded per #789, so the
+// totals can differ by those rows; deferred misses are a separate report, DeferredMisses, sharing the same grouping.
 //
-// Source: work_queue rows where status IN ('failed','deferred'), grouped by
-// (status, normalized last_error). Status is included in the grouping so a
-// deferred miss and a hard failure carrying the same last_error text are
-// reported separately. An empty last_error normalizes to queue.NoReasonRecorded
+// Source: work_queue rows where status = 'failed', grouped by normalized
+// last_error (see groupedReasons). An empty last_error normalizes to queue.NoReasonRecorded
 // (via COALESCE over NULLIF), matching internal/queue.CountFailuresByReason. A
 // row whose cause was destroyed by a release carries the distinct
 // "cause cleared by release" sentinel instead (queue.go's
@@ -667,17 +668,52 @@ type FailureGroup struct {
 // rather than mint the catch-all a prettier label, but only for the shape this
 // guard actually recognizes.
 func (r *Repo) FailureAnalysis(ctx context.Context) ([]FailureGroup, error) {
+	return r.groupedReasons(ctx, "failed")
+}
+
+// DeferredMisses returns DEFERRED work_queue rows grouped by reason, most
+// frequent first: benign misses waiting on their retry schedule (#638). Same
+// grouping, normalization and #789 guard as FailureAnalysis, scoped to
+// status='deferred'.
+func (r *Repo) DeferredMisses(ctx context.Context) ([]FailureGroup, error) {
+	return r.groupedReasons(ctx, "deferred")
+}
+
+// groupedReasons groups the work_queue rows of ONE status ('failed' or
+// 'deferred') by normalized last_error. The #789 guard is keyed per status: a
+// failed row is a non-fetch write at attempts=0, a deferred one at miss_count=0,
+// each only when last_error is also empty.
+func (r *Repo) groupedReasons(ctx context.Context, status string) ([]FailureGroup, error) {
+	if status != "failed" && status != "deferred" {
+		return nil, fmt.Errorf("reports: grouped reasons: unsupported status %q", status)
+	}
+	// 'deferred' is shared with non-miss writers, so the deferred report keeps
+	// only genuine provider misses (queue.Defer). Excluded, each parked for the
+	// worker rather than waiting on a catalog miss:
+	//   - word recheck (word_timing_state='queued', #982) and upgrade trips
+	//     (upgrade_queued=1, #553): via queue.NotParkedRecheckSQL, the same
+	//     predicate every miss sweep uses;
+	//   - refused waits (queue.DeferRefused, #950): a lane did not answer, so no
+	//     miss happened; marked by refused_waits > 0 (DeferRefused is its only
+	//     incrementer, and every settle zeroes it). A row refused and later a
+	//     real miss keeps refused_waits until it settles and is hidden too.
+	// 'failed' is a hard error from queue.Fail, never a parked non-miss, so it
+	// is left unfiltered.
+	extra := ""
+	if status == "deferred" {
+		extra = queue.NotParkedRecheckSQL + ` AND refused_waits = 0`
+	}
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT status, COALESCE(NULLIF(last_error, ''), ?) AS reason, COUNT(*) AS n
          FROM work_queue
-         WHERE status IN ('failed', 'deferred')
-           AND NOT (status = 'failed' AND attempts = 0 AND last_error = '')
-           AND NOT (status = 'deferred' AND miss_count = 0 AND last_error = '')
+         WHERE status = ?
+           AND NOT (last_error = ''
+                    AND CASE status WHEN 'failed' THEN attempts ELSE miss_count END = 0)`+extra+`
          GROUP BY status, reason
          ORDER BY n DESC, status, reason`,
-		queue.NoReasonRecorded)
+		queue.NoReasonRecorded, status)
 	if err != nil {
-		return nil, fmt.Errorf("reports: failure analysis: %w", err)
+		return nil, fmt.Errorf("reports: grouped reasons (%s): %w", status, err)
 	}
 	defer func() { _ = rows.Close() }()
 
