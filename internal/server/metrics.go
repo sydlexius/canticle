@@ -218,14 +218,14 @@ func writeLaneMetrics(w io.Writer, lanes []orchestrator.LaneState) {
 		}
 	}
 
-	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_open_until_seconds Unix time the lane's open window ends; 0 when not open.")
-	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_open_until_seconds gauge")
+	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_open_until_timestamp_seconds Unix time the lane's open window ends; 0 when not open.")
+	_, _ = fmt.Fprintln(w, "# TYPE mxlrcgo_lane_open_until_timestamp_seconds gauge")
 	for _, l := range lanes {
 		var until int64
 		if l.State == orchestrator.LaneStateOpen && !l.OpenUntil.IsZero() {
 			until = l.OpenUntil.Unix()
 		}
-		_, _ = fmt.Fprintf(w, "mxlrcgo_lane_open_until_seconds{lane=\"%s\"} %d\n", promEscape(l.Provider), until)
+		_, _ = fmt.Fprintf(w, "mxlrcgo_lane_open_until_timestamp_seconds{lane=\"%s\"} %d\n", promEscape(l.Provider), until)
 	}
 
 	_, _ = fmt.Fprintln(w, "# HELP mxlrcgo_lane_trips Consecutive circuit trips on the lane (throttle ramp position).")

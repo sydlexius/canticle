@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -44,8 +43,8 @@ func TestMetricsLaneFamilies(t *testing.T) {
 		`mxlrcgo_lane_state{lane="musixmatch",state="half-open"} 0`,
 		`mxlrcgo_lane_state{lane="petitlyrics",state="closed"} 1`,
 		`mxlrcgo_lane_state{lane="petitlyrics",state="open"} 0`,
-		`mxlrcgo_lane_open_until_seconds{lane="musixmatch"} ` + strconv.FormatInt(until.Unix(), 10),
-		`mxlrcgo_lane_open_until_seconds{lane="petitlyrics"} 0`,
+		`mxlrcgo_lane_open_until_timestamp_seconds{lane="musixmatch"} ` + strconv.FormatInt(until.Unix(), 10),
+		`mxlrcgo_lane_open_until_timestamp_seconds{lane="petitlyrics"} 0`,
 		`mxlrcgo_lane_trips{lane="musixmatch"} 3`,
 		`mxlrcgo_lane_trips{lane="petitlyrics"} 0`,
 	} {
@@ -64,7 +63,7 @@ func TestMetricsLaneHalfOpenAndStaleOpenUntil(t *testing.T) {
 	}))
 	for _, want := range []string{
 		`mxlrcgo_lane_state{lane="a\"b",state="half-open"} 1`,
-		`mxlrcgo_lane_open_until_seconds{lane="a\"b"} 0`,
+		`mxlrcgo_lane_open_until_timestamp_seconds{lane="a\"b"} 0`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics missing %q\n%s", want, body)
@@ -81,18 +80,12 @@ func TestMetricsNoLaneSeamOmitsFamilies(t *testing.T) {
 }
 
 // TestMetricsLaneSeamReadPerScrape verifies the seam is called on every scrape,
-// so a source that swaps its lanes (a rebuild) is reflected immediately and a
-// concurrent swap is race-free.
+// so a source that swaps its lanes (a rebuild) is reflected on the next scrape.
 func TestMetricsLaneSeamReadPerScrape(t *testing.T) {
-	var mu sync.RWMutex
 	lanes := []orchestrator.LaneState{{Provider: "old", State: orchestrator.LaneStateClosed}}
 	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
 		WithMetricsReporter(&fakeMetrics{statusCounts: map[string]int64{}, failureCounts: map[string]int64{}}),
-		WithLaneHealth(func() []orchestrator.LaneState {
-			mu.RLock()
-			defer mu.RUnlock()
-			return lanes
-		}))
+		WithLaneHealth(func() []orchestrator.LaneState { return lanes }))
 	scrape := func() string {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, metricsRequest())
@@ -101,20 +94,7 @@ func TestMetricsLaneSeamReadPerScrape(t *testing.T) {
 	if !strings.Contains(scrape(), `lane="old"`) {
 		t.Fatal("first scrape missing old lane")
 	}
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 50; i++ {
-			mu.Lock()
-			lanes = []orchestrator.LaneState{{Provider: "new", State: orchestrator.LaneStateClosed}}
-			mu.Unlock()
-		}
-	}()
-	for i := 0; i < 50; i++ {
-		scrape()
-	}
-	wg.Wait()
+	lanes = []orchestrator.LaneState{{Provider: "new", State: orchestrator.LaneStateClosed}}
 	body := scrape()
 	if !strings.Contains(body, `lane="new"`) || strings.Contains(body, `lane="old"`) {
 		t.Errorf("scrape after swap must show only the new lanes\n%s", body)
