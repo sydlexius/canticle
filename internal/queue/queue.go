@@ -414,6 +414,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 const dequeueRandomizedSQL = `UPDATE work_queue
          SET status = 'processing',
              prev_status = status,
+             claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
              batch_seq = NULL
          WHERE id = (
              SELECT id
@@ -432,6 +433,7 @@ const dequeueRandomizedSQL = `UPDATE work_queue
 const dequeueDeterministicSQL = `UPDATE work_queue
          SET status = 'processing',
              prev_status = status,
+             claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
              batch_seq = NULL
          WHERE id = (
              SELECT id
@@ -456,6 +458,7 @@ const dequeueDeterministicSQL = `UPDATE work_queue
 const dequeueBatchedClaimSQL = `UPDATE work_queue
          SET status = 'processing',
              prev_status = status,
+             claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
              batch_seq = NULL
          WHERE id = (
              SELECT id
