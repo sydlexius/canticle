@@ -194,3 +194,37 @@ func (b *Breaker) EverSucceeded() bool {
 	defer b.mu.Unlock()
 	return b.everProviderSuccess
 }
+
+// Snapshot is a point-in-time, read-only view of a breaker.
+type Snapshot struct {
+	// State is the state a caller would observe right now. An elapsed open
+	// window reads StateHalfOpen even before any Allow call has performed the
+	// transition, so the view never lags the real gate.
+	State BreakerState
+	// OpenUntil is the end of the open window; zero unless State is StateOpen.
+	OpenUntil time.Time
+	// Trips is the consecutive-trip count (the ramp position).
+	Trips int
+	// EverSucceeded reports a genuine provider success this session.
+	EverSucceeded bool
+}
+
+// Snapshot reads every observable field under ONE lock acquisition, so the
+// fields are mutually consistent. Unlike Allow it never mutates: observing a
+// breaker (a metrics scrape, a dashboard) must not consume its half-open
+// transition or otherwise change what the next real caller sees.
+func (b *Breaker) Snapshot() Snapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := Snapshot{Trips: b.consecutiveTrips, EverSucceeded: b.everProviderSuccess}
+	switch {
+	case !b.openUntil.IsZero() && b.now().Before(b.openUntil):
+		s.State = StateOpen
+		s.OpenUntil = b.openUntil
+	case !b.openUntil.IsZero() || b.probing:
+		s.State = StateHalfOpen
+	default:
+		s.State = StateClosed
+	}
+	return s
+}
