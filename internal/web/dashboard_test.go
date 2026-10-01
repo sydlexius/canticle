@@ -444,3 +444,57 @@ func TestHandleDashboard_NoCacheTile(t *testing.T) {
 		t.Error("dashboard must not render the lyrics-cache tile (removed)")
 	}
 }
+
+var (
+	dashTileAnchorRE  = regexp.MustCompile(`<a class="mx-dash-tile-link" href="([^"]+)">`)
+	dashInstrAnchorRE = regexp.MustCompile(`<a [^>]*>\s*<span class="mx-dash-tile-label">Instrumental`)
+)
+
+// TestHandleDashboard_QueueTilesLinkToBuckets: every bucket-backed tile is an
+// anchor whose href is a registered /queue route answering 200, covering every
+// registered bucket; the Instrumental tile (no bucket) renders no anchor.
+func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
+	mux := newReportsUIServer(t, openReportsTestDB(t))
+	rec := getQueue(t, mux, "/dashboard", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	matches := dashTileAnchorRE.FindAllStringSubmatch(body, -1)
+	if len(matches) != len(reports.Buckets()) {
+		t.Fatalf("tile anchors = %d, want %d (one per bucket)", len(matches), len(reports.Buckets()))
+	}
+	seen := map[string]bool{}
+	for _, m := range matches {
+		seen[m[1]] = true
+		if got := getQueue(t, mux, m[1], false); got.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", m[1], got.Code)
+		}
+	}
+	for _, b := range reports.Buckets() {
+		if !seen["/queue/"+string(b)] {
+			t.Errorf("no tile links to bucket %q", b)
+		}
+	}
+	if !strings.Contains(body, `<span class="mx-dash-tile-label">Instrumental</span>`) {
+		t.Error("Instrumental tile missing")
+	}
+	if dashInstrAnchorRE.MatchString(body) {
+		t.Error("Instrumental tile must not be a link")
+	}
+}
+
+// TestBuildQueueTilesHrefsAreRegisteredBuckets: each tile href parses back to a
+// registered bucket, so a typo or a retired key fails here.
+func TestBuildQueueTilesHrefsAreRegisteredBuckets(t *testing.T) {
+	for _, tile := range buildQueueTiles(reports.QueueSummary{}) {
+		key := strings.TrimPrefix(tile.Href, "/queue/")
+		if key == tile.Href {
+			t.Errorf("tile %q href %q is not under /queue/", tile.Label, tile.Href)
+			continue
+		}
+		if _, err := reports.ParseBucket(key); err != nil {
+			t.Errorf("tile %q href %q: %v", tile.Label, tile.Href, err)
+		}
+	}
+}
