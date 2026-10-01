@@ -197,3 +197,17 @@ func TestApplyEditRecordsSelfWrite(t *testing.T) {
 		t.Error("write not recorded with selfwrite")
 	}
 }
+
+func TestApplyEditRefusesWordTimedLines(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, "[00:01.00]one\n")
+	lines := []TimedLine{{StartMS: 1000, Text: "one", Words: []TimedWord{{StartMS: 1000, Text: "one"}}}}
+	if _, err := ApplyEdit(p, lines, nil, EditOptions{Roots: []string{root}, DurationSeconds: 30}); !errors.Is(err, ErrEditRefused) {
+		t.Fatalf("err = %v, want ErrEditRefused", err)
+	}
+	assertNoOrig(t, p)
+	if got := readFile(t, p); got != "[00:01.00]one\n" {
+		t.Errorf("file changed on refusal:\n%s", got)
+	}
+}

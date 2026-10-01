@@ -180,6 +180,14 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 	if !opts.ExpectMTime.IsZero() && !fi.ModTime().Equal(opts.ExpectMTime) {
 		return EditResult{}, ErrEditChanged
 	}
+	// The writer below emits line stamps only, so a line carrying word timings
+	// would silently lose them (a downgrade). Word-preserving edits are a later
+	// phase; until then such input is refused, never written.
+	for _, l := range lines {
+		if len(l.Words) > 0 {
+			return EditResult{}, ErrEditRefused
+		}
+	}
 	song := models.Song{}
 	for _, l := range lines {
 		song.Subtitles.Lines = append(song.Subtitles.Lines, models.Lines{Text: l.Text, Time: models.MsToTime(l.StartMS)})
