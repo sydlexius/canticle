@@ -3,5 +3,12 @@
     "parser": {
       "tailwindDirectives": true
     }
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!web/static/css/output.css",
+      "!web/static/js/*.min.js"
+    ]
   }
 }
