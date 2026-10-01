@@ -200,6 +200,81 @@ body {
   max-width: var(--mx-content-max-width);
 }
 
+/* -- Phone width (#1094) --------------------------------------------------
+   Below 768px the fixed sidebar would eat 220px of a ~390px viewport and the
+   content margin beside it forced horizontal scroll. Without JS the sidebar
+   becomes a static block above the content (always reachable). shell.js adds
+   .mx-js to <html>, which moves it off-canvas behind the .mx-nav-toggle button
+   in the top bar. Closed state uses visibility:hidden so off-canvas links leave
+   the tab order. The open drawer starts BELOW the top bar so the toggle stays
+   visible and tappable as its close control (WCAG 2.4.11). No inline styles:
+   CSP is style-src 'self'. */
+.mx-topbar {
+  display: none;
+}
+
+@media (max-width: 767.98px) {
+  .mx-shell {
+    --mx-topbar-height: 3.5rem;
+    flex-direction: column;
+  }
+
+  .mx-sidebar {
+    position: static;
+    width: auto;
+    border-inline-end: none;
+    border-block-end: 1px solid var(--mx-sidebar-border);
+  }
+
+  .mx-content {
+    margin-inline-start: 0;
+    padding: 1rem;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .mx-js .mx-topbar {
+    display: flex;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    box-sizing: border-box;
+    height: var(--mx-topbar-height);
+    align-items: center;
+    padding: 0 0.75rem;
+    background-color: var(--mx-sidebar-bg);
+    border-block-end: 1px solid var(--mx-sidebar-border);
+  }
+
+  .mx-nav-toggle {
+    font: inherit;
+    color: var(--mx-sidebar-text-hover);
+    background: none;
+    border: 1px solid var(--mx-sidebar-text);
+    border-radius: 0.375rem;
+    padding: 0.375rem 0.75rem;
+    cursor: pointer;
+  }
+
+  .mx-js .mx-sidebar {
+    position: fixed;
+    inset-block: var(--mx-topbar-height) 0;
+    inset-inline-start: 0;
+    width: min(var(--mx-sidebar-width), 85vw);
+    overflow-y: auto;
+    border-block-end: none;
+    border-inline-end: 1px solid var(--mx-sidebar-border);
+    visibility: hidden;
+    transform: translateX(-100%);
+    z-index: 30;
+  }
+
+  .mx-js .mx-sidebar[data-open="true"] {
+    visibility: visible;
+    transform: none;
+  }
+}
+
 /* Tokenless-Musixmatch notice banner (#385): a warning callout rendered at the
    top of the main content column on every shell page when serve started without
    a usable Musixmatch token. Amber-tinted to read as a notice, not an error,

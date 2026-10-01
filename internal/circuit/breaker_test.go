@@ -258,3 +258,45 @@ func TestConcurrentAccessIsRaceFree(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestSnapshotDoesNotMutateAndMatchesAllow(t *testing.T) {
+	b := New(testBase, testCap)
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	b.SetClock(func() time.Time { return now })
+
+	if s := b.Snapshot(); s.State != StateClosed || s.Trips != 0 || s.EverSucceeded {
+		t.Fatalf("fresh snapshot = %+v; want closed, 0 trips, never succeeded", s)
+	}
+	res := b.Trip()
+	if s := b.Snapshot(); s.State != StateOpen || !s.OpenUntil.Equal(res.OpenUntil) || s.Trips != 1 {
+		t.Fatalf("open snapshot = %+v; want open until %v, 1 trip", s, res.OpenUntil)
+	}
+
+	now = res.OpenUntil // window elapsed
+	for i := 0; i < 2; i++ {
+		// Repeated snapshots must stay half-open and must not clear openUntil.
+		if s := b.Snapshot(); s.State != StateHalfOpen || !s.OpenUntil.IsZero() {
+			t.Fatalf("elapsed snapshot %d = %+v; want half-open, zero OpenUntil", i, s)
+		}
+	}
+	if b.OpenUntil().IsZero() {
+		t.Fatal("Snapshot consumed the open window; it must not mutate")
+	}
+	if got := b.Allow(); got != StateHalfOpen {
+		t.Fatalf("Allow after snapshots = %v; want half-open", got)
+	}
+	if s := b.Snapshot(); s.State != StateHalfOpen {
+		t.Fatalf("post-Allow snapshot = %+v; want half-open (probing)", s)
+	}
+
+	b.RecordSuccess()
+	if s := b.Snapshot(); s.State != StateClosed || s.Trips != 0 || !s.EverSucceeded {
+		t.Fatalf("recovered snapshot = %+v; want closed, 0 trips, ever succeeded", s)
+	}
+
+	// EverSucceeded must survive a later trip: it is not tied to the trip count.
+	b.Trip()
+	if s := b.Snapshot(); s.State != StateOpen || s.Trips != 1 || !s.EverSucceeded {
+		t.Fatalf("re-tripped snapshot = %+v; want open, 1 trip, ever succeeded", s)
+	}
+}

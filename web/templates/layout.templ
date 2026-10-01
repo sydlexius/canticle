@@ -59,9 +59,21 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 			// self-contained and offline. defer keeps it non-render-blocking; htmx
 			// processes the DOM on DOMContentLoaded.
 			<script src="/static/js/htmx.min.js" defer></script>
+			// shell.js wires the phone-width sidebar toggle (#1094). It is a
+			// progressive enhancement: without it the sidebar stays a static block.
+			<script src="/static/js/shell.js" defer></script>
 		</head>
 		<body>
 			<div class="mx-shell">
+				// Phone-width top bar (#1094). Hidden by CSS above 768px and, until
+				// shell.js adds .mx-js to <html>, at every width: without JS the
+				// sidebar renders as a static block above the content, so the toggle
+				// would do nothing.
+				<header class="mx-topbar">
+					<button type="button" class="mx-nav-toggle" aria-expanded="false" aria-controls="mx-sidebar">
+						<span class="mx-nav-toggle-label">Menu</span>
+					</button>
+				</header>
 				@Sidebar(active, version, reports)
 				<main class="mx-content">
 					// The banner sits OUTSIDE #mx-main so it survives htmx report-rail
