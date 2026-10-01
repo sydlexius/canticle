@@ -15,6 +15,9 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 			if view.After > 0 {
 				<a class="mx-queue-link" href={ templ.SafeURL("/queue/" + view.Key) }>Back to start of list</a>
 			}
+			if view.ReviveLink {
+				<a class="mx-queue-link" href="/queue/unavailable/revive">Revive retired tracks</a>
+			}
 		</p>
 		if len(view.Rows) == 0 {
 			if view.After > 0 {

@@ -1,0 +1,80 @@
+package templates
+
+// ReviveRetiredPage is /queue/unavailable/revive (#598): the blast radius of
+// reviving retired tracks, a library picker (a plain GET form, so previewing
+// another scope needs no script), and the confirm form, which POSTs the
+// previewed scope. Failed rows get no action here: they are already retried
+// automatically.
+templ ReviveRetiredPage(version string, view ReviveView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout("Revive retired tracks", "/dashboard", version, reports, "/static/css/queue.css", musixmatchInactive, musixmatchServing) {
+		<h1 class="mx-page-title">Revive retired tracks</h1>
+		<p class="mx-page-subtitle">
+			Retired tracks were given up on after repeated misses. Reviving puts them back in the
+			queue at low priority so they are looked up again.
+		</p>
+		<p class="mx-queue-nav">
+			<a class="mx-queue-link" href="/queue/unavailable">Back to unavailable tracks</a>
+			<a class="mx-queue-link" href="/dashboard">Back to dashboard</a>
+		</p>
+		if view.Error != "" {
+			<p class="mx-revive-error mx-status-error" role="alert">{ view.Error }</p>
+		}
+		if view.Result != nil {
+			<p class="mx-revive-result" role="status">
+				Revived { itoa64(view.Result.Revived) } tracks ({ view.Result.Scope }).
+			</p>
+		}
+		if view.Total == 0 {
+			<p class="mx-dash-empty">No retired tracks to revive.</p>
+		} else {
+			<div class="mx-table-wrap mx-queue-wrap">
+				<table class="mx-table" aria-label="Retired tracks per library">
+					<thead>
+						<tr>
+							<th>Library</th>
+							<th>Retired tracks</th>
+							<th>Also in another library</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, lib := range view.Libraries {
+							<tr>
+								<td>{ lib.Name }</td>
+								<td class="mx-cell-mono">{ itoa64(lib.Count) }</td>
+								<td class="mx-cell-mono">{ itoa64(lib.Shared) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
+			<p class="mx-revive-note">
+				All libraries: { itoa64(view.Total) } tracks, { itoa64(view.Shared) } shared by more than one
+				library, { itoa64(view.Unlinked) } not linked to any library. A track shared by several
+				libraries is one queue entry: reviving it for one library looks it up again for every
+				library that shares it.
+			</p>
+			<form class="mx-revive-picker" method="get" action="/queue/unavailable/revive">
+				<label for="mx-revive-library">Library</label>
+				<select class="mx-settings-select" id="mx-revive-library" name="library">
+					<option value="all" selected?={ view.Selected == "all" }>All libraries</option>
+					for _, lib := range view.Libraries {
+						<option value={ lib.ID } selected?={ view.Selected == lib.ID }>{ lib.Name }</option>
+					}
+				</select>
+				<button type="submit" class="mx-run-button">Preview</button>
+			</form>
+			if view.Manageable {
+				<form class="mx-revive-confirm" method="post" action="/queue/unavailable/revive">
+					<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+					<input type="hidden" name="library" value={ view.Selected }/>
+					<input type="hidden" name="expected" value={ itoa64(view.ScopeCount) }/>
+					<p class="mx-revive-note">
+						This will revive { itoa64(view.ScopeCount) } tracks for { view.ScopeLabel },
+						{ itoa64(view.ScopeShared) } of them shared with another library.
+					</p>
+					<button type="submit" class="mx-run-button">Revive { itoa64(view.ScopeCount) } tracks</button>
+				</form>
+			}
+		}
+	}
+}

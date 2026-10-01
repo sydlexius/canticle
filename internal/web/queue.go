@@ -17,12 +17,13 @@ import (
 // fragment) lists. A display bound, far under reports.MaxBucketLimit.
 const queuePageSize = 50
 
-// QueueActions is the seam for write actions on the queue pages (#598-5
-// implements revive behind it). The read-only view never calls it; a nil
-// UI.queueActions means no action UI is rendered at all.
+// QueueActions is the seam for write actions on the queue pages: the revive
+// flow in queue_actions.go calls it. The read-only view never does; a nil
+// UI.queueActions means no action UI is rendered at all. *queue.DBQueue
+// satisfies it (wired in the server layer).
 type QueueActions interface {
-	CountRecheckRetired(ctx context.Context, libraryID *int64) (int64, error)
-	RecheckRetired(ctx context.Context, libraryID *int64) (int64, error)
+	RecheckRetiredPreview(ctx context.Context) (queue.RecheckRetiredPreview, error)
+	RecheckRetiredExpect(ctx context.Context, libraryID *int64, expected int64) (int64, error)
 }
 
 // AttachQueueActions wires the queue action backend onto an already-constructed
@@ -33,6 +34,8 @@ func (u *UI) AttachQueueActions(a QueueActions) { u.queueActions = a }
 // are guarded exactly like every other page route.
 func (u *UI) registerQueueRoutes(reg routeReg) {
 	reg("GET /queue/{bucket}", u.handleQueueBucket)
+	reg("GET /queue/unavailable/revive", u.handleReviveRetiredPreview)
+	reg("POST /queue/unavailable/revive", u.handleReviveRetiredConfirm)
 }
 
 // queueBucketInfo is the heading and one-line meaning of each bucket page.
@@ -85,6 +88,9 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	}
 	info := queueBucketInfo[bucket]
 	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: after}
+	// Only the retired bucket can be revived; failed rows are already retried,
+	// so no other bucket offers an action.
+	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
 	for _, row := range rows {
 		view.Rows = append(view.Rows, buildQueueRow(row))
 	}

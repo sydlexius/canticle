@@ -1605,6 +1605,24 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 // (the upsert keeps work_queue.status for deferred/done/unavailable/processing
 // rows), so no duplicate work_queue row is created alongside the revived one.
 func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, error) {
+	return q.recheckRetired(ctx, libraryID, nil)
+}
+
+// ErrRecheckRetiredCountChanged is returned by RecheckRetiredExpect when the
+// scope's retired population no longer matches the count the caller expected.
+// Nothing is revived.
+var ErrRecheckRetiredCountChanged = errors.New("queue: retired count changed since it was previewed")
+
+// RecheckRetiredExpect is RecheckRetired bound to a previewed count: it recounts
+// the scope with the same predicate inside the write transaction and revives
+// nothing, returning ErrRecheckRetiredCountChanged, when the count differs. The
+// check and the write therefore see one snapshot, with no window for another
+// row to retire in between.
+func (q *DBQueue) RecheckRetiredExpect(ctx context.Context, libraryID *int64, expected int64) (int64, error) {
+	return q.recheckRetired(ctx, libraryID, &expected)
+}
+
+func (q *DBQueue) recheckRetired(ctx context.Context, libraryID *int64, expected *int64) (int64, error) {
 	now := formatTime(q.now())
 	libClause, libArgs := recheckLibraryClause(libraryID)
 
@@ -1613,6 +1631,19 @@ func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, 
 		return 0, fmt.Errorf("queue: begin recheck retired tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if expected != nil {
+		var actual int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM work_queue WHERE `+recheckRetiredWhere+libClause, //nolint:gosec // reason: G202: recheckRetiredWhere is a package constant and libClause a hardcoded constant from recheckLibraryClause, never user input
+			append([]any{missLimitReachedError}, libArgs...)...,
+		).Scan(&actual); err != nil {
+			return 0, fmt.Errorf("queue: recheck retired expected count: %w", err)
+		}
+		if actual != *expected {
+			return 0, ErrRecheckRetiredCountChanged
+		}
+	}
 
 	// Collect the IDs of retired rows we are about to revive so the
 	// scan_results writeback can target exactly those rows.
