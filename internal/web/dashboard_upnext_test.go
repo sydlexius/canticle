@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
@@ -228,6 +229,135 @@ func TestHandleDashboard_UpNextEmpty(t *testing.T) {
 	// No ordered table when the buffer is empty.
 	if strings.Contains(body, `aria-label="Upcoming queue work"`) {
 		t.Error("empty state must not render the ordered table")
+	}
+}
+
+// insertProcessing inserts a processing row with an explicit claimed_at ("" =
+// unknown: claimed_at NULL and updated_at blank, which needs the updated_at
+// trigger dropped since it refires on any UPDATE).
+func insertProcessing(t *testing.T, sqlDB *sql.DB, artist, title, claimedAt string) {
+	t.Helper()
+	ctx := context.Background()
+	insertBuffered(t, sqlDB, artist, title, "Album "+title, "processing", 0, 0)
+	stmts := []string{`UPDATE work_queue SET claimed_at = ? WHERE title = ?`}
+	args := []any{claimedAt, title}
+	if claimedAt == "" {
+		if _, err := sqlDB.ExecContext(ctx, `DROP TRIGGER IF EXISTS update_work_queue_updated_at`); err != nil {
+			t.Fatalf("drop trigger: %v", err)
+		}
+		stmts = []string{`UPDATE work_queue SET claimed_at = NULL, updated_at = '' WHERE title = ?`}
+		args = []any{title}
+	}
+	if _, err := sqlDB.ExecContext(ctx, stmts[0], args...); err != nil {
+		t.Fatalf("stamp claimed_at: %v", err)
+	}
+}
+
+func dashboardBody(t *testing.T, sqlDB *sql.DB) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	newReportsUIServer(t, sqlDB).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard status = %d", rec.Code)
+	}
+	return rec.Body.String()
+}
+
+// TestHandleDashboard_UpNextInFlightClaimed claims a row through the real queue
+// and confirms it stays visible in Up Next, above the buffered rows, as a live
+// claim with no stuck badge.
+func TestHandleDashboard_UpNextInFlightClaimed(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertBuffered(t, sqlDB, "Artist Live", "Track Live", "Album Live", "pending", 0, 1)
+	insertBuffered(t, sqlDB, "Artist Wait", "Track Wait", "Album Wait", "pending", 0, 2)
+	item, err := queue.NewDBQueue(sqlDB).Dequeue(context.Background())
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if item.Inputs.Track.ArtistName != "Artist Live" {
+		t.Fatalf("claimed %q, want Artist Live", item.Inputs.Track.ArtistName)
+	}
+
+	body := dashboardBody(t, sqlDB)
+	iLive, iWait := strings.Index(body, "Track Live"), strings.Index(body, "Track Wait")
+	if iLive < 0 || iWait < 0 || iLive >= iWait {
+		t.Fatalf("claimed row must render above buffered rows: live=%d wait=%d", iLive, iWait)
+	}
+	if !strings.Contains(body, `class="mx-upnext-inflight"`) || !strings.Contains(body, ">in flight<") {
+		t.Errorf("claimed row missing in-flight highlight/label: %s", excerptAround(body, "Track Live"))
+	}
+	if strings.Contains(body, "stuck?") {
+		t.Error("a just-claimed row must not carry the stuck badge")
+	}
+}
+
+// TestHandleDashboard_UpNextInFlightLiveAndOrphan renders a live claim beside
+// an orphan: both appear, and only the orphan is flagged stuck.
+func TestHandleDashboard_UpNextInFlightLiveAndOrphan(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	now := time.Now().UTC()
+	insertProcessing(t, sqlDB, "Artist L", "Track Live", now.Add(-2*time.Minute).Format(time.RFC3339))
+	insertProcessing(t, sqlDB, "Artist O", "Track Orphan", now.Add(-3*time.Hour).Format(time.RFC3339))
+
+	body := dashboardBody(t, sqlDB)
+	rows := strings.Split(body, `class="mx-upnext-inflight"`)
+	if len(rows) != 3 {
+		t.Fatalf("want 2 in-flight rows, got %d", len(rows)-1)
+	}
+	// Oldest claim first: the orphan, then the live row.
+	orphan := strings.SplitN(rows[1], "</tr>", 2)[0]
+	live := strings.SplitN(rows[2], "</tr>", 2)[0]
+	if !strings.Contains(orphan, "Track Orphan") || !strings.Contains(orphan, "stuck?") || !strings.Contains(orphan, ">3h<") {
+		t.Errorf("orphan row wrong: %s", orphan)
+	}
+	if !strings.Contains(live, "Track Live") || !strings.Contains(live, ">2m<") {
+		t.Errorf("live row wrong: %s", live)
+	}
+	if strings.Contains(live, "stuck?") {
+		t.Error("live claim must not carry the stuck badge")
+	}
+}
+
+// TestHandleDashboard_UpNextInFlightUnknownClaim: no recorded claim time reads
+// "unknown" with no badge (no age is known to judge).
+func TestHandleDashboard_UpNextInFlightUnknownClaim(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertProcessing(t, sqlDB, "Artist U", "Track Unknown", "")
+	body := dashboardBody(t, sqlDB)
+	if !strings.Contains(body, ">unknown<") {
+		t.Errorf("zero ClaimedAt must render unknown: %s", excerptAround(body, "Track Unknown"))
+	}
+	if strings.Contains(body, "stuck?") {
+		t.Error("unknown claim time must not carry the stuck badge")
+	}
+}
+
+func TestBuildInFlightRows_StuckBoundary(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	rows := buildInFlightRows([]reports.InFlightItem{
+		{Title: "Edge", ClaimedAt: now.Add(-dashboardStuckAfter)},
+		{Title: "Past", ClaimedAt: now.Add(-dashboardStuckAfter - time.Second)},
+	}, now)
+	if rows[0].Stuck || !rows[1].Stuck {
+		t.Errorf("boundary: edge stuck=%v past stuck=%v, want false/true", rows[0].Stuck, rows[1].Stuck)
+	}
+}
+
+// TestHandleDashboard_UpNextInFlightPrivacy: the in-flight row shows artist and
+// title (session-guarded page) but never a source path.
+func TestHandleDashboard_UpNextInFlightPrivacy(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	insertProcessing(t, sqlDB, "Artist P", "Track P", time.Now().UTC().Format(time.RFC3339))
+	if _, err := sqlDB.ExecContext(context.Background(),
+		`UPDATE work_queue SET source_path = '/private/music/secret.flac' WHERE title = 'Track P'`); err != nil {
+		t.Fatalf("set source_path: %v", err)
+	}
+	body := dashboardBody(t, sqlDB)
+	if !strings.Contains(body, "Track P") {
+		t.Fatal("in-flight row missing")
+	}
+	if strings.Contains(body, "/private/music") || strings.Contains(body, "secret.flac") {
+		t.Error("in-flight panel leaked a source path")
 	}
 }
 

@@ -31,7 +31,7 @@ templ dashboardContent(view DashboardView) {
 		@dashQueueTiles(view.QueueTiles, view.QueueChart)
 		@dashResultsTiles(view.ResultsTiles)
 		@dashProviderTiles(view.ProviderTiles)
-		@dashUpNext(view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
+		@dashUpNext(view.InFlightRows, view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
 		@dashRecentOutcomes(view.RecentRows)
 		@dashNeedsAttention(view.AttentionRows, view.AttentionLimit)
 		<p class="mx-dash-maintenance-note" title="Stacked (multi-timestamp) .lrc sidecars render incorrectly in simple players; reconcile-lrc expands them to one cue per line.">
@@ -320,14 +320,14 @@ templ attentionTable(rows []AttentionRow, emptyMsg string) {
 // cooldown counts only, with no ordered list and no ordering claim -- the empty
 // value carries that pre-formatted line. Reuses the mx-table styling from
 // dashRecentOutcomes so the two tables read as one system.
-templ dashUpNext(rows []UpNextRow, header, empty string) {
+templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-upnext-heading"
-		title={ dashUpNextTitle(len(rows) == 0) }
+		title={ dashUpNextTitle(len(rows)+len(inFlight) == 0) }
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-upnext-heading">Up Next</h2>
-		if len(rows) == 0 {
+		if len(rows)+len(inFlight) == 0 {
 			<p class="mx-dash-empty">{ empty }</p>
 		} else {
 			<p class="mx-dash-section-sub">{ header }</p>
@@ -344,6 +344,21 @@ templ dashUpNext(rows []UpNextRow, header, empty string) {
 						</tr>
 					</thead>
 					<tbody>
+						for _, f := range inFlight {
+							<tr class="mx-upnext-inflight">
+								<td class="mx-cell-mono mx-upnext-pos">-</td>
+								<td>{ f.Artist }</td>
+								<td>{ f.Title }</td>
+								<td>{ f.Album }</td>
+								<td>
+									<span class="mx-upnext-tier mx-upnext-tier-inflight">in flight</span>
+									if f.Stuck {
+										<span class="mx-upnext-tier mx-upnext-tier-stuck" title="Claimed longer ago than any single item should take. A crashed run can leave a row like this until restart.">stuck?</span>
+									}
+								</td>
+								<td class="mx-cell-mono mx-upnext-waited" title="Time since the worker claimed this row">{ f.Elapsed }</td>
+							</tr>
+						}
 						for _, row := range rows {
 							<tr>
 								<td class="mx-cell-mono mx-upnext-pos">{ row.Position }</td>

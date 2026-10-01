@@ -262,6 +262,28 @@
   background: transparent;
 }
 
+/* In-flight rows (#599): highlighted so a claimed row reads apart from the
+ * buffered ones. The text ("in flight", "stuck?") states the status; the tint
+ * and badge hue only reinforce it. Badges never wrap. */
+.mx-upnext-inflight {
+  background: var(--mx-accent-glow);
+}
+
+.mx-upnext-inflight .mx-upnext-tier {
+  white-space: nowrap;
+}
+
+.mx-upnext-tier-inflight {
+  color: var(--mx-content-text);
+  background: transparent;
+}
+
+.mx-upnext-tier-stuck {
+  margin-left: 0.35rem;
+  color: var(--mx-chart-deferred);
+  background: rgba(245, 158, 11, 0.12);
+}
+
 /* -- Maintenance summary note ----------------------------------------------- */
 /* Shares the metrics footer note's muted, small-text treatment (#929) so the
    two read as one system, but carries its own top border/margin rather than

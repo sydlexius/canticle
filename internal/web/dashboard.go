@@ -31,6 +31,16 @@ const dashboardAttentionLimit = 10
 // batch_size sees the first N; the buffer never lists more than batch_size rows.
 const dashboardUpNextLimit = 50
 
+// dashboardStuckAfter is how long a row may sit in 'processing' before the Up
+// Next panel flags it "stuck?" (#599, assumption A4). It is a display hint, not
+// a verdict. The worst legitimate single item is bounded by the real client
+// timeouts: the detector (3m, detector/http.go) and verification (2m,
+// verification/verification.go) calls plus up to three provider lanes at 30s
+// each (musixmatch/petitlyrics/innertube clients), about 6.5 minutes, so 10
+// minutes sits clearly past any live claim. An orphan left by a crash stays
+// 'processing' until startup recovery and so ages past it.
+const dashboardStuckAfter = 10 * time.Minute
+
 // AttachLaneHealth wires the per-lane circuit-state source onto the dashboard
 // (#488). Pass a method value on the owner (worker.LaneHealth), never a captured
 // orchestrator: it is called on every dashboard request and must see the
@@ -111,6 +121,12 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	}
 	view.AttentionRows = buildAttentionRows(attention, serverLoc)
 	view.AttentionLimit = dashboardAttentionLimit
+
+	inFlight, err := u.reports.InFlight(ctx)
+	if err != nil {
+		return templates.DashboardView{}, fmt.Errorf("dashboard: in flight: %w", err)
+	}
+	view.InFlightRows = buildInFlightRows(inFlight, time.Now())
 
 	upNext, err := u.reports.UpNext(ctx, dashboardUpNextLimit)
 	if err != nil {
@@ -197,6 +213,28 @@ func buildUpNextRows(items []reports.UpNextItem, now time.Time) []templates.UpNe
 			Tier:     tierLabel(it.Priority),
 			Waited:   formatWaited(it.CreatedAt, now),
 		})
+	}
+	return rows
+}
+
+// buildInFlightRows shapes claimed (status='processing') rows into the panel's
+// top rows (#599). Elapsed is time since the claim; an unknown claim time
+// (zero) renders "unknown" and is never flagged stuck, since no age is known.
+// Several rows are expected: a live claim can sit beside a crash orphan.
+func buildInFlightRows(items []reports.InFlightItem, now time.Time) []templates.InFlightRow {
+	rows := make([]templates.InFlightRow, 0, len(items))
+	for _, it := range items {
+		row := templates.InFlightRow{
+			Artist:  it.Artist,
+			Title:   it.Title,
+			Album:   it.Album,
+			Elapsed: "unknown",
+		}
+		if !it.ClaimedAt.IsZero() {
+			row.Elapsed = formatWaited(it.ClaimedAt, now)
+			row.Stuck = now.Sub(it.ClaimedAt) > dashboardStuckAfter
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }
