@@ -77,7 +77,7 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # while the base digest predates the fix.
 # Raise/drop when the base index ships it by default.
 # libpng floor pinned to remediate CVE-2026-46675 (LOW, code-scanning alert 137),
-# present in 1.6.58-r1 and fixed in the 1.6.59-r0 the Alpine 3.24 index now ships.
+# present in 1.6.58-r1 and fixed in 1.6.59-r0, which the Alpine 3.24 index now ships.
 # Arrives TRANSITIVELY via ffmpeg, so `apk upgrade` alone leaves 1.6.58-r1 in
 # place while the base digest predates the fix. Raise/drop when the base index
 # ships it by default.
