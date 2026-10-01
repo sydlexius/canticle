@@ -43,6 +43,55 @@ var replacements = []struct {
 	re   *regexp.Regexp
 	with string
 }{
+	// URLs (#1167). FIRST, because the bare-path rule below would otherwise
+	// mangle "//host/path" and strand the scheme.
+	//
+	// A file:// or smb:// URL is a library PATH in URL form, so it may contain
+	// spaces ("smb://nas/music/Some Artist/x.flac"). It follows the path rules'
+	// delimiter discipline: up to ": ", a quote, a tab or a newline...
+	{regexp.MustCompile(`(?i)\b(?:file|smb)://[^"'\t\n<>]*?(: |"|'|\t|\n)`), `<url>${1}`},
+	// ...or to end of TEXT when its last segment has no whitespace, the same
+	// test the verb rule below uses to tell a path tail from trailing prose.
+	//
+	// No (?m) here, nor on the Windows extension rule, the "output " rule or
+	// the unprefixed extension rule below: each has a delimited sibling whose
+	// delimiter set includes "\n", so a path that ends a line INSIDE the text
+	// is claimed before "$" is tried, and "$" only ever sees the end of the
+	// whole value. A (?m) there was dead (no test could tell it apart), so it is
+	// gone rather than left implying a case it does not handle. The verb rule
+	// and the track rule keep theirs; each says why.
+	{regexp.MustCompile(`(?i)\b(?:file|smb)://(?:[^"'\t\n<>]*/)?[^/\s"'<>]*$`), `<url>`},
+	// Any other URL, with a bracketed IPv6 host ("http://[fd00::1]:8080/x") and
+	// its whole query string: a request URL can carry credential-like parameters
+	// ("?usertoken=..."). Host, path and query all stop only at whitespace, a
+	// quote or an angle bracket. The path deliberately CONSUMES ")" and "]": an
+	// earlier version stopped there, so "/a(b)c?usertoken=SECRET" left the whole
+	// query behind. The cost is that a URL wrapped in "(...)" takes its closing
+	// paren with it, which is stable and leaks nothing.
+	{regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9+.-]*://(?:\[[0-9A-Fa-f:.]+\])?[^\s"'<>?]*(?:\?[^\s"'<>]*)?`), `<url>`},
+	// A Windows drive path or UNC path (\\host\share\...), quoted or not, up to
+	// ": ", a quote, a tab or a newline. NOT end of line: "open D:\x.flac
+	// permission denied" and "... checksum mismatch" are two causes, and an
+	// end-of-line exit merged them.
+	{regexp.MustCompile(`(?:\b[A-Za-z]:\\|\\\\[^\\\s"]+\\)[^"\t\n]*?(: |"|\t|\n)`), `<path>${1}`},
+	// A Windows/UNC path that ends the text in a KNOWN audio or sidecar
+	// extension: the extension proves the path IS the tail, as in the POSIX
+	// tail rule below (see mediaExt for why it is an allowlist).
+	{regexp.MustCompile(`(?:\b[A-Za-z]:\\|\\\\[^\\\s"]+\\)[^"\t\n]*` + mediaExt + `$`), `<path>`},
+	// Free-text track identity (#1167, #1164). Anchored to the one real emitter,
+	// lyrics.LRCWriter's "nothing to save for <artist> - <title>"; no other
+	// emitter in internal/ prints a track after a fixed phrase. Deliberately NOT
+	// a generic "no results for": petitlyrics.ErrProviderUnavailable's "no
+	// results for 20 consecutive lookups (application id revoked?)" is fixed
+	// text that must survive. Stops at ": " followed by a LOWER-CASE letter, so
+	// a cause in Go's error convention ("...: context deadline exceeded")
+	// survives for grouping and Classify, while a title's own ": Part Two" (and
+	// a " (feat. Other Artist)", hence no " (" stop) is still stripped. The
+	// writer's error is innermost today, so no cause follows it in practice; a
+	// title with ": lower-case" text leaves that tail, the accepted cost of not
+	// erasing a cause. (?m) so a line inside an errors.Join value is caught. RE2
+	// has no lookahead, so the delimiter letter is captured and restored.
+	{regexp.MustCompile(`(?m)\bnothing to save for [^\n]*?(: [a-z]|$)`), `nothing to save for <track>${1}`},
 	// A quoted absolute path, e.g. output dir "/Share/Music/...". Handled before
 	// the bare-path rule so the quotes are consumed with it rather than left as
 	// an empty pair.
@@ -102,13 +151,44 @@ var replacements = []struct {
 	// left alone rather than guessed at -- see pathToEOL below, which handles the
 	// one shape where end-of-line is provably safe. RE2 has no lookahead, so the
 	// delimiter is captured and restored rather than peeked at.
-	{regexp.MustCompile(`/[^"\n]*?(: |\n)`), `<path>${1}`},
+	//
+	// A tab is a delimiter too (#1167): no library path contains one, and a
+	// tab-separated cause must survive like a ": "-separated one.
+	{regexp.MustCompile(`/[^"\t\n]*?(: |\t|\n)`), `<path>${1}`},
+	// A path after a known path-taking verb that ends the line with no delimiter
+	// (#1167), e.g. "stat /srv/Some Artist/Album" (no extension, so the tail
+	// rule below cannot claim it). Only when the LAST segment has no whitespace:
+	// that is what separates a path tail from a path followed by prose, so
+	// "read /mnt/a permission denied" keeps its cause. POSIX, drive and UNC
+	// roots. The verbs are the os.PathError/LinkError ops plus ffmpeg's wrapper.
+	// (?m) is live here, unlike the tail rules: a bare UNC host ("\\nas") has
+	// no second backslash, so no delimited sibling claims it mid-text.
+	{regexp.MustCompile(`(?m)\b(open|stat|lstat|read|write|mkdir|rename|remove|readdir|opendir|symlink|link|ffmpeg exited:) (?:/|[A-Za-z]:\\|\\\\)(?:[^"\t\n]*[/\\])?[^/\\\s"]*$`), `${1} <path>`},
 	// A path that ends the line, but ONLY when the line has no further text after
 	// it -- i.e. the path IS the tail. Anchored to a quote or a known
 	// path-introducing token so an unquoted path followed by prose (the case
 	// above) is never consumed.
-	{regexp.MustCompile(`(output |file |path )/[^"\n]*$`), `${1}<path>`},
+	{regexp.MustCompile(`(output |file |path )/[^"\t\n]*$`), `${1}<path>`},
+	// An unprefixed path that ends the text in a known extension (#1167), e.g.
+	// "open /share/Music/A B/track.flac". The extension is what proves the path
+	// IS the tail: "read /mnt/a permission denied" ends in prose, has no
+	// extension, and keeps its diagnostic. A directory with no extension and no
+	// delimiter is still left alone rather than guessed at.
+	{regexp.MustCompile(`(^|\s)/[^"\t\n]*` + mediaExt + `$`), `${1}<path>`},
 }
+
+// mediaExt matches a trailing extension canticle actually reads or writes:
+// the audio formats a library holds, the sidecars it writes, and the temp
+// file's suffix. Case-insensitive, since "TRACK.FLAC" is as real as
+// "track.flac".
+//
+// AN ALLOWLIST, DELIBERATELY. The first version accepted any 1-5 alphanumeric
+// token after a dot, so every trailing dotted word read as an extension and
+// erased the prose before it: "read /mnt/a timed out after 2.5" and "... after
+// 3.0" merged, as did "... in v1.2" and "... via host.com", and Musixmatch's
+// own "Cannot GET /ws/1.1/track.get" error body merged with ".../macro.get".
+// That is the over-normalization this package exists to prevent.
+const mediaExt = `\.(?i:flac|mp3|m4a|mp4|ogg|oga|opus|wav|aac|wma|ape|wv|dsf|dff|aif|aiff|alac|lrc|elrc|txt|tmp)`
 
 // Normalize returns a stable grouping key for one last_error value.
 //
