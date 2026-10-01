@@ -117,11 +117,19 @@
 
   // Leaving phone width with the drawer open would strand aria-expanded="true"
   // on a hidden button; normalize it.
-  phone.addEventListener('change', function (ev) {
+  function onPhoneChange(ev) {
     if (!ev.matches) {
       close();
     }
-  });
+  }
+  if (typeof phone.addEventListener === 'function') {
+    phone.addEventListener('change', onPhoneChange);
+  } else if (typeof phone.addListener === 'function') {
+    // Safari < 14 only has the deprecated addListener.
+    phone.addListener(onPhoneChange);
+  } else {
+    console.error('shell.js: matchMedia change events unsupported; drawer will not auto-close on resize');
+  }
 
   // History: snapshot closed, and normalize whatever a restore brings back.
   document.addEventListener('htmx:beforeHistorySave', close);
