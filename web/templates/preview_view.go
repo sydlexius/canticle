@@ -1,0 +1,65 @@
+package templates
+
+import (
+	"context"
+	"html"
+	"io"
+
+	"github.com/a-h/templ"
+)
+
+// previewWords writes a line's word spans with the exact separators between
+// them. It is Go rather than templ markup because templ collapses the
+// whitespace between sibling nodes on separate lines into one space, which
+// would put a space between two CJK words the source never separated.
+func previewWords(l PreviewLine) templ.Component {
+	return templ.ComponentFunc(func(_ context.Context, w io.Writer) error {
+		var err error
+		put := func(s string) {
+			if err == nil {
+				_, err = io.WriteString(w, s)
+			}
+		}
+		for _, word := range l.Words {
+			put(html.EscapeString(word.Before))
+			put(`<span class="mx-preview-word" data-start-ms="` + html.EscapeString(word.StartMS) + `">` + html.EscapeString(word.Text) + `</span>`)
+		}
+		return err
+	})
+}
+
+// PreviewView is the view model for the preview player page (#481). The handler
+// maps a reports.PreviewTarget and the parsed sidecars onto it, so the templ
+// file stays free of lyrics-package concerns. It carries library content, so
+// the page is session-guarded and no-store.
+type PreviewView struct {
+	Artist string
+	Title  string
+	Album  string
+	// AudioSrc is the same-origin audio route for the row.
+	AudioSrc string
+	Lines    []PreviewLine
+	// HasWords reports whether any line carries word timings (A2).
+	HasWords bool
+	// Truncated reports that the .lrc exceeded the read bound and the lines
+	// are only its leading complete cues; the page says so.
+	Truncated bool
+}
+
+// PreviewLine is one lyric cue. StartMS is a decimal millisecond string, the
+// value of the line's data-start-ms attribute.
+type PreviewLine struct {
+	StartMS    string
+	Text       string
+	Words      []PreviewWord
+	Decorative bool
+}
+
+// PreviewWord is one A2 word with its own data-start-ms.
+type PreviewWord struct {
+	StartMS string
+	// Before is the exact text preceding the word in its line (the separator,
+	// or leading unmarked text for the first word); empty for CJK.
+	Before string
+	Text   string
+}
