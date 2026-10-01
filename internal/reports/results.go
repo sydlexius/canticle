@@ -8,7 +8,7 @@ import (
 // lineTierPredicate is the ONE definition of "this synced row is at the
 // line-synced rung": sync_tier='line' with the same two exclusions as
 // wordTierPredicate (a timing-remediated tier is stale; a row mid
-// word-recheck is re-litigating its tier). Shared by SyncTierCounts and
+// word-recheck is re-litigating its tier). Shared by the word tier and
 // ResultsBreakdown so the two cannot disagree. No leading AND/WHERE.
 const lineTierPredicate = `sync_tier = 'line'
                       AND NOT ` + retiredPredicate + `
@@ -54,7 +54,7 @@ func (b ResultsBreakdown) Total() int64 {
 // ResultsBreakdown returns the result-type split of status='done' rows in one
 // scan over work_queue.
 //
-// Unlike SyncTierCounts, this admits status='done' ONLY: a row mid
+// This admits status='done' ONLY: a row mid
 // word-recheck has been flipped to 'deferred' (queue.MarkWordRecheckQueued)
 // and is counted by the queue-status row, not here, so the Results row can
 // sum to Done exactly. The one reachable done+queued shape (prune's retired

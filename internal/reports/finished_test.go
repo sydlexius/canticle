@@ -64,22 +64,3 @@ func TestQueueSummaryFinishedSplit(t *testing.T) {
 		t.Errorf("Finished(%d)+SettledUpgradable(%d) != Done(%d)", got.Finished, got.SettledUpgradable, got.Done)
 	}
 }
-
-// TestQueueSummaryFinishedMatchesWordSyncedTile asserts the two dashboard
-// surfaces agree on what finished means: the queue row's Finished and the
-// sync-tier row's Word-synced are one predicate, not two that can drift.
-func TestQueueSummaryFinishedMatchesWordSyncedTile(t *testing.T) {
-	repo, _, _ := seedFinishedSplit(t)
-	ctx := context.Background()
-	qs, err := repo.QueueSummary(ctx)
-	if err != nil {
-		t.Fatalf("QueueSummary: %v", err)
-	}
-	tiers, err := repo.SyncTierCounts(ctx)
-	if err != nil {
-		t.Fatalf("SyncTierCounts: %v", err)
-	}
-	if qs.Finished != tiers.WordSynced {
-		t.Errorf("QueueSummary.Finished = %d, SyncTierCounts.WordSynced = %d; want equal", qs.Finished, tiers.WordSynced)
-	}
-}
