@@ -4,9 +4,19 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const JS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "preview.js"), "utf8");
+
+// Every window load() creates. preview.js runs a rAF loop while the audio
+// reports playing, and jsdom keeps a window (and its timers) alive until it is
+// closed, so each test's window is closed afterwards, pass or fail.
+const openWindows = [];
+afterEach(() => {
+  while (openWindows.length > 0) {
+    openWindows.pop().close();
+  }
+});
 
 const PAGE = `<body>
   <audio id="mx-preview-audio"></audio>
@@ -19,6 +29,7 @@ const PAGE = `<body>
 function load({ html = PAGE, reduce = false } = {}) {
   const dom = new JSDOM(html, { runScripts: "outside-only", pretendToBeVisual: true });
   const win = dom.window;
+  openWindows.push(win);
   // jsdom reports readyState "loading" until its own async DOMContentLoaded, so
   // evaluate the script as a deferred script would: after the document is parsed.
   Object.defineProperty(win.document, "readyState", { get: () => "complete" });
