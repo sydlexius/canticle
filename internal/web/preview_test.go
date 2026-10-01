@@ -80,9 +80,19 @@ func TestPreviewAudioServesBytesWithHeaders(t *testing.T) {
 	f := newPreviewFixture(t)
 	id := f.row(t, f.writeFile(t, f.root, "song.flac"))
 
+	// httptest.ResponseRecorder supports no write deadline, so this request
+	// also exercises the deadline-failure branch, which must log loudly.
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	rec := f.get(strconv.FormatInt(id, 10))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := logs.String(); !strings.Contains(got, "level=ERROR") || !strings.Contains(got, "cannot extend the write deadline") {
+		t.Errorf("deadline failure not logged at ERROR: %q", got)
 	}
 	if !bytes.Equal(rec.Body.Bytes(), previewBytes) {
 		t.Errorf("body = %q, want %q", rec.Body.Bytes(), previewBytes)
@@ -396,12 +406,10 @@ func TestOpenPreviewAudioRootMatching(t *testing.T) {
 		path  string
 		ok    bool
 	}{
-		"blank root skipped":  {[]string{"", root}, p, true},
-		"relative path":       {[]string{root}, "song.flac", false},
-		"no roots":            {nil, p, false},
-		"root is a file":      {[]string{p}, p, false},
-		"root itself":         {[]string{root}, root, false},
-		"sibling with prefix": {[]string{root}, root + "x/song.flac", false},
+		"blank root skipped": {[]string{"", root}, p, true},
+		"no roots":           {nil, p, false},
+		"root is a file":     {[]string{p}, p, false},
+		"root itself":        {[]string{root}, root, false},
 	} {
 		f, _, ok := openPreviewAudio(tc.roots, tc.path)
 		if f != nil {
@@ -409,6 +417,53 @@ func TestOpenPreviewAudioRootMatching(t *testing.T) {
 		}
 		if ok != tc.ok {
 			t.Errorf("%s: ok = %v, want %v", name, ok, tc.ok)
+		}
+	}
+}
+
+// TestRelUnder tests the containment guard directly: behind os.Root an
+// end-to-end refusal cannot tell whether this guard or the open refused.
+func TestRelUnder(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "lib")
+	for name, tc := range map[string]struct {
+		path, rel string
+		ok        bool
+	}{
+		"beneath":             {filepath.Join(root, "a", "b.flac"), filepath.Join("a", "b.flac"), true},
+		"sibling with prefix": {root + "x" + string(filepath.Separator) + "b.flac", "", false},
+		"parent":              {filepath.Dir(root), "", false},
+		"relative path":       {"b.flac", "", false},
+	} {
+		rel, ok := relUnder(root, tc.path)
+		if ok != tc.ok || rel != tc.rel {
+			t.Errorf("%s: relUnder = (%q, %v), want (%q, %v)", name, rel, ok, tc.rel, tc.ok)
+		}
+	}
+}
+
+// TestPreviewAudioAbsoluteSymlinkInsideRoot pins that an ABSOLUTE symlink
+// whose target stays inside the root serves, final or intermediate: os.Root
+// refuses every absolute symlink, and the scanner enqueues such files. The
+// escaping case is "symlink escaping root" in TestPreviewAudioRefusals.
+func TestPreviewAudioAbsoluteSymlinkInsideRoot(t *testing.T) {
+	f := newPreviewFixture(t)
+	b := filepath.Join(f.root, "B")
+	if err := os.Mkdir(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := f.writeFile(t, b, "song.flac")
+	final := filepath.Join(f.root, "final.flac")
+	album := filepath.Join(f.root, "AlbumLink")
+	if os.Symlink(target, final) != nil || os.Symlink(b, album) != nil {
+		t.Skip("symlinks unsupported")
+	}
+	for name, src := range map[string]string{
+		"final symlink":        final,
+		"intermediate symlink": filepath.Join(album, "song.flac"),
+	} {
+		rec := f.get(strconv.FormatInt(f.row(t, src), 10))
+		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), previewBytes) {
+			t.Errorf("%s: status = %d, want 200 with the bytes", name, rec.Code)
 		}
 	}
 }

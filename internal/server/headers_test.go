@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
 )
@@ -62,5 +63,26 @@ func TestStatusRecorderUnwraps(t *testing.T) {
 	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
 	if err := http.NewResponseController(rec).Flush(); err != nil {
 		t.Fatalf("Flush through statusRecorder: %v, want nil", err)
+	}
+}
+
+// TestHandlerLetsAHandlerExtendItsWriteDeadline serves through Handler on a
+// real connection and asserts SetWriteDeadline succeeds, as the preview audio
+// stream (#481) needs to outlive the server-wide WriteTimeout.
+func TestHandlerLetsAHandlerExtendItsWriteDeadline(t *testing.T) {
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics")
+	errc := make(chan error, 1)
+	h.mux.HandleFunc("GET /deadline-probe", func(w http.ResponseWriter, _ *http.Request) {
+		errc <- http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Minute))
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := srv.Client().Get(srv.URL + "/deadline-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if err := <-errc; err != nil {
+		t.Fatalf("SetWriteDeadline through Handler: %v, want nil", err)
 	}
 }

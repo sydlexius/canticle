@@ -63,6 +63,8 @@ const previewWriteBound = 30 * time.Minute
 // written. A root matches by its configured spelling or its symlink-resolved
 // spelling, since a row may store either. The handle is fstat'ed regular.
 func openPreviewAudio(roots []string, p string) (*os.File, fs.FileInfo, bool) {
+	// A cheap pre-filter: filepath.Rel already refuses to relate a relative p
+	// to an absolute root, so this only skips the per-root work.
 	if !filepath.IsAbs(p) {
 		return nil, nil, false
 	}
@@ -72,9 +74,13 @@ func openPreviewAudio(roots []string, p string) (*os.File, fs.FileInfo, bool) {
 			continue
 		}
 		abs, canon := pathutil.CanonicalRoot(root)
-		for _, spelling := range []string{abs, canon} {
-			rel, err := filepath.Rel(spelling, p)
-			if err != nil || !filepath.IsLocal(rel) {
+		spellings := []string{abs, canon}
+		if abs == canon {
+			spellings = spellings[:1]
+		}
+		for _, spelling := range spellings {
+			rel, ok := relUnder(spelling, p)
+			if !ok {
 				continue
 			}
 			if f, fi, ok := openInRoot(canon, rel); ok {
@@ -85,9 +91,25 @@ func openPreviewAudio(roots []string, p string) (*os.File, fs.FileInfo, bool) {
 	return nil, nil, false
 }
 
+// relUnder returns p relative to dir when p lies at or beneath dir (lexically).
+func relUnder(dir, p string) (string, bool) {
+	rel, err := filepath.Rel(dir, p)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", false
+	}
+	return rel, true
+}
+
 // openInRoot opens rel read-only beneath dir via os.Root (which refuses any
 // escaping component on every platform) and returns it only if it is a
 // regular file. previewOpenFlags keeps a FIFO from blocking the open.
+//
+// os.Root also refuses every ABSOLUTE symlink, even one that stays inside dir
+// (root/a.flac -> /root/B/a.flac, or a directory root/Link -> /root/B), which
+// the scanner happily enqueues. On any failure other than not-exist, the path
+// is therefore resolved with EvalSymlinks and, only when the result still lies
+// under dir, that resolved relative path is opened through the SAME os.Root:
+// a swap between the resolve and the open is still confined by the open.
 func openInRoot(dir, rel string) (*os.File, fs.FileInfo, bool) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -96,7 +118,21 @@ func openInRoot(dir, rel string) (*os.File, fs.FileInfo, bool) {
 	defer func() { _ = root.Close() }()
 	f, err := root.OpenFile(rel, os.O_RDONLY|previewOpenFlags, 0)
 	if err != nil {
-		return nil, nil, false
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, false
+		}
+		resolved, rerr := filepath.EvalSymlinks(filepath.Join(dir, rel))
+		if rerr != nil {
+			return nil, nil, false
+		}
+		// An early-out, not the authority: os.Root refuses a "../" name too.
+		inner, ok := relUnder(dir, resolved)
+		if !ok {
+			return nil, nil, false
+		}
+		if f, err = root.OpenFile(inner, os.O_RDONLY|previewOpenFlags, 0); err != nil {
+			return nil, nil, false
+		}
 	}
 	fi, err := f.Stat()
 	if err != nil || !fi.Mode().IsRegular() {
