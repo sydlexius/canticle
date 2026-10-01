@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -221,5 +222,33 @@ func TestRecheckRetiredPreviewMatchesRevive(t *testing.T) {
 		if n != c.Count {
 			t.Errorf("RecheckRetired(lib %d) revived %d; preview = %d", id, n, c.Count)
 		}
+	}
+}
+
+// TestRecheckRetiredExpect binds the revive to a previewed count inside the
+// write transaction: a mismatch revives nothing, a match revives the scope.
+func TestRecheckRetiredExpect(t *testing.T) {
+	ctx := context.Background()
+	q, libA, _ := previewFixture(t)
+	retired := func() int64 {
+		n, err := q.CountRecheckRetired(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := retired()
+	if _, err := q.RecheckRetiredExpect(ctx, &libA, 99); !errors.Is(err, ErrRecheckRetiredCountChanged) {
+		t.Fatalf("mismatch err = %v, want ErrRecheckRetiredCountChanged", err)
+	}
+	if got := retired(); got != before {
+		t.Fatalf("mismatch changed rows: retired %d -> %d", before, got)
+	}
+	n, err := q.RecheckRetiredExpect(ctx, &libA, 2)
+	if err != nil || n != 2 {
+		t.Fatalf("match revived %d, err %v; want 2, nil", n, err)
+	}
+	if got := retired(); got != before-2 {
+		t.Errorf("retired after revive = %d, want %d", got, before-2)
 	}
 }

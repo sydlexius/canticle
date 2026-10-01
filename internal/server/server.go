@@ -265,9 +265,10 @@ func WithOnboarding(o *web.Onboarding) Option {
 }
 
 // WithReportsDB wires the database that backs the serve-mode Reports workspace.
-// The handler builds a read-only reports.Repo from db and attaches it to the
-// mounted web UI (see NewHandler). It is meaningful only alongside a mounted web
-// UI; with no UI, or a nil db, it is a no-op (the reports routes never mount).
+// The handler builds a reports.Repo from db for the read-only reports and, on the
+// same read-write handle, the queue action backend behind the revive page (see
+// NewHandler); it attaches both to the mounted web UI. It is meaningful only
+// alongside a mounted web UI; with no UI, or a nil db, it is a no-op (the reports routes never mount).
 func WithReportsDB(db *sql.DB) Option {
 	return func(h *Handler) { h.reportsDB = db }
 }
@@ -350,6 +351,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.reportsDB != nil {
 			h.webui.AttachReports(reports.New(h.reportsDB))
+			h.webui.AttachQueueActions(queue.NewDBQueue(h.reportsDB))
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)
