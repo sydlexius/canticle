@@ -597,9 +597,7 @@ func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT
              SUM(CASE WHEN `+wordTierPredicate+` THEN 1 ELSE 0 END),
-             SUM(CASE WHEN sync_tier = 'line'
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
-                      AND COALESCE(word_timing_state, '') <> 'queued' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN `+lineTierPredicate+` THEN 1 ELSE 0 END),
              SUM(CASE WHEN `+TierUnknownPredicate+` THEN 1 ELSE 0 END)
          FROM work_queue
          WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,
