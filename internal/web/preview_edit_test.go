@@ -1,8 +1,12 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -227,6 +231,37 @@ func TestPreviewEditSerializesPerRow(t *testing.T) {
 	}
 	if n := len(e.ui.editLocks.m); n != 0 {
 		t.Errorf("lock map holds %d entries after release, want 0", n)
+	}
+}
+
+// failingEditor records nothing: the file write succeeded, the DB did not.
+type failingEditor struct{ *queue.DBQueue }
+
+func (failingEditor) SetLyricEdit(context.Context, int64, int) error {
+	return &fs.PathError{Op: "set", Path: "/music/Artist/Title.lrc", Err: errors.New("disk I/O error")}
+}
+
+// TestPreviewEditRecordFailure pins the post-write DB failure: a 500 with
+// {"error":"record"}, the file already written, and a log line carrying the
+// row id but never a path.
+func TestPreviewEditRecordFailure(t *testing.T) {
+	e := newEditEnv(t)
+	e.ui.editor.Queue = failingEditor{e.q}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}})
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"record"`) {
+		t.Fatalf("record failure = %d %s, want 500 record", rec.Code, rec.Body)
+	}
+	if !strings.Contains(e.lrc(t), "[00:01.60]one") {
+		t.Errorf("file not written before the record step:\n%s", e.lrc(t))
+	}
+	got := logs.String()
+	if !strings.Contains(got, "id="+e.id) || strings.Contains(got, "/music") || strings.Contains(got, e.root) {
+		t.Errorf("log must carry the id and no path: %q", got)
 	}
 }
 
