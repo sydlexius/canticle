@@ -69,7 +69,7 @@ func TestQueueBucketListsOnlyItsRows(t *testing.T) {
 	if got := titlesIn(body); len(got) != 3 || got[0] != "Pend 001" {
 		t.Errorf("titles = %v, want exactly the 3 pending rows", got)
 	}
-	for _, want := range []string{"<html", "<h1", "Pending", "Next attempt", "Libraries", "/static/css/queue.css"} {
+	for _, want := range []string{"<html", "<h1", "Queued", "Next attempt", "Libraries", "/static/css/queue.css"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("full page missing %q", want)
 		}

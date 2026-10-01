@@ -96,7 +96,7 @@ func insertUnavailable(t *testing.T, sqlDB *sql.DB, title string) {
 	}
 }
 
-// TestReportFragmentQueueSummaryUnavailableRow asserts the Unavailable row
+// TestReportFragmentQueueSummaryUnavailableRow asserts the Given up row
 // renders its OWN count: 3 unavailable vs 2 done (total 5), so a row wired to
 // any other field cannot pass.
 func TestReportFragmentQueueSummaryUnavailableRow(t *testing.T) {
@@ -109,13 +109,13 @@ func TestReportFragmentQueueSummaryUnavailableRow(t *testing.T) {
 	mux := newReportsUIServer(t, sqlDB)
 
 	body := getFragment(t, mux, "queue-summary").Body.String()
-	row := regexp.MustCompile(`<td>Unavailable</td>\s*<td class="mx-cell-mono">(\d+)</td>`)
+	row := regexp.MustCompile(`<td>Given up</td>\s*<td class="mx-cell-mono">(\d+)</td>`)
 	m := row.FindStringSubmatch(body)
 	if m == nil {
-		t.Fatalf("queue-summary fragment missing Unavailable row; body:\n%s", body)
+		t.Fatalf("queue-summary fragment missing Given up row; body:\n%s", body)
 	}
 	if m[1] != "3" {
-		t.Errorf("Unavailable row count = %s, want 3", m[1])
+		t.Errorf("Given up row count = %s, want 3", m[1])
 	}
 }
 

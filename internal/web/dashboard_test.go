@@ -114,14 +114,14 @@ func TestHandleDashboard_QueueTiles(t *testing.T) {
 	body := rec.Body.String()
 	// Done renders as Finished + Settled (upgradable) (#553); the chart carries
 	// the same labels (#1139), so match the tile label markup, not a bare substring.
-	for _, label := range []string{"Pending", "Processing", "Finished", "Settled (upgradable)", "Failed", "Deferred", "Unavailable"} {
+	for _, label := range []string{"Retrying", "Errored", "Queued", "Finished", "Settled (upgradable)", "Given up"} {
 		if !strings.Contains(body, `<span class="mx-dash-tile-label">`+label+`</span>`) {
 			t.Errorf("dashboard missing queue tile label %q", label)
 		}
 	}
 }
 
-// TestHandleDashboard_UnavailableTileValue asserts the Unavailable tile shows
+// TestHandleDashboard_UnavailableTileValue asserts the Given up tile shows
 // its OWN count (#477): 3 unavailable vs 2 done, so a tile wired to any other
 // QueueSummary field cannot pass.
 func TestHandleDashboard_UnavailableTileValue(t *testing.T) {
@@ -140,13 +140,13 @@ func TestHandleDashboard_UnavailableTileValue(t *testing.T) {
 		t.Fatalf("GET /dashboard status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	tile := regexp.MustCompile(`<span class="mx-dash-tile-label">Unavailable</span>\s*<span class="mx-dash-tile-value">(\d+)</span>`)
+	tile := regexp.MustCompile(`<span class="mx-dash-tile-label">Given up</span>\s*<span class="mx-dash-tile-value">(\d+)</span>`)
 	m := tile.FindStringSubmatch(body)
 	if m == nil {
-		t.Fatalf("dashboard missing Unavailable tile; body:\n%s", body)
+		t.Fatalf("dashboard missing Given up tile; body:\n%s", body)
 	}
 	if m[1] != "3" {
-		t.Errorf("Unavailable tile value = %s, want 3", m[1])
+		t.Errorf("Given up tile value = %s, want 3", m[1])
 	}
 }
 
@@ -287,7 +287,7 @@ func TestBuildQueueChart(t *testing.T) {
 	c := buildQueueChart(reports.QueueSummary{
 		Pending: 1, Processing: 2, Done: 7, Finished: 3, SettledUpgradable: 4, Failed: 5, Deferred: 6, Unavailable: 7, Total: 27,
 	})
-	wantLabels := []string{"Pending", "Processing", "Finished", "Settled (upgradable)", "Failed", "Deferred", "Unavailable"}
+	wantLabels := []string{"Retrying", "Errored", "Queued", "Finished", "Settled (upgradable)", "Given up"}
 	if len(c.Labels) != len(wantLabels) {
 		t.Fatalf("Labels len = %d, want %d", len(c.Labels), len(wantLabels))
 	}
@@ -296,7 +296,7 @@ func TestBuildQueueChart(t *testing.T) {
 			t.Errorf("Labels[%d] = %q, want %q", i, c.Labels[i], l)
 		}
 	}
-	wantValues := []float64{1, 2, 3, 4, 5, 6, 7}
+	wantValues := []float64{6, 5, 1, 3, 4, 7}
 	for i, v := range wantValues {
 		if c.Values[i] != v {
 			t.Errorf("Values[%d] = %v, want %v", i, c.Values[i], v)
@@ -358,7 +358,7 @@ func TestHandleDashboard_Charts(t *testing.T) {
 	// data-chart-labels JSON attribute, not merely appear somewhere in the body
 	// (a loose Contains would also match the stat-tile label text). templ
 	// HTML-escapes the JSON quotes to &#34; inside the attribute value.
-	const wantQueueLabelsAttr = `data-chart-labels="[&#34;Pending&#34;,&#34;Processing&#34;,&#34;Finished&#34;,&#34;Settled (upgradable)&#34;,&#34;Failed&#34;,&#34;Deferred&#34;,&#34;Unavailable&#34;]"`
+	const wantQueueLabelsAttr = `data-chart-labels="[&#34;Retrying&#34;,&#34;Errored&#34;,&#34;Queued&#34;,&#34;Finished&#34;,&#34;Settled (upgradable)&#34;,&#34;Given up&#34;]"`
 	if !strings.Contains(body, wantQueueLabelsAttr) {
 		t.Errorf("dashboard charts: work-queue canvas missing serialized labels attribute %q", wantQueueLabelsAttr)
 	}
@@ -452,7 +452,8 @@ var (
 
 // TestHandleDashboard_QueueTilesLinkToBuckets: every bucket-backed tile is an
 // anchor whose href is a registered /queue route answering 200, covering every
-// registered bucket; the Results tiles (no bucket) render no anchor.
+// registered bucket except processing (in-flight rows live in Up Next, #599, so
+// that bucket keeps its route but has no tile); the Results tiles render no anchor.
 func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 	mux := newReportsUIServer(t, openReportsTestDB(t))
 	rec := getQueue(t, mux, "/dashboard", false)
@@ -461,8 +462,8 @@ func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 	}
 	body := rec.Body.String()
 	matches := dashTileAnchorRE.FindAllStringSubmatch(body, -1)
-	if len(matches) != len(reports.Buckets()) {
-		t.Fatalf("tile anchors = %d, want %d (one per bucket)", len(matches), len(reports.Buckets()))
+	if want := len(reports.Buckets()) - 1; len(matches) != want {
+		t.Fatalf("tile anchors = %d, want %d (one per bucket except processing)", len(matches), want)
 	}
 	seen := map[string]bool{}
 	for _, m := range matches {
@@ -472,6 +473,9 @@ func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 		}
 	}
 	for _, b := range reports.Buckets() {
+		if b == reports.BucketProcessing {
+			continue
+		}
 		if !seen["/queue/"+string(b)] {
 			t.Errorf("no tile links to bucket %q", b)
 		}
@@ -502,13 +506,12 @@ func TestBuildQueueTilesHrefsAreRegisteredBuckets(t *testing.T) {
 // valid buckets between tiles would otherwise stay green.
 func TestBuildQueueTilesLabelToBucket(t *testing.T) {
 	want := map[string]reports.Bucket{
-		"Pending":              reports.BucketPending,
-		"Processing":           reports.BucketProcessing,
+		"Queued":               reports.BucketPending,
 		"Finished":             reports.BucketFinished,
 		"Settled (upgradable)": reports.BucketSettled,
-		"Failed":               reports.BucketFailed,
-		"Deferred":             reports.BucketDeferred,
-		"Unavailable":          reports.BucketUnavailable,
+		"Errored":              reports.BucketFailed,
+		"Retrying":             reports.BucketDeferred,
+		"Given up":             reports.BucketUnavailable,
 	}
 	tiles := buildQueueTiles(reports.QueueSummary{})
 	if len(tiles) != len(want) {

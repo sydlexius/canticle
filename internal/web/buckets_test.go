@@ -60,8 +60,8 @@ func TestQueueBucketSurfacesAgree(t *testing.T) {
 }
 
 // TestQueueBucketTooltips asserts every bucket has its own non-empty tooltip,
-// and keeps the #477 Unavailable guard that used to sit on the templ switch:
-// it must not reuse Failed's copy and must name the manual revival command,
+// and keeps the #477 Given up guard that used to sit on the templ switch:
+// it must not reuse Errored's copy and must name the manual revival command,
 // since nothing revives these rows on its own.
 func TestQueueBucketTooltips(t *testing.T) {
 	seen := map[string]string{}
@@ -76,8 +76,8 @@ func TestQueueBucketTooltips(t *testing.T) {
 		seen[b.Tooltip] = b.Label
 		byLabel[b.Label] = b.Tooltip
 	}
-	if !strings.Contains(byLabel["Unavailable"], "queue recheck --retired") {
-		t.Errorf("Unavailable tooltip %q does not name the manual revival command", byLabel["Unavailable"])
+	if !strings.Contains(byLabel["Given up"], "queue recheck --retired") {
+		t.Errorf("Given up tooltip %q does not name the manual revival command", byLabel["Given up"])
 	}
 }
 
@@ -140,6 +140,29 @@ func TestQueueBucketsHaveChartColors(t *testing.T) {
 	for _, label := range buildQueueChart(distinctSummary).Labels {
 		if !keys[label] {
 			t.Errorf("chart label %q has no QUEUE_COLOR_VARS entry in chart-init.js", label)
+		}
+	}
+}
+
+// TestQueueBucketsOrderAndNoProcessing pins the #599 vocabulary: activity first,
+// the two settled halves, then Given up, and no Processing bucket on any
+// surface (an in-flight row is shown in Up Next instead).
+func TestQueueBucketsOrderAndNoProcessing(t *testing.T) {
+	want := []string{"Retrying", "Errored", "Queued", "Finished", "Settled (upgradable)", "Given up"}
+	var got []string
+	for _, b := range queueBuckets {
+		got = append(got, b.Label)
+		if b.Key == reports.BucketProcessing {
+			t.Errorf("bucket %q reads the processing status; in-flight rows belong to Up Next", b.Label)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("bucket labels = %q, want %q", got, want)
+	}
+	keys := queueColorKeys(t)
+	for _, old := range []string{"Processing", "Pending", "Failed", "Deferred", "Unavailable"} {
+		if keys[old] {
+			t.Errorf("chart-init.js QUEUE_COLOR_VARS still carries retired label %q", old)
 		}
 	}
 }

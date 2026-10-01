@@ -75,7 +75,9 @@ func TestReportFragmentQueueSummaryFinishedSplit(t *testing.T) {
 }
 
 // TestBuildQueueTilesSumToTotal: the tile row is one status axis, so its
-// values must sum to Total with no row counted twice.
+// values must sum to Total with no row counted twice. Processing has no tile
+// (in-flight rows live in Up Next, #599), so the tiles sum to Total minus the
+// rows the worker currently holds.
 func TestBuildQueueTilesSumToTotal(t *testing.T) {
 	qs := reports.QueueSummary{Pending: 1, Processing: 2, Done: 7, Failed: 4, Deferred: 5, Unavailable: 6, Total: 25, Finished: 3, SettledUpgradable: 4}
 	var sum int64
@@ -86,7 +88,7 @@ func TestBuildQueueTilesSumToTotal(t *testing.T) {
 		}
 		sum += v
 	}
-	if sum != qs.Total {
-		t.Errorf("queue tiles sum to %d, want Total %d", sum, qs.Total)
+	if want := qs.Total - qs.Processing; sum != want {
+		t.Errorf("queue tiles sum to %d, want Total-Processing %d", sum, want)
 	}
 }

@@ -28,20 +28,28 @@ type queueBucket struct {
 // its two halves, Finished and Settled (upgradable), never beside them (#553,
 // maintainer decision 2026-09-24): with word-synced output the only terminal
 // state, a bare "Done" reads as "finished" while most of it is a current-best
-// snapshot. Replacing rather than adding keeps the set one status axis that
-// sums to Total.
+// snapshot. Buckets run activity first (Retrying, Errored, Queued) then the
+// settled states. There is deliberately no Processing bucket: an in-flight row
+// is shown in the dashboard's Up Next panel (#599), so the buckets sum to Total
+// minus the rows currently claimed by the worker.
 var queueBuckets = []queueBucket{
 	{
-		Key:     reports.BucketPending,
-		Label:   "Pending",
-		Tooltip: "Tracks waiting to be picked up by the background worker.",
-		Value:   func(s reports.QueueSummary) int64 { return s.Pending },
+		Key:     reports.BucketDeferred,
+		Label:   "Retrying",
+		Tooltip: "No lyrics found yet; the worker will look again after a delay.",
+		Value:   func(s reports.QueueSummary) int64 { return s.Deferred },
 	},
 	{
-		Key:     reports.BucketProcessing,
-		Label:   "Processing",
-		Tooltip: "Tracks currently being fetched by the worker.",
-		Value:   func(s reports.QueueSummary) int64 { return s.Processing },
+		Key:     reports.BucketFailed,
+		Label:   "Errored",
+		Tooltip: "Tracks that hit an error. They will be retried automatically after a backoff delay.",
+		Value:   func(s reports.QueueSummary) int64 { return s.Failed },
+	},
+	{
+		Key:     reports.BucketPending,
+		Label:   "Queued",
+		Tooltip: "Tracks waiting for their first lookup by the background worker.",
+		Value:   func(s reports.QueueSummary) int64 { return s.Pending },
 	},
 	{
 		Key:     reports.BucketFinished,
@@ -56,25 +64,13 @@ var queueBuckets = []queueBucket{
 		Value:   func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{
-		Key:     reports.BucketFailed,
-		Label:   "Failed",
-		Tooltip: "Tracks that hit an error; retried after a backoff delay.",
-		Value:   func(s reports.QueueSummary) int64 { return s.Failed },
-	},
-	{
-		Key:     reports.BucketDeferred,
-		Label:   "Deferred",
-		Tooltip: "No lyrics found yet; re-checked later.",
-		Value:   func(s reports.QueueSummary) int64 { return s.Deferred },
-	},
-	{
-		// Unavailable (#477): an exhausted benign miss, distinct from Done (which
-		// implies a written sidecar) and from Failed/Deferred (still active or
-		// retrying). Revival is manual only: RecheckRetired's sole production
-		// caller is `queue recheck --retired`; a provider-set change does not
-		// revive.
+		// Given up is status 'unavailable' (#477): an exhausted benign miss,
+		// distinct from Done (which implies a written sidecar) and from
+		// Errored/Retrying (still active or retrying). Revival is manual only:
+		// RecheckRetired's sole production caller is `queue recheck --retired`; a
+		// provider-set change does not revive.
 		Key:     reports.BucketUnavailable,
-		Label:   "Unavailable",
+		Label:   "Given up",
 		Tooltip: "Tracks retired after every lyrics source repeatedly found nothing; revived by 'queue recheck --retired'.",
 		Value:   func(s reports.QueueSummary) int64 { return s.Unavailable },
 	},

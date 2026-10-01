@@ -39,13 +39,12 @@
   // Status label -> design-token custom property for the queue doughnut. Labels
   // that are not in this map (none today) fall back to the accent color.
   var QUEUE_COLOR_VARS = {
-    Pending: '--mx-chart-pending',
-    Processing: '--mx-chart-processing',
+    Retrying: '--mx-chart-deferred',
+    Errored: '--mx-chart-failed',
+    Queued: '--mx-chart-pending',
     Finished: '--mx-chart-finished',
     'Settled (upgradable)': '--mx-chart-settled',
-    Failed: '--mx-chart-failed',
-    Deferred: '--mx-chart-deferred',
-    Unavailable: '--mx-chart-unavailable',
+    'Given up': '--mx-chart-unavailable',
   };
 
   // resolveVar reads a CSS custom property off an element, trimmed. Returns the

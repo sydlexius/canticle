@@ -40,13 +40,13 @@ func (u *UI) registerQueueRoutes(reg routeReg) {
 
 // queueBucketInfo is the heading and one-line meaning of each bucket page.
 var queueBucketInfo = map[reports.Bucket][2]string{
-	reports.BucketPending:     {"Pending", "Tracks waiting for their first lyrics lookup."},
+	reports.BucketPending:     {"Queued", "Tracks waiting for their first lyrics lookup."},
 	reports.BucketProcessing:  {"Processing", "Tracks a worker has claimed and is working on now."},
-	reports.BucketDeferred:    {"Deferred", "Tracks with no lyrics found yet, waiting to be retried."},
-	reports.BucketFailed:      {"Failed", "Tracks whose last lookup hit an error; they are retried automatically."},
+	reports.BucketDeferred:    {"Retrying", "Tracks with no lyrics found yet, waiting to be retried."},
+	reports.BucketFailed:      {"Errored", "Tracks whose last lookup hit an error; they are retried automatically."},
 	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, the best result there is."},
 	reports.BucketSettled:     {"Settled", "Tracks with lyrics that could still be upgraded to word sync."},
-	reports.BucketUnavailable: {"Unavailable", "Tracks given up on after repeated misses."},
+	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
 }
 
 // handleQueueBucket lists the rows behind one dashboard queue counter. An htmx
