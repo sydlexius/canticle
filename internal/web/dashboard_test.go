@@ -446,7 +446,7 @@ func TestHandleDashboard_NoCacheTile(t *testing.T) {
 }
 
 var (
-	dashTileAnchorRE  = regexp.MustCompile(`<a class="mx-dash-tile-link" href="([^"]+)">`)
+	dashTileAnchorRE  = regexp.MustCompile(`<a class="mx-dash-tile-link" href="([^"]+)"[^>]*>`)
 	dashInstrAnchorRE = regexp.MustCompile(`<a [^>]*>\s*<span class="mx-dash-tile-label">Instrumental`)
 )
 
@@ -495,6 +495,35 @@ func TestBuildQueueTilesHrefsAreRegisteredBuckets(t *testing.T) {
 		}
 		if _, err := reports.ParseBucket(key); err != nil {
 			t.Errorf("tile %q href %q: %v", tile.Label, tile.Href, err)
+		}
+	}
+}
+
+// TestBuildQueueTilesLabelToBucket pins WHICH bucket each tile drills into. The
+// registered-bucket test above only proves an href is valid, so swapping two
+// valid buckets between tiles would otherwise stay green.
+func TestBuildQueueTilesLabelToBucket(t *testing.T) {
+	want := map[string]reports.Bucket{
+		"Pending":              reports.BucketPending,
+		"Processing":           reports.BucketProcessing,
+		"Finished":             reports.BucketFinished,
+		"Settled (upgradable)": reports.BucketSettled,
+		"Failed":               reports.BucketFailed,
+		"Deferred":             reports.BucketDeferred,
+		"Unavailable":          reports.BucketUnavailable,
+	}
+	tiles := buildQueueTiles(reports.QueueSummary{})
+	if len(tiles) != len(want) {
+		t.Fatalf("got %d tiles, want %d", len(tiles), len(want))
+	}
+	for _, tile := range tiles {
+		b, ok := want[tile.Label]
+		if !ok {
+			t.Errorf("unexpected tile label %q", tile.Label)
+			continue
+		}
+		if wantHref := "/queue/" + string(b); tile.Href != wantHref {
+			t.Errorf("tile %q href = %q, want %q", tile.Label, tile.Href, wantHref)
 		}
 	}
 }
