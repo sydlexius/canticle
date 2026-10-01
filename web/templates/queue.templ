@@ -40,6 +40,7 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 							<th>Attempts</th>
 							<th>Updated</th>
 							<th>Libraries</th>
+							<th>Lyrics</th>
 						</tr>
 					</thead>
 					<tbody id="mx-queue-body">
@@ -75,11 +76,16 @@ templ QueueRows(view QueueView) {
 			<td class="mx-cell-mono">{ row.Attempts }</td>
 			<td class="mx-cell-mono">{ row.UpdatedAt }</td>
 			<td>{ row.Libraries }</td>
+			<td>
+				if row.PreviewHref != "" {
+					<a class="mx-queue-link mx-queue-preview" href={ templ.SafeURL(row.PreviewHref) }>Preview</a>
+				}
+			</td>
 		</tr>
 	}
 	if view.NextCursor > 0 {
 		<tr class="mx-queue-more-row">
-			<td colspan="10">
+			<td colspan="11">
 				<a
 					class="mx-run-button mx-queue-more"
 					href={ templ.SafeURL(QueueMoreHref(view.Key, view.NextCursor)) }

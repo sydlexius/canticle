@@ -300,3 +300,16 @@ func TestListBucketQueryErrorsPropagate(t *testing.T) {
 		t.Error("expected page query error on closed DB")
 	}
 }
+
+func TestListBucketCarriesSyncTier(t *testing.T) {
+	sqlDB := openTestDB(t)
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "line", status: "done", outcomeType: "synced", syncTier: "line"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "none", status: "done", outcomeType: "unsynced"})
+	got := map[string]string{}
+	for _, r := range listAll(t, reports.New(sqlDB), reports.BucketSettled) {
+		got[r.Title] = r.SyncTier
+	}
+	if got["line"] != "line" || got["none"] != "" {
+		t.Errorf("sync tiers = %v, want line=line none=empty", got)
+	}
+}

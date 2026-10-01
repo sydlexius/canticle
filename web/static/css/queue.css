@@ -86,3 +86,8 @@
 .mx-revive-picker select {
   max-width: 100%;
 }
+
+/* Preview link (#481-7): one line, so the Lyrics cell never wraps. */
+.mx-queue-preview {
+  white-space: nowrap;
+}

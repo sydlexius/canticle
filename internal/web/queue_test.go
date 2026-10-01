@@ -354,3 +354,44 @@ func TestEveryRegisteredRouteIsGuarded(t *testing.T) {
 		}
 	}
 }
+
+func TestQueuePreviewHref(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  reports.BucketRow
+		want string
+	}{
+		{"word tier", reports.BucketRow{ID: 7, Status: queue.StatusDone, SyncTier: "word"}, "/preview/7"},
+		{"line tier", reports.BucketRow{ID: 8, Status: queue.StatusDone, SyncTier: "line"}, "/preview/8"},
+		{"unsynced tier", reports.BucketRow{ID: 9, Status: queue.StatusDone, SyncTier: "unsynced"}, ""},
+		{"unclassified", reports.BucketRow{ID: 10, Status: queue.StatusDone}, ""},
+		{"not settled", reports.BucketRow{ID: 11, Status: queue.StatusPending, SyncTier: "line"}, ""},
+	} {
+		if got := queuePreviewHref(tc.row); got != tc.want {
+			t.Errorf("%s: href = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestQueueBucketPreviewLinkOnlyOnSyncedRows(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	ids := seedQueueRows(t, sqlDB, "done", "Done", 3)
+	for i, tier := range []string{"word", "line", "unsynced"} {
+		if _, err := sqlDB.ExecContext(context.Background(),
+			`UPDATE work_queue SET outcome_type = 'synced', sync_tier = ? WHERE id = ?`, tier, ids[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := newReportsUIServer(t, sqlDB)
+	finished := getQueue(t, mux, "/queue/finished", false).Body.String()
+	if !strings.Contains(finished, fmt.Sprintf(`href="/preview/%d"`, ids[0])) {
+		t.Errorf("finished (word) row lacks its preview link")
+	}
+	settled := getQueue(t, mux, "/queue/settled", false).Body.String()
+	if !strings.Contains(settled, fmt.Sprintf(`href="/preview/%d"`, ids[1])) {
+		t.Errorf("settled line-synced row lacks its preview link")
+	}
+	if strings.Contains(settled, fmt.Sprintf(`href="/preview/%d"`, ids[2])) {
+		t.Errorf("unsynced row must not link to the player")
+	}
+}
