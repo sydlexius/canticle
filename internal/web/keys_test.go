@@ -95,6 +95,10 @@ func TestWebhookKeysListNeverExposesSecrets(t *testing.T) {
 	if strings.Contains(body, "@keyTime") {
 		t.Error("list page leaked a literal templ component call")
 	}
+	// #1203: the table scrolls inside its own wrapper instead of widening the page.
+	if !strings.Contains(body, `<div class="mx-table-wrap"><table class="mx-keys-table">`) {
+		t.Error("keys table is not inside .mx-table-wrap")
+	}
 }
 
 // TestWebhookKeysCreateShowsRawOnce asserts the create response reveals the raw
