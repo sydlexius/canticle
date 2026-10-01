@@ -90,7 +90,9 @@ templ reportView(v ReportView) {
 		case "instrumental-inventory":
 			@tableInstrumentals(v.InstrumentalRows)
 		case "failure-analysis":
-			@tableFailures(v.FailureRows)
+			@tableFailures(v.FailureRows, "No failed tracks.")
+		case "deferred-misses":
+			@tableFailures(v.FailureRows, "No deferred misses.")
 		case "review-queue":
 			@tableReviewQueue(v.ReviewQueueRows)
 	}
@@ -232,9 +234,9 @@ templ tableInstrumentals(rows []InstrumentalRow) {
 	}
 }
 
-templ tableFailures(rows []FailureRow) {
+templ tableFailures(rows []FailureRow, emptyMsg string) {
 	if len(rows) == 0 {
-		@reportEmpty("No failed or deferred tracks.")
+		@reportEmpty(emptyMsg)
 	} else {
 		<div class="mx-table-wrap">
 			<table class="mx-table">

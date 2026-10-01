@@ -868,18 +868,24 @@ func TestFailureAnalysis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FailureAnalysis: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("got %d groups, want 3: %+v", len(got), got)
+	// Failed only (#638): the deferred "miss" group belongs to DeferredMisses.
+	if len(got) != 2 {
+		t.Fatalf("got %d groups, want 2: %+v", len(got), got)
 	}
-	// ORDER BY count DESC: timeout(3), miss(2), auth(1).
+	// ORDER BY count DESC: timeout(3), auth(1).
 	if got[0].Status != "failed" || got[0].Reason != "timeout" || got[0].Count != 3 {
 		t.Errorf("got[0] = %+v, want failed/timeout/3", got[0])
 	}
-	if got[1].Status != "deferred" || got[1].Reason != "miss" || got[1].Count != 2 {
-		t.Errorf("got[1] = %+v, want deferred/miss/2", got[1])
+	if got[1].Status != "failed" || got[1].Reason != "auth error" || got[1].Count != 1 {
+		t.Errorf("got[1] = %+v, want failed/auth error/1", got[1])
 	}
-	if got[2].Status != "failed" || got[2].Reason != "auth error" || got[2].Count != 1 {
-		t.Errorf("got[2] = %+v, want failed/auth error/1", got[2])
+
+	deferred, err := repo.DeferredMisses(ctx)
+	if err != nil {
+		t.Fatalf("DeferredMisses: %v", err)
+	}
+	if len(deferred) != 1 || deferred[0].Status != "deferred" || deferred[0].Reason != "miss" || deferred[0].Count != 2 {
+		t.Errorf("DeferredMisses = %+v, want one deferred/miss/2 group", deferred)
 	}
 }
 
@@ -939,12 +945,17 @@ func TestFailureAnalysisEmptyReasonNormalized(t *testing.T) {
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "ferr", status: "failed", lastError: "", attempts: 1})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "derr", status: "deferred", lastError: "", missCount: 1})
 
-	got, err := repo.FailureAnalysis(ctx)
+	failed, err := repo.FailureAnalysis(ctx)
 	if err != nil {
 		t.Fatalf("FailureAnalysis: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d groups, want 2: %+v", len(got), got)
+	deferred, err := repo.DeferredMisses(ctx)
+	if err != nil {
+		t.Fatalf("DeferredMisses: %v", err)
+	}
+	got := append(failed, deferred...)
+	if len(failed) != 1 || len(deferred) != 1 {
+		t.Fatalf("got %d failed / %d deferred groups, want 1 each: %+v", len(failed), len(deferred), got)
 	}
 	for _, g := range got {
 		if g.Reason != queue.NoReasonRecorded {
@@ -996,6 +1007,9 @@ func TestQueryErrorsSurface(t *testing.T) {
 	}
 	if _, err := repo.FailureAnalysis(ctx); err == nil {
 		t.Error("FailureAnalysis on closed DB: want error")
+	}
+	if _, err := repo.DeferredMisses(ctx); err == nil {
+		t.Error("DeferredMisses on closed DB: want error")
 	}
 	if _, err := repo.CountInstrumental(ctx); err == nil {
 		t.Error("CountInstrumental on closed DB: want error")
@@ -1429,10 +1443,15 @@ func TestFailureAnalysisExcludesNonFetchWrites(t *testing.T) {
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "real-failed", status: "failed", lastError: "", attempts: 1})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "real-deferred", status: "deferred", lastError: "", missCount: 1})
 
-	got, err := repo.FailureAnalysis(ctx)
+	failedGroups, err := repo.FailureAnalysis(ctx)
 	if err != nil {
 		t.Fatalf("FailureAnalysis: %v", err)
 	}
+	deferredGroups, err := repo.DeferredMisses(ctx)
+	if err != nil {
+		t.Fatalf("DeferredMisses: %v", err)
+	}
+	got := append(failedGroups, deferredGroups...)
 	if len(got) != 2 {
 		t.Fatalf("got %d groups, want 2 (one failed/%s, one deferred/%s -- "+
 			"the maintenance-writer rows excluded, the genuine ones counted): %+v",
