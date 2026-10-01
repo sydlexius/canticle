@@ -424,12 +424,12 @@ func TestSaveSectionReportsAppliedPerPath(t *testing.T) {
 func postRejectedBatch(t *testing.T, pairs [][2]string) sectionErrorResponse {
 	t.Helper()
 	h, cfgPath := writableTestUI(t, newFakeSecretStore())
-	before, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	before, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
 	rec := postSectionAccept(t, h, pairs, "application/json")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	after, _ := os.ReadFile(cfgPath) //nolint:gosec // G304: test temp path
+	after, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
 	if !bytes.Equal(before, after) {
 		t.Errorf("config mutated on a rejected batch:\n%s", after)
 	}
@@ -505,14 +505,19 @@ func TestSaveSectionBatchHalfFailedPairNotDoubleReported(t *testing.T) {
 
 func TestSaveSectionBatchConflictWinsRegardlessOfOrder(t *testing.T) {
 	orders := [][][2]string{
-		{{"providers.mode", "bogus"}, {"secrets.key_file", "/tmp/x.key"}},
-		{{"secrets.key_file", "/tmp/x.key"}, {"providers.mode", "bogus"}},
+		{{"logging.level", "debug"}, {"providers.mode", "bogus"}, {"secrets.key_file", "/tmp/x.key"}},
+		{{"logging.level", "debug"}, {"secrets.key_file", "/tmp/x.key"}, {"providers.mode", "bogus"}},
 	}
 	for _, pairs := range orders {
-		h, _ := writableTestUI(t, newFakeSecretStore())
+		h, cfgPath := writableTestUI(t, newFakeSecretStore())
+		before, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
 		rec := postSectionAccept(t, h, pairs, "application/json")
 		if rec.Code != http.StatusConflict {
 			t.Errorf("order %v: status = %d, want 409; body=%s", pairs, rec.Code, rec.Body.String())
+		}
+		after, _ := os.ReadFile(cfgPath) //nolint:gosec // reason: G304: test temp path
+		if !bytes.Equal(before, after) {
+			t.Errorf("order %v: config mutated on a rejected batch:\n%s", pairs, after)
 		}
 	}
 }
