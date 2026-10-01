@@ -347,6 +347,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 	reg("POST /settings/keys", u.handleCreateWebhookKey)
 	reg("POST /settings/keys/revoke", u.handleRevokeWebhookKey)
 	u.registerQueueRoutes(reg)
+	u.registerPreviewRoutes(reg)
 }
 
 // settingsPath is the single config destination. Settings replaced the old
