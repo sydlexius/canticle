@@ -7,9 +7,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -1093,5 +1095,57 @@ func TestFieldEnvLockSource(t *testing.T) {
 	name, locked = fieldEnvLockSource(spec)
 	if !locked || name != "MXLRC_LOG_LEVEL" {
 		t.Errorf("env set: got (%q, %v), want (%q, true)", name, locked, "MXLRC_LOG_LEVEL")
+	}
+}
+
+// decodeSaveResponse parses a successful save's JSON body.
+func decodeSaveResponse(t *testing.T, rec *httptest.ResponseRecorder) saveResponse {
+	t.Helper()
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	var got saveResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode save response %q: %v", rec.Body.String(), err)
+	}
+	return got
+}
+
+func TestSaveFieldReportsAppliedRestart(t *testing.T) {
+	h, _ := writableTestUI(t, newFakeSecretStore())
+	rec := postField(t, h, url.Values{"path": {"logging.level"}, "value": {"debug"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeSaveResponse(t, rec)
+	if got.Status != "saved" {
+		t.Errorf("status field = %q, want saved", got.Status)
+	}
+	want := map[string]string{"logging.level": "restart"}
+	if !maps.Equal(got.Applied, want) {
+		t.Errorf("applied = %v, want %v", got.Applied, want)
+	}
+}
+
+func TestSaveFieldBlankSecretReportsNothingApplied(t *testing.T) {
+	h, _ := writableTestUI(t, newFakeSecretStore())
+	rec := postField(t, h, url.Values{"path": {"api.token"}, "value": {""}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeSaveResponse(t, rec); len(got.Applied) != 0 {
+		t.Errorf("applied = %v, want empty for a no-op save", got.Applied)
+	}
+}
+
+func TestApplyModeOf(t *testing.T) {
+	if got := applyModeOf(config.FieldSpec{AppliesLive: true}); got != "live" {
+		t.Errorf("AppliesLive=true -> %q, want live", got)
+	}
+	if got := applyModeOf(config.FieldSpec{}); got != "restart" {
+		t.Errorf("AppliesLive=false -> %q, want restart", got)
+	}
+	if got := appliedMode("no.such.key"); got != "restart" {
+		t.Errorf("unknown path -> %q, want restart", got)
 	}
 }

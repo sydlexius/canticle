@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+// TestRegistryNothingAppliesLive pins that no key hot-applies today (#836), so
+// the save response truthfully reports every key as "restart". Flipping a key to
+// AppliesLive must come with the code that actually applies it, and a deliberate
+// edit of this guard.
+func TestRegistryNothingAppliesLive(t *testing.T) {
+	reg := Registry()
+	if len(reg) == 0 {
+		t.Fatal("registry is empty")
+	}
+	for _, f := range reg {
+		if f.AppliesLive {
+			t.Errorf("%s: AppliesLive = true, but nothing hot-applies yet; update this guard together with the apply code", f.Path)
+		}
+	}
+}
+
 // appliedKeyRe matches the provenance keys applyEnvOverrides records, e.g.
 //
 //	applied["api.token"] = true
