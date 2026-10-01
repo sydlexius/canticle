@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"io/fs"
@@ -27,63 +28,92 @@ func (u *UI) registerPreviewRoutes(reg routeReg) {
 }
 
 // previewSidecarMax bounds how much of a lyric sidecar the page reads; a real
-// .lrc or .elrc is a few KiB, so anything larger is truncated, not buffered.
+// .lrc or .elrc is a few KiB, so anything larger is cut, not buffered.
 const previewSidecarMax = 2 << 20
 
 // readPreviewSidecar reads a sidecar through the same os.Root confinement as
-// the audio route (the path is DB-derived), bounded to previewSidecarMax.
-func readPreviewSidecar(roots []string, p string) (string, bool) {
+// the audio route (the path is DB-derived), bounded to previewSidecarMax. It
+// reads one byte past the bound so an oversized file is told apart from one
+// that exactly fits: on overflow the body is cut back to its last complete
+// line (never mid-cue) and truncated is true.
+func readPreviewSidecar(roots []string, p string) (body string, truncated, ok bool) {
 	if p == "" {
-		return "", false
+		return "", false, false
 	}
 	f, _, ok := openPreviewAudio(roots, p)
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	defer func() { _ = f.Close() }()
-	b, err := io.ReadAll(io.LimitReader(f, previewSidecarMax))
+	b, err := io.ReadAll(io.LimitReader(f, previewSidecarMax+1))
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
-	return string(b), true
+	if len(b) > previewSidecarMax {
+		b = b[:previewSidecarMax]
+		if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
+			b = b[:i+1]
+		} else {
+			b = nil
+		}
+		return string(b), true, true
+	}
+	return string(b), false, true
+}
+
+// previewWords splits a line's words out of its own text, recording the exact
+// text before each word so the page renders the line as
+// written. ParseTimedLRC trims every word, so the separator is not in the word:
+// a space for Latin text, nothing for CJK, any leading unmarked text before
+// the first marker. Words are found in source order; when one cannot be found
+// the line cannot be reconstructed losslessly and ok is false, so the caller
+// renders the line's full text without spans.
+func previewWords(text string, ws []lyrics.TimedWord) (words []templates.PreviewWord, ok bool) {
+	pos := 0
+	for _, w := range ws {
+		i := strings.Index(text[pos:], w.Text)
+		if i < 0 {
+			return nil, false
+		}
+		words = append(words, templates.PreviewWord{
+			StartMS: strconv.Itoa(w.StartMS),
+			Before:  text[pos : pos+i],
+			Text:    w.Text,
+		})
+		pos += i + len(w.Text)
+	}
+	return words, true
 }
 
 // previewLines parses the line-synced body and, when an owned word-synced
-// companion body is given, attaches its A2 words to the line with the same
-// start. Inline words in the .lrc itself are kept. A companion that is not
-// canticle's own ([by:canticle]) is ignored, as every other consumer does.
+// companion body is given, attaches its A2 words to the lines by start time
+// and, among lines sharing a start, by occurrence order. Inline words in the
+// .lrc itself are kept. A companion that is not canticle's own is ignored, by
+// the lyrics package's own header-only [by:canticle] rule.
 func previewLines(lrc, elrc string) ([]templates.PreviewLine, bool) {
 	parsed := lyrics.ParseTimedLRC(lrc)
-	words := map[int][]lyrics.TimedWord{}
-	if elrc != "" {
-		comp := lyrics.ParseTimedLRC(elrc)
-		owned := false
-		for _, t := range comp.Tags {
-			if strings.EqualFold(t.Key, "by") && strings.TrimSpace(t.Value) == "canticle" {
-				owned = true
-			}
-		}
-		if owned {
-			for _, l := range comp.Lines {
-				if len(l.Words) > 0 {
-					words[l.StartMS] = l.Words
-				}
-			}
+	words := map[int][][]lyrics.TimedWord{}
+	if elrc != "" && lyrics.IsOwnedCompanionBody(elrc) {
+		for _, l := range lyrics.ParseTimedLRC(elrc).Lines {
+			words[l.StartMS] = append(words[l.StartMS], l.Words)
 		}
 	}
+	seen := map[int]int{}
 	out := make([]templates.PreviewLine, 0, len(parsed.Lines))
 	hasWords := false
 	for _, l := range parsed.Lines {
+		n := seen[l.StartMS]
+		seen[l.StartMS]++
 		ws := l.Words
-		if len(ws) == 0 && !l.Decorative {
-			ws = words[l.StartMS]
+		if len(ws) == 0 && !l.Decorative && n < len(words[l.StartMS]) {
+			ws = words[l.StartMS][n]
 		}
 		pl := templates.PreviewLine{StartMS: strconv.Itoa(l.StartMS), Text: l.Text, Decorative: l.Decorative}
-		for _, w := range ws {
-			pl.Words = append(pl.Words, templates.PreviewWord{StartMS: strconv.Itoa(w.StartMS), Text: w.Text})
-		}
-		if len(pl.Words) > 0 {
-			hasWords = true
+		if len(ws) > 0 {
+			if pw, ok := previewWords(l.Text, ws); ok {
+				pl.Words = pw
+				hasWords = true
+			}
 		}
 		out = append(out, pl)
 	}
@@ -122,20 +152,25 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
 		return
 	}
-	lrc, ok := readPreviewSidecar(roots, t.LRCPath)
+	lrc, lrcCut, ok := readPreviewSidecar(roots, t.LRCPath)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	elrc, _ := readPreviewSidecar(roots, t.ELRCCandidate)
+	elrc, elrcCut, _ := readPreviewSidecar(roots, t.ELRCCandidate)
+	if elrcCut {
+		// A cut companion would misalign its words with the lines; ignore it.
+		elrc = ""
+	}
 	lines, hasWords := previewLines(lrc, elrc)
 	view := templates.PreviewView{
-		Artist:   t.Artist,
-		Title:    t.Title,
-		Album:    t.Album,
-		AudioSrc: "/preview/" + strconv.FormatInt(id, 10) + "/audio",
-		Lines:    lines,
-		HasWords: hasWords,
+		Artist:    t.Artist,
+		Title:     t.Title,
+		Album:     t.Album,
+		AudioSrc:  "/preview/" + strconv.FormatInt(id, 10) + "/audio",
+		Lines:     lines,
+		HasWords:  hasWords,
+		Truncated: lrcCut,
 	}
 	render(w, r, templates.PreviewPage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
 }

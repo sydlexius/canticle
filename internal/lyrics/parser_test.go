@@ -579,3 +579,19 @@ func TestInjectProvenance_TagsBeforeBlankLine(t *testing.T) {
 		t.Errorf("[source:] at line %d is AFTER the blank line at %d; should be before", sourceIdx, blankIdx)
 	}
 }
+
+func TestIsOwnedCompanionBodyHeaderOnly(t *testing.T) {
+	cases := map[string]bool{
+		"[by:canticle]\n[00:01.00]x\n":         true,
+		"[ar:a]\n[by:canticle]\n[00:01.00]x\n": true,
+		"[00:01.00]x\n[by:canticle]\n":         false,
+		"[by:someone]\n[00:01.00]x\n":          false,
+		"\ufeff[by:canticle]\n[00:01.00]x\n":   true,
+		"":                                     false,
+	}
+	for body, want := range cases {
+		if got := IsOwnedCompanionBody(body); got != want {
+			t.Errorf("IsOwnedCompanionBody(%q) = %v, want %v", body, got, want)
+		}
+	}
+}

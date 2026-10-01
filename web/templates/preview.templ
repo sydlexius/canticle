@@ -14,18 +14,16 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 			}
 		</p>
 		<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc }></audio>
+		if view.Truncated {
+			<p class="mx-preview-notice" role="status">This lyric file is larger than the preview limit; only its first lines are shown.</p>
+		}
 		<ol id="mx-preview-lyrics" class="mx-preview-lyrics" data-has-words?={ view.HasWords }>
 			for _, l := range view.Lines {
 				if l.Decorative {
 					<li class="mx-preview-line mx-preview-line-decorative" data-start-ms={ l.StartMS }>{ l.Text }</li>
 				} else if len(l.Words) > 0 {
 					<li class="mx-preview-line" data-start-ms={ l.StartMS }>
-						for i, w := range l.Words {
-							if i > 0 {
-								{ " " }
-							}
-							<span class="mx-preview-word" data-start-ms={ w.StartMS }>{ w.Text }</span>
-						}
+						@previewWords(l)
 					</li>
 				} else {
 					<li class="mx-preview-line" data-start-ms={ l.StartMS }>{ l.Text }</li>

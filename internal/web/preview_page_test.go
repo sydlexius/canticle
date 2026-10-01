@@ -157,3 +157,91 @@ func TestPreviewPageUnwiredReportsIs503(t *testing.T) {
 }
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
+
+func TestPreviewSidecarBoundary(t *testing.T) {
+	f := newPreviewFixture(t)
+	roots := []string{f.root}
+	line := "[00:01.00]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+	fill := func(n int) string {
+		b := strings.Repeat(line, n/len(line))
+		return b + strings.Repeat("x", n-len(b))
+	}
+	f.put(t, "exact.lrc", fill(previewSidecarMax))
+	f.put(t, "over.lrc", fill(previewSidecarMax+1))
+	body, cut, ok := readPreviewSidecar(roots, filepath.Join(f.root, "exact.lrc"))
+	if !ok || cut || len(body) != previewSidecarMax {
+		t.Errorf("exactly max: ok=%v cut=%v len=%d, want ok, not cut, full", ok, cut, len(body))
+	}
+	body, cut, ok = readPreviewSidecar(roots, filepath.Join(f.root, "over.lrc"))
+	if !ok || !cut {
+		t.Fatalf("max+1: ok=%v cut=%v, want ok and cut", ok, cut)
+	}
+	if !strings.HasSuffix(body, "\n") || len(body) > previewSidecarMax {
+		t.Errorf("cut body must end on a complete line within the bound, len=%d", len(body))
+	}
+}
+
+func TestPreviewPageTruncatedLRCShowsNotice(t *testing.T) {
+	f := newPreviewFixture(t)
+	id := f.row(t, f.writeFile(t, f.root, "song.flac"))
+	f.put(t, "song.lrc", strings.Repeat("[00:01.00]line of lyric text here\n", previewSidecarMax/30))
+	if !strings.Contains(f.page(itoa(id)).Body.String(), `class="mx-preview-notice"`) {
+		t.Error("oversized .lrc rendered without a truncation notice")
+	}
+	id2 := f.row(t, f.writeFile(t, f.root, "ok.flac"))
+	f.put(t, "ok.lrc", pageLRC)
+	if strings.Contains(f.page(itoa(id2)).Body.String(), `class="mx-preview-notice"`) {
+		t.Error("normal .lrc rendered a truncation notice")
+	}
+}
+
+func TestPreviewLinesCompanionOwnershipIsHeaderOnly(t *testing.T) {
+	foreign := "[00:01.00]<00:01.00>Hello <00:01.50>there\n[by:canticle]\n"
+	if _, hasWords := previewLines(pageLRC, foreign); hasWords {
+		t.Error("a [by:canticle] tag after a cue made a foreign companion owned")
+	}
+	if _, hasWords := previewLines(pageLRC, pageELRC); !hasWords {
+		t.Error("a header [by:canticle] companion was not honored")
+	}
+}
+
+func TestPreviewLinesDuplicateStartsMergeByOccurrence(t *testing.T) {
+	lrc := "[00:01.00]First one\n[00:01.00]Second two\n"
+	elrc := "[by:canticle]\n[00:01.00]<00:01.00>First <00:01.20>one\n[00:01.00]<00:01.00>Second <00:01.30>two\n"
+	lines, _ := previewLines(lrc, elrc)
+	if len(lines) != 2 || len(lines[0].Words) != 2 || len(lines[1].Words) != 2 {
+		t.Fatalf("lines = %+v, want two lines of two words", lines)
+	}
+	if lines[0].Words[1].Text != "one" || lines[1].Words[1].Text != "two" || lines[1].Words[1].StartMS != "1300" {
+		t.Errorf("same-start lines got each other's words: %+v", lines)
+	}
+}
+
+func TestPreviewLinesWordSeparatorsAreFaithful(t *testing.T) {
+	cjk, _ := previewLines("[00:01.00]你好\n", "[by:canticle]\n[00:01.00]<00:01.00>你<00:01.50>好\n")
+	if len(cjk[0].Words) != 2 || cjk[0].Words[1].Before != "" {
+		t.Errorf("CJK words must carry no separator: %+v", cjk[0].Words)
+	}
+	lead, _ := previewLines("[00:01.00]La <00:01.20>da <00:01.60>dee\n", "")
+	w := lead[0].Words
+	if len(w) != 2 || w[0].Before != "La " || w[1].Before != " " || w[1].Text != "dee" {
+		t.Errorf("leading unmarked text lost: %+v", w)
+	}
+	// A companion whose words are not in the line's text cannot be
+	// reconstructed: the line stays plain rather than rendering wrong text.
+	stale, hasWords := previewLines("[00:01.00]Hello there\n", "[by:canticle]\n[00:01.00]<00:01.00>Other <00:01.50>words\n")
+	if hasWords || len(stale[0].Words) != 0 {
+		t.Errorf("mismatched companion words attached: %+v", stale[0])
+	}
+}
+
+func TestPreviewPageRendersCJKWithoutSpaces(t *testing.T) {
+	f := newPreviewFixture(t)
+	id := f.row(t, f.writeFile(t, f.root, "song.flac"))
+	f.put(t, "song.lrc", "[00:01.00]你好\n")
+	f.put(t, "song.elrc", "[by:canticle]\n[00:01.00]<00:01.00>你<00:01.50>好\n")
+	body := f.page(itoa(id)).Body.String()
+	if !strings.Contains(body, `data-start-ms="1000">你</span><span class="mx-preview-word" data-start-ms="1500">好</span>`) {
+		t.Errorf("CJK words not adjacent: %s", body)
+	}
+}

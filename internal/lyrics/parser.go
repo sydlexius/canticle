@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -97,12 +98,22 @@ func parseLRCHeader(path string) ([]lrcTag, []string, error) {
 		return nil, nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
+	tags, lyrics, err := parseLRCHeaderFrom(f)
+	if err != nil {
+		return nil, nil, fmt.Errorf("scan %s: %w", path, err)
+	}
+	return tags, lyrics, nil
+}
 
+// parseLRCHeaderFrom is parseLRCHeader over an already-open reader, so a
+// caller holding the bytes (the preview page's confined read) applies the very
+// same leading-header rule instead of mirroring it.
+func parseLRCHeaderFrom(r io.Reader) ([]lrcTag, []string, error) {
 	var tags []lrcTag
 	var lyrics []string
 	inHeader := true
 
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	first := true
 	for sc.Scan() {
 		line := sc.Text()
@@ -125,9 +136,26 @@ func parseLRCHeader(path string) ([]lrcTag, []string, error) {
 		lyrics = append(lyrics, line)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, nil, fmt.Errorf("scan %s: %w", path, err)
+		return nil, nil, err
 	}
 	return tags, lyrics, nil
+}
+
+// IsOwnedCompanionBody reports whether body, the already-read text of a
+// word-synced companion, carries [by:canticle] in its leading header block:
+// the same rule IsOwnedCompanion applies to a file on disk (a [by:] line after
+// the first cue does not count). Unreadable body reads as foreign.
+func IsOwnedCompanionBody(body string) bool {
+	tags, _, err := parseLRCHeaderFrom(strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	for _, t := range tags {
+		if strings.EqualFold(t.key, "by") && strings.TrimSpace(t.value) == "canticle" {
+			return true
+		}
+	}
+	return false
 }
 
 // parseTagLine parses a single LRC tag line of the form [key:value].
