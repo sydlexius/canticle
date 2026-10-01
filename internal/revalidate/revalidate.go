@@ -29,12 +29,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/realign"
 	"github.com/sydlexius/canticle/internal/scanner"
+	"github.com/sydlexius/canticle/internal/sidecar"
 	"github.com/sydlexius/canticle/internal/timing"
 )
 
@@ -1004,109 +1004,15 @@ func (c *dirListingCache) list(dir string) ([]os.DirEntry, error) {
 	return entries, nil
 }
 
-// ResolveSidecarCaseVariant looks for an extension-case variant of path
-// (#989/#1051) and returns its real on-disk name and Lstat info. The STEM
-// stays byte-identical and only the extension's ASCII letters are permuted --
-// the same rule sidecar.Listing.Variants enforces -- so "Intro.lrc" is never
-// treated as a variant of "intro.lrc", and a Unicode fold (long s, micro sign,
-// final sigma) is never attempted because only ASCII letters are permuted at
-// all.
-//
-// DELIBERATELY NOT sidecar.List/Variants, and that is an I/O-shape choice, not
-// a rule difference: List reads the whole directory, and judgeCandidate's
-// caller reaches this exactly when the exact-case Lstat just missed -- which
-// is the ORDINARY case for a candidate in the timing backlog (the sidecar was
-// moved or deleted by a reorg), not a rare one. Paying a directory read for
-// that population would reintroduce the exact per-candidate O(N) cost
-// #691/#801 already removed from the neighboring companion lookup; see
-// TestPlanCandidatesReadsNoDirectoryForTheCommonCases, which pins zero
-// directory reads for it. Enumerating the extension's own case permutations
-// with bounded Lstat calls (at most 2^n for an n-letter extension --  8 for
-// ".lrc"/".txt", the only two this package ever derives) costs stats, never a
-// listing, and still matches Variants' extension-folding rule exactly since
-// every ASCII-letter permutation is tried.
-//
-// A permutation that stats as a directory or symlink is rejected (mirroring
-// Variants' regular-file-only rule): a directory can never be a sidecar, and
-// following a symlinked one is exactly what judgeCandidate's own Lstat-not-
-// Stat choice avoids for the exact-case name.
-//
-// ORDER MATCHES sidecar.Listing.Variants (#1051 review): when more than one
-// case permutation exists on disk -- an unusual but possible shape, e.g. both
-// "track.LRC" and "track.Lrc" -- this and Variants must agree on which one is
-// THE variant, or the scanner and revalidate can each act on a different real
-// file for the same logical sidecar. Variants reports its non-exact matches in
-// the order os.ReadDir's entries come back in, which is ascending file-name
-// order; caseVariantsOf's own order is an unrelated bitmask sequence, so every
-// matching candidate is collected first and the full set is then sorted by
-// name before the smallest is returned, rather than returning whichever one
-// caseVariantsOf happened to generate first.
+// ResolveSidecarCaseVariant forwards to sidecar.ResolveCaseVariant, where the
+// bounded extension-case probe now lives (a leaf package, so read-only
+// consumers need not import revalidate). See that function for the contract.
 func ResolveSidecarCaseVariant(path string) (string, os.FileInfo, bool) {
-	ext := filepath.Ext(path)
-	stem := strings.TrimSuffix(path, ext)
-	var matches []string
-	infos := map[string]os.FileInfo{}
-	for _, variant := range caseVariantsOf(ext) {
-		if variant == ext {
-			continue // the exact case; the caller already knows this one misses
-		}
-		candidate := stem + variant
-		fi, err := os.Lstat(candidate)
-		if err != nil || !fi.Mode().IsRegular() {
-			continue
-		}
-		matches = append(matches, candidate)
-		infos[candidate] = fi
-	}
-	if len(matches) == 0 {
-		return "", nil, false
-	}
-	sort.Strings(matches)
-	return matches[0], infos[matches[0]], true
+	return sidecar.ResolveCaseVariant(path)
 }
 
-// caseVariantsOf returns every ASCII-case permutation of ext's letters, dot
-// included and unpermuted, in a deterministic order (increasing permutation
-// index) so a run is reproducible. Non-letter bytes (the leading dot) are
-// never flipped. Bounded by construction: canticle's own sidecar extensions
-// are short (".lrc", ".txt"), so this is at most 8 stats, never a scan of
-// arbitrary length.
-func caseVariantsOf(ext string) []string {
-	letterIdx := make([]int, 0, len(ext))
-	for i := 0; i < len(ext); i++ {
-		if c := ext[i]; ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') {
-			letterIdx = append(letterIdx, i)
-		}
-	}
-	n := len(letterIdx)
-	out := make([]string, 0, 1<<uint(n))
-	for mask := 0; mask < (1 << uint(n)); mask++ {
-		b := []byte(ext)
-		for bit, i := range letterIdx {
-			if mask&(1<<uint(bit)) != 0 {
-				b[i] = toUpperASCII(b[i])
-			} else {
-				b[i] = toLowerASCII(b[i])
-			}
-		}
-		out = append(out, string(b))
-	}
-	return out
-}
-
-func toUpperASCII(c byte) byte {
-	if 'a' <= c && c <= 'z' {
-		return c - ('a' - 'A')
-	}
-	return c
-}
-
-func toLowerASCII(c byte) byte {
-	if 'A' <= c && c <= 'Z' {
-		return c + ('a' - 'A')
-	}
-	return c
-}
+// caseVariantsOf forwards to sidecar.CaseVariants.
+func caseVariantsOf(ext string) []string { return sidecar.CaseVariants(ext) }
 
 // companionAudioByListing is the pre-#691 lookup, kept as companionAudio's
 // miss-path fallback so an unusually-cased extension still resolves through
