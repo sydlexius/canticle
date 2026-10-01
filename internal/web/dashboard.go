@@ -254,19 +254,29 @@ func formatWaited(since, now time.Time) string {
 // adding keeps the row one status axis that sums to Total. The doughnut
 // (buildQueueChart) splits Done the same way (#1139).
 func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
+	// Every tile here is one reports.Bucket, so its drill-down href comes from
+	// the bucket registry (#598), never a hand-typed key. The Instrumental tile
+	// is rendered by the template, has no bucket, and stays a plain tile.
+	tile := func(label string, b reports.Bucket, n int64) templates.StatTile {
+		return templates.StatTile{Label: label, Value: strconv.FormatInt(n, 10), Href: queueBucketHref(b)}
+	}
 	return []templates.StatTile{
-		{Label: "Pending", Value: strconv.FormatInt(qs.Pending, 10)},
-		{Label: "Processing", Value: strconv.FormatInt(qs.Processing, 10)},
-		{Label: "Finished", Value: strconv.FormatInt(qs.Finished, 10)},
-		{Label: "Settled (upgradable)", Value: strconv.FormatInt(qs.SettledUpgradable, 10)},
-		{Label: "Failed", Value: strconv.FormatInt(qs.Failed, 10)},
-		{Label: "Deferred", Value: strconv.FormatInt(qs.Deferred, 10)},
+		tile("Pending", reports.BucketPending, qs.Pending),
+		tile("Processing", reports.BucketProcessing, qs.Processing),
+		tile("Finished", reports.BucketFinished, qs.Finished),
+		tile("Settled (upgradable)", reports.BucketSettled, qs.SettledUpgradable),
+		tile("Failed", reports.BucketFailed, qs.Failed),
+		tile("Deferred", reports.BucketDeferred, qs.Deferred),
 		// Unavailable (#477): an exhausted benign miss, distinct from Done (which
 		// implies a written sidecar) and from Failed/Deferred (which are still
 		// active or retrying).
-		{Label: "Unavailable", Value: strconv.FormatInt(qs.Unavailable, 10)},
+		tile("Unavailable", reports.BucketUnavailable, qs.Unavailable),
 	}
 }
+
+// queueBucketHref is the /queue/{bucket} drill-down URL for a bucket, the
+// inverse of the route registerQueueRoutes serves.
+func queueBucketHref(b reports.Bucket) string { return "/queue/" + string(b) }
 
 // buildSyncTierTiles shapes SyncTierCounts into the dashboard's sync-tier
 // tiles (#627). The three tiles are kept SEPARATE, never summed into one

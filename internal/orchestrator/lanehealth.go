@@ -42,8 +42,8 @@ type LaneState struct {
 // orchestrator state is locked at all (the lane slice is fixed at New).
 // Safe for concurrent use with dispatch.
 //
-// No production caller yet: /metrics (#488 slice 2) and the dashboard (slice 3)
-// consume it.
+// Production caller: /metrics through worker.LaneHealth (#488 slice 2); the
+// dashboard (slice 3) will consume it too.
 func (o *Orchestrator) LaneHealth() []LaneState {
 	out := make([]LaneState, 0, len(o.lanes))
 	for _, l := range o.lanes {

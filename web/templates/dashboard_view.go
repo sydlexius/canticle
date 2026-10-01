@@ -114,6 +114,9 @@ type StatTile struct {
 	Label string // short human label, e.g. "Pending" or a provider lane name
 	Value string // formatted numeric value
 	Sub   string // optional annotation, e.g. "75.0% hit rate"; empty = not shown
+	// Href, when set, makes the tile a link to that drill-down page (#598); empty
+	// renders a plain tile.
+	Href string
 	// LabelMark is the lane mark token shown beside Label (#601), empty when the
 	// tile has no mark. The work-queue tiles leave it empty -- they are not lanes.
 	LabelMark string

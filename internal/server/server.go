@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
@@ -84,6 +85,7 @@ type Handler struct {
 	ready              Readiness
 	stats              StatusReporter
 	metrics            MetricsReporter
+	laneHealth         func() []orchestrator.LaneState
 	inventory          Inventory
 	realigner          Realigner
 	allowedRoots       []string
@@ -130,6 +132,14 @@ func WithReadiness(r Readiness) Option {
 // WithStatusReporter wires a queue summary source used by GET /api/v1/status.
 func WithStatusReporter(s StatusReporter) Option {
 	return func(h *Handler) { h.stats = s }
+}
+
+// WithLaneHealth wires the per-lane circuit-state source read by GET /metrics
+// (#488). fn is called on every scrape and must return the CURRENT lanes (pass a
+// method value on the owner, never a captured orchestrator, which goes stale on
+// a rebuild). Unset, /metrics omits the lane families.
+func WithLaneHealth(fn func() []orchestrator.LaneState) Option {
+	return func(h *Handler) { h.laneHealth = fn }
 }
 
 // WithMetricsReporter wires a metrics source used by GET /metrics.
@@ -255,9 +265,10 @@ func WithOnboarding(o *web.Onboarding) Option {
 }
 
 // WithReportsDB wires the database that backs the serve-mode Reports workspace.
-// The handler builds a read-only reports.Repo from db and attaches it to the
-// mounted web UI (see NewHandler). It is meaningful only alongside a mounted web
-// UI; with no UI, or a nil db, it is a no-op (the reports routes never mount).
+// The handler builds a reports.Repo from db for the read-only reports and, on the
+// same read-write handle, the queue action backend behind the revive page (see
+// NewHandler); it attaches both to the mounted web UI. It is meaningful only
+// alongside a mounted web UI; with no UI, or a nil db, it is a no-op (the reports routes never mount).
 func WithReportsDB(db *sql.DB) Option {
 	return func(h *Handler) { h.reportsDB = db }
 }
@@ -340,6 +351,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.reportsDB != nil {
 			h.webui.AttachReports(reports.New(h.reportsDB))
+			h.webui.AttachQueueActions(queue.NewDBQueue(h.reportsDB))
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)

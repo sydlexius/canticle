@@ -18,7 +18,54 @@ type QueueView struct {
 	// from; non-zero means the page does not begin at the top of the bucket.
 	NextCursor int64
 	After      int64
+	// ReviveLink shows the "Revive retired tracks" link (the unavailable bucket
+	// only, and only when a queue action backend is wired).
+	ReviveLink bool
 }
+
+// ReviveView is the presentation model for /queue/unavailable/revive (#598): the
+// blast radius of reviving retired tracks, the library picker, and (after a
+// confirm) the result.
+type ReviveView struct {
+	// Manageable is false when no CSRF token could be issued; the page then
+	// renders the numbers but no form, mirroring the keys page's fail-safe.
+	Manageable bool
+	CSRFToken  string
+	Error      string
+
+	// Total, Shared and Unlinked describe the all-libraries population.
+	Total    int64
+	Shared   int64
+	Unlinked int64
+
+	Libraries []ReviveLibrary
+	// Selected is "all" or a library id; ScopeLabel/ScopeCount/ScopeShared
+	// describe exactly what the confirm button will revive.
+	Selected    string
+	ScopeLabel  string
+	ScopeCount  int64
+	ScopeShared int64
+
+	// Result is set on the page rendered after a confirm.
+	Result *ReviveResult
+}
+
+// ReviveLibrary is one library option in the picker.
+type ReviveLibrary struct {
+	ID     string
+	Name   string
+	Count  int64
+	Shared int64
+}
+
+// ReviveResult reports a completed revive.
+type ReviveResult struct {
+	Revived int64
+	Scope   string
+}
+
+// itoa64 formats a count for templates.
+func itoa64(n int64) string { return strconv.FormatInt(n, 10) }
 
 // QueueRow is one work_queue row as the drill-down table shows it.
 type QueueRow struct {
