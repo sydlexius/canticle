@@ -8,8 +8,9 @@ import (
 // lineTierPredicate is the ONE definition of "this synced row is at the
 // line-synced rung": sync_tier='line' with the same two exclusions as
 // wordTierPredicate (a timing-remediated tier is stale; a row mid
-// word-recheck is re-litigating its tier). Shared by the word tier and
-// ResultsBreakdown so the two cannot disagree. No leading AND/WHERE.
+// word-recheck is re-litigating its tier). Shared by ResultsBreakdown and
+// ListBucket's previewability expression, so the two cannot disagree. No
+// leading AND/WHERE.
 const lineTierPredicate = `sync_tier = 'line'
                       AND NOT ` + retiredPredicate + `
                       AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
