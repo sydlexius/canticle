@@ -116,6 +116,42 @@ describe("keyboard.js", () => {
     expect(plain).not.toHaveBeenCalled();
   });
 
+  it("treats Shift exactly for Space and for the bracket code fallback", () => {
+    const win = load("MacIntel");
+    const play = vi.fn();
+    const fine = vi.fn();
+    const coarse = vi.fn();
+    win.mxKeyboard.register({ keys: [" "], label: "play", handler: play });
+    win.mxKeyboard.register({ keys: ["Alt", "]"], label: "+0.01 s", handler: fine });
+    win.mxKeyboard.register({ keys: ["Alt", "Shift", "]"], label: "alt-shift", handler: coarse });
+    press(win, { key: " ", shiftKey: true });
+    expect(play).not.toHaveBeenCalled();
+    press(win, { key: "\u2019", code: "BracketRight", altKey: true, shiftKey: true });
+    expect(fine).not.toHaveBeenCalled();
+    expect(coarse).toHaveBeenCalledOnce();
+  });
+
+  it("ignores keydown during IME composition", () => {
+    const win = load("Linux x86_64");
+    const discard = vi.fn();
+    win.mxKeyboard.register({ keys: ["Escape"], label: "discard", handler: discard, allowInInput: true });
+    const e = press(win, { key: "Escape", isComposing: true });
+    expect(discard).not.toHaveBeenCalled();
+    expect(e.defaultPrevented).toBe(false);
+  });
+
+  it("sees an input inside an open shadow root as typing", () => {
+    const win = load("Linux x86_64");
+    const nudge = vi.fn();
+    win.mxKeyboard.register({ keys: ["]"], label: "+0.1 s", handler: nudge });
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    const input = win.document.createElement("input");
+    host.attachShadow({ mode: "open" }).appendChild(input);
+    input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "]", bubbles: true, composed: true, cancelable: true }));
+    expect(nudge).not.toHaveBeenCalled();
+  });
+
   it("renders a legend matching the registry", () => {
     const win = load("Linux x86_64");
     const kb = win.mxKeyboard;

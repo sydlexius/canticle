@@ -71,15 +71,22 @@
     }
     var k = item.key;
     var isLetter = k.length === 1 && k.toLowerCase() !== k.toUpperCase();
-    // Shift is exact for letters and named keys; punctuation is already
-    // shift-dependent on some layouts, so it is only checked when asked for.
-    if ((isLetter || k.length > 1 || w.shift) && e.shiftKey !== w.shift) {
+    var isPunct = k.length === 1 && !isLetter && k !== " ";
+    var shiftExact = e.shiftKey === w.shift;
+    // Shift is exact for letters, Space and named keys. A punctuation key typed
+    // literally tolerates an extra Shift, since some layouts need Shift to
+    // produce it; the physical-code fallback below always checks Shift exactly,
+    // so a Shift+bracket chord never lands on the unshifted binding.
+    if (!isPunct && !shiftExact) {
       return false;
     }
     if (isLetter) {
       return e.key.toLowerCase() === k.toLowerCase();
     }
-    return e.key === k || ((w.shift || w.alt) && CODES[k] !== undefined && e.code === CODES[k]);
+    if (e.key === k) {
+      return w.shift ? shiftExact : true;
+    }
+    return shiftExact && (w.shift || w.alt) && CODES[k] !== undefined && e.code === CODES[k];
   }
 
   function isTyping(el) {
@@ -94,7 +101,15 @@
   }
 
   document.addEventListener("keydown", function (e) {
-    var typing = isTyping(e.target);
+    // A keydown during IME composition (an Escape that cancels it, for one)
+    // belongs to the input method, never to an application shortcut.
+    if (e.isComposing || e.keyCode === 229) {
+      return;
+    }
+    // composedPath()[0] is the real target inside an open shadow root, where
+    // e.target is only the host.
+    var path = typeof e.composedPath === "function" ? e.composedPath() : [];
+    var typing = isTyping(path.length ? path[0] : e.target);
     for (var i = 0; i < entries.length; i++) {
       var item = entries[i];
       if (typing && !item.entry.allowInInput) {
