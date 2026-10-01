@@ -3,6 +3,7 @@ package reports_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/failsig"
@@ -10,9 +11,19 @@ import (
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
+var failedUpdatedAt = []string{
+	"2026-01-01T10:00:00Z", "2026-01-01T12:00:00Z", "2026-01-01T11:00:00Z",
+	"2026-01-01T09:00:00Z", "2026-01-01T08:00:00Z",
+}
+
 func seedFailureItems(t *testing.T) *reports.Repo {
 	t.Helper()
 	sqlDB := openTestDB(t)
+	// An AFTER UPDATE trigger restamps updated_at to now on every write, which
+	// would erase the distinct timestamps seeded below; drop it for this DB.
+	if _, err := sqlDB.ExecContext(context.Background(), `DROP TRIGGER update_work_queue_updated_at`); err != nil {
+		t.Fatalf("drop updated_at trigger: %v", err)
+	}
 	// Raw last_error values that differ but normalize to one signature, plus a
 	// distinct one, a no-reason row with attempts, and a row the #789 guard hides.
 	for i, le := range []string{
@@ -22,13 +33,23 @@ func seedFailureItems(t *testing.T) *reports.Repo {
 		"musixmatch: unexpected matcher status_code 500",
 		"",
 	} {
-		insertWorkItem(t, sqlDB, workItem{
+		id := insertWorkItem(t, sqlDB, workItem{
 			artist: "A", title: fmt.Sprintf("f%d", i), status: "failed", lastError: le, attempts: 1,
 		})
+		// Distinct updated_at, deliberately not monotonic in id, so the
+		// newest-first order is observable: f1 newest, then f2, then f0.
+		setWorkItemColumn(t, sqlDB, id, "updated_at", true, failedUpdatedAt[i])
 	}
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "guarded", status: "failed", attempts: 0})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "d1", status: "deferred", lastError: "no match", missCount: 1})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "d2", status: "deferred", lastError: "no match", missCount: 2})
+	// Parked rows share the ordinary deferred rows' normalized error, so only
+	// the deferred row filter keeps them out of the group and its items.
+	parkedRefused := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "parked-refused", status: "deferred", lastError: "no match", missCount: 1})
+	setWorkItemColumn(t, sqlDB, parkedRefused, "refused_waits", true, 1)
+	parkedUpgrade := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "parked-upgrade", status: "deferred", lastError: "no match", missCount: 1})
+	setWorkItemColumn(t, sqlDB, parkedUpgrade, "upgrade_queued", true, 1)
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "parked-word", status: "deferred", lastError: "no match", missCount: 1, wordTimingState: "queued"})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "pend", status: "pending", lastError: "no match"})
 	return reports.New(sqlDB)
 }
@@ -76,6 +97,9 @@ func TestFailureGroupItemsAgreeWithGroups(t *testing.T) {
 				t.Errorf("group %s %q: count %d, items %d", g.Status, g.Reason, g.Count, len(items))
 			}
 			for _, it := range items {
+				if strings.HasPrefix(it.Title, "parked-") {
+					t.Errorf("parked row %q leaked into %s group %q", it.Title, g.Status, g.Reason)
+				}
 				if it.Reason != g.Reason || it.Status != g.Status {
 					t.Errorf("item %d in wrong group: %q/%q", it.ID, it.Status, it.Reason)
 				}
@@ -91,15 +115,17 @@ func TestFailureGroupItemsClassAndOrder(t *testing.T) {
 	if err != nil || len(items) != 3 {
 		t.Fatalf("items=%d err=%v", len(items), err)
 	}
-	for i, it := range items {
+	for _, it := range items {
 		if it.Class != failsig.Persistent {
 			t.Errorf("class = %q, want persistent", it.Class)
 		}
 		if it.Title == "" || it.Artist != "A" {
 			t.Errorf("display fields missing: %+v", it)
 		}
-		if i > 0 && items[i-1].UpdatedAt == it.UpdatedAt && items[i-1].ID < it.ID {
-			t.Errorf("not newest first: ids %d then %d", items[i-1].ID, it.ID)
+	}
+	for i, want := range []string{"f1", "f2", "f0"} {
+		if items[i].Title != want {
+			t.Errorf("newest-first position %d = %q, want %q", i, items[i].Title, want)
 		}
 	}
 	trans, err := repo.FailureGroupItems(context.Background(), "failed", "musixmatch: unexpected matcher status_code 500", 10)
