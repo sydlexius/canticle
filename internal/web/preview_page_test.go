@@ -261,6 +261,7 @@ func TestPreviewPageRendersEditorOnlyForEditableRow(t *testing.T) {
 		`id="mx-edit-save"`, `value="` + token + `"`,
 		`data-mtime="` + e.mtime(t) + `"`, `data-duration-ms="30000"`, `data-offset-ms="0"`,
 		`data-save-url="/preview/` + e.id + `/offset"`, `/static/js/keyboard.js`, `id="mx-preview-keys"`,
+		`id="mx-ear-toggle"`, `data-ear-unit="line"`, `id="mx-ear-banner"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("editable page missing %q", want)
@@ -285,7 +286,7 @@ func TestPreviewPageWordSyncedIsReadOnlyAndEditorUnwiredRendersNone(t *testing.T
 	wordID := itoa(e.seedTier(t, e.writeFile(t, e.root, "other.flac"), "word"))
 	e.put(t, "other.lrc", pageLRC)
 	body := e.page(wordID).Body.String()
-	if strings.Contains(body, `id="mx-edit-save"`) || strings.Contains(body, `id="mx-edit"`) {
+	if strings.Contains(body, `id="mx-edit-save"`) || strings.Contains(body, `id="mx-edit"`) || strings.Contains(body, "mx-ear-") {
 		t.Error("word-synced row rendered the editor")
 	}
 	if !strings.Contains(body, "Offset editing works on line-synced files only") {

@@ -7,6 +7,7 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const JS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "preview.js"), "utf8");
+const KB = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "keyboard.js"), "utf8");
 
 // Every window load() creates. preview.js runs a rAF loop while the audio
 // reports playing, and jsdom keeps a window (and its timers) alive until it is
@@ -220,15 +221,19 @@ describe("offset editor helpers", () => {
     <button class="mx-edit-nudge" data-delta="-1000">-1s</button><button class="mx-edit-nudge" data-delta="-100">-0.1</button>
     <button class="mx-edit-nudge" data-delta="100">+0.1</button><button class="mx-edit-nudge" data-delta="1000">+1s</button>
     <button id="mx-edit-save"></button><button id="mx-edit-discard"></button><button id="mx-edit-revert" hidden></button>
+    <button id="mx-ear-toggle" data-ear-unit="line" aria-pressed="false"></button>
     <p id="mx-edit-status"></p>
     <dialog id="mx-edit-confirm"><span id="mx-edit-confirm-offset"></span><p id="mx-edit-confirm-body"></p>
       <input id="mx-edit-skip" type="checkbox"><button id="mx-edit-confirm-cancel"></button><button id="mx-edit-confirm-ok"></button></dialog>
   </section>
+  <div id="mx-ear-banner" hidden><span id="mx-ear-step"></span><span id="mx-ear-title"></span><span id="mx-ear-help"></span>
+    <button id="mx-ear-replay" hidden></button><button id="mx-ear-cancel"></button></div>
+  <p id="mx-preview-keys"></p>
   <ol id="mx-preview-lyrics">LINES</ol></body>`;
 
   // mountEditor builds the editor markup subset around the given line starts.
   // orig defaults to the shown starts (an unedited file); toleranceMs to timing.Tolerance.
-  function mountEditor({ durationMs = 30000, starts = [1000], orig = null, toleranceMs = 2000, savedOffsetMs = 0, edited = false, fetchImpl = null, decorative = [] } = {}) {
+  function mountEditor({ durationMs = 30000, starts = [1000], orig = null, toleranceMs = 2000, savedOffsetMs = 0, edited = false, fetchImpl = null, decorative = [], keyboard = false } = {}) {
     const lines = starts
       .map((ms, i) => `<li class="mx-preview-line${decorative.includes(i) ? " mx-preview-line-decorative" : ""}" data-start-ms="${ms}">l${ms}</li>`)
       .join("");
@@ -251,6 +256,19 @@ describe("offset editor helpers", () => {
         if (fetchImpl) {
           win.fetch = fetchImpl;
         }
+        // jsdom has no media playback: model play/pause as a paused flag.
+        let paused = true;
+        Object.defineProperty(win.HTMLMediaElement.prototype, "paused", { get: () => paused });
+        win.HTMLMediaElement.prototype.play = () => {
+          paused = false;
+          return Promise.resolve();
+        };
+        win.HTMLMediaElement.prototype.pause = () => {
+          paused = true;
+        };
+        if (keyboard) {
+          win.eval(KB);
+        }
       },
     });
     const $ = (id) => p.doc.getElementById(id);
@@ -261,6 +279,233 @@ describe("offset editor helpers", () => {
   }
   const reply = (status, text) =>
     vi.fn(() => Promise.resolve({ ok: status === 200, status, text: () => Promise.resolve(text) }));
+
+  describe("find by ear (unit-agnostic core)", () => {
+    // fakeEar drives createEar with a synthetic unit list (not lines: plain
+    // objects with no element), a fake audio and a hand-cranked frame clock.
+    // playImpl, when given, replaces play() (e.g. a rejecting promise).
+    function fakeEar(starts, { durationMs = 0, offset = 0, enabled = true, playImpl = null } = {}) {
+      const loaded = load();
+      const { createEar } = loaded.win.mxPreviewEdit;
+      const audio = { currentTime: 0, paused: true, plays: [], play() { this.paused = false; this.plays.push(this.currentTime); }, pause() { this.paused = true; } };
+      if (playImpl) {
+        audio.play = function () {
+          this.plays.push(this.currentTime);
+          return playImpl.call(this);
+        };
+      }
+      const frames = [];
+      const cancelled = [];
+      const st = { offset, enabled };
+      const ear = createEar({
+        audio,
+        noun: "word",
+        durationMs,
+        units: () => starts.map((s) => ({ start: s + st.offset })),
+        getOffset: () => st.offset,
+        setOffset: (ms) => (st.offset = ms),
+        enabled: () => st.enabled,
+        frame: (fn) => frames.push(fn),
+        cancelFrame: (id) => cancelled.push(id),
+        onChange: () => {},
+      });
+      // run advances the audio clock to ms and fires the queued frames,
+      // returning the furthest time the audio reached while still playing.
+      const run = (stepMs) => {
+        let reached = audio.currentTime * 1000;
+        for (let n = 0; n < 1000 && frames.length > 0; n++) {
+          frames.shift()();
+          if (audio.paused) break;
+          reached = audio.currentTime * 1000 + stepMs;
+          audio.currentTime = reached / 1000;
+        }
+        return reached;
+      };
+      return { ear, audio, frames, cancelled, st, run, errors: loaded.errors };
+    }
+
+    it("stops at the earliest later start, not the next element, when units are out of order", () => {
+      // word stamps can be non-monotonic: after 1000 the next SOUND is 2000,
+      // even though the next element in the list is 5000.
+      const f = fakeEar([1000, 5000, 2000]);
+      f.ear.toggle();
+      f.ear.activate(0);
+      const reached = f.run(17);
+      expect(reached).toBeLessThan(2000);
+      expect(reached).toBeGreaterThan(2000 - 100);
+      // a unit with nothing later still falls back to the track end, capped
+      const last = fakeEar([1000, 5000, 2000], { durationMs: 7000 });
+      last.ear.toggle();
+      last.ear.activate(1);
+      const r = last.run(17);
+      expect(r).toBeLessThan(7000);
+      expect(r).toBeGreaterThan(6900);
+    });
+
+    it("a refused play returns to pick with a retryable note, never the answer step", async () => {
+      const f = fakeEar([1000, 3000], { playImpl: () => Promise.reject(new Error("not allowed")) });
+      f.ear.toggle();
+      f.ear.activate(0);
+      // frames that fire before play() settles see a paused element; that is
+      // "not started", not "finished", so the test must not reach step 2.
+      for (let n = 0; n < 2 && f.frames.length > 0; n++) f.frames.shift()();
+      expect(f.ear.view().step).toBe("1");
+      expect(f.ear.view().playing).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(f.ear.pending()).toBe(false);
+      expect(f.ear.view().step).toBe("1");
+      expect(f.ear.view().playing).toBe(false);
+      expect(f.ear.view().help).toBe("That word's snippet could not play (not allowed). Click a word to try again.");
+      expect(f.cancelled.length).toBeGreaterThan(0); // the queued frame was cancelled
+      expect(f.errors.join()).toContain("snippet playback failed");
+      // whatever frames remain do nothing; a retry plays again
+      while (f.frames.length > 0) f.frames.shift()();
+      expect(f.ear.view().step).toBe("1");
+      f.ear.activate(1);
+      expect(f.audio.plays).toEqual([1, 3]);
+      expect(f.st.offset).toBe(0);
+    });
+
+    it("plays from the unit's shifted start and stops before the next unit's shifted start", () => {
+      const f = fakeEar([1000, 3000, 6000], { offset: 500 });
+      f.ear.toggle();
+      f.ear.activate(1);
+      expect(f.audio.plays).toEqual([3.5]);
+      const reached = f.run(17); // ~60 Hz frames
+      expect(f.audio.paused).toBe(true);
+      expect(reached).toBeLessThan(6500);
+      expect(reached).toBeGreaterThan(6500 - 100);
+      expect(f.ear.view().step).toBe("2");
+    });
+
+    it("plays the last unit to the track end, capped at 10 s", () => {
+      const end = fakeEar([1000, 3000], { durationMs: 5000 });
+      end.ear.toggle();
+      end.ear.activate(1);
+      const r1 = end.run(17);
+      expect(r1).toBeLessThan(5000);
+      expect(r1).toBeGreaterThan(4900);
+      const cap = fakeEar([1000, 3000], { durationMs: 60000 });
+      cap.ear.toggle();
+      cap.ear.activate(1);
+      const r = cap.run(17);
+      expect(r).toBeLessThan(13000);
+      expect(r).toBeGreaterThan(12900);
+    });
+
+    it("an answer adds played minus heard to the current offset, and a second test refines it", () => {
+      const f = fakeEar([1000, 3000, 6000], { offset: 200 });
+      f.ear.toggle();
+      f.ear.activate(2); // played the unit at 6.2 s
+      f.ear.activate(1); // heard the one at 3.2 s
+      expect(f.st.offset).toBe(200 + 3000);
+      expect(f.ear.view().help).toContain("Test another word");
+      f.ear.activate(1); // now at 6.2 s
+      f.ear.activate(0); // heard the one at 4.2 s
+      expect(f.st.offset).toBe(3200 + 2000);
+    });
+
+    it("the same unit answered is a no-op that says so", () => {
+      const f = fakeEar([1000, 3000], { offset: 300 });
+      f.ear.toggle();
+      f.ear.activate(1);
+      f.ear.activate(1);
+      expect(f.st.offset).toBe(300);
+      expect(f.ear.view().help).toBe("That word was already in time, so the offset is unchanged.");
+    });
+
+    it("cancel drops a pending test without moving the offset; replay plays the same unit again", () => {
+      const f = fakeEar([1000, 3000, 6000]);
+      f.ear.toggle();
+      f.ear.activate(2);
+      f.ear.replay();
+      expect(f.audio.plays).toEqual([6, 6]);
+      f.ear.cancel();
+      expect(f.audio.paused).toBe(true);
+      expect(f.ear.pending()).toBe(false);
+      expect(f.ear.on()).toBe(true);
+      f.ear.activate(0); // a fresh test, not an answer
+      expect(f.st.offset).toBe(0);
+      expect(f.ear.view().played).toBe(0);
+      f.ear.cancel();
+      f.ear.cancel(); // nothing pending: Done leaves the mode
+      expect(f.ear.on()).toBe(false);
+    });
+
+    it("refuses to start or act while disabled, but still claims the click", () => {
+      const f = fakeEar([1000, 3000], { enabled: false });
+      f.ear.toggle();
+      expect(f.ear.on()).toBe(false);
+      expect(f.ear.activate(0)).toBe(false);
+      f.st.enabled = true;
+      f.ear.toggle();
+      f.st.enabled = false;
+      expect(f.ear.activate(0)).toBe(true);
+      expect(f.audio.plays).toEqual([]);
+    });
+  });
+
+  describe("find by ear (editor wiring)", () => {
+    it("routes a line click to the snippet, not a seek, and an answer moves the offset", () => {
+      // saved at +200: the snippet must start at the SHIFTED stamp (6.2 s).
+      const e = mountEditor({ starts: [1200, 3200, 6200], orig: [1000, 3000, 6000], savedOffsetMs: 200, edited: true });
+      e.$("mx-ear-toggle").click();
+      expect(e.$("mx-ear-toggle").getAttribute("aria-pressed")).toBe("true");
+      expect(e.$("mx-ear-banner").hidden).toBe(false);
+      const lines = e.doc.querySelectorAll(".mx-preview-line");
+      lines[2].click();
+      expect(e.time()).toBe(6.2);
+      expect(lines[2].classList.contains("is-ear-playing")).toBe(true);
+      expect(e.$("mx-ear-title").textContent).toBe("Playing that line's snippet");
+      lines[0].click();
+      expect(e.$("mx-edit-offset").value).toBe("+5.20");
+      expect(e.$("mx-edit-status").textContent).toContain("Offset set by ear");
+      expect(e.$("mx-edit-save").disabled).toBe(false);
+    });
+
+    it("measures the answer from unclamped starts when the offset pushes a line below 0", () => {
+      // at -2 s the first line's shifted start is -1 s: shown and played from
+      // 0, but the delta must use -1 s or it understates the move by 1 s.
+      const e = mountEditor({ starts: [1000, 3000] });
+      e.nudge("-1s");
+      e.nudge("-1s");
+      e.$("mx-ear-toggle").click();
+      const lines = e.doc.querySelectorAll(".mx-preview-line");
+      lines[0].click();
+      expect(e.time()).toBe(0); // playback still clamps at 0
+      lines[1].click(); // heard the line shifted to 1 s
+      expect(e.$("mx-edit-offset").value).toBe("-4.00");
+    });
+
+    it("Esc cancels a pending test and keeps the offset; a second Esc discards", () => {
+      const e = mountEditor({ starts: [1000, 3000], keyboard: true });
+      e.nudge("+0.1");
+      e.$("mx-ear-toggle").click();
+      e.doc.querySelectorAll(".mx-preview-line")[1].click();
+      expect(e.$("mx-preview-keys").textContent).toContain("cancel test");
+      const esc = () => e.doc.body.dispatchEvent(new e.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      esc();
+      expect(e.$("mx-edit-offset").value).toBe("+0.10");
+      expect(e.$("mx-ear-title").textContent).toBe("Click a line to hear it");
+      expect(e.$("mx-preview-keys").textContent).toContain("discard");
+      esc();
+      expect(e.$("mx-edit-offset").value).toBe("0.00");
+    });
+
+    it("E toggles the mode, and a locked editor turns it off and disables the toggle", async () => {
+      const e = mountEditor({ starts: [1000, 3000], keyboard: true, fetchImpl: reply(409, '{"error":"changed"}') });
+      e.doc.body.dispatchEvent(new e.win.KeyboardEvent("keydown", { key: "e", bubbles: true }));
+      expect(e.$("mx-ear-banner").hidden).toBe(false);
+      e.win.localStorage.setItem("mx-offset-confirm-skip", "1");
+      e.nudge("+0.1");
+      e.$("mx-edit-save").click();
+      await vi.waitFor(() => expect(e.$("mx-edit-status").textContent).toContain("changed on disk"));
+      expect(e.$("mx-ear-toggle").disabled).toBe(true);
+      expect(e.$("mx-ear-banner").hidden).toBe(true);
+      e.doc.querySelectorAll(".mx-preview-line")[1].click(); // back to a plain seek
+      expect(e.time()).toBe(3.1);
+    });
+  });
 
   it("parses typed offsets", () => {
     const { parseOffset } = load().win.mxPreviewEdit;

@@ -40,6 +40,19 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 				}
 			</div>
 			<div class="mx-preview-body">
+				if view.Editable {
+					<div id="mx-ear-banner" class="mx-ear-banner" role="status" hidden>
+						<span id="mx-ear-step" class="mx-ear-step">1</span>
+						<div class="mx-ear-text">
+							<span id="mx-ear-title" class="mx-ear-title"></span>
+							<span id="mx-ear-help" class="mx-ear-help"></span>
+						</div>
+						<div class="mx-ear-actions">
+							<button type="button" id="mx-ear-replay" class="mx-edit-btn" hidden>Replay</button>
+							<button type="button" id="mx-ear-cancel" class="mx-edit-btn">Cancel test</button>
+						</div>
+					</div>
+				}
 				<ol id="mx-preview-lyrics" class="mx-preview-lyrics" data-has-words?={ view.HasWords }>
 					for _, l := range view.Lines {
 						if l.Decorative {
@@ -105,10 +118,20 @@ templ previewEditor(view PreviewView) {
 			<button type="button" class="mx-edit-nudge" data-delta="1000" aria-label="Later by 1 second">+1s</button>
 		</div>
 		<div class="mx-edit-scale"><span>Lyrics earlier</span><span>Lyrics later</span></div>
-		<div class="mx-edit-actions">
-			<button type="button" id="mx-edit-save" class="mx-edit-btn is-primary" disabled>Save</button>
-			<button type="button" id="mx-edit-discard" class="mx-edit-btn" disabled>Discard</button>
-			<button type="button" id="mx-edit-revert" class="mx-edit-link" hidden>Revert to original</button>
+		<div class="mx-edit-foot">
+			<div class="mx-ear-row">
+				// data-ear-unit names the timed unit in the find-by-ear copy (#1222).
+				<button type="button" id="mx-ear-toggle" class="mx-edit-btn mx-ear-toggle" aria-pressed="false" data-ear-unit="line">
+					<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4.5 6.5a3.5 3.5 0 1 1 7 0c0 2.2-2.3 2.6-2.3 4.8a1.8 1.8 0 0 1-3.4.8"></path><path d="M6.6 6.6a1.4 1.4 0 0 1 2.8 0c0 .9-.9 1.1-.9 1.9"></path></svg>
+					<span class="mx-ear-long">Find by ear</span><span class="mx-ear-short">By ear</span>
+				</button>
+				<span class="mx-edit-hint">Hear one line, then click the line you actually heard. The difference becomes the offset.</span>
+			</div>
+			<div class="mx-edit-actions">
+				<button type="button" id="mx-edit-save" class="mx-edit-btn is-primary" disabled>Save</button>
+				<button type="button" id="mx-edit-discard" class="mx-edit-btn" disabled>Discard</button>
+				<button type="button" id="mx-edit-revert" class="mx-edit-link" hidden>Revert to original</button>
+			</div>
 		</div>
 		<p id="mx-edit-status" class="mx-edit-status" role="status"></p>
 		<dialog id="mx-edit-confirm" class="mx-edit-dialog" aria-labelledby="mx-edit-confirm-h" aria-describedby="mx-edit-confirm-body">
