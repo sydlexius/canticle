@@ -151,7 +151,15 @@
             started = true;
           }
         }, function (e) {
-          console.error("preview.js: snippet playback failed", e && e.message);
+          // One failure, one log line (#1243): a media error already logged by
+          // audioFailed owns it; otherwise this logs and tells the page so a
+          // media error landing right behind it does not log a second time.
+          if (!o.audio.error) {
+            console.error("preview.js: snippet playback failed", e && e.message);
+            if (o.onRejectLogged) {
+              o.onRejectLogged();
+            }
+          }
           if (token !== attempt || !pending()) {
             return;
           }
@@ -279,7 +287,7 @@
 
   // initEditor wires the offset editor. lineStarts is mutated in place so the
   // highlight and click-to-seek in init() follow the shifted times.
-  function initEditor(panel, audio, lines, lineStarts, update, route) {
+  function initEditor(panel, audio, lines, lineStarts, update, route, playback) {
     var $ = function (id) {
       return document.getElementById(id);
     };
@@ -361,7 +369,7 @@
         setOffset(ms);
       },
       enabled: function () {
-        return !locked();
+        return !locked() && !playback.failed;
       },
       frame: function (fn) {
         return window.requestAnimationFrame(fn);
@@ -372,18 +380,31 @@
       onChange: function () {
         render();
       },
+      onRejectLogged: function () {
+        playback.rejectLogged = true;
+        window.setTimeout(function () {
+          playback.rejectLogged = false;
+        }, 250); // covers the gap between the rejection and the error event
+      },
     });
     route.activate = ear.activate;
     earBtn.addEventListener("click", ear.toggle);
     earCancel.addEventListener("click", ear.cancel);
     earReplay.addEventListener("click", ear.replay);
 
+    // Find by ear needs playback. When the audio failed it is disabled and its
+    // hint says why, in place, so the control is never a silent dead end (#1243).
+    var earHint = earBtn.parentNode && earBtn.parentNode.querySelector(".mx-edit-hint");
+    var earHintText = earHint ? earHint.textContent : "";
     function paintEar(isLocked) {
-      if (isLocked && ear.on()) {
-        ear.toggle(); // re-renders with the mode off
+      if ((isLocked || playback.failed) && ear.on()) {
+        ear.toggle(); // re-renders with the mode off; a failure must not strand the mode on
       }
       var v = ear.view();
-      earBtn.disabled = isLocked;
+      earBtn.disabled = isLocked || playback.failed;
+      if (earHint) {
+        earHint.textContent = playback.failed ? "Unavailable: " + FAILURE_WORDS[playback.kind].hint + " You can still type an offset or use the nudges." : earHintText;
+      }
       earBtn.setAttribute("aria-pressed", String(v.on));
       banner.hidden = !v.on;
       $("mx-ear-step").textContent = v.step;
@@ -459,6 +480,12 @@
         msg = ["This file is " + fmtOffset(st.saved).replace(/^[+-]/, "") + " s " + (st.saved > 0 ? "later" : "earlier") + " than the original.", ""];
       } else {
         msg = ["Matches the original file. Nudge while it plays to line the lyrics up.", ""];
+      }
+      if (playback.failed) {
+        // The panel is always on screen (sticky on a phone), so it carries the
+        // audio failure too, whatever the message tone, not only the message
+        // beside the player (#1243).
+        msg = [msg[0] + " " + FAILURE_WORDS[playback.kind].status + " so Find by ear is off.", msg[1]];
       }
       statusEl.textContent = msg[0];
       statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "");
@@ -660,7 +687,38 @@
       });
       kb.renderLegend(legend);
     }
+    playback.onFail = render;
     render();
+  }
+
+  // audioFailure words a media error for the page: what the browser reported,
+  // the file's format, and what still works. Codes 3 and 4 (decode, or no
+  // supported source) are the unplayable-format case; 4 is also what a missing
+  // file reports, so the text allows for it.
+  var FAILURE_WORDS = {
+    interrupted: { hint: "audio playback was interrupted.", status: "Audio playback was interrupted," },
+    network: { hint: "the audio could not be loaded (network error).", status: "The audio could not be loaded (network error)," },
+    unplayable: { hint: "this browser cannot play the audio.", status: "The audio cannot be played in this browser," },
+  };
+
+  // failureKind maps a media error code to the kind that words every surface.
+  function failureKind(audio) {
+    var code = audio.error && audio.error.code;
+    return code === 1 ? "interrupted" : code === 2 ? "network" : "unplayable";
+  }
+
+  function audioFailure(audio) {
+    var fmt = audio.getAttribute("data-format") || "unknown";
+    var type = audio.getAttribute("data-type");
+    var what = fmt + " file" + (type ? ", served as " + type : "");
+    var code = audio.error && audio.error.code;
+    if (code === 1) {
+      return "Playback was interrupted (" + what + "). Reload the page to try again.";
+    }
+    if (code === 2) {
+      return "The audio could not be loaded (network error, " + what + "). Reload the page to try again.";
+    }
+    return "This browser cannot play this track's audio (" + what + "), or the file could not be read. Try another browser, or play the file in a desktop player. The lyrics are shown, and an offset can still be typed.";
   }
 
   function init() {
@@ -671,6 +729,41 @@
       return;
     }
     var lines = Array.prototype.slice.call(list.querySelectorAll(".mx-preview-line"));
+    // A stream the browser cannot decode (ALAC outside Safari, WMA, APE, ...)
+    // otherwise just sits silent, so say so in the player and in the console
+    // (#1243). The error may already have fired before this script ran. This is
+    // wired before the no-lines early return so a lyric-less page still says so.
+    var playback = { failed: false, kind: "", onFail: null };
+    var errorBox = document.getElementById("mx-preview-audio-error");
+    function audioFailed() {
+      if (playback.failed) {
+        return; // the event can follow an audio.error already handled below
+      }
+      var msg = audioFailure(audio);
+      if (!playback.rejectLogged) {
+        console.error("preview.js: audio failed: " + msg + " (media error code " + (audio.error ? audio.error.code : "none") + ")");
+      }
+      playback.failed = true;
+      playback.kind = failureKind(audio);
+      if (errorBox) {
+        errorBox.textContent = msg;
+        errorBox.hidden = false;
+      } else {
+        console.error("preview.js: missing #mx-preview-audio-error; failure not shown on the page");
+      }
+      if (playback.onFail) {
+        playback.onFail();
+      }
+    }
+    audio.addEventListener("error", audioFailed);
+    // A <source> child reports its error on itself and does not bubble.
+    Array.prototype.forEach.call(audio.querySelectorAll("source"), function (src) {
+      src.addEventListener("error", audioFailed);
+    });
+    if (audio.error) {
+      audioFailed();
+    }
+
     if (lines.length === 0) {
       console.error("preview.js: no .mx-preview-line elements to sync");
       return;
@@ -819,7 +912,7 @@
 
     var panel = document.getElementById("mx-edit");
     if (panel) {
-      initEditor(panel, audio, lines, lineStarts, update, route);
+      initEditor(panel, audio, lines, lineStarts, update, route, playback);
     }
   }
 

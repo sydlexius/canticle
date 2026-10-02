@@ -43,7 +43,13 @@ type PreviewView struct {
 	BackLabel string
 	// AudioSrc is the same-origin audio route for the row.
 	AudioSrc string
-	Lines    []PreviewLine
+	// AudioFormat is the audio file's extension, upper-cased without the dot
+	// ("M4A"), or "" when it has none; AudioType is the Content-Type the audio
+	// route serves it as. The page names them when the browser cannot decode
+	// the stream (#1243).
+	AudioFormat string
+	AudioType   string
+	Lines       []PreviewLine
 	// HasWords reports whether any line carries word timings (A2).
 	HasWords bool
 	// Truncated reports that the .lrc exceeded the read bound and the lines
