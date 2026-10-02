@@ -329,6 +329,59 @@ The Dashboard (`/dashboard`) is the default landing page after you sign in - the
 
 The Dashboard requires the web UI to be enabled and an admin session (or a trusted-network request), the same as the other UI pages. For the deeper per-report views (queue summary, recent outcomes, provider effectiveness, instrumental inventory, failure analysis, deferred misses), see the [Reports workspace](#reports-workspace) below.
 
+## Web UI: Lyric preview and offset editor
+
+The Queue page has a **Preview** link on rows whose lyrics file is synced. It opens a player: the track's audio on top, the lyrics below, with the current line highlighted as the audio plays.
+
+For a line-synced track the player also shows a **Timing offset** panel. Use it when a provider's lyrics are right but consistently early or late against your copy of the recording (a different release or edit than the one the lyrics were timed to).
+
+### Editing the offset
+
+1. Play the track. Drag the slider for a rough fit (-5 s to +5 s), use the nudge buttons (-1s, -0.1, -0.01, +0.01, +0.1, +1s), or type any value in seconds into the offset field and press Enter. A positive offset makes the lyrics later, a negative one earlier.
+2. The status chip reads **Original** (never edited), **Unsaved** (you have a change in the page that is not written yet), **Saving**, or **Edited** (saved). Nothing touches the file until you save.
+3. Press **Save** and confirm. **Discard** drops the unsaved change. **Revert to original** appears once a saved edit exists and no change is pending.
+
+The offset you see is always measured from the original timing, never from the last save, so saving twice does not compound. A line pushed before the start of the track is held at 0:00.
+
+Keyboard shortcuts work while the panel is on screen:
+
+| Keys | Action |
+| --- | --- |
+| Space | Play or pause |
+| `[` and `]` | Earlier or later by 0.1 s |
+| Shift + `[` and `]` | Earlier or later by 1 s |
+| Alt (Option on a Mac) + `[` and `]` | Earlier or later by 0.01 s |
+| Cmd+S (Mac) or Ctrl+S (others) | Save |
+| Esc | Discard the unsaved change |
+
+While you are typing in the offset field only Esc and the save shortcut are active, so the other keys go into the field. Space or Enter on a focused button presses that button.
+
+The confirmation dialog has a "Don't ask again in this browser" box. The choice is remembered by that browser only, not by the server or other browsers.
+
+### What a save does
+
+- The first successful save copies the current file to a `.lrc.orig` file beside it (for example `track.lrc.orig`), then writes the shifted file. The backup is created once and never overwritten. If a `.lrc.orig` already exists (for instance from an earlier backfill), it is used as the original and left alone.
+- Later saves are applied to that original, not to the already-shifted file.
+- **Revert to original** writes the original timing back and keeps the `.lrc.orig`. The reverted file is in Canticle's normal form (one line per timestamp), which can differ in layout from a hand-formatted original. Reverting a track that was never edited is refused.
+- Header lines such as `[ar:]` or `[offset:]` are carried over unchanged. The editor never writes or changes an `[offset:]` header; it shifts each line's own timestamp, so the result plays the same in any player, whether or not that player honors `[offset:]`.
+
+### When a save is refused
+
+Nothing is written, and the panel says why, when:
+
+- the lyrics file changed on disk since the page loaded (reload the page and edit the current file);
+- the shifted timing fails the timing check against the audio's exact length (an unknown length passes, as everywhere else);
+- the track is being processed right now (try again shortly);
+- the row is not a finished, line-synced file.
+
+Lines that would start more than 2 seconds after the track ends are marked, and Save stays off until they fit.
+
+A file with word-level timing (an `.elrc` companion, or word marks inside the `.lrc`) is read-only here, and the panel gives the reason: shifting only line starts would put the words out of step.
+
+### Edited tracks are protected
+
+A track you saved an edit on is not replaced by the automatic upgrade and word-sync recheck passes, so a hand-tuned file is not overwritten by a later fetch. Explicit operator commands still can: `--update`, a manual re-fetch, and `canticle revalidate --apply` act on the file regardless. Use **Revert to original** first if you want the automatic passes to consider the track again.
+
 ## Web UI: Settings page
 
 The Settings page (`/settings`) is the single destination for editing the daemon configuration from the browser. It is available whenever `web_ui_enabled = true` and the operator is signed in as admin (or is accessing from a trusted network).
