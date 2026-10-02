@@ -88,10 +88,53 @@ describe("preview.js audio failure", () => {
     expect(p.$("mx-preview-audio-error").textContent).not.toContain("cannot play");
   });
 
+  it("words an aborted load neutrally, not as an unplayable format", () => {
+    const p = load();
+    p.fail(1);
+    const text = p.$("mx-preview-audio-error").textContent;
+    expect(text).toContain("interrupted");
+    expect(text).not.toContain("cannot play");
+  });
+
   it("reports an error that fired before the script ran", () => {
     const p = load({ preError: { code: 4 } });
     expect(p.$("mx-preview-audio-error").hidden).toBe(false);
     expect(p.$("mx-ear-toggle").disabled).toBe(true);
+    // a later error event must not log or report a second time
+    p.win.document.getElementById("mx-preview-audio").dispatchEvent(new p.win.Event("error"));
+    expect(p.errors.length).toBe(1);
+  });
+
+  it("turns find by ear off when playback fails while it is on", () => {
+    const p = load();
+    p.$("mx-ear-toggle").click();
+    expect(p.$("mx-ear-banner").hidden).toBe(false);
+    p.fail(2);
+    expect(p.$("mx-ear-banner").hidden).toBe(true);
+    expect(p.$("mx-ear-toggle").getAttribute("aria-pressed")).toBe("false");
+    // a lyric click seeks again instead of being swallowed by the dead mode
+    const audio = p.$("mx-preview-audio");
+    audio.currentTime = 0;
+    p.win.document.querySelector(".mx-preview-line").click();
+    expect(audio.currentTime).toBeGreaterThan(0);
+    expect(p.$("mx-ear-banner").hidden).toBe(true);
+  });
+
+  it("keeps the e shortcut from starting find by ear after a failure", () => {
+    const p = load();
+    p.fail(4);
+    p.win.document.dispatchEvent(new p.win.KeyboardEvent("keydown", { key: "e", bubbles: true }));
+    expect(p.$("mx-ear-banner").hidden).toBe(true);
+    expect(p.$("mx-ear-toggle").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps the failure note beside a toned status message", () => {
+    const p = load();
+    p.fail(4);
+    p.$("mx-edit-offset").value = "40";
+    p.$("mx-edit-offset").dispatchEvent(new p.win.Event("change", { bubbles: true }));
+    expect(p.$("mx-edit-status").className).toContain("is-warn");
+    expect(p.$("mx-edit-status").textContent).toContain("cannot be played");
   });
 
   it("disables find by ear with a visible reason and keeps typed offsets usable", () => {

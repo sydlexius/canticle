@@ -383,8 +383,8 @@
     var earHint = earBtn.parentNode && earBtn.parentNode.querySelector(".mx-edit-hint");
     var earHintText = earHint ? earHint.textContent : "";
     function paintEar(isLocked) {
-      if (isLocked && ear.on()) {
-        ear.toggle(); // re-renders with the mode off
+      if ((isLocked || playback.failed) && ear.on()) {
+        ear.toggle(); // re-renders with the mode off; a failure must not strand the mode on
       }
       var v = ear.view();
       earBtn.disabled = isLocked || playback.failed;
@@ -467,9 +467,10 @@
       } else {
         msg = ["Matches the original file. Nudge while it plays to line the lyrics up.", ""];
       }
-      if (playback.failed && !msg[1]) {
+      if (playback.failed) {
         // The panel is always on screen (sticky on a phone), so it carries the
-        // audio failure too, not only the message beside the player (#1243).
+        // audio failure too, whatever the message tone, not only the message
+        // beside the player (#1243).
         msg = [msg[0] + " The audio cannot be played in this browser, so Find by ear is off.", msg[1]];
       }
       statusEl.textContent = msg[0];
@@ -685,6 +686,9 @@
     var type = audio.getAttribute("data-type");
     var what = fmt + " file" + (type ? ", served as " + type : "");
     var code = audio.error && audio.error.code;
+    if (code === 1) {
+      return "Playback was interrupted (" + what + "). Reload the page to try again.";
+    }
     if (code === 2) {
       return "The audio could not be loaded (network error, " + what + "). Reload the page to try again.";
     }
