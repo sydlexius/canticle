@@ -784,3 +784,19 @@ func TestRedactURIHidesAPIKey(t *testing.T) {
 		t.Fatalf("redacted URI = %q; want redacted apikey", got)
 	}
 }
+
+func TestRedactURIHidesSearchAndNext(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet,
+		"/queue/pending?q=SECRETARTIST&after=42&next=%2Fqueue%2Fpending%3Fq%3DSECRETARTIST&signature=SECRETSIG&library=main", nil)
+	got := redactURI(req.URL)
+	for _, leak := range []string{"SECRETARTIST", "SECRETSIG"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("redacted URI = %q; contains %q", got, leak)
+		}
+	}
+	for _, want := range []string{"/queue/pending?", "after=42", "library=main", "q=REDACTED", "next=REDACTED", "signature=REDACTED"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("redacted URI = %q; want %q", got, want)
+		}
+	}
+}

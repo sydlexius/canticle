@@ -130,8 +130,32 @@ func TestListBucketFilteredRespectsBucket(t *testing.T) {
 	db := openTestDB(t)
 	insertWorkItem(t, db, workItem{artist: "needle", title: "t1", status: "failed"})
 	insertKeyed(t, db, "needle", "t2")
+	// A failed row whose TITLE matches: only the title arm of the OR can leak it,
+	// so it pins the parentheses around the OR (AND binds tighter than OR).
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status)
+         VALUES ('other', 'needle title', ?, ?, '', 'failed')`,
+		normalize.NormalizeKey("other"), normalize.NormalizeKey("needle title")); err != nil {
+		t.Fatalf("insert other-bucket title match: %v", err)
+	}
 	repo := reports.New(db)
 	if got := searchTitles(t, repo, "needle"); !sameSet(got, "t2") {
 		t.Errorf("search leaked across buckets: %v", got)
+	}
+	// The keyset cursor is also an AND term; an unbracketed OR would let the
+	// other-bucket title match through past the last pending id.
+	first, err := repo.ListBucketFiltered(context.Background(), reports.BucketPending,
+		reports.BucketFilter{Query: "needle"}, 0, reports.MaxBucketLimit)
+	if err != nil || len(first) == 0 {
+		t.Fatalf("first page: %v rows=%d", err, len(first))
+	}
+	lastID := first[len(first)-1].ID
+	rest, err := repo.ListBucketFiltered(context.Background(), reports.BucketPending,
+		reports.BucketFilter{Query: "needle"}, lastID, reports.MaxBucketLimit)
+	if err != nil {
+		t.Fatalf("ListBucketFiltered after: %v", err)
+	}
+	if len(rest) != 0 {
+		t.Errorf("after the last pending match, got %d rows; want 0 (other-bucket title leaked)", len(rest))
 	}
 }

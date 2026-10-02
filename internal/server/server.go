@@ -879,16 +879,40 @@ func apiKey(r *http.Request) string {
 	return ""
 }
 
+// loggableQueryKeys are the only query parameters whose values reach the
+// request log. Everything else is replaced by a placeholder (the key name is
+// kept so logs stay useful), because the web UI carries library metadata in
+// the query string: `q` (queue search text), `next` (a login return path that
+// embeds the page's own query), `signature` (library-derived failure text).
+// The listed keys are non-sensitive: `after` and `from` are numeric row
+// cursors, `status` is a queue status enum, `library` is a library scope.
+// `apikey` is deliberately absent: it is a credential.
+var loggableQueryKeys = map[string]bool{
+	"after":   true,
+	"from":    true,
+	"status":  true,
+	"library": true,
+}
+
+const redactedValue = "REDACTED"
+
+// redactURI renders the request URI for the log: the path, plus the query with
+// every value not on loggableQueryKeys replaced by a placeholder.
 func redactURI(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
 	cp := *u
 	q := cp.Query()
-	if _, ok := q["apikey"]; ok {
-		q.Set("apikey", "REDACTED")
-		cp.RawQuery = q.Encode()
+	for k, vs := range q {
+		if loggableQueryKeys[k] {
+			continue
+		}
+		for i := range vs {
+			vs[i] = redactedValue
+		}
 	}
+	cp.RawQuery = q.Encode()
 	return cp.RequestURI()
 }
 
