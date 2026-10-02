@@ -122,6 +122,19 @@ func TestUpNextInFlightRow(t *testing.T) {
 	assertArtistAlbumTitle(t, heads, rows[2], tcAlbum)
 }
 
+// TestInstrumentalsArtistLeads pins that Artist, Album, Title are the FIRST
+// three columns of the Instrumentals table, with the row ID after them. (Up
+// Next's "#" is a queue position, not a track attribute, and stays first.)
+func TestInstrumentalsArtistLeads(t *testing.T) {
+	heads, cells := renderTable(t, tableInstrumentals([]InstrumentalRow{{ID: "7", Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}))
+	if len(heads) < 4 || heads[0] != "Artist" || heads[1] != "Album" || heads[2] != "Title" || heads[3] != "ID" {
+		t.Fatalf("headers %v: want Artist, Album, Title, ID leading", heads)
+	}
+	if cells[0] != tcArtist || cells[3] != "7" {
+		t.Errorf("cells %v: want artist first and ID 7 fourth", cells)
+	}
+}
+
 func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
 	tests := []struct {
 		name string
