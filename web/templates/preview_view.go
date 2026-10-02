@@ -44,6 +44,26 @@ type PreviewView struct {
 	// Truncated reports that the .lrc exceeded the read bound and the lines
 	// are only its leading complete cues; the page says so.
 	Truncated bool
+
+	// Lyric offset editor (#1211). Editable renders the editor panel (only for
+	// a line-synced, settled row with the editor wired); a non-empty
+	// ReadOnlyReason renders the read-only card instead.
+	Editable       bool
+	ReadOnlyReason string
+	// EditURL is the row's /preview/{id} base; the panel posts to its
+	// /offset and /revert children.
+	EditURL    string
+	OffsetMS   int
+	Edited     bool
+	MTime      string // the .lrc mtime in unix nanoseconds, decimal, as the page loaded it
+	DurationMS int    // exact audio duration, 0 when unknown
+	CSRFToken  string
+	// OrigMS is the ORIGINAL start of each shown line, comma-separated in line
+	// order: the base every offset is measured from (#1211).
+	OrigMS string
+	// ToleranceMS is timing.Tolerance in ms, so the client's past-end preview
+	// uses the same allowance the server's timing guard enforces.
+	ToleranceMS int
 }
 
 // PreviewLine is one lyric cue. StartMS is a decimal millisecond string, the

@@ -100,6 +100,27 @@
     return !!(el.isContentEditable || (el.closest && el.closest('[contenteditable]:not([contenteditable="false"])')));
   }
 
+  // A focused button, link, checkbox or role=button element activates on a bare
+  // Space or Enter; a shortcut bound to either key must not steal that press,
+  // or the control (a dialog's Save, a nudge button) becomes unusable from the
+  // keyboard.
+  function activatesOnKey(el, e) {
+    if (!el || !el.tagName || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) {
+      return false;
+    }
+    if (e.key !== " " && e.key !== "Enter") {
+      return false;
+    }
+    var tag = el.tagName.toLowerCase();
+    if (tag === "button" || tag === "a" || tag === "summary") {
+      return true;
+    }
+    if (tag === "input" && (el.type === "checkbox" || el.type === "radio" || el.type === "button" || el.type === "submit")) {
+      return true;
+    }
+    return el.getAttribute && el.getAttribute("role") === "button";
+  }
+
   document.addEventListener("keydown", function (e) {
     // A keydown during IME composition (an Escape that cancels it, for one)
     // belongs to the input method, never to an application shortcut.
@@ -109,7 +130,11 @@
     // composedPath()[0] is the real target inside an open shadow root, where
     // e.target is only the host.
     var path = typeof e.composedPath === "function" ? e.composedPath() : [];
-    var typing = isTyping(path.length ? path[0] : e.target);
+    var origin = path.length ? path[0] : e.target;
+    if (activatesOnKey(origin, e)) {
+      return;
+    }
+    var typing = isTyping(origin);
     for (var i = 0; i < entries.length; i++) {
       var item = entries[i];
       if (typing && !item.entry.allowInInput) {
@@ -129,6 +154,9 @@
     }
     if (k === "Escape") {
       return "Esc";
+    }
+    if (k === " ") {
+      return "Space"; // a bare space would render an empty keycap
     }
     return k;
   }
