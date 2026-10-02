@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -441,19 +442,41 @@ func runEditorTagBackfill(ctx context.Context, sqlDB *sql.DB, cfg config.Config,
 		// either complete (mark set) before the check or refused afterward by
 		// ApplyEdit's mtime check. A skip is a deliberate outcome, not a
 		// degradation: it does not hold the one-shot marker open.
+		//
+		// work_queue.source_path holds EITHER spelling of a symlinked root
+		// (Copilot 4162607417): a scan-enqueued row carries the configured
+		// root's spelling (scanner.ScanLibrary joins under the root it was
+		// given), a webhook row the symlink-resolved one
+		// (pathutil.ResolveWithinRoot). The editor's lock key is derived from
+		// the row's own source_path (reports.PreviewSource), so it follows the
+		// same split. Both spellings are therefore locked and both checked.
 		_, canonRoot := pathutil.CanonicalRoot(l.Path)
 		libRoot := l.Path
 		guarded := func(path string) (bool, bool, error) {
-			srcPath := sourceSpelling(libRoot, canonRoot, path)
-			unlock := lyrics.LockEditPath(srcPath)
-			defer unlock()
-			edited, eerr := sidecarHandEdited(ctx, sqlDB, srcPath)
-			if eerr != nil {
-				return false, false, eerr
+			spellings := sidecarSpellings(libRoot, canonRoot, path)
+			unlocks := make([]func(), 0, len(spellings))
+			for _, sp := range spellings {
+				// The editor locks the track's .lrc (it never writes the
+				// .elrc), so a walked .elrc contends on its .lrc's name.
+				if sidecar.KindOf(sp) == sidecar.KindWordSynced {
+					sp = sidecar.StemOf(sp) + sidecar.ExtLineSynced
+				}
+				unlocks = append(unlocks, lyrics.LockEditPath(sp))
 			}
-			if edited {
-				editSkips++
-				return false, false, nil
+			defer func() {
+				for i := len(unlocks) - 1; i >= 0; i-- {
+					unlocks[i]()
+				}
+			}()
+			for _, sp := range spellings {
+				edited, eerr := sidecarHandEdited(ctx, sqlDB, sp)
+				if eerr != nil {
+					return false, false, eerr
+				}
+				if edited {
+					editSkips++
+					return false, false, nil
+				}
 			}
 			return perFile(path)
 		}
@@ -525,15 +548,23 @@ func runEditorTagBackfill(ctx context.Context, sqlDB *sql.DB, cfg config.Config,
 	}
 }
 
-// sourceSpelling maps a sidecar found by walkEditorTagRoot (which walks the
-// symlink-resolved canonRoot) back to the library root's own spelling, the one
-// work_queue.source_path and the editor's lock key are built from.
-func sourceSpelling(libRoot, canonRoot, path string) string {
+// sidecarSpellings returns every spelling a work_queue.source_path (and so
+// the editor's lock key) can carry for a sidecar found by walkEditorTagRoot,
+// which walks the symlink-resolved canonRoot: the walked (canonical) path
+// itself, as a webhook-enqueued row stores it, and the same path under the
+// library root's configured spelling, as a scan-enqueued row stores it.
+// Sorted and de-duplicated, so the locks are always taken in one order and a
+// non-symlinked root yields a single entry.
+func sidecarSpellings(libRoot, canonRoot, path string) []string {
+	out := []string{path}
 	rel, err := filepath.Rel(canonRoot, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return path
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if configured := filepath.Join(libRoot, rel); configured != path {
+			out = append(out, configured)
+		}
 	}
-	return filepath.Join(libRoot, rel)
+	sort.Strings(out)
+	return out
 }
 
 // sidecarHandEdited reports whether a work_queue row whose audio shares
