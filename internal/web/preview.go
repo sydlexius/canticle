@@ -169,15 +169,17 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 	}
 	lines, hasWords := previewLines(lrc, elrc)
 	view := templates.PreviewView{
-		Artist:    t.Artist,
-		Title:     t.Title,
-		Album:     t.Album,
-		BackHref:  "/queue",
-		BackLabel: "Back to queue",
-		AudioSrc:  "/preview/" + strconv.FormatInt(id, 10) + "/audio",
-		Lines:     lines,
-		HasWords:  hasWords,
-		Truncated: lrcCut,
+		Artist:      t.Artist,
+		Title:       t.Title,
+		Album:       t.Album,
+		BackHref:    "/queue",
+		BackLabel:   "Back to queue",
+		AudioSrc:    "/preview/" + strconv.FormatInt(id, 10) + "/audio",
+		AudioFormat: previewFormat(t.AudioPath),
+		AudioType:   previewContentType(t.AudioPath),
+		Lines:       lines,
+		HasWords:    hasWords,
+		Truncated:   lrcCut,
 	}
 	// Exactly one `from` value is accepted; a repeated parameter is ambiguous
 	// and falls back to the queue root rather than trusting the first value.
@@ -288,6 +290,13 @@ func previewContentType(path string) string {
 		return t
 	}
 	return "application/octet-stream"
+}
+
+// previewFormat is the audio file's extension upper-cased without the dot, or
+// "" when it has none. A browser that cannot decode the stream reports no
+// format of its own, so the page names this one (#1243).
+func previewFormat(path string) string {
+	return strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
 }
 
 // previewWriteBound replaces the server-wide 15s WriteTimeout for one audio

@@ -368,6 +368,12 @@ The confirmation dialog has a "Don't ask again in this browser" box. The choice 
 
 If you do not know how far off the lyrics are, let your ears find it. Press **Find by ear** (labeled **By ear** on a phone, or the `E` key) to turn the mode on, then click a lyric line: only that line's stretch of the track plays, at the current timing. Listen for which line is actually sung, then click that line. The difference between the line you played and the line you heard becomes the offset. Click the same line again if what you heard matches it, which means its timing is already right. **Replay** repeats the snippet, **Cancel test** drops the pending test and keeps the offset, and **Done** leaves the mode. The result is an unsaved change like any other: check it with Play, fine-tune with the nudges, then Save.
 
+### When the audio will not play
+
+The player streams your original audio file as it is; it never converts it, so it can only play what your browser can decode. MP3, AAC, WAV, Ogg (Vorbis and Opus) and FLAC play in every current desktop and phone browser. An `.m4a` plays in all of them when it holds AAC, but an Apple Lossless (ALAC) `.m4a` plays only in Safari. WMA and APE do not play in Chrome, Firefox or Edge, and neither does any other format outside those listed.
+
+When the browser refuses the stream, the player says so in red above the controls, naming the file's format (for example "M4A file, served as audio/mp4"), and the Timing offset panel repeats that the audio cannot be played. The message means this browser cannot decode the file (or the file could not be read), not that the lyrics are wrong. The lyrics are still shown and the timing editor still works: you can type an offset or use the nudges and Save, but **Find by ear** is turned off because it needs playback. To check an offset by ear, open the page in a browser that can play the format, or play the file in a desktop player. A "network error" message instead means the stream was cut off; reload the page to try again.
+
 ### What a save does
 
 - The first successful save copies the current file to a `.lrc.orig` file beside it (for example `track.lrc.orig`), then writes the shifted file. The backup is created once and never overwritten. If a `.lrc.orig` already exists (for instance from an earlier backfill), it is used as the original and left alone.

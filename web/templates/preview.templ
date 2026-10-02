@@ -23,7 +23,10 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 		}
 		<div class="mx-preview-layout" data-editor?={ view.Editable }>
 			<div class="mx-preview-side">
-				<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc }></audio>
+				// preview.js fills and reveals this when the browser cannot play the audio (#1243).
+				// It sits above the player it explains so the sticky mobile panel never covers it.
+				<p id="mx-preview-audio-error" class="mx-preview-notice mx-preview-error" role="alert" hidden></p>
+				<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc } data-format={ view.AudioFormat } data-type={ view.AudioType }></audio>
 				if view.Truncated {
 					<p class="mx-preview-notice" role="status">This lyric file is larger than the preview limit; only its first lines are shown.</p>
 				}

@@ -14,6 +14,10 @@
   font-size: 0.875rem;
 }
 
+.mx-preview-error {
+  color: var(--mx-status-failed);
+}
+
 .mx-preview-lyrics {
   list-style: none;
   margin: 0;
