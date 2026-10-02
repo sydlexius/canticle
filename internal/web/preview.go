@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/timing"
 	"github.com/sydlexius/canticle/web/templates"
 )
 
@@ -194,15 +195,39 @@ func previewSidecarMTime(roots []string, p string) int64 {
 }
 
 // fillPreviewEditor sets the lyric offset editor fields (#1211 S5). A
-// line-editable row gets the panel; a word-synced one gets the read-only
-// reason; anything else (not yet classified, unsynced) gets neither. A failed
+// line-editable row gets the panel; a word-synced one (by DB tier OR by the
+// parsed file) gets the read-only reason; anything else (not yet classified,
+// unsynced) gets neither. A failed
 // lookup or token degrades to no editor, logged, never a failed page.
 func (u *UI) fillPreviewEditor(w http.ResponseWriter, r *http.Request, view *templates.PreviewView, t reports.PreviewTarget, id int64, roots []string, mtime int64) {
-	if !t.LineEditable {
-		if t.SyncTier == "word" || view.HasWords {
-			view.ReadOnlyReason = "Offset editing works on line-synced files only. This file also has word timing, which a line-only shift would put out of step."
-		}
+	// The DB tier can lag the file: a row tiered "line" whose .lrc or owned
+	// .elrc now carries word timing would lose it to a line-only shift, so the
+	// parsed file is consulted too and either signal makes the page read-only.
+	if t.SyncTier == "word" || view.HasWords {
+		view.ReadOnlyReason = "Offset editing works on line-synced files only. This file also has word timing, which a line-only shift would put out of step."
 		return
+	}
+	if !t.LineEditable {
+		return
+	}
+	// The editor's offset is relative to the ORIGINAL, and a save clamps
+	// negative starts to 0, so the shown file cannot be un-shifted on the
+	// client. The original starts come from the server, read exactly as the
+	// save route reads them (.orig when present, else the .lrc).
+	orig, _, err := lyrics.OriginalLines(t.LRCPath, roots)
+	if err != nil {
+		slog.Error("preview editor: original lines unreadable; editor off", "id", id, editErrAttr(err))
+		return
+	}
+	if len(orig) != len(view.Lines) {
+		// The shown file is not a line-for-line shift of the original, so no
+		// original start can be paired with a shown line.
+		slog.Error("preview editor: shown lines do not match the original; editor off", "id", id)
+		return
+	}
+	origMS := make([]string, len(orig))
+	for i, l := range orig {
+		origMS[i] = strconv.Itoa(l.StartMS)
 	}
 	off, edited, err := u.editor.Queue.LyricEdit(r.Context(), id)
 	if err != nil {
@@ -225,6 +250,8 @@ func (u *UI) fillPreviewEditor(w http.ResponseWriter, r *http.Request, view *tem
 	view.MTime = strconv.FormatInt(mtime, 10)
 	view.DurationMS = u.editDuration(r, id, roots, t.AudioPath) * 1000
 	view.CSRFToken = token
+	view.OrigMS = strings.Join(origMS, ",")
+	view.ToleranceMS = int(timing.Tolerance * 1000)
 }
 
 // previewAudioTypes maps a lowercase audio extension to its Content-Type. The

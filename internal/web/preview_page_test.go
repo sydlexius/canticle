@@ -301,6 +301,54 @@ func TestPreviewPageWordSyncedIsReadOnlyAndEditorUnwiredRendersNone(t *testing.T
 	}
 }
 
+// A negative save clamps an early line to 0 on disk, so the shown file cannot
+// be un-shifted; the page must carry the ORIGINAL starts from the server.
+func TestPreviewPageRendersOriginalStartsAfterAClampedSave(t *testing.T) {
+	e := newEditEnv(t)
+	e.put(t, "song.lrc", "[00:00.10]early\n[00:05.00]later\n")
+	body, _ := e.editorPage(e.id)
+	if !strings.Contains(body.Body.String(), `data-orig-ms="100,5000"`) {
+		t.Fatalf("unedited page original starts wrong: %s", body.Body)
+	}
+	if r := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"-300"}, "mtime": {e.mtime(t)}}); r.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", r.Code, r.Body)
+	}
+	got := e.page(e.id).Body.String()
+	for _, want := range []string{`data-start-ms="0"`, `data-start-ms="4700"`, `data-orig-ms="100,5000"`, `data-offset-ms="-300"`, `data-tolerance-ms="2000"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("clamped-save page missing %q", want)
+		}
+	}
+}
+
+// A shown file that is not a line-for-line shift of its original cannot pair
+// original starts with lines, so the editor is off (fail closed).
+func TestPreviewPageEditorOffWhenOriginalLineCountDiffers(t *testing.T) {
+	e := newEditEnv(t)
+	e.put(t, "song.lrc.orig", "[00:01.00]one\n[00:05.00]two\n")
+	body := e.page(e.id).Body.String()
+	if strings.Contains(body, `id="mx-edit"`) {
+		t.Error("editor rendered although the .lrc and .orig line counts differ")
+	}
+	if !strings.Contains(body, `data-start-ms="9000"`) {
+		t.Error("the player itself must still render")
+	}
+}
+
+// The DB tier can say line while the file carries word timing; the parsed file
+// wins and the page is read-only.
+func TestPreviewPageLineTierWithWordsInFileIsReadOnly(t *testing.T) {
+	e := newEditEnv(t)
+	e.put(t, "song.lrc", "[00:01.00]<00:01.00>Hello <00:01.50>there\n[00:05.00]<00:05.00>two\n")
+	body := e.page(e.id).Body.String()
+	if strings.Contains(body, `id="mx-edit"`) {
+		t.Error("line-tier row whose file has word timing rendered the editor")
+	}
+	if !strings.Contains(body, "Offset editing works on line-synced files only") {
+		t.Error("line-tier row whose file has word timing is missing the read-only reason")
+	}
+}
+
 func TestPreviewPageRendersCJKWithoutSpaces(t *testing.T) {
 	f := newPreviewFixture(t)
 	id := f.row(t, f.writeFile(t, f.root, "song.flac"))

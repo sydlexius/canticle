@@ -77,6 +77,8 @@ templ previewEditor(view PreviewView) {
 		data-offset-ms={ strconv.Itoa(view.OffsetMS) }
 		data-mtime={ view.MTime }
 		data-duration-ms={ strconv.Itoa(view.DurationMS) }
+		data-orig-ms={ view.OrigMS }
+		data-tolerance-ms={ strconv.Itoa(view.ToleranceMS) }
 		data-edited?={ view.Edited }
 	>
 		<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>

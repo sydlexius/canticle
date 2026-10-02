@@ -213,7 +213,8 @@ describe("offset editor helpers", () => {
   const EDITOR = `<body>
   <audio id="mx-preview-audio"></audio>
   <section id="mx-edit" data-save-url="/preview/7/offset" data-revert-url="/preview/7/revert"
-    data-offset-ms="OFFSET" EDITED data-mtime="1700000000000000001" data-duration-ms="DURATION">
+    data-offset-ms="OFFSET" EDITED data-mtime="1700000000000000001" data-duration-ms="DURATION"
+    data-orig-ms="ORIG" data-tolerance-ms="TOLERANCE">
     <input type="hidden" name="csrf_token" value="tok">
     <span id="mx-edit-chip"></span><input id="mx-edit-offset"><input id="mx-edit-slider" type="range">
     <button class="mx-edit-nudge" data-delta="-1000">-1s</button><button class="mx-edit-nudge" data-delta="-100">-0.1</button>
@@ -226,9 +227,17 @@ describe("offset editor helpers", () => {
   <ol id="mx-preview-lyrics">LINES</ol></body>`;
 
   // mountEditor builds the editor markup subset around the given line starts.
-  function mountEditor({ durationMs = 30000, starts = [1000], savedOffsetMs = 0, edited = false, fetchImpl = null } = {}) {
-    const lines = starts.map((ms) => `<li class="mx-preview-line" data-start-ms="${ms}">l${ms}</li>`).join("");
-    const html = EDITOR.replace("OFFSET", String(savedOffsetMs)).replace("EDITED", edited ? "data-edited" : "").replace("DURATION", String(durationMs)).replace("LINES", lines);
+  // orig defaults to the shown starts (an unedited file); toleranceMs to timing.Tolerance.
+  function mountEditor({ durationMs = 30000, starts = [1000], orig = null, toleranceMs = 2000, savedOffsetMs = 0, edited = false, fetchImpl = null, decorative = [] } = {}) {
+    const lines = starts
+      .map((ms, i) => `<li class="mx-preview-line${decorative.includes(i) ? " mx-preview-line-decorative" : ""}" data-start-ms="${ms}">l${ms}</li>`)
+      .join("");
+    const html = EDITOR.replace("OFFSET", String(savedOffsetMs))
+      .replace("EDITED", edited ? "data-edited" : "")
+      .replace("DURATION", String(durationMs))
+      .replace("ORIG", (orig || starts).join(","))
+      .replace("TOLERANCE", String(toleranceMs))
+      .replace("LINES", lines);
     const p = load({
       html,
       setup: (win) => {
@@ -264,9 +273,10 @@ describe("offset editor helpers", () => {
 
   it("counts lines past the end", () => {
     const { pastEnd } = load().win.mxPreviewEdit;
-    expect(pastEnd([1000, 9000], 0, 10000)).toBe(0);
-    expect(pastEnd([1000, 9000], 4000, 10000)).toBe(1);
-    expect(pastEnd([1000, 9000], 4000, 0)).toBe(0);
+    expect(pastEnd([1000, 9000], 0, 10000, 2000)).toBe(0);
+    expect(pastEnd([1000, 9000], 4000, 10000, 2000)).toBe(1);
+    expect(pastEnd([1000, 9000], 4000, 0, 2000)).toBe(0);
+    expect(pastEnd([1000, 9000], 4000, 10000, 5000)).toBe(0);
   });
 
   it("a nudge shifts the shown times, the highlight and the seek target", () => {
@@ -318,10 +328,49 @@ describe("offset editor helpers", () => {
 
   it("measures the offset from the original, not from the already-shifted saved file", () => {
     // the file shows 1300 ms because the original 1000 ms was saved with +300
-    const e = mountEditor({ starts: [1300], savedOffsetMs: 300, edited: true });
+    const e = mountEditor({ starts: [1300], orig: [1000], savedOffsetMs: 300, edited: true });
     expect(e.times()).toEqual(["0:01.30"]);
     e.nudge("+0.1");
     expect(e.times()).toEqual(["0:01.40"]);
+  });
+
+  it("takes the base from data-orig-ms, so a line a negative save clamped to 0 keeps its true original", () => {
+    // original 100 ms saved at -300: the file shows 0, and subtracting the
+    // offset would wrongly give 300. The server says the original is 100.
+    const e = mountEditor({ starts: [0, 4700], orig: [100, 5000], savedOffsetMs: -300, edited: true });
+    expect(e.times()).toEqual(["0:00.00", "0:04.70"]);
+    e.nudge("+1s"); // offset -300 + 1000 = +700 from the original
+    expect(e.times()).toEqual(["0:00.80", "0:05.70"]);
+  });
+
+  it("turns the editor off when data-orig-ms does not match the lines", () => {
+    const e = mountEditor({ starts: [1000, 2000], orig: [1000] });
+    expect(e.$("mx-edit").hidden).toBe(true);
+    expect(e.errors.join()).toContain("data-orig-ms");
+    expect(e.times()).toEqual([]);
+  });
+
+  it("uses the server's tolerance for the past-end check", () => {
+    // line at 9 s +4 s = 13 s on a 10 s track: 3 s over. Past the end with a
+    // 2 s tolerance, inside it with 5 s.
+    const tight = mountEditor({ durationMs: 10000, starts: [1000, 9000], toleranceMs: 2000 });
+    const loose = mountEditor({ durationMs: 10000, starts: [1000, 9000], toleranceMs: 5000 });
+    for (let i = 0; i < 4; i++) {
+      tight.nudge("+1s");
+      loose.nudge("+1s");
+    }
+    expect(tight.$("mx-edit-save").disabled).toBe(true);
+    expect(loose.$("mx-edit-save").disabled).toBe(false);
+    expect(loose.doc.querySelectorAll(".is-past-end").length).toBe(0);
+  });
+
+  it("a decorative line (the server's timing.IsDecorative) never blocks Save", () => {
+    const e = mountEditor({ durationMs: 10000, starts: [1000, 9000], decorative: [1] });
+    for (let i = 0; i < 4; i++) {
+      e.nudge("+1s");
+    }
+    expect(e.$("mx-edit-save").disabled).toBe(false);
+    expect(e.doc.querySelectorAll(".is-past-end").length).toBe(0);
   });
 
   it("an edited row shows Edited and Revert, which posts and returns to Original", async () => {
@@ -387,5 +436,42 @@ describe("offset editor helpers", () => {
     e.$("mx-edit-save").click();
     await vi.waitFor(() => expect(e.$("mx-edit-status").textContent).toContain("Reload"));
     expect(e.doc.querySelector(".mx-edit-nudge").disabled).toBe(true);
+  });
+
+  it("a changed refusal locks the editor until reload: Discard, nudges, Save and keys do nothing", async () => {
+    const f = reply(409, '{"error":"changed"}');
+    const e = mountEditor({ starts: [1000], fetchImpl: f });
+    e.win.localStorage.setItem("mx-offset-confirm-skip", "1");
+    e.nudge("+0.1");
+    e.$("mx-edit-save").click();
+    await vi.waitFor(() => expect(e.$("mx-edit-status").textContent).toContain("changed on disk"));
+    expect(e.$("mx-edit-discard").disabled).toBe(true);
+    expect(e.$("mx-edit-save").disabled).toBe(true);
+    expect(e.doc.querySelector(".mx-edit-nudge").disabled).toBe(true);
+    // A click on a disabled button still reaches its listener when dispatched
+    // programmatically (and via the Escape shortcut), so the handlers must refuse too.
+    e.$("mx-edit-discard").dispatchEvent(new e.win.Event("click"));
+    e.doc.querySelector(".mx-edit-nudge").dispatchEvent(new e.win.Event("click"));
+    e.$("mx-edit-save").dispatchEvent(new e.win.Event("click"));
+    e.$("mx-edit-revert").dispatchEvent(new e.win.Event("click"));
+    expect(e.$("mx-edit-status").textContent).toContain("changed on disk");
+    expect(e.$("mx-edit-offset").value).toBe("+0.10");
+    expect(e.$("mx-edit-discard").disabled).toBe(true);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("a second post while saving sends nothing (Save or Revert)", async () => {
+    let resolve;
+    const f = vi.fn(() => new Promise((r) => (resolve = r)));
+    const e = mountEditor({ starts: [1000], savedOffsetMs: 300, orig: [700], edited: true, fetchImpl: f });
+    e.win.localStorage.setItem("mx-offset-confirm-skip", "1");
+    e.$("mx-edit-revert").click();
+    expect(e.$("mx-edit-chip").textContent).toBe("Saving");
+    // The Revert link is hidden while saving, but a queued click still fires.
+    e.$("mx-edit-revert").dispatchEvent(new e.win.Event("click"));
+    e.$("mx-edit-confirm-ok").click();
+    expect(f).toHaveBeenCalledTimes(1);
+    resolve({ ok: true, status: 200, text: () => Promise.resolve('{"offset_ms":0,"mtime":5}') });
+    await vi.waitFor(() => expect(e.$("mx-edit-status").textContent).toContain("Reverted."));
   });
 });

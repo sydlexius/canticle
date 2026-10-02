@@ -28,7 +28,6 @@
 (function () {
   "use strict";
 
-  var TOLERANCE_MS = 2000; // timing.Tolerance: lines this far past the end are refused
   var MAX_OFFSET_MS = 600000;
   var SKIP_KEY = "mx-offset-confirm-skip";
 
@@ -43,14 +42,17 @@
     return Math.abs(ms) > MAX_OFFSET_MS ? null : ms;
   }
 
-  // pastEnd counts the (non-decorative) line starts that the offset would put
-  // more than TOLERANCE_MS after the audio end; 0 when the duration is unknown.
-  function pastEnd(startsMs, offsetMs, durationMs) {
+  // pastEnd counts the line starts that the offset would put more than
+  // toleranceMs after the audio end; 0 when the duration is unknown. Callers
+  // pass only non-decorative lines: the server marks those with
+  // timing.IsDecorative, the same rule its timing guard skips. This is a
+  // preview only; the server's timing guard stays authoritative on save.
+  function pastEnd(startsMs, offsetMs, durationMs, toleranceMs) {
     if (!(durationMs > 0)) {
       return 0;
     }
     return startsMs.filter(function (s) {
-      return Math.max(0, s + offsetMs) > durationMs + TOLERANCE_MS;
+      return Math.max(0, s + offsetMs) > durationMs + toleranceMs;
     }).length;
   }
 
@@ -109,13 +111,29 @@
       return document.getElementById(id);
     };
     // The page shows the file as saved, which is the ORIGINAL shifted by the
-    // saved offset; the offset is always relative to the original, so undo it.
-    // (A line the save clamped to 0 cannot be recovered exactly; it only affects
-    // the preview of such a line, the server recomputes from the original.)
+    // saved offset (with negative starts clamped to 0, so it cannot be undone
+    // here). The server renders the original starts in line order; the offset
+    // is always applied to those.
     var savedMS = Number(panel.getAttribute("data-offset-ms")) || 0;
-    var base = lineStarts.map(function (s) {
-      return Math.max(0, s - savedMS);
-    });
+    var origParts = String(panel.getAttribute("data-orig-ms") || "").split(",");
+    var base = origParts.map(Number);
+    // timing.Tolerance in ms, rendered by the server so this preview cannot
+    // drift from the guard that judges the save.
+    var tolerance = Number(panel.getAttribute("data-tolerance-ms"));
+    var bad =
+      origParts.length !== lineStarts.length ||
+      origParts.some(function (p) {
+        return !/^\d+$/.test(p);
+      })
+        ? "data-orig-ms does not match the lyric lines"
+        : !(tolerance > 0)
+          ? "data-tolerance-ms is missing"
+          : "";
+    if (bad) {
+      console.error("preview.js: " + bad + "; editor off");
+      panel.hidden = true;
+      return;
+    }
     var live = lines.map(function (li) {
       return !li.classList.contains("mx-preview-line-decorative");
     });
@@ -170,27 +188,27 @@
         if (live[i]) {
           starts.push(base[i]);
         }
-        li.classList.toggle("is-past-end", live[i] && duration > 0 && lineStarts[i] > duration + TOLERANCE_MS);
+        li.classList.toggle("is-past-end", live[i] && duration > 0 && lineStarts[i] > duration + tolerance);
       });
-      var past = pastEnd(starts, st.offset, duration);
+      var past = pastEnd(starts, st.offset, duration, tolerance);
       var dirty = st.offset !== st.saved;
       var busy = st.phase === "saving";
-      var locked = busy || st.phase === "refused-changed";
+      var isLocked = locked();
       field.value = fmtOffset(st.offset);
       slider.value = String(Math.max(-5000, Math.min(5000, st.offset)));
       nudgers.concat([field, slider]).forEach(function (c) {
-        c.disabled = locked;
+        c.disabled = isLocked;
       });
-      save.disabled = !dirty || past > 0 || locked;
+      save.disabled = !dirty || past > 0 || isLocked;
       save.textContent = busy ? "Saving" : "Save";
-      discard.disabled = !dirty || busy;
-      revert.hidden = !(st.edited && !dirty) || busy;
+      discard.disabled = !dirty || isLocked;
+      revert.hidden = !(st.edited && !dirty) || isLocked;
       var tone = busy ? "blue" : dirty ? "amber" : st.edited ? "green" : "grey";
       chip.textContent = busy ? "Saving" : dirty ? "Unsaved" : st.edited ? "Edited" : "Original";
       chip.className = "mx-edit-chip is-" + tone;
       var msg;
       if (past > 0) {
-        msg = [past + (past === 1 ? " line would" : " lines would") + " start more than 2 s after the track ends (" + fmtTime(duration).replace(/\.\d+$/, "") + "). Save is off until they fit.", "warn"];
+        msg = [past + (past === 1 ? " line would" : " lines would") + " start more than " + tolerance / 1000 + " s after the track ends (" + fmtTime(duration).replace(/\.\d+$/, "") + "). Save is off until they fit.", "warn"];
       } else if (MESSAGES[st.phase]) {
         msg = MESSAGES[st.phase];
       } else if (dirty) {
@@ -206,7 +224,7 @@
     }
 
     function setOffset(ms) {
-      if (st.phase === "saving" || st.phase === "refused-changed") {
+      if (locked()) {
         return;
       }
       st.offset = Math.max(-MAX_OFFSET_MS, Math.min(MAX_OFFSET_MS, ms));
@@ -236,8 +254,14 @@
         field.dispatchEvent(new window.Event("change"));
       }
     });
+    // A "changed" refusal locks the editor for good: the page's mtime and
+    // original are stale, so only a reload may edit again.
+    function locked() {
+      return st.phase === "saving" || st.phase === "refused-changed";
+    }
+
     discard.addEventListener("click", function () {
-      if (st.phase !== "saving") {
+      if (!locked()) {
         st.offset = st.saved;
         st.phase = "idle";
         render();
@@ -247,6 +271,11 @@
     // post sends one edit. The response mtime is unix nanoseconds, beyond 2^53,
     // so it is read from the text and kept as a string, never via JSON.parse.
     function post(url, offsetMs, isRevert) {
+      // One request at a time: a second call (a double click, Save racing
+      // Revert) would send the mtime the first one is about to replace.
+      if (locked()) {
+        return;
+      }
       st.phase = "saving";
       render();
       var body = new window.URLSearchParams();
@@ -288,7 +317,7 @@
     }
 
     function requestSave() {
-      if (save.disabled) {
+      if (save.disabled || locked()) {
         return;
       }
       if (skipAsking()) {
