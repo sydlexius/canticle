@@ -132,6 +132,11 @@ type UI struct {
 	// implementation.
 	queueActions QueueActions
 
+	// editor backs the lyric offset editor's save/revert routes (#481 Stage
+	// 2); nil leaves the player read-only. editLocks serializes edits per row.
+	editor    *EditDeps
+	editLocks rowLocks
+
 	// guardedRoutes records every pattern Register put behind the session guard
 	// (empty when auth is not configured). It exists so a test can enumerate the
 	// guarded surface instead of hand-picking routes.
@@ -359,6 +364,8 @@ func (u *UI) Register(mux *http.ServeMux) {
 	u.registerQueueRoutes(reg)
 	u.registerFailureGroupRoutes(reg)
 	u.registerPreviewRoutes(reg)
+	reg("POST /preview/{id}/offset", u.handlePreviewOffset)
+	reg("POST /preview/{id}/revert", u.handlePreviewRevert)
 }
 
 // settingsPath is the single config destination. Settings replaced the old

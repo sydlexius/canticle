@@ -35,6 +35,10 @@ type PreviewTarget struct {
 	Album    string
 	Status   string
 	SyncTier string // "word", "line", "unsynced" or "" when not yet classified
+	// LineEditable reports a settled synced row at the current line-synced
+	// rung (lineTierPredicate), the only rows the offset editor may rewrite
+	// (#481 Stage 2). Decided in SQL from the row's recorded state.
+	LineEditable bool
 
 	// AudioPath is work_queue.source_path, whitespace-trimmed ("" when the row
 	// has none). Sidecars are probed only when it is absolute; otherwise both
@@ -92,9 +96,10 @@ type PreviewTarget struct {
 func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, error) {
 	t := PreviewTarget{ID: id}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT artist, title, album, status, COALESCE(sync_tier, ''), source_path
+		`SELECT artist, title, album, status, COALESCE(sync_tier, ''), source_path,
+		        COALESCE(status = 'done' AND outcome_type = 'synced' AND `+lineTierPredicate+`, 0)
 		   FROM work_queue WHERE id = ?`, id,
-	).Scan(&t.Artist, &t.Title, &t.Album, &t.Status, &t.SyncTier, &t.AudioPath)
+	).Scan(&t.Artist, &t.Title, &t.Album, &t.Status, &t.SyncTier, &t.AudioPath, &t.LineEditable)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PreviewTarget{}, ErrPreviewNotFound
 	}
