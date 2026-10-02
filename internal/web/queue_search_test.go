@@ -199,3 +199,46 @@ func TestQueueViewStateRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A query that normalizes to nothing is no search: the page shows the ordinary
+// bucket with no active-search state (#1234 review).
+func TestQueueWhitespaceQueryIsNoSearch(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedSearchRow(t, db, "Some Act", "Some Song")
+	mux := newReportsUIServer(t, db)
+
+	body := getQueue(t, mux, "/queue/pending?q=%20", false).Body.String()
+	if !strings.Contains(body, "Some Song") {
+		t.Errorf("whitespace query filtered the bucket")
+	}
+	if strings.Contains(body, "Clear search") {
+		t.Errorf("whitespace query shows the active-search clear link")
+	}
+	if strings.Contains(body, `value=" "`) {
+		t.Errorf("search box echoes the whitespace query")
+	}
+}
+
+func TestQueueWhitespaceQueryEmptyBucketIsOrdinary(t *testing.T) {
+	db := openReportsTestDB(t)
+	mux := newReportsUIServer(t, db)
+
+	body := getQueue(t, mux, "/queue/pending?q=%20%20", false).Body.String()
+	if strings.Contains(body, "No tracks match your search") {
+		t.Errorf("whitespace query on an empty bucket claims a search")
+	}
+	if !strings.Contains(body, "No rows in this bucket") {
+		t.Errorf("ordinary empty state missing")
+	}
+}
+
+// The HTML maxlength counts UTF-16 units and would block queries the server's
+// rune cap accepts; the server is the single authority.
+func TestQueueSearchInputHasNoMaxlength(t *testing.T) {
+	db := openReportsTestDB(t)
+	mux := newReportsUIServer(t, db)
+	body := getQueue(t, mux, "/queue/pending", false).Body.String()
+	if strings.Contains(body, "maxlength") {
+		t.Errorf("search input carries a maxlength that disagrees with the server's rune cap")
+	}
+}

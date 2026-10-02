@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
@@ -70,6 +71,14 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "invalid queue parameters: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// A query that normalizes to nothing (whitespace only) applies no filter, so
+	// it is no search: drop it here, before it reaches the repo, the view, or any
+	// pager link, so the page never claims a search that is not happening. The
+	// search box then shows empty rather than echoing the stray whitespace.
+	if normalize.NormalizeKey(state.Query) == "" {
+		state.Query = ""
 	}
 
 	// Fetch one extra row to know whether another page exists, rather than

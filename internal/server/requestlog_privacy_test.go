@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -82,6 +83,38 @@ func TestSearchTextNeverReachesRequestLog(t *testing.T) {
 			}
 			if strings.Contains(out, token) {
 				t.Errorf("search text leaked into the log: %s", out)
+			}
+		})
+	}
+}
+
+// TestRedactURIValidatesAllowlistedValues pins that an allowlisted key's value
+// is logged only when it has the shape its handler accepts (#1234 review).
+func TestRedactURIValidatesAllowlistedValues(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"after valid", "/queue/pending?after=42", "/queue/pending?after=42"},
+		{"after invalid", "/queue/pending?after=SECRETARTIST", "/queue/pending?after=REDACTED"},
+		{"after negative", "/queue/pending?after=-1", "/queue/pending?after=REDACTED"},
+		{"from valid", "/preview/3?from=failed", "/preview/3?from=failed"},
+		{"from invalid", "/preview/3?from=SECRETARTIST", "/preview/3?from=REDACTED"},
+		{"from numeric is not a bucket", "/preview/3?from=7", "/preview/3?from=REDACTED"},
+		{"status valid", "/x?status=deferred", "/x?status=deferred"},
+		{"status invalid", "/x?status=SECRETARTIST", "/x?status=REDACTED"},
+		{"library all", "/x?library=all", "/x?library=all"},
+		{"library id", "/x?library=12", "/x?library=12"},
+		{"library zero", "/x?library=0", "/x?library=REDACTED"},
+		{"library text", "/x?library=SECRETARTIST", "/x?library=REDACTED"},
+		{"repeated validated independently", "/x?after=1&after=SECRETARTIST", "/x?after=1&after=REDACTED"},
+		{"unlisted key", "/x?q=SECRETARTIST&apikey=k", "/x?apikey=REDACTED&q=REDACTED"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := redactURI(u); got != tc.want {
+				t.Errorf("redactURI(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

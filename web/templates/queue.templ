@@ -21,7 +21,7 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 		</p>
 		<form class="mx-queue-search" method="get" action={ templ.SafeURL("/queue/" + view.Key) } role="search">
 			<label class="mx-queue-search-label" for="mx-queue-q">Search artist or title</label>
-			<input class="mx-queue-search-input" id="mx-queue-q" type="search" name="q" value={ view.Query } maxlength="200" autocomplete="off"/>
+			<input class="mx-queue-search-input" id="mx-queue-q" type="search" name="q" value={ view.Query } autocomplete="off"/>
 			<button class="mx-run-button" type="submit">Search</button>
 			if view.Query != "" {
 				<a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear search</a>

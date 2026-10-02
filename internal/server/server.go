@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -884,20 +885,39 @@ func apiKey(r *http.Request) string {
 // kept so logs stay useful), because the web UI carries library metadata in
 // the query string: `q` (queue search text), `next` (a login return path that
 // embeds the page's own query), `signature` (library-derived failure text).
-// The listed keys are non-sensitive: `after` and `from` are numeric row
-// cursors, `status` is a queue status enum, `library` is a library scope.
+// A listed key's value is logged only when it passes that key's validator, which
+// mirrors the shape the handler itself accepts; a value of any other shape
+// (user text smuggled into an allowlisted key) is replaced like any other.
 // `apikey` is deliberately absent: it is a credential.
-var loggableQueryKeys = map[string]bool{
-	"after":   true,
-	"from":    true,
-	"status":  true,
-	"library": true,
+var loggableQueryKeys = map[string]func(string) bool{
+	// after: the queue keyset cursor, a non-negative integer (web.parseQueueViewState).
+	"after": func(v string) bool {
+		n, err := strconv.ParseInt(v, 10, 64)
+		return err == nil && n >= 0
+	},
+	// from: the player back-link origin, a queue bucket name (web preview handler).
+	"from": func(v string) bool {
+		_, err := reports.ParseBucket(v)
+		return err == nil
+	},
+	// status: the failure-group status enum (web handleFailureGroup).
+	"status": func(v string) bool { return v == "failed" || v == "deferred" },
+	// library: the revive scope, the literal "all" or a positive library id
+	// (web parseReviveScope).
+	"library": func(v string) bool {
+		if v == "all" {
+			return true
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		return err == nil && n > 0
+	},
 }
 
 const redactedValue = "REDACTED"
 
 // redactURI renders the request URI for the log: the path, plus the query with
-// every value not on loggableQueryKeys replaced by a placeholder.
+// every value not accepted by its loggableQueryKeys validator replaced by a
+// placeholder. Each value of a repeated key is validated independently.
 func redactURI(u *url.URL) string {
 	if u == nil {
 		return ""
@@ -905,10 +925,11 @@ func redactURI(u *url.URL) string {
 	cp := *u
 	q := cp.Query()
 	for k, vs := range q {
-		if loggableQueryKeys[k] {
-			continue
-		}
+		valid := loggableQueryKeys[k]
 		for i := range vs {
+			if valid != nil && valid(vs[i]) {
+				continue
+			}
 			vs[i] = redactedValue
 		}
 	}
