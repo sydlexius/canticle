@@ -1326,6 +1326,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// Back the Reports workspace with the same DB the rest of serve mode
 			// uses; the handler builds a read-only reports.Repo from it (#211).
 			server.WithReportsDB(sqlDB),
+			// The lyric offset editor (#481 Stage 2) judges a save against the
+			// exact audio duration and records its rewrite so the watcher drops it.
+			server.WithLyricEditDeps(audiodur.New(sqlDB, scanner.DurationReaderVersion), selfWrites),
 			// Enable the settings write path (#288 Phase 2): writes go to the
 			// RESOLVED config file (never ""), and secret-field saves route to the
 			// encrypted store rather than the TOML.

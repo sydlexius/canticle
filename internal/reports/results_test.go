@@ -75,6 +75,83 @@ func TestResultsBreakdownSumsToDone(t *testing.T) {
 	}
 }
 
+// TestResultsBreakdownRemediatedRowsNeverTiered pins (ported from the retired
+// SyncTierCounts suite, #1200) that a row the timing guard remediated
+// (categorical / mis_synced / degenerate) never counts as word- or
+// line-synced, whatever stale tier it kept: it routes to tier-unknown. Both
+// tiers are exercised for every verdict, so neither tier predicate can drop
+// the exclusion unnoticed.
+func TestResultsBreakdownRemediatedRowsNeverTiered(t *testing.T) {
+	sqlDB := openTestDB(t)
+	rows := []workItem{
+		{artist: "A", title: "ok", status: "done", outcomeType: "synced", syncTier: "word"},
+		{artist: "A", title: "cat-word", status: "done", outcomeType: "synced", syncTier: "word", timingOutcome: "categorical"},
+		{artist: "A", title: "cat-line", status: "done", outcomeType: "synced", syncTier: "line", timingOutcome: "categorical"},
+		{artist: "A", title: "missync-word", status: "done", outcomeType: "synced", syncTier: "word", timingOutcome: "mis_synced"},
+		{artist: "A", title: "missync-line", status: "done", outcomeType: "synced", syncTier: "line", timingOutcome: "mis_synced"},
+		{artist: "A", title: "deg-word", status: "done", outcomeType: "synced", syncTier: "word", timingOutcome: "degenerate"},
+		{artist: "A", title: "deg-line", status: "done", outcomeType: "synced", syncTier: "line", timingOutcome: "degenerate"},
+	}
+	for _, w := range rows {
+		insertWorkItem(t, sqlDB, w)
+	}
+	got, err := reports.New(sqlDB).ResultsBreakdown(context.Background())
+	if err != nil {
+		t.Fatalf("ResultsBreakdown: %v", err)
+	}
+	want := reports.ResultsBreakdown{WordSynced: 1, SyncedTierUnknown: 6}
+	if got != want {
+		t.Errorf("ResultsBreakdown = %+v, want %+v (remediated rows route to tier unknown)", got, want)
+	}
+}
+
+// TestResultsBreakdownQueuedRowKeepsStaleTierAsUnknown pins (ported from the
+// retired SyncTierCounts suite, #1085 finding 1 / #1200) that a done row left
+// mid word-recheck (word_timing_state='queued', prune's retired shape) never
+// counts as tiered even when it carries a stale word or line tier.
+func TestResultsBreakdownQueuedRowKeepsStaleTierAsUnknown(t *testing.T) {
+	sqlDB := openTestDB(t)
+	rows := []workItem{
+		{artist: "A", title: "queued-word", status: "done", outcomeType: "synced", syncTier: "word", wordTimingState: "queued"},
+		{artist: "A", title: "queued-line", status: "done", outcomeType: "synced", syncTier: "line", wordTimingState: "queued"},
+		{artist: "A", title: "queued-untiered", status: "done", outcomeType: "synced", wordTimingState: "queued"},
+	}
+	for _, w := range rows {
+		insertWorkItem(t, sqlDB, w)
+	}
+	got, err := reports.New(sqlDB).ResultsBreakdown(context.Background())
+	if err != nil {
+		t.Fatalf("ResultsBreakdown: %v", err)
+	}
+	want := reports.ResultsBreakdown{SyncedTierUnknown: 3}
+	if got != want {
+		t.Errorf("ResultsBreakdown = %+v, want %+v (queued row's stale tier must not count)", got, want)
+	}
+}
+
+// TestResultsBreakdownWordSyncedMatchesFinished pins (ported from the retired
+// SyncTierCounts agreement check, #1200) that the Results row's word-synced
+// bucket and QueueSummary.Finished are one predicate, over the full
+// finished-split fixture (every remediated, queued, stray and non-done shape).
+func TestResultsBreakdownWordSyncedMatchesFinished(t *testing.T) {
+	repo, _, wantFinished := seedFinishedSplit(t)
+	ctx := context.Background()
+	qs, err := repo.QueueSummary(ctx)
+	if err != nil {
+		t.Fatalf("QueueSummary: %v", err)
+	}
+	rb, err := repo.ResultsBreakdown(ctx)
+	if err != nil {
+		t.Fatalf("ResultsBreakdown: %v", err)
+	}
+	if rb.WordSynced != qs.Finished {
+		t.Errorf("ResultsBreakdown.WordSynced = %d, QueueSummary.Finished = %d; want equal", rb.WordSynced, qs.Finished)
+	}
+	if rb.WordSynced != wantFinished {
+		t.Errorf("ResultsBreakdown.WordSynced = %d, want %d", rb.WordSynced, wantFinished)
+	}
+}
+
 // TestResultsBreakdownEmptyAndClosed covers a fresh install (every bucket
 // zero, no NULL-scan failure) and the query-error branch.
 func TestResultsBreakdownEmptyAndClosed(t *testing.T) {
