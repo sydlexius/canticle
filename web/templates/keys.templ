@@ -153,51 +153,54 @@ templ keyList(view WebhookKeysView) {
 		if len(view.Keys) == 0 {
 			<p class="mx-settings-field-desc">No keys yet. Generate one above to authenticate Lidarr webhooks.</p>
 		} else {
-			<table class="mx-keys-table">
-				<thead>
-					<tr>
-						<th scope="col">Name</th>
-						<th scope="col">ID</th>
-						<th scope="col">Scopes</th>
-						<th scope="col">Created</th>
-						<th scope="col">Status</th>
-						<th scope="col"><span class="mx-visually-hidden">Actions</span></th>
-					</tr>
-				</thead>
-				<tbody>
-					for _, row := range view.Keys {
-						<tr class={ "mx-keys-row", templ.KV("mx-keys-row-revoked", row.Revoked) }>
-							<td>{ row.Name }</td>
-							<td><code class="mx-field-value">{ row.ID }</code></td>
-							<td>{ row.Scopes }</td>
-							<td>@keyTime(row.Created, row.CreatedISO, row.CreatedTZApplied)</td>
-							<td>
-								if row.Revoked {
-									<span class="mx-keys-status mx-keys-status-revoked">Revoked</span>
-									{ " " }
-									@keyTime(row.RevokedAt, row.RevokedAtISO, row.RevokedAtTZApplied)
-								} else {
-									<span class="mx-keys-status mx-keys-status-active">Active</span>
-								}
-							</td>
-							<td>
-								if !row.Revoked {
-									<form
-										hx-post="/settings/keys/revoke"
-										hx-target="#mx-keys-panel"
-										hx-swap="innerHTML"
-										hx-confirm="Revoke this key? Any client using it will immediately stop working."
-									>
-										<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
-										<input type="hidden" name="id" value={ row.FullID }/>
-										<button type="submit" class="mx-keys-revoke">Revoke</button>
-									</form>
-								}
-							</td>
+			<div class="mx-table-wrap">
+				<table class="mx-keys-table">
+					<thead>
+						<tr>
+							<th scope="col">Name</th>
+							<th scope="col">ID</th>
+							<th scope="col">Scopes</th>
+							<th scope="col">Created</th>
+							<th scope="col">Status</th>
+							<th scope="col"><span class="mx-visually-hidden">Actions</span></th>
 						</tr>
-					}
-				</tbody>
-			</table>
+					</thead>
+					<tbody>
+						for _, row := range view.Keys {
+							<tr class={ "mx-keys-row", templ.KV("mx-keys-row-revoked", row.Revoked) }>
+								<td>{ row.Name }</td>
+								<td><code class="mx-field-value">{ row.ID }</code></td>
+								<td>{ row.Scopes }</td>
+								<td>@keyTime(row.Created, row.CreatedISO, row.CreatedTZApplied)
+</td>
+								<td>
+									if row.Revoked {
+										<span class="mx-keys-status mx-keys-status-revoked">Revoked</span>
+										{ " " }
+										@keyTime(row.RevokedAt, row.RevokedAtISO, row.RevokedAtTZApplied)
+									} else {
+										<span class="mx-keys-status mx-keys-status-active">Active</span>
+									}
+								</td>
+								<td>
+									if !row.Revoked {
+										<form
+											hx-post="/settings/keys/revoke"
+											hx-target="#mx-keys-panel"
+											hx-swap="innerHTML"
+											hx-confirm="Revoke this key? Any client using it will immediately stop working."
+										>
+											<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+											<input type="hidden" name="id" value={ row.FullID }/>
+											<button type="submit" class="mx-keys-revoke">Revoke</button>
+										</form>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 	</section>
 }
