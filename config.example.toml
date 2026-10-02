@@ -157,6 +157,12 @@ addr = "127.0.0.1:3876"
 # "Web UI enablement" for headless admin bootstrap.
 # web_ui_enabled = false
 
+# Let the lyric preview player retry once as a FLAC conversion (made with
+# ffmpeg, kept in a capped temp cache, never written to the library) when the
+# browser cannot decode a track such as ALAC or WMA. Off by default. The
+# MXLRC_PREVIEW_FLAC_FALLBACK env var overrides this value.
+# preview_flac_fallback = false
+
 # API keys accepted by webhook endpoints. Generate/store these outside the file
 # when possible; MXLRC_WEBHOOK_API_KEY can also provide one or more comma-separated keys.
 # webhook_api_keys = ["mxlrc_your-webhook-key"]

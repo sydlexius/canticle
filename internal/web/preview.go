@@ -26,6 +26,7 @@ import (
 func (u *UI) registerPreviewRoutes(reg routeReg) {
 	reg("GET /preview/{id}", u.handlePreviewPage)
 	reg("GET /preview/{id}/audio", u.handlePreviewAudio)
+	reg("GET /preview/{id}/audio.flac", u.handlePreviewFlac)
 }
 
 // previewSidecarMax bounds how much of a lyric sidecar the page reads; a real
@@ -175,11 +176,10 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		BackHref:    "/queue",
 		BackLabel:   "Back to queue",
 		AudioSrc:    "/preview/" + strconv.FormatInt(id, 10) + "/audio",
-		AudioFormat: previewFormat(t.AudioPath),
-		AudioType:   previewContentType(t.AudioPath),
-		Lines:       lines,
-		HasWords:    hasWords,
-		Truncated:   lrcCut,
+		AudioFormat: previewFormat(t.AudioPath), AudioType: previewContentType(t.AudioPath),
+		Lines:     lines,
+		HasWords:  hasWords,
+		Truncated: lrcCut,
 	}
 	// Exactly one `from` value is accepted; a repeated parameter is ambiguous
 	// and falls back to the queue root rather than trusting the first value.

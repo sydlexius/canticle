@@ -56,6 +56,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_WEBHOOK_API_KEY` | (none) | Comma-separated webhook API key(s) accepted by the server. Generate with `canticle keys create --scope webhook`. |
 | `MXLRC_SERVER_ADDR` | `127.0.0.1:3876` | HTTP listen address for `serve`. Docker images default this to `0.0.0.0:50705`. |
 | `MXLRC_WEB_UI_ENABLED` | `false` | Enable the browser UI on the serve listener. Env override of `web_ui_enabled` (precedence: env > file). Restart to apply. |
+| `MXLRC_PREVIEW_FLAC_FALLBACK` | `false` | Retry a track the preview player cannot decode (ALAC, WMA) once as an ffmpeg FLAC conversion in a temp cache. Env override of `preview_flac_fallback`. Restart to apply. |
 | `MXLRC_TRUSTED_CIDRS` | (none) | Comma-separated CIDRs of trusted client networks (serve mode). Loopback is always trusted. Requests from listed CIDRs may scrape `GET /metrics` and bypass the web UI session requirement. |
 | `MXLRC_TRUSTED_PROXIES` | (none) | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` is trusted to carry the real client IP (serve mode). Must not overlap `MXLRC_TRUSTED_CIDRS`. |
 | `MXLRC_TLS_CERT_FILE` | (none) | PEM certificate path for the serve listener. Set with `MXLRC_TLS_KEY_FILE` to terminate TLS (minimum TLS 1.2). |
@@ -235,6 +236,7 @@ addr = "127.0.0.1:3876"
 # scan_interval_seconds = 900
 # work_interval_seconds = 0
 # web_ui_enabled = false
+# preview_flac_fallback = false
 ```
 
 HTTP listen address, webhook keys, and the scheduler scan/worker poll intervals (env: `MXLRC_SERVER_ADDR`, `MXLRC_WEBHOOK_API_KEY`, `MXLRC_SCAN_INTERVAL`, `MXLRC_WORK_INTERVAL`; CLI: `--listen`, `--scan-interval`, `--work-interval`).
@@ -242,6 +244,8 @@ HTTP listen address, webhook keys, and the scheduler scan/worker poll intervals 
 `scan_interval_seconds` is **deprecated** in favor of `[server.scan_schedule]` below. It still works, and still takes effect whenever `scan_schedule.frequency` is blank, so an existing config keeps running unchanged.
 
 `web_ui_enabled` (default `false`, env: `MXLRC_WEB_UI_ENABLED`, precedence env > file) gates the browser UI on the serve listener. When enabled, the UI pages require a session login (a single admin account, separate from the webhook API key), or a request from a trusted network (the `[server.trusted_networks]` CIDR allowlist). Secret values (API token, webhook keys) are always redacted in the Config view. See [Web UI access](#web-ui-access) for the first-run onboarding flow.
+
+`preview_flac_fallback` (default `false`, env: `MXLRC_PREVIEW_FLAC_FALLBACK`) lets the lyric preview player retry once, as a whole-file FLAC conversion made with ffmpeg, when the browser cannot decode a track's audio. Conversions live in a temp cache capped at 512 MiB (oldest evicted, at most 2 conversions at once) in a private directory under the OS temp dir, created per process (`canticle-preview-flac-*`) and removed on shutdown, and are never written to the library. It needs the web UI and an ffmpeg (a configured path, PATH, or the auto-provisioned build). See the [User Guide](USER_GUIDE.md#when-the-audio-will-not-play).
 
 ### `[server.scan_schedule]`
 

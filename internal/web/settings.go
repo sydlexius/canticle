@@ -417,6 +417,7 @@ func settingsInputType(spec config.FieldSpec) string {
 var boolLabels = map[string][2]string{
 	"output.bilingual_output":               {"Save original and translation together", "Save one language only"},
 	"output.bump_audio_mtime":               {"Touch the audio file's modified time after a correction", "Leave audio files alone"},
+	"server.preview_flac_fallback":          {"Convert unplayable tracks to FLAC for the preview", "Show an error instead"},
 	"output.word_sync":                      {"Highlight each word as it is sung", "Highlight whole lines only"},
 	"verification.enabled":                  {"Verify lyrics against the audio", "Don't verify"},
 	"instrumental_detector.enabled":         {"Detect instrumental tracks", "Don't detect"},
@@ -1062,6 +1063,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 	// [server]
 	case "server.addr":
 		return cfg.Server.Addr
+	case "server.preview_flac_fallback":
+		return strconv.FormatBool(cfg.Server.PreviewFlacFallback)
 	case "server.scan_interval_seconds":
 		return strconv.Itoa(cfg.Server.ScanIntervalSeconds)
 	case "server.scan_schedule.frequency":
@@ -1315,6 +1318,7 @@ var settingsLabels = map[string]string{
 	"providers.mode":                 "How to use multiple sources",
 	"server.addr":                    "Web page address",
 	"server.web_ui_enabled":          "Show the web page",
+	"server.preview_flac_fallback":   "Convert tracks the preview player cannot play to FLAC",
 	"server.webhook_api_keys":        "Webhook keys",
 	"server.scan_interval_seconds":   "How often to scan the library (seconds, deprecated)",
 	"server.scan_schedule.frequency": "How often to scan the library",
