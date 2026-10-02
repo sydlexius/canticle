@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // notLyricEdited keeps automatic replacement paths away from a file a person
@@ -30,6 +31,41 @@ func (q *DBQueue) ClearLyricEdit(ctx context.Context, id int64) error {
 		return fmt.Errorf("queue: clear lyric edit %d: %w", id, err)
 	}
 	return nil
+}
+
+// LyricEditedAmong returns which of ids carry a hand-edit mark. The timing
+// sweep (#1226) stamps such a row's verdict but never remediates its file, so
+// it asks after planning, immediately before applying.
+func (q *DBQueue) LyricEditedAmong(ctx context.Context, ids []int64) (_ map[int64]bool, retErr error) {
+	out := make(map[int64]bool)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	query := `SELECT id FROM work_queue WHERE lyric_edited_at IS NOT NULL AND id IN (?` + strings.Repeat(",?", len(ids)-1) + `)` //nolint:gosec // reason: G202: only "?" placeholders are concatenated; every id is a bound parameter
+	rows, err := q.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("queue: lyric edited among: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close lyric edited rows: %w", cerr)
+		}
+	}()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("queue: lyric edited scan: %w", err)
+		}
+		out[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: lyric edited rows: %w", err)
+	}
+	return out, nil
 }
 
 // LyricEdit reports the row's recorded hand edit.

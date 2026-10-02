@@ -153,6 +153,11 @@ func revalidateRoots(ctx context.Context, out io.Writer, sqlDB *sql.DB, args Rev
 
 // applyRevalidate runs the planned actions through realign.Apply and prints the
 // aggregate outcome.
+//
+// It deliberately does NOT honor the hand-edit mark (work_queue.lyric_edited_at,
+// #1226), unlike the serve-mode sweep: `revalidate --apply` is an explicit
+// operator action over files on disk (preview first, then --apply), so it may
+// remediate a hand-edited .lrc. Only automatic paths must leave an edit alone.
 func applyRevalidate(ctx context.Context, out io.Writer, cfg config.Config, sqlDB *sql.DB, args RevalidateCmd, plan revalidate.Plan) int {
 	if len(plan.Moves) == 0 {
 		_, _ = fmt.Fprintln(out, "revalidate: nothing to remediate")

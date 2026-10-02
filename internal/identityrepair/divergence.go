@@ -28,6 +28,8 @@ type DivergenceResult struct {
 	Unlinked        int // scan_results rows unlinked from a disagreeing queue row and reset to pending
 	Deleted         int // work_queue rows deleted after every linked member was unlinked (no member still matches)
 	ProcessingSkips int // candidate groups skipped because the queue row was mid-flight
+	EditHeld        int // re-keyed rows left settled because they carry a hand-edit mark (#1226)
+	EditSkips       int // candidate groups skipped because a merge, or a disagreement's unlink/delete, would touch a hand-edited row (#1226)
 	// ScopeSkips counts candidate groups skipped because the shared work_queue
 	// row also links a scan_results member OUTSIDE the requested LibraryID/
 	// PathPrefix scope whose artist_key disagrees with the queue row's own
@@ -50,6 +52,7 @@ type queueRow struct {
 	artistKey           string
 	titleKey            string
 	status              string
+	edited              bool // carries the hand-edit mark (#1226)
 }
 
 // scanMember is one scan_results row linked to a candidate work_queue row.
@@ -66,8 +69,10 @@ type scanMember struct {
 // work_queue row.
 type divergenceOutcome struct {
 	rekeyed, merged, unlinked, deleted int
+	editHeld                           int
 	processingSkip                     bool
 	scopeSkip                          bool
+	editSkip                           bool
 }
 
 // RepairDivergence finds work_queue rows whose stored artist identity has
@@ -143,6 +148,10 @@ func (r *Repairer) RepairDivergence(ctx context.Context, opts Options) (Divergen
 		res.Merged += outcome.merged
 		res.Unlinked += outcome.unlinked
 		res.Deleted += outcome.deleted
+		res.EditHeld += outcome.editHeld
+		if outcome.editSkip {
+			res.EditSkips++
+		}
 		if outcome.processingSkip {
 			res.ProcessingSkips++
 		}
@@ -423,6 +432,9 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 		if lookup.skip {
 			return divergenceOutcome{processingSkip: true}, nil
 		}
+		if lookup.editSkip {
+			return divergenceOutcome{editSkip: true}, nil
+		}
 		if dryRun {
 			if lookup.conflictID != 0 {
 				outcome.merged = 1
@@ -430,6 +442,9 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 			} else {
 				outcome.rekeyed = 1
 				ch.Op = OpQueueRekey
+				if lookup.oldEdited {
+					outcome.editHeld = 1
+				}
 			}
 		} else {
 			qOut, err := reconcileQueue(ctx, tx, ch, wq.titleKey, lookup)
@@ -442,10 +457,20 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 			} else {
 				outcome.rekeyed = 1
 				ch.Op = OpQueueRekey
+				outcome.editHeld = qOut.editHeld
 			}
 		}
 		changes = append(changes, ch)
 	} else {
+		// A HAND-EDITED ROW IS LEFT WHOLE (#1226). An unlink resets the member to
+		// pending, so the next scan enqueues it under its new key and the fetch
+		// rewrites that member's .lrc, and a row left with no link is DELETED, mark
+		// and all, after which a fresh unmarked row overwrites the edit. Skip the
+		// whole group (no unlink, no reset, no delete), as a merge is skipped: the
+		// divergence is reported again on every pass until the edit is reverted.
+		if wq.edited {
+			return divergenceOutcome{editSkip: true}, nil
+		}
 		// Disagreement: some members still match the queue row's own key, or the
 		// diverging members disagree with each other. Never re-key -- that would
 		// orphan whichever members are still correct. Unlink and reset only the
@@ -575,8 +600,8 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 func loadQueueRowForDivergence(ctx context.Context, tx *sql.Tx, id int64) (queueRow, bool, error) {
 	var q queueRow
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, artist, album_artist, artist_key, title_key, status FROM work_queue WHERE id = ?`, id).
-		Scan(&q.id, &q.artist, &q.albumArtist, &q.artistKey, &q.titleKey, &q.status)
+		`SELECT id, artist, album_artist, artist_key, title_key, status, lyric_edited_at IS NOT NULL FROM work_queue WHERE id = ?`, id).
+		Scan(&q.id, &q.artist, &q.albumArtist, &q.artistKey, &q.titleKey, &q.status, &q.edited)
 	if errors.Is(err, sql.ErrNoRows) {
 		return queueRow{}, false, nil
 	}

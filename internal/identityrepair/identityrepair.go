@@ -112,6 +112,12 @@ type Result struct {
 	QueueUpdated    int // work_queue rows re-keyed/synced in place
 	QueueMerged     int // work_queue rows merged into an existing correct-key row
 	ProcessingSkips int // changes skipped because a linked work_queue row was in-flight
+	// EditHeld counts re-keyed rows left settled because they carry a hand-edit
+	// mark (#1226): the identity is corrected, but no re-fetch may replace the
+	// edited .lrc. EditSkips counts changes abandoned because a merge would
+	// collapse a hand-edited row (see probeQueueConflict).
+	EditHeld  int
+	EditSkips int
 }
 
 // Options controls a Run.
@@ -210,7 +216,22 @@ func (r *Repairer) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 
 		if opts.DryRun {
+			// The same skip/hold classification apply makes (#1226), read-only, so
+			// the preview's counts are the ones --yes will report.
+			outcome, err := r.previewApply(ctx, ch, rw.titleKey)
+			if err != nil {
+				return res, err
+			}
+			if outcome.processingSkip {
+				res.ProcessingSkips++
+				continue
+			}
+			if outcome.editSkip {
+				res.EditSkips++
+				continue
+			}
 			res.Changed++
+			res.EditHeld += outcome.editHeld
 			if opts.Report != nil {
 				if err := opts.Report(ch); err != nil {
 					return res, fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err)
@@ -230,7 +251,12 @@ func (r *Repairer) Run(ctx context.Context, opts Options) (Result, error) {
 			res.ProcessingSkips++
 			continue
 		}
+		if outcome.editSkip {
+			res.EditSkips++
+			continue
+		}
 		res.Changed++
+		res.EditHeld += outcome.editHeld
 		res.QueueUpdated += outcome.queueUpdated
 		res.QueueMerged += outcome.queueMerged
 	}
@@ -273,7 +299,9 @@ func (r *Repairer) load(ctx context.Context, libraryID *int64) ([]row, error) {
 type applyOutcome struct {
 	queueUpdated   int
 	queueMerged    int
+	editHeld       int
 	processingSkip bool
+	editSkip       bool
 }
 
 // apply corrects one scan_results row and reconciles its coupled work_queue row
@@ -314,6 +342,9 @@ func (r *Repairer) applyOnce(ctx context.Context, ch Change, titleKey string, re
 	if lookup.skip {
 		return applyOutcome{processingSkip: true}, nil
 	}
+	if lookup.editSkip {
+		return applyOutcome{editSkip: true}, nil
+	}
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE scan_results SET artist = ?, album_artist = ?, artist_key = ? WHERE id = ?`,
@@ -348,15 +379,53 @@ func (r *Repairer) applyOnce(ctx context.Context, ch Change, titleKey string, re
 	return out, nil
 }
 
+// previewApply is apply's classification without its writes: the same
+// probeQueueConflict inside a read-only transaction that is always rolled back.
+// It reports processingSkip, editSkip, and editHeld exactly as apply would for
+// the database as it stands; the queue tallies stay zero, as a dry run has
+// always reported them.
+func (r *Repairer) previewApply(ctx context.Context, ch Change, titleKey string) (applyOutcome, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return applyOutcome{}, fmt.Errorf("identityrepair: begin preview tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	lookup, err := probeQueueConflict(ctx, tx, ch, titleKey)
+	if err != nil {
+		return applyOutcome{}, err
+	}
+	var out applyOutcome
+	switch {
+	case lookup.skip:
+		out.processingSkip = true
+	case lookup.editSkip:
+		out.editSkip = true
+	case lookup.oldEdited && ch.NewArtistKey != ch.OldArtistKey && lookup.conflictID == 0:
+		// reconcileQueue's re-key-in-place arm: corrected, but held settled.
+		out.editHeld = 1
+	}
+	return out, nil
+}
+
 // queueLookup bundles what probeQueueConflict found about the work_queue row(s)
 // touching ch: the row (if any) carrying the OLD identity, and -- when the key
 // is changing -- the row (if any) already occupying the corrected key. skip is
 // true when either match is mid-flight ('processing'), meaning the whole
 // change must be abandoned so scan_results and work_queue never drift apart.
+//
+// editSkip is true when a merge would collapse a hand-edited row (#1226), and
+// the change is abandoned the same way. A merge deletes the dropped row (its
+// mark with it) and reopens the survivor, whose re-fetch rewrites every unioned
+// path, so neither an edited dropped row nor an edited survivor can merge
+// without a fetch replacing the edit. Carrying the mark onto the survivor was
+// rejected: a 'pending' survivor still fetches, and the worker does not read
+// the mark. The divergence persists and is reported on every pass until a
+// person reverts the edit.
 type queueLookup struct {
 	oldID, conflictID         int64
 	oldStatus, conflictStatus string
-	skip                      bool
+	oldEdited                 bool
+	skip, editSkip            bool
 }
 
 // probeQueueConflict locates the work_queue row(s) relevant to ch without
@@ -366,7 +435,7 @@ type queueLookup struct {
 func probeQueueConflict(ctx context.Context, tx *sql.Tx, ch Change, titleKey string) (queueLookup, error) {
 	// Locate the queue row that carried the OLD identity (UNIQUE(artist_key,
 	// title_key) => at most one). A 'processing' match aborts the whole change.
-	oldID, oldStatus, err := queueRowAt(ctx, tx, ch.OldArtistKey, titleKey, 0)
+	oldID, oldStatus, oldEdited, err := queueRowAt(ctx, tx, ch.OldArtistKey, titleKey, 0)
 	if err != nil {
 		return queueLookup{}, err
 	}
@@ -384,15 +453,19 @@ func probeQueueConflict(ctx context.Context, tx *sql.Tx, ch Change, titleKey str
 	var conflictID int64
 	var conflictStatus string
 	if keyChanged && oldID != 0 {
-		conflictID, conflictStatus, err = queueRowAt(ctx, tx, ch.NewArtistKey, titleKey, oldID)
+		var conflictEdited bool
+		conflictID, conflictStatus, conflictEdited, err = queueRowAt(ctx, tx, ch.NewArtistKey, titleKey, oldID)
 		if err != nil {
 			return queueLookup{}, err
 		}
 		if conflictID != 0 && conflictStatus == "processing" {
 			return queueLookup{skip: true}, nil
 		}
+		if conflictID != 0 && (oldEdited || conflictEdited) {
+			return queueLookup{editSkip: true}, nil
+		}
 	}
-	return queueLookup{oldID: oldID, oldStatus: oldStatus, conflictID: conflictID, conflictStatus: conflictStatus}, nil
+	return queueLookup{oldID: oldID, oldStatus: oldStatus, oldEdited: oldEdited, conflictID: conflictID, conflictStatus: conflictStatus}, nil
 }
 
 // reconcileQueue applies ch's queue-side reconciliation using an
@@ -460,7 +533,11 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, ch Change, titleKey string,
 		// reasoning on the merge side).
 		// A word-recheck row (#982, 'deferred'+'queued') is a settled row too, so
 		// the helper reopens it and clears 'queued' (#1039); its guard decides.
-		if oldStatus == queue.StatusDone || oldStatus == queue.StatusDeferred {
+		// A hand-edited row (#1226) keeps its corrected identity but is NOT
+		// reopened: the re-fetch would replace the edited .lrc.
+		if lookup.oldEdited {
+			out.editHeld = 1
+		} else if oldStatus == queue.StatusDone || oldStatus == queue.StatusDeferred {
 			if _, err := queue.ReopenDoneRowTx(ctx, tx, oldID, time.Now().UTC()); err != nil {
 				return applyOutcome{}, fmt.Errorf("identityrepair: reopen re-keyed work_queue %d: %w", oldID, err)
 			}
@@ -475,23 +552,24 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, ch Change, titleKey string,
 	return out, nil
 }
 
-// queueRowAt returns the id and status of the work_queue row at (artistKey,
-// titleKey), excluding excludeID (pass 0 to exclude nothing). It returns
-// (0, "", nil) when none exists. UNIQUE(artist_key, title_key) guarantees at
-// most one match.
-func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, excludeID int64) (int64, string, error) {
+// queueRowAt returns the id, status and hand-edit mark (#1226) of the
+// work_queue row at (artistKey, titleKey), excluding excludeID (pass 0 to
+// exclude nothing). It returns (0, "", false, nil) when none exists.
+// UNIQUE(artist_key, title_key) guarantees at most one match.
+func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, excludeID int64) (int64, string, bool, error) {
 	var id int64
 	var status string
+	var edited bool
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, status FROM work_queue WHERE artist_key = ? AND title_key = ? AND id != ?`,
-		artistKey, titleKey, excludeID).Scan(&id, &status)
+		`SELECT id, status, lyric_edited_at IS NOT NULL FROM work_queue WHERE artist_key = ? AND title_key = ? AND id != ?`,
+		artistKey, titleKey, excludeID).Scan(&id, &status, &edited)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", nil
+		return 0, "", false, nil
 	}
 	if err != nil {
-		return 0, "", fmt.Errorf("identityrepair: lookup work_queue (%q,%q): %w", artistKey, titleKey, err)
+		return 0, "", false, fmt.Errorf("identityrepair: lookup work_queue (%q,%q): %w", artistKey, titleKey, err)
 	}
-	return id, status, nil
+	return id, status, edited, nil
 }
 
 // mergeQueueRows folds the old-key queue row (dropID) into the row already at the

@@ -163,6 +163,11 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 		divRes.Rekeyed, divRes.Merged, divRes.Unlinked, divRes.Deleted, divRes.ProcessingSkips, divRes.ScopeSkips, suffixDryRun(args.Yes))
 	_, _ = fmt.Fprintf(out, "reconcile-identity: scanned %d row(s); %s %d (%d queue re-keyed, %d queue merged, %d skipped in-flight, %d unreadable)%s\n",
 		res.Scanned, verb, res.Changed, res.QueueUpdated, res.QueueMerged, res.ProcessingSkips, res.ReadFailures, suffixDryRun(args.Yes))
+	if held, skips := res.EditHeld+divRes.EditHeld, res.EditSkips+divRes.EditSkips; held+skips > 0 {
+		// Hand-edited rows (#1226): corrected but not re-fetched, or not merged.
+		_, _ = fmt.Fprintf(out, "reconcile-identity: hand-edited rows: %d corrected without re-fetch, %d merge(s) skipped%s\n",
+			held, skips, suffixDryRun(args.Yes))
+	}
 	if backupFile != nil {
 		_, _ = fmt.Fprintf(out, "backup of corrected rows written to %s\n", backupPath)
 	}
@@ -224,7 +229,8 @@ func runIdentityBackfill(ctx context.Context, sqlDB *sql.DB) {
 	slog.Info("identity backfill: complete",
 		"scanned", res.Scanned, "corrected", res.Changed,
 		"queue_rekeyed", res.QueueUpdated, "queue_merged", res.QueueMerged,
-		"skipped_in_flight", res.ProcessingSkips, "unreadable", res.ReadFailures)
+		"skipped_in_flight", res.ProcessingSkips, "unreadable", res.ReadFailures,
+		"edit_held", res.EditHeld, "edit_skipped", res.EditSkips)
 
 	if err := markIdentityBackfillDone(ctx, sqlDB); err != nil {
 		slog.Warn("identity backfill: completed but failed to record marker; it may re-run next startup", "error", err)
