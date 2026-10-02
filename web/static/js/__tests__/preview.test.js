@@ -283,10 +283,19 @@ describe("offset editor helpers", () => {
   describe("find by ear (unit-agnostic core)", () => {
     // fakeEar drives createEar with a synthetic unit list (not lines: plain
     // objects with no element), a fake audio and a hand-cranked frame clock.
-    function fakeEar(starts, { durationMs = 0, offset = 0, enabled = true } = {}) {
-      const { createEar } = load().win.mxPreviewEdit;
+    // playImpl, when given, replaces play() (e.g. a rejecting promise).
+    function fakeEar(starts, { durationMs = 0, offset = 0, enabled = true, playImpl = null } = {}) {
+      const loaded = load();
+      const { createEar } = loaded.win.mxPreviewEdit;
       const audio = { currentTime: 0, paused: true, plays: [], play() { this.paused = false; this.plays.push(this.currentTime); }, pause() { this.paused = true; } };
+      if (playImpl) {
+        audio.play = function () {
+          this.plays.push(this.currentTime);
+          return playImpl.call(this);
+        };
+      }
       const frames = [];
+      const cancelled = [];
       const st = { offset, enabled };
       const ear = createEar({
         audio,
@@ -297,7 +306,7 @@ describe("offset editor helpers", () => {
         setOffset: (ms) => (st.offset = ms),
         enabled: () => st.enabled,
         frame: (fn) => frames.push(fn),
-        cancelFrame: () => {},
+        cancelFrame: (id) => cancelled.push(id),
         onChange: () => {},
       });
       // run advances the audio clock to ms and fires the queued frames,
@@ -312,8 +321,50 @@ describe("offset editor helpers", () => {
         }
         return reached;
       };
-      return { ear, audio, frames, st, run };
+      return { ear, audio, frames, cancelled, st, run, errors: loaded.errors };
     }
+
+    it("stops at the earliest later start, not the next element, when units are out of order", () => {
+      // word stamps can be non-monotonic: after 1000 the next SOUND is 2000,
+      // even though the next element in the list is 5000.
+      const f = fakeEar([1000, 5000, 2000]);
+      f.ear.toggle();
+      f.ear.activate(0);
+      const reached = f.run(17);
+      expect(reached).toBeLessThan(2000);
+      expect(reached).toBeGreaterThan(2000 - 100);
+      // a unit with nothing later still falls back to the track end, capped
+      const last = fakeEar([1000, 5000, 2000], { durationMs: 7000 });
+      last.ear.toggle();
+      last.ear.activate(1);
+      const r = last.run(17);
+      expect(r).toBeLessThan(7000);
+      expect(r).toBeGreaterThan(6900);
+    });
+
+    it("a refused play returns to pick with a retryable note, never the answer step", async () => {
+      const f = fakeEar([1000, 3000], { playImpl: () => Promise.reject(new Error("not allowed")) });
+      f.ear.toggle();
+      f.ear.activate(0);
+      // frames that fire before play() settles see a paused element; that is
+      // "not started", not "finished", so the test must not reach step 2.
+      for (let n = 0; n < 2 && f.frames.length > 0; n++) f.frames.shift()();
+      expect(f.ear.view().step).toBe("1");
+      expect(f.ear.view().playing).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(f.ear.pending()).toBe(false);
+      expect(f.ear.view().step).toBe("1");
+      expect(f.ear.view().playing).toBe(false);
+      expect(f.ear.view().help).toBe("That word's snippet could not play (not allowed). Click a word to try again.");
+      expect(f.cancelled.length).toBeGreaterThan(0); // the queued frame was cancelled
+      expect(f.errors.join()).toContain("snippet playback failed");
+      // whatever frames remain do nothing; a retry plays again
+      while (f.frames.length > 0) f.frames.shift()();
+      expect(f.ear.view().step).toBe("1");
+      f.ear.activate(1);
+      expect(f.audio.plays).toEqual([1, 3]);
+      expect(f.st.offset).toBe(0);
+    });
 
     it("plays from the unit's shifted start and stops before the next unit's shifted start", () => {
       const f = fakeEar([1000, 3000, 6000], { offset: 500 });
@@ -410,6 +461,20 @@ describe("offset editor helpers", () => {
       expect(e.$("mx-edit-offset").value).toBe("+5.20");
       expect(e.$("mx-edit-status").textContent).toContain("Offset set by ear");
       expect(e.$("mx-edit-save").disabled).toBe(false);
+    });
+
+    it("measures the answer from unclamped starts when the offset pushes a line below 0", () => {
+      // at -2 s the first line's shifted start is -1 s: shown and played from
+      // 0, but the delta must use -1 s or it understates the move by 1 s.
+      const e = mountEditor({ starts: [1000, 3000] });
+      e.nudge("-1s");
+      e.nudge("-1s");
+      e.$("mx-ear-toggle").click();
+      const lines = e.doc.querySelectorAll(".mx-preview-line");
+      lines[0].click();
+      expect(e.time()).toBe(0); // playback still clamps at 0
+      lines[1].click(); // heard the line shifted to 1 s
+      expect(e.$("mx-edit-offset").value).toBe("-4.00");
     });
 
     it("Esc cancels a pending test and keeps the offset; a second Esc discards", () => {

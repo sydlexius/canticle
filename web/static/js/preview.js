@@ -59,9 +59,10 @@
   // Find by ear (#1222): play one unit's snippet at the CURRENT shifted timing,
   // then the next unit clicked is the one actually heard, and the offset moves
   // by (played - heard). The flow knows nothing about lines: it takes a list of
-  // timed units ({start} in shifted ms, plus whatever the caller paints), a
-  // noun for the copy, the audio, and a frame clock seam, so word-level timing
-  // can reuse it with a different list. Modes: off, pick, playing, answer.
+  // timed units ({start} in shifted ms, UNCLAMPED so a start the offset pushed
+  // below 0 still measures its true distance; plus whatever the caller paints),
+  // a noun for the copy, the audio, and a frame clock seam, so word-level
+  // timing can reuse it with a different list. Modes: off, pick, playing, answer.
   var SNIPPET_CAP_MS = 10000;
   // A rAF frame is ~17 ms at 60 Hz, so pausing two frames early keeps a late
   // frame from letting the next unit's first sound through.
@@ -73,6 +74,8 @@
     var msg = "";
     var stopAt = 0;
     var frame = 0;
+    var attempt = 0;
+    var started = false;
     var noun = o.noun;
 
     function halt() {
@@ -90,22 +93,36 @@
       msg = text || "";
       o.onChange();
     }
-    // bounds: from the unit's shifted start to the next unit that starts
-    // later; the last one plays to the track end, capped.
+    // bounds: from the unit's shifted start to the EARLIEST start strictly
+    // after it anywhere in the list (word stamps can be out of order, so the
+    // next element is not necessarily the next sound); with none, it plays to
+    // the track end, capped. Both ends clamp at 0 for playback only.
     function bounds(i) {
       var u = o.units();
       var start = u[i].start;
-      for (var j = i + 1; j < u.length; j++) {
-        if (u[j].start > start) {
-          return [start, u[j].start];
+      var end = Infinity;
+      for (var j = 0; j < u.length; j++) {
+        if (u[j].start > start && u[j].start < end) {
+          end = u[j].start;
         }
       }
-      var cap = start + SNIPPET_CAP_MS;
-      return [start, o.durationMs > start ? Math.min(cap, o.durationMs) : cap];
+      var from = Math.max(0, start);
+      if (end !== Infinity) {
+        return [from, Math.max(0, end)];
+      }
+      var cap = from + SNIPPET_CAP_MS;
+      return [from, o.durationMs > from ? Math.min(cap, o.durationMs) : cap];
     }
     function watch() {
       frame = 0;
       if (mode !== "playing") {
+        return;
+      }
+      // Until play() settles, a paused element means "not started yet", not
+      // "finished": treating it as finished would reach the answer step for a
+      // snippet that may never sound.
+      if (!started) {
+        frame = o.frame(watch);
         return;
       }
       if (o.audio.paused || o.audio.currentTime * 1000 >= stopAt - STOP_EARLY_MS) {
@@ -121,13 +138,27 @@
       stopAt = b[1];
       set("playing", i);
       o.audio.currentTime = b[0] / 1000;
+      var token = ++attempt;
       var p = o.audio.play();
-      if (p && p.catch) {
-        p.catch(function (e) {
+      started = !(p && p.then);
+      frame = o.frame(watch);
+      if (!started) {
+        // A refused play (autoplay policy, unsupported source) never sounded,
+        // so there is nothing to answer: back to pick with a retryable note.
+        // The token drops a stale settle from an earlier snippet.
+        p.then(function () {
+          if (token === attempt) {
+            started = true;
+          }
+        }, function (e) {
           console.error("preview.js: snippet playback failed", e && e.message);
+          if (token !== attempt || !pending()) {
+            return;
+          }
+          halt();
+          set("pick", -1, "That " + noun + "'s snippet could not play" + (e && e.message ? " (" + e.message + ")" : "") + ". Click a " + noun + " to try again.");
         });
       }
-      frame = o.frame(watch);
     }
     function answer(h) {
       var u = o.units();
@@ -314,9 +345,12 @@
       audio: audio,
       noun: earBtn.getAttribute("data-ear-unit"),
       durationMs: duration,
+      // start is the UNCLAMPED shifted time: lineStarts clamps at 0 for
+      // display and seek, which would understate the delta for a line the
+      // offset pushed below 0. createEar clamps only the playback position.
       units: function () {
         return lines.map(function (li, i) {
-          return { start: lineStarts[i], el: li };
+          return { start: base[i] + st.offset, el: li };
         });
       },
       getOffset: function () {
