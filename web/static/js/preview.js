@@ -334,14 +334,13 @@
       kb.register({
         keys: [" "],
         label: "play / pause",
-        handler: function (e) {
-          // A focused lyric line seeks on Space itself.
-          if (!e.target.classList.contains("mx-preview-line")) {
-            if (audio.paused) {
-              audio.play();
-            } else {
-              audio.pause();
-            }
+        // keyboard.js leaves Space on a focused control (a button, or a lyric
+        // line, which is role=button and seeks itself) to that control.
+        handler: function () {
+          if (audio.paused) {
+            audio.play();
+          } else {
+            audio.pause();
           }
         },
       });
