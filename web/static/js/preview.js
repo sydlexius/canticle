@@ -56,7 +56,149 @@
     }).length;
   }
 
-  window.mxPreviewEdit = { parseOffset: parseOffset, pastEnd: pastEnd };
+  // Find by ear (#1222): play one unit's snippet at the CURRENT shifted timing,
+  // then the next unit clicked is the one actually heard, and the offset moves
+  // by (played - heard). The flow knows nothing about lines: it takes a list of
+  // timed units ({start} in shifted ms, plus whatever the caller paints), a
+  // noun for the copy, the audio, and a frame clock seam, so word-level timing
+  // can reuse it with a different list. Modes: off, pick, playing, answer.
+  var SNIPPET_CAP_MS = 10000;
+  // A rAF frame is ~17 ms at 60 Hz, so pausing two frames early keeps a late
+  // frame from letting the next unit's first sound through.
+  var STOP_EARLY_MS = 40;
+
+  function createEar(o) {
+    var mode = "off";
+    var played = -1;
+    var msg = "";
+    var stopAt = 0;
+    var frame = 0;
+    var noun = o.noun;
+
+    function halt() {
+      if (frame) {
+        o.cancelFrame(frame);
+        frame = 0;
+      }
+      if (!o.audio.paused) {
+        o.audio.pause();
+      }
+    }
+    function set(m, p, text) {
+      mode = m;
+      played = p;
+      msg = text || "";
+      o.onChange();
+    }
+    // bounds: from the unit's shifted start to the next unit that starts
+    // later; the last one plays to the track end, capped.
+    function bounds(i) {
+      var u = o.units();
+      var start = u[i].start;
+      for (var j = i + 1; j < u.length; j++) {
+        if (u[j].start > start) {
+          return [start, u[j].start];
+        }
+      }
+      var cap = start + SNIPPET_CAP_MS;
+      return [start, o.durationMs > start ? Math.min(cap, o.durationMs) : cap];
+    }
+    function watch() {
+      frame = 0;
+      if (mode !== "playing") {
+        return;
+      }
+      if (o.audio.paused || o.audio.currentTime * 1000 >= stopAt - STOP_EARLY_MS) {
+        halt();
+        set("answer", played);
+        return;
+      }
+      frame = o.frame(watch);
+    }
+    function play(i) {
+      var b = bounds(i);
+      halt();
+      stopAt = b[1];
+      set("playing", i);
+      o.audio.currentTime = b[0] / 1000;
+      var p = o.audio.play();
+      if (p && p.catch) {
+        p.catch(function (e) {
+          console.error("preview.js: snippet playback failed", e && e.message);
+        });
+      }
+      frame = o.frame(watch);
+    }
+    function answer(h) {
+      var u = o.units();
+      var delta = u[played].start - u[h].start;
+      halt();
+      if (delta === 0) {
+        set("pick", -1, "That " + noun + " was already in time, so the offset is unchanged.");
+        return;
+      }
+      o.setOffset(o.getOffset() + delta);
+      set("pick", -1, "Offset moved " + fmtOffset(delta) + " s, now " + fmtOffset(o.getOffset()) + " s. Test another " + noun + " to confirm it.");
+    }
+    function pending() {
+      return mode === "playing" || mode === "answer";
+    }
+
+    return {
+      pending: pending,
+      on: function () {
+        return mode !== "off";
+      },
+      toggle: function () {
+        if (mode !== "off" || o.enabled()) {
+          halt();
+          set(mode === "off" ? "pick" : "off", -1);
+        }
+      },
+      // activate routes a unit click; true means the mode consumed it.
+      activate: function (i) {
+        if (mode === "off") {
+          return false;
+        }
+        if (o.enabled()) {
+          if (mode === "pick") {
+            play(i);
+          } else {
+            answer(i);
+          }
+        }
+        return true;
+      },
+      replay: function () {
+        if (pending()) {
+          play(played);
+        }
+      },
+      // cancel drops a pending test; with none pending it leaves the mode.
+      cancel: function () {
+        if (mode !== "off") {
+          halt();
+          set(pending() ? "pick" : "off", -1);
+        }
+      },
+      view: function () {
+        var v = { on: mode !== "off", played: played, playing: mode === "playing", step: mode === "answer" ? "2" : "1", replay: mode === "answer", cancel: mode === "pick" ? "Done" : "Cancel test" };
+        if (mode === "pick") {
+          v.title = "Click a " + noun + " to hear it";
+          v.help = msg || "Only that " + noun + "'s stretch of the track plays, at the current timing.";
+        } else if (mode === "playing") {
+          v.title = "Playing that " + noun + "'s snippet";
+          v.help = "Listen for which " + noun + " is actually sung. You can answer as soon as you know.";
+        } else {
+          v.title = "Click the " + noun + " you actually heard";
+          v.help = "Heard the same " + noun + "? Click it again: its timing is already right.";
+        }
+        return v;
+      },
+    };
+  }
+
+  window.mxPreviewEdit = { parseOffset: parseOffset, pastEnd: pastEnd, createEar: createEar };
 
   function fmtTime(ms) {
     var m = Math.floor(ms / 60000);
@@ -106,7 +248,7 @@
 
   // initEditor wires the offset editor. lineStarts is mutated in place so the
   // highlight and click-to-seek in init() follow the shifted times.
-  function initEditor(panel, audio, lines, lineStarts, update) {
+  function initEditor(panel, audio, lines, lineStarts, update, route) {
     var $ = function (id) {
       return document.getElementById(id);
     };
@@ -160,7 +302,71 @@
       edited: panel.hasAttribute("data-edited"),
       mtime: panel.getAttribute("data-mtime"),
       phase: "idle",
+      byEar: false,
     };
+    var earBtn = $("mx-ear-toggle");
+    var banner = $("mx-ear-banner");
+    var earCancel = $("mx-ear-cancel");
+    var earReplay = $("mx-ear-replay");
+    var legend = $("mx-preview-keys");
+    var escEntry = null;
+    var ear = createEar({
+      audio: audio,
+      noun: earBtn.getAttribute("data-ear-unit"),
+      durationMs: duration,
+      units: function () {
+        return lines.map(function (li, i) {
+          return { start: lineStarts[i], el: li };
+        });
+      },
+      getOffset: function () {
+        return st.offset;
+      },
+      setOffset: function (ms) {
+        st.byEar = true;
+        setOffset(ms);
+      },
+      enabled: function () {
+        return !locked();
+      },
+      frame: function (fn) {
+        return window.requestAnimationFrame(fn);
+      },
+      cancelFrame: function (id) {
+        window.cancelAnimationFrame(id);
+      },
+      onChange: function () {
+        render();
+      },
+    });
+    route.activate = ear.activate;
+    earBtn.addEventListener("click", ear.toggle);
+    earCancel.addEventListener("click", ear.cancel);
+    earReplay.addEventListener("click", ear.replay);
+
+    function paintEar(isLocked) {
+      if (isLocked && ear.on()) {
+        ear.toggle(); // re-renders with the mode off
+      }
+      var v = ear.view();
+      earBtn.disabled = isLocked;
+      earBtn.setAttribute("aria-pressed", String(v.on));
+      banner.hidden = !v.on;
+      $("mx-ear-step").textContent = v.step;
+      $("mx-ear-title").textContent = v.title;
+      $("mx-ear-help").textContent = v.help;
+      earReplay.hidden = !v.replay;
+      earCancel.textContent = v.cancel;
+      lines.forEach(function (li, i) {
+        li.classList.toggle("is-ear-playing", v.playing && i === v.played);
+        li.classList.toggle("is-ear-played", !v.playing && i === v.played);
+      });
+      var esc = ear.pending() ? "cancel test" : "discard";
+      if (escEntry && escEntry.label !== esc) {
+        escEntry.label = esc;
+        window.mxKeyboard.renderLegend(legend);
+      }
+    }
 
     function skipAsking() {
       try {
@@ -211,6 +417,8 @@
         msg = [past + (past === 1 ? " line would" : " lines would") + " start more than " + tolerance / 1000 + " s after the track ends (" + fmtTime(duration).replace(/\.\d+$/, "") + "). Save is off until they fit.", "warn"];
       } else if (MESSAGES[st.phase]) {
         msg = MESSAGES[st.phase];
+      } else if (dirty && st.byEar) {
+        msg = ["Offset set by ear. Play to check it, fine-tune with the nudges, then save. Nothing is written until you save.", ""];
       } else if (dirty) {
         msg = ["Play the track and nudge until the lines land. Nothing is written until you save.", ""];
       } else if (st.edited) {
@@ -220,6 +428,7 @@
       }
       statusEl.textContent = msg[0];
       statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "");
+      paintEar(isLocked);
       update();
     }
 
@@ -264,6 +473,7 @@
       if (!locked()) {
         st.offset = st.saved;
         st.phase = "idle";
+        st.byEar = false;
         render();
       }
     });
@@ -302,6 +512,7 @@
               st.saved = isRevert ? 0 : offsetMs;
               st.offset = st.saved;
               st.edited = !isRevert;
+              st.byEar = false;
               st.phase = isRevert ? "reverted" : "saved";
             } else {
               st.phase = { timing: "refused-timing", changed: "refused-changed", busy: "busy" }[data.error] || "error";
@@ -389,19 +600,31 @@
           }
         },
       });
-      kb.register({
+      escEntry = {
         keys: ["Escape"],
         label: "discard",
         allowInInput: true,
         handler: function () {
           if (dialog.open) {
             dialog.close();
+          } else if (ear.pending()) {
+            ear.cancel(); // a pending test is dropped first; the offset stays
           } else {
             discard.click();
           }
         },
+      };
+      kb.register(escEntry);
+      kb.register({
+        keys: ["E"],
+        label: "find by ear",
+        handler: function () {
+          if (!dialog.open) {
+            ear.toggle();
+          }
+        },
       });
-      kb.renderLegend($("mx-preview-keys"));
+      kb.renderLegend(legend);
     }
     render();
   }
@@ -501,7 +724,13 @@
       }
     }
 
+    // route lets the editor's find-by-ear mode claim line activations: while
+    // it is on, a click or Enter/Space is an ear answer, never a seek.
+    var route = { activate: null };
     function seekTo(li) {
+      if (route.activate && route.activate(li)) {
+        return;
+      }
       audio.currentTime = lineStarts[li] / 1000;
       resumeFollowing();
       update();
@@ -556,7 +785,7 @@
 
     var panel = document.getElementById("mx-edit");
     if (panel) {
-      initEditor(panel, audio, lines, lineStarts, update);
+      initEditor(panel, audio, lines, lineStarts, update, route);
     }
   }
 
