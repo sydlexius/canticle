@@ -163,6 +163,124 @@ func TestRunEditorTagBackfill_MarkerGatedStartupPass(t *testing.T) {
 	}
 }
 
+// TestRunEditorTagBackfill_SkipsHandEditedFile (#1228): the unattended startup
+// pass leaves a hand-edited .lrc byte-identical, still tags its unedited
+// neighbor, and a skip does not hold the one-shot marker open.
+func TestRunEditorTagBackfill_SkipsHandEditedFile(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	edited := filepath.Join(root, "Album", "01 edited.lrc")
+	plain := filepath.Join(root, "Album", "02 plain.lrc")
+	mkdirT(t, filepath.Dir(edited))
+	mustWrite(t, edited, canticleLRCFixture)
+	mustWrite(t, plain, canticleLRCFixture)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	ctx := context.Background()
+	// The mark is on the row of the audio beside the edited sidecar; a row for
+	// an audio file sharing only a name prefix must not leak its mark onto it.
+	for _, r := range []struct {
+		key, src string
+		mark     bool
+	}{
+		{"edited", filepath.Join(root, "Album", "01 edited.flac"), true},
+		{"prefix", filepath.Join(root, "Album", "02 plain.live.flac"), true},
+		{"plain", filepath.Join(root, "Album", "02 plain.flac"), false},
+	} {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, source_path, status, lyric_edited_at)
+			 VALUES ('A', ?, 'a', ?, ?, 'done', CASE WHEN ? THEN '2026-09-01T00:00:00Z' END)`,
+			r.key, r.key, r.src, r.mark); err != nil {
+			t.Fatalf("seed %s: %v", r.key, err)
+		}
+	}
+	runEditorTagBackfill(ctx, sqlDB, loadCfgT(t, cfgPath), selfwrite.New(0))
+
+	if got := readFile(t, edited); got != canticleLRCFixture {
+		t.Errorf("hand-edited file was rewritten:\n%s", got)
+	}
+	if got := readFile(t, plain); !strings.Contains(got, "[re:canticle]") {
+		t.Errorf("unedited file not stamped: %q", got)
+	}
+	if done, err := editorTagBackfillDone(ctx, sqlDB); err != nil || !done {
+		t.Errorf("marker done=%v err=%v; a hand-edit skip must not hold the pass open", done, err)
+	}
+}
+
+// TestRunEditorTagBackfill_SkipsHandEditedUnderSymlinkedRoot (Copilot
+// 4162607417): with the library configured through a symlink, the walk runs
+// under the RESOLVED root, while work_queue.source_path carries the configured
+// spelling for a scan-enqueued row and the resolved one for a webhook row.
+// Either way the edited sidecar must be found and left byte-identical; the
+// unedited neighbor is the control that proves the pass ran.
+func TestRunEditorTagBackfill_SkipsHandEditedUnderSymlinkedRoot(t *testing.T) {
+	for _, spelling := range []string{"configured", "canonical"} {
+		t.Run(spelling, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "test.db")
+			cfgPath := filepath.Join(dir, "config.toml")
+			mustWrite(t, cfgPath, "[db]\npath = \""+strings.ReplaceAll(dbPath, `\`, `\\`)+"\"\n")
+			realRoot := filepath.Join(dir, "array", "music")
+			mkdirT(t, filepath.Join(realRoot, "Album"))
+			linkRoot := filepath.Join(dir, "music")
+			if err := os.Symlink(realRoot, linkRoot); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+			canonRoot, err := filepath.EvalSymlinks(linkRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sqlDB := openDBFromConfig(t, cfgPath)
+			if _, err := library.New(sqlDB).Add(ctx, linkRoot, "lib", models.LibrarySettings{}); err != nil {
+				t.Fatalf("library.Add: %v", err)
+			}
+			edited := filepath.Join(realRoot, "Album", "01 edited.lrc")
+			plain := filepath.Join(realRoot, "Album", "02 plain.lrc")
+			mustWrite(t, edited, canticleLRCFixture)
+			mustWrite(t, plain, canticleLRCFixture)
+			srcRoot := linkRoot
+			if spelling == "canonical" {
+				srcRoot = canonRoot
+			}
+			if _, err := sqlDB.ExecContext(ctx,
+				`INSERT INTO work_queue (artist, title, artist_key, title_key, source_path, status, lyric_edited_at)
+				 VALUES ('A', 'e', 'a', 'e', ?, 'done', '2026-09-01T00:00:00Z')`,
+				filepath.Join(srcRoot, "Album", "01 edited.flac")); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			runEditorTagBackfill(ctx, sqlDB, loadCfgT(t, cfgPath), selfwrite.New(0))
+			if got := readFile(t, edited); got != canticleLRCFixture {
+				t.Errorf("hand-edited file under a symlinked root was rewritten (source_path %s spelling):\n%s", spelling, got)
+			}
+			if got := readFile(t, plain); !strings.Contains(got, "[re:canticle]") {
+				t.Errorf("unedited file not stamped: %q", got)
+			}
+		})
+	}
+}
+
+func TestSidecarSpellings(t *testing.T) {
+	got := sidecarSpellings("/music", "/mnt/array/music", "/mnt/array/music/A/x.lrc")
+	want := []string{"/mnt/array/music/A/x.lrc", "/music/A/x.lrc"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("symlinked root: got %q, want %q", got, want)
+	}
+	if got := sidecarSpellings("/music", "/music", "/music/A/x.lrc"); len(got) != 1 {
+		t.Errorf("plain root: got %q, want one spelling", got)
+	}
+	if got := sidecarSpellings("/music", "/mnt/array/music", "/elsewhere/x.lrc"); len(got) != 1 {
+		t.Errorf("outside root: got %q, want only the walked path", got)
+	}
+}
+
+func TestSidecarHandEdited_QueryError(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	_ = sqlDB.Close()
+	if _, err := sidecarHandEdited(context.Background(), sqlDB, filepath.Join(root, "x.lrc")); err == nil {
+		t.Error("closed database: want an error")
+	}
+}
+
 // TestDegradedSubdir pins findings 2 and 6: an unreadable subdirectory must
 // not abort the walk (counts degraded, continues); the CLI exits non-zero
 // aggregate-only (#487's precedent); a wrapped walk error never logs the path.

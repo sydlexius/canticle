@@ -177,6 +177,10 @@ type Result struct {
 	Pruned      []PrunedRow
 	Relinked    []RelinkedRow
 	Retained    []RetainedRow
+	// EditHeld counts relinked work_queue rows a resurrect would have reopened
+	// to 'pending' but that carry the hand-edit mark (#1228): their path moved,
+	// their status did not. Applied runs only; a dry run leaves it 0.
+	EditHeld int
 }
 
 // SweepOptions controls a whole-scope reconciliation sweep.
@@ -751,11 +755,12 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 	}
 
 	if len(toRelink) > 0 {
-		applied, retainedByConflict, err := p.applyRelinks(ctx, toRelink, hooks.Relinked, hooks.Retained)
+		applied, retainedByConflict, editHeld, err := p.applyRelinks(ctx, toRelink, hooks.Relinked, hooks.Retained)
 		if err != nil {
 			return Result{}, err
 		}
 		res.Relinked = applied
+		res.EditHeld = editHeld
 		// A candidate that failed to relink (its target is already owned by a
 		// different work_queue row) is neither pruned nor relinked, but it must
 		// still be accounted for -- appending here, not overwriting, keeps it
@@ -1007,7 +1012,7 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 // report fires for anything in this call, applied or retained-by-conflict
 // alike, so a report is never written for a row a rollback left untouched by
 // a different mechanism than it claims.
-func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, reportRelinked func(RelinkedRow) error, reportRetained func(RetainedRow) error) (applied []RelinkedRow, retained []RetainedRow, retErr error) {
+func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, reportRelinked func(RelinkedRow) error, reportRetained func(RetainedRow) error) (applied []RelinkedRow, retained []RetainedRow, editHeld int, retErr error) {
 	// Retirements owed by DECLINED relinks, applied after the transaction commits
 	// (retireUnresolvable runs against p.db and would deadlock against tx on
 	// SQLite). idx points at the RetainedRow this retirement belongs to, so the
@@ -1023,7 +1028,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	// commit), so each attempt starts from empty accumulators and a rolled-back
 	// attempt leaves no trace.
 	if err := dbpkg.RetryBatchTx(ctx, "prune relink", func() error {
-		applied, retained, toRetire = nil, nil, nil
+		applied, retained, toRetire, editHeld = nil, nil, nil, 0
 		tx, err := p.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("prune: begin relink tx: %w", err)
@@ -1086,6 +1091,10 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 				retained = append(retained, row)
 			} else {
 				applied = append(applied, cg.relinked)
+				// Counted only for a candidate that keeps its writes: a
+				// declined one rolls its edit-held rows back with the rest
+				// (CodeRabbit 4162619974).
+				editHeld += decision.editHeld
 			}
 			if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
 				return fmt.Errorf("prune: release relink savepoint: %w", err)
@@ -1096,7 +1105,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 		}
 		return nil
 	}); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	// Settle every declined relink, now that tx is committed and the row's
 	// pre-decline writes are rolled back. Stamped onto the RetainedRow BEFORE it
@@ -1107,7 +1116,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	for _, plan := range toRetire {
 		retired, err := p.retireUnresolvable(ctx, plan.c)
 		if err != nil {
-			return nil, nil, fmt.Errorf("prune: retire declined relink %q: %w", retained[plan.idx].SourcePath, err)
+			return nil, nil, 0, fmt.Errorf("prune: retire declined relink %q: %w", retained[plan.idx].SourcePath, err)
 		}
 		retained[plan.idx].WouldRetire = true
 		retained[plan.idx].Retired = retired
@@ -1115,18 +1124,18 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	if reportRelinked != nil {
 		for _, rr := range applied {
 			if err := reportRelinked(rr); err != nil {
-				return applied, retained, fmt.Errorf("prune: report relinked %q: %w", rr.OldPath, err)
+				return applied, retained, editHeld, fmt.Errorf("prune: report relinked %q: %w", rr.OldPath, err)
 			}
 		}
 	}
 	if reportRetained != nil {
 		for _, rr := range retained {
 			if err := reportRetained(rr); err != nil {
-				return applied, retained, fmt.Errorf("prune: report retained %q: %w", rr.SourcePath, err)
+				return applied, retained, editHeld, fmt.Errorf("prune: report retained %q: %w", rr.SourcePath, err)
 			}
 		}
 	}
-	return applied, retained, nil
+	return applied, retained, editHeld, nil
 }
 
 // relinkDecision is relinkOne's verdict for one candidate. A zero value means
@@ -1134,6 +1143,10 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 // caller must roll the candidate back and report it as retained.
 type relinkDecision struct {
 	reason string
+	// editHeld counts this candidate's rows relinked WITHOUT the resurrect
+	// because they carry the hand-edit mark (#1228). Meaningful only when
+	// reason is empty; a declined candidate is rolled back whole.
+	editHeld int
 }
 
 // relinkOne performs one candidate's relink within tx, returning a non-empty
@@ -1220,6 +1233,16 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	// A resurrected row also leaves word-recheck mode (#1039): it is reopened
 	// for an ordinary fetch, and a 'queued' state would route it to the recheck
 	// path, which writes nothing without words and settles it straight back.
+	//
+	// A HAND-EDITED row is never resurrected (#1228): reopening it to 'pending'
+	// would re-fetch over the edit. relinkResurrectSQL carries the mark guard, so
+	// an edited row matches nothing there and takes relinkPathSQL+relinkEditedOnly
+	// instead: its path still moves (it stays attached to its file), its status
+	// and stamps do not. The guard is in SQL, inside this write transaction, so
+	// an editor save that set the mark after gather is honored too. Prune never
+	// touches a sidecar, so an edited .lrc that did not move with its audio is
+	// left exactly where it is.
+	var decision relinkDecision
 	resurrect := c.retiredAsUnresolvable()
 	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {
@@ -1233,10 +1256,15 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 			res, err = tx.ExecContext(ctx,
 				relinkResurrectSQL,
 				target.filePath, target.outdir, target.filename, string(outputPathsJSON), resurrectNow, w.id, w.rawOutputPaths)
+			if err == nil && rowsAffected(res) == 0 {
+				res, err = tx.ExecContext(ctx, relinkPathSQL+relinkEditedOnly,
+					target.filePath, target.outdir, target.filename, string(outputPathsJSON), w.id, w.rawOutputPaths)
+				if err == nil && rowsAffected(res) > 0 {
+					decision.editHeld++
+				}
+			}
 		} else {
-			res, err = tx.ExecContext(ctx,
-				`UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?
-                 WHERE id = ? AND status != 'processing' AND output_paths IS ?`,
+			res, err = tx.ExecContext(ctx, relinkPathSQL,
 				target.filePath, target.outdir, target.filename, string(outputPathsJSON), w.id, w.rawOutputPaths)
 		}
 		if err != nil {
@@ -1270,7 +1298,7 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 			return relinkDecision{}, fmt.Errorf("prune: delete stale scan_result %d: %w", id, err)
 		}
 	}
-	return relinkDecision{}, nil
+	return decision, nil
 }
 
 // relinkOutputPaths returns a work_queue row's output_paths, rewritten so a
@@ -1848,7 +1876,13 @@ const (
                      completed_at = NULL, last_error = '',
                      outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL,
                      ` + queue.ClearWordRecheckQueued + `
+                 WHERE id = ? AND status != 'processing' AND output_paths IS ?
+                   AND lyric_edited_at IS NULL`
+	// relinkPathSQL moves only the path columns: an ordinary relink, and (with
+	// relinkEditedOnly appended) a hand-edited row a resurrect skipped (#1228).
+	relinkPathSQL = `UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?
                  WHERE id = ? AND status != 'processing' AND output_paths IS ?`
+	relinkEditedOnly      = ` AND lyric_edited_at IS NOT NULL`
 	retireUnresolvableSQL = `UPDATE work_queue
              SET status = 'done',
                  completed_at = ?,

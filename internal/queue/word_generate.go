@@ -39,12 +39,14 @@ const wordGenerateCommon = ` status = 'done'
 // answered 'absent' under the CURRENT word generation. NULL, 'queued',
 // 'served' and a stale-generation 'absent' are not candidates: the provider
 // path goes first. Timing-remediated rows belong to the other arm or to none.
-// Its first terms match idx_work_queue_word_timing's partial WHERE.
+// Its first terms match idx_work_queue_word_timing's partial WHERE. Each arm
+// carries notLyricEdited itself (#1228): a generated .elrc never replaces a
+// hand edit.
 const wordGenerateLineArm = ` AND outcome_type = 'synced'
    AND sync_tier = 'line'
    AND word_timing_state = 'absent'
    AND word_timing_generation = ?
-   AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')`
+   AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')` + notLyricEdited
 
 // wordGenerateRetimeArm (two bound args, the providers generation and
 // NoProviderPass): known words
@@ -57,7 +59,7 @@ const wordGenerateLineArm = ` AND outcome_type = 'synced'
 // generation (#1120), so a newer lane gets its chance before local compute,
 // unless no pass can happen here (NoProviderPass), when waiting would strand it.
 const wordGenerateRetimeArm = ` AND timing_outcome = 'mis_synced'
-   AND (timing_stamp_source = 'fetch' OR missync_recheck_generation = ? OR ?)`
+   AND (timing_stamp_source = 'fetch' OR missync_recheck_generation = ? OR ?)` + notLyricEdited
 
 // ListWordGenerateCandidates returns up to opts.Limit candidate ids, least
 // recently offered first (never offered leads), then oldest completion. The

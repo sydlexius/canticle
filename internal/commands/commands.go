@@ -2366,6 +2366,9 @@ func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg
 			slog.Info("path-reconciliation sweep relinked moved sources", "sources", len(res.Relinked),
 				"first_old_path", res.Relinked[0].OldPath, "first_new_path", res.Relinked[0].NewPath)
 		}
+		if res.EditHeld > 0 {
+			slog.Info("path-reconciliation sweep relinked hand-edited rows without reopening them", "edit_held", res.EditHeld)
+		}
 		if len(res.Retained) > 0 {
 			// One exemplar rather than the whole set: a large reorganization can
 			// retain thousands, and a per-row line would drown the log. The count
@@ -2426,7 +2429,10 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 	}, func(ctx context.Context, path string) error {
 		// Reactive, disk-cheap reconciliation: the watcher already learned path
 		// vanished, so delete its rows without a rescan (Exact granularity).
-		_, err := pruner.PrunePath(ctx, path)
+		res, err := pruner.PrunePath(ctx, path)
+		if res.EditHeld > 0 {
+			slog.Info("reactive prune relinked hand-edited rows without reopening them", "edit_held", res.EditHeld)
+		}
 		return err
 	})
 	wch.SetSelfWriteRegistry(selfWrites)
