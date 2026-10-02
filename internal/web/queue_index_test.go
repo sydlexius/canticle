@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/sydlexius/canticle/internal/config"
 )
 
 func getPath(t *testing.T, mux http.Handler, target string) *httptest.ResponseRecorder {
@@ -108,5 +110,36 @@ func TestPreviewBackLink(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("query %q: missing %s", tc.query, want)
 		}
+	}
+}
+
+// TestQueueIndexQueryError: a failing summary source yields a 500 and never a
+// partial page, and the response is not cacheable.
+func TestQueueIndexQueryError(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	mux := newReportsUIServer(t, sqlDB)
+	_ = sqlDB.Close() // force every query to error
+
+	rec := getPath(t, mux, "/queue")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("GET /queue over a closed DB = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "mx-queue-link") {
+		t.Error("error response rendered queue rows")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+// TestQueueIndexReportsNotWired: a UI built without a reports repo answers 503
+// rather than panicking on a nil source.
+func TestQueueIndexReportsNotWired(t *testing.T) {
+	mux := http.NewServeMux()
+	NewUI(config.Config{}, "v-test").Register(mux)
+
+	rec := getPath(t, mux, "/queue")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /queue without reports = %d, want 503", rec.Code)
 	}
 }
