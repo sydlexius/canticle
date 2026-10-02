@@ -140,6 +140,11 @@ func TestPreviewBackLink(t *testing.T) {
 		{"?from=bogus", "/queue", "Back to queue"},
 		{"?from=%22%3E%3Cscript%3E", "/queue", "Back to queue"},
 		{"?from=/dashboard", "/queue", "Back to queue"},
+		{"?from=settled&from=bogus", "/queue", "Back to queue"},
+		{"?from=bogus&from=settled", "/queue", "Back to queue"},
+		{"?from=settled&from=finished", "/queue", "Back to queue"},
+		{"?from=", "/queue", "Back to queue"},
+		{"?from=&from=settled", "/queue", "Back to queue"},
 	} {
 		body := getPath(t, f.mux, "/preview/"+id+tc.query).Body.String()
 		want := `id="mx-preview-back" href="` + tc.href + `">` + tc.label + `</a>`

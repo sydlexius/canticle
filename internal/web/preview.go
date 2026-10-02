@@ -179,9 +179,13 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		HasWords:  hasWords,
 		Truncated: lrcCut,
 	}
-	if b, err := reports.ParseBucket(r.URL.Query().Get("from")); err == nil {
-		view.BackHref = queueBucketHref(b)
-		view.BackLabel = "Back to " + queueBucketInfo[b][0]
+	// Exactly one `from` value is accepted; a repeated parameter is ambiguous
+	// and falls back to the queue root rather than trusting the first value.
+	if from := r.URL.Query()["from"]; len(from) == 1 {
+		if b, err := reports.ParseBucket(from[0]); err == nil {
+			view.BackHref = queueBucketHref(b)
+			view.BackLabel = "Back to " + queueBucketInfo[b][0]
+		}
 	}
 	if u.editor != nil && !lrcCut {
 		u.fillPreviewEditor(w, r, &view, t, id, roots, lrcMTime)
