@@ -1375,3 +1375,46 @@ func TestDeferredMissesTiesOrderByReason(t *testing.T) {
 		t.Errorf("DeferredMisses = %+v, want apple then zebra", got)
 	}
 }
+
+// TestInstrumentalInventoryAlbumIsPerFile pins that each per-file line carries
+// that file's own album (scan_results.album), falling back to the queue row's
+// album only when the file's is empty. One collapsed row covers two files from
+// different albums.
+func TestInstrumentalInventoryAlbumIsPerFile(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	libID := insertLibrary(t, sqlDB)
+	wq := insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "T", album: "Row Album", status: "done", instrumentalResult: 1,
+	})
+	one := insertScanResult(t, sqlDB, libID, "/music/one.flac")
+	two := insertScanResult(t, sqlDB, libID, "/music/two.flac")
+	three := insertScanResult(t, sqlDB, libID, "/music/three.flac")
+	for id, album := range map[int64]string{one: "File Album One", two: "File Album Two"} {
+		if _, err := sqlDB.ExecContext(ctx, `UPDATE scan_results SET album = ? WHERE id = ?`, album, id); err != nil {
+			t.Fatalf("set scan_results album: %v", err)
+		}
+	}
+	linkScanResult(t, sqlDB, wq, one)
+	linkScanResult(t, sqlDB, wq, two)
+	linkScanResult(t, sqlDB, wq, three)
+
+	got, err := repo.InstrumentalInventory(ctx)
+	if err != nil {
+		t.Fatalf("InstrumentalInventory: %v", err)
+	}
+	want := map[string]string{
+		"/music/one.flac":   "File Album One",
+		"/music/two.flac":   "File Album Two",
+		"/music/three.flac": "Row Album",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines, want %d: %+v", len(got), len(want), got)
+	}
+	for _, g := range got {
+		if g.Album != want[g.FilePath] {
+			t.Errorf("file %s: album = %q, want %q", g.FilePath, g.Album, want[g.FilePath])
+		}
+	}
+}

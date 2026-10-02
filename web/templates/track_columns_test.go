@@ -26,6 +26,14 @@ func cellText(s string) string {
 // body row that carries as many cells as there are headers.
 func renderTable(t *testing.T, c templ.Component) (heads, cells []string) {
 	t.Helper()
+	heads, all := renderTableRows(t, c)
+	return heads, all[0]
+}
+
+// renderTableRows renders c and returns its header texts and the cells of
+// every body row that carries as many cells as there are headers.
+func renderTableRows(t *testing.T, c templ.Component) (heads []string, rows [][]string) {
+	t.Helper()
 	var buf bytes.Buffer
 	if err := c.Render(context.Background(), &buf); err != nil {
 		t.Fatalf("render: %v", err)
@@ -40,16 +48,18 @@ func renderTable(t *testing.T, c templ.Component) (heads, cells []string) {
 			row = append(row, cellText(m[1]))
 		}
 		if len(heads) > 0 && len(row) == len(heads) {
-			return heads, row
+			rows = append(rows, row)
 		}
 	}
-	t.Fatalf("no body row matching %d headers in %q", len(heads), out)
-	return nil, nil
+	if len(rows) == 0 {
+		t.Fatalf("no body row matching %d headers in %q", len(heads), out)
+	}
+	return heads, rows
 }
 
 // assertArtistAlbumTitle checks the header order Artist, Album, Title (adjacent,
 // in that order) and that the row's cell under each header holds that field.
-func assertArtistAlbumTitle(t *testing.T, heads, cells []string, artist, album, title string) {
+func assertArtistAlbumTitle(t *testing.T, heads, cells []string, album string) {
 	t.Helper()
 	idx := func(h string) int {
 		for i, x := range heads {
@@ -64,8 +74,8 @@ func assertArtistAlbumTitle(t *testing.T, heads, cells []string, artist, album, 
 	if b != a+1 || c != b+1 {
 		t.Fatalf("headers %v: want Artist, Album, Title adjacent in that order", heads)
 	}
-	if cells[a] != artist || cells[b] != album || cells[c] != title {
-		t.Errorf("cells %v: want artist %q, album %q, title %q under their headers", cells, artist, album, title)
+	if cells[a] != tcArtist || cells[b] != album || cells[c] != tcTitle {
+		t.Errorf("cells %v: want artist %q, album %q, title %q under their headers", cells, tcArtist, album, tcTitle)
 	}
 }
 
@@ -92,9 +102,24 @@ func TestTrackTablesArtistAlbumTitle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			heads, cells := renderTable(t, tt.c)
-			assertArtistAlbumTitle(t, heads, cells, tcArtist, tcAlbum, tcTitle)
+			assertArtistAlbumTitle(t, heads, cells, tcAlbum)
 		})
 	}
+}
+
+// TestUpNextInFlightRow covers the in-flight rows of the Up Next table, which
+// are a separate loop from the queued rows. Both kinds are asserted, every row.
+func TestUpNextInFlightRow(t *testing.T) {
+	c := dashUpNext(
+		[]InFlightRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}, {Artist: tcArtist, Title: tcTitle}},
+		[]UpNextRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "h", "e")
+	heads, rows := renderTableRows(t, c)
+	if len(rows) != 3 {
+		t.Fatalf("got %d body rows, want 3 (2 in flight, 1 queued)", len(rows))
+	}
+	assertArtistAlbumTitle(t, heads, rows[0], tcAlbum)
+	assertArtistAlbumTitle(t, heads, rows[1], "-")
+	assertArtistAlbumTitle(t, heads, rows[2], tcAlbum)
 }
 
 func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
@@ -106,13 +131,15 @@ func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
 		{"dashboard recent", dashRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"attention", attentionTable([]AttentionRow{{Artist: tcArtist, Title: tcTitle}}, "none")},
 		{"up next", dashUpNext(nil, []UpNextRow{{Artist: tcArtist, Title: tcTitle}}, "h", "e")},
+		{"reports recent", tableRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"reports instrumentals", tableInstrumentals([]InstrumentalRow{{Artist: tcArtist, Title: tcTitle}})},
+		{"failure group", FailureGroupRows(FailureGroupView{Rows: []FailureItemRow{{Artist: tcArtist, Title: tcTitle}}})},
 		{"review queue", tableReviewQueue([]ReviewQueueRow{{Artist: tcArtist, Title: tcTitle}})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			heads, cells := renderTable(t, tt.c)
-			assertArtistAlbumTitle(t, heads, cells, tcArtist, "-", tcTitle)
+			assertArtistAlbumTitle(t, heads, cells, "-")
 		})
 	}
 }

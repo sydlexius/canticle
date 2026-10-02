@@ -335,10 +335,16 @@ func TestReportFragmentInstrumentalRows(t *testing.T) {
 	insertInstrumental(t, sqlDB, "Requested", 1, "/music/a.flac")
 	insertInstrumental(t, sqlDB, "NotRequested", 0, "")
 	insertInstrumental(t, sqlDB, "Defaulted", nil, "")
+	// The Album reaches the view-model and renders (#1244).
+	if _, err := sqlDB.ExecContext(context.Background(),
+		`UPDATE work_queue SET album = 'Invented Album' WHERE title = 'NotRequested'`); err != nil {
+		t.Fatalf("set album: %v", err)
+	}
 	mux := newReportsUIServer(t, sqlDB)
 
 	body := getFragment(t, mux, "instrumental-inventory").Body.String()
 	for _, want := range []string{
+		"Invented Album",
 		"/music/a.flac", "requested", "not requested", "config default",
 		"Requested", "NotRequested", "Defaulted",
 	} {

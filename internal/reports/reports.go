@@ -526,7 +526,7 @@ type InstrumentalTrack struct {
 // The LEFT JOIN keeps CLI-enqueued rows that have no scan_results link.
 func (r *Repo) InstrumentalInventory(ctx context.Context) ([]InstrumentalTrack, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT wq.id, wq.artist, wq.album, wq.title, wq.detect_instrumental, COALESCE(sr.file_path, '')
+		`SELECT wq.id, wq.artist, COALESCE(NULLIF(sr.album, ''), wq.album), wq.title, wq.detect_instrumental, COALESCE(sr.file_path, '')
          FROM work_queue wq
          LEFT JOIN work_queue_scan_results wqsr ON wqsr.work_queue_id = wq.id
          LEFT JOIN scan_results sr ON sr.id = wqsr.scan_result_id
