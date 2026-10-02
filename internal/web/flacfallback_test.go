@@ -20,7 +20,7 @@ var fakeFlac = []byte("fLaC-fake-converted-bytes")
 type countingConverter struct {
 	calls atomic.Int32
 	gate  chan struct{} // when non-nil, each call blocks until it is closed
-	err   error
+	err   error         // returned after writing to out, so a failure leaves a file to clean
 }
 
 func (c *countingConverter) convert(ctx context.Context, _ *os.File, _ string, out string) error {
@@ -32,15 +32,26 @@ func (c *countingConverter) convert(ctx context.Context, _ *os.File, _ string, o
 			return ctx.Err()
 		}
 	}
-	if c.err != nil {
-		return c.err
+	if err := os.WriteFile(out, fakeFlac, 0o600); err != nil || c.err != nil {
+		return errors.Join(err, c.err)
 	}
-	return os.WriteFile(out, fakeFlac, 0o600)
+	return nil
 }
 
-func openSrc(t *testing.T, dir string) (string, func() (*os.File, error), os.FileInfo) {
+func newTestCache(t *testing.T, max int64, conv flacConverter) *flacCache {
 	t.Helper()
-	p := filepath.Join(dir, "song.m4a")
+	c, err := newFlacCache(t.TempDir(), max, conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// srcNamed writes a source file name into dir and returns its path, opener and info.
+func srcNamed(t *testing.T, dir, name string) (string, func() (*os.File, error), os.FileInfo) {
+	t.Helper()
+	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, previewBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -51,17 +62,44 @@ func openSrc(t *testing.T, dir string) (string, func() (*os.File, error), os.Fil
 	return p, func() (*os.File, error) { return os.Open(p) }, fi
 }
 
-func readAll(t *testing.T, f *os.File) []byte {
+// getAsync runs Get in a goroutine and reports the body it served.
+func getAsync(c *flacCache, ctx context.Context, p string, open func() (*os.File, error), fi os.FileInfo) chan error {
+	ch := make(chan error, 1)
+	go func() {
+		f, err := c.Get(ctx, p, fi, open)
+		if err == nil {
+			b, _ := os.ReadFile(f.Name())
+			_ = f.Close()
+			if !bytes.Equal(b, fakeFlac) {
+				err = errors.New("served body is not the conversion: " + string(b))
+			}
+		}
+		ch <- err
+	}()
+	return ch
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	defer func() { _ = f.Close() }()
-	b := make([]byte, 1<<10)
-	n, _ := f.Read(b)
-	return b[:n]
+	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+func (c *flacCache) waiters(key string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if j := c.inflight[key]; j != nil {
+		return j.waiters
+	}
+	return 0
 }
 
 func TestFlacKeyChangesWithPathMtimeSize(t *testing.T) {
 	dir := t.TempDir()
-	p, _, fi := openSrc(t, dir)
+	p, _, fi := srcNamed(t, dir, "song.m4a")
 	base := flacKey(p, fi)
 	if flacKey(p, fi) != base {
 		t.Fatal("key is not stable")
@@ -90,18 +128,11 @@ func TestFlacKeyChangesWithPathMtimeSize(t *testing.T) {
 
 func TestFlacCacheReusesAndReconvertsOnChange(t *testing.T) {
 	conv := &countingConverter{}
-	c, err := newFlacCache(filepath.Join(t.TempDir(), "c"), 1<<20, conv.convert)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, open, fi := openSrc(t, t.TempDir())
+	c := newTestCache(t, 1<<20, conv.convert)
+	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
 	for i := 0; i < 2; i++ {
-		f, err := c.Get(context.Background(), p, fi, open)
-		if err != nil {
+		if err := <-getAsync(c, context.Background(), p, open, fi); err != nil {
 			t.Fatal(err)
-		}
-		if got := readAll(t, f); !bytes.Equal(got, fakeFlac) {
-			t.Fatalf("body = %q", got)
 		}
 	}
 	if conv.calls.Load() != 1 {
@@ -112,131 +143,169 @@ func TestFlacCacheReusesAndReconvertsOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi2, _ := os.Stat(p)
-	f, err := c.Get(context.Background(), p, fi2, open)
+	if err := <-getAsync(c, context.Background(), p, open, fi2); err != nil || conv.calls.Load() != 2 {
+		t.Fatalf("err = %v, calls = %d, want 2 after the file changed", err, conv.calls.Load())
+	}
+}
+
+// Two instances on one parent get separate private dirs: starting the second
+// never touches the first's in-flight conversion, and Close removes only its own.
+func TestFlacCacheInstancesDoNotShareADir(t *testing.T) {
+	parent := t.TempDir()
+	conv := &countingConverter{gate: make(chan struct{})}
+	c1, err := newFlacCache(parent, 1<<20, conv.convert)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = f.Close()
-	if conv.calls.Load() != 2 {
-		t.Fatalf("calls = %d, want 2 after the file changed", conv.calls.Load())
+	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
+	done := getAsync(c1, context.Background(), p, open, fi)
+	waitFor(t, "the conversion to start", func() bool { return conv.calls.Load() == 1 })
+	c2, err := newFlacCache(parent, 1<<20, conv.convert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(conv.gate)
+	if err := <-done; err != nil {
+		t.Fatalf("first instance's Get after a second instance started: %v", err)
+	}
+	if st, err := os.Stat(c1.dir); err != nil || st.Mode().Perm() != 0o700 || c1.dir == c2.dir {
+		t.Fatalf("cache dirs %q / %q: want distinct 0700 dirs (%v, %v)", c1.dir, c2.dir, st, err)
+	}
+	_ = c2.Close()
+	if err := c1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if ents, _ := os.ReadDir(parent); len(ents) != 0 {
+		t.Fatalf("Close left %d entries under the parent", len(ents))
 	}
 }
 
-func TestFlacCacheClearedOnStartup(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "c")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	stale := filepath.Join(dir, "old.flac")
-	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newFlacCache(dir, 1<<20, (&countingConverter{}).convert); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale cache entry survived startup: %v", err)
-	}
-}
-
-func TestFlacCacheEvictsOldestOverCap(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "c")
+func TestFlacCacheEvictsOldestOverCapAndHitsCountAsRecent(t *testing.T) {
 	conv := &countingConverter{}
-	// Each fake conversion is len(fakeFlac) bytes; room for two.
-	c, err := newFlacCache(dir, int64(len(fakeFlac))*2, conv.convert)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := newTestCache(t, int64(len(fakeFlac))*2, conv.convert) // room for two
 	src := t.TempDir()
-	var keys []string
-	for i, name := range []string{"a.m4a", "b.m4a", "c.m4a"} {
+	get := func(name string) string {
 		p := filepath.Join(src, name)
-		if err := os.WriteFile(p, previewBytes, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		fi, _ := os.Stat(p)
-		f, err := c.Get(context.Background(), p, fi, func() (*os.File, error) { return os.Open(p) })
+		fi, err := os.Stat(p)
 		if err != nil {
+			_, _, fi = srcNamed(t, src, name)
+		}
+		if err := <-getAsync(c, context.Background(), p, func() (*os.File, error) { return os.Open(p) }, fi); err != nil {
 			t.Fatal(err)
 		}
-		_ = f.Close()
-		k := flacKey(p, fi)
-		keys = append(keys, k)
-		// Backdate so "oldest" is unambiguous regardless of fs timestamp resolution.
-		old := time.Now().Add(time.Duration(i-10) * time.Minute)
-		if i < 2 {
-			_ = os.Chtimes(filepath.Join(dir, k), old, old)
+		return filepath.Join(c.dir, flacKey(p, fi))
+	}
+	a, b := get("a.m4a"), get("b.m4a")
+	// Backdate so "oldest" is unambiguous regardless of fs timestamp resolution.
+	for i, path := range []string{a, b} {
+		old := time.Now().Add(time.Duration(i-20) * time.Minute)
+		_ = os.Chtimes(path, old, old)
+	}
+	get("a.m4a") // a cache hit: a is now the most recent
+	cpath := get("c.m4a")
+	for path, want := range map[string]bool{a: true, b: false, cpath: true} {
+		if _, err := os.Stat(path); (err == nil) != want {
+			t.Errorf("%s present = %v, want %v", filepath.Base(path)[:8], err == nil, want)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, keys[0])); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("oldest entry was not evicted: %v", err)
+	if conv.calls.Load() != 3 {
+		t.Errorf("calls = %d, want 3 (the second a.m4a is a hit)", conv.calls.Load())
 	}
-	for _, k := range keys[1:] {
-		if _, err := os.Stat(filepath.Join(dir, k)); err != nil {
-			t.Errorf("entry %s evicted though within cap: %v", k[:8], err)
+}
+
+// A result is pinned until its waiters have opened it: two conversions that
+// finish together in a cache with room for one must both be served (so is a
+// single file over the cap).
+func TestFlacCacheEvictionSparesUnservedResults(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		conv := &countingConverter{gate: make(chan struct{})}
+		c := newTestCache(t, int64(len(fakeFlac)), conv.convert)
+		src := t.TempDir()
+		var errs []chan error
+		for _, name := range []string{"a.m4a", "b.m4a"} {
+			p, open, fi := srcNamed(t, src, name)
+			errs = append(errs, getAsync(c, context.Background(), p, open, fi))
+		}
+		waitFor(t, "both conversions to start", func() bool { return conv.calls.Load() == 2 })
+		close(conv.gate)
+		for _, ch := range errs {
+			if err := <-ch; err != nil {
+				t.Fatalf("iteration %d: a finished conversion was not served: %v", iter, err)
+			}
 		}
 	}
 }
 
-func TestFlacCacheKeepsNewestEvenWhenOverCap(t *testing.T) {
-	conv := &countingConverter{}
-	c, err := newFlacCache(filepath.Join(t.TempDir(), "c"), 1, conv.convert)
-	if err != nil {
+// A partial conversion is never visible under the cached name, and its bytes
+// count toward the cap: with room for two entries, a cached one goes when a
+// finished one plus a large partial pass the cap.
+func TestFlacCacheHidesAndCountsPartials(t *testing.T) {
+	big := make(chan struct{})
+	conv := func(ctx context.Context, in *os.File, name, out string) error {
+		if strings.HasSuffix(name, "big.m4a") {
+			_ = os.WriteFile(out, make([]byte, 1024), 0o600)
+			<-big
+		}
+		return os.WriteFile(out, fakeFlac, 0o600)
+	}
+	c := newTestCache(t, int64(len(fakeFlac))*2, conv)
+	defer close(big)
+	src := t.TempDir()
+	x, xopen, xfi := srcNamed(t, src, "x.m4a")
+	if err := <-getAsync(c, context.Background(), x, xopen, xfi); err != nil {
 		t.Fatal(err)
 	}
-	p, open, fi := openSrc(t, t.TempDir())
-	f, err := c.Get(context.Background(), p, fi, open)
-	if err != nil {
+	old := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(filepath.Join(c.dir, flacKey(x, xfi)), old, old)
+	bp, bopen, bfi := srcNamed(t, src, "big.m4a")
+	_ = getAsync(c, context.Background(), bp, bopen, bfi)
+	waitFor(t, "the large partial", func() bool { m, _ := filepath.Glob(filepath.Join(c.dir, "*.part")); return len(m) == 1 })
+	if _, err := os.Stat(filepath.Join(c.dir, flacKey(bp, bfi))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a partial conversion is visible under the cached name: %v", err)
+	}
+	y, yopen, yfi := srcNamed(t, src, "y.m4a")
+	if err := <-getAsync(c, context.Background(), y, yopen, yfi); err != nil {
 		t.Fatal(err)
 	}
-	if got := readAll(t, f); !bytes.Equal(got, fakeFlac) {
-		t.Fatalf("a single file over the cap must still be served, got %q", got)
+	if _, err := os.Stat(filepath.Join(c.dir, flacKey(x, xfi))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oldest entry survived though cached + partial bytes pass the cap: %v", err)
+	}
+}
+
+func TestFlacCacheBoundsConcurrentConversions(t *testing.T) {
+	conv := &countingConverter{gate: make(chan struct{})}
+	c := newTestCache(t, 1<<20, conv.convert)
+	src := t.TempDir()
+	var errs []chan error
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		p, open, fi := srcNamed(t, src, name+".m4a")
+		errs = append(errs, getAsync(c, context.Background(), p, open, fi))
+	}
+	waitFor(t, "the first conversions", func() bool { return conv.calls.Load() == flacMaxConversions })
+	time.Sleep(50 * time.Millisecond) // room for an unbounded cache to start the rest
+	if n := conv.calls.Load(); n != flacMaxConversions {
+		t.Fatalf("%d conversions running at once, want %d", n, flacMaxConversions)
+	}
+	close(conv.gate)
+	for _, ch := range errs {
+		if err := <-ch; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func TestFlacCacheSingleConversionForConcurrentRequests(t *testing.T) {
 	conv := &countingConverter{gate: make(chan struct{})}
-	c, err := newFlacCache(filepath.Join(t.TempDir(), "c"), 1<<20, conv.convert)
-	if err != nil {
-		t.Fatal(err)
+	c := newTestCache(t, 1<<20, conv.convert)
+	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
+	var errs []chan error
+	for i := 0; i < 8; i++ {
+		errs = append(errs, getAsync(c, context.Background(), p, open, fi))
 	}
-	p, open, fi := openSrc(t, t.TempDir())
-	const n = 8
-	var wg sync.WaitGroup
-	errs := make(chan error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			f, err := c.Get(context.Background(), p, fi, open)
-			if err == nil {
-				_ = f.Close()
-			}
-			errs <- err
-		}()
-	}
-	// Wait until every request is parked on the one in-flight job.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		c.mu.Lock()
-		w := 0
-		for _, j := range c.inflight {
-			w = j.waiters
-		}
-		c.mu.Unlock()
-		if w == n {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d requests joined the job", w, n)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "every request to join the job", func() bool { return c.waiters(flacKey(p, fi)) == len(errs) })
 	close(conv.gate)
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
+	for _, ch := range errs {
+		if err := <-ch; err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -245,57 +314,101 @@ func TestFlacCacheSingleConversionForConcurrentRequests(t *testing.T) {
 	}
 }
 
-func TestFlacCacheCancelsWhenEveryWaiterLeaves(t *testing.T) {
-	started := make(chan struct{})
+// One waiter leaving (the creator, here) does not cancel a conversion another
+// still wants; the last one leaving does.
+func TestFlacCacheCancelsOnlyWhenEveryWaiterLeaves(t *testing.T) {
 	canceled := make(chan struct{})
-	c, err := newFlacCache(filepath.Join(t.TempDir(), "c"), 1<<20,
-		func(ctx context.Context, _ *os.File, _, _ string) error {
-			close(started)
-			<-ctx.Done()
-			close(canceled)
-			return ctx.Err()
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, open, fi := openSrc(t, t.TempDir())
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, err := c.Get(ctx, p, fi, open)
-		done <- err
-	}()
-	<-started
-	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Get err = %v, want context canceled", err)
+	conv := &countingConverter{gate: make(chan struct{})}
+	c := newTestCache(t, 1<<20, func(ctx context.Context, in *os.File, name, out string) error {
+		defer close(canceled)
+		return conv.convert(ctx, in, name, out)
+	})
+	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	first, second := getAsync(c, ctx1, p, open, fi), getAsync(c, ctx2, p, open, fi)
+	waitFor(t, "both requests to join", func() bool { return c.waiters(flacKey(p, fi)) == 2 && conv.calls.Load() == 1 })
+	cancel1()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leaver err = %v, want context canceled", err)
 	}
 	select {
 	case <-canceled:
+		t.Fatal("conversion canceled while a waiter remained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel2()
+	<-second
+	select {
+	case <-canceled:
 	case <-time.After(5 * time.Second):
-		t.Fatal("conversion was not canceled after its only waiter left")
+		t.Fatal("conversion was not canceled after its last waiter left")
 	}
 }
 
-func TestFlacCacheDoesNotCacheFailures(t *testing.T) {
-	conv := &countingConverter{err: errors.New("boom")}
-	dir := filepath.Join(t.TempDir(), "c")
-	c, err := newFlacCache(dir, 1<<20, conv.convert)
-	if err != nil {
-		t.Fatal(err)
+// A request arriving after every waiter left (while the canceled conversion is
+// still being torn down) starts a fresh one instead of inheriting the cancel.
+func TestFlacCacheLateJoinerAfterCancelStartsFresh(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	var calls atomic.Int32
+	c := newTestCache(t, 1<<20, func(ctx context.Context, _ *os.File, _, out string) error {
+		if calls.Add(1) == 1 {
+			<-ctx.Done()
+			<-release // ffmpeg kill + reap latency
+			return ctx.Err()
+		}
+		return os.WriteFile(out, fakeFlac, 0o600)
+	})
+	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
+	ctx, cancel := context.WithCancel(context.Background())
+	first := getAsync(c, ctx, p, open, fi)
+	waitFor(t, "the conversion to start", func() bool { return calls.Load() == 1 })
+	cancel()
+	<-first
+	second := getAsync(c, context.Background(), p, open, fi)
+	// Release the dying run once the live request has joined it or started anew.
+	waitFor(t, "the live request", func() bool { return c.waiters(flacKey(p, fi)) == 1 || calls.Load() == 2 })
+	once.Do(func() { close(release) })
+	if err := <-second; err != nil {
+		t.Fatalf("live request after a cancel: %v", err)
 	}
-	p, open, fi := openSrc(t, t.TempDir())
-	if _, err := c.Get(context.Background(), p, fi, open); err == nil {
-		t.Fatal("want the conversion error")
+}
+
+// A failure is returned as itself, leaves no partial file and is not cached.
+func TestFlacCacheDoesNotCacheFailures(t *testing.T) {
+	boom := errors.New("boom")
+	conv := &countingConverter{err: boom}
+	c := newTestCache(t, 1<<20, conv.convert)
+	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
+	if _, err := c.Get(context.Background(), p, fi, open); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the conversion error", err)
+	}
+	if ents, _ := os.ReadDir(c.dir); len(ents) != 0 {
+		t.Fatalf("a failed conversion left %d files in the cache", len(ents))
 	}
 	conv.err = nil
-	f, err := c.Get(context.Background(), p, fi, open)
-	if err != nil {
-		t.Fatalf("retry after failure: %v", err)
+	if err := <-getAsync(c, context.Background(), p, open, fi); err != nil || conv.calls.Load() != 2 {
+		t.Fatalf("retry: err = %v, calls = %d, want 2 (a failure must not be cached)", err, conv.calls.Load())
 	}
-	_ = f.Close()
-	if conv.calls.Load() != 2 {
-		t.Fatalf("calls = %d, want 2 (a failure must not be cached)", conv.calls.Load())
+}
+
+func TestFlacInputAndCappedStderr(t *testing.T) {
+	in, _ := os.Open(os.DevNull)
+	defer func() { _ = in.Close() }()
+	if name, extra := flacInput("windows", in, `C:\m\a:b.m4a`); name != `file:C:\m\a:b.m4a` || extra != nil {
+		t.Errorf("windows input = %q, %v: want a file: path and no extra handles", name, extra)
+	}
+	if name, extra := flacInput("linux", in, "/m/a.m4a"); name != "/dev/fd/3" || len(extra) != 1 {
+		t.Errorf("linux input = %q, %v: want the handle as fd 3", name, extra)
+	}
+	b := &cappedBuffer{max: 16}
+	for _, s := range []string{"HEAD-", strings.Repeat("x", 1000), "-TAIL"} {
+		_, _ = b.Write([]byte(s))
+	}
+	if s := b.String(); len(s) > 64 || !strings.HasPrefix(s, "HEAD-") || !strings.HasSuffix(s, "-TAIL") {
+		t.Errorf("capped stderr = %q, want head and tail within the cap", s)
 	}
 }
 
@@ -310,12 +423,19 @@ func requireFFmpeg(t *testing.T) string {
 	return bin
 }
 
-// makeFixture encodes a 2.3 s tone (an awkward, non-round sample count) with codec into dir/name.
+// tone is a 2.3 s 440 Hz lavfi input (an awkward, non-round sample count).
+var tone = []string{"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2.3"}
+
+// makeFixture encodes the tone with codec into dir/name.
 func makeFixture(t *testing.T, bin, dir, name string, codecArgs ...string) string {
 	t.Helper()
+	return makeFixtureFrom(t, bin, dir, name, append(append([]string{}, tone...), codecArgs...)...)
+}
+
+func makeFixtureFrom(t *testing.T, bin, dir, name string, args ...string) string {
+	t.Helper()
 	out := filepath.Join(dir, name)
-	args := append([]string{"-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2.3"}, codecArgs...)
-	args = append(args, out)
+	args = append(append([]string{"-nostdin", "-loglevel", "error"}, args...), out)
 	if b, err := exec.Command(bin, args...).CombinedOutput(); err != nil { //nolint:gosec // reason: G204 -- test fixture generation with a fixed argv
 		t.Skipf("this ffmpeg cannot build the %s fixture: %v: %s", name, err, b)
 	}
@@ -339,6 +459,11 @@ func TestFFmpegFlacConversionIsSampleExact(t *testing.T) {
 	fixtures := map[string]string{
 		"alac": makeFixture(t, bin, dir, "t.m4a", "-c:a", "alac"),
 		"wma":  makeFixture(t, bin, dir, "t.wma", "-c:a", "wmav2"),
+		// A second, stereo (so ffmpeg's default pick) and shorter audio stream
+		// plus a title tag: only the first audio stream and no tags may survive.
+		"two-stream": makeFixtureFrom(t, bin, dir, "two.m4a", append(append([]string{}, tone...),
+			"-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1.1", "-map", "0", "-map", "1",
+			"-ac:a:1", "2", "-metadata", "title=T", "-c:a", "alac")...),
 	}
 	conv := ffmpegFlacConverter(bin)
 	for name, src := range fixtures {
@@ -357,7 +482,11 @@ func TestFFmpegFlacConversionIsSampleExact(t *testing.T) {
 				t.Fatal("source decoded to no samples")
 			}
 			if len(got) != len(want) {
-				t.Fatalf("decoded samples: flac %d, source %d (bytes of s16 mono)", len(got)/2, len(want)/2)
+				t.Fatalf("decoded samples: flac %d, source stream 0 %d (bytes of s16 mono)", len(got)/2, len(want)/2)
+			}
+			meta, _ := exec.Command(bin, "-nostdin", "-loglevel", "error", "-i", out, "-f", "ffmetadata", "-").Output() //nolint:gosec // reason: G204 -- fixed argv in a test
+			if strings.Contains(strings.ToLower(string(meta)), "title=") {
+				t.Errorf("source tags carried into the conversion: %q", meta)
 			}
 		})
 	}
