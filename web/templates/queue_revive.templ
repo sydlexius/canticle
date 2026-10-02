@@ -6,7 +6,7 @@ package templates
 // previewed scope. Failed rows get no action here: they are already retried
 // automatically.
 templ ReviveRetiredPage(version string, view ReviveView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
-	@Layout("Revive retired tracks", "/dashboard", version, reports, "/static/css/queue.css", musixmatchInactive, musixmatchServing) {
+	@Layout("Revive retired tracks", "/queue", version, reports, "/static/css/queue.css", musixmatchInactive, musixmatchServing) {
 		<h1 class="mx-page-title">Revive retired tracks</h1>
 		<p class="mx-page-subtitle">
 			Retired tracks were given up on after repeated misses. Reviving puts them back in the

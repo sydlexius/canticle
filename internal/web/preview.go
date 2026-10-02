@@ -172,10 +172,16 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		Artist:    t.Artist,
 		Title:     t.Title,
 		Album:     t.Album,
+		BackHref:  "/queue",
+		BackLabel: "Back to queue",
 		AudioSrc:  "/preview/" + strconv.FormatInt(id, 10) + "/audio",
 		Lines:     lines,
 		HasWords:  hasWords,
 		Truncated: lrcCut,
+	}
+	if b, err := reports.ParseBucket(r.URL.Query().Get("from")); err == nil {
+		view.BackHref = queueBucketHref(b)
+		view.BackLabel = "Back to " + queueBucketInfo[b][0]
 	}
 	if u.editor != nil && !lrcCut {
 		u.fillPreviewEditor(w, r, &view, t, id, roots, lrcMTime)
