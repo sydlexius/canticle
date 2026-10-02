@@ -78,6 +78,8 @@ type timingSweepResult struct {
 	Remedied  int
 	Failed    int
 	Remaining int
+	// EditHeld counts hand-edited rows (#1226) whose remediation was skipped.
+	EditHeld int
 }
 
 // timingSweepJob holds one cycle's already-open dependencies. Built once at
@@ -347,6 +349,17 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 	}
 	res.Counts = plan.Counts
 
+	// A HAND-EDITED ROW IS JUDGED, NEVER REMEDIATED (#1226). The verdict is still
+	// stamped (the review report shows it, and the stamp is what retires the row
+	// from the backlog), but no automatic path replaces a hand edit, so its move
+	// is dropped and its finding records no file change. Asked after planning,
+	// right before applying, so a mark set while the batch was judged still holds.
+	held, err := j.holdEditedRows(ctx, &plan)
+	if err != nil {
+		return res, err
+	}
+	res.EditHeld = held
+
 	// APPLY BEFORE STAMPING, and the order is load-bearing. A stamp says "this
 	// row has been judged and acted on"; writing it first would retire the row
 	// from the backlog whether or not the file was actually moved, so a failed
@@ -390,6 +403,44 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 		res.Remaining = remaining
 	}
 	return res, nil
+}
+
+// holdEditedRows strips the planned remediation from every finding whose row
+// carries a hand-edit mark, returning how many it held. The finding keeps its
+// verdict, so the row is stamped and leaves the backlog like an off-mode row;
+// its Action is cleared so fileStateFor leaves the row's file state alone.
+func (j *timingSweepJob) holdEditedRows(ctx context.Context, plan *revalidate.Plan) (int, error) {
+	var ids []int64
+	for _, f := range plan.Findings {
+		if f.ID != 0 && f.Action != "" {
+			ids = append(ids, f.ID)
+		}
+	}
+	edited, err := j.q.LyricEditedAmong(ctx, ids)
+	if err != nil || len(edited) == 0 {
+		return 0, err
+	}
+	// Dropped by sidecar path, and a held path wins over any other finding that
+	// names the same file: the hand edit is what is on disk.
+	drop := map[string]bool{}
+	held := 0
+	for i := range plan.Findings {
+		f := &plan.Findings[i]
+		if f.Action == "" || !edited[f.ID] {
+			continue
+		}
+		drop[f.Path] = true
+		f.Action, f.KeptText = "", false
+		held++
+	}
+	moves := plan.Moves[:0]
+	for _, mv := range plan.Moves {
+		if !drop[mv.Orphan] {
+			moves = append(moves, mv)
+		}
+	}
+	plan.Moves = moves
+	return held, nil
 }
 
 // candidatesFor turns backlog rows into revalidate candidates, resolving each
@@ -558,7 +609,7 @@ func runTimingSweepCycle(ctx context.Context, j timingSweeper) {
 	// would let a permanently-failing sweep look like a working one.
 	if res.Failed > 0 {
 		slog.Warn("timing validation sweep finished with failed actions",
-			"failed", res.Failed, "remedied", res.Remedied, "stamped", res.Stamped,
+			"failed", res.Failed, "remedied", res.Remedied, "stamped", res.Stamped, "edit_held", res.EditHeld,
 			"mis_synced", res.Counts.MisSynced, "categorical", res.Counts.Categorical,
 			"degenerate", res.Counts.Degenerate, "remaining", res.Remaining)
 		return
@@ -571,7 +622,7 @@ func runTimingSweepCycle(ctx context.Context, j timingSweeper) {
 		"mis_synced", res.Counts.MisSynced, "categorical", res.Counts.Categorical,
 		"degenerate", res.Counts.Degenerate, "unknown_duration", res.Counts.UnknownDuration,
 		"no_sidecar", res.Counts.NoSidecar, "no_audio", res.Counts.NoAudio,
-		"remedied", res.Remedied, "stamped", res.Stamped, "remaining", res.Remaining)
+		"remedied", res.Remedied, "stamped", res.Stamped, "edit_held", res.EditHeld, "remaining", res.Remaining)
 }
 
 // runTimingSweepLoop runs a cycle at startup and then once per interval until

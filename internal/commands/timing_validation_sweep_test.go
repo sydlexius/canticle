@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1003,5 +1004,75 @@ func TestRunCycleStampsPostSettleSource(t *testing.T) {
 	ids, err := q.ListUpgradeCandidates(ctx, time.Now().Add(-7*24*time.Hour), 10)
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("upgrade candidates after the sweep stamped mis_synced = %v, %v; want the one row (source %q)", ids, err, queue.TimingSourceSweep)
+	}
+}
+
+// sweepRowVerdict reads the fixture row's timing verdict and outcome through a
+// second handle on the fixture database (it sits beside the backup trail).
+func sweepRowVerdict(t *testing.T, job *timingSweepJob, id int64) (timingOutcome, outcomeType string) {
+	t.Helper()
+	sqlDB, err := db.Open(context.Background(), filepath.Join(filepath.Dir(job.backupPath), "sweep.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	var verdict, outcome sql.NullString
+	if err := sqlDB.QueryRow(`SELECT timing_outcome, outcome_type FROM work_queue WHERE id = ?`, id).Scan(&verdict, &outcome); err != nil {
+		t.Fatalf("read row %d: %v", id, err)
+	}
+	return verdict.String, outcome.String
+}
+
+// TestRunCycleStampsButNeverRemediatesAHandEdit (#1226): a hand-edited row's
+// verdict is stamped (so it leaves the backlog and the review report shows it),
+// but its .lrc stays exactly as the person left it and no file state changes.
+func TestRunCycleStampsButNeverRemediatesAHandEdit(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, lrc := sweepFixture(t, nil)
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	ids, err := q.IDsBySourcePaths(ctx, []string{audio})
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("row lookup = %v, %v; want one row", ids, err)
+	}
+	if err := q.SetLyricEdit(ctx, ids[0], 250); err != nil {
+		t.Fatalf("mark edited: %v", err)
+	}
+	before, err := os.ReadFile(lrc)
+	if err != nil {
+		t.Fatalf("read lrc: %v", err)
+	}
+	// An UNEDITED mis-synced sibling in the same batch is still remediated.
+	otherAudio := filepath.Join(filepath.Dir(lrc), "other.mp3")
+	otherLRC := strings.TrimSuffix(otherAudio, ".mp3") + ".lrc"
+	if err := os.WriteFile(otherAudio, []byte("not really audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.WriteFile(otherLRC, before, 0o600); err != nil {
+		t.Fatalf("write lrc: %v", err)
+	}
+	seedBacklogRow(t, q, otherAudio, "Artist", "Other")
+
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Counts.MisSynced != 2 || res.Stamped != 2 || res.Remedied != 1 || res.EditHeld != 1 {
+		t.Errorf("result = %+v; want MisSynced=2 Stamped=2 Remedied=1 EditHeld=1", res)
+	}
+	if _, err := os.Stat(otherLRC); !os.IsNotExist(err) {
+		t.Errorf("the unedited sibling .lrc is still in place (stat err=%v); want it demoted", err)
+	}
+	after, err := os.ReadFile(lrc)
+	if err != nil || string(after) != string(before) {
+		t.Errorf("the hand-edited .lrc was touched (err=%v); want it byte-identical", err)
+	}
+	if _, err := os.Stat(strings.TrimSuffix(lrc, ".lrc") + ".txt"); !os.IsNotExist(err) {
+		t.Errorf("a demoted .txt was written beside a hand edit (stat err=%v)", err)
+	}
+	if verdict, outcome := sweepRowVerdict(t, job, ids[0]); verdict != string(timing.MisSynced) || outcome != "synced" {
+		t.Errorf("row = (timing %q, outcome %q); want (mis_synced, synced): verdict stamped, file state unchanged", verdict, outcome)
+	}
+	if n, err := q.CountTimingBacklog(ctx); err != nil || n != 0 {
+		t.Errorf("backlog = %d, %v; want 0: an edited row must still leave the backlog", n, err)
 	}
 }

@@ -28,6 +28,8 @@ type DivergenceResult struct {
 	Unlinked        int // scan_results rows unlinked from a disagreeing queue row and reset to pending
 	Deleted         int // work_queue rows deleted after every linked member was unlinked (no member still matches)
 	ProcessingSkips int // candidate groups skipped because the queue row was mid-flight
+	EditHeld        int // re-keyed rows left settled because they carry a hand-edit mark (#1226)
+	EditSkips       int // candidate groups skipped because a merge would collapse a hand-edited row (#1226)
 	// ScopeSkips counts candidate groups skipped because the shared work_queue
 	// row also links a scan_results member OUTSIDE the requested LibraryID/
 	// PathPrefix scope whose artist_key disagrees with the queue row's own
@@ -66,8 +68,10 @@ type scanMember struct {
 // work_queue row.
 type divergenceOutcome struct {
 	rekeyed, merged, unlinked, deleted int
+	editHeld                           int
 	processingSkip                     bool
 	scopeSkip                          bool
+	editSkip                           bool
 }
 
 // RepairDivergence finds work_queue rows whose stored artist identity has
@@ -143,6 +147,10 @@ func (r *Repairer) RepairDivergence(ctx context.Context, opts Options) (Divergen
 		res.Merged += outcome.merged
 		res.Unlinked += outcome.unlinked
 		res.Deleted += outcome.deleted
+		res.EditHeld += outcome.editHeld
+		if outcome.editSkip {
+			res.EditSkips++
+		}
 		if outcome.processingSkip {
 			res.ProcessingSkips++
 		}
@@ -423,6 +431,9 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 		if lookup.skip {
 			return divergenceOutcome{processingSkip: true}, nil
 		}
+		if lookup.editSkip {
+			return divergenceOutcome{editSkip: true}, nil
+		}
 		if dryRun {
 			if lookup.conflictID != 0 {
 				outcome.merged = 1
@@ -430,6 +441,9 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 			} else {
 				outcome.rekeyed = 1
 				ch.Op = OpQueueRekey
+				if lookup.oldEdited {
+					outcome.editHeld = 1
+				}
 			}
 		} else {
 			qOut, err := reconcileQueue(ctx, tx, ch, wq.titleKey, lookup)
@@ -442,6 +456,7 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 			} else {
 				outcome.rekeyed = 1
 				ch.Op = OpQueueRekey
+				outcome.editHeld = qOut.editHeld
 			}
 		}
 		changes = append(changes, ch)
