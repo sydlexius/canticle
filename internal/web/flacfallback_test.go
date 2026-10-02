@@ -101,28 +101,16 @@ func TestFlacKeyChangesWithPathMtimeSize(t *testing.T) {
 	dir := t.TempDir()
 	p, _, fi := srcNamed(t, dir, "song.m4a")
 	base := flacKey(p, fi)
-	if flacKey(p, fi) != base {
-		t.Fatal("key is not stable")
+	if flacKey(p, fi) != base || flacKey(p+"x", fi) == base {
+		t.Fatal("key is not stable, or ignores the path")
 	}
-	if flacKey(p+"x", fi) == base {
-		t.Error("key ignores the path")
-	}
-	if err := os.Chtimes(p, time.Now(), time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
+	_ = os.Chtimes(p, time.Now(), time.Now().Add(time.Hour))
 	fi2, _ := os.Stat(p)
-	if flacKey(p, fi2) == base {
-		t.Error("key ignores the mtime")
-	}
-	if err := os.WriteFile(p, append(previewBytes, 'x'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(p, fi.ModTime(), fi.ModTime()); err != nil {
-		t.Fatal(err)
-	}
+	_ = os.WriteFile(p, append(previewBytes, 'x'), 0o600)
+	_ = os.Chtimes(p, fi.ModTime(), fi.ModTime())
 	fi3, _ := os.Stat(p)
-	if flacKey(p, fi3) == base {
-		t.Error("key ignores the size")
+	if fi3.ModTime() != fi.ModTime() || flacKey(p, fi2) == base || flacKey(p, fi3) == base {
+		t.Error("key ignores the mtime or the size")
 	}
 }
 
@@ -139,9 +127,7 @@ func TestFlacCacheReusesAndReconvertsOnChange(t *testing.T) {
 		t.Fatalf("calls = %d, want 1 (second Get should hit the cache)", conv.calls.Load())
 	}
 	// A changed file (new mtime) converts again.
-	if err := os.Chtimes(p, time.Now(), time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
+	_ = os.Chtimes(p, time.Now(), time.Now().Add(time.Hour))
 	fi2, _ := os.Stat(p)
 	if err := <-getAsync(c, context.Background(), p, open, fi2); err != nil || conv.calls.Load() != 2 {
 		t.Fatalf("err = %v, calls = %d, want 2 after the file changed", err, conv.calls.Load())
@@ -152,27 +138,36 @@ func TestFlacCacheReusesAndReconvertsOnChange(t *testing.T) {
 // never touches the first's in-flight conversion, and Close removes only its own.
 func TestFlacCacheInstancesDoNotShareADir(t *testing.T) {
 	parent := t.TempDir()
-	conv := &countingConverter{gate: make(chan struct{})}
-	c1, err := newFlacCache(parent, 1<<20, conv.convert)
+	gate, started := make(chan struct{}), make(chan struct{})
+	conv := func(_ context.Context, _ *os.File, _, out string) error {
+		f, err := os.Create(out) // held open across the gate, as ffmpeg holds its output
+		if err != nil {
+			return err
+		}
+		close(started)
+		<-gate
+		_, err = f.Write(fakeFlac)
+		return errors.Join(err, f.Close())
+	}
+	c1, err := newFlacCache(parent, 1<<20, conv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
 	done := getAsync(c1, context.Background(), p, open, fi)
-	waitFor(t, "the conversion to start", func() bool { return conv.calls.Load() == 1 })
-	c2, err := newFlacCache(parent, 1<<20, conv.convert)
+	<-started
+	c2, err := newFlacCache(parent, 1<<20, conv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	close(conv.gate)
+	close(gate)
 	if err := <-done; err != nil {
 		t.Fatalf("first instance's Get after a second instance started: %v", err)
 	}
 	if st, err := os.Stat(c1.dir); err != nil || st.Mode().Perm() != 0o700 || c1.dir == c2.dir {
 		t.Fatalf("cache dirs %q / %q: want distinct 0700 dirs (%v, %v)", c1.dir, c2.dir, st, err)
 	}
-	_ = c2.Close()
-	if err := c1.Close(); err != nil {
+	if err := errors.Join(c1.Close(), c2.Close()); err != nil {
 		t.Fatal(err)
 	}
 	if ents, _ := os.ReadDir(parent); len(ents) != 0 {
@@ -240,10 +235,11 @@ func TestFlacCacheEvictionSparesUnservedResults(t *testing.T) {
 // count toward the cap: with room for two entries, a cached one goes when a
 // finished one plus a large partial pass the cap.
 func TestFlacCacheHidesAndCountsPartials(t *testing.T) {
-	big := make(chan struct{})
+	big, bigWritten := make(chan struct{}), make(chan struct{})
 	conv := func(ctx context.Context, in *os.File, name, out string) error {
 		if strings.HasSuffix(name, "big.m4a") {
 			_ = os.WriteFile(out, make([]byte, 1024), 0o600)
+			close(bigWritten)
 			<-big
 		}
 		return os.WriteFile(out, fakeFlac, 0o600)
@@ -259,7 +255,7 @@ func TestFlacCacheHidesAndCountsPartials(t *testing.T) {
 	_ = os.Chtimes(filepath.Join(c.dir, flacKey(x, xfi)), old, old)
 	bp, bopen, bfi := srcNamed(t, src, "big.m4a")
 	_ = getAsync(c, context.Background(), bp, bopen, bfi)
-	waitFor(t, "the large partial", func() bool { m, _ := filepath.Glob(filepath.Join(c.dir, "*.part")); return len(m) == 1 })
+	<-bigWritten
 	if _, err := os.Stat(filepath.Join(c.dir, flacKey(bp, bfi))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a partial conversion is visible under the cached name: %v", err)
 	}
@@ -281,7 +277,7 @@ func TestFlacCacheBoundsConcurrentConversions(t *testing.T) {
 		p, open, fi := srcNamed(t, src, name+".m4a")
 		errs = append(errs, getAsync(c, context.Background(), p, open, fi))
 	}
-	waitFor(t, "the first conversions", func() bool { return conv.calls.Load() == flacMaxConversions })
+	waitFor(t, "the first conversions", func() bool { return conv.calls.Load() >= flacMaxConversions })
 	time.Sleep(50 * time.Millisecond) // room for an unbounded cache to start the rest
 	if n := conv.calls.Load(); n != flacMaxConversions {
 		t.Fatalf("%d conversions running at once, want %d", n, flacMaxConversions)
@@ -326,8 +322,10 @@ func TestFlacCacheCancelsOnlyWhenEveryWaiterLeaves(t *testing.T) {
 	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	first, second := getAsync(c, ctx1, p, open, fi), getAsync(c, ctx2, p, open, fi)
-	waitFor(t, "both requests to join", func() bool { return c.waiters(flacKey(p, fi)) == 2 && conv.calls.Load() == 1 })
+	first := getAsync(c, ctx1, p, open, fi) // the creator
+	waitFor(t, "the conversion to start", func() bool { return conv.calls.Load() == 1 })
+	second := getAsync(c, ctx2, p, open, fi)
+	waitFor(t, "both requests to join", func() bool { return c.waiters(flacKey(p, fi)) == 2 })
 	cancel1()
 	if err := <-first; !errors.Is(err, context.Canceled) {
 		t.Fatalf("leaver err = %v, want context canceled", err)
@@ -347,7 +345,8 @@ func TestFlacCacheCancelsOnlyWhenEveryWaiterLeaves(t *testing.T) {
 }
 
 // A request arriving after every waiter left (while the canceled conversion is
-// still being torn down) starts a fresh one instead of inheriting the cancel.
+// still being torn down) starts a fresh one instead of inheriting the cancel,
+// and the dying run's cleanup does not delete the fresh run's partial file.
 func TestFlacCacheLateJoinerAfterCancelStartsFresh(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
@@ -359,7 +358,10 @@ func TestFlacCacheLateJoinerAfterCancelStartsFresh(t *testing.T) {
 			<-release // ffmpeg kill + reap latency
 			return ctx.Err()
 		}
-		return os.WriteFile(out, fakeFlac, 0o600)
+		err := os.WriteFile(out, fakeFlac, 0o600)
+		once.Do(func() { close(release) })
+		time.Sleep(50 * time.Millisecond) // the dying run cleans up meanwhile
+		return err
 	})
 	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -459,11 +461,11 @@ func TestFFmpegFlacConversionIsSampleExact(t *testing.T) {
 	fixtures := map[string]string{
 		"alac": makeFixture(t, bin, dir, "t.m4a", "-c:a", "alac"),
 		"wma":  makeFixture(t, bin, dir, "t.wma", "-c:a", "wmav2"),
-		// A second, stereo (so ffmpeg's default pick) and shorter audio stream
+		// A second, shorter audio stream marked default (so ffmpeg's own pick)
 		// plus a title tag: only the first audio stream and no tags may survive.
 		"two-stream": makeFixtureFrom(t, bin, dir, "two.m4a", append(append([]string{}, tone...),
 			"-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1.1", "-map", "0", "-map", "1",
-			"-ac:a:1", "2", "-metadata", "title=T", "-c:a", "alac")...),
+			"-ac:a:1", "2", "-disposition:a:0", "0", "-disposition:a:1", "default", "-metadata", "title=T", "-c:a", "alac")...),
 	}
 	conv := ffmpegFlacConverter(bin)
 	for name, src := range fixtures {
