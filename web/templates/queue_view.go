@@ -18,6 +18,14 @@ type QueueView struct {
 	// from; non-zero means the page does not begin at the top of the bucket.
 	NextCursor int64
 	After      int64
+	// Query is the active search text ("" when none). StartHref is the first page
+	// of this bucket with the search kept, ClearHref the bucket with no search,
+	// MoreHref the next page with the search kept; all rendered by the handler's
+	// one URL renderer so a new view parameter reaches every link.
+	Query     string
+	StartHref string
+	ClearHref string
+	MoreHref  string
 	// ReviveLink shows the "Revive retired tracks" link (the unavailable bucket
 	// only, and only when a queue action backend is wired).
 	ReviveLink bool
@@ -84,9 +92,4 @@ type QueueRow struct {
 	// PreviewHref is the /preview/{id} player link, set only for a row with a
 	// synced .lrc; empty renders no link.
 	PreviewHref string
-}
-
-// QueueMoreHref is the "Show more" target for a bucket and cursor.
-func QueueMoreHref(key string, cursor int64) string {
-	return "/queue/" + key + "?after=" + strconv.FormatInt(cursor, 10)
 }

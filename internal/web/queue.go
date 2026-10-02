@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
@@ -66,18 +67,23 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "queue data source unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	var after int64
-	if raw := r.URL.Query().Get("after"); raw != "" {
-		after, err = strconv.ParseInt(raw, 10, 64)
-		if err != nil || after < 0 {
-			http.Error(w, "invalid after cursor", http.StatusBadRequest)
-			return
-		}
+	state, err := parseQueueViewState(r.URL.Query())
+	if err != nil {
+		http.Error(w, "invalid queue parameters: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// A query that normalizes to nothing (whitespace only) applies no filter, so
+	// it is no search: drop it here, before it reaches the repo, the view, or any
+	// pager link, so the page never claims a search that is not happening. The
+	// search box then shows empty rather than echoing the stray whitespace.
+	if normalize.NormalizeKey(state.Query) == "" {
+		state.Query = ""
 	}
 
 	// Fetch one extra row to know whether another page exists, rather than
 	// guessing from a full page (which would offer an empty "Show more").
-	rows, err := u.reports.ListBucket(r.Context(), bucket, after, queuePageSize+1)
+	rows, err := u.reports.ListBucketFiltered(r.Context(), bucket, reports.BucketFilter{Query: state.Query}, state.After, queuePageSize+1)
 	if err != nil {
 		slog.Error("queue bucket query failed", "bucket", string(bucket), "error", err)
 		http.Error(w, "queue query failed", http.StatusInternalServerError)
@@ -88,7 +94,8 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		rows = rows[:queuePageSize]
 	}
 	info := queueBucketInfo[bucket]
-	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: after}
+	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: state.After,
+		Query: state.Query, StartHref: state.href(string(bucket), 0), ClearHref: (queueViewState{}).href(string(bucket), 0)}
 	// Only the retired bucket can be revived; failed rows are already retried,
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
@@ -97,7 +104,11 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	}
 	if more {
 		view.NextCursor = rows[len(rows)-1].ID
+		view.MoreHref = state.href(string(bucket), view.NextCursor)
 	}
+
+	// Counts only: the query text is library metadata and is never logged.
+	slog.Debug("queue bucket served", "bucket", string(bucket), "searched", state.Query != "", "rows", len(rows), "more", more)
 
 	if r.Header.Get("HX-Request") == "true" {
 		render(w, r, templates.QueueRows(view))

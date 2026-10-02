@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -102,6 +103,27 @@ const MaxBucketLimit = 500
 // Per-row artist/title is deliberate, as for ReviewQueue: this feeds the
 // authenticated, session-gated UI.
 func (r *Repo) ListBucket(ctx context.Context, bucket Bucket, afterID int64, limit int) ([]BucketRow, error) {
+	return r.ListBucketFiltered(ctx, bucket, BucketFilter{}, afterID, limit)
+}
+
+// BucketFilter narrows a bucket listing (#1234). The zero value is no filter.
+// Later discoverability slices add their fields here.
+type BucketFilter struct {
+	// Query is a case-insensitive substring searched in artist and title. It is
+	// normalized with normalize.NormalizeKey, the function that stamps the
+	// stored artist_key/title_key, so the two sides agree on case and accents.
+	// A query that normalizes to empty applies no filter.
+	Query string
+}
+
+// ListBucketFiltered is ListBucket with the filter applied as an extra
+// predicate on the same keyset query, so paging by id is unchanged.
+//
+// The search is instr(artist_key, ?) / instr(title_key, ?) on the normalized
+// keys: a literal substring test, so '%', '_' and backslash in the query match
+// themselves (LIKE would need escaping). The query is bound as a parameter,
+// never concatenated, and never logged by this package.
+func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFilter, afterID int64, limit int) ([]BucketRow, error) {
 	pred, ok := bucketPredicates[bucket]
 	if !ok {
 		return nil, fmt.Errorf("reports: unknown bucket %q", string(bucket))
@@ -112,6 +134,13 @@ func (r *Repo) ListBucket(ctx context.Context, bucket Bucket, afterID int64, lim
 	if limit > MaxBucketLimit {
 		limit = MaxBucketLimit
 	}
+	args := []any{queue.NoReasonRecorded, afterID}
+	search := ""
+	if q := normalize.NormalizeKey(f.Query); q != "" {
+		search = ` AND (instr(artist_key, ?) > 0 OR instr(title_key, ?) > 0)`
+		args = append(args, q, q)
+	}
+	args = append(args, limit)
 	// pred is selected from the constant map above, never from caller input.
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, artist, title, album, status,
@@ -120,9 +149,9 @@ func (r *Repo) ListBucket(ctx context.Context, bucket Bucket, afterID int64, lim
                 COALESCE(status = 'done' AND outcome_type = 'synced'
                  AND ((`+wordTierPredicate+`) OR (`+lineTierPredicate+`)), 0)
          FROM work_queue
-         WHERE id > ? AND (`+pred+`)
+         WHERE id > ? AND (`+pred+`)`+search+`
          ORDER BY id ASC
-         LIMIT ?`, queue.NoReasonRecorded, afterID, limit)
+         LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("reports: list bucket %s: %w", bucket, err)
 	}
