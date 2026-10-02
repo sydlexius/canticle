@@ -525,6 +525,7 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 			v.InstrumentalRows = append(v.InstrumentalRows, templates.InstrumentalRow{
 				ID:              strconv.FormatInt(t.WorkQueueID, 10),
 				Artist:          t.Artist,
+				Album:           t.Album,
 				Title:           t.Title,
 				File:            t.FilePath,
 				DetectRequested: detectRequestedLabel(t.DetectRequested),

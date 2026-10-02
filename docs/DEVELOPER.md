@@ -165,6 +165,7 @@ CI publishes the site to GitHub Pages via `.github/workflows/pages.yml`. The bui
 - Run `make gate` (or `/prep-pr`) before opening a pull request; the pre-push hook is the fast subset described above.
 - Use `slog` for structured logs; `fmt.Printf` only for direct user-facing CLI output (timer, counts).
 - Wrap errors with `fmt.Errorf("context: %w", err)`.
+- Web UI track tables list the identity columns in the order Artist, Album, Title; the album is the library file's own, shown as a dash when empty (`templates.AlbumText`).
 - Formatting, naming, and file layout are enforced by `gofmt` and `.golangci.yml` -- follow the linter.
 
 See `CLAUDE.md` (the "Architecture" orientation and "Package catalog" sections) for a deeper reference on the package surface, architecture, and data flow.

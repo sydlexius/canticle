@@ -31,8 +31,8 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 					<thead>
 						<tr>
 							<th>Artist</th>
-							<th>Title</th>
 							<th>Album</th>
+							<th>Title</th>
 							<th>Status</th>
 							<th>Reason</th>
 							<th>Next attempt</th>
@@ -67,8 +67,8 @@ templ QueueRows(view QueueView) {
 			}
 		>
 			<td>{ row.Artist }</td>
+			<td>{ AlbumText(row.Album) }</td>
 			<td>{ row.Title }</td>
-			<td>{ row.Album }</td>
 			<td>{ row.Status }</td>
 			<td>{ row.Reason }</td>
 			<td class="mx-cell-mono">{ row.NextAttemptAt }</td>

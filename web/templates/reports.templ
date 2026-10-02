@@ -144,8 +144,8 @@ templ tableRecentOutcomes(rows []RecentOutcomeRow) {
 				<thead>
 					<tr>
 						<th scope="col">Artist</th>
-						<th scope="col">Title</th>
 						<th scope="col">Album</th>
+						<th scope="col">Title</th>
 						<th scope="col">Result</th>
 						<th scope="col">Detail</th>
 						<th scope="col">Source</th>
@@ -156,8 +156,8 @@ templ tableRecentOutcomes(rows []RecentOutcomeRow) {
 					for _, r := range rows {
 						<tr>
 							<td>{ r.Artist }</td>
+							<td>{ AlbumText(r.Album) }</td>
 							<td>{ r.Title }</td>
-							<td>{ r.Album }</td>
 							<td class="mx-cell-mono">
 								if r.ResultTierClass != "" {
 									<span class={ r.ResultTierClass } if r.ResultAria != "" { role="img" aria-label={ r.ResultAria } }>{ r.Result }</span>
@@ -213,9 +213,10 @@ templ tableInstrumentals(rows []InstrumentalRow) {
 			<table class="mx-table">
 				<thead>
 					<tr>
-						<th scope="col">ID</th>
 						<th scope="col">Artist</th>
+						<th scope="col">Album</th>
 						<th scope="col">Title</th>
+						<th scope="col">ID</th>
 						<th scope="col">File</th>
 						<th scope="col">Detect requested</th>
 					</tr>
@@ -223,9 +224,10 @@ templ tableInstrumentals(rows []InstrumentalRow) {
 				<tbody>
 					for _, r := range rows {
 						<tr>
-							<td class="mx-cell-mono">{ r.ID }</td>
 							<td>{ r.Artist }</td>
+							<td>{ AlbumText(r.Album) }</td>
 							<td>{ r.Title }</td>
+							<td class="mx-cell-mono">{ r.ID }</td>
 							<td class="mx-cell-mono">{ r.File }</td>
 							<td class="mx-cell-mono">{ r.DetectRequested }</td>
 						</tr>
@@ -302,8 +304,8 @@ templ FailureGroupRows(view FailureGroupView) {
 				<thead>
 					<tr>
 						<th scope="col">Artist</th>
-						<th scope="col">Title</th>
 						<th scope="col">Album</th>
+						<th scope="col">Title</th>
 						<th scope="col">Next attempt</th>
 						<th scope="col">Misses</th>
 						<th scope="col">Attempts</th>
@@ -314,8 +316,8 @@ templ FailureGroupRows(view FailureGroupView) {
 					for _, r := range view.Rows {
 						<tr>
 							<td>{ r.Artist }</td>
+							<td>{ AlbumText(r.Album) }</td>
 							<td>{ r.Title }</td>
-							<td>{ r.Album }</td>
 							<td class="mx-cell-mono">{ r.NextAttemptAt }</td>
 							<td class="mx-cell-mono">{ r.MissCount }</td>
 							<td class="mx-cell-mono">{ r.Attempts }</td>
@@ -340,8 +342,8 @@ templ tableReviewQueue(rows []ReviewQueueRow) {
 				<thead>
 					<tr>
 						<th scope="col">Artist</th>
-						<th scope="col">Title</th>
 						<th scope="col">Album</th>
+						<th scope="col">Title</th>
 						<th scope="col">Outcome</th>
 						<th scope="col">Overrun (s)</th>
 						<th scope="col">Ratio</th>
@@ -352,8 +354,8 @@ templ tableReviewQueue(rows []ReviewQueueRow) {
 					for _, r := range rows {
 						<tr>
 							<td>{ r.Artist }</td>
+							<td>{ AlbumText(r.Album) }</td>
 							<td>{ r.Title }</td>
-							<td>{ r.Album }</td>
 							<td class="mx-cell-mono">{ r.Outcome }</td>
 							<td class="mx-cell-mono">{ r.OverrunSeconds }</td>
 							<td class="mx-cell-mono">{ r.Ratio }</td>

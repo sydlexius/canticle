@@ -626,7 +626,7 @@ func TestInstrumentalInventory(t *testing.T) {
 
 	// Detected instrumental, detection explicitly requested, with a file link.
 	one := insertWorkItem(t, sqlDB, workItem{
-		artist: "Mogwai", title: "Inst", status: "done",
+		artist: "Mogwai", title: "Inst", album: "Invented Album", status: "done",
 		instrumentalResult: 1, detectInstrumental: 1,
 	})
 	sr := insertScanResult(t, sqlDB, libID, "/music/mogwai.flac")
@@ -658,6 +658,12 @@ func TestInstrumentalInventory(t *testing.T) {
 	}
 
 	// First row (lower id): file-linked, detect requested.
+	if got[0].Album != "Invented Album" {
+		t.Errorf("got[0].Album = %q, want the row's own album", got[0].Album)
+	}
+	if got[1].Album != "" {
+		t.Errorf("got[1].Album = %q, want empty", got[1].Album)
+	}
 	if got[0].FilePath != "/music/mogwai.flac" {
 		t.Errorf("got[0].FilePath = %q, want /music/mogwai.flac", got[0].FilePath)
 	}
@@ -1367,5 +1373,76 @@ func TestDeferredMissesTiesOrderByReason(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Reason != "apple" || got[1].Reason != "zebra" {
 		t.Errorf("DeferredMisses = %+v, want apple then zebra", got)
+	}
+}
+
+// TestInstrumentalInventoryAlbumIsPerFile pins that each per-file line carries
+// that file's own album (scan_results.album), falling back to the queue row's
+// album only when the row links at most one file (on a multi-file row it is
+// just one file's album). One collapsed row covers three files, one untagged.
+func TestInstrumentalInventoryAlbumFallbackSingleOrUnlinked(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	libID := insertLibrary(t, sqlDB)
+	single := insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "Single", album: "Single Row Album", status: "done", instrumentalResult: 1,
+	})
+	linkScanResult(t, sqlDB, single, insertScanResult(t, sqlDB, libID, "/music/single.flac"))
+	unlinked := insertWorkItem(t, sqlDB, workItem{
+		artist: "B", title: "Unlinked", album: "Unlinked Row Album", status: "done", instrumentalResult: 1,
+	})
+
+	got, err := repo.InstrumentalInventory(ctx)
+	if err != nil {
+		t.Fatalf("InstrumentalInventory: %v", err)
+	}
+	want := map[int64]string{single: "Single Row Album", unlinked: "Unlinked Row Album"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines, want %d: %+v", len(got), len(want), got)
+	}
+	for _, g := range got {
+		if g.Album != want[g.WorkQueueID] {
+			t.Errorf("row %d: album = %q, want %q", g.WorkQueueID, g.Album, want[g.WorkQueueID])
+		}
+	}
+}
+
+func TestInstrumentalInventoryAlbumIsPerFile(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	libID := insertLibrary(t, sqlDB)
+	wq := insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "T", album: "Row Album", status: "done", instrumentalResult: 1,
+	})
+	one := insertScanResult(t, sqlDB, libID, "/music/one.flac")
+	two := insertScanResult(t, sqlDB, libID, "/music/two.flac")
+	three := insertScanResult(t, sqlDB, libID, "/music/three.flac")
+	for id, album := range map[int64]string{one: "File Album One", two: "File Album Two"} {
+		if _, err := sqlDB.ExecContext(ctx, `UPDATE scan_results SET album = ? WHERE id = ?`, album, id); err != nil {
+			t.Fatalf("set scan_results album: %v", err)
+		}
+	}
+	linkScanResult(t, sqlDB, wq, one)
+	linkScanResult(t, sqlDB, wq, two)
+	linkScanResult(t, sqlDB, wq, three)
+
+	got, err := repo.InstrumentalInventory(ctx)
+	if err != nil {
+		t.Fatalf("InstrumentalInventory: %v", err)
+	}
+	want := map[string]string{
+		"/music/one.flac":   "File Album One",
+		"/music/two.flac":   "File Album Two",
+		"/music/three.flac": "",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines, want %d: %+v", len(got), len(want), got)
+	}
+	for _, g := range got {
+		if g.Album != want[g.FilePath] {
+			t.Errorf("file %s: album = %q, want %q", g.FilePath, g.Album, want[g.FilePath])
+		}
 	}
 }

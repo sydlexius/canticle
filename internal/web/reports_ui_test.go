@@ -335,10 +335,16 @@ func TestReportFragmentInstrumentalRows(t *testing.T) {
 	insertInstrumental(t, sqlDB, "Requested", 1, "/music/a.flac")
 	insertInstrumental(t, sqlDB, "NotRequested", 0, "")
 	insertInstrumental(t, sqlDB, "Defaulted", nil, "")
+	// The Album reaches the view-model and renders (#1244).
+	if _, err := sqlDB.ExecContext(context.Background(),
+		`UPDATE work_queue SET album = 'Invented Album' WHERE title = 'NotRequested'`); err != nil {
+		t.Fatalf("set album: %v", err)
+	}
 	mux := newReportsUIServer(t, sqlDB)
 
 	body := getFragment(t, mux, "instrumental-inventory").Body.String()
 	for _, want := range []string{
+		"Invented Album",
 		"/music/a.flac", "requested", "not requested", "config default",
 		"Requested", "NotRequested", "Defaulted",
 	} {
@@ -685,11 +691,14 @@ func TestFailureReportsEmptyStates(t *testing.T) {
 // while the Recent Outcomes table carries no failed/deferred pill.
 func TestNeedsAttentionSectionRendersApartFromOutcomes(t *testing.T) {
 	rows := buildAttentionRows([]reports.FailureItem{
-		{Title: "f", Status: "failed", Class: failsig.Transient, Reason: "lane x: transport error: <url>", UpdatedAt: "2026-09-01T10:00:00Z"},
+		{Title: "f", Album: "Invented Album", Status: "failed", Class: failsig.Transient, Reason: "lane x: transport error: <url>", UpdatedAt: "2026-09-01T10:00:00Z"},
 		{Title: "d", Status: "deferred", Reason: "orchestrator: lane benign miss (no result)", UpdatedAt: "bogus"},
 	}, nil)
 	if rows[0].State != "failed (transient)" || rows[1].State != "deferred" {
 		t.Fatalf("states = %q, %q", rows[0].State, rows[1].State)
+	}
+	if rows[0].Album != "Invented Album" || rows[1].Album != "" {
+		t.Errorf("albums = %q, %q, want the row's album then empty", rows[0].Album, rows[1].Album)
 	}
 	if rows[0].LastAttempt != "2026-09-01 10:00:00 UTC" || rows[1].LastAttempt != "-" {
 		t.Errorf("last attempt = %q, %q", rows[0].LastAttempt, rows[1].LastAttempt)
