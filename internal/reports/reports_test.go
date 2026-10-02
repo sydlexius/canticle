@@ -46,13 +46,13 @@ type workItem struct {
 	// renders Result='unknown' with its reason one column over.
 	timingOutcome any // string or nil
 	// wordTimingState is work_queue.word_timing_state (#982): nil => NULL (not
-	// examined). Drives ONLY the recheck sweep and the SyncTierCounts
+	// examined). Drives ONLY the recheck sweep and the tier-unknown
 	// 'queued' OR-clause now (#1075 switched the word/line tier source to
 	// syncTier below); "served"/"absent" no longer affect ResultClass.
 	wordTimingState any // string or nil
 	// syncTier is work_queue.sync_tier (#1075): nil => NULL (not yet
 	// classified -- every row predating the column, and the RecentOutcomes/
-	// SyncTierCounts "tier unknown" bucket), "word" => word-synced, "line" =>
+	// ResultsBreakdown "tier unknown" bucket), "word" => word-synced, "line" =>
 	// line-synced, "unsynced" => a corrupted/hand-placed .lrc (also tier
 	// unknown). THIS is the #627 report split's tier source as of #1075.
 	syncTier any // string or nil
@@ -464,184 +464,9 @@ func TestRecentOutcomesWordLineSyncTiers(t *testing.T) {
 	}
 }
 
-// TestSyncTierCounts asserts the dashboard tier-count query splits the same
-// three ways as RecentOutcomes' classification, and that a non-synced row
-// (with or without a sync_tier) never counts toward any tier.
-func TestSyncTierCounts(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := reports.New(sqlDB)
-
-	insertWorkItem(t, sqlDB, workItem{artist: "A1", title: "T1", status: "done", outcomeType: "synced", syncTier: "word"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A2", title: "T2", status: "done", outcomeType: "synced", syncTier: "word"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A3", title: "T3", status: "done", outcomeType: "synced", syncTier: "line"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A4", title: "T4", status: "done", outcomeType: "synced"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A5", title: "T5", status: "done", outcomeType: "synced", syncTier: "unsynced"})
-	// Not synced: must not contribute to any tier, even carrying a tier.
-	insertWorkItem(t, sqlDB, workItem{artist: "A6", title: "T6", status: "done", outcomeType: "unsynced", syncTier: "word"})
-
-	got, err := repo.SyncTierCounts(ctx)
-	if err != nil {
-		t.Fatalf("SyncTierCounts: %v", err)
-	}
-	want := reports.SyncTierCounts{WordSynced: 2, LineSynced: 1, Unknown: 2}
-	if got != want {
-		t.Errorf("SyncTierCounts = %+v, want %+v", got, want)
-	}
-}
-
-// TestSyncTierCountsEmpty asserts a fresh database (no synced rows at all)
-// returns all-zero counts rather than an error or a NULL-scan failure (SQLite
-// SUM over zero rows is NULL).
-func TestSyncTierCountsEmpty(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := reports.New(sqlDB)
-
-	got, err := repo.SyncTierCounts(ctx)
-	if err != nil {
-		t.Fatalf("SyncTierCounts: %v", err)
-	}
-	if got != (reports.SyncTierCounts{}) {
-		t.Errorf("SyncTierCounts on empty db = %+v, want zero value", got)
-	}
-}
-
-// TestSyncTierCountsExcludesStaleSyncedStatuses is the #627 hostile review's I1
-// fix: a row that left outcome_type='synced' behind after it stopped being
-// settled must not count toward any tier. This reproduces the review's own
-// measured cases -- a purgeprovenance-reset 'deferred' row and a
-// RetireMiss-retired 'unavailable' row -- both of which leave outcome_type
-// untouched (see purgeprovenance.resetRows and queue.RetireMiss). Before the
-// status filter, both counted here while RecentOutcomes (status IN
-// ('done','unavailable') -- wait, 'unavailable' DOES show there, but never as
-// 'synced': RetireMiss's miss sentinel wins the CASE) showed neither as
-// tiered, so the tiles silently diverged from the table. Also covers a
-// 'failed' synced+served row (a hypothetical stale shape the review names,
-// covering queue.Fail's stamp-but-fail path) and a 'pending' row (never
-// completed).
-func TestSyncTierCountsExcludesStaleSyncedStatuses(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := reports.New(sqlDB)
-
-	insertWorkItem(t, sqlDB, workItem{artist: "OK", title: "T0", status: "done", outcomeType: "synced", syncTier: "word"})
-	// purgeprovenance.resetRows shape: 'deferred', outcome_type left 'synced',
-	// sync_tier untouched by the reset itself (a pre-existing gap; excluded
-	// here by status='done' regardless).
-	insertWorkItem(t, sqlDB, workItem{artist: "Purged", title: "T1", status: "deferred", outcomeType: "synced"})
-	// A hard-failed row that never got its outcome_type cleared.
-	insertWorkItem(t, sqlDB, workItem{artist: "Failed", title: "T2", status: "failed", outcomeType: "synced", syncTier: "word", lastError: "boom"})
-	// RetireMiss shape: 'unavailable', outcome_type untouched from a prior
-	// completion (RetireMiss's UPDATE never writes outcome_type).
-	insertWorkItem(t, sqlDB, workItem{artist: "Retired", title: "T3", status: "unavailable", outcomeType: "synced", syncTier: "line", lastError: "miss limit reached"})
-	// Never completed at all.
-	insertWorkItem(t, sqlDB, workItem{artist: "Pending", title: "T4", status: "pending", outcomeType: "synced", syncTier: "word"})
-
-	got, err := repo.SyncTierCounts(ctx)
-	if err != nil {
-		t.Fatalf("SyncTierCounts: %v", err)
-	}
-	want := reports.SyncTierCounts{WordSynced: 1, LineSynced: 0, Unknown: 0}
-	if got != want {
-		t.Errorf("SyncTierCounts = %+v, want %+v (only the 'done' row counts)", got, want)
-	}
-}
-
-// TestSyncTierCountsIncludesMidRecheckQueued asserts a row flipped into a
-// word-sync recheck (status='deferred', word_timing_state='queued') still
-// counts, in Unknown, so the tile total does not visibly dip for the duration
-// of a sweep -- the deliberate OR clause the status filter adds alongside the
-// status='done' exclusion above.
-func TestSyncTierCountsIncludesMidRecheckQueued(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := reports.New(sqlDB)
-
-	insertWorkItem(t, sqlDB, workItem{artist: "Queued", title: "T0", status: "deferred", outcomeType: "synced", wordTimingState: "queued"})
-
-	got, err := repo.SyncTierCounts(ctx)
-	if err != nil {
-		t.Fatalf("SyncTierCounts: %v", err)
-	}
-	want := reports.SyncTierCounts{WordSynced: 0, LineSynced: 0, Unknown: 1}
-	if got != want {
-		t.Errorf("SyncTierCounts = %+v, want %+v (mid-recheck row counts as unknown)", got, want)
-	}
-}
-
-// TestSyncTierCountsQueuedRowKeepsStaleTierAsUnknown is the #1085 review's
-// finding 1: a row admitted by the word_timing_state='queued' OR-clause can
-// carry a NON-NULL sync_tier left over from BEFORE its recheck started (an
-// upgrade candidate re-litigating an already-tiered file). That stale tier
-// must not count toward WordSynced/LineSynced -- only Unknown -- until the
-// recheck resettles it, matching TestSyncTierCountsIncludesMidRecheckQueued's
-// contract for the NULL-tier case.
-func TestSyncTierCountsQueuedRowKeepsStaleTierAsUnknown(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := reports.New(sqlDB)
-
-	insertWorkItem(t, sqlDB, workItem{
-		artist: "Requeued", title: "T0", status: "deferred", outcomeType: "synced",
-		syncTier: "word", wordTimingState: "queued",
-	})
-
-	got, err := repo.SyncTierCounts(ctx)
-	if err != nil {
-		t.Fatalf("SyncTierCounts: %v", err)
-	}
-	want := reports.SyncTierCounts{WordSynced: 0, LineSynced: 0, Unknown: 1}
-	if got != want {
-		t.Errorf("SyncTierCounts = %+v, want %+v (queued row's stale tier must not count)", got, want)
-	}
-}
-
-// TestSyncTierCountsExcludesRemediatedRows is the #627 hostile review's I3
-// fix, still enforced under #1075's sync_tier source: a row the timing guard
-// later remediated (quarantined or demoted, #442/#443) must not keep
-// asserting its stale tier, since the remediation may have moved or
-// downgraded the very sidecar the tier was stamped against. Neither
-// remediation path clears sync_tier today, so without this exclusion a
-// quarantined 'word_synced' row would still read "terminal: nothing further
-// to gain" and a demoted 'line_synced' row would still read "upgrade-eligible"
-// even though wordRecheckPredicate (internal/queue/word_timing.go) permanently
-// excludes both timing_outcome values from ever being rechecked.
-func TestSyncTierCountsExcludesRemediatedRows(t *testing.T) {
-	ctx := context.Background()
-	sqlDB := openTestDB(t)
-	repo := reports.New(sqlDB)
-
-	insertWorkItem(t, sqlDB, workItem{artist: "OK", title: "T0", status: "done", outcomeType: "synced", syncTier: "word"})
-	insertWorkItem(t, sqlDB, workItem{
-		artist: "Quarantined", title: "T1", status: "done", outcomeType: "synced",
-		syncTier: "word", timingOutcome: "categorical",
-	})
-	insertWorkItem(t, sqlDB, workItem{
-		artist: "Demoted", title: "T2", status: "done", outcomeType: "synced",
-		syncTier: "line", timingOutcome: "mis_synced",
-	})
-	// A degenerate verdict demotes too (#1082: the revalidate CLI stamps it
-	// without touching outcome_type), so it must route to Unknown as well.
-	insertWorkItem(t, sqlDB, workItem{
-		artist: "Degenerate", title: "T3", status: "done", outcomeType: "synced",
-		syncTier: "line", timingOutcome: "degenerate",
-	})
-
-	got, err := repo.SyncTierCounts(ctx)
-	if err != nil {
-		t.Fatalf("SyncTierCounts: %v", err)
-	}
-	want := reports.SyncTierCounts{WordSynced: 1, LineSynced: 0, Unknown: 3}
-	if got != want {
-		t.Errorf("SyncTierCounts = %+v, want %+v (remediated rows route to Unknown)", got, want)
-	}
-}
-
-// TestRecentOutcomesExcludesRemediatedTier is the RecentOutcomes-side twin of
-// TestSyncTierCountsExcludesRemediatedRows: a quarantined/demoted row's
+// TestRecentOutcomesExcludesRemediatedTier: a quarantined/demoted row's
 // classification falls back to plain ResultSynced rather than asserting its
-// stale word/line tier, so the table and the tiles agree on these rows too.
+// stale word/line tier, so the table and the Results row (see TestResultsBreakdownRemediatedRowsNeverTiered) agree on these rows.
 func TestRecentOutcomesExcludesRemediatedTier(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)

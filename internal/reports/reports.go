@@ -73,7 +73,7 @@ const retiredPredicate = `COALESCE(last_error, '') = '` + queue.UnresolvableGone
 
 // wordTierPredicate is the ONE definition of "this synced row is at the
 // word-synced (terminal) rung" (#553), shared by QueueSummary.Finished and
-// SyncTierCounts.WordSynced so the two dashboard rows cannot disagree. It is
+// ResultsBreakdown.WordSynced so the two dashboard rows cannot disagree. It is
 // decided from sync_tier -- what the FILE on disk is (#1075, stamped from
 // lyrics.WordsLanded or backfilled by lyrics.ClassifyLRCFile) -- never from a
 // provenance header. A remediation now clears sync_tier (#1130), but
@@ -88,7 +88,7 @@ const wordTierPredicate = `sync_tier = 'word'
                       AND COALESCE(word_timing_state, '') <> 'queued'`
 
 // TierUnknownPredicate is the ONE definition of the dashboard's "Synced (tier
-// unknown)" rows (#1143): the Unknown arm of SyncTierCounts, exported so the
+// unknown)" rows (#1143): the tier-unknown arm of ResultsBreakdown, exported so the
 // `scan reconcile-remediated` backfill selects exactly what the tile counts.
 // No leading AND/WHERE.
 const TierUnknownPredicate = `(sync_tier IS NULL
@@ -169,7 +169,7 @@ const (
 	// EXCLUDES a row the timing guard later remediated (timing_outcome
 	// 'categorical'/'mis_synced'/'degenerate', #442/#443/#1082): neither remediation path clears
 	// sync_tier, so such a row reads ResultSynced instead of asserting a stale
-	// tier (see SyncTierCounts).
+	// tier (see ResultsBreakdown).
 	ResultLineSynced ResultClass = "line_synced"
 	// ResultSynced means a synced .lrc was written but its tier is NOT
 	// RECORDED: sync_tier is NULL (unclassified, or the backfill scan could
@@ -316,8 +316,8 @@ type RecentOutcome struct {
 // appears here at all: the flip (queue.MarkWordRecheckQueued) moves the row to
 // status='deferred', and this query's WHERE admits only 'done'/'unavailable',
 // so it is invisible to Recent Outcomes for the whole time it is queued --
-// unlike the sync-tier tiles below, which include it deliberately (see
-// SyncTierCounts). The one 'done'+'queued' shape reachable here is
+// unlike the retired sync-tier tiles, which included it deliberately (see
+// the #1200 removal of SyncTierCounts). The one done+queued shape reachable here is
 // prune.retireUnresolvable's retired row (#1039), which carries whatever
 // sync_tier it had BEFORE the recheck that was still in flight when it
 // retired; the word_timing_state <> 'queued' guard on the word_synced/
@@ -560,81 +560,6 @@ func (r *Repo) CountInstrumental(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("reports: count instrumental: %w", err)
 	}
 	return n, nil
-}
-
-// SyncTierCounts splits the completed-synced population into its three tiers:
-// WordSynced ('word', the #553 terminal rung), LineSynced ('line', still
-// upgrade-eligible), and Unknown (sync_tier NULL/'unsynced', OR a tiered row
-// the timing guard later remediated -- see ResultSynced's doc comment, #1075).
-// The three always sum to the ROW POPULATION this query admits; there is no
-// fourth bucket, so a dashboard counter built from this can never silently
-// merge two tiers into one number the way a single ResultSynced count would.
-type SyncTierCounts struct {
-	WordSynced int64
-	LineSynced int64
-	Unknown    int64
-}
-
-// SyncTierCounts returns the tier split described above, sourced from
-// outcome_type='synced' rows with status='done' OR word_timing_state='queued'
-// (#627 hostile review I1). Matches RecentOutcomes' 'word_synced'/
-// 'line_synced'/'synced' classification population, WITH ONE DELIBERATE
-// DIFFERENCE: RecentOutcomes' WHERE (status IN ('done','unavailable')) can
-// never observe a 'queued' row, because the recheck flip
-// (queue.MarkWordRecheckQueued) always moves status to 'deferred' in the same
-// transaction that stamps 'queued' -- so on RecentOutcomes' own admission
-// criterion, 'queued' rows are already excluded by construction, not by an
-// added predicate. This query is admitting them ON PURPOSE via the OR clause,
-// so a sweep in progress does not make the total (Word+Line+Unknown) dip
-// mid-cycle: a row that leaves the tiles here still counts, in Unknown, until
-// its recheck resettles. Both queries therefore agree on every row
-// RecentOutcomes CAN show; this one additionally counts the in-flight rows
-// RecentOutcomes structurally cannot.
-//
-// WITHOUT THE STATUS FILTER, a row that is no longer settled but still carries
-// a stale outcome_type='synced' would count here while never appearing in
-// Recent Outcomes: purgeprovenance's reset (status='deferred') and RetireMiss
-// (status='unavailable') both leave outcome_type untouched, so such a row
-// would silently inflate "Synced (tier unknown)" forever. status='done'
-// excludes every such row; the word_timing_state='queued' OR-clause is needed
-// because a recheck candidate is deliberately flipped OFF 'done' (to
-// 'deferred') for the duration of the recheck. THIS OR-CLAUSE STILL KEYS ON
-// word_timing_state, unchanged by #1075: a mid-recheck row is drained by that
-// column, not sync_tier.
-//
-// ALSO EXCLUDED FROM WORD_SYNCED/LINE_SYNCED (routed to Unknown instead): a row
-// the timing guard later remediated (timing_outcome IN ('categorical',
-// 'mis_synced', 'degenerate'), #442/#443/#1082). Remediation clears sync_tier now (#1130), but a
-// row remediated by an older build would otherwise keep asserting a stale
-// tier; see ResultLineSynced/ResultSynced.
-//
-// ALSO EXCLUDED, for the SAME reason (#1085 review): a row admitted by the
-// word_timing_state='queued' OR-clause above. sync_tier still holds whatever
-// it was BEFORE the recheck started (the column the recheck may yet change),
-// so counting it toward word/line here would assert a tier the row is mid-way
-// through re-litigating; it counts in Unknown until the recheck resettles,
-// matching RecentOutcomes' own handling of the one reachable done+queued shape
-// (prune.retireUnresolvable's retired row, see that doc comment).
-//
-// TIER SOURCE (#1075): sync_tier, not word_timing_state -- see
-// ResultWordSynced/ResultLineSynced. sync_tier NULL (unclassified) or
-// 'unsynced' (a corrupted/hand-placed .lrc) both route to Unknown.
-func (r *Repo) SyncTierCounts(ctx context.Context) (SyncTierCounts, error) {
-	// SUM over zero matching rows is NULL in SQLite (no synced rows exist yet on
-	// a fresh install), so each total is scanned through sql.NullInt64 and
-	// defaults to 0, matching the QueueEligibility convention above.
-	var wordSynced, lineSynced, unknown sql.NullInt64
-	if err := r.db.QueryRowContext(ctx,
-		`SELECT
-             SUM(CASE WHEN `+wordTierPredicate+` THEN 1 ELSE 0 END),
-             SUM(CASE WHEN `+lineTierPredicate+` THEN 1 ELSE 0 END),
-             SUM(CASE WHEN `+TierUnknownPredicate+` THEN 1 ELSE 0 END)
-         FROM work_queue
-         WHERE outcome_type = 'synced' AND (status = 'done' OR word_timing_state = 'queued')`,
-	).Scan(&wordSynced, &lineSynced, &unknown); err != nil {
-		return SyncTierCounts{}, fmt.Errorf("reports: sync tier counts: %w", err)
-	}
-	return SyncTierCounts{WordSynced: wordSynced.Int64, LineSynced: lineSynced.Int64, Unknown: unknown.Int64}, nil
 }
 
 // FailureGroup is a count of failed/deferred work_queue rows sharing one status
