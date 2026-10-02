@@ -12,6 +12,7 @@ import (
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/realign"
@@ -99,6 +100,10 @@ type timingSweepJob struct {
 	// timestamped one: this pass runs forever, so a file per cycle would litter
 	// the config directory with thousands of mostly-empty records.
 	backupPath string
+	// beforeEditLock, when set, runs just before each move takes its sidecar's
+	// edit lock. A test seam only: it lets a test order a concurrent edit
+	// against the per-move re-check deterministically.
+	beforeEditLock func(sidecar string)
 }
 
 // newTimingSweepJob validates the config and builds the cycle's dependencies,
@@ -365,7 +370,7 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 	// from the backlog whether or not the file was actually moved, so a failed
 	// remediation would be invisible and never retried. Applying first means a
 	// failure is still reflected in what gets stamped below.
-	failedPaths := j.apply(plan.Moves, &res)
+	failedPaths := j.apply(ctx, &plan, &res)
 
 	for _, f := range plan.Findings {
 		if f.ID == 0 {
@@ -405,14 +410,21 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 	return res, nil
 }
 
-// holdEditedRows strips the planned remediation from every finding whose row
-// carries a hand-edit mark, returning how many it held. The finding keeps its
-// verdict, so the row is stamped and leaves the backlog like an off-mode row;
-// its Action is cleared so fileStateFor leaves the row's file state alone.
+// holdEditedRows strips the planned remediation from every sidecar that ANY
+// hand-edited row in the batch reaches, returning how many findings it held.
+// A held finding keeps its verdict, so the row is stamped and leaves the
+// backlog like an off-mode row; its Action is cleared so fileStateFor leaves
+// the row's file state alone.
+//
+// EVERY candidate row is asked, not only the one that planned a move: two rows
+// can reach one sidecar (PlanCandidates' claim), and the later one gets a
+// no-action no_sidecar finding. If that later row is the edited one, asking
+// only the claimant would let an unedited sibling's move remediate the hand
+// edit. So the drop is keyed on the sidecar path, whichever row claimed it.
 func (j *timingSweepJob) holdEditedRows(ctx context.Context, plan *revalidate.Plan) (int, error) {
 	var ids []int64
 	for _, f := range plan.Findings {
-		if f.ID != 0 && f.Action != "" {
+		if f.ID != 0 {
 			ids = append(ids, f.ID)
 		}
 	}
@@ -420,27 +432,40 @@ func (j *timingSweepJob) holdEditedRows(ctx context.Context, plan *revalidate.Pl
 	if err != nil || len(edited) == 0 {
 		return 0, err
 	}
-	// Dropped by sidecar path, and a held path wins over any other finding that
-	// names the same file: the hand edit is what is on disk.
 	drop := map[string]bool{}
+	for _, f := range plan.Findings {
+		if edited[f.ID] && f.Path != "" {
+			drop[sidecarKey(f.Path)] = true
+		}
+	}
+	return holdPaths(plan, drop), nil
+}
+
+// sidecarKey normalizes a sidecar path for comparison. The plan names one
+// sidecar by one derived string (its claim map is keyed on it, and a move's
+// Orphan is that same string), so Clean only absorbs a cosmetic difference.
+func sidecarKey(path string) string { return filepath.Clean(path) }
+
+// holdPaths clears the planned action of every finding on a dropped sidecar
+// path and removes the matching moves, returning how many findings it held.
+func holdPaths(plan *revalidate.Plan, drop map[string]bool) int {
 	held := 0
 	for i := range plan.Findings {
 		f := &plan.Findings[i]
-		if f.Action == "" || !edited[f.ID] {
+		if f.Action == "" || !drop[sidecarKey(f.Path)] {
 			continue
 		}
-		drop[f.Path] = true
 		f.Action, f.KeptText = "", false
 		held++
 	}
 	moves := plan.Moves[:0]
 	for _, mv := range plan.Moves {
-		if !drop[mv.Orphan] {
+		if !drop[sidecarKey(mv.Orphan)] {
 			moves = append(moves, mv)
 		}
 	}
 	plan.Moves = moves
-	return held, nil
+	return held
 }
 
 // candidatesFor turns backlog rows into revalidate candidates, resolving each
@@ -484,21 +509,84 @@ func (j *timingSweepJob) candidatesFor(ctx context.Context, items []queue.WorkIt
 
 // apply runs the planned moves through realign's one apply path and returns the
 // paths whose action FAILED, so the caller can leave those rows unstamped.
-func (j *timingSweepJob) apply(moves []realign.Move, res *timingSweepResult) map[string]struct{} {
+//
+// EACH MOVE IS APPLIED UNDER THE SIDECAR'S EDIT LOCK, AFTER A FRESH MARK CHECK
+// (#1226). holdEditedRows read the marks once, but an editor save can land
+// between that read and the move; lyrics.LockEditPath documents the protocol.
+// Under the lock, a sidecar that any owning row now marks as hand-edited is
+// held exactly as holdEditedRows would have held it. Moves go to realign.Apply
+// one at a time, which keeps its backup-first semantics and one JSONL record
+// per move; the backup file is merely reopened (append) per move.
+func (j *timingSweepJob) apply(ctx context.Context, plan *revalidate.Plan, res *timingSweepResult) map[string]struct{} {
 	failed := map[string]struct{}{}
-	if len(moves) == 0 {
+	if len(plan.Moves) == 0 {
 		return failed
 	}
-	applied, aerr := j.ra.Apply(moves, j.backupPath, realign.Policy{AllowHeuristic: true})
+	// The batch rows reaching each sidecar, so the re-check covers a row whose
+	// own finding planned no move (a later claimant, see holdEditedRows).
+	owners := map[string][]int64{}
+	for _, f := range plan.Findings {
+		if f.ID != 0 && f.Path != "" {
+			k := sidecarKey(f.Path)
+			owners[k] = append(owners[k], f.ID)
+		}
+	}
+	held := map[string]bool{}
+	for _, mv := range plan.Moves {
+		k := sidecarKey(mv.Orphan)
+		if j.beforeEditLock != nil {
+			j.beforeEditLock(mv.Orphan)
+		}
+		unlock := lyrics.LockEditPath(mv.Orphan)
+		edited, cerr := j.sidecarEdited(ctx, mv.Orphan, owners[k])
+		switch {
+		case cerr != nil:
+			// Unknown is not "unedited": leave the file and the row for the next
+			// cycle rather than risk remediating a hand edit.
+			slog.Warn("timing validation sweep: could not re-check the hand-edit mark; leaving the file in place",
+				"path", mv.Orphan, "error", cerr)
+			res.Failed++
+			failed[mv.Orphan] = struct{}{}
+		case edited:
+			held[k] = true
+		default:
+			j.applyOne(mv, res, failed)
+		}
+		unlock()
+	}
+	if len(held) > 0 {
+		// The moves are already consumed; this only clears the held findings'
+		// actions so their rows are stamped without a file-state change.
+		res.EditHeld += holdPaths(plan, held)
+	}
+	return failed
+}
+
+// sidecarEdited reports whether any row owning sidecar carries a hand-edit
+// mark: the batch's own owners, plus every row whose source_path is a same-stem
+// audio sibling (the editor's row may sit outside this batch).
+func (j *timingSweepJob) sidecarEdited(ctx context.Context, sidecar string, batchOwners []int64) (bool, error) {
+	ids, err := j.q.IDsBySourcePaths(ctx, revalidate.SiblingAudioPaths(sidecar))
+	if err != nil {
+		return false, err
+	}
+	edited, err := j.q.LyricEditedAmong(ctx, append(ids, batchOwners...))
+	if err != nil {
+		return false, err
+	}
+	return len(edited) > 0, nil
+}
+
+// applyOne applies one move through realign.Apply and records its outcome.
+func (j *timingSweepJob) applyOne(mv realign.Move, res *timingSweepResult, failed map[string]struct{}) {
+	applied, aerr := j.ra.Apply([]realign.Move{mv}, j.backupPath, realign.Policy{AllowHeuristic: true})
 	if aerr != nil {
 		// Apply returns an error only for a backup-file failure, which is
-		// backup-FIRST: nothing was touched. Treat every move as failed so no row
-		// is stamped for work that did not happen.
+		// backup-FIRST: nothing was touched. The row is left unstamped so no
+		// stamp claims work that did not happen.
 		slog.Error("timing validation sweep: could not write the backup trail; no file was touched", "error", aerr)
-		for _, mv := range moves {
-			failed[mv.Orphan] = struct{}{}
-		}
-		return failed
+		failed[mv.Orphan] = struct{}{}
+		return
 	}
 	for _, a := range applied {
 		if a.Err != nil {
@@ -517,7 +605,6 @@ func (j *timingSweepJob) apply(moves []realign.Move, res *timingSweepResult) map
 		}
 		res.Remedied++
 	}
-	return failed
 }
 
 // timingOutcomeIsTerminal reports whether a finding settles a row for good.

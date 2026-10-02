@@ -158,7 +158,7 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert bo
 	}
 
 	unlock := u.editLocks.lock(id)
-	defer unlock()
+	defer unlock() // released after the path lock below (defers run LIFO)
 	t, err := u.reports.PreviewSource(r.Context(), id)
 	if errors.Is(err, reports.ErrPreviewNotFound) || (err == nil && (!t.LineEditable || t.LRCPath == "")) {
 		http.NotFound(w, r)
@@ -195,6 +195,13 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert bo
 	// restores the prior mark. A revert keeps write-then-clear: the row is
 	// marked throughout, and a failed clear leaves it protected (the safe
 	// direction).
+	//
+	// The per-sidecar edit lock (lyrics.LockEditPath, #1226) is held from
+	// before the mark changes until the file write (and a revert's clear) is
+	// done, so the serve-mode timing sweep, which re-reads the mark under the
+	// same lock before each remediation move, never moves a file mid-edit.
+	unlockPath := lyrics.LockEditPath(t.LRCPath)
+	defer unlockPath()
 	restore := func() {}
 	if !revert {
 		if err := u.editor.Queue.SetLyricEdit(r.Context(), id, offset); err != nil {

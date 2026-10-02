@@ -20,6 +20,7 @@ import (
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
@@ -232,6 +233,35 @@ func TestPreviewEditSerializesPerRow(t *testing.T) {
 	}
 	if n := len(e.ui.editLocks.m); n != 0 {
 		t.Errorf("lock map holds %d entries after release, want 0", n)
+	}
+}
+
+// TestPreviewEditHoldsTheSidecarEditLock (#1226): a save and a revert both
+// wait on the per-sidecar edit lock the timing sweep takes before it moves a
+// file, so the sweep's mark re-check never sees a half-done edit.
+func TestPreviewEditHoldsTheSidecarEditLock(t *testing.T) {
+	e := newEditEnv(t)
+	for _, step := range []struct {
+		route string
+		vals  url.Values
+	}{
+		{"/offset", url.Values{"offset_ms": {"100"}}},
+		{"/revert", url.Values{}},
+	} {
+		unlock := lyrics.LockEditPath(e.lrcP)
+		step.vals.Set("mtime", e.mtime(t))
+		done := make(chan int, 1)
+		go func() { done <- e.post("/preview/"+e.id+step.route, step.vals).Code }()
+		select {
+		case code := <-done:
+			unlock()
+			t.Fatalf("%s ran (%d) while the sidecar's edit lock was held", step.route, code)
+		case <-time.After(150 * time.Millisecond):
+		}
+		unlock()
+		if code := <-done; code != http.StatusOK {
+			t.Fatalf("%s after unlock = %d, want 200", step.route, code)
+		}
 	}
 }
 

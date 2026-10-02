@@ -14,8 +14,10 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/realign"
 	"github.com/sydlexius/canticle/internal/revalidate"
 	"github.com/sydlexius/canticle/internal/scanner"
 	"github.com/sydlexius/canticle/internal/testutil"
@@ -1074,5 +1076,128 @@ func TestRunCycleStampsButNeverRemediatesAHandEdit(t *testing.T) {
 	}
 	if n, err := q.CountTimingBacklog(ctx); err != nil || n != 0 {
 		t.Errorf("backlog = %d, %v; want 0: an edited row must still leave the backlog", n, err)
+	}
+}
+
+// TestHoldEditedRowsDropsAMoveClaimedByAnUneditedSibling (Copilot 4162129607,
+// #1226): two rows reach one sidecar, the unedited one claims the move and the
+// edited one gets a no-action no_sidecar finding. The move must still be held,
+// because the drop is keyed on the sidecar, not on the claimant's mark.
+func TestHoldEditedRowsDropsAMoveClaimedByAnUneditedSibling(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, lrc := sweepFixture(t, nil)
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	first, err := q.IDsBySourcePaths(ctx, []string{audio})
+	if err != nil || len(first) != 1 {
+		t.Fatalf("row lookup = %v, %v; want one row", first, err)
+	}
+	seedBacklogRow(t, q, audio, "Artist", "Title (alt)")
+	both, err := q.IDsBySourcePaths(ctx, []string{audio})
+	if err != nil || len(both) != 2 {
+		t.Fatalf("row lookup = %v, %v; want two rows on one source_path", both, err)
+	}
+	editedID := both[1]
+	if err := q.SetLyricEdit(ctx, editedID, 250); err != nil {
+		t.Fatalf("mark edited: %v", err)
+	}
+	plan := revalidate.Plan{
+		Findings: []revalidate.Finding{
+			{ID: first[0], Path: lrc, Outcome: timing.MisSynced, Action: realign.KindDemote, KeptText: true},
+			{ID: editedID, Path: lrc, Outcome: "no_sidecar"},
+		},
+		Moves: []realign.Move{{Orphan: lrc, Kind: realign.KindDemote}},
+	}
+	held, err := job.holdEditedRows(ctx, &plan)
+	if err != nil {
+		t.Fatalf("holdEditedRows: %v", err)
+	}
+	if held != 1 || len(plan.Moves) != 0 || plan.Findings[0].Action != "" || plan.Findings[0].KeptText {
+		t.Fatalf("held=%d moves=%d first finding=%+v; want held=1, no moves, the claimant's action cleared", held, len(plan.Moves), plan.Findings[0])
+	}
+}
+
+// TestRunCycleHoldsASidecarWhoseEditedRowIsTheLaterClaimant is the same case
+// end to end: the edited row is the SECOND to reach the sidecar.
+func TestRunCycleHoldsASidecarWhoseEditedRowIsTheLaterClaimant(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, lrc := sweepFixture(t, nil)
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	seedBacklogRow(t, q, audio, "Artist", "Title (alt)")
+	ids, err := q.IDsBySourcePaths(ctx, []string{audio})
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("row lookup = %v, %v; want two rows", ids, err)
+	}
+	if err := q.SetLyricEdit(ctx, ids[1], 250); err != nil {
+		t.Fatalf("mark edited: %v", err)
+	}
+	before, err := os.ReadFile(lrc)
+	if err != nil {
+		t.Fatalf("read lrc: %v", err)
+	}
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Remedied != 0 || res.EditHeld != 1 || res.Stamped != 2 {
+		t.Errorf("result = %+v; want Remedied=0 EditHeld=1 Stamped=2", res)
+	}
+	if after, err := os.ReadFile(lrc); err != nil || string(after) != string(before) {
+		t.Errorf("the hand-edited .lrc was touched (err=%v); want it byte-identical", err)
+	}
+}
+
+// TestSweepApplyRechecksTheMarkUnderTheEditLock (CodeRabbit 4162154117,
+// #1226): an editor save holding the sidecar's edit lock sets the mark AFTER
+// the batch's marks were read. The sweep's per-move apply waits on the lock,
+// re-reads the mark, and leaves the file alone.
+func TestSweepApplyRechecksTheMarkUnderTheEditLock(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, lrc := sweepFixture(t, nil)
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	ids, err := q.IDsBySourcePaths(ctx, []string{audio})
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("row lookup = %v, %v; want one row", ids, err)
+	}
+	before, err := os.ReadFile(lrc)
+	if err != nil {
+		t.Fatalf("read lrc: %v", err)
+	}
+
+	// The in-flight edit: holds the lock, has not yet set the mark.
+	unlock := lyrics.LockEditPath(lrc)
+	reached := make(chan struct{})
+	job.beforeEditLock = func(string) { close(reached) }
+	type out struct {
+		res timingSweepResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		res, err := job.runCycle(ctx)
+		done <- out{res, err}
+	}()
+	select {
+	case <-reached:
+	case o := <-done:
+		unlock()
+		t.Fatalf("runCycle returned before reaching the move (%+v, %v)", o.res, o.err)
+	}
+	if err := q.SetLyricEdit(ctx, ids[0], 250); err != nil {
+		unlock()
+		t.Fatalf("mark edited: %v", err)
+	}
+	unlock()
+	o := <-done
+	if o.err != nil {
+		t.Fatalf("runCycle: %v", o.err)
+	}
+	if o.res.Remedied != 0 || o.res.EditHeld != 1 || o.res.Stamped != 1 {
+		t.Errorf("result = %+v; want Remedied=0 EditHeld=1 Stamped=1", o.res)
+	}
+	if after, err := os.ReadFile(lrc); err != nil || string(after) != string(before) {
+		t.Errorf("the sweep moved a sidecar edited while it waited on the lock (err=%v); want it byte-identical", err)
+	}
+	if verdict, outcome := sweepRowVerdict(t, job, ids[0]); verdict != string(timing.MisSynced) || outcome != "synced" {
+		t.Errorf("row = (timing %q, outcome %q); want (mis_synced, synced)", verdict, outcome)
 	}
 }
