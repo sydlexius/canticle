@@ -98,11 +98,11 @@ func TestQueueBucketPastEndSaysNoMoreRows(t *testing.T) {
 func TestBuildQueueRowSettledHasNoNextAttempt(t *testing.T) {
 	stale := "2026-06-17T10:00:00Z"
 	for _, status := range []string{queue.StatusDone, queue.StatusUnavailable} {
-		if got := buildQueueRow(reports.BucketRow{Status: status, NextAttemptAt: stale}).NextAttemptAt; got != "-" {
+		if got := buildQueueRow(reports.BucketRow{Status: status, NextAttemptAt: stale}, reports.BucketSettled).NextAttemptAt; got != "-" {
 			t.Errorf("%s next attempt = %q, want - (stale retry time)", status, got)
 		}
 	}
-	if got := buildQueueRow(reports.BucketRow{Status: queue.StatusDeferred, NextAttemptAt: stale}).NextAttemptAt; got == "-" {
+	if got := buildQueueRow(reports.BucketRow{Status: queue.StatusDeferred, NextAttemptAt: stale}, reports.BucketSettled).NextAttemptAt; got == "-" {
 		t.Errorf("deferred row lost its next attempt")
 	}
 }
@@ -325,7 +325,7 @@ func TestEveryRegisteredRouteIsGuarded(t *testing.T) {
 		"GET /{$}", "GET /dashboard", "GET /reports", "GET /reports/{key}", "GET /config",
 		"GET /settings", "POST /settings/field", "POST /settings/section",
 		"GET /settings/keys", "POST /settings/keys", "POST /settings/keys/revoke",
-		"GET /queue/{bucket}", "GET /reports/failure-group", "GET /preview/{id}/audio",
+		"GET /queue", "GET /queue/{bucket}", "GET /reports/failure-group", "GET /preview/{id}/audio",
 		"GET /queue/unavailable/revive", "POST /queue/unavailable/revive",
 	}
 	have := map[string]bool{}
@@ -361,10 +361,10 @@ func TestQueuePreviewHref(t *testing.T) {
 		row  reports.BucketRow
 		want string
 	}{
-		{"previewable", reports.BucketRow{ID: 7, Status: queue.StatusDone, Previewable: true}, "/preview/7"},
+		{"previewable", reports.BucketRow{ID: 7, Status: queue.StatusDone, Previewable: true}, "/preview/7?from=settled"},
 		{"not previewable", reports.BucketRow{ID: 9, Status: queue.StatusDone}, ""},
 	} {
-		if got := queuePreviewHref(tc.row); got != tc.want {
+		if got := queuePreviewHref(tc.row, reports.BucketSettled); got != tc.want {
 			t.Errorf("%s: href = %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -381,14 +381,14 @@ func TestQueueBucketPreviewLinkOnlyOnSyncedRows(t *testing.T) {
 	}
 	mux := newReportsUIServer(t, sqlDB)
 	finished := getQueue(t, mux, "/queue/finished", false).Body.String()
-	if !strings.Contains(finished, fmt.Sprintf(`href="/preview/%d"`, ids[0])) {
+	if !strings.Contains(finished, fmt.Sprintf(`href="/preview/%d?from=finished"`, ids[0])) {
 		t.Errorf("finished (word) row lacks its preview link")
 	}
 	settled := getQueue(t, mux, "/queue/settled", false).Body.String()
-	if !strings.Contains(settled, fmt.Sprintf(`href="/preview/%d"`, ids[1])) {
+	if !strings.Contains(settled, fmt.Sprintf(`href="/preview/%d?from=settled"`, ids[1])) {
 		t.Errorf("settled line-synced row lacks its preview link")
 	}
-	if strings.Contains(settled, fmt.Sprintf(`href="/preview/%d"`, ids[2])) {
+	if strings.Contains(settled, fmt.Sprintf(`href="/preview/%d?from=settled"`, ids[2])) {
 		t.Errorf("unsynced row must not link to the player")
 	}
 }

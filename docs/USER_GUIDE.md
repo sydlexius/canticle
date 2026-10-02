@@ -331,7 +331,13 @@ The Dashboard requires the web UI to be enabled and an admin session (or a trust
 
 ## Web UI: Lyric preview and offset editor
 
-The Queue page has a **Preview** link on rows whose lyrics file is synced. It opens a player: the track's audio on top, the lyrics below, with the current line highlighted as the audio plays.
+A queue bucket's page (for example Settled) has a **Preview** link on rows whose lyrics file is synced. It opens a player: the track's audio on top, the lyrics below, with the current line highlighted as the audio plays.
+
+### Finding a track to edit
+
+1. Click **Queue** in the sidebar. The page lists each bucket with its track count; the counts are the same as the Dashboard's queue tiles.
+2. Open **Finished** (word-synced tracks) or **Settled (upgradable)** (line-synced and the rest). Only these two hold completed tracks, and the player is reached from them.
+3. Click **Preview** on a row whose lyrics file is synced. The player has a link at the top that returns you to the bucket you came from. Line-synced tracks (the Settled bucket) get the timing editor below; a word-synced (Finished) track opens read-only.
 
 For a line-synced track the player also shows a **Timing offset** panel. Use it when a provider's lyrics are right but consistently early or late against your copy of the recording (a different release or edit than the one the lyrics were timed to).
 
@@ -357,6 +363,10 @@ Keyboard shortcuts work while the panel is on screen:
 While you are typing in the offset field only Esc and the save shortcut are active, so the other keys go into the field. Space or Enter on a focused button presses that button.
 
 The confirmation dialog has a "Don't ask again in this browser" box. The choice is remembered by that browser only, not by the server or other browsers.
+
+### Finding the offset by ear
+
+If you do not know how far off the lyrics are, let your ears find it. Press **Find by ear** (labeled **By ear** on a phone, or the `E` key) to turn the mode on, then click a lyric line: only that line's stretch of the track plays, at the current timing. Listen for which line is actually sung, then click that line. The difference between the line you played and the line you heard becomes the offset. Click the same line again if what you heard matches it, which means its timing is already right. **Replay** repeats the snippet, **Cancel test** drops the pending test and keeps the offset, and **Done** leaves the mode. The result is an unsaved change like any other: check it with Play, fine-tune with the nudges, then Save.
 
 ### What a save does
 

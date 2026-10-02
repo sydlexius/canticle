@@ -33,6 +33,7 @@ func (u *UI) AttachQueueActions(a QueueActions) { u.queueActions = a }
 // registerQueueRoutes registers the queue drill-down routes through reg, so they
 // are guarded exactly like every other page route.
 func (u *UI) registerQueueRoutes(reg routeReg) {
+	reg("GET /queue", u.handleQueueIndex)
 	reg("GET /queue/{bucket}", u.handleQueueBucket)
 	reg("GET /queue/unavailable/revive", u.handleReviveRetiredPreview)
 	reg("POST /queue/unavailable/revive", u.handleReviveRetiredConfirm)
@@ -92,7 +93,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
 	for _, row := range rows {
-		view.Rows = append(view.Rows, buildQueueRow(row))
+		view.Rows = append(view.Rows, buildQueueRow(row, bucket))
 	}
 	if more {
 		view.NextCursor = rows[len(rows)-1].ID
@@ -106,7 +107,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildQueueRow formats one bucket row for display.
-func buildQueueRow(row reports.BucketRow) templates.QueueRow {
+func buildQueueRow(row reports.BucketRow, from reports.Bucket) templates.QueueRow {
 	names := make([]string, 0, len(row.Libraries))
 	for _, l := range row.Libraries {
 		names = append(names, l.Name)
@@ -132,7 +133,7 @@ func buildQueueRow(row reports.BucketRow) templates.QueueRow {
 		Attempts:      strconv.FormatInt(row.Attempts, 10),
 		UpdatedAt:     formatQueueTime(row.UpdatedAt),
 		Libraries:     libs,
-		PreviewHref:   queuePreviewHref(row),
+		PreviewHref:   queuePreviewHref(row, from),
 	}
 }
 
@@ -142,11 +143,15 @@ func buildQueueRow(row reports.BucketRow) templates.QueueRow {
 // disks, the #684 shape), so eligibility is the row's recorded state
 // (BucketRow.Previewable, the dashboard's own tier predicates). A sidecar
 // removed since its tier was stamped is the one case that still 404s.
-func queuePreviewHref(row reports.BucketRow) string {
+//
+// from is the bucket the row is listed in; it rides as ?from= so the player can
+// link back to that list (#1241). The page re-validates it against the bucket
+// allowlist, so a hand-edited value can only fall back to /queue.
+func queuePreviewHref(row reports.BucketRow, from reports.Bucket) string {
 	if !row.Previewable {
 		return ""
 	}
-	return "/preview/" + strconv.FormatInt(row.ID, 10)
+	return "/preview/" + strconv.FormatInt(row.ID, 10) + "?from=" + string(from)
 }
 
 // formatQueueTime renders a stored timestamp in the same display zone as the

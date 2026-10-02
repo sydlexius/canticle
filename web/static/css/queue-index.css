@@ -1,0 +1,7 @@
+/* Queue landing page (#1241). Per-page stylesheet; the table reuses .mx-table. */
+
+.mx-queue-index-hint {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--mx-content-text-secondary);
+}

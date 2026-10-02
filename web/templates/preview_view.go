@@ -36,6 +36,11 @@ type PreviewView struct {
 	Artist string
 	Title  string
 	Album  string
+	// BackHref and BackLabel are the link back to the queue list the player was
+	// opened from (the Preview link's ?from=<bucket>), or to /queue when the
+	// origin is absent or not a known bucket.
+	BackHref  string
+	BackLabel string
 	// AudioSrc is the same-origin audio route for the row.
 	AudioSrc string
 	Lines    []PreviewLine

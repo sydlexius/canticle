@@ -9,7 +9,8 @@ import "strconv"
 // A line-synced row also gets the offset editor panel (#1211); a word-synced
 // one gets a read-only card saying why it cannot be edited.
 templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
-	@Layout("Preview", "", version, reports, "/static/css/preview.css", musixmatchInactive, musixmatchServing) {
+	@Layout("Preview", "/queue", version, reports, "/static/css/preview.css", musixmatchInactive, musixmatchServing) {
+		<p class="mx-preview-back"><a class="mx-text-link" id="mx-preview-back" href={ templ.SafeURL(view.BackHref) }>{ view.BackLabel }</a></p>
 		<h1 class="mx-page-title">{ view.Title }</h1>
 		<p class="mx-page-subtitle">
 			{ view.Artist }
