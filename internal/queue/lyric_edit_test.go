@@ -30,6 +30,30 @@ func TestLyricEditSetClear(t *testing.T) {
 	}
 }
 
+func TestLyricEditedAmong(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	edited := seedUpgradeRow(t, dbh, "edited", "")
+	plain := seedUpgradeRow(t, dbh, "plain", "")
+	if err := q.SetLyricEdit(ctx, edited, 300); err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.LyricEditedAmong(ctx, []int64{edited, plain, 99999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[edited] {
+		t.Errorf("LyricEditedAmong = %v, want only the edited row %d", got, edited)
+	}
+	if got, err := q.LyricEditedAmong(ctx, nil); err != nil || len(got) != 0 {
+		t.Errorf("empty ids = %v, %v; want an empty map", got, err)
+	}
+	_ = dbh.Close()
+	if _, err := q.LyricEditedAmong(ctx, []int64{edited}); err == nil {
+		t.Error("closed database: want an error")
+	}
+}
+
 // Each population is its own test so a mutation of one predicate reddens
 // exactly the test that names it.
 func TestEditedRowSkipsUpgradeUnsyncedArm(t *testing.T) {
