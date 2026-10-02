@@ -40,8 +40,8 @@ const PAGE = `<body>
 
 // load runs preview.js; preError, when set, is the audio.error already present
 // when the script starts (the error fired before the deferred script ran).
-function load({ preError = null } = {}) {
-  const dom = new JSDOM(PAGE, { runScripts: "outside-only", pretendToBeVisual: true, url: "http://localhost/" });
+function load({ preError = null, page = PAGE } = {}) {
+  const dom = new JSDOM(page, { runScripts: "outside-only", pretendToBeVisual: true, url: "http://localhost/" });
   const win = dom.window;
   openWindows.push(win);
   Object.defineProperty(win.document, "readyState", { get: () => "complete" });
@@ -151,6 +151,60 @@ describe("preview.js audio failure", () => {
     expect(p.win.document.querySelector(".mx-edit-nudge").disabled).toBe(false);
     ear.click();
     expect(p.$("mx-ear-banner").hidden).toBe(true);
+  });
+
+  it("words the hint and status line to match the failure kind", () => {
+    const want = {
+      1: ["interrupted", "interrupted"],
+      2: ["network error", "network error"],
+      4: ["cannot play the audio", "cannot be played"],
+    };
+    for (const code of [1, 2, 4]) {
+      const p = load();
+      p.fail(code);
+      const hint = p.win.document.querySelector(".mx-ear-row .mx-edit-hint").textContent;
+      const status = p.$("mx-edit-status").textContent;
+      expect(hint).toContain(want[code][0]);
+      expect(status).toContain(want[code][1]);
+      if (code !== 4) {
+        expect(hint).not.toContain("cannot play");
+        expect(status).not.toContain("cannot be played");
+      }
+      expect(p.$("mx-ear-toggle").disabled).toBe(true);
+    }
+  });
+
+  it("shows the error on a page whose sidecar has no lyric lines", () => {
+    const page = PAGE.replace(/<li class="mx-preview-line"[^>]*>one<\/li>/, "");
+    const p = load({ page });
+    expect(p.win.document.querySelectorAll(".mx-preview-line").length).toBe(0);
+    p.fail(4);
+    expect(p.$("mx-preview-audio-error").hidden).toBe(false);
+    expect(p.errors.filter((e) => e.includes("audio failed")).length).toBe(1);
+  });
+
+  it("logs one console error when a media error lands during a pending snippet", async () => {
+    for (const rejectFirst of [false, true]) {
+      const p = load();
+      const audio = p.$("mx-preview-audio");
+      let reject;
+      audio.play = () => new p.win.Promise((_, rj) => { reject = rj; });
+      p.$("mx-ear-toggle").click();
+      p.win.document.querySelector(".mx-preview-line").click();
+      const settle = async () => {
+        reject(new Error("NotSupportedError"));
+        await new Promise((r) => setTimeout(r, 0));
+      };
+      if (rejectFirst) {
+        p.fail(4);
+        await settle();
+      } else {
+        await settle();
+        p.fail(4);
+      }
+      await new Promise((r) => setTimeout(r, 0));
+      expect(p.errors.length).toBe(1);
+    }
   });
 
   it("leaves a healthy page alone", () => {

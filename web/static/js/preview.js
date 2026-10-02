@@ -151,7 +151,15 @@
             started = true;
           }
         }, function (e) {
-          console.error("preview.js: snippet playback failed", e && e.message);
+          // One failure, one log line (#1243): a media error already logged by
+          // audioFailed owns it; otherwise this logs and tells the page so a
+          // media error landing right behind it does not log a second time.
+          if (!o.audio.error) {
+            console.error("preview.js: snippet playback failed", e && e.message);
+            if (o.onRejectLogged) {
+              o.onRejectLogged();
+            }
+          }
           if (token !== attempt || !pending()) {
             return;
           }
@@ -372,6 +380,12 @@
       onChange: function () {
         render();
       },
+      onRejectLogged: function () {
+        playback.rejectLogged = true;
+        window.setTimeout(function () {
+          playback.rejectLogged = false;
+        }, 250); // covers the gap between the rejection and the error event
+      },
     });
     route.activate = ear.activate;
     earBtn.addEventListener("click", ear.toggle);
@@ -389,7 +403,7 @@
       var v = ear.view();
       earBtn.disabled = isLocked || playback.failed;
       if (earHint) {
-        earHint.textContent = playback.failed ? "Unavailable: this browser cannot play the audio. You can still type an offset or use the nudges." : earHintText;
+        earHint.textContent = playback.failed ? "Unavailable: " + FAILURE_WORDS[playback.kind].hint + " You can still type an offset or use the nudges." : earHintText;
       }
       earBtn.setAttribute("aria-pressed", String(v.on));
       banner.hidden = !v.on;
@@ -471,7 +485,7 @@
         // The panel is always on screen (sticky on a phone), so it carries the
         // audio failure too, whatever the message tone, not only the message
         // beside the player (#1243).
-        msg = [msg[0] + " The audio cannot be played in this browser, so Find by ear is off.", msg[1]];
+        msg = [msg[0] + " " + FAILURE_WORDS[playback.kind].status + " so Find by ear is off.", msg[1]];
       }
       statusEl.textContent = msg[0];
       statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "");
@@ -681,6 +695,18 @@
   // the file's format, and what still works. Codes 3 and 4 (decode, or no
   // supported source) are the unplayable-format case; 4 is also what a missing
   // file reports, so the text allows for it.
+  var FAILURE_WORDS = {
+    interrupted: { hint: "audio playback was interrupted.", status: "Audio playback was interrupted," },
+    network: { hint: "the audio could not be loaded (network error).", status: "The audio could not be loaded (network error)," },
+    unplayable: { hint: "this browser cannot play the audio.", status: "The audio cannot be played in this browser," },
+  };
+
+  // failureKind maps a media error code to the kind that words every surface.
+  function failureKind(audio) {
+    var code = audio.error && audio.error.code;
+    return code === 1 ? "interrupted" : code === 2 ? "network" : "unplayable";
+  }
+
   function audioFailure(audio) {
     var fmt = audio.getAttribute("data-format") || "unknown";
     var type = audio.getAttribute("data-type");
@@ -703,6 +729,41 @@
       return;
     }
     var lines = Array.prototype.slice.call(list.querySelectorAll(".mx-preview-line"));
+    // A stream the browser cannot decode (ALAC outside Safari, WMA, APE, ...)
+    // otherwise just sits silent, so say so in the player and in the console
+    // (#1243). The error may already have fired before this script ran. This is
+    // wired before the no-lines early return so a lyric-less page still says so.
+    var playback = { failed: false, kind: "", onFail: null };
+    var errorBox = document.getElementById("mx-preview-audio-error");
+    function audioFailed() {
+      if (playback.failed) {
+        return; // the event can follow an audio.error already handled below
+      }
+      var msg = audioFailure(audio);
+      if (!playback.rejectLogged) {
+        console.error("preview.js: audio failed: " + msg + " (media error code " + (audio.error ? audio.error.code : "none") + ")");
+      }
+      playback.failed = true;
+      playback.kind = failureKind(audio);
+      if (errorBox) {
+        errorBox.textContent = msg;
+        errorBox.hidden = false;
+      } else {
+        console.error("preview.js: missing #mx-preview-audio-error; failure not shown on the page");
+      }
+      if (playback.onFail) {
+        playback.onFail();
+      }
+    }
+    audio.addEventListener("error", audioFailed);
+    // A <source> child reports its error on itself and does not bubble.
+    Array.prototype.forEach.call(audio.querySelectorAll("source"), function (src) {
+      src.addEventListener("error", audioFailed);
+    });
+    if (audio.error) {
+      audioFailed();
+    }
+
     if (lines.length === 0) {
       console.error("preview.js: no .mx-preview-line elements to sync");
       return;
@@ -848,37 +909,6 @@
     audio.addEventListener("pause", update);
     audio.addEventListener("ended", update);
     update();
-
-    // A stream the browser cannot decode (ALAC outside Safari, WMA, APE, ...)
-    // otherwise just sits silent, so say so in the player and in the console
-    // (#1243). The error may already have fired before this script ran.
-    var playback = { failed: false, onFail: null };
-    var errorBox = document.getElementById("mx-preview-audio-error");
-    function audioFailed() {
-      if (playback.failed) {
-        return; // the event can follow an audio.error already handled below
-      }
-      var msg = audioFailure(audio);
-      console.error("preview.js: audio failed: " + msg + " (media error code " + (audio.error ? audio.error.code : "none") + ")");
-      playback.failed = true;
-      if (errorBox) {
-        errorBox.textContent = msg;
-        errorBox.hidden = false;
-      } else {
-        console.error("preview.js: missing #mx-preview-audio-error; failure not shown on the page");
-      }
-      if (playback.onFail) {
-        playback.onFail();
-      }
-    }
-    audio.addEventListener("error", audioFailed);
-    // A <source> child reports its error on itself and does not bubble.
-    Array.prototype.forEach.call(audio.querySelectorAll("source"), function (src) {
-      src.addEventListener("error", audioFailed);
-    });
-    if (audio.error) {
-      audioFailed();
-    }
 
     var panel = document.getElementById("mx-edit");
     if (panel) {
