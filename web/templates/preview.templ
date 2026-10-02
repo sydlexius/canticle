@@ -27,7 +27,7 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 				// It sits above the player it explains. On a short phone (about 667px tall) the sticky
 				// mobile panel can still overlap it (#1247); the panel's status line repeats the failure.
 				<p id="mx-preview-audio-error" class="mx-preview-notice mx-preview-error" role="alert" hidden></p>
-				<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc } data-format={ view.AudioFormat } data-type={ view.AudioType }></audio>
+				<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc } data-format={ view.AudioFormat } data-type={ view.AudioType } if view.FlacSrc != "" { data-flac-src={ view.FlacSrc } }></audio>
 				if view.Truncated {
 					<p class="mx-preview-notice" role="status">This lyric file is larger than the preview limit; only its first lines are shown.</p>
 				}

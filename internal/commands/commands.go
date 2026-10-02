@@ -1123,6 +1123,19 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			return 1
 		}
 	}
+	// The preview FLAC fallback (#1243) needs ffmpeg only when the web UI and
+	// the key are both on. A failure here costs only the fallback, never serve.
+	var previewFlacFFmpeg string
+	if cfg.Server.WebUIEnabled && cfg.Server.PreviewFlacFallback {
+		previewFlacFFmpeg = ffmpegPath
+		if previewFlacFFmpeg == "" {
+			if p, ferr := resolveFFmpeg(ctx, cfg); ferr != nil {
+				slog.Error("preview FLAC fallback disabled: failed to resolve ffmpeg", "error", ferr)
+			} else {
+				previewFlacFFmpeg = p
+			}
+		}
+	}
 	verifier, err := newVerifier(cfg, ffmpegPath)
 	if err != nil {
 		_ = sqlDB.Close()
@@ -1329,6 +1342,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// The lyric offset editor (#481 Stage 2) judges a save against the
 			// exact audio duration and records its rewrite so the watcher drops it.
 			server.WithLyricEditDeps(audiodur.New(sqlDB, scanner.DurationReaderVersion), selfWrites),
+			server.WithPreviewFlacFallback(previewFlacFFmpeg),
 			// Enable the settings write path (#288 Phase 2): writes go to the
 			// RESOLVED config file (never ""), and secret-field saves route to the
 			// encrypted store rather than the TOML.
@@ -3389,6 +3403,7 @@ func configKeys() []string {
 		"output.word_sync_mode",
 		"db.path",
 		"server.addr",
+		"server.preview_flac_fallback",
 		"server.webhook_api_keys",
 		"server.scan_interval_seconds",
 		"server.scan_schedule.frequency",
@@ -3454,6 +3469,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return cfg.DB.Path, true
 	case "server.addr":
 		return cfg.Server.Addr, true
+	case "server.preview_flac_fallback":
+		return strconv.FormatBool(cfg.Server.PreviewFlacFallback), true
 	case "server.webhook_api_keys":
 		return strings.Join(cfg.Server.WebhookAPIKeys, ","), true
 	case "server.scan_interval_seconds":
@@ -3630,6 +3647,12 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 		cfg.DB.Path = value
 	case "server.addr":
 		cfg.Server.Addr = value
+	case "server.preview_flac_fallback":
+		v, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("server.preview_flac_fallback must be a boolean: %w", err)
+		}
+		cfg.Server.PreviewFlacFallback = v
 	case "server.webhook_api_keys":
 		cfg.Server.WebhookAPIKeys = splitCSV(value)
 	case "server.scan_interval_seconds":

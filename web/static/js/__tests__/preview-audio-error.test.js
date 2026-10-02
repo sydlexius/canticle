@@ -214,3 +214,59 @@ describe("preview.js audio failure", () => {
     expect(p.$("mx-ear-toggle").disabled).toBe(false);
   });
 });
+
+describe("preview.js FLAC fallback (#1243)", () => {
+  const FLAC = "/preview/7/audio.flac";
+  const withFlac = PAGE.replace('data-type="audio/mp4"', 'data-type="audio/mp4" data-flac-src="' + FLAC + '"');
+
+  function loadFlac(opts = {}) {
+    const p = load({ page: withFlac, ...opts });
+    const audio = p.$("mx-preview-audio");
+    let loads = 0;
+    audio.load = () => {
+      loads++;
+    };
+    return { ...p, audio, loads: () => loads };
+  }
+
+  it("retries once against the fallback URL on a decode error, without showing the error", () => {
+    const p = loadFlac();
+    p.fail(4);
+    expect(p.audio.getAttribute("src")).toBe(FLAC);
+    expect(p.loads()).toBe(1);
+    expect(p.$("mx-ear-toggle").disabled).toBe(false);
+    expect(p.$("mx-preview-audio-error").textContent).toContain("Converting");
+    p.audio.dispatchEvent(new p.win.Event("loadedmetadata"));
+    expect(p.$("mx-preview-audio-error").hidden).toBe(true);
+  });
+
+  it("shows the ordinary error, naming the conversion, when the retry fails too", () => {
+    const p = loadFlac();
+    p.fail(4);
+    p.fail(4);
+    expect(p.loads()).toBe(1);
+    const box = p.$("mx-preview-audio-error");
+    expect(box.hidden).toBe(false);
+    expect(box.textContent).toContain("cannot play");
+    expect(box.textContent).toContain("FLAC conversion did not play");
+    expect(p.$("mx-ear-toggle").disabled).toBe(true);
+  });
+
+  it("does not retry a network error", () => {
+    const p = loadFlac();
+    p.fail(2);
+    expect(p.loads()).toBe(0);
+    expect(p.$("mx-preview-audio-error").textContent).toContain("network error");
+  });
+
+  it("does not retry when the page names no fallback", () => {
+    const p = load();
+    const audio = p.$("mx-preview-audio");
+    let loads = 0;
+    audio.load = () => loads++;
+    p.fail(4);
+    expect(loads).toBe(0);
+    expect(audio.hasAttribute("src")).toBe(false);
+    expect(p.$("mx-preview-audio-error").textContent).not.toContain("FLAC");
+  });
+});
