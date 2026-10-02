@@ -1048,7 +1048,6 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 			if err != nil {
 				return err
 			}
-			editHeld += decision.editHeld
 			if decision.reason != "" {
 				// This candidate is declined: either the present-file scan_results
 				// row is already owned by a DIFFERENT work_queue row (merging two
@@ -1092,6 +1091,10 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 				retained = append(retained, row)
 			} else {
 				applied = append(applied, cg.relinked)
+				// Counted only for a candidate that keeps its writes: a
+				// declined one rolls its edit-held rows back with the rest
+				// (CodeRabbit 4162619974).
+				editHeld += decision.editHeld
 			}
 			if _, err := tx.ExecContext(ctx, "RELEASE "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
 				return fmt.Errorf("prune: release relink savepoint: %w", err)
