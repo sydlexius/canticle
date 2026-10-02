@@ -363,7 +363,7 @@ The confirmation dialog has a "Don't ask again in this browser" box. The choice 
 - The first successful save copies the current file to a `.lrc.orig` file beside it (for example `track.lrc.orig`), then writes the shifted file. The backup is created once and never overwritten. If a `.lrc.orig` already exists (for instance from an earlier backfill), it is used as the original and left alone.
 - Later saves are applied to that original, not to the already-shifted file.
 - **Revert to original** writes the original timing back and keeps the `.lrc.orig`. The reverted file is in Canticle's normal form (one line per timestamp), which can differ in layout from a hand-formatted original. Reverting a track that was never edited is refused.
-- Header lines such as `[ar:]` or `[offset:]` are carried over unchanged. The editor never writes or changes an `[offset:]` header; it shifts each line's own timestamp, so the result plays the same in any player, whether or not that player honors `[offset:]`.
+- Header lines such as `[ar:]` or `[offset:]` are carried over unchanged. The editor never writes or changes an `[offset:]` header; it shifts each line's own timestamp. If the file already carries a nonzero `[offset:]`, a player that honors that header applies it on top of the shifted timestamps, so playback can differ from a player that ignores it.
 
 ### When a save is refused
 
@@ -371,12 +371,13 @@ Nothing is written, and the panel says why, when:
 
 - the lyrics file changed on disk since the page loaded (reload the page and edit the current file);
 - the shifted timing fails the timing check against the audio's exact length (an unknown length passes, as everywhere else);
-- the track is being processed right now (try again shortly);
-- the row is not a finished, line-synced file.
+- the track is being processed right now (try again shortly).
+
+The panel only appears for a finished, line-synced file. Any other row shows the player without it, and a row that stops being editable while you are on the page (for example because it was picked up for processing) is refused with a generic error; reload the page to see its current state.
 
 Lines that would start more than 2 seconds after the track ends are marked, and Save stays off until they fit.
 
-A file with word-level timing (an `.elrc` companion, or word marks inside the `.lrc`) is read-only here, and the panel gives the reason: shifting only line starts would put the words out of step.
+A file with word-level timing (a Canticle-written `.elrc` companion, recognized by its `[by:canticle]` header, or word marks inside the `.lrc`) is read-only here, and the panel gives the reason: shifting only line starts would put the words out of step. An `.elrc` written by another tool is ignored and does not block editing.
 
 ### Edited tracks are protected
 
