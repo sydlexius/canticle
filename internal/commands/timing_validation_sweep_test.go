@@ -1201,3 +1201,55 @@ func TestSweepApplyRechecksTheMarkUnderTheEditLock(t *testing.T) {
 		t.Errorf("row = (timing %q, outcome %q); want (mis_synced, synced)", verdict, outcome)
 	}
 }
+
+// TestSweepApplyFailsClosedWhenTheMarkCannotBeRechecked (#1226): an unknown
+// mark is not "unedited". When the per-move re-check errors, the file stays,
+// the action counts as failed, and the row is left unstamped for a retry.
+func TestSweepApplyFailsClosedWhenTheMarkCannotBeRechecked(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, lrc := sweepFixture(t, nil)
+	audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+	ids, err := q.IDsBySourcePaths(ctx, []string{audio})
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("row lookup = %v, %v; want one row", ids, err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Cancel just before the re-check: its queries fail, nothing else ran yet.
+	job.beforeEditLock = func(string) { cancel() }
+	res := timingSweepResult{}
+	// The real planner's move, so the only thing between it and the file is
+	// the re-check.
+	plan, err := job.rev.PlanCandidates(ctx, []revalidate.Candidate{{ID: ids[0], AudioPath: audio, Root: filepath.Dir(filepath.Dir(lrc))}})
+	if err != nil || len(plan.Moves) != 1 {
+		t.Fatalf("plan = %+v, %v; want one move", plan, err)
+	}
+	failed := job.apply(cctx, &plan, &res)
+	if _, bad := failed[lrc]; !bad || res.Failed != 1 || res.Remedied != 0 {
+		t.Errorf("failed=%v res=%+v; want the move failed (Failed=1, Remedied=0)", failed, res)
+	}
+	if _, err := os.Stat(lrc); err != nil {
+		t.Errorf("the sidecar moved although its mark could not be re-checked (stat err=%v)", err)
+	}
+}
+
+// TestSweepApplyBackupFailureTouchesNothing: a backup trail that cannot be
+// opened fails the move before any file changes (realign.Apply is backup-first).
+func TestSweepApplyBackupFailureTouchesNothing(t *testing.T) {
+	ctx := context.Background()
+	job, q, _, lrc := sweepFixture(t, nil)
+	job.backupPath = filepath.Join(t.TempDir(), "missing-dir", "trail.jsonl")
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Remedied != 0 || res.Stamped != 0 {
+		t.Errorf("result = %+v; want nothing remedied or stamped", res)
+	}
+	if _, err := os.Stat(lrc); err != nil {
+		t.Errorf("the sidecar moved without a backup record (stat err=%v)", err)
+	}
+	if n, err := q.CountTimingBacklog(ctx); err != nil || n != 1 {
+		t.Errorf("backlog = %d, %v; want 1: the row stays for a retry", n, err)
+	}
+}
