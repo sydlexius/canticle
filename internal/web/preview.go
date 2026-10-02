@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/timing"
 	"github.com/sydlexius/canticle/web/templates"
 )
 
@@ -152,6 +153,10 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
 		return
 	}
+	// The mtime is taken BEFORE the body is read, so a file replaced in
+	// between leaves the page with a stale mtime and the save refuses as
+	// "changed" (the safe direction).
+	lrcMTime := previewSidecarMTime(roots, t.LRCPath)
 	lrc, lrcCut, ok := readPreviewSidecar(roots, t.LRCPath)
 	if !ok {
 		http.NotFound(w, r)
@@ -172,7 +177,81 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		HasWords:  hasWords,
 		Truncated: lrcCut,
 	}
+	if u.editor != nil && !lrcCut {
+		u.fillPreviewEditor(w, r, &view, t, id, roots, lrcMTime)
+	}
 	render(w, r, templates.PreviewPage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+}
+
+// previewSidecarMTime is the mtime (unix nanoseconds) of a sidecar opened
+// through the same confinement as the reads; 0 when it cannot be opened.
+func previewSidecarMTime(roots []string, p string) int64 {
+	f, fi, ok := openPreviewAudio(roots, p)
+	if !ok {
+		return 0
+	}
+	_ = f.Close()
+	return fi.ModTime().UnixNano()
+}
+
+// fillPreviewEditor sets the lyric offset editor fields (#1211 S5). A
+// line-editable row gets the panel; a word-synced one (by DB tier OR by the
+// parsed file) gets the read-only reason; anything else (not yet classified,
+// unsynced) gets neither. A failed
+// lookup or token degrades to no editor, logged, never a failed page.
+func (u *UI) fillPreviewEditor(w http.ResponseWriter, r *http.Request, view *templates.PreviewView, t reports.PreviewTarget, id int64, roots []string, mtime int64) {
+	// The DB tier can lag the file: a row tiered "line" whose .lrc or owned
+	// .elrc now carries word timing would lose it to a line-only shift, so the
+	// parsed file is consulted too and either signal makes the page read-only.
+	if t.SyncTier == "word" || view.HasWords {
+		view.ReadOnlyReason = "Offset editing works on line-synced files only. This file also has word timing, which a line-only shift would put out of step."
+		return
+	}
+	if !t.LineEditable {
+		return
+	}
+	// The editor's offset is relative to the ORIGINAL, and a save clamps
+	// negative starts to 0, so the shown file cannot be un-shifted on the
+	// client. The original starts come from the server, read exactly as the
+	// save route reads them (.orig when present, else the .lrc).
+	orig, _, err := lyrics.OriginalLines(t.LRCPath, roots)
+	if err != nil {
+		slog.Error("preview editor: original lines unreadable; editor off", "id", id, editErrAttr(err))
+		return
+	}
+	if len(orig) != len(view.Lines) {
+		// The shown file is not a line-for-line shift of the original, so no
+		// original start can be paired with a shown line.
+		slog.Error("preview editor: shown lines do not match the original; editor off", "id", id)
+		return
+	}
+	origMS := make([]string, len(orig))
+	for i, l := range orig {
+		origMS[i] = strconv.Itoa(l.StartMS)
+	}
+	off, edited, err := u.editor.Queue.LyricEdit(r.Context(), id)
+	if err != nil {
+		slog.Error("preview editor: edit state lookup failed; editor off", "id", id, editErrAttr(err))
+		return
+	}
+	if mtime <= 0 {
+		slog.Error("preview editor: sidecar mtime unreadable; editor off", "id", id)
+		return
+	}
+	token, err := ensureCSRFToken(w, r, u.secureRequest(r))
+	if err != nil {
+		slog.Error("preview editor: CSRF token generation failed; editor off", "id", id, "error", err)
+		return
+	}
+	view.Editable = true
+	view.EditURL = "/preview/" + strconv.FormatInt(id, 10)
+	view.OffsetMS = off
+	view.Edited = edited
+	view.MTime = strconv.FormatInt(mtime, 10)
+	view.DurationMS = u.editDuration(r, id, roots, t.AudioPath) * 1000
+	view.CSRFToken = token
+	view.OrigMS = strings.Join(origMS, ",")
+	view.ToleranceMS = int(timing.Tolerance * 1000)
 }
 
 // previewAudioTypes maps a lowercase audio extension to its Content-Type. The

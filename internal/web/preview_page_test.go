@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -233,6 +234,118 @@ func TestPreviewLinesWordSeparatorsAreFaithful(t *testing.T) {
 	stale, hasWords := previewLines("[00:01.00]Hello there\n", "[by:canticle]\n[00:01.00]<00:01.00>Other <00:01.50>words\n")
 	if hasWords || len(stale[0].Words) != 0 {
 		t.Errorf("mismatched companion words attached: %+v", stale[0])
+	}
+}
+
+// editorPage fetches the player page of the editEnv row (the page mints its own
+// CSRF cookie; the test reads the token back from the Set-Cookie).
+func (e *editEnv) editorPage(id string) (*httptest.ResponseRecorder, string) {
+	rec := e.page(id)
+	token := ""
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == CSRFCookieName {
+			token = c.Value
+		}
+	}
+	return rec, token
+}
+
+func TestPreviewPageRendersEditorOnlyForEditableRow(t *testing.T) {
+	e := newEditEnv(t)
+	rec, token := e.editorPage(e.id)
+	body := rec.Body.String()
+	if token == "" {
+		t.Fatal("page set no CSRF cookie")
+	}
+	for _, want := range []string{
+		`id="mx-edit-save"`, `value="` + token + `"`,
+		`data-mtime="` + e.mtime(t) + `"`, `data-duration-ms="30000"`, `data-offset-ms="0"`,
+		`data-save-url="/preview/` + e.id + `/offset"`, `/static/js/keyboard.js`, `id="mx-preview-keys"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("editable page missing %q", want)
+		}
+	}
+	if strings.Contains(body, "data-edited") {
+		t.Error("unedited row rendered data-edited")
+	}
+
+	// A saved edit comes back as the page's saved offset, marked edited.
+	if r := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}}); r.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", r.Code, r.Body)
+	}
+	body = e.page(e.id).Body.String()
+	if !strings.Contains(body, `data-offset-ms="600"`) || !strings.Contains(body, "data-edited") || !strings.Contains(body, `data-mtime="`+e.mtime(t)+`"`) {
+		t.Errorf("edited page does not carry the saved state: %s", body)
+	}
+}
+
+func TestPreviewPageWordSyncedIsReadOnlyAndEditorUnwiredRendersNone(t *testing.T) {
+	e := newEditEnv(t)
+	wordID := itoa(e.seedTier(t, e.writeFile(t, e.root, "other.flac"), "word"))
+	e.put(t, "other.lrc", pageLRC)
+	body := e.page(wordID).Body.String()
+	if strings.Contains(body, `id="mx-edit-save"`) || strings.Contains(body, `id="mx-edit"`) {
+		t.Error("word-synced row rendered the editor")
+	}
+	if !strings.Contains(body, "Offset editing works on line-synced files only") {
+		t.Errorf("word-synced row missing the read-only reason: %s", body)
+	}
+
+	// Without AttachLyricEditor the page is exactly the old player.
+	f := newPreviewFixture(t)
+	id := f.row(t, f.writeFile(t, f.root, "song.flac"))
+	f.put(t, "song.lrc", pageLRC)
+	if b := f.page(itoa(id)).Body.String(); strings.Contains(b, "mx-edit") {
+		t.Error("page without a wired editor rendered editor markup")
+	}
+}
+
+// A negative save clamps an early line to 0 on disk, so the shown file cannot
+// be un-shifted; the page must carry the ORIGINAL starts from the server.
+func TestPreviewPageRendersOriginalStartsAfterAClampedSave(t *testing.T) {
+	e := newEditEnv(t)
+	e.put(t, "song.lrc", "[00:00.10]early\n[00:05.00]later\n")
+	body, _ := e.editorPage(e.id)
+	if !strings.Contains(body.Body.String(), `data-orig-ms="100,5000"`) {
+		t.Fatalf("unedited page original starts wrong: %s", body.Body)
+	}
+	if r := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"-300"}, "mtime": {e.mtime(t)}}); r.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", r.Code, r.Body)
+	}
+	got := e.page(e.id).Body.String()
+	for _, want := range []string{`data-start-ms="0"`, `data-start-ms="4700"`, `data-orig-ms="100,5000"`, `data-offset-ms="-300"`, `data-tolerance-ms="2000"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("clamped-save page missing %q", want)
+		}
+	}
+}
+
+// A shown file that is not a line-for-line shift of its original cannot pair
+// original starts with lines, so the editor is off (fail closed).
+func TestPreviewPageEditorOffWhenOriginalLineCountDiffers(t *testing.T) {
+	e := newEditEnv(t)
+	e.put(t, "song.lrc.orig", "[00:01.00]one\n[00:05.00]two\n")
+	body := e.page(e.id).Body.String()
+	if strings.Contains(body, `id="mx-edit"`) {
+		t.Error("editor rendered although the .lrc and .orig line counts differ")
+	}
+	if !strings.Contains(body, `data-start-ms="9000"`) {
+		t.Error("the player itself must still render")
+	}
+}
+
+// The DB tier can say line while the file carries word timing; the parsed file
+// wins and the page is read-only.
+func TestPreviewPageLineTierWithWordsInFileIsReadOnly(t *testing.T) {
+	e := newEditEnv(t)
+	e.put(t, "song.lrc", "[00:01.00]<00:01.00>Hello <00:01.50>there\n[00:05.00]<00:05.00>two\n")
+	body := e.page(e.id).Body.String()
+	if strings.Contains(body, `id="mx-edit"`) {
+		t.Error("line-tier row whose file has word timing rendered the editor")
+	}
+	if !strings.Contains(body, "Offset editing works on line-synced files only") {
+		t.Error("line-tier row whose file has word timing is missing the read-only reason")
 	}
 }
 
