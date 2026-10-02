@@ -13,15 +13,25 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 		<p class="mx-queue-nav">
 			<a class="mx-queue-link" href="/dashboard">Back to dashboard</a>
 			if view.After > 0 {
-				<a class="mx-queue-link" href={ templ.SafeURL("/queue/" + view.Key) }>Back to start of list</a>
+				<a class="mx-queue-link" href={ templ.SafeURL(view.StartHref) }>Back to start of list</a>
 			}
 			if view.ReviveLink {
 				<a class="mx-queue-link" href="/queue/unavailable/revive">Revive retired tracks</a>
 			}
 		</p>
+		<form class="mx-queue-search" method="get" action={ templ.SafeURL("/queue/" + view.Key) } role="search">
+			<label class="mx-queue-search-label" for="mx-queue-q">Search artist or title</label>
+			<input class="mx-queue-search-input" id="mx-queue-q" type="search" name="q" value={ view.Query } maxlength="200" autocomplete="off"/>
+			<button class="mx-run-button" type="submit">Search</button>
+			if view.Query != "" {
+				<a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear search</a>
+			}
+		</form>
 		if len(view.Rows) == 0 {
 			if view.After > 0 {
 				<p class="mx-dash-empty">No more rows.</p>
+			} else if view.Query != "" {
+				<p class="mx-dash-empty">No tracks match your search. <a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear the search</a> to see every track in this bucket.</p>
 			} else {
 				<p class="mx-dash-empty">No rows in this bucket.</p>
 			}
@@ -88,8 +98,8 @@ templ QueueRows(view QueueView) {
 			<td colspan="11">
 				<a
 					class="mx-run-button mx-queue-more"
-					href={ templ.SafeURL(QueueMoreHref(view.Key, view.NextCursor)) }
-					hx-get={ QueueMoreHref(view.Key, view.NextCursor) }
+					href={ templ.SafeURL(view.MoreHref) }
+					hx-get={ view.MoreHref }
 					hx-target="closest tr"
 					hx-swap="outerHTML"
 				>

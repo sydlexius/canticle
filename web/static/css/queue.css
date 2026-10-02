@@ -91,3 +91,21 @@
 .mx-queue-preview {
   white-space: nowrap;
 }
+
+/* Search form (#1234): wraps on a narrow viewport, never forces page scroll. */
+.mx-queue-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 1rem;
+  font-size: 0.8125rem;
+}
+
+.mx-queue-search-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+  max-width: 24rem;
+  padding: 0.375rem 0.5rem;
+  font: inherit;
+}
