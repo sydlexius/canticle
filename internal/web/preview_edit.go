@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,14 +83,41 @@ func writeEditJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// editErrAttr describes err without the path a *fs.PathError carries (a
-// library path names the artist and title); logs hold the row id only.
+// editErrAttr describes err without any path it may carry (a library path
+// names the artist and title); logs hold the row id only. The wrapping layers
+// of a chain are where callers put paths ("audiodur: lookup %q: %w",
+// *fs.PathError, *os.LinkError), so only the innermost error's text is
+// emitted, plus the operation of a filesystem error. Never err.Error().
 func editErrAttr(err error) slog.Attr {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
-		return slog.String("error", pe.Op+": "+pe.Err.Error())
+		return slog.String("error", pe.Op+": "+innermostErr(pe.Err).Error())
 	}
-	return slog.String("error", err.Error())
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return slog.String("error", le.Op+": "+innermostErr(le.Err).Error())
+	}
+	return slog.String("error", innermostErr(err).Error())
+}
+
+// innermostErr follows the Unwrap chain (the first branch of a joined error)
+// to its leaf.
+func innermostErr(err error) error {
+	for {
+		var next error
+		switch x := err.(type) {
+		case interface{ Unwrap() error }:
+			next = x.Unwrap()
+		case interface{ Unwrap() []error }:
+			if errs := x.Unwrap(); len(errs) > 0 {
+				next = errs[0]
+			}
+		}
+		if next == nil {
+			return err
+		}
+		err = next
+	}
 }
 
 func (u *UI) handlePreviewOffset(w http.ResponseWriter, r *http.Request) {
@@ -140,25 +168,59 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert bo
 	if err == nil {
 		err = rerr
 	}
+	var priorOff int
+	var priorEdited bool
+	if err == nil {
+		priorOff, priorEdited, err = u.editor.Queue.LyricEdit(r.Context(), id)
+	}
 	if err != nil {
 		slog.Error("lyric edit: lookup failed", "id", id, editErrAttr(err))
 		writeEditJSON(w, http.StatusInternalServerError, map[string]string{"error": "lookup"})
 		return
 	}
-	if revert {
-		// Revert undoes a recorded edit. On an unedited row it would only
-		// rewrite the file (and create the .orig no save asked for).
-		var edited bool
-		if _, edited, err = u.editor.Queue.LyricEdit(r.Context(), id); err != nil {
-			slog.Error("lyric edit: lookup failed", "id", id, editErrAttr(err))
-			writeEditJSON(w, http.StatusInternalServerError, map[string]string{"error": "lookup"})
-			return
-		}
-		if !edited {
-			writeEditJSON(w, http.StatusConflict, map[string]string{"error": "not_edited"})
-			return
-		}
+	// Revert undoes a recorded edit. On an unedited row it would only rewrite
+	// the file (and create the .orig no save asked for).
+	if revert && !priorEdited {
+		writeEditJSON(w, http.StatusConflict, map[string]string{"error": "not_edited"})
+		return
 	}
+
+	// Ordering. The sweeps that replace a line-tier .lrc (upgrade, word
+	// recheck) skip a row with lyric_edited_at set, but only when they ADMIT
+	// it. So a save MARKS the row before writing, then re-checks that it is
+	// still a settled line-editable row: once marked no sweep can admit it,
+	// and a row a sweep admitted before the mark is no longer 'done' (or is
+	// word-recheck 'queued'), so the re-check refuses it and the worker's
+	// later write cannot overwrite the hand edit. A failure after the mark
+	// restores the prior mark. A revert keeps write-then-clear: the row is
+	// marked throughout, and a failed clear leaves it protected (the safe
+	// direction).
+	restore := func() {}
+	if !revert {
+		if err := u.editor.Queue.SetLyricEdit(r.Context(), id, offset); err != nil {
+			slog.Error("lyric edit: recording the edit failed", "id", id, editErrAttr(err))
+			writeEditJSON(w, http.StatusInternalServerError, map[string]string{"error": "record"})
+			return
+		}
+		restore = func() { u.restoreLyricEdit(r.Context(), id, priorOff, priorEdited) }
+	}
+	t2, err := u.reports.PreviewSource(r.Context(), id)
+	if err == nil && (!t2.LineEditable || t2.LRCPath != t.LRCPath || t2.AudioPath != t.AudioPath) {
+		restore()
+		writeEditJSON(w, http.StatusConflict, map[string]string{"error": "busy"})
+		return
+	}
+	if err != nil {
+		restore()
+		if errors.Is(err, reports.ErrPreviewNotFound) {
+			writeEditJSON(w, http.StatusConflict, map[string]string{"error": "busy"})
+			return
+		}
+		slog.Error("lyric edit: lookup failed", "id", id, editErrAttr(err))
+		writeEditJSON(w, http.StatusInternalServerError, map[string]string{"error": "lookup"})
+		return
+	}
+
 	var res lyrics.EditResult
 	orig, tags, err := lyrics.OriginalLines(t.LRCPath, roots)
 	if err == nil {
@@ -168,6 +230,9 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert bo
 			DurationSeconds: u.editDuration(r, id, roots, t.AudioPath),
 			SelfWrites:      u.editor.SelfWrites,
 		})
+	}
+	if err != nil {
+		restore()
 	}
 	switch {
 	case errors.Is(err, lyrics.ErrEditRefused):
@@ -187,20 +252,34 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert bo
 		return
 	}
 	if revert {
-		err = u.editor.Queue.ClearLyricEdit(r.Context(), id)
-	} else {
-		err = u.editor.Queue.SetLyricEdit(r.Context(), id, offset)
-	}
-	if err != nil {
-		// The file is already written; the next save re-derives from .orig.
-		slog.Error("lyric edit: recording the edit failed", "id", id, editErrAttr(err))
-		writeEditJSON(w, http.StatusInternalServerError, map[string]string{"error": "record"})
-		return
+		if err := u.editor.Queue.ClearLyricEdit(r.Context(), id); err != nil {
+			// The original is back on disk but the row stays marked, so it
+			// is only over-protected; the next revert clears it.
+			slog.Error("lyric edit: clearing the edit failed", "id", id, editErrAttr(err))
+			writeEditJSON(w, http.StatusInternalServerError, map[string]string{"error": "record"})
+			return
+		}
 	}
 	slog.Info("lyric edit saved", "id", id, "offset_ms", offset, "revert", revert, "created_orig", res.CreatedOrig)
 	writeEditJSON(w, http.StatusOK, map[string]any{
 		"offset_ms": offset, "mtime": res.NewMTime.UnixNano(), "created_orig": res.CreatedOrig,
 	})
+}
+
+// restoreLyricEdit puts back the mark a refused or failed save replaced: the
+// prior offset, or no mark at all. A failed restore leaves the row marked,
+// which only stops automatic upgrades of it (the safe direction), so it is
+// logged and not surfaced.
+func (u *UI) restoreLyricEdit(ctx context.Context, id int64, priorOff int, priorEdited bool) {
+	var err error
+	if priorEdited {
+		err = u.editor.Queue.SetLyricEdit(ctx, id, priorOff)
+	} else {
+		err = u.editor.Queue.ClearLyricEdit(ctx, id)
+	}
+	if err != nil {
+		slog.Error("lyric edit: restoring the prior edit mark failed; row stays marked", "id", id, editErrAttr(err))
+	}
 }
 
 // editDuration is the exact audio duration the timing guard judges against,

@@ -19,6 +19,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
@@ -234,34 +235,163 @@ func TestPreviewEditSerializesPerRow(t *testing.T) {
 	}
 }
 
-// failingEditor records nothing: the file write succeeded, the DB did not.
-type failingEditor struct{ *queue.DBQueue }
-
-func (failingEditor) SetLyricEdit(context.Context, int64, int) error {
-	return &fs.PathError{Op: "set", Path: "/music/Artist/Title.lrc", Err: errors.New("disk I/O error")}
+// hookEditor wraps the real queue so a test can fail the mark or change the
+// row at the moment the route touches it.
+type hookEditor struct {
+	*queue.DBQueue
+	setErr      error
+	onSet       func()
+	onLyricEdit func()
 }
 
-// TestPreviewEditRecordFailure pins the post-write DB failure: a 500 with
-// {"error":"record"}, the file already written, and a log line carrying the
-// row id but never a path.
-func TestPreviewEditRecordFailure(t *testing.T) {
-	e := newEditEnv(t)
-	e.ui.editor.Queue = failingEditor{e.q}
+func (h *hookEditor) SetLyricEdit(ctx context.Context, id int64, off int) error {
+	if h.onSet != nil {
+		h.onSet()
+	}
+	if h.setErr != nil {
+		return h.setErr
+	}
+	return h.DBQueue.SetLyricEdit(ctx, id, off)
+}
+
+func (h *hookEditor) LyricEdit(ctx context.Context, id int64) (int, bool, error) {
+	if h.onLyricEdit != nil {
+		h.onLyricEdit()
+	}
+	return h.DBQueue.LyricEdit(ctx, id)
+}
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
 	var logs bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &logs
+}
+
+// TestPreviewEditRecordFailure pins the mark-first order: a save whose mark
+// cannot be recorded writes nothing (no shift, no .orig), answers 500
+// {"error":"record"}, and logs the row id but never a path.
+func TestPreviewEditRecordFailure(t *testing.T) {
+	e := newEditEnv(t)
+	e.ui.editor.Queue = &hookEditor{DBQueue: e.q,
+		setErr: &fs.PathError{Op: "set", Path: "/music/Artist/Title.lrc", Err: errors.New("disk I/O error")}}
+	logs := captureLogs(t)
 
 	rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}})
 	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"record"`) {
 		t.Fatalf("record failure = %d %s, want 500 record", rec.Code, rec.Body)
 	}
-	if !strings.Contains(e.lrc(t), "[00:01.60]one") {
-		t.Errorf("file not written before the record step:\n%s", e.lrc(t))
+	if e.lrc(t) != editLRC || e.hasOrig() {
+		t.Errorf("an unrecorded save wrote the file (orig=%v):\n%s", e.hasOrig(), e.lrc(t))
 	}
 	got := logs.String()
 	if !strings.Contains(got, "id="+e.id) || strings.Contains(got, "/music") || strings.Contains(got, e.root) {
 		t.Errorf("log must carry the id and no path: %q", got)
+	}
+}
+
+// TestPreviewEditFailureRestoresMark pins the rollback: a save marked first
+// and then refused by the writer leaves the row's mark exactly as it was,
+// whether the row was unedited or already carried an offset.
+func TestPreviewEditFailureRestoresMark(t *testing.T) {
+	for _, prior := range []int{0, 600} {
+		e := newEditEnv(t)
+		if prior != 0 {
+			if rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {strconv.Itoa(prior)}, "mtime": {e.mtime(t)}}); rec.Code != http.StatusOK {
+				t.Fatalf("seed save = %d %s", rec.Code, rec.Body)
+			}
+		}
+		for _, tc := range []struct {
+			name string
+			vals url.Values
+			want int
+		}{
+			{"stale mtime", url.Values{"offset_ms": {"100"}, "mtime": {"1"}}, http.StatusConflict},
+			{"timing", url.Values{"offset_ms": {"60000"}, "mtime": {e.mtime(t)}}, http.StatusUnprocessableEntity},
+		} {
+			if got := e.post("/preview/"+e.id+"/offset", tc.vals).Code; got != tc.want {
+				t.Fatalf("prior %d, %s: %d, want %d", prior, tc.name, got, tc.want)
+			}
+			off, edited, err := e.q.LyricEdit(context.Background(), e.rowID)
+			if err != nil || edited != (prior != 0) || off != prior {
+				t.Errorf("prior %d, %s: mark = %d/%v (%v), want it restored", prior, tc.name, off, edited, err)
+			}
+		}
+	}
+}
+
+// TestPreviewEditRecheckRefusesAdmittedRow pins the re-check after the mark: a
+// row a sweep admitted between the first check and the mark (here, flipped to
+// word-recheck 'queued' at that moment) is refused 409 busy, nothing is
+// written, and the mark is restored. A revert re-checks the same way.
+func TestPreviewEditRecheckRefusesAdmittedRow(t *testing.T) {
+	e := newEditEnv(t)
+	admit := func() {
+		if _, err := e.db.ExecContext(context.Background(),
+			`UPDATE work_queue SET status = 'deferred', word_timing_state = 'queued' WHERE id = ?`, e.rowID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.ui.editor.Queue = &hookEditor{DBQueue: e.q, onSet: admit}
+	rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"busy"`) {
+		t.Fatalf("admitted row save = %d %s, want 409 busy", rec.Code, rec.Body)
+	}
+	if e.lrc(t) != editLRC || e.hasOrig() {
+		t.Errorf("a refused save wrote the file:\n%s", e.lrc(t))
+	}
+	if _, edited, _ := e.q.LyricEdit(context.Background(), e.rowID); edited {
+		t.Error("a refused save left the row marked")
+	}
+
+	// Revert: a recorded edit, then the row is admitted before the re-check.
+	e2 := newEditEnv(t)
+	if rec := e2.post("/preview/"+e2.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e2.mtime(t)}}); rec.Code != http.StatusOK {
+		t.Fatalf("seed save = %d %s", rec.Code, rec.Body)
+	}
+	shifted := e2.lrc(t)
+	e2.ui.editor.Queue = &hookEditor{DBQueue: e2.q, onLyricEdit: func() {
+		if _, err := e2.db.ExecContext(context.Background(),
+			`UPDATE work_queue SET status = 'processing' WHERE id = ?`, e2.rowID); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	rec = e2.post("/preview/"+e2.id+"/revert", url.Values{"mtime": {e2.mtime(t)}})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"busy"`) {
+		t.Fatalf("admitted row revert = %d %s, want 409 busy", rec.Code, rec.Body)
+	}
+	if e2.lrc(t) != shifted {
+		t.Errorf("a refused revert wrote the file:\n%s", e2.lrc(t))
+	}
+	if off, edited, _ := e2.q.LyricEdit(context.Background(), e2.rowID); !edited || off != 600 {
+		t.Errorf("a refused revert changed the mark: %d/%v, want 600/true", off, edited)
+	}
+}
+
+// TestPreviewEditDurationLookupLogIsPathFree pins finding 4: audiodur's lookup
+// error embeds the queried audio path (not as a *fs.PathError), and the
+// route's warning must still carry only the row id.
+func TestPreviewEditDurationLookupLogIsPathFree(t *testing.T) {
+	e := newEditEnv(t)
+	closed, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closed.Close()
+	e.ui.editor.Durations = audiodur.New(closed, "test")
+	logs := captureLogs(t)
+
+	if rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}}); rec.Code != http.StatusOK {
+		t.Fatalf("save with a failing duration store = %d %s, want 200 (fail open)", rec.Code, rec.Body)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "duration lookup failed") || !strings.Contains(got, "id="+e.id) {
+		t.Fatalf("no id-tagged duration warning logged: %q", got)
+	}
+	if strings.Contains(got, e.root) || strings.Contains(got, "song") {
+		t.Errorf("duration warning leaks the audio path: %q", got)
 	}
 }
 
