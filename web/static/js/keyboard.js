@@ -130,6 +130,9 @@
     if (k === "Escape") {
       return "Esc";
     }
+    if (k === " ") {
+      return "Space"; // a bare space would render an empty keycap
+    }
     return k;
   }
 

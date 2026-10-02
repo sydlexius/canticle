@@ -152,6 +152,10 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
 		return
 	}
+	// The mtime is taken BEFORE the body is read, so a file replaced in
+	// between leaves the page with a stale mtime and the save refuses as
+	// "changed" (the safe direction).
+	lrcMTime := previewSidecarMTime(roots, t.LRCPath)
 	lrc, lrcCut, ok := readPreviewSidecar(roots, t.LRCPath)
 	if !ok {
 		http.NotFound(w, r)
@@ -172,7 +176,55 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		HasWords:  hasWords,
 		Truncated: lrcCut,
 	}
+	if u.editor != nil && !lrcCut {
+		u.fillPreviewEditor(w, r, &view, t, id, roots, lrcMTime)
+	}
 	render(w, r, templates.PreviewPage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+}
+
+// previewSidecarMTime is the mtime (unix nanoseconds) of a sidecar opened
+// through the same confinement as the reads; 0 when it cannot be opened.
+func previewSidecarMTime(roots []string, p string) int64 {
+	f, fi, ok := openPreviewAudio(roots, p)
+	if !ok {
+		return 0
+	}
+	_ = f.Close()
+	return fi.ModTime().UnixNano()
+}
+
+// fillPreviewEditor sets the lyric offset editor fields (#1211 S5). A
+// line-editable row gets the panel; a word-synced one gets the read-only
+// reason; anything else (not yet classified, unsynced) gets neither. A failed
+// lookup or token degrades to no editor, logged, never a failed page.
+func (u *UI) fillPreviewEditor(w http.ResponseWriter, r *http.Request, view *templates.PreviewView, t reports.PreviewTarget, id int64, roots []string, mtime int64) {
+	if !t.LineEditable {
+		if t.SyncTier == "word" || view.HasWords {
+			view.ReadOnlyReason = "Offset editing works on line-synced files only. This file also has word timing, which a line-only shift would put out of step."
+		}
+		return
+	}
+	off, edited, err := u.editor.Queue.LyricEdit(r.Context(), id)
+	if err != nil {
+		slog.Error("preview editor: edit state lookup failed; editor off", "id", id, editErrAttr(err))
+		return
+	}
+	if mtime <= 0 {
+		slog.Error("preview editor: sidecar mtime unreadable; editor off", "id", id)
+		return
+	}
+	token, err := ensureCSRFToken(w, r, u.secureRequest(r))
+	if err != nil {
+		slog.Error("preview editor: CSRF token generation failed; editor off", "id", id, "error", err)
+		return
+	}
+	view.Editable = true
+	view.EditURL = "/preview/" + strconv.FormatInt(id, 10)
+	view.OffsetMS = off
+	view.Edited = edited
+	view.MTime = strconv.FormatInt(mtime, 10)
+	view.DurationMS = u.editDuration(r, id, roots, t.AudioPath) * 1000
+	view.CSRFToken = token
 }
 
 // previewAudioTypes maps a lowercase audio extension to its Content-Type. The

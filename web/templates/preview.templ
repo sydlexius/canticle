@@ -1,9 +1,13 @@
 package templates
 
+import "strconv"
+
 // PreviewPage renders the preview player (#481): an audio element sourcing the
 // row's audio route plus the server-rendered lyric lines. Every line carries
 // data-start-ms, and a line with A2 word timing wraps each word in a span with
 // its own data-start-ms, so preview.js highlights and seeks without parsing.
+// A line-synced row also gets the offset editor panel (#1211); a word-synced
+// one gets a read-only card saying why it cannot be edited.
 templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
 	@Layout("Preview", "", version, reports, "/static/css/preview.css", musixmatchInactive, musixmatchServing) {
 		<h1 class="mx-page-title">{ view.Title }</h1>
@@ -13,24 +17,107 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 				<span>- { view.Album }</span>
 			}
 		</p>
-		<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc }></audio>
-		if view.Truncated {
-			<p class="mx-preview-notice" role="status">This lyric file is larger than the preview limit; only its first lines are shown.</p>
+		if view.Editable {
+			<link rel="stylesheet" href="/static/css/keyboard.css"/>
 		}
-		<ol id="mx-preview-lyrics" class="mx-preview-lyrics" data-has-words?={ view.HasWords }>
-			for _, l := range view.Lines {
-				if l.Decorative {
-					<li class="mx-preview-line mx-preview-line-decorative" data-start-ms={ l.StartMS }>{ l.Text }</li>
-				} else if len(l.Words) > 0 {
-					<li class="mx-preview-line" data-start-ms={ l.StartMS }>
-						@previewWords(l)
-					</li>
-				} else {
-					<li class="mx-preview-line" data-start-ms={ l.StartMS }>{ l.Text }</li>
+		<div class="mx-preview-layout" data-editor?={ view.Editable }>
+			<div class="mx-preview-side">
+				<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc }></audio>
+				if view.Truncated {
+					<p class="mx-preview-notice" role="status">This lyric file is larger than the preview limit; only its first lines are shown.</p>
 				}
-			}
-		</ol>
+				if view.ReadOnlyReason != "" {
+					<section class="mx-edit" aria-labelledby="mx-edit-h">
+						<div class="mx-edit-head">
+							<h2 id="mx-edit-h" class="mx-edit-title">Timing offset</h2>
+							<span class="mx-edit-chip is-grey">Word-synced</span>
+						</div>
+						<p class="mx-edit-status" role="status">{ view.ReadOnlyReason }</p>
+					</section>
+				}
+				if view.Editable {
+					@previewEditor(view)
+				}
+			</div>
+			<div class="mx-preview-body">
+				<ol id="mx-preview-lyrics" class="mx-preview-lyrics" data-has-words?={ view.HasWords }>
+					for _, l := range view.Lines {
+						if l.Decorative {
+							<li class="mx-preview-line mx-preview-line-decorative" data-start-ms={ l.StartMS }>{ l.Text }</li>
+						} else if len(l.Words) > 0 {
+							<li class="mx-preview-line" data-start-ms={ l.StartMS }>
+								@previewWords(l)
+							</li>
+						} else {
+							<li class="mx-preview-line" data-start-ms={ l.StartMS }>{ l.Text }</li>
+						}
+					}
+				</ol>
+			</div>
+		</div>
+		if view.Editable {
+			<p id="mx-preview-keys" class="mx-kbd-legend" role="note"></p>
+			<script src="/static/js/keyboard.js" defer></script>
+		}
 		// preview.js (#481) adds the sync; served from /static under script-src 'self'.
 		<script src="/static/js/preview.js" defer></script>
 	}
+}
+
+// previewEditor is the offset editor panel (#1211). All state travels in
+// data-* attributes (the CSP forbids inline scripts and styles); preview.js
+// owns the behavior and writes every status string via textContent.
+templ previewEditor(view PreviewView) {
+	<section
+		id="mx-edit"
+		class="mx-edit"
+		aria-labelledby="mx-edit-h"
+		data-save-url={ view.EditURL + "/offset" }
+		data-revert-url={ view.EditURL + "/revert" }
+		data-offset-ms={ strconv.Itoa(view.OffsetMS) }
+		data-mtime={ view.MTime }
+		data-duration-ms={ strconv.Itoa(view.DurationMS) }
+		data-edited?={ view.Edited }
+	>
+		<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+		<div class="mx-edit-head">
+			<h2 id="mx-edit-h" class="mx-edit-title">Timing offset</h2>
+			<span id="mx-edit-chip" class="mx-edit-chip is-grey">Original</span>
+		</div>
+		<div class="mx-edit-readout">
+			<label for="mx-edit-offset" class="mx-sr-only">Offset in seconds</label>
+			<input id="mx-edit-offset" class="mx-edit-offset" type="text" inputmode="decimal" value="0.00" title="Type an offset in seconds, then press Enter"/>
+			<span class="mx-edit-unit">s</span>
+		</div>
+		<div class="mx-edit-slide">
+			<label for="mx-edit-slider" class="mx-edit-hint">Drag for a rough fit, fine-tune with the buttons, or type any value above</label>
+			<input id="mx-edit-slider" class="mx-edit-slider" type="range" min="-5000" max="5000" step="10" value="0"/>
+			<div class="mx-edit-scale"><span>-5 s</span><span>0</span><span>+5 s</span></div>
+		</div>
+		<div class="mx-edit-nudges" role="group" aria-label="Nudge timing">
+			<button type="button" class="mx-edit-nudge" data-delta="-1000" aria-label="Earlier by 1 second">-1s</button>
+			<button type="button" class="mx-edit-nudge" data-delta="-100" aria-label="Earlier by 100 milliseconds">-0.1</button>
+			<button type="button" class="mx-edit-nudge" data-delta="-10" aria-label="Earlier by 10 milliseconds">-0.01</button>
+			<button type="button" class="mx-edit-nudge" data-delta="10" aria-label="Later by 10 milliseconds">+0.01</button>
+			<button type="button" class="mx-edit-nudge" data-delta="100" aria-label="Later by 100 milliseconds">+0.1</button>
+			<button type="button" class="mx-edit-nudge" data-delta="1000" aria-label="Later by 1 second">+1s</button>
+		</div>
+		<div class="mx-edit-scale"><span>Lyrics earlier</span><span>Lyrics later</span></div>
+		<div class="mx-edit-actions">
+			<button type="button" id="mx-edit-save" class="mx-edit-btn is-primary" disabled>Save</button>
+			<button type="button" id="mx-edit-discard" class="mx-edit-btn" disabled>Discard</button>
+			<button type="button" id="mx-edit-revert" class="mx-edit-link" hidden>Revert to original</button>
+		</div>
+		<p id="mx-edit-status" class="mx-edit-status" role="status"></p>
+		<dialog id="mx-edit-confirm" class="mx-edit-dialog" aria-labelledby="mx-edit-confirm-h" aria-describedby="mx-edit-confirm-body">
+			<h2 id="mx-edit-confirm-h" class="mx-edit-title">Save the new timing?</h2>
+			<p class="mx-edit-confirm-offset"><span id="mx-edit-confirm-offset"></span> <span class="mx-edit-hint">from the original</span></p>
+			<p id="mx-edit-confirm-body" class="mx-edit-confirm-body"></p>
+			<label class="mx-edit-skip"><input id="mx-edit-skip" type="checkbox"/> Don't ask again in this browser</label>
+			<div class="mx-edit-dialog-actions">
+				<button type="button" id="mx-edit-confirm-cancel" class="mx-edit-btn">Cancel</button>
+				<button type="button" id="mx-edit-confirm-ok" class="mx-edit-btn is-primary">Save</button>
+			</div>
+		</dialog>
+	</section>
 }

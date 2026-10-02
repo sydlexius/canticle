@@ -20,8 +20,51 @@
 // scroll event the script did not cause (e.g. dragging the scrollbar) also
 // pauses following; scrolls caused by scrollIntoView are told apart by a short
 // "programmatic" window that lasts until scroll events go quiet. Motion is instant under prefers-reduced-motion, smooth otherwise.
+//
+// Offset editor (#1211): when the page carries #mx-edit, nudging shifts the
+// in-memory line starts (highlight, seek and the shown times) only; nothing is
+// written until Save, which POSTs the total offset and the mtime the page
+// loaded with. Pure helpers are exported on window.mxPreviewEdit for tests.
 (function () {
   "use strict";
+
+  var TOLERANCE_MS = 2000; // timing.Tolerance: lines this far past the end are refused
+  var MAX_OFFSET_MS = 600000;
+  var SKIP_KEY = "mx-offset-confirm-skip";
+
+  // parseOffset reads a typed offset in seconds ("-7.25", "+0.6", "1,5") and
+  // returns ms rounded to 10, or null for anything else or |ms| > 600000.
+  function parseOffset(text) {
+    var t = String(text).trim().replace(",", ".");
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(t)) {
+      return null;
+    }
+    var ms = Math.round(parseFloat(t) * 100) * 10;
+    return Math.abs(ms) > MAX_OFFSET_MS ? null : ms;
+  }
+
+  // pastEnd counts the (non-decorative) line starts that the offset would put
+  // more than TOLERANCE_MS after the audio end; 0 when the duration is unknown.
+  function pastEnd(startsMs, offsetMs, durationMs) {
+    if (!(durationMs > 0)) {
+      return 0;
+    }
+    return startsMs.filter(function (s) {
+      return Math.max(0, s + offsetMs) > durationMs + TOLERANCE_MS;
+    }).length;
+  }
+
+  window.mxPreviewEdit = { parseOffset: parseOffset, pastEnd: pastEnd };
+
+  function fmtTime(ms) {
+    var m = Math.floor(ms / 60000);
+    var r = (ms % 60000) / 1000;
+    return m + ":" + (r < 10 ? "0" : "") + r.toFixed(2);
+  }
+
+  function fmtOffset(ms) {
+    return (ms > 0 ? "+" : ms < 0 ? "-" : "") + (Math.abs(ms) / 1000).toFixed(2);
+  }
 
   var SCROLL_KEYS = ["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown", " "];
 
@@ -57,6 +100,282 @@
       }
     }
     return found;
+  }
+
+  // initEditor wires the offset editor. lineStarts is mutated in place so the
+  // highlight and click-to-seek in init() follow the shifted times.
+  function initEditor(panel, audio, lines, lineStarts, update) {
+    var $ = function (id) {
+      return document.getElementById(id);
+    };
+    // The page shows the file as saved, which is the ORIGINAL shifted by the
+    // saved offset; the offset is always relative to the original, so undo it.
+    // (A line the save clamped to 0 cannot be recovered exactly; it only affects
+    // the preview of such a line, the server recomputes from the original.)
+    var savedMS = Number(panel.getAttribute("data-offset-ms")) || 0;
+    var base = lineStarts.map(function (s) {
+      return Math.max(0, s - savedMS);
+    });
+    var live = lines.map(function (li) {
+      return !li.classList.contains("mx-preview-line-decorative");
+    });
+    var times = lines.map(function (li) {
+      var t = document.createElement("span");
+      t.className = "mx-preview-time";
+      li.insertBefore(t, li.firstChild);
+      return t;
+    });
+    var field = $("mx-edit-offset");
+    var slider = $("mx-edit-slider");
+    var save = $("mx-edit-save");
+    var discard = $("mx-edit-discard");
+    var revert = $("mx-edit-revert");
+    var chip = $("mx-edit-chip");
+    var statusEl = $("mx-edit-status");
+    var dialog = $("mx-edit-confirm");
+    var nudgers = Array.prototype.slice.call(panel.querySelectorAll(".mx-edit-nudge"));
+    var duration = Number(panel.getAttribute("data-duration-ms")) || 0;
+    var token = panel.querySelector('input[name="csrf_token"]');
+    var st = {
+      offset: savedMS,
+      saved: savedMS,
+      edited: panel.hasAttribute("data-edited"),
+      mtime: panel.getAttribute("data-mtime"),
+      phase: "idle",
+    };
+
+    function skipAsking() {
+      try {
+        return window.localStorage.getItem(SKIP_KEY) === "1";
+      } catch (e) {
+        return false; // storage blocked: ask every time
+      }
+    }
+
+    var MESSAGES = {
+      saving: ["Saving. The original file is backed up first.", ""],
+      "refused-timing": ["Not saved: the timing check failed for this offset. Nothing was written.", "error"],
+      "refused-changed": ["Not saved: the lyrics file changed on disk since this page loaded. Reload to edit the current file.", "error"],
+      busy: ["Not saved: the track is being processed. Try again shortly.", "error"],
+      error: ["Not saved: the server could not complete the request. Reload to see the file's current state.", "error"],
+      saved: ["Saved. The original is kept as a backup, so Revert can restore it.", "ok"],
+      reverted: ["Reverted. The file is back to its original timing.", "ok"],
+    };
+
+    function render() {
+      var starts = [];
+      lines.forEach(function (li, i) {
+        lineStarts[i] = Math.max(0, base[i] + st.offset);
+        times[i].textContent = fmtTime(lineStarts[i]);
+        if (live[i]) {
+          starts.push(base[i]);
+        }
+        li.classList.toggle("is-past-end", live[i] && duration > 0 && lineStarts[i] > duration + TOLERANCE_MS);
+      });
+      var past = pastEnd(starts, st.offset, duration);
+      var dirty = st.offset !== st.saved;
+      var busy = st.phase === "saving";
+      var locked = busy || st.phase === "refused-changed";
+      field.value = fmtOffset(st.offset);
+      slider.value = String(Math.max(-5000, Math.min(5000, st.offset)));
+      nudgers.concat([field, slider]).forEach(function (c) {
+        c.disabled = locked;
+      });
+      save.disabled = !dirty || past > 0 || locked;
+      save.textContent = busy ? "Saving" : "Save";
+      discard.disabled = !dirty || busy;
+      revert.hidden = !(st.edited && !dirty) || busy;
+      var tone = busy ? "blue" : dirty ? "amber" : st.edited ? "green" : "grey";
+      chip.textContent = busy ? "Saving" : dirty ? "Unsaved" : st.edited ? "Edited" : "Original";
+      chip.className = "mx-edit-chip is-" + tone;
+      var msg;
+      if (past > 0) {
+        msg = [past + (past === 1 ? " line would" : " lines would") + " start more than 2 s after the track ends (" + fmtTime(duration).replace(/\.\d+$/, "") + "). Save is off until they fit.", "warn"];
+      } else if (MESSAGES[st.phase]) {
+        msg = MESSAGES[st.phase];
+      } else if (dirty) {
+        msg = ["Play the track and nudge until the lines land. Nothing is written until you save.", ""];
+      } else if (st.edited) {
+        msg = ["This file is " + fmtOffset(st.saved).replace(/^[+-]/, "") + " s " + (st.saved > 0 ? "later" : "earlier") + " than the original.", ""];
+      } else {
+        msg = ["Matches the original file. Nudge while it plays to line the lyrics up.", ""];
+      }
+      statusEl.textContent = msg[0];
+      statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "");
+      update();
+    }
+
+    function setOffset(ms) {
+      if (st.phase === "saving" || st.phase === "refused-changed") {
+        return;
+      }
+      st.offset = Math.max(-MAX_OFFSET_MS, Math.min(MAX_OFFSET_MS, ms));
+      st.phase = "idle";
+      render();
+    }
+
+    nudgers.forEach(function (b) {
+      b.addEventListener("click", function () {
+        setOffset(st.offset + Number(b.getAttribute("data-delta")));
+      });
+    });
+    slider.addEventListener("input", function () {
+      setOffset(parseInt(slider.value, 10) || 0);
+    });
+    field.addEventListener("change", function () {
+      var ms = parseOffset(field.value);
+      if (ms === null) {
+        render(); // invalid input is ignored: put the current value back
+      } else {
+        setOffset(ms);
+      }
+    });
+    field.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        field.dispatchEvent(new window.Event("change"));
+      }
+    });
+    discard.addEventListener("click", function () {
+      if (st.phase !== "saving") {
+        st.offset = st.saved;
+        st.phase = "idle";
+        render();
+      }
+    });
+
+    // post sends one edit. The response mtime is unix nanoseconds, beyond 2^53,
+    // so it is read from the text and kept as a string, never via JSON.parse.
+    function post(url, offsetMs, isRevert) {
+      st.phase = "saving";
+      render();
+      var body = new window.URLSearchParams();
+      body.append("mtime", st.mtime);
+      body.append("csrf_token", token ? token.value : "");
+      if (!isRevert) {
+        body.append("offset_ms", String(offsetMs));
+      }
+      return window
+        .fetch(url, { method: "POST", body: body, credentials: "same-origin" })
+        .then(function (res) {
+          return res.text().then(function (text) {
+            var data = {};
+            try {
+              data = JSON.parse(text);
+            } catch (e) {
+              data = {};
+            }
+            if (res.ok) {
+              var m = /"mtime"\s*:\s*(\d+)/.exec(text);
+              if (m) {
+                st.mtime = m[1];
+              }
+              st.saved = isRevert ? 0 : offsetMs;
+              st.offset = st.saved;
+              st.edited = !isRevert;
+              st.phase = isRevert ? "reverted" : "saved";
+            } else {
+              st.phase = { timing: "refused-timing", changed: "refused-changed", busy: "busy" }[data.error] || "error";
+            }
+            render();
+          });
+        })
+        .catch(function (e) {
+          console.error("preview.js: edit request failed", e && e.message);
+          st.phase = "error";
+          render();
+        });
+    }
+
+    function requestSave() {
+      if (save.disabled) {
+        return;
+      }
+      if (skipAsking()) {
+        post(panel.getAttribute("data-save-url"), st.offset, false);
+        return;
+      }
+      $("mx-edit-confirm-offset").textContent = fmtOffset(st.offset) + " s";
+      $("mx-edit-confirm-body").textContent = st.edited
+        ? "This rewrites the lyrics file with the new timing. Your backup of the original already exists and is kept unchanged."
+        : "This rewrites the lyrics file with the new timing. The original is first copied to a .lrc.orig file beside it, so Revert can always restore it.";
+      dialog.showModal();
+    }
+    save.addEventListener("click", requestSave);
+    revert.addEventListener("click", function () {
+      post(panel.getAttribute("data-revert-url"), 0, true);
+    });
+    $("mx-edit-confirm-cancel").addEventListener("click", function () {
+      dialog.close();
+    });
+    $("mx-edit-confirm-ok").addEventListener("click", function () {
+      if ($("mx-edit-skip").checked) {
+        try {
+          window.localStorage.setItem(SKIP_KEY, "1");
+        } catch (e) {
+          // blocked storage only means the dialog appears again next time
+        }
+      }
+      dialog.close();
+      post(panel.getAttribute("data-save-url"), st.offset, false);
+    });
+
+    var kb = window.mxKeyboard;
+    if (!kb) {
+      console.error("preview.js: keyboard.js did not load; editor shortcuts are off");
+    } else {
+      var step = function (d) {
+        return function () {
+          if (!dialog.open) {
+            setOffset(st.offset + d);
+          }
+        };
+      };
+      kb.register({
+        keys: [" "],
+        label: "play / pause",
+        handler: function (e) {
+          // A focused lyric line seeks on Space itself.
+          if (!e.target.classList.contains("mx-preview-line")) {
+            if (audio.paused) {
+              audio.play();
+            } else {
+              audio.pause();
+            }
+          }
+        },
+      });
+      kb.register({ keys: ["["], label: "-0.1 s", handler: step(-100) });
+      kb.register({ keys: ["]"], label: "+0.1 s", handler: step(100) });
+      kb.register({ keys: ["Shift", "["], label: "-1 s", handler: step(-1000) });
+      kb.register({ keys: ["Shift", "]"], label: "+1 s", handler: step(1000) });
+      kb.register({ keys: ["Alt", "["], label: "-0.01 s", handler: step(-10) });
+      kb.register({ keys: ["Alt", "]"], label: "+0.01 s", handler: step(10) });
+      kb.register({
+        keys: ["Mod", "S"],
+        label: "save",
+        allowInInput: true,
+        handler: function () {
+          if (!dialog.open) {
+            requestSave();
+          }
+        },
+      });
+      kb.register({
+        keys: ["Escape"],
+        label: "discard",
+        allowInInput: true,
+        handler: function () {
+          if (dialog.open) {
+            dialog.close();
+          } else {
+            discard.click();
+          }
+        },
+      });
+      kb.renderLegend($("mx-preview-keys"));
+    }
+    render();
   }
 
   function init() {
@@ -206,6 +525,11 @@
     audio.addEventListener("pause", update);
     audio.addEventListener("ended", update);
     update();
+
+    var panel = document.getElementById("mx-edit");
+    if (panel) {
+      initEditor(panel, audio, lines, lineStarts, update);
+    }
   }
 
   if (document.readyState === "loading") {

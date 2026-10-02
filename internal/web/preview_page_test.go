@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -233,6 +234,70 @@ func TestPreviewLinesWordSeparatorsAreFaithful(t *testing.T) {
 	stale, hasWords := previewLines("[00:01.00]Hello there\n", "[by:canticle]\n[00:01.00]<00:01.00>Other <00:01.50>words\n")
 	if hasWords || len(stale[0].Words) != 0 {
 		t.Errorf("mismatched companion words attached: %+v", stale[0])
+	}
+}
+
+// editorPage fetches the player page of the editEnv row (the page mints its own
+// CSRF cookie; the test reads the token back from the Set-Cookie).
+func (e *editEnv) editorPage(id string) (*httptest.ResponseRecorder, string) {
+	rec := e.page(id)
+	token := ""
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == CSRFCookieName {
+			token = c.Value
+		}
+	}
+	return rec, token
+}
+
+func TestPreviewPageRendersEditorOnlyForEditableRow(t *testing.T) {
+	e := newEditEnv(t)
+	rec, token := e.editorPage(e.id)
+	body := rec.Body.String()
+	if token == "" {
+		t.Fatal("page set no CSRF cookie")
+	}
+	for _, want := range []string{
+		`id="mx-edit-save"`, `value="` + token + `"`,
+		`data-mtime="` + e.mtime(t) + `"`, `data-duration-ms="30000"`, `data-offset-ms="0"`,
+		`data-save-url="/preview/` + e.id + `/offset"`, `/static/js/keyboard.js`, `id="mx-preview-keys"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("editable page missing %q", want)
+		}
+	}
+	if strings.Contains(body, "data-edited") {
+		t.Error("unedited row rendered data-edited")
+	}
+
+	// A saved edit comes back as the page's saved offset, marked edited.
+	if r := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}}); r.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", r.Code, r.Body)
+	}
+	body = e.page(e.id).Body.String()
+	if !strings.Contains(body, `data-offset-ms="600"`) || !strings.Contains(body, "data-edited") || !strings.Contains(body, `data-mtime="`+e.mtime(t)+`"`) {
+		t.Errorf("edited page does not carry the saved state: %s", body)
+	}
+}
+
+func TestPreviewPageWordSyncedIsReadOnlyAndEditorUnwiredRendersNone(t *testing.T) {
+	e := newEditEnv(t)
+	wordID := itoa(e.seedTier(t, e.writeFile(t, e.root, "other.flac"), "word"))
+	e.put(t, "other.lrc", pageLRC)
+	body := e.page(wordID).Body.String()
+	if strings.Contains(body, `id="mx-edit-save"`) || strings.Contains(body, `id="mx-edit"`) {
+		t.Error("word-synced row rendered the editor")
+	}
+	if !strings.Contains(body, "Offset editing works on line-synced files only") {
+		t.Errorf("word-synced row missing the read-only reason: %s", body)
+	}
+
+	// Without AttachLyricEditor the page is exactly the old player.
+	f := newPreviewFixture(t)
+	id := f.row(t, f.writeFile(t, f.root, "song.flac"))
+	f.put(t, "song.lrc", pageLRC)
+	if b := f.page(itoa(id)).Body.String(); strings.Contains(b, "mx-edit") {
+		t.Error("page without a wired editor rendered editor markup")
 	}
 }
 

@@ -157,12 +157,14 @@ describe("keyboard.js", () => {
     const kb = win.mxKeyboard;
     kb.register({ keys: ["["], label: "-0.1 s", handler() {} });
     kb.register({ keys: ["Escape"], label: "discard", handler() {}, allowInInput: true });
+    kb.register({ keys: [" "], label: "play / pause", handler() {} });
     const div = win.document.createElement("div");
     kb.renderLegend(div);
     kb.renderLegend(div); // re-render replaces, never accumulates
-    expect(div.querySelectorAll("kbd").length).toBe(2);
+    expect(div.querySelectorAll("kbd").length).toBe(3);
+    expect(Array.from(div.querySelectorAll("kbd")).map((k) => k.textContent)).toEqual(["[", "Esc", "Space"]);
     expect(div.classList.contains("mx-kbd-legend")).toBe(true);
-    expect(kb.list().map((e) => e.label)).toEqual(["-0.1 s", "discard"]);
+    expect(kb.list().map((e) => e.label)).toEqual(["-0.1 s", "discard", "play / pause"]);
   });
 
   it("re-init keeps the existing registry and a single listener", () => {
