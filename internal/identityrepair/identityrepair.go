@@ -216,7 +216,22 @@ func (r *Repairer) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 
 		if opts.DryRun {
+			// The same skip/hold classification apply makes (#1226), read-only, so
+			// the preview's counts are the ones --yes will report.
+			outcome, err := r.previewApply(ctx, ch, rw.titleKey)
+			if err != nil {
+				return res, err
+			}
+			if outcome.processingSkip {
+				res.ProcessingSkips++
+				continue
+			}
+			if outcome.editSkip {
+				res.EditSkips++
+				continue
+			}
 			res.Changed++
+			res.EditHeld += outcome.editHeld
 			if opts.Report != nil {
 				if err := opts.Report(ch); err != nil {
 					return res, fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err)
@@ -360,6 +375,34 @@ func (r *Repairer) applyOnce(ctx context.Context, ch Change, titleKey string, re
 			err = dbpkg.NotRetryable(err)
 		}
 		return applyOutcome{}, err
+	}
+	return out, nil
+}
+
+// previewApply is apply's classification without its writes: the same
+// probeQueueConflict inside a read-only transaction that is always rolled back.
+// It reports processingSkip, editSkip, and editHeld exactly as apply would for
+// the database as it stands; the queue tallies stay zero, as a dry run has
+// always reported them.
+func (r *Repairer) previewApply(ctx context.Context, ch Change, titleKey string) (applyOutcome, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return applyOutcome{}, fmt.Errorf("identityrepair: begin preview tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	lookup, err := probeQueueConflict(ctx, tx, ch, titleKey)
+	if err != nil {
+		return applyOutcome{}, err
+	}
+	var out applyOutcome
+	switch {
+	case lookup.skip:
+		out.processingSkip = true
+	case lookup.editSkip:
+		out.editSkip = true
+	case lookup.oldEdited && ch.NewArtistKey != ch.OldArtistKey && lookup.conflictID == 0:
+		// reconcileQueue's re-key-in-place arm: corrected, but held settled.
+		out.editHeld = 1
 	}
 	return out, nil
 }
