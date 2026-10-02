@@ -163,6 +163,57 @@ func TestRunEditorTagBackfill_MarkerGatedStartupPass(t *testing.T) {
 	}
 }
 
+// TestRunEditorTagBackfill_SkipsHandEditedFile (#1228): the unattended startup
+// pass leaves a hand-edited .lrc byte-identical, still tags its unedited
+// neighbor, and a skip does not hold the one-shot marker open.
+func TestRunEditorTagBackfill_SkipsHandEditedFile(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	edited := filepath.Join(root, "Album", "01 edited.lrc")
+	plain := filepath.Join(root, "Album", "02 plain.lrc")
+	mkdirT(t, filepath.Dir(edited))
+	mustWrite(t, edited, canticleLRCFixture)
+	mustWrite(t, plain, canticleLRCFixture)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	ctx := context.Background()
+	// The mark is on the row of the audio beside the edited sidecar; a row for
+	// an audio file sharing only a name prefix must not leak its mark onto it.
+	for _, r := range []struct {
+		key, src string
+		mark     bool
+	}{
+		{"edited", filepath.Join(root, "Album", "01 edited.flac"), true},
+		{"prefix", filepath.Join(root, "Album", "02 plain.live.flac"), true},
+		{"plain", filepath.Join(root, "Album", "02 plain.flac"), false},
+	} {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, source_path, status, lyric_edited_at)
+			 VALUES ('A', ?, 'a', ?, ?, 'done', CASE WHEN ? THEN '2026-09-01T00:00:00Z' END)`,
+			r.key, r.key, r.src, r.mark); err != nil {
+			t.Fatalf("seed %s: %v", r.key, err)
+		}
+	}
+	runEditorTagBackfill(ctx, sqlDB, loadCfgT(t, cfgPath), selfwrite.New(0))
+
+	if got := readFile(t, edited); got != canticleLRCFixture {
+		t.Errorf("hand-edited file was rewritten:\n%s", got)
+	}
+	if got := readFile(t, plain); !strings.Contains(got, "[re:canticle]") {
+		t.Errorf("unedited file not stamped: %q", got)
+	}
+	if done, err := editorTagBackfillDone(ctx, sqlDB); err != nil || !done {
+		t.Errorf("marker done=%v err=%v; a hand-edit skip must not hold the pass open", done, err)
+	}
+}
+
+func TestSidecarHandEdited_QueryError(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	sqlDB := openDBFromConfig(t, cfgPath)
+	_ = sqlDB.Close()
+	if _, err := sidecarHandEdited(context.Background(), sqlDB, filepath.Join(root, "x.lrc")); err == nil {
+		t.Error("closed database: want an error")
+	}
+}
+
 // TestDegradedSubdir pins findings 2 and 6: an unreadable subdirectory must
 // not abort the walk (counts degraded, continues); the CLI exits non-zero
 // aggregate-only (#487's precedent); a wrapped walk error never logs the path.

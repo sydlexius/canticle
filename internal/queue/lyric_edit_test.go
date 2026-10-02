@@ -111,6 +111,32 @@ func TestEditedRowSkipsUpgradeMissyncedArm(t *testing.T) {
 	}
 }
 
+// editedRowSkipsWordGenerate seeds one word-generate candidate shaped by set,
+// confirms it is listed, marks it edited, and asserts it no longer is (#1228).
+func editedRowSkipsWordGenerate(t *testing.T, arm, set string) {
+	t.Helper()
+	q, dbh := upgradeQueue(t)
+	id := seedGenerateRow(t, dbh, arm, set)
+	if got := listGenerate(t, q, genTestVersion, 10); !slices.Contains(got, id) {
+		t.Fatalf("precondition: candidates %v lack %d", got, id)
+	}
+	if err := q.SetLyricEdit(context.Background(), id, 300); err != nil {
+		t.Fatal(err)
+	}
+	if got := listGenerate(t, q, genTestVersion, 10); slices.Contains(got, id) {
+		t.Errorf("edited row %d offered to word generation (%s arm)", id, arm)
+	}
+}
+
+func TestEditedRowSkipsWordGenerateLineArm(t *testing.T) {
+	editedRowSkipsWordGenerate(t, "line", "")
+}
+
+func TestEditedRowSkipsWordGenerateRetimeArm(t *testing.T) {
+	editedRowSkipsWordGenerate(t, "retime", `outcome_type = 'unsynced', sync_tier = NULL, word_timing_state = NULL,
+		word_timing_generation = NULL, timing_outcome = 'mis_synced', timing_stamp_source = 'fetch'`)
+}
+
 func TestEditedRowSkipsWordRecheck(t *testing.T) {
 	ctx := context.Background()
 	dbh := openQueueTestDB(t)

@@ -159,6 +159,9 @@ func walkEditorTagRoot(ctx context.Context, root string, fn func(path string) (s
 // runReconcileEditorTag backfills [re:canticle] onto canticle-written
 // .lrc/.elrc sidecars (#483). Dry-run by default; --yes applies and backs
 // up. Stdout is aggregate-only, matching `revalidate`'s privacy convention.
+// It does NOT skip hand-edited tracks (#1228), unlike the unattended startup
+// pass: it is an explicit operator command, an override like `revalidate
+// --apply`.
 func runReconcileEditorTag(ctx context.Context, out io.Writer, args ScanReconcileEditorTagCmd) int {
 	cfg, err := config.Load(args.ConfigPath)
 	if err != nil {
@@ -428,10 +431,33 @@ func runEditorTagBackfill(ctx context.Context, sqlDB *sql.DB, cfg config.Config,
 		return injectEditorTag(path)
 	}
 
-	var scanned, stamped, changed, errored, degraded int
+	var scanned, stamped, changed, errored, degraded, editSkips int
 	rootUnavailable := false
 	for _, l := range libs {
-		res, werr := walkEditorTagRoot(ctx, l.Path, perFile)
+		// A HAND-EDITED track is skipped (#1228): even an additive header line
+		// rewrites a file a person adjusted by ear. The check runs per file
+		// under the editor's per-sidecar lock (lyrics.LockEditPath), because
+		// the web UI is already listening, so a save landing mid-walk is
+		// either complete (mark set) before the check or refused afterward by
+		// ApplyEdit's mtime check. A skip is a deliberate outcome, not a
+		// degradation: it does not hold the one-shot marker open.
+		_, canonRoot := pathutil.CanonicalRoot(l.Path)
+		libRoot := l.Path
+		guarded := func(path string) (bool, bool, error) {
+			srcPath := sourceSpelling(libRoot, canonRoot, path)
+			unlock := lyrics.LockEditPath(srcPath)
+			defer unlock()
+			edited, eerr := sidecarHandEdited(ctx, sqlDB, srcPath)
+			if eerr != nil {
+				return false, false, eerr
+			}
+			if edited {
+				editSkips++
+				return false, false, nil
+			}
+			return perFile(path)
+		}
+		res, werr := walkEditorTagRoot(ctx, l.Path, guarded)
 		scanned += res.Scanned
 		stamped += res.Stamped
 		changed += res.Changed
@@ -485,7 +511,7 @@ func runEditorTagBackfill(ctx context.Context, sqlDB *sql.DB, cfg config.Config,
 		return
 	}
 
-	slog.Info("editor-tag backfill: complete", "scanned", scanned, "stamped", stamped)
+	slog.Info("editor-tag backfill: complete", "scanned", scanned, "stamped", stamped, "edit_skips", editSkips)
 	if err := markEditorTagBackfillDone(ctx, sqlDB); err != nil {
 		slog.Warn("editor-tag backfill: completed but failed to record marker; it may re-run next startup", "error", err)
 		return
@@ -497,6 +523,49 @@ func runEditorTagBackfill(ctx context.Context, sqlDB *sql.DB, cfg config.Config,
 	if cerr := clearDegradedAttempts(ctx, sqlDB, editorTagBackfillDegradedAttemptsMarker); cerr != nil {
 		slog.Warn("editor-tag backfill: completed but failed to clear the degraded-attempt counter", "error", cerr)
 	}
+}
+
+// sourceSpelling maps a sidecar found by walkEditorTagRoot (which walks the
+// symlink-resolved canonRoot) back to the library root's own spelling, the one
+// work_queue.source_path and the editor's lock key are built from.
+func sourceSpelling(libRoot, canonRoot, path string) string {
+	rel, err := filepath.Rel(canonRoot, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return path
+	}
+	return filepath.Join(libRoot, rel)
+}
+
+// sidecarHandEdited reports whether a work_queue row whose audio shares
+// sidecar's stem carries the hand-edit mark (#1228). One indexed range seek
+// on source_path per call; the stem is then compared exactly.
+func sidecarHandEdited(ctx context.Context, sqlDB *sql.DB, sidecarPath string) (_ bool, retErr error) {
+	stem := sidecar.StemOf(sidecarPath)
+	rows, err := sqlDB.QueryContext(ctx,
+		`SELECT source_path FROM work_queue
+		  WHERE source_path >= ? AND source_path < ? AND lyric_edited_at IS NOT NULL`,
+		stem+".", stem+"/")
+	if err != nil {
+		return false, fmt.Errorf("query hand-edit mark: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && retErr == nil {
+			retErr = fmt.Errorf("close hand-edit rows: %w", cerr)
+		}
+	}()
+	for rows.Next() {
+		var src string
+		if err := rows.Scan(&src); err != nil {
+			return false, fmt.Errorf("scan hand-edit row: %w", err)
+		}
+		if sidecar.StemOf(src) == stem {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("hand-edit rows: %w", err)
+	}
+	return false, nil
 }
 
 // editorTagBackfillDone reports whether the one-shot backfill marker is present.
