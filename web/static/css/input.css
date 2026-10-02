@@ -334,12 +334,17 @@ body {
   letter-spacing: -0.02em;
   color: #f1f5f9;
   margin: 0 0 0.375rem;
+  /* The preview page title is a track title: break it rather than overflow (#1203). */
+  overflow-wrap: anywhere;
 }
 
 .mx-page-subtitle {
   font-size: 0.9rem;
   color: var(--mx-content-text-secondary);
   margin: 0 0 1.75rem;
+  /* A long unbroken artist/album/blurb breaks instead of widening the page
+     (#1203); `anywhere` also shrinks min-content, unlike `break-word`. */
+  overflow-wrap: anywhere;
 }
 
 /* Settings sub-area link (e.g. Webhook keys): a labeled jump to a related

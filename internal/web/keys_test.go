@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -16,6 +17,10 @@ import (
 // errTest is a sentinel returned by errKeyManager to drive the handler error
 // branches.
 var errTest = errors.New("test error")
+
+// keysTableWrapRe pins the keys table directly inside .mx-table-wrap (#1203),
+// tolerating whitespace templ may emit between the two tags.
+var keysTableWrapRe = regexp.MustCompile(`<div class="mx-table-wrap">\s*<table class="mx-keys-table">`)
 
 // keysTestUI builds a UI with the given key manager wired and returns the mounted
 // handler. Built without auth, so routes are public and the same-origin check
@@ -94,6 +99,10 @@ func TestWebhookKeysListNeverExposesSecrets(t *testing.T) {
 	}
 	if strings.Contains(body, "@keyTime") {
 		t.Error("list page leaked a literal templ component call")
+	}
+	// #1203: the table scrolls inside its own wrapper instead of widening the page.
+	if !keysTableWrapRe.MatchString(body) {
+		t.Error("keys table is not inside .mx-table-wrap")
 	}
 }
 

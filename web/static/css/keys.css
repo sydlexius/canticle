@@ -129,6 +129,13 @@
   letter-spacing: 0.03em;
 }
 
+.mx-keys-table td {
+  /* A long unbroken key name wraps inside its cell instead of widening the
+     table past the viewport (#1203). `anywhere` also lowers the cell's
+     min-content size, which `break-word` does not. */
+  overflow-wrap: anywhere;
+}
+
 .mx-keys-table td code {
   font-family: var(--mx-font-mono);
 }
