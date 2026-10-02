@@ -381,7 +381,7 @@ A file with word-level timing (a Canticle-written `.elrc` companion, recognized 
 
 ### Edited tracks are protected
 
-A track you saved an edit on is not replaced by the automatic upgrade and word-sync recheck passes, so a hand-tuned file is not overwritten by a later fetch. Explicit operator commands still can: `--update`, a manual re-fetch, and `canticle revalidate --apply` act on the file regardless. Use **Revert to original** first if you want the automatic passes to consider the track again.
+A track you saved an edit on is not replaced by the automatic upgrade and word-sync recheck passes, so a hand-tuned file is not overwritten by a later fetch. The timing-validation sweep still records its verdict for an edited track but never demotes or quarantines the file, and identity repair corrects the track's details without reopening it for a new fetch. Explicit operator commands still can: `--update`, a manual re-fetch, and `canticle revalidate --apply` act on the file regardless. Use **Revert to original** first if you want the automatic passes to consider the track again.
 
 ## Web UI: Settings page
 
