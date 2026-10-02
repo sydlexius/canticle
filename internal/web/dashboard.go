@@ -560,7 +560,7 @@ func buildAttentionRows(items []reports.FailureItem, loc *time.Location) []templ
 		}
 		at, _ := time.Parse(time.RFC3339, it.UpdatedAt)
 		rows = append(rows, templates.AttentionRow{
-			Artist: it.Artist, Title: it.Title,
+			Artist: it.Artist, Album: it.Album, Title: it.Title,
 			State: state, StateClass: class, Reason: it.Reason,
 			LastAttempt: formatReportTime(at, loc),
 		})

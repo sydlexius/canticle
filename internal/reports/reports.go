@@ -498,7 +498,10 @@ func (r *Repo) ProviderEffectiveness(ctx context.Context) ([]ProviderEffectivene
 type InstrumentalTrack struct {
 	WorkQueueID int64
 	Artist      string
-	Title       string
+	// Album is the library file's own album as stored on the row (never the
+	// provider match's); empty when not recorded.
+	Album string
+	Title string
 	// FilePath is the source audio path from scan_results; empty when the row
 	// has no linked scan_results (e.g. CLI-enqueued items). A work_queue row
 	// that collapsed multiple files yields one InstrumentalTrack per file.
@@ -523,7 +526,7 @@ type InstrumentalTrack struct {
 // The LEFT JOIN keeps CLI-enqueued rows that have no scan_results link.
 func (r *Repo) InstrumentalInventory(ctx context.Context) ([]InstrumentalTrack, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT wq.id, wq.artist, wq.title, wq.detect_instrumental, COALESCE(sr.file_path, '')
+		`SELECT wq.id, wq.artist, wq.album, wq.title, wq.detect_instrumental, COALESCE(sr.file_path, '')
          FROM work_queue wq
          LEFT JOIN work_queue_scan_results wqsr ON wqsr.work_queue_id = wq.id
          LEFT JOIN scan_results sr ON sr.id = wqsr.scan_result_id
@@ -537,7 +540,7 @@ func (r *Repo) InstrumentalInventory(ctx context.Context) ([]InstrumentalTrack, 
 	var out []InstrumentalTrack
 	for rows.Next() {
 		var t InstrumentalTrack
-		if err := rows.Scan(&t.WorkQueueID, &t.Artist, &t.Title, &t.DetectRequested, &t.FilePath); err != nil {
+		if err := rows.Scan(&t.WorkQueueID, &t.Artist, &t.Album, &t.Title, &t.DetectRequested, &t.FilePath); err != nil {
 			return nil, fmt.Errorf("reports: scan instrumental track: %w", err)
 		}
 		out = append(out, t)

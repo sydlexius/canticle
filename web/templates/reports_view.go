@@ -90,6 +90,7 @@ type RecentOutcomeRow struct {
 // completion, since nothing completed.
 type AttentionRow struct {
 	Artist      string
+	Album       string
 	Title       string
 	State       string
 	StateClass  string
@@ -111,6 +112,7 @@ type ProviderRow struct {
 type InstrumentalRow struct {
 	ID              string
 	Artist          string
+	Album           string
 	Title           string
 	File            string
 	DetectRequested string
@@ -182,4 +184,14 @@ type ReviewQueueRow struct {
 	// EvaluatedAt is the formatted verdict timestamp, or "-" for the zero
 	// value, matching RecentOutcomeRow.CompletedAt's convention.
 	EvaluatedAt string
+}
+
+// AlbumText is the display text of an Album cell: the library file's own album
+// as stored on the row, or a dash when none is recorded (#1244). Every track
+// table lists Artist, Album, Title in that order.
+func AlbumText(album string) string {
+	if album == "" {
+		return "-"
+	}
+	return album
 }

@@ -228,6 +228,7 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 					<thead>
 						<tr>
 							<th>Artist</th>
+							<th>Album</th>
 							<th>Title</th>
 							<th>Result</th>
 							<th>Source</th>
@@ -238,6 +239,7 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 						for _, row := range rows {
 							<tr>
 								<td>{ row.Artist }</td>
+								<td>{ AlbumText(row.Album) }</td>
 								<td>{ row.Title }</td>
 								<td>
 									if row.ResultTierClass != "" {
@@ -292,6 +294,7 @@ templ attentionTable(rows []AttentionRow, emptyMsg string) {
 				<thead>
 					<tr>
 						<th scope="col">Artist</th>
+						<th scope="col">Album</th>
 						<th scope="col">Title</th>
 						<th scope="col">State</th>
 						<th scope="col">Reason</th>
@@ -302,6 +305,7 @@ templ attentionTable(rows []AttentionRow, emptyMsg string) {
 					for _, r := range rows {
 						<tr>
 							<td>{ r.Artist }</td>
+							<td>{ AlbumText(r.Album) }</td>
 							<td>{ r.Title }</td>
 							<td><span class={ r.StateClass }>{ r.State }</span></td>
 							<td class="mx-attention-reason">{ r.Reason }</td>
@@ -337,8 +341,8 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 						<tr>
 							<th class="mx-upnext-pos">#</th>
 							<th>Artist</th>
-							<th>Title</th>
 							<th>Album</th>
+							<th>Title</th>
 							<th>Tier</th>
 							<th class="mx-upnext-waited">Waited</th>
 						</tr>
@@ -348,8 +352,8 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 							<tr class="mx-upnext-inflight">
 								<td class="mx-cell-mono mx-upnext-pos">-</td>
 								<td>{ f.Artist }</td>
+								<td>{ AlbumText(f.Album) }</td>
 								<td>{ f.Title }</td>
-								<td>{ f.Album }</td>
 								<td>
 									<span class="mx-upnext-tier mx-upnext-tier-inflight">in flight</span>
 									if f.Stuck {
@@ -363,8 +367,8 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 							<tr>
 								<td class="mx-cell-mono mx-upnext-pos">{ row.Position }</td>
 								<td>{ row.Artist }</td>
+								<td>{ AlbumText(row.Album) }</td>
 								<td>{ row.Title }</td>
-								<td>{ row.Album }</td>
 								<td><span class={ dashUpNextTierClass(row.Tier) }>{ row.Tier }</span></td>
 								<td class="mx-cell-mono mx-upnext-waited">{ row.Waited }</td>
 							</tr>

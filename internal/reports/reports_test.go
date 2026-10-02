@@ -626,7 +626,7 @@ func TestInstrumentalInventory(t *testing.T) {
 
 	// Detected instrumental, detection explicitly requested, with a file link.
 	one := insertWorkItem(t, sqlDB, workItem{
-		artist: "Mogwai", title: "Inst", status: "done",
+		artist: "Mogwai", title: "Inst", album: "Invented Album", status: "done",
 		instrumentalResult: 1, detectInstrumental: 1,
 	})
 	sr := insertScanResult(t, sqlDB, libID, "/music/mogwai.flac")
@@ -658,6 +658,12 @@ func TestInstrumentalInventory(t *testing.T) {
 	}
 
 	// First row (lower id): file-linked, detect requested.
+	if got[0].Album != "Invented Album" {
+		t.Errorf("got[0].Album = %q, want the row's own album", got[0].Album)
+	}
+	if got[1].Album != "" {
+		t.Errorf("got[1].Album = %q, want empty", got[1].Album)
+	}
 	if got[0].FilePath != "/music/mogwai.flac" {
 		t.Errorf("got[0].FilePath = %q, want /music/mogwai.flac", got[0].FilePath)
 	}
