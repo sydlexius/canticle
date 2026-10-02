@@ -331,7 +331,7 @@ The Dashboard requires the web UI to be enabled and an admin session (or a trust
 
 ## Web UI: Lyric preview and offset editor
 
-The Queue page has a **Preview** link on rows whose lyrics file is synced. It opens a player: the track's audio on top, the lyrics below, with the current line highlighted as the audio plays.
+A queue bucket's page (for example Settled) has a **Preview** link on rows whose lyrics file is synced. It opens a player: the track's audio on top, the lyrics below, with the current line highlighted as the audio plays.
 
 ### Finding a track to edit
 
@@ -366,7 +366,7 @@ The confirmation dialog has a "Don't ask again in this browser" box. The choice 
 
 ### Finding the offset by ear
 
-If you do not know how far off the lyrics are, let your ears find it. Press **Find by ear** (or the `E` key) to turn the mode on, then click a lyric line: only that line's stretch of the track plays, at the current timing. Listen for which line is actually sung, then click that line. The difference between the line you played and the line you heard becomes the offset. Click the same line again if what you heard matches it, which means its timing is already right. **Replay** repeats the snippet, **Cancel test** drops the pending test and keeps the offset, and **Done** leaves the mode. The result is an unsaved change like any other: check it with Play, fine-tune with the nudges, then Save.
+If you do not know how far off the lyrics are, let your ears find it. Press **Find by ear** (labeled **By ear** on a phone, or the `E` key) to turn the mode on, then click a lyric line: only that line's stretch of the track plays, at the current timing. Listen for which line is actually sung, then click that line. The difference between the line you played and the line you heard becomes the offset. Click the same line again if what you heard matches it, which means its timing is already right. **Replay** repeats the snippet, **Cancel test** drops the pending test and keeps the offset, and **Done** leaves the mode. The result is an unsaved change like any other: check it with Play, fine-tune with the nudges, then Save.
 
 ### What a save does
 

@@ -68,7 +68,7 @@ func TestQueueIndexCountsMatchDashboardTiles(t *testing.T) {
 	for _, m := range tile.FindAllStringSubmatch(getPath(t, mux, "/dashboard").Body.String(), -1) {
 		want = append(want, [2]string{m[1], m[2]})
 	}
-	row := regexp.MustCompile(`<td><a class="mx-queue-link" href="(/queue/[a-z]+)">([^<]+)</a></td>\s*<td class="mx-cell-mono">(\d+)</td>`)
+	row := regexp.MustCompile(`<td><a class="mx-text-link" href="(/queue/[a-z]+)">([^<]+)</a></td>\s*<td class="mx-cell-mono">(\d+)</td>`)
 	var got [][2]string
 	for _, m := range row.FindAllStringSubmatch(getPath(t, mux, "/queue").Body.String(), -1) {
 		got = append(got, [2]string{m[2], m[3]})
@@ -88,8 +88,44 @@ func TestQueueIndexCountsMatchDashboardTiles(t *testing.T) {
 func TestQueueIndexEditHintOnlyOnCompletedBuckets(t *testing.T) {
 	mux := newReportsUIServer(t, openReportsTestDB(t))
 	body := getPath(t, mux, "/queue").Body.String()
-	if n := strings.Count(body, "can be previewed and their timing edited"); n != 2 {
-		t.Errorf("edit hint appears %d times, want 2 (Finished, Settled)", n)
+	hint := regexp.MustCompile(`<span class="mx-queue-index-hint">([^<]+)</span>`)
+	rowHint := func(href string) string {
+		row := regexp.MustCompile(`(?s)<a class="mx-text-link" href="` + href + `">.*?</tr>`).FindString(body)
+		if row == "" {
+			t.Fatalf("no row for %s", href)
+		}
+		m := hint.FindStringSubmatch(row)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	if got, want := rowHint("/queue/finished"), "Synced tracks here can be previewed (read-only: they have word timing)."; got != want {
+		t.Errorf("Finished hint = %q, want %q", got, want)
+	}
+	if got, want := rowHint("/queue/settled"), "Line-synced tracks here can be previewed and their timing edited."; got != want {
+		t.Errorf("Settled hint = %q, want %q", got, want)
+	}
+	if n := len(hint.FindAllString(body, -1)); n != 2 {
+		t.Errorf("hint appears %d times, want 2 (Finished, Settled)", n)
+	}
+}
+
+// TestRevivePageMarksQueueActive: the revive page is a queue page, so the
+// sidebar's Queue item is current there (it was Dashboard before #1241). The
+// page answers 503 unless queue actions are attached.
+func TestRevivePageMarksQueueActive(t *testing.T) {
+	f := seedRevive(t)
+	rec := getPath(t, f.mux, revivePath)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200", revivePath, rec.Code)
+	}
+	body := rec.Body.String()
+	if !queueNavCurrent.MatchString(body) {
+		t.Error("Queue nav item is not aria-current on the revive page")
+	}
+	if strings.Contains(body, `<a href="/dashboard" class="mx-nav-link" aria-current="page">`) {
+		t.Error("Dashboard nav item is current on the revive page")
 	}
 }
 
@@ -124,7 +160,7 @@ func TestQueueIndexQueryError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("GET /queue over a closed DB = %d, want 500", rec.Code)
 	}
-	if strings.Contains(rec.Body.String(), "mx-queue-link") {
+	if strings.Contains(rec.Body.String(), "mx-text-link") {
 		t.Error("error response rendered queue rows")
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {

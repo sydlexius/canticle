@@ -1,19 +1,5 @@
 /* Queue landing page (#1241). Per-page stylesheet; the table reuses .mx-table. */
 
-.mx-queue-link {
-  color: var(--mx-sidebar-active-text);
-  text-decoration: none;
-}
-
-.mx-queue-link:hover,
-.mx-queue-link:focus-visible {
-  text-decoration: underline;
-}
-
-.mx-content {
-  min-width: 0;
-}
-
 .mx-queue-index-hint {
   display: block;
   margin-top: 0.25rem;

@@ -3,9 +3,9 @@ package templates
 // QueueIndexPage is the /queue landing page (#1241): one row per work-queue
 // bucket with its count and a link to the drill-down. The rows are the
 // dashboard's own queue tiles (same labels, counts, order and hrefs), so the
-// two surfaces cannot disagree. Finished and Settled rows add a hint that
-// their synced tracks can be previewed and have their timing edited, since
-// that is the only route to the player.
+// two surfaces cannot disagree. Finished and Settled rows add a hint about the
+// player, since those buckets are the only route to it: Finished tracks are
+// word-synced and open read-only, Settled line-synced tracks can be edited.
 templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
 	@Layout("Queue", "/queue", version, reports, "/static/css/queue-index.css", musixmatchInactive, musixmatchServing) {
 		<h1 class="mx-page-title">Queue</h1>
@@ -22,12 +22,12 @@ templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musix
 				<tbody>
 					for _, t := range tiles {
 						<tr class="mx-queue-index-row">
-							<td><a class="mx-queue-link" href={ templ.SafeURL(t.Href) }>{ t.Label }</a></td>
+							<td><a class="mx-text-link" href={ templ.SafeURL(t.Href) }>{ t.Label }</a></td>
 							<td class="mx-cell-mono">{ t.Value }</td>
 							<td>
 								{ t.Tooltip }
-								if queueIndexEditable(t.Href) {
-									<span class="mx-queue-index-hint">Synced tracks here can be previewed and their timing edited.</span>
+								if hint := queueIndexHint(t.Href); hint != "" {
+									<span class="mx-queue-index-hint">{ hint }</span>
 								}
 							</td>
 						</tr>
@@ -38,8 +38,16 @@ templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musix
 	}
 }
 
-// queueIndexEditable reports whether a bucket's rows can carry a Preview link:
-// the two completed buckets, Finished and Settled.
-func queueIndexEditable(href string) bool {
-	return href == "/queue/finished" || href == "/queue/settled"
+// queueIndexHint is the player hint for a bucket row, or "" for a bucket with
+// no Preview links. Finished rows are word-tier, which the preview page opens
+// read-only (fillPreviewEditor); Settled rows can hold line-synced tracks,
+// which get the offset editor.
+func queueIndexHint(href string) string {
+	switch href {
+	case "/queue/finished":
+		return "Synced tracks here can be previewed (read-only: they have word timing)."
+	case "/queue/settled":
+		return "Line-synced tracks here can be previewed and their timing edited."
+	}
+	return ""
 }
