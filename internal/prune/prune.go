@@ -834,8 +834,11 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		}
 		res.Relinked = applied
 		res.EditHeld = editHeld
-		for i := 0; i < len(toRelink) && declines.changed > 0; i++ {
-			ds.retry(toRelink[i].src) // a worker raced a relink: look again
+		for _, r := range applied {
+			ds.relinked(r.OldPath)
+		}
+		for _, src := range declines.raced {
+			ds.retry(src) // a worker raced this relink: look again
 		}
 		res.RelinkOwned, res.RelinkChanged = declines.owned, declines.changed
 		// A candidate that failed to relink (its target is already owned by a
@@ -1163,6 +1166,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 					declines.owned++
 				} else {
 					declines.changed++
+					declines.raced = append(declines.raced, cg.src)
 				}
 				// An already-retired row whose reconsidered relink was declined drops
 				// out silently: it is exactly as settled as before, nothing was
@@ -1244,7 +1248,11 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 
 // relinkDeclines tallies the planned relinks one applyRelinks call declined, by
 // reason, including the already-settled ones it drops without a RetainedRow.
-type relinkDeclines struct{ owned, changed int }
+// raced names the sources behind changed, so the caller retries exactly those.
+type relinkDeclines struct {
+	owned, changed int
+	raced          []string
+}
 
 // planRelinks is the dry run's stand-in for applyRelinks: the same ownership
 // check, mutating nothing. claimed carries the links an earlier relink in this

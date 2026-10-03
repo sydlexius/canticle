@@ -55,7 +55,7 @@ type dirObs struct {
 	exists  bool  // false only on a definitive not-exist
 	examine bool  // stat this directory's row files
 	record  bool  // the mtime is old enough to store
-	gone    bool  // a row file is definitively gone
+	gone    int   // row files definitively gone and not relinked since
 	retry   bool  // a row was unreadable or in flight: never recorded
 	mtime   int64 // UnixNano
 }
@@ -113,9 +113,21 @@ func (d *dirMtimes) gone(src string) (isGone, inFolder bool) {
 		return false, false
 	}
 	_, err := d.stat(src)
-	o.gone = o.gone || errors.Is(err, fs.ErrNotExist)
+	if errors.Is(err, fs.ErrNotExist) {
+		o.gone++
+	}
 	o.retry = o.retry || (err != nil && !errors.Is(err, fs.ErrNotExist))
 	return errors.Is(err, fs.ErrNotExist), true
+}
+
+// relinked takes src back out of its directory's gone count: a row the sweep
+// relinked is no longer gone, so a directory whose last gone row moved is
+// stored without the scan mark and is not re-examined on the next scan insert.
+// A nil d (Exact granularity) is a no-op.
+func (d *dirMtimes) relinked(src string) {
+	if d != nil {
+		d.seen[filepath.Dir(src)].gone--
+	}
 }
 
 // retry keeps src's directory unrecorded, so it is examined again next sweep.
@@ -152,7 +164,7 @@ func (d *dirMtimes) saveOnce(ctx context.Context, db *sql.DB) error {
 			continue // unchanged, or its stat failed: the stored row stands
 		case o.exists && o.record && !o.retry:
 			var mark any
-			if o.gone {
+			if o.gone > 0 {
 				mark = d.scanMark
 			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO prune_dir_state (dir, mtime_ns, gone_scan_id) VALUES (?, ?, ?)

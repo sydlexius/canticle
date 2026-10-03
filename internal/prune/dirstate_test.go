@@ -78,6 +78,10 @@ func TestSweepDirectory_RelinksInFolderSwap(t *testing.T) {
 	}
 	flac := filepath.Join(dir, "01. a.flac")
 	seedPresentScanResult(t, ctx, sqlDB, libID, flac, "", "")
+	old := time.Now().Add(-2 * time.Hour) // settled, and not the mtime already stored
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
 
 	res := sweepDir(t, ctx, p)
 	if len(res.Relinked) != 1 || len(res.Pruned) != 0 {
@@ -85,6 +89,20 @@ func TestSweepDirectory_RelinksInFolderSwap(t *testing.T) {
 	}
 	if got := workQueueSourcePath(t, ctx, sqlDB, id); got != flac {
 		t.Errorf("source_path = %q, want %q", got, flac)
+	}
+	// The relinked row is no longer gone, so the directory is stored with no
+	// scan mark: a later scan insert must not re-examine it.
+	var mark sql.NullInt64
+	if err := sqlDB.QueryRowContext(ctx, `SELECT gone_scan_id FROM prune_dir_state WHERE dir = ?`, dir).Scan(&mark); err != nil || mark.Valid {
+		t.Fatalf("gone_scan_id = %v (err %v), want the directory stored with NULL", mark, err)
+	}
+	seedPresentScanResult(t, ctx, sqlDB, libID, filepath.Join(root, "Elsewhere", "new.flac"), "", "")
+	p2, calls := countingPruner(sqlDB)
+	sweepDir(t, ctx, p2)
+	for _, c := range *calls {
+		if filepath.Dir(c) == dir {
+			t.Errorf("an unrelated scan insert re-examined the relinked directory: statted %q", c)
+		}
 	}
 }
 
@@ -241,6 +259,16 @@ func TestSweepDirectory_RacedRelinkIsNotRecorded(t *testing.T) {
 	dir := filepath.Join(root, "Artist", "Album")
 	_, id := seedSwap(t, ctx, sqlDB, libID, dir, "done", ".flac")
 	age(t, dir)
+	// A second swap that sorts FIRST and relinks cleanly: only the raced
+	// directory may be left unrecorded, not whichever relink came first.
+	clean := filepath.Join(root, "AAA", "Album")
+	cleanMP3 := filepath.Join(clean, "02. b.mp3")
+	seedRow(t, ctx, sqlDB, libID, cleanMP3, "done", "done")
+	if err := os.Remove(cleanMP3); err != nil {
+		t.Fatal(err)
+	}
+	seedPresentScanResult(t, ctx, sqlDB, libID, filepath.Join(clean, "02. b.ogg"), "", "")
+	age(t, clean)
 	p := New(sqlDB)
 	p.stat = func(path string) (fs.FileInfo, error) {
 		if filepath.Ext(path) == ".flac" { // the sibling's stat: after the read, before the apply
@@ -250,8 +278,15 @@ func TestSweepDirectory_RacedRelinkIsNotRecorded(t *testing.T) {
 		}
 		return os.Stat(path)
 	}
-	if res := sweepDir(t, ctx, p); len(res.Relinked) != 0 || res.RelinkChanged != 1 || storedDirs(t, ctx, sqlDB) != 0 {
-		t.Fatalf("relinked=%d changed=%d stored=%d, want 0/1/0", len(res.Relinked), res.RelinkChanged, storedDirs(t, ctx, sqlDB))
+	if res := sweepDir(t, ctx, p); len(res.Relinked) != 1 || res.RelinkChanged != 1 {
+		t.Fatalf("relinked=%d changed=%d, want 1/1", len(res.Relinked), res.RelinkChanged)
+	}
+	var stored string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COALESCE(group_concat(dir, '|'), '') FROM prune_dir_state`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != clean {
+		t.Fatalf("stored directories = %q, want only the cleanly relinked %q", stored, clean)
 	}
 }
 
