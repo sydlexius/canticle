@@ -31,8 +31,15 @@ func TestFlacCacheCloseStopsConversion(t *testing.T) {
 	p, open, fi := srcNamed(t, t.TempDir(), "s.m4a")
 	done := getAsync(c, context.Background(), p, open, fi)
 	<-started
-	if err := c.Close(); err != nil {
-		t.Fatal(err)
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return: it waits on a conversion it never canceled")
 	}
 	select {
 	case <-stopped:
@@ -215,5 +222,23 @@ func TestFlacCacheQueuedJobLeavesAndTimesFromItsSlot(t *testing.T) {
 	}
 	if deadline.Before(released.Add(flacConvertTimeout)) {
 		t.Fatalf("timeout counted from before the slot: deadline %v is earlier than release + %v", deadline, flacConvertTimeout)
+	}
+}
+
+// A job canceled before it gets a slot never converts, even when a slot is
+// free and select may pick it over the cancel.
+func TestFlacCacheCanceledJobNeverConverts(t *testing.T) {
+	conv := &countingConverter{}
+	c := newTestCache(t, 1<<20, conv.convert)
+	p, open, _ := srcNamed(t, t.TempDir(), "s.m4a")
+	for i := 0; i < 50; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		job := &flacJob{done: make(chan struct{}), cancel: cancel}
+		c.runs.Add(1)
+		c.run(ctx, "k.flac", job, open, p, filepath.Join(c.dir, "k.flac"))
+		if !errors.Is(job.err, context.Canceled) || conv.calls.Load() != 0 {
+			t.Fatalf("iteration %d: err = %v, conversions = %d, want canceled and none", i, job.err, conv.calls.Load())
+		}
 	}
 }

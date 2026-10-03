@@ -95,14 +95,16 @@ func newFlacCache(parent string, max int64, convert flacConverter) (*flacCache, 
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("lock preview flac cache: %w", err), os.RemoveAll(dir))
 	}
-	sweepFlacDirs(parent, dir)
+	sweepFlacDirs(parent)
 	return &flacCache{dir: dir, max: max, convert: convert, lock: lock,
 		sem: make(chan struct{}, flacMaxConversions), inflight: map[string]*flacJob{}}, nil
 }
 
-// sweepFlacDirs removes the dead cache dirs under parent other than own. Only
-// real directories are probed, never a symlink planted under the prefix.
-func sweepFlacDirs(parent, own string) {
+// sweepFlacDirs removes the dead cache dirs under parent. The caller's own dir
+// is not dead: it already holds its lock (a probe's flock on a second open
+// file conflicts even within one process). Only real directories are probed,
+// never a symlink planted under the prefix.
+func sweepFlacDirs(parent string) {
 	ents, err := os.ReadDir(parent)
 	if err != nil {
 		slog.Warn("preview flac cache: cannot list for stale dirs", "error", err)
@@ -110,7 +112,7 @@ func sweepFlacDirs(parent, own string) {
 	}
 	for _, e := range ents {
 		p := filepath.Join(parent, e.Name())
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), flacDirPrefix) || p == own || !flacDirDead(p) {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), flacDirPrefix) || !flacDirDead(p) {
 			continue
 		}
 		if err := os.RemoveAll(p); err != nil {
