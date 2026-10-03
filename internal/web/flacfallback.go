@@ -126,9 +126,8 @@ func (c *flacCache) Get(ctx context.Context, srcPath string, fi fs.FileInfo, ope
 	c.mu.Lock()
 	job.waiters--
 	if job.waiters == 0 {
-		// Only this branch removes a job from inflight and a job is joined
-		// only while it is there, so the count reaches 0 once, with job
-		// still mapped under key: the delete cannot drop a newer job.
+		// Only this branch unmaps a job, and a job is joined only while mapped,
+		// so 0 is reached once, with job still under key: never a newer job.
 		job.cancel()            // no-op once the job has finished
 		delete(c.inflight, key) // unpins the result; a later request starts afresh
 	}
