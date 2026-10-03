@@ -2845,6 +2845,12 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 					"library", lib.Name, "trigger", string(trigger), "skipped_out_of_scope", divRes.ScopeSkips)
 			}
 
+			// A file replaced in place whose sidecar survived is indexed as settled
+			// and never enqueued, so its row is re-pointed here instead (#1262).
+			if n := enq.RepointSettled(ctx, found); n > 0 {
+				slog.Info("scan: moved settled queue rows to the files that replaced their sources",
+					"library", lib.Name, "trigger", string(trigger), "moved", n)
+			}
 			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)
 			if err != nil {
 				// Counts are partial on an aborted enqueue; don't log "complete".

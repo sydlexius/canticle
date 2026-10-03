@@ -17,6 +17,8 @@ import (
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/scanner"
 	"github.com/sydlexius/canticle/internal/testutil"
 )
 
@@ -1032,5 +1034,46 @@ func TestIndexMetadataDryRunWritesNoDurationOnCacheHit(t *testing.T) {
 
 	if n := countAudioDurationRows(t, dbPath); n != 0 {
 		t.Errorf("dry run wrote %d audio_durations row(s), want 0: a preview must never mutate the database", n)
+	}
+}
+
+// TestSchedulerRepointsSettledRowAfterFormatSwap drives the production
+// OnScanComplete closure (scheduler().RunOnce) over an in-place swap whose sidecar
+// survived (#1262): only the closure's RepointSettled call can move that row.
+func TestSchedulerRepointsSettledRowAfterFormatSwap(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openBackfillDB(t)
+	lib, err := library.New(sqlDB).Add(ctx, t.TempDir(), "Music", models.LibrarySettings{})
+	if err != nil {
+		t.Fatalf("Add library: %v", err)
+	}
+	// The settled row of the .mp3 the re-rip removed, beside its sidecar and the .flac.
+	item, err := queue.NewDBQueue(sqlDB).Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Some Artist", TrackName: "Some Title"},
+		SourcePath: filepath.Join(lib.Path, "01 song.mp3"),
+	}, queue.PriorityScan)
+	if err == nil {
+		_, err = sqlDB.ExecContext(ctx, `UPDATE work_queue SET status = 'done'`)
+	}
+	if err == nil {
+		err = os.WriteFile(filepath.Join(lib.Path, "01 song.lrc"), []byte("[00:01.00]la\n"), 0o600)
+	}
+	if err == nil {
+		err = testutil.WriteFLACFileWithComments(lib.Path, "01 song.flac", 44100, 44100*30,
+			map[string]string{"ARTIST": "Some Artist", "TITLE": "Some Title"})
+	}
+	if err != nil {
+		t.Fatalf("seed the swap: %v", err)
+	}
+	s := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 1}, nil, false, nil, nil, "", 0)
+	if err := s.RunOnce(ctx); err != nil {
+		t.Fatalf("scan after the swap: %v", err)
+	}
+	var source string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT source_path FROM work_queue WHERE id = ?`, item.ID).Scan(&source); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if filepath.Base(source) != "01 song.flac" {
+		t.Errorf("row after the swap names %q, want 01 song.flac", filepath.Base(source))
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -158,6 +160,9 @@ type DBQueue struct {
 	baseBackoff time.Duration
 	maxBackoff  time.Duration
 	now         func() time.Time
+	// stat is the filesystem seam Enqueue's gone-source check reads (#1262);
+	// os.Stat outside tests.
+	stat func(string) (fs.FileInfo, error)
 	// randomized shuffles the dequeue order within each priority tier to remove
 	// the strictly-alphabetical request fingerprint. On by default; flip to false
 	// (via SetRandomized) to restore deterministic created_at/id ordering. Also
@@ -182,6 +187,7 @@ func NewDBQueue(db *sql.DB) *DBQueue {
 		baseBackoff: backoff.DefaultBase,
 		maxBackoff:  backoff.DefaultMax,
 		now:         time.Now,
+		stat:        os.Stat,
 		randomized:  true,
 		batchSize:   defaultBatchSize,
 	}
@@ -223,6 +229,11 @@ func (q *DBQueue) SetProvidersVersion(v int) {
 // a scan_result_id (an inventory-matched webhook included); only inputs.FromScan
 // decides whether a word-recheck row is reopened.
 //
+// On a collision the row keeps a settled or in-flight row's paths, with one
+// exception (#1262): when the row's source file is gone and the incoming path
+// is the same-stem file that replaced it (a format swap), the row is moved to
+// the incoming path first, telemetry intact. See planGoneSourceMove.
+//
 // Priority update semantics on conflict:
 //   - A webhook-priority (>= PriorityWebhook) enqueue always overrides the
 //     stored priority so an explicit webhook can always preempt a deferred miss.
@@ -245,11 +256,21 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 	if priority >= PriorityWebhook {
 		refreshFailedBackoff = 1
 	}
+	move, err := q.planGoneSourceMove(ctx, inputs)
+	if err != nil {
+		return WorkItem{}, err
+	}
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: begin enqueue tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if move != nil {
+		if _, err := moveGoneSourceTx(ctx, tx, move, inputs, now); err != nil {
+			return WorkItem{}, err
+		}
+	}
 
 	// A SCAN collision with a word-recheck row (#982, 'deferred'+'queued')
 	// reopens it for an ordinary fetch first (#1039), so the upsert below treats

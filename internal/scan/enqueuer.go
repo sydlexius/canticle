@@ -356,8 +356,55 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 	return enqueued, cacheHits, nil
 }
 
+// SourceRepointer moves a settled work_queue row whose audio file was replaced
+// in place by a same-stem sibling. *queue.DBQueue satisfies it.
+type SourceRepointer interface {
+	RepointGoneSource(ctx context.Context, inputs models.Inputs) (bool, error)
+}
+
+// RepointSettled repairs the half of an in-place format swap (#1262) that
+// EnqueuePending never sees: a replaced file whose sidecar survived is indexed
+// as already settled (StatusDone), so it is never pending and never reaches
+// Enqueue. found is this scan's results; the scanner emits a settled file only
+// the first time it sees the path, so this costs nothing on later scans.
+//
+// That makes the repair ONE-SHOT, offered only on the scan that first indexes
+// the replacement. If the old file still existed then (copy, scan, then
+// delete), or that attempt hit a stat error or a database failure, the row
+// stays on the vanished file exactly as before #1262; the same-stem sibling
+// relink in prune (a later #1262 slice) is what covers those rows.
+//
+// Best-effort: a failure is logged and the row is left as it was; a canceled
+// ctx stops the loop quietly. A queue that is not a SourceRepointer repairs nothing.
+func (e *Enqueuer) RepointSettled(ctx context.Context, found []models.ScanResult) (moved int) {
+	rp, ok := e.Queue.(SourceRepointer)
+	if !ok {
+		return 0
+	}
+	for _, res := range found {
+		if ctx.Err() != nil {
+			break
+		}
+		if res.Status != StatusDone {
+			continue
+		}
+		inputs, err := scanInputs(res)
+		if err == nil {
+			var did bool
+			if did, err = rp.RepointGoneSource(ctx, inputs); did {
+				moved++
+			}
+		}
+		if err != nil {
+			slog.Warn("scan: could not check a settled file against a vanished queue source", "error", err)
+		}
+	}
+	return moved
+}
+
 // OnScanComplete adapts EnqueuePending to Scheduler.OnScanComplete.
-func (e *Enqueuer) OnScanComplete(ctx context.Context, lib models.Library, _ []models.ScanResult, _ string, _ Trigger) error {
+func (e *Enqueuer) OnScanComplete(ctx context.Context, lib models.Library, found []models.ScanResult, _ string, _ Trigger) error {
+	e.RepointSettled(ctx, found)
 	_, _, err := e.EnqueuePending(ctx, lib)
 	return err
 }
