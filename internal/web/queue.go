@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/tablesort"
 	"github.com/sydlexius/canticle/web/templates"
 )
 
@@ -67,7 +69,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "queue data source unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	state, err := parseQueueViewState(r.URL.Query())
+	state, err := parseQueueViewState(r.URL.Query(), reports.BucketSpec(bucket))
 	if err != nil {
 		http.Error(w, "invalid queue parameters: "+err.Error(), http.StatusBadRequest)
 		return
@@ -83,7 +85,15 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch one extra row to know whether another page exists, rather than
 	// guessing from a full page (which would offer an empty "Show more").
-	rows, err := u.reports.ListBucketFiltered(r.Context(), bucket, reports.BucketFilter{Query: state.Query}, state.After, queuePageSize+1)
+	spec := reports.BucketSpec(bucket)
+	order := spec.Resolve(state.Sort, state.Dir)
+	// A forged or stale cursor (wrong shape for this sort) is not an error: the
+	// page falls back to the top of the list.
+	cursor, ok := spec.DecodeCursor(order, state.After)
+	if !ok {
+		state.After = ""
+	}
+	rows, err := u.reports.ListBucketFiltered(r.Context(), bucket, reports.BucketFilter{Query: state.Query}, order, cursor, queuePageSize+1)
 	if err != nil {
 		slog.Error("queue bucket query failed", "bucket", string(bucket), "error", err)
 		http.Error(w, "queue query failed", http.StatusInternalServerError)
@@ -94,17 +104,26 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		rows = rows[:queuePageSize]
 	}
 	info := queueBucketInfo[bucket]
-	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: state.After,
-		Query: state.Query, StartHref: state.href(string(bucket), 0), ClearHref: (queueViewState{}).href(string(bucket), 0)}
+	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: cursor.ID,
+		Query: state.Query, StartHref: state.href(string(bucket), ""), ClearHref: state.withoutQuery().href(string(bucket), ""),
+		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir}
 	// Only the retired bucket can be revived; failed rows are already retried,
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
 	for _, row := range rows {
-		view.Rows = append(view.Rows, buildQueueRow(row, bucket))
+		view.Rows = append(view.Rows, buildQueueRow(row, bucket, state))
 	}
 	if more {
-		view.NextCursor = rows[len(rows)-1].ID
-		view.MoreHref = state.href(string(bucket), view.NextCursor)
+		last := rows[len(rows)-1]
+		view.NextCursor = last.ID
+		// A cursor the decoder would refuse must never be emitted: the next page
+		// would fall back to page 1 and repeat rows. Fail loudly, with the row id
+		// only (the value is private library metadata), and offer no pager.
+		if enc := (tablesort.Cursor{ID: last.ID, Val: last.SortVal}).Encode(); len(enc) > tablesort.MaxCursorBytes {
+			slog.Error("queue cursor exceeds the cap; no further pages offered", "bucket", string(bucket), "row_id", last.ID)
+		} else {
+			view.MoreHref = state.href(string(bucket), enc)
+		}
 	}
 
 	// Counts only: the query text is library metadata and is never logged.
@@ -118,7 +137,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildQueueRow formats one bucket row for display.
-func buildQueueRow(row reports.BucketRow, from reports.Bucket) templates.QueueRow {
+func buildQueueRow(row reports.BucketRow, from reports.Bucket, state queueViewState) templates.QueueRow {
 	names := make([]string, 0, len(row.Libraries))
 	for _, l := range row.Libraries {
 		names = append(names, l.Name)
@@ -144,7 +163,7 @@ func buildQueueRow(row reports.BucketRow, from reports.Bucket) templates.QueueRo
 		Attempts:      strconv.FormatInt(row.Attempts, 10),
 		UpdatedAt:     formatQueueTime(row.UpdatedAt),
 		Libraries:     libs,
-		PreviewHref:   queuePreviewHref(row, from),
+		PreviewHref:   queuePreviewHref(row, from, state),
 	}
 }
 
@@ -158,11 +177,41 @@ func buildQueueRow(row reports.BucketRow, from reports.Bucket) templates.QueueRo
 // from is the bucket the row is listed in; it rides as ?from= so the player can
 // link back to that list (#1241). The page re-validates it against the bucket
 // allowlist, so a hand-edited value can only fall back to /queue.
-func queuePreviewHref(row reports.BucketRow, from reports.Bucket) string {
+func queuePreviewHref(row reports.BucketRow, from reports.Bucket, state queueViewState) string {
 	if !row.Previewable {
 		return ""
 	}
-	return "/preview/" + strconv.FormatInt(row.ID, 10) + "?from=" + string(from)
+	v := state.backLinkState().values()
+	v.Set("from", string(from))
+	return "/preview/" + strconv.FormatInt(row.ID, 10) + "?" + v.Encode()
+}
+
+// queueColumns is the table's column order (Artist, Album, Title first). A
+// column with no sort key (Status, Reason, Libraries, Lyrics) is not orderable.
+var queueColumns = []struct{ label, key string }{
+	{"Artist", tablesort.KeyArtist}, {"Album", tablesort.KeyAlbum}, {"Title", tablesort.KeyTitle},
+	{"Status", ""}, {"Reason", ""}, {"Next attempt", tablesort.KeyNextAttempt},
+	{"Misses", tablesort.KeyMisses}, {"Attempts", tablesort.KeyAttempts}, {"Updated", tablesort.KeyUpdated},
+	{"Libraries", ""}, {"Lyrics", ""},
+}
+
+// buildQueueColumns shapes the header row for the shared SortHeader component:
+// each sortable header links to the order a click requests, keeping the search.
+func buildQueueColumns(bucket string, state queueViewState, spec tablesort.Spec, active tablesort.Order) []templates.SortHeaderView {
+	keep := url.Values{}
+	if state.Query != "" {
+		keep.Set("q", state.Query)
+	}
+	out := make([]templates.SortHeaderView, 0, len(queueColumns))
+	for _, c := range queueColumns {
+		h := templates.SortHeaderView{Label: c.label}
+		if c.key != "" {
+			h.Href = tablesort.HeaderHref("/queue/"+bucket, keep, spec.Toggle(active, c.key))
+			h.Aria = tablesort.AriaSort(active, c.key)
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // formatQueueTime renders a stored timestamp in the same display zone as the

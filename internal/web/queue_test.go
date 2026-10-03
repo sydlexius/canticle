@@ -89,7 +89,7 @@ func TestQueueBucketEmptyState(t *testing.T) {
 
 func TestQueueBucketPastEndSaysNoMoreRows(t *testing.T) {
 	mux := newReportsUIServer(t, openReportsTestDB(t))
-	body := getQueue(t, mux, "/queue/unavailable?after=999", false).Body.String()
+	body := getQueue(t, mux, "/queue/unavailable?after=999:n", false).Body.String()
 	if !strings.Contains(body, "No more rows.") || !strings.Contains(body, "Back to start of list") {
 		t.Fatalf("past-the-end page wording wrong: %s", body)
 	}
@@ -98,11 +98,11 @@ func TestQueueBucketPastEndSaysNoMoreRows(t *testing.T) {
 func TestBuildQueueRowSettledHasNoNextAttempt(t *testing.T) {
 	stale := "2026-06-17T10:00:00Z"
 	for _, status := range []string{queue.StatusDone, queue.StatusUnavailable} {
-		if got := buildQueueRow(reports.BucketRow{Status: status, NextAttemptAt: stale}, reports.BucketSettled).NextAttemptAt; got != "-" {
+		if got := buildQueueRow(reports.BucketRow{Status: status, NextAttemptAt: stale}, reports.BucketSettled, queueViewState{}).NextAttemptAt; got != "-" {
 			t.Errorf("%s next attempt = %q, want - (stale retry time)", status, got)
 		}
 	}
-	if got := buildQueueRow(reports.BucketRow{Status: queue.StatusDeferred, NextAttemptAt: stale}, reports.BucketSettled).NextAttemptAt; got == "-" {
+	if got := buildQueueRow(reports.BucketRow{Status: queue.StatusDeferred, NextAttemptAt: stale}, reports.BucketSettled, queueViewState{}).NextAttemptAt; got == "-" {
 		t.Errorf("deferred row lost its next attempt")
 	}
 }
@@ -127,14 +127,14 @@ func TestQueueBucketPagerWalksWithoutDuplicates(t *testing.T) {
 		for _, title := range titlesIn(body) {
 			seen[title]++
 		}
-		m := regexp.MustCompile(`hx-get="(/queue/pending\?after=\d+)"`).FindStringSubmatch(body)
+		m := regexp.MustCompile(`hx-get="(/queue/pending\?after=[^"]+)"`).FindStringSubmatch(body)
 		if m == nil {
 			break
 		}
 		target = m[1]
 		// The cursor is exactly the last row of the page just rendered.
 		wantAfter := ids[(page+1)*queuePageSize-1]
-		if target != fmt.Sprintf("/queue/pending?after=%d", wantAfter) {
+		if !strings.HasPrefix(target, fmt.Sprintf("/queue/pending?after=%d%%3A", wantAfter)) {
 			t.Fatalf("page %d: next = %q, want after=%d", page, target, wantAfter)
 		}
 	}
@@ -163,7 +163,7 @@ func TestQueueBucketExactPageHasNoShowMore(t *testing.T) {
 func TestQueueBucketFragmentNoStoreAndNoLayout(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	ids := seedQueueRows(t, sqlDB, "pending", "Pend", 3)
-	rec := getQueue(t, newReportsUIServer(t, sqlDB), fmt.Sprintf("/queue/pending?after=%d", ids[0]), true)
+	rec := getQueue(t, newReportsUIServer(t, sqlDB), fmt.Sprintf("/queue/pending?sort=title&dir=asc&after=%d:tpend%%20001", ids[0]), true)
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("fragment Cache-Control = %q, want no-store", cc)
 	}
@@ -180,8 +180,6 @@ func TestQueueBucketErrors(t *testing.T) {
 		want   int
 	}{
 		{"/queue/nonsense", http.StatusNotFound},
-		{"/queue/pending?after=abc", http.StatusBadRequest},
-		{"/queue/pending?after=-4", http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		rec := getQueue(t, mux, c.target, false)
@@ -364,7 +362,7 @@ func TestQueuePreviewHref(t *testing.T) {
 		{"previewable", reports.BucketRow{ID: 7, Status: queue.StatusDone, Previewable: true}, "/preview/7?from=settled"},
 		{"not previewable", reports.BucketRow{ID: 9, Status: queue.StatusDone}, ""},
 	} {
-		if got := queuePreviewHref(tc.row, reports.BucketSettled); got != tc.want {
+		if got := queuePreviewHref(tc.row, reports.BucketSettled, queueViewState{}); got != tc.want {
 			t.Errorf("%s: href = %q, want %q", tc.name, got, tc.want)
 		}
 	}

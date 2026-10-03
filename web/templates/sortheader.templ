@@ -1,0 +1,36 @@
+package templates
+
+// SortHeaderView is one table header cell for the shared sort component
+// (#1242). An empty Href is a plain, non-sortable header. Aria is
+// "ascending"/"descending" on the active column and "" elsewhere; Href is built
+// by tablesort.HeaderHref so it toggles direction and keeps the table's other
+// params.
+type SortHeaderView struct {
+	Label string
+	Href  string
+	Aria  string
+}
+
+// SortHeader renders one header cell: a link that toggles the sort, aria-sort on
+// the active column and a direction indicator (decorative; aria-sort carries
+// the meaning).
+templ SortHeader(h SortHeaderView) {
+	<th
+		if h.Aria != "" {
+			aria-sort={ h.Aria }
+		}
+	>
+		if h.Href == "" {
+			{ h.Label }
+		} else {
+			<a class="mx-sort-link" href={ templ.SafeURL(h.Href) }>
+				{ h.Label }
+				if h.Aria == "ascending" {
+					<span class="mx-sort-arrow" aria-hidden="true">&#9650;</span>
+				} else if h.Aria == "descending" {
+					<span class="mx-sort-arrow" aria-hidden="true">&#9660;</span>
+				}
+			</a>
+		}
+	</th>
+}

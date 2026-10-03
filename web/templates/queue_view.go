@@ -26,6 +26,12 @@ type QueueView struct {
 	StartHref string
 	ClearHref string
 	MoreHref  string
+	// Columns is the header row.
+	Columns []SortHeaderView
+	// Sort and Dir are the validated explicit sort params the search form
+	// re-submits so a new search keeps the ordering.
+	Sort string
+	Dir  string
 	// ReviveLink shows the "Revive retired tracks" link (the unavailable bucket
 	// only, and only when a queue action backend is wired).
 	ReviveLink bool

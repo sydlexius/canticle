@@ -28,6 +28,7 @@ import (
 	"github.com/sydlexius/canticle/internal/secrets"
 	"github.com/sydlexius/canticle/internal/selfwrite"
 	"github.com/sydlexius/canticle/internal/sidecar"
+	"github.com/sydlexius/canticle/internal/tablesort"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/web"
 )
@@ -904,11 +905,14 @@ func apiKey(r *http.Request) string {
 // (user text smuggled into an allowlisted key) is replaced like any other.
 // `apikey` is deliberately absent: it is a credential.
 var loggableQueryKeys = map[string]func(string) bool{
-	// after: the queue keyset cursor, a non-negative integer (web.parseQueueViewState).
-	"after": func(v string) bool {
-		n, err := strconv.ParseInt(v, 10, 64)
-		return err == nil && n >= 0
-	},
+	// after: the keyset cursor (web.parseQueueViewState). Only the id and a
+	// NULL/integer sort value are logged; a cursor carrying text (library
+	// metadata) is redacted.
+	"after": tablesort.LoggableCursor,
+	// sort and dir: the shared column vocabulary and the two directions, one
+	// validator for every sortable table.
+	"sort": tablesort.KnownKey,
+	"dir":  tablesort.ValidDir,
 	// from: the player back-link origin, a queue bucket name (web preview handler).
 	"from": func(v string) bool {
 		_, err := reports.ParseBucket(v)
