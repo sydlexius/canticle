@@ -818,7 +818,7 @@ func TestSweep_RelinkDeclinedWhenWorkItemRacesIntoProcessing(t *testing.T) {
 
 	var retainedSeen []RetainedRow
 	var relinkedSeen []RelinkedRow
-	applied, retained, _, err := p.applyRelinks(ctx, []classifiedRelink{{
+	applied, retained, _, _, err := p.applyRelinks(ctx, []classifiedRelink{{
 		src:      oldPath,
 		c:        c,
 		relinked: RelinkedRow{OldPath: oldPath, NewPath: newPath, ScanResultIDs: c.scanResultIDs, WorkItemIDs: []int64{wqID}, MBID: "mbid-n-shared"},

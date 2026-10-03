@@ -133,7 +133,7 @@ func TestApplyRelinks_RolledBackCandidateCountsNoEditHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applied, retained, editHeld, err := p.applyRelinks(ctx, []classifiedRelink{{
+	applied, retained, editHeld, _, err := p.applyRelinks(ctx, []classifiedRelink{{
 		src:      gone,
 		c:        c,
 		relinked: RelinkedRow{OldPath: gone, NewPath: moved, ScanResultIDs: c.scanResultIDs, WorkItemIDs: []int64{editedID, siblingID}},

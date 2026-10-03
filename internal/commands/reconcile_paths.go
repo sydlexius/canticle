@@ -33,7 +33,8 @@ type reconcilePathsBackupRecord struct {
 	WorkItemIDs   []int64         `json:"work_item_ids,omitempty"`
 	Inputs        []models.Inputs `json:"inputs,omitempty"`
 	// NewPath, MBID, ISRC, and Reason are populated for "relinked"/"retained"
-	// records; empty for "pruned".
+	// records; empty for "pruned". MBID/ISRC are also empty for a same-stem
+	// sibling relink (#1262), which no identity drove.
 	NewPath string `json:"new_path,omitempty"`
 	MBID    string `json:"mbid,omitempty"`
 	ISRC    string `json:"isrc,omitempty"`
@@ -244,6 +245,12 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 	}
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d source(s) with a vanished file (%d scan_results, %d work_items), %s %d source(s) to a moved file, retained %d source(s) with unresolved identity%s\n",
 		verb, len(res.Pruned), res.ScanResults, res.WorkItems, relinkVerb, len(res.Relinked), len(res.Retained), suffixDryRun(args.Yes))
+	// Planned relinks that did not (in a dry run, would not) happen, by reason
+	// (#1262); the counts above already exclude them in both modes.
+	if res.RelinkOwned+res.RelinkChanged > 0 {
+		_, _ = fmt.Fprintf(out, "reconcile-paths: %d planned relink(s) not applied (%d target file already belongs to another queue row, %d row claimed or changed since it was read)%s\n",
+			res.RelinkOwned+res.RelinkChanged, res.RelinkOwned, res.RelinkChanged, suffixDryRun(args.Yes))
+	}
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d work_queue row(s) with a stale output_paths destination (skipped: %d ambiguous, %d unfixable, %d stat error, %d malformed, %d raced)%s\n",
 		repairVerb, len(repairRes.Repaired), repairRes.SkippedAmbiguous, repairRes.SkippedUnfixable,
 		repairRes.SkippedStatError, repairRes.SkippedMalformed, repairRes.SkippedRaced, suffixDryRun(args.Yes))
