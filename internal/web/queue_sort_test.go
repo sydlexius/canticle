@@ -110,7 +110,7 @@ func TestQueuePagingUnderEverySortShowsEachRowOnce(t *testing.T) {
 	}
 	mux := newReportsUIServer(t, db)
 	next := regexp.MustCompile(`hx-get="(/queue/failed\?[^"]+)"`)
-	for _, key := range []string{"artist", "album", "title", "status", "next_attempt", "misses", "attempts", "updated"} {
+	for _, key := range []string{"artist", "album", "title", "next_attempt", "misses", "attempts", "updated"} {
 		for _, dir := range []string{"asc", "desc"} {
 			seen := map[string]int{}
 			target := fmt.Sprintf("/queue/failed?sort=%s&dir=%s", key, dir)
@@ -138,6 +138,50 @@ func TestQueuePagingUnderEverySortShowsEachRowOnce(t *testing.T) {
 					t.Errorf("sort=%s dir=%s: %s shown %d times", key, dir, ti, n)
 				}
 			}
+		}
+	}
+}
+
+// A row whose sort value is far past the old 600-rune cursor cap must still
+// page: the pager's cursor round-trips through the decoder, so every row shows
+// exactly once instead of "Show more" looping back to page 1.
+func TestQueuePagingSurvivesLongSortValue(t *testing.T) {
+	db := openReportsTestDB(t)
+	const total = 60
+	longAlbum := strings.Repeat("Invented Album \u00e9 ", 37) // 629 runes
+	if n := len([]rune(longAlbum)); n < 620 {
+		t.Fatalf("test album is %d runes, want >= 620", n)
+	}
+	for i := 1; i <= total; i++ {
+		if _, err := db.Exec(`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status)
+            VALUES ('Invented Artist', ?, 'invented artist', ?, ?, 'failed')`,
+			fmt.Sprintf("Pend %03d", i), fmt.Sprintf("pend %03d", i), longAlbum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := newReportsUIServer(t, db)
+	next := regexp.MustCompile(`hx-get="(/queue/failed\?[^"]+)"`)
+	seen := map[string]int{}
+	target := "/queue/failed?sort=album&dir=asc"
+	for page := 0; page < 10 && target != ""; page++ {
+		rec := getQueue(t, mux, target, page > 0)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", target, rec.Code)
+		}
+		for _, ti := range titlesIn(rec.Body.String()) {
+			seen[ti]++
+		}
+		target = ""
+		if m := next.FindStringSubmatch(rec.Body.String()); m != nil {
+			target = html.UnescapeString(m[1])
+		}
+	}
+	if len(seen) != total {
+		t.Errorf("saw %d distinct rows, want %d", len(seen), total)
+	}
+	for ti, n := range seen {
+		if n != 1 {
+			t.Errorf("%s shown %d times", ti, n)
 		}
 	}
 }
@@ -172,7 +216,7 @@ func TestQueueHeadersSortableAndAria(t *testing.T) {
 		!strings.Contains(body, `href="/queue/pending?dir=asc&amp;q=pend&amp;sort=artist"`) {
 		t.Error("inactive headers lack their natural-direction links")
 	}
-	for _, plain := range []string{"Reason", "Libraries", "Lyrics"} {
+	for _, plain := range []string{"Status", "Reason", "Libraries", "Lyrics"} {
 		if !strings.Contains(body, "<th>"+plain+"</th>") {
 			t.Errorf("%s header should be plain and not sortable", plain)
 		}

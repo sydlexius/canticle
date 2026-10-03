@@ -116,7 +116,14 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	if more {
 		last := rows[len(rows)-1]
 		view.NextCursor = last.ID
-		view.MoreHref = state.href(string(bucket), tablesort.Cursor{ID: last.ID, Val: last.SortVal}.Encode())
+		// A cursor the decoder would refuse must never be emitted: the next page
+		// would fall back to page 1 and repeat rows. Fail loudly, with the row id
+		// only (the value is private library metadata), and offer no pager.
+		if enc := (tablesort.Cursor{ID: last.ID, Val: last.SortVal}).Encode(); len(enc) > tablesort.MaxCursorBytes {
+			slog.Error("queue cursor exceeds the cap; no further pages offered", "bucket", string(bucket), "row_id", last.ID)
+		} else {
+			view.MoreHref = state.href(string(bucket), enc)
+		}
 	}
 
 	// Counts only: the query text is library metadata and is never logged.
@@ -180,10 +187,10 @@ func queuePreviewHref(row reports.BucketRow, from reports.Bucket, state queueVie
 }
 
 // queueColumns is the table's column order (Artist, Album, Title first). A
-// column with no sort key (Reason, Libraries, Lyrics) is not orderable.
+// column with no sort key (Status, Reason, Libraries, Lyrics) is not orderable.
 var queueColumns = []struct{ label, key string }{
 	{"Artist", tablesort.KeyArtist}, {"Album", tablesort.KeyAlbum}, {"Title", tablesort.KeyTitle},
-	{"Status", tablesort.KeyStatus}, {"Reason", ""}, {"Next attempt", tablesort.KeyNextAttempt},
+	{"Status", ""}, {"Reason", ""}, {"Next attempt", tablesort.KeyNextAttempt},
 	{"Misses", tablesort.KeyMisses}, {"Attempts", tablesort.KeyAttempts}, {"Updated", tablesort.KeyUpdated},
 	{"Libraries", ""}, {"Lyrics", ""},
 }

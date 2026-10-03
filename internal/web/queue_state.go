@@ -12,9 +12,6 @@ import (
 // never truncated or passed through unbounded.
 const maxQueueQueryRunes = 200
 
-// maxQueueCursorRunes caps the raw cursor (the tablesort codec bounds it again).
-const maxQueueCursorRunes = 600
-
 // queueViewState is the parsed, validated URL state of one /queue/{bucket}
 // page (#1234, #1242). It is the single place the page's parameters are read and
 // the single place they are written back into a URL (href), so every pager
@@ -43,7 +40,7 @@ func parseQueueViewState(v url.Values) (queueViewState, error) {
 			return s, errors.New("repeated parameter " + k)
 		}
 	}
-	if raw := v.Get("after"); utf8.RuneCountInString(raw) <= maxQueueCursorRunes {
+	if raw := v.Get("after"); len(raw) <= tablesort.MaxCursorBytes {
 		s.After = raw
 	}
 	if sort := v.Get("sort"); tablesort.KnownKey(sort) {

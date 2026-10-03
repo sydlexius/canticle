@@ -123,12 +123,12 @@ type BucketFilter struct {
 // bucketColumns is the Work Queue's sortable columns (#1242), over the shared
 // tablesort vocabulary. Artist and title sort on the normalized keys (case and
 // accent folded, the same keys the search uses); album has no key column.
-// Reason, Libraries and Lyrics are deliberately not sortable.
+// Reason, Libraries and Lyrics are deliberately not sortable, and neither is
+// Status: every bucket is a single status, so sorting on it would only be id order.
 var bucketColumns = map[string]tablesort.Column{
 	tablesort.KeyArtist:      {Expr: "artist_key"},
 	tablesort.KeyAlbum:       {Expr: "album COLLATE NOCASE"},
 	tablesort.KeyTitle:       {Expr: "title_key"},
-	tablesort.KeyStatus:      {Expr: "status"},
 	tablesort.KeyNextAttempt: {Expr: "next_attempt_at"},
 	tablesort.KeyMisses:      {Expr: "miss_count", Integer: true, DescFirst: true},
 	tablesort.KeyAttempts:    {Expr: "attempts", Integer: true, DescFirst: true},
