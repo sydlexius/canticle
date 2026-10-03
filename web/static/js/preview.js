@@ -699,6 +699,10 @@
     interrupted: { hint: "audio playback was interrupted.", status: "Audio playback was interrupted," },
     network: { hint: "the audio could not be loaded (network error).", status: "The audio could not be loaded (network error)," },
     unplayable: { hint: "this browser cannot play the audio.", status: "The audio cannot be played in this browser," },
+    missing: { hint: "the audio file could not be found on the server.", status: "The audio file could not be found on the server," },
+    server: { hint: "the server could not deliver the audio.", status: "The server could not deliver the audio," },
+    session: { hint: "your session has expired. Reload the page and sign in again.", status: "Your session has expired," },
+    refused: { hint: "the server refused to deliver the audio.", status: "The server refused to deliver the audio," },
   };
 
   // failureKind maps a media error code to the kind that words every surface.
@@ -753,26 +757,127 @@
       audio.src = flacSrc;
       audio.load();
     }
-    function audioFailed() {
-      if (playback.failed) {
-        return; // the event can follow an audio.error already handled below
+    // probeAudio asks the audio route what it says about the file with one
+    // Range GET for the first byte (#1261): the route is a ServeContent
+    // handler, so a hit answers 206 and a refusal answers a bare 404. The
+    // X-Requested-With header makes the session guard answer 401 instead of a
+    // 303 to the login page, which fetch would follow and report as a 200.
+    // It resolves to {status, redirected}; status is 0 when the request failed
+    // (or was aborted by the timeout).
+    function probeAudio(url, signal) {
+      var opts = { headers: { Range: "bytes=0-0", "X-Requested-With": "XMLHttpRequest" }, credentials: "same-origin", cache: "no-store" };
+      if (signal) {
+        opts.signal = signal;
       }
-      // Only a decode or unsupported-source error (codes 3, 4) earns the
-      // conversion: never a network or interrupted error (1, 2), and never a
-      // missing or unknown code, which says nothing about the format.
-      if (flacSrc && !flacTried && audio.error && (audio.error.code === 3 || audio.error.code === 4)) {
-        retryAsFlac();
-        return;
-      }
+      return window.fetch(url, opts).then(function (res) {
+        return { status: res.status, redirected: res.redirected === true };
+      }, function (e) {
+        console.error("preview.js: audio check request failed", e && e.message);
+        return { status: 0, redirected: false };
+      });
+    }
+    // PROBE_TIMEOUT_MS bounds the probe so a stalled answer cannot leave the
+    // player with no message. The route opens the file before it answers, and
+    // a spun-down disk can take several seconds to wake, so 8 s outlasts a
+    // normal spin-up while still ending the wait in a bounded time.
+    var PROBE_TIMEOUT_MS = 8000;
+    var probing = false;
+    function settleFailure(quiet) {
       var msg = audioFailure(audio);
       if (flacTried) {
         msg += " The FLAC conversion did not play either.";
       }
-      if (!playback.rejectLogged) {
+      showFailure(msg, failureKind(audio), quiet);
+    }
+    function audioFailed() {
+      if (playback.failed || probing) {
+        return; // the event can follow an audio.error already handled below
+      }
+      var code = audio.error && audio.error.code;
+      // A network (2) or unsupported-source (4) error is also what a refused
+      // file reports, so ask the route before blaming the browser (#1261). The
+      // FLAC retry's own failure is judged as before.
+      if ((code === 2 || code === 4) && !flacTried) {
+        var url = audio.getAttribute("src");
+        if (typeof window.fetch !== "function") {
+          console.error("preview.js: fetch is unavailable; cannot check why the audio did not play");
+        } else if (!url) {
+          console.error("preview.js: audio element has no src; cannot check why the audio did not play");
+        } else {
+          probing = true;
+          // Captured now so a snippet rejection that logged before this media
+          // error still suppresses the second log however slow the probe is.
+          var quiet = playback.rejectLogged;
+          var done = false;
+          var timer = 0;
+          var finish = function (r) {
+            if (done) {
+              return;
+            }
+            done = true;
+            window.clearTimeout(timer);
+            probing = false;
+            // Stale: the source changed while the check was in flight.
+            if (audio.getAttribute("src") !== url) {
+              return;
+            }
+            var status = r.status;
+            // Any 2xx says the route served the file, so the failure is the
+            // browser's. Status 0 (the check failed or timed out) says nothing.
+            var served = status >= 200 && status <= 299;
+            if (r.redirected || status === 401 || status === 403) {
+              showFailure("Your session has expired. Reload the page and sign in again.", "session", quiet);
+            } else if (status === 404) {
+              showFailure("The audio file could not be found on the server (it may have moved since the last scan).", "missing", quiet);
+            } else if (status >= 500) {
+              showFailure("The server could not deliver the audio (error " + status + "). Reload the page to try again.", "server", quiet);
+            } else if (status !== 0 && !served) {
+              showFailure("The audio could not be loaded (error " + status + "). Reload the page to try again.", "refused", quiet);
+            } else if (served && flacSrc && code === 4) {
+              // Only a served file earns the conversion: after a failed check
+              // the .flac request would most likely fail the same way.
+              retryAsFlac();
+            } else {
+              settleFailure(quiet);
+            }
+          };
+          var ctl = null;
+          if (typeof window.AbortController === "function") {
+            ctl = new window.AbortController();
+          } else {
+            console.error("preview.js: AbortController is unavailable; the audio check cannot be cancelled, only timed out");
+          }
+          timer = window.setTimeout(function () {
+            console.error("preview.js: audio check timed out");
+            if (ctl) {
+              ctl.abort(); // the fetch rejects and finish() runs with status 0
+            } else {
+              finish({ status: 0, redirected: false });
+            }
+          }, PROBE_TIMEOUT_MS);
+          probeAudio(url, ctl && ctl.signal).then(finish);
+          return;
+        }
+      }
+      // Only a decode or unsupported-source error (3, 4) earns the conversion
+      // (4 reaches here only when the check above could not run): never a
+      // network or interrupted error, and never a missing or unknown code,
+      // which says nothing about the format.
+      if (flacSrc && !flacTried && (code === 3 || code === 4)) {
+        retryAsFlac();
+        return;
+      }
+      settleFailure();
+    }
+    function showFailure(msg, kind, quiet) {
+      if (quiet === undefined) {
+        quiet = playback.rejectLogged;
+      }
+      if (!quiet) {
         console.error("preview.js: audio failed: " + msg + " (media error code " + (audio.error ? audio.error.code : "none") + ")");
       }
       playback.failed = true;
-      playback.kind = failureKind(audio);
+      playback.kind = kind;
       if (errorBox) {
         errorBox.textContent = msg;
         errorBox.hidden = false;
