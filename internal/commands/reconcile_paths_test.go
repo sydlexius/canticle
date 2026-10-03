@@ -329,6 +329,38 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 	<-done
 }
 
+// TestRunSweeperRelinksInFolderSwap drives #1262's case through the production
+// caller: a track replaced in place by another format, its folder surviving,
+// is moved to the replacement by the sweeper's startup run.
+func TestRunSweeperRelinksInFolderSwap(t *testing.T) {
+	ctx, _, dbPath, root := setupReconcilePaths(t)
+	mp3, flac := filepath.Join(root, "ArtistA", "01. a.mp3"), filepath.Join(root, "ArtistA", "01. a.flac")
+	seedReconcilePathsRow(t, ctx, dbPath, mp3)
+	if err := os.Remove(mp3); err != nil {
+		t.Fatal(err)
+	}
+	seedReconcilePathsPresentFile(t, ctx, dbPath, flac, "")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	cctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { runSweeper(cctx, sqlDB, time.Hour, config.RealignConfig{}); close(done) }()
+	var got string
+	for deadline := time.Now().Add(2 * time.Second); got != flac && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if err := sqlDB.QueryRowContext(ctx, `SELECT source_path FROM work_queue`).Scan(&got); err != nil {
+			t.Fatalf("read source_path: %v", err)
+		}
+	}
+	cancel()
+	<-done
+	if got != flac {
+		t.Errorf("source_path = %q, want the in-folder replacement %q", got, flac)
+	}
+}
+
 // TestRunSweeperLogsRelinkAndRetainOutcomes: the periodic sweep is unattended,
 // so its LOG is the only surface an operator has. A relink silently moved a row
 // to a new path and a retain is the keep-and-report path -- a row the sweep

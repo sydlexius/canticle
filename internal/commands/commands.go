@@ -2344,8 +2344,10 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 
 // runSweeper runs the periodic path-reconciliation sweep: on each tick it
 // reconciles queue/scan rows whose source file has vanished, at Directory
-// granularity (one stat per directory) so the unattended backstop stays
-// disk-cheap. Its first run also reconciles any rows that predate this feature.
+// granularity so the unattended backstop stays disk-cheap: one stat per
+// directory, plus one per row file only in a directory whose mtime moved since
+// it was last examined, or that holds a gone row once a scan has indexed
+// something new (prune_dir_state, durable across restarts; #1262). Its first run also reconciles any rows that predate this feature.
 // Caller guarantees interval > 0. A per-run failure is logged and the loop
 // continues; the sweep is a backstop and must never take down serve.
 //

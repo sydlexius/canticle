@@ -948,7 +948,7 @@ func TestClassify_PoolErrorPropagatesRatherThanRetiring(t *testing.T) {
 	if !ok {
 		t.Fatalf("candidate for %q not gathered", gone)
 	}
-	roots, err := p.availableRoots(ctx)
+	roots, _, err := p.availableRoots(ctx)
 	if err != nil {
 		t.Fatalf("availableRoots: %v", err)
 	}
