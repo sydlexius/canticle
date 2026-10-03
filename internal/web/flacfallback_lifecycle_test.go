@@ -60,6 +60,39 @@ func TestFlacCacheCloseStopsConversion(t *testing.T) {
 	}
 }
 
+// A cache hit whose open lands just as Close begins returns no handle: Get
+// rechecks closed after the open, so it never hands out a file from a cache
+// Close is tearing down.
+func TestFlacCacheHitRacingCloseReturnsClosed(t *testing.T) {
+	c, err := newFlacCache(t.TempDir(), 1<<20, (&countingConverter{}).convert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, open, fi := srcNamed(t, t.TempDir(), "s.m4a")
+	if err := <-getAsync(c, context.Background(), p, open, fi); err != nil {
+		t.Fatal(err) // now cached: the next Get takes the hit path
+	}
+	prev := flacHitOpened
+	t.Cleanup(func() { flacHitOpened = prev })
+	hits := 0
+	flacHitOpened = func() {
+		hits++
+		// Close's dir removal can fail on Windows while the hit is open; only
+		// that Close has begun matters here.
+		_ = c.Close()
+	}
+	f, err := c.Get(context.Background(), p, fi, open)
+	if f != nil {
+		_ = f.Close()
+	}
+	if hits != 1 {
+		t.Fatalf("the hit path ran %d times, want 1 (the test did not exercise it)", hits)
+	}
+	if f != nil || !errors.Is(err, errFlacCacheClosed) {
+		t.Fatalf("Get racing Close = %v, %v: want no handle and errFlacCacheClosed", f, err)
+	}
+}
+
 // Close as a conversion finishes (it ignores the cancel, as a conversion
 // already writing its last bytes does) still leaves nothing behind.
 func TestFlacCacheCloseRacesFinishingConversion(t *testing.T) {
