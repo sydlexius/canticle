@@ -221,8 +221,8 @@ describe("offset editor helpers", () => {
     <button class="mx-edit-nudge" data-delta="-1000">-1s</button><button class="mx-edit-nudge" data-delta="-100">-0.1</button>
     <button class="mx-edit-nudge" data-delta="100">+0.1</button><button class="mx-edit-nudge" data-delta="1000">+1s</button>
     <button id="mx-edit-save"></button><button id="mx-edit-discard"></button><button id="mx-edit-revert" hidden></button>
-    <button id="mx-ear-toggle" data-ear-unit="line" aria-pressed="false"></button>
-    <p id="mx-edit-status"></p>
+    <button id="mx-ear-toggle" class="mx-ear-toggle" data-ear-unit="line" aria-pressed="false"></button>
+    MORE<p id="mx-edit-status"></p>
     <dialog id="mx-edit-confirm"><span id="mx-edit-confirm-offset"></span><p id="mx-edit-confirm-body"></p>
       <input id="mx-edit-skip" type="checkbox"><button id="mx-edit-confirm-cancel"></button><button id="mx-edit-confirm-ok"></button></dialog>
   </section>
@@ -233,19 +233,30 @@ describe("offset editor helpers", () => {
 
   // mountEditor builds the editor markup subset around the given line starts.
   // orig defaults to the shown starts (an unedited file); toleranceMs to timing.Tolerance.
-  function mountEditor({ durationMs = 30000, starts = [1000], orig = null, toleranceMs = 2000, savedOffsetMs = 0, edited = false, fetchImpl = null, decorative = [], keyboard = false } = {}) {
+  function mountEditor({ durationMs = 30000, starts = [1000], orig = null, toleranceMs = 2000, savedOffsetMs = 0, edited = false, fetchImpl = null, decorative = [], keyboard = false, more = false, observer = true } = {}) {
     const lines = starts
       .map((ms, i) => `<li class="mx-preview-line${decorative.includes(i) ? " mx-preview-line-decorative" : ""}" data-start-ms="${ms}">l${ms}</li>`)
       .join("");
     const html = EDITOR.replace("OFFSET", String(savedOffsetMs))
       .replace("EDITED", edited ? "data-edited" : "")
+      .replace("MORE", more ? '<button id="mx-edit-more" aria-expanded="false">More</button>' : "")
       .replace("DURATION", String(durationMs))
       .replace("ORIG", (orig || starts).join(","))
       .replace("TOLERANCE", String(toleranceMs))
       .replace("LINES", lines);
+    const observed = [];
     const p = load({
       html,
       setup: (win) => {
+        // jsdom has no ResizeObserver: record the callbacks so a test can fire one.
+        if (observer) {
+          win.ResizeObserver = class {
+            constructor(cb) {
+              observed.push(cb);
+            }
+            observe() {}
+          };
+        }
         // jsdom has no <dialog> behavior: model the two calls the editor makes.
         win.HTMLDialogElement.prototype.showModal = function () {
           this.setAttribute("open", "");
@@ -275,10 +286,204 @@ describe("offset editor helpers", () => {
     const nudge = (label) =>
       Array.from(p.doc.querySelectorAll(".mx-edit-nudge")).find((b) => b.textContent === label).click();
     const times = () => Array.from(p.doc.querySelectorAll(".mx-preview-time")).map((e) => e.textContent);
-    return { ...p, $, nudge, times };
+    // layout stubs jsdom's missing geometry: the player's bottom edge (document
+    // coordinates), the bar's content height and the viewport height.
+    const layout = ({ playerBottom, barHeight, viewport }) => {
+      p.win.innerHeight = viewport;
+      $("mx-preview-audio").getBoundingClientRect = () => ({ bottom: playerBottom });
+      Object.defineProperty($("mx-edit"), "scrollHeight", { configurable: true, get: () => barHeight });
+    };
+    return { ...p, $, nudge, times, observed, layout };
   }
   const reply = (status, text) =>
     vi.fn(() => Promise.resolve({ ok: status === 200, status, text: () => Promise.resolve(text) }));
+
+  describe("phone expand control (#1247)", () => {
+    it("toggles the panel class and aria-expanded, and relabels itself", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(true);
+      expect(btn.getAttribute("aria-expanded")).toBe("true");
+      expect(btn.textContent).toBe("Less");
+      btn.click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(btn.getAttribute("aria-expanded")).toBe("false");
+      expect(btn.textContent).toBe("More");
+      expect(e.errors).toEqual([]);
+    });
+
+    it("leaves a panel without the control alone", () => {
+      const e = mountEditor({ keyboard: true });
+      e.$("mx-edit").click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.errors).toEqual([]);
+    });
+
+    it("does not toggle on a click elsewhere in a panel that has the control", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      e.nudge("+0.1");
+      e.$("mx-edit").click();
+      e.$("mx-edit-save").click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.$("mx-edit-more").getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("swaps the accessible label with the state", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      expect(btn.getAttribute("aria-label")).toBe("Fewer timing controls");
+      btn.click();
+      expect(btn.getAttribute("aria-label")).toBe("More timing controls");
+    });
+
+    it("collapses when By ear turns on, by button and by the E shortcut", () => {
+      for (const start of [(e) => e.$("mx-ear-toggle").click(), (e) => e.doc.body.dispatchEvent(new e.win.KeyboardEvent("keydown", { key: "e", bubbles: true }))]) {
+        const e = mountEditor({ more: true, keyboard: true, starts: [1000, 3000] });
+        e.$("mx-edit-more").click();
+        expect(e.$("mx-edit").classList.contains("is-open")).toBe(true);
+        start(e);
+        expect(e.$("mx-ear-toggle").getAttribute("aria-pressed")).toBe("true");
+        expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+        expect(e.$("mx-edit-more").getAttribute("aria-expanded")).toBe("false");
+        expect(e.$("mx-edit-more").textContent).toBe("More");
+      }
+    });
+
+    it("keeps focus on the By ear toggle when the panel collapses, since the collapsed bar shows it", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      e.$("mx-edit-more").click();
+      const toggle = e.$("mx-ear-toggle");
+      toggle.focus();
+      e.$("mx-edit-more").click(); // collapse while the toggle holds focus
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("keeps focus on the By ear toggle when it is turned off while collapsed", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000, 3000] });
+      const toggle = e.$("mx-ear-toggle");
+      e.$("mx-edit-more").click();
+      toggle.focus();
+      toggle.click(); // turning it on collapses the open panel under the focused toggle
+      expect(toggle.getAttribute("aria-pressed")).toBe("true");
+      expect(e.doc.activeElement).toBe(toggle);
+      toggle.click();
+      expect(toggle.getAttribute("aria-pressed")).toBe("false");
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("moves focus to More when collapsing from a control the collapsed bar hides", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      const far = Array.from(e.doc.querySelectorAll(".mx-edit-nudge")).find((b) => b.dataset.delta === "1000");
+      far.focus();
+      expect(e.doc.activeElement).toBe(far);
+      btn.click();
+      expect(e.doc.activeElement).toBe(btn);
+    });
+
+    it("leaves focus alone when it is on a control the collapsed bar keeps", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      const near = Array.from(e.doc.querySelectorAll(".mx-edit-nudge")).find((b) => b.dataset.delta === "100");
+      near.focus();
+      btn.click();
+      expect(e.doc.activeElement).toBe(near);
+    });
+
+    it("tones the status for a save result so the collapsed bar can keep it", async () => {
+      const f = reply(200, '{"offset_ms":100,"mtime":1700000000000000002,"created_orig":true}');
+      const e = mountEditor({ starts: [1000], fetchImpl: f });
+      e.win.localStorage.setItem("mx-offset-confirm-skip", "1");
+      e.nudge("+0.1");
+      e.$("mx-edit-save").click();
+      await vi.waitFor(() => expect(e.$("mx-edit-status").textContent).toContain("Saved."));
+      expect(e.$("mx-edit-status").classList.contains("is-ok")).toBe(true);
+      e.nudge("+0.1");
+      expect(e.$("mx-edit-status").classList.contains("is-ok")).toBe(false);
+    });
+  });
+
+  describe("phone bar clears the player (#1247)", () => {
+    const unpinned = (e) => e.$("mx-edit").classList.contains("is-unpinned");
+
+    it("pinFits: the bar fits only when it ends below the player plus the gap", () => {
+      const { pinFits } = mountEditor().win.mxPreviewEdit;
+      expect(pinFits(300, 150, 568)).toBe(true); // 308 <= 418
+      expect(pinFits(300, 260, 568)).toBe(true); // 308 <= 308: exactly fits
+      expect(pinFits(300, 261, 568)).toBe(false);
+      expect(pinFits(300, 900, 568)).toBe(false); // capped at 70% of the viewport: 568 - 397.6 = 170
+      expect(pinFits(150, 900, 568)).toBe(true); // a short header leaves room even for the capped bar
+    });
+
+    it("stays pinned while the bar fits, unpins when it would intersect, and re-pins when it shrinks", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568 });
+      e.nudge("+0.1");
+      expect(unpinned(e)).toBe(false);
+      e.layout({ playerBottom: 300, barHeight: 270, viewport: 568 }); // a long status grew the bar
+      e.nudge("+0.1");
+      expect(unpinned(e)).toBe(true);
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568 });
+      e.nudge("+0.1");
+      expect(unpinned(e)).toBe(false);
+      expect(e.errors).toEqual([]);
+    });
+
+    it("re-evaluates when the observed layout changes and on resize, with no render", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      e.layout({ playerBottom: 400, barHeight: 150, viewport: 568 }); // 408 <= 418: fits
+      e.observed.forEach((cb) => cb());
+      expect(unpinned(e)).toBe(false);
+      e.layout({ playerBottom: 430, barHeight: 150, viewport: 568 }); // an error notice pushed the player down
+      e.observed.forEach((cb) => cb());
+      expect(unpinned(e)).toBe(true);
+      e.layout({ playerBottom: 100, barHeight: 150, viewport: 568 });
+      e.win.dispatchEvent(new e.win.Event("resize"));
+      expect(unpinned(e)).toBe(false);
+    });
+
+    it("unpins an expanded panel that does not fit and brings it into view", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568 });
+      e.nudge("+0.1");
+      e.layout({ playerBottom: 300, barHeight: 400, viewport: 568 }); // the open panel is taller
+      e.$("mx-edit-more").click();
+      expect(unpinned(e)).toBe(true);
+      expect(e.scrolls.map((s) => s.opts)).toEqual([{ block: "nearest" }]);
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568 });
+      e.$("mx-edit-more").click(); // collapsing measures the short bar again
+      expect(unpinned(e)).toBe(false);
+    });
+
+    it("fails loudly when ResizeObserver is missing", () => {
+      const e = mountEditor({ more: true, keyboard: true, observer: false });
+      expect(e.errors.some((m) => m.includes("ResizeObserver is missing"))).toBe(true);
+    });
+  });
+
+  describe("More while By ear is on (#1247)", () => {
+    it("disables More and refuses an expand, so the open panel never covers the banner", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000, 3000] });
+      const btn = e.$("mx-edit-more");
+      e.$("mx-ear-toggle").click();
+      expect(btn.disabled).toBe(true);
+      btn.click();
+      btn.dispatchEvent(new e.win.MouseEvent("click", { bubbles: true })); // the guard holds even if a click gets through
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(btn.getAttribute("aria-expanded")).toBe("false");
+      expect(e.$("mx-ear-banner").hidden).toBe(false);
+      e.$("mx-ear-toggle").click(); // By ear off: More works again
+      expect(btn.disabled).toBe(false);
+      btn.click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(true);
+    });
+  });
 
   describe("find by ear (unit-agnostic core)", () => {
     // fakeEar drives createEar with a synthetic unit list (not lines: plain
