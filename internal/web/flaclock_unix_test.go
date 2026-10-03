@@ -68,6 +68,15 @@ func TestFlacSweepFifoLockNeitherHangsNorDeletes(t *testing.T) {
 	requirePresent(t, d, true)
 }
 
+// A .lock that is not a regular file (here a directory, which opens and
+// flocks fine) is not this package's lock, so the dir reads as live.
+func TestFlacSweepNonRegularLockKeepsDir(t *testing.T) {
+	parent := t.TempDir()
+	d := plantDir(t, parent, "dirlock", func(l string) error { return os.Mkdir(l, 0o700) })
+	sweepWithin(t, parent)
+	requirePresent(t, d, true)
+}
+
 // A .lock that is a symlink is never followed and the dir reads as live,
 // even when the link's target is a free regular file.
 func TestFlacSweepSymlinkLockKeepsDir(t *testing.T) {
