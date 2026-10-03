@@ -912,6 +912,7 @@ func TestPreviewFlacEndToEndALACSeeks(t *testing.T) {
 	mux := http.NewServeMux()
 	ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
 	ui.attachPreviewFlac(t.TempDir(), 64<<20, ffmpegFlacConverter(bin))
+	t.Cleanup(ui.ClosePreviewFlac)
 	ui.Register(mux)
 	id := strconv.FormatInt(f.row(t, src), 10)
 
