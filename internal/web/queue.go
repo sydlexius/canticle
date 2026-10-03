@@ -69,7 +69,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "queue data source unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	state, err := parseQueueViewState(r.URL.Query())
+	state, err := parseQueueViewState(r.URL.Query(), reports.BucketSpec(bucket))
 	if err != nil {
 		http.Error(w, "invalid queue parameters: "+err.Error(), http.StatusBadRequest)
 		return

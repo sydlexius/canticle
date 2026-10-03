@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/reports"
 )
 
 // seedSearchRow inserts a pending row with app-style normalized keys.
@@ -183,10 +184,11 @@ func TestQueueViewStateRoundTrip(t *testing.T) {
 		{"q=x&after=7:n", queueViewState{Query: "x", After: "7:n"}, "/queue/pending?after=9%3Atab&q=x", "9:tab"},
 		{"sort=artist&dir=desc&sort2=x", queueViewState{Sort: "artist", Dir: "desc"}, "/queue/pending?dir=desc&sort=artist", ""},
 		{"sort=id%3Bdrop&dir=sideways", queueViewState{}, "/queue/pending", ""},
+		{"sort=status&dir=desc", queueViewState{Dir: "desc"}, "/queue/pending?dir=desc", ""}, // in the vocabulary, not in the spec
 	}
 	for _, c := range cases {
 		v, _ := url.ParseQuery(c.raw)
-		got, err := parseQueueViewState(v)
+		got, err := parseQueueViewState(v, reports.BucketSpec(reports.BucketPending))
 		if err != nil || got != c.want {
 			t.Errorf("parse(%q) = %+v, %v; want %+v", c.raw, got, err, c.want)
 		}
@@ -196,7 +198,7 @@ func TestQueueViewStateRoundTrip(t *testing.T) {
 	}
 	for _, bad := range []string{"q=a&q=b", "after=1&after=2", "sort=a&sort=b", "dir=asc&dir=desc"} {
 		v, _ := url.ParseQuery(bad)
-		if _, err := parseQueueViewState(v); err == nil {
+		if _, err := parseQueueViewState(v, reports.BucketSpec(reports.BucketPending)); err == nil {
 			t.Errorf("parse(%q) accepted, want error", bad)
 		}
 	}

@@ -240,6 +240,43 @@ func TestQueueHeadersSortableAndAria(t *testing.T) {
 	}
 }
 
+// status is in the shared sort vocabulary but not in the queue's spec: it must
+// behave exactly like an unknown key, not linger in the state that feeds the
+// search form, the pager and the header links.
+func TestQueueSortKeyOutsideBucketSpecIsDropped(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedSortRows(t, db, "failed", [][3]string{
+		{"Pend 001", "2026-01-02T00:00:00Z", "2026-03-01T00:00:00Z"},
+		{"Pend 002", "2026-01-03T00:00:00Z", "2026-03-03T00:00:00Z"},
+		{"Pend 003", "2026-01-01T00:00:00Z", "2026-03-02T00:00:00Z"},
+	})
+	for i := 0; i < queuePageSize; i++ { // force a pager
+		if _, err := db.Exec(`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, updated_at)
+			VALUES ('Invented Artist', ?, 'invented artist', ?, 'Invented Album', 'failed', '2025-01-01T00:00:00Z')`,
+			fmt.Sprintf("Old %03d", i), fmt.Sprintf("old %03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := newReportsUIServer(t, db)
+	body := getQueue(t, mux, "/queue/failed?sort=status&q=pend", false).Body.String()
+	if got := fmt.Sprint(titlesIn(body)); got != "[Pend 002 Pend 001 Pend 003]" {
+		t.Errorf("order = %s, want the default (updated, newest first)", got)
+	}
+	if n := strings.Count(body, "aria-sort="); n != 1 || !strings.Contains(body, `aria-sort="descending"`) {
+		t.Errorf("aria-sort count = %d, want exactly one descending (Updated)", n)
+	}
+	if strings.Contains(body, "sort=status") || strings.Contains(body, `name="sort"`) {
+		t.Error("unsupported sort carried into the search form or a link")
+	}
+	paged := getQueue(t, mux, "/queue/failed?sort=status", false).Body.String()
+	if !strings.Contains(paged, "after=") {
+		t.Fatal("expected a pager on the page")
+	}
+	if strings.Contains(paged, "sort=status") {
+		t.Error("pager link carries sort=status")
+	}
+}
+
 func TestQueuePreviewHrefCarriesView(t *testing.T) {
 	row := reports.BucketRow{ID: 7, Previewable: true}
 	got := queuePreviewHref(row, reports.BucketFailed, queueViewState{Query: "a&b", Sort: "title", Dir: "desc", After: "5:n"})
@@ -257,6 +294,7 @@ func TestPreviewBackLinkCarriesAndValidatesView(t *testing.T) {
 		{"?from=failed&sort=title&dir=sideways", "/queue/failed?sort=title"},
 		{"?from=failed&sort=id%3Bdrop&dir=up", "/queue/failed"},
 		{"?from=failed&sort=title&sort=artist", "/queue/failed"},
+		{"?from=failed&sort=status&q=moon", "/queue/failed?q=moon"}, // vocabulary key the bucket's spec lacks
 		{"?from=failed&after=9%3An&sort=title", "/queue/failed?sort=title"},
 		{"?from=failed&sort=title&q=" + strings.Repeat("x", maxQueueQueryRunes+1), "/queue/failed"}, // overlong search drops the whole view
 		{"?from=bogus&q=moon&sort=title", "/queue"},

@@ -32,8 +32,11 @@ type queueViewState struct {
 }
 
 // parseQueueViewState validates the page's query string. A repeated parameter
-// is ambiguous and rejected, as the player's `from` is.
-func parseQueueViewState(v url.Values) (queueViewState, error) {
+// is ambiguous and rejected, as the player's `from` is. A sort key is kept only
+// if the bucket's own spec sorts on it: a key that is merely in the shared
+// vocabulary (status) would otherwise resolve to the default order in SQL while
+// the state, and every link built from it, kept naming an unsupported sort.
+func parseQueueViewState(v url.Values, spec tablesort.Spec) (queueViewState, error) {
 	var s queueViewState
 	for _, k := range []string{"q", "after", "sort", "dir"} {
 		if len(v[k]) > 1 {
@@ -44,7 +47,9 @@ func parseQueueViewState(v url.Values) (queueViewState, error) {
 		s.After = raw
 	}
 	if sort := v.Get("sort"); tablesort.KnownKey(sort) {
-		s.Sort = sort
+		if _, ok := spec.Columns[sort]; ok {
+			s.Sort = sort
+		}
 	}
 	if dir := v.Get("dir"); tablesort.ValidDir(dir) {
 		s.Dir = dir

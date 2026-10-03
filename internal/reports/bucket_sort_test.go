@@ -38,15 +38,16 @@ func TestListBucketFilteredRejectsUnknownSort(t *testing.T) {
 }
 
 // The default sort of every bucket must be served by an index (migration 059):
-// a temp B-tree means each "Show more" re-sorts the whole bucket.
+// a temp B-tree means each "Show more" re-sorts the whole bucket. The predicate
+// is the bucket's real one (reports.BucketPredicateForTest), so Finished and
+// Settled are judged on the SQL ListBucketFiltered actually runs.
 func TestDefaultSortsAvoidTempBTree(t *testing.T) {
 	d := openTestDB(t)
-	for _, b := range []reports.Bucket{reports.BucketPending, reports.BucketDeferred, reports.BucketFailed, reports.BucketUnavailable} {
+	for _, b := range reports.Buckets() {
 		sp := reports.BucketSpec(b)
 		o := sp.Default
 		where, args := sp.Keyset(o, tablesort.Cursor{ID: 5, Val: "t2026"})
-		rows, err := d.Query("EXPLAIN QUERY PLAN SELECT id FROM work_queue WHERE status = ?"+where+" ORDER BY "+sp.OrderBy(o)+" LIMIT 51",
-			append([]any{string(b)}, args...)...)
+		rows, err := d.Query("EXPLAIN QUERY PLAN SELECT id FROM work_queue WHERE ("+reports.BucketPredicateForTest(b)+")"+where+" ORDER BY "+sp.OrderBy(o)+" LIMIT 51", args...)
 		if err != nil {
 			t.Fatal(err)
 		}
