@@ -517,9 +517,17 @@ func (u *UI) handlePreviewFlac(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = f.Close() // the stat keys the cache; a conversion re-opens through the same confinement
 	open := func() (*os.File, error) {
-		g, _, ok := openPreviewAudio(roots, audioPath)
+		g, gfi, ok := openPreviewAudio(roots, audioPath)
 		if !ok {
 			return nil, errors.New("not a regular file under a library root")
+		}
+		// The conversion is cached under fi's key, so it must convert the
+		// file fi described: a file replaced in between (another inode, or
+		// rewritten in place) fails this conversion instead of being cached
+		// under the old key. The next request keys the new file afresh.
+		if !sameFlacSource(fi, gfi) {
+			_ = g.Close()
+			return nil, errors.New("source changed since the request opened it")
 		}
 		return g, nil
 	}
@@ -550,4 +558,10 @@ func (u *UI) handlePreviewFlac(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "audio/flac")
 	http.ServeContent(w, r, "", ofi.ModTime(), out)
+}
+
+// sameFlacSource reports whether b is the same file as a, unchanged: the same
+// file identity and the same mtime and size, the fields the cache key holds.
+func sameFlacSource(a, b fs.FileInfo) bool {
+	return os.SameFile(a, b) && a.ModTime().Equal(b.ModTime()) && a.Size() == b.Size()
 }

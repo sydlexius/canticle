@@ -590,6 +590,60 @@ func TestPreviewFlacConversionFailureIs502(t *testing.T) {
 	}
 }
 
+// A source replaced after the request's confined open (before the conversion
+// re-opens it) is not converted under the old file's key: the request fails
+// and nothing is cached.
+func TestPreviewFlacReplacedSourceIsNotConverted(t *testing.T) {
+	for name, replace := range map[string]func(t *testing.T, p string){
+		"new inode": func(t *testing.T, p string) {
+			tmp := p + ".new"
+			if err := os.WriteFile(tmp, []byte("a different file"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, p); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rewritten in place": func(t *testing.T, p string) {
+			if err := os.WriteFile(p, []byte("rewritten, longer than before"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPreviewFixture(t)
+			conv := &countingConverter{}
+			mux := http.NewServeMux()
+			ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
+			ui.attachPreviewFlac(t.TempDir(), 1<<20, conv.convert)
+			t.Cleanup(ui.ClosePreviewFlac)
+			ui.Register(mux)
+			src := f.writeFile(t, f.root, "song.m4a")
+			id := strconv.FormatInt(f.row(t, src), 10)
+			for i := 0; i < cap(ui.flac.sem); i++ { // hold every slot: the job queues before its open
+				ui.flac.sem <- struct{}{}
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- flacGet(mux, id) }()
+			waitFor(t, "the request to queue its conversion", func() bool {
+				ui.flac.mu.Lock()
+				defer ui.flac.mu.Unlock()
+				return len(ui.flac.inflight) == 1
+			})
+			replace(t, src)
+			for i := 0; i < cap(ui.flac.sem); i++ {
+				<-ui.flac.sem
+			}
+			if rec := <-done; rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for a source replaced mid-request", rec.Code)
+			}
+			if n := conv.calls.Load(); n != 0 {
+				t.Fatalf("converter ran %d times on a replaced source, want 0", n)
+			}
+		})
+	}
+}
+
 func TestPreviewFlacSrc(t *testing.T) {
 	u := NewUI(config.Config{}, "v")
 	if got := u.previewFlacSrc(7); got != "" {
