@@ -255,8 +255,10 @@ func flacInput(goos string, in *os.File, inName string) (string, []*os.File) {
 	return "/dev/fd/3", []*os.File{in}
 }
 
-// cappedBuffer holds at most max bytes of output: the first and the last
-// max/2, which carry the failing stream and the cause that ended the run.
+// cappedBuffer keeps the first and the last max/2 bytes of output, which carry
+// the failing stream and the cause that ended the run. The tail is trimmed only
+// once it doubles, so a run of small writes copies it rarely (it holds up to
+// 1.5*max between trims).
 type cappedBuffer struct {
 	head, tail []byte
 	max        int
@@ -268,16 +270,20 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	k := min(len(p), max(b.max/2-len(b.head), 0))
 	b.head, p = append(b.head, p[:k]...), p[k:]
 	b.tail = append(b.tail, p...)
-	if over := len(b.tail) - b.max/2; over > 0 {
+	if over := len(b.tail) - b.max/2; len(b.tail) > b.max && over > 0 {
 		b.dropped += over
-		b.tail = append(b.tail[:0:0], b.tail[over:]...)
+		b.tail = append(b.tail[:0], b.tail[over:]...)
 	}
 	return n, nil
 }
 
 func (b *cappedBuffer) String() string {
-	if b.dropped == 0 {
-		return string(b.head) + string(b.tail)
+	tail, dropped := b.tail, b.dropped
+	if over := len(tail) - b.max/2; over > 0 {
+		tail, dropped = tail[over:], dropped+over
 	}
-	return fmt.Sprintf("%s\n... [%d bytes dropped] ...\n%s", b.head, b.dropped, b.tail)
+	if dropped == 0 {
+		return string(b.head) + string(tail)
+	}
+	return fmt.Sprintf("%s\n... [%d bytes dropped] ...\n%s", b.head, dropped, tail)
 }

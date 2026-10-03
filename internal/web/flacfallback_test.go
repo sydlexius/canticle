@@ -420,6 +420,15 @@ func TestFlacInputAndCappedStderr(t *testing.T) {
 	if s := b.String(); len(s) > 64 || !strings.HasPrefix(s, "HEAD-") || !strings.HasSuffix(s, "-TAIL") {
 		t.Errorf("capped stderr = %q, want head and tail within the cap", s)
 	}
+	for i := 0; i < 100; i++ { // small writes after the overflow: held bytes stay bounded
+		_, _ = b.Write([]byte("abc"))
+		if len(b.tail) > b.max {
+			t.Fatalf("tail holds %d bytes, want at most %d", len(b.tail), b.max)
+		}
+	}
+	if s, want := b.String(), "HEAD-xxx\n... [1294 bytes dropped] ...\nbcabcabc"; s != want {
+		t.Errorf("capped stderr = %q, want %q", s, want)
+	}
 }
 
 // ---- real ffmpeg (skipped when none is on PATH) ----
