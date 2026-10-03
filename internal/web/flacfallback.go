@@ -126,10 +126,11 @@ func (c *flacCache) Get(ctx context.Context, srcPath string, fi fs.FileInfo, ope
 	c.mu.Lock()
 	job.waiters--
 	if job.waiters == 0 {
-		job.cancel() // no-op once the job has finished
-		if c.inflight[key] == job {
-			delete(c.inflight, key) // unpins the result; a later request starts afresh
-		}
+		// Only this branch removes a job from inflight and a job is joined
+		// only while it is there, so the count reaches 0 once, with job
+		// still mapped under key: the delete cannot drop a newer job.
+		job.cancel()            // no-op once the job has finished
+		delete(c.inflight, key) // unpins the result; a later request starts afresh
 	}
 	c.mu.Unlock()
 	return f, err
@@ -178,6 +179,11 @@ func (c *flacCache) run(ctx context.Context, key string, job *flacJob, open func
 // .part files fit the cap. An entry whose job still has waiters to open it is
 // pinned, so a result is never deleted before it is served; a single file
 // larger than the cap is therefore still served and goes with a later eviction.
+//
+// Windows (not exercised by any test here): removing, or renaming a fresh
+// conversion onto, a file another request is still serving fails unless the
+// reader opened it with share-delete. Eviction logs that and moves on; the
+// rename fails that one request.
 func (c *flacCache) evict() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -21,10 +21,12 @@ type countingConverter struct {
 	calls atomic.Int32
 	gate  chan struct{} // when non-nil, each call blocks until it is closed
 	err   error         // returned after writing to out, so a failure leaves a file to clean
+	in    atomic.Pointer[os.File]
 }
 
-func (c *countingConverter) convert(ctx context.Context, _ *os.File, _ string, out string) error {
+func (c *countingConverter) convert(ctx context.Context, in *os.File, _ string, out string) error {
 	c.calls.Add(1)
+	c.in.Store(in)
 	if c.gate != nil {
 		select {
 		case <-c.gate:
@@ -125,6 +127,9 @@ func TestFlacCacheReusesAndReconvertsOnChange(t *testing.T) {
 	}
 	if conv.calls.Load() != 1 {
 		t.Fatalf("calls = %d, want 1 (second Get should hit the cache)", conv.calls.Load())
+	}
+	if _, err := conv.in.Load().Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("source handle after the conversion: stat err = %v, want it closed", err)
 	}
 	// A changed file (new mtime) converts again.
 	_ = os.Chtimes(p, time.Now(), time.Now().Add(time.Hour))
@@ -313,10 +318,10 @@ func TestFlacCacheSingleConversionForConcurrentRequests(t *testing.T) {
 // One waiter leaving (the creator, here) does not cancel a conversion another
 // still wants; the last one leaving does.
 func TestFlacCacheCancelsOnlyWhenEveryWaiterLeaves(t *testing.T) {
-	canceled := make(chan struct{})
+	var jctx atomic.Value
 	conv := &countingConverter{gate: make(chan struct{})}
 	c := newTestCache(t, 1<<20, func(ctx context.Context, in *os.File, name, out string) error {
-		defer close(canceled)
+		jctx.Store(ctx)
 		return conv.convert(ctx, in, name, out)
 	})
 	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
@@ -330,16 +335,13 @@ func TestFlacCacheCancelsOnlyWhenEveryWaiterLeaves(t *testing.T) {
 	if err := <-first; !errors.Is(err, context.Canceled) {
 		t.Fatalf("leaver err = %v, want context canceled", err)
 	}
-	select {
-	case <-canceled:
-		t.Fatal("conversion canceled while a waiter remained")
-	case <-time.After(50 * time.Millisecond):
+	// Get decides on the cancel before it returns, and cancel is synchronous.
+	if err := jctx.Load().(context.Context).Err(); err != nil {
+		t.Fatalf("conversion canceled while a waiter remained: %v", err)
 	}
 	cancel2()
 	<-second
-	select {
-	case <-canceled:
-	case <-time.After(5 * time.Second):
+	if jctx.Load().(context.Context).Err() == nil {
 		t.Fatal("conversion was not canceled after its last waiter left")
 	}
 }
@@ -352,6 +354,7 @@ func TestFlacCacheLateJoinerAfterCancelStartsFresh(t *testing.T) {
 	var once sync.Once
 	defer once.Do(func() { close(release) })
 	var calls atomic.Int32
+	var dying *flacJob
 	c := newTestCache(t, 1<<20, func(ctx context.Context, _ *os.File, _, out string) error {
 		if calls.Add(1) == 1 {
 			<-ctx.Done()
@@ -360,13 +363,16 @@ func TestFlacCacheLateJoinerAfterCancelStartsFresh(t *testing.T) {
 		}
 		err := os.WriteFile(out, fakeFlac, 0o600)
 		once.Do(func() { close(release) })
-		time.Sleep(50 * time.Millisecond) // the dying run cleans up meanwhile
+		<-dying.done // the dying run has finished its cleanup
 		return err
 	})
 	p, open, fi := srcNamed(t, t.TempDir(), "song.m4a")
 	ctx, cancel := context.WithCancel(context.Background())
 	first := getAsync(c, ctx, p, open, fi)
 	waitFor(t, "the conversion to start", func() bool { return calls.Load() == 1 })
+	c.mu.Lock()
+	dying = c.inflight[flacKey(p, fi)]
+	c.mu.Unlock()
 	cancel()
 	<-first
 	second := getAsync(c, context.Background(), p, open, fi)
