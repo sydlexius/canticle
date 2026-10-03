@@ -143,11 +143,14 @@ type BucketFilter struct {
 	Lane string
 }
 
-// Lanes are the provider lanes the Lane filter offers, in display order, the
-// names providers defines (the values the worker stamps into provider_lane).
-// The detector's instrumental lane is deliberately not offered.
+// Lanes are the provider lanes the Lane filter offers, in display order:
+// providers.Known, the one list of built-in lanes (the values the worker
+// stamps into provider_lane), so a provider added there is offered here and
+// admitted by the request-log allowlist with no second list to update. The
+// detector's instrumental lane is not a provider and is deliberately not
+// offered.
 func Lanes() []string {
-	return []string{providers.Musixmatch, providers.PetitLyrics, providers.InnerTube}
+	return providers.Known()
 }
 
 // ValidLane reports whether l is one of Lanes.

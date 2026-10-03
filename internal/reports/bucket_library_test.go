@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
@@ -227,7 +228,9 @@ func TestListBucketFilteredByLane(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	if got, want := fmt.Sprint(Lanes()), "[musixmatch petitlyrics innertube]"; got != want {
-		t.Errorf("Lanes() = %s, want %s", got, want)
+	// The offered lanes are providers.Known, not a second list that could
+	// drift from it when a provider is added.
+	if got, want := fmt.Sprint(Lanes()), fmt.Sprint(providers.Known()); got != want {
+		t.Errorf("Lanes() = %s, want providers.Known() %s", got, want)
 	}
 }
