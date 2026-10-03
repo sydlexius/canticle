@@ -85,6 +85,10 @@ type flacCache struct {
 
 var errFlacCacheClosed = errors.New("preview flac cache is closed")
 
+// flacHitOpened runs between a cache hit's open and its closed check; a test
+// seam for the race with Close.
+var flacHitOpened = func() {}
+
 // newFlacCache creates the cache in a fresh private directory under parent
 // (os.MkdirTemp: 0700 and a random name, so two processes sharing parent never
 // touch each other's files and nothing pre-planted is followed), holds that
@@ -173,6 +177,17 @@ func (c *flacCache) Get(ctx context.Context, srcPath string, fi fs.FileInfo, ope
 	key := flacKey(srcPath, fi)
 	out := filepath.Join(c.dir, key)
 	if f, err := os.Open(out); err == nil { //nolint:gosec // reason: G304 -- out is dir joined with a sha256 hex name this package computed; no caller input reaches the path
+		flacHitOpened()
+		// The closed check under c.mu is the hit's linearization point: a Close
+		// that began before it gets no handle back, one that begins after it
+		// finds the handle already served.
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if closed {
+			_ = f.Close()
+			return nil, errFlacCacheClosed
+		}
 		now := time.Now()
 		_ = os.Chtimes(out, now, now) // recency for eviction; best effort
 		return f, nil
