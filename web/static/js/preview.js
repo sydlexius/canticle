@@ -822,15 +822,20 @@
               return;
             }
             var status = r.status;
+            // Any 2xx says the route served the file, so the failure is the
+            // browser's. Status 0 (the check failed or timed out) says nothing.
+            var served = status >= 200 && status <= 299;
             if (r.redirected || status === 401 || status === 403) {
               showFailure("Your session has expired. Reload the page and sign in again.", "session", quiet);
             } else if (status === 404) {
               showFailure("The audio file could not be found on the server (it may have moved since the last scan).", "missing", quiet);
             } else if (status >= 500) {
               showFailure("The server could not deliver the audio (error " + status + "). Reload the page to try again.", "server", quiet);
-            } else if (status !== 0 && status !== 200 && status !== 206) {
+            } else if (status !== 0 && !served) {
               showFailure("The audio could not be loaded (error " + status + "). Reload the page to try again.", "refused", quiet);
-            } else if (flacSrc && code === 4) {
+            } else if (served && flacSrc && code === 4) {
+              // Only a served file earns the conversion: after a failed check
+              // the .flac request would most likely fail the same way.
               retryAsFlac();
             } else {
               settleFailure(quiet);

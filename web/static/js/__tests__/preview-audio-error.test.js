@@ -440,6 +440,27 @@ describe("preview.js audio failure check (#1261)", () => {
     }
   });
 
+  it("treats any 2xx answer as served: decode message and the FLAC retry", async () => {
+    for (const code of [200, 204, 299]) {
+      const p = loadWith(reply(code));
+      p.fail(4);
+      await flush();
+      expect(p.loads()).toBe(1);
+      expect(p.audio.getAttribute("src")).toBe(FLAC);
+      expect(p.text()).not.toContain("error " + code);
+    }
+  });
+
+  it("does not retry as FLAC when the check itself fails", async () => {
+    const p = loadWith(() => Promise.reject(new Error("offline")));
+    p.fail(4);
+    await flush();
+    expect(p.loads()).toBe(0);
+    expect(p.audio.getAttribute("src")).toBe("/preview/7/audio");
+    expect(p.text()).toContain("cannot play");
+    expect(p.text()).not.toContain("Converting");
+  });
+
   it("never retries a network error (code 2) as FLAC after a 2xx answer", async () => {
     const p = loadWith(answer(206));
     p.fail(2);
