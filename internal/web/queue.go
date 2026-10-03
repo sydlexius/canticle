@@ -122,7 +122,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		Query: state.Query, StartHref: state.href(string(bucket), ""), ClearHref: state.withoutQuery().href(string(bucket), ""),
 		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir,
 		Chips: buildQueueChips(bucket, state), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive(),
-		Libraries: buildLibraryOptions(libs, state.Library)}
+		Libraries: buildLibraryOptions(libs, state.Library), Lanes: buildLaneOptions(state.Lane)}
 	// Only the retired bucket can be revived; failed rows are already retried,
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
@@ -299,6 +299,16 @@ func buildLibraryOptions(libs []reports.BucketLibrary, selected int64) []templat
 	out := make([]templates.QueueOption, 0, len(libs))
 	for _, l := range libs {
 		out = append(out, templates.QueueOption{Value: strconv.FormatInt(l.ID, 10), Label: l.Name, Selected: l.ID == selected})
+	}
+	return out
+}
+
+// buildLaneOptions is the Source select's options, labeled as the dashboard
+// and reports label the same lanes.
+func buildLaneOptions(selected string) []templates.QueueOption {
+	var out []templates.QueueOption
+	for _, l := range reports.Lanes() {
+		out = append(out, templates.QueueOption{Value: l, Label: laneLabel(l), Selected: l == selected})
 	}
 	return out
 }

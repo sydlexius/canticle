@@ -40,6 +40,8 @@ type QueueView struct {
 	Filtered bool
 	// Libraries are the Library select's options (empty: no control).
 	Libraries []QueueOption
+	// Lanes are the provider Lane select's options (empty: no control).
+	Lanes []QueueOption
 	// ReviveLink shows the "Revive retired tracks" link (the unavailable bucket
 	// only, and only when a queue action backend is wired).
 	ReviveLink bool

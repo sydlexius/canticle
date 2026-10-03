@@ -42,6 +42,17 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 					</select>
 				</span>
 			}
+			if len(view.Lanes) > 0 {
+				<span class="mx-queue-field">
+					<label class="mx-queue-search-label" for="mx-queue-lane">Source</label>
+					<select class="mx-queue-filter" id="mx-queue-lane" name="lane" autocomplete="off" data-queue-autosubmit>
+						<option value="">All sources</option>
+						for _, o := range view.Lanes {
+							<option value={ o.Value } selected?={ o.Selected }>{ o.Label }</option>
+						}
+					</select>
+				</span>
+			}
 			<button class="mx-run-button" type="submit">Search</button>
 			if view.Query != "" {
 				<a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear search</a>
