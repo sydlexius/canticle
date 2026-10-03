@@ -396,7 +396,7 @@ func TestFlacCacheDoesNotCacheFailures(t *testing.T) {
 	if _, err := c.Get(context.Background(), p, fi, open); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the conversion error", err)
 	}
-	if ents, _ := os.ReadDir(c.dir); len(ents) != 0 {
+	if ents, _ := os.ReadDir(c.dir); len(ents) != 0 && (len(ents) != 1 || ents[0].Name() != flacLockName) {
 		t.Fatalf("a failed conversion left %d files in the cache", len(ents))
 	}
 	conv.err = nil
@@ -417,6 +417,15 @@ func TestFlacInputAndCappedStderr(t *testing.T) {
 	}
 	if s := b.String(); len(s) > 64 || !strings.HasPrefix(s, "HEAD-") || !strings.HasSuffix(s, "-TAIL") {
 		t.Errorf("capped stderr = %q, want head and tail within the cap", s)
+	}
+	for i := 0; i < 100; i++ { // small writes after the overflow: held bytes stay bounded
+		_, _ = b.Write([]byte("abc"))
+		if len(b.tail) > b.max {
+			t.Fatalf("tail holds %d bytes, want at most %d", len(b.tail), b.max)
+		}
+	}
+	if s, want := b.String(), "HEAD-xxx\n... [1294 bytes dropped] ...\nbcabcabc"; s != want {
+		t.Errorf("capped stderr = %q, want %q", s, want)
 	}
 }
 
