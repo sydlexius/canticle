@@ -90,7 +90,7 @@ func TestTrackTablesArtistAlbumTitle(t *testing.T) {
 		name string
 		c    templ.Component
 	}{
-		{"queue bucket", QueuePage("v", QueueView{Rows: []QueueRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}}, nil, false, false)},
+		{"queue bucket", QueuePage("v", QueueView{Columns: tcQueueColumns(), Rows: []QueueRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}}, nil, false, false)},
 		{"dashboard recent", dashRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
 		{"attention", attentionTable([]AttentionRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "none")},
 		{"up next", dashUpNext(nil, []UpNextRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "h", "e")},
@@ -140,7 +140,7 @@ func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
 		name string
 		c    templ.Component
 	}{
-		{"queue bucket", QueuePage("v", QueueView{Rows: []QueueRow{{Artist: tcArtist, Title: tcTitle}}}, nil, false, false)},
+		{"queue bucket", QueuePage("v", QueueView{Columns: tcQueueColumns(), Rows: []QueueRow{{Artist: tcArtist, Title: tcTitle}}}, nil, false, false)},
 		{"dashboard recent", dashRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"attention", attentionTable([]AttentionRow{{Artist: tcArtist, Title: tcTitle}}, "none")},
 		{"up next", dashUpNext(nil, []UpNextRow{{Artist: tcArtist, Title: tcTitle}}, "h", "e")},
@@ -164,4 +164,13 @@ func TestAlbumText(t *testing.T) {
 	if got := AlbumText("X"); got != "X" {
 		t.Errorf("album = %q, want X", got)
 	}
+}
+
+// tcQueueColumns is the queue table's header row as the handler builds it.
+func tcQueueColumns() []SortHeaderView {
+	var out []SortHeaderView
+	for _, l := range []string{"Artist", "Album", "Title", "Status", "Reason", "Next attempt", "Misses", "Attempts", "Updated", "Libraries", "Lyrics"} {
+		out = append(out, SortHeaderView{Label: l})
+	}
+	return out
 }

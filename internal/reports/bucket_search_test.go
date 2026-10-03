@@ -8,6 +8,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
 // insertKeyed inserts a pending row whose keys are stamped the way the app
@@ -28,7 +29,7 @@ func insertKeyed(t *testing.T, db *sql.DB, artist, title string) int64 {
 func searchTitles(t *testing.T, repo *reports.Repo, q string) []string {
 	t.Helper()
 	rows, err := repo.ListBucketFiltered(context.Background(), reports.BucketPending,
-		reports.BucketFilter{Query: q}, 0, reports.MaxBucketLimit)
+		reports.BucketFilter{Query: q}, tablesort.Order{}, tablesort.Cursor{}, reports.MaxBucketLimit)
 	if err != nil {
 		t.Fatalf("ListBucketFiltered(%q): %v", q, err)
 	}
@@ -109,7 +110,7 @@ func TestListBucketFilteredPagesAcrossBoundary(t *testing.T) {
 	var after int64
 	for pages := 0; pages < 20; pages++ {
 		page, err := repo.ListBucketFiltered(context.Background(), reports.BucketPending,
-			reports.BucketFilter{Query: "NEEDLE"}, after, 4)
+			reports.BucketFilter{Query: "NEEDLE"}, tablesort.Order{}, tablesort.Cursor{ID: after}, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -145,13 +146,13 @@ func TestListBucketFilteredRespectsBucket(t *testing.T) {
 	// The keyset cursor is also an AND term; an unbracketed OR would let the
 	// other-bucket title match through past the last pending id.
 	first, err := repo.ListBucketFiltered(context.Background(), reports.BucketPending,
-		reports.BucketFilter{Query: "needle"}, 0, reports.MaxBucketLimit)
+		reports.BucketFilter{Query: "needle"}, tablesort.Order{}, tablesort.Cursor{}, reports.MaxBucketLimit)
 	if err != nil || len(first) == 0 {
 		t.Fatalf("first page: %v rows=%d", err, len(first))
 	}
 	lastID := first[len(first)-1].ID
 	rest, err := repo.ListBucketFiltered(context.Background(), reports.BucketPending,
-		reports.BucketFilter{Query: "needle"}, lastID, reports.MaxBucketLimit)
+		reports.BucketFilter{Query: "needle"}, tablesort.Order{}, tablesort.Cursor{ID: lastID}, reports.MaxBucketLimit)
 	if err != nil {
 		t.Fatalf("ListBucketFiltered after: %v", err)
 	}

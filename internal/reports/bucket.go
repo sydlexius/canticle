@@ -8,6 +8,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
 // Bucket names one drill-down population of work_queue rows (#598). A bucket
@@ -88,6 +89,9 @@ type BucketRow struct {
 	// tier may be stale) is not offered to the player. Decided in SQL from the
 	// row's recorded state, never by touching the disk.
 	Previewable bool
+	// SortVal is the row's value under the listing's sort, encoded for a
+	// tablesort.Cursor ("n" when NULL or unsorted); the next page's cursor reads it.
+	SortVal string
 }
 
 // MaxBucketLimit caps one page so a caller cannot ask for the whole table.
@@ -103,7 +107,7 @@ const MaxBucketLimit = 500
 // Per-row artist/title is deliberate, as for ReviewQueue: this feeds the
 // authenticated, session-gated UI.
 func (r *Repo) ListBucket(ctx context.Context, bucket Bucket, afterID int64, limit int) ([]BucketRow, error) {
-	return r.ListBucketFiltered(ctx, bucket, BucketFilter{}, afterID, limit)
+	return r.ListBucketFiltered(ctx, bucket, BucketFilter{}, tablesort.Order{}, tablesort.Cursor{ID: afterID}, limit)
 }
 
 // BucketFilter narrows a bucket listing (#1234). The zero value is no filter.
@@ -116,14 +120,41 @@ type BucketFilter struct {
 	Query string
 }
 
+// bucketColumns is the Work Queue's sortable columns (#1242), over the shared
+// tablesort vocabulary. Artist and title sort on the normalized keys (case and
+// accent folded, the same keys the search uses); album has no key column.
+// Reason, Libraries and Lyrics are deliberately not sortable.
+var bucketColumns = map[string]tablesort.Column{
+	tablesort.KeyArtist:      {Expr: "artist_key"},
+	tablesort.KeyAlbum:       {Expr: "album COLLATE NOCASE"},
+	tablesort.KeyTitle:       {Expr: "title_key"},
+	tablesort.KeyStatus:      {Expr: "status"},
+	tablesort.KeyNextAttempt: {Expr: "next_attempt_at"},
+	tablesort.KeyMisses:      {Expr: "miss_count", Integer: true, DescFirst: true},
+	tablesort.KeyAttempts:    {Expr: "attempts", Integer: true, DescFirst: true},
+	tablesort.KeyUpdated:     {Expr: "updated_at", DescFirst: true},
+}
+
+// BucketSpec is the bucket's sort spec: the shared columns with the bucket's
+// own default. Queued and Retrying list what the worker will try soonest;
+// every other bucket lists what changed most recently.
+func BucketSpec(b Bucket) tablesort.Spec {
+	def := tablesort.Order{Key: tablesort.KeyUpdated, Desc: true}
+	if b == BucketPending || b == BucketDeferred {
+		def = tablesort.Order{Key: tablesort.KeyNextAttempt}
+	}
+	return tablesort.Spec{Columns: bucketColumns, ID: "id", Default: def}
+}
+
 // ListBucketFiltered is ListBucket with the filter applied as an extra
-// predicate on the same keyset query, so paging by id is unchanged.
+// predicate, ordered by o with a keyset cursor on (sort value, id) (#1242). The
+// cursor must have passed BucketSpec(bucket).DecodeCursor for o.
 //
 // The search is instr(artist_key, ?) / instr(title_key, ?) on the normalized
 // keys: a literal substring test, so '%', '_' and backslash in the query match
 // themselves (LIKE would need escaping). The query is bound as a parameter,
 // never concatenated, and never logged by this package.
-func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFilter, afterID int64, limit int) ([]BucketRow, error) {
+func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFilter, o tablesort.Order, after tablesort.Cursor, limit int) ([]BucketRow, error) {
 	pred, ok := bucketPredicates[bucket]
 	if !ok {
 		return nil, fmt.Errorf("reports: unknown bucket %q", string(bucket))
@@ -134,24 +165,32 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 	if limit > MaxBucketLimit {
 		limit = MaxBucketLimit
 	}
-	args := []any{queue.NoReasonRecorded, afterID}
+	spec := BucketSpec(bucket)
+	if _, ok := spec.Columns[o.Key]; o.Key != "" && !ok {
+		return nil, fmt.Errorf("reports: unknown sort %q", o.Key)
+	}
+	keyset, keyArgs := spec.Keyset(o, after)
+	args := append([]any{queue.NoReasonRecorded}, keyArgs...)
 	search := ""
 	if q := normalize.NormalizeKey(f.Query); q != "" {
 		search = ` AND (instr(artist_key, ?) > 0 OR instr(title_key, ?) > 0)`
 		args = append(args, q, q)
 	}
 	args = append(args, limit)
-	// pred is selected from the constant map above, never from caller input.
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, artist, title, album, status,
+	// pred, the sort expressions and the keyset text come from constant maps,
+	// never from caller input; every caller value is a bound parameter.
+	//nolint:gosec // reason: every concatenated fragment is a constant (bucket predicate, tablesort Spec expression); caller values are bound parameters.
+	query := `SELECT id, artist, title, album, status,
                 COALESCE(NULLIF(last_error, ''), ?),
                 COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, ''),
                 COALESCE(status = 'done' AND outcome_type = 'synced'
-                 AND ((`+wordTierPredicate+`) OR (`+lineTierPredicate+`)), 0)
+                 AND ((` + wordTierPredicate + `) OR (` + lineTierPredicate + `)), 0),
+                ` + spec.SelectExpr(o) + `
          FROM work_queue
-         WHERE id > ? AND (`+pred+`)`+search+`
-         ORDER BY id ASC
-         LIMIT ?`, args...)
+         WHERE (` + pred + `)` + keyset + search + `
+         ORDER BY ` + spec.OrderBy(o) + `
+         LIMIT ?`
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("reports: list bucket %s: %w", bucket, err)
 	}
@@ -159,11 +198,15 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 
 	var out []BucketRow
 	for rows.Next() {
-		var it BucketRow
+		var (
+			it BucketRow
+			sv any
+		)
 		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
-			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable); err != nil {
+			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable, &sv); err != nil {
 			return nil, fmt.Errorf("reports: scan bucket row: %w", err)
 		}
+		it.SortVal = tablesort.EncodeValue(sv)
 		it.Reason = normalizedReason(it.Reason)
 		out = append(out, it)
 	}

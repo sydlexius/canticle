@@ -176,11 +176,13 @@ func TestQueueViewStateRoundTrip(t *testing.T) {
 		raw   string
 		want  queueViewState
 		href  string
-		after int64
+		after string
 	}{
-		{"", queueViewState{}, "/queue/pending", 0},
-		{"q=a+b%26c", queueViewState{Query: "a b&c"}, "/queue/pending?q=a+b%26c", 0},
-		{"q=x&after=7", queueViewState{Query: "x", After: 7}, "/queue/pending?after=9&q=x", 9},
+		{"", queueViewState{}, "/queue/pending", ""},
+		{"q=a+b%26c", queueViewState{Query: "a b&c"}, "/queue/pending?q=a+b%26c", ""},
+		{"q=x&after=7:n", queueViewState{Query: "x", After: "7:n"}, "/queue/pending?after=9%3Atab&q=x", "9:tab"},
+		{"sort=artist&dir=desc&sort2=x", queueViewState{Sort: "artist", Dir: "desc"}, "/queue/pending?dir=desc&sort=artist", ""},
+		{"sort=id%3Bdrop&dir=sideways", queueViewState{}, "/queue/pending", ""},
 	}
 	for _, c := range cases {
 		v, _ := url.ParseQuery(c.raw)
@@ -192,7 +194,7 @@ func TestQueueViewStateRoundTrip(t *testing.T) {
 			t.Errorf("href(%q) = %q, want %q", c.raw, h, c.href)
 		}
 	}
-	for _, bad := range []string{"after=-1", "after=x", "q=a&q=b", "after=1&after=2"} {
+	for _, bad := range []string{"q=a&q=b", "after=1&after=2", "sort=a&sort=b", "dir=asc&dir=desc"} {
 		v, _ := url.ParseQuery(bad)
 		if _, err := parseQueueViewState(v); err == nil {
 			t.Errorf("parse(%q) accepted, want error", bad)

@@ -188,6 +188,12 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 	if from := r.URL.Query()["from"]; len(from) == 1 {
 		if b, err := reports.ParseBucket(from[0]); err == nil {
 			view.BackHref = queueBucketHref(b)
+			// Carry the list's search/sort/dir so Back returns to the same view.
+			// The values pass the list page's own validator; a failure (or a
+			// repeated key) drops all of them rather than reflecting any.
+			if st, err := parseQueueViewState(r.URL.Query()); err == nil {
+				view.BackHref = st.backLinkState().href(string(b), "")
+			}
 			view.BackLabel = "Back to " + queueBucketInfo[b][0]
 		}
 	}
