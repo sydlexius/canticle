@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -69,7 +68,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "queue data source unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	state, err := parseQueueViewState(r.URL.Query(), reports.BucketSpec(bucket))
+	state, err := parseQueueViewState(r.URL.Query(), bucket)
 	if err != nil {
 		http.Error(w, "invalid queue parameters: "+err.Error(), http.StatusBadRequest)
 		return
@@ -93,7 +92,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		state.After = ""
 	}
-	rows, err := u.reports.ListBucketFiltered(r.Context(), bucket, reports.BucketFilter{Query: state.Query}, order, cursor, queuePageSize+1)
+	rows, err := u.reports.ListBucketFiltered(r.Context(), bucket, state.filter(), order, cursor, queuePageSize+1)
 	if err != nil {
 		slog.Error("queue bucket query failed", "bucket", string(bucket), "error", err)
 		http.Error(w, "queue query failed", http.StatusInternalServerError)
@@ -106,7 +105,8 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	info := queueBucketInfo[bucket]
 	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: cursor.ID,
 		Query: state.Query, StartHref: state.href(string(bucket), ""), ClearHref: state.withoutQuery().href(string(bucket), ""),
-		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir}
+		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir,
+		Chips: buildQueueChips(bucket, state), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive()}
 	// Only the retired bucket can be revived; failed rows are already retried,
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
@@ -198,10 +198,7 @@ var queueColumns = []struct{ label, key string }{
 // buildQueueColumns shapes the header row for the shared SortHeader component:
 // each sortable header links to the order a click requests, keeping the search.
 func buildQueueColumns(bucket string, state queueViewState, spec tablesort.Spec, active tablesort.Order) []templates.SortHeaderView {
-	keep := url.Values{}
-	if state.Query != "" {
-		keep.Set("q", state.Query)
-	}
+	keep := state.filterValues()
 	out := make([]templates.SortHeaderView, 0, len(queueColumns))
 	for _, c := range queueColumns {
 		h := templates.SortHeaderView{Label: c.label}
@@ -210,6 +207,73 @@ func buildQueueColumns(bucket string, state queueViewState, spec tablesort.Spec,
 			h.Aria = tablesort.AriaSort(active, c.key)
 		}
 		out = append(out, h)
+	}
+	return out
+}
+
+// queueChipLabels are the chip labels, keyed by chip. Which chips a bucket
+// shows, and in what order, is reports.BucketChips: the one place that decides.
+var queueChipLabels = map[reports.Chip]string{
+	reports.ChipLineSynced: "Line-synced (editable)",
+	reports.ChipEdited:     "Hand-edited",
+	reports.ChipMissynced:  "Mis-synced",
+}
+
+// buildQueueChips is the chip row for the buckets that offer chips (nil
+// elsewhere). Each chip links to the same view with that one chip toggled,
+// keeping search, sort and the other chips and dropping the cursor (a stale
+// position would hide rows). Line-synced and Mis-synced are mutually exclusive:
+// turning one on turns the other off in the link.
+//
+// No chip shows a count. tier and edited read unindexed columns, so a count is a
+// scan of the done partition per page view. The Settled mis-synced count looks
+// cheap (idx_work_queue_word_generate_missynced) but is not once composed with
+// the Settled bucket clause, which also reads outcome_type, sync_tier and
+// last_error: EXPLAIN QUERY PLAN gives "SEARCH work_queue USING INDEX
+// idx_work_queue_word_generate_missynced (timing_outcome=? AND status=?)", a
+// partial-index search with a table lookup per row, not a COVERING INDEX read.
+func buildQueueChips(bucket reports.Bucket, state queueViewState) []templates.QueueChip {
+	offered := reports.BucketChips(bucket)
+	if len(offered) == 0 {
+		return nil
+	}
+	out := make([]templates.QueueChip, 0, len(offered))
+	for _, c := range offered {
+		next := state
+		var active bool
+		switch c {
+		case reports.ChipLineSynced:
+			active = state.Tier == reports.TierLine
+			if active {
+				next.Tier = ""
+			} else {
+				next.Tier, next.MisSynced = reports.TierLine, false
+			}
+		case reports.ChipEdited:
+			active = state.Edited
+			next.Edited = !state.Edited
+		case reports.ChipMissynced:
+			active = state.MisSynced
+			next.MisSynced = !state.MisSynced
+			if next.MisSynced {
+				next.Tier = ""
+			}
+		}
+		out = append(out, templates.QueueChip{Label: queueChipLabels[c], Active: active, Href: next.href(string(bucket), "")})
+	}
+	return out
+}
+
+// queueHiddenFilters are the chip params the search form re-submits so a new
+// search keeps the active chips.
+func queueHiddenFilters(state queueViewState) []templates.QueueHidden {
+	v := state.filterValues()
+	v.Del("q")
+	out := make([]templates.QueueHidden, 0, len(v))
+	for _, k := range []string{"tier", "edited", "missync"} {
+		if val := v.Get(k); val != "" {
+			out = append(out, templates.QueueHidden{Name: k, Value: val})
+		}
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"unicode/utf8"
 
+	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
@@ -29,6 +30,13 @@ type queueViewState struct {
 	// at parse, never carried or reflected.
 	Sort string
 	Dir  string
+	// Tier, Edited and MisSynced are the #1235 chips. A chip the bucket does not
+	// offer (reports.BucketChips) is dropped at parse, so it never reaches the
+	// filter or a link. Tier is "line" when set. Tier and MisSynced are mutually
+	// exclusive (see parseQueueViewState).
+	Tier      string
+	Edited    bool
+	MisSynced bool
 }
 
 // parseQueueViewState validates the page's query string. A repeated parameter
@@ -36,9 +44,16 @@ type queueViewState struct {
 // if the bucket's own spec sorts on it: a key that is merely in the shared
 // vocabulary (status) would otherwise resolve to the default order in SQL while
 // the state, and every link built from it, kept naming an unsupported sort.
-func parseQueueViewState(v url.Values, spec tablesort.Spec) (queueViewState, error) {
+func parseQueueViewState(v url.Values, bucket reports.Bucket) (queueViewState, error) {
 	var s queueViewState
-	for _, k := range []string{"q", "after", "sort", "dir"} {
+	spec := reports.BucketSpec(bucket)
+	keys := []string{"q", "after", "sort", "dir"}
+	// A repeated chip param is ambiguous only where the bucket offers that chip;
+	// elsewhere it is ignored like any other chip param.
+	for _, c := range reports.BucketChips(bucket) {
+		keys = append(keys, string(c))
+	}
+	for _, k := range keys {
 		if len(v[k]) > 1 {
 			return s, errors.New("repeated parameter " + k)
 		}
@@ -54,6 +69,26 @@ func parseQueueViewState(v url.Values, spec tablesort.Spec) (queueViewState, err
 	if dir := v.Get("dir"); tablesort.ValidDir(dir) {
 		s.Dir = dir
 	}
+	// Chips: an unknown value is ignored, never an error, and a chip the bucket
+	// does not offer is dropped so no link ever carries a filter that cannot
+	// apply (or one that is always empty or a no-op there).
+	if reports.HasChip(bucket, reports.ChipLineSynced) {
+		if t := v.Get("tier"); reports.ValidTier(t) {
+			s.Tier = t
+		}
+	}
+	if reports.HasChip(bucket, reports.ChipEdited) {
+		s.Edited = v.Get("edited") == "1"
+	}
+	if reports.HasChip(bucket, reports.ChipMissynced) {
+		s.MisSynced = v.Get("missync") == "1"
+	}
+	// The line tier predicate excludes mis_synced rows, so the two chips can
+	// never both match. A URL carrying both resolves to Mis-synced, the narrower
+	// and more deliberate filter, and the line tier is dropped.
+	if s.MisSynced {
+		s.Tier = ""
+	}
 	q := v.Get("q")
 	if utf8.RuneCountInString(q) > maxQueueQueryRunes {
 		return s, errors.New("search text too long")
@@ -64,10 +99,7 @@ func parseQueueViewState(v url.Values, spec tablesort.Spec) (queueViewState, err
 
 // values renders the state, omitting zero values so a default page has a clean URL.
 func (s queueViewState) values() url.Values {
-	v := url.Values{}
-	if s.Query != "" {
-		v.Set("q", s.Query)
-	}
+	v := s.filterValues()
 	if s.After != "" {
 		v.Set("after", s.After)
 	}
@@ -78,6 +110,33 @@ func (s queueViewState) values() url.Values {
 		v.Set("dir", s.Dir)
 	}
 	return v
+}
+
+// filterValues is the part of the state that selects WHICH rows are listed
+// (search and chips), as the sort header links and the search form carry it.
+func (s queueViewState) filterValues() url.Values {
+	v := url.Values{}
+	if s.Query != "" {
+		v.Set("q", s.Query)
+	}
+	if s.Tier != "" {
+		v.Set("tier", s.Tier)
+	}
+	if s.Edited {
+		v.Set("edited", "1")
+	}
+	if s.MisSynced {
+		v.Set("missync", "1")
+	}
+	return v
+}
+
+// chipsActive reports whether any chip narrows the list.
+func (s queueViewState) chipsActive() bool { return s.Tier != "" || s.Edited || s.MisSynced }
+
+// filter is the repo filter for this state.
+func (s queueViewState) filter() reports.BucketFilter {
+	return reports.BucketFilter{Query: s.Query, Tier: s.Tier, Edited: s.Edited, MisSynced: s.MisSynced}
 }
 
 // href is the URL of bucket's page for this state at the given cursor.
