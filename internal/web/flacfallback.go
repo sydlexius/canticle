@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -50,8 +51,8 @@ const (
 	flacStderrMax = 64 << 10
 )
 
-// flacConverter writes a FLAC conversion of in to outPath. inName is in's path
-// (used only where the platform cannot read the open handle).
+// flacConverter writes a FLAC conversion of in to outPath. inName is in's path,
+// for tests and messages only: the conversion reads the handle, never the name.
 type flacConverter func(ctx context.Context, in *os.File, inName, outPath string) error
 
 // flacJob is one conversion shared by every request for its key. It stays in
@@ -260,7 +261,7 @@ func (c *flacCache) run(ctx context.Context, key string, job *flacJob, open func
 }
 
 // evict removes the oldest cached conversions until they and the in-flight
-// .part files fit the cap. An entry whose job still has waiters to open it is
+// .part files (and any source snapshot, see flacInput) fit the cap. An entry whose job still has waiters to open it is
 // pinned, so a result is never deleted before it is served; a single file
 // larger than the cap is therefore still served and goes with a later eviction.
 //
@@ -310,8 +311,12 @@ func (c *flacCache) evict() {
 // ffmpegFlacConverter returns a converter that runs the ffmpeg at bin with an
 // argument list (no shell), keeping only the first audio stream and no tags.
 func ffmpegFlacConverter(bin string) flacConverter {
-	return func(ctx context.Context, in *os.File, inName, outPath string) error {
-		input, extra := flacInput(runtime.GOOS, in, inName)
+	return func(ctx context.Context, in *os.File, _, outPath string) error {
+		input, extra, cleanup, err := flacInput(ctx, flacSnapshotInput, in, outPath)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 		cmd := exec.CommandContext(ctx, bin, //nolint:gosec // reason: G204 -- bin comes from ffmpeg.Resolve and the argv is fixed; no value passes through a shell
 			"-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", input,
 			"-map", "0:a:0", "-map_metadata", "-1", "-vn", "-c:a", "flac", "-f", "flac", outPath)
@@ -325,19 +330,54 @@ func ffmpegFlacConverter(bin string) flacConverter {
 	}
 }
 
-// flacInput picks how ffmpeg reads the source. Where the platform has /dev/fd
-// the already-open, already-confined handle is passed as fd 3 (a seekable
-// regular file, so an m4a with its index at the end works) and the library
-// path is never re-opened. Windows cannot pass extra handles (os/exec fails
-// every start that sets ExtraFiles there), so ffmpeg opens inName itself: that
-// re-open is NOT confined, so a path swapped after the handle was opened is
-// not caught on Windows. The file: prefix keeps a name with a colon from being
-// read as a protocol.
-func flacInput(goos string, in *os.File, inName string) (string, []*os.File) {
-	if goos == "windows" {
-		return "file:" + inName, nil
+// flacSnapshotInput selects the snapshot input (see flacInput); a test seam, so
+// the Windows path runs on every platform's tests.
+var flacSnapshotInput = runtime.GOOS == "windows"
+
+// flacInput picks how ffmpeg reads the source, always through the handle in,
+// which was opened and confined under the library root; the library path is
+// never re-opened, so a path swapped after that check cannot redirect the read.
+//
+// Where the platform has /dev/fd the handle is passed as fd 3 (a seekable
+// regular file, so an m4a with its index at the end works). Windows cannot
+// pass extra handles (os/exec fails every start that sets ExtraFiles there),
+// so with snapshot set the handle's bytes are first copied into a private
+// file beside outPath, in the cache dir, and ffmpeg reads that copy: still
+// seekable, which stdin would not be. The copy counts toward the cache cap
+// like a partial conversion while it exists, and cleanup removes it. The file:
+// prefix keeps a name with a colon from being read as a protocol.
+func flacInput(ctx context.Context, snapshot bool, in *os.File, outPath string) (input string, extra []*os.File, cleanup func(), err error) {
+	if !snapshot {
+		return "/dev/fd/3", []*os.File{in}, func() {}, nil
 	}
-	return "/dev/fd/3", []*os.File{in}
+	snap, err := os.CreateTemp(filepath.Dir(outPath), filepath.Base(outPath)+".src-*")
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("create source snapshot: %w", err)
+	}
+	remove := func() { _ = os.Remove(snap.Name()) }
+	_, err = io.Copy(snap, ctxReader{ctx, io.NewSectionReader(in, 0, 1<<62)})
+	if cerr := snap.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		remove()
+		return "", nil, nil, fmt.Errorf("snapshot source: %w", err)
+	}
+	return "file:" + snap.Name(), nil, remove, nil
+}
+
+// ctxReader stops a copy once ctx is done, so a cancel or Close is not held up
+// by a long snapshot.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // cappedBuffer keeps the first and the last max/2 bytes of output, which carry
