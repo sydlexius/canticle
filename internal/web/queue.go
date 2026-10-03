@@ -82,6 +82,21 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		state.Query = ""
 	}
 
+	// The Library filter offers the configured libraries; an id naming none is
+	// ignored (dropped here so no link carries it), never an error. An htmx
+	// "Show more" fragment renders no select, so it skips the query: its links
+	// carry what the (already validated) page it came from carried.
+	fragment := r.Header.Get("HX-Request") == "true"
+	var libs []reports.BucketLibrary
+	if !fragment {
+		libs, err = u.reports.Libraries(r.Context())
+		if err != nil {
+			slog.Error("queue libraries query failed", "bucket", string(bucket), "error", err)
+			http.Error(w, "queue query failed", http.StatusInternalServerError)
+			return
+		}
+		state.Library = knownLibrary(libs, state.Library)
+	}
 	// Fetch one extra row to know whether another page exists, rather than
 	// guessing from a full page (which would offer an empty "Show more").
 	spec := reports.BucketSpec(bucket)
@@ -106,7 +121,8 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: cursor.ID,
 		Query: state.Query, StartHref: state.href(string(bucket), ""), ClearHref: state.withoutQuery().href(string(bucket), ""),
 		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir,
-		Chips: buildQueueChips(bucket, state), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive()}
+		Chips: buildQueueChips(bucket, state), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive(),
+		Libraries: buildLibraryOptions(libs, state.Library)}
 	// Only the retired bucket can be revived; failed rows are already retried,
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
@@ -129,7 +145,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	// Counts only: the query text is library metadata and is never logged.
 	slog.Debug("queue bucket served", "bucket", string(bucket), "searched", state.Query != "", "rows", len(rows), "more", more)
 
-	if r.Header.Get("HX-Request") == "true" {
+	if fragment {
 		render(w, r, templates.QueueRows(view))
 		return
 	}
@@ -260,6 +276,29 @@ func buildQueueChips(bucket reports.Bucket, state queueViewState) []templates.Qu
 			}
 		}
 		out = append(out, templates.QueueChip{Label: queueChipLabels[c], Active: active, Href: next.href(string(bucket), "")})
+	}
+	return out
+}
+
+// knownLibrary is id when it names one of libs, else 0 (no filter).
+func knownLibrary(libs []reports.BucketLibrary, id int64) int64 {
+	for _, l := range libs {
+		if l.ID == id {
+			return id
+		}
+	}
+	return 0
+}
+
+// buildLibraryOptions is the Library select's options (nil when no library is
+// configured, so the control is not rendered).
+func buildLibraryOptions(libs []reports.BucketLibrary, selected int64) []templates.QueueOption {
+	if len(libs) == 0 {
+		return nil
+	}
+	out := make([]templates.QueueOption, 0, len(libs))
+	for _, l := range libs {
+		out = append(out, templates.QueueOption{Value: strconv.FormatInt(l.ID, 10), Label: l.Name, Selected: l.ID == selected})
 	}
 	return out
 }

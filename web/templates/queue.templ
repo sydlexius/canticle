@@ -31,6 +31,17 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 			for _, h := range view.Hidden {
 				<input type="hidden" name={ h.Name } value={ h.Value }/>
 			}
+			if len(view.Libraries) > 0 {
+				<span class="mx-queue-field">
+					<label class="mx-queue-search-label" for="mx-queue-library">Library</label>
+					<select class="mx-queue-filter" id="mx-queue-library" name="library" autocomplete="off" data-queue-autosubmit>
+						<option value="">All libraries</option>
+						for _, o := range view.Libraries {
+							<option value={ o.Value } selected?={ o.Selected }>{ o.Label }</option>
+						}
+					</select>
+				</span>
+			}
 			<button class="mx-run-button" type="submit">Search</button>
 			if view.Query != "" {
 				<a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear search</a>

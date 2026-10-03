@@ -3,6 +3,7 @@ package web
 import (
 	"errors"
 	"net/url"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/sydlexius/canticle/internal/reports"
@@ -37,6 +38,9 @@ type queueViewState struct {
 	Tier      string
 	Edited    bool
 	MisSynced bool
+	// Library is the Library filter's id (0 = all libraries). Parsing keeps any
+	// positive id; the handler drops one that names no library.
+	Library int64
 }
 
 // parseQueueViewState validates the page's query string. A repeated parameter
@@ -47,7 +51,7 @@ type queueViewState struct {
 func parseQueueViewState(v url.Values, bucket reports.Bucket) (queueViewState, error) {
 	var s queueViewState
 	spec := reports.BucketSpec(bucket)
-	keys := []string{"q", "after", "sort", "dir"}
+	keys := []string{"q", "after", "sort", "dir", "library"}
 	// A repeated chip param is ambiguous only where the bucket offers that chip;
 	// elsewhere it is ignored like any other chip param.
 	for _, c := range reports.BucketChips(bucket) {
@@ -89,6 +93,10 @@ func parseQueueViewState(v url.Values, bucket reports.Bucket) (queueViewState, e
 	if s.MisSynced {
 		s.Tier = ""
 	}
+	// Library: a positive id; anything else (empty, text, zero, overflow) is ignored.
+	if n, err := strconv.ParseInt(v.Get("library"), 10, 64); err == nil && n > 0 {
+		s.Library = n
+	}
 	q := v.Get("q")
 	if utf8.RuneCountInString(q) > maxQueueQueryRunes {
 		return s, errors.New("search text too long")
@@ -128,15 +136,20 @@ func (s queueViewState) filterValues() url.Values {
 	if s.MisSynced {
 		v.Set("missync", "1")
 	}
+	if s.Library > 0 {
+		v.Set("library", strconv.FormatInt(s.Library, 10))
+	}
 	return v
 }
 
 // chipsActive reports whether any chip narrows the list.
-func (s queueViewState) chipsActive() bool { return s.Tier != "" || s.Edited || s.MisSynced }
+func (s queueViewState) chipsActive() bool {
+	return s.Tier != "" || s.Edited || s.MisSynced || s.Library > 0
+}
 
 // filter is the repo filter for this state.
 func (s queueViewState) filter() reports.BucketFilter {
-	return reports.BucketFilter{Query: s.Query, Tier: s.Tier, Edited: s.Edited, MisSynced: s.MisSynced}
+	return reports.BucketFilter{Query: s.Query, Tier: s.Tier, Edited: s.Edited, MisSynced: s.MisSynced, LibraryID: s.Library}
 }
 
 // href is the URL of bucket's page for this state at the given cursor.

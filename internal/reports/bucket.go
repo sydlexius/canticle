@@ -128,6 +128,49 @@ type BucketFilter struct {
 	Tier      string
 	Edited    bool
 	MisSynced bool
+	// LibraryID, when positive, keeps only rows linked to that library (a
+	// work_queue row dedupes several files, so it can belong to several
+	// libraries; a CLI-enqueued row belongs to none and never matches). The id
+	// is bound as a parameter. Whether the id names a real library is the
+	// caller's check; an id that matches nothing simply lists nothing.
+	LibraryID int64
+}
+
+// libraryPredicate is the Library filter: an EXISTS over the junction, not a
+// JOIN, so a row linked to several files of one library cannot repeat and
+// break the keyset cursor. The unary plus on wqsr.scan_result_id is
+// load-bearing: without it SQLite drives the junction primary key with BOTH
+// columns (work_queue_id=? AND scan_result_id=?) and walks the library's whole
+// IN list once per candidate row, which is quadratic (seconds, then the write
+// timeout, at ten thousand files; production never runs ANALYZE). With it the
+// junction is searched by work_queue_id alone and the IN list is a bloom
+// filter built once per query. A plain JOIN inside the EXISTS is as slow as
+// the unadorned IN. TestLibraryPredicateUsesPrefixProbe pins the plan.
+// Constant text; the library id is the one bound "?".
+const libraryPredicate = `EXISTS (SELECT 1 FROM work_queue_scan_results wqsr
+        WHERE wqsr.work_queue_id = work_queue.id
+          AND +wqsr.scan_result_id IN (SELECT id FROM scan_results WHERE library_id = ?))`
+
+// Libraries lists every configured library, by name then id, for the Library
+// filter's options.
+func (r *Repo) Libraries(ctx context.Context) ([]BucketLibrary, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, name FROM libraries ORDER BY name COLLATE NOCASE, id`)
+	if err != nil {
+		return nil, fmt.Errorf("reports: list libraries: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []BucketLibrary
+	for rows.Next() {
+		var l BucketLibrary
+		if err := rows.Scan(&l.ID, &l.Name); err != nil {
+			return nil, fmt.Errorf("reports: scan library: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reports: library rows: %w", err)
+	}
+	return out, nil
 }
 
 // TierLine is the one Tier chip key (the URL value tier=line). A word-synced
@@ -233,18 +276,12 @@ func BucketSpec(b Bucket) tablesort.Spec {
 	return tablesort.Spec{Columns: bucketColumns, ID: "id", Default: def}
 }
 
-// ListBucketFiltered is ListBucket with the filter applied as an extra
-// predicate, ordered by o with a keyset cursor on (sort value, id) (#1242). The
-// cursor must have passed BucketSpec(bucket).DecodeCursor for o.
-//
-// The search is instr(artist_key, ?) / instr(title_key, ?) on the normalized
-// keys: a literal substring test, so '%', '_' and backslash in the query match
-// themselves (LIKE would need escaping). The query is bound as a parameter,
-// never concatenated, and never logged by this package.
-func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFilter, o tablesort.Order, after tablesort.Cursor, limit int) ([]BucketRow, error) {
+// bucketQuery builds the page query and its arguments; split from the listing
+// so the plan test can EXPLAIN the real text.
+func bucketQuery(bucket Bucket, f BucketFilter, o tablesort.Order, after tablesort.Cursor, limit int) (string, []any, error) {
 	pred, ok := bucketPredicates[bucket]
 	if !ok {
-		return nil, fmt.Errorf("reports: unknown bucket %q", string(bucket))
+		return "", nil, fmt.Errorf("reports: unknown bucket %q", string(bucket))
 	}
 	if limit < 1 {
 		limit = 1
@@ -254,7 +291,7 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 	}
 	spec := BucketSpec(bucket)
 	if _, ok := spec.Columns[o.Key]; o.Key != "" && !ok {
-		return nil, fmt.Errorf("reports: unknown sort %q", o.Key)
+		return "", nil, fmt.Errorf("reports: unknown sort %q", o.Key)
 	}
 	keyset, keyArgs := spec.Keyset(o, after)
 	args := append([]any{queue.NoReasonRecorded}, keyArgs...)
@@ -264,10 +301,13 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 		args = append(args, q, q)
 	}
 	search += f.chipSQL()
+	if f.LibraryID > 0 {
+		search += ` AND ` + libraryPredicate
+		args = append(args, f.LibraryID)
+	}
 	args = append(args, limit)
 	// pred, the sort expressions and the keyset text come from constant maps,
 	// never from caller input; every caller value is a bound parameter.
-	//nolint:gosec // reason: every concatenated fragment is a constant (bucket predicate, tablesort Spec expression); caller values are bound parameters.
 	query := `SELECT id, artist, title, album, status,
                 COALESCE(NULLIF(last_error, ''), ?),
                 COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, ''),
@@ -278,6 +318,22 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
          WHERE (` + pred + `)` + keyset + search + `
          ORDER BY ` + spec.OrderBy(o) + `
          LIMIT ?`
+	return query, args, nil
+}
+
+// ListBucketFiltered is ListBucket with the filter applied as an extra
+// predicate, ordered by o with a keyset cursor on (sort value, id) (#1242). The
+// cursor must have passed BucketSpec(bucket).DecodeCursor for o.
+//
+// The search is instr(artist_key, ?) / instr(title_key, ?) on the normalized
+// keys: a literal substring test, so '%', '_' and backslash in the query match
+// themselves (LIKE would need escaping). The query is bound as a parameter,
+// never concatenated, and never logged by this package.
+func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFilter, o tablesort.Order, after tablesort.Cursor, limit int) ([]BucketRow, error) {
+	query, args, err := bucketQuery(bucket, f, o, after, limit)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("reports: list bucket %s: %w", bucket, err)
