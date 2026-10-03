@@ -620,6 +620,46 @@ func TestAttachPreviewFlacLeavesItOffWhenCacheUncreatable(t *testing.T) {
 	u.ClosePreviewFlac() // a no-op when off
 }
 
+// deadlineRecorder records each write deadline the handler sets, and when.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	set, at []time.Time
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	d.set, d.at = append(d.set, t), append(d.at, time.Now())
+	return nil
+}
+
+// The deadline armed before the conversion is re-armed once it ends, for the
+// stream and for the error write alike: a long queue must not cut either.
+func TestPreviewFlacRearmsWriteDeadlineAfterConversion(t *testing.T) {
+	for name, convErr := range map[string]error{"stream": nil, "error": errors.New("boom")} {
+		t.Run(name, func(t *testing.T) {
+			f := newPreviewFixture(t)
+			var finished time.Time
+			conv := &countingConverter{err: convErr}
+			mux := http.NewServeMux()
+			ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
+			ui.attachPreviewFlac(t.TempDir(), 1<<20, func(ctx context.Context, in *os.File, n, out string) error {
+				defer func() { finished = time.Now() }()
+				return conv.convert(ctx, in, n, out)
+			})
+			t.Cleanup(ui.ClosePreviewFlac)
+			ui.Register(mux)
+			id := strconv.FormatInt(f.row(t, f.writeFile(t, f.root, "song.m4a")), 10)
+			rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/preview/"+id+"/audio.flac", nil))
+			if n := len(rec.set); n == 0 || rec.at[n-1].Before(finished) {
+				t.Fatalf("status %d: no write deadline set after the conversion ended (%d set)", rec.Code, n)
+			}
+			if got := rec.set[len(rec.set)-1].Sub(finished); got < previewWriteBound || got > previewWriteBound+time.Minute {
+				t.Fatalf("re-armed deadline = conversion end+%v, want +%v", got, previewWriteBound)
+			}
+		})
+	}
+}
+
 // ---- real ffmpeg (skipped when none is on PATH) ----
 
 func requireFFmpeg(t *testing.T) string {

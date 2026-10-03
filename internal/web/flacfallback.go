@@ -470,11 +470,15 @@ func (u *UI) handlePreviewFlac(w http.ResponseWriter, r *http.Request) {
 	}
 	// A conversion can outlast the server-wide write timeout, and so can the
 	// stream that follows. The conversion's own timeout starts only once it
-	// gets a slot, so the deadline is re-armed after Get for the stream.
+	// gets a slot, so the deadline is re-armed after Get, before any write:
+	// the stream's, or the error's after a long queue.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(flacConvertTimeout + previewWriteBound)); err != nil {
 		slog.Error("preview flac: cannot extend the write deadline; long responses will be cut", "id", id, "error", err)
 	}
 	out, err := u.flac.Get(r.Context(), filepath.Clean(audioPath), fi, open)
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(previewWriteBound)); err != nil {
+		slog.Error("preview flac: cannot extend the write deadline; long responses will be cut", "id", id, "error", err)
+	}
 	if err != nil {
 		if r.Context().Err() == nil {
 			slog.Error("preview flac conversion failed", "id", id, "error", err)
@@ -483,9 +487,6 @@ func (u *UI) handlePreviewFlac(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = out.Close() }()
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(previewWriteBound)); err != nil {
-		slog.Error("preview flac: cannot extend the write deadline; long responses will be cut", "id", id, "error", err)
-	}
 	ofi, err := out.Stat()
 	if err != nil {
 		slog.Error("preview flac: stat of converted file failed", "id", id, "error", err)
