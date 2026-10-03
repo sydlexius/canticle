@@ -221,8 +221,8 @@ describe("offset editor helpers", () => {
     <button class="mx-edit-nudge" data-delta="-1000">-1s</button><button class="mx-edit-nudge" data-delta="-100">-0.1</button>
     <button class="mx-edit-nudge" data-delta="100">+0.1</button><button class="mx-edit-nudge" data-delta="1000">+1s</button>
     <button id="mx-edit-save"></button><button id="mx-edit-discard"></button><button id="mx-edit-revert" hidden></button>
-    <button id="mx-ear-toggle" data-ear-unit="line" aria-pressed="false"></button>
-    <p id="mx-edit-status"></p>
+    <button id="mx-ear-toggle" class="mx-ear-toggle" data-ear-unit="line" aria-pressed="false"></button>
+    MORE<p id="mx-edit-status"></p>
     <dialog id="mx-edit-confirm"><span id="mx-edit-confirm-offset"></span><p id="mx-edit-confirm-body"></p>
       <input id="mx-edit-skip" type="checkbox"><button id="mx-edit-confirm-cancel"></button><button id="mx-edit-confirm-ok"></button></dialog>
   </section>
@@ -233,12 +233,13 @@ describe("offset editor helpers", () => {
 
   // mountEditor builds the editor markup subset around the given line starts.
   // orig defaults to the shown starts (an unedited file); toleranceMs to timing.Tolerance.
-  function mountEditor({ durationMs = 30000, starts = [1000], orig = null, toleranceMs = 2000, savedOffsetMs = 0, edited = false, fetchImpl = null, decorative = [], keyboard = false } = {}) {
+  function mountEditor({ durationMs = 30000, starts = [1000], orig = null, toleranceMs = 2000, savedOffsetMs = 0, edited = false, fetchImpl = null, decorative = [], keyboard = false, more = false } = {}) {
     const lines = starts
       .map((ms, i) => `<li class="mx-preview-line${decorative.includes(i) ? " mx-preview-line-decorative" : ""}" data-start-ms="${ms}">l${ms}</li>`)
       .join("");
     const html = EDITOR.replace("OFFSET", String(savedOffsetMs))
       .replace("EDITED", edited ? "data-edited" : "")
+      .replace("MORE", more ? '<button id="mx-edit-more" aria-expanded="false">More</button>' : "")
       .replace("DURATION", String(durationMs))
       .replace("ORIG", (orig || starts).join(","))
       .replace("TOLERANCE", String(toleranceMs))
@@ -279,6 +280,117 @@ describe("offset editor helpers", () => {
   }
   const reply = (status, text) =>
     vi.fn(() => Promise.resolve({ ok: status === 200, status, text: () => Promise.resolve(text) }));
+
+  describe("phone expand control (#1247)", () => {
+    it("toggles the panel class and aria-expanded, and relabels itself", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(true);
+      expect(btn.getAttribute("aria-expanded")).toBe("true");
+      expect(btn.textContent).toBe("Less");
+      btn.click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(btn.getAttribute("aria-expanded")).toBe("false");
+      expect(btn.textContent).toBe("More");
+      expect(e.errors).toEqual([]);
+    });
+
+    it("leaves a panel without the control alone", () => {
+      const e = mountEditor({ keyboard: true });
+      e.$("mx-edit").click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.errors).toEqual([]);
+    });
+
+    it("does not toggle on a click elsewhere in a panel that has the control", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      e.nudge("+0.1");
+      e.$("mx-edit").click();
+      e.$("mx-edit-save").click();
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.$("mx-edit-more").getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("swaps the accessible label with the state", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      expect(btn.getAttribute("aria-label")).toBe("Fewer timing controls");
+      btn.click();
+      expect(btn.getAttribute("aria-label")).toBe("More timing controls");
+    });
+
+    it("collapses when By ear turns on, by button and by the E shortcut", () => {
+      for (const start of [(e) => e.$("mx-ear-toggle").click(), (e) => e.doc.body.dispatchEvent(new e.win.KeyboardEvent("keydown", { key: "e", bubbles: true }))]) {
+        const e = mountEditor({ more: true, keyboard: true, starts: [1000, 3000] });
+        e.$("mx-edit-more").click();
+        expect(e.$("mx-edit").classList.contains("is-open")).toBe(true);
+        start(e);
+        expect(e.$("mx-ear-toggle").getAttribute("aria-pressed")).toBe("true");
+        expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+        expect(e.$("mx-edit-more").getAttribute("aria-expanded")).toBe("false");
+        expect(e.$("mx-edit-more").textContent).toBe("More");
+      }
+    });
+
+    it("keeps focus on the By ear toggle when the panel collapses, since the collapsed bar shows it", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      e.$("mx-edit-more").click();
+      const toggle = e.$("mx-ear-toggle");
+      toggle.focus();
+      e.$("mx-edit-more").click(); // collapse while the toggle holds focus
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("keeps focus on the By ear toggle when it is turned off while collapsed", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000, 3000] });
+      const toggle = e.$("mx-ear-toggle");
+      e.$("mx-edit-more").click();
+      toggle.focus();
+      toggle.click(); // turning it on collapses the open panel under the focused toggle
+      expect(toggle.getAttribute("aria-pressed")).toBe("true");
+      expect(e.doc.activeElement).toBe(toggle);
+      toggle.click();
+      expect(toggle.getAttribute("aria-pressed")).toBe("false");
+      expect(e.$("mx-edit").classList.contains("is-open")).toBe(false);
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("moves focus to More when collapsing from a control the collapsed bar hides", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      const far = Array.from(e.doc.querySelectorAll(".mx-edit-nudge")).find((b) => b.dataset.delta === "1000");
+      far.focus();
+      expect(e.doc.activeElement).toBe(far);
+      btn.click();
+      expect(e.doc.activeElement).toBe(btn);
+    });
+
+    it("leaves focus alone when it is on a control the collapsed bar keeps", () => {
+      const e = mountEditor({ more: true, keyboard: true });
+      const btn = e.$("mx-edit-more");
+      btn.click();
+      const near = Array.from(e.doc.querySelectorAll(".mx-edit-nudge")).find((b) => b.dataset.delta === "100");
+      near.focus();
+      btn.click();
+      expect(e.doc.activeElement).toBe(near);
+    });
+
+    it("tones the status for a save result so the collapsed bar can keep it", async () => {
+      const f = reply(200, '{"offset_ms":100,"mtime":1700000000000000002,"created_orig":true}');
+      const e = mountEditor({ starts: [1000], fetchImpl: f });
+      e.win.localStorage.setItem("mx-offset-confirm-skip", "1");
+      e.nudge("+0.1");
+      e.$("mx-edit-save").click();
+      await vi.waitFor(() => expect(e.$("mx-edit-status").textContent).toContain("Saved."));
+      expect(e.$("mx-edit-status").classList.contains("is-ok")).toBe(true);
+      e.nudge("+0.1");
+      expect(e.$("mx-edit-status").classList.contains("is-ok")).toBe(false);
+    });
+  });
 
   describe("find by ear (unit-agnostic core)", () => {
     // fakeEar drives createEar with a synthetic unit list (not lines: plain

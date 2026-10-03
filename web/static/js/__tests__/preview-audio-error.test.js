@@ -155,6 +155,19 @@ describe("preview.js audio failure", () => {
     expect(p.$("mx-edit-status").textContent).toContain("cannot be played");
   });
 
+  it("marks the status as a playback failure and leads with it, for the collapsed phone bar", () => {
+    const p = load();
+    expect(p.$("mx-edit-status").classList.contains("is-playback-failed")).toBe(false);
+    p.fail(4);
+    expect(p.$("mx-edit-status").classList.contains("is-playback-failed")).toBe(true);
+    expect(p.$("mx-edit-status").textContent.startsWith("The audio cannot be played in this browser, so Find by ear is off.")).toBe(true);
+    p.$("mx-edit-offset").value = "40";
+    p.$("mx-edit-offset").dispatchEvent(new p.win.Event("change", { bubbles: true }));
+    const cls = p.$("mx-edit-status").className;
+    expect(cls).toContain("is-warn");
+    expect(cls).toContain("is-playback-failed");
+  });
+
   it("disables find by ear with a visible reason and keeps typed offsets usable", () => {
     const p = load();
     expect(p.$("mx-ear-toggle").disabled).toBe(false);

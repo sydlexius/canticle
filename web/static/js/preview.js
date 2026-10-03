@@ -285,12 +285,48 @@
     return found;
   }
 
+  // initMore wires the phone-width expand control (#1247). CSS shows the button
+  // and the extra controls only below 768px; the class is inert above it. The
+  // click is delegated from the panel, so a panel without the button has nothing
+  // to wire and nothing to report. It returns collapse(), which By ear uses to
+  // get the panel out of the way of the banner and the lyrics.
+  function initMore(panel) {
+    function setOpen(open) {
+      var btn = panel.querySelector("#mx-edit-more");
+      panel.classList.toggle("is-open", open);
+      if (!btn) {
+        return;
+      }
+      btn.setAttribute("aria-expanded", String(open));
+      btn.setAttribute("aria-label", (open ? "Fewer" : "More") + " timing controls");
+      btn.textContent = open ? "Less" : "More";
+      var active = document.activeElement;
+      // These are the controls the collapsed CSS hides; focus on one of them
+      // would be left on an element that is not rendered.
+      if (!open && active && active !== btn && panel.contains(active) && active.closest(HIDDEN_WHEN_COLLAPSED)) {
+        btn.focus();
+      }
+    }
+    panel.addEventListener("click", function (ev) {
+      if (ev.target.closest && ev.target.closest("#mx-edit-more")) {
+        setOpen(!panel.classList.contains("is-open"));
+      }
+    });
+    return function collapse() {
+      if (panel.classList.contains("is-open")) {
+        setOpen(false);
+      }
+    };
+  }
+  var HIDDEN_WHEN_COLLAPSED = '.mx-edit-slide, .mx-edit-nudge[data-delta="-1000"], .mx-edit-nudge[data-delta="1000"]';
+
   // initEditor wires the offset editor. lineStarts is mutated in place so the
   // highlight and click-to-seek in init() follow the shifted times.
   function initEditor(panel, audio, lines, lineStarts, update, route, playback) {
     var $ = function (id) {
       return document.getElementById(id);
     };
+    var collapse = initMore(panel);
     // The page shows the file as saved, which is the ORIGINAL shifted by the
     // saved offset (with negative starts clamped to 0, so it cannot be undone
     // here). The server renders the original starts in line order; the offset
@@ -396,6 +432,7 @@
     // hint says why, in place, so the control is never a silent dead end (#1243).
     var earHint = earBtn.parentNode && earBtn.parentNode.querySelector(".mx-edit-hint");
     var earHintText = earHint ? earHint.textContent : "";
+    var earWasOn = false;
     function paintEar(isLocked) {
       if ((isLocked || playback.failed) && ear.on()) {
         ear.toggle(); // re-renders with the mode off; a failure must not strand the mode on
@@ -407,6 +444,10 @@
       }
       earBtn.setAttribute("aria-pressed", String(v.on));
       banner.hidden = !v.on;
+      if (v.on && !earWasOn) {
+        collapse(); // an open phone panel would cover the banner and the lyrics
+      }
+      earWasOn = v.on;
       $("mx-ear-step").textContent = v.step;
       $("mx-ear-title").textContent = v.title;
       $("mx-ear-help").textContent = v.help;
@@ -481,14 +522,16 @@
       } else {
         msg = ["Matches the original file. Nudge while it plays to line the lyrics up.", ""];
       }
+      var failedClass = "";
       if (playback.failed) {
-        // The panel is always on screen (sticky on a phone), so it carries the
-        // audio failure too, whatever the message tone, not only the message
-        // beside the player (#1243).
-        msg = [msg[0] + " " + FAILURE_WORDS[playback.kind].status + " so Find by ear is off.", msg[1]];
+        // The failure leads, so the phone bar's line clamp never cuts it, and
+        // the class keeps the line visible while the bar is collapsed (#1243,
+        // #1247). The underlying message and its tone follow.
+        msg = [FAILURE_WORDS[playback.kind].status + " so Find by ear is off. " + msg[0], msg[1]];
+        failedClass = " is-playback-failed";
       }
       statusEl.textContent = msg[0];
-      statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "");
+      statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "") + failedClass;
       paintEar(isLocked);
       update();
     }

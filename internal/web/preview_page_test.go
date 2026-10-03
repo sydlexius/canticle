@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -267,6 +269,52 @@ func TestPreviewPageRendersEditorOnlyForEditableRow(t *testing.T) {
 			t.Errorf("editable page missing %q", want)
 		}
 	}
+	// The expand control's own tag carries the state; a bare page substring
+	// would be satisfied by the nav toggle in the layout.
+	more := regexp.MustCompile(`<button[^>]*\bid="mx-edit-more"[^>]*>`).FindString(body)
+	if more == "" {
+		t.Fatal("editable page has no mx-edit-more button")
+	}
+	if !strings.Contains(more, ` aria-expanded="false"`) {
+		t.Errorf("More button must start collapsed, got %s", more)
+	}
+	controls := regexp.MustCompile(`aria-controls="([^"]*)"`).FindStringSubmatch(more)
+	if controls == nil || strings.TrimSpace(controls[1]) == "" {
+		t.Fatalf("More button must name what it controls, got %s", more)
+	}
+	for _, id := range strings.Fields(controls[1]) {
+		if !strings.Contains(body, ` id="`+id+`"`) {
+			t.Errorf("aria-controls names %q, which is not an id on the page", id)
+		}
+	}
+	// More shows and hides exactly the slider, the scale labels and the 1 s
+	// nudges; By ear and the status stay in the collapsed bar, so they are not
+	// controlled by it.
+	ids := strings.Fields(controls[1])
+	for _, want := range []string{"mx-edit-slider", "mx-nudge-minus-1s", "mx-nudge-plus-1s"} {
+		if !slices.Contains(ids, want) {
+			t.Errorf("aria-controls %q must name %q", controls[1], want)
+		}
+	}
+	for _, not := range []string{"mx-ear-toggle", "mx-edit-status"} {
+		if slices.Contains(ids, not) {
+			t.Errorf("aria-controls %q must not name %q, which the collapsed bar keeps visible", controls[1], not)
+		}
+	}
+	// The phone bar keeps these controls visible when collapsed (#1247): the
+	// expand control, the offset, the fine nudges, Save and Discard. The slider
+	// is the one behind it, so it must not be wrapped with them.
+	for _, want := range []string{
+		`id="mx-edit-more"`, `id="mx-edit-offset"`, `data-delta="-10"`, `data-delta="10"`,
+		`id="mx-edit-save"`, `id="mx-edit-discard"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("collapsed bar controls missing %q", want)
+		}
+	}
+	if strings.Index(body, `id="mx-edit-more"`) > strings.Index(body, `id="mx-edit-slider"`) {
+		t.Error("expand control must precede the controls it reveals")
+	}
 	if strings.Contains(body, "data-edited") {
 		t.Error("unedited row rendered data-edited")
 	}
@@ -286,7 +334,7 @@ func TestPreviewPageWordSyncedIsReadOnlyAndEditorUnwiredRendersNone(t *testing.T
 	wordID := itoa(e.seedTier(t, e.writeFile(t, e.root, "other.flac"), "word"))
 	e.put(t, "other.lrc", pageLRC)
 	body := e.page(wordID).Body.String()
-	if strings.Contains(body, `id="mx-edit-save"`) || strings.Contains(body, `id="mx-edit"`) || strings.Contains(body, "mx-ear-") {
+	if strings.Contains(body, `id="mx-edit-save"`) || strings.Contains(body, `id="mx-edit"`) || strings.Contains(body, "mx-ear-") || strings.Contains(body, "mx-edit-more") {
 		t.Error("word-synced row rendered the editor")
 	}
 	if !strings.Contains(body, "Offset editing works on line-synced files only") {
