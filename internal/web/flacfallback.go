@@ -387,8 +387,9 @@ func (u *UI) AttachPreviewFlacFallback(bin string) {
 	u.attachPreviewFlac(os.TempDir(), flacCacheMaxBytes, ffmpegFlacConverter(bin))
 }
 
-// ClosePreviewFlac removes the FLAC fallback's cache directory, if any. Call
-// it once the HTTP server has stopped serving.
+// ClosePreviewFlac cancels the FLAC fallback's conversions, waits for them to
+// stop, and removes its cache directory, if any. Call it once the HTTP server
+// has stopped serving; a request still waiting on a conversion then fails.
 func (u *UI) ClosePreviewFlac() {
 	if u.flac == nil {
 		return
@@ -468,7 +469,8 @@ func (u *UI) handlePreviewFlac(w http.ResponseWriter, r *http.Request) {
 		return g, nil
 	}
 	// A conversion can outlast the server-wide write timeout, and so can the
-	// stream that follows.
+	// stream that follows. The conversion's own timeout starts only once it
+	// gets a slot, so the deadline is re-armed after Get for the stream.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(flacConvertTimeout + previewWriteBound)); err != nil {
 		slog.Error("preview flac: cannot extend the write deadline; long responses will be cut", "id", id, "error", err)
 	}
@@ -481,6 +483,9 @@ func (u *UI) handlePreviewFlac(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = out.Close() }()
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(previewWriteBound)); err != nil {
+		slog.Error("preview flac: cannot extend the write deadline; long responses will be cut", "id", id, "error", err)
+	}
 	ofi, err := out.Stat()
 	if err != nil {
 		slog.Error("preview flac: stat of converted file failed", "id", id, "error", err)
