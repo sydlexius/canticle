@@ -5,15 +5,22 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/trustnet"
 )
 
 var fakeFlac = []byte("fLaC-fake-converted-bytes")
@@ -429,6 +436,282 @@ func TestFlacInputAndCappedStderr(t *testing.T) {
 	}
 }
 
+// flacMux builds a UI over the fixture DB with the fallback attached (fake
+// converter) when conv is non-nil.
+func flacMux(t *testing.T, f *previewFixture, conv *countingConverter) (*http.ServeMux, string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	ui := NewUI(config.Config{}, "v-test", WithReports(reports.New(f.db)))
+	cacheDir := ""
+	if conv != nil {
+		ui.attachPreviewFlac(t.TempDir(), 1<<20, conv.convert)
+		cacheDir = ui.flac.dir
+		t.Cleanup(ui.ClosePreviewFlac)
+	}
+	ui.Register(mux)
+	return mux, cacheDir
+}
+
+func flacGet(mux http.Handler, id string, hdr ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/preview/"+id+"/audio.flac", nil)
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestPreviewFlacOffIs404(t *testing.T) {
+	f := newPreviewFixture(t)
+	mux, _ := flacMux(t, f, nil)
+	id := strconv.FormatInt(f.row(t, f.writeFile(t, f.root, "song.m4a")), 10)
+	rec := flacGet(mux, id)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 with the key off", rec.Code)
+	}
+	if bytes.Contains(rec.Body.Bytes(), previewBytes) || bytes.Contains(rec.Body.Bytes(), fakeFlac) {
+		t.Error("404 body carries file content")
+	}
+}
+
+func TestPreviewFlacServesConversionWithRange(t *testing.T) {
+	f := newPreviewFixture(t)
+	conv := &countingConverter{}
+	mux, cacheDir := flacMux(t, f, conv)
+	id := strconv.FormatInt(f.row(t, f.writeFile(t, f.root, "song.m4a")), 10)
+
+	rec := flacGet(mux, id)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), fakeFlac) {
+		t.Fatalf("status = %d body = %q, want 200 with the conversion", rec.Code, rec.Body.Bytes())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "audio/flac" {
+		t.Errorf("Content-Type = %q, want audio/flac", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Errorf("Accept-Ranges = %q, want bytes", got)
+	}
+	rec = flacGet(mux, id, "Range", "bytes=2-5")
+	if rec.Code != http.StatusPartialContent || !bytes.Equal(rec.Body.Bytes(), fakeFlac[2:6]) {
+		t.Fatalf("range: status = %d body = %q, want 206 %q", rec.Code, rec.Body.Bytes(), fakeFlac[2:6])
+	}
+	if conv.calls.Load() != 1 {
+		t.Errorf("conversions = %d, want 1", conv.calls.Load())
+	}
+	// Nothing lands in the library: the root holds only the source file.
+	ents, _ := os.ReadDir(f.root)
+	if len(ents) != 1 {
+		t.Errorf("library root has %d entries, want only the source", len(ents))
+	}
+	if _, err := os.Stat(cacheDir); err != nil {
+		t.Errorf("cache dir missing: %v", err)
+	}
+}
+
+func TestPreviewFlacRefusesWhatTheAudioRouteRefuses(t *testing.T) {
+	f := newPreviewFixture(t)
+	conv := &countingConverter{}
+	mux, _ := flacMux(t, f, conv)
+	secret := f.writeFile(t, f.outside, "secret.m4a")
+	link := filepath.Join(f.root, "link.m4a")
+	symlinkOK := os.Symlink(secret, link) == nil
+	cases := map[string]string{
+		"missing file":       filepath.Join(f.root, "gone.m4a"),
+		"outside every root": secret,
+		"dotdot out of root": filepath.Join(f.root, "..", filepath.Base(f.outside), "secret.m4a"),
+		"relative path":      "song.m4a",
+		"directory":          f.root,
+	}
+	if symlinkOK {
+		cases["symlink escaping root"] = link
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := flacGet(mux, strconv.FormatInt(f.row(t, path), 10))
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", rec.Code)
+			}
+		})
+	}
+	for _, bad := range []string{"0", "-3", "abc", "99999"} {
+		if rec := flacGet(mux, bad); rec.Code != http.StatusNotFound {
+			t.Errorf("id %q: status = %d, want 404", bad, rec.Code)
+		}
+	}
+	if conv.calls.Load() != 0 {
+		t.Errorf("converter ran %d times for refused paths, want 0", conv.calls.Load())
+	}
+}
+
+func TestPreviewFlacRequiresSession(t *testing.T) {
+	a, svc := newTestAuth(t, trustnet.LoopbackOnly())
+	f := newPreviewFixture(t)
+	conv := &countingConverter{}
+	mux := http.NewServeMux()
+	ui := NewUI(config.Config{}, "vtest", WithAuth(a), WithReports(reports.New(f.db)))
+	ui.attachPreviewFlac(t.TempDir(), 1<<20, conv.convert)
+	ui.Register(mux)
+	id := strconv.FormatInt(f.row(t, f.writeFile(t, f.root, "song.m4a")), 10)
+
+	req := httptest.NewRequest(http.MethodGet, "/preview/"+id+"/audio.flac", nil)
+	req.RemoteAddr = "198.51.100.31:1"
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/login") {
+		t.Fatalf("no session: %d -> %q, want 303 to /login", rec.Code, rec.Header().Get("Location"))
+	}
+	if conv.calls.Load() != 0 {
+		t.Fatal("an unauthenticated request started a conversion")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/preview/"+id+"/audio.flac", nil)
+	req.RemoteAddr = "198.51.100.31:1"
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: loginToken(t, svc)})
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), fakeFlac) {
+		t.Fatalf("with session: status = %d, want 200 with the conversion", rec.Code)
+	}
+}
+
+func TestPreviewFlacConversionFailureIs502(t *testing.T) {
+	f := newPreviewFixture(t)
+	mux, _ := flacMux(t, f, &countingConverter{err: errors.New("boom")})
+	id := strconv.FormatInt(f.row(t, f.writeFile(t, f.root, "song.m4a")), 10)
+	rec := flacGet(mux, id)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "boom") {
+		t.Error("response leaks the converter error")
+	}
+}
+
+// A source replaced after the request's confined open (before the conversion
+// re-opens it) is not converted under the old file's key: the request fails
+// and nothing is cached.
+func TestPreviewFlacReplacedSourceIsNotConverted(t *testing.T) {
+	for name, replace := range map[string]func(t *testing.T, p string){
+		"new inode": func(t *testing.T, p string) {
+			tmp := p + ".new"
+			if err := os.WriteFile(tmp, []byte("a different file"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, p); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rewritten in place": func(t *testing.T, p string) {
+			if err := os.WriteFile(p, []byte("rewritten, longer than before"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPreviewFixture(t)
+			conv := &countingConverter{}
+			mux := http.NewServeMux()
+			ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
+			ui.attachPreviewFlac(t.TempDir(), 1<<20, conv.convert)
+			t.Cleanup(ui.ClosePreviewFlac)
+			ui.Register(mux)
+			src := f.writeFile(t, f.root, "song.m4a")
+			id := strconv.FormatInt(f.row(t, src), 10)
+			for i := 0; i < cap(ui.flac.sem); i++ { // hold every slot: the job queues before its open
+				ui.flac.sem <- struct{}{}
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- flacGet(mux, id) }()
+			waitFor(t, "the request to queue its conversion", func() bool {
+				ui.flac.mu.Lock()
+				defer ui.flac.mu.Unlock()
+				return len(ui.flac.inflight) == 1
+			})
+			replace(t, src)
+			for i := 0; i < cap(ui.flac.sem); i++ {
+				<-ui.flac.sem
+			}
+			if rec := <-done; rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for a source replaced mid-request", rec.Code)
+			}
+			if n := conv.calls.Load(); n != 0 {
+				t.Fatalf("converter ran %d times on a replaced source, want 0", n)
+			}
+		})
+	}
+}
+
+func TestPreviewFlacSrc(t *testing.T) {
+	u := NewUI(config.Config{}, "v")
+	if got := u.previewFlacSrc(7); got != "" {
+		t.Errorf("off: src = %q, want empty", got)
+	}
+	u.attachPreviewFlac(t.TempDir(), 1, (&countingConverter{}).convert)
+	if got := u.previewFlacSrc(7); got != "/preview/7/audio.flac" {
+		t.Errorf("on: src = %q", got)
+	}
+	u.ClosePreviewFlac()
+	if _, err := os.Stat(u.flac.dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ClosePreviewFlac left the cache dir: %v", err)
+	}
+}
+
+func TestAttachPreviewFlacLeavesItOffWhenCacheUncreatable(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u := NewUI(config.Config{}, "v")
+	u.attachPreviewFlac(blocker, 1, (&countingConverter{}).convert)
+	if u.flac != nil {
+		t.Error("an uncreatable cache must leave the fallback off")
+	}
+	u.ClosePreviewFlac() // a no-op when off
+}
+
+// deadlineRecorder records each write deadline the handler sets, and when.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	set, at []time.Time
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	d.set, d.at = append(d.set, t), append(d.at, time.Now())
+	return nil
+}
+
+// The deadline armed before the conversion is re-armed once it ends, for the
+// stream and for the error write alike: a long queue must not cut either.
+func TestPreviewFlacRearmsWriteDeadlineAfterConversion(t *testing.T) {
+	for name, convErr := range map[string]error{"stream": nil, "error": errors.New("boom")} {
+		t.Run(name, func(t *testing.T) {
+			f := newPreviewFixture(t)
+			var finished time.Time
+			conv := &countingConverter{err: convErr}
+			mux := http.NewServeMux()
+			ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
+			ui.attachPreviewFlac(t.TempDir(), 1<<20, func(ctx context.Context, in *os.File, n, out string) error {
+				defer func() { finished = time.Now() }()
+				return conv.convert(ctx, in, n, out)
+			})
+			t.Cleanup(ui.ClosePreviewFlac)
+			ui.Register(mux)
+			id := strconv.FormatInt(f.row(t, f.writeFile(t, f.root, "song.m4a")), 10)
+			rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/preview/"+id+"/audio.flac", nil))
+			if n := len(rec.set); n == 0 || rec.at[n-1].Before(finished) {
+				t.Fatalf("status %d: no write deadline set after the conversion ended (%d set)", rec.Code, n)
+			}
+			if got := rec.set[len(rec.set)-1].Sub(finished); got < previewWriteBound || got > previewWriteBound+time.Minute {
+				t.Fatalf("re-armed deadline = conversion end+%v, want +%v", got, previewWriteBound)
+			}
+		})
+	}
+}
+
 // fakeFFmpeg writes a stand-in ffmpeg (POSIX sh) that records the -i argument
 // in argLog and copies the bytes it reads there to the output, the last arg.
 func fakeFFmpeg(t *testing.T) (bin, argLog string) {
@@ -619,5 +902,30 @@ func TestFFmpegFlacConversionFailureNamesFFmpeg(t *testing.T) {
 	err := ffmpegFlacConverter(bin)(context.Background(), in, src, filepath.Join(t.TempDir(), "o.flac"))
 	if err == nil || !strings.Contains(err.Error(), "ffmpeg flac conversion") {
 		t.Fatalf("err = %v, want an ffmpeg conversion error", err)
+	}
+}
+
+func TestPreviewFlacEndToEndALACSeeks(t *testing.T) {
+	bin := requireFFmpeg(t)
+	f := newPreviewFixture(t)
+	src := makeFixture(t, bin, f.root, "t.m4a", "-c:a", "alac")
+	mux := http.NewServeMux()
+	ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
+	ui.attachPreviewFlac(t.TempDir(), 64<<20, ffmpegFlacConverter(bin))
+	t.Cleanup(ui.ClosePreviewFlac)
+	ui.Register(mux)
+	id := strconv.FormatInt(f.row(t, src), 10)
+
+	rec := flacGet(mux, id)
+	if rec.Code != http.StatusOK || !bytes.HasPrefix(rec.Body.Bytes(), []byte("fLaC")) {
+		t.Fatalf("status = %d, want 200 with a fLaC stream", rec.Code)
+	}
+	total := rec.Body.Len()
+	rec = flacGet(mux, id, "Range", "bytes="+strconv.Itoa(total/2)+"-")
+	if rec.Code != http.StatusPartialContent || rec.Body.Len() != total-total/2 {
+		t.Fatalf("seek: status = %d len = %d, want 206 with the tail", rec.Code, rec.Body.Len())
+	}
+	if ents, _ := os.ReadDir(f.root); len(ents) != 1 {
+		t.Errorf("library root has %d entries after conversion, want 1", len(ents))
 	}
 }

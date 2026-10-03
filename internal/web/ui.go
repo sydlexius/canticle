@@ -137,6 +137,10 @@ type UI struct {
 	editor    *EditDeps
 	editLocks rowLocks
 
+	// flac is the preview FLAC fallback's conversion cache (#1243); nil when
+	// server.preview_flac_fallback is off or its cache could not be created.
+	flac *flacCache
+
 	// guardedRoutes records every pattern Register put behind the session guard
 	// (empty when auth is not configured). It exists so a test can enumerate the
 	// guarded surface instead of hand-picking routes.

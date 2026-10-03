@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,15 +21,20 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/ffmpeg"
+	"github.com/sydlexius/canticle/internal/reports"
 )
 
-// The preview FLAC fallback's conversion cache (#1243), consumed by the
-// /preview/{id}/audio.flac endpoint, #1243. Conversions live in a size-capped
-// temp directory, never in a library; FLAC because every browser plays it and
-// it is lossless, so no encoder delay shifts the timing the offset editor
-// corrects.
+// The preview FLAC fallback (#1243, opt-in via server.preview_flac_fallback).
+// When the browser cannot decode a track, the player retries ONCE against
+// /preview/{id}/audio.flac, which serves a whole-file FLAC conversion made with
+// ffmpeg. FLAC because every browser plays it and it is lossless, so no encoder
+// delay shifts the timing the offset editor corrects. Conversions live in a
+// size-capped temp directory, never in a library.
 
 const (
+	// flacCacheMaxBytes caps the conversion cache; the oldest entries are
+	// evicted once the total passes it.
+	flacCacheMaxBytes int64 = 512 << 20
 	// flacConvertTimeout bounds one ffmpeg run, from when it gets a slot.
 	flacConvertTimeout = 10 * time.Minute
 	// flacMaxConversions bounds concurrent ffmpeg runs: the CPU they take and
@@ -426,4 +432,136 @@ func (b *cappedBuffer) String() string {
 		return string(b.head) + string(tail)
 	}
 	return fmt.Sprintf("%s\n... [%d bytes dropped] ...\n%s", b.head, dropped, tail)
+}
+
+// AttachPreviewFlacFallback enables the FLAC fallback with the ffmpeg at bin
+// (server.preview_flac_fallback), caching in a private directory under the OS
+// temp dir that ClosePreviewFlac removes. A cache that cannot be created
+// leaves it off, logged: the player then shows its ordinary error.
+func (u *UI) AttachPreviewFlacFallback(bin string) {
+	u.attachPreviewFlac(os.TempDir(), flacCacheMaxBytes, ffmpegFlacConverter(bin))
+}
+
+// ClosePreviewFlac cancels the FLAC fallback's conversions, waits for them to
+// stop, and removes its cache directory, if any. Call it once the HTTP server
+// has stopped serving; a request still waiting on a conversion then fails.
+func (u *UI) ClosePreviewFlac() {
+	if u.flac == nil {
+		return
+	}
+	if err := u.flac.Close(); err != nil {
+		slog.Warn("preview flac cache: cannot remove on shutdown", "error", err)
+	}
+}
+
+func (u *UI) attachPreviewFlac(parent string, max int64, convert flacConverter) {
+	c, err := newFlacCache(parent, max, convert)
+	if err != nil {
+		slog.Error("preview flac fallback unavailable", "error", err)
+		return
+	}
+	u.flac = c
+}
+
+// previewFlacSrc is the fallback URL the player retries against, or "" when the
+// fallback is off, so the page learns of it from the server and never probes.
+func (u *UI) previewFlacSrc(id int64) string {
+	if u.flac == nil {
+		return ""
+	}
+	return "/preview/" + strconv.FormatInt(id, 10) + "/audio.flac"
+}
+
+// handlePreviewFlac serves the FLAC conversion of one row's audio, with Range
+// support. It resolves and confines the file exactly as handlePreviewAudio does
+// (the same session guard, DB lookup and os.Root open) and answers 404 for every
+// refusal and whenever the fallback is not enabled.
+func (u *UI) handlePreviewFlac(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	if u.flac == nil {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if u.reports == nil {
+		slog.Error("reports repo not wired; cannot serve preview flac", "id", id)
+		http.Error(w, "preview data source unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	audioPath, err := u.reports.PreviewAudioPath(r.Context(), id)
+	if errors.Is(err, reports.ErrPreviewNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		slog.Error("preview source lookup failed", "id", id, "error", err)
+		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+		return
+	}
+	roots, err := u.reports.LibraryRoots(r.Context())
+	if err != nil {
+		slog.Error("preview library roots lookup failed", "id", id, "error", err)
+		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+		return
+	}
+	f, fi, ok := openPreviewAudio(roots, audioPath)
+	if !ok {
+		slog.Warn("preview flac refused: not a regular file under a library root", "id", id)
+		http.NotFound(w, r)
+		return
+	}
+	_ = f.Close() // the stat keys the cache; a conversion re-opens through the same confinement
+	open := func() (*os.File, error) {
+		g, gfi, ok := openPreviewAudio(roots, audioPath)
+		if !ok {
+			return nil, errors.New("not a regular file under a library root")
+		}
+		// The conversion is cached under fi's key, so it must convert the
+		// file fi described: a file replaced in between (another inode, or
+		// rewritten in place) fails this conversion instead of being cached
+		// under the old key. The next request keys the new file afresh.
+		if !sameFlacSource(fi, gfi) {
+			_ = g.Close()
+			return nil, errors.New("source changed since the request opened it")
+		}
+		return g, nil
+	}
+	// A conversion can outlast the server-wide write timeout, and so can the
+	// stream that follows. The conversion's own timeout starts only once it
+	// gets a slot, so the deadline is re-armed after Get, before any write:
+	// the stream's, or the error's after a long queue.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(flacConvertTimeout + previewWriteBound)); err != nil {
+		slog.Error("preview flac: cannot extend the write deadline; long responses will be cut", "id", id, "error", err)
+	}
+	out, err := u.flac.Get(r.Context(), filepath.Clean(audioPath), fi, open)
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(previewWriteBound)); err != nil {
+		slog.Error("preview flac: cannot extend the write deadline; long responses will be cut", "id", id, "error", err)
+	}
+	if err != nil {
+		if r.Context().Err() == nil {
+			slog.Error("preview flac conversion failed", "id", id, "error", err)
+			http.Error(w, "audio conversion failed", http.StatusBadGateway)
+		}
+		return
+	}
+	defer func() { _ = out.Close() }()
+	ofi, err := out.Stat()
+	if err != nil {
+		slog.Error("preview flac: stat of converted file failed", "id", id, "error", err)
+		http.Error(w, "audio conversion failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/flac")
+	http.ServeContent(w, r, "", ofi.ModTime(), out)
+}
+
+// sameFlacSource reports whether b is the same file as a, unchanged: the same
+// file identity and the same mtime and size, the fields the cache key holds.
+func sameFlacSource(a, b fs.FileInfo) bool {
+	return os.SameFile(a, b) && a.ModTime().Equal(b.ModTime()) && a.Size() == b.Size()
 }

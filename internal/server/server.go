@@ -99,6 +99,7 @@ type Handler struct {
 	reportsDB          *sql.DB
 	editDurations      *audiodur.Store
 	editSelfWrites     *selfwrite.Registry
+	previewFlacFFmpeg  string
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
@@ -287,6 +288,13 @@ func WithLyricEditDeps(durations *audiodur.Store, selfWrites *selfwrite.Registry
 	return func(h *Handler) { h.editDurations, h.editSelfWrites = durations, selfWrites }
 }
 
+// WithPreviewFlacFallback enables the preview player's opt-in FLAC fallback
+// (#1243) using the ffmpeg at path. Omitting it (or an empty path) leaves
+// /preview/{id}/audio.flac answering 404.
+func WithPreviewFlacFallback(ffmpegPath string) Option {
+	return func(h *Handler) { h.previewFlacFFmpeg = ffmpegPath }
+}
+
 // WithSettingsWriter enables the settings page write path (#288 Phase 2): the
 // resolved config file path the save handlers write through config.ApplyChanges,
 // and the encrypted secret store that absorbs secret-field saves (the Musixmatch
@@ -369,6 +377,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 			h.webui.AttachLyricEditor(web.EditDeps{
 				Queue: queue.NewDBQueue(h.reportsDB), Durations: h.editDurations, SelfWrites: h.editSelfWrites,
 			})
+		}
+		if h.previewFlacFFmpeg != "" {
+			h.webui.AttachPreviewFlacFallback(h.previewFlacFFmpeg)
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)
@@ -633,6 +644,9 @@ func (h *Handler) Close() {
 	h.shutdownOnce.Do(func() { close(h.shutdown) })
 	h.closeMu.Unlock()
 	h.bgRealign.Wait()
+	if h.webui != nil {
+		h.webui.ClosePreviewFlac()
+	}
 }
 
 func (h *Handler) reactiveRealign(ctx context.Context, event string, payload lidarrWebhook) {
