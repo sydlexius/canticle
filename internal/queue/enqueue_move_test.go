@@ -251,3 +251,99 @@ func TestPathOnlyMoveKeepsLinkUntilScanRelinks(t *testing.T) {
 		t.Errorf("repoint of a correctly linked row = (moved %v, %v, %d stats), want a no-op with no stat", moved, err, stats)
 	}
 }
+
+// libState renders "linked scan_result|junction|scan_results", each scan_result
+// as library:extension so two libraries' rows for one path are told apart.
+func libState(t *testing.T, sqlDB *sql.DB, id int64) (got string) {
+	t.Helper()
+	const name = `(SELECT l.name || ':' || sr.file_path FROM libraries l WHERE l.id = sr.library_id)`
+	if err := sqlDB.QueryRow(`SELECT replace(
+             COALESCE((SELECT `+name+` FROM scan_results sr WHERE sr.id = wq.scan_result_id), '-') || '|' ||
+             COALESCE((SELECT group_concat(n) FROM (SELECT `+name+` AS n FROM work_queue_scan_results j
+                 JOIN scan_results sr ON sr.id = j.scan_result_id WHERE j.work_queue_id = wq.id ORDER BY sr.id)), '-') || '|' ||
+             COALESCE((SELECT group_concat(n) FROM (SELECT `+name+` || ':' || sr.status AS n
+                 FROM scan_results sr ORDER BY sr.id)), '-'),
+             '/lib/album/01 song', '')
+         FROM work_queue wq WHERE id = ?`, id).Scan(&got); err != nil {
+		t.Fatalf("read library state: %v", err)
+	}
+	return got
+}
+
+// TestGoneSourceMoveIsLibraryScoped pins the move against overlapping libraries
+// (#1262 review): scan_results is unique per (library_id, file_path), so each
+// library holds its own row for the vanished file and for its replacement, and
+// one deduped work_queue row is linked to both. A move made for one library
+// must leave the other library's rows for that library's own scan.
+func TestGoneSourceMoveIsLibraryScoped(t *testing.T) {
+	ctx := context.Background()
+	// Library B is created first, so its rows carry the LOWER ids.
+	const seed = `INSERT INTO libraries (id, path, name) VALUES (1, '/lib', 'B'), (2, '/lib/album', 'A');
+         INSERT INTO scan_results (library_id, file_path, status) VALUES (1, '` + moveOld + `', 'processing');`
+	const indexA = `INSERT INTO scan_results (library_id, file_path, status) VALUES
+             (2, '` + moveOld + `', 'processing'), (2, '` + moveNew + `', 'processing');
+         UPDATE work_queue SET scan_result_id = (SELECT id FROM scan_results WHERE library_id = 2 AND file_path LIKE '%.mp3');
+         INSERT INTO work_queue_scan_results SELECT wq.id, sr.id FROM work_queue wq, scan_results sr`
+	const indexB = `INSERT INTO scan_results (library_id, file_path, status) VALUES (1, '` + moveNew + `', 'processing');`
+	in := func(libraryID int64) models.Inputs {
+		return models.Inputs{Track: models.Track{ArtistName: "Artist", TrackName: "Song"}, SourcePath: moveNew, LibraryID: libraryID}
+	}
+	setup := func(t *testing.T, sqls ...string) (*DBQueue, *sql.DB, int64, *int) {
+		t.Helper()
+		sqlDB := openQueueTestDB(t)
+		id := seedMoveRow(t, sqlDB, "")
+		for _, s := range sqls {
+			if _, err := sqlDB.Exec(s); err != nil {
+				t.Fatalf("seed libraries: %v", err)
+			}
+		}
+		q, stats := NewDBQueue(sqlDB), new(int)
+		q.stat = func(p string) (fs.FileInfo, error) {
+			*stats++
+			return fakeStat(map[string]error{moveOld: fs.ErrNotExist})(p)
+		}
+		return q, sqlDB, id, stats
+	}
+
+	t.Run("the lookup picks the scanning library's row, not a lower id elsewhere", func(t *testing.T) {
+		q, sqlDB, id, _ := setup(t, seed, indexB, indexA)
+		if moved, err := q.RepointGoneSource(ctx, in(2)); err != nil || !moved {
+			t.Fatalf("RepointGoneSource for A = (%v, %v), want a move", moved, err)
+		}
+		want := "A:.flac|B:.mp3,B:.flac,A:.flac|B:.mp3:processing,B:.flac:processing,A:.flac:done"
+		if got := libState(t, sqlDB, id); got != want {
+			t.Errorf("after A's scan:\n got %s\nwant %s", got, want)
+		}
+	})
+
+	t.Run("each library's scan repairs only its own rows", func(t *testing.T) {
+		q, sqlDB, id, stats := setup(t, seed, indexA)
+		if moved, err := q.RepointGoneSource(ctx, in(2)); err != nil || !moved {
+			t.Fatalf("RepointGoneSource for A = (%v, %v), want a move", moved, err)
+		}
+		want := "A:.flac|B:.mp3,A:.flac|B:.mp3:processing,A:.flac:done"
+		if got := libState(t, sqlDB, id); got != want {
+			t.Fatalf("after A's scan (B's row and link must survive):\n got %s\nwant %s", got, want)
+		}
+		// B scans the replacement later: the row already names it and is linked to A's row.
+		if _, err := sqlDB.Exec(indexB); err != nil {
+			t.Fatalf("index the replacement in B: %v", err)
+		}
+		if moved, err := q.RepointGoneSource(ctx, in(1)); err != nil || !moved {
+			t.Errorf("RepointGoneSource for B = (%v, %v), want a relink", moved, err)
+		}
+		want = "A:.flac|A:.flac,B:.flac|A:.flac:done,B:.flac:done"
+		if got := libState(t, sqlDB, id); got != want {
+			t.Errorf("after B's scan:\n got %s\nwant %s", got, want)
+		}
+		if got, want := moveRow(t, sqlDB, id), moveNew+"|done|2|synced|ok|line|musixmatch|2026-01-10T00:00:00Z||0"+moveTail; got != want {
+			t.Errorf("row after both scans:\n got %s\nwant %s", got, want)
+		}
+		*stats = 0
+		for _, lib := range []int64{1, 2} {
+			if moved, err := q.RepointGoneSource(ctx, in(lib)); err != nil || moved || *stats != 0 {
+				t.Errorf("repeat repoint for library %d = (moved %v, %v, %d stats), want a no-op with no stat", lib, moved, err, *stats)
+			}
+		}
+	})
+}

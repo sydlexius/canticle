@@ -439,6 +439,7 @@ func scanInputs(res models.ScanResult) (models.Inputs, error) {
 		Filename:     filename,
 		SourcePath:   res.FilePath,
 		ScanResultID: res.ID,
+		LibraryID:    res.LibraryID,
 		OutputPaths: []models.OutputPath{{
 			Outdir:   outdir,
 			Filename: filename,

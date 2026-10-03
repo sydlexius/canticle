@@ -18,10 +18,13 @@ import (
 // goneSourceMove is a planned repair of one work_queue row whose recorded audio
 // file was replaced in place by a same-stem sibling (#1262: an album re-ripped
 // from .mp3 to .flac). oldPath is the optimistic-concurrency guard for the
-// write, gonePath the vanished file whose scan_results row is removed ("" for none).
+// write, gonePath the vanished file whose scan_results row is removed ("" for
+// none), and keepLink leaves work_queue.scan_result_id as it is (the row is
+// already linked to another library's row for the incoming file).
 type goneSourceMove struct {
 	id                int64
 	oldPath, gonePath string
+	keepLink          bool
 }
 
 // sameStemSibling reports whether a and b name two different files in one
@@ -51,7 +54,9 @@ func sameStemSibling(a, b string) bool {
 //
 // A row ALREADY at the incoming path is planned as a relink when its scan_result
 // link is missing or names a definitely-gone same-stem sibling (a path-only
-// caller moved it before a scan indexed the replacement); else no stat is made.
+// caller moved it before a scan indexed the replacement). A row whose link is
+// already right is handed to planLibraryRelink, for the overlapping library
+// that scans the replacement second; else no stat is made.
 func (q *DBQueue) planGoneSourceMove(ctx context.Context, inputs models.Inputs) (*goneSourceMove, error) {
 	if inputs.SourcePath == "" {
 		return nil, nil
@@ -80,8 +85,9 @@ func (q *DBQueue) planGoneSourceMove(ctx context.Context, inputs models.Inputs) 
 				m.gonePath = linked
 				return &m, nil
 			}
+			return nil, nil
 		}
-		return nil, nil
+		return q.planLibraryRelink(ctx, &m, inputs)
 	}
 	if !sameStemSibling(m.oldPath, inputs.SourcePath) {
 		return nil, nil
@@ -94,6 +100,59 @@ func (q *DBQueue) planGoneSourceMove(ctx context.Context, inputs models.Inputs) 
 		return nil, nil
 	}
 	return &m, nil
+}
+
+// planLibraryRelink covers overlapping libraries: scan_results is unique per
+// (library_id, file_path), so each library holds its own row for the vanished
+// file and its own for the replacement, and the move made for the first library
+// to scan touches only that library's rows. When a later library offers the
+// replacement the row already names it and is linked to the first library's
+// scan_result, so nothing above fires. This plans the rest: remove THIS
+// library's row for a definitely-gone same-stem sibling, link and settle its
+// row for the incoming file, and leave work_queue.scan_result_id alone.
+//
+// The library is inputs.LibraryID, else that of inputs.ScanResultID; with
+// neither, nothing is planned. The sibling is found by an index range over
+// (library_id, file_path), not a directory read, and only if no OTHER queue
+// row is linked to it. The stat is made only when such a row exists.
+func (q *DBQueue) planLibraryRelink(ctx context.Context, m *goneSourceMove, inputs models.Inputs) (*goneSourceMove, error) {
+	if inputs.LibraryID <= 0 && inputs.ScanResultID <= 0 {
+		return nil, nil
+	}
+	prefix := strings.TrimSuffix(inputs.SourcePath, filepath.Ext(inputs.SourcePath)) + "."
+	rows, err := q.db.QueryContext(ctx,
+		`SELECT sr.file_path FROM scan_results sr
+         WHERE sr.library_id = COALESCE(NULLIF(?, 0), (SELECT library_id FROM scan_results WHERE id = ?))
+           AND sr.file_path >= ? AND sr.file_path < ? AND sr.file_path != ?
+           AND NOT EXISTS (SELECT 1 FROM work_queue_scan_results j
+                           WHERE j.scan_result_id = sr.id AND j.work_queue_id != ?)
+         ORDER BY sr.id`,
+		inputs.LibraryID, inputs.ScanResultID, prefix, prefix[:len(prefix)-1]+"/", inputs.SourcePath, m.id)
+	if err != nil {
+		return nil, fmt.Errorf("queue: read sibling scan_results for row %d: %w", m.id, err)
+	}
+	var siblings []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("queue: scan sibling scan_result for row %d: %w", m.id, err)
+		}
+		siblings = append(siblings, p)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, fmt.Errorf("queue: read sibling scan_results for row %d: %w", m.id, err)
+	}
+	for _, p := range siblings { // stat only after the rows are closed
+		if !sameStemSibling(p, inputs.SourcePath) {
+			continue
+		}
+		if _, err := q.stat(p); errors.Is(err, fs.ErrNotExist) {
+			m.gonePath, m.keepLink = p, true
+			return m, nil
+		}
+	}
+	return nil, nil
 }
 
 // moveResurrectSQL moves a row prune RETIRED as unresolvable (its file was
@@ -122,20 +181,33 @@ const (
 // so the upsert's "keep a settled row's paths" arms then keep the NEW path.
 //
 // The incoming file's scan_result is inputs.ScanResultID, or, for a caller that
-// has only the path (RepointGoneSource, a webhook), the scan_results row naming
-// it. With none yet, the vanished file's scan_results row is KEPT and stays
-// linked (deleting it would null the link, ON DELETE SET NULL); the relink arm
-// of a later RepointGoneSource swaps the link and removes it.
+// has none (RepointGoneSource is fed the scanner's results, which carry no id),
+// the row naming the path in inputs.LibraryID: scan_results is unique per
+// (library_id, file_path), so overlapping libraries each hold one. Only a
+// caller with neither (a webhook) falls back to the lowest-id row naming the
+// path, in whichever library. With none yet, the vanished file's scan_results
+// row is KEPT and stays linked (deleting it would null the link, ON DELETE SET
+// NULL); the relink arm of a later RepointGoneSource swaps the link and removes it.
+//
+// Only the incoming scan_result's OWN library loses its row for the vanished
+// file. Another library's row, and its junction link, are left for that
+// library's scan of the replacement (planLibraryRelink).
 func moveGoneSourceTx(ctx context.Context, tx *sql.Tx, m *goneSourceMove, inputs models.Inputs, now string) (bool, error) {
 	srID := inputs.ScanResultID
 	if srID <= 0 {
-		err := tx.QueryRowContext(ctx,
-			`SELECT id FROM scan_results WHERE file_path = ? ORDER BY id LIMIT 1`, inputs.SourcePath).Scan(&srID)
+		query, args := `SELECT id FROM scan_results WHERE file_path = ? ORDER BY id LIMIT 1`, []any{inputs.SourcePath}
+		if inputs.LibraryID > 0 {
+			query, args = `SELECT id FROM scan_results WHERE file_path = ? AND library_id = ?`, append(args, inputs.LibraryID)
+		}
+		err := tx.QueryRowContext(ctx, query, args...).Scan(&srID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return false, fmt.Errorf("queue: find scan_result of new source for row %d: %w", m.id, err)
 		}
 	}
 	scanResultID := nullableID(srID)
+	if m.keepLink {
+		scanResultID = nil
+	}
 	relink := m.oldPath == inputs.SourcePath // swaps the link only; never reopens a row
 	if relink && srID <= 0 {
 		return false, nil
@@ -164,15 +236,16 @@ func moveGoneSourceTx(ctx context.Context, tx *sql.Tx, m *goneSourceMove, inputs
 	}
 	// The vanished file's scan_results row would otherwise strand: nothing else
 	// removes it while its directory survives. Same in-flight guard as prune.
-	// The junction cascades with it.
+	// The junction cascades with it. Scoped to the incoming row's library.
 	if m.gonePath != "" {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM scan_results WHERE file_path = ? AND id != ?
+               AND library_id = (SELECT library_id FROM scan_results WHERE id = ?)
                AND NOT EXISTS (
                    SELECT 1 FROM work_queue_scan_results j
                    JOIN work_queue wq ON wq.id = j.work_queue_id
                    WHERE j.scan_result_id = scan_results.id AND wq.status = 'processing')`,
-			m.gonePath, srID); err != nil {
+			m.gonePath, srID, srID); err != nil {
 			return false, fmt.Errorf("queue: delete scan_result of vanished source for row %d: %w", m.id, err)
 		}
 	}
@@ -200,8 +273,8 @@ func moveGoneSourceTx(ctx context.Context, tx *sql.Tx, m *goneSourceMove, inputs
 // RepointGoneSource applies the same repair without enqueueing anything, for a
 // file the scan indexed as already settled: its sidecar survived the swap, so
 // the scan never offers it to Enqueue and the collision above never happens.
-// It reports whether a row was moved or relinked; a row already linked to the
-// incoming file's scan_result costs one read, no stat and no write.
+// It reports whether a row was moved or relinked; a row already at the incoming
+// path with a live link costs two indexed reads, no stat and no write.
 //
 // LIMIT: it judges only the moment it is called. If the old file still exists
 // then (copy, scan, then delete) or its stat fails for any reason but not-exist,
