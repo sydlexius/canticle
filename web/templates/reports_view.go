@@ -81,6 +81,9 @@ type RecentOutcomeRow struct {
 	// CompletedAtTZApplied is true when the server formatted CompletedAt using the
 	// TZ env var, signaling that JS should not reformat it.
 	CompletedAtTZApplied bool
+	// CompletedAtRelative is the dashboard-only relative label ("5 min ago",
+	// #1263). Empty on Reports, which renders CompletedAt unchanged.
+	CompletedAtRelative string
 }
 
 // AttentionRow is one failed or deferred track (#654 AC2). State is the pill

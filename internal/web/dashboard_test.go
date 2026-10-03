@@ -233,6 +233,45 @@ func TestHandleDashboard_TZEnvTimestamp(t *testing.T) {
 	}
 }
 
+// TestHandleDashboard_RecentRelativeCell pins the production wiring of the
+// relative Completed label (#1263): the handler stamps the label from the real
+// clock, and the whole <time> element is asserted in both zone modes. The row
+// completed 3 hours and 30 seconds ago, so the label stays "3 hours ago" for
+// the (far longer than a test run) rest of that hour.
+func TestHandleDashboard_RecentRelativeCell(t *testing.T) {
+	completed := time.Now().UTC().Add(-3*time.Hour - 30*time.Second).Truncate(time.Second)
+	iso := completed.Format(time.RFC3339)
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	cases := []struct {
+		name, tz, want string
+	}{
+		{"zone configured", "America/Los_Angeles",
+			`<time datetime="` + iso + `" title="` + completed.In(la).Format("2006-01-02 15:04 MST") + `" data-tz-applied="1">3 hours ago</time>`},
+		{"zone unset", "",
+			`<time datetime="` + iso + `" title="` + completed.Format("2006-01-02 15:04 UTC") + `" data-tz="pending">3 hours ago</time>`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TZ", tc.tz)
+			sqlDB := openReportsTestDB(t)
+			insertDone(t, sqlDB, "Rel Track", "musixmatch", `[{"outdir":"/o","filename":"rel.lrc"}]`, iso)
+
+			mux := newReportsUIServer(t, sqlDB)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /dashboard status = %d, want 200", rec.Code)
+			}
+			if body := rec.Body.String(); !strings.Contains(body, tc.want) {
+				t.Errorf("dashboard missing %s in:\n%s", tc.want, body)
+			}
+		})
+	}
+}
+
 // TestHandleDashboard_ProviderTiles verifies that provider lane tiles render when
 // lane_attempts data exists (covers the ProviderTiles loop body in buildDashboardView).
 func TestHandleDashboard_ProviderTiles(t *testing.T) {
