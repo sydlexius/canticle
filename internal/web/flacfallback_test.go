@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,10 +70,11 @@ func getAsync(c *flacCache, ctx context.Context, p string, open func() (*os.File
 	ch := make(chan error, 1)
 	go func() {
 		f, err := c.Get(ctx, p, fi, open)
-		if err == nil {
-			b, _ := os.ReadFile(f.Name())
+		if err == nil { // read the served handle: once opened, the name may be evicted
+			var b []byte
+			b, err = io.ReadAll(f)
 			_ = f.Close()
-			if !bytes.Equal(b, fakeFlac) {
+			if err == nil && !bytes.Equal(b, fakeFlac) {
 				err = errors.New("served body is not the conversion: " + string(b))
 			}
 		}
