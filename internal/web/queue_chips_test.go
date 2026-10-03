@@ -318,10 +318,14 @@ func TestQueueChipsSecondPage(t *testing.T) {
 					t.Errorf("page 2 chip %q link %v keeps the cursor or loses search/sort", label, q)
 				}
 			}
-			if h := html2(clearRE.FindStringSubmatch(body)[1]); !strings.Contains(h, "tier=line") || strings.Contains(h, "q=") || strings.Contains(h, "after=") {
+			cm, sm := clearRE.FindStringSubmatch(body), startRE.FindStringSubmatch(body)
+			if cm == nil || sm == nil {
+				t.Fatalf("page 2 lacks the Clear search link (%v) or the Back to start link (%v)", cm == nil, sm == nil)
+			}
+			if h := html2(cm[1]); !strings.Contains(h, "tier=line") || strings.Contains(h, "q=") || strings.Contains(h, "after=") {
 				t.Errorf("Clear search link %q must keep the chip, drop q and the cursor", h)
 			}
-			if h := html2(startRE.FindStringSubmatch(body)[1]); !strings.Contains(h, "tier=line") || strings.Contains(h, "after=") {
+			if h := html2(sm[1]); !strings.Contains(h, "tier=line") || strings.Contains(h, "after=") {
 				t.Errorf("Back to start link %q must keep the chip and drop the cursor", h)
 			}
 		}
