@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 const PAGE = `<body>
-  <audio id="mx-preview-audio" data-format="M4A" data-type="audio/mp4"></audio>
+  <audio id="mx-preview-audio" src="/preview/7/audio" data-format="M4A" data-type="audio/mp4"></audio>
   <p id="mx-preview-audio-error" role="alert" hidden></p>
   <section id="mx-edit" data-save-url="/s" data-revert-url="/r" data-offset-ms="0"
     data-mtime="1" data-duration-ms="30000" data-orig-ms="1000" data-tolerance-ms="2000">
@@ -40,7 +40,7 @@ const PAGE = `<body>
 
 // load runs preview.js; preError, when set, is the audio.error already present
 // when the script starts (the error fired before the deferred script ran).
-function load({ preError = null, page = PAGE } = {}) {
+function load({ preError = null, page = PAGE, fetch = null, noAbort = false, fakeTimers = false } = {}) {
   const dom = new JSDOM(page, { runScripts: "outside-only", pretendToBeVisual: true, url: "http://localhost/" });
   const win = dom.window;
   openWindows.push(win);
@@ -48,6 +48,24 @@ function load({ preError = null, page = PAGE } = {}) {
   const errors = [];
   win.console.error = (...a) => errors.push(a.join(" "));
   win.matchMedia = () => ({ matches: false });
+  if (noAbort) {
+    delete win.AbortController;
+  }
+  // fakeTimers captures setTimeout so a test can fire the probe timeout at will.
+  const timers = [];
+  if (fakeTimers) {
+    win.setTimeout = (fn, ms) => timers.push({ fn, ms, live: true });
+    win.clearTimeout = (id) => {
+      if (timers[id - 1]) timers[id - 1].live = false;
+    };
+  }
+  const fetches = [];
+  if (fetch) {
+    win.fetch = (url, opts) => {
+      fetches.push({ url, opts });
+      return fetch(url, opts);
+    };
+  }
   win.HTMLElement.prototype.scrollIntoView = () => {};
   win.HTMLDialogElement.prototype.showModal = function () {
     this.setAttribute("open", "");
@@ -65,7 +83,7 @@ function load({ preError = null, page = PAGE } = {}) {
     audio.dispatchEvent(new win.Event("error"));
   };
   const $ = (id) => win.document.getElementById(id);
-  return { win, $, errors, fail };
+  return { win, $, errors, fail, fetches, timers };
 }
 
 describe("preview.js audio failure", () => {
@@ -102,7 +120,7 @@ describe("preview.js audio failure", () => {
     expect(p.$("mx-ear-toggle").disabled).toBe(true);
     // a later error event must not log or report a second time
     p.win.document.getElementById("mx-preview-audio").dispatchEvent(new p.win.Event("error"));
-    expect(p.errors.length).toBe(1);
+    expect(p.errors.filter((e) => e.includes("audio failed")).length).toBe(1);
   });
 
   it("turns find by ear off when playback fails while it is on", () => {
@@ -203,7 +221,7 @@ describe("preview.js audio failure", () => {
         p.fail(4);
       }
       await new Promise((r) => setTimeout(r, 0));
-      expect(p.errors.length).toBe(1);
+      expect(p.errors.filter((e) => !e.includes("fetch is unavailable")).length).toBe(1);
     }
   });
 
@@ -270,7 +288,7 @@ describe("preview.js FLAC fallback (#1243)", () => {
     const p = loadFlac();
     p.audio.dispatchEvent(new p.win.Event("error"));
     expect(p.loads()).toBe(0);
-    expect(p.audio.hasAttribute("src")).toBe(false);
+    expect(p.audio.getAttribute("src")).toBe("/preview/7/audio");
     expect(p.$("mx-preview-audio-error").hidden).toBe(false);
   });
 
@@ -278,7 +296,7 @@ describe("preview.js FLAC fallback (#1243)", () => {
     const p = loadFlac();
     p.fail(5);
     expect(p.loads()).toBe(0);
-    expect(p.audio.hasAttribute("src")).toBe(false);
+    expect(p.audio.getAttribute("src")).toBe("/preview/7/audio");
     expect(p.$("mx-preview-audio-error").textContent).not.toContain("Converting");
   });
 
@@ -289,7 +307,226 @@ describe("preview.js FLAC fallback (#1243)", () => {
     audio.load = () => loads++;
     p.fail(4);
     expect(loads).toBe(0);
-    expect(audio.hasAttribute("src")).toBe(false);
+    expect(audio.getAttribute("src")).toBe("/preview/7/audio");
     expect(p.$("mx-preview-audio-error").textContent).not.toContain("FLAC");
+  });
+});
+
+describe("preview.js audio failure check (#1261)", () => {
+  const FLAC = "/preview/7/audio.flac";
+  const withFlac = PAGE.replace('data-type="audio/mp4"', 'data-type="audio/mp4" data-flac-src="' + FLAC + '"');
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const answer = (status) => () => Promise.resolve({ status });
+
+  function loadWith(fetch, page = withFlac, opts = {}) {
+    const p = load({ page, fetch, ...opts });
+    const audio = p.$("mx-preview-audio");
+    let loads = 0;
+    audio.load = () => {
+      loads++;
+    };
+    return { ...p, audio, loads: () => loads, text: () => p.$("mx-preview-audio-error").textContent };
+  }
+
+  it("says the file is missing on a 404 and does not retry as FLAC", async () => {
+    const p = loadWith(answer(404));
+    p.fail(4);
+    await flush();
+    expect(p.text()).toContain("could not be found on the server");
+    expect(p.text()).not.toContain("cannot play");
+    expect(p.loads()).toBe(0);
+    expect(p.audio.getAttribute("src")).toBe("/preview/7/audio");
+    expect(p.fetches.length).toBe(1);
+    expect(p.fetches[0].opts.headers.Range).toBe("bytes=0-0");
+    expect(p.$("mx-ear-toggle").disabled).toBe(true);
+    expect(p.win.document.querySelector(".mx-ear-row .mx-edit-hint").textContent).toContain("could not be found");
+  });
+
+  it("checks a network error (code 2) too", async () => {
+    const p = loadWith(answer(404));
+    p.fail(2);
+    await flush();
+    expect(p.text()).toContain("could not be found on the server");
+  });
+
+  it("words a 5xx as a server error", async () => {
+    const p = loadWith(answer(503));
+    p.fail(4);
+    await flush();
+    expect(p.text()).toContain("server could not deliver");
+    expect(p.text()).not.toContain("cannot play");
+    expect(p.loads()).toBe(0);
+  });
+
+  it("keeps the decode message and the FLAC retry on a 206", async () => {
+    const p = loadWith(answer(206));
+    p.fail(4);
+    await flush();
+    expect(p.loads()).toBe(1);
+    expect(p.audio.getAttribute("src")).toBe(FLAC);
+    p.fail(4);
+    await flush();
+    expect(p.text()).toContain("cannot play");
+    expect(p.text()).toContain("FLAC conversion did not play");
+    expect(p.fetches.length).toBe(1);
+  });
+
+  it("keeps the decode message on a 200 when no fallback is named", async () => {
+    const p = loadWith(answer(200), PAGE);
+    p.fail(4);
+    await flush();
+    expect(p.text()).toContain("cannot play");
+    expect(p.text()).toContain("M4A");
+  });
+
+  it("falls back to the decode message when the check itself fails", async () => {
+    const p = loadWith(() => Promise.reject(new Error("offline")), PAGE);
+    p.fail(4);
+    await flush();
+    expect(p.text()).toContain("cannot play");
+    expect(p.errors.join("\n")).toContain("audio check request failed");
+  });
+
+  it("drops a late answer when the source changed meanwhile", async () => {
+    let resolve;
+    const p = loadWith(() => new Promise((r) => (resolve = r)));
+    p.fail(4);
+    p.audio.setAttribute("src", "/preview/8/audio");
+    resolve({ status: 404 });
+    await flush();
+    expect(p.$("mx-preview-audio-error").hidden).toBe(true);
+    expect(p.loads()).toBe(0);
+  });
+
+  it("checks once when a second error event lands mid-check", async () => {
+    const p = loadWith(answer(404));
+    p.fail(4);
+    p.fail(4);
+    await flush();
+    expect(p.fetches.length).toBe(1);
+    expect(p.text()).toContain("could not be found");
+  });
+
+  const reply = (status, extra = {}) => () => Promise.resolve({ status, redirected: false, ...extra });
+
+  it("sends X-Requested-With so the session guard answers 401, not a redirect", async () => {
+    const p = loadWith(answer(206));
+    p.fail(4);
+    await flush();
+    expect(p.fetches[0].opts.headers["X-Requested-With"]).toBe("XMLHttpRequest");
+  });
+
+  it("reports an expired session on a 401, 403 or followed redirect, with no FLAC retry", async () => {
+    for (const r of [reply(401), reply(403), reply(200, { redirected: true })]) {
+      const p = loadWith(r);
+      p.fail(4);
+      await flush();
+      expect(p.text()).toContain("session has expired");
+      expect(p.text()).not.toContain("cannot play");
+      expect(p.loads()).toBe(0);
+      expect(p.audio.getAttribute("src")).toBe("/preview/7/audio");
+      expect(p.win.document.querySelector(".mx-ear-row .mx-edit-hint").textContent).toContain("session has expired");
+    }
+  });
+
+  it("shows a generic message with the status for another refusal, with no FLAC retry", async () => {
+    for (const code of [416, 429, 400]) {
+      const p = loadWith(reply(code));
+      p.fail(4);
+      await flush();
+      expect(p.text()).toContain("error " + code);
+      expect(p.text()).not.toContain("cannot play");
+      expect(p.loads()).toBe(0);
+    }
+  });
+
+  it("never retries a network error (code 2) as FLAC after a 2xx answer", async () => {
+    const p = loadWith(answer(206));
+    p.fail(2);
+    await flush();
+    expect(p.loads()).toBe(0);
+    expect(p.audio.getAttribute("src")).toBe("/preview/7/audio");
+    expect(p.text()).toContain("network error");
+  });
+
+  it("sets the find by ear hint to the server wording on a 5xx", async () => {
+    const p = loadWith(answer(502));
+    p.fail(4);
+    await flush();
+    expect(p.win.document.querySelector(".mx-ear-row .mx-edit-hint").textContent).toContain("server could not deliver");
+  });
+
+  it("logs and does not probe when fetch is missing", () => {
+    const p = loadWith(null, PAGE);
+    p.fail(4);
+    expect(p.errors.join("\n")).toContain("fetch is unavailable");
+    expect(p.fetches.length).toBe(0);
+    expect(p.text()).toContain("cannot play");
+  });
+
+  it("logs and does not probe when the audio element has no src", () => {
+    const p = loadWith(answer(404), PAGE.replace(' src="/preview/7/audio"', ""));
+    p.fail(4);
+    expect(p.errors.join("\n")).toContain("no src");
+    expect(p.fetches.length).toBe(0);
+    expect(p.text()).toContain("cannot play");
+  });
+
+  it("shows a message once the probe times out, and aborts the request", async () => {
+    let signal;
+    const never = (url, opts) => {
+      signal = opts.signal;
+      return new Promise((_, rj) => opts.signal.addEventListener("abort", () => rj(new Error("aborted"))));
+    };
+    const p = loadWith(never, PAGE, { fakeTimers: true });
+    p.fail(4);
+    await flush();
+    expect(p.$("mx-preview-audio-error").hidden).toBe(true);
+    const t = p.timers.find((x) => x.ms >= 1000);
+    expect(t.ms).toBe(8000);
+    t.fn();
+    await flush();
+    expect(signal.aborted).toBe(true);
+    expect(p.text()).toContain("cannot play");
+    expect(p.errors.join("\n")).toContain("timed out");
+  });
+
+  it("times out without AbortController and ignores a late answer", async () => {
+    let resolve;
+    const p = loadWith(() => new Promise((r) => (resolve = r)), PAGE, { fakeTimers: true, noAbort: true });
+    p.fail(4);
+    expect(p.errors.join("\n")).toContain("AbortController is unavailable");
+    p.timers.find((x) => x.ms >= 1000).fn();
+    await flush();
+    expect(p.text()).toContain("cannot play");
+    const shown = p.errors.filter((e) => e.includes("audio failed")).length;
+    resolve({ status: 404, redirected: false });
+    await flush();
+    expect(p.text()).toContain("cannot play");
+    expect(p.errors.filter((e) => e.includes("audio failed")).length).toBe(shown);
+  });
+
+  it("clears the timer when the probe settles", async () => {
+    const p = loadWith(answer(404), PAGE, { fakeTimers: true });
+    p.fail(4);
+    await flush();
+    expect(p.timers.find((x) => x.ms >= 1000).live).toBe(false);
+  });
+
+  it("logs one console error for a snippet rejection then a media error, however slow the probe", async () => {
+    for (const delay of [0, 300]) {
+      const slow = () => new Promise((r) => setTimeout(() => r({ status: 404, redirected: false }), delay));
+      const p = loadWith(slow, PAGE);
+      let reject;
+      p.audio.play = () => new p.win.Promise((_, rj) => { reject = rj; });
+      p.$("mx-ear-toggle").click();
+      p.win.document.querySelector(".mx-preview-line").click();
+      reject(new Error("NotSupportedError"));
+      await flush();
+      p.fail(4);
+      await new Promise((r) => setTimeout(r, delay + 20));
+      expect(p.text()).toContain("could not be found");
+      expect(p.errors.length).toBe(1);
+    }
   });
 });
