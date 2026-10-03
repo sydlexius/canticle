@@ -258,6 +258,7 @@ func HeaderHref(base string, keep url.Values, o Order) string {
 	for k, vs := range keep {
 		v[k] = append([]string(nil), vs...)
 	}
+	v.Del("after")
 	v.Set("sort", o.Key)
 	v.Set("dir", map[bool]string{false: "asc", true: "desc"}[o.Desc])
 	return base + "?" + v.Encode()

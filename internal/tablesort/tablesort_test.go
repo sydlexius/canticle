@@ -301,7 +301,7 @@ func TestHeaderHelpers(t *testing.T) {
 		}
 	}
 	keep := url.Values{"q": {"a b"}, "after": {"stale"}}
-	got := HeaderHref("/t", url.Values{"q": keep["q"]}, Order{Key: KeyTitle, Desc: true})
+	got := HeaderHref("/t", keep, Order{Key: KeyTitle, Desc: true})
 	if got != "/t?dir=desc&q=a+b&sort=title" {
 		t.Errorf("HeaderHref = %q", got)
 	}
