@@ -110,6 +110,34 @@
   font: inherit;
 }
 
+/* One label plus its select (#1235): the pair wraps as a unit, so a label is
+   never stranded on a different row from its control. */
+.mx-queue-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 100%;
+  min-width: 0;
+}
+.mx-queue-field .mx-queue-search-label {
+  white-space: nowrap;
+}
+
+/* Filter select (#1235): same size as the search input, 44px tall on phones. */
+.mx-queue-filter {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.375rem 0.5rem;
+  font: inherit;
+}
+@media (max-width: 767.98px) {
+  .mx-queue-filter,
+  .mx-queue-search-input,
+  .mx-queue-search .mx-run-button {
+    min-height: 44px;
+  }
+}
+
 /* Sortable column headers (#1242): a full-height tap target; the arrow marks
    the active direction. */
 .mx-sort-link {

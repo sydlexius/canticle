@@ -38,6 +38,8 @@ type QueueView struct {
 	Chips    []QueueChip
 	Hidden   []QueueHidden
 	Filtered bool
+	// Libraries are the Library select's options (empty: no control).
+	Libraries []QueueOption
 	// ReviveLink shows the "Revive retired tracks" link (the unavailable bucket
 	// only, and only when a queue action backend is wired).
 	ReviveLink bool
@@ -49,6 +51,12 @@ type QueueChip struct {
 	Label  string
 	Href   string
 	Active bool
+}
+
+// QueueOption is one <option> of a queue filter select.
+type QueueOption struct {
+	Value, Label string
+	Selected     bool
 }
 
 // QueueHidden is one hidden form field carrying an active chip param.
