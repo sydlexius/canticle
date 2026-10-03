@@ -336,6 +336,11 @@ type Inputs struct {
 	// Zero means no scan_results row is linked (e.g. ad-hoc fetch). It says
 	// nothing about WHO enqueued: an inventory-matched webhook links one too.
 	ScanResultID int64
+	// LibraryID is the library the scan result came from, for a caller whose
+	// result carries no id yet (a scan's own results): scan_results is unique
+	// per (library_id, file_path), so a path alone can name another library's
+	// row. Zero means unknown. Enqueue-time only; never persisted or serialized.
+	LibraryID int64 `json:"-"`
 	// FromScan marks an enqueue made by the scan enqueuer for a scan_result it
 	// just reserved from 'pending' (the file wants fetching), as opposed to a
 	// webhook or any other caller. Set ONLY by scan.Enqueuer.EnqueuePending,
