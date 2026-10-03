@@ -663,6 +663,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 		return Result{}, err
 	}
 	idx := newPresentIndex(p.db, roots)
+	idx.scopeLibrary = libraryID
 
 	statCache := make(map[string]bool) // directory -> exists (Directory granularity)
 	var res Result
@@ -871,8 +872,7 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		// THE SAME-STEM SIBLING TIER (#1262), ahead of the settled short-circuit
 		// (the rows a format swap strands are mostly 'done') and of the name
 		// tier: see trySiblingRelink for the order.
-		ok, sibWhy, cls, err := p.trySiblingRelink(ctx, policy, src, c)
-		if err != nil || ok {
+		if ok, cls, err := p.trySiblingRelink(ctx, idx.scopeLibrary, policy, src, c); err != nil || ok {
 			return cls, err
 		}
 		// Already settled: gone and no longer work. Re-reporting it every sweep is
@@ -963,9 +963,6 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		} else if why != "" {
 			reason = why
 		}
-		if sibWhy != "" {
-			reason = sibWhy
-		}
 		// An ALREADY-RETIRED row that the tier just declined drops back out
 		// silently. It was only reconsidered on the chance that its target had
 		// since been indexed; with no match it is exactly as settled as before, and
@@ -1006,7 +1003,7 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 	if verdict != identity.VerdictUnique {
 		// A re-rip often changes or drops the tags: the in-place swap is
 		// consulted before the row is deleted or retained on this verdict (#1262).
-		if ok, _, cls, err := p.trySiblingRelink(ctx, policy, src, c); err != nil || ok {
+		if ok, cls, err := p.trySiblingRelink(ctx, idx.scopeLibrary, policy, src, c); err != nil || ok {
 			return cls, err
 		}
 	}
@@ -1297,22 +1294,42 @@ func ownershipConflict(ctx context.Context, q rowsQuerier, target presentRowDeta
 // failure RETAINS the row (an unreadable sibling is where a delete is least
 // justified), and two or more present siblings are ambiguous. A sibling whose
 // MBID or ISRC differs from the gone row's own is another recording: retained.
+// A sibling another queue row owns is retained too, as the apply's decline is.
+// Every one of these is a HARD STOP: once a present sibling is found the row
+// is never deleted or handed to the name tier, which would relink it elsewhere.
 // A key on one side only is no contradiction, and a differing TITLE is
 // deliberately not one either, since a re-rip is routinely retitled. A source
 // with no queue row at all is not this tier's: nothing would move, so it keeps
 // the outcome it had before. The relink keeps outdir, filename and
 // output_paths (the sidecar did not move) and links every library's row for
-// the sibling.
-func (p *Pruner) trySiblingRelink(ctx context.Context, policy Policy, src string, c *candidate) (bool, string, classified, error) {
+// the sibling. A library-scoped run (lib non-nil) sees, links and checks only
+// that library's rows; a sibling indexed only in another library is not seen.
+func (p *Pruner) trySiblingRelink(ctx context.Context, lib *int64, policy Policy, src string, c *candidate) (bool, classified, error) {
 	if len(c.workItems) == 0 {
-		return false, "", classified{}, nil
+		return false, classified{}, nil
 	}
-	retain := func(reason string) (bool, string, classified, error) {
-		return true, "", classified{
-			outcome:          outcomeRetain,
-			retained:         RetainedRow{SourcePath: src, Reason: reason, MBID: c.mbid, ISRC: c.isrc},
+	noIdentity := c.mbid == "" && c.isrc == ""
+	retain := func(reason string) classified {
+		return classified{
+			outcome:  outcomeRetain,
+			retained: RetainedRow{SourcePath: src, Reason: reason, MBID: c.mbid, ISRC: c.isrc},
+			// An identity-less row that is still work is retired as well, as in
+			// classify's own retain: left eligible, it is re-fetched forever (#732).
+			shouldRetire:     policy == PolicyFull && !c.settled && noIdentity,
 			classifiedRelink: classifiedRelink{src: src, c: c},
-		}, nil
+		}
+	}
+	// stop is retain for a decline that used to fall through: an identity-less
+	// row that is already settled drops out unreported, as it did then.
+	stop := func(reason string) classified {
+		if c.settled && noIdentity {
+			return classified{outcome: outcomeSettled}
+		}
+		return retain(reason)
+	}
+	var scopeArg any
+	if lib != nil {
+		scopeArg = *lib
 	}
 	differs := func(own, other string) bool {
 		return own != "" && other != "" && !strings.EqualFold(strings.TrimSpace(own), strings.TrimSpace(other))
@@ -1323,8 +1340,9 @@ func (p *Pruner) trySiblingRelink(ctx context.Context, policy Policy, src string
 	var paths []string
 	if err := queryRows(ctx, p.db,
 		`SELECT id, file_path, recording_mbid, isrc FROM scan_results
-         WHERE file_path >= ? AND file_path < ? ORDER BY file_path, id`,
-		[]any{prefix, prefix[:len(prefix)-1] + "/"}, func(rows *sql.Rows) error {
+         WHERE file_path >= ? AND file_path < ? AND (? IS NULL OR library_id = ?)
+         ORDER BY file_path, id`,
+		[]any{prefix, prefix[:len(prefix)-1] + "/", scopeArg, scopeArg}, func(rows *sql.Rows) error {
 			var id int64
 			var path, mbid, isrc string
 			if err := rows.Scan(&id, &path, &mbid, &isrc); err != nil {
@@ -1342,7 +1360,7 @@ func (p *Pruner) trySiblingRelink(ctx context.Context, policy Policy, src string
 			rowsByPath[path] = append(rowsByPath[path], id)
 			return nil
 		}); err != nil {
-		return false, "", classified{}, fmt.Errorf("prune: read same-stem siblings: %w", err)
+		return false, classified{}, fmt.Errorf("prune: read same-stem siblings: %w", err)
 	}
 	var live []string
 	for _, path := range paths { // statted only after the rows are closed
@@ -1351,40 +1369,42 @@ func (p *Pruner) trySiblingRelink(ctx context.Context, policy Policy, src string
 			continue
 		}
 		if err != nil {
-			return retain("a same-name file with another extension could not be read; kept until it can be")
+			return true, retain("a same-name file with another extension could not be read; kept until it can be"), nil
 		}
 		live = append(live, path)
 	}
 	if len(live) == 0 {
-		return false, "", classified{}, nil
+		return false, classified{}, nil
 	}
 	if len(live) > 1 {
-		return false, "several present files share this file's name with another extension; never picked one on a guess", classified{}, nil
+		return true, stop("several present files share this file's name with another extension; never picked one on a guess"), nil
 	}
 	if contradicts[live[0]] {
-		return retain("the same-name file with another extension carries a different MBID or ISRC; a different recording, never relinked")
+		return true, retain("the same-name file with another extension carries a different MBID or ISRC; a different recording, never relinked"), nil
 	}
 	ids := rowsByPath[live[0]]
 	target := presentRowDetail{scanResultID: ids[0], filePath: live[0], keepOutput: true, alsoLink: ids[1:]}
 	// A sibling with its own queue row (junction-linked to it, or already sitting
 	// at it by source_path) is a different track as far as the queue can tell.
-	// Declined here, so the row takes the outcome it had before.
+	// A hard stop, matching the apply's own ownership decline: falling through
+	// deleted an identity-bearing row beside its replacement and let the name
+	// tier move an identity-less one onto some other same-title file.
 	if conflict, err := ownershipConflict(ctx, p.db, target, c.ownIDs(), nil); err != nil {
-		return false, "", classified{}, err
+		return false, classified{}, err
 	} else if conflict != "" {
-		return false, "the same-name file with another extension already belongs to a different queue row; merging is identityrepair's job", classified{}, nil
+		return true, stop("the same-name file with another extension already belongs to a different queue row; merging is identityrepair's job"), nil
 	}
 	// MBID/ISRC stay empty: no identity drove this match.
 	rr := RelinkedRow{OldPath: src, NewPath: live[0], ScanResultIDs: c.scanResultIDs}
 	for _, w := range c.workItems {
 		rr.WorkItemIDs = append(rr.WorkItemIDs, w.id)
 	}
-	return true, "", classified{
+	return true, classified{
 		outcome: outcomeRelink,
 		classifiedRelink: classifiedRelink{
 			src: src, c: c, relinked: rr, target: target, alreadySettled: c.settled,
 			// A declined identity-less row still has to settle, as in the name tier.
-			retireIfDeclined: policy == PolicyFull && !c.settled && c.mbid == "" && c.isrc == "",
+			retireIfDeclined: policy == PolicyFull && !c.settled && noIdentity,
 		},
 	}, nil
 }
@@ -1705,6 +1725,9 @@ type presentIndex struct {
 	// pays none of this cost (#740).
 	byScopeWide map[int64][]identity.Candidate
 	detailsWide map[int64]map[string]presentRowDetail
+	// scopeLibrary is the RUN's requested library (SweepOptions.LibraryID), nil
+	// when unscoped. Not candidate.libraryID, which is the row's own library.
+	scopeLibrary *int64
 }
 
 func newPresentIndex(db *sql.DB, roots []string) *presentIndex {

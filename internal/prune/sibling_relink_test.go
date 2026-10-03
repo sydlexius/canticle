@@ -380,3 +380,109 @@ func TestSweep_DryRunAndApplyAgreeOnDeclinedRelinks(t *testing.T) {
 		}
 	}
 }
+
+// An ambiguous or already-owned sibling is a hard stop (#1262 review): the row
+// is never deleted beside its replacement and never handed to the name tier,
+// even with a same-title file elsewhere. Still-work identity-less rows retire,
+// settled ones drop out unreported, identity-bearing ones are plainly retained.
+func TestSweep_SiblingAmbiguityOrOwnerIsHardStop(t *testing.T) {
+	for _, tc := range []struct {
+		name, mbid, status, lastError string
+		retained                      int
+		retire                        bool
+		want                          string
+	}{
+		{"identity-less work", "", "failed", "", 1, true, "done"},
+		{"identity-less settled", "", "done", "", 0, false, "done"},
+		{"identity-less retired", "", "done", unresolvableGoneError, 0, false, "done"},
+		{"identity-bearing", "mbid-nowhere", "failed", "", 1, false, "failed"},
+	} {
+		for _, owned := range []bool{false, true} {
+			ctx, sqlDB, libID, root := openSeeded(t)
+			dir := filepath.Join(root, "A", "B")
+			gone := filepath.Join(dir, "01. a.mp3")
+			seedRowWithIdentity(t, ctx, sqlDB, libID, gone, "done", tc.status, tc.mbid, "")
+			id := mustWorkQueueID(t, ctx, sqlDB)
+			execWQ(t, ctx, sqlDB, `UPDATE work_queue SET last_error = ? WHERE id = ?`, tc.lastError, id)
+			reason := "several present files share this file's name"
+			if owned {
+				reason = "already belongs to a different queue row"
+				seedPresentScanResultOwnedByOtherRow(t, ctx, sqlDB, libID, filepath.Join(dir, "01. a.flac"), "", "")
+			} else {
+				seedPresentScanResult(t, ctx, sqlDB, libID, filepath.Join(dir, "01. a.flac"), "", "")
+				seedPresentScanResult(t, ctx, sqlDB, libID, filepath.Join(dir, "01. a.m4a"), "", "")
+			}
+			// The lone same-title file elsewhere: the name tier's pick, if reached.
+			seedNamedPresent(t, ctx, sqlDB, libID, filepath.Join(root, "Else", "x.mp3"), "Artist", "01. a.mp3")
+			if err := os.Remove(gone); err != nil {
+				t.Fatal(err)
+			}
+			for _, dryRun := range []bool{true, false} {
+				res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact, DryRun: dryRun})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(res.Relinked)+len(res.Pruned) != 0 || len(res.Retained) != tc.retained {
+					t.Errorf("%s owned=%v dry=%v: relinked=%d pruned=%d retained=%+v; want 0, 0 and %d retained",
+						tc.name, owned, dryRun, len(res.Relinked), len(res.Pruned), res.Retained, tc.retained)
+				} else if tc.retained == 1 && (!strings.Contains(res.Retained[0].Reason, reason) || res.Retained[0].WouldRetire != tc.retire || res.Retained[0].Retired != (tc.retire && !dryRun)) {
+					t.Errorf("%s owned=%v dry=%v: retained = %+v; want reason %q, WouldRetire=%v", tc.name, owned, dryRun, res.Retained[0], reason, tc.retire)
+				}
+			}
+			if got, st := workQueueSourcePath(t, ctx, sqlDB, id), workQueueStatus(t, ctx, sqlDB, id); got != gone || st != tc.want {
+				t.Errorf("%s owned=%v: source_path=%q status=%q, want the row kept at %q as %q", tc.name, owned, got, st, gone, tc.want)
+			}
+		}
+	}
+}
+
+// A library-scoped sweep sees and links only that library's rows (#1262 review):
+// the other library's sibling row (the lower id here) is not linked, its
+// gone-path row and link stay, and a sibling indexed only there is not seen. An
+// unscoped sweep links both libraries' rows.
+func TestSweep_SiblingRelinkHonorsLibraryScope(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		scoped, own  bool
+		relinked, sr int
+		links        string // %[1]s the gone path, %[2]s the sibling
+	}{
+		{"scoped", true, true, 1, 3, "1:%[2]s|2:%[1]s"},
+		{"scoped, sibling only in the other library", true, false, 0, 3, "1:%[1]s|2:%[1]s"},
+		{"unscoped", false, true, 1, 2, "1:%[2]s|2:%[2]s"},
+	} {
+		ctx, sqlDB, libID, root := openSeeded(t)
+		dir := filepath.Join(root, "A", "B")
+		lib2, err := library.New(sqlDB).Add(ctx, filepath.Join(root, "A"), "inner", models.LibrarySettings{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mp3, flac := filepath.Join(dir, "01. a.mp3"), filepath.Join(dir, "01. a.flac")
+		seedRow(t, ctx, sqlDB, libID, mp3, "done", "done")
+		id := mustWorkQueueID(t, ctx, sqlDB)
+		stale2 := seedPresentScanResult(t, ctx, sqlDB, lib2.ID, mp3, "", "")
+		execWQ(t, ctx, sqlDB, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, stale2)
+		seedPresentScanResult(t, ctx, sqlDB, lib2.ID, flac, "", "") // the lower id
+		if tc.own {
+			seedPresentScanResult(t, ctx, sqlDB, libID, flac, "", "")
+		}
+		if err := os.Remove(mp3); err != nil {
+			t.Fatal(err)
+		}
+		opts := SweepOptions{Granularity: Exact}
+		if tc.scoped {
+			opts.LibraryID = &libID
+		}
+		res, err := New(sqlDB).Sweep(ctx, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := strings.NewReplacer("%[1]s", mp3, "%[2]s", flac).Replace(tc.links)
+		if got := linkedPaths(t, ctx, sqlDB, id); len(res.Relinked) != tc.relinked || got != want {
+			t.Errorf("%s: relinked=%d links=%q, want %d and %q", tc.name, len(res.Relinked), got, tc.relinked, want)
+		}
+		if sr, _, _ := rowCounts(t, ctx, sqlDB); sr != tc.sr {
+			t.Errorf("%s: scan_results = %d, want %d", tc.name, sr, tc.sr)
+		}
+	}
+}
