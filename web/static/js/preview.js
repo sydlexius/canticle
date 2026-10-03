@@ -757,9 +757,10 @@
       if (playback.failed) {
         return; // the event can follow an audio.error already handled below
       }
-      // A network or interrupted error (codes 1, 2) is not an undecodable
-      // format; only a decode or unsupported-source error earns the conversion.
-      if (flacSrc && !flacTried && failureKind(audio) === "unplayable") {
+      // Only a decode or unsupported-source error (codes 3, 4) earns the
+      // conversion: never a network or interrupted error (1, 2), and never a
+      // missing or unknown code, which says nothing about the format.
+      if (flacSrc && !flacTried && audio.error && (audio.error.code === 3 || audio.error.code === 4)) {
         retryAsFlac();
         return;
       }

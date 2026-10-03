@@ -259,6 +259,29 @@ describe("preview.js FLAC fallback (#1243)", () => {
     expect(p.$("mx-preview-audio-error").textContent).toContain("network error");
   });
 
+  it("retries on a decode error (code 3) as on an unsupported source (code 4)", () => {
+    const p = loadFlac();
+    p.fail(3);
+    expect(p.loads()).toBe(1);
+    expect(p.audio.getAttribute("src")).toBe(FLAC);
+  });
+
+  it("does not retry an error event with no media error", () => {
+    const p = loadFlac();
+    p.audio.dispatchEvent(new p.win.Event("error"));
+    expect(p.loads()).toBe(0);
+    expect(p.audio.hasAttribute("src")).toBe(false);
+    expect(p.$("mx-preview-audio-error").hidden).toBe(false);
+  });
+
+  it("does not retry an unknown media error code", () => {
+    const p = loadFlac();
+    p.fail(5);
+    expect(p.loads()).toBe(0);
+    expect(p.audio.hasAttribute("src")).toBe(false);
+    expect(p.$("mx-preview-audio-error").textContent).not.toContain("Converting");
+  });
+
   it("does not retry when the page names no fallback", () => {
     const p = load();
     const audio = p.$("mx-preview-audio");
