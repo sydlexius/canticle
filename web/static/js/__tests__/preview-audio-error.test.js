@@ -48,6 +48,9 @@ function load({ preError = null, page = PAGE, fetch = null, noAbort = false, fak
   const errors = [];
   win.console.error = (...a) => errors.push(a.join(" "));
   win.matchMedia = () => ({ matches: false });
+  win.ResizeObserver = class {
+    observe() {}
+  };
   if (noAbort) {
     delete win.AbortController;
   }

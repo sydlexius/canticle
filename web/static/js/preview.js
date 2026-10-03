@@ -237,7 +237,7 @@
     };
   }
 
-  window.mxPreviewEdit = { parseOffset: parseOffset, pastEnd: pastEnd, createEar: createEar };
+  window.mxPreviewEdit = { parseOffset: parseOffset, pastEnd: pastEnd, createEar: createEar, pinFits: pinFits };
 
   function fmtTime(ms) {
     var m = Math.floor(ms / 60000);
@@ -285,14 +285,56 @@
     return found;
   }
 
+  // PIN_GAP is the clear space kept between the player and a pinned bar, and
+  // PIN_MAX_VH mirrors the phone bar's max-height (70dvh) in preview.css.
+  var PIN_GAP = 8;
+  var PIN_MAX_VH = 0.7;
+
+  // pinFits says whether the phone bar, pinned to the viewport bottom, would
+  // stay clear of the player when the page is scrolled to the top (#1247).
+  // playerBottom is the player's bottom edge in document coordinates; the bar
+  // is as tall as its content, capped like the CSS caps it.
+  function pinFits(playerBottom, barHeight, viewportHeight) {
+    var bar = Math.min(barHeight, viewportHeight * PIN_MAX_VH);
+    return playerBottom + PIN_GAP <= viewportHeight - bar;
+  }
+
+  // initPin keeps the phone bar off the player: it toggles .is-unpinned (static,
+  // in the flow after the lyrics, see preview.css) whenever the pinned bar would
+  // not fit below the player. The answer depends only on the player's position,
+  // the bar's content height and the viewport, so unpinning cannot flip it back.
+  // A resize observer covers the status text, the error notice and a wrapping
+  // title; render() and More call the returned function directly as well.
+  function initPin(panel, audio) {
+    function update() {
+      var r = audio.getBoundingClientRect();
+      panel.classList.toggle("is-unpinned", !pinFits(r.bottom + window.scrollY, panel.scrollHeight, window.innerHeight));
+    }
+    window.addEventListener("resize", update);
+    if (typeof window.ResizeObserver === "function") {
+      var ro = new window.ResizeObserver(update);
+      ro.observe(panel);
+      ro.observe(document.body);
+    } else {
+      console.error("preview: ResizeObserver is missing; the phone bar re-checks only on resize and edits");
+    }
+    update();
+    return update;
+  }
+
   // initMore wires the phone-width expand control (#1247). CSS shows the button
   // and the extra controls only below 768px; the class is inert above it. The
   // click is delegated from the panel, so a panel without the button has nothing
   // to wire and nothing to report. It returns collapse(), which By ear uses to
-  // get the panel out of the way of the banner and the lyrics.
-  function initMore(panel) {
+  // get the panel out of the way of the banner and the lyrics. canOpen refuses
+  // an expand while By ear is on (the open panel would cover the banner);
+  // afterToggle re-checks the pin, since the open panel is taller.
+  function initMore(panel, canOpen, afterToggle) {
     function setOpen(open) {
       var btn = panel.querySelector("#mx-edit-more");
+      if (open && !canOpen()) {
+        return;
+      }
       panel.classList.toggle("is-open", open);
       if (!btn) {
         return;
@@ -305,6 +347,12 @@
       // would be left on an element that is not rendered.
       if (!open && active && active !== btn && panel.contains(active) && active.closest(HIDDEN_WHEN_COLLAPSED)) {
         btn.focus();
+      }
+      afterToggle();
+      if (open && panel.classList.contains("is-unpinned")) {
+        // The expanded panel did not fit below the player, so it now sits in the
+        // flow after the lyrics; bring it into view rather than strand it.
+        panel.scrollIntoView({ block: "nearest" });
       }
     }
     panel.addEventListener("click", function (ev) {
@@ -326,7 +374,14 @@
     var $ = function (id) {
       return document.getElementById(id);
     };
-    var collapse = initMore(panel);
+    var repin = initPin(panel, audio);
+    var collapse = initMore(
+      panel,
+      function () {
+        return !earWasOn;
+      },
+      repin,
+    );
     // The page shows the file as saved, which is the ORIGINAL shifted by the
     // saved offset (with negative starts clamped to 0, so it cannot be undone
     // here). The server renders the original starts in line order; the offset
@@ -433,6 +488,7 @@
     var earHint = earBtn.parentNode && earBtn.parentNode.querySelector(".mx-edit-hint");
     var earHintText = earHint ? earHint.textContent : "";
     var earWasOn = false;
+    var moreBtn = $("mx-edit-more");
     function paintEar(isLocked) {
       if ((isLocked || playback.failed) && ear.on()) {
         ear.toggle(); // re-renders with the mode off; a failure must not strand the mode on
@@ -448,6 +504,9 @@
         collapse(); // an open phone panel would cover the banner and the lyrics
       }
       earWasOn = v.on;
+      if (moreBtn) {
+        moreBtn.disabled = v.on; // the open panel would cover the banner (#1247)
+      }
       $("mx-ear-step").textContent = v.step;
       $("mx-ear-title").textContent = v.title;
       $("mx-ear-help").textContent = v.help;
@@ -524,15 +583,16 @@
       }
       var failedClass = "";
       if (playback.failed) {
-        // The failure leads, so the phone bar's line clamp never cuts it, and
-        // the class keeps the line visible while the bar is collapsed (#1243,
-        // #1247). The underlying message and its tone follow.
+        // The failure leads, and the class keeps the line visible while the
+        // phone bar is collapsed (#1243, #1247). The underlying message and its
+        // tone follow.
         msg = [FAILURE_WORDS[playback.kind].status + " so Find by ear is off. " + msg[0], msg[1]];
         failedClass = " is-playback-failed";
       }
       statusEl.textContent = msg[0];
       statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "") + failedClass;
       paintEar(isLocked);
+      repin();
       update();
     }
 
