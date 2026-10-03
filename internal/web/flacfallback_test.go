@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -414,11 +415,8 @@ func TestFlacCacheDoesNotCacheFailures(t *testing.T) {
 func TestFlacInputAndCappedStderr(t *testing.T) {
 	in, _ := os.Open(os.DevNull)
 	defer func() { _ = in.Close() }()
-	if name, extra := flacInput("windows", in, `C:\m\a:b.m4a`); name != `file:C:\m\a:b.m4a` || extra != nil {
-		t.Errorf("windows input = %q, %v: want a file: path and no extra handles", name, extra)
-	}
-	if name, extra := flacInput("linux", in, "/m/a.m4a"); name != "/dev/fd/3" || len(extra) != 1 {
-		t.Errorf("linux input = %q, %v: want the handle as fd 3", name, extra)
+	if name, extra, _, err := flacInput(context.Background(), false, in, "/m/o.part"); err != nil || name != "/dev/fd/3" || len(extra) != 1 || extra[0] != in {
+		t.Errorf("handle input = %q, %v, %v: want the handle as fd 3", name, extra, err)
 	}
 	b := &cappedBuffer{max: 16}
 	for _, s := range []string{"HEAD-", strings.Repeat("x", 1000), "-TAIL"} {
@@ -592,6 +590,60 @@ func TestPreviewFlacConversionFailureIs502(t *testing.T) {
 	}
 }
 
+// A source replaced after the request's confined open (before the conversion
+// re-opens it) is not converted under the old file's key: the request fails
+// and nothing is cached.
+func TestPreviewFlacReplacedSourceIsNotConverted(t *testing.T) {
+	for name, replace := range map[string]func(t *testing.T, p string){
+		"new inode": func(t *testing.T, p string) {
+			tmp := p + ".new"
+			if err := os.WriteFile(tmp, []byte("a different file"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, p); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rewritten in place": func(t *testing.T, p string) {
+			if err := os.WriteFile(p, []byte("rewritten, longer than before"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPreviewFixture(t)
+			conv := &countingConverter{}
+			mux := http.NewServeMux()
+			ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
+			ui.attachPreviewFlac(t.TempDir(), 1<<20, conv.convert)
+			t.Cleanup(ui.ClosePreviewFlac)
+			ui.Register(mux)
+			src := f.writeFile(t, f.root, "song.m4a")
+			id := strconv.FormatInt(f.row(t, src), 10)
+			for i := 0; i < cap(ui.flac.sem); i++ { // hold every slot: the job queues before its open
+				ui.flac.sem <- struct{}{}
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- flacGet(mux, id) }()
+			waitFor(t, "the request to queue its conversion", func() bool {
+				ui.flac.mu.Lock()
+				defer ui.flac.mu.Unlock()
+				return len(ui.flac.inflight) == 1
+			})
+			replace(t, src)
+			for i := 0; i < cap(ui.flac.sem); i++ {
+				<-ui.flac.sem
+			}
+			if rec := <-done; rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for a source replaced mid-request", rec.Code)
+			}
+			if n := conv.calls.Load(); n != 0 {
+				t.Fatalf("converter ran %d times on a replaced source, want 0", n)
+			}
+		})
+	}
+}
+
 func TestPreviewFlacSrc(t *testing.T) {
 	u := NewUI(config.Config{}, "v")
 	if got := u.previewFlacSrc(7); got != "" {
@@ -660,6 +712,99 @@ func TestPreviewFlacRearmsWriteDeadlineAfterConversion(t *testing.T) {
 	}
 }
 
+// fakeFFmpeg writes a stand-in ffmpeg (POSIX sh) that records the -i argument
+// in argLog and copies the bytes it reads there to the output, the last arg.
+func fakeFFmpeg(t *testing.T) (bin, argLog string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in ffmpeg is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	bin, argLog = filepath.Join(dir, "ffmpeg"), filepath.Join(dir, "args")
+	script := "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -i ]; then shift; in=\"$1\"; fi\n  last=\"$1\"; shift\ndone\n" +
+		"printf '%s' \"$in\" > '" + argLog + "'\ncat \"${in#file:}\" > \"$last\"\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil { //nolint:gosec // reason: G306 -- an executable test stand-in in a private temp dir
+		t.Fatal(err)
+	}
+	return bin, argLog
+}
+
+// Where handles cannot be passed (Windows), ffmpeg reads a private snapshot of
+// the already-confined handle, made in the cache dir: never the library path,
+// so a file swapped in under that path after the open is not what converts.
+// The snapshot is gone once the conversion returns.
+func TestFlacSnapshotInputReadsTheHandleNotThePath(t *testing.T) {
+	bin, argLog := fakeFFmpeg(t)
+	prev := flacSnapshotInput
+	flacSnapshotInput = true
+	t.Cleanup(func() { flacSnapshotInput = prev })
+
+	src := filepath.Join(t.TempDir(), "song.m4a")
+	if err := os.WriteFile(src, []byte("confined-original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = in.Close() }()
+	// Swap the path after the confined open, as an attacker racing the check would.
+	swapped := filepath.Join(filepath.Dir(src), "evil")
+	if err := os.WriteFile(swapped, []byte("outside-the-root"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(swapped, src); err != nil {
+		t.Fatal(err)
+	}
+
+	cacheDir := t.TempDir()
+	out := filepath.Join(cacheDir, "k.flac.1.part")
+	if err := ffmpegFlacConverter(bin)(context.Background(), in, src, out); err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	arg, err := os.ReadFile(argLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := strings.TrimPrefix(string(arg), "file:")
+	if filepath.Dir(read) != cacheDir || read == src {
+		t.Fatalf("ffmpeg read %q, want a snapshot inside the cache dir %q, never the library path", arg, cacheDir)
+	}
+	if got, _ := os.ReadFile(out); string(got) != "confined-original" {
+		t.Fatalf("ffmpeg read %q, want the confined handle's bytes", got)
+	}
+	if _, err := os.Stat(read); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot %q survived the conversion: %v", read, err)
+	}
+	if ents, _ := os.ReadDir(cacheDir); len(ents) != 1 {
+		t.Fatalf("cache dir holds %d files after the conversion, want only the output", len(ents))
+	}
+}
+
+// A conversion that fails still removes its snapshot.
+func TestFlacSnapshotRemovedOnFailure(t *testing.T) {
+	prev := flacSnapshotInput
+	flacSnapshotInput = true
+	t.Cleanup(func() { flacSnapshotInput = prev })
+	src := filepath.Join(t.TempDir(), "song.m4a")
+	if err := os.WriteFile(src, previewBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = in.Close() }()
+	cacheDir := t.TempDir()
+	err = ffmpegFlacConverter(filepath.Join(t.TempDir(), "no-such-ffmpeg"))(context.Background(), in, src, filepath.Join(cacheDir, "k.part"))
+	if err == nil {
+		t.Fatal("conversion with a missing ffmpeg succeeded")
+	}
+	if ents, _ := os.ReadDir(cacheDir); len(ents) != 0 {
+		t.Fatalf("a failed conversion left %d files (the snapshot) in the cache dir", len(ents))
+	}
+}
+
 // ---- real ffmpeg (skipped when none is on PATH) ----
 
 func requireFFmpeg(t *testing.T) string {
@@ -714,29 +859,35 @@ func TestFFmpegFlacConversionIsSampleExact(t *testing.T) {
 			"-ac:a:1", "2", "-disposition:a:0", "0", "-disposition:a:1", "default", "-metadata", "title=T", "-c:a", "alac")...),
 	}
 	conv := ffmpegFlacConverter(bin)
-	for name, src := range fixtures {
-		t.Run(name, func(t *testing.T) {
-			in, err := os.Open(src)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = in.Close() }()
-			out := filepath.Join(t.TempDir(), "o.flac")
-			if err := conv(context.Background(), in, src, out); err != nil {
-				t.Fatalf("convert: %v", err)
-			}
-			want, got := pcm(t, bin, src), pcm(t, bin, out)
-			if len(want) == 0 {
-				t.Fatal("source decoded to no samples")
-			}
-			if len(got) != len(want) {
-				t.Fatalf("decoded samples: flac %d, source stream 0 %d (bytes of s16 mono)", len(got)/2, len(want)/2)
-			}
-			meta, _ := exec.Command(bin, "-nostdin", "-loglevel", "error", "-i", out, "-f", "ffmetadata", "-").Output() //nolint:gosec // reason: G204 -- fixed argv in a test
-			if strings.Contains(strings.ToLower(string(meta)), "title=") {
-				t.Errorf("source tags carried into the conversion: %q", meta)
-			}
-		})
+	prev := flacSnapshotInput
+	t.Cleanup(func() { flacSnapshotInput = prev })
+	for _, snapshot := range []bool{false, true} {
+		flacSnapshotInput = snapshot
+		for name, src := range fixtures {
+			name += map[bool]string{false: "/handle", true: "/snapshot"}[snapshot]
+			t.Run(name, func(t *testing.T) {
+				in, err := os.Open(src)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = in.Close() }()
+				out := filepath.Join(t.TempDir(), "o.flac")
+				if err := conv(context.Background(), in, src, out); err != nil {
+					t.Fatalf("convert: %v", err)
+				}
+				want, got := pcm(t, bin, src), pcm(t, bin, out)
+				if len(want) == 0 {
+					t.Fatal("source decoded to no samples")
+				}
+				if len(got) != len(want) {
+					t.Fatalf("decoded samples: flac %d, source stream 0 %d (bytes of s16 mono)", len(got)/2, len(want)/2)
+				}
+				meta, _ := exec.Command(bin, "-nostdin", "-loglevel", "error", "-i", out, "-f", "ffmetadata", "-").Output() //nolint:gosec // reason: G204 -- fixed argv in a test
+				if strings.Contains(strings.ToLower(string(meta)), "title=") {
+					t.Errorf("source tags carried into the conversion: %q", meta)
+				}
+			})
+		}
 	}
 }
 
@@ -761,6 +912,7 @@ func TestPreviewFlacEndToEndALACSeeks(t *testing.T) {
 	mux := http.NewServeMux()
 	ui := NewUI(config.Config{}, "v", WithReports(reports.New(f.db)))
 	ui.attachPreviewFlac(t.TempDir(), 64<<20, ffmpegFlacConverter(bin))
+	t.Cleanup(ui.ClosePreviewFlac)
 	ui.Register(mux)
 	id := strconv.FormatInt(f.row(t, src), 10)
 
