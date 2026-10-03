@@ -28,14 +28,34 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 			if view.Dir != "" {
 				<input type="hidden" name="dir" value={ view.Dir }/>
 			}
+			for _, h := range view.Hidden {
+				<input type="hidden" name={ h.Name } value={ h.Value }/>
+			}
 			<button class="mx-run-button" type="submit">Search</button>
 			if view.Query != "" {
 				<a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear search</a>
 			}
 		</form>
+		if len(view.Chips) > 0 {
+			<nav class="mx-queue-chips" aria-label="Filter rows">
+				for _, c := range view.Chips {
+					<a
+						class={ "mx-queue-chip", templ.KV("is-active", c.Active) }
+						href={ templ.SafeURL(c.Href) }
+						if c.Active {
+							aria-current="true"
+						}
+					>{ c.Label }</a>
+				}
+			</nav>
+		}
 		if len(view.Rows) == 0 {
 			if view.After > 0 {
 				<p class="mx-dash-empty">No more rows.</p>
+			} else if view.Filtered && view.Query != "" {
+				<p class="mx-dash-empty">No tracks match your search and the selected filters. <a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear the search</a> to see every track matching the filters.</p>
+			} else if view.Filtered {
+				<p class="mx-dash-empty">No tracks match the selected filters.</p>
 			} else if view.Query != "" {
 				<p class="mx-dash-empty">No tracks match your search. <a class="mx-queue-link" href={ templ.SafeURL(view.ClearHref) }>Clear the search</a> to see every track in this bucket.</p>
 			} else {

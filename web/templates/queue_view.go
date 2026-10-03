@@ -32,10 +32,27 @@ type QueueView struct {
 	// re-submits so a new search keeps the ordering.
 	Sort string
 	Dir  string
+	// Chips is the filter chip row (done buckets only); Hidden re-submits the
+	// active chip params with the search form; Filtered is true when a chip
+	// narrows the list (the empty state then says so).
+	Chips    []QueueChip
+	Hidden   []QueueHidden
+	Filtered bool
 	// ReviveLink shows the "Revive retired tracks" link (the unavailable bucket
 	// only, and only when a queue action backend is wired).
 	ReviveLink bool
 }
+
+// QueueChip is one filter chip: a link that toggles its filter. Href already
+// carries every other part of the view state.
+type QueueChip struct {
+	Label  string
+	Href   string
+	Active bool
+}
+
+// QueueHidden is one hidden form field carrying an active chip param.
+type QueueHidden struct{ Name, Value string }
 
 // ReviveView is the presentation model for /queue/unavailable/revive (#598): the
 // blast radius of reviving retired tracks, the library picker, and (after a
