@@ -229,9 +229,9 @@ func TestCursorRoundTripAndForgery(t *testing.T) {
 		t.Errorf("empty cursor = %+v ok=%v, want zero, true", got, ok)
 	}
 	for _, bad := range []string{
-		"abc", "5", "5:", "0:n", "-1:n", "x:n", "5:z", "5:iabc", "5:i", "5:t' OR 1=1 --x" + "\xff",
+		"abc", "5", "5:", "0:n", "-1:n", "x:n", "5:z", "5:iabc", "5:i",
 		"5:i3", // integer value on a text column
-		strings.Repeat("9", 700) + ":n",
+		"5:t" + strings.Repeat("x", MaxCursorBytes), // one byte over the cap
 	} {
 		if _, ok := testSpec.DecodeCursor(text, bad); ok {
 			t.Errorf("forged cursor %q accepted for a text column", bad)
@@ -242,6 +242,24 @@ func TestCursorRoundTripAndForgery(t *testing.T) {
 	}
 	if _, ok := testSpec.DecodeCursor(Order{}, "5:tabc"); ok {
 		t.Error("typed value accepted for an unsorted listing")
+	}
+}
+
+// DecodeCursor accepts everything EncodeValue can produce, up to the byte cap:
+// a value far past the old 600-rune cap and one that is not valid UTF-8 both
+// round-trip, since a tag can hold either and the value is only a bound parameter.
+func TestCursorRoundTripsLongAndInvalidUTF8Values(t *testing.T) {
+	text := Order{Key: KeyTitle}
+	for name, val := range map[string]string{
+		"long":       EncodeValue(strings.Repeat("\u00e9", 620)),
+		"invalidUTF": EncodeValue("bad\xff\xfe tag"),
+		"atCap":      "t" + strings.Repeat("x", MaxCursorBytes-len("9:t")),
+	} {
+		c := Cursor{ID: 9, Val: val}
+		got, ok := testSpec.DecodeCursor(text, c.Encode())
+		if !ok || got != c {
+			t.Errorf("%s: round trip failed ok=%v", name, ok)
+		}
 	}
 }
 

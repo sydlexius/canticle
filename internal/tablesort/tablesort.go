@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 // Shared column vocabulary: every table that sorts names its columns from this
@@ -159,8 +158,10 @@ func EncodeValue(v any) string {
 	return "n"
 }
 
-// maxCursorRunes bounds an encoded cursor.
-const maxCursorRunes = 600
+// MaxCursorBytes bounds an encoded cursor. It is one generous byte cap shared
+// by the codec and its callers, so a caller can tell before emitting a cursor
+// whether DecodeCursor will accept it.
+const MaxCursorBytes = 4096
 
 // Encode renders the cursor for a URL ("<id>:<value>"); the zero Cursor is "".
 func (c Cursor) Encode() string {
@@ -177,7 +178,9 @@ func (s Spec) DecodeCursor(o Order, raw string) (Cursor, bool) {
 	if raw == "" {
 		return Cursor{}, true
 	}
-	if utf8.RuneCountInString(raw) > maxCursorRunes || !utf8.ValidString(raw) {
+	// No UTF-8 validity check: the value is only ever a bound parameter, and
+	// EncodeValue can emit any bytes a tag holds, so the decoder must take them.
+	if len(raw) > MaxCursorBytes {
 		return Cursor{}, false
 	}
 	idPart, val, found := strings.Cut(raw, ":")
