@@ -242,3 +242,18 @@ func TestFlacCacheCanceledJobNeverConverts(t *testing.T) {
 		}
 	}
 }
+
+// A cache whose lock cannot be taken removes the dir it created, since no
+// sweep would reclaim a fresh lockless dir.
+func TestFlacCacheLockFailureRemovesDir(t *testing.T) {
+	old := flacLockDir
+	flacLockDir = func(string) (*os.File, error) { return nil, errors.New("no lock") }
+	t.Cleanup(func() { flacLockDir = old })
+	parent := t.TempDir()
+	if _, err := newFlacCache(parent, 1<<20, nil); err == nil {
+		t.Fatal("newFlacCache succeeded without its lock")
+	}
+	if ents, _ := os.ReadDir(parent); len(ents) != 0 {
+		t.Fatalf("a failed lock left %d entries under the parent", len(ents))
+	}
+}

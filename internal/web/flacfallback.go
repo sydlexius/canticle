@@ -40,6 +40,11 @@ const (
 	// exclusive flock on it for the cache's lifetime, and the kernel drops
 	// the lock when the process dies, however it dies.
 	flacLockName = ".lock"
+	// flacLocklessStale is how old a cache dir with no .lock must be before a
+	// sweep reads it as dead: a creating sibling renames its lock into place
+	// within moments, so an hour-old lockless dir was left by a crash or a
+	// failed Close.
+	flacLocklessStale = time.Hour
 	// flacStderrMax bounds the ffmpeg stderr held in memory (a corrupt file can
 	// print one line per bad frame, #731).
 	flacStderrMax = 64 << 10
@@ -91,20 +96,21 @@ func newFlacCache(parent string, max int64, convert flacConverter) (*flacCache, 
 	if err != nil {
 		return nil, fmt.Errorf("create preview flac cache: %w", err)
 	}
-	lock, err := lockFlacDir(dir)
+	lock, err := flacLockDir(dir)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("lock preview flac cache: %w", err), os.RemoveAll(dir))
 	}
-	sweepFlacDirs(parent)
+	sweepFlacDirs(parent, dir)
 	return &flacCache{dir: dir, max: max, convert: convert, lock: lock,
 		sem: make(chan struct{}, flacMaxConversions), inflight: map[string]*flacJob{}}, nil
 }
 
-// sweepFlacDirs removes the dead cache dirs under parent. The caller's own dir
-// is not dead: it already holds its lock (a probe's flock on a second open
-// file conflicts even within one process). Only real directories are probed,
-// never a symlink planted under the prefix.
-func sweepFlacDirs(parent string) {
+// flacLockDir takes a new cache dir's liveness lock; a test seam.
+var flacLockDir = lockFlacDir
+
+// sweepFlacDirs removes the dead cache dirs under parent, never own. Only real
+// directories are probed, never a symlink planted under the prefix.
+func sweepFlacDirs(parent, own string) {
 	ents, err := os.ReadDir(parent)
 	if err != nil {
 		slog.Warn("preview flac cache: cannot list for stale dirs", "error", err)
@@ -112,6 +118,13 @@ func sweepFlacDirs(parent string) {
 	}
 	for _, e := range ents {
 		p := filepath.Join(parent, e.Name())
+		if p == own {
+			// Never probe our own dir. Native flock conflicts across two open
+			// files even in one process, but NFS emulates flock with per-process
+			// POSIX locks and some FUSE filesystems make it a no-op, so there the
+			// probe would succeed and remove the dir this cache just created.
+			continue
+		}
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), flacDirPrefix) || !flacDirDead(p) {
 			continue
 		}
