@@ -3,6 +3,7 @@ package reports
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -172,8 +173,8 @@ var bucketChips = map[Bucket][]Chip{
 }
 
 // BucketChips returns the chips b offers, in display order (nil for none). The
-// caller must not modify it.
-func BucketChips(b Bucket) []Chip { return bucketChips[b] }
+// result is a copy, so a caller cannot change the set other requests see.
+func BucketChips(b Bucket) []Chip { return slices.Clone(bucketChips[b]) }
 
 // HasChip reports whether bucket b offers chip c.
 func HasChip(b Bucket, c Chip) bool {

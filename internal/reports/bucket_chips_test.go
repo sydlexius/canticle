@@ -184,3 +184,16 @@ func TestValidTier(t *testing.T) {
 		t.Error("ValidTier vocabulary wrong: only line is a tier chip")
 	}
 }
+
+// A caller writing into the returned slice must not change the chip set later
+// callers (or HasChip) see.
+func TestBucketChipsReturnsACopy(t *testing.T) {
+	got := reports.BucketChips(reports.BucketSettled)
+	got[0] = reports.ChipMissynced
+	if again := reports.BucketChips(reports.BucketSettled); again[0] != reports.ChipLineSynced {
+		t.Errorf("BucketChips(settled)[0] = %q after a caller write, want %q", again[0], reports.ChipLineSynced)
+	}
+	if !reports.HasChip(reports.BucketSettled, reports.ChipLineSynced) {
+		t.Error("HasChip(settled, line) = false after a caller write to a returned slice")
+	}
+}
