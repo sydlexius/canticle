@@ -3,6 +3,7 @@ package reports
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -118,6 +119,92 @@ type BucketFilter struct {
 	// stored artist_key/title_key, so the two sides agree on case and accents.
 	// A query that normalizes to empty applies no filter.
 	Query string
+	// Tier, Edited and MisSynced are the #1235 chips; they AND together with each
+	// other and the search. Tier is the TierLine key mapped through
+	// tierPredicates; any other value applies no filter. Each chip reuses an
+	// existing shared predicate. The repo applies whatever it is given: which
+	// chips a bucket OFFERS (BucketChips) is decided by the caller, which drops
+	// the rest before they reach a filter.
+	Tier      string
+	Edited    bool
+	MisSynced bool
+}
+
+// TierLine is the one Tier chip key (the URL value tier=line). A word-synced
+// chip is deliberately absent: Finished IS the word tier and Settled excludes it,
+// so on either bucket that chip would be a no-op or always empty.
+const TierLine = "line"
+
+// tierPredicates maps a Tier key to its SQL: the dashboard's own shared tier
+// predicate, restricted to synced outcomes exactly as ResultsBreakdown does.
+// The ONE place a Tier value becomes SQL; callers never supply the text.
+var tierPredicates = map[string]string{
+	TierLine: `outcome_type = 'synced' AND ` + lineTierPredicate,
+}
+
+// Hand-edited (#1213) and mis-synced chips: constant fragments, no caller text.
+const (
+	editedPredicate = `lyric_edited_at IS NOT NULL`
+	// timingWrongPredicate means exactly timing_outcome = 'mis_synced' on done rows
+	// (composed with a done bucket), NOT the review queue's wider
+	// ('mis_synced', 'categorical') set over any status.
+	timingWrongPredicate = `timing_outcome = 'mis_synced'`
+)
+
+// Chip names one filter chip. The string is also its URL parameter name
+// ("tier" for the line chip, which carries the value TierLine).
+type Chip string
+
+// The chips a bucket page can offer.
+const (
+	ChipLineSynced Chip = "tier"
+	ChipEdited     Chip = "edited"
+	ChipMissynced  Chip = "missync"
+)
+
+// bucketChips is the ONE place the chip set per bucket is decided, in display
+// order. Finished is status done AND synced AND word tier (which excludes
+// mis_synced) and Settled is its complement within done, so only Hand-edited
+// can match on Finished, while Line-synced and Mis-synced only ever match on
+// Settled. A chip a bucket does not list is never offered and never honored.
+var bucketChips = map[Bucket][]Chip{
+	BucketFinished: {ChipEdited},
+	BucketSettled:  {ChipLineSynced, ChipEdited, ChipMissynced},
+}
+
+// BucketChips returns the chips b offers, in display order (nil for none). The
+// result is a copy, so a caller cannot change the set other requests see.
+func BucketChips(b Bucket) []Chip { return slices.Clone(bucketChips[b]) }
+
+// HasChip reports whether bucket b offers chip c.
+func HasChip(b Bucket, c Chip) bool {
+	for _, have := range bucketChips[b] {
+		if have == c {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidTier reports whether t is a Tier chip key.
+func ValidTier(t string) bool { _, ok := tierPredicates[t]; return ok }
+
+// ChipBucket reports whether b offers any chip.
+func ChipBucket(b Bucket) bool { return len(bucketChips[b]) > 0 }
+
+// chipSQL renders the chip predicates as AND-joined constant fragments.
+func (f BucketFilter) chipSQL() string {
+	out := ""
+	if p, ok := tierPredicates[f.Tier]; ok {
+		out += ` AND (` + p + `)`
+	}
+	if f.Edited {
+		out += ` AND ` + editedPredicate
+	}
+	if f.MisSynced {
+		out += ` AND ` + timingWrongPredicate
+	}
+	return out
 }
 
 // bucketColumns is the Work Queue's sortable columns (#1242), over the shared
@@ -176,6 +263,7 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 		search = ` AND (instr(artist_key, ?) > 0 OR instr(title_key, ?) > 0)`
 		args = append(args, q, q)
 	}
+	search += f.chipSQL()
 	args = append(args, limit)
 	// pred, the sort expressions and the keyset text come from constant maps,
 	// never from caller input; every caller value is a bound parameter.
