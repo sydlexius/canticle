@@ -113,6 +113,13 @@ func TestRedactURIValidatesAllowlistedValues(t *testing.T) {
 		{"library id", "/x?library=12", "/x?library=12"},
 		{"library zero", "/x?library=0", "/x?library=REDACTED"},
 		{"library text", "/x?library=SECRETARTIST", "/x?library=REDACTED"},
+		{"tier line", "/queue/settled?tier=line", "/queue/settled?tier=line"},
+		{"tier word is not offered", "/queue/settled?tier=word", "/queue/settled?tier=REDACTED"},
+		{"tier invalid", "/queue/settled?tier=SECRETARTIST", "/queue/settled?tier=REDACTED"},
+		{"edited one", "/queue/settled?edited=1", "/queue/settled?edited=1"},
+		{"edited text", "/queue/settled?edited=SECRETARTIST", "/queue/settled?edited=REDACTED"},
+		{"missync one", "/queue/settled?missync=1", "/queue/settled?missync=1"},
+		{"missync text", "/queue/settled?missync=SECRETARTIST", "/queue/settled?missync=REDACTED"},
 		{"repeated validated independently", "/x?after=1&after=SECRETARTIST", "/x?after=1&after=REDACTED"},
 		{"unlisted key", "/x?q=SECRETARTIST&apikey=k", "/x?apikey=REDACTED&q=REDACTED"},
 	}
