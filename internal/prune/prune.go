@@ -127,7 +127,8 @@ type RelinkedRow struct {
 	WorkItemIDs   []int64
 	// MBID/ISRC are whichever identity values the gone row carried and that
 	// drove the match (both may be set; only one may have been the one an
-	// operator cares to inspect).
+	// operator cares to inspect). Empty for a same-stem sibling relink (#1262),
+	// which no identity drove.
 	MBID string
 	ISRC string
 }
@@ -181,6 +182,12 @@ type Result struct {
 	// to 'pending' but that carry the hand-edit mark (#1228): their path moved,
 	// their status did not. Applied runs only; a dry run leaves it 0.
 	EditHeld int
+	// RelinkOwned and RelinkChanged count planned relinks that did not happen
+	// (#1262): the target already belongs to a different queue row, or a row was
+	// claimed or changed after it was read. A dry run makes the ownership check
+	// too, so RelinkOwned matches the apply's; RelinkChanged is a race, 0 there.
+	RelinkOwned   int
+	RelinkChanged int
 }
 
 // SweepOptions controls a whole-scope reconciliation sweep.
@@ -656,6 +663,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 		return Result{}, err
 	}
 	idx := newPresentIndex(p.db, roots)
+	idx.scopeLibrary = libraryID
 
 	statCache := make(map[string]bool) // directory -> exists (Directory granularity)
 	var res Result
@@ -728,11 +736,15 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 		}
 	}
 	res.Pruned = toPrune
-	for _, cg := range toRelink {
-		res.Relinked = append(res.Relinked, cg.relinked)
-	}
 
 	if dryRun {
+		// The plan takes the apply's ownership check, so the two report the same.
+		planned, declined, owned, err := p.planRelinks(ctx, toRelink)
+		if err != nil {
+			return Result{}, err
+		}
+		res.Relinked, res.RelinkOwned = planned, owned
+		res.Retained = append(res.Retained, declined...)
 		// Dry-run reports the intended outcome (gather-time counts), since no
 		// mutation runs to measure.
 		for _, row := range toPrune {
@@ -744,10 +756,17 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 				}
 			}
 		}
-		for _, cg := range toRelink {
+		for _, rr := range planned {
 			if hooks.Relinked != nil {
-				if err := hooks.Relinked(cg.relinked); err != nil {
-					return Result{}, fmt.Errorf("prune: report relinked %q: %w", cg.relinked.OldPath, err)
+				if err := hooks.Relinked(rr); err != nil {
+					return Result{}, fmt.Errorf("prune: report relinked %q: %w", rr.OldPath, err)
+				}
+			}
+		}
+		for _, rr := range declined {
+			if hooks.Retained != nil {
+				if err := hooks.Retained(rr); err != nil {
+					return Result{}, fmt.Errorf("prune: report retained %q: %w", rr.SourcePath, err)
 				}
 			}
 		}
@@ -755,12 +774,13 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 	}
 
 	if len(toRelink) > 0 {
-		applied, retainedByConflict, editHeld, err := p.applyRelinks(ctx, toRelink, hooks.Relinked, hooks.Retained)
+		applied, retainedByConflict, editHeld, declines, err := p.applyRelinks(ctx, toRelink, hooks.Relinked, hooks.Retained)
 		if err != nil {
 			return Result{}, err
 		}
 		res.Relinked = applied
 		res.EditHeld = editHeld
+		res.RelinkOwned, res.RelinkChanged = declines.owned, declines.changed
 		// A candidate that failed to relink (its target is already owned by a
 		// different work_queue row) is neither pruned nor relinked, but it must
 		// still be accounted for -- appending here, not overwriting, keeps it
@@ -849,6 +869,12 @@ type classified struct {
 // delete).
 func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy, src string, c *candidate) (classified, error) {
 	if c.mbid == "" && c.isrc == "" {
+		// THE SAME-STEM SIBLING TIER (#1262), ahead of the settled short-circuit
+		// (the rows a format swap strands are mostly 'done') and of the name
+		// tier: see trySiblingRelink for the order.
+		if ok, cls, err := p.trySiblingRelink(ctx, idx.scopeLibrary, policy, src, c); err != nil || ok {
+			return cls, err
+		}
 		// Already settled: gone and no longer work. Re-reporting it every sweep is
 		// exactly the churn #732 exists to stop, so it normally drops out of the
 		// candidate set here.
@@ -974,6 +1000,13 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		return classified{}, err
 	}
 	verdict, ref := identity.ResolveExact(c.mbid, c.isrc, p.identityKeys, pool)
+	if verdict != identity.VerdictUnique {
+		// A re-rip often changes or drops the tags: the in-place swap is
+		// consulted before the row is deleted or retained on this verdict (#1262).
+		if ok, cls, err := p.trySiblingRelink(ctx, idx.scopeLibrary, policy, src, c); err != nil || ok {
+			return cls, err
+		}
+	}
 	switch verdict {
 	case identity.VerdictUnique:
 		detail := idx.detail(c.libraryID, ref)
@@ -1012,7 +1045,7 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 // report fires for anything in this call, applied or retained-by-conflict
 // alike, so a report is never written for a row a rollback left untouched by
 // a different mechanism than it claims.
-func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, reportRelinked func(RelinkedRow) error, reportRetained func(RetainedRow) error) (applied []RelinkedRow, retained []RetainedRow, editHeld int, retErr error) {
+func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, reportRelinked func(RelinkedRow) error, reportRetained func(RetainedRow) error) (applied []RelinkedRow, retained []RetainedRow, editHeld int, declines relinkDeclines, retErr error) {
 	// Retirements owed by DECLINED relinks, applied after the transaction commits
 	// (retireUnresolvable runs against p.db and would deadlock against tx on
 	// SQLite). idx points at the RetainedRow this retirement belongs to, so the
@@ -1028,7 +1061,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	// commit), so each attempt starts from empty accumulators and a rolled-back
 	// attempt leaves no trace.
 	if err := dbpkg.RetryBatchTx(ctx, "prune relink", func() error {
-		applied, retained, toRetire, editHeld = nil, nil, nil, 0
+		applied, retained, toRetire, editHeld, declines = nil, nil, nil, 0, relinkDeclines{}
 		tx, err := p.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("prune: begin relink tx: %w", err)
@@ -1059,6 +1092,12 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 				// literally true of the database.
 				if _, err := tx.ExecContext(ctx, "ROLLBACK TO "+sp); err != nil { //nolint:gosec // reason: sp is a fixed prefix plus a loop index, never external input
 					return fmt.Errorf("prune: rollback relink savepoint: %w", err)
+				}
+				// Counted before the silent drop below (#1262).
+				if decision.owned {
+					declines.owned++
+				} else {
+					declines.changed++
 				}
 				// An already-retired row whose reconsidered relink was declined drops
 				// out silently: it is exactly as settled as before, nothing was
@@ -1105,7 +1144,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 		}
 		return nil
 	}); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, relinkDeclines{}, err
 	}
 	// Settle every declined relink, now that tx is committed and the row's
 	// pre-decline writes are rolled back. Stamped onto the RetainedRow BEFORE it
@@ -1116,7 +1155,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	for _, plan := range toRetire {
 		retired, err := p.retireUnresolvable(ctx, plan.c)
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("prune: retire declined relink %q: %w", retained[plan.idx].SourcePath, err)
+			return nil, nil, 0, relinkDeclines{}, fmt.Errorf("prune: retire declined relink %q: %w", retained[plan.idx].SourcePath, err)
 		}
 		retained[plan.idx].WouldRetire = true
 		retained[plan.idx].Retired = retired
@@ -1124,18 +1163,250 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 	if reportRelinked != nil {
 		for _, rr := range applied {
 			if err := reportRelinked(rr); err != nil {
-				return applied, retained, editHeld, fmt.Errorf("prune: report relinked %q: %w", rr.OldPath, err)
+				return applied, retained, editHeld, declines, fmt.Errorf("prune: report relinked %q: %w", rr.OldPath, err)
 			}
 		}
 	}
 	if reportRetained != nil {
 		for _, rr := range retained {
 			if err := reportRetained(rr); err != nil {
-				return applied, retained, editHeld, fmt.Errorf("prune: report retained %q: %w", rr.SourcePath, err)
+				return applied, retained, editHeld, declines, fmt.Errorf("prune: report retained %q: %w", rr.SourcePath, err)
 			}
 		}
 	}
-	return applied, retained, editHeld, nil
+	return applied, retained, editHeld, declines, nil
+}
+
+// relinkDeclines tallies the planned relinks one applyRelinks call declined, by
+// reason, including the already-settled ones it drops without a RetainedRow.
+type relinkDeclines struct{ owned, changed int }
+
+// planRelinks is the dry run's stand-in for applyRelinks: the same ownership
+// check, mutating nothing. claimed carries the links an earlier relink in this
+// batch would create, which the apply sees as written rows by the time it
+// reaches a later candidate. The apply's other decline (a row claimed or
+// changed after it was read) is a race with a worker and cannot be previewed.
+func (p *Pruner) planRelinks(ctx context.Context, targets []classifiedRelink) (planned []RelinkedRow, retained []RetainedRow, owned int, retErr error) {
+	claimed := map[int64][]int64{}
+	for _, cg := range targets {
+		own := cg.c.ownIDs()
+		reason, err := ownershipConflict(ctx, p.db, cg.target, own, claimed)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if reason == "" {
+			planned = append(planned, cg.relinked)
+			for _, srID := range cg.target.linkIDs() {
+				for id := range own {
+					claimed[srID] = append(claimed[srID], id)
+				}
+			}
+			continue
+		}
+		owned++
+		if cg.alreadySettled {
+			continue
+		}
+		retained = append(retained, RetainedRow{
+			SourcePath: cg.relinked.OldPath, Reason: reason,
+			MBID: cg.relinked.MBID, ISRC: cg.relinked.ISRC,
+			WouldRetire: cg.retireIfDeclined,
+		})
+	}
+	return planned, retained, owned, nil
+}
+
+// ownIDs is the set of this candidate's own work_queue row ids.
+func (c *candidate) ownIDs() map[int64]bool {
+	own := make(map[int64]bool, len(c.workItems))
+	for _, w := range c.workItems {
+		own[w.id] = true
+	}
+	return own
+}
+
+// ownershipConflict returns the decline reason when a scan_results row the
+// relink would link is already linked (in the database, or by an earlier
+// planned relink in claimed) to a work_queue row outside own, else "". A
+// same-stem sibling target (keepOutput) is also owned by any other row whose
+// source_path already is that file, junction-linked or not: moving a second
+// row onto it would leave two rows sharing one source path.
+func ownershipConflict(ctx context.Context, q rowsQuerier, target presentRowDetail, own map[int64]bool, claimed map[int64][]int64) (string, error) {
+	const reason = "present-file candidate already linked to work_queue row %d; merging is identityrepair's job"
+	if len(own) == 0 {
+		return "", nil
+	}
+	if target.keepOutput {
+		var at []int64
+		rows, err := q.QueryContext(ctx, `SELECT id FROM work_queue WHERE source_path = ? ORDER BY id`, target.filePath)
+		if err != nil {
+			return "", fmt.Errorf("prune: read rows at the sibling: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return "", fmt.Errorf("prune: scan row at the sibling: %w", err)
+			}
+			at = append(at, id)
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return "", fmt.Errorf("prune: read rows at the sibling: %w", err)
+		}
+		for _, id := range at {
+			if !own[id] {
+				return fmt.Sprintf(reason, id), nil
+			}
+		}
+	}
+	for _, srID := range target.linkIDs() {
+		for _, id := range claimed[srID] {
+			if !own[id] {
+				return fmt.Sprintf(reason, id), nil
+			}
+		}
+		otherID, found, err := foreignOwner(ctx, q, srID, own)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return fmt.Sprintf(reason, otherID), nil
+		}
+	}
+	return "", nil
+}
+
+// trySiblingRelink is the same-stem sibling tier (#1262): a gone source whose
+// directory holds exactly ONE present audio file with the same stem and another
+// extension (an album re-ripped from .mp3 to .flac in place) is relinked to it.
+// It covers what queue.RepointGoneSource's one-shot repair misses: a swap whose
+// old file still existed when the replacement was scanned.
+//
+// ORDER. A unique MBID/ISRC match wins; this tier runs when that does not
+// resolve, and BEFORE the name tier, which picks the lone same-title file
+// anywhere in the library (a compilation's copy, say) while the sibling is the
+// one path that replaces the source without moving its sidecar. Unlike the name
+// tier it also runs in the reactive pass and for settled rows.
+//
+// EVIDENCE. Siblings come from scan_results by an index range on file_path,
+// never a directory read; one no scan has indexed yet is not seen, and the row
+// waits. Each is statted once: a definitely-gone one is ignored, any other stat
+// failure RETAINS the row (an unreadable sibling is where a delete is least
+// justified), and two or more present siblings are ambiguous. A sibling whose
+// MBID or ISRC differs from the gone row's own is another recording: retained.
+// A sibling another queue row owns is retained too, as the apply's decline is.
+// Every one of these is a HARD STOP: once a present sibling is found the row
+// is never deleted or handed to the name tier, which would relink it elsewhere.
+// A key on one side only is no contradiction, and a differing TITLE is
+// deliberately not one either, since a re-rip is routinely retitled. A source
+// with no queue row at all is not this tier's: nothing would move, so it keeps
+// the outcome it had before. The relink keeps outdir, filename and
+// output_paths (the sidecar did not move) and links every library's row for
+// the sibling. A library-scoped run (lib non-nil) sees, links and checks only
+// that library's rows; a sibling indexed only in another library is not seen.
+func (p *Pruner) trySiblingRelink(ctx context.Context, lib *int64, policy Policy, src string, c *candidate) (bool, classified, error) {
+	if len(c.workItems) == 0 {
+		return false, classified{}, nil
+	}
+	noIdentity := c.mbid == "" && c.isrc == ""
+	retain := func(reason string) classified {
+		return classified{
+			outcome:  outcomeRetain,
+			retained: RetainedRow{SourcePath: src, Reason: reason, MBID: c.mbid, ISRC: c.isrc},
+			// An identity-less row that is still work is retired as well, as in
+			// classify's own retain: left eligible, it is re-fetched forever (#732).
+			shouldRetire:     policy == PolicyFull && !c.settled && noIdentity,
+			classifiedRelink: classifiedRelink{src: src, c: c},
+		}
+	}
+	// stop is retain for a decline that used to fall through: an identity-less
+	// row that is already settled drops out unreported, as it did then.
+	stop := func(reason string) classified {
+		if c.settled && noIdentity {
+			return classified{outcome: outcomeSettled}
+		}
+		return retain(reason)
+	}
+	var scopeArg any
+	if lib != nil {
+		scopeArg = *lib
+	}
+	differs := func(own, other string) bool {
+		return own != "" && other != "" && !strings.EqualFold(strings.TrimSpace(own), strings.TrimSpace(other))
+	}
+	prefix := strings.TrimSuffix(src, filepath.Ext(src)) + "."
+	rowsByPath := map[string][]int64{}
+	contradicts := map[string]bool{}
+	var paths []string
+	if err := queryRows(ctx, p.db,
+		`SELECT id, file_path, recording_mbid, isrc FROM scan_results
+         WHERE file_path >= ? AND file_path < ? AND (? IS NULL OR library_id = ?)
+         ORDER BY file_path, id`,
+		[]any{prefix, prefix[:len(prefix)-1] + "/", scopeArg, scopeArg}, func(rows *sql.Rows) error {
+			var id int64
+			var path, mbid, isrc string
+			if err := rows.Scan(&id, &path, &mbid, &isrc); err != nil {
+				return err
+			}
+			if !queue.SameStemSibling(path, src) {
+				return nil
+			}
+			if differs(c.mbid, mbid) || differs(c.isrc, isrc) {
+				contradicts[path] = true
+			}
+			if _, seen := rowsByPath[path]; !seen {
+				paths = append(paths, path)
+			}
+			rowsByPath[path] = append(rowsByPath[path], id)
+			return nil
+		}); err != nil {
+		return false, classified{}, fmt.Errorf("prune: read same-stem siblings: %w", err)
+	}
+	var live []string
+	for _, path := range paths { // statted only after the rows are closed
+		_, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return true, retain("a same-name file with another extension could not be read; kept until it can be"), nil
+		}
+		live = append(live, path)
+	}
+	if len(live) == 0 {
+		return false, classified{}, nil
+	}
+	if len(live) > 1 {
+		return true, stop("several present files share this file's name with another extension; never picked one on a guess"), nil
+	}
+	if contradicts[live[0]] {
+		return true, retain("the same-name file with another extension carries a different MBID or ISRC; a different recording, never relinked"), nil
+	}
+	ids := rowsByPath[live[0]]
+	target := presentRowDetail{scanResultID: ids[0], filePath: live[0], keepOutput: true, alsoLink: ids[1:]}
+	// A sibling with its own queue row (junction-linked to it, or already sitting
+	// at it by source_path) is a different track as far as the queue can tell.
+	// A hard stop, matching the apply's own ownership decline: falling through
+	// deleted an identity-bearing row beside its replacement and let the name
+	// tier move an identity-less one onto some other same-title file.
+	if conflict, err := ownershipConflict(ctx, p.db, target, c.ownIDs(), nil); err != nil {
+		return false, classified{}, err
+	} else if conflict != "" {
+		return true, stop("the same-name file with another extension already belongs to a different queue row; merging is identityrepair's job"), nil
+	}
+	// MBID/ISRC stay empty: no identity drove this match.
+	rr := RelinkedRow{OldPath: src, NewPath: live[0], ScanResultIDs: c.scanResultIDs}
+	for _, w := range c.workItems {
+		rr.WorkItemIDs = append(rr.WorkItemIDs, w.id)
+	}
+	return true, classified{
+		outcome: outcomeRelink,
+		classifiedRelink: classifiedRelink{
+			src: src, c: c, relinked: rr, target: target, alreadySettled: c.settled,
+			// A declined identity-less row still has to settle, as in the name tier.
+			retireIfDeclined: policy == PolicyFull && !c.settled && noIdentity,
+		},
+	}, nil
 }
 
 // relinkDecision is relinkOne's verdict for one candidate. A zero value means
@@ -1143,6 +1414,9 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 // caller must roll the candidate back and report it as retained.
 type relinkDecision struct {
 	reason string
+	// owned marks a decline for an ownership conflict, as opposed to a row that
+	// was claimed or changed after it was read.
+	owned bool
 	// editHeld counts this candidate's rows relinked WITHOUT the resurrect
 	// because they carry the hand-edit mark (#1228). Meaningful only when
 	// reason is empty; a declined candidate is rolled back whole.
@@ -1174,18 +1448,10 @@ type relinkDecision struct {
 // loss reported as a successful relink, exactly the outcome #640 exists to
 // prevent. The candidate is declined whole instead.
 func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowDetail) (relinkDecision, error) {
-	own := make(map[int64]bool, len(c.workItems))
-	for _, w := range c.workItems {
-		own[w.id] = true
-	}
-	if len(own) > 0 {
-		otherID, found, err := foreignOwner(ctx, tx, target.scanResultID, own)
-		if err != nil {
-			return relinkDecision{}, err
-		}
-		if found {
-			return relinkDecision{reason: fmt.Sprintf("present-file candidate already linked to work_queue row %d; merging is identityrepair's job", otherID)}, nil
-		}
+	if reason, err := ownershipConflict(ctx, tx, target, c.ownIDs(), nil); err != nil {
+		return relinkDecision{}, err
+	} else if reason != "" {
+		return relinkDecision{reason: reason, owned: true}, nil
 	}
 	// A row this package RETIRED is relinking back out of its terminal state, so
 	// the retirement stamps have to come off with it: leaving status='done' would
@@ -1246,9 +1512,12 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	resurrect := c.retiredAsUnresolvable()
 	resurrectNow := time.Now().UTC().Format(timeFormat)
 	for _, w := range c.workItems {
-		relinkedPaths := relinkOutputPaths(w.inputs.OutputPaths, w.inputs.Outdir, w.inputs.Filename, target)
-		outputPathsJSON, err := json.Marshal(relinkedPaths)
-		if err != nil {
+		var outputPathsJSON []byte
+		var err error
+		if target.keepOutput {
+			// A same-stem sibling relink (#1262): the sidecar did not move.
+			target.outdir, target.filename, outputPathsJSON = w.inputs.Outdir, w.inputs.Filename, []byte(w.rawOutputPaths)
+		} else if outputPathsJSON, err = json.Marshal(relinkOutputPaths(w.inputs.OutputPaths, w.inputs.Outdir, w.inputs.Filename, target)); err != nil {
 			return relinkDecision{}, fmt.Errorf("prune: marshal relinked output_paths for work_queue %d: %w", w.id, err)
 		}
 		var res sql.Result
@@ -1279,10 +1548,12 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 			// the gone path.
 			return relinkDecision{reason: fmt.Sprintf("work_queue row %d became in-flight, vanished, or changed since it was read before the relink could apply; kept for a later pass", w.id)}, nil
 		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
-			w.id, target.scanResultID); err != nil {
-			return relinkDecision{}, fmt.Errorf("prune: link work_queue %d to scan_result %d: %w", w.id, target.scanResultID, err)
+		for _, srID := range target.linkIDs() {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
+				w.id, srID); err != nil {
+				return relinkDecision{}, fmt.Errorf("prune: link work_queue %d to scan_result %d: %w", w.id, srID, err)
+			}
 		}
 	}
 	for _, id := range c.scanResultIDs {
@@ -1384,7 +1655,7 @@ func dedupeOutputPaths(paths []models.OutputPath) []models.OutputPath {
 // items. Filtering in Go rather than building a variadic NOT IN keeps the
 // query a single fixed statement; the junction row count per scan_result is
 // tiny (normally one), so the scan is trivial.
-func foreignOwner(ctx context.Context, tx *sql.Tx, scanResultID int64, own map[int64]bool) (int64, bool, error) {
+func foreignOwner(ctx context.Context, tx rowsQuerier, scanResultID int64, own map[int64]bool) (int64, bool, error) {
 	var foreignID int64
 	var found bool
 	rows, err := tx.QueryContext(ctx,
@@ -1408,6 +1679,12 @@ func foreignOwner(ctx context.Context, tx *sql.Tx, scanResultID int64, own map[i
 	return foreignID, found, nil
 }
 
+// rowsQuerier is the read both *sql.DB (the dry run) and *sql.Tx (the apply)
+// offer, so one ownership check serves both.
+type rowsQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // presentRowDetail is the detail applyRelinks needs from the present-file
 // scan_results row an identity match resolved to.
 type presentRowDetail struct {
@@ -1415,6 +1692,15 @@ type presentRowDetail struct {
 	filePath     string
 	outdir       string
 	filename     string
+	// keepOutput leaves each row's outdir, filename and output_paths alone;
+	// alsoLink is the other libraries' rows for the file. Sibling tier only.
+	keepOutput bool
+	alsoLink   []int64
+}
+
+// linkIDs is every scan_results row a relink to this target links.
+func (d presentRowDetail) linkIDs() []int64 {
+	return append([]int64{d.scanResultID}, d.alsoLink...)
 }
 
 // presentIndexGlobalKey is the map key presentIndex uses for an unscoped
@@ -1439,6 +1725,9 @@ type presentIndex struct {
 	// pays none of this cost (#740).
 	byScopeWide map[int64][]identity.Candidate
 	detailsWide map[int64]map[string]presentRowDetail
+	// scopeLibrary is the RUN's requested library (SweepOptions.LibraryID), nil
+	// when unscoped. Not candidate.libraryID, which is the row's own library.
+	scopeLibrary *int64
 }
 
 func newPresentIndex(db *sql.DB, roots []string) *presentIndex {

@@ -27,12 +27,12 @@ type goneSourceMove struct {
 	keepLink          bool
 }
 
-// sameStemSibling reports whether a and b name two different files in one
+// SameStemSibling reports whether a and b name two different files in one
 // directory that share a stem and differ only by extension. That is the one
 // shape where the row's sidecar (stem.lrc beside the audio) still describes
 // the incoming file, so outdir, filename and output_paths need no rewrite and
 // a settled row stays truthfully settled.
-func sameStemSibling(a, b string) bool {
+func SameStemSibling(a, b string) bool {
 	if a == "" || b == "" || a == b || filepath.Dir(a) != filepath.Dir(b) {
 		return false
 	}
@@ -80,7 +80,7 @@ func (q *DBQueue) planGoneSourceMove(ctx context.Context, inputs models.Inputs) 
 		switch {
 		case linked == "":
 			return &m, nil
-		case sameStemSibling(linked, inputs.SourcePath):
+		case SameStemSibling(linked, inputs.SourcePath):
 			if _, err := q.stat(linked); errors.Is(err, fs.ErrNotExist) {
 				m.gonePath = linked
 				return &m, nil
@@ -89,7 +89,7 @@ func (q *DBQueue) planGoneSourceMove(ctx context.Context, inputs models.Inputs) 
 		}
 		return q.planLibraryRelink(ctx, &m, inputs)
 	}
-	if !sameStemSibling(m.oldPath, inputs.SourcePath) {
+	if !SameStemSibling(m.oldPath, inputs.SourcePath) {
 		return nil, nil
 	}
 	m.gonePath = m.oldPath
@@ -144,7 +144,7 @@ func (q *DBQueue) planLibraryRelink(ctx context.Context, m *goneSourceMove, inpu
 		return nil, fmt.Errorf("queue: read sibling scan_results for row %d: %w", m.id, err)
 	}
 	for _, p := range siblings { // stat only after the rows are closed
-		if !sameStemSibling(p, inputs.SourcePath) {
+		if !SameStemSibling(p, inputs.SourcePath) {
 			continue
 		}
 		if _, err := q.stat(p); errors.Is(err, fs.ErrNotExist) {

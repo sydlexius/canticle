@@ -416,3 +416,34 @@ func TestReconcilePaths_RelinkNeverCrossesLibraryBoundary(t *testing.T) {
 		t.Errorf("the other library's scan_results row was disturbed: %d rows, want 1", otherSurvives)
 	}
 }
+
+// Two gone rows whose identity resolves to ONE present file: only the first can
+// take it. The dry run and --yes report the same relinked and retained counts,
+// and both name the reason the second relink does not happen (#1262).
+func TestReconcilePaths_DryRunAndApplyAgreeOnDeclinedRelink(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupReconcilePaths(t)
+	for _, name := range []string{"01. one.flac", "02. two.flac"} {
+		gone := filepath.Join(root, "Old", name)
+		seedReconcilePathsRowWithIdentity(t, ctx, dbPath, gone, "mbid-dup")
+		if err := os.Remove(gone); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedReconcilePathsPresentFile(t, ctx, dbPath, filepath.Join(root, "New", "01. one.flac"), "mbid-dup")
+	for _, yes := range []bool{false, true} { // dry run first: --yes mutates the library
+		verb := "would relink"
+		if yes {
+			verb = "relinked"
+		}
+		var buf bytes.Buffer
+		if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Yes: yes}); code != 0 {
+			t.Fatalf("yes=%v exit=%d out=%s", yes, code, buf.String())
+		}
+		for _, want := range []string{verb + " 1 source(s) to a moved file, retained 1 source(s)",
+			"1 planned relink(s) not applied (1 target file already belongs to another queue row, 0 row claimed"} {
+			if !strings.Contains(buf.String(), want) {
+				t.Errorf("yes=%v: want %q in: %s", yes, want, buf.String())
+			}
+		}
+	}
+}
