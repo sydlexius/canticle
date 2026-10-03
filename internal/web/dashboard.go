@@ -114,6 +114,7 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		return templates.DashboardView{}, fmt.Errorf("dashboard: recent outcomes: %w", err)
 	}
 	view.RecentRows = buildRecentRows(recent, serverLoc)
+	stampRecentRelative(view.RecentRows, recent, time.Now())
 
 	attention, err := u.reports.NeedsAttention(ctx, dashboardAttentionLimit)
 	if err != nil {
@@ -285,19 +286,15 @@ func formatWaited(since, now time.Time) string {
 		return "0s"
 	}
 	d := now.Sub(since)
-	switch {
-	case d < time.Minute:
+	if d < time.Minute {
 		if d < 0 {
 			d = 0
 		}
 		return strconv.Itoa(int(d/time.Second)) + "s"
-	case d < time.Hour:
-		return strconv.Itoa(int(d/time.Minute)) + "m"
-	case d < 24*time.Hour:
-		return strconv.Itoa(int(d/time.Hour)) + "h"
-	default:
-		return strconv.Itoa(int(d/(24*time.Hour))) + "d"
 	}
+	n, unit := spanBucket(d)
+	suffix := map[time.Duration]string{time.Minute: "m", time.Hour: "h", 24 * time.Hour: "d"}[unit]
+	return strconv.Itoa(n) + suffix
 }
 
 // buildQueueTiles shapes a QueueSummary into the dashboard's queue stat tiles,
@@ -528,6 +525,17 @@ func buildRecentRows(recent []reports.RecentOutcome, serverLoc *time.Location) [
 		})
 	}
 	return rows
+}
+
+// stampRecentRelative fills the dashboard-only CompletedAtRelative label on
+// rows built by buildRecentRows (#1263). It is separate so the Reports table,
+// which shares the row type, keeps its absolute timestamp.
+func stampRecentRelative(rows []templates.RecentOutcomeRow, recent []reports.RecentOutcome, now time.Time) {
+	for i := range rows {
+		if i < len(recent) {
+			rows[i].CompletedAtRelative = formatRelativeTime(recent[i].CompletedAt, now)
+		}
+	}
 }
 
 // formatDashboardTime formats a completed-at timestamp for the dashboard table.

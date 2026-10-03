@@ -18,7 +18,7 @@ templ DashboardPage(version string, reports []RailItem, view DashboardView, musi
 
 // dashboardContent is the main content column for the dashboard.
 templ dashboardContent(view DashboardView) {
-	<div class="mx-dash-page">
+	<div class="mx-dash-page" hx-history="false">
 		<div class="mx-dash-header">
 			<h1 class="mx-dash-title">Dashboard</h1>
 			<p class="mx-dash-sub">
@@ -49,7 +49,7 @@ templ dashboardContent(view DashboardView) {
 	</div>
 	<script>
 	(function() {
-		// Reformat <time data-tz="pending"> elements to the browser's local timezone.
+		// Reformat the title of <time data-tz="pending"> elements to the browser's local timezone.
 		// Skipped when data-tz-applied="1" (server already applied TZ env).
 		// Uses 'en-US' locale so timeZoneName:'short' always emits a 3-letter
 		// abbreviation (e.g. "PDT") rather than a "GMT-7" offset, regardless
@@ -60,7 +60,9 @@ templ dashboardContent(view DashboardView) {
 			try {
 				var d = new Date(iso);
 				var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-				el.textContent = d.toLocaleString('en-US', {
+				// The visible text is the server's relative label; only the
+				// exact-time tooltip is localized.
+				el.title = d.toLocaleString('en-US', {
 					year: 'numeric', month: '2-digit', day: '2-digit',
 					hour: '2-digit', minute: '2-digit',
 					timeZone: tz,
@@ -250,11 +252,11 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 								</td>
 								<td>@laneCell(row.Lane, row.LaneMark)</td>
 								<td class="mx-table-mono">
-									if row.CompletedAtISO != "" {
+									if row.CompletedAtISO != "" && row.CompletedAtRelative != "" {
 										if row.CompletedAtTZApplied {
-											<time datetime={ row.CompletedAtISO } data-tz-applied="1">{ row.CompletedAt }</time>
+											<time datetime={ row.CompletedAtISO } title={ row.CompletedAt } data-tz-applied="1">{ row.CompletedAtRelative }</time>
 										} else {
-											<time datetime={ row.CompletedAtISO } data-tz="pending">{ row.CompletedAt }</time>
+											<time datetime={ row.CompletedAtISO } title={ row.CompletedAt } data-tz="pending">{ row.CompletedAtRelative }</time>
 										}
 									} else {
 										{ row.CompletedAt }
