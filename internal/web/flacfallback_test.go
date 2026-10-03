@@ -395,7 +395,7 @@ func TestFlacCacheDoesNotCacheFailures(t *testing.T) {
 	if _, err := c.Get(context.Background(), p, fi, open); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the conversion error", err)
 	}
-	if ents, _ := os.ReadDir(c.dir); len(ents) != 0 {
+	if ents, _ := os.ReadDir(c.dir); len(ents) != 0 && (len(ents) != 1 || ents[0].Name() != flacLockName) {
 		t.Fatalf("a failed conversion left %d files in the cache", len(ents))
 	}
 	conv.err = nil

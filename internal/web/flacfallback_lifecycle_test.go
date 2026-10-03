@@ -1,0 +1,219 @@
+package web
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+)
+
+// Close cancels a running conversion and returns only once it has stopped:
+// no converter outlives Close, its dir is gone, and Get then fails.
+func TestFlacCacheCloseStopsConversion(t *testing.T) {
+	started, stopped, never := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c, err := newFlacCache(t.TempDir(), 1<<20, func(ctx context.Context, _ *os.File, _, out string) error {
+		close(started)
+		select {
+		case <-ctx.Done():
+			close(stopped)
+			return ctx.Err()
+		case <-never: // a converter Close neither cancels nor waits for keeps running
+			return os.WriteFile(out, fakeFlac, 0o600)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close(never)
+	p, open, fi := srcNamed(t, t.TempDir(), "s.m4a")
+	done := getAsync(c, context.Background(), p, open, fi)
+	<-started
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("Close returned while the conversion was still running")
+	}
+	if _, err := os.Stat(c.dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Close left the cache dir: %v", err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("a Get canceled by Close succeeded")
+	}
+	if _, err := c.Get(context.Background(), p, fi, open); !errors.Is(err, errFlacCacheClosed) {
+		t.Fatalf("Get after Close: err = %v, want errFlacCacheClosed", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// Close as a conversion finishes (it ignores the cancel, as a conversion
+// already writing its last bytes does) still leaves nothing behind.
+func TestFlacCacheCloseRacesFinishingConversion(t *testing.T) {
+	for iter := 0; iter < 100; iter++ {
+		parent := t.TempDir()
+		gate, started := make(chan struct{}), make(chan struct{})
+		c, err := newFlacCache(parent, 1<<20, func(_ context.Context, _ *os.File, _, out string) error {
+			close(started)
+			<-gate
+			time.Sleep(time.Duration(iter%5) * 100 * time.Microsecond)
+			return os.WriteFile(out, fakeFlac, 0o600)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, open, fi := srcNamed(t, t.TempDir(), "s.m4a")
+		done := getAsync(c, context.Background(), p, open, fi)
+		<-started
+		close(gate)
+		if err := c.Close(); err != nil {
+			t.Fatalf("iteration %d: Close: %v", iter, err)
+		}
+		if ents, _ := os.ReadDir(parent); len(ents) != 0 {
+			t.Fatalf("iteration %d: Close left %d entries under the parent", iter, len(ents))
+		}
+		<-done
+	}
+}
+
+func requireFlock(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("no liveness lock and no sweep on " + runtime.GOOS)
+	}
+}
+
+// A new cache removes a sibling dir whose lock is free (its process died
+// without Close), and keeps one whose lock is held, one with no lock yet, and
+// anything not named like a cache dir.
+func TestFlacCacheSweepsOnlyDeadSiblings(t *testing.T) {
+	requireFlock(t)
+	parent := t.TempDir()
+	live, err := newFlacCache(parent, 1<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = live.Close() }()
+	dead := filepath.Join(parent, flacDirPrefix+"dead")
+	noLock := filepath.Join(parent, flacDirPrefix+"creating")
+	other := filepath.Join(parent, "unrelated")
+	for _, d := range []string{dead, noLock, other} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "x.flac"), fakeFlac, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{dead, other} {
+		if err := os.WriteFile(filepath.Join(d, flacLockName), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := newFlacCache(parent, 1<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	for d, want := range map[string]bool{dead: false, noLock: true, other: true, live.dir: true, c.dir: true} {
+		if _, err := os.Stat(d); (err == nil) != want {
+			t.Errorf("%s present = %v, want %v", filepath.Base(d), err == nil, want)
+		}
+	}
+}
+
+// A sibling whose owner holds its lock survives a new cache with a conversion
+// in flight; its lock is gone only once it closes, and the next cache then
+// finds nothing to sweep.
+func TestFlacCacheKeepsLiveSibling(t *testing.T) {
+	requireFlock(t)
+	parent := t.TempDir()
+	gate := make(chan struct{})
+	conv := &countingConverter{gate: gate}
+	first, err := newFlacCache(parent, 1<<20, conv.convert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, open, fi := srcNamed(t, t.TempDir(), "s.m4a")
+	done := getAsync(first, context.Background(), p, open, fi)
+	waitFor(t, "the conversion to start", func() bool { return conv.calls.Load() == 1 })
+	second, err := newFlacCache(parent, 1<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatalf("live sibling's Get after a new cache started: %v", err)
+	}
+	if flacDirDead(first.dir) {
+		t.Fatal("a live cache's dir reads as dead")
+	}
+	if err := errors.Join(first.Close(), second.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if ents, _ := os.ReadDir(parent); len(ents) != 0 {
+		t.Fatalf("Close left %d entries under the parent", len(ents))
+	}
+}
+
+// A queued job (both slots busy) whose only waiter leaves exits at once and
+// never converts; and a job's timeout starts when it gets a slot, not while
+// it waits for one.
+func TestFlacCacheQueuedJobLeavesAndTimesFromItsSlot(t *testing.T) {
+	gate := make(chan struct{})
+	var deadline time.Time
+	conv := &countingConverter{gate: gate}
+	c := newTestCache(t, 1<<20, func(ctx context.Context, in *os.File, name, out string) error {
+		if filepath.Base(name) == "late.m4a" {
+			deadline, _ = ctx.Deadline()
+		}
+		return conv.convert(ctx, in, name, out)
+	})
+	src := t.TempDir()
+	var errs []chan error
+	for _, name := range []string{"a.m4a", "b.m4a"} {
+		p, open, fi := srcNamed(t, src, name)
+		errs = append(errs, getAsync(c, context.Background(), p, open, fi))
+	}
+	waitFor(t, "both slots to fill", func() bool { return conv.calls.Load() == flacMaxConversions })
+
+	q, qopen, qfi := srcNamed(t, src, "q.m4a")
+	ctx, cancel := context.WithCancel(context.Background())
+	left := getAsync(c, ctx, q, qopen, qfi)
+	waitFor(t, "the queued request", func() bool { return c.waiters(flacKey(q, qfi)) == 1 })
+	c.mu.Lock()
+	queued := c.inflight[flacKey(q, qfi)]
+	c.mu.Unlock()
+	late, lopen, lfi := srcNamed(t, src, "late.m4a")
+	errs = append(errs, getAsync(c, context.Background(), late, lopen, lfi))
+	waitFor(t, "the late request", func() bool { return c.waiters(flacKey(late, lfi)) == 1 })
+
+	cancel()
+	if err := <-left; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leaver err = %v, want context canceled", err)
+	}
+	select {
+	case <-queued.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a queued job whose waiter left still holds its goroutine while the slots are busy")
+	}
+	released := time.Now()
+	close(gate)
+	for _, ch := range errs {
+		if err := <-ch; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := conv.calls.Load(); n != 3 {
+		t.Fatalf("conversions = %d, want 3 (the abandoned queued job must not convert)", n)
+	}
+	if deadline.Before(released.Add(flacConvertTimeout)) {
+		t.Fatalf("timeout counted from before the slot: deadline %v is earlier than release + %v", deadline, flacConvertTimeout)
+	}
+}

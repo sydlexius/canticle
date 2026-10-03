@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -27,11 +28,18 @@ import (
 // corrects.
 
 const (
-	// flacConvertTimeout bounds one ffmpeg run.
+	// flacConvertTimeout bounds one ffmpeg run, from when it gets a slot.
 	flacConvertTimeout = 10 * time.Minute
 	// flacMaxConversions bounds concurrent ffmpeg runs: the CPU they take and
 	// the in-flight .part bytes, which the cap counts but cannot evict.
 	flacMaxConversions = 2
+	// flacDirPrefix names every cache dir, so a new cache can find and
+	// remove its dead siblings'.
+	flacDirPrefix = "canticle-preview-flac-"
+	// flacLockName is the liveness lock in a cache dir: its owner holds an
+	// exclusive flock on it for the cache's lifetime, and the kernel drops
+	// the lock when the process dies, however it dies.
+	flacLockName = ".lock"
 	// flacStderrMax bounds the ffmpeg stderr held in memory (a corrupt file can
 	// print one line per bad frame, #731).
 	flacStderrMax = 64 << 10
@@ -58,26 +66,78 @@ type flacCache struct {
 	max     int64
 	convert flacConverter
 	sem     chan struct{}
+	lock    *os.File // the dir's liveness lock; nil where there is none
+	runs    sync.WaitGroup
+
+	closeOnce sync.Once
+	closeErr  error
 
 	mu       sync.Mutex
+	closed   bool
 	inflight map[string]*flacJob
 }
 
+var errFlacCacheClosed = errors.New("preview flac cache is closed")
+
 // newFlacCache creates the cache in a fresh private directory under parent
 // (os.MkdirTemp: 0700 and a random name, so two processes sharing parent never
-// touch each other's files and nothing pre-planted is followed). Close removes
-// it; a process that dies without closing leaves it to the OS temp cleanup.
+// touch each other's files and nothing pre-planted is followed), holds that
+// dir's liveness lock until Close, and removes every sibling cache dir whose
+// lock is free: one a process left when it died without Close (a crash, a
+// kill, a container stop). A live sibling holds its lock, so it is never
+// touched. Windows has no lock and no sweep (flaclock_other.go).
 func newFlacCache(parent string, max int64, convert flacConverter) (*flacCache, error) {
-	dir, err := os.MkdirTemp(parent, "canticle-preview-flac-*")
+	dir, err := os.MkdirTemp(parent, flacDirPrefix+"*")
 	if err != nil {
 		return nil, fmt.Errorf("create preview flac cache: %w", err)
 	}
-	return &flacCache{dir: dir, max: max, convert: convert,
+	lock, err := lockFlacDir(dir)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("lock preview flac cache: %w", err), os.RemoveAll(dir))
+	}
+	sweepFlacDirs(parent, dir)
+	return &flacCache{dir: dir, max: max, convert: convert, lock: lock,
 		sem: make(chan struct{}, flacMaxConversions), inflight: map[string]*flacJob{}}, nil
 }
 
-// Close removes the cache directory and every conversion in it.
-func (c *flacCache) Close() error { return os.RemoveAll(c.dir) }
+// sweepFlacDirs removes the dead cache dirs under parent other than own. Only
+// real directories are probed, never a symlink planted under the prefix.
+func sweepFlacDirs(parent, own string) {
+	ents, err := os.ReadDir(parent)
+	if err != nil {
+		slog.Warn("preview flac cache: cannot list for stale dirs", "error", err)
+		return
+	}
+	for _, e := range ents {
+		p := filepath.Join(parent, e.Name())
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), flacDirPrefix) || p == own || !flacDirDead(p) {
+			continue
+		}
+		if err := os.RemoveAll(p); err != nil {
+			slog.Warn("preview flac cache: cannot remove a stale dir", "error", err)
+		}
+	}
+}
+
+// Close cancels every conversion, waits for each to finish (an ffmpeg kill
+// and reap), then removes the cache directory and releases its lock. Get fails
+// once Close has begun. Calling Close again returns the first call's result.
+func (c *flacCache) Close() error {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		for _, job := range c.inflight {
+			job.cancel()
+		}
+		c.mu.Unlock()
+		c.runs.Wait()
+		c.closeErr = os.RemoveAll(c.dir)
+		if c.lock != nil {
+			c.closeErr = errors.Join(c.closeErr, c.lock.Close())
+		}
+	})
+	return c.closeErr
+}
 
 // flacKey names a conversion by source path, mtime and size, so a changed file
 // is converted afresh and an unchanged one is not.
@@ -103,11 +163,16 @@ func (c *flacCache) Get(ctx context.Context, srcPath string, fi fs.FileInfo, ope
 	}
 
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, errFlacCacheClosed
+	}
 	job, ok := c.inflight[key]
 	if !ok {
-		jctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flacConvertTimeout)
+		jctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		job = &flacJob{done: make(chan struct{}), cancel: cancel}
 		c.inflight[key] = job
+		c.runs.Add(1) // under c.mu with closed false, so never after Close's Wait began
 		go c.run(jctx, key, job, open, srcPath, out)
 	}
 	job.waiters++
@@ -139,6 +204,7 @@ func (c *flacCache) Get(ctx context.Context, srcPath string, fi fs.FileInfo, ope
 // into place, so a reader never sees a partial file and a canceled run's
 // cleanup never touches a newer run's file.
 func (c *flacCache) run(ctx context.Context, key string, job *flacJob, open func() (*os.File, error), srcPath, out string) {
+	defer c.runs.Done()
 	defer close(job.done)
 	defer job.cancel()
 	select {
@@ -151,6 +217,10 @@ func (c *flacCache) run(ctx context.Context, key string, job *flacJob, open func
 	if job.err = ctx.Err(); job.err != nil {
 		return
 	}
+	// The timeout starts with the slot, so time queued behind other
+	// conversions never cuts this one short.
+	ctx, cancel := context.WithTimeout(ctx, flacConvertTimeout)
+	defer cancel()
 	src, err := open()
 	if err != nil {
 		job.err = fmt.Errorf("open source: %w", err)
