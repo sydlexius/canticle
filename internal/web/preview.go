@@ -176,10 +176,12 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		BackHref:    "/queue",
 		BackLabel:   "Back to queue",
 		AudioSrc:    "/preview/" + strconv.FormatInt(id, 10) + "/audio",
-		AudioFormat: previewFormat(t.AudioPath), AudioType: previewContentType(t.AudioPath),
-		Lines:     lines,
-		HasWords:  hasWords,
-		Truncated: lrcCut,
+		AudioFormat: previewFormat(t.AudioPath),
+		FlacSrc:     u.previewFlacSrc(id),
+		AudioType:   previewContentType(t.AudioPath),
+		Lines:       lines,
+		HasWords:    hasWords,
+		Truncated:   lrcCut,
 	}
 	// Exactly one `from` value is accepted; a repeated parameter is ambiguous
 	// and falls back to the queue root rather than trusting the first value.

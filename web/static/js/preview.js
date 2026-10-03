@@ -735,11 +735,39 @@
     // wired before the no-lines early return so a lyric-less page still says so.
     var playback = { failed: false, kind: "", onFail: null };
     var errorBox = document.getElementById("mx-preview-audio-error");
+    // The server renders data-flac-src only when the opt-in FLAC fallback is on
+    // (#1243); the page never probes for it. The browser's playback error is the
+    // sole trigger, and the retry happens once.
+    var flacSrc = audio.getAttribute("data-flac-src");
+    var flacTried = false;
+    function retryAsFlac() {
+      flacTried = true;
+      console.warn("preview.js: audio failed to play; retrying once as a server-made FLAC conversion");
+      if (errorBox) {
+        errorBox.textContent = "Converting this track to FLAC so this browser can play it...";
+        errorBox.hidden = false;
+        audio.addEventListener("loadedmetadata", function () {
+          errorBox.hidden = true;
+        }, { once: true });
+      }
+      audio.src = flacSrc;
+      audio.load();
+    }
     function audioFailed() {
       if (playback.failed) {
         return; // the event can follow an audio.error already handled below
       }
+      // Only a decode or unsupported-source error (codes 3, 4) earns the
+      // conversion: never a network or interrupted error (1, 2), and never a
+      // missing or unknown code, which says nothing about the format.
+      if (flacSrc && !flacTried && audio.error && (audio.error.code === 3 || audio.error.code === 4)) {
+        retryAsFlac();
+        return;
+      }
       var msg = audioFailure(audio);
+      if (flacTried) {
+        msg += " The FLAC conversion did not play either.";
+      }
       if (!playback.rejectLogged) {
         console.error("preview.js: audio failed: " + msg + " (media error code " + (audio.error ? audio.error.code : "none") + ")");
       }

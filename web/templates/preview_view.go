@@ -49,7 +49,10 @@ type PreviewView struct {
 	// the stream (#1243).
 	AudioFormat string
 	AudioType   string
-	Lines       []PreviewLine
+	// FlacSrc is the FLAC fallback route the player retries once when the
+	// browser cannot decode AudioSrc; "" when the fallback is off (#1243).
+	FlacSrc string
+	Lines   []PreviewLine
 	// HasWords reports whether any line carries word timings (A2).
 	HasWords bool
 	// Truncated reports that the .lrc exceeded the read bound and the lines

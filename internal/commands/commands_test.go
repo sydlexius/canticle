@@ -1216,6 +1216,22 @@ func TestConfigBumpAudioMtimeGetSet(t *testing.T) {
 	}
 }
 
+func TestConfigPreviewFlacFallbackGetSet(t *testing.T) {
+	cfg := config.Config{}
+	if got, ok := configValue(cfg, "server.preview_flac_fallback"); !ok || got != "false" {
+		t.Fatalf("configValue = %q, %v; want false, true", got, ok)
+	}
+	if !slices.Contains(configKeys(), "server.preview_flac_fallback") {
+		t.Fatal("configKeys missing server.preview_flac_fallback")
+	}
+	if err := setConfigValue(&cfg, "server.preview_flac_fallback", "true"); err != nil || !cfg.Server.PreviewFlacFallback {
+		t.Fatalf("set true: err=%v value=%v", err, cfg.Server.PreviewFlacFallback)
+	}
+	if err := setConfigValue(&cfg, "server.preview_flac_fallback", "maybe"); err == nil {
+		t.Fatal("accepted a non-boolean")
+	}
+}
+
 func TestConfigBilingualOutputGetSetRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		Output: config.OutputConfig{BilingualOutput: true},
