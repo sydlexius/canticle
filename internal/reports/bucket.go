@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/tablesort"
 )
@@ -134,7 +135,23 @@ type BucketFilter struct {
 	// is bound as a parameter. Whether the id names a real library is the
 	// caller's check; an id that matches nothing simply lists nothing.
 	LibraryID int64
+	// Lane keeps only rows whose provider_lane equals it; a value outside Lanes
+	// applies no filter. Every bucket offers it: a row keeps the lane that last
+	// served or was rejected for it through a retire, an upgrade trip and a
+	// verify failure, so the column is not confined to done rows. A row that
+	// never reached a lane (NULL) or was settled by the detector never matches.
+	Lane string
 }
+
+// Lanes are the provider lanes the Lane filter offers, in display order, the
+// names providers defines (the values the worker stamps into provider_lane).
+// The detector's instrumental lane is deliberately not offered.
+func Lanes() []string {
+	return []string{providers.Musixmatch, providers.PetitLyrics, providers.InnerTube}
+}
+
+// ValidLane reports whether l is one of Lanes.
+func ValidLane(l string) bool { return slices.Contains(Lanes(), l) }
 
 // libraryPredicate is the Library filter: an EXISTS over the junction, not a
 // JOIN, so a row linked to several files of one library cannot repeat and
@@ -301,6 +318,10 @@ func bucketQuery(bucket Bucket, f BucketFilter, o tablesort.Order, after tableso
 		args = append(args, q, q)
 	}
 	search += f.chipSQL()
+	if ValidLane(f.Lane) {
+		search += ` AND provider_lane = ?`
+		args = append(args, f.Lane)
+	}
 	if f.LibraryID > 0 {
 		search += ` AND ` + libraryPredicate
 		args = append(args, f.LibraryID)

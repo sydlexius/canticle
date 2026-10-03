@@ -183,3 +183,51 @@ func TestLibraryPredicateUsesPrefixProbe(t *testing.T) {
 		}
 	}
 }
+
+// The Lane filter is an exact match on provider_lane for one of Lanes: a lane
+// differing only in case, the detector lane and a row no lane served are never
+// selectable, a value outside Lanes applies no filter (it is not bound as a
+// lane that matches nothing), it composes with the Library filter, and a row
+// outside done keeps its lane.
+func TestListBucketFilteredByLane(t *testing.T) {
+	d := seedLibraryRows(t)
+	ctx := context.Background()
+	for title, lane := range map[string]string{"only-north": "musixmatch", "only-south": "petitlyrics", "both": "innertube",
+		"north-twice": "Musixmatch"} {
+		if _, err := d.ExecContext(ctx, `UPDATE work_queue SET provider_lane = ? WHERE title = ?`, lane, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range [][3]string{{"detector-settled", "done", "detector"}, {"second-musixmatch", "done", "musixmatch"}, {"queued-musixmatch", "pending", "musixmatch"}} {
+		if _, err := d.ExecContext(ctx,
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, outcome_type, provider_lane)
+             VALUES ('Shelf Band', ?, 'shelf band', ?, 'Album', ?, 'unsynced', ?)`, row[0], row[0], row[1], row[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const all = "both,detector-settled,north-twice,only-north,only-south,second-musixmatch,unlinked"
+	for _, tc := range []struct {
+		name   string
+		bucket Bucket
+		f      BucketFilter
+		want   string
+	}{
+		{"musixmatch", BucketSettled, BucketFilter{Lane: "musixmatch"}, "only-north,second-musixmatch"},
+		{"petitlyrics", BucketSettled, BucketFilter{Lane: "petitlyrics"}, "only-south"},
+		{"innertube", BucketSettled, BucketFilter{Lane: "innertube"}, "both"},
+		{"case variant is not a lane", BucketSettled, BucketFilter{Lane: "Musixmatch"}, all},
+		{"detector is not offered", BucketSettled, BucketFilter{Lane: "detector"}, all},
+		{"unknown value", BucketSettled, BucketFilter{Lane: "x' OR 1=1 --"}, all},
+		{"lane and library", BucketSettled, BucketFilter{Lane: "musixmatch", LibraryID: 1}, "only-north"},
+		{"lane and a library without it", BucketSettled, BucketFilter{Lane: "musixmatch", LibraryID: 2}, ""},
+		{"lane on a queued row", BucketPending, BucketFilter{Lane: "musixmatch"}, "queued-musixmatch"},
+		{"another lane on the queued bucket", BucketPending, BucketFilter{Lane: "innertube"}, ""},
+	} {
+		if got := filteredTitles(t, d, tc.bucket, tc.f); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if got, want := fmt.Sprint(Lanes()), "[musixmatch petitlyrics innertube]"; got != want {
+		t.Errorf("Lanes() = %s, want %s", got, want)
+	}
+}

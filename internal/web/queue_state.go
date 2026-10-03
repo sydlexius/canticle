@@ -41,6 +41,8 @@ type queueViewState struct {
 	// Library is the Library filter's id (0 = all libraries). Parsing keeps any
 	// positive id; the handler drops one that names no library.
 	Library int64
+	// Lane is a reports.Lanes value; anything else is ignored.
+	Lane string
 }
 
 // parseQueueViewState validates the page's query string. A repeated parameter
@@ -51,7 +53,7 @@ type queueViewState struct {
 func parseQueueViewState(v url.Values, bucket reports.Bucket) (queueViewState, error) {
 	var s queueViewState
 	spec := reports.BucketSpec(bucket)
-	keys := []string{"q", "after", "sort", "dir", "library"}
+	keys := []string{"q", "after", "sort", "dir", "library", "lane"}
 	// A repeated chip param is ambiguous only where the bucket offers that chip;
 	// elsewhere it is ignored like any other chip param.
 	for _, c := range reports.BucketChips(bucket) {
@@ -97,6 +99,9 @@ func parseQueueViewState(v url.Values, bucket reports.Bucket) (queueViewState, e
 	if n, err := strconv.ParseInt(v.Get("library"), 10, 64); err == nil && n > 0 {
 		s.Library = n
 	}
+	if l := v.Get("lane"); reports.ValidLane(l) {
+		s.Lane = l
+	}
 	q := v.Get("q")
 	if utf8.RuneCountInString(q) > maxQueueQueryRunes {
 		return s, errors.New("search text too long")
@@ -139,17 +144,20 @@ func (s queueViewState) filterValues() url.Values {
 	if s.Library > 0 {
 		v.Set("library", strconv.FormatInt(s.Library, 10))
 	}
+	if s.Lane != "" {
+		v.Set("lane", s.Lane)
+	}
 	return v
 }
 
 // chipsActive reports whether any chip narrows the list.
 func (s queueViewState) chipsActive() bool {
-	return s.Tier != "" || s.Edited || s.MisSynced || s.Library > 0
+	return s.Tier != "" || s.Edited || s.MisSynced || s.Library > 0 || s.Lane != ""
 }
 
 // filter is the repo filter for this state.
 func (s queueViewState) filter() reports.BucketFilter {
-	return reports.BucketFilter{Query: s.Query, Tier: s.Tier, Edited: s.Edited, MisSynced: s.MisSynced, LibraryID: s.Library}
+	return reports.BucketFilter{Query: s.Query, Tier: s.Tier, Edited: s.Edited, MisSynced: s.MisSynced, LibraryID: s.Library, Lane: s.Lane}
 }
 
 // href is the URL of bucket's page for this state at the given cursor.

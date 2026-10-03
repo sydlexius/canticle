@@ -91,7 +91,9 @@ func TestQueueLibrarySelectAndLinksCarryState(t *testing.T) {
 		t.Fatal("Library select or its label is not rendered inside the search form")
 	}
 	var sel []string
-	for _, m := range libOptionRE.FindAllStringSubmatch(body, -1) {
+	libSel := body[strings.Index(body, `id="mx-queue-library"`):]
+	libSel = libSel[:strings.Index(libSel, "</select>")]
+	for _, m := range libOptionRE.FindAllStringSubmatch(libSel, -1) {
 		sel = append(sel, m[1]+":"+m[3]+":"+m[2])
 	}
 	if got, want := fmt.Sprint(sel), "[:All libraries: 1:Lib One: 2:Lib Two: selected]"; got != want {
@@ -222,5 +224,167 @@ func TestQueueLibraryFilterEmptyState(t *testing.T) {
 	body := getQueue(t, mux, "/queue/finished?library=1", false).Body.String()
 	if !strings.Contains(body, "No tracks match the selected filters.") {
 		t.Error("an empty library-filtered bucket does not say the filters matched nothing")
+	}
+}
+
+// setLanes stamps provider_lane on the seeded done rows: 001 musixmatch, 002
+// petitlyrics, 003 innertube, 004 musixmatch, 005 unstamped; plus a row whose
+// lane differs only in case (006) and a detector-settled row (007), neither of
+// which any lane option may match. 001 and 003 are the only rows with a library
+// besides 002/004.
+func setLanes(t *testing.T, db *sql.DB) {
+	t.Helper()
+	seedSortRows(t, db, "done", [][3]string{
+		{"Done 006", "2026-01-06T00:00:00Z", "2026-01-06T00:00:00Z"},
+		{"Done 007", "2026-01-07T00:00:00Z", "2026-01-07T00:00:00Z"},
+	})
+	for title, lane := range map[string]string{"Done 001": "musixmatch", "Done 002": "petitlyrics", "Done 003": "innertube",
+		"Done 004": "musixmatch", "Done 006": "Musixmatch", "Done 007": "detector"} {
+		if _, err := db.ExecContext(context.Background(), `UPDATE work_queue SET provider_lane = ? WHERE title = ?`, lane, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The Source (provider lane) filter: exact rows, combination with library,
+// search and sort, ignored when not one of the three lanes (a differently cased
+// or detector lane included), offered and applied on every bucket.
+func TestQueueLaneFilter(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedLibraryPage(t, db)
+	setLanes(t, db)
+	// A retired or queued row keeps the lane that last served it.
+	seedSortRows(t, db, "pending", [][3]string{{"Pend 001", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"}, {"Pend 002", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"}})
+	if _, err := db.ExecContext(context.Background(), `UPDATE work_queue SET provider_lane = 'musixmatch' WHERE title = 'Pend 001'`); err != nil {
+		t.Fatal(err)
+	}
+	mux := newReportsUIServer(t, db)
+	// Stamping a lane bumps updated_at (a trigger), so the unfiltered order is read, not typed.
+	all := fmt.Sprint(orderOf(t, mux, "/queue/settled"))
+	if !strings.Contains(all, "Done 006") || !strings.Contains(all, "Done 007") {
+		t.Fatalf("unfiltered settled list = %s, want all seven rows", all)
+	}
+	pendAll := fmt.Sprint(orderOf(t, mux, "/queue/pending"))
+	for target, want := range map[string]string{
+		"/queue/settled?lane=musixmatch":                               "[Done 004 Done 001]",
+		"/queue/settled?lane=innertube":                                "[Done 003]",
+		"/queue/settled?lane=musixmatch&library=2":                     "[]",
+		"/queue/settled?lane=musixmatch&library=1&sort=title&dir=desc": "[Done 004 Done 001]",
+		"/queue/settled?lane=musixmatch&q=done+004":                    "[Done 004]",
+		"/queue/settled?lane=bogus":                                    all,
+		"/queue/settled?lane=":                                         all,
+		"/queue/settled?lane=musixmatch%27--":                          all,
+		// Not one of the three lanes: ignored, never matched case-insensitively.
+		"/queue/settled?lane=Musixmatch": all,
+		"/queue/settled?lane=detector":   all,
+		"/queue/pending?lane=musixmatch": "[Pend 001]",
+		"/queue/pending?lane=bogus":      pendAll,
+	} {
+		if got := fmt.Sprint(orderOf(t, mux, target)); got != want {
+			t.Errorf("GET %s = %s, want %s", target, got, want)
+		}
+	}
+	for target, want := range map[string]int{
+		"/queue/settled?lane=musixmatch&lane=innertube": http.StatusBadRequest,
+		"/queue/pending?lane=musixmatch&lane=innertube": http.StatusBadRequest,
+	} {
+		if rec := getQueue(t, mux, target, false); rec.Code != want {
+			t.Errorf("GET %s = %d, want %d", target, rec.Code, want)
+		}
+	}
+}
+
+var laneOptionRE = regexp.MustCompile(`<option value="([a-z]*)"( selected)?>([^<]*)</option>`)
+
+func TestQueueLaneSelectAndLinksCarryState(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedLibraryPage(t, db)
+	setLanes(t, db)
+	mux := newReportsUIServer(t, db)
+	body := getQueue(t, mux, "/queue/settled?lane=innertube&q=done&sort=title&dir=asc", false).Body.String()
+	if !strings.Contains(body, `<label class="mx-queue-search-label" for="mx-queue-lane">Source</label>`) ||
+		!strings.Contains(body, `<select class="mx-queue-filter" id="mx-queue-lane" name="lane" autocomplete="off" data-queue-autosubmit>`) {
+		t.Fatal("Source select, its label or its auto-submit marker is not rendered")
+	}
+	laneSel := body[strings.Index(body, `id="mx-queue-lane"`):]
+	laneSel = laneSel[:strings.Index(laneSel, "</select>")]
+	var opts []string
+	for _, m := range laneOptionRE.FindAllStringSubmatch(laneSel, -1) {
+		opts = append(opts, m[1]+":"+m[3]+":"+m[2])
+	}
+	// Labeled by laneLabel, as the dashboard and reports label the lanes (lanes
+	// without a case render as their name).
+	if got, want := fmt.Sprint(opts), "[:All sources: musixmatch:musixmatch: petitlyrics:petitlyrics: innertube:YouTube Music: selected]"; got != want {
+		t.Errorf("options = %s, want %s", got, want)
+	}
+	for _, re := range []*regexp.Regexp{regexp.MustCompile(`class="mx-sort-link" href="([^"]*)"`), clearRE, regexp.MustCompile(`class="mx-queue-chip[^"]*" href="([^"]*)"`)} {
+		ms := re.FindAllStringSubmatch(body, -1)
+		if len(ms) == 0 {
+			t.Fatalf("no links matched %s", re)
+		}
+		for _, m := range ms {
+			if h := html2(m[1]); !strings.Contains(h, "lane=innertube") {
+				t.Errorf("link %q drops the lane", h)
+			}
+		}
+	}
+	// Every bucket offers the select.
+	for _, b := range []string{"pending", "processing", "deferred", "failed", "finished", "settled", "unavailable"} {
+		if !strings.Contains(getQueue(t, mux, "/queue/"+b, false).Body.String(), `id="mx-queue-lane"`) {
+			t.Errorf("bucket %s does not offer the Source select", b)
+		}
+	}
+	// An ignored lane value is never reflected: no option selected, no link, no
+	// preview href carries it.
+	for _, bad := range []string{"bogus", "Musixmatch", "detector", "x%22%3E%3Cscript%3E"} {
+		for _, b := range []string{"settled", "pending"} {
+			body = getQueue(t, mux, "/queue/"+b+"?q=done&lane="+bad, false).Body.String()
+			if strings.Contains(body, "lane="+bad) || strings.Contains(body, " selected>") || strings.Contains(body, "<script>") {
+				t.Errorf("bucket %s: lane=%s was carried into the page", b, bad)
+			}
+		}
+	}
+	st, err := parseQueueViewState(url.Values{"lane": {"bogus"}, "library": {"2"}}, reports.BucketSettled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := queuePreviewHref(reports.BucketRow{ID: 7, Previewable: true}, reports.BucketSettled, st); strings.Contains(h, "lane") {
+		t.Errorf("preview link %q carries an invalid lane", h)
+	}
+	st, _ = parseQueueViewState(url.Values{"lane": {"innertube"}}, reports.BucketSettled)
+	if h := queuePreviewHref(reports.BucketRow{ID: 7, Previewable: true}, reports.BucketSettled, st); !strings.Contains(h, "lane=innertube") {
+		t.Errorf("preview link %q drops the lane", h)
+	}
+}
+
+// The preview back link returns to the same Source view, and an invalid value
+// is not reflected into it.
+func TestPreviewBackLinkCarriesBothFilters(t *testing.T) {
+	f := newPreviewFixture(t)
+	id := itoa(f.row(t, f.writeFile(t, f.root, "song.flac")))
+	f.put(t, "song.lrc", pageLRC)
+	for query, href := range map[string]string{
+		"?from=settled&lane=innertube&library=2": "/queue/settled?lane=innertube&amp;library=2",
+		"?from=settled&lane=innertube":           "/queue/settled?lane=innertube",
+		"?from=pending&lane=musixmatch":          "/queue/pending?lane=musixmatch",
+		"?from=settled&lane=bogus":               "/queue/settled",
+		"?from=settled&lane=Musixmatch":          "/queue/settled",
+	} {
+		body := getPath(t, f.mux, "/preview/"+id+query).Body.String()
+		if want := `id="mx-preview-back" href="` + href + `">`; !strings.Contains(body, want) {
+			t.Errorf("query %q: back link missing %s", query, want)
+		}
+	}
+}
+
+// A Source filter that matches no row says so, with no search and no chip.
+func TestQueueLaneFilterEmptyState(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedLibraryPage(t, db)
+	mux := newReportsUIServer(t, db)
+	for _, target := range []string{"/queue/finished?lane=innertube", "/queue/settled?lane=musixmatch"} {
+		if !strings.Contains(getQueue(t, mux, target, false).Body.String(), "No tracks match the selected filters.") {
+			t.Errorf("GET %s does not say the filters matched nothing", target)
+		}
 	}
 }
