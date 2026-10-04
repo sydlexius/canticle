@@ -123,7 +123,7 @@ bash scripts/ci-shards.sh verify          # assert exactly-once package coverage
 
 `rest` is the **dynamic remainder** -- everything no named shard claims -- so a newly added package automatically lands in a shard.
 
-Two packages are heavy enough that a shard of their own would still be the pole (`internal/commands` at 252s, `internal/queue` at 178s of measured CI time), so they are *partitioned by test name*: a round-robin over sorted test names splits each into buckets (`commands-1..3`, `queue-1..2`) selected with `-run`. Before relying on a new partition, confirm each bucket passes alone, shuffled, under `-race`.
+Three packages are heavy enough that a shard of their own would still be the pole (`internal/commands` at 252s, `internal/web` at 248s, `internal/queue` at 178s of measured CI time), so they are *partitioned by test name*: a round-robin over sorted test names splits each into buckets (`commands-1..3`, `web-1..3`, `queue-1..2`) selected with `-run`. Before relying on a new partition, confirm each bucket passes alone, shuffled, under `-race`.
 
 To rebalance, edit the `SHARDS` / `BUCKETS` maps at the top of the script and re-run `verify`; the matrix regenerates from them. Base the split on **CI** timings from the job log, not local ones -- the ratio between the two is not stable.
 

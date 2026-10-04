@@ -35,6 +35,7 @@
   "internal/verification": 80,
   "internal/version": 100,
   "internal/watcher": 89,
+  "internal/web": 91,
   "internal/webauth": 90,
   "internal/worker": 83
 }
