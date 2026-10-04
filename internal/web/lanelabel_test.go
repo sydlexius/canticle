@@ -19,7 +19,8 @@ func TestLaneLabel(t *testing.T) {
 	}{
 		{"detector lane gets the full display name", "detector", "Instrumental Detector"},
 		{"innertube lane gets the full display name", "innertube", "YouTube Music"},
-		{"provider lanes pass through unchanged", "musixmatch", "musixmatch"},
+		{"musixmatch gets its proper name", "musixmatch", "Musixmatch"},
+		{"petitlyrics gets its proper name", "petitlyrics", "PetitLyrics"},
 		{"unmapped lane passes through rather than blanking", "somefuturelane", "somefuturelane"},
 		{"empty lane stays empty", "", ""},
 	}
@@ -47,8 +48,8 @@ func TestBuildProviderTilesAppliesLaneLabel(t *testing.T) {
 	if tiles[0].Label != "Instrumental Detector" {
 		t.Errorf("detector tile Label = %q; want %q", tiles[0].Label, "Instrumental Detector")
 	}
-	if tiles[1].Label != "musixmatch" {
-		t.Errorf("provider tile Label = %q; want it unchanged", tiles[1].Label)
+	if tiles[1].Label != "Musixmatch" {
+		t.Errorf("provider tile Label = %q; want it relabeled", tiles[1].Label)
 	}
 }
 
@@ -68,8 +69,8 @@ func TestBuildRecentRowsAppliesLaneLabel(t *testing.T) {
 	if rows[0].Lane != "Instrumental Detector" {
 		t.Errorf("detector row Lane = %q; want %q", rows[0].Lane, "Instrumental Detector")
 	}
-	if rows[1].Lane != "musixmatch" {
-		t.Errorf("provider row Lane = %q; want it unchanged", rows[1].Lane)
+	if rows[1].Lane != "Musixmatch" {
+		t.Errorf("provider row Lane = %q; want it relabeled", rows[1].Lane)
 	}
 }
 
