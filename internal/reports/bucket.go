@@ -92,6 +92,14 @@ type BucketRow struct {
 	// tier may be stale) is not offered to the player. Decided in SQL from the
 	// row's recorded state, never by touching the disk.
 	Previewable bool
+	// LineEditable is PreviewTarget.LineEditable's predicate (lineEditableSQL),
+	// so the list's "Preview / edit timing" link and the editor's gate share one
+	// database predicate; the preview page may still decline the editor on what
+	// it reads from disk (word timing in the file, a truncated or missing sidecar). Edited and OffsetMS are the hand-edit mark (lyric_edited_at set,
+	// lyric_offset_ms), the same predicate as the Hand-edited chip.
+	LineEditable bool
+	Edited       bool
+	OffsetMS     int64
 	// SortVal is the row's value under the listing's sort, encoded for a
 	// tablesort.Cursor ("n" when NULL or unsorted); the next page's cursor reads it.
 	SortVal string
@@ -347,6 +355,7 @@ func bucketQuery(bucket Bucket, f BucketFilter, o tablesort.Order, after tableso
                 COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, ''),
                 COALESCE(status = 'done' AND outcome_type = 'synced'
                  AND ((` + wordTierPredicate + `) OR (` + lineTierPredicate + `)), 0),
+                COALESCE(` + lineEditableSQL + `, 0), ` + editedPredicate + `, COALESCE(lyric_offset_ms, 0),
                 ` + spec.SelectExpr(o) + `
          FROM work_queue
          WHERE (` + pred + `)` + keyset + search + `
@@ -381,7 +390,8 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 			sv any
 		)
 		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
-			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable, &sv); err != nil {
+			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable,
+			&it.LineEditable, &it.Edited, &it.OffsetMS, &sv); err != nil {
 			return nil, fmt.Errorf("reports: scan bucket row: %w", err)
 		}
 		it.SortVal = tablesort.EncodeValue(sv)

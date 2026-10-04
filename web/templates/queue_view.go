@@ -127,4 +127,11 @@ type QueueRow struct {
 	// PreviewHref is the /preview/{id} player link, set only for a row with a
 	// synced .lrc; empty renders no link.
 	PreviewHref string
+	// PreviewLabel is the link text: "Preview / edit timing" on a line-editable
+	// row, "Preview" otherwise (the editor is read-only on a word-synced row).
+	PreviewLabel string
+	// Edited marks a hand-edited row; EditedTitle is its badge tooltip, the
+	// saved offset ("+0.60 s").
+	Edited      bool
+	EditedTitle string
 }
