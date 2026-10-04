@@ -390,7 +390,7 @@ func TestQueueLaneFilterEmptyState(t *testing.T) {
 }
 
 // seedReasons adds rows with a recorded failure: failed 001 write, 002 network,
-// 003 no reason, 004 write; deferred 005 miss, 006 network (lane musixmatch),
+// 003 no reason, 004 write, 009 miss (one lane missed, one failed); deferred 005 miss, 006 network (lane musixmatch),
 // 008 write (lane petitlyrics); unavailable 007 miss. Titles are invented.
 func seedReasons(t *testing.T, db *sql.DB) {
 	t.Helper()
@@ -403,6 +403,7 @@ func seedReasons(t *testing.T, db *sql.DB) {
 		{"Other 005", "deferred", "lane a: musixmatch: no results found"},
 		{"Other 006", "deferred", "lane a: transport error"},
 		{"Other 007", "unavailable", "miss limit reached"},
+		{"Other 009", "failed", "lane a: musixmatch: no results found; lane b: unexpected response shape"},
 	} {
 		if _, err := db.ExecContext(context.Background(),
 			`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, last_error)
@@ -438,7 +439,8 @@ func TestQueueReasonFilter(t *testing.T) {
 		"/queue/failed?reason=":                              failedAll,
 		"/queue/failed?reason=write%27--":                    failedAll,
 		"/queue/failed?reason=WRITE":                         failedAll,
-		"/queue/failed?reason=miss":                          failedAll, // a category this bucket does not offer
+		"/queue/failed?reason=miss":                          "[Other 009]",
+		"/queue/failed?reason=gone":                          failedAll, // not a category
 		"/queue/pending?reason=write":                        pendAll,
 		"/queue/settled?reason=none":                         fmt.Sprint(orderOf(t, mux, "/queue/settled")),
 		"/queue/deferred?reason=network&lane=musixmatch":     "[Other 006]",
@@ -476,7 +478,7 @@ func TestQueueReasonSelectAndLinksCarryState(t *testing.T) {
 	for _, m := range reasonOptionRE.FindAllStringSubmatch(sel, -1) {
 		opts = append(opts, m[1]+":"+m[3]+":"+m[2])
 	}
-	want := "[:All reasons: none:No reason recorded: write:Write or file error: selected throttle:Rate limited or refused: network:Server or network error: other:Other:]"
+	want := "[:All reasons: none:No reason recorded: miss:Not found or no lyrics: write:Write or file error: selected throttle:Rate limited or refused: network:Server or network error: other:Other:]"
 	if got := fmt.Sprint(opts); got != want {
 		t.Errorf("options = %s, want %s", got, want)
 	}

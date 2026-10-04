@@ -406,9 +406,9 @@ func TestReasonUnknownValueAppliesNoFilter(t *testing.T) {
 			}
 		}
 	}
-	if HasReason(BucketFinished, ReasonNone) || ReasonCategories(BucketSettled) != nil || HasReason(BucketFailed, ReasonMiss) ||
+	if HasReason(BucketFinished, ReasonNone) || ReasonCategories(BucketSettled) != nil || !HasReason(BucketFailed, ReasonMiss) ||
 		ReasonCategories(BucketUnavailable) != nil || ValidReason("gone") {
-		t.Error("a bucket offers a reason it cannot hold")
+		t.Error("a bucket offers a reason it cannot hold, or Errored lacks miss")
 	}
 	if got := ReasonCategories(BucketDeferred); len(got) != 6 || got[2].Label != "Write or file error" {
 		t.Errorf("deferred categories = %+v", got)

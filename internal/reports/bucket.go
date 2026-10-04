@@ -528,13 +528,15 @@ var reasonDefs = []reasonDef{
 // reasonOffered is the ONE place the categories per bucket are decided, in
 // display order: only those the worker and queue can write there. Retrying holds
 // benign misses, parked lanes (Defer, DeferRefused) and a word recheck's failed
-// write; Errored holds hard failures (Fail). Given up is not listed: RetireMiss
+// write; Errored holds hard failures (Fail), which can still carry a miss
+// message: a dispatch where one lane missed and another failed in a shape no
+// marker names is failed with both texts. Given up is not listed: RetireMiss
 // is its only writer, so every row there reads "miss limit reached" and a filter
 // would be vacuous. A category a bucket does not list is never offered or
-// honored (a benign miss never fails).
+// honored.
 var reasonOffered = map[Bucket][]string{
 	BucketDeferred: {ReasonNone, ReasonMiss, ReasonWrite, ReasonThrottle, ReasonNetwork, ReasonOther},
-	BucketFailed:   {ReasonNone, ReasonWrite, ReasonThrottle, ReasonNetwork, ReasonOther},
+	BucketFailed:   {ReasonNone, ReasonMiss, ReasonWrite, ReasonThrottle, ReasonNetwork, ReasonOther},
 }
 
 // reasonCaseSQL is the CASE expression yielding a row's category key. Built once
