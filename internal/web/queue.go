@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -181,7 +182,30 @@ func buildQueueRow(row reports.BucketRow, from reports.Bucket, state queueViewSt
 		UpdatedAt:     formatQueueTime(row.UpdatedAt),
 		Libraries:     libs,
 		PreviewHref:   queuePreviewHref(row, from, state),
+		PreviewLabel:  queuePreviewLabel(row),
+		Edited:        row.Edited,
+		EditedTitle:   formatEditOffset(row.OffsetMS),
 	}
+}
+
+// formatEditOffset renders a saved offset in seconds with an explicit sign; a
+// value that rounds to zero at two decimals is "0.00 s" (no "+0.00"/"-0.00"),
+// matching the editor's own zero.
+func formatEditOffset(ms int64) string {
+	s := fmt.Sprintf("%+.2f", float64(ms)/1000)
+	if s == "+0.00" || s == "-0.00" {
+		s = "0.00"
+	}
+	return s + " s"
+}
+
+// queuePreviewLabel is the player link text: the editor is writable only on a
+// line-editable row (reports.BucketRow.LineEditable).
+func queuePreviewLabel(row reports.BucketRow) string {
+	if row.LineEditable {
+		return "Preview / edit timing"
+	}
+	return "Preview"
 }
 
 // queuePreviewHref is the player link for a row whose sidecar is a synced

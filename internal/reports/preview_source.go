@@ -97,7 +97,7 @@ func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, erro
 	t := PreviewTarget{ID: id}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT artist, title, album, status, COALESCE(sync_tier, ''), source_path,
-		        COALESCE(status = 'done' AND outcome_type = 'synced' AND `+lineTierPredicate+`, 0)
+		        COALESCE(`+lineEditableSQL+`, 0)
 		   FROM work_queue WHERE id = ?`, id,
 	).Scan(&t.Artist, &t.Title, &t.Album, &t.Status, &t.SyncTier, &t.AudioPath, &t.LineEditable)
 	if errors.Is(err, sql.ErrNoRows) {

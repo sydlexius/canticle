@@ -194,3 +194,18 @@
     min-height: 44px;
   }
 }
+
+/* Edited badge (#1236): reuses .mx-result-tier on its own line under the Preview
+   link, so the longer link text never collides with it. The phone breakpoint
+   gives the link the same 44px tap height as the chips. */
+.mx-queue-edited {
+  display: table;
+  margin-top: 0.25rem;
+}
+@media (max-width: 767.98px) {
+  .mx-queue-preview {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+}
