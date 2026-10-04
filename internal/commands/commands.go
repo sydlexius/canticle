@@ -2451,7 +2451,7 @@ func (b *sweepBackup) report(row prune.PrunedRow) error {
 		b.unrecorded++
 		return nil
 	}
-	if err := appendReconcilePathsBackup(b.f, reconcilePathsBackupRecord{Action: "pruned", SourcePath: row.SourcePath, ScanResultIDs: row.ScanResultIDs, WorkItemIDs: row.WorkItemIDs, Inputs: row.Inputs}); err != nil {
+	if err := appendReconcilePathsBackup(b.f, prunedBackupRecord(row)); err != nil {
 		b.unrecorded++
 		if b.firstErr == nil {
 			b.firstErr = err
@@ -2470,6 +2470,13 @@ func (b *sweepBackup) close() {
 			slog.Warn("path-reconciliation sweep failed to close its backup file", "error", err)
 		}
 	}
+}
+
+// prunedBackupRecord is the "pruned" record of one deleted source, shared by
+// the serve sweeper and `scan reconcile-paths`.
+func prunedBackupRecord(row prune.PrunedRow) reconcilePathsBackupRecord {
+	return reconcilePathsBackupRecord{Action: "pruned", SourcePath: row.SourcePath, ScanResultIDs: row.ScanResultIDs,
+		WorkItemIDs: row.WorkItemIDs, Inputs: row.Inputs, WorkStates: row.States}
 }
 
 // runWatcher runs the optional filesystem watcher, triggering a targeted scan of

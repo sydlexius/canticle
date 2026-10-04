@@ -19,6 +19,14 @@ import (
 // cannot hide behind an mtime that was already stored.
 const dirSettleMargin = time.Minute
 
+// goneGrace is the age past which a gone mark counts as overdue (#1262): how
+// long a row has been gone inside a surviving directory with nothing to relink
+// it to. Wall-clock, not a sweep count: serve restarts nightly and sweeps at
+// startup, so a count would run out in days on one deployment and months on
+// another. Nothing is deleted on it here: it only splits AgingCounts, and the
+// follow-up that ages such rows out consumes it.
+const goneGrace = 7 * 24 * time.Hour
+
 // dirMtimes is the Directory-granularity sweep's change detector (#1262). A
 // recorded directory costs one stat; its row files are stat'ed exactly only
 // when it is unrecorded, its mtime differs from the stored one (an in-folder
@@ -33,7 +41,7 @@ const dirSettleMargin = time.Minute
 // differs) is recorded like any other: it is retried only on a directory
 // change, a scan insert, or `scan reconcile-paths`, not when the owner goes.
 //
-// ASSUMPTION, not testable here: the directory mtime seen through the library
+// ASSUMPTION, verified on the Unraid user share (2026-10-03): the directory mtime seen through the library
 // path moves on an in-folder change. A union/FUSE share that reports a
 // directory's attributes from one branch only could hide a swap on another.
 type dirMtimes struct {
@@ -43,6 +51,10 @@ type dirMtimes struct {
 	offline  []string // configured library roots that are unavailable
 	stored   map[string]dirRecord
 	seen     map[string]*dirObs
+	// since is prune_gone_since (path -> unix seconds when first seen gone and
+	// unrelinkable); changed names the paths save must write back.
+	since   map[string]int64
+	changed map[string]bool
 }
 
 // dirRecord is one stored row; goneMark is NULL when every row was present.
@@ -61,7 +73,8 @@ type dirObs struct {
 }
 
 func (p *Pruner) loadDirState(ctx context.Context) (*dirMtimes, error) {
-	d := &dirMtimes{stat: p.stat, now: p.now(), stored: map[string]dirRecord{}, seen: map[string]*dirObs{}}
+	d := &dirMtimes{stat: p.stat, now: p.now(), stored: map[string]dirRecord{}, seen: map[string]*dirObs{},
+		since: map[string]int64{}, changed: map[string]bool{}}
 	err := queryRows(ctx, p.db, `SELECT dir, mtime_ns, gone_scan_id FROM prune_dir_state`, nil, func(rows *sql.Rows) error {
 		var dir string
 		var rec dirRecord
@@ -71,6 +84,17 @@ func (p *Pruner) loadDirState(ctx context.Context) (*dirMtimes, error) {
 		d.stored[dir] = rec
 		return nil
 	})
+	if err == nil {
+		err = queryRows(ctx, p.db, `SELECT path, first_seen FROM prune_gone_since`, nil, func(rows *sql.Rows) error {
+			var path string
+			var first int64
+			if err := rows.Scan(&path, &first); err != nil {
+				return err
+			}
+			d.since[path] = first
+			return nil
+		})
+	}
 	if err == nil {
 		err = p.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM scan_results`).Scan(&d.scanMark)
 	}
@@ -115,6 +139,8 @@ func (d *dirMtimes) gone(src string) (isGone, inFolder bool) {
 	_, err := d.stat(src)
 	if errors.Is(err, fs.ErrNotExist) {
 		o.gone++
+	} else {
+		d.forget(src) // seen present, or unreadable: the mark is dropped
 	}
 	o.retry = o.retry || (err != nil && !errors.Is(err, fs.ErrNotExist))
 	return errors.Is(err, fs.ErrNotExist), true
@@ -127,6 +153,36 @@ func (d *dirMtimes) gone(src string) (isGone, inFolder bool) {
 func (d *dirMtimes) relinked(src string) {
 	if d != nil {
 		d.seen[filepath.Dir(src)].gone--
+	}
+}
+
+// mark records when src was first seen gone with nothing to relink it to, if
+// it has no mark yet. first_seen is never rewritten: an existing mark stands
+// whatever the clock says now, and one later than now is simply not overdue.
+// A mark is not STARTED while the directory's mtime is too recent to record
+// (or later than now): under a clock that is behind, a just-removed file would
+// get a first_seen years early and be overdue once the clock is corrected. The
+// directory stays unrecorded, so the next sweep examines it and marks then.
+func (d *dirMtimes) mark(src string) {
+	if o := d.seen[filepath.Dir(src)]; o == nil || !o.record {
+		return
+	}
+	if _, ok := d.since[src]; !ok {
+		d.since[src], d.changed[src] = d.now.Unix(), true
+	}
+}
+
+// forget drops src's mark: the file is back, or the row was relinked or is held
+// for a present sibling or same-identity file. A held row is not marked again
+// until its directory is examined again (its mtime moves, or a scan inserts).
+// A nil d (Exact) is a no-op.
+func (d *dirMtimes) forget(src string) {
+	if d == nil {
+		return
+	}
+	if _, ok := d.since[src]; ok {
+		delete(d.since, src)
+		d.changed[src] = true
 	}
 }
 
@@ -183,6 +239,24 @@ func (d *dirMtimes) saveOnce(ctx context.Context, db *sql.DB) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM prune_dir_state WHERE dir = ?`, dir); err != nil {
 			return err
 		}
+	}
+	for src := range d.changed {
+		if first, ok := d.since[src]; ok {
+			_, err = tx.ExecContext(ctx, `INSERT INTO prune_gone_since (path, first_seen) VALUES (?, ?)
+                ON CONFLICT(path) DO UPDATE SET first_seen = excluded.first_seen`, src, first)
+		} else {
+			_, err = tx.ExecContext(ctx, `DELETE FROM prune_gone_since WHERE path = ?`, src)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// A path no row names any more (deleted, or relinked by another pass) keeps
+	// no mark for a later row at the same path to inherit.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM prune_gone_since
+        WHERE NOT EXISTS (SELECT 1 FROM scan_results WHERE file_path = prune_gone_since.path)
+          AND NOT EXISTS (SELECT 1 FROM work_queue WHERE source_path = prune_gone_since.path)`); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

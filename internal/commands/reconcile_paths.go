@@ -32,6 +32,8 @@ type reconcilePathsBackupRecord struct {
 	ScanResultIDs []int64         `json:"scan_result_ids,omitempty"`
 	WorkItemIDs   []int64         `json:"work_item_ids,omitempty"`
 	Inputs        []models.Inputs `json:"inputs,omitempty"`
+	// WorkStates is each WorkItemIDs row's status and settled state, in order.
+	WorkStates []prune.WorkState `json:"work_states,omitempty"`
 	// NewPath, MBID, ISRC, and Reason are populated for "relinked"/"retained"
 	// records; empty for "pruned". MBID/ISRC are also empty for a same-stem
 	// sibling relink (#1262), which no identity drove.
@@ -134,13 +136,7 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 		if err := openBackup(); err != nil {
 			return err
 		}
-		return appendReconcilePathsBackup(backupFile, reconcilePathsBackupRecord{
-			Action:        "pruned",
-			SourcePath:    row.SourcePath,
-			ScanResultIDs: row.ScanResultIDs,
-			WorkItemIDs:   row.WorkItemIDs,
-			Inputs:        row.Inputs,
-		})
+		return appendReconcilePathsBackup(backupFile, prunedBackupRecord(row))
 	}
 	reportRelinked := func(row prune.RelinkedRow) error {
 		if !args.Yes {
@@ -254,6 +250,16 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 	if res.RelinkOwned+res.RelinkChanged > 0 {
 		_, _ = fmt.Fprintf(out, "reconcile-paths: %d planned relink(s) not applied (%d target file already belongs to another queue row, %d row claimed or changed since it was read)%s\n",
 			res.RelinkOwned+res.RelinkChanged, res.RelinkOwned, res.RelinkChanged, suffixDryRun(args.Yes))
+	}
+	// The periodic sweep's gone marks (#1262), reported as counts only. This
+	// command writes no mark and deletes nothing on one. The marks are not per
+	// library, so a library-scoped run omits the line.
+	if libID == nil {
+		if aging, due, aerr := pruner.AgingCounts(ctx); aerr != nil {
+			slog.Warn("reconcile-paths could not count aging sources", "error", aerr)
+		} else if aging+due > 0 {
+			_, _ = fmt.Fprintf(out, "reconcile-paths: the periodic sweep has marked %d gone source(s) inside a surviving directory with nothing to relink them to, %d of them for over a week; all are kept\n", aging+due, due)
+		}
 	}
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d work_queue row(s) with a stale output_paths destination (skipped: %d ambiguous, %d unfixable, %d stat error, %d malformed, %d raced)%s\n",
 		repairVerb, len(repairRes.Repaired), repairRes.SkippedAmbiguous, repairRes.SkippedUnfixable,

@@ -127,6 +127,16 @@ type PrunedRow struct {
 	WorkItemIDs []int64
 	// Inputs carries the removed work_queue rows' restorable payload for backup.
 	Inputs []models.Inputs
+	States []WorkState // each WorkItemIDs row's state, in the same order
+}
+
+// WorkState is a pruned work_queue row's state, for its backup record.
+type WorkState struct {
+	Status        string `json:"status"`
+	OutcomeType   string `json:"outcome_type,omitempty"`
+	SyncTier      string `json:"sync_tier,omitempty"`
+	TimingOutcome string `json:"timing_outcome,omitempty"`
+	LyricEditedAt string `json:"lyric_edited_at,omitempty"`
 }
 
 // RelinkedRow describes one gone source path whose identity resolved uniquely
@@ -441,6 +451,7 @@ type workRow struct {
 	// is derived from this snapshot, so the write only lands if the column still
 	// holds it.
 	rawOutputPaths string
+	state          WorkState
 }
 
 // retiredAsUnresolvable reports whether EVERY linked work item carries the
@@ -718,6 +729,15 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	var res Result
 	var toPrune []PrunedRow
 	var toRelink []classifiedRelink
+	prunedRow := func(src string, c *candidate) PrunedRow {
+		row := PrunedRow{SourcePath: src, ScanResultIDs: c.scanResultIDs}
+		for _, w := range c.workItems {
+			row.WorkItemIDs = append(row.WorkItemIDs, w.id)
+			row.Inputs = append(row.Inputs, w.inputs)
+			row.States = append(row.States, w.state)
+		}
+		return row
+	}
 	for _, src := range sortedKeys(bySource) {
 		c := bySource[src]
 		if !underAvailableRoot(src, roots) {
@@ -745,6 +765,27 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		cg, err := p.classify(ctx, idx, policy, src, c)
 		if err != nil {
 			return Result{}, err
+		}
+		// THE GONE MARK (#1262). A row gone inside a surviving directory that this
+		// examination could neither relink nor tie to a present file is marked
+		// with when that was first seen. A row held for a present sibling
+		// (ambiguous, owned, another recording, unreadable), for an indexed file
+		// with its MBID/ISRC that is present or cannot be ruled out, or for the
+		// one present file the name tier would relink it to by title, is not
+		// marked and loses its mark: its replacement may be there. A mark changes
+		// nothing about what happens to the row, which is retained as before.
+		markable := policy == policyInFolder && !cg.siblingHeld && cg.outcome != outcomeRelink
+		if markable {
+			held, err := p.identityHeld(ctx, src, c, roots)
+			if err != nil {
+				return Result{}, err
+			}
+			markable = !held
+		}
+		if markable {
+			ds.mark(src)
+		} else {
+			ds.forget(src)
 		}
 		switch cg.outcome {
 		case outcomeSettled:
@@ -784,12 +825,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		case outcomeRelink:
 			toRelink = append(toRelink, cg.classifiedRelink)
 		case outcomePrune:
-			row := PrunedRow{SourcePath: src, ScanResultIDs: c.scanResultIDs}
-			for _, w := range c.workItems {
-				row.WorkItemIDs = append(row.WorkItemIDs, w.id)
-				row.Inputs = append(row.Inputs, w.inputs)
-			}
-			toPrune = append(toPrune, row)
+			toPrune = append(toPrune, prunedRow(src, c))
 		}
 	}
 	res.Pruned = toPrune
@@ -923,6 +959,10 @@ type classified struct {
 	// committed -- collapsing the two is how a dry run ends up claiming a write it
 	// never made.
 	shouldRetire bool
+	// siblingHeld marks a row the sibling tier stopped on a PRESENT same-name
+	// file it would not relink to, or one the name tier would relink. Such a
+	// row is never marked gone.
+	siblingHeld bool
 	classifiedRelink
 }
 
@@ -1014,6 +1054,13 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		// 1.0, so a lone survivor is Unique and two or more trip the margin rule
 		// as a Conflict. That is exactly the wanted semantics, and it keeps one
 		// shared definition of a name verdict rather than a second private one.
+		nameHeld := false
+		if policy == policyInFolder {
+			var err error
+			if nameHeld, _, _, err = p.tryNameRelink(ctx, idx, PolicyFull, src, c); err != nil {
+				return classified{}, err
+			}
+		}
 		reason := "identity absent, and no present file shares this title; never deleted on a guess"
 		if ok, why, cls, err := p.tryNameRelink(ctx, idx, policy, src, c); err != nil {
 			// NEVER swallow this error. The exact tier below propagates its pool
@@ -1036,10 +1083,11 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		// An 'unavailable' row (#477) is treated identically: already out of the
 		// eligible set, so a declined tier leaves it untouched and uncounted.
 		if c.settled && (c.retiredAsUnresolvable() || c.holdsUnavailable()) {
-			return classified{outcome: outcomeSettled}, nil
+			return classified{outcome: outcomeSettled, siblingHeld: nameHeld}, nil
 		}
 		return classified{
-			outcome: outcomeRetain,
+			outcome:     outcomeRetain,
+			siblingHeld: nameHeld,
 			retained: RetainedRow{
 				SourcePath: src,
 				// The reason distinguishes WHY the tier declined -- not eligible,
@@ -1393,6 +1441,7 @@ func (p *Pruner) trySiblingRelink(ctx context.Context, lib *int64, policy Policy
 			// An identity-less row that is still work is retired as well, as in
 			// classify's own retain: left eligible, it is re-fetched forever (#732).
 			shouldRetire:     policy == PolicyFull && !c.settled && noIdentity,
+			siblingHeld:      true,
 			classifiedRelink: classifiedRelink{src: src, c: c},
 		}
 	}
@@ -1400,7 +1449,7 @@ func (p *Pruner) trySiblingRelink(ctx context.Context, lib *int64, policy Policy
 	// row that is already settled drops out unreported, as it did then.
 	stop := func(reason string) classified {
 		if c.settled && noIdentity {
-			return classified{outcome: outcomeSettled}
+			return classified{outcome: outcomeSettled, siblingHeld: true}
 		}
 		return retain(reason)
 	}
@@ -1984,6 +2033,46 @@ func (idx *presentIndex) detail(libraryID *int64, ref string) presentRowDetail {
 	return idx.details[key][ref]
 }
 
+// identityHeld reports whether another indexed file with src's MBID or ISRC is
+// present (or unreadable): one indexed query, a stat per match, no relink.
+// A match under no available root cannot be ruled out, so it holds too.
+func (p *Pruner) identityHeld(ctx context.Context, src string, c *candidate, roots []string) (bool, error) {
+	if c.mbid == "" && c.isrc == "" {
+		return false, nil
+	}
+	var paths []string
+	// Each arm repeats its partial index's own predicate so the index is usable.
+	if err := queryRows(ctx, p.db, `SELECT DISTINCT file_path FROM scan_results WHERE file_path != ?
+        AND ((recording_mbid = ? AND recording_mbid != '') OR (isrc = ? AND isrc != ''))`,
+		[]any{src, c.mbid, c.isrc}, func(rows *sql.Rows) error {
+			paths = append(paths, "")
+			return rows.Scan(&paths[len(paths)-1])
+		}); err != nil {
+		return false, fmt.Errorf("prune: read same-identity files: %w", err)
+	}
+	for _, path := range paths { // statted only after the rows are closed
+		if !underAvailableRoot(path, roots) || pathExists(p.stat, path) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// AgingCounts reports how many gone sources the periodic sweep has marked as
+// gone inside a surviving directory with nothing to relink them to: those
+// marked for under goneGrace, and those marked for longer.
+func (p *Pruner) AgingCounts(ctx context.Context) (aging, due int, err error) {
+	// A mark whose rows another pass already removed is not counted.
+	err = p.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(first_seen <= ?), 0) FROM prune_gone_since g
+        WHERE EXISTS (SELECT 1 FROM scan_results WHERE file_path = g.path)
+           OR EXISTS (SELECT 1 FROM work_queue WHERE source_path = g.path)`,
+		p.now().Add(-goneGrace).Unix()).Scan(&aging, &due)
+	if err != nil {
+		return 0, 0, fmt.Errorf("prune: count aging sources: %w", err)
+	}
+	return aging - due, due, nil
+}
+
 // availableRoots returns the configured library root paths that are currently
 // mounted and populated. Deletion is confined to sources under these roots so an
 // unmounted or unavailable library cannot trigger a mass prune. A root must be
@@ -2084,12 +2173,13 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		return nil, fmt.Errorf("prune: gather scan_results: %w", err)
 	}
 
-	wqQuery := `SELECT id, artist, title, outdir, filename, source_path, output_paths, status, isrc, mbid, last_error FROM work_queue WHERE source_path != ''`
+	const stateCols = `, COALESCE(wq.outcome_type, ''), COALESCE(wq.sync_tier, ''), COALESCE(wq.timing_outcome, ''), COALESCE(wq.lyric_edited_at, '')` // for the backup record
+	wqQuery := `SELECT id, artist, title, outdir, filename, source_path, output_paths, status, isrc, mbid, last_error` + stateCols + ` FROM work_queue wq WHERE source_path != ''`
 	var wqArgs []any
 	if libraryID != nil {
 		// Library-scope work_queue through the junction so a scoped sweep only
 		// prunes queue rows belonging to that library.
-		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.outdir, wq.filename, wq.source_path, wq.output_paths, wq.status, wq.isrc, wq.mbid, wq.last_error
+		wqQuery = `SELECT DISTINCT wq.id, wq.artist, wq.title, wq.outdir, wq.filename, wq.source_path, wq.output_paths, wq.status, wq.isrc, wq.mbid, wq.last_error` + stateCols + `
                    FROM work_queue wq
                    JOIN work_queue_scan_results j ON j.work_queue_id = wq.id
                    JOIN scan_results sr ON sr.id = j.scan_result_id
@@ -2106,14 +2196,15 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		var id int64
 		var artist, title, outdir, filename, source, outputPaths, status string
 		var isrc, mbid, lastError sql.NullString
-		if err := rows.Scan(&id, &artist, &title, &outdir, &filename, &source, &outputPaths, &status, &isrc, &mbid, &lastError); err != nil {
+		var st WorkState
+		if err := rows.Scan(&id, &artist, &title, &outdir, &filename, &source, &outputPaths, &status, &isrc, &mbid, &lastError, &st.OutcomeType, &st.SyncTier, &st.TimingOutcome, &st.LyricEditedAt); err != nil {
 			return err
 		}
 		if !sc.matches(source) {
 			return nil
 		}
 		c := ensureCandidate(bySource, source)
-		if status == "processing" {
+		if st.Status = status; status == "processing" {
 			c.processing = true
 			return nil
 		}
@@ -2152,6 +2243,7 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 			lastError:      lastError.String,
 			status:         status,
 			rawOutputPaths: outputPaths,
+			state:          st,
 		})
 		// work_queue.isrc/mbid (migration 033, the provider's resolved identity
 		// at fetch time) is only a FALLBACK: scan_results' tag-read identity is
@@ -2348,7 +2440,7 @@ func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDe
 				return 0, 0, 0, nil, fmt.Errorf("prune: delete work_queue %d: %w", id, err)
 			}
 			if rowsAffected(res) > 0 {
-				done.WorkItemIDs, done.Inputs = append(done.WorkItemIDs, id), append(done.Inputs, row.Inputs[i])
+				done.WorkItemIDs, done.Inputs, done.States = append(done.WorkItemIDs, id), append(done.Inputs, row.Inputs[i]), append(done.States, row.States[i])
 			}
 			workDeleted += rowsAffected(res)
 		}

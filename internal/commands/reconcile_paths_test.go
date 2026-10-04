@@ -687,3 +687,76 @@ func TestReconcilePaths_SkippedPruneIsNotCountedAsPruned(t *testing.T) {
 		t.Errorf("backup record = %+v, want the deleted work id only (the scan_results row survived)", rec)
 	}
 }
+
+// TestRunSweeperMarksGoneRowAndKeepsIt: a row whose file is gone inside a
+// surviving directory is marked by the unattended sweep (#1262) and NOT deleted
+// by it, however old the mark; `scan reconcile-paths` reports the marks as a
+// count naming no path. A source that IS deleted (here by the attended command,
+// as before) has each queue row's state in its backup record.
+func TestRunSweeperMarksGoneRowAndKeepsIt(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupReconcilePaths(t)
+	gone := filepath.Join(root, "ArtistA", "01. gone.flac")
+	seedReconcilePathsRow(t, ctx, dbPath, gone)
+	seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistA", "02. kept.flac"))
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	if err := errors.Join(os.Remove(gone), os.Chtimes(filepath.Dir(gone), old, old)); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	if _, err := sqlDB.ExecContext(ctx, `INSERT INTO prune_gone_since (path, first_seen) VALUES (?, ?)`, gone, old.Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(filepath.Dir(dbPath), "sweep-backup.jsonl")
+	cctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { runSweeper(cctx, sqlDB, time.Hour, config.RealignConfig{}, backup); close(done) }()
+	// The sweep stores its directory state last, so a stored directory means it ran.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline) && countRows(t, ctx, dbPath, "prune_dir_state") == 0; {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if dirs, rows, marks := countRows(t, ctx, dbPath, "prune_dir_state"), countRows(t, ctx, dbPath, "work_queue"), countRows(t, ctx, dbPath, "prune_gone_since"); dirs != 1 || rows != 2 || marks != 1 {
+		t.Fatalf("after the sweep: %d stored directories, %d work_queue rows, %d marks, want 1, 2 kept and 1", dirs, rows, marks)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Errorf("a sweep that deleted nothing left a backup file (stat err %v)", err)
+	}
+
+	var buf bytes.Buffer
+	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("dry run exit %d: %s", code, buf.String())
+	}
+	if want := "has marked 1 gone source(s) inside a surviving directory with nothing to relink them to, 1 of them for over a week; all are kept"; !strings.Contains(buf.String(), want) {
+		t.Errorf("dry run output lacks %q: %s", want, buf.String())
+	}
+	buf.Reset() // the marks are not per library: a scoped run says nothing of them
+	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Library: "lib"}); code != 0 || strings.Contains(buf.String(), "has marked") {
+		t.Errorf("library-scoped dry run: exit %d, output %s", code, buf.String())
+	}
+
+	var status string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE source_path = ?`, gone).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	cli := filepath.Join(filepath.Dir(dbPath), "cli-backup.jsonl")
+	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Yes: true, Backup: cli}); code != 0 || countRows(t, ctx, dbPath, "work_queue") != 1 {
+		t.Fatalf("--yes exit %d, work_queue rows = %d, want 1: %s", code, countRows(t, ctx, dbPath, "work_queue"), buf.String())
+	}
+	raw, err := os.ReadFile(cli) //nolint:gosec // reason: a path under the test's temp dir
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	var rec reconcilePathsBackupRecord
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &rec); err != nil {
+		t.Fatalf("backup is not one JSON record: %v: %s", err, raw)
+	}
+	if rec.Action != "pruned" || rec.SourcePath != gone || len(rec.Inputs) != 1 || len(rec.WorkStates) != 1 || rec.WorkStates[0].Status != status || status == "" {
+		t.Errorf("backup record = %+v, want a pruned record carrying the row's state (status %q)", rec, status)
+	}
+}
