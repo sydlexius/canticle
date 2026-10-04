@@ -202,6 +202,9 @@ type Result struct {
 	// too, so RelinkOwned matches the apply's; RelinkChanged is a race, 0 there.
 	RelinkOwned   int
 	RelinkChanged int
+	// PruneSkipped counts the Pruned (planned) sources an apply did not fully
+	// delete: a row in flight, or moved since it was read. 0 in a dry run.
+	PruneSkipped int
 }
 
 // SweepOptions controls a whole-scope reconciliation sweep.
@@ -852,7 +855,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	if len(toPrune) == 0 {
 		return res, nil
 	}
-	scanDeleted, workDeleted, err := p.deletePruned(ctx, toPrune, hooks.Prune)
+	scanDeleted, workDeleted, skipped, err := p.deletePruned(ctx, toPrune, hooks.Prune)
 	if err != nil {
 		return Result{}, err
 	}
@@ -860,6 +863,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	// 'processing' (and was therefore skipped) is not counted as pruned.
 	res.ScanResults = scanDeleted
 	res.WorkItems = workDeleted
+	res.PruneSkipped = skipped
 	return res, nil
 }
 
@@ -2291,45 +2295,60 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
 	return retired, nil
 }
 
-func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report func(PrunedRow) error) (scanDeleted, workDeleted int, retErr error) {
+func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report func(PrunedRow) error) (scanDeleted, workDeleted, skipped int, retErr error) {
 	var applied []PrunedRow // rows that actually lost >=1 row, reported post-commit
 	// Retried whole on SQLITE_BUSY (#978). The report runs only after the commit,
 	// so a rolled-back attempt has written nothing; each attempt resets its tallies.
 	if err := dbpkg.RetryBatchTx(ctx, "prune delete", func() error {
 		var err error
-		scanDeleted, workDeleted, applied, err = p.deletePrunedTx(ctx, pruned)
+		scanDeleted, workDeleted, skipped, applied, err = p.deletePrunedTx(ctx, pruned)
 		return err
 	}); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	// Report only after the deletes are durably committed, so a backup record is
 	// never written for a row that survived (skipped mid-tx or rolled back).
+	// One failure never stops the rest being reported: the deletes stand. The
+	// error names no source path, since the unattended sweep logs it.
+	var failed int
+	var first error
 	if report != nil {
 		for _, row := range applied {
 			if err := report(row); err != nil {
-				return scanDeleted, workDeleted, fmt.Errorf("prune: report %q: %w", row.SourcePath, err)
+				if failed++; first == nil {
+					first = err
+				}
 			}
 		}
 	}
-	return scanDeleted, workDeleted, nil
+	if failed > 0 {
+		return scanDeleted, workDeleted, skipped, fmt.Errorf("prune: report: %d of %d deleted source(s) not recorded, first failure: %w", failed, len(applied), first)
+	}
+	return scanDeleted, workDeleted, skipped, nil
 }
 
 // deletePrunedTx is one attempt of deletePruned's transaction, returning the
-// committed tallies and the rows that actually lost at least one row.
-func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDeleted, workDeleted int, applied []PrunedRow, retErr error) {
+// committed tallies, the rows not fully deleted, and the rows that actually
+// lost at least one row, each listing only the ids deleted. Both deletes name
+// the path the row was READ at: a scan's Enqueue or queue.RepointGoneSource
+// may since have moved it to the present file that replaced its source (#1262).
+func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDeleted, workDeleted, skipped int, applied []PrunedRow, retErr error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, 0, nil, fmt.Errorf("prune: begin tx: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("prune: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	for _, row := range pruned {
-		before := scanDeleted + workDeleted
-		for _, id := range row.WorkItemIDs {
+		before, done := scanDeleted+workDeleted, PrunedRow{SourcePath: row.SourcePath}
+		for i, id := range row.WorkItemIDs {
 			res, err := tx.ExecContext(ctx,
-				`DELETE FROM work_queue WHERE id = ? AND status != 'processing'`, id)
+				`DELETE FROM work_queue WHERE id = ? AND status != 'processing' AND source_path = ?`, id, row.SourcePath)
 			if err != nil {
-				return 0, 0, nil, fmt.Errorf("prune: delete work_queue %d: %w", id, err)
+				return 0, 0, 0, nil, fmt.Errorf("prune: delete work_queue %d: %w", id, err)
+			}
+			if rowsAffected(res) > 0 {
+				done.WorkItemIDs, done.Inputs = append(done.WorkItemIDs, id), append(done.Inputs, row.Inputs[i])
 			}
 			workDeleted += rowsAffected(res)
 		}
@@ -2337,26 +2356,35 @@ func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDe
 			// Skip a scan_results row still linked to an in-flight (processing)
 			// work_queue row, so a worker never has its scan_result_id nulled
 			// (migration 009) and junction cascaded (010) out from under it.
+			// The path guard is defensive and symmetric with the work_queue
+			// one: no production statement re-paths an existing scan_results
+			// row, so it closes no observed race.
 			res, err := tx.ExecContext(ctx,
-				`DELETE FROM scan_results WHERE id = ?
+				`DELETE FROM scan_results WHERE id = ? AND file_path = ?
                  AND NOT EXISTS (
                      SELECT 1 FROM work_queue_scan_results j
                      JOIN work_queue wq ON wq.id = j.work_queue_id
                      WHERE j.scan_result_id = ? AND wq.status = 'processing')`,
-				id, id)
+				id, row.SourcePath, id)
 			if err != nil {
-				return 0, 0, nil, fmt.Errorf("prune: delete scan_results %d: %w", id, err)
+				return 0, 0, 0, nil, fmt.Errorf("prune: delete scan_results %d: %w", id, err)
+			}
+			if rowsAffected(res) > 0 {
+				done.ScanResultIDs = append(done.ScanResultIDs, id)
 			}
 			scanDeleted += rowsAffected(res)
 		}
 		if scanDeleted+workDeleted > before {
-			applied = append(applied, row)
+			applied = append(applied, done)
+		}
+		if scanDeleted+workDeleted-before < len(row.WorkItemIDs)+len(row.ScanResultIDs) {
+			skipped++
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, 0, nil, fmt.Errorf("prune: commit tx: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("prune: commit tx: %w", err)
 	}
-	return scanDeleted, workDeleted, applied, nil
+	return scanDeleted, workDeleted, skipped, applied, nil
 }
 
 // rowsAffected returns the affected-row count, treating a driver that does not

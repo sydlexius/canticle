@@ -1515,7 +1515,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runSweeper(runCtx, sqlDB, sweepInterval, cfg.Realign)
+			runSweeper(runCtx, sqlDB, sweepInterval, cfg.Realign, sweepBackupPath(cfg))
 		}()
 	}
 	// One-shot identity-repair backfill (#466): correct run-together multi-value
@@ -2363,20 +2363,28 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 // the SAME keys and name-match thresholds realign does (#740), so passing the
 // one struct keeps a future knob from having to widen this signature again, and
 // makes it impossible to wire the keys while forgetting the thresholds.
-func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg config.RealignConfig) {
+//
+// Every source a sweep deletes (a removed directory's) is appended to
+// backupPath as a `scan reconcile-paths` "pruned" record; see sweepBackup.
+func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg config.RealignConfig, backupPath string) {
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(rcfg.IdentityKeys)
 	pruner.SetNameMatchThresholds(rcfg.MinConfidence, rcfg.MinMargin)
 	sweep := func() {
-		res, err := pruner.Sweep(ctx, prune.SweepOptions{Granularity: prune.Directory})
+		backup := sweepBackup{path: backupPath}
+		res, err := pruner.Sweep(ctx, prune.SweepOptions{Granularity: prune.Directory, Report: backup.report})
+		backup.close()
 		if err != nil {
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				slog.Warn("path-reconciliation sweep failed; will retry next interval", "error", err)
+				slog.Warn("path-reconciliation sweep returned an error; anything it had already committed stands, and the next interval sweeps again", "error", err)
 			}
 			return
 		}
 		if res.ScanResults > 0 || res.WorkItems > 0 {
 			slog.Info("path-reconciliation sweep pruned rows for vanished sources", "scan_results", res.ScanResults, "work_items", res.WorkItems)
+		}
+		if res.PruneSkipped > 0 {
+			slog.Info("path-reconciliation sweep left sources it had planned to prune: a row was in flight or had moved to another file since it was read", "sources", res.PruneSkipped)
 		}
 		if len(res.Relinked) > 0 {
 			slog.Info("path-reconciliation sweep relinked moved sources", "sources", len(res.Relinked),
@@ -2404,6 +2412,55 @@ func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg
 			return
 		case <-ticker.C:
 			sweep()
+		}
+	}
+}
+
+// sweepBackupPath is the append-only JSONL file the periodic sweep records its
+// deleted rows to, next to the database.
+func sweepBackupPath(cfg config.Config) string {
+	return filepath.Join(filepath.Dir(cfg.DB.Path), "reconcile-paths-serve-backup.jsonl")
+}
+
+// sweepBackup records one sweep's deleted sources. The file is opened (0600,
+// append-only) on the first delete, so a sweep that deletes nothing creates
+// none. A file that cannot be opened or appended to never stops the sweep or
+// discards its result (the deletes already committed): the source is counted
+// as unrecorded and close logs ONE Warn for the sweep, naming no source.
+type sweepBackup struct {
+	path       string
+	f          *os.File
+	openErr    error
+	firstErr   error
+	unrecorded int
+}
+
+func (b *sweepBackup) report(row prune.PrunedRow) error {
+	if b.f == nil && b.openErr == nil {
+		b.f, b.openErr = os.OpenFile(b.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: path is derived from the configured db dir, not untrusted input
+		b.firstErr = b.openErr
+	}
+	if b.openErr != nil {
+		b.unrecorded++
+		return nil
+	}
+	if err := appendReconcilePathsBackup(b.f, reconcilePathsBackupRecord{Action: "pruned", SourcePath: row.SourcePath, ScanResultIDs: row.ScanResultIDs, WorkItemIDs: row.WorkItemIDs, Inputs: row.Inputs}); err != nil {
+		b.unrecorded++
+		if b.firstErr == nil {
+			b.firstErr = err
+		}
+	}
+	return nil
+}
+
+func (b *sweepBackup) close() {
+	if b.unrecorded > 0 {
+		slog.Warn("path-reconciliation sweep could not record every source it deleted in its backup file; the unrecorded sources are not restorable from it",
+			"sources", b.unrecorded, "error", b.firstErr)
+	}
+	if b.f != nil {
+		if err := b.f.Close(); err != nil {
+			slog.Warn("path-reconciliation sweep failed to close its backup file", "error", err)
 		}
 	}
 }

@@ -243,8 +243,12 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 		relinkVerb = "relinked"
 		repairVerb = "repaired"
 	}
+	// A planned prune the apply skipped is not counted; 0 in a dry run (the plan).
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d source(s) with a vanished file (%d scan_results, %d work_items), %s %d source(s) to a moved file, retained %d source(s) with unresolved identity%s\n",
-		verb, len(res.Pruned), res.ScanResults, res.WorkItems, relinkVerb, len(res.Relinked), len(res.Retained), suffixDryRun(args.Yes))
+		verb, len(res.Pruned)-res.PruneSkipped, res.ScanResults, res.WorkItems, relinkVerb, len(res.Relinked), len(res.Retained), suffixDryRun(args.Yes))
+	if res.PruneSkipped > 0 {
+		_, _ = fmt.Fprintf(out, "reconcile-paths: %d planned prune(s) not or only partly applied (the row was in flight, or had moved to another file since it was read); rows already deleted for them are counted above\n", res.PruneSkipped)
+	}
 	// Planned relinks that did not (in a dry run, would not) happen, by reason
 	// (#1262); the counts above already exclude them in both modes.
 	if res.RelinkOwned+res.RelinkChanged > 0 {
