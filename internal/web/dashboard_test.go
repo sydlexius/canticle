@@ -443,8 +443,8 @@ func TestBuildProviderTiles(t *testing.T) {
 		t.Fatalf("buildProviderTiles len = %d, want 2", len(tiles))
 	}
 	mx := tiles[0]
-	if mx.Label != "musixmatch" || mx.Value != "3/4" || mx.Sub != "75%" {
-		t.Errorf("musixmatch tile = %+v, want label=musixmatch value=3/4 sub=75%%", mx)
+	if mx.Label != "Musixmatch" || mx.Value != "3/4" || mx.Sub != "75%" {
+		t.Errorf("musixmatch tile = %+v, want label=Musixmatch value=3/4 sub=75%%", mx)
 	}
 	if !mx.ShowBar || mx.BarPct != "75" || mx.BarLabel != "Hit rate 75%" {
 		t.Errorf("musixmatch bar = {ShowBar:%v BarPct:%q BarLabel:%q}, want {true \"75\" \"Hit rate 75%%\"}", mx.ShowBar, mx.BarPct, mx.BarLabel)

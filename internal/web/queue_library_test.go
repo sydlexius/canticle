@@ -312,9 +312,9 @@ func TestQueueLaneSelectAndLinksCarryState(t *testing.T) {
 	for _, m := range laneOptionRE.FindAllStringSubmatch(laneSel, -1) {
 		opts = append(opts, m[1]+":"+m[3]+":"+m[2])
 	}
-	// Labeled by laneLabel, as the dashboard and reports label the lanes (lanes
-	// without a case render as their name).
-	if got, want := fmt.Sprint(opts), "[:All sources: musixmatch:musixmatch: petitlyrics:petitlyrics: innertube:YouTube Music: selected]"; got != want {
+	// Labeled by laneLabel, as the dashboard and reports label the lanes. The
+	// option VALUE (first field) stays the raw lane name: it is the URL identifier.
+	if got, want := fmt.Sprint(opts), "[:All sources: musixmatch:Musixmatch: petitlyrics:PetitLyrics: innertube:YouTube Music: selected]"; got != want {
 		t.Errorf("options = %s, want %s", got, want)
 	}
 	for _, re := range []*regexp.Regexp{regexp.MustCompile(`class="mx-sort-link" href="([^"]*)"`), clearRE, regexp.MustCompile(`class="mx-queue-chip[^"]*" href="([^"]*)"`)} {

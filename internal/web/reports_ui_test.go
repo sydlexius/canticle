@@ -187,7 +187,7 @@ func TestReportFragmentRecentOutcomes(t *testing.T) {
 	mux := newReportsUIServer(t, sqlDB)
 
 	body := getFragment(t, mux, "recent-outcomes").Body.String()
-	for _, want := range []string{"Artist", "Title", "Result", "synced", "petitlyrics"} {
+	for _, want := range []string{"Artist", "Title", "Result", "synced", "PetitLyrics"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("recent-outcomes fragment missing %q", want)
 		}
@@ -605,7 +605,7 @@ func TestReportFragmentRendersLaneMarks(t *testing.T) {
 	// Every lane still renders its NAME. The mark supplements the text, it never
 	// replaces it -- an icon-only cell would strand both the unmarked lane and
 	// every screen-reader user.
-	for _, want := range []string{"musixmatch", "Instrumental Detector", "petitlyrics"} {
+	for _, want := range []string{"Musixmatch", "Instrumental Detector", "PetitLyrics"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("rendered fragment missing lane name %q", want)
 		}

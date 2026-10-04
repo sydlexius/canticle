@@ -24,6 +24,12 @@ func laneLabel(lane string) string {
 	switch lane {
 	case detectorbackfill.LaneName:
 		return "Instrumental Detector"
+	// The two single-source lanes read as the provider's own name (#1276), the
+	// spelling the layout's credit line uses. Constants for the same reason.
+	case providers.Musixmatch:
+		return "Musixmatch"
+	case providers.PetitLyrics:
+		return "PetitLyrics"
 	// Taken from providers.InnerTube for the same reason the detector's case is
 	// taken from detectorbackfill: that constant IS the persisted value, so the
 	// label can never drift from the lane it labels.
