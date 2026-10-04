@@ -117,6 +117,8 @@ func TestRedactURIValidatesAllowlistedValues(t *testing.T) {
 		{"queue library name is metadata", "/queue/settled?library=SECRETLIBRARY", "/queue/settled?library=REDACTED"},
 		{"lane valid", "/queue/settled?lane=innertube", "/queue/settled?lane=innertube"},
 		{"lane text", "/queue/settled?lane=SECRETARTIST", "/queue/settled?lane=REDACTED"},
+		{"reason valid", "/queue/failed?reason=write", "/queue/failed?reason=write"},
+		{"reason text", "/queue/failed?reason=SECRETARTIST", "/queue/failed?reason=REDACTED"},
 		{"tier line", "/queue/settled?tier=line", "/queue/settled?tier=line"},
 		{"tier word is not offered", "/queue/settled?tier=word", "/queue/settled?tier=REDACTED"},
 		{"tier invalid", "/queue/settled?tier=SECRETARTIST", "/queue/settled?tier=REDACTED"},
