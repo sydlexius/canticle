@@ -5,22 +5,27 @@
 #
 # Usage:
 #   check-commit-signatures.sh            commits in <merge-base>..HEAD, where the
-#                                         base is the merge base with origin/main,
-#                                         else main
+#                                         base is the merge base with origin/main;
+#                                         when origin/main does not resolve, every
+#                                         commit of HEAD no remote-tracking ref has
+#                                         (all of HEAD if there are none)
 #   check-commit-signatures.sh <range>    an explicit rev-list range (A..B)
 #   check-commit-signatures.sh --refs     read pre-push ref lines on STDIN
 #                                         (githooks(5): "<local ref> <local sha>
 #                                         <remote ref> <remote sha>") and check what
 #                                         each ref would send: remote..local, or, for
 #                                         a new branch (all-zero remote sha, or one
-#                                         not present locally), the merge base with
-#                                         origin/main (else main)..local. A delete
+#                                         not present locally), every commit of local
+#                                         that no remote-tracking ref has (all of its
+#                                         history if there are none). A delete
 #                                         (all-zero local sha) sends nothing: skipped.
 #
 # Exit status:
 #   0  every commit in range is signed (or the range is empty)
 #   1  at least one unsigned commit; each is named on stderr with a fix hint
-#   2  setup error (no base resolves, bad range, unreadable commit): FAIL CLOSED
+#   2  setup error (bad range, unreadable commit): FAIL CLOSED. A missing base is NOT
+#      an error: it widens the check to every commit no remote has. A LOCAL branch is
+#      never a boundary, since it is no evidence the remote holds those commits.
 #
 # What "signed" means: the commit object has a `gpgsig` header. PRESENCE only, on
 # purpose. This repo signs with SSH keys (gpg.format=ssh); `git verify-commit` and
@@ -35,27 +40,21 @@ set -uo pipefail
 
 zero_re='^(0{40}|0{64})$'
 
-base_for() { # base_for <sha> -> merge base with origin/main, else main; fails if none
-  local ref b
-  for ref in origin/main main; do
-    b="$(git merge-base "$ref" "$1" 2>/dev/null)" && [ -n "$b" ] && { echo "$b"; return 0; }
-  done
-  return 1
-}
-
 ranges=()
 case "${1:-}" in
   "")
-    base="$(base_for HEAD)" || { echo "check-commit-signatures: cannot resolve a base (origin/main, main); refusing to pass" >&2; exit 2; }
-    ranges+=("$base..HEAD")
+    if base="$(git merge-base origin/main HEAD 2>/dev/null)" && [ -n "$base" ]; then
+      ranges+=("$base..HEAD")
+    else
+      ranges+=("HEAD --not --remotes")
+    fi
     ;;
   --refs)
     while read -r _ lsha _ rsha; do
       [ -n "${lsha:-}" ] || continue
       [[ "$lsha" =~ $zero_re ]] && continue # delete: nothing is sent
       if [[ "${rsha:-}" =~ $zero_re ]] || ! git cat-file -e "${rsha:-x}^{commit}" 2>/dev/null; then
-        base="$(base_for "$lsha")" || { echo "check-commit-signatures: cannot resolve a base for $lsha; refusing to pass" >&2; exit 2; }
-        ranges+=("$base..$lsha")
+        ranges+=("$lsha --not --remotes") # new remote ref: what no remote is known to have
       else
         ranges+=("$rsha..$lsha")
       fi
@@ -67,11 +66,15 @@ esac
 
 bad=0
 for r in "${ranges[@]+"${ranges[@]}"}"; do
-  shas="$(git rev-list "$r" 2>/dev/null)" || { echo "check-commit-signatures: bad range '$r'" >&2; exit 2; }
+  # shellcheck disable=SC2086 # reason: a range entry is deliberately several rev-list words
+  shas="$(git rev-list $r 2>/dev/null)" || { echo "check-commit-signatures: bad range '$r'" >&2; exit 2; }
   for sha in $shas; do
-    hdr="$(git cat-file commit "$sha" 2>/dev/null)" || { echo "check-commit-signatures: cannot read $sha" >&2; exit 2; }
+    raw="$(git cat-file commit "$sha" 2>/dev/null)" || { echo "check-commit-signatures: cannot read $sha" >&2; exit 2; }
     # The header block ends at the first blank line; a message line must not count.
-    if ! printf '%s\n' "$hdr" | sed '/^$/q' | grep -q '^gpgsig '; then
+    # Pure bash: an early-closing pipeline (sed q | grep -q) SIGPIPEs the writer on a
+    # large message and reads a signed commit as unsigned under pipefail.
+    hdr="${raw%%$'\n\n'*}"
+    if [[ $'\n'"$hdr" != *$'\n'"gpgsig "* ]]; then
       echo "UNSIGNED: $(git log -1 --format='%h %s' "$sha")" >&2
       bad=1
     fi

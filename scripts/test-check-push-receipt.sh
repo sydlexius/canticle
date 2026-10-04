@@ -108,6 +108,8 @@ h "receipt pass skips the gate"   0 ""
 # An unsigned commit must be refused BEFORE the receipt fast path (tree-keyed).
 SIG_RC=1 h "unsigned commit beats a passing receipt" 1 ""
 h "PUSH_GATE=full runs full gate" 0 "gate: "      full
+# The override must not bypass the signature check (full gate only checks base..HEAD).
+SIG_RC=1 h "unsigned commit beats PUSH_GATE=full" 1 "" full
 h "PUSH_GATE=skip is rejected"    2 ""            skip
 h "unknown PUSH_GATE is rejected" 2 ""            bogus
 rm -f "$R"

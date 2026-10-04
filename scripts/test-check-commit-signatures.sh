@@ -49,8 +49,16 @@ expect 1 "unsigned commit mid-range fails and is named" "UNSIGNED: .* naked-mid"
 newrepo "$TMP/msg"; unsigned "$TMP/msg" "$(printf 'x\n\ngpgsig fake')"
 expect 1 "gpgsig text in the message does not count" "UNSIGNED" "$TMP/msg"
 
+# No origin/main and no remote-tracking refs: the whole of HEAD is checked (fail
+# closed), never local main as a boundary.
 newrepo "$TMP/nobase"; git -C "$TMP/nobase" update-ref -d refs/remotes/origin/main; git -C "$TMP/nobase" branch -m work
-expect 2 "unresolvable base exits 2" "cannot resolve a base" "$TMP/nobase"
+expect 0 "no remote refs: all-signed history passes" "PASS" "$TMP/nobase"
+unsigned "$TMP/nobase" naked-nobase
+expect 1 "no remote refs: unsigned commit is checked and named" "UNSIGNED: .* naked-nobase" "$TMP/nobase"
+
+# Large signed commit message: must not read as unsigned (SIGPIPE under pipefail).
+newrepo "$TMP/big"; git -C "$TMP/big" commit -q --allow-empty -m bigmsg -m "$(head -c 400000 /dev/zero | tr '\0' 'x' | fold -w 70)"
+expect 0 "signed commit with a large message passes" "PASS" "$TMP/big"
 
 newrepo "$TMP/empty"
 expect 0 "empty range passes" "PASS" "$TMP/empty"
@@ -69,6 +77,14 @@ check_refs 1 "--refs new branch checks vs merge base" "refs/heads/w $tip refs/he
 check_refs 0 "--refs up-to-date ref sends nothing" "refs/heads/w $tip refs/heads/w $tip"
 check_refs 0 "--refs delete is skipped" "refs/heads/w $zero refs/heads/w $first"
 check_refs 1 "--refs existing branch checks remote..local" "refs/heads/w $tip refs/heads/w $first"
+
+# New remote ref whose tip IS local main, with no origin/main: local main is no
+# evidence the remote has it, so the unsigned commit must be caught.
+newrepo "$TMP/newmain"; git -C "$TMP/newmain" update-ref -d refs/remotes/origin/main; unsigned "$TMP/newmain" naked-newmain
+nm=$(git -C "$TMP/newmain" rev-parse HEAD)
+cd "$TMP/newmain" || exit 1
+out=$(printf '%s\n' "refs/heads/main $nm refs/heads/main $zero" | bash "$CHECK" --refs 2>&1); rc=$?
+if [ "$rc" = 1 ] && printf '%s' "$out" | grep -q "UNSIGNED: .* naked-newmain"; then ok "--refs new ref at local main, no origin/main, fails and is named"; else bad "--refs new ref at local main: rc=$rc"; fi
 
 echo "passed=$passed failed=$failed"
 [ "$failed" -eq 0 ]

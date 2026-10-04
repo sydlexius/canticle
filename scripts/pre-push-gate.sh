@@ -85,9 +85,14 @@ if git grep -nIE "$CONFLICT_RE" -- ':!.githooks/*' >/dev/null 2>&1; then
 fi
 
 echo "==> commit signatures (main requires signed commits)"
-# Presence of a gpgsig header on every commit in BASE..HEAD. The pre-push hook also
-# runs this over the refs actually pushed, BEFORE its receipt fast path.
-bash scripts/check-commit-signatures.sh || fail "sign the commits listed above before pushing"
+# Presence of a gpgsig header on every commit in BASE..HEAD. FULL mode only: the
+# pre-push hook checks the refs actually pushed (before this gate runs), and a
+# HEAD-based check here could reject a push over an unrelated unsigned commit.
+if [ "$MODE" = full ]; then
+  bash scripts/check-commit-signatures.sh || fail "sign the commits listed above before pushing"
+else
+  echo "    skipped in the push hook: it already checked the refs being pushed"
+fi
 
 echo "==> product name in user-facing prose"
 # The logotype is "Canticle"; the lowercase form is an IDENTIFIER (module path,
