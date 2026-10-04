@@ -48,7 +48,7 @@ cd "$repo_root"
 #
 #   internal/commands  252.2s -> PARTITIONED 3 ways (~84s each)
 #   internal/queue     178.5s -> PARTITIONED 2 ways (~89s each)
-#   internal/web       111.5s -> its own shard; the projected pole
+#   internal/web       247.7s (was 111.5s) -> PARTITIONED 3 ways (~82s each)
 #   auth               webauth 59.5 + auth 16.4 + secrets 12.7 + server 4.8 = 93.4s
 #   sqlite             instrumentalrecalib 35.6 + purgeprovenance 33.9 + prune 25.6 = 95.1s
 #   scanpath           cache 24.2 + scan 23.9 + db 21.2 + reports 21.2 + identityrepair 17.9 = 108.4s
@@ -61,10 +61,16 @@ cd "$repo_root"
 # be faster than its slowest single package, so 252s and 178s had to be split by
 # test name to come down at all.
 #
-# internal/web is NOT partitioned. It could be, but one test (TestSameOriginGuard,
-# 27.8s) is a quarter of the package, so a name round-robin would leave a ~70s
-# bucket next to a ~40s one -- little gain for an extra runner. Revisit only if
-# web becomes the pole by a wide margin.
+# internal/web was left whole at 111.5s, and is partitioned now (#1282): it grew to
+# 247.7s (336s of job time) and became the pole by a wide margin, the next shard
+# being ~200s. Per-test times from the `Test Shard (web)` log of run 37162519809
+# (457 tests, 246.5s summed) put the round-robin buckets at N=2: 138.2 / 108.3s,
+# N=3: 78.0 / 87.1 / 81.4s, N=4: 61.2 / 49.1 / 77.0 / 59.2s. N=3 is the smallest
+# count whose slowest bucket (~87s of test step, ~170s of job with ~83s of runner
+# overhead) is under the next pole; N=2 (~138s) is not. A fourth bucket would pay
+# a runner for nothing, since the round-robin leaves it lopsided anyway.
+# TestSameOriginGuard (20.5s) bounds how far any further
+# split could go: a bucket cannot be faster than its slowest test.
 # ---------------------------------------------------------------------------
 declare -A SHARDS=(
   [commands]="internal/commands"
@@ -81,6 +87,7 @@ declare -A SHARDS=(
 declare -A BUCKETS=(
   [commands]=3
   [queue]=2
+  [web]=3
 )
 
 # ---------------------------------------------------------------------------
