@@ -19,13 +19,31 @@ import (
 // cannot hide behind an mtime that was already stored.
 const dirSettleMargin = time.Minute
 
-// goneGrace is the age past which a gone mark counts as overdue (#1262): how
-// long a row has been gone inside a surviving directory with nothing to relink
-// it to. Wall-clock, not a sweep count: serve restarts nightly and sweeps at
-// startup, so a count would run out in days on one deployment and months on
-// another. Nothing is deleted on it here: it only splits AgingCounts, and the
-// follow-up that ages such rows out consumes it.
+// goneGrace is how long a row must have been gone inside a surviving directory,
+// with nothing to relink it to, before the periodic sweep deletes it (#1262).
+// Wall-clock, not a sweep count: serve restarts nightly and sweeps at startup,
+// so a count would run out in days on one deployment and months on another. A
+// week outlasts a slow re-rip and a weekend's outage. A constant on purpose:
+// nothing has asked to tune it, and a shorter value only deletes sooner.
 const goneGrace = 7 * 24 * time.Hour
+
+// goneConfirmGap is how long after the sweep that first found a mark due (and
+// recorded confirmed_at) a later sweep must run before it may delete: downtime
+// is not absence, and a clock stepping a week makes every mark due at once.
+const goneConfirmGap = time.Hour
+
+// ageOutMaxPerSweep is the age-out's circuit breaker: more rows due in one
+// sweep reads as a fault (a missing union-share branch), so none is deleted.
+const ageOutMaxPerSweep = 50
+
+// heldMark is the confirmed_at of a mark the tripped breaker holds. No periodic
+// sweep deletes its row or releases it, whatever the count held falls to: only
+// the attended `scan reconcile-paths --yes` does. A sweep drops it when the
+// file is back or the row is relinked or held for a replacement.
+const heldMark = -1
+
+// goneMark is one prune_gone_since row, unix seconds; confirmed 0 is NULL.
+type goneMark struct{ first, confirmed int64 }
 
 // dirMtimes is the Directory-granularity sweep's change detector (#1262). A
 // recorded directory costs one stat; its row files are stat'ed exactly only
@@ -51,9 +69,9 @@ type dirMtimes struct {
 	offline  []string // configured library roots that are unavailable
 	stored   map[string]dirRecord
 	seen     map[string]*dirObs
-	// since is prune_gone_since (path -> unix seconds when first seen gone and
-	// unrelinkable); changed names the paths save must write back.
-	since   map[string]int64
+	// since is prune_gone_since (path -> when first seen gone and unrelinkable);
+	// changed names the paths save must write back.
+	since   map[string]goneMark
 	changed map[string]bool
 }
 
@@ -74,7 +92,7 @@ type dirObs struct {
 
 func (p *Pruner) loadDirState(ctx context.Context) (*dirMtimes, error) {
 	d := &dirMtimes{stat: p.stat, now: p.now(), stored: map[string]dirRecord{}, seen: map[string]*dirObs{},
-		since: map[string]int64{}, changed: map[string]bool{}}
+		since: map[string]goneMark{}, changed: map[string]bool{}}
 	err := queryRows(ctx, p.db, `SELECT dir, mtime_ns, gone_scan_id FROM prune_dir_state`, nil, func(rows *sql.Rows) error {
 		var dir string
 		var rec dirRecord
@@ -85,13 +103,19 @@ func (p *Pruner) loadDirState(ctx context.Context) (*dirMtimes, error) {
 		return nil
 	})
 	if err == nil {
-		err = queryRows(ctx, p.db, `SELECT path, first_seen FROM prune_gone_since`, nil, func(rows *sql.Rows) error {
+		err = queryRows(ctx, p.db, `SELECT path, first_seen, COALESCE(confirmed_at, 0) FROM prune_gone_since`, nil, func(rows *sql.Rows) error {
 			var path string
-			var first int64
-			if err := rows.Scan(&path, &first); err != nil {
+			var m goneMark
+			if err := rows.Scan(&path, &m.first, &m.confirmed); err != nil {
 				return err
 			}
-			d.since[path] = first
+			// first_seen is never rewritten: one later than now is simply not due. A
+			// confirmation later than now, or on a mark found not due, is dropped.
+			// A held mark is never dropped here: only the attended run releases it.
+			if now := d.now.Unix(); m.confirmed > 0 && (m.confirmed > now || now-m.first < int64(goneGrace/time.Second)) {
+				m.confirmed, d.changed[path] = 0, true
+			}
+			d.since[path] = m
 			return nil
 		})
 	}
@@ -133,7 +157,9 @@ func (d *dirMtimes) gone(src string) (isGone, inFolder bool) {
 	if !o.exists {
 		return true, false
 	}
-	if !o.examine {
+	// A row whose grace period has run out is stat'ed by itself: its directory
+	// has not changed, so nothing else in it needs a look.
+	if !o.examine && (d.holding(src) || !d.due(src)) {
 		return false, false
 	}
 	_, err := d.stat(src)
@@ -168,14 +194,66 @@ func (d *dirMtimes) mark(src string) {
 		return
 	}
 	if _, ok := d.since[src]; !ok {
-		d.since[src], d.changed[src] = d.now.Unix(), true
+		d.since[src], d.changed[src] = goneMark{first: d.now.Unix()}, true
 	}
 }
 
-// forget drops src's mark: the file is back, or the row was relinked or is held
-// for a present sibling or same-identity file. A held row is not marked again
-// until its directory is examined again (its mtime moves, or a scan inserts).
-// A nil d (Exact) is a no-op.
+// due reports whether src has been gone for the whole grace period. A clock
+// that stepped backward reads as not due.
+func (d *dirMtimes) due(src string) bool {
+	m, ok := d.since[src]
+	return ok && d.now.Unix()-m.first >= int64(goneGrace/time.Second)
+}
+
+// confirm is the second phase for a due src still gone: the first such sweep
+// records it and reports false; one goneConfirmGap or more later reports true.
+// A held mark is never confirmed, however old: it is counted and stays held.
+func (d *dirMtimes) confirm(src string) bool {
+	m := d.since[src]
+	if m.confirmed == heldMark {
+		return false
+	}
+	if m.confirmed == 0 {
+		m.confirmed = d.now.Unix()
+		d.since[src], d.changed[src] = m, true
+		return false
+	}
+	return d.now.Unix()-m.confirmed >= int64(goneConfirmGap/time.Second)
+}
+
+// holding reports a held mark. In a directory that has not changed it costs no
+// stat and no directory read, however many or few are held.
+func (d *dirMtimes) holding(src string) bool {
+	return d.since[src].confirmed == heldMark
+}
+
+// held counts the candidates whose mark is held as the sweep ends: left
+// unexamined, or examined and found still gone with nothing to tie them to.
+func (d *dirMtimes) held(bySource map[string]*candidate) (n int) {
+	for src := range bySource {
+		if d.holding(src) {
+			n++
+		}
+	}
+	return n
+}
+
+// confirmedDue reports whether src is due and was confirmed long enough ago, or held.
+func (d *dirMtimes) confirmedDue(src string) bool {
+	return d != nil && d.since[src].confirmed != 0 && d.now.Unix()-d.since[src].confirmed >= int64(goneConfirmGap/time.Second)
+}
+
+// aged starts src's grace period if it has none (mark, which may decline), and
+// reports whether it is over.
+func (d *dirMtimes) aged(src string) bool {
+	d.mark(src)
+	return d.due(src)
+}
+
+// forget drops src's mark: the file is back, the row was relinked or is held
+// for a present sibling or same-identity file, or the delete was refused. A
+// refused or held row is not marked again until its directory is examined
+// again (its mtime moves, or a scan inserts). A nil d (Exact) is a no-op.
 func (d *dirMtimes) forget(src string) {
 	if d == nil {
 		return
@@ -241,9 +319,9 @@ func (d *dirMtimes) saveOnce(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	for src := range d.changed {
-		if first, ok := d.since[src]; ok {
-			_, err = tx.ExecContext(ctx, `INSERT INTO prune_gone_since (path, first_seen) VALUES (?, ?)
-                ON CONFLICT(path) DO UPDATE SET first_seen = excluded.first_seen`, src, first)
+		if m, ok := d.since[src]; ok {
+			_, err = tx.ExecContext(ctx, `INSERT INTO prune_gone_since (path, first_seen, confirmed_at) VALUES (?, ?, NULLIF(?, 0))
+                ON CONFLICT(path) DO UPDATE SET first_seen = excluded.first_seen, confirmed_at = excluded.confirmed_at`, src, m.first, m.confirmed)
 		} else {
 			_, err = tx.ExecContext(ctx, `DELETE FROM prune_gone_since WHERE path = ?`, src)
 		}
@@ -252,7 +330,7 @@ func (d *dirMtimes) saveOnce(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	// A path no row names any more (deleted, or relinked by another pass) keeps
-	// no mark for a later row at the same path to inherit.
+	// no grace period for a later row at the same path to inherit.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM prune_gone_since
         WHERE NOT EXISTS (SELECT 1 FROM scan_results WHERE file_path = prune_gone_since.path)
           AND NOT EXISTS (SELECT 1 FROM work_queue WHERE source_path = prune_gone_since.path)`); err != nil {

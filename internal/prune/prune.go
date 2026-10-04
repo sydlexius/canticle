@@ -78,9 +78,8 @@ const (
 	// a row still gone, no scan has indexed anything since (see dirMtimes);
 	// otherwise that directory's row files are stat'ed exactly, so an in-folder
 	// swap or rename is caught on the next sweep (#1262). A row gone inside a surviving directory is relinked or
-	// retained (policyInFolder), never deleted or retired by this unattended
-	// pass: the sweep did not act on such rows at all before, and deleting them
-	// stays with the operator-invoked CLI (an empty nested mountpoint looks the same).
+	// retained (policyInFolder), never retired, and deleted by this unattended
+	// pass only by reconcile's age-out: gone for goneGrace, then confirmed twice.
 	Directory Granularity = iota
 	// Exact stats every candidate source path individually, so a single-file
 	// rename within a still-existing directory is caught. Used by the reactive
@@ -108,7 +107,7 @@ const (
 	PolicyRelinkOrRetain
 	// policyInFolder is the periodic Directory sweep's policy for a row gone
 	// INSIDE a surviving directory (#1262). Like PolicyRelinkOrRetain it never
-	// deletes or retires, and it also never builds the identity pool, which
+	// retires, deletes only by age-out, and never builds the identity pool, which
 	// costs one stat per identity-bearing file in the library: the only relink
 	// it makes is the same-stem sibling's. Relinking by MBID/ISRC or by title
 	// stays with `scan reconcile-paths` and the removed-directory path.
@@ -127,8 +126,18 @@ type PrunedRow struct {
 	WorkItemIDs []int64
 	// Inputs carries the removed work_queue rows' restorable payload for backup.
 	Inputs []models.Inputs
-	States []WorkState // each WorkItemIDs row's state, in the same order
+	// AgedOut marks a source the periodic sweep deleted for having been gone
+	// inside a surviving directory for the whole grace period (#1262).
+	AgedOut bool
+	// Corrects: an AgedOut source is reported BEFORE its delete; if a row then stays, this second report replaces the first.
+	Corrects bool
+	States   []WorkState // each WorkItemIDs row's state, in the same order
 }
+
+// ErrNotRecorded is what a Report hook returns for an AgedOut row whose backup
+// record it could not write and has accounted for itself: the row is kept (an
+// aged-out row is never deleted unrecorded) and the sweep does not fail.
+var ErrNotRecorded = errors.New("prune: backup record not written")
 
 // WorkState is a pruned work_queue row's state, for its backup record.
 type WorkState struct {
@@ -212,6 +221,15 @@ type Result struct {
 	// too, so RelinkOwned matches the apply's; RelinkChanged is a race, 0 there.
 	RelinkOwned   int
 	RelinkChanged int
+	// AgedOut counts the Pruned sources the periodic sweep deleted (in a dry
+	// run, would delete) because they were gone inside a surviving directory
+	// for the whole grace period (#1262).
+	AgedOut int
+	// AgeOutHeld, when non-zero, is the age-out's circuit breaker: that many
+	// sources are held after this sweep. It trips when the sources due plus those
+	// already held exceed ageOutMaxPerSweep (none is deleted, each is held), and
+	// a held source stays held, and counted here, until the attended run.
+	AgeOutHeld int
 	// PruneSkipped counts the Pruned (planned) sources an apply did not fully
 	// delete: a row in flight, or moved since it was read. 0 in a dry run.
 	PruneSkipped int
@@ -271,6 +289,8 @@ type Pruner struct {
 	// test can count stats and inject a stat failure.
 	stat func(string) (fs.FileInfo, error)
 	now  func() time.Time
+	// readDir is the age-out's one directory read.
+	readDir func(string) ([]os.DirEntry, error)
 }
 
 // New returns a Pruner backed by db, with the default identity-key order
@@ -286,6 +306,7 @@ func New(db *sql.DB) *Pruner {
 		minMargin:     defaultMinMargin,
 		stat:          os.Stat,
 		now:           time.Now,
+		readDir:       os.ReadDir,
 	}
 }
 
@@ -351,6 +372,14 @@ func (p *Pruner) Sweep(ctx context.Context, opts SweepOptions) (Result, error) {
 	})
 	// A dry run records nothing, and neither does a library-scoped sweep: it saw
 	// only that library's rows, and the state is per directory, not per library.
+	// Attended and unscoped: the next sweep looks again at what the breaker still
+	// holds. A library-scoped apply releases none: it saw one library's rows, and
+	// releasing the rest would only have the next sweep re-examine and trip again.
+	if err == nil && ds == nil && !opts.DryRun && opts.LibraryID == nil {
+		if _, rerr := p.db.ExecContext(ctx, `UPDATE prune_gone_since SET confirmed_at = first_seen WHERE confirmed_at = ?`, heldMark); rerr != nil {
+			slog.Warn("path reconciliation could not release the age-out marks the periodic sweep is holding", "error", rerr)
+		}
+	}
 	if err != nil || ds == nil || opts.DryRun || opts.LibraryID != nil {
 		return res, err
 	}
@@ -723,11 +752,19 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	idx := newPresentIndex(p.db, roots)
 	idx.scopeLibrary, idx.stat = libraryID, p.stat
 
+	// An Exact sweep (`scan reconcile-paths`, attended) is the circuit breaker's
+	// exit: it also deletes the rows whose marks are due and confirmed, uncapped.
+	marks := ds
 	if ds != nil {
 		ds.offline = offline
+	} else if fullPolicy == PolicyFull {
+		if marks, err = p.loadDirState(ctx); err != nil {
+			return Result{}, err
+		}
 	}
 	var res Result
-	var toPrune []PrunedRow
+	var toPrune, aged []PrunedRow
+	listings := map[string][]os.DirEntry{}
 	var toRelink []classifiedRelink
 	prunedRow := func(src string, c *candidate) PrunedRow {
 		row := PrunedRow{SourcePath: src, ScanResultIDs: c.scanResultIDs}
@@ -766,26 +803,37 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		if err != nil {
 			return Result{}, err
 		}
-		// THE GONE MARK (#1262). A row gone inside a surviving directory that this
-		// examination could neither relink nor tie to a present file is marked
-		// with when that was first seen. A row held for a present sibling
-		// (ambiguous, owned, another recording, unreadable), for an indexed file
-		// with its MBID/ISRC that is present or cannot be ruled out, or for the
-		// one present file the name tier would relink it to by title, is not
-		// marked and loses its mark: its replacement may be there. A mark changes
-		// nothing about what happens to the row, which is retained as before.
-		markable := policy == policyInFolder && !cg.siblingHeld && cg.outcome != outcomeRelink
-		if markable {
+		// THE AGE-OUT (#1262). A row gone inside a surviving directory that this
+		// examination could neither relink nor tie to a present same-name file
+		// is marked, and is deleted once the mark is a week old and confirmed. A row
+		// held for a present sibling (ambiguous, owned, another recording,
+		// unreadable), for an indexed file with its MBID/ISRC that is present or
+		// cannot be ruled out, or for the one present file the name tier would
+		// relink it to by title, never ages: its replacement may be there. Nor
+		// does a row whose queue row another library's file also links.
+		ageable := (policy == policyInFolder || (ds == nil && marks.confirmedDue(src))) && !cg.siblingHeld && cg.outcome != outcomeRelink
+		if ageable {
 			held, err := p.identityHeld(ctx, src, c, roots)
 			if err != nil {
 				return Result{}, err
 			}
-			markable = !held
+			ageable = !held
 		}
-		if markable {
-			ds.mark(src)
-		} else {
+		if ageable {
+			shared, err := p.sharedAcrossLibraries(ctx, src, c, libraryID)
+			if err != nil {
+				return Result{}, err
+			}
+			ageable = !shared
+		}
+		if !ageable {
 			ds.forget(src)
+		} else if ds == nil { // attended: a refusal is reported as the row it is
+			ageable = !p.replacementOnDisk(src, listings)
+		}
+		if ageable && (ds == nil || ds.aged(src)) {
+			aged = append(aged, prunedRow(src, c))
+			continue
 		}
 		switch cg.outcome {
 		case outcomeSettled:
@@ -827,6 +875,37 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		case outcomePrune:
 			toPrune = append(toPrune, prunedRow(src, c))
 		}
+	}
+	// An aged row is deleted only if its file is STILL definitively gone now and
+	// its directory, read once, holds something (an unmounted nested mountpoint
+	// is an empty directory whose every file reads not-exist) and no unindexed
+	// same-name file. Checked in a dry run too, so the plan matches the apply.
+	// A refusal drops the mark. Then the confirmation, then the circuit breaker,
+	// a hard stop: the marks already held count toward the cap, so rows newly due
+	// that would take the total over it are held too, and a held row is never in
+	// due on a periodic sweep (confirm refuses it), so only the attended run
+	// deletes one.
+	var due []PrunedRow
+	for _, row := range aged {
+		if _, err := p.stat(row.SourcePath); !errors.Is(err, fs.ErrNotExist) || p.replacementOnDisk(row.SourcePath, listings) {
+			ds.forget(row.SourcePath)
+		} else if ds == nil || ds.confirm(row.SourcePath) {
+			row.AgedOut = true
+			due = append(due, row)
+		}
+	}
+	held := 0
+	if ds != nil {
+		held = ds.held(bySource)
+	}
+	if ds != nil && held+len(due) > ageOutMaxPerSweep {
+		res.AgeOutHeld = held + len(due)
+		for _, row := range due {
+			ds.since[row.SourcePath], ds.changed[row.SourcePath] = goneMark{ds.since[row.SourcePath].first, heldMark}, true
+		}
+	} else {
+		toPrune, res.AgedOut = append(toPrune, due...), len(due)
+		res.AgeOutHeld = held // still held, at or under the cap: reported every sweep
 	}
 	res.Pruned = toPrune
 
@@ -891,7 +970,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	if len(toPrune) == 0 {
 		return res, nil
 	}
-	scanDeleted, workDeleted, skipped, err := p.deletePruned(ctx, toPrune, hooks.Prune)
+	scanDeleted, workDeleted, skipped, applied, err := p.deletePruned(ctx, toPrune, hooks.Prune)
 	if err != nil {
 		return Result{}, err
 	}
@@ -899,7 +978,13 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	// 'processing' (and was therefore skipped) is not counted as pruned.
 	res.ScanResults = scanDeleted
 	res.WorkItems = workDeleted
-	res.PruneSkipped = skipped
+	res.PruneSkipped, res.AgedOut = skipped, 0
+	for _, row := range applied {
+		if row.AgedOut {
+			res.AgedOut++
+			ds.relinked(row.SourcePath) // no longer a gone row of its directory
+		}
+	}
 	return res, nil
 }
 
@@ -961,7 +1046,7 @@ type classified struct {
 	shouldRetire bool
 	// siblingHeld marks a row the sibling tier stopped on a PRESENT same-name
 	// file it would not relink to, or one the name tier would relink. Such a
-	// row is never marked gone.
+	// row never ages out.
 	siblingHeld bool
 	classifiedRelink
 }
@@ -2058,19 +2143,77 @@ func (p *Pruner) identityHeld(ctx context.Context, src string, c *candidate, roo
 	return false, nil
 }
 
-// AgingCounts reports how many gone sources the periodic sweep has marked as
-// gone inside a surviving directory with nothing to relink them to: those
-// marked for under goneGrace, and those marked for longer.
-func (p *Pruner) AgingCounts(ctx context.Context) (aging, due int, err error) {
+// sharedAcrossLibraries reports whether a queue row of c is also linked to
+// another library's scan_results row. work_queue is unique on (artist_key,
+// title_key), so two libraries' files of one song share ONE queue row, and
+// aging it out for the copy that is gone would delete the row the other
+// library's file still uses (and cascade its link). Such a row never ages out,
+// on any sweep; it is classified as it was before the age-out (#1293 tracks
+// what that classification itself does with a shared row).
+// A library-scoped run holds on any link into another library. An unscoped one
+// gathered every library's row for src into c, so there only a link to another
+// library's row for a DIFFERENT file holds; with no scan_results row of its own
+// to name a library, c is not held.
+// Asked only of a candidate otherwise ageable: per queue row, one prefix probe
+// of the junction's primary key and a rowid lookup per link; no stat.
+func (p *Pruner) sharedAcrossLibraries(ctx context.Context, src string, c *candidate, scope *int64) (bool, error) {
+	lib, own := scope, ""
+	if lib == nil {
+		lib, own = c.libraryID, src
+	}
+	if lib == nil {
+		return false, nil
+	}
+	for _, w := range c.workItems {
+		var shared bool
+		if err := p.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM work_queue_scan_results j WHERE j.work_queue_id = ?
+            AND EXISTS (SELECT 1 FROM scan_results sr WHERE sr.id = j.scan_result_id AND sr.library_id != ? AND sr.file_path != ?))`,
+			w.id, *lib, own).Scan(&shared); err != nil {
+			return false, fmt.Errorf("prune: read other libraries' links: %w", err)
+		}
+		if shared {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// replacementOnDisk reads src's directory once and reports whether an age-out
+// must be refused: it is unreadable or empty, or an entry that is not a lyric
+// sidecar shares src's stem (case-insensitive), i.e. an unindexed replacement.
+func (p *Pruner) replacementOnDisk(src string, seen map[string][]os.DirEntry) bool {
+	entries, ok := seen[filepath.Dir(src)]
+	if !ok { // read once per sweep; a failed read refuses whatever it returned
+		if l, err := p.readDir(filepath.Dir(src)); err == nil {
+			entries = l
+		}
+		seen[filepath.Dir(src)] = entries
+	}
+	for _, e := range entries {
+		ext := strings.ToLower(filepath.Ext(e.Name()))
+		if ext != ".lrc" && ext != ".elrc" && ext != ".txt" && strings.EqualFold(stemOf(e.Name()), stemOf(src)) {
+			return true
+		}
+	}
+	return len(entries) == 0
+}
+
+// AgingCounts reports how many gone sources the periodic sweep is holding for
+// its grace period, how many are past it (deleted once two sweeps at least
+// goneConfirmGap apart both still find them gone), and how many the tripped
+// breaker holds (heldMark): no sweep deletes those, however few remain held,
+// only the attended run (`scan reconcile-paths --yes`).
+func (p *Pruner) AgingCounts(ctx context.Context) (aging, due, held int, err error) {
 	// A mark whose rows another pass already removed is not counted.
-	err = p.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(first_seen <= ?), 0) FROM prune_gone_since g
+	err = p.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(first_seen <= ?1 AND confirmed_at IS NOT ?2), 0),
+               COALESCE(SUM(confirmed_at IS ?2), 0) FROM prune_gone_since g
         WHERE EXISTS (SELECT 1 FROM scan_results WHERE file_path = g.path)
            OR EXISTS (SELECT 1 FROM work_queue WHERE source_path = g.path)`,
-		p.now().Add(-goneGrace).Unix()).Scan(&aging, &due)
+		p.now().Add(-goneGrace).Unix(), heldMark).Scan(&aging, &due, &held)
 	if err != nil {
-		return 0, 0, fmt.Errorf("prune: count aging sources: %w", err)
+		return 0, 0, 0, fmt.Errorf("prune: count aging sources: %w", err)
 	}
-	return aging - due, due, nil
+	return aging - due - held, due, held, nil
 }
 
 // availableRoots returns the configured library root paths that are currently
@@ -2387,25 +2530,71 @@ func (p *Pruner) retireUnresolvable(ctx context.Context, c *candidate) (bool, er
 	return retired, nil
 }
 
-func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report func(PrunedRow) error) (scanDeleted, workDeleted, skipped int, retErr error) {
-	var applied []PrunedRow // rows that actually lost >=1 row, reported post-commit
-	// Retried whole on SQLITE_BUSY (#978). The report runs only after the commit,
-	// so a rolled-back attempt has written nothing; each attempt resets its tallies.
-	if err := dbpkg.RetryBatchTx(ctx, "prune delete", func() error {
-		var err error
-		scanDeleted, workDeleted, skipped, applied, err = p.deletePrunedTx(ctx, pruned)
+// deletePruned deletes the planned rows and reports what it deleted. A row
+// that is not aged out is reported after its delete commits. An aged-out row
+// (#1262) is BACKUP FIRST: reported before the transaction and left alone when
+// that report fails; if the delete then leaves any of its rows, a second report
+// (Corrects) replaces the first. A hook that answers ErrNotRecorded for an
+// aged-out row keeps the row without failing the sweep.
+func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report func(PrunedRow) error) (scanDeleted, workDeleted, skipped int, applied []PrunedRow, retErr error) {
+	var unwritten int // aged-out records, or their corrections, that failed
+	var unwrittenFirst error
+	tell := func(row PrunedRow) error {
+		if report == nil {
+			return nil
+		}
+		err := report(row)
+		if err != nil && !errors.Is(err, ErrNotRecorded) {
+			if unwritten++; unwrittenFirst == nil {
+				unwrittenFirst = err
+			}
+		}
 		return err
-	}); err != nil {
-		return 0, 0, 0, err
+	}
+	todo := make([]PrunedRow, 0, len(pruned))
+	for _, row := range pruned {
+		if !row.AgedOut || tell(row) == nil {
+			todo = append(todo, row)
+		}
+	}
+	// Retried whole on SQLITE_BUSY (#978). Every other report runs only after the
+	// commit, so a rolled-back attempt has written nothing; each attempt resets its tallies.
+	txErr := dbpkg.RetryBatchTx(ctx, "prune delete", func() error {
+		var err error
+		scanDeleted, workDeleted, skipped, applied, err = p.deletePrunedTx(ctx, todo)
+		return err
+	})
+	if txErr != nil {
+		applied = nil
+	}
+	// An aged-out row's record was written ahead: correct it when a row stayed
+	// (in flight, moved, or the transaction failed), listing only the ids deleted.
+	lost := make(map[string]PrunedRow, len(applied))
+	for _, d := range applied {
+		lost[d.SourcePath] = d
+	}
+	for _, row := range todo {
+		d := lost[row.SourcePath]
+		if row.AgedOut && len(d.WorkItemIDs)+len(d.ScanResultIDs) < len(row.WorkItemIDs)+len(row.ScanResultIDs) {
+			d.SourcePath, d.AgedOut, d.Corrects = row.SourcePath, true, true
+			_ = tell(d)
+		}
+	}
+	if txErr != nil {
+		return 0, 0, 0, nil, txErr
 	}
 	// Report only after the deletes are durably committed, so a backup record is
 	// never written for a row that survived (skipped mid-tx or rolled back).
 	// One failure never stops the rest being reported: the deletes stand. The
 	// error names no source path, since the unattended sweep logs it.
-	var failed int
+	var failed, reported int
 	var first error
 	if report != nil {
 		for _, row := range applied {
+			if row.AgedOut {
+				continue // recorded before its delete
+			}
+			reported++
 			if err := report(row); err != nil {
 				if failed++; first == nil {
 					first = err
@@ -2414,9 +2603,12 @@ func (p *Pruner) deletePruned(ctx context.Context, pruned []PrunedRow, report fu
 		}
 	}
 	if failed > 0 {
-		return scanDeleted, workDeleted, skipped, fmt.Errorf("prune: report: %d of %d deleted source(s) not recorded, first failure: %w", failed, len(applied), first)
+		retErr = fmt.Errorf("prune: report: %d of %d deleted source(s) not recorded, first failure: %w", failed, reported, first)
 	}
-	return scanDeleted, workDeleted, skipped, nil
+	if unwritten > 0 {
+		retErr = errors.Join(fmt.Errorf("prune: %d backup record(s) could not be written, first: %w", unwritten, unwrittenFirst), retErr)
+	}
+	return scanDeleted, workDeleted, skipped, applied, retErr
 }
 
 // deletePrunedTx is one attempt of deletePruned's transaction, returning the
@@ -2432,7 +2624,7 @@ func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDe
 	defer func() { _ = tx.Rollback() }()
 
 	for _, row := range pruned {
-		before, done := scanDeleted+workDeleted, PrunedRow{SourcePath: row.SourcePath}
+		before, done := scanDeleted+workDeleted, PrunedRow{SourcePath: row.SourcePath, AgedOut: row.AgedOut}
 		for i, id := range row.WorkItemIDs {
 			res, err := tx.ExecContext(ctx,
 				`DELETE FROM work_queue WHERE id = ? AND status != 'processing' AND source_path = ?`, id, row.SourcePath)
