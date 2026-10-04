@@ -14,6 +14,28 @@ go run ./cmd/mxlrcgo-svc [args]
 
 `make help` lists every target.
 
+### Web UI assets
+
+The serve-mode web UI is built from templ templates and Tailwind CSS. The generated output (`web/templates/*_templ.go`, `web/static/css/output.css`) is gitignored and produced by `make ui` in every build path (the pre-push gate, the Dockerfile, GoReleaser and CI). The compiled CSS is embedded with `go:embed`, so the shipped binary needs no node runtime and no CGO.
+
+After a fresh clone, run `make ui` before `go build`: `web/static/embed.go` embeds `output.css` at compile time, so a bare `go build ./...` on a clean checkout fails until the assets exist. Run it again after editing `web/templates/*.templ` or `web/static/css/*.css`; there is nothing generated to commit.
+
+```sh
+make ui          # templ generate + Tailwind; writes *_templ.go and output.css
+```
+
+- **templ** is pinned through the `go.mod` tool directive, so `go tool templ` needs no separate install.
+- **Tailwind** uses the standalone CLI, a single node-free binary, from the [Tailwind releases](https://github.com/tailwindlabs/tailwindcss/releases) or `brew install tailwindcss`. CI pins v4.2.0; match it locally to keep the generated CSS identical. Override the binary with `make ui TAILWIND=/path/to/tailwindcss`.
+
+| Path | Purpose |
+| --- | --- |
+| `web/templates/*.templ` | templ source for the shell, sidebar and pages |
+| `web/static/css/input.css` | Tailwind entry and component classes |
+| `web/static/css/design-tokens.css` | design tokens |
+| `web/static/fonts/` | self-hosted fonts (woff2 and their licenses) |
+| `web/static/embed.go` | `go:embed` of the CSS and fonts |
+| `internal/web/` | static handler and page renderers |
+
 ## Quality gate and git hooks
 
 Wire the tracked git hooks once (this sets `core.hooksPath=.githooks`, a relative shared setting, so every worktree -- including any you add later -- inherits them with no extra setup):

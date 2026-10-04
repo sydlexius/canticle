@@ -3,6 +3,8 @@
 useDefault = true
 
 [allowlist]
+# .planning/ was removed from the tree; the entry stays because a history scan
+# still reads the commits that held it.
 description = "Allowlist for planning docs and path references"
 paths = [
   ".planning/",
