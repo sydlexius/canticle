@@ -84,6 +84,16 @@ if git grep -nIE "$CONFLICT_RE" -- ':!.githooks/*' >/dev/null 2>&1; then
   fail "resolve conflict markers before pushing"
 fi
 
+echo "==> commit signatures (main requires signed commits)"
+# Presence of a gpgsig header on every commit in BASE..HEAD. FULL mode only: the
+# pre-push hook checks the refs actually pushed (before this gate runs), and a
+# HEAD-based check here could reject a push over an unrelated unsigned commit.
+if [ "$MODE" = full ]; then
+  bash scripts/check-commit-signatures.sh || fail "sign the commits listed above before pushing"
+else
+  echo "    skipped in the push hook: it already checked the refs being pushed"
+fi
+
 echo "==> product name in user-facing prose"
 # The logotype is "Canticle"; the lowercase form is an IDENTIFIER (module path,
 # image ref, binary, URL), not a name. typos cannot enforce this -- it matches

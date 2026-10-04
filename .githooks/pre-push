@@ -3,6 +3,12 @@
 # checks (Lint, Test, Build, Coverage Floor, Analyze Go) are the source of truth.
 #
 # Order:
+#   0. Commit signatures, over the commits actually being pushed. This runs BEFORE
+#      the PUSH_GATE override and the receipt fast path, so every path has it: the
+#      receipt is keyed on the TREE (re-creating a commit unsigned with
+#      git commit-tree keeps the tree), and the full gate only checks base..HEAD.
+#      An unknown PUSH_GATE value is rejected first (exit 2). main requires signed
+#      commits.
 #   1. Gate receipt. If /prep-pr's gate-runner.py already gated this exact tree
 #      (a passing gate-receipt/v1 whose tree_sha matches EVERY pushed ref, on a
 #      clean working tree), exit 0 at once rather than re-run the same gate.
@@ -27,7 +33,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 case "${PUSH_GATE:-}" in
   "") ;;
-  full) exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" </dev/null ;;
+  full) ;;
   *)
     echo "pre-push: unknown PUSH_GATE='${PUSH_GATE}' (expected empty or full)" >&2
     exit 2
@@ -40,6 +46,14 @@ esac
 # HEAD, could carry changes it never looks at; those widen every scoped step
 # (./... tests, actionlint, govulncheck) rather than build a union-of-refs diff.
 REFS="$(cat)"
+sig_rc=0
+printf '%s\n' "$REFS" | bash "$REPO_ROOT/scripts/check-commit-signatures.sh" --refs || sig_rc=$?
+[ "$sig_rc" -eq 0 ] || exit "$sig_rc"
+
+if [ "${PUSH_GATE:-}" = full ]; then
+  exec bash "$REPO_ROOT/scripts/pre-push-gate.sh" </dev/null
+fi
+
 if printf '%s\n' "$REFS" | bash "$REPO_ROOT/scripts/check-push-receipt.sh"; then
   exit 0
 fi

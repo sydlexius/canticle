@@ -45,10 +45,11 @@ make hooks      # enable the pre-commit + pre-push hooks
 make doctor     # verify the hooks are wired and tool-version pins agree
 ```
 
-`make gate` runs the full local gate: conflict markers, product name, gofmt, web asset generation, build, non-race tests of the changed packages, patch coverage, golangci-lint, actionlint, the PR-trigger scope check, the test-shard split check, and govulncheck. The race suite, coverage floor and codecov dry-run are CI-authoritative and run locally only under `RUN_RACE=1 make gate` (full `go test -race ./...`). `/prep-pr` runs this same chain through `.gates.toml` and records a gate receipt. Run it on demand before a PR. The git hooks do not run all of it.
+`make gate` runs the full local gate: conflict markers, commit signatures, product name, gofmt, web asset generation, build, non-race tests of the changed packages, patch coverage, golangci-lint, actionlint, the PR-trigger scope check, the test-shard split check, and govulncheck. The race suite, coverage floor and codecov dry-run are CI-authoritative and run locally only under `RUN_RACE=1 make gate` (full `go test -race ./...`). `/prep-pr` runs this same chain through `.gates.toml` and records a gate receipt. Run it on demand before a PR. The git hooks do not run all of it.
 
 `.githooks/pre-push` is the fast push path:
 
+0. **Commit signatures.** `scripts/check-commit-signatures.sh --refs` runs first, over the commits each pushed ref would send, and refuses any commit with no `gpgsig` header (main requires signed commits). It runs before receipt reuse and the `PUSH_GATE=full` override (the full gate re-checks only base..HEAD, and `make gate` runs that check in full mode only) because the receipt is keyed on the tree, which an unsigned re-created commit (`git commit-tree`) keeps.
 1. **Receipt reuse.** If `$(git rev-parse --git-dir)/prep-pr-receipt.json` is a passing `gate-receipt/v1`, its `tree_sha` matches the tree of every ref being pushed, and the working tree is clean, the hook prints one PASS line and exits (`scripts/check-push-receipt.sh`). Anything else (missing, malformed, failing or stale receipt, or a dirty tree) falls through to step 2. A push that only deletes refs needs no gate.
 2. **`scripts/pre-push-gate.sh --hook`**, the fast gate. It keeps the cheap checks and the ones CI does not require, and drops the ones a required CI check already enforces:
 
@@ -56,6 +57,7 @@ make doctor     # verify the hooks are wired and tool-version pins agree
 | --- | --- | --- | --- | --- |
 | conflict markers | staged | yes | yes | none |
 | typos | staged | no | no | none |
+| commit signatures | no | yes (before the receipt check, over the pushed refs) | yes | Ruleset `required_signatures` (merge-blocking) |
 | product name | staged docs | yes (HEAD) | yes | none |
 | gofmt | staged | yes | yes | Lint (required, golangci formatters) |
 | generate + ui-validate + build | build | yes | yes | Lint, Build (required) |

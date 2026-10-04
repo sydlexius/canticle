@@ -82,6 +82,7 @@ H="$T/hookrepo"
 mkdir -p "$H/scripts" && cd "$H" || exit 2
 git init -q -b main . && git config user.email t@example.invalid && git config user.name t
 cp "$CHK" scripts/check-push-receipt.sh
+printf '#!/usr/bin/env bash\nexit "${SIG_RC:-0}"\n' > scripts/check-commit-signatures.sh # stub; real one is tested separately
 printf '#!/usr/bin/env bash\necho "gate:$*" >> "%s/gate.log"\nexit 0\n' "$T" > scripts/pre-push-gate.sh
 git add scripts && git commit -qm hook
 HC=$(git rev-parse HEAD)
@@ -104,7 +105,11 @@ h() { # h <name> <want-rc> <want-gate-log> [PUSH_GATE value]
   fi
 }
 h "receipt pass skips the gate"   0 ""
+# An unsigned commit must be refused BEFORE the receipt fast path (tree-keyed).
+SIG_RC=1 h "unsigned commit beats a passing receipt" 1 ""
 h "PUSH_GATE=full runs full gate" 0 "gate: "      full
+# The override must not bypass the signature check (full gate only checks base..HEAD).
+SIG_RC=1 h "unsigned commit beats PUSH_GATE=full" 1 "" full
 h "PUSH_GATE=skip is rejected"    2 ""            skip
 h "unknown PUSH_GATE is rejected" 2 ""            bogus
 rm -f "$R"
