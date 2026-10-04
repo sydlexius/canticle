@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/providers"
@@ -451,8 +452,10 @@ func (r *Repo) attachLibraries(ctx context.Context, items []BucketRow) error {
 // in order by one CASE expression. A CASE yields exactly one key per row, so the
 // categories partition a bucket by construction. A marker can only misfile a
 // row into another category; it can never hide one, because "other" is the ELSE.
-// Accepted limits: path or response-body text holding a marker can misfile a
-// row, and a value of only non-ASCII whitespace filters as "other".
+// Accepted limit: path or response-body text holding a marker can misfile a
+// row. A value of only whitespace is "none" for every Unicode space, because
+// the SQL trim set is derived from unicode.IsSpace, the same predicate
+// strings.TrimSpace (the displayed Reason) uses.
 //
 // Not indexable (a scan of one status's rows). These buckets hold the retry
 // backlog, not the done rows. Cost scales with message bytes, since
@@ -539,6 +542,22 @@ var reasonOffered = map[Bucket][]string{
 // caller input.
 var reasonCaseSQL = buildReasonCase()
 
+// spaceCharSQL is a SQL expression yielding exactly the code points
+// unicode.IsSpace accepts, as char(...) of integer constants, so the "none"
+// trim agrees with strings.TrimSpace in normalizedReason. Built once at init
+// from the rune table; nothing from a request reaches it.
+var spaceCharSQL = buildSpaceCharSQL()
+
+func buildSpaceCharSQL() string {
+	var cps []string
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) {
+			cps = append(cps, strconv.Itoa(int(r)))
+		}
+	}
+	return "char(" + strings.Join(cps, ", ") + ")"
+}
+
 func buildReasonCase() string {
 	var b strings.Builder
 	b.WriteString("CASE")
@@ -546,7 +565,7 @@ func buildReasonCase() string {
 		switch {
 		case d.Key == ReasonNone:
 			// Blank counts as none, as normalizedReason does for the display.
-			b.WriteString(` WHEN TRIM(COALESCE(last_error, ''), ' ' || char(9, 10, 13)) = '' THEN '` + d.Key + `'`)
+			b.WriteString(` WHEN TRIM(COALESCE(last_error, ''), ` + spaceCharSQL + `) = '' THEN '` + d.Key + `'`)
 		case len(d.markers) > 0:
 			conds := make([]string, 0, len(d.markers))
 			for _, m := range d.markers {

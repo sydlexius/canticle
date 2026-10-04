@@ -249,6 +249,8 @@ func TestListBucketFilteredByLane(t *testing.T) {
 var reasonShapes = []struct{ err, want string }{
 	{"", ReasonNone},
 	{"  \t\n", ReasonNone},
+	{"\u00a0", ReasonNone},               // only a no-break space: the display reads "no reason recorded"
+	{"\u3000\t\u2003\u0085", ReasonNone}, // ideographic, tab, em and next-line spaces
 	{`worker: write item 5 output /Share/Music/Timeout Band/Album/01. Song.lrc: no space left on device`, ReasonWrite},
 	{`lyrics: refusing to write: output dir "/mnt/a" does not exist`, ReasonWrite},
 	{`open /mnt/a/b.lrc.tmp: read-only file system`, ReasonWrite},
