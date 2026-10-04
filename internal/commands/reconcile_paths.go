@@ -27,7 +27,7 @@ import (
 // Written before the corresponding mutation commits (backup-first); a
 // retained row is never a mutation, so its record is purely informational.
 type reconcilePathsBackupRecord struct {
-	Action        string          `json:"action"` // "pruned", "relinked", "retained", or "repaired"
+	Action        string          `json:"action"` // "pruned", "pruned-corrected", "relinked", "retained", or "repaired"
 	SourcePath    string          `json:"source_path"`
 	ScanResultIDs []int64         `json:"scan_result_ids,omitempty"`
 	WorkItemIDs   []int64         `json:"work_item_ids,omitempty"`
@@ -35,7 +35,7 @@ type reconcilePathsBackupRecord struct {
 	// WorkStates is each WorkItemIDs row's status and settled state, in order.
 	WorkStates []prune.WorkState `json:"work_states,omitempty"`
 	// NewPath, MBID, ISRC, and Reason are populated for "relinked"/"retained"
-	// records; empty for "pruned". MBID/ISRC are also empty for a same-stem
+	// records; empty for "pruned" (but for the periodic sweep's age-out Reason). MBID/ISRC are also empty for a same-stem
 	// sibling relink (#1262), which no identity drove.
 	NewPath string `json:"new_path,omitempty"`
 	MBID    string `json:"mbid,omitempty"`
@@ -134,9 +134,12 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 			return nil
 		}
 		if err := openBackup(); err != nil {
-			return err
+			return fmt.Errorf("%q: %w", row.SourcePath, err) // attended: it may name the source
 		}
-		return appendReconcilePathsBackup(backupFile, prunedBackupRecord(row))
+		if err := appendReconcilePathsBackup(backupFile, prunedBackupRecord(row)); err != nil {
+			return fmt.Errorf("%q: %w", row.SourcePath, err)
+		}
+		return nil
 	}
 	reportRelinked := func(row prune.RelinkedRow) error {
 		if !args.Yes {
@@ -251,14 +254,19 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 		_, _ = fmt.Fprintf(out, "reconcile-paths: %d planned relink(s) not applied (%d target file already belongs to another queue row, %d row claimed or changed since it was read)%s\n",
 			res.RelinkOwned+res.RelinkChanged, res.RelinkOwned, res.RelinkChanged, suffixDryRun(args.Yes))
 	}
-	// The periodic sweep's gone marks (#1262), reported as counts only. This
-	// command writes no mark and deletes nothing on one. The marks are not per
-	// library, so a library-scoped run omits the line.
+	// The periodic sweep's age-out (#1262), reported as counts only. This command
+	// starts no grace period; it deletes (above) the sources past it and confirmed.
+	// The marks are not per library, so a library-scoped run omits the line.
 	if libID == nil {
-		if aging, due, aerr := pruner.AgingCounts(ctx); aerr != nil {
+		aging, due, held, aerr := pruner.AgingCounts(ctx)
+		if aerr != nil {
 			slog.Warn("reconcile-paths could not count aging sources", "error", aerr)
-		} else if aging+due > 0 {
-			_, _ = fmt.Fprintf(out, "reconcile-paths: the periodic sweep has marked %d gone source(s) inside a surviving directory with nothing to relink them to, %d of them for over a week; all are kept\n", aging+due, due)
+		}
+		if aging+due > 0 {
+			_, _ = fmt.Fprintf(out, "reconcile-paths: the periodic sweep is holding %d gone source(s) for its one-week grace period; %d more are past it and are deleted once two sweeps at least an hour apart both still find them gone\n", aging, due)
+		}
+		if held > 0 { // the tripped breaker: no sweep deletes these
+			_, _ = fmt.Fprintf(out, "reconcile-paths: %d gone source(s) past the grace period are held, because too many came due at once, and no sweep deletes them; run `scan reconcile-paths --yes` to delete them\n", held)
 		}
 	}
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d work_queue row(s) with a stale output_paths destination (skipped: %d ambiguous, %d unfixable, %d stat error, %d malformed, %d raced)%s\n",

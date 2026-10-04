@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/prune"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -688,18 +690,18 @@ func TestReconcilePaths_SkippedPruneIsNotCountedAsPruned(t *testing.T) {
 	}
 }
 
-// TestRunSweeperMarksGoneRowAndKeepsIt: a row whose file is gone inside a
-// surviving directory is marked by the unattended sweep (#1262) and NOT deleted
-// by it, however old the mark; `scan reconcile-paths` reports the marks as a
-// count naming no path. A source that IS deleted (here by the attended command,
-// as before) has each queue row's state in its backup record.
-func TestRunSweeperMarksGoneRowAndKeepsIt(t *testing.T) {
+// TestRunSweeperAgesOutGoneRow: a row whose file has been gone inside a
+// surviving directory for the grace period, and confirmed gone, is deleted by
+// the unattended sweep, which appends its restorable record to the sweep
+// backup (#1262), and by no sweep that cannot write that backup: such a sweep
+// keeps the row, fails nothing and says so in one Warn that names no path.
+// Before that, `scan reconcile-paths` reports it as a count.
+func TestRunSweeperAgesOutGoneRow(t *testing.T) {
 	ctx, cfgPath, dbPath, root := setupReconcilePaths(t)
 	gone := filepath.Join(root, "ArtistA", "01. gone.flac")
 	seedReconcilePathsRow(t, ctx, dbPath, gone)
 	seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistA", "02. kept.flac"))
-	old := time.Now().Add(-8 * 24 * time.Hour)
-	if err := errors.Join(os.Remove(gone), os.Chtimes(filepath.Dir(gone), old, old)); err != nil {
+	if err := os.Remove(gone); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, err := db.Open(ctx, dbPath)
@@ -707,56 +709,175 @@ func TestRunSweeperMarksGoneRowAndKeepsIt(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer sqlDB.Close() //nolint:errcheck // test cleanup
-	if _, err := sqlDB.ExecContext(ctx, `INSERT INTO prune_gone_since (path, first_seen) VALUES (?, ?)`, gone, old.Unix()); err != nil {
+	if _, err := sqlDB.ExecContext(ctx, `INSERT INTO prune_gone_since (path, first_seen, confirmed_at) VALUES (?, ?, ?)`,
+		gone, time.Now().Add(-8*24*time.Hour).Unix(), time.Now().Add(-2*time.Hour).Unix()); err != nil {
 		t.Fatal(err)
-	}
-
-	backup := filepath.Join(filepath.Dir(dbPath), "sweep-backup.jsonl")
-	cctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() { runSweeper(cctx, sqlDB, time.Hour, config.RealignConfig{}, backup); close(done) }()
-	// The sweep stores its directory state last, so a stored directory means it ran.
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline) && countRows(t, ctx, dbPath, "prune_dir_state") == 0; {
-		time.Sleep(5 * time.Millisecond)
-	}
-	cancel()
-	<-done
-	if dirs, rows, marks := countRows(t, ctx, dbPath, "prune_dir_state"), countRows(t, ctx, dbPath, "work_queue"), countRows(t, ctx, dbPath, "prune_gone_since"); dirs != 1 || rows != 2 || marks != 1 {
-		t.Fatalf("after the sweep: %d stored directories, %d work_queue rows, %d marks, want 1, 2 kept and 1", dirs, rows, marks)
-	}
-	if _, err := os.Stat(backup); !os.IsNotExist(err) {
-		t.Errorf("a sweep that deleted nothing left a backup file (stat err %v)", err)
 	}
 
 	var buf bytes.Buffer
 	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath}); code != 0 {
 		t.Fatalf("dry run exit %d: %s", code, buf.String())
 	}
-	if want := "has marked 1 gone source(s) inside a surviving directory with nothing to relink them to, 1 of them for over a week; all are kept"; !strings.Contains(buf.String(), want) {
+	if want := "holding 0 gone source(s) for its one-week grace period; 1 more are past it"; !strings.Contains(buf.String(), want) {
 		t.Errorf("dry run output lacks %q: %s", want, buf.String())
 	}
+	if strings.Contains(buf.String(), "gone.flac") {
+		t.Errorf("dry run output names a path: %s", buf.String())
+	}
 	buf.Reset() // the marks are not per library: a scoped run says nothing of them
-	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Library: "lib"}); code != 0 || strings.Contains(buf.String(), "has marked") {
+	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Library: "lib"}); code != 0 || strings.Contains(buf.String(), "grace period") {
 		t.Errorf("library-scoped dry run: exit %d, output %s", code, buf.String())
 	}
 
-	var status string
-	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE source_path = ?`, gone).Scan(&status); err != nil {
-		t.Fatal(err)
+	var logBuf lockedBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	backup := filepath.Join(filepath.Dir(dbPath), "sweep-backup.jsonl")
+	bad := ScanReconcilePathsCmd{ConfigPath: cfgPath, Yes: true, Backup: filepath.Join(root, "no such dir", "b.jsonl")}
+	if code, got := runReconcilePaths(ctx, &buf, bad), logBuf.String(); code != 1 || countRows(t, ctx, dbPath, "work_queue") != 2 ||
+		!strings.Contains(got, "1 backup record(s) could not be written") || !strings.Contains(got, "gone.flac") {
+		t.Fatalf("unwritable backup: exit %d, want 1, no row deleted without its record, and the source named; log:\n%s", code, got)
 	}
-	cli := filepath.Join(filepath.Dir(dbPath), "cli-backup.jsonl")
-	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Yes: true, Backup: cli}); code != 0 || countRows(t, ctx, dbPath, "work_queue") != 1 {
-		t.Fatalf("--yes exit %d, work_queue rows = %d, want 1: %s", code, countRows(t, ctx, dbPath, "work_queue"), buf.String())
+	// First with a backup that cannot be opened, then one that opens but takes
+	// no record (a character device), then one that works.
+	for _, path := range []string{filepath.Join(filepath.Dir(dbPath), "no such dir", "b.jsonl"), os.DevNull, backup} {
+		before := len(logBuf.String())
+		cctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { runSweeper(cctx, sqlDB, time.Hour, config.RealignConfig{}, path); close(done) }()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && (path == backup && countRows(t, ctx, dbPath, "work_queue") > 1 ||
+			path != backup && !strings.Contains(logBuf.String()[before:], "sources due for age-out were kept")) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		<-done
+		if path == backup {
+			break
+		}
+		got := logBuf.String()[before:]
+		if n := countRows(t, ctx, dbPath, "work_queue"); n != 2 || strings.Count(got, "level=WARN") != 1 || !strings.Contains(got, "sources=0 aged_out_kept=1") ||
+			strings.Contains(got, "sweep returned an error") || strings.Contains(got, root) {
+			t.Fatalf("unwritable backup %q: work_queue rows = %d, want 2 kept and one Warn with the count and no library path; log:\n%s", path, n, got)
+		}
+		if path != os.DevNull {
+			continue
+		}
+		// A row the delete skipped after its record was written: the correction
+		// that cannot be written is counted as unrecorded, since the file now
+		// overstates what was deleted, and nothing more is deleted for it.
+		before = len(logBuf.String())
+		b := &sweepBackup{path: path}
+		if err := b.report(prune.PrunedRow{SourcePath: gone, AgedOut: true, Corrects: true}); !errors.Is(err, prune.ErrNotRecorded) {
+			t.Fatalf("failed correction: err = %v, want prune.ErrNotRecorded", err)
+		}
+		b.close()
+		if got := logBuf.String()[before:]; strings.Count(got, "level=WARN") != 1 || !strings.Contains(got, "could not record every source it deleted") ||
+			!strings.Contains(got, " sources=1 ") || strings.Contains(got, root) {
+			t.Fatalf("failed correction: want one Warn counting it as unrecorded (sources=1) and no library path; log:\n%s", got)
+		}
 	}
-	raw, err := os.ReadFile(cli) //nolint:gosec // reason: a path under the test's temp dir
+	if n := countRows(t, ctx, dbPath, "work_queue"); n != 1 {
+		t.Fatalf("work_queue rows = %d, want 1 (the aged-out row deleted)", n)
+	}
+	raw, err := os.ReadFile(backup) //nolint:gosec // reason: a path under the test's temp dir
 	if err != nil {
-		t.Fatalf("read backup: %v", err)
+		t.Fatalf("read sweep backup: %v", err)
 	}
 	var rec reconcilePathsBackupRecord
 	if err := json.Unmarshal(bytes.TrimSpace(raw), &rec); err != nil {
-		t.Fatalf("backup is not one JSON record: %v: %s", err, raw)
+		t.Fatalf("sweep backup is not one JSON record: %v: %s", err, raw)
 	}
-	if rec.Action != "pruned" || rec.SourcePath != gone || len(rec.Inputs) != 1 || len(rec.WorkStates) != 1 || rec.WorkStates[0].Status != status || status == "" {
-		t.Errorf("backup record = %+v, want a pruned record carrying the row's state (status %q)", rec, status)
+	if rec.Action != "pruned" || rec.SourcePath != gone || len(rec.Inputs) != 1 || rec.Reason == "" || len(rec.WorkStates) != 1 || rec.WorkStates[0].Status != "failed" {
+		t.Errorf("sweep backup record = %+v, want a restorable pruned record with the age-out reason and the row's state", rec)
+	}
+}
+
+// TestRunSweeperBreakerAndItsAdvice: over the cap the unattended sweep deletes nothing and warns with a
+// count and no path; the command its Warn names plans those deletes and with --yes makes them, identity
+// or none (not a mark unconfirmed or with a same-name file on disk), and releases the marks still held.
+func TestRunSweeperBreakerAndItsAdvice(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupReconcilePaths(t)
+	const n = 51
+	seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistA", "kept.flac"))
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	old := time.Now().Add(-2 * time.Hour).Unix()
+	for i, confirmed := range append(make([]any, n, n+3), nil, time.Now().Add(-time.Minute).Unix(), old) {
+		gone := filepath.Join(root, "ArtistA", fmt.Sprintf("%02d gone.flac", i))
+		seedReconcilePathsRowWithIdentity(t, ctx, dbPath, gone, "")
+		if i < n {
+			confirmed = old
+		}
+		if _, err := sqlDB.ExecContext(ctx, `INSERT INTO prune_gone_since (path, first_seen, confirmed_at) VALUES (?, ?, ?)`,
+			gone, time.Now().Add(-8*24*time.Hour).Unix(), confirmed); err != nil || os.Remove(gone) != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "ArtistA", "53 gone.mp3"), []byte("audio"), 0o600); err != nil || os.Chtimes(filepath.Join(root, "ArtistA"), time.Unix(old, 0), time.Unix(old, 0)) != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath}); code != 0 || !strings.Contains(buf.String(), "would prune 51 source(s)") || !strings.Contains(buf.String(), "retained 3 source(s)") {
+		t.Fatalf("dry run exit %d, want the 51 planned and 3 retained: %s", code, buf.String())
+	}
+	var logBuf lockedBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	sweep := func(until string) {
+		cctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { runSweeper(cctx, sqlDB, time.Hour, config.RealignConfig{}, dbPath+".sweep.jsonl"); close(done) }()
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && !strings.Contains(logBuf.String(), until); {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		<-done
+	}
+	sweep("too many rows due")
+	rows := func() int { return countRows(t, ctx, dbPath, "work_queue") }
+	if got := logBuf.String(); !strings.Contains(got, "scan reconcile-paths --yes") || !strings.Contains(got, "sources=51") || strings.Contains(got, "gone.flac") || rows() != n+4 {
+		t.Fatalf("tripped breaker: work_queue rows = %d, want %d and one Warn with the command and the count, no path; log:\n%s", rows(), n+4, got)
+	}
+	if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath}); code != 0 || strings.Count(buf.String(), "would prune 51 source(s)") != 2 ||
+		countRows(t, ctx, dbPath, "prune_gone_since WHERE confirmed_at = -1") != n {
+		t.Fatalf("dry run after the trip: exit %d, want the 51 planned again and every held mark left held: %s", code, buf.String())
+	}
+	// Held marks are reported as held, with the command that deletes them, never as due for a sweep.
+	if out := buf.String(); !strings.Contains(out, "51 gone source(s) past the grace period are held") || !strings.Contains(out, "run `scan reconcile-paths --yes`") ||
+		!strings.Contains(out, "; 2 more are past it") || strings.Contains(out, "gone.flac") {
+		t.Fatalf("dry run after the trip: want the 51 held marks counted as held, not as due for a sweep, and no path: %s", out)
+	}
+	// An apply scoped to another library is not the exit: it releases no held mark.
+	other := filepath.Join(filepath.Dir(root), "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := library.New(sqlDB).Add(ctx, other, "other", models.LibrarySettings{}); err != nil || os.WriteFile(filepath.Join(other, "a.flac"), []byte("audio"), 0o600) != nil {
+		t.Fatal(err)
+	}
+	scoped := ScanReconcilePathsCmd{ConfigPath: cfgPath, Yes: true, Library: "other", Backup: filepath.Join(filepath.Dir(dbPath), "other-backup.jsonl")}
+	if code := runReconcilePaths(ctx, &buf, scoped); code != 0 || rows() != n+4 || countRows(t, ctx, dbPath, "prune_gone_since WHERE confirmed_at = -1") != n {
+		t.Fatalf("apply scoped to another library: exit %d, work_queue rows = %d, marks still held = %d, want 0, %d and %d", code, rows(), countRows(t, ctx, dbPath, "prune_gone_since WHERE confirmed_at = -1"), n+4, n)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `CREATE TRIGGER keep BEFORE DELETE ON work_queue WHEN old.source_path LIKE '%50 gone.flac' BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err) // the trigger stands in for the delete's own guards skipping one queue row
+	}
+	buf.Reset()
+	backup := filepath.Join(filepath.Dir(dbPath), "cli-backup.jsonl")
+	code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Yes: true, Backup: backup})
+	raw, err := os.ReadFile(backup)                                               //nolint:gosec // reason: a path under the test's temp dir
+	held := countRows(t, ctx, dbPath, "prune_gone_since WHERE confirmed_at = -1") // the row the delete skipped
+	if code != 0 || err != nil || rows() != 5 || held != 0 || !strings.Contains(buf.String(), "pruned 50 source(s)") ||
+		bytes.Count(raw, []byte(`"action":"pruned"`)) != n || bytes.Count(raw, []byte(`"action":"pruned-corrected"`)) != 1 {
+		t.Fatalf("the advised command: exit %d (err %v), work_queue rows = %d, marks still held = %d, want 5, 0, 50 pruned, %d records and one correction: %s", code, err, rows(), held, n, buf.String())
+	}
+	if sweep("left sources it had planned to prune"); !strings.Contains(logBuf.String(), "had moved to another file since it was read\" sources=1") {
+		t.Fatalf("the sweep after it did not log its skipped delete as a count; log:\n%s", logBuf.String())
 	}
 }

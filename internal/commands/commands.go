@@ -2364,7 +2364,8 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 // one struct keeps a future knob from having to widen this signature again, and
 // makes it impossible to wire the keys while forgetting the thresholds.
 //
-// Every source a sweep deletes (a removed directory's) is appended to
+// Every source a sweep deletes (a removed directory's, or one gone inside a
+// surviving directory for the whole grace period, #1262) is appended to
 // backupPath as a `scan reconcile-paths` "pruned" record; see sweepBackup.
 func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg config.RealignConfig, backupPath string) {
 	pruner := prune.New(sqlDB)
@@ -2392,6 +2393,13 @@ func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg
 		}
 		if res.EditHeld > 0 {
 			slog.Info("path-reconciliation sweep relinked hand-edited rows without reopening them", "edit_held", res.EditHeld)
+		}
+		if res.AgedOut > 0 {
+			slog.Info("path-reconciliation sweep deleted rows whose file had been gone for the grace period; each is recorded in the sweep backup beside the database", "sources", res.AgedOut)
+		}
+		if res.AgeOutHeld > 0 {
+			slog.Warn("path-reconciliation sweep found too many rows due for age-out at once and deletes none of them; check the library is fully mounted, then run `scan reconcile-paths` to review and `scan reconcile-paths --yes` to delete them",
+				"sources", res.AgeOutHeld)
 		}
 		if len(res.Retained) > 0 {
 			// One exemplar rather than the whole set: a large reorganization can
@@ -2427,12 +2435,18 @@ func sweepBackupPath(cfg config.Config) string {
 // none. A file that cannot be opened or appended to never stops the sweep or
 // discards its result (the deletes already committed): the source is counted
 // as unrecorded and close logs ONE Warn for the sweep, naming no source.
+//
+// An aged-out source (#1262) is the exception, because prune reports it BEFORE
+// its delete: when its record (or the correction of it) cannot be written,
+// report answers prune.ErrNotRecorded, which keeps the row without failing the
+// sweep, and the source is counted as kept in that same one Warn.
 type sweepBackup struct {
 	path       string
 	f          *os.File
 	openErr    error
 	firstErr   error
 	unrecorded int
+	kept       int // aged-out sources left undeleted for want of a record
 }
 
 func (b *sweepBackup) report(row prune.PrunedRow) error {
@@ -2448,20 +2462,38 @@ func (b *sweepBackup) report(row prune.PrunedRow) error {
 		b.firstErr = b.openErr
 	}
 	if b.openErr != nil {
-		b.unrecorded++
-		return nil
+		return b.failed(row)
 	}
 	if err := appendReconcilePathsBackup(b.f, prunedBackupRecord(row)); err != nil {
-		b.unrecorded++
 		if b.firstErr == nil {
 			b.firstErr = err
 		}
+		return b.failed(row)
+	}
+	return nil
+}
+
+// failed counts a source whose record was not written. A source already
+// deleted stands (nil); an aged-out one is not deleted without its record. A
+// failed correction leaves that source's earlier record overstating what was
+// deleted, so it counts as unrecorded.
+func (b *sweepBackup) failed(row prune.PrunedRow) error {
+	if row.AgedOut && !row.Corrects {
+		b.kept++
+		return prune.ErrNotRecorded
+	}
+	b.unrecorded++
+	if row.AgedOut {
+		return prune.ErrNotRecorded
 	}
 	return nil
 }
 
 func (b *sweepBackup) close() {
-	if b.unrecorded > 0 {
+	if b.kept > 0 {
+		slog.Warn("path-reconciliation sweep could not write its backup file; sources due for age-out were kept, to be tried again next sweep, and any other source it deleted is not restorable from the file",
+			"sources", b.unrecorded, "aged_out_kept", b.kept, "error", b.firstErr)
+	} else if b.unrecorded > 0 {
 		slog.Warn("path-reconciliation sweep could not record every source it deleted in its backup file; the unrecorded sources are not restorable from it",
 			"sources", b.unrecorded, "error", b.firstErr)
 	}
@@ -2472,11 +2504,18 @@ func (b *sweepBackup) close() {
 	}
 }
 
-// prunedBackupRecord is the "pruned" record of one deleted source, shared by
-// the serve sweeper and `scan reconcile-paths`.
+// prunedBackupRecord: an aged-out source's is written BEFORE its delete; if a row then stays,
+// a "pruned-corrected" record REPLACES it, listing only the rows deleted (maybe none).
 func prunedBackupRecord(row prune.PrunedRow) reconcilePathsBackupRecord {
-	return reconcilePathsBackupRecord{Action: "pruned", SourcePath: row.SourcePath, ScanResultIDs: row.ScanResultIDs,
+	rec := reconcilePathsBackupRecord{Action: "pruned", SourcePath: row.SourcePath, ScanResultIDs: row.ScanResultIDs,
 		WorkItemIDs: row.WorkItemIDs, Inputs: row.Inputs, WorkStates: row.States}
+	if row.AgedOut {
+		rec.Reason = "gone inside a surviving directory for the grace period"
+	}
+	if row.Corrects {
+		rec.Action, rec.Reason = "pruned-corrected", "replaces this source's previous pruned record: only the rows listed here were deleted"
+	}
+	return rec
 }
 
 // runWatcher runs the optional filesystem watcher, triggering a targeted scan of
