@@ -248,8 +248,8 @@ echo "==> coverage floor (per-package ratchet -- informational; CI enforces)"
 # (e.g. a debounce/event branch missing its window under CPU pressure), and a
 # false local failure must not block a push. The check still runs and prints, so a
 # genuine whole-package regression is visible here too; it is simply not fatal
-# locally. internal/web is absent from the floor JSON, so the extra packages in the
-# ./... profile are not evaluated.
+# locally. The ./... profile covers every package with a floor entry, internal/web
+# included, so each floor is evaluated here.
 if [ -s "$COVER_OUT" ]; then
   # Distinguish coverage-floor.sh exit codes: 1 == below floor (informational
   # only -- CI enforces); anything else (2 == config/parser error, etc.) is a

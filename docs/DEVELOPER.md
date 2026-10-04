@@ -145,7 +145,7 @@ bash scripts/coverage-floor.sh --bump internal/<pkg>
 bash scripts/coverage-floor.sh --lower internal/<pkg>
 ```
 
-Ratchet to *current actuals*, not aspirational targets - do not nickel-and-dime coverage on defensive or unreachable branches. `internal/web` is intentionally excluded (its tests need the `make ui` CSS asset, so they can't run in a bare `go test`); Codecov covers it. Commit the `--bump`/`--lower` JSON change in the same PR that earned it, citing the change in the commit message.
+Ratchet to *current actuals*, not aspirational targets - do not nickel-and-dime coverage on defensive or unreachable branches. `internal/web` has a floor like every other package, checked in CI from the merged shard profiles; only a local run with no supplied profile skips it (its tests need the `make ui` CSS asset, so they cannot run in a bare `go test`). Commit the `--bump`/`--lower` JSON change in the same PR that earned it, citing the change in the commit message.
 
 ## Documentation site
 
