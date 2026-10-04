@@ -69,6 +69,7 @@ hooks-test:
 	bash scripts/test-check-push-receipt.sh
 	bash scripts/test-hook-test-pkgs.sh
 	bash scripts/test-check-pr-trigger-scope.sh
+	bash scripts/test-check-commit-signatures.sh
 
 ## scan: Build the Docker image and scan it for HIGH+ CVEs with grype
 scan:
