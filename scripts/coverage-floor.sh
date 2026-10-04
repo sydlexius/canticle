@@ -68,6 +68,7 @@ cover_arg=""
 floor_arg=""
 bump_pkgs=""    # space-separated list of packages to bump
 lower_pkgs=""   # space-separated list of packages to lower
+unmeasured_pkgs="" # floor packages the standalone fallback run cannot measure
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -130,11 +131,13 @@ else
   # COVER_OUT directly, so this only runs for a standalone invocation).
   COVER_OUT="${TMPDIR:-/tmp}/coverage-floor-$$.out"
   echo "coverage-floor: no coverage profile supplied; running go test to generate one..."
-  # internal/web is excluded: its tests depend on the tailwind-generated CSS
-  # asset (produced by `make ui`), so a bare `go test` cannot build/run them.
-  # web coverage is left to Codecov; it is intentionally absent from the floor
-  # JSON. The pre-push gate supplies COVER_OUT directly, so this fallback path
-  # only runs for a standalone `make coverage-floor` invocation.
+  # internal/web is excluded from THIS run: its tests depend on the
+  # tailwind-generated CSS asset (produced by `make ui`), so a bare `go test`
+  # cannot build/run them. Its floor is still enforced whenever a profile is
+  # supplied (CI's merged shard profiles, RUN_RACE=1 make gate); here it is
+  # skipped, not read as 0%. This fallback path only runs for a standalone
+  # `make coverage-floor` invocation.
+  unmeasured_pkgs="internal/web"
   floor_pkgs=$(cd "$repo_root" && go list ./internal/... | grep -v '/internal/web$')
   # shellcheck disable=SC2086 # intentional word-splitting of the package list
   (cd "$repo_root" && go test -count=1 -covermode=atomic \
@@ -405,6 +408,13 @@ while IFS= read -r fline; do
   [ -z "$fline" ] && continue
   floor_pkg=$(printf '%s' "$fline" | awk '{print $1}')
   floor_pct=$(printf '%s' "$fline" | awk '{print $2}')
+
+  case " $unmeasured_pkgs " in
+    *" $floor_pkg "*)
+      printf "  skip %-46s %6s  %6d%%   (not measured in a standalone run)\n" "$floor_pkg" "-" "$floor_pct"
+      continue
+      ;;
+  esac
 
   # Look up current coverage for this package
   current_line=$(printf '%s\n' "$pkg_stats" | awk -v p="$floor_pkg" '$1 == p {print; exit}')

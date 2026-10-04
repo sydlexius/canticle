@@ -38,7 +38,7 @@
   "internal/realign": 86,
   "internal/reports": 89,
   "internal/respdrift": 91,
-  "internal/revalidate": 95,
+  "internal/revalidate": 93,
   "internal/scan": 78,
   "internal/scanfail": 86,
   "internal/scanner": 68,
