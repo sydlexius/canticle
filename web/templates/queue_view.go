@@ -42,6 +42,8 @@ type QueueView struct {
 	Libraries []QueueOption
 	// Lanes are the provider Lane select's options (empty: no control).
 	Lanes []QueueOption
+	// Reasons are the failure-reason select's options (empty: no control).
+	Reasons []QueueOption
 	// ReviveLink shows the "Revive retired tracks" link (the unavailable bucket
 	// only, and only when a queue action backend is wired).
 	ReviveLink bool

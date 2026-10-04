@@ -122,7 +122,8 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		Query: state.Query, StartHref: state.href(string(bucket), ""), ClearHref: state.withoutQuery().href(string(bucket), ""),
 		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir,
 		Chips: buildQueueChips(bucket, state), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive(),
-		Libraries: buildLibraryOptions(libs, state.Library), Lanes: buildLaneOptions(state.Lane)}
+		Libraries: buildLibraryOptions(libs, state.Library), Lanes: buildLaneOptions(state.Lane),
+		Reasons: buildReasonOptions(bucket, state.Reason)}
 	// Only the retired bucket can be revived; failed rows are already retried,
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
@@ -309,6 +310,16 @@ func buildLaneOptions(selected string) []templates.QueueOption {
 	var out []templates.QueueOption
 	for _, l := range reports.Lanes() {
 		out = append(out, templates.QueueOption{Value: l, Label: laneLabel(l), Selected: l == selected})
+	}
+	return out
+}
+
+// buildReasonOptions is the failure-reason select's options (nil on a bucket
+// that does not offer the filter, so the control is not rendered).
+func buildReasonOptions(bucket reports.Bucket, selected string) []templates.QueueOption {
+	var out []templates.QueueOption
+	for _, c := range reports.ReasonCategories(bucket) {
+		out = append(out, templates.QueueOption{Value: c.Key, Label: c.Label, Selected: c.Key == selected})
 	}
 	return out
 }

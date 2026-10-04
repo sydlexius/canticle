@@ -919,6 +919,8 @@ var loggableQueryKeys = map[string]func(string) bool{
 	"missync": func(v string) bool { return v == "1" },
 	// lane: the queue Source filter (#1235), a provider lane name.
 	"lane": reports.ValidLane,
+	// reason: the queue failure-reason filter (#1235), a fixed category key.
+	"reason": reports.ValidReason,
 	// from: the player back-link origin, a queue bucket name (web preview handler).
 	"from": func(v string) bool {
 		_, err := reports.ParseBucket(v)

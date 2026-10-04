@@ -388,3 +388,138 @@ func TestQueueLaneFilterEmptyState(t *testing.T) {
 		}
 	}
 }
+
+// seedReasons adds rows with a recorded failure: failed 001 write, 002 network,
+// 003 no reason, 004 write, 009 miss (one lane missed, one failed); deferred 005 miss, 006 network (lane musixmatch),
+// 008 write (lane petitlyrics); unavailable 007 miss. Titles are invented.
+func seedReasons(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, r := range []struct{ title, status, lastErr string }{
+		{"Other 008", "deferred", "worker: write item 8 output: disk full"},
+		{"Other 001", "failed", "worker: write item 1 output x: no space left on device"},
+		{"Other 002", "failed", "lane a: transport error: connection refused"},
+		{"Other 003", "failed", ""},
+		{"Other 004", "failed", "worker: write item 4 output y: permission denied"},
+		{"Other 005", "deferred", "lane a: musixmatch: no results found"},
+		{"Other 006", "deferred", "lane a: transport error"},
+		{"Other 007", "unavailable", "miss limit reached"},
+		{"Other 009", "failed", "lane a: musixmatch: no results found; lane b: unexpected response shape"},
+	} {
+		if _, err := db.ExecContext(context.Background(),
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, album, status, last_error)
+             VALUES ('Invented Artist', ?, 'invented artist', ?, 'Invented Album', ?, ?)`,
+			r.title, strings.ToLower(r.title), r.status, r.lastErr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE work_queue SET provider_lane =
+         CASE title WHEN 'Other 006' THEN 'musixmatch' ELSE 'petitlyrics' END WHERE title IN ('Other 006', 'Other 008')`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The reason filter: exact rows per category, combination with search and sort,
+// ignored when unknown or not offered by the bucket, repeated value rejected.
+func TestQueueReasonFilter(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedReasons(t, db)
+	mux := newReportsUIServer(t, db)
+	failedAll := fmt.Sprint(orderOf(t, mux, "/queue/failed"))
+	pendAll := fmt.Sprint(orderOf(t, mux, "/queue/pending"))
+	for target, want := range map[string]string{
+		"/queue/failed?reason=write":                         "[Other 004 Other 001]",
+		"/queue/failed?reason=write&sort=title&dir=asc":      "[Other 001 Other 004]",
+		"/queue/failed?reason=write&q=other+004":             "[Other 004]",
+		"/queue/failed?reason=network":                       "[Other 002]",
+		"/queue/failed?reason=none":                          "[Other 003]",
+		"/queue/deferred?reason=miss":                        "[Other 005]",
+		"/queue/deferred?reason=write":                       "[Other 008]",
+		"/queue/unavailable?reason=none":                     "[Other 007]", // Given up offers no reason filter
+		"/queue/failed?reason=bogus":                         failedAll,
+		"/queue/failed?reason=":                              failedAll,
+		"/queue/failed?reason=write%27--":                    failedAll,
+		"/queue/failed?reason=WRITE":                         failedAll,
+		"/queue/failed?reason=miss":                          "[Other 009]",
+		"/queue/failed?reason=gone":                          failedAll, // not a category
+		"/queue/pending?reason=write":                        pendAll,
+		"/queue/settled?reason=none":                         fmt.Sprint(orderOf(t, mux, "/queue/settled")),
+		"/queue/deferred?reason=network&lane=musixmatch":     "[Other 006]",
+		"/queue/deferred?reason=network&lane=petitlyrics":    "[]",
+		"/queue/failed?reason=write&reason=network&bad=skip": "400",
+	} {
+		if want == "400" {
+			if rec := getQueue(t, mux, target, false); rec.Code != http.StatusBadRequest {
+				t.Errorf("GET %s = %d, want 400", target, rec.Code)
+			}
+			continue
+		}
+		if got := fmt.Sprint(orderOf(t, mux, target)); got != want {
+			t.Errorf("GET %s = %s, want %s", target, got, want)
+		}
+	}
+}
+
+var reasonOptionRE = regexp.MustCompile(`<option value="([a-z]*)"( selected)?>([^<]*)</option>`)
+
+// The select is offered only on Retrying and Errored, lists exactly what the
+// bucket offers, marks the active value, and every link carries it.
+func TestQueueReasonSelectAndLinksCarryState(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedReasons(t, db)
+	mux := newReportsUIServer(t, db)
+	body := getQueue(t, mux, "/queue/failed?reason=write&q=other&sort=title&dir=asc", false).Body.String()
+	if !strings.Contains(body, `<label class="mx-queue-search-label" for="mx-queue-reason">Reason</label>`) ||
+		!strings.Contains(body, `<select class="mx-queue-filter" id="mx-queue-reason" name="reason" autocomplete="off" data-queue-autosubmit>`) {
+		t.Fatal("Reason select, its label or its auto-submit marker is not rendered")
+	}
+	sel := body[strings.Index(body, `id="mx-queue-reason"`):]
+	sel = sel[:strings.Index(sel, "</select>")]
+	var opts []string
+	for _, m := range reasonOptionRE.FindAllStringSubmatch(sel, -1) {
+		opts = append(opts, m[1]+":"+m[3]+":"+m[2])
+	}
+	want := "[:All reasons: none:No reason recorded: miss:Not found or no lyrics: write:Write or file error: selected throttle:Rate limited or refused: network:Server or network error: other:Other:]"
+	if got := fmt.Sprint(opts); got != want {
+		t.Errorf("options = %s, want %s", got, want)
+	}
+	for _, re := range []*regexp.Regexp{regexp.MustCompile(`class="mx-sort-link" href="([^"]*)"`), clearRE} {
+		ms := re.FindAllStringSubmatch(body, -1)
+		if len(ms) == 0 {
+			t.Fatalf("no links matched %s", re)
+		}
+		for _, m := range ms {
+			if h := html2(m[1]); !strings.Contains(h, "reason=write") {
+				t.Errorf("link %q drops the reason", h)
+			}
+		}
+	}
+	for _, b := range []string{"pending", "processing", "finished", "settled", "unavailable"} {
+		if strings.Contains(getQueue(t, mux, "/queue/"+b+"?reason=miss", false).Body.String(), "mx-queue-reason") {
+			t.Errorf("bucket %s offers the Reason select", b)
+		}
+	}
+	for _, b := range []string{"deferred", "failed"} {
+		if !strings.Contains(getQueue(t, mux, "/queue/"+b, false).Body.String(), `id="mx-queue-reason"`) {
+			t.Errorf("bucket %s does not offer the Reason select", b)
+		}
+	}
+	// A value the bucket does not offer is dropped before any link or preview href.
+	st, err := parseQueueViewState(url.Values{"reason": {"miss"}}, reports.BucketUnavailable)
+	if err != nil || st.Reason != "" {
+		t.Errorf("reason=miss on unavailable parsed to %q (err %v), want ignored", st.Reason, err)
+	}
+	st, _ = parseQueueViewState(url.Values{"reason": {"miss"}, "library": {"2"}}, reports.BucketDeferred)
+	if h := queuePreviewHref(reports.BucketRow{ID: 7, Previewable: true}, reports.BucketDeferred, st); !strings.Contains(h, "reason=miss") {
+		t.Errorf("preview link %q drops the reason", h)
+	}
+}
+
+// A reason filter that matches nothing says so, with no search and no chip.
+func TestQueueReasonFilterEmptyState(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedReasons(t, db)
+	mux := newReportsUIServer(t, db)
+	if !strings.Contains(getQueue(t, mux, "/queue/deferred?reason=none", false).Body.String(), "No tracks match the selected filters.") {
+		t.Error("an empty reason filter does not say the filters matched nothing")
+	}
+}
