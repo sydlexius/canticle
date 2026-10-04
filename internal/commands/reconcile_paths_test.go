@@ -500,9 +500,9 @@ func (b *lockedBuffer) String() string {
 // in the CLI's own format, 0600. When the file cannot be opened the sweep still
 // prunes and says so once, without naming a library path.
 func TestRunSweeperRecordsDeletedSources(t *testing.T) {
-	for name, mode := range map[string]string{"backup file opens": "ok", "backup file cannot be opened": "open", "backup file cannot be appended to": "append"} {
+	for name, mode := range map[string]string{"backup file opens": "ok", "existing 0644 backup file is tightened": "loose", "backup file cannot be opened": "open", "backup file cannot be appended to": "append"} {
 		t.Run(name, func(t *testing.T) {
-			openable := mode == "ok"
+			openable := mode == "ok" || mode == "loose"
 			ctx, _, dbPath, root := setupReconcilePaths(t)
 			gone := []string{filepath.Join(root, "ArtistA", "01. gone.flac"), filepath.Join(root, "ArtistA", "02. gone.flac")}
 			for _, g := range append(gone, filepath.Join(root, "ArtistB", "01. kept.flac")) {
@@ -518,6 +518,14 @@ func TestRunSweeperRecordsDeletedSources(t *testing.T) {
 			}
 			backup := sweepBackupPath(config.Config{DB: config.DBConfig{Path: dbPath}})
 			switch mode {
+			case "loose":
+				// A pre-existing, world-readable file: O_CREATE's 0600 does not apply to it.
+				if err := os.WriteFile(backup, nil, 0o644); err != nil { //nolint:gosec // reason: the test needs a loose mode
+					t.Fatal(err)
+				}
+				if err := os.Chmod(backup, 0o644); err != nil { //nolint:gosec // reason: defeat the umask
+					t.Fatal(err)
+				}
 			case "open":
 				backup = filepath.Join(filepath.Dir(dbPath), "no-such-dir", "backup.jsonl")
 			case "append":

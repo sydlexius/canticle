@@ -2423,7 +2423,7 @@ func sweepBackupPath(cfg config.Config) string {
 }
 
 // sweepBackup records one sweep's deleted sources. The file is opened (0600,
-// append-only) on the first delete, so a sweep that deletes nothing creates
+// append-only; an existing file's mode is tightened to 0600) on the first delete, so a sweep that deletes nothing creates
 // none. A file that cannot be opened or appended to never stops the sweep or
 // discards its result (the deletes already committed): the source is counted
 // as unrecorded and close logs ONE Warn for the sweep, naming no source.
@@ -2438,6 +2438,13 @@ type sweepBackup struct {
 func (b *sweepBackup) report(row prune.PrunedRow) error {
 	if b.f == nil && b.openErr == nil {
 		b.f, b.openErr = os.OpenFile(b.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: path is derived from the configured db dir, not untrusted input
+		if b.openErr == nil {
+			// O_CREATE's mode only applies to a new file; tighten an existing one before any write.
+			if err := b.f.Chmod(0o600); err != nil {
+				_ = b.f.Close()
+				b.f, b.openErr = nil, fmt.Errorf("tighten backup file mode: %w", err)
+			}
+		}
 		b.firstErr = b.openErr
 	}
 	if b.openErr != nil {
