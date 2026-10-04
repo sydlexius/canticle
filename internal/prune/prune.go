@@ -5,7 +5,8 @@
 //
 // The filesystem is the sole authority for "gone": a source path is a
 // candidate for removal only when os.Stat of that path (Exact granularity) or
-// its directory (Directory granularity) fails. The same primitive backs three
+// its directory (Directory granularity, which also stats the files of a
+// directory whose mtime changed) fails. The same primitive backs three
 // callers -- a watcher-reactive prune on Remove/Rename events, a lazy periodic
 // sweep, and the `scan reconcile-paths` CLI -- so the reconciliation rule
 // lives in exactly one place.
@@ -23,8 +24,9 @@
 // wrongly-deleted one destroys a GPU-class inference result. Only a row whose
 // identity is present but matches nothing anywhere in the library is a genuine
 // delete, and the reactive PrunePath path never performs one at all (relink or
-// retain only), leaving genuine deletion to the periodic sweep and the CLI, by
-// which time a rescan has had time to settle.
+// retain only), leaving genuine deletion to the CLI and to the periodic sweep
+// of a REMOVED directory (see policyInFolder for a surviving one), by which
+// time a rescan has had time to settle.
 //
 // A retained row is additionally RETIRED when it is provably unactionable --
 // gone AND carrying no identity, so no future sweep could ever relink it (#732).
@@ -45,6 +47,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,10 +73,14 @@ type Granularity int
 
 const (
 	// Directory stats only the parent directory of each candidate source path.
-	// A source is considered gone when its directory is gone. This is the cheap
-	// strategy for the unattended periodic sweep (one stat per directory rather
-	// than per file), matching the ticket's disk-I/O constraint. Single-file
-	// renames within a surviving directory are NOT caught at this granularity.
+	// A source is gone when its directory is gone. A surviving directory costs
+	// one stat while its mtime matches the stored one and, if it was stored with
+	// a row still gone, no scan has indexed anything since (see dirMtimes);
+	// otherwise that directory's row files are stat'ed exactly, so an in-folder
+	// swap or rename is caught on the next sweep (#1262). A row gone inside a surviving directory is relinked or
+	// retained (policyInFolder), never deleted or retired by this unattended
+	// pass: the sweep did not act on such rows at all before, and deleting them
+	// stays with the operator-invoked CLI (an empty nested mountpoint looks the same).
 	Directory Granularity = iota
 	// Exact stats every candidate source path individually, so a single-file
 	// rename within a still-existing directory is caught. Used by the reactive
@@ -99,6 +106,13 @@ const (
 	// populated the present-file candidate pool, so a "no match anywhere"
 	// verdict at that moment cannot be trusted to mean "genuinely deleted".
 	PolicyRelinkOrRetain
+	// policyInFolder is the periodic Directory sweep's policy for a row gone
+	// INSIDE a surviving directory (#1262). Like PolicyRelinkOrRetain it never
+	// deletes or retires, and it also never builds the identity pool, which
+	// costs one stat per identity-bearing file in the library: the only relink
+	// it makes is the same-stem sibling's. Relinking by MBID/ISRC or by title
+	// stays with `scan reconcile-paths` and the removed-directory path.
+	policyInFolder
 )
 
 // PrunedRow describes one gone source path and the rows removed for it, for
@@ -240,6 +254,10 @@ type Pruner struct {
 	// conservative behavior rather than a zero threshold that accepts anything.
 	minConfidence float64
 	minMargin     float64
+	// stat and now are the reconcile's filesystem and clock, fields only so a
+	// test can count stats and inject a stat failure.
+	stat func(string) (fs.FileInfo, error)
+	now  func() time.Time
 }
 
 // New returns a Pruner backed by db, with the default identity-key order
@@ -253,6 +271,8 @@ func New(db *sql.DB) *Pruner {
 		identityKeys:  identity.NormalizeKeys([]string{"mbid", "isrc"}),
 		minConfidence: defaultMinConfidence,
 		minMargin:     defaultMinMargin,
+		stat:          os.Stat,
+		now:           time.Now,
 	}
 }
 
@@ -292,21 +312,39 @@ func (p *Pruner) SetIdentityKeys(keys []string) {
 // identity resolves uniquely to an already-present file) or retained, never
 // genuinely deleted -- see PolicyRelinkOrRetain's doc for why.
 func (p *Pruner) PrunePath(ctx context.Context, path string) (Result, error) {
-	return p.reconcile(ctx, scope{prefix: path, scoped: true}, nil, Exact, false, PolicyRelinkOrRetain, reportHooks{})
+	return p.reconcile(ctx, scope{prefix: path, scoped: true}, nil, nil, false, PolicyRelinkOrRetain, reportHooks{})
 }
 
 // Sweep reconciles every candidate source path in scope. Directory granularity
 // is the cheap backstop; Exact is the thorough operator-invoked pass. With
-// DryRun set it reports without mutating. Runs under PolicyFull: a gone row
-// whose identity is present but resolves to no candidate anywhere in the
-// library is genuinely deleted, since the periodic sweep and the CLI both run
-// well after any rescan of a moved file's new location would have settled.
+// DryRun set it reports without mutating. Runs under PolicyFull (a gone row
+// whose identity matches nothing anywhere in the library is genuinely
+// deleted), except that a Directory sweep's row gone inside a SURVIVING
+// directory runs under policyInFolder. An unscoped, non-dry Directory sweep
+// then stores its directory state; a failure to store it is logged and the
+// committed result still returned, since the next sweep just re-examines.
 func (p *Pruner) Sweep(ctx context.Context, opts SweepOptions) (Result, error) {
-	return p.reconcile(ctx, scope{}, opts.LibraryID, opts.Granularity, opts.DryRun, PolicyFull, reportHooks{
+	var ds *dirMtimes
+	if opts.Granularity == Directory {
+		var err error
+		if ds, err = p.loadDirState(ctx); err != nil {
+			return Result{}, err
+		}
+	}
+	res, err := p.reconcile(ctx, scope{}, opts.LibraryID, ds, opts.DryRun, PolicyFull, reportHooks{
 		Prune:    opts.Report,
 		Relinked: opts.ReportRelinked,
 		Retained: opts.ReportRetained,
 	})
+	// A dry run records nothing, and neither does a library-scoped sweep: it saw
+	// only that library's rows, and the state is per directory, not per library.
+	if err != nil || ds == nil || opts.DryRun || opts.LibraryID != nil {
+		return res, err
+	}
+	if err := ds.save(ctx, p.db); err != nil && ctx.Err() == nil {
+		slog.Warn("path-reconciliation sweep could not store its directory state; the next sweep re-examines", "error", err)
+	}
+	return res, nil
 }
 
 // reportHooks bundles the three optional per-outcome callbacks so internal
@@ -527,6 +565,9 @@ func (p *Pruner) tryNameRelink(ctx context.Context, idx *presentIndex, policy Po
 	// defers RETIREMENT to the periodic sweep for exactly this reason; a relink is
 	// at least as consequential, so it earns the same discipline. By the periodic
 	// sweep the rescan has settled and the real target is present.
+	if policy == policyInFolder {
+		return false, "identity absent, and no same-name file with another extension is indexed beside it; the periodic sweep relinks nothing else inside a surviving directory (`scan reconcile-paths` does)", classified{}, nil
+	}
 	if policy != PolicyFull {
 		return false, "identity absent; deferred to the periodic sweep, which sees a settled index", classified{}, nil
 	}
@@ -613,7 +654,7 @@ func (p *Pruner) tryNameRelink(ctx context.Context, idx *presentIndex, policy Po
 	// wakeups on a spun-down array -- so this is where that safety is bought back,
 	// for one stat rather than tens of thousands. A winner that has itself
 	// vanished is no target: it would trade one dangling reference for another.
-	if !pathExists(hres.Ref) {
+	if !pathExists(p.stat, hres.Ref) {
 		return false, "identity absent, and the only same-title file has itself vanished; never relinked onto a dead path", classified{}, nil
 	}
 	// A detail MISS must decline, never proceed with the zero value: a zero detail
@@ -648,7 +689,10 @@ func (p *Pruner) tryNameRelink(ctx context.Context, idx *presentIndex, policy Po
 // identity resolver into prune/relink/retain, and applies the result --
 // deleting genuinely-gone rows, relinking rows whose identity resolved
 // elsewhere, and reporting (never mutating) retained rows.
-func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Granularity, dryRun bool, policy Policy, hooks reportHooks) (Result, error) {
+//
+// ds non-nil selects Directory granularity (see dirMtimes); nil stats every
+// candidate source exactly.
+func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *dirMtimes, dryRun bool, fullPolicy Policy, hooks reportHooks) (Result, error) {
 	bySource, err := p.gatherCandidates(ctx, sc, libraryID)
 	if err != nil {
 		return Result{}, err
@@ -658,14 +702,16 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 	// library that is merely unmounted (its mountpoint present but empty, making
 	// every child os.Stat return ENOENT) cannot be mass-deleted. A root that is
 	// genuinely removed is left to `library remove`, not this reconciler.
-	roots, err := p.availableRoots(ctx)
+	roots, offline, err := p.availableRoots(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	idx := newPresentIndex(p.db, roots)
-	idx.scopeLibrary = libraryID
+	idx.scopeLibrary, idx.stat = libraryID, p.stat
 
-	statCache := make(map[string]bool) // directory -> exists (Directory granularity)
+	if ds != nil {
+		ds.offline = offline
+	}
 	var res Result
 	var toPrune []PrunedRow
 	var toRelink []classifiedRelink
@@ -674,10 +720,18 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 		if !underAvailableRoot(src, roots) {
 			continue
 		}
-		if !gone(src, g, statCache) {
+		policy := fullPolicy
+		if ds == nil {
+			if pathExists(p.stat, src) {
+				continue
+			}
+		} else if isGone, inFolder := ds.gone(src); !isGone {
 			continue
+		} else if inFolder {
+			policy = policyInFolder
 		}
 		if c.processing {
+			ds.retry(src) // not recorded: looked at again once the worker lets go
 			// The worker still owns this source; deleting its scan_results row now
 			// would null work_queue.scan_result_id (migration 009, ON DELETE SET
 			// NULL) and cascade away the junction row mid-flight. Defer to a later
@@ -780,6 +834,12 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, g Gr
 		}
 		res.Relinked = applied
 		res.EditHeld = editHeld
+		for _, r := range applied {
+			ds.relinked(r.OldPath)
+		}
+		for _, src := range declines.raced {
+			ds.retry(src) // a worker raced this relink: look again
+		}
 		res.RelinkOwned, res.RelinkChanged = declines.owned, declines.changed
 		// A candidate that failed to relink (its target is already owned by a
 		// different work_queue row) is neither pruned nor relinked, but it must
@@ -995,6 +1055,14 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 			classifiedRelink: classifiedRelink{src: src, c: c},
 		}, nil
 	}
+	if policy == policyInFolder {
+		// No pool here: it stats every identity-bearing file in the library, and
+		// a retained row would buy that again on each examination (#1262).
+		if ok, cls, err := p.trySiblingRelink(ctx, idx.scopeLibrary, policy, src, c); err != nil || ok {
+			return cls, err
+		}
+		return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "gone inside a surviving directory with no same-name file with another extension indexed beside it; the periodic sweep neither deletes it nor searches the library by MBID/ISRC (`scan reconcile-paths` does)", MBID: c.mbid, ISRC: c.isrc}}, nil
+	}
 	pool, err := idx.pool(ctx, c.libraryID)
 	if err != nil {
 		return classified{}, err
@@ -1019,7 +1087,7 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "identity matches more than one present file; never guessed", MBID: c.mbid, ISRC: c.isrc}}, nil
 	default: // VerdictNone
 		if policy == PolicyRelinkOrRetain {
-			return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "identity present but not yet found elsewhere; reactive pass defers genuine delete to the periodic sweep", MBID: c.mbid, ISRC: c.isrc}}, nil
+			return classified{outcome: outcomeRetain, retained: RetainedRow{SourcePath: src, Reason: "identity present but not yet found elsewhere; this pass never deletes (a removed directory or `scan reconcile-paths` does)", MBID: c.mbid, ISRC: c.isrc}}, nil
 		}
 		return classified{outcome: outcomePrune}, nil
 	}
@@ -1098,6 +1166,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 					declines.owned++
 				} else {
 					declines.changed++
+					declines.raced = append(declines.raced, cg.src)
 				}
 				// An already-retired row whose reconsidered relink was declined drops
 				// out silently: it is exactly as settled as before, nothing was
@@ -1179,7 +1248,11 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 
 // relinkDeclines tallies the planned relinks one applyRelinks call declined, by
 // reason, including the already-settled ones it drops without a RetainedRow.
-type relinkDeclines struct{ owned, changed int }
+// raced names the sources behind changed, so the caller retries exactly those.
+type relinkDeclines struct {
+	owned, changed int
+	raced          []string
+}
 
 // planRelinks is the dry run's stand-in for applyRelinks: the same ownership
 // check, mutating nothing. claimed carries the links an earlier relink in this
@@ -1364,7 +1437,7 @@ func (p *Pruner) trySiblingRelink(ctx context.Context, lib *int64, policy Policy
 	}
 	var live []string
 	for _, path := range paths { // statted only after the rows are closed
-		_, err := os.Stat(path)
+		_, err := p.stat(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -1728,10 +1801,12 @@ type presentIndex struct {
 	// scopeLibrary is the RUN's requested library (SweepOptions.LibraryID), nil
 	// when unscoped. Not candidate.libraryID, which is the row's own library.
 	scopeLibrary *int64
+	stat         func(string) (fs.FileInfo, error)
 }
 
 func newPresentIndex(db *sql.DB, roots []string) *presentIndex {
 	return &presentIndex{
+		stat:        os.Stat,
 		db:          db,
 		roots:       roots,
 		byScope:     map[int64][]identity.Candidate{},
@@ -1787,7 +1862,7 @@ func (idx *presentIndex) pool(ctx context.Context, libraryID *int64) ([]identity
 		// under the stat, so it is a real cost, just a small and bounded one --
 		// nowhere near what reading candidate durations for the heuristic tier
 		// would have cost (Design Choice 1 explicitly ruled that out).
-		if !underAvailableRoot(path, idx.roots) || !pathExists(path) {
+		if !underAvailableRoot(path, idx.roots) || !pathExists(idx.stat, path) {
 			return nil
 		}
 		pool = append(pool, identity.Candidate{Ref: path, MBID: mbid, ISRC: isrc})
@@ -1914,9 +1989,8 @@ func (idx *presentIndex) detail(libraryID *int64, ref string) presentRowDetail {
 // would be pruned. Requiring at least one entry treats an empty mountpoint as
 // unavailable. The trade-off is that a genuinely-emptied library is not
 // auto-pruned (its rows are left to `library remove`), which is the safe bias
-// for a destructive operation.
-func (p *Pruner) availableRoots(ctx context.Context) ([]string, error) {
-	var roots []string
+// for a destructive operation. offline are the configured roots that are not.
+func (p *Pruner) availableRoots(ctx context.Context) (roots, offline []string, _ error) {
 	if err := queryRows(ctx, p.db, `SELECT path FROM libraries WHERE path != ''`, nil, func(rows *sql.Rows) error {
 		var path string
 		if err := rows.Scan(&path); err != nil {
@@ -1924,12 +1998,14 @@ func (p *Pruner) availableRoots(ctx context.Context) ([]string, error) {
 		}
 		if dirPopulated(path) {
 			roots = append(roots, path)
+		} else {
+			offline = append(offline, path)
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("prune: load library roots: %w", err)
+		return nil, nil, fmt.Errorf("prune: load library roots: %w", err)
 	}
-	return roots, nil
+	return roots, offline, nil
 }
 
 // dirPopulated reports whether path is a directory with at least one entry. Any
@@ -2302,26 +2378,11 @@ func ensureCandidate(m map[string]*candidate, src string) *candidate {
 	return c
 }
 
-// gone reports whether src's source file is absent, per granularity. Directory
-// granularity caches directory existence so a large album is statted once.
-func gone(src string, g Granularity, dirCache map[string]bool) bool {
-	if g == Directory {
-		dir := filepath.Dir(src)
-		exists, cached := dirCache[dir]
-		if !cached {
-			exists = pathExists(dir)
-			dirCache[dir] = exists
-		}
-		return !exists
-	}
-	return !pathExists(src)
-}
-
 // pathExists reports whether p exists. Only a definitive not-exist result counts
 // as gone; any other stat error (permissions, I/O) is treated as "exists" so a
 // transient error never triggers a destructive prune.
-func pathExists(p string) bool {
-	if _, err := os.Stat(p); err != nil {
+func pathExists(stat func(string) (fs.FileInfo, error), p string) bool {
+	if _, err := stat(p); err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
 	}
 	return true

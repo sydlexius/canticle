@@ -265,9 +265,9 @@ func TestPrunePath_DefersInFlightProcessing(t *testing.T) {
 }
 
 // TestSweep_DirectoryVsExact: a single-file rename inside a surviving directory
-// (the file is gone but its directory remains) is caught by Granularity: Exact
-// but not by Granularity: Directory. Both rows carry no identity, so the caught
-// row is retained (not deleted) under the new #640 policy.
+// (the file is gone but its directory remains) is caught by both granularities
+// (#1262: Directory examines a directory it has not recorded). Both rows carry
+// no identity, so the caught row is retained (not deleted) under #640.
 func TestSweep_DirectoryVsExact(t *testing.T) {
 	ctx, sqlDB, libID, root := openSeeded(t)
 	album := filepath.Join(root, "ArtistD", "AlbumD")
@@ -281,13 +281,13 @@ func TestSweep_DirectoryVsExact(t *testing.T) {
 	}
 
 	p := New(sqlDB)
-	// Directory granularity: album dir exists, so nothing is touched.
+	// Directory granularity: first sight of the album, so its rows are stat'ed.
 	dirRes, err := p.Sweep(ctx, SweepOptions{Granularity: Directory})
 	if err != nil {
 		t.Fatalf("Sweep dir: %v", err)
 	}
-	if dirRes.ScanResults != 0 || len(dirRes.Retained) != 0 {
-		t.Fatalf("directory sweep acted on %d/%d, want 0/0 (dir survives)", dirRes.ScanResults, len(dirRes.Retained))
+	if dirRes.ScanResults != 0 || len(dirRes.Retained) != 1 || dirRes.Retained[0].Retired {
+		t.Fatalf("directory sweep deleted %d, retained %d, want 0/1 unretired", dirRes.ScanResults, len(dirRes.Retained))
 	}
 	// Exact granularity: the renamed-away file is gone and carries no identity,
 	// so it is retained (not pruned) under the new policy.
