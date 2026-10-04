@@ -62,6 +62,23 @@ func TestQueueEditedBadgeAndPreviewLabel(t *testing.T) {
 	}
 }
 
+// An edited row with no preview link (plain text here: nothing to preview)
+// still carries the badge, alone in its cell, with no link beside it.
+func TestQueueEditedBadgeWithoutPreviewLink(t *testing.T) {
+	db := openReportsTestDB(t)
+	seedChipPage(t, db)
+	if _, err := db.Exec(`UPDATE work_queue SET lyric_offset_ms = 250, lyric_edited_at = '2026-01-01T00:00:00Z' WHERE title = 'Done 006'`); err != nil {
+		t.Fatal(err)
+	}
+	row := rowHTML(t, getQueue(t, newReportsUIServer(t, db), "/queue/settled", false).Body.String(), "Done 006")
+	if !strings.Contains(row, ">Edited +0.25 s<") {
+		t.Errorf("edited row without a preview link lacks the badge: %s", row)
+	}
+	if strings.Contains(row, "mx-queue-preview") {
+		t.Errorf("plain-text row offers a preview link: %s", row)
+	}
+}
+
 func TestFormatEditOffset(t *testing.T) {
 	for ms, want := range map[int64]string{-4: "0.00 s", 4: "0.00 s", 0: "0.00 s", -5: "-0.01 s", 600000: "+600.00 s", -1234: "-1.23 s"} {
 		if got := formatEditOffset(ms); got != want {
