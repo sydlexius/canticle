@@ -139,7 +139,10 @@ templ QueueRows(view QueueView) {
 			<td>{ row.Libraries }</td>
 			<td>
 				if row.PreviewHref != "" {
-					<a class="mx-queue-link mx-queue-preview" href={ templ.SafeURL(row.PreviewHref) }>Preview</a>
+					<a class="mx-queue-link mx-queue-preview" href={ templ.SafeURL(row.PreviewHref) }>{ row.PreviewLabel }</a>
+				}
+				if row.Edited {
+					<span class="mx-result-tier mx-result-tier-unknown mx-queue-edited" title={ row.EditedTitle }>Edited { row.EditedTitle }</span>
 				}
 			</td>
 		</tr>

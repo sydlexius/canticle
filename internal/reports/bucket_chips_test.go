@@ -197,3 +197,28 @@ func TestBucketChipsReturnsACopy(t *testing.T) {
 		t.Error("HasChip(settled, line) = false after a caller write to a returned slice")
 	}
 }
+
+// TestBucketRowEditFields pins the row's LineEditable/Edited/OffsetMS columns:
+// Edited is the Hand-edited chip's predicate, LineEditable the offset editor's.
+func TestBucketRowEditFields(t *testing.T) {
+	repo := seedChipRows(t)
+	sp := reports.BucketSpec(reports.BucketSettled)
+	rows, err := repo.ListBucketFiltered(context.Background(), reports.BucketSettled, reports.BucketFilter{}, sp.Default, tablesort.Cursor{}, reports.MaxBucketLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][2]bool{}
+	for _, r := range rows {
+		got[r.Title] = [2]bool{r.LineEditable, r.Edited}
+	}
+	want := map[string][2]bool{
+		"line": {true, false}, "line-edited": {true, true}, "txt-edited": {false, true},
+		"word-missync": {false, false}, "line-recheck": {false, false},
+		"line-unsynced-outcome": {false, false}, "line-retired": {false, false}, "line-missync": {false, false},
+	}
+	for title, w := range want {
+		if got[title] != w {
+			t.Errorf("%s: (LineEditable, Edited) = %v, want %v", title, got[title], w)
+		}
+	}
+}

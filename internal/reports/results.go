@@ -114,3 +114,8 @@ func (r *Repo) ResultsBreakdown(ctx context.Context) (ResultsBreakdown, error) {
 	}
 	return b, nil
 }
+
+// lineEditableSQL is the ONE definition of "the offset editor may rewrite this
+// row's .lrc": a settled synced row at the current line rung. PreviewSource and
+// the queue listing both read it.
+const lineEditableSQL = `status = 'done' AND outcome_type = 'synced' AND ` + lineTierPredicate
