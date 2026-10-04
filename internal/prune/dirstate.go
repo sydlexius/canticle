@@ -36,7 +36,10 @@ const goneConfirmGap = time.Hour
 // sweep reads as a fault (a missing union-share branch), so none is deleted.
 const ageOutMaxPerSweep = 50
 
-// heldMark is the confirmed_at of a mark the tripped breaker holds: while over the cap, counted but not looked at.
+// heldMark is the confirmed_at of a mark the tripped breaker holds. No periodic
+// sweep deletes its row or releases it, whatever the count held falls to: only
+// the attended `scan reconcile-paths --yes` does. A sweep drops it when the
+// file is back or the row is relinked or held for a replacement.
 const heldMark = -1
 
 // goneMark is one prune_gone_since row, unix seconds; confirmed 0 is NULL.
@@ -70,8 +73,6 @@ type dirMtimes struct {
 	// changed names the paths save must write back.
 	since   map[string]goneMark
 	changed map[string]bool
-	heldN   int // rows whose mark the tripped breaker holds
-	skipped int // those this sweep counted without examining
 }
 
 // dirRecord is one stored row; goneMark is NULL when every row was present.
@@ -110,7 +111,8 @@ func (p *Pruner) loadDirState(ctx context.Context) (*dirMtimes, error) {
 			}
 			// first_seen is never rewritten: one later than now is simply not due. A
 			// confirmation later than now, or on a mark found not due, is dropped.
-			if now := d.now.Unix(); m.confirmed != 0 && (m.confirmed > now || now-m.first < int64(goneGrace/time.Second)) {
+			// A held mark is never dropped here: only the attended run releases it.
+			if now := d.now.Unix(); m.confirmed > 0 && (m.confirmed > now || now-m.first < int64(goneGrace/time.Second)) {
 				m.confirmed, d.changed[path] = 0, true
 			}
 			d.since[path] = m
@@ -157,7 +159,7 @@ func (d *dirMtimes) gone(src string) (isGone, inFolder bool) {
 	}
 	// A row whose grace period has run out is stat'ed by itself: its directory
 	// has not changed, so nothing else in it needs a look.
-	if !o.examine && (!d.due(src) || d.holding(src)) {
+	if !o.examine && (d.holding(src) || !d.due(src)) {
 		return false, false
 	}
 	_, err := d.stat(src)
@@ -205,8 +207,12 @@ func (d *dirMtimes) due(src string) bool {
 
 // confirm is the second phase for a due src still gone: the first such sweep
 // records it and reports false; one goneConfirmGap or more later reports true.
+// A held mark is never confirmed, however old: it is counted and stays held.
 func (d *dirMtimes) confirm(src string) bool {
 	m := d.since[src]
+	if m.confirmed == heldMark {
+		return false
+	}
 	if m.confirmed == 0 {
 		m.confirmed = d.now.Unix()
 		d.since[src], d.changed[src] = m, true
@@ -215,13 +221,21 @@ func (d *dirMtimes) confirm(src string) bool {
 	return d.now.Unix()-m.confirmed >= int64(goneConfirmGap/time.Second)
 }
 
-// holding reports, and counts, a mark the tripped breaker is still holding.
+// holding reports a held mark. In a directory that has not changed it costs no
+// stat and no directory read, however many or few are held.
 func (d *dirMtimes) holding(src string) bool {
-	if d.since[src].confirmed != heldMark || d.heldN <= ageOutMaxPerSweep {
-		return false
+	return d.since[src].confirmed == heldMark
+}
+
+// held counts the candidates whose mark is held as the sweep ends: left
+// unexamined, or examined and found still gone with nothing to tie them to.
+func (d *dirMtimes) held(bySource map[string]*candidate) (n int) {
+	for src := range bySource {
+		if d.holding(src) {
+			n++
+		}
 	}
-	d.skipped++
-	return true
+	return n
 }
 
 // confirmedDue reports whether src is due and was confirmed long enough ago, or held.

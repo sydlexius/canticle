@@ -12,6 +12,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // markGone records path as first seen gone the given time ago; a mark past the
@@ -380,8 +383,9 @@ func TestSweepDirectory_ClockBehindStartsNoMark(t *testing.T) {
 }
 
 // THE CIRCUIT BREAKER, and the report after it. More due rows than
-// ageOutMaxPerSweep in one sweep deletes none and holds every mark, which then costs nothing. At the
-// cap each row is recorded first and deleted only if that worked; a row partly deleted is corrected.
+// ageOutMaxPerSweep in one sweep deletes none and holds every mark, which then costs nothing and is
+// deleted by no sweep, at the cap or under it. Rows confirmed in the ordinary way, at the cap, are each
+// recorded first and deleted only if that worked; a row partly deleted is corrected.
 func TestSweepDirectory_AgeOutCircuitBreaker(t *testing.T) {
 	ctx, sqlDB, libID, root := openSeeded(t)
 	album := filepath.Join(root, "Artist", "Album")
@@ -416,6 +420,13 @@ func TestSweepDirectory_AgeOutCircuitBreaker(t *testing.T) {
 	}
 	sqlArrange(`DELETE FROM work_queue WHERE source_path = ?`, tracks[0])(t, ctx, sqlDB, 0, "") // one row is gone: the rest are at the cap
 	sqlArrange(`DELETE FROM scan_results WHERE file_path = ?`, tracks[0])(t, ctx, sqlDB, 0, "")
+	atCap, calls := countingPruner(sqlDB) // at the cap the held rows stay held, still for one stat
+	res = sweepDir(t, ctx, atCap)
+	if _, wq, _ := rowCounts(t, ctx, sqlDB); len(res.Pruned) != 0 || res.AgeOutHeld != ageOutMaxPerSweep || wq != ageOutMaxPerSweep || len(*calls) != 1 {
+		t.Fatalf("held rows at the cap: pruned=%d held=%d rows=%d stats=%d, want 0/%d/%d/1: no sweep deletes a held row", len(res.Pruned), res.AgeOutHeld, wq, len(*calls), ageOutMaxPerSweep, ageOutMaxPerSweep)
+	}
+	// The rest of this test is about rows confirmed in the ordinary way, so the marks are made that.
+	sqlArrange(`UPDATE prune_gone_since SET confirmed_at = ?`, time.Now().Add(-2*goneConfirmGap).Unix())(t, ctx, sqlDB, 0, "")
 	reports := 0
 	_, err = New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Directory, Report: func(PrunedRow) error { reports++; return errors.New("disk full") }})
 	if _, wq, _ := rowCounts(t, ctx, sqlDB); err == nil || strings.Contains(err.Error(), root) || reports != ageOutMaxPerSweep || wq != ageOutMaxPerSweep ||
@@ -448,5 +459,161 @@ func TestSweepDirectory_AgeOutCircuitBreaker(t *testing.T) {
 	}
 	if sqlArrange(`DELETE FROM prune_dir_state WHERE gone_scan_id IS NULL`)(t, ctx, sqlDB, 0, ""); storedDirs(t, ctx, sqlDB) != 0 {
 		t.Fatal("the directory was stored as still holding a gone row, though its gone rows were deleted")
+	}
+}
+
+// A HELD ROW IS DELETED ONLY BY THE ATTENDED RUN. The breaker trips on one row over the cap; then files
+// come back, so fewer than the cap are held: no periodic sweep deletes a held row or releases its mark,
+// and one in an unchanged directory costs no stat and no directory read. Held rows count toward the cap
+// for rows newly due: those are deleted while held plus due stays at or under it, and held too otherwise.
+func TestSweepDirectory_HeldRowsAreDeletedOnlyByTheAttendedRun(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	album := filepath.Join(root, "Artist", "Album")
+	gone := func(path string) { // a row whose file is gone, its mark due and confirmed
+		t.Helper()
+		seedRowWithIdentity(t, ctx, sqlDB, libID, path, "done", "done", "mbid-"+path, "")
+		if err := errors.Join(os.Remove(path), os.WriteFile(filepath.Join(filepath.Dir(path), "keep.txt"), []byte("words"), 0o600)); err != nil {
+			t.Fatal(err)
+		}
+		markGone(t, ctx, sqlDB, path, goneGrace+time.Hour)
+		age(t, filepath.Dir(path))
+	}
+	var tracks []string
+	for i := 0; i <= ageOutMaxPerSweep; i++ {
+		tracks = append(tracks, filepath.Join(album, fmt.Sprintf("%02d.mp3", i)))
+		gone(tracks[i])
+	}
+	heldMarks := func() (n int) {
+		t.Helper()
+		if err := sqlDB.QueryRowContext(ctx, `SELECT count(*) FROM prune_gone_since WHERE confirmed_at = ?`, heldMark).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// sweep runs one periodic sweep and checks what it deleted, what is held after it, and its cost.
+	sweep := func(step string, now time.Time, wantAged, wantHeld, wantRows, wantStats, wantReads int) {
+		t.Helper()
+		p, calls := countingPruner(sqlDB)
+		p.now = func() time.Time { return now }
+		reads, readDir := 0, p.readDir
+		p.readDir = func(dir string) ([]os.DirEntry, error) { reads++; return readDir(dir) }
+		res := sweepDir(t, ctx, p)
+		if _, wq, _ := rowCounts(t, ctx, sqlDB); res.AgedOut != wantAged || len(res.Pruned) != wantAged || res.AgeOutHeld != wantHeld || heldMarks() != wantHeld || wq != wantRows {
+			t.Fatalf("%s: aged=%d pruned=%d held=%d held marks=%d rows=%d, want %d/%d/%d/%d/%d", step, res.AgedOut, len(res.Pruned), res.AgeOutHeld, heldMarks(), wq, wantAged, wantAged, wantHeld, wantHeld, wantRows)
+		}
+		if len(*calls) != wantStats || reads != wantReads {
+			t.Fatalf("%s: %d stats %d directory reads, want %d/%d", step, len(*calls), reads, wantStats, wantReads)
+		}
+	}
+	n := len(tracks) // 51
+	sweep("the breaker trips", time.Now(), 0, n, n, 1+2*n, 1)
+
+	// One file comes back: 50 are still gone, which is at the cap. The directory changed, so it is
+	// examined (each row's stat, the re-stat of the 50, one read), and nothing is deleted.
+	if err := os.WriteFile(tracks[0], []byte("audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	age(t, album)
+	sweep("one file back, the changed directory", time.Now(), 0, n-1, n, 1+n+(n-1), 1)
+	for i := 0; i < 2; i++ { // unchanged: a held mark costs no stat and no read, and is not deleted
+		sweep("one file back, later sweeps", time.Now().Add(time.Duration(i+2)*goneConfirmGap), 0, n-1, n, 1, 0)
+	}
+	// A clock that stepped back does not turn a held mark into an ordinary one.
+	sweep("the clock behind", time.Now().Add(-30*24*time.Hour), 0, n-1, n, 1, 0)
+
+	// A second file comes back: 49 held. One row newly due elsewhere keeps the total at the cap and is
+	// deleted; the held rows are not. Two more would take it over, so they are held as well.
+	if err := os.WriteFile(tracks[1], []byte("audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	age(t, album)
+	sweep("two files back", time.Now(), 0, n-2, n, 1+n+(n-2), 1)
+	gone(filepath.Join(root, "Artist", "Other", "x.mp3"))
+	// (Seeding a row is a scan insert, so the album, which holds gone rows, is examined again.)
+	sweep("one newly due row, at the cap", time.Now(), 1, n-2, n, 2+n+(n-2)+2, 2)
+	gone(filepath.Join(root, "Artist", "Third", "y.mp3"))
+	gone(filepath.Join(root, "Artist", "Third", "z.mp3"))
+	sweep("two newly due rows, over the cap", time.Now(), 0, n, n+2, 2+n+(n-2)+4, 2)
+	sweep("all held", time.Now(), 0, n, n+2, 2, 0)
+
+	// The attended run plans them all and deletes them all, and no mark is left held.
+	dry, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact, DryRun: true})
+	if err != nil || len(dry.Pruned) != n || dry.AgedOut != n {
+		t.Fatalf("attended dry run: err=%v pruned=%d aged=%d, want the %d held rows planned", err, len(dry.Pruned), dry.AgedOut, n)
+	}
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if _, wq, _ := rowCounts(t, ctx, sqlDB); err != nil || res.AgedOut != n || wq != 2 || heldMarks() != 0 {
+		t.Fatalf("attended apply: err=%v aged=%d rows=%d held marks=%d, want the %d held rows deleted, the 2 present rows left and no mark held", err, res.AgedOut, wq, heldMarks(), n)
+	}
+}
+
+// A QUEUE ROW TWO LIBRARIES SHARE IS NOT AGED OUT. work_queue is unique per song, so two libraries'
+// copies link one queue row; when one copy is gone and its mark is due and confirmed, no run (scoped
+// attended, unscoped attended, periodic) deletes the row the other library's present file still uses.
+func TestSweep_AgeOutLeavesARowAnotherLibraryLinks(t *testing.T) {
+	for name, opts := range map[string]SweepOptions{
+		"attended, scoped to the library": {Granularity: Exact},
+		"attended, unscoped":              {Granularity: Exact},
+		"periodic":                        {Granularity: Directory},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, sqlDB, libA, rootA := openSeeded(t)
+			rootB := filepath.Join(filepath.Dir(rootA), "other")
+			libB, err := library.New(sqlDB).Add(ctx, rootB, "other", models.LibrarySettings{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(name, "scoped to") {
+				opts.LibraryID = &libA
+			}
+			goneA := filepath.Join(rootA, "Artist", "Album", "song.mp3")
+			seedRow(t, ctx, sqlDB, libA, goneA, "done", "done")
+			srB := seedPresentScanResult(t, ctx, sqlDB, libB.ID, filepath.Join(rootB, "Artist", "Album", "song.flac"), "", "")
+			sqlArrange(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) SELECT id, ? FROM work_queue`, srB)(t, ctx, sqlDB, 0, "")
+			if err := errors.Join(os.Remove(goneA), os.WriteFile(filepath.Join(filepath.Dir(goneA), "keep.txt"), []byte("words"), 0o600)); err != nil {
+				t.Fatal(err)
+			}
+			age(t, filepath.Dir(goneA))
+			markGone(t, ctx, sqlDB, goneA, goneGrace+time.Hour)
+			res, err := New(sqlDB).Sweep(ctx, opts)
+			if sr, wq, links := rowCounts(t, ctx, sqlDB); err != nil || len(res.Pruned) != 0 || res.AgedOut != 0 || sr != 2 || wq != 1 || links != 2 || !scanResultExists(t, ctx, sqlDB, srB) {
+				t.Fatalf("err=%v pruned=%d aged=%d scan=%d wq=%d links=%d, want nothing deleted: the other library's file still links the queue row", err, len(res.Pruned), res.AgedOut, sr, wq, links)
+			}
+			// Control: with the other library's link gone, the same row ages out.
+			sqlArrange(`DELETE FROM scan_results WHERE id = ?`, srB)(t, ctx, sqlDB, 0, "")
+			sqlArrange(`DELETE FROM prune_gone_since`)(t, ctx, sqlDB, 0, "")
+			markGone(t, ctx, sqlDB, goneA, goneGrace+time.Hour)
+			sqlArrange(`DELETE FROM prune_dir_state`)(t, ctx, sqlDB, 0, "")
+			res, err = New(sqlDB).Sweep(ctx, opts)
+			if sr, wq, _ := rowCounts(t, ctx, sqlDB); err != nil || res.AgedOut != 1 || sr != 0 || wq != 0 {
+				t.Fatalf("control, unshared: err=%v aged=%d scan=%d wq=%d, want the row aged out", err, res.AgedOut, sr, wq)
+			}
+		})
+	}
+}
+
+// Two libraries that both index the SAME gone file: a run scoped to one sees only its own row, so it
+// leaves the shared queue row; the unscoped run gathered both rows and ages the source out whole.
+func TestSweep_AgeOutOfAFileTwoLibrariesIndex(t *testing.T) {
+	ctx, sqlDB, libA, root := openSeeded(t)
+	libB, err := library.New(sqlDB).Add(ctx, filepath.Join(root, "Artist"), "nested", models.LibrarySettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(root, "Artist", "Album", "song.mp3")
+	seedRow(t, ctx, sqlDB, libA, gone, "done", "done")
+	sqlArrange(`INSERT INTO scan_results (library_id, file_path, artist, title, status, outdir, filename) VALUES (?, ?, 'Artist', 'Title', 'done', '', '')`, libB.ID, gone)(t, ctx, sqlDB, 0, "")
+	sqlArrange(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) SELECT (SELECT id FROM work_queue), max(id) FROM scan_results`)(t, ctx, sqlDB, 0, "")
+	if err := errors.Join(os.Remove(gone), os.WriteFile(filepath.Join(filepath.Dir(gone), "keep.txt"), []byte("words"), 0o600)); err != nil {
+		t.Fatal(err)
+	}
+	markGone(t, ctx, sqlDB, gone, goneGrace+time.Hour)
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact, LibraryID: &libA})
+	if sr, wq, links := rowCounts(t, ctx, sqlDB); err != nil || res.AgedOut != 0 || sr != 2 || wq != 1 || links != 2 {
+		t.Fatalf("scoped: err=%v aged=%d scan=%d wq=%d links=%d, want nothing deleted: the other library's row links the queue row", err, res.AgedOut, sr, wq, links)
+	}
+	res, err = New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if sr, wq, _ := rowCounts(t, ctx, sqlDB); err != nil || res.AgedOut != 1 || sr != 0 || wq != 0 {
+		t.Fatalf("unscoped: err=%v aged=%d scan=%d wq=%d, want the source aged out with both libraries' rows", err, res.AgedOut, sr, wq)
 	}
 }

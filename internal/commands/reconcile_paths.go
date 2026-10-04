@@ -266,7 +266,7 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 			_, _ = fmt.Fprintf(out, "reconcile-paths: the periodic sweep is holding %d gone source(s) for its one-week grace period; %d more are past it and are deleted once two sweeps at least an hour apart both still find them gone\n", aging, due)
 		}
 		if held > 0 { // the tripped breaker: no sweep deletes these
-			_, _ = fmt.Fprintf(out, "reconcile-paths: %d gone source(s) past the grace period are held, because too many came due at once, and no sweep deletes them; run `scan reconcile-paths --yes` to delete them\n", held)
+			_, _ = fmt.Fprintf(out, "reconcile-paths: %d gone source(s) past the grace period are held, because too many came due at once, and no sweep deletes them however few remain held; run `scan reconcile-paths --yes` to delete them\n", held)
 		}
 	}
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d work_queue row(s) with a stale output_paths destination (skipped: %d ambiguous, %d unfixable, %d stat error, %d malformed, %d raced)%s\n",

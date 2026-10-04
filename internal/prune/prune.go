@@ -225,8 +225,10 @@ type Result struct {
 	// run, would delete) because they were gone inside a surviving directory
 	// for the whole grace period (#1262).
 	AgedOut int
-	// AgeOutHeld, when non-zero, is the age-out's tripped circuit breaker: that
-	// many sources (over ageOutMaxPerSweep) were due at once, so none was deleted.
+	// AgeOutHeld, when non-zero, is the age-out's circuit breaker: that many
+	// sources are held after this sweep. It trips when the sources due plus those
+	// already held exceed ageOutMaxPerSweep (none is deleted, each is held), and
+	// a held source stays held, and counted here, until the attended run.
 	AgeOutHeld int
 	// PruneSkipped counts the Pruned (planned) sources an apply did not fully
 	// delete: a row in flight, or moved since it was read. 0 in a dry run.
@@ -755,9 +757,6 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	marks := ds
 	if ds != nil {
 		ds.offline = offline
-		for src := range bySource {
-			ds.heldN += int(-min(ds.since[src].confirmed, 0)) // one per held row: heldMark is -1
-		}
 	} else if fullPolicy == PolicyFull {
 		if marks, err = p.loadDirState(ctx); err != nil {
 			return Result{}, err
@@ -810,7 +809,8 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		// held for a present sibling (ambiguous, owned, another recording,
 		// unreadable), for an indexed file with its MBID/ISRC that is present or
 		// cannot be ruled out, or for the one present file the name tier would
-		// relink it to by title, never ages: its replacement may be there.
+		// relink it to by title, never ages: its replacement may be there. Nor
+		// does a row whose queue row another library's file also links.
 		ageable := (policy == policyInFolder || (ds == nil && marks.confirmedDue(src))) && !cg.siblingHeld && cg.outcome != outcomeRelink
 		if ageable {
 			held, err := p.identityHeld(ctx, src, c, roots)
@@ -818,6 +818,13 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 				return Result{}, err
 			}
 			ageable = !held
+		}
+		if ageable {
+			shared, err := p.sharedAcrossLibraries(ctx, src, c, libraryID)
+			if err != nil {
+				return Result{}, err
+			}
+			ageable = !shared
 		}
 		if !ageable {
 			ds.forget(src)
@@ -873,7 +880,11 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 	// its directory, read once, holds something (an unmounted nested mountpoint
 	// is an empty directory whose every file reads not-exist) and no unindexed
 	// same-name file. Checked in a dry run too, so the plan matches the apply.
-	// A refusal drops the mark. Then the confirmation, then the circuit breaker.
+	// A refusal drops the mark. Then the confirmation, then the circuit breaker,
+	// a hard stop: the marks already held count toward the cap, so rows newly due
+	// that would take the total over it are held too, and a held row is never in
+	// due on a periodic sweep (confirm refuses it), so only the attended run
+	// deletes one.
 	var due []PrunedRow
 	for _, row := range aged {
 		if _, err := p.stat(row.SourcePath); !errors.Is(err, fs.ErrNotExist) || p.replacementOnDisk(row.SourcePath, listings) {
@@ -883,13 +894,18 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 			due = append(due, row)
 		}
 	}
-	if ds != nil && ds.skipped+len(due) > ageOutMaxPerSweep {
-		res.AgeOutHeld = ds.skipped + len(due)
+	held := 0
+	if ds != nil {
+		held = ds.held(bySource)
+	}
+	if ds != nil && held+len(due) > ageOutMaxPerSweep {
+		res.AgeOutHeld = held + len(due)
 		for _, row := range due {
 			ds.since[row.SourcePath], ds.changed[row.SourcePath] = goneMark{ds.since[row.SourcePath].first, heldMark}, true
 		}
 	} else {
 		toPrune, res.AgedOut = append(toPrune, due...), len(due)
+		res.AgeOutHeld = held // still held, at or under the cap: reported every sweep
 	}
 	res.Pruned = toPrune
 
@@ -2127,6 +2143,41 @@ func (p *Pruner) identityHeld(ctx context.Context, src string, c *candidate, roo
 	return false, nil
 }
 
+// sharedAcrossLibraries reports whether a queue row of c is also linked to
+// another library's scan_results row. work_queue is unique on (artist_key,
+// title_key), so two libraries' files of one song share ONE queue row, and
+// aging it out for the copy that is gone would delete the row the other
+// library's file still uses (and cascade its link). Such a row never ages out,
+// on any sweep; it is classified as it was before the age-out (#1293 tracks
+// what that classification itself does with a shared row).
+// A library-scoped run holds on any link into another library. An unscoped one
+// gathered every library's row for src into c, so there only a link to another
+// library's row for a DIFFERENT file holds; with no scan_results row of its own
+// to name a library, c is not held.
+// Asked only of a candidate otherwise ageable: per queue row, one prefix probe
+// of the junction's primary key and a rowid lookup per link; no stat.
+func (p *Pruner) sharedAcrossLibraries(ctx context.Context, src string, c *candidate, scope *int64) (bool, error) {
+	lib, own := scope, ""
+	if lib == nil {
+		lib, own = c.libraryID, src
+	}
+	if lib == nil {
+		return false, nil
+	}
+	for _, w := range c.workItems {
+		var shared bool
+		if err := p.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM work_queue_scan_results j WHERE j.work_queue_id = ?
+            AND EXISTS (SELECT 1 FROM scan_results sr WHERE sr.id = j.scan_result_id AND sr.library_id != ? AND sr.file_path != ?))`,
+			w.id, *lib, own).Scan(&shared); err != nil {
+			return false, fmt.Errorf("prune: read other libraries' links: %w", err)
+		}
+		if shared {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // replacementOnDisk reads src's directory once and reports whether an age-out
 // must be refused: it is unreadable or empty, or an entry that is not a lyric
 // sidecar shares src's stem (case-insensitive), i.e. an unindexed replacement.
@@ -2150,7 +2201,8 @@ func (p *Pruner) replacementOnDisk(src string, seen map[string][]os.DirEntry) bo
 // AgingCounts reports how many gone sources the periodic sweep is holding for
 // its grace period, how many are past it (deleted once two sweeps at least
 // goneConfirmGap apart both still find them gone), and how many the tripped
-// breaker holds (heldMark): no sweep deletes those, only the attended run.
+// breaker holds (heldMark): no sweep deletes those, however few remain held,
+// only the attended run (`scan reconcile-paths --yes`).
 func (p *Pruner) AgingCounts(ctx context.Context) (aging, due, held int, err error) {
 	// A mark whose rows another pass already removed is not counted.
 	err = p.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(first_seen <= ?1 AND confirmed_at IS NOT ?2), 0),

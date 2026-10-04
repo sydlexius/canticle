@@ -2398,7 +2398,7 @@ func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg
 			slog.Info("path-reconciliation sweep deleted rows whose file had been gone for the grace period; each is recorded in the sweep backup beside the database", "sources", res.AgedOut)
 		}
 		if res.AgeOutHeld > 0 {
-			slog.Warn("path-reconciliation sweep found too many rows due for age-out at once and deletes none of them; check the library is fully mounted, then run `scan reconcile-paths` to review and `scan reconcile-paths --yes` to delete them",
+			slog.Warn("path-reconciliation sweep is holding rows past the age-out grace period because it found too many rows due at once; no sweep deletes a held row, even after some of the files come back; check the library is fully mounted, then run `scan reconcile-paths` to review and `scan reconcile-paths --yes` to delete them",
 				"sources", res.AgeOutHeld)
 		}
 		if len(res.Retained) > 0 {
@@ -2504,7 +2504,7 @@ func (b *sweepBackup) close() {
 	}
 }
 
-// prunedBackupRecord: an aged-out source's is written BEFORE its delete; if a row then stays,
+// prunedBackupRecord: an aged-out source's record is written BEFORE its delete; if a row then stays,
 // a "pruned-corrected" record REPLACES it, listing only the rows deleted (maybe none).
 func prunedBackupRecord(row prune.PrunedRow) reconcilePathsBackupRecord {
 	rec := reconcilePathsBackupRecord{Action: "pruned", SourcePath: row.SourcePath, ScanResultIDs: row.ScanResultIDs,
