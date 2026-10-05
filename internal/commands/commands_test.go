@@ -3902,3 +3902,68 @@ func TestSetConfigValueWordSyncBoolMovesTheMode(t *testing.T) {
 		})
 	}
 }
+
+// TestAutoAlignerOptionsBuildsClientOnlyWhenEnabledAndURLValid pins the serve
+// wiring of the Auto alignment action (#1008): no client (no option, no probe)
+// unless the web UI is on, word_sync_generate.enabled is true and its url is
+// non-blank and valid; with all three, the option attaches a client the web UI
+// primes with GET /health, and a handler with no web UI never probes.
+func TestAutoAlignerOptionsBuildsClientOnlyWhenEnabledAndURLValid(t *testing.T) {
+	probed := make(chan string, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probed <- r.Method + " " + r.URL.Path
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	logs := captureLogs(t)
+	const badURL = "ftp://user:hunter2@aligner.invalid/x"
+	for _, tc := range []struct {
+		name    string
+		webUI   bool
+		enabled bool
+		url     string
+		want    int
+	}{
+		{"disabled with a valid url", true, false, srv.URL, 0},
+		{"enabled with a blank url", true, true, "  ", 0},
+		{"enabled with an invalid url", true, true, badURL, 0},
+		{"web UI off with a valid url", false, true, srv.URL, 0},
+		{"enabled with a valid url", true, true, srv.URL, 1},
+	} {
+		logs.Reset()
+		cfg := config.Config{}
+		cfg.Server.WebUIEnabled = tc.webUI
+		cfg.WordSyncGenerate.Enabled, cfg.WordSyncGenerate.URL = tc.enabled, tc.url
+		opts := autoAlignerOptions(cfg)
+		if len(opts) != tc.want {
+			t.Fatalf("%s: %d options, want %d", tc.name, len(opts), tc.want)
+		}
+		if tc.url == badURL {
+			if got := logs.String(); !strings.Contains(got, "level=ERROR") || !strings.Contains(got, "auto alignment disabled") || strings.Contains(got, "hunter2") {
+				t.Errorf("%s: want one Error naming the key and never the url, got %q", tc.name, got)
+			}
+		} else if logs.Len() != 0 {
+			t.Errorf("%s: unexpected log %q", tc.name, logs.String())
+		}
+		server.NewHandler(&serveTestAuth{}, nil, t.TempDir(),
+			append([]server.Option{server.WithWebUI(config.Config{}, "vtest")}, opts...)...)
+		got := ""
+		select {
+		case got = <-probed:
+		case <-time.After(map[int]time.Duration{0: 150 * time.Millisecond, 1: 5 * time.Second}[tc.want]):
+		}
+		if want := map[int]string{0: "", 1: "GET /health"}[tc.want]; got != want {
+			t.Fatalf("%s: sidecar saw %q, want %q", tc.name, got, want)
+		}
+		if tc.want == 0 {
+			continue
+		}
+		// The option alone, on a handler with no web UI, attaches nothing.
+		server.NewHandler(&serveTestAuth{}, nil, t.TempDir(), opts...)
+		select {
+		case got = <-probed:
+			t.Fatalf("%s: a handler with no web UI probed the sidecar (%q)", tc.name, got)
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+}

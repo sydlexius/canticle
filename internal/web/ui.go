@@ -141,6 +141,10 @@ type UI struct {
 	// server.preview_flac_fallback is off or its cache could not be created.
 	flac *flacCache
 
+	// auto is the attached aligner and its cached availability behind the
+	// player's Auto alignment action (#1008); nil when none is attached.
+	auto *autoState
+
 	// guardedRoutes records every pattern Register put behind the session guard
 	// (empty when auth is not configured). It exists so a test can enumerate the
 	// guarded surface instead of hand-picking routes.

@@ -273,6 +273,7 @@ func (u *UI) fillPreviewEditor(w http.ResponseWriter, r *http.Request, view *tem
 	view.CSRFToken = token
 	view.OrigMS = strings.Join(origMS, ",")
 	view.ToleranceMS = int(timing.Tolerance * 1000)
+	view.AutoURL = u.autoURL(t, id)
 }
 
 // previewAudioTypes maps a lowercase audio extension to its Content-Type. The

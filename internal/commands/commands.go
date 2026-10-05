@@ -23,11 +23,13 @@ import (
 
 	"github.com/BurntSushi/toml"
 	arg "github.com/alexflint/go-arg"
+	"github.com/sydlexius/canticle/internal/aligner"
 	"github.com/sydlexius/canticle/internal/app"
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/audiometa"
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/cache"
+	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/detector"
@@ -1363,6 +1365,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			server.WithMusixmatchServing(musixmatchServing),
 		)
 	}
+	handlerOpts = append(handlerOpts, autoAlignerOptions(cfg)...)
 	apiHandler := server.NewHandler(authSvc, workQ, outdir, handlerOpts...)
 	// httpDrained closes once the HTTP server has stopped AND every reactive
 	// realign pass has been dropped or finished, so the database is never closed
@@ -2143,6 +2146,33 @@ func resolveFFmpeg(ctx context.Context, cfg config.Config) (string, error) {
 	}
 	cacheDir := filepath.Join(filepath.Dir(cfg.DB.Path), "ffmpeg")
 	return ffmpeg.Resolve(ctx, override, ffmpeg.Options{CacheDir: cacheDir})
+}
+
+// The on-demand Auto alignment client (#1008): one alignment may run for
+// minutes, and a person waits on its breaker, so that is gentler than default.
+const (
+	autoAlignTimeout      = 10 * time.Minute
+	autoAlignBackoffBase  = 15 * time.Second
+	autoAlignOpenDuration = 2 * time.Minute
+)
+
+// autoAlignerOptions builds the aligner client behind the player's Auto
+// alignment action and returns the option that attaches it, or nothing unless
+// the web UI is on, word_sync_generate.enabled is true AND its url is
+// non-blank and valid. An invalid url is logged and leaves the action off; it
+// never fails serve.
+func autoAlignerOptions(cfg config.Config) []server.Option {
+	wg := cfg.WordSyncGenerate
+	if !cfg.Server.WebUIEnabled || !wg.Enabled || strings.TrimSpace(wg.URL) == "" {
+		return nil
+	}
+	client, err := aligner.NewHTTPClient(wg.URL, autoAlignTimeout, circuit.New(autoAlignBackoffBase, autoAlignOpenDuration))
+	if err != nil {
+		// The url may carry credentials, so neither it nor the error is logged.
+		slog.Error("auto alignment disabled: word_sync_generate.url is not a valid http(s) URL")
+		return nil
+	}
+	return []server.Option{server.WithAutoAligner(client, wg.Concurrency)}
 }
 
 func newVerifier(cfg config.Config, ffmpegPath string) (verification.Verifier, error) {
