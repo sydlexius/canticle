@@ -100,3 +100,36 @@ func TestRunUpgradeSweepLoopRunsAtStartupAndStopsOnCancel(t *testing.T) {
 		t.Fatal("loop did not stop on cancel")
 	}
 }
+
+// TestNewServeUpgradeSweep (#1120): serve's constructor keys the sweep's queue
+// on the lane-set generation, so a post-settle mis_synced row already passed
+// under that generation is not offered again. Row 1 is unpassed, row 2 passed
+// under generation 9; with no live provider the sweep does not exist.
+func TestNewServeUpgradeSweep(t *testing.T) {
+	const gen = 9
+	dbh := upgradeSweepDB(t, 0)
+	for i, marker := range []any{nil, gen} {
+		if _, err := dbh.Exec(`INSERT INTO work_queue (id, artist, title, artist_key, title_key, source_path, status, outcome_type,
+		      timing_outcome, timing_stamp_source, missync_recheck_generation, completed_at)
+		      VALUES (?, 'a', ?, 'a', ?, '/m/x.flac', 'done', 'unsynced', 'mis_synced', 'sweep', ?, '2026-01-01T00:00:00Z')`,
+			i+1, fmt.Sprint(i), fmt.Sprint(i), marker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Config{}
+	cfg.UpgradeSweep.Enabled, cfg.UpgradeSweep.Batch = true, 10
+	if j := newServeUpgradeSweep(dbh, cfg, gen, true); j != nil {
+		t.Fatal("sweep started with lyrics disabled")
+	}
+	if j := newServeUpgradeSweep(dbh, config.Config{}, gen, false); j != nil {
+		t.Fatal("sweep started with upgrade_sweep.enabled unset")
+	}
+	j := newServeUpgradeSweep(dbh, cfg, gen, false)
+	if j == nil {
+		t.Fatal("sweep did not start")
+	}
+	ids, err := j.q.ListUpgradeCandidates(context.Background(), time.Now().Add(-7*24*time.Hour), 10)
+	if err != nil || len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("upgrade candidates = %v, %v; want [1] (row 2 passed under the wired generation)", ids, err)
+	}
+}
