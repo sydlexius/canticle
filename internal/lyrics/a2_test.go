@@ -51,6 +51,13 @@ func TestA2Words_TrailingEndTag(t *testing.T) {
 		{"end equals start", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2000)}, "<00:01.00>alpha <00:02.00>beta"},
 		{"end before start", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 1500)}, "<00:01.00>alpha <00:02.00>beta"},
 		{"end inside the start's hundredth", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2009)}, "<00:01.00>alpha <00:02.00>beta"},
+		// Pinned as the code behaves today: the end tag keys on the last word's
+		// timing, not its text, so a blank final chunk still carries one.
+		{"whitespace-only final chunk", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2300), wt(" ", 2500, 3000)}, "<00:01.00>alpha <00:02.00>beta<00:02.50> <00:03.00>"},
+		{"empty final chunk", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2300), wt("", 2500, 3000)}, "<00:01.00>alpha <00:02.00>beta<00:02.50><00:03.00>"},
+		// Shaped as chunkTimings emits an out-of-order entry: provider order,
+		// ends derived in time order, te on the chronologically last chunk.
+		{"out-of-order provider chunks keep the te end tag", []models.WordTiming{wt("beta", 2000, 4000), wt("alpha ", 1000, 2000)}, "<00:01.00>alpha <00:02.00>beta<00:04.00>"},
 	} {
 		got, ok := a2Words("alpha beta", tc.words)
 		if !ok || got != tc.want {
