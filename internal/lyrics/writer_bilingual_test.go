@@ -319,7 +319,7 @@ func TestWriteLRC_BilingualCompanionPairsByTimestamp(t *testing.T) {
 		t.Errorf(".lrc pairing mismatch.\nwant substring:\n%q\ngot:\n%q", want, lrc)
 	}
 	elrc := readFileString(t, filepath.Join(dir, "song.elrc"))
-	if want := "[00:00.50]intro\n[00:01.50]<00:01.50>alpha <00:02.00>beta\n[00:01.50]alpha-t\n"; !strings.Contains(elrc, want) {
+	if want := "[00:00.50]intro\n[00:01.50]<00:01.50>alpha <00:02.00>beta<00:02.50>\n[00:01.50]alpha-t\n"; !strings.Contains(elrc, want) {
 		t.Errorf(".elrc pairing mismatch.\nwant substring:\n%q\ngot:\n%q", want, elrc)
 	}
 }

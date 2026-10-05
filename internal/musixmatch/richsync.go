@@ -338,30 +338,46 @@ func textsConflict(cueText, entryText string) bool {
 // trimming would still satisfy a2Words' whitespace-insensitive fidelity guard
 // while silently removing the spaces from what a player renders.
 //
-// EndMS is derived, since a chunk carries only a start: the next chunk's
-// absolute start, and the entry's te for the last one, giving a gapless span.
-// a2Words does not read EndMS today, but a zero there reads as "this word has no
-// duration" rather than "nobody knew". Both stamps clamp non-negative, matching
-// petitlyrics/decode.go and what models.WordTiming requires of producers.
+// EndMS is derived, since a chunk carries only a start, and in TIME order, not
+// provider order: a chunk's end is the start of the next chunk by ascending
+// offset, and the chronologically last chunk gets the entry's te. The output
+// slice stays in provider order. The writer's a2Words sorts a line's words by
+// start (stably) and emits the last word's EndMS as its trailing end tag
+// (#1280), so te must land on the word a2Words treats as last. Among chunks
+// sharing the latest start that is the one latest in provider order, which is
+// the one the same stable sort leaves last here. Both stamps clamp
+// non-negative, matching petitlyrics/decode.go and what models.WordTiming
+// requires of producers.
 func chunkTimings(e richSyncEntry, line int) []models.WordTiming {
+	starts := make([]int, len(e.L))
+	order := make([]int, len(e.L))
+	for i, ch := range e.L {
+		starts[i] = max(toMS(e.TS+ch.O), 0)
+		order[i] = i
+	}
+	// Stable, like a2Words' own sort, so equal starts keep provider order.
+	sort.SliceStable(order, func(a, b int) bool { return starts[order[a]] < starts[order[b]] })
+	ends := make([]int, len(e.L))
+	for pos, i := range order {
+		if pos+1 < len(order) {
+			ends[i] = starts[order[pos+1]]
+		} else {
+			ends[i] = toMS(e.TE)
+		}
+	}
 	out := make([]models.WordTiming, 0, len(e.L))
 	for i, ch := range e.L {
-		endSec := e.TE
-		if i+1 < len(e.L) {
-			endSec = e.TS + e.L[i+1].O
-		}
-		// EndMS floors at StartMS, never merely at zero. Two provider shapes
-		// invert the span otherwise: a last chunk whose offset runs past the
-		// entry's te, and chunks not ascending by o (the next chunk's start is
-		// read as this one's end without assuming that order). A negative-length
-		// word is not a value any consumer should have to defend against, and it
-		// is latent only because a2Words does not read EndMS yet.
-		start := max(toMS(e.TS+ch.O), 0)
+		// EndMS floors at StartMS, never merely at zero: a last chunk whose
+		// offset runs past the entry's te would otherwise invert the span (as
+		// would a tie's earlier chunk, whose next start equals its own). A
+		// negative-length word is not a value any consumer should have to defend
+		// against; a2Words writes no end tag for a word whose end is not after
+		// its start.
 		out = append(out, models.WordTiming{
 			Line:    line,
 			Text:    ch.C,
-			StartMS: start,
-			EndMS:   max(toMS(endSec), start),
+			StartMS: starts[i],
+			EndMS:   max(ends[i], starts[i]),
 		})
 	}
 	return out

@@ -3,9 +3,12 @@ package musixmatch
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -451,8 +454,7 @@ func TestBindStillBindsWhenEitherTextIsAbsent(t *testing.T) {
 
 // TestEndMSNeverPrecedesStartMS covers two provider shapes that invert the span:
 // a last chunk whose offset runs past the entry's te, and chunks not ascending
-// by o (the next chunk's start is read as this one's end without assuming that
-// order). Latent only because a2Words does not read EndMS today.
+// by o. a2Words reads the last word's EndMS for its end tag (#1280).
 func TestEndMSNeverPrecedesStartMS(t *testing.T) {
 	for _, tc := range []struct{ name, entries string }{
 		{"last chunk starts after te", `[{"ts":1.0,"te":1.2,"x":"alpha","l":[{"c":"alpha","o":0.5}]}]`},
@@ -470,6 +472,73 @@ func TestEndMSNeverPrecedesStartMS(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestChunkTimingsDeriveEndsInTimeOrder pins #1280: a chunk's end is the start
+// of the next chunk by ascending offset and the chronologically last chunk
+// carries te, while the output stays in provider order.
+func TestChunkTimingsDeriveEndsInTimeOrder(t *testing.T) {
+	type span struct{ start, end int }
+	for _, tc := range []struct {
+		name  string
+		chunk []richSyncChunk
+		want  []span
+	}{
+		{"ascending", []richSyncChunk{{"alpha ", 0}, {"bravo ", 0.5}, {"charlie", 1.0}},
+			[]span{{1000, 1500}, {1500, 2000}, {2000, 4000}}},
+		{"out of order", []richSyncChunk{{"bravo ", 0.5}, {"charlie", 1.0}, {"alpha ", 0}},
+			[]span{{1500, 2000}, {2000, 4000}, {1000, 1500}}},
+		{"last by time is first in provider order", []richSyncChunk{{"charlie", 1.0}, {"alpha ", 0}, {"bravo ", 0.5}},
+			[]span{{2000, 4000}, {1000, 1500}, {1500, 2000}}},
+		{"tied latest start: te on the later provider index", []richSyncChunk{{"alpha ", 0}, {"bravo ", 1.0}, {"charlie", 1.0}},
+			[]span{{1000, 2000}, {2000, 2000}, {2000, 4000}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chunkTimings(richSyncEntry{TS: 1.0, TE: 4.0, L: tc.chunk}, 3)
+			if len(got) != len(tc.chunk) {
+				t.Fatalf("len = %d; want %d", len(got), len(tc.chunk))
+			}
+			for i, w := range got {
+				if w.Text != tc.chunk[i].C || w.Line != 3 {
+					t.Errorf("[%d] = %q line %d; want provider order %q line 3", i, w.Text, w.Line, tc.chunk[i].C)
+				}
+				if w.StartMS != tc.want[i].start || w.EndMS != tc.want[i].end {
+					t.Errorf("[%d] %q span = %d..%d; want %d..%d", i, w.Text, w.StartMS, w.EndMS, tc.want[i].start, tc.want[i].end)
+				}
+			}
+		})
+	}
+}
+
+// TestOutOfOrderEntryKeepsTheTrailingEndTag drives an out-of-order entry through
+// the real writer: the chronologically last chunk is first in provider order,
+// and the file must still close its word on the entry's te (#1280).
+func TestOutOfOrderEntryKeepsTheTrailingEndTag(t *testing.T) {
+	cues := []models.Lines{cue(1.0, "alpha beta")}
+	words, err := parseRichSyncBody(richSyncBody(t,
+		`[{"ts":1.0,"te":4.0,"x":"alpha beta","l":[{"c":"beta","o":1.0},{"c":"alpha ","o":0}]}]`), cues)
+	if err != nil {
+		t.Fatalf("parseRichSyncBody: %v", err)
+	}
+	dir := t.TempDir()
+	w := lyrics.NewLRCWriter()
+	w.SetWordSync(true)
+	song := models.Song{
+		Track:                models.Track{ArtistName: "A", TrackName: "T"},
+		Subtitles:            models.Synced{Lines: cues},
+		AudioDurationSeconds: 240,
+		WordTimings:          words,
+	}
+	if err := w.WriteLRC(song, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRC: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "song.lrc"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if want := "[00:01.00]<00:01.00>alpha <00:02.00>beta<00:04.00>\n"; !strings.Contains(string(body), want) {
+		t.Errorf("written file lacks %q:\n%s", want, body)
 	}
 }
 

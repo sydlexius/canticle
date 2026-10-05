@@ -3,10 +3,12 @@ package lyrics
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/timing"
 )
 
 // wt is a word timing within a single cue. Line is always 0 here: a2Words takes
@@ -26,8 +28,125 @@ func TestA2Words_RendersInlineMarkers(t *testing.T) {
 	if !ok {
 		t.Fatalf("a2Words refused a well-formed line: %q", got)
 	}
-	if got != "<00:01.50>alpha <00:02.00>beta" {
-		t.Errorf("a2Words = %q; want %q", got, "<00:01.50>alpha <00:02.00>beta")
+	if want := "<00:01.50>alpha <00:02.00>beta<00:02.50>"; got != want {
+		t.Errorf("a2Words = %q; want %q", got, want)
+	}
+}
+
+// TestA2Words_TrailingEndTag pins #1280: the last word's end is written as one
+// trailing tag, so a player stops highlighting that word when it ends instead
+// of holding it until the next line starts. The tag appears only when it says
+// something: an end at or before the start (a producer that knew no end), or
+// one that rounds to the start's own stamp, writes nothing.
+func TestA2Words_TrailingEndTag(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		words []models.WordTiming
+		want  string
+	}{
+		{"end after start", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2750)}, "<00:01.00>alpha <00:02.00>beta<00:02.75>"},
+		{"single word", []models.WordTiming{wt("alpha beta", 61000, 63250)}, "<01:01.00>alpha beta<01:03.25>"},
+		{"last word is the latest start, not the last given", []models.WordTiming{wt("beta", 2000, 2600), wt("alpha ", 1000, 9000)}, "<00:01.00>alpha <00:02.00>beta<00:02.60>"},
+		{"end unknown (zero)", []models.WordTiming{wt("alpha ", 1000, 0), wt("beta", 2000, 0)}, "<00:01.00>alpha <00:02.00>beta"},
+		{"end equals start", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2000)}, "<00:01.00>alpha <00:02.00>beta"},
+		{"end before start", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 1500)}, "<00:01.00>alpha <00:02.00>beta"},
+		{"end inside the start's hundredth", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2009)}, "<00:01.00>alpha <00:02.00>beta"},
+		// Pinned as the code behaves today: the end tag keys on the last word's
+		// timing, not its text, so a blank final chunk still carries one.
+		{"whitespace-only final chunk", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2300), wt(" ", 2500, 3000)}, "<00:01.00>alpha <00:02.00>beta<00:02.50> <00:03.00>"},
+		{"empty final chunk", []models.WordTiming{wt("alpha ", 1000, 1400), wt("beta", 2000, 2300), wt("", 2500, 3000)}, "<00:01.00>alpha <00:02.00>beta<00:02.50><00:03.00>"},
+		// Shaped as chunkTimings emits an out-of-order entry: provider order,
+		// ends derived in time order, te on the chronologically last chunk.
+		{"out-of-order provider chunks keep the te end tag", []models.WordTiming{wt("beta", 2000, 4000), wt("alpha ", 1000, 2000)}, "<00:01.00>alpha <00:02.00>beta<00:04.00>"},
+	} {
+		got, ok := a2Words("alpha beta", tc.words)
+		if !ok || got != tc.want {
+			t.Errorf("%s: a2Words = %q, %v; want %q", tc.name, got, ok, tc.want)
+		}
+	}
+}
+
+// TestTrailingEndTag_ReadersRoundTrip writes a word-timed song both ways (inline
+// markers, and a companion .elrc) and reads the files back through every reader
+// in this package. The trailing tag must be invisible to all of them: no extra
+// word, no tag in the text, the same tier and the same plain body as before.
+func TestTrailingEndTag_ReadersRoundTrip(t *testing.T) {
+	const marked = "[00:01.50]<00:01.50>alpha <00:02.00>beta<00:02.50>\n"
+	wantWords := []TimedWord{{1500, "alpha"}, {2000, "beta"}}
+
+	inline := t.TempDir()
+	if err := modeWriter(true, false).WriteLRC(a2Song(), "song.lrc", inline); err != nil {
+		t.Fatalf("WriteLRC inline: %v", err)
+	}
+	both := t.TempDir()
+	if err := modeWriter(false, true).WriteLRC(a2Song(), "song.lrc", both); err != nil {
+		t.Fatalf("WriteLRC companion: %v", err)
+	}
+	for name, path := range map[string]string{
+		"inline .lrc":     filepath.Join(inline, "song.lrc"),
+		"companion .elrc": filepath.Join(both, "song.elrc"),
+	} {
+		body := readFileString(t, path)
+		if !strings.Contains(body, marked) {
+			t.Fatalf("%s: no trailing end tag written:\n%s", name, body)
+		}
+		doc := ParseTimedLRC(body)
+		if len(doc.Lines) != 1 || !doc.HasWords {
+			t.Fatalf("%s: ParseTimedLRC = %+v", name, doc)
+		}
+		if l := doc.Lines[0]; l.Text != "alpha beta" || l.Decorative || !reflect.DeepEqual(l.Words, wantWords) {
+			t.Errorf("%s: ParseTimedLRC line = %+v; want text %q and words %+v", name, l, "alpha beta", wantWords)
+		}
+		synced, err := ReadSyncedLRC(path)
+		if err != nil {
+			t.Fatalf("%s: ReadSyncedLRC: %v", name, err)
+		}
+		if got := ClassifySynced(synced); got != TierWord {
+			t.Errorf("%s: ClassifySynced = %q; want %q", name, got, TierWord)
+		}
+		if got := PlainBody(synced); got != "alpha beta\n" {
+			t.Errorf("%s: PlainBody = %q; want the plain words only", name, got)
+		}
+		if out, _, cues, err := EvaluateLRCFile(path, 240); err != nil || out != timing.Ok || cues != 1 {
+			t.Errorf("%s: EvaluateLRCFile = %v, %d cues, %v; want Ok over 1 cue", name, out, cues, err)
+		}
+	}
+
+	// The clean .lrc beside the companion is unchanged by the tag, and the pair
+	// still reads as word tier through the companion.
+	if got := readFileString(t, filepath.Join(both, "song.lrc")); strings.Contains(got, "<") {
+		t.Errorf("companion mode put a marker in the .lrc:\n%s", got)
+	}
+	for name, dir := range map[string]string{"inline": inline, "companion": both} {
+		if tier, err := ClassifyLRCFile(filepath.Join(dir, "song.lrc")); err != nil || tier != TierWord {
+			t.Errorf("%s: ClassifyLRCFile = %q, %v; want %q", name, tier, err, TierWord)
+		}
+	}
+	if !HasQualifyingWords(a2Song()) {
+		t.Error("HasQualifyingWords = false for a song whose last word carries an end")
+	}
+
+	// A trailing tag alone must not turn a line into a word-timed one for the
+	// editor, which refuses any line carrying words.
+	if doc := ParseTimedLRC("[00:01.50]alpha beta<00:02.50>\n"); doc.HasWords || doc.Lines[0].Text != "alpha beta" {
+		t.Errorf("a line with only a trailing tag parsed as %+v; want plain text and no words", doc.Lines[0])
+	}
+
+	// The editor-tag backfill rewrites headers only; the cue comes back intact.
+	path := filepath.Join(inline, "song.lrc")
+	before := readFileString(t, path)
+	stripped := strings.Replace(before, "[re:canticle]\n", "", 1)
+	if stripped == before {
+		t.Fatalf("written file carries no [re:canticle] line to remove:\n%s", before)
+	}
+	if err := os.WriteFile(path, []byte(stripped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InjectEditorTag(path); err != nil {
+		t.Fatalf("InjectEditorTag: %v", err)
+	}
+	if after := readFileString(t, path); after != before {
+		t.Errorf("InjectEditorTag did not restore the file byte for byte:\nbefore %q\nafter  %q", before, after)
 	}
 }
 
@@ -123,7 +242,7 @@ func TestA2Words_SortsByStartTime(t *testing.T) {
 	if !ok {
 		t.Fatalf("a2Words refused an out-of-order line: %q", got)
 	}
-	if got != "<00:01.00>alpha <00:02.00>beta" {
+	if got != "<00:01.00>alpha <00:02.00>beta<00:02.50>" {
 		t.Errorf("a2Words = %q; want the words emitted in time order", got)
 	}
 }
