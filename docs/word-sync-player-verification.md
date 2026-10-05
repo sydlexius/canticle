@@ -100,7 +100,8 @@ no word after it, for example `[00:01.50]<00:01.50>alpha <00:02.00>beta<00:02.50
 Readers that understand word tags take it as the time the last word ends, so
 the highlight on that word stops there instead of staying on until the next
 line starts. The tag is left out when the provider gave no end later than the
-word's start. Files written before this was added do not have the tag, and
+word's start, or when the two stamps are equal at the file's hundredths
+precision (a 2000 to 2009 ms word gets no tag). Files written before this was added do not have the tag, and
 Canticle does not go back and add it: an older word-timed file gains it only
 when that file is next rewritten (a re-fetch, an upgrade, or a word-timing
 re-check that lands). Until then old and new files differ by that one tag per

@@ -102,7 +102,8 @@ dir = "lyrics"
 # Enhanced-LRC (A2) word markers, a.k.a. karaoke-style per-word timing.
 # Default false. When true AND a provider serves word-level timings (Musixmatch
 # or Petit Lyrics' word-synced tier), each cue keeps its normal [MM:SS.cc] stamp and
-# gains a <MM:SS.cc> marker before each word and one trailing <MM:SS.cc> end tag.
+# gains a <MM:SS.cc> marker before each word and one trailing <MM:SS.cc> end tag
+# when the last word's end is known and differs from its start at that precision.
 #
 # LEAVE THIS OFF UNLESS YOU KNOW YOUR PLAYER SUPPORTS A2. Support is not
 # universal and there are three outcomes, only one of which is obviously wrong:
@@ -131,8 +132,8 @@ dir = "lyrics"
 #   "replace"           -- word markers go INTO the .lrc, no companion file.
 #                          This is the old word_sync = true. It needs a player
 #                          that understands inline word tags (Navidrome does
-#                          from 0.63); one that does not shows the timing codes
-#                          as text. See the A2 warning above before choosing it.
+#                          from 0.63); one that does not may show the timing
+#                          codes as text or ignore them. See the A2 warning above before choosing it.
 #
 # "sidecar" and "inline" are deprecated aliases for "both" and "replace"
 # (#1072); they still decode, with a warning naming the new value. The old

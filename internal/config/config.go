@@ -279,7 +279,8 @@ type OutputConfig struct {
 	// (#480). Default false. When true AND a provider serves word-level timings
 	// (today: petitlyrics' word-synced tier), each cue keeps its leading
 	// line-level [mm:ss.xx] and gains a <mm:ss.xx> marker before each word and one trailing <mm:ss.xx> tag
-	// after the last word (its end time).
+	// after the last word (its end time), only when that end is known and differs
+	// from the word's start at hundredths precision.
 	//
 	// Default-off is deliberate rather than cautious-by-habit: A2 player support
 	// is not universal and the failure mode is THREE-WAY -- render the markers,
