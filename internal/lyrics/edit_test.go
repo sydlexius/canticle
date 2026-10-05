@@ -529,3 +529,33 @@ func TestIsWordCompanionName(t *testing.T) {
 		}
 	}
 }
+
+// TestReadRegularDetectsInPlaceRewrite: a rewrite of the same inode after the
+// Lstat (different size, or same size with a new mtime) is ErrEditChanged.
+func TestReadRegularDetectsInPlaceRewrite(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{{"size", "[00:02.00]longer\n"}, {"mtime", "[00:01.00]aaaa\n"}} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "a.lrc")
+		if err := os.WriteFile(p, []byte("[00:01.00]bbbb\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = root.Close() }()
+		fi, err := lstatRegular(root, "a.lrc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, time.Time{}, fi.ModTime().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readRegular(root, "a.lrc", fi); !errors.Is(err, ErrEditChanged) {
+			t.Errorf("%s: err = %v, want ErrEditChanged", tc.name, err)
+		}
+	}
+}

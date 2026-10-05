@@ -226,7 +226,10 @@ func lstatRegular(root *os.Root, rel string) (fs.FileInfo, error) {
 }
 
 // readRegular reads rel through root, verifying the opened handle is the file
-// Lstat saw (a swap between the two is refused). A file over maxEditFileSize is
+// Lstat saw and unchanged since (a swap is ErrEditRefused, an in-place rewrite
+// before or during the read is ErrEditChanged). Outside writers cannot be fully
+// serialized without OS file locks: a rewrite after the post-read stat and
+// before the caller's atomic rename is not caught. A file over maxEditFileSize is
 // refused before anything parses it.
 func readRegular(root *os.Root, rel string, want fs.FileInfo) ([]byte, error) {
 	f, err := root.Open(rel)
@@ -238,14 +241,24 @@ func readRegular(root *os.Root, rel string, want fs.FileInfo) ([]byte, error) {
 	if err != nil || !os.SameFile(fi, want) {
 		return nil, ErrEditRefused
 	}
+	if !sameStamp(fi, want) {
+		return nil, ErrEditChanged
+	}
 	b, err := io.ReadAll(io.LimitReader(f, maxEditFileSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading lyrics file: %w", err)
+	}
+	if after, serr := f.Stat(); serr != nil || !sameStamp(after, want) {
+		return nil, ErrEditChanged
 	}
 	if len(b) > maxEditFileSize {
 		return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrEditRefused, maxEditFileSize)
 	}
 	return b, nil
+}
+
+func sameStamp(a, b fs.FileInfo) bool {
+	return a.ModTime().Equal(b.ModTime()) && a.Size() == b.Size()
 }
 
 // OriginalLines returns the lines an edit applies to: <path>.orig when it is a
