@@ -105,8 +105,11 @@ updates:
   # parse as direct), and `allow: direct` confines bumps to packages named in
   # requirements.in / requirements-test.in (requirements-test.txt matches its
   # .in by basename, so its transitives are correctly indirect). On any such
-  # bump, regenerating the locks is a follow-up commit; the ci.yml
-  # "Verify aligner locks are fresh" step fails the PR until that lands.
+  # bump, regenerating the locks is a follow-up commit; ci.yml's aligner-test
+  # job ("Aligner Sidecar Tests") is red on the PR until that lands. That job
+  # is not a required check on main, so a red run does NOT block a merge:
+  # dependabot-auto-approve.yml leaves this directory's PRs unapproved and
+  # without auto-merge for that reason. Merge one only after the follow-up.
   - package-ecosystem: pip
     directory: /deploy/aligner
     schedule:

@@ -1,6 +1,26 @@
 # Auto-approve Dependabot PRs for patch and minor updates, and hand them to
 # GitHub's native auto-merge. Major version bumps are left for manual review.
 #
+# Exception: a PR that changes anything under deploy/aligner/ is never approved
+# or auto-merged here. Dependabot can update requirements.in and
+# requirements-test.txt there but never the per-arch locks (dependabot.yml
+# hides them via exclude-paths), so a requirements.in bump always needs a
+# lock-regeneration follow-up commit and can never be correct to merge as
+# opened. The check that says so (ci.yml's "Aligner Sidecar Tests") is NOT a
+# required check on main, so native auto-merge merged #1304, #1305 and #1306
+# with it red, leaving requirements.in ahead of every lock.
+#
+# The primary key is the PR's own changed-file list (the "Detect aligner
+# changes" step), not its branch name: a grouped Dependabot PR spanning several
+# pip directories gets a branch that carries no directory at all (#833 was
+# dependabot/pip/pip-55c7a475ee), and fetch-metadata derives its
+# `package-ecosystem` and `directory` outputs from the branch name, so those
+# read as "not the aligner" for exactly such a PR. The step fails closed: if
+# the listing fails, the job fails and nothing is approved, and the approve and
+# auto-merge steps require its output to be the explicit string 'false', so a
+# missing or empty output never approves. The fetch-metadata outputs and the
+# head-branch prefix stay as a second key.
+#
 # Merging is native: GitHub merges the PR itself once the branch ruleset's
 # required checks pass. A previous dependabot-merge.yml polled with
 # `gh pr checks --watch`, which needs the actions: read scope it never had, and
@@ -38,17 +58,58 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
+      - name: Detect aligner changes
+        id: changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Every path the PR touches, including a rename's old path. Any
+          # failure here (API error, empty or truncated listing) fails the job
+          # before the approve step, so nothing is approved on doubt.
+          files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')"
+          if [ -z "$files" ]; then
+            echo "::error::PR $PR_NUMBER lists no changed files; refusing to classify it"
+            exit 1
+          fi
+          # The endpoint returns at most 3000 files; a listing that long may be
+          # truncated, so it is not evidence that the aligner is untouched.
+          if [ "$(wc -l <<<"$files")" -ge 3000 ]; then
+            echo "::error::PR $PR_NUMBER changed-file listing may be truncated; refusing to classify it"
+            exit 1
+          fi
+          if grep -q '^deploy/aligner/' <<<"$files"; then
+            aligner=true
+          else
+            aligner=false
+          fi
+          echo "aligner=$aligner" >> "$GITHUB_OUTPUT"
+          echo "PR $PR_NUMBER touches deploy/aligner/: $aligner"
+
       - name: Auto-approve patch and minor updates
-        if: contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'),
+        if: >-
+          contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'),
           steps.metadata.outputs.update-type)
+          && steps.changes.outputs.aligner == 'false'
+          && !(steps.metadata.outputs.package-ecosystem == 'pip'
+          && steps.metadata.outputs.directory == '/deploy/aligner')
+          && !startsWith(github.event.pull_request.head.ref, 'dependabot/pip/deploy/aligner/')
         run: gh pr review --approve "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable auto-merge for patch and minor updates
-        if: contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'),
+        if: >-
+          contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'),
           steps.metadata.outputs.update-type)
+          && steps.changes.outputs.aligner == 'false'
+          && !(steps.metadata.outputs.package-ecosystem == 'pip'
+          && steps.metadata.outputs.directory == '/deploy/aligner')
+          && !startsWith(github.event.pull_request.head.ref, 'dependabot/pip/deploy/aligner/')
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}

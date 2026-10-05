@@ -221,7 +221,7 @@ unpacked against ~0.65 GB / ~2.8 GB for CPU (+~3.5 GB to pull, +~9.3 GB on disk)
 The CPU variant installs from one of
 `requirements-linux-amd64.txt` / `requirements-linux-arm64.txt` (picked by
 `TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to
-2.14.0/2.11.0, #1068, see `requirements.in`) resolve against the PyTorch CPU index
+2.14.1/2.11.0, see `requirements.in`) resolve against the PyTorch CPU index
 (`https://download.pytorch.org/whl/cpu`, passed as `--extra-index-url`),
 because PyPI's x86_64 `torch` wheel is the CUDA build and would add ~5 GB of
 unused `nvidia-*-cu12` libraries. A build-time check fails the build if a
@@ -389,7 +389,7 @@ for arch in amd64 arm64; do
       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
       --only-binary :all: --no-binary demucs \
       --no-binary antlr4-python3-runtime \
-      --exclude-newer 2026-09-25T07:00:00Z \
+      --exclude-newer 2026-10-05T07:00:00Z \
       requirements.in -o requirements-linux-$arch.txt"
 done
 
@@ -401,7 +401,7 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
     --index-strategy unsafe-best-match --no-header --no-emit-index-url \
     --only-binary :all: --no-binary demucs \
     --no-binary antlr4-python3-runtime \
-    --exclude-newer 2026-09-25T07:00:00Z \
+    --exclude-newer 2026-10-05T07:00:00Z \
     requirements.in -o requirements-linux-amd64-cuda.txt'
 ```
 
@@ -427,7 +427,7 @@ changing either file (same `--exclude-newer` reproducibility note applies):
 cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
   bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
     --python-version 3.14 --no-header --no-emit-index-url \
-    --exclude-newer 2026-09-25T07:00:00Z \
+    --exclude-newer 2026-10-05T07:00:00Z \
     requirements-test.in -o requirements-test.txt'
 ```
 

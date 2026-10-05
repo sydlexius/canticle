@@ -16,11 +16,11 @@
 #   cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
 #     bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
 #       --python-version 3.14 --no-header --no-emit-index-url \
-#       --exclude-newer 2026-09-25T07:00:00Z \
+#       --exclude-newer 2026-10-05T07:00:00Z \
 #       requirements-test.in -o requirements-test.txt'
 #   (then re-add this header block)
 #
-# Generated: --exclude-newer 2026-09-25T07:00:00Z (verified to reproduce this
+# Generated: --exclude-newer 2026-10-05T07:00:00Z (verified to reproduce this
 # exact lock byte-for-byte).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
