@@ -91,6 +91,52 @@ general, not evidence about this specific plugin.
 If you verify a player against this procedure, the result belongs in this
 table (with its confidence noted) rather than assumed elsewhere.
 
+## Format notes and known limits
+
+These describe the files Canticle writes, whichever player reads them.
+
+**The last word's end time.** A word-timed line ends with one more tag that has
+no word after it, for example `[00:01.50]<00:01.50>alpha <00:02.00>beta<00:02.50>`.
+Readers that understand word tags take it as the time the last word ends, so
+the highlight on that word stops there instead of staying on until the next
+line starts. The tag is left out when the provider gave no end later than the
+word's start, or when the two stamps are equal at the file's hundredths
+precision (a 2000 to 2009 ms word gets no tag). Files written before this was added do not have the tag, and
+Canticle does not go back and add it: an older word-timed file gains it only
+when that file is next rewritten (a re-fetch, an upgrade, or a word-timing
+re-check that lands). Until then old and new files differ by that one tag per
+line, and both are valid.
+
+The end tag is the provider's own end time for the last word. Canticle does not
+cap it at the next line's start, so it can run past it if the provider's data does.
+
+Under `word_sync_mode = "replace"` with `output.bump_audio_mtime` on, an older
+word-timed `.lrc` gets one audio-mtime bump the first time it is rewritten,
+because its body now differs by the tag. The default `both` is unaffected (the
+`.lrc` carries no tags, so only the `.elrc` changes).
+
+Checked against Navidrome v0.64.2's own lyrics parser (the parser only, not a
+server with a client attached): with the tag, the last word of a line ends at
+the tag's time; without it, the same word runs until the next line starts. One
+exception in that parser: when the file ends with a newline (Canticle's always
+do), the tag on the very last line of the file is not used, so that one line
+reads exactly as it did before the tag existed. Nothing is shown as text and no
+word is lost.
+
+**Tracks of 100 minutes or more.** Canticle writes minutes without wrapping, so
+a cue at 100 minutes is `[100:00.00]`. Navidrome accepts one or two minute
+digits, does not read that as a timestamp, and joins the line onto the previous
+lyric as text. This affects the plain `.lrc` as well as the `.elrc`, and only
+cues at 100:00 or later. There is no spelling every reader accepts (Navidrome
+would take `[hh:mm:ss.xx]`, which Jellyfin's parser does not), so the writer
+is left as it is.
+
+**`replace` needs a reader that understands inline word tags.** `replace` puts
+the word tags in the plain `.lrc`. A reader without Enhanced LRC support shows
+them as raw text. Navidrome reads them from 0.63; on an older Navidrome, or any
+other reader you have not checked with the procedure above, use the default
+`both`, which keeps the `.lrc` free of tags.
+
 ## What this procedure does not cover
 
 There is no automated (e.g. browser-driven) classifier for this, and none is
