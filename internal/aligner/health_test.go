@@ -271,4 +271,23 @@ func TestScrubTransportErrorKeepsHostOut(t *testing.T) {
 			t.Errorf("scrubTransportError lost errors.Is(%v): %v", want, got)
 		}
 	}
+	// A matched cause is rewrapped alone: the address and URL around it are dropped.
+	for _, want := range []error{context.DeadlineExceeded, context.Canceled, io.EOF, syscall.ECONNREFUSED} {
+		inner := want
+		if errors.Is(want, syscall.ECONNREFUSED) {
+			inner = &os.SyscallError{Syscall: "connect", Err: want}
+		}
+		op := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.ParseIP("10.9.8.7"), Port: 8765}, Err: inner}
+		for _, in := range []error{op, &url.Error{Op: "Get", URL: "http://" + host + ":8765/health", Err: op}} {
+			got := scrubTransportError(in)
+			if !errors.Is(got, want) {
+				t.Errorf("scrubTransportError lost errors.Is(%v): %v", want, got)
+			}
+			for _, leak := range []string{"10.9.8.7", host, "8765"} {
+				if strings.Contains(got.Error(), leak) {
+					t.Errorf("%v: error %q leaks %q", want, got, leak)
+				}
+			}
+		}
+	}
 }

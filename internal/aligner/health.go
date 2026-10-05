@@ -87,10 +87,17 @@ func scrubTransportError(err error) error {
 	if errors.As(err, &urlErr) {
 		err = urlErr.Err
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, os.ErrDeadlineExceeded) ||
-		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return fmt.Errorf("aligner: health request: %w", err)
+	// Wrap the matched SENTINEL, never err: err may be a *net.OpError whose
+	// text carries the dialed address around that very cause.
+	var matched []error
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded,
+		os.ErrDeadlineExceeded, io.EOF, io.ErrUnexpectedEOF} {
+		if errors.Is(err, cause) {
+			matched = append(matched, cause)
+		}
+	}
+	if len(matched) > 0 {
+		return fmt.Errorf("aligner: health request: %w", errors.Join(matched...))
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
