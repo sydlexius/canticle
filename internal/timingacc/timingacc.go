@@ -254,7 +254,7 @@ func FormatRow(key string, s LineStats) string {
 // one start counts as having none). RefWords counts the reference words of every
 // matched line that has them. With a repeated word the error is a lower bound.
 type WordStats struct {
-	// Tracks counts tracks where at least one matched line had words on both sides.
+	// Tracks is the number of tracks in which at least one matched line has word timings on both sides.
 	Tracks        int
 	RefWords      int
 	Matched       int

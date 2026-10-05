@@ -464,8 +464,34 @@ func TestRunTimingAccuracy_StackedReferenceWordsNotMeasured(t *testing.T) {
 		{Line: 2, Text: "gamma", StartMS: 30000},
 	}
 	code, got := taRunWords(t, lrc, song)
-	if code != 0 || !strings.Contains(got, "words not measured: 2\n") || !strings.Contains(got, "words(ref=1 matched=1) word-MAE=0ms") {
+	if code != 0 || !strings.Contains(got, "words not measured: 1\n") || !strings.Contains(got, "words(ref=1 matched=1) word-MAE=0ms") {
 		t.Errorf("exit %d; want stacked words dropped and only the plain line measured:\n%s", code, got)
+	}
+}
+
+func TestRunTimingAccuracy_StackedCountIsPerSourceLine(t *testing.T) {
+	lrc := "[00:01.00][00:20.00][00:40.00]<00:01.00>alpha <00:01.50>beta\n[00:30.00][00:50.00]<00:30.00>gamma\n"
+	song := taSong("", 0, []int{1000, 20000, 30000, 40000, 50000}, []string{"alpha beta", "alpha beta", "gamma", "alpha beta", "gamma"})
+	code, got := taRunWords(t, lrc, song)
+	if code != 0 || !strings.Contains(got, "words not measured: 2\n") {
+		t.Errorf("exit %d; want 2 stacked source lines (one three-fold, one two-fold):\n%s", code, got)
+	}
+}
+
+func TestRunTimingAccuracy_AllStackedWordReference(t *testing.T) {
+	lrc := "[00:01.00][00:20.00]<00:01.00>alpha <00:01.50>beta\n"
+	song := taSong("", 0, []int{1000, 20000}, []string{"alpha beta", "alpha beta"})
+	ref := filepath.Join(t.TempDir(), "ref")
+	taMust(t, os.MkdirAll(ref, 0o755))
+	taMust(t, os.WriteFile(filepath.Join(ref, "w.lrc"), []byte(lrc), 0o600))
+	m := "[[track]]\nid = \"w\"\nfile = \"w.lrc\"\ntitle = \"wt\"\nline_residual_ms = 20\n"
+	taMust(t, os.WriteFile(filepath.Join(ref, "manifest.toml"), []byte(m), 0o600))
+	if code, got := taRejectOne(t, ref); code != 1 || !strings.Contains(got, "word_residual_ms is required when the reference carries word timings") {
+		t.Errorf("exit %d; want the residual required for an all-stacked word reference:\n%s", code, got)
+	}
+	code, got := taRunWords(t, lrc, song)
+	if code != 0 || !strings.Contains(got, "line starts and word starts") || !strings.Contains(got, "words not measured: 1\n") || !strings.Contains(got, "word-MAE=n/a") {
+		t.Errorf("exit %d; want the word section and the stacked count:\n%s", code, got)
 	}
 }
 

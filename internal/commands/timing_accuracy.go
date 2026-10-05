@@ -160,9 +160,10 @@ func loadRefSet(dir string) ([]refTrack, [][]byte, error) {
 // them). A line with stacked timestamps expands to several cues that all carry
 // the same absolute word stamps, which can belong to at most one of them, so
 // words shared by more than one expanded cue are dropped from all of them
-// (those lines are measured for line starts only); stacked counts the cues
-// that lost their words this way.
-func refCues(body []byte) (cues []timingacc.Cue, dropped, stacked int) {
+// (those lines are measured for line starts only); stacked counts the source
+// lines that lost their words this way (once per line, not per expanded cue),
+// and hadWords reports whether any cue carried words before that.
+func refCues(body []byte) (cues []timingacc.Cue, dropped, stacked int, hadWords bool) {
 	sig := map[string]int{}
 	var sigs []string
 	for _, l := range lyrics.ParseTimedLRC(string(body)).Lines {
@@ -178,6 +179,7 @@ func refCues(body []byte) (cues []timingacc.Cue, dropped, stacked int) {
 		}
 		sigs = append(sigs, sb.String())
 		if len(c.Words) > 0 {
+			hadWords = true
 			sig[sigs[len(sigs)-1]]++
 		}
 		cues = append(cues, c)
@@ -185,10 +187,14 @@ func refCues(body []byte) (cues []timingacc.Cue, dropped, stacked int) {
 	for i := range cues {
 		if len(cues[i].Words) > 0 && sig[sigs[i]] > 1 {
 			cues[i].Words = nil
+		}
+	}
+	for _, n := range sig {
+		if n > 1 {
 			stacked++
 		}
 	}
-	return cues, dropped, stacked
+	return cues, dropped, stacked, hadWords
 }
 
 // songCues converts a served song's line cues, dropping decorative ones.
@@ -322,16 +328,6 @@ func (a *acc) add(ref, prov []timingacc.Cue, lineRes, wordRes int) {
 	a.word.AddTrack(ref, prov, wordRes)
 }
 
-// hasWords reports whether any cue carries word timings.
-func hasWords(cues []timingacc.Cue) bool {
-	for _, c := range cues {
-		if len(c.Words) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // laneTally counts what a lane did NOT serve, split by cause.
 type laneTally struct {
 	notFound, failed, notAsked int
@@ -354,10 +350,10 @@ func runTimingAccuracy(ctx context.Context, out io.Writer, args TimingAccCmd, la
 	var dropRef, dropProv, dropStacked int
 	anyRefWords := false
 	for i, t := range tracks {
-		cues, d, st := refCues(bodies[i])
+		cues, d, st, had := refCues(bodies[i])
 		dropRef += d
 		dropStacked += st
-		if hasWords(cues) {
+		if had {
 			anyRefWords = true
 			if t.WordResidualMS == nil {
 				_, _ = fmt.Fprintf(out, "timing-accuracy: manifest track #%d: word_residual_ms is required when the reference carries word timings\n", i+1)
