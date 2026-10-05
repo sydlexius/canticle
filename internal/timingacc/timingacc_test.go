@@ -110,3 +110,73 @@ func TestAccumulatesAcrossTracks(t *testing.T) {
 		t.Errorf("row = %q", got)
 	}
 }
+
+func words(starts []int, texts ...string) []Word {
+	w := make([]Word, len(texts))
+	for i, t := range texts {
+		w[i] = Word{StartMS: starts[i], Text: t}
+	}
+	return w
+}
+
+func TestWordStarts(t *testing.T) {
+	line := func(ws []Word) []Cue { return []Cue{{StartMS: 0, Text: "x", Words: ws}} }
+	var s WordStats
+	// Reworded word stays unmatched; the repeated word pairs with its nearest occurrence.
+	s.AddTrack(line(words([]int{0, 500, 1000, 1500}, "a", "b", "a", "c")),
+		line(words([]int{0, 520, 1700, 1990}, "a", "x", "a", "c")), 40)
+	if s.Tracks != 1 || s.RefWords != 4 || s.Matched != 3 || s.SumAbsErrMS != 700+490 || s.WithinCount != 1 {
+		t.Fatalf("stats = %+v", s)
+	}
+	want := "k: word-tracks=1 words(ref=4 matched=3) word-MAE=397ms within-300ms=33.3% ref-residual(mean=40ms max=40ms) n=3"
+	if got := FormatWordRow("k", s); got != want {
+		t.Errorf("row = %q; want %q", got, want)
+	}
+}
+
+func TestWordStartsNeedWordsOnBothSides(t *testing.T) {
+	var s WordStats
+	ref := []Cue{{Text: "x", Words: words([]int{0}, "a")}}
+	s.AddTrack(ref, []Cue{{Text: "x"}}, 10)
+	s.AddTrack(ref, []Cue{{Text: "other", Words: words([]int{0}, "a")}}, 10) // line unmatched
+	if s.Tracks != 0 || s.Matched != 0 || s.RefWords != 1 {
+		t.Errorf("stats = %+v; want ref words counted on the matched line only", s)
+	}
+	if got := FormatWordRow("k", s); got != "k: word-tracks=0 words(ref=1 matched=0) word-MAE=n/a" {
+		t.Errorf("row = %q", got)
+	}
+}
+
+func TestWordKeysIgnoreEdgePunctuation(t *testing.T) {
+	var s WordStats
+	ref := []Cue{{Text: "x", Words: words([]int{0, 500, 900}, "Don't,", "(go)", "...")}}
+	prov := []Cue{{Text: "x", Words: words([]int{300, 800, 1200}, "Don't", "go", "!!")}}
+	s.AddTrack(ref, prov, 0)
+	// "Don't," and "(go)" pair; a word that is all punctuation never pairs.
+	if s.Matched != 2 || s.WithinCount != 2 {
+		t.Errorf("stats = %+v; want 2 matched, both exactly 300ms off (within)", s)
+	}
+}
+
+func TestUniformProviderWordsAreNotMeasured(t *testing.T) {
+	var s WordStats
+	ref := []Cue{{Text: "x", Words: words([]int{0, 500}, "a", "b")}}
+	s.AddTrack(ref, []Cue{{Text: "x", Words: words([]int{0, 0}, "a", "b")}}, 0)
+	if s.Matched != 0 || s.Tracks != 0 || s.RefWords != 2 {
+		t.Errorf("stats = %+v; want line-level provider words skipped", s)
+	}
+	s.AddTrack(ref, []Cue{{Text: "x", Words: words([]int{0}, "a")}}, 0) // one word is honest
+	if s.Matched != 1 {
+		t.Errorf("stats = %+v; want a single word measured", s)
+	}
+}
+
+func TestWordsSortedByStartBeforeMatching(t *testing.T) {
+	var s WordStats
+	ref := []Cue{{Text: "x", Words: words([]int{0, 500}, "a", "b")}}
+	prov := []Cue{{Text: "x", Words: words([]int{500, 0}, "b", "a")}}
+	s.AddTrack(ref, prov, 0)
+	if s.Matched != 2 || s.SumAbsErrMS != 0 {
+		t.Errorf("stats = %+v; want both words paired with zero error", s)
+	}
+}
