@@ -221,7 +221,7 @@ unpacked against ~0.65 GB / ~2.8 GB for CPU (+~3.5 GB to pull, +~9.3 GB on disk)
 The CPU variant installs from one of
 `requirements-linux-amd64.txt` / `requirements-linux-arm64.txt` (picked by
 `TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to
-2.14.0/2.11.0, #1068, see `requirements.in`) resolve against the PyTorch CPU index
+2.14.1/2.11.0, see `requirements.in`) resolve against the PyTorch CPU index
 (`https://download.pytorch.org/whl/cpu`, passed as `--extra-index-url`),
 because PyPI's x86_64 `torch` wheel is the CUDA build and would add ~5 GB of
 unused `nvidia-*-cu12` libraries. A build-time check fails the build if a

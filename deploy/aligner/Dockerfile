@@ -5,7 +5,7 @@
 #   docker buildx imagetools inspect python:3.14-slim --format '{{.Manifest.Digest}}'
 #
 # 3.14, the latest mainline CPython every native package in this closure
-# ships a linux/amd64 + linux/arm64 wheel for (#1068: torch 2.14.0,
+# ships a linux/amd64 + linux/arm64 wheel for (#1068; torch now 2.14.1,
 # torchaudio 2.11.0, ctranslate2 4.8.2, onnxruntime 1.30.0, av, numpy,
 # tokenizers, ... all publish cp314 manylinux wheels on both arches; the
 # lock's --only-binary recipe enforces that, with demucs and
@@ -68,8 +68,8 @@ COPY requirements-linux-amd64.txt requirements-linux-amd64-cuda.txt requirements
 # lock was generated against the CPU index resolution, so a same-name,
 # same-version artifact from the wrong index (or a future PyPI release)
 # fails the hash check rather than installing silently. torch/torchaudio
-# specifically pin `torch==2.14.0+cpu` / `torchaudio==2.11.0+cpu` on both
-# arches -- an exact version string pip cannot satisfy from PyPI's `2.14.0`
+# specifically pin `torch==2.14.1+cpu` / `torchaudio==2.11.0+cpu` on both
+# arches -- an exact version string pip cannot satisfy from PyPI's `2.14.1`
 # CUDA build, so it is forced to the CPU index regardless of search order.
 # (torchaudio 2.11 declares no torch dependency at all; its extension is
 # built against torch's stable ABI, see requirements.in.)
