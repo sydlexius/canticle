@@ -119,6 +119,9 @@ var (
 	// trip the breaker, but a caller needs to tell it apart from a genuine
 	// rejection. Use errors.As to recover the advertised delay via *BusyError.
 	ErrBusy = errors.New("aligner: sidecar is busy")
+	// ErrRejected is returned when the sidecar validated the request and
+	// refused it (400, 411, 413, 422): the audio or the lyrics, not the sidecar.
+	ErrRejected = errors.New("aligner: request rejected")
 )
 
 // BusyError wraps ErrBusy with the sidecar's advertised retry delay, parsed
@@ -329,6 +332,32 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 	if strings.TrimSpace(audioPath) == "" {
 		return Result{}, fmt.Errorf("aligner: audio path is empty")
 	}
+	return c.align(ctx, c.client, false, func() (io.ReadCloser, error) { return openAudioFile(audioPath) }, lines)
+}
+
+// AlignFile is Align for audio the caller already holds open (a caller whose
+// path is a database column opens it under its own confinement). audio is
+// read to its end into memory and not closed; bounding it is the caller's.
+//
+// A ctx deadline is the call's ONLY deadline: the client timeout is not
+// applied, so a caller's budget for a long alignment is not cut short. Running
+// out of it is the context's error and, standing in for the client timeout,
+// trips the breaker (a hung sidecar); a cancel never does.
+func (c *HTTPClient) AlignFile(ctx context.Context, audio io.Reader, lines []string) (Result, error) {
+	client := c.client
+	if _, ok := ctx.Deadline(); ok {
+		// A shallow copy, as Health does: Transport and CheckRedirect are shared.
+		detached := *c.client
+		detached.Timeout = 0
+		client = &detached
+	}
+	return c.align(ctx, client, true, func() (io.ReadCloser, error) { return io.NopCloser(audio), nil }, lines)
+}
+
+// align is the request path behind Align and AlignFile. open runs only after
+// the line preconditions and the breaker let the request through. deadlineTrips
+// (AlignFile) makes a call ended by its ctx DEADLINE a breaker failure.
+func (c *HTTPClient) align(ctx context.Context, client *http.Client, deadlineTrips bool, open func() (io.ReadCloser, error), lines []string) (Result, error) {
 	if len(lines) == 0 {
 		return Result{}, fmt.Errorf("aligner: lines must not be empty")
 	}
@@ -344,18 +373,23 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 		return Result{}, ErrBreakerOpen
 	}
 
-	req, err := c.buildRequest(ctx, audioPath, lines)
+	f, err := open()
+	if err != nil {
+		return Result{}, fmt.Errorf("aligner: open audio: %w", err)
+	}
+	req, err := c.buildRequest(ctx, f, lines)
+	_ = f.Close()
 	if err != nil {
 		return Result{}, err
 	}
 
-	res, err := c.client.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// Report the context's own error (not the breaker below) so a
 			// caller can distinguish "we gave up" from "the sidecar is
 			// broken" -- a caller-initiated cancel is not breaker evidence.
-			return Result{}, fmt.Errorf("aligner: %w", ctxErr)
+			return Result{}, c.ctxEnded(ctxErr, deadlineTrips)
 		}
 		c.breaker.Trip()
 		return Result{}, fmt.Errorf("aligner: request failed: %w", err)
@@ -380,7 +414,7 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 		// unprocessable audio/lyrics) -- a benign miss, per the doc above.
 		c.breaker.RecordBenignMiss()
 		errBody, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
-		return Result{}, fmt.Errorf("aligner: request rejected, status %d: %s", res.StatusCode, strings.TrimSpace(string(errBody)))
+		return Result{}, fmt.Errorf("%w, status %d: %s", ErrRejected, res.StatusCode, strings.TrimSpace(string(errBody)))
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		// Everything else non-2xx trips the breaker: a redirect this client
@@ -401,7 +435,7 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 			// Same carve-out as the Do() error path above: a caller-initiated
 			// cancel or deadline can abort the body read just as easily as
 			// the round-trip itself, and it is equally not breaker evidence.
-			return Result{}, fmt.Errorf("aligner: %w", ctxErr)
+			return Result{}, c.ctxEnded(ctxErr, deadlineTrips)
 		}
 		c.breaker.Trip()
 		return Result{}, fmt.Errorf("aligner: read response: %w", err)
@@ -419,6 +453,15 @@ func (c *HTTPClient) Align(ctx context.Context, audioPath string, lines []string
 
 	c.breaker.RecordSuccess()
 	return result, nil
+}
+
+// ctxEnded wraps the context error that ended a call, first tripping the
+// breaker when deadlineTrips and the context ran out rather than was canceled.
+func (c *HTTPClient) ctxEnded(ctxErr error, deadlineTrips bool) error {
+	if deadlineTrips && errors.Is(ctxErr, context.DeadlineExceeded) {
+		c.breaker.Trip()
+	}
+	return fmt.Errorf("aligner: %w", ctxErr)
 }
 
 // wireWord and wireResult mirror the sidecar's JSON field names (snake_case)
@@ -552,15 +595,7 @@ func decodeAndValidate(body []byte, filteredToRaw []int) (Result, error) {
 }
 
 // buildRequest constructs the multipart POST per the package-doc contract.
-func (c *HTTPClient) buildRequest(ctx context.Context, audioPath string, lines []string) (*http.Request, error) {
-	f, err := openAudioFile(audioPath)
-	if err != nil {
-		return nil, fmt.Errorf("aligner: open audio: %w", err)
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-
+func (c *HTTPClient) buildRequest(ctx context.Context, f io.Reader, lines []string) (*http.Request, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	// The multipart filename is a constant, never audioPath's basename: the

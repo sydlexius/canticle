@@ -846,3 +846,54 @@ func TestAlign_Preconditions(t *testing.T) {
 		t.Fatal("Align: want error on empty lines, got nil")
 	}
 }
+
+// TestAlignFile: the reader's bytes are sent, a ctx deadline replaces the
+// client timeout, and a sidecar refusal of the input is ErrRejected.
+func TestAlignFile(t *testing.T) {
+	var got []byte
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f, _, err := r.FormFile("file"); err == nil {
+			got, _ = io.ReadAll(f)
+		}
+		time.Sleep(150 * time.Millisecond) // longer than the client timeout below
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"words":[],"transcript":""}`))
+	}))
+	defer srv.Close()
+	c, err := NewHTTPClient(srv.URL, 20*time.Millisecond, newTestBreaker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.AlignFile(ctx, strings.NewReader("invented-bytes"), []string{"line"}); err != nil {
+		t.Fatalf("AlignFile under a ctx deadline longer than the client timeout: %v", err)
+	}
+	if string(got) != "invented-bytes" {
+		t.Errorf("uploaded audio = %q, want the reader's bytes", got)
+	}
+	status = http.StatusUnprocessableEntity
+	if _, err := c.AlignFile(ctx, strings.NewReader("x"), []string{"line"}); !errors.Is(err, ErrRejected) {
+		t.Errorf("422 error = %v, want ErrRejected", err)
+	}
+	// Last on c (it trips the breaker): no ctx deadline, so the client timeout.
+	status = http.StatusOK
+	var te interface{ Timeout() bool }
+	if _, err := c.AlignFile(context.Background(), strings.NewReader("x"), []string{"line"}); !errors.As(err, &te) || !te.Timeout() {
+		t.Errorf("AlignFile without a ctx deadline = %v, want the client timeout", err)
+	}
+	// A ctx deadline that runs out is a breaker failure; a cancel is not.
+	b := newTestBreaker()
+	hung, _ := NewHTTPClient(srv.URL, time.Minute, b)
+	gone, stop := context.WithCancel(ctx)
+	time.AfterFunc(30*time.Millisecond, stop)
+	if _, err := hung.AlignFile(gone, strings.NewReader("x"), []string{"line"}); !errors.Is(err, context.Canceled) || b.Trips() != 0 {
+		t.Errorf("canceled AlignFile = %v with %d trips, want context.Canceled and 0", err, b.Trips())
+	}
+	short, stop := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer stop()
+	if _, err := hung.AlignFile(short, strings.NewReader("x"), []string{"line"}); !errors.Is(err, context.DeadlineExceeded) || b.Trips() != 1 {
+		t.Errorf("AlignFile past its ctx deadline = %v with %d trips, want DeadlineExceeded and 1", err, b.Trips())
+	}
+}

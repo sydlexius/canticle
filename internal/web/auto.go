@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"strconv"
 	"sync/atomic"
@@ -22,9 +23,11 @@ const (
 
 // AutoAligner is what the web layer needs from the aligner sidecar client
 // (internal/aligner) for the player's Auto alignment action (#1008). Health
-// is nil only for a live sidecar. Later slices add the alignment call.
+// is nil only for a live sidecar. AlignFile aligns lines to audio the caller
+// opened under its own confinement (see auto_run.go).
 type AutoAligner interface {
 	Health(ctx context.Context) error
+	AlignFile(ctx context.Context, audio io.Reader, lines []string) (aligner.Result, error)
 }
 
 // autoState is the attached aligner plus its cached availability. A render
@@ -32,8 +35,9 @@ type AutoAligner interface {
 type autoState struct {
 	aligner AutoAligner
 	// maxConcurrent is word_sync_generate.concurrency, the cap on alignments
-	// running at once. Read by the start route in the next #1008 slice.
+	// running at once (autoRuns.begin refuses a new run past it).
 	maxConcurrent int
+	runs          autoRuns
 	healthy       atomic.Bool
 	checkedAt     atomic.Int64 // unix nanoseconds of the last finished probe; 0 = never
 	refreshing    atomic.Bool
@@ -52,7 +56,8 @@ func (u *UI) AttachAutoAligner(a AutoAligner, maxConcurrent int) {
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}
-	u.auto = &autoState{aligner: a, maxConcurrent: maxConcurrent, now: time.Now}
+	u.auto = &autoState{aligner: a, maxConcurrent: maxConcurrent, now: time.Now,
+		runs: autoRuns{m: map[int64]*autoRun{}, timeout: autoRunTimeout, maxAudio: autoMaxAudioBytes}}
 	u.auto.refresh()
 }
 

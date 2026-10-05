@@ -374,6 +374,8 @@ func (u *UI) Register(mux *http.ServeMux) {
 	u.registerPreviewRoutes(reg)
 	reg("POST /preview/{id}/offset", u.handlePreviewOffset)
 	reg("POST /preview/{id}/revert", u.handlePreviewRevert)
+	reg("POST /preview/{id}/auto", u.handleAutoStart)
+	reg("GET /preview/{id}/auto", u.handleAutoPoll)
 	reg("POST /preview/{id}/auto/accept", u.handlePreviewAutoAccept)
 }
 
