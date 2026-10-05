@@ -691,11 +691,8 @@ const wordSyncGenerateConcurrencyDefault = 1
 // mirrors verification.enabled and instrumental_detector.enabled, which are
 // also dormant until an operator opts in.
 //
-// Slice 3 (#1007, commands.newWordGenerateSweepJob) reads Enabled, URL and
-// BudgetPerCycle, but starts only with a generator, which slice 4 (#1008,
-// gate-and-write; also the Concurrency consumer) supplies. Until then this
-// section is inert even when Enabled is set to true: serve logs once that
-// generation has no consumer yet.
+// No background sweep reads this section and serve starts nothing for it; the
+// #1007 sweep was removed in favor of the on-demand #1008 action.
 type WordSyncGenerateConfig struct {
 	// Enabled is the master switch. Default false.
 	// Override: MXLRC_WORD_SYNC_GENERATE_ENABLED.

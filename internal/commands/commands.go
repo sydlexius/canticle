@@ -1291,11 +1291,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if !lyricsDisabled {
 		wordRecheck, _ = newWordRecheckSweepJob(sqlDB, cfg, w)
 	}
-	// Upgrade sweep (#553, only with a live provider to drain it) and word-sync
-	// generate sweep (#1007: no generator until #1008, so enabled it logs once
-	// and starts nothing; not gated on lyricsDisabled, since it aligns words
-	// already on disk). Built together for the #1120 mis_synced pass wiring.
-	upgradeSweep, wordGenerate := newPassSweeps(sqlDB, cfg, w, nil, gen, lyricsDisabled)
+	// Upgrade sweep (#553, only with a live provider to drain it). Its queue is
+	// keyed on the lane-set generation for the #1120 post-settle mis_synced pass.
+	upgradeSweep := newServeUpgradeSweep(sqlDB, cfg, gen, lyricsDisabled)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -1599,13 +1597,6 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		go func() {
 			defer wg.Done()
 			runUpgradeSweepLoop(runCtx, upgradeSweep, resolveTimingSweepInterval(serveScanInterval(cfg, args)))
-		}()
-	}
-	if wordGenerate != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runWordGenerateSweepLoop(runCtx, wordGenerate, resolveTimingSweepInterval(serveScanInterval(cfg, args)))
 		}()
 	}
 	// Background session sweeper: periodically delete expired/revoked sessions,

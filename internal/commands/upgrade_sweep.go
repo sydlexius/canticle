@@ -37,6 +37,20 @@ func newUpgradeSweepJob(sqlDB *sql.DB, cfg config.Config) (*upgradeSweepJob, boo
 	return &upgradeSweepJob{q: queue.NewDBQueue(sqlDB), batch: batch, now: time.Now}, true
 }
 
+// newServeUpgradeSweep builds serve's upgrade sweep (nil when not started: only
+// with a live provider to drain it, #553) and keys its queue on the lane-set
+// generation, which the #1120 post-settle mis_synced pass reads.
+func newServeUpgradeSweep(sqlDB *sql.DB, cfg config.Config, providersGen int, lyricsDisabled bool) *upgradeSweepJob {
+	if lyricsDisabled {
+		return nil
+	}
+	upgrade, _ := newUpgradeSweepJob(sqlDB, cfg)
+	if upgrade != nil {
+		upgrade.q.SetProvidersVersion(providersGen)
+	}
+	return upgrade
+}
+
 // runCycle admits batch minus this sweep's in-flight rows; returns the count.
 func (j *upgradeSweepJob) runCycle(ctx context.Context) (int, error) {
 	inFlight, err := j.q.CountUpgradeInFlight(ctx)
