@@ -541,16 +541,18 @@ min_similarity = 0.35
 # other sidecar in this file -- one call can take minutes, longer on a cold
 # start while models load lazily on first use. Leave this disabled unless you
 # run a dedicated aligner sidecar (see deploy/aligner) with hardware and time
-# budget for that. There is no production caller of this section yet -- it is
-# inert even when enabled=true until a later release wires up the candidate
-# sweep and gate-and-write path.
+# budget for that. With the web UI on, enabled=true and a url enable the
+# on-demand Auto alignment action in the lyric preview editor, which asks the
+# aligner sidecar at url. Nothing runs in the background and nothing is
+# written until you accept a result.
 # Env: MXLRC_WORD_SYNC_GENERATE_ENABLED.
 # enabled = false
 
-# Base URL of the aligner sidecar. Env: MXLRC_WORD_SYNC_GENERATE_URL.
+# Base URL of the aligner sidecar the Auto alignment action calls. Env: MXLRC_WORD_SYNC_GENERATE_URL.
 # url = ""
 
-# Tracks aligned per sweep cycle. Default 10, kept small since one alignment
+# Has no effect: it belonged to a background sweep that was removed, and a
+# later release retires it. Default 10. One alignment
 # call can take minutes (decode + separation + transcription + alignment;
 # the sidecar's own decode step alone is capped at
 # ALIGNER_DECODE_TIMEOUT_SECONDS, default 300s, on top of model load time).
@@ -558,7 +560,8 @@ min_similarity = 0.35
 # Env: MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE.
 # budget_per_cycle = 10
 
-# Concurrent aligner calls per cycle. Default 1 (serialized) -- the reference
+# Alignments the Auto action may run at once. Reserved: nothing enforces it
+# yet. Default 1 (serialized) -- the reference
 # sidecar processes /align requests one at a time by design (it admits up to
 # ALIGNER_MAX_PENDING, default 2: one running, one queued; a request beyond
 # that gets 429 with Retry-After rather than being refused outright). Values

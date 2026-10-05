@@ -661,8 +661,8 @@ type InstrumentalBackfillConfig struct {
 	CooldownSeconds int `toml:"cooldown_seconds"`
 }
 
-// wordSyncGenerateBudgetDefault caps how many tracks one word-sync-generate
-// sweep cycle spends aligner calls on. Deliberately small: forced alignment
+// wordSyncGenerateBudgetDefault was the per-cycle track cap of the removed
+// word-sync-generate background sweep; nothing reads it now. Deliberately small: forced alignment
 // (Demucs vocal separation, then Whisper transcription and wav2vec2 forced
 // alignment) costs one to two orders of magnitude more per item than the
 // timing sweep's file read. The reference sidecar (deploy/aligner) ships a
@@ -699,18 +699,18 @@ type WordSyncGenerateConfig struct {
 	// Override: MXLRC_WORD_SYNC_GENERATE_ENABLED.
 	Enabled bool `toml:"enabled"`
 	// URL is the base URL of the aligner sidecar (internal/aligner). Empty
-	// (the default) means unconfigured; a future caller must treat an empty
-	// URL the same as Enabled=false regardless of the Enabled value.
+	// (the default) means unconfigured; an empty URL leaves the Auto
+	// action off regardless of the Enabled value.
 	// Override: MXLRC_WORD_SYNC_GENERATE_URL.
 	URL string `toml:"url"`
-	// BudgetPerCycle caps how many tracks one sweep cycle spends aligner calls
-	// on. Values below 1 reset to the default (10) -- a budget of 0 would spin
-	// the sweep forever doing nothing, the same failure mode
-	// timing_validation.revalidate_batch guards against.
+	// BudgetPerCycle belonged to the removed background sweep and has no
+	// reader now; a later slice retires it. Values below 1 still reset to the
+	// default (10).
 	// Override: MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE.
 	BudgetPerCycle int `toml:"budget_per_cycle"`
-	// Concurrency caps how many aligner calls one sweep cycle runs at once.
-	// Values below 1 reset to the default (1).
+	// Concurrency is the cap on alignments the Auto action runs at once. It
+	// reaches web.AttachAutoAligner but nothing enforces it yet. Values below 1
+	// reset to the default (1).
 	// Override: MXLRC_WORD_SYNC_GENERATE_CONCURRENCY.
 	Concurrency int `toml:"concurrency"`
 	// Model is RESERVED and NOT YET SENT to the sidecar: internal/aligner's

@@ -143,7 +143,7 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("cooldown_seconds = %d%s\n", cfg.InstrumentalDetector.Backfill.CooldownSeconds, ann("instrumental_detector.backfill.cooldown_seconds"))
 	p("\n")
 
-	// [word_sync_generate] -- experimental, opt-in, no production caller yet.
+	// [word_sync_generate] -- experimental, opt-in; read only by the on-demand Auto alignment action.
 	p("[word_sync_generate]\n")
 	p("enabled = %t%s\n", cfg.WordSyncGenerate.Enabled, ann("word_sync_generate.enabled"))
 	p("url = %s%s\n", cfg.WordSyncGenerate.URL, ann("word_sync_generate.url"))
