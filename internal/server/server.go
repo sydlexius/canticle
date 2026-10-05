@@ -101,6 +101,8 @@ type Handler struct {
 	editDurations      *audiodur.Store
 	editSelfWrites     *selfwrite.Registry
 	previewFlacFFmpeg  string
+	autoAligner        web.AutoAligner
+	autoMaxConcurrent  int
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
@@ -296,6 +298,13 @@ func WithPreviewFlacFallback(ffmpegPath string) Option {
 	return func(h *Handler) { h.previewFlacFFmpeg = ffmpegPath }
 }
 
+// WithAutoAligner offers the player's Auto alignment action (#1008) backed by
+// the given aligner, with at most maxConcurrent alignments running at once.
+// It has no effect unless the web UI is mounted.
+func WithAutoAligner(a web.AutoAligner, maxConcurrent int) Option {
+	return func(h *Handler) { h.autoAligner, h.autoMaxConcurrent = a, maxConcurrent }
+}
+
 // WithSettingsWriter enables the settings page write path (#288 Phase 2): the
 // resolved config file path the save handlers write through config.ApplyChanges,
 // and the encrypted secret store that absorbs secret-field saves (the Musixmatch
@@ -381,6 +390,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.previewFlacFFmpeg != "" {
 			h.webui.AttachPreviewFlacFallback(h.previewFlacFFmpeg)
+		}
+		if h.autoAligner != nil {
+			h.webui.AttachAutoAligner(h.autoAligner, h.autoMaxConcurrent)
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)

@@ -98,6 +98,9 @@ templ previewEditor(view PreviewView) {
 		data-orig-ms={ view.OrigMS }
 		data-tolerance-ms={ strconv.Itoa(view.ToleranceMS) }
 		data-edited?={ view.Edited }
+		if view.AutoURL != "" {
+			data-auto-url={ view.AutoURL }
+		}
 	>
 		<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
 		<div class="mx-edit-head">

@@ -66,7 +66,11 @@ type PreviewView struct {
 	ReadOnlyReason string
 	// EditURL is the row's /preview/{id} base; the panel posts to its
 	// /offset and /revert children.
-	EditURL    string
+	EditURL string
+	// AutoURL is the row's Auto alignment endpoint (#1008), rendered as
+	// data-auto-url on the editor panel. Empty (attribute absent) unless an
+	// aligner is attached, healthy, and the row is eligible.
+	AutoURL    string
 	OffsetMS   int
 	Edited     bool
 	MTime      string // the .lrc mtime in unix nanoseconds, decimal, as the page loaded it
