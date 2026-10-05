@@ -146,6 +146,13 @@ func TestSettleUpgradeTrip(t *testing.T) {
 		t.Fatalf("settled row = %s completed_at=%s outcome=%s timing=%s tier=%s attempts=%d armed=%d; want done, file record unchanged, disarmed",
 			status, completed, outcome, timing, tier, attempts, armed)
 	}
+	var marker sql.NullInt64
+	if err := dbh.QueryRow(`SELECT missync_recheck_generation FROM work_queue WHERE id = ?`, up).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker.Valid {
+		t.Fatalf("missync_recheck_generation = %d for an ok row, want NULL", marker.Int64)
+	}
 }
 
 // TestUpgradeTripSurvivesCollisionAndCancel (#553 review I-2): a scan or

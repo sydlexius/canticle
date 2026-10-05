@@ -5,8 +5,10 @@ import (
 	"testing"
 )
 
-// Migration 054 (#1007) round-trips; selection and the marker are covered over
-// the real queue (internal/queue/word_generate_test.go).
+// Migration 054 (#1007) round-trips. Its queue-side readers were removed (#1008);
+// the columns stay until their own migration drops them. The INDEX stays too because
+// it is live: the upgrade sweep's mis_synced arm uses idx_work_queue_word_generate_missynced,
+// so that later migration must replace it with one on (timing_outcome, status).
 func TestMigration054RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	dbh, provider := openAtVersionAppPragmas(t, 53)

@@ -149,7 +149,7 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 	if song.WordAnswer == models.WordAnswerAbsent {
 		// The gated orchestrator's aggregate: every word lane answered, none
 		// with usable words (a held or unqualified word result included, plan
-		// 2.4 rows 2-3; #1007 can retime them).
+		// 2.4 rows 2-3; no automatic path retimes them now, the #1008 Auto action is on demand).
 		w.consecutiveFailures = 0
 		return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
 	}
