@@ -691,8 +691,9 @@ const wordSyncGenerateConcurrencyDefault = 1
 // mirrors verification.enabled and instrumental_detector.enabled, which are
 // also dormant until an operator opts in.
 //
-// No background sweep reads this section and serve starts nothing for it; the
-// #1007 sweep was removed in favor of the on-demand #1008 action.
+// No background sweep reads this section: the #1007 sweep was removed. With the
+// web UI on, serve reads Enabled and URL to attach the aligner client behind the
+// on-demand #1008 Auto alignment action.
 type WordSyncGenerateConfig struct {
 	// Enabled is the master switch. Default false.
 	// Override: MXLRC_WORD_SYNC_GENERATE_ENABLED.
