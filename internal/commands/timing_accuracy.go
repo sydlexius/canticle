@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 
@@ -30,7 +31,7 @@ import (
 type TimingAccCmd struct {
 	RefDir     string `arg:"positional,required" help:"local reference directory holding manifest.toml and the reference .lrc/.elrc files (keep it outside any git tree)"`
 	Lanes      string `arg:"--lanes" help:"comma-separated lanes to measure (default: every known provider)" default:""`
-	Token      string `arg:"--token" help:"Musixmatch API token (default: MUSIXMATCH_TOKEN / MXLRC_API_TOKEN, then config; the encrypted store is not consulted)" default:""`
+	Token      string `arg:"--token" help:"optional Musixmatch API token override, visible in shell history and process listings; prefer MUSIXMATCH_TOKEN / MXLRC_API_TOKEN or the config file (the encrypted store is not consulted)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -53,14 +54,33 @@ type refManifest struct {
 	Track []refTrack `toml:"track"`
 }
 
+var errNotRegular = errors.New("not a readable regular file")
+
 // readRegular reads name through root, refusing a non-regular file (symlink,
-// FIFO, device, directory) BEFORE opening it so a FIFO cannot hang the run.
+// FIFO, device, directory) before opening it.
 func readRegular(root *os.Root, name string) ([]byte, error) {
 	fi, err := root.Lstat(name)
 	if err != nil || !fi.Mode().IsRegular() {
-		return nil, errors.New("not a readable regular file")
+		return nil, errNotRegular
 	}
-	return root.ReadFile(name)
+	return readRegularHandle(root, name, fi)
+}
+
+// readRegularHandle reads name from one handle, opened non-blocking so a FIFO
+// swapped in after the Lstat cannot hang the run. The handle itself must be a
+// regular file and the very file the Lstat saw (fi), which also refuses a
+// swapped-in symlink: os.Root follows one that stays inside the root.
+func readRegularHandle(root *os.Root, name string, fi os.FileInfo) ([]byte, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errNotRegular
+	}
+	defer func() { _ = f.Close() }()
+	hfi, err := f.Stat()
+	if err != nil || !hfi.Mode().IsRegular() || !os.SameFile(fi, hfi) {
+		return nil, errNotRegular
+	}
+	return io.ReadAll(f)
 }
 
 // loadRefSet reads the manifest and every reference file through one os.Root.
@@ -68,7 +88,7 @@ func readRegular(root *os.Root, name string) ([]byte, error) {
 func loadRefSet(dir string) ([]refTrack, [][]byte, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, nil, errors.New("manifest.toml could not be read or parsed")
+		return nil, nil, errors.New("reference directory could not be opened")
 	}
 	defer func() { _ = root.Close() }()
 	if _, err := root.Lstat(".git"); err == nil {
@@ -177,17 +197,18 @@ func accuracyLanes(cfg config.Config, token string, names []string, newFetcher f
 }
 
 // errClass is the only thing logged about a lane error: a raw error string can
-// embed a query URL carrying the reference track's identity.
+// embed a query URL carrying the reference track's identity. Both petitlyrics
+// outage sentinels wrap ErrNotFound, so they are tested before the miss case.
 func errClass(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "context"
+	case errors.Is(err, petitlyrics.ErrProviderUnavailable), errors.Is(err, petitlyrics.ErrOutageLatched):
+		return "unavailable"
 	case errors.Is(err, musixmatch.ErrNotFound), errors.Is(err, petitlyrics.ErrNotFound), errors.Is(err, innertube.ErrNotFound):
 		return "not_found"
 	case errors.Is(err, musixmatch.ErrRateLimited), errors.Is(err, petitlyrics.ErrRateLimited), errors.Is(err, innertube.ErrRateLimited):
 		return "rate_limited"
-	case errors.Is(err, petitlyrics.ErrProviderUnavailable):
-		return "unavailable"
 	default:
 		return "error"
 	}
@@ -243,11 +264,11 @@ type served struct {
 // laneTally counts what a lane did NOT serve, split by cause.
 type laneTally struct {
 	notFound, failed, notAsked int
-	stopped                    bool
+	stopped                    string // why the lane was not asked again; empty if it was
 }
 
 // runTimingAccuracy is the testable core: lane-outer, track-inner, sequential.
-// A throttled lane is not asked again. No writes, no database, aggregate stdout.
+// A throttled or unavailable lane is not asked again. No writes, no database, aggregate stdout.
 func runTimingAccuracy(ctx context.Context, out io.Writer, args TimingAccCmd, lanes []providers.LyricsProvider, skipped []string) int {
 	tracks, bodies, err := loadRefSet(args.RefDir)
 	if err != nil {
@@ -308,7 +329,7 @@ laneLoop:
 					tl.failed++
 				}
 				if class == "rate_limited" || class == "unavailable" {
-					tl.stopped = true
+					tl.stopped = strings.Replace(class, "rate_limited", "throttled", 1)
 					tl.notAsked = len(refs) - i - 1
 					break
 				}
@@ -371,8 +392,8 @@ func printAccuracy(out io.Writer, nRefs, dropped int, skipped, order []string, r
 		if tl.notFound > 0 || tl.failed > 0 {
 			_, _ = fmt.Fprintf(out, "%s: not_found=%d failed=%d\n", key, tl.notFound, tl.failed)
 		}
-		if tl.stopped {
-			_, _ = fmt.Fprintf(out, "%s: stopped early (throttled); remaining tracks not asked: %d\n", key, tl.notAsked)
+		if tl.stopped != "" {
+			_, _ = fmt.Fprintf(out, "%s: stopped early (%s); remaining tracks not asked: %d\n", key, tl.stopped, tl.notAsked)
 		}
 	}
 }

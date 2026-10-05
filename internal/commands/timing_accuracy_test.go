@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
+	"github.com/sydlexius/canticle/internal/petitlyrics"
 	"github.com/sydlexius/canticle/internal/providers"
 )
 
@@ -244,6 +245,9 @@ func TestLoadRefSet_Rejections(t *testing.T) {
 			taMust(t, os.Rename(filepath.Join(ref, "manifest.toml"), outside))
 			taMust(t, os.Symlink(outside, filepath.Join(ref, "manifest.toml")))
 		}},
+		"missing directory": {manifest: one("a.lrc"), want: "timing-accuracy: reference directory could not be opened\n", mutate: func(t *testing.T, ref string) {
+			taMust(t, os.RemoveAll(ref))
+		}},
 		"directory as file": {manifest: one("sub"), want: taMsgRefFile, mutate: func(t *testing.T, ref string) {
 			taMust(t, os.Mkdir(filepath.Join(ref, "sub"), 0o755))
 		}},
@@ -283,18 +287,29 @@ func (f *taSeqFetcher) FindLyrics(context.Context, models.Track) (models.Song, e
 	return models.Song{}, f.err
 }
 
-func TestRunTimingAccuracy_StopsOnThrottle(t *testing.T) {
+// The petitlyrics outage sentinels wrap ErrNotFound: each must stop the lane as
+// a failure, never count as a clean miss.
+func TestRunTimingAccuracy_StopsOnThrottleOrOutage(t *testing.T) {
 	m := taManifest("[[track]]\nid = \"c\"\ntitle = \"c\"\nfile = \"a.lrc\"\nline_residual_ms = 1\n")
-	ref := taRefDir(t, t.TempDir(), m)
-	f := &taSeqFetcher{song: taSong("", 0, []int{1000, 5000, 9000}, taTexts), err: fmt.Errorf("lane: %w", musixmatch.ErrRateLimited)}
-	var out bytes.Buffer
-	code := runTimingAccuracy(t.Context(), &out, TimingAccCmd{RefDir: ref}, []providers.LyricsProvider{providers.New("musixmatch", f)}, nil)
-	if code != 0 || f.calls != 2 {
-		t.Fatalf("exit %d calls %d (want 0, 2):\n%s", code, f.calls, out.String())
-	}
-	for _, want := range []string{"musixmatch: tracks=1", "musixmatch: not_found=0 failed=1", "stopped early (throttled); remaining tracks not asked: 1"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("missing %q:\n%s", want, out.String())
+	for _, tc := range []struct {
+		err error
+		why string
+	}{
+		{musixmatch.ErrRateLimited, "throttled"},
+		{petitlyrics.ErrProviderUnavailable, "unavailable"},
+		{petitlyrics.ErrOutageLatched, "unavailable"},
+	} {
+		ref := taRefDir(t, t.TempDir(), m)
+		f := &taSeqFetcher{song: taSong("", 0, []int{1000, 5000, 9000}, taTexts), err: fmt.Errorf("lane: %w", tc.err)}
+		var out bytes.Buffer
+		code := runTimingAccuracy(t.Context(), &out, TimingAccCmd{RefDir: ref}, []providers.LyricsProvider{providers.New("musixmatch", f)}, nil)
+		if code != 0 || f.calls != 2 {
+			t.Fatalf("%v: exit %d calls %d (want 0, 2):\n%s", tc.err, code, f.calls, out.String())
+		}
+		for _, want := range []string{"musixmatch: tracks=1", "musixmatch: not_found=0 failed=1", "stopped early (" + tc.why + "); remaining tracks not asked: 1"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("%v: missing %q:\n%s", tc.err, want, out.String())
+			}
 		}
 	}
 }
