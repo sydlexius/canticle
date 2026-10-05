@@ -32,6 +32,10 @@ type ProvenanceTags struct {
 	// name guard); InjectProvenance never writes them.
 	Artist string // [ar:] tag
 	Title  string // [ti:] tag
+	// Timing is the [timing:] tag: TimingAligner when the stamps came from an
+	// accepted aligner suggestion (#1008), empty for every other file. Read
+	// only; InjectProvenance never writes it.
+	Timing string // [timing:] tag
 	// Ve is intentionally absent: [ve:] is skipped on backfilled files (DC4).
 }
 
@@ -66,6 +70,8 @@ func ReadProvenanceTags(path string) (ProvenanceTags, error) {
 			pt.Artist = strings.TrimSpace(t.value)
 		case "ti":
 			pt.Title = strings.TrimSpace(t.value)
+		case "timing":
+			pt.Timing = strings.TrimSpace(t.value)
 		}
 	}
 	return pt, nil

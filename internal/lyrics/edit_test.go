@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/selfwrite"
 )
 
@@ -329,5 +330,202 @@ func TestRootWriteAtomicExclusiveKeepsExisting(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("entries = %d, want only the destination (temp left behind?)", len(entries))
+	}
+}
+
+const genFixture = "[ti:x]\n[source:lane-a]\n[fetched:2026-01-02T03:04:05Z]\n[00:01.00]one\n[00:05.00]two a\n[00:05.00]two b\n[00:09.00]\n"
+
+// TestApplyEditNilGeneratedBytes pins the exact bytes of the two edit modes
+// that predate #1008 (a shift, then a zero-offset revert). The strings were
+// produced by the code before EditOptions.Generated existed.
+func TestApplyEditNilGeneratedBytes(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, genFixture)
+	for _, tc := range []struct {
+		off  int
+		want string
+	}{
+		{600, "[ti:x]\n[source:lane-a]\n[fetched:2026-01-02T03:04:05Z]\n[00:01.60]one\n[00:05.60]two a\n[00:05.60]two b\n[00:09.60]♪\n"},
+		{0, "[ti:x]\n[source:lane-a]\n[fetched:2026-01-02T03:04:05Z]\n[00:01.00]one\n[00:05.00]two a\n[00:05.00]two b\n[00:09.00]♪\n"},
+	} {
+		orig, tags, err := OriginalLines(p, []string{root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ApplyEdit(p, ShiftLines(orig, tc.off), tags, EditOptions{Roots: []string{root}, DurationSeconds: 30}); err != nil {
+			t.Fatal(err)
+		}
+		if got := readFile(t, p); got != tc.want {
+			t.Errorf("offset %d wrote:\n%q\nwant:\n%q", tc.off, got, tc.want)
+		}
+	}
+	if got := readFile(t, p+".orig"); got != genFixture {
+		t.Errorf(".orig = %q, want the original bytes", got)
+	}
+}
+
+func genApply(t *testing.T, root, p string, starts []int, g *GeneratedEdit, dur int) (EditResult, error) {
+	t.Helper()
+	orig, tags, err := OriginalLines(p, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, err := RetimeLines(orig, starts)
+	if err != nil {
+		return EditResult{}, err
+	}
+	return ApplyEdit(p, lines, tags, EditOptions{Roots: []string{root}, ExpectMTime: mtimeOf(t, p), DurationSeconds: dur, Generated: g})
+}
+
+func TestApplyEditGeneratedWritesMarkerAndStamps(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, genFixture)
+	const head = "[ti:x]\n[source:lane-a]\n[fetched:2026-01-02T03:04:05Z]\n[timing:canticle-aligner]\n"
+	g := &GeneratedEdit{Words: []models.WordTiming{{Line: 1, Text: "two", StartMS: 5500}, {Line: 1, Text: "a", StartMS: 5600}}}
+	res, err := genApply(t, root, p, []int{1200, 5500, 5500, 9000}, g, 30)
+	if err != nil || !res.CreatedOrig {
+		t.Fatalf("accept: res=%+v err=%v", res, err)
+	}
+	// Words are validated, never written, in this slice.
+	if got, want := readFile(t, p), head+"[00:01.20]one\n[00:05.50]two a\n[00:05.50]two b\n[00:09.00]♪\n"; got != want {
+		t.Errorf("accept wrote:\n%q\nwant:\n%q", got, want)
+	}
+	// A second accept whose header tags already carry the marker (a file
+	// accepted before its backup was lost) still yields it exactly once.
+	lines, tags, err := OriginalLines(p, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags = append([]string{"[timing:canticle-aligner]"}, tags...)
+	res, err = ApplyEdit(p, lines, tags, EditOptions{Roots: []string{root}, DurationSeconds: 30, Generated: &GeneratedEdit{}})
+	if err != nil || res.CreatedOrig {
+		t.Fatalf("second accept: res=%+v err=%v", res, err)
+	}
+	if got := readFile(t, p); strings.Count(got, "[timing:") != 1 || !strings.HasPrefix(got, head) {
+		t.Errorf("marker not written exactly once, after the kept tags:\n%s", got)
+	}
+	if got := readFile(t, p+".orig"); got != genFixture {
+		t.Errorf(".orig = %q, want the original bytes", got)
+	}
+	pt, err := ReadProvenanceTags(p)
+	if err != nil || pt.Timing != TimingAligner || pt.Source != "lane-a" {
+		t.Errorf("tags = %+v (%v), want timing %q and the source kept", pt, err, TimingAligner)
+	}
+	if pt, _ := ReadProvenanceTags(p + ".orig"); pt.Timing != "" {
+		t.Errorf("unmarked file reads timing %q", pt.Timing)
+	}
+}
+
+func TestApplyEditGeneratedRefusals(t *testing.T) {
+	ok := []int{1200, 5500, 5500, 9000}
+	word := func(line, ms int) *GeneratedEdit {
+		return &GeneratedEdit{Words: []models.WordTiming{{Line: line, Text: "w", StartMS: ms}}}
+	}
+	for _, tc := range []struct {
+		name   string
+		body   string
+		setup  func(t *testing.T, dir string)
+		starts []int
+		gen    *GeneratedEdit
+		want   error  // nil: the accept succeeds
+		as     string // the name the path is addressed by, when not t.lrc
+		foldFS bool   // observable only where the volume folds name case
+	}{
+		{name: "too few stamps", starts: []int{1200, 5500, 5500}, want: ErrEditInvalid},
+		{name: "negative", starts: []int{-1, 5500, 5500, 9000}, want: ErrEditInvalid},
+		{name: "decreasing", starts: []int{6000, 5500, 5500, 9000}, want: ErrEditInvalid},
+		{name: "split same-stamp group", starts: []int{1200, 5500, 5600, 9000}, want: ErrEditInvalid},
+		{name: "timing guard", starts: []int{1200, 95000, 95000, 95000}, want: ErrEditTiming},
+		{name: "word names no line", starts: ok, gen: word(4, 10), want: ErrEditInvalid},
+		{name: "negative word", starts: ok, gen: word(0, -5), want: ErrEditInvalid},
+		{name: "stamp past 24h", starts: []int{1200, 5500, 5500, 86_400_001}, want: ErrEditInvalid},
+		{name: "word past 24h", starts: ok, gen: word(0, 86_400_001), want: ErrEditInvalid},
+		{name: "words out of order", starts: ok, want: ErrEditInvalid, gen: &GeneratedEdit{Words: []models.WordTiming{
+			{Line: 1, Text: "a", StartMS: 5600}, {Line: 1, Text: "two", StartMS: 5500}}}},
+		{name: "loose inline words", body: "[00:01.00]<00:01.000>one <00:01.500>more\n[00:05.00]two a\n[00:05.00]two b\n[00:09.00]\n", starts: ok, want: ErrEditHasWords},
+		{name: "loose words, no fraction", body: "[00:01.00]<00:01>one <00:02>more\n[00:05.00]two a\n[00:05.00]two b\n[00:09.00]\n", starts: ok, want: ErrEditHasWords},
+		// A known conservative refusal: lyric text shaped like a mark is not told apart from one.
+		{name: "ratio in the text", body: "[00:01.00]ratio <16:9>\n[00:05.00]two a\n[00:05.00]two b\n[00:09.00]\n", starts: ok, want: ErrEditHasWords},
+		{name: "ordinary angle brackets", body: "[00:01.00]a < b > c <3\n[00:05.00]<x:1> two <12>\n[00:05.00]two b\n[00:09.00]\n", starts: ok},
+		// foldFS rows: the Lstat branch is observable only on a case-insensitive volume; Linux CI guards the listing branch.
+		{name: "companion stem in another case", starts: ok, want: ErrEditHasWords, foldFS: true, setup: func(t *testing.T, dir string) {
+			writeFixture(t, filepath.Join(dir, "T.elrc"), "[by:someone]\n")
+		}},
+		{name: "path in another case than disk", starts: ok, want: ErrEditHasWords, foldFS: true, as: "T.lrc", setup: func(t *testing.T, dir string) {
+			writeFixture(t, filepath.Join(dir, "t.elrc"), "[by:someone]\n")
+		}},
+		{name: "inline words", body: "[00:01.00]<00:01.00>one <00:01.50>more\n[00:05.00]two a\n[00:05.00]two b\n[00:09.00]\n", starts: ok, want: ErrEditHasWords},
+		{name: "elrc sibling", starts: ok, want: ErrEditHasWords, setup: func(t *testing.T, dir string) {
+			writeFixture(t, filepath.Join(dir, "t.elrc"), "[by:someone]\n")
+		}},
+		{name: "upper-case sibling", starts: ok, want: ErrEditHasWords, setup: func(t *testing.T, dir string) {
+			writeFixture(t, filepath.Join(dir, "t.ELRC"), "x\n")
+		}},
+		{name: "directory sibling", starts: ok, want: ErrEditHasWords, setup: func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "t.elrc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "dangling symlink sibling", starts: ok, want: ErrEditHasWords, setup: func(t *testing.T, dir string) {
+			if err := os.Symlink(filepath.Join(dir, "absent"), filepath.Join(dir, "t.eLrc")); err != nil {
+				t.Skip("symlinks unsupported")
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			p := filepath.Join(root, "a", "t.lrc")
+			body := tc.body
+			if body == "" {
+				body = genFixture
+			}
+			writeFixture(t, p, body)
+			if tc.foldFS && caseSensitiveFS(t, root) {
+				t.Skip("case-sensitive volume: that name is another track's file, so nothing resolves it as this one's companion")
+			}
+			writeFixture(t, filepath.Join(root, "a", "other.elrc"), "x\n") // not its companion
+			if tc.setup != nil {
+				tc.setup(t, filepath.Join(root, "a"))
+			}
+			addressed := p
+			if tc.as != "" {
+				addressed = filepath.Join(root, "a", tc.as)
+			}
+			gen := tc.gen
+			if gen == nil {
+				gen = &GeneratedEdit{}
+			}
+			before := mtimeOf(t, p)
+			if _, err := genApply(t, root, addressed, tc.starts, gen, 30); !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if tc.want == nil {
+				return
+			}
+			if got := readFile(t, p); got != body || !mtimeOf(t, p).Equal(before) {
+				t.Errorf("refused accept touched the file:\n%q", got)
+			}
+			assertNoOrig(t, p)
+		})
+	}
+}
+
+// TestIsWordCompanionName judges entry NAMES directly, so the extension-case
+// rule is proven on a case-insensitive filesystem too, where "t.ELRC" and
+// "t.elrc" cannot both exist and a listing returns only one spelling. It is
+// the name rule ONLY: "T.elrc" is another track's file by name, and whether
+// the volume resolves it as this one's companion is refuseIfWordTimed's Lstat
+// (the two case rows of TestApplyEditGeneratedRefusals).
+func TestIsWordCompanionName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"t.elrc": true, "t.ELRC": true, "t.eLrC": true,
+		"t.lrc": false, "t.txt": false, "t.elrc.orig": false, "t.x.elrc": false,
+		"T.elrc": false, "other.elrc": false, ".elrc": false, "t": false,
+	} {
+		if got := isWordCompanionName(name, "t"); got != want {
+			t.Errorf("isWordCompanionName(%q, \"t\") = %v, want %v", name, got, want)
+		}
 	}
 }

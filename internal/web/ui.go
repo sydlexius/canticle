@@ -370,6 +370,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 	u.registerPreviewRoutes(reg)
 	reg("POST /preview/{id}/offset", u.handlePreviewOffset)
 	reg("POST /preview/{id}/revert", u.handlePreviewRevert)
+	reg("POST /preview/{id}/auto/accept", u.handlePreviewAutoAccept)
 }
 
 // settingsPath is the single config destination. Settings replaced the old

@@ -24,6 +24,29 @@ func (q *DBQueue) SetLyricEdit(ctx context.Context, id int64, offsetMS int) erro
 	return nil
 }
 
+// SetLyricRetime records an accepted generated retiming of the row's .lrc
+// (#1008): the edit time, with lyric_offset_ms left NULL because the change is
+// per line, not one offset. The mark keeps the automatic sweeps away exactly
+// as a hand edit's does (notLyricEdited).
+func (q *DBQueue) SetLyricRetime(ctx context.Context, id int64) error {
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET lyric_offset_ms = NULL, lyric_edited_at = ? WHERE id = ?`,
+		formatTime(q.now()), id); err != nil {
+		return fmt.Errorf("queue: set lyric retime %d: %w", id, err)
+	}
+	return nil
+}
+
+// LyricRetimed reports whether the row's mark is a retime: edited, no offset.
+func (q *DBQueue) LyricRetimed(ctx context.Context, id int64) (bool, error) {
+	var retimed bool
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT lyric_edited_at IS NOT NULL AND lyric_offset_ms IS NULL FROM work_queue WHERE id = ?`, id).Scan(&retimed); err != nil {
+		return false, fmt.Errorf("queue: lyric retimed %d: %w", id, err)
+	}
+	return retimed, nil
+}
+
 // ClearLyricEdit forgets a hand edit (a revert, or an explicit re-fetch).
 func (q *DBQueue) ClearLyricEdit(ctx context.Context, id int64) error {
 	if _, err := q.db.ExecContext(ctx,
