@@ -2,11 +2,16 @@ package aligner
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,6 +80,8 @@ func TestHealthURL(t *testing.T) {
 		"http://h:1/x?key=abc": "http://h:1/x/health",
 		"http://h:1/x#frag":    "http://h:1/x/health",
 		"http://u:p@h:1/x/":    "http://u:p@h:1/x/health",
+		"http://h/x%2Falign":   "http://h/x%2Falign/health",
+		"http://h/a%20b/align": "http://h/a%20b/health",
 	} {
 		c := &HTTPClient{baseURL: in}
 		got, err := c.healthURL()
@@ -180,15 +187,20 @@ func hangingServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// The probe's own 3 s deadline, not the client's 5 s timeout, ends the call.
+// The probe's own 3 s deadline, not the client's (shorter) alignment timeout,
+// ends the call: a 200 ms client against a server that never answers stops at
+// about 3 s.
 func TestHealthTimesOut(t *testing.T) {
-	c := newClientForServer(t, hangingServer(t), nil)
+	c, err := NewHTTPClient(hangingServer(t).URL, 200*time.Millisecond, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := time.Now()
-	err := c.Health(context.Background())
+	err = c.Health(context.Background())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Health() error = %v, want a deadline error", err)
 	}
-	if d := time.Since(start); d < healthTimeout || d > 4900*time.Millisecond {
+	if d := time.Since(start); d < healthTimeout || d > 3500*time.Millisecond {
 		t.Errorf("Health() returned after %v, want about %v", d, healthTimeout)
 	}
 }
@@ -204,5 +216,59 @@ func TestHealthContextCancelReturnsPromptly(t *testing.T) {
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("Health() took %v after a cancel", d)
+	}
+}
+
+// A client whose alignment timeout is shorter than the probe's answer time
+// still sees a healthy sidecar: the probe's deadline is its own.
+func TestHealthIgnoresShortClientTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(600 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	c, err := NewHTTPClient(srv.URL, 200*time.Millisecond, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("Health() = %v, want nil despite a 200 ms client timeout", err)
+	}
+	if c.client.Timeout != 200*time.Millisecond {
+		t.Errorf("client Timeout = %v, the probe mutated it", c.client.Timeout)
+	}
+}
+
+func TestScrubTransportErrorKeepsHostOut(t *testing.T) {
+	const host = "secret-host.invalid"
+	wrap := func(inner error) error {
+		return &url.Error{Op: "Get", URL: "http://" + host + "/health", Err: inner}
+	}
+	cases := map[string]error{
+		"dns not found": wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Name: host, Server: "10.9.8.7:53", Err: "no such host", IsNotFound: true}}),
+		"dns timeout":   wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Name: host, Err: "i/o timeout", IsTimeout: true}}),
+		"addr error":    wrap(&net.OpError{Op: "dial", Err: &net.AddrError{Err: "bad address", Addr: host}}),
+		"tls hostname":  wrap(x509.HostnameError{Certificate: &x509.Certificate{}, Host: host}),
+		"parse error":   wrap(&net.ParseError{Type: "IP address", Text: host}),
+	}
+	for name, in := range cases {
+		if got := scrubTransportError(in); strings.Contains(got.Error(), host) || strings.Contains(got.Error(), "10.9.8.7") {
+			t.Errorf("%s: error %q leaks the host", name, got)
+		}
+	}
+	if err := scrubTransportError(cases["dns not found"]); !strings.Contains(err.Error(), "lookup") {
+		t.Errorf("dns error = %q, want a lookup class", err)
+	}
+	if err := scrubTransportError(cases["tls hostname"]); !strings.Contains(err.Error(), "tls") {
+		t.Errorf("tls error = %q, want a tls class", err)
+	}
+	for _, want := range []error{context.DeadlineExceeded, context.Canceled, syscall.ECONNREFUSED, io.EOF} {
+		in := wrap(want)
+		if errors.Is(want, syscall.ECONNREFUSED) {
+			in = wrap(&net.OpError{Op: "dial", Err: os.NewSyscallError("connect", want)})
+		}
+		if got := scrubTransportError(in); !errors.Is(got, want) {
+			t.Errorf("scrubTransportError lost errors.Is(%v): %v", want, got)
+		}
 	}
 }

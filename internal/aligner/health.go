@@ -2,6 +2,8 @@ package aligner
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -28,7 +32,7 @@ var ErrUnhealthy = errors.New("aligner: sidecar is not healthy")
 
 // Health probes GET /health and returns nil only for a 200 whose JSON body
 // carries status "ok". It uses Align's http.Client (a redirect is never
-// followed) under its own 3 s deadline, and neither consults nor moves the
+// followed) under its own 3 s deadline (independent of the client's timeout), and neither consults nor moves the
 // breaker: availability is not evidence about alignment calls.
 func (c *HTTPClient) Health(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, healthTimeout)
@@ -41,7 +45,12 @@ func (c *HTTPClient) Health(ctx context.Context) error {
 	if err != nil {
 		return errors.New("aligner: build health request")
 	}
-	res, err := c.client.Do(req)
+	// A shallow copy with no Timeout: the alignment timeout must not cut the
+	// probe short, so the request context is its only deadline. Transport and
+	// CheckRedirect (no redirect is followed) are shared; c.client is untouched.
+	probe := *c.client
+	probe.Timeout = 0
+	res, err := probe.Do(req)
 	if err != nil {
 		return scrubTransportError(err)
 	}
@@ -68,19 +77,52 @@ func (c *HTTPClient) Health(ctx context.Context) error {
 	return nil
 }
 
-// scrubTransportError drops the request URL (userinfo, path, query) and the
-// dialed address that Go's transport errors embed, keeping only the
-// underlying cause so errors.Is/As still see a cancel, deadline or errno.
+// scrubTransportError drops everything a transport error can embed (the
+// request URL, the dialed address, a looked-up or certificate host) and keeps
+// only a coarse class. An ALLOWLIST of causes known not to carry a host passes
+// through wrapped, so errors.Is/As still see a cancel, deadline, errno or EOF;
+// every other cause is replaced by fixed text.
 func scrubTransportError(err error) error {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		err = urlErr.Err
 	}
-	var oe *net.OpError
-	if errors.As(err, &oe) && oe.Err != nil {
-		return fmt.Errorf("aligner: health request %s: %w", oe.Op, oe.Err)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, os.ErrDeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("aligner: health request: %w", err)
 	}
-	return fmt.Errorf("aligner: health request: %w", err)
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		switch {
+		case dnsErr.IsNotFound:
+			return errors.New("aligner: health request: host lookup failed (not found)")
+		case dnsErr.IsTimeout:
+			return errors.New("aligner: health request: host lookup failed (timeout)")
+		}
+		return errors.New("aligner: health request: host lookup failed")
+	}
+	var (
+		hostErr x509.HostnameError
+		authErr x509.UnknownAuthorityError
+		invErr  x509.CertificateInvalidError
+		verErr  *tls.CertificateVerificationError
+		alert   tls.AlertError
+		hdrErr  tls.RecordHeaderError
+	)
+	if errors.As(err, &hostErr) || errors.As(err, &authErr) || errors.As(err, &invErr) ||
+		errors.As(err, &verErr) || errors.As(err, &alert) || errors.As(err, &hdrErr) {
+		return errors.New("aligner: health request: tls failure")
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return fmt.Errorf("aligner: health request: %w", errno)
+	}
+	var oe *net.OpError
+	if errors.As(err, &oe) {
+		return errors.New("aligner: health request: connect failure")
+	}
+	return errors.New("aligner: health request: failed")
 }
 
 // healthURL builds the probe URL from the parsed base: a trailing /align path
@@ -92,9 +134,13 @@ func (c *HTTPClient) healthURL() (string, error) {
 	if err != nil {
 		return "", errors.New("aligner: configured url is not parsable")
 	}
-	p := strings.TrimSuffix(u.Path, "/")
-	p = strings.TrimSuffix(p, "/align")
-	u.Path, u.RawPath = p+"/health", ""
+	escaped := strings.TrimSuffix(u.EscapedPath(), "/")
+	escaped = strings.TrimSuffix(escaped, "/align") + "/health"
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil {
+		return "", errors.New("aligner: configured url is not parsable")
+	}
+	u.Path, u.RawPath = decoded, escaped
 	u.RawQuery, u.Fragment, u.RawFragment, u.ForceQuery = "", "", "", false
 	return u.String(), nil
 }
