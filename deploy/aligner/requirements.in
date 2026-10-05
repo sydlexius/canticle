@@ -6,7 +6,8 @@
 fastapi==0.142.2
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
-# torch 2.14.0 / torchaudio 2.11.0 (#1068; previously held at 2.8.0).
+# torch 2.14.1 / torchaudio 2.11.0. The 2.8.0 hold ended at torch 2.14.0
+# (#1068); 2.14.1 is a later Dependabot patch bump.
 # torch must be >= 2.13.0, the highest first-patched version among the torch
 # advisories open against the 2.8.0 pin. torchaudio 2.11.0 is its LAST
 # release, and it is built against torch's stable C ABI (abi3 extension, no
@@ -38,14 +39,27 @@ demucs==4.0.1
 # wrapped this same library plus its own bundled pyannote VAD). transformers:
 # the Hugging Face wav2vec2 forced-alignment models for the non-torchaudio
 # languages (see app.ALIGN_MODELS / _aligner_models.FasterWhisperAligner).
-# Pinned at 5.17.0/1.2.1, the same versions the whisperx image's own freeze
-# carried (measured, #1016 review). A fresh resolution of this file first
-# picked transformers 4.57.1, which carries known advisories a current
-# release fixes (PYSEC-2026-2289, a config.json-driven RCE fixed in 5.3.0;
-# PYSEC-2026-3929, fixed in 5.10.0), and _load_align_model `from_pretrained`s
-# third-party, non-revision-pinned HF repo ids (jonatasgrosman/*, Yehor/*,
-# ...) from app.ALIGN_MODELS -- exactly PYSEC-2026-2289's vector. Verified
-# compatible: bit-identical wav2vec2 logits on identical input between
-# transformers 4.57.1 and 5.17.0 (#1016 hostile review).
+# faster-whisper is pinned at 1.2.1 and transformers at 5.18.0. They were
+# first pinned at 1.2.1/5.17.0, the same versions the whisperx image's own
+# freeze carried (measured, #1016 review); 5.18.0 is a later Dependabot bump.
+# A fresh resolution of this file first picked transformers 4.57.1, which
+# carries known advisories a current release fixes (PYSEC-2026-2289, a
+# config.json-driven RCE fixed in 5.3.0; PYSEC-2026-3929, fixed in 5.10.0),
+# and _load_align_model `from_pretrained`s third-party, non-revision-pinned
+# HF repo ids (jonatasgrosman/*, Yehor/*, ...) from app.ALIGN_MODELS --
+# exactly PYSEC-2026-2289's vector. The compatibility check was made at
+# 5.17.0, not at the current pin: bit-identical wav2vec2 logits on identical
+# input between transformers 4.57.1 and 5.17.0 (#1016 hostile review).
+#
+# av (PyAV) is not pinned here: it is transitive via faster-whisper 1.2.1,
+# which declares `av>=11` with no upper bound, and the locks resolve av 19.
+# faster-whisper 1.2.1's own file decode (faster_whisper.audio.decode_audio)
+# is broken under av 19: it raises TypeError, open() got an unexpected keyword
+# argument 'metadata_errors' (it works under av 18.1.0). The sidecar is
+# unaffected ONLY because _aligner_models.FasterWhisperAligner.transcribe
+# always hands model.transcribe an already-decoded numpy array
+# (_decode_audio_f32, ffmpeg via app.decode_pcm); faster-whisper calls
+# decode_audio only for a path or file object. That call shape is
+# load-bearing: passing model.transcribe a path needs `av<19` here first.
 faster-whisper==1.2.1
 transformers==5.18.0
