@@ -92,7 +92,7 @@ func (g *GeneratedEdit) validate(lines []TimedLine) error {
 	return nil
 }
 
-// RetimeLines returns a copy of orig (from OriginalLines) with each start
+// RetimeLines returns a copy of orig (from CurrentLines) with each start
 // replaced by its startsMS value. It refuses a count that is not one per line,
 // a negative or absurd value, a decreasing sequence, and a same-stamp group
 // (consecutive lines sharing a start) whose members would stop sharing one.
@@ -266,6 +266,19 @@ func sameStamp(a, b fs.FileInfo) bool {
 // stacked [t1][t2] timestamps), plus the raw header tag lines. Same
 // confinement as ApplyEdit.
 func OriginalLines(path string, roots []string) ([]TimedLine, []string, error) {
+	return editLines(path, roots, false, time.Time{})
+}
+
+// CurrentLines returns the lines of <path> itself, never its .orig backup, and
+// only while the file's mtime is expect (else ErrEditChanged; a zero expect
+// never matches). A generated accept validates against these: the mtime binds
+// the posted starts to the cues they were computed for, position by position.
+func CurrentLines(path string, roots []string, expect time.Time) ([]TimedLine, error) {
+	lines, _, err := editLines(path, roots, true, expect)
+	return lines, err
+}
+
+func editLines(path string, roots []string, current bool, expect time.Time) ([]TimedLine, []string, error) {
 	canon, rel, err := confineEdit(path, roots)
 	if err != nil {
 		return nil, nil, err
@@ -279,9 +292,14 @@ func OriginalLines(path string, roots []string) ([]TimedLine, []string, error) {
 	if err != nil {
 		return nil, nil, refuseOrWrap(err)
 	}
+	if current && !cur.ModTime().Equal(expect) {
+		return nil, nil, ErrEditChanged
+	}
 	src, srcFI := rel, cur
 	ofi, oerr := lstatRegular(root, rel+".orig")
 	switch {
+	case current:
+		// The backup plays no part in what a generated accept validates.
 	case oerr == nil:
 		src, srcFI = rel+".orig", ofi
 	case errors.Is(oerr, fs.ErrNotExist):

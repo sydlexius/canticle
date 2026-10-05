@@ -559,3 +559,21 @@ func TestReadRegularDetectsInPlaceRewrite(t *testing.T) {
 		}
 	}
 }
+
+// TestCurrentLinesIgnoresBackup pins the reader a generated accept validates
+// from: the file itself whatever its .orig holds, and only at the given mtime.
+func TestCurrentLinesIgnoresBackup(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	writeFixture(t, p, "[00:01.00]cur\n")
+	writeFixture(t, p+".orig", "[00:02.00]old a\n[00:03.00]old b\n")
+	lines, err := CurrentLines(p, []string{root}, mtimeOf(t, p))
+	if err != nil || len(lines) != 1 || lines[0].Text != "cur" {
+		t.Errorf("CurrentLines = %+v, %v; want the current file's one cue", lines, err)
+	}
+	for _, stale := range []time.Time{{}, mtimeOf(t, p).Add(time.Second)} {
+		if _, err := CurrentLines(p, []string{root}, stale); !errors.Is(err, ErrEditChanged) {
+			t.Errorf("CurrentLines at mtime %v: err = %v, want ErrEditChanged", stale, err)
+		}
+	}
+}

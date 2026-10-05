@@ -580,15 +580,17 @@ func TestPreviewAutoAcceptRefusals(t *testing.T) {
 	}
 }
 
-// TestPreviewAutoAcceptStaleBackup pins that an accept writes the CURRENT
-// file's text and tags whatever a leftover .orig holds, that words resolve
-// against the current text, and that a .orig with another cue count refuses.
+// TestPreviewAutoAcceptStaleBackup pins that a leftover .orig plays no part in
+// an accept: the starts are validated against, and land on, the CURRENT file's
+// cues by position, with its text and tags, whatever the backup's text, tags,
+// order, grouping or cue count. Only the request's own count can refuse.
 func TestPreviewAutoAcceptStaleBackup(t *testing.T) {
 	const ok, cues = "[1200,5400,9100]", "[00:01.00]one\n[00:05.00]two\n[00:09.00]three\n"
 	const out = "[timing:canticle-aligner]\n[00:01.20]one\n[00:05.40]two\n[00:09.10]three\n"
+	const grouped = "[ti:x]\n[00:01.00]one\n[00:01.00]two\n[00:09.00]three\n"
 	for _, tc := range []struct {
 		name, cur, orig, lines, words string
-		want                          string // the file after a 200; "" means 409 changed, nothing touched
+		want                          string // the file after a 200; "" means 400 lines, nothing touched
 	}{
 		// The word names a token only the current text has (the .orig line is empty).
 		{name: "stale text", cur: editLRC, orig: "[ti:x]\n[00:01.00]OLD one\n[00:05.00]\n[00:09.00]OLD three\n",
@@ -596,7 +598,13 @@ func TestPreviewAutoAcceptStaleBackup(t *testing.T) {
 		// [re:canticle] injected after the .orig was made, and a tag only the .orig has.
 		{name: "stale tags", cur: "[ti:x]\n[re:canticle]\n" + cues, orig: "[ti:x]\n[source:lane-old]\n" + cues, lines: ok,
 			want: "[ti:x]\n[re:canticle]\n" + out},
-		{name: "cue count differs", cur: editLRC, orig: editLRC + "[00:09.50]four\n", lines: "[1200,5400,9100,9600]"},
+		{name: "other order", cur: editLRC, orig: "[ti:x]\n[00:01.00]three\n[00:05.00]one\n[00:09.00]two\n", lines: ok, want: "[ti:x]\n" + out},
+		// Equal counts, but the .orig groups cues 2+3 where the file groups 1+2.
+		{name: "other grouping", cur: grouped, orig: "[ti:x]\n[00:01.00]one\n[00:05.00]two\n[00:05.00]three\n", lines: "[1200,1200,9100]",
+			want: "[ti:x]\n[timing:canticle-aligner]\n[00:01.20]one\n[00:01.20]two\n[00:09.10]three\n"},
+		{name: "splits the file's group", cur: grouped, orig: editLRC, lines: ok},
+		{name: "cue count differs", cur: editLRC, orig: editLRC + "[00:09.50]four\n", lines: ok, want: "[ti:x]\n" + out},
+		{name: "sized for the backup", cur: editLRC, orig: editLRC + "[00:09.50]four\n", lines: "[1200,5400,9100,9600]"},
 	} {
 		e := newEditEnv(t)
 		e.put(t, "song.lrc", tc.cur)
@@ -607,13 +615,13 @@ func TestPreviewAutoAcceptStaleBackup(t *testing.T) {
 			t.Errorf("%s: .orig rewritten: %q", tc.name, b)
 		}
 		if tc.want != "" {
-			if got := e.lrc(t); rec.Code != http.StatusOK || got != tc.want || strings.Contains(got, "OLD") {
-				t.Errorf("%s: %d %s wrote:\n%q\nwant the current text and tags:\n%q", tc.name, rec.Code, rec.Body, got, tc.want)
+			if got := e.lrc(t); rec.Code != http.StatusOK || got != tc.want {
+				t.Errorf("%s: %d %s wrote:\n%q\nwant the current file retimed:\n%q", tc.name, rec.Code, rec.Body, got, tc.want)
 			}
 			continue
 		}
-		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"changed"`) || e.lrc(t) != tc.cur || e.mtime(t) != mt || e.mark(t) != "null/0" {
-			t.Errorf("%s: %d %s, want 409 changed with the file and mark untouched (%s): %q", tc.name, rec.Code, rec.Body, e.mark(t), e.lrc(t))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"lines"`) || e.lrc(t) != tc.cur || e.mtime(t) != mt || e.mark(t) != "null/0" {
+			t.Errorf("%s: %d %s, want 400 lines with the file and mark untouched (%s): %q", tc.name, rec.Code, rec.Body, e.mark(t), e.lrc(t))
 		}
 	}
 

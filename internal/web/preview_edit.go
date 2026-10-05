@@ -190,7 +190,8 @@ func acceptWords(cur []lyrics.TimedLine, words [][][]int) ([]models.WordTiming, 
 // taken from the request: it is the row's own sidecar, from PreviewSource.
 // A row that is unknown or not line-editable is the same bare 404 the player
 // gives, so the route reveals nothing the player does not.
-// An accept (#1008) posts one start per original line instead of an offset.
+// An accept (#1008) posts one start per line of the current file instead of
+// an offset, and its mtime must be that file's.
 func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert, accept bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, map[bool]int64{false: editMaxBody, true: acceptMaxBody}[accept])
@@ -305,7 +306,16 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert, a
 	var res lyrics.EditResult
 	var gen *lyrics.GeneratedEdit
 	badField := "words" // which accept field an ErrEditInvalid is about
-	orig, tags, err := lyrics.OriginalLines(t.LRCPath, roots)
+	var orig []lyrics.TimedLine
+	var tags []string
+	if accept {
+		// An accept is judged against the CURRENT file's cues at the posted
+		// mtime, never the .orig: position is a start's only identity, and a
+		// backup of equal count can hold the cues in another order or grouping.
+		orig, err = lyrics.CurrentLines(t.LRCPath, roots, time.Unix(0, mtime))
+	} else {
+		orig, tags, err = lyrics.OriginalLines(t.LRCPath, roots)
+	}
 	lines := orig
 	switch {
 	case err != nil:
@@ -313,8 +323,6 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert, a
 	case !accept:
 		lines = lyrics.ShiftLines(orig, offset)
 	default:
-		// orig supplies the same-stamp group rule only; text, tags and word
-		// tokens are the current file's, read by ApplyEdit.
 		if lines, err = lyrics.RetimeLines(orig, starts); err != nil {
 			badField = "lines"
 		}
