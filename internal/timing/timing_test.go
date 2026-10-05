@@ -589,6 +589,10 @@ func TestStripWordMarkers(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"<05:00.00>♪", "♪"},
 		{"<00:01.50>alpha <00:02.00>beta", "alpha beta"},
+		// A trailing marker is the last word's end (#1280), not a word: it leaves
+		// no text and no trailing space behind.
+		{"<00:01.50>alpha <00:02.00>beta<00:02.50>", "alpha beta"},
+		{"<05:00.00>♪<05:02.00>", "♪"},
 		{"plain line", "plain line"},
 		{"", ""},
 		// A malformed or partial marker is NOT a marker: leave it alone rather
@@ -619,7 +623,7 @@ func TestStripWordMarkers(t *testing.T) {
 // exactly the ~33% false-demotion class this package exists to prevent,
 // reintroduced by the writer. revalidate would then demote a correct file.
 func TestIsDecorative_MarkedNoteStillDecorative(t *testing.T) {
-	for _, s := range []string{"♪", "<05:00.00>♪", "<00:00.00>♪ ♪"} {
+	for _, s := range []string{"♪", "<05:00.00>♪", "<00:00.00>♪ ♪", "<05:00.00>♪<05:02.00>"} {
 		if !IsDecorative(s) {
 			t.Errorf("IsDecorative(%q) = false; a marked decorative cue is still decorative", s)
 		}

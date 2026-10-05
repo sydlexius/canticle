@@ -340,8 +340,9 @@ func textsConflict(cueText, entryText string) bool {
 //
 // EndMS is derived, since a chunk carries only a start: the next chunk's
 // absolute start, and the entry's te for the last one, giving a gapless span.
-// a2Words does not read EndMS today, but a zero there reads as "this word has no
-// duration" rather than "nobody knew". Both stamps clamp non-negative, matching
+// The writer's a2Words emits the line's last EndMS as its trailing end tag
+// (#1280), so the last chunk's te is what a player closes the line's final word
+// on. Both stamps clamp non-negative, matching
 // petitlyrics/decode.go and what models.WordTiming requires of producers.
 func chunkTimings(e richSyncEntry, line int) []models.WordTiming {
 	out := make([]models.WordTiming, 0, len(e.L))
@@ -354,8 +355,8 @@ func chunkTimings(e richSyncEntry, line int) []models.WordTiming {
 		// invert the span otherwise: a last chunk whose offset runs past the
 		// entry's te, and chunks not ascending by o (the next chunk's start is
 		// read as this one's end without assuming that order). A negative-length
-		// word is not a value any consumer should have to defend against, and it
-		// is latent only because a2Words does not read EndMS yet.
+		// word is not a value any consumer should have to defend against; a2Words
+		// writes no end tag for a word whose end is not after its start.
 		start := max(toMS(e.TS+ch.O), 0)
 		out = append(out, models.WordTiming{
 			Line:    line,

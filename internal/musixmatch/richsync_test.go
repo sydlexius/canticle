@@ -452,7 +452,7 @@ func TestBindStillBindsWhenEitherTextIsAbsent(t *testing.T) {
 // TestEndMSNeverPrecedesStartMS covers two provider shapes that invert the span:
 // a last chunk whose offset runs past the entry's te, and chunks not ascending
 // by o (the next chunk's start is read as this one's end without assuming that
-// order). Latent only because a2Words does not read EndMS today.
+// order). a2Words reads the last word's EndMS for its end tag (#1280).
 func TestEndMSNeverPrecedesStartMS(t *testing.T) {
 	for _, tc := range []struct{ name, entries string }{
 		{"last chunk starts after te", `[{"ts":1.0,"te":1.2,"x":"alpha","l":[{"c":"alpha","o":0.5}]}]`},

@@ -10,8 +10,9 @@ import (
 )
 
 // a2Words renders one cue's words as Enhanced-LRC (A2) inline markers:
-// `<mm:ss.xx>word` per word, concatenated. It reports false when the line must
-// fall back to a plain line-level cue instead.
+// `<mm:ss.xx>word` per word, concatenated, then one trailing `<mm:ss.xx>`
+// carrying the last word's end when it is known. It reports false when the line
+// must fall back to a plain line-level cue instead.
 //
 // It is deliberately CONSERVATIVE, and every refusal below is a case where
 // emitting markers would be worse than not having them:
@@ -78,6 +79,16 @@ func a2Words(lineText string, timings []models.WordTiming) (string, bool) {
 	var b strings.Builder
 	for _, t := range ordered {
 		fmt.Fprintf(&b, "<%s>%s", a2Stamp(t.StartMS), t.Text)
+	}
+	// Trailing end tag (#1280): a tag with no word after it is read as the last
+	// word's END by the players that parse A2, and without it that word stays
+	// highlighted until the next line starts. Written only when the end is
+	// later than the start at the precision the file carries: a producer that
+	// knows no end leaves EndMS at or below StartMS, and a tag repeating the
+	// word's own stamp would claim a duration of zero.
+	last := ordered[len(ordered)-1]
+	if end := a2Stamp(last.EndMS); last.EndMS > last.StartMS && end != a2Stamp(last.StartMS) {
+		fmt.Fprintf(&b, "<%s>", end)
 	}
 	return b.String(), true
 }

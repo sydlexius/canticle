@@ -221,6 +221,24 @@ func TestPreviewLinesDuplicateStartsMergeByOccurrence(t *testing.T) {
 	}
 }
 
+// A trailing end tag (#1280) closes the last word; it is never a word of its
+// own and never shows in the line, from a companion or from inline markers.
+func TestPreviewLinesTrailingEndTagIsNotAWord(t *testing.T) {
+	for name, in := range map[string][2]string{
+		"companion": {"[00:01.00]Hello there\n", "[by:canticle]\n[00:01.00]<00:01.00>Hello <00:01.50>there<00:02.25>\n"},
+		"inline":    {"[00:01.00]<00:01.00>Hello <00:01.50>there<00:02.25>\n", ""},
+	} {
+		lines, hasWords := previewLines(in[0], in[1])
+		if !hasWords || len(lines) != 1 || lines[0].Text != "Hello there" {
+			t.Fatalf("%s: lines = %+v, hasWords = %v", name, lines, hasWords)
+		}
+		w := lines[0].Words
+		if len(w) != 2 || w[1].Text != "there" || w[1].StartMS != "1500" || w[1].Before != " " {
+			t.Errorf("%s: words = %+v; want exactly Hello and there", name, w)
+		}
+	}
+}
+
 func TestPreviewLinesWordSeparatorsAreFaithful(t *testing.T) {
 	cjk, _ := previewLines("[00:01.00]你好\n", "[by:canticle]\n[00:01.00]<00:01.00>你<00:01.50>好\n")
 	if len(cjk[0].Words) != 2 || cjk[0].Words[1].Before != "" {

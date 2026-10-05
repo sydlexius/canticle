@@ -339,3 +339,29 @@ func TestExpand_IdempotentOnA2Cues(t *testing.T) {
 		}
 	}
 }
+
+// TestTrailingEndTag_StaysInOneCue pins #1280 for this package: the writer ends
+// a word-timed line with one more marker carrying the last word's end. It sits
+// at the very end of the line, where a trim or a stamp matcher could take it for
+// something else, so parse, expand and the stacked-line rewrite must all leave
+// it exactly where it is.
+func TestTrailingEndTag_StaysInOneCue(t *testing.T) {
+	const cue = "<00:01.00>one <00:01.80>two<00:02.40>"
+	const body = "[00:01.00]" + cue + "\n[00:05.00]plain line\n"
+
+	doc := ParseBody(body)
+	if len(doc.Cues) != 2 || doc.Cues[0].Text != cue || doc.Cues[0].Time.Total != 1 {
+		t.Fatalf("ParseBody cues = %+v; want the marked cue verbatim at 1s", doc.Cues)
+	}
+	if out := Expand(models.Synced{Lines: doc.Cues}); len(out.Lines) != 2 || out.Lines[0].Text != cue {
+		t.Errorf("Expand changed a cue ending in a marker: %+v", out.Lines)
+	}
+	if got, changed := NormalizeBody(body); changed || got != body {
+		t.Errorf("NormalizeBody rewrote a body with a trailing marker: changed=%v\n%q", changed, got)
+	}
+	// A stacked line still expands, each copy keeping the trailing marker.
+	stacked := ParseBody("[00:01.00][00:09.00]" + cue + "\n")
+	if len(stacked.Cues) != 2 || stacked.Cues[0].Text != cue || stacked.Cues[1].Text != cue {
+		t.Errorf("stacked cues = %+v; want two copies of the marked text", stacked.Cues)
+	}
+}
