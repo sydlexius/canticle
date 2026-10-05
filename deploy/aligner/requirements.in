@@ -27,7 +27,7 @@ python-multipart==0.0.32
 # x86_64 torch is the CUDA build and pulls ~5 GB of nvidia-*-cu12 libraries.
 # Keep the pins in exactly this `name==version` form -- it is what the lock
 # regeneration command resolves against.
-torch==2.14.0
+torch==2.14.1
 torchaudio==2.11.0
 # demucs is held at 4.0.1 (#1102 tracks 4.1.0): 4.1.0 requires sphn>=0.1.12,
 # which publishes no linux-aarch64 wheel (sdist only), and python:3.14-slim has
