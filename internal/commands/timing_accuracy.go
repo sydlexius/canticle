@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -45,14 +46,19 @@ type refTrack struct {
 	Album          string `toml:"album"`
 	DurationSecs   int    `toml:"duration_seconds"`
 	LineResidualMS *int   `toml:"line_residual_ms"`
-	// WordResidualMS is parsed for the manifest format but unused until the
-	// word-start slice.
+	// WordResidualMS is required when the reference file carries word timings.
 	WordResidualMS *int `toml:"word_residual_ms"`
 }
 
 type refManifest struct {
 	Track []refTrack `toml:"track"`
 }
+
+// manifestKeyRe is the only shape of unknown key the loader will print.
+var manifestKeyRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// maxResidualMS caps a declared residual; anything larger is a unit mistake.
+const maxResidualMS = 60000
 
 var errNotRegular = errors.New("not a readable regular file")
 
@@ -99,8 +105,17 @@ func loadRefSet(dir string) ([]refTrack, [][]byte, error) {
 		return nil, nil, errors.New("manifest.toml could not be read or parsed")
 	}
 	var m refManifest
-	if _, err = toml.Decode(string(raw), &m); err != nil {
+	md, err := toml.Decode(string(raw), &m)
+	if err != nil {
 		return nil, nil, errors.New("manifest.toml could not be read or parsed")
+	}
+	if un := md.Undecoded(); len(un) > 0 {
+		// A key is operator-authored text: echo it only when it is plainly a
+		// schema-shaped token, never a quoted key that could carry a title.
+		if k := un[0].String(); manifestKeyRe.MatchString(k) {
+			return nil, nil, fmt.Errorf("manifest.toml has an unknown key: %s", k)
+		}
+		return nil, nil, errors.New("manifest.toml has an unknown key")
 	}
 	if len(m.Track) == 0 {
 		return nil, nil, errors.New("manifest.toml lists no [[track]] entries")
@@ -119,6 +134,16 @@ func loadRefSet(dir string) ([]refTrack, [][]byte, error) {
 			return nil, nil, fmt.Errorf("manifest track #%d: line_residual_ms is required", n)
 		case *t.LineResidualMS < 0:
 			return nil, nil, fmt.Errorf("manifest track #%d: line_residual_ms must not be negative", n)
+		case *t.LineResidualMS > maxResidualMS:
+			return nil, nil, fmt.Errorf("manifest track #%d: line_residual_ms must not exceed %d", n, maxResidualMS)
+		case t.WordResidualMS != nil && *t.WordResidualMS > maxResidualMS:
+			return nil, nil, fmt.Errorf("manifest track #%d: word_residual_ms must not exceed %d", n, maxResidualMS)
+		case t.WordResidualMS != nil && *t.WordResidualMS < 0:
+			return nil, nil, fmt.Errorf("manifest track #%d: word_residual_ms must not be negative", n)
+		case strings.TrimSpace(t.Title) == "":
+			return nil, nil, fmt.Errorf("manifest track #%d: title is required", n)
+		case t.DurationSecs < 0:
+			return nil, nil, fmt.Errorf("manifest track #%d: duration_seconds must not be negative", n)
 		}
 		seen[t.ID] = true
 	}
@@ -131,29 +156,47 @@ func loadRefSet(dir string) ([]refTrack, [][]byte, error) {
 	return m.Track, bodies, nil
 }
 
-// refCues parses a reference body, dropping decorative cues (and counting them).
-func refCues(body []byte) ([]timingacc.Cue, int) {
-	var cues []timingacc.Cue
-	dropped := 0
+// refCues parses a reference body, dropping decorative cues (and counting
+// them). A line with stacked timestamps expands to several cues that all carry
+// the same absolute word stamps, which can belong to at most one of them, so
+// words shared by more than one expanded cue are dropped from all of them
+// (those lines are measured for line starts only); stacked counts the cues
+// that lost their words this way.
+func refCues(body []byte) (cues []timingacc.Cue, dropped, stacked int) {
+	sig := map[string]int{}
+	var sigs []string
 	for _, l := range lyrics.ParseTimedLRC(string(body)).Lines {
 		if l.Decorative {
 			dropped++
 			continue
 		}
 		c := timingacc.Cue{StartMS: l.StartMS, Text: l.Text}
+		var sb strings.Builder
 		for _, w := range l.Words {
 			c.Words = append(c.Words, timingacc.Word{StartMS: w.StartMS, Text: w.Text})
+			fmt.Fprintf(&sb, "%d:%s|", w.StartMS, w.Text)
+		}
+		sigs = append(sigs, sb.String())
+		if len(c.Words) > 0 {
+			sig[sigs[len(sigs)-1]]++
 		}
 		cues = append(cues, c)
 	}
-	return cues, dropped
+	for i := range cues {
+		if len(cues[i].Words) > 0 && sig[sigs[i]] > 1 {
+			cues[i].Words = nil
+			stacked++
+		}
+	}
+	return cues, dropped, stacked
 }
 
 // songCues converts a served song's line cues, dropping decorative ones.
 func songCues(song models.Song) ([]timingacc.Cue, int) {
 	var cues []timingacc.Cue
 	dropped := 0
-	for _, l := range song.Subtitles.Lines {
+	kept := make(map[int]int, len(song.Subtitles.Lines)) // source line index -> cue index
+	for li, l := range song.Subtitles.Lines {
 		if timing.IsDecorative(l.Text) {
 			dropped++
 			continue
@@ -162,7 +205,13 @@ func songCues(song models.Song) ([]timingacc.Cue, int) {
 		if l.Time.Total > 0 {
 			ms = int(math.Round(l.Time.Total * 1000))
 		}
+		kept[li] = len(cues)
 		cues = append(cues, timingacc.Cue{StartMS: ms, Text: strings.TrimSpace(l.Text)})
+	}
+	for _, w := range song.WordTimings {
+		if ci, ok := kept[w.Line]; ok {
+			cues[ci].Words = append(cues[ci].Words, timingacc.Word{StartMS: w.StartMS, Text: strings.TrimSpace(w.Text)})
+		}
 	}
 	return cues, dropped
 }
@@ -255,10 +304,32 @@ func runTimingAccuracyCmd(ctx context.Context, out io.Writer, args TimingAccCmd,
 }
 
 type served struct {
-	upstream string
-	cues     []timingacc.Cue
-	ref      []timingacc.Cue
-	residual int
+	upstream     string
+	cues         []timingacc.Cue
+	ref          []timingacc.Cue
+	residual     int
+	wordResidual int
+}
+
+// acc is one report group's line and word statistics.
+type acc struct {
+	line timingacc.LineStats
+	word timingacc.WordStats
+}
+
+func (a *acc) add(ref, prov []timingacc.Cue, lineRes, wordRes int) {
+	a.line.AddTrack(ref, prov, lineRes)
+	a.word.AddTrack(ref, prov, wordRes)
+}
+
+// hasWords reports whether any cue carries word timings.
+func hasWords(cues []timingacc.Cue) bool {
+	for _, c := range cues {
+		if len(c.Words) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // laneTally counts what a lane did NOT serve, split by cause.
@@ -280,19 +351,28 @@ func runTimingAccuracy(ctx context.Context, out io.Writer, args TimingAccCmd, la
 		meta refTrack
 	}
 	refs := make([]loaded, 0, len(tracks))
-	dropped := 0
+	var dropRef, dropProv, dropStacked int
+	anyRefWords := false
 	for i, t := range tracks {
-		cues, d := refCues(bodies[i])
-		dropped += d
+		cues, d, st := refCues(bodies[i])
+		dropRef += d
+		dropStacked += st
+		if hasWords(cues) {
+			anyRefWords = true
+			if t.WordResidualMS == nil {
+				_, _ = fmt.Fprintf(out, "timing-accuracy: manifest track #%d: word_residual_ms is required when the reference carries word timings\n", i+1)
+				return 1
+			}
+		}
 		refs = append(refs, loaded{cues, t})
 	}
 
-	rows := map[string]*timingacc.LineStats{}
+	rows := map[string]*acc{}
 	tally := map[string]*laneTally{}
 	var order []string
-	add := func(key string) *timingacc.LineStats {
+	add := func(key string) *acc {
 		if rows[key] == nil {
-			rows[key] = &timingacc.LineStats{}
+			rows[key] = &acc{}
 			order = append(order, key)
 		}
 		return rows[key]
@@ -336,13 +416,17 @@ laneLoop:
 				continue
 			}
 			pc, d := songCues(song)
-			dropped += d
+			dropProv += d
 			if len(pc) == 0 {
 				tl.notFound++
 				continue
 			}
-			results = append(results, served{song.Upstream, pc, r.cues, *r.meta.LineResidualMS})
-			rows[name].AddTrack(r.cues, pc, *r.meta.LineResidualMS)
+			wr := 0
+			if r.meta.WordResidualMS != nil {
+				wr = *r.meta.WordResidualMS
+			}
+			results = append(results, served{song.Upstream, pc, r.cues, *r.meta.LineResidualMS, wr})
+			rows[name].add(r.cues, pc, *r.meta.LineResidualMS, wr)
 		}
 		// Per-upstream rows only for a lane that names any upstream; a served
 		// result that names none sorts under an explicit marker.
@@ -358,14 +442,22 @@ laneLoop:
 			if up == "" {
 				up = "(upstream not named)"
 			}
-			add(name+"/"+up).AddTrack(s.ref, s.cues, s.residual)
+			add(name+"/"+up).add(s.ref, s.cues, s.residual, s.wordResidual)
 		}
 	}
 	if interrupted {
 		_, _ = fmt.Fprintln(out, "timing-accuracy: interrupted; results below are partial")
 	}
-	printAccuracy(out, len(refs), dropped, skipped, order, rows, tally, len(lanes))
+	printAccuracy(out, len(refs), dropRef, dropProv, dropStacked, anyRefWords, skipped, order, rows, tally, len(lanes))
 	if interrupted {
+		return 1
+	}
+	measured := false
+	for _, a := range rows {
+		measured = measured || a.line.Matched > 0
+	}
+	if !measured {
+		_, _ = fmt.Fprintln(out, "timing-accuracy: no lane produced a measurement")
 		return 1
 	}
 	return 0
@@ -373,9 +465,16 @@ laneLoop:
 
 // printAccuracy writes the aggregate report: only lane/upstream tokens and
 // numbers, never a track identity or lyric text.
-func printAccuracy(out io.Writer, nRefs, dropped int, skipped, order []string, rows map[string]*timingacc.LineStats, tally map[string]*laneTally, nLanes int) {
-	_, _ = fmt.Fprintf(out, "timing-accuracy: %d reference tracks, line starts, tolerance %dms\n", nRefs, timingacc.WithinMS)
-	_, _ = fmt.Fprintf(out, "decorative cues dropped (both sides): %d\n", dropped)
+func printAccuracy(out io.Writer, nRefs, dropRef, dropProv, dropStacked int, words bool, skipped, order []string, rows map[string]*acc, tally map[string]*laneTally, nLanes int) {
+	kind := "line starts"
+	if words {
+		kind = "line starts and word starts"
+	}
+	_, _ = fmt.Fprintf(out, "timing-accuracy: %d reference tracks, %s, tolerance %dms\n", nRefs, kind, timingacc.WithinMS)
+	_, _ = fmt.Fprintf(out, "decorative cues dropped: reference=%d provider=%d\n", dropRef, dropProv)
+	if dropStacked > 0 {
+		_, _ = fmt.Fprintf(out, "reference lines with stacked timestamps, words not measured: %d\n", dropStacked)
+	}
 	if len(skipped) > 0 {
 		_, _ = fmt.Fprintf(out, "skipped lanes: %s\n", strings.Join(skipped, ","))
 	}
@@ -384,7 +483,10 @@ func printAccuracy(out io.Writer, nRefs, dropped int, skipped, order []string, r
 	}
 	sort.Strings(order)
 	for _, key := range order {
-		_, _ = fmt.Fprintln(out, timingacc.FormatRow(key, *rows[key]))
+		_, _ = fmt.Fprintln(out, timingacc.FormatRow(key, rows[key].line))
+		if words {
+			_, _ = fmt.Fprintln(out, timingacc.FormatWordRow(key, rows[key].word))
+		}
 		tl := tally[key]
 		if tl == nil {
 			continue

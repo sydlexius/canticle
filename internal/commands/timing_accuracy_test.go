@@ -162,7 +162,7 @@ func TestRunTimingAccuracy_AggregateOnlyAndWritesNothing(t *testing.T) {
 	}
 	for _, want := range []string{
 		"2 reference tracks",
-		"decorative cues dropped (both sides): 3", // one note cue per reference file plus one served
+		"decorative cues dropped: reference=2 provider=1", // one note cue per reference file; one served
 		"skipped lanes: skippedlane",
 		"innertube: tracks=2 cues(ref=6 matched=6",
 		"line-MAE=500ms within-300ms=0.0%",
@@ -232,7 +232,14 @@ func TestLoadRefSet_Rejections(t *testing.T) {
 		"escaping file with a real target": {manifest: one("../x.lrc"), want: "file must be a relative path", mutate: func(t *testing.T, ref string) {
 			taMust(t, os.WriteFile(filepath.Join(filepath.Dir(ref), "x.lrc"), []byte("[00:01.00]a\n"), 0o600))
 		}},
-		"duplicate id": {manifest: one("a.lrc") + one("b.lrc"), want: "duplicate id"},
+		"blank title":                        {manifest: "[[track]]\nid = \"x\"\ntitle = \" \"\nfile = \"a.lrc\"\nline_residual_ms = 1\n", want: "title is required"},
+		"negative duration":                  {manifest: "[[track]]\nid = \"x\"\ntitle = \"t\"\nfile = \"a.lrc\"\nline_residual_ms = 1\nduration_seconds = -1\n", want: "duration_seconds must not be negative"},
+		"negative word residual":             {manifest: "[[track]]\nid = \"x\"\ntitle = \"t\"\nfile = \"a.lrc\"\nline_residual_ms = 1\nword_residual_ms = -5\n", want: "word_residual_ms must not be negative"},
+		"unknown key is named, value is not": {manifest: "[[track]]\nid = \"x\"\ntitle = \"t\"\nfile = \"a.lrc\"\nline_residual_ms = 1\nartst = \"" + taSentinel + "\"\n", want: "unknown key: track.artst"},
+		"unknown quoted key is not echoed":   {manifest: "[[track]]\nid = \"x\"\ntitle = \"t\"\nfile = \"a.lrc\"\nline_residual_ms = 1\n\"" + taSentinel + " Song Title\" = 1\n", want: "manifest.toml has an unknown key\n"},
+		"line residual above cap":            {manifest: "[[track]]\nid = \"x\"\ntitle = \"t\"\nfile = \"a.lrc\"\nline_residual_ms = 60001\n", want: "line_residual_ms must not exceed 60000"},
+		"word residual above cap":            {manifest: "[[track]]\nid = \"x\"\ntitle = \"t\"\nfile = \"a.lrc\"\nline_residual_ms = 1\nword_residual_ms = 60001\n", want: "word_residual_ms must not exceed 60000"},
+		"duplicate id":                       {manifest: one("a.lrc") + one("b.lrc"), want: "duplicate id"},
 		"git present": {manifest: taManifest(""), want: ".git entry", mutate: func(t *testing.T, ref string) {
 			taMust(t, os.Mkdir(filepath.Join(ref, ".git"), 0o755))
 		}},
@@ -365,13 +372,119 @@ func TestRun_TimingAccuracyWritesNothing(t *testing.T) {
 		t.Error("a fetcher was built; no lane should run")
 		return taFetcher{}
 	}}
-	if code := Run(t.Context(), []string{"timing-accuracy", ref}, &out, deps); code != 0 {
-		t.Fatalf("exit %d:\n%s", code, out.String())
+	if code := Run(t.Context(), []string{"timing-accuracy", ref}, &out, deps); code != 1 {
+		t.Fatalf("exit %d; want 1 when no lane measured:\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "skipped lanes: musixmatch(no token),petitlyrics(disabled),innertube(disabled)") || !strings.Contains(out.String(), "no lane was measured") {
+	if !strings.Contains(out.String(), "no lane produced a measurement") || !strings.Contains(out.String(), "skipped lanes: musixmatch(no token),petitlyrics(disabled),innertube(disabled)") || !strings.Contains(out.String(), "no lane was measured") {
 		t.Errorf("unexpected output:\n%s", out.String())
 	}
 	if ents, err := os.ReadDir(home); err != nil || len(ents) != 0 {
 		t.Errorf("sandbox HOME not empty (err=%v): %v", err, ents)
+	}
+}
+
+const taWordLRC = "[00:01.00]<00:01.00>alpha <00:01.50>beta <00:02.00>gamma\n[00:05.00]<00:05.00>delta <00:05.40>alpha\n"
+
+// taWordSong serves the two lines of taWordLRC, each word shifted by shiftMS,
+// with "beta" reworded to "bravo" and the second line's "alpha" repeated.
+func taWordSong(shiftMS int) models.Song {
+	s := taSong("", 0, []int{1000, 5000}, []string{"alpha beta gamma", "delta alpha"})
+	s.WordTimings = append(s.WordTimings, []models.WordTiming{
+		{Line: 0, Text: "alpha", StartMS: 1000 + shiftMS}, {Line: 0, Text: "bravo", StartMS: 1500 + shiftMS}, {Line: 0, Text: "gamma", StartMS: 2000 + shiftMS},
+		{Line: 1, Text: "delta", StartMS: 5000 + shiftMS}, {Line: 1, Text: "alpha", StartMS: 5400 + shiftMS}, {Line: 1, Text: "alpha", StartMS: 5900 + shiftMS},
+	}...)
+	return s
+}
+
+func taWordRef(t *testing.T, wordResidual string) string {
+	t.Helper()
+	ref := filepath.Join(t.TempDir(), "ref")
+	taMust(t, os.MkdirAll(ref, 0o755))
+	taMust(t, os.WriteFile(filepath.Join(ref, "w.lrc"), []byte(taWordLRC), 0o600))
+	m := "[[track]]\nid = \"w\"\nfile = \"w.lrc\"\ntitle = \"wt\"\nline_residual_ms = 20\n" + wordResidual
+	taMust(t, os.WriteFile(filepath.Join(ref, "manifest.toml"), []byte(m), 0o600))
+	return ref
+}
+
+func TestRunTimingAccuracy_WordStarts(t *testing.T) {
+	ref := taWordRef(t, "word_residual_ms = 30\n")
+	lane := func(name string, song models.Song) providers.LyricsProvider {
+		return providers.New(name, taFetcher{songs: map[string]models.Song{"wt": song}})
+	}
+	// A line-only lane serves the same lines with no word timings at all.
+	plain := taWordSong(0)
+	plain.WordTimings = nil
+	var out bytes.Buffer
+	code := runTimingAccuracy(t.Context(), &out, TimingAccCmd{RefDir: ref}, []providers.LyricsProvider{lane("innertube", taWordSong(100)), lane("petitlyrics", plain)}, nil)
+	got := out.String()
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, got)
+	}
+	for _, want := range []string{
+		// line 1: alpha and gamma pair, bravo is reworded; line 2: delta pairs and the
+		// repeated alpha pairs once, to the nearer occurrence (5400), so 4 of 5 ref words.
+		"innertube: word-tracks=1 words(ref=5 matched=4) word-MAE=100ms within-300ms=100.0% ref-residual(mean=30ms max=30ms) n=4",
+		"petitlyrics: word-tracks=0 words(ref=5 matched=0) word-MAE=n/a",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stdout missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "alpha") || strings.Contains(got, "delta") {
+		t.Errorf("lyric text leaked:\n%s", got)
+	}
+}
+
+func TestRunTimingAccuracy_WordResidualRequiredWhenRefHasWords(t *testing.T) {
+	code, got := taRejectOne(t, taWordRef(t, ""))
+	if code != 1 || !strings.Contains(got, "word_residual_ms is required") {
+		t.Errorf("exit %d:\n%s", code, got)
+	}
+}
+
+func taRunWords(t *testing.T, lrc string, song models.Song) (int, string) {
+	t.Helper()
+	ref := filepath.Join(t.TempDir(), "ref")
+	taMust(t, os.MkdirAll(ref, 0o755))
+	taMust(t, os.WriteFile(filepath.Join(ref, "w.lrc"), []byte(lrc), 0o600))
+	m := "[[track]]\nid = \"w\"\nfile = \"w.lrc\"\ntitle = \"wt\"\nline_residual_ms = 20\nword_residual_ms = 30\n"
+	taMust(t, os.WriteFile(filepath.Join(ref, "manifest.toml"), []byte(m), 0o600))
+	lane := providers.New("innertube", taFetcher{songs: map[string]models.Song{"wt": song}})
+	var out bytes.Buffer
+	code := runTimingAccuracy(t.Context(), &out, TimingAccCmd{RefDir: ref}, []providers.LyricsProvider{lane}, nil)
+	return code, out.String()
+}
+
+func TestRunTimingAccuracy_StackedReferenceWordsNotMeasured(t *testing.T) {
+	lrc := "[00:01.00][00:20.00]<00:01.00>alpha <00:01.50>beta\n[00:30.00]<00:30.00>gamma\n"
+	song := taSong("", 0, []int{1000, 20000, 30000}, []string{"alpha beta", "alpha beta", "gamma"})
+	song.WordTimings = []models.WordTiming{
+		{Line: 0, Text: "alpha", StartMS: 1000}, {Line: 0, Text: "beta", StartMS: 1500},
+		{Line: 1, Text: "alpha", StartMS: 20000}, {Line: 1, Text: "beta", StartMS: 20500},
+		{Line: 2, Text: "gamma", StartMS: 30000},
+	}
+	code, got := taRunWords(t, lrc, song)
+	if code != 0 || !strings.Contains(got, "words not measured: 2\n") || !strings.Contains(got, "words(ref=1 matched=1) word-MAE=0ms") {
+		t.Errorf("exit %d; want stacked words dropped and only the plain line measured:\n%s", code, got)
+	}
+}
+
+func TestRunTimingAccuracy_DecorativeFirstLineRemapsWordIndexes(t *testing.T) {
+	song := taSong("", 0, []int{500, 1000, 5000}, []string{"\u266a", "alpha beta gamma", "delta alpha"})
+	song.WordTimings = []models.WordTiming{
+		{Line: 1, Text: "alpha", StartMS: 1100}, {Line: 1, Text: "beta", StartMS: 1600}, {Line: 1, Text: "gamma", StartMS: 2100},
+		{Line: 2, Text: "delta", StartMS: 5100}, {Line: 2, Text: "alpha", StartMS: 5500},
+	}
+	code, got := taRunWords(t, taWordLRC, song)
+	if code != 0 || !strings.Contains(got, "words(ref=5 matched=5) word-MAE=100ms") {
+		t.Errorf("exit %d; want words kept through the decorative drop:\n%s", code, got)
+	}
+}
+
+func TestRunTimingAccuracy_NoMatchExitsOne(t *testing.T) {
+	song := taSong("", 0, []int{1000}, []string{"unrelated words here"})
+	code, got := taRunWords(t, taWordLRC, song)
+	if code != 1 || !strings.Contains(got, "no lane produced a measurement") {
+		t.Errorf("exit %d; want 1:\n%s", code, got)
 	}
 }

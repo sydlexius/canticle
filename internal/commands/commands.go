@@ -74,7 +74,7 @@ type Args struct {
 	Provenance *ProvenanceCmd `arg:"subcommand:provenance" help:"embed or inspect provenance tags in .lrc files"`
 	Realign    *RealignCmd    `arg:"subcommand:realign" help:"re-attach orphaned .lrc/.txt sidecars (and their .elrc companions) to renamed audio files"`
 	Revalidate *RevalidateCmd `arg:"subcommand:revalidate" help:"re-check existing .lrc timing against audio duration and remediate the backlog"`
-	TimingAcc  *TimingAccCmd  `arg:"subcommand:timing-accuracy" help:"measure per-provider line-start timing error against a local hand-verified reference set"`
+	TimingAcc  *TimingAccCmd  `arg:"subcommand:timing-accuracy" help:"measure per-provider line-start and word-start timing error against a local hand-verified reference set"`
 	Completion *CompletionCmd `arg:"subcommand:completion" help:"output a shell completion script (bash, zsh, or fish)"`
 }
 
