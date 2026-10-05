@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -434,5 +435,227 @@ func TestPreviewEditNotAttached(t *testing.T) {
 	f.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("no editor attached: %d, want 404", rec.Code)
+	}
+}
+
+func (e *editEnv) accept(lines, mtime string) *httptest.ResponseRecorder {
+	return e.post("/preview/"+e.id+"/auto/accept", url.Values{"lines": {lines}, "mtime": {mtime}})
+}
+
+// mark is the row's edit mark as "<offset or null>/<edited 0|1>".
+func (e *editEnv) mark(t *testing.T) (s string) {
+	t.Helper()
+	if err := e.db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(lyric_offset_ms, 'null') || '/' || (lyric_edited_at IS NOT NULL) FROM work_queue WHERE id = ?`, e.rowID).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// TestPreviewAutoAccept pins the #1008 accept: posted line starts land in the
+// .lrc with the generated marker, the original is backed up once, the row is
+// marked with no offset, and no text in the request can reach the file.
+func TestPreviewAutoAccept(t *testing.T) {
+	e := newEditEnv(t)
+	rec := e.post("/preview/"+e.id+"/auto/accept", url.Values{
+		"lines": {"[1200,5400,9100]"}, "words": {"[[[0,1200]],[],[[0,9100]]]"},
+		"mtime": {e.mtime(t)}, "text": {"smuggled"}, "offset_ms": {"777"},
+	})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"created_orig":true`) {
+		t.Fatalf("accept = %d %s", rec.Code, rec.Body)
+	}
+	const want = "[ti:x]\n[timing:canticle-aligner]\n[00:01.20]one\n[00:05.40]two\n[00:09.10]three\n"
+	if got := e.lrc(t); got != want {
+		t.Errorf("accepted file:\n%q\nwant:\n%q", got, want)
+	}
+	if b, err := os.ReadFile(e.lrcP + ".orig"); err != nil || string(b) != editLRC {
+		t.Errorf(".orig = %q (%v), want the original bytes", b, err)
+	}
+	if got := e.mark(t); got != "null/1" {
+		t.Errorf("mark = %s, want null/1 (edited, no offset)", got)
+	}
+	// A second accept keeps the first backup and a single marker.
+	if rec := e.accept("[1000,5000,9000]", e.mtime(t)); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"created_orig":false`) {
+		t.Fatalf("second accept = %d %s", rec.Code, rec.Body)
+	}
+	if got := e.lrc(t); strings.Count(got, "[timing:") != 1 || !strings.Contains(got, "[00:01.00]one") {
+		t.Errorf("second accept:\n%s", got)
+	}
+	if b, _ := os.ReadFile(e.lrcP + ".orig"); string(b) != editLRC {
+		t.Errorf(".orig overwritten: %q", b)
+	}
+}
+
+// TestPreviewAutoAcceptRefusals pins each refusal's status and that it leaves
+// the file, its mtime, the absent .orig and the row's mark exactly as found.
+func TestPreviewAutoAcceptRefusals(t *testing.T) {
+	const ok = "[1200,5400,9100]"
+	for _, prior := range []string{"none", "offset", "retime"} {
+		e := newEditEnv(t)
+		switch prior {
+		case "offset":
+			if err := e.q.SetLyricEdit(context.Background(), e.rowID, 250); err != nil {
+				t.Fatal(err)
+			}
+		case "retime":
+			if err := e.q.SetLyricRetime(context.Background(), e.rowID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wantMark := e.mark(t)
+		path, mt := "/preview/"+e.id+"/auto/accept", e.mtime(t)
+		for _, tc := range []struct {
+			name  string
+			vals  url.Values
+			csrf  bool
+			hdr   []string
+			setup func() (undo func())
+			want  int
+			body  string
+		}{
+			{name: "cross origin", vals: url.Values{"lines": {ok}}, csrf: true, hdr: []string{"Origin", "https://evil.example"}, want: http.StatusForbidden},
+			{name: "no csrf", vals: url.Values{"lines": {ok}}, want: http.StatusForbidden},
+			{name: "lines missing", vals: url.Values{}, csrf: true, want: http.StatusBadRequest, body: `"lines"`},
+			{name: "lines not numbers", vals: url.Values{"lines": {`["a",1,2]`}}, csrf: true, want: http.StatusBadRequest, body: `"lines"`},
+			{name: "wrong count", vals: url.Values{"lines": {"[1200,5400]"}}, csrf: true, want: http.StatusBadRequest, body: `"lines"`},
+			{name: "negative", vals: url.Values{"lines": {"[-1,5400,9100]"}}, csrf: true, want: http.StatusBadRequest, body: `"lines"`},
+			{name: "decreasing", vals: url.Values{"lines": {"[1200,900,9100]"}}, csrf: true, want: http.StatusBadRequest, body: `"lines"`},
+			{name: "words malformed", vals: url.Values{"lines": {ok}, "words": {"{"}}, csrf: true, want: http.StatusBadRequest, body: `"words"`},
+			{name: "word token out of range", vals: url.Values{"lines": {ok}, "words": {"[[[1,1200]],[],[]]"}}, csrf: true, want: http.StatusBadRequest, body: `"words"`},
+			{name: "word time negative", vals: url.Values{"lines": {ok}, "words": {"[[[0,-4]],[],[]]"}}, csrf: true, want: http.StatusBadRequest, body: `"words"`},
+			{name: "null line", vals: url.Values{"lines": {"[null,5400,9100]"}}, csrf: true, want: http.StatusBadRequest, body: `"lines"`},
+			{name: "null word pair", vals: url.Values{"lines": {ok}, "words": {"[[[0,1200]],null,[]]"}}, csrf: true, want: http.StatusBadRequest, body: `"words"`},
+			{name: "null word time", vals: url.Values{"lines": {ok}, "words": {"[[[0,null]],[],[]]"}}, csrf: true, want: http.StatusBadRequest, body: `"words"`},
+			{name: "words for too few lines", vals: url.Values{"lines": {ok}, "words": {"[[[0,1200]],[]]"}}, csrf: true, want: http.StatusBadRequest, body: `"words"`},
+			{name: "word token repeated", vals: url.Values{"lines": {ok}, "words": {"[[[0,1200],[0,1300]],[],[]]"}}, csrf: true, want: http.StatusBadRequest, body: `"words"`},
+			{name: "no mtime", vals: url.Values{"lines": {ok}, "mtime": {""}}, csrf: true, want: http.StatusBadRequest, body: `"mtime"`},
+			{name: "stale mtime", vals: url.Values{"lines": {ok}, "mtime": {"1"}}, csrf: true, want: http.StatusConflict, body: `"changed"`},
+			{name: "timing guard", vals: url.Values{"lines": {"[1200,5400,95000]"}}, csrf: true, want: http.StatusUnprocessableEntity, body: `"timing"`},
+			{name: "word companion beside it", vals: url.Values{"lines": {ok}}, csrf: true, want: http.StatusConflict, body: `"has_words"`, setup: func() func() {
+				p := filepath.Join(e.root, "song.elrc")
+				if err := os.WriteFile(p, []byte("[by:someone]\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return func() { _ = os.Remove(p) }
+			}},
+		} {
+			undo := func() {}
+			if tc.setup != nil {
+				undo = tc.setup()
+			}
+			if _, set := tc.vals["mtime"]; !set {
+				tc.vals.Set("mtime", mt)
+			}
+			rec := e.postWith(path, tc.vals, tc.csrf, tc.hdr...)
+			undo()
+			if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.body) {
+				t.Errorf("prior %s, %s: %d %s, want %d %s", prior, tc.name, rec.Code, rec.Body, tc.want, tc.body)
+			}
+			if e.lrc(t) != editLRC || e.mtime(t) != mt || e.hasOrig() {
+				t.Fatalf("prior %s, %s: a refused accept touched the file (orig=%v)", prior, tc.name, e.hasOrig())
+			}
+			if got := e.mark(t); got != wantMark {
+				t.Errorf("prior %s, %s: mark = %s, want it restored to %s", prior, tc.name, got, wantMark)
+			}
+		}
+	}
+
+	// Rows the offset editor refuses are the same bare 404 here, and a file
+	// that already carries inline word marks is a 409.
+	e := newEditEnv(t)
+	wordID := e.seedTier(t, filepath.Join(e.root, "song.flac"), "word")
+	for name, id := range map[string]string{"word tier": itoa(wordID), "unknown": "999999", "bad id": "x"} {
+		if got := e.post("/preview/"+id+"/auto/accept", url.Values{"lines": {ok}, "mtime": {e.mtime(t)}}).Code; got != http.StatusNotFound {
+			t.Errorf("%s: %d, want 404", name, got)
+		}
+	}
+	inline := "[00:01.00]<00:01.00>one <00:01.40>more\n[00:05.00]two\n[00:09.00]three\n"
+	e.put(t, "song.lrc", inline)
+	e.put(t, "song.lrc.orig", editLRC) // a wordless backup: only the current file's marks can refuse
+	if rec := e.accept(ok, e.mtime(t)); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "has_words") {
+		t.Errorf("inline words: %d %s, want 409 has_words", rec.Code, rec.Body)
+	}
+	if e.lrc(t) != inline {
+		t.Error("an accept over inline word marks touched the file")
+	}
+}
+
+// TestPreviewAutoAcceptStaleBackup pins that a leftover .orig plays no part in
+// an accept: the starts are validated against, and land on, the CURRENT file's
+// cues by position, with its text and tags, whatever the backup's text, tags,
+// order, grouping or cue count. Only the request's own count can refuse.
+func TestPreviewAutoAcceptStaleBackup(t *testing.T) {
+	const ok, cues = "[1200,5400,9100]", "[00:01.00]one\n[00:05.00]two\n[00:09.00]three\n"
+	const out = "[timing:canticle-aligner]\n[00:01.20]one\n[00:05.40]two\n[00:09.10]three\n"
+	const grouped = "[ti:x]\n[00:01.00]one\n[00:01.00]two\n[00:09.00]three\n"
+	for _, tc := range []struct {
+		name, cur, orig, lines, words string
+		want                          string // the file after a 200; "" means 400 lines, nothing touched
+	}{
+		// The word names a token only the current text has (the .orig line is empty).
+		{name: "stale text", cur: editLRC, orig: "[ti:x]\n[00:01.00]OLD one\n[00:05.00]\n[00:09.00]OLD three\n",
+			lines: ok, words: "[[],[[0,5400]],[]]", want: "[ti:x]\n" + out},
+		// [re:canticle] injected after the .orig was made, and a tag only the .orig has.
+		{name: "stale tags", cur: "[ti:x]\n[re:canticle]\n" + cues, orig: "[ti:x]\n[source:lane-old]\n" + cues, lines: ok,
+			want: "[ti:x]\n[re:canticle]\n" + out},
+		{name: "other order", cur: editLRC, orig: "[ti:x]\n[00:01.00]three\n[00:05.00]one\n[00:09.00]two\n", lines: ok, want: "[ti:x]\n" + out},
+		// Equal counts, but the .orig groups cues 2+3 where the file groups 1+2.
+		{name: "other grouping", cur: grouped, orig: "[ti:x]\n[00:01.00]one\n[00:05.00]two\n[00:05.00]three\n", lines: "[1200,1200,9100]",
+			want: "[ti:x]\n[timing:canticle-aligner]\n[00:01.20]one\n[00:01.20]two\n[00:09.10]three\n"},
+		{name: "splits the file's group", cur: grouped, orig: editLRC, lines: ok},
+		{name: "cue count differs", cur: editLRC, orig: editLRC + "[00:09.50]four\n", lines: ok, want: "[ti:x]\n" + out},
+		{name: "sized for the backup", cur: editLRC, orig: editLRC + "[00:09.50]four\n", lines: "[1200,5400,9100,9600]"},
+	} {
+		e := newEditEnv(t)
+		e.put(t, "song.lrc", tc.cur)
+		e.put(t, "song.lrc.orig", tc.orig)
+		mt := e.mtime(t)
+		rec := e.post("/preview/"+e.id+"/auto/accept", url.Values{"lines": {tc.lines}, "words": {tc.words}, "mtime": {mt}})
+		if b, _ := os.ReadFile(e.lrcP + ".orig"); string(b) != tc.orig {
+			t.Errorf("%s: .orig rewritten: %q", tc.name, b)
+		}
+		if tc.want != "" {
+			if got := e.lrc(t); rec.Code != http.StatusOK || got != tc.want {
+				t.Errorf("%s: %d %s wrote:\n%q\nwant the current file retimed:\n%q", tc.name, rec.Code, rec.Body, got, tc.want)
+			}
+			continue
+		}
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"lines"`) || e.lrc(t) != tc.cur || e.mtime(t) != mt || e.mark(t) != "null/0" {
+			t.Errorf("%s: %d %s, want 400 lines with the file and mark untouched (%s): %q", tc.name, rec.Code, rec.Body, e.mark(t), e.lrc(t))
+		}
+	}
+
+	e := newEditEnv(t)
+	if rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}}); rec.Code != http.StatusOK {
+		t.Fatalf("offset = %d %s", rec.Code, rec.Body)
+	}
+	if rec := e.accept(ok, e.mtime(t)); rec.Code != http.StatusOK {
+		t.Fatalf("accept after an offset edit = %d %s", rec.Code, rec.Body)
+	}
+	if got, want := e.lrc(t), "[ti:x]\n[timing:canticle-aligner]\n[00:01.20]one\n[00:05.40]two\n[00:09.10]three\n"; got != want {
+		t.Errorf("accept after an offset edit wrote:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestPreviewAutoAcceptLargeBody pins the accept's own body cap: one start per
+// line of a long file is several times the 4 KiB the offset form allows.
+func TestPreviewAutoAcceptLargeBody(t *testing.T) {
+	e := newEditEnv(t)
+	var file strings.Builder
+	starts := make([]string, 1000)
+	for i := range starts {
+		fmt.Fprintf(&file, "[00:%02d.%02d]w\n", i/50, i%50*2)
+		starts[i] = strconv.Itoa(i*20 + 10)
+	}
+	e.put(t, "song.lrc", file.String())
+	lines := "[" + strings.Join(starts, ",") + "]"
+	if len(lines) <= editMaxBody {
+		t.Fatalf("body is %d bytes, not over the %d byte offset cap", len(lines), editMaxBody)
+	}
+	if rec := e.accept(lines, e.mtime(t)); rec.Code != http.StatusOK {
+		t.Fatalf("large accept = %d %s", rec.Code, rec.Body)
+	}
+	if got := e.lrc(t); !strings.Contains(got, "[00:19.99]w\n") {
+		t.Error("the last line's stamp was not written")
 	}
 }

@@ -325,6 +325,7 @@ func TestEveryRegisteredRouteIsGuarded(t *testing.T) {
 		"GET /settings/keys", "POST /settings/keys", "POST /settings/keys/revoke",
 		"GET /queue", "GET /queue/{bucket}", "GET /reports/failure-group", "GET /preview/{id}/audio",
 		"GET /queue/unavailable/revive", "POST /queue/unavailable/revive",
+		"POST /preview/{id}/offset", "POST /preview/{id}/revert", "POST /preview/{id}/auto/accept",
 	}
 	have := map[string]bool{}
 	for _, p := range ui.guardedRoutes {

@@ -178,3 +178,33 @@ func TestEditedRowSkipsWordRecheck(t *testing.T) {
 		t.Errorf("edited row flipped to the word recheck: %v", flipped)
 	}
 }
+
+// TestSetLyricRetime pins the #1008 mark: edited with a NULL offset (a retime,
+// not a zero offset), replacing any earlier hand offset.
+func TestSetLyricRetime(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	id := seedUpgradeRow(t, dbh, "retime", "")
+	if err := q.SetLyricEdit(ctx, id, 300); err != nil {
+		t.Fatal(err)
+	}
+	if retimed, err := q.LyricRetimed(ctx, id); err != nil || retimed {
+		t.Fatalf("hand offset reads retimed=%v err=%v", retimed, err)
+	}
+	if err := q.SetLyricRetime(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	var offNull, edited bool
+	if err := dbh.QueryRowContext(ctx,
+		`SELECT lyric_offset_ms IS NULL, lyric_edited_at IS NOT NULL FROM work_queue WHERE id = ?`, id).Scan(&offNull, &edited); err != nil {
+		t.Fatal(err)
+	}
+	retimed, err := q.LyricRetimed(ctx, id)
+	if err != nil || !retimed || !offNull || !edited {
+		t.Errorf("after retime: retimed=%v offsetNull=%v edited=%v err=%v", retimed, offNull, edited, err)
+	}
+	_ = dbh.Close()
+	if q.SetLyricRetime(ctx, id) == nil {
+		t.Error("closed database: SetLyricRetime wants an error")
+	}
+}
