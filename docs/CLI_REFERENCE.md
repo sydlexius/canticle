@@ -5,7 +5,7 @@ This page documents every subcommand and flag. For operational guidance (running
 ## Usage
 
 ```text
-Usage: canticle [fetch|serve|scan|library|keys|admin|secrets|config|queue|provenance|realign|revalidate|completion]
+Usage: canticle [fetch|serve|scan|library|keys|admin|secrets|config|queue|provenance|realign|revalidate|timing-accuracy|completion]
 
 Commands:
   fetch       fetch lyrics once without HTTP server or DB queue
@@ -20,6 +20,7 @@ Commands:
   provenance  embed or inspect provenance tags in .lrc files
   realign     re-attach orphaned .lrc/.txt sidecars (and their .elrc companions) to renamed audio files
   revalidate  re-check existing .lrc timing against audio duration and remediate the backlog
+  timing-accuracy  measure per-provider line-start timing error against a local hand-verified reference set
   completion  output a shell completion script (bash, zsh, or fish)
 
 Global flags:
@@ -377,3 +378,11 @@ canticle completion <bash|zsh|fish>
 ```
 
 See [Shell completion](USER_GUIDE.md#shell-completion) for installation snippets.
+
+## Timing accuracy
+
+`canticle timing-accuracy <RefDir> [--lanes a,b] [--token T] [--config P]` reports how far each lane's line starts sit from a hand-verified reference (#1117). It asks each lane for every reference track, compares, and writes nothing: no library, queue, cache, or database.
+
+`RefDir` is **local only** and should live outside any git tree (a directory that itself holds a `.git` entry is refused; parents are not checked). It holds `manifest.toml` plus the reference `.lrc`/`.elrc` files. Each `[[track]]` has `id` (unique, never printed), `file` (relative, inside `RefDir`), `artist`, `title`, `album` (optional), `duration_seconds`, and `line_residual_ms` (required: the reference's own declared error).
+
+Output is aggregate-only: one row per lane and per `lane/upstream`, with sample sizes, line MAE, share within 0.3 s, and the declared residual. Decorative cues are dropped on both sides. A lane with no matched cues prints `n/a`, never 0. Cues pair only when their normalized text is equal, so a reworded or re-punctuated line stays unmatched (it lowers the matched count, not the error). When a track repeats a line (a chorus) and the two sides disagree on how many times, the reported error is a lower bound. Lanes run one after another at each lane's own pacing (`api.cooldown` below 1 is raised to 1 second, then each lane's floor applies; InnerTube costs three requests per track). A lane that reports a rate limit is not asked again, and the tracks it was not asked are counted separately from `not_found` and `failed`. `--token` falls back to `MUSIXMATCH_TOKEN` / `MXLRC_API_TOKEN`, then the config file; the encrypted store is not consulted. An interrupted run prints partial rows and exits 1.

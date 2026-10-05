@@ -598,7 +598,7 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 			// and it should be rare. If it ever becomes common that signals a
 			// payload-shape change worth noticing in production.
 			slog.Info("petitlyrics: cue normalization split a line; dropping word timings",
-				"track", track.TrackName, "before", len(cues), "after", len(expanded.Lines))
+				"before", len(cues), "after", len(expanded.Lines))
 		}
 		return song, nil
 
