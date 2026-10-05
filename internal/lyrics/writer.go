@@ -135,7 +135,8 @@ type LRCWriter struct {
 // SetWordSync enables or disables Enhanced-LRC (A2) word markers on synced
 // output. When enabled AND a Song carries WordTimings that pass a2Words' checks,
 // each cue keeps its leading line-level [mm:ss.xx] and gains inline <mm:ss.xx>
-// markers per word.
+// markers per word, plus one trailing <mm:ss.xx> end tag after the last word
+// when the provider gave an end later than its start.
 //
 // Default false. Player support for A2 is not universal and the failure mode is
 // three-way -- render, silently strip, or show the markers as literal text --
