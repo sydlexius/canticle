@@ -5,10 +5,13 @@ import (
 	"testing"
 )
 
-// Migration 054 (#1007) round-trips. Its queue-side readers were removed (#1008);
-// the columns stay until their own migration drops them. The INDEX stays too because
-// it is live: the upgrade sweep's mis_synced arm uses idx_work_queue_word_generate_missynced,
-// so that later migration must replace it with one on (timing_outcome, status).
+// Migration 054 (#1007) round-trips. Its queue-side readers were removed (#1008).
+// The columns stay until their own migration drops them. The index lives on: it
+// serves upgrade_sweep.go's mis_synced arm (ListUpgradeCandidates) and reports
+// bucket.go's Settled bucket mis-synced filter. The migration files (054 and 055)
+// describe the removed word-generate reader and are applied; this comment is
+// current documentation. When the columns drop, replace the index with one on
+// (timing_outcome, status).
 func TestMigration054RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	dbh, provider := openAtVersionAppPragmas(t, 53)
