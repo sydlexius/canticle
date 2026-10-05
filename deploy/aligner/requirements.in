@@ -48,4 +48,4 @@ demucs==4.0.1
 # compatible: bit-identical wav2vec2 logits on identical input between
 # transformers 4.57.1 and 5.17.0 (#1016 hostile review).
 faster-whisper==1.2.1
-transformers==5.17.0
+transformers==5.18.0
