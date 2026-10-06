@@ -20,7 +20,10 @@ out=""
 while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
 if [ -n "$out" ]; then printf 'payload' > "$out"; else echo "$STUB_SUM  ./tailwindcss-linux-x64"; fi
 STUB
-chmod +x "$TMP/bin/curl"
+chmod +x "$TMP/bin/curl" || {
+  echo "failed to make curl stub executable" >&2
+  exit 1
+}
 
 GOOD="$(printf 'payload' | { sha256sum 2>/dev/null || shasum -a 256; } | awk '{print $1}')"
 passed=0 failed=0
