@@ -469,7 +469,15 @@ func TestUpgradeTrip_CompleteFailureAppliesAttemptCap(t *testing.T) {
 		if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ? WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
 			t.Fatal(err)
 		}
-		r.run(t)
+		if _, err := r.db.Exec(`UPDATE work_queue SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, r.id); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.w.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce = %v, want nil after a successful cap settle (the drain continues)", err)
+		}
+		if r.w.consecutiveFailures != 0 {
+			t.Fatalf("consecutiveFailures = %d, want 0 after a cap settle", r.w.consecutiveFailures)
+		}
 		if got := r.row(t); got != "done outcome=synced timing=ok lane=musixmatch misses=14 armed=0" {
 			t.Fatalf("row = %q, want settled done describing the written file", got)
 		}
@@ -521,6 +529,33 @@ func (r *upgradeRig) completedAt(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return s.String
+}
+
+// failingSettleQueue fails Complete and the cap settle, so the cap path must
+// fall through to Fail and surface the error.
+type failingSettleQueue struct{ failingCompleteQueue }
+
+func (failingSettleQueue) SettleStuckUpgradeTrip(context.Context, int64, bool) (bool, error) {
+	return false, errors.New("injected settle failure")
+}
+
+// TestUpgradeTrip_CapSettleFailureStillFails: when the cap settle itself fails
+// the row is failed (never wedged) and the error is returned.
+func TestUpgradeTrip_CapSettleFailureStillFails(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+	r.w.queue = failingSettleQueue{failingCompleteQueue{r.q}}
+	if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ?, next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.w.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce = nil, want the error when the cap settle fails")
+	}
+	if r.w.consecutiveFailures != 1 {
+		t.Fatalf("consecutiveFailures = %d, want 1", r.w.consecutiveFailures)
+	}
+	if got := r.row(t); got != "failed outcome=synced timing=ok lane=musixmatch misses=14 armed=1" {
+		t.Fatalf("row = %q, want failed and still armed", got)
+	}
 }
 
 // TestUpgradeTrip_StampFailureAtCapStaysRetryable: a trip at the cap whose

@@ -1906,13 +1906,15 @@ const (
 // Complete does (a lane answered, or no file would exist). A failed
 // stamp-and-clear of the sync tier passes capNever, because a settle leaves the
 // file-record columns alone and would keep the PREVIOUS tier for a file this
-// pass already rewrote, so that case stays retryable. A settle error falls
-// through to Fail, so the row never wedges.
+// pass already rewrote, so that case stays retryable. A successful cap settle
+// returns nil and leaves consecutiveFailures alone, like failPass's cap settle:
+// the cause is logged and the drain continues. A settle error falls through to
+// Fail, so the row never wedges.
 func (w *Worker) failStuckItem(ctxNoCancel context.Context, item queue.WorkItem, how capSettle, cause error) error {
 	if how != capNever && item.UpgradeQueued && item.Attempts+1 >= upgradeMaxAttempts {
 		slog.Info("worker: upgrade trip could not complete; settling at the attempt cap", "id", item.ID, "attempts", item.Attempts+1, "error", cause)
 		if settled, err := w.queue.SettleStuckUpgradeTrip(ctxNoCancel, item.ID, how == capLanded); err == nil && settled {
-			return fmt.Errorf("worker: item %d (upgrade trip settled at the attempt cap): %w", item.ID, cause)
+			return nil
 		}
 	}
 	w.consecutiveFailures++
