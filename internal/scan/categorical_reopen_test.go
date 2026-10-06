@@ -117,7 +117,7 @@ func TestScanReopensCategoricalRowEndToEnd(t *testing.T) {
 			}
 			rowState := func() (state string) {
 				t.Helper()
-				if err := dbh.QueryRow(`SELECT status || '|' || source_path || '|' || timing_outcome || '|' ||
+				if err := dbh.QueryRow(`SELECT status || '|' || source_path || '|' || COALESCE(timing_outcome, '') || '|' ||
                          COALESCE(outcome_type, '') || '|' || COALESCE(sync_tier, '') || '|' || COALESCE(lyric_edited_at, '') || '|' || updated_at
                      FROM work_queue WHERE id = ?`, rowID).Scan(&state); err != nil {
 					t.Fatalf("read row: %v", err)
