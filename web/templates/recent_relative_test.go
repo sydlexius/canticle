@@ -78,7 +78,7 @@ func TestDashRecentOutcomesRelativeNeedsISO(t *testing.T) {
 // Reports shares RecentOutcomeRow but must keep the absolute timestamp even
 // when the relative field is populated.
 func TestReportsRecentOutcomesStaysAbsolute(t *testing.T) {
-	out := renderToString(t, tableRecentOutcomes([]RecentOutcomeRow{relativeRow()}))
+	out := renderToString(t, tableRecentOutcomes(plainCols(recentLabels...), []RecentOutcomeRow{relativeRow()}))
 	if !strings.Contains(out, ">2026-10-03 11:55 UTC<") {
 		t.Errorf("reports lost its absolute timestamp:\n%s", out)
 	}

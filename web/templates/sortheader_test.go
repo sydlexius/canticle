@@ -15,6 +15,7 @@ func renderHeader(t *testing.T, h SortHeaderView) string {
 	return b.String()
 }
 
+// TestSortHeaderRender pins the SortHeader markup for sorted, unsorted and unsortable columns.
 func TestSortHeaderRender(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -22,7 +23,7 @@ func TestSortHeaderRender(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{"plain", SortHeaderView{Label: "Reason"}, []string{"<th>Reason</th>"}, []string{"<a ", "aria-sort"}},
+		{"plain", SortHeaderView{Label: "Reason"}, []string{`<th scope="col">Reason</th>`}, []string{"<a ", "aria-sort"}},
 		{"inactive link", SortHeaderView{Label: "Title", Href: "/t?dir=asc&sort=title"},
 			[]string{`href="/t?dir=asc&amp;sort=title"`, ">Title"}, []string{"aria-sort", "mx-sort-arrow"}},
 		{"ascending", SortHeaderView{Label: "Title", Href: "/t?dir=desc&sort=title", Aria: "ascending"},

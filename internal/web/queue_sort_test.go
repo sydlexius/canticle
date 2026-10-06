@@ -198,6 +198,7 @@ func TestQueueForgedCursorFallsBackToFirstPage(t *testing.T) {
 	}
 }
 
+// TestQueueHeadersSortableAndAria pins that the queue headers are sort links with a single aria-sort on the active column, toggling direction and keeping the search.
 func TestQueueHeadersSortableAndAria(t *testing.T) {
 	db := openReportsTestDB(t)
 	seedQueueRows(t, db, "pending", "Pend", 2)
@@ -217,7 +218,7 @@ func TestQueueHeadersSortableAndAria(t *testing.T) {
 		t.Error("inactive headers lack their natural-direction links")
 	}
 	for _, plain := range []string{"Status", "Reason", "Libraries", "Lyrics"} {
-		if !strings.Contains(body, "<th>"+plain+"</th>") {
+		if !strings.Contains(body, `<th scope="col">`+plain+"</th>") {
 			t.Errorf("%s header should be plain and not sortable", plain)
 		}
 	}

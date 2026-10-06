@@ -440,7 +440,7 @@ func (u *UI) handleReportFragment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view, err := u.buildReportView(r.Context(), def)
+	view, err := u.buildReportView(r.Context(), def, r.URL.Query())
 	if err != nil {
 		slog.Error("report query failed", "report", key, "error", err)
 		http.Error(w, "report query failed", http.StatusInternalServerError)
@@ -481,7 +481,7 @@ func (u *UI) buildRail(activeKey string) []templates.RailItem {
 
 // buildReportView runs the report identified by def and maps its read-only
 // results onto the presentation view. LastRun is stamped by the caller.
-func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.ReportView, error) {
+func (u *UI) buildReportView(ctx context.Context, def reportDef, q url.Values) (templates.ReportView, error) {
 	v := templates.ReportView{Key: def.key, Title: def.title, Subtitle: def.subtitle}
 
 	// Resolve the server display timezone for completed-at timestamps,
@@ -497,7 +497,10 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 
 	switch def.key {
 	case "recent-outcomes":
-		rows, err := u.reports.RecentOutcomes(ctx, recentOutcomesLimit)
+		order, cols := reportSort(q, nsRecentOutcomes, reportPath(def.key), recentOutcomeCols)
+		v.Columns = cols
+		v.RefreshHref = refreshHref(q, nsRecentOutcomes, reportPath(def.key))
+		rows, err := u.reports.RecentOutcomesSorted(ctx, recentOutcomesLimit, order)
 		if err != nil {
 			return templates.ReportView{}, err
 		}
@@ -538,7 +541,10 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 			})
 		}
 	case "instrumental-inventory":
-		rows, err := u.reports.InstrumentalInventory(ctx)
+		order, cols := reportSort(q, nsInstrumentals, reportPath(def.key), instrumentalCols)
+		v.Columns = cols
+		v.RefreshHref = refreshHref(q, nsInstrumentals, reportPath(def.key))
+		rows, err := u.reports.InstrumentalInventorySorted(ctx, order)
 		if err != nil {
 			return templates.ReportView{}, err
 		}
@@ -572,7 +578,10 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 			})
 		}
 	case "review-queue":
-		rows, err := u.reports.ReviewQueue(ctx)
+		order, cols := reportSort(q, nsReviewQueue, reportPath(def.key), reviewQueueCols)
+		v.Columns = cols
+		v.RefreshHref = refreshHref(q, nsReviewQueue, reportPath(def.key))
+		rows, err := u.reports.ReviewQueueSorted(ctx, order)
 		if err != nil {
 			return templates.ReportView{}, err
 		}

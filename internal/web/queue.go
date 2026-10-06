@@ -254,17 +254,11 @@ var queueColumns = []struct{ label, key string }{
 // buildQueueColumns shapes the header row for the shared SortHeader component:
 // each sortable header links to the order a click requests, keeping the search.
 func buildQueueColumns(bucket string, state queueViewState, spec tablesort.Spec, active tablesort.Order) []templates.SortHeaderView {
-	keep := state.filterValues()
-	out := make([]templates.SortHeaderView, 0, len(queueColumns))
-	for _, c := range queueColumns {
-		h := templates.SortHeaderView{Label: c.label}
-		if c.key != "" {
-			h.Href = tablesort.HeaderHref("/queue/"+bucket, keep, spec.Toggle(active, c.key))
-			h.Aria = tablesort.AriaSort(active, c.key)
-		}
-		out = append(out, h)
+	cols := make([]sortCol, len(queueColumns))
+	for i, c := range queueColumns {
+		cols[i] = sortCol{c.label, c.key}
 	}
-	return out
+	return sortHeaders("/queue/"+bucket, cols, spec, active, "", state.filterValues())
 }
 
 // queueChipLabels are the chip labels, keyed by chip. Which chips a bucket

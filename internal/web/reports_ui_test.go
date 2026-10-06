@@ -585,7 +585,7 @@ func TestBuildRailEncodesKeyPath(t *testing.T) {
 func TestBuildReportViewUnimplementedKey(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	ui := NewUI(config.Config{}, "v-test", WithReports(reports.New(sqlDB)))
-	if _, err := ui.buildReportView(context.Background(), reportDef{key: "no-such-report"}); err == nil {
+	if _, err := ui.buildReportView(context.Background(), reportDef{key: "no-such-report"}, nil); err == nil {
 		t.Fatal("buildReportView with unknown key = nil error, want fail-fast error")
 	}
 }

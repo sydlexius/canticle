@@ -29,11 +29,38 @@ const (
 	KeyMisses      = "misses"
 	KeyAttempts    = "attempts"
 	KeyUpdated     = "updated"
+	KeyResult      = "result"
+	KeySource      = "source"
+	KeyCompleted   = "completed"
+	KeyOutcome     = "outcome"
+	KeyOverrun     = "overrun"
+	KeyRatio       = "ratio"
+	KeyEvaluated   = "evaluated"
+	KeyDetect      = "detect"
 )
 
+// Namespaces are the URL parameter prefixes of tables that share a page with
+// another sortable table or fragment (#1260): "ro" Recent outcomes, "in"
+// Instrumentals, "rq" Review queue. A namespaced
+// table reads <ns>_sort / <ns>_dir, so sorting one never resets another. The
+// request-log validators accept exactly these names.
+var Namespaces = []string{"ro", "in", "rq"}
+
+// ParamNames are the sort and dir parameter names of namespace ns ("" is the
+// plain sort/dir pair the Work Queue uses).
+func ParamNames(ns string) (sortParam, dirParam string) {
+	if ns == "" {
+		return "sort", "dir"
+	}
+	return ns + "_sort", ns + "_dir"
+}
+
+// vocabulary is the set of sort keys any table may name; a Spec admits a subset of it.
 var vocabulary = map[string]bool{
 	KeyArtist: true, KeyAlbum: true, KeyTitle: true, KeyStatus: true,
 	KeyNextAttempt: true, KeyMisses: true, KeyAttempts: true, KeyUpdated: true,
+	KeyResult: true, KeySource: true, KeyCompleted: true, KeyOutcome: true,
+	KeyOverrun: true, KeyRatio: true, KeyEvaluated: true, KeyDetect: true,
 }
 
 // KnownKey reports whether key is in the shared vocabulary. Adding a column to
@@ -86,17 +113,24 @@ func (s Spec) Resolve(sort, dir string) Order {
 // the query values to re-emit: only a value that was present AND valid, so an
 // invalid one is dropped rather than reflected.
 func ParseValues(v url.Values, s Spec) (Order, url.Values) {
+	return ParseValuesNS(v, s, "")
+}
+
+// ParseValuesNS is ParseValues for the table namespaced ns (see Namespaces):
+// it reads <ns>_sort / <ns>_dir and re-emits only those, valid.
+func ParseValuesNS(v url.Values, s Spec, ns string) (Order, url.Values) {
 	keep := url.Values{}
-	sort, dir := v.Get("sort"), v.Get("dir")
+	sortParam, dirParam := ParamNames(ns)
+	sort, dir := v.Get(sortParam), v.Get(dirParam)
 	if _, ok := s.Columns[sort]; !ok {
 		sort = ""
 	} else {
-		keep.Set("sort", sort)
+		keep.Set(sortParam, sort)
 	}
 	if !ValidDir(dir) {
 		dir = ""
 	} else {
-		keep.Set("dir", dir)
+		keep.Set(dirParam, dir)
 	}
 	return s.Resolve(sort, dir), keep
 }
@@ -254,13 +288,20 @@ func AriaSort(active Order, key string) string {
 // HeaderHref is a header link: base plus the preserved params (never a cursor,
 // a re-sort starts at the top) plus the requested sort and dir.
 func HeaderHref(base string, keep url.Values, o Order) string {
+	return HeaderHrefNS(base, keep, o, "")
+}
+
+// HeaderHrefNS is HeaderHref for the table namespaced ns: it sets <ns>_sort /
+// <ns>_dir and leaves every other param in keep, other tables' sort included.
+func HeaderHrefNS(base string, keep url.Values, o Order, ns string) string {
+	sortParam, dirParam := ParamNames(ns)
 	v := url.Values{}
 	for k, vs := range keep {
 		v[k] = append([]string(nil), vs...)
 	}
 	v.Del("after")
-	v.Set("sort", o.Key)
-	v.Set("dir", map[bool]string{false: "asc", true: "desc"}[o.Desc])
+	v.Set(sortParam, o.Key)
+	v.Set(dirParam, map[bool]string{false: "asc", true: "desc"}[o.Desc])
 	return base + "?" + v.Encode()
 }
 
