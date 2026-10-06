@@ -654,3 +654,58 @@ func TestSetMusixmatchTokenWithIdentityIfUnchangedFallback(t *testing.T) {
 		t.Error("token written although its stamp write failed")
 	}
 }
+
+// TestTokenPairIfUnchangedStores covers the compare-and-set write on both real
+// stores: a matching state commits, a changed one returns
+// ErrMusixmatchTokenChanged and writes nothing, and the SQL read/commit error
+// arms surface.
+func TestTokenPairIfUnchangedStores(t *testing.T) {
+	ctx := context.Background()
+	sqlStore, sqlDB := newTestStore(t)
+	stores := map[string]interface {
+		TokenPairWriter
+		TokenPairCASWriter
+		Get(context.Context, string) (string, bool, error)
+	}{"sqlite": sqlStore, "memory": NewMemoryStore()}
+	for name, s := range stores {
+		t.Run(name, func(t *testing.T) {
+			if err := s.SetTokenWithIdentity(ctx, "tok", "host|app"); err != nil {
+				t.Fatal(err)
+			}
+			state, err := ReadMusixmatchTokenState(ctx, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetTokenWithIdentityIfUnchanged(ctx, "tok2", "", state); err != nil {
+				t.Fatalf("matching state: %v", err)
+			}
+			if v, _, _ := s.Get(ctx, NameMusixmatchToken); v != "tok2" {
+				t.Errorf("token = %q, want tok2", v)
+			}
+			// state is now stale: the write above changed the stamp.
+			err = s.SetTokenWithIdentityIfUnchanged(ctx, "tok3", "", state)
+			if !errors.Is(err, ErrMusixmatchTokenChanged) {
+				t.Fatalf("stale state err = %v, want ErrMusixmatchTokenChanged", err)
+			}
+			if v, _, _ := s.Get(ctx, NameMusixmatchToken); v != "tok2" {
+				t.Errorf("token = %q after refused write, want tok2", v)
+			}
+		})
+	}
+
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlStore.SetTokenWithIdentityIfUnchanged(ctx, "x", "", MusixmatchTokenState{}); err == nil {
+		t.Error("SQL write on a closed database returned nil error")
+	}
+	if err := NewMemoryStore().SetTokenWithIdentityIfUnchanged(canceledCtx(), "x", "", MusixmatchTokenState{}); err == nil {
+		t.Error("memory write with a canceled context returned nil error")
+	}
+}
+
+func canceledCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
