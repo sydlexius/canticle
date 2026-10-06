@@ -1376,7 +1376,7 @@ var settingsLabels = map[string]string{
 	"word_sync_generate.enabled":                      "Enable the Auto alignment action in the lyric preview (experimental, needs a dedicated aligner sidecar)",
 	"word_sync_generate.url":                          "Aligner sidecar address",
 	"word_sync_generate.budget_per_cycle":             "No effect (belonged to a removed background sweep)",
-	"word_sync_generate.concurrency":                  "Alignments the Auto action may run at once (reserved, not enforced yet)",
+	"word_sync_generate.concurrency":                  "Auto alignment runs allowed at once across tracks (a start over the cap is refused as busy)",
 	"word_sync_generate.model":                        "Reserved, not sent yet (the sidecar picks its own model)",
 	"realign.enabled":                                 "Re-attach orphaned lyric files in serve mode",
 	"realign.on_scan":                                 "Realign automatically after each scan",

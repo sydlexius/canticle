@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -292,14 +293,31 @@ func (h *hookEditor) LyricEdit(ctx context.Context, id int64) (int, bool, error)
 	return h.DBQueue.LyricEdit(ctx, id)
 }
 
-func captureLogs(t *testing.T) *bytes.Buffer {
+func captureLogs(t *testing.T) *lockedLog {
 	t.Helper()
-	var logs bytes.Buffer
+	logs := &lockedLog{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &logs
+	return logs
 }
+
+// lockedLog is captureLogs' sink: a background goroutine may still be logging
+// while the test reads, so every access takes the lock.
+type lockedLog struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedLog) do(f func()) { l.mu.Lock(); defer l.mu.Unlock(); f() }
+
+func (l *lockedLog) Write(p []byte) (n int, err error) {
+	l.do(func() { n, err = l.b.Write(p) })
+	return n, err
+}
+func (l *lockedLog) String() (s string) { l.do(func() { s = l.b.String() }); return s }
+func (l *lockedLog) Len() (n int)       { l.do(func() { n = l.b.Len() }); return n }
+func (l *lockedLog) Reset()             { l.do(l.b.Reset) }
 
 // TestPreviewEditRecordFailure pins the mark-first order: a save whose mark
 // cannot be recorded writes nothing (no shift, no .orig), answers 500

@@ -708,9 +708,9 @@ type WordSyncGenerateConfig struct {
 	// default (10).
 	// Override: MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE.
 	BudgetPerCycle int `toml:"budget_per_cycle"`
-	// Concurrency is the cap on alignments the Auto action runs at once. It
-	// reaches web.AttachAutoAligner but nothing enforces it yet. Values below 1
-	// reset to the default (1).
+	// Concurrency caps how many Auto alignment runs go at once across tracks
+	// (web.AttachAutoAligner); a start over the cap is refused as busy. Values
+	// below 1 reset to the default (1).
 	// Override: MXLRC_WORD_SYNC_GENERATE_CONCURRENCY.
 	Concurrency int `toml:"concurrency"`
 	// Model is RESERVED and NOT YET SENT to the sidecar: internal/aligner's
