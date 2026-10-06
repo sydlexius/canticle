@@ -130,6 +130,9 @@ func TestRetiredQueueSummaryRedirects(t *testing.T) {
 		}
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
+		if got := rec.Header().Values("Vary"); len(got) != 1 || got[0] != "HX-Request" {
+			t.Errorf("hx=%v: Vary = %q, want [HX-Request]", hx, got)
+		}
 		if hx {
 			if rec.Code != http.StatusOK {
 				t.Errorf("htmx: status = %d, want 200", rec.Code)

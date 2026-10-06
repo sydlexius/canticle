@@ -415,6 +415,8 @@ func (u *UI) handleReportFragment(w http.ResponseWriter, r *http.Request) {
 		// The Queue page replaced this report (#1248); keep old links useful.
 		// An htmx request follows a 301 transparently and would swap the whole
 		// /queue page into #mx-main, so tell htmx to navigate instead.
+		// The answer differs by HX-Request, so a shared cache must key on it.
+		w.Header().Add("Vary", "HX-Request")
 		if r.Header.Get("HX-Request") == "true" {
 			w.Header().Set("HX-Redirect", "/queue")
 			w.WriteHeader(http.StatusOK)
