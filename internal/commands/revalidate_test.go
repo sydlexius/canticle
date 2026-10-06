@@ -481,7 +481,7 @@ func seedRevalidateRow(t *testing.T, cfgPath, audio string) *queue.DBQueue {
 
 func revalidateRowOutcome(t *testing.T, q *queue.DBQueue) string {
 	t.Helper()
-	outcome, _, _, err := q.LookupTiming(t.Context(), "Some Artist", "Some Title")
+	outcome, _, _, _, err := q.LookupTiming(t.Context(), "Some Artist", "Some Title")
 	if err != nil {
 		t.Fatalf("lookup timing: %v", err)
 	}
