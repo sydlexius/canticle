@@ -2515,22 +2515,25 @@ func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec Timi
 // derived rather than stored: a measured stamp records overrun_magnitude =
 // maxTS - d and overrun_ratio = maxTS / d, so d = magnitude / (ratio - 1). It is
 // 0 (not derivable) when either column is NULL or the ratio is not above 1,
-// which a categorical verdict (ratio >= timing.CategoricalRatio) never is.
+// which a categorical verdict (ratio >= timing.CategoricalRatio) never is. It
+// is also 0 for a row that is not categoricalFileless: the reopen would refuse
+// it, so the scan is given no duration to compare and never asks.
 func (q *DBQueue) LookupTiming(ctx context.Context, artist, title string) (outcome string, providersVersion, judgedSeconds int, found bool, err error) {
 	var (
 		storedOutcome   sql.NullString
 		storedVersion   sql.NullInt64
 		storedMagnitude sql.NullFloat64
 		storedRatio     sql.NullFloat64
+		fileless        bool
 	)
 	row := q.db.QueryRowContext(ctx,
-		`SELECT timing_outcome, providers_version, overrun_magnitude, overrun_ratio
+		`SELECT timing_outcome, providers_version, overrun_magnitude, overrun_ratio, `+categoricalFileless+`
          FROM work_queue
          WHERE artist_key = ? AND title_key = ?`,
 		normalize.NormalizeKey(artist),
 		normalize.NormalizeKey(title),
 	)
-	switch err := row.Scan(&storedOutcome, &storedVersion, &storedMagnitude, &storedRatio); {
+	switch err := row.Scan(&storedOutcome, &storedVersion, &storedMagnitude, &storedRatio, &fileless); {
 	case errors.Is(err, sql.ErrNoRows):
 		return "", 0, 0, false, nil
 	case err != nil:
@@ -2539,7 +2542,7 @@ func (q *DBQueue) LookupTiming(ctx context.Context, artist, title string) (outco
 	if !storedOutcome.Valid || storedOutcome.String == "" {
 		return "", 0, 0, false, nil
 	}
-	if storedMagnitude.Valid && storedRatio.Valid && storedRatio.Float64 > 1 {
+	if fileless && storedMagnitude.Valid && storedRatio.Valid && storedRatio.Float64 > 1 {
 		judgedSeconds = max(0, int(math.Round(storedMagnitude.Float64/(storedRatio.Float64-1))))
 	}
 	return storedOutcome.String, int(storedVersion.Int64), judgedSeconds, true, nil
@@ -3871,30 +3874,46 @@ func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 	return nil
 }
 
+// categoricalFileless is the SELECT expression for "this row records no
+// sidecar and no hand edit" (#972). Only the worker's fetch-time categorical
+// settle and a quarantine/purge remediation leave outcome_type and sync_tier
+// both NULL. A verdict the timing sweep stamps under on_categorical = off, or
+// on a hand-edited row (#1226: judged, never remediated), keeps the file and
+// its outcome_type; such a row is never reopened for another recording, which
+// would strand that file with no row and carry its edit mark and tier along.
+const categoricalFileless = `(outcome_type IS NULL AND sync_tier IS NULL` + notLyricEdited + `)`
+
 // reopenCategoricalForScan reopens the 'done' + categorical row a scan-origin
 // enqueue collides with when the scan judged the incoming file a different
 // recording (#972, inputs.ReopenCategorical). The verdict spoke for the other
-// recording only and wrote no file, so the row is reopened through
-// ReopenDoneRowTx (verdict, lane and outcome cleared, refused_waits reset) plus
-// timing_stamp_source, and the upsert that follows in the same transaction
-// moves its paths to the incoming file with no worker claim able to land in
-// between.
+// recording only, so the row is reopened through ReopenDoneRowTx (verdict,
+// lane and outcome cleared, refused_waits reset) plus timing_stamp_source, and
+// the upsert that follows in the same transaction moves its paths to the
+// incoming file with no worker claim able to land in between.
 //
 // The scan decided from a read made outside this transaction, so the row is
 // judged again here. No categorical row any more, or one the upsert moves to
-// the incoming file by itself (pending, failed or deferred, outside a trip),
-// is an ordinary enqueue. A row that is still categorical but would keep its
-// paths returns ErrCategoricalNotReopened instead: one a worker holds
-// ('processing', stamped before Complete), a retired one, one in an upgrade
-// trip or word recheck, and one linked to a scan_result for a DIFFERENT file
-// that is not done, since this trip's Complete would write that file done
-// unfetched (a done link is not rewritten, and a categorical row has no
-// sidecar to orphan).
+// the incoming file by itself (pending, failed or deferred, outside an upgrade
+// trip), is an ordinary enqueue. A row that is still categorical but would
+// keep its paths returns ErrCategoricalNotReopened instead: one a worker holds
+// ('processing', stamped before Complete), a retired one ('unavailable'), one
+// in an upgrade trip, a 'done' row prune retired over a queued word recheck (a
+// parked recheck, 'deferred' + queued, never gets here: reopenWordRecheckForScan
+// reopened it first, so it enqueues as usual), one that records a file or a
+// hand edit (categoricalFileless), and one linked to a scan_result for a
+// DIFFERENT file that is not done, since this trip's Complete would write that
+// file done unfetched (a done link is not rewritten).
+//
+// KNOWN LIMIT of that last guard (#1366 tracks per-recording verdict state):
+// when the other file is the judged recording itself and its scan_result is
+// pending or processing and still linked (after a forced --update/--upgrade
+// scan, or a provider-generation change), this recording is refused on every
+// scan until that scan_result settles. main suppresses it in that state too.
 func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
 	var (
-		id         int64
-		status     string
-		held, live bool
+		id                   int64
+		status               string
+		held, live, fileless bool
 	)
 	err := tx.QueryRowContext(ctx,
 		`SELECT id, status,
@@ -3902,12 +3921,13 @@ func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
                 EXISTS (SELECT 1 FROM work_queue_scan_results j
                         JOIN scan_results sr ON sr.id = j.scan_result_id
                         WHERE j.work_queue_id = work_queue.id
-                          AND sr.file_path <> ? AND sr.status <> 'done')
+                          AND sr.file_path <> ? AND sr.status <> 'done'),
+                `+categoricalFileless+`
          FROM work_queue
          WHERE artist_key = ? AND title_key = ? AND timing_outcome = 'categorical'`,
 		inputs.SourcePath,
 		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName),
-	).Scan(&id, &status, &held, &live)
+	).Scan(&id, &status, &held, &live, &fileless)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -3917,11 +3937,18 @@ func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 	if !held && (status == StatusPending || status == StatusFailed || status == StatusDeferred) {
 		return nil
 	}
-	if held || live || status != StatusDone {
+	if held || live || !fileless || status != StatusDone {
 		return ErrCategoricalNotReopened
 	}
-	if reopened, err := ReopenDoneRowTx(ctx, tx, id, now); err != nil || !reopened {
-		return errors.Join(err, ErrCategoricalNotReopened)
+	reopened, err := ReopenDoneRowTx(ctx, tx, id, now)
+	if err != nil {
+		return err
+	}
+	if !reopened {
+		// Unreachable after the status check above. Kept because ReopenDoneRowTx's
+		// own WHERE decides what was written: carrying on after a no-op would link
+		// the incoming file to a row that keeps its paths.
+		return ErrCategoricalNotReopened
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE work_queue SET timing_stamp_source = NULL WHERE id = ?`, id); err != nil {
