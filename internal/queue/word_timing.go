@@ -92,8 +92,11 @@ type WordRecheckOptions struct {
 // so a dry-run count can never describe a different population than the rows
 // an apply flips. status='done' excludes 'processing' (the worker owns
 // it) and non-settled rows (fetched anyway); timing-rejected rows are never
-// re-examined (mis_synced is #1007's retime source; degenerate is a demotion too, #1082); source_path is required
-// because the sidecar is derived from it.
+// re-examined (degenerate is a demotion too, #1082). The word recheck never
+// examines mis_synced rows: an enabled upgrade sweep may re-fetch an eligible
+// post-settle one (#1120) and a result that lands re-stamps it, while forced
+// alignment of the existing words is only the on-demand #1008 Auto action.
+// source_path is required because the sidecar is derived from it.
 func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	var b strings.Builder
 	var args []any
