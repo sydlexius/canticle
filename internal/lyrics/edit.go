@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -185,6 +186,9 @@ var (
 	ErrEditHasWords = errors.New("lyrics: word timings already exist for this file")
 	// ErrEditInvalid means generated timings do not fit the file's lines.
 	ErrEditInvalid = errors.New("lyrics: generated timings do not fit the lines")
+	// ErrEditStaleOrig means the .orig beside the .lrc is not the original of the
+	// file on disk, so a rewrite would destroy text, tags or lines no copy holds (#1313).
+	ErrEditStaleOrig = errors.New("lyrics: the .orig backup is not the original of the current file")
 )
 
 // confineEdit resolves path beneath one of roots (lexically, over both the
@@ -313,6 +317,11 @@ func editLines(path string, roots []string, current bool, expect time.Time) ([]T
 	if err != nil {
 		return nil, nil, err
 	}
+	if src != rel {
+		if err := requireOrigBacksCurrent(root, rel, cur, body, false); err != nil {
+			return nil, nil, err
+		}
+	}
 	doc := ParseTimedLRC(string(body))
 	tags := make([]string, 0, len(doc.Tags))
 	for _, tg := range doc.Tags {
@@ -371,6 +380,68 @@ func SameLyric(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// editSkeleton is what a rewrite by ApplyEdit keeps or discards of a body: its
+// header tags (trimmed), its cue texts in order, and every other non-blank
+// line (an unstamped credit line, say), which the writer never carries over.
+type editSkeleton struct {
+	tags, cues, orphans []string
+}
+
+func skeletonOf(body []byte) editSkeleton {
+	var sk editSkeleton
+	for _, raw := range strings.Split(strings.TrimPrefix(string(body), utf8BOM), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		doc := lrcnormalize.ParseBody(line)
+		switch {
+		case len(doc.Cues) > 0:
+			for _, c := range doc.Cues {
+				text := strings.TrimSpace(timing.StripWordMarkers(c.Text))
+				if text == "" {
+					text = "♪" // ApplyEdit writes an empty cue as a note
+				}
+				sk.cues = append(sk.cues, text)
+			}
+		case len(doc.Tags) > 0:
+			if line != timingMarker { // the aligner marker is canticle's own addition
+				sk.tags = append(sk.tags, line)
+			}
+		default:
+			sk.orphans = append(sk.orphans, line)
+		}
+	}
+	return sk
+}
+
+// requireOrigBacksCurrent returns ErrEditStaleOrig unless the .orig body is the
+// original of the current .lrc: the same tags and cue texts in order, and
+// every unstamped line of the current file also present in the .orig. Only
+// stamps may differ, which is all an edit changes. With orphansOnly (a
+// generated edit, which writes the current file's own text and tags and so
+// cannot lose them) only the unstamped-line condition is checked. The current file is read
+// through root, pinned to the Lstat info the caller already holds.
+func requireOrigBacksCurrent(root *os.Root, rel string, cur fs.FileInfo, orig []byte, orphansOnly bool) error {
+	cb, err := readRegular(root, rel, cur)
+	if err != nil {
+		return err
+	}
+	c, o := skeletonOf(cb), skeletonOf(orig)
+	inOrig := map[string]bool{}
+	for _, l := range o.orphans {
+		inOrig[l] = true
+	}
+	same := orphansOnly || (reflect.DeepEqual(c.tags, o.tags) && reflect.DeepEqual(c.cues, o.cues))
+	for _, l := range c.orphans {
+		same = same && inOrig[l]
+	}
+	if !same {
+		return ErrEditStaleOrig
+	}
+	return nil
 }
 
 func refuseOrWrap(err error) error {
@@ -483,6 +554,17 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 		// Present but not a regular file: no usable backup exists, so refuse
 		// rather than rewrite the only copy of the original.
 		return EditResult{}, refuseOrWrap(oerr)
+	default:
+		// A backup exists and is never touched, so it must really back THIS
+		// file: otherwise the rewrite destroys bytes no copy holds (#1313).
+		ofi, _ := lstatRegular(root, rel+".orig")
+		ob, rerr := readRegular(root, rel+".orig", ofi)
+		if rerr != nil {
+			return EditResult{}, rerr
+		}
+		if err := requireOrigBacksCurrent(root, rel, fi, ob, opts.Generated != nil); err != nil {
+			return EditResult{}, err
+		}
 	}
 
 	var body bytes.Buffer

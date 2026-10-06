@@ -577,3 +577,55 @@ func TestCurrentLinesIgnoresBackup(t *testing.T) {
 		}
 	}
 }
+
+// A .orig that is not the original of the current file must stop a rewrite:
+// the bytes it would replace are saved nowhere (#1313).
+func TestApplyEditRefusesStaleOrig(t *testing.T) {
+	const cur = "[ar:a]\n[source:new]\n[00:01.00]one\n[00:05.00]two\n"
+	for _, tc := range []struct {
+		name, current, orig string
+		generated, want     bool // want: refused
+	}{
+		{name: "same text and tags, other stamps", current: cur, orig: "[ar:a]\n[source:new]\n[00:02.00]one\n[00:06.00]two\n"},
+		{name: "empty cue equals note", current: "[00:01.00]\n[00:05.00]two\n", orig: "[00:01.00]♪\n[00:05.00]two\n"},
+		{name: "aligner marker only in current", current: "[ar:a]\n[timing:canticle-aligner]\n[00:01.00]one\n", orig: "[ar:a]\n[00:01.00]one\n"},
+		{name: "different text", current: cur, orig: "[ar:a]\n[source:new]\n[00:01.00]uno\n[00:05.00]dos\n", want: true},
+		{name: "different tags", current: cur, orig: "[ar:a]\n[source:old]\n[00:01.00]one\n[00:05.00]two\n", want: true},
+		{name: "unstamped line only in current", current: cur + "Credit line\n", orig: cur, want: true},
+		{name: "unstamped line in both", current: cur + "Credit line\n", orig: "Credit line\n" + cur},
+		{name: "generated: stale text is not lost", current: cur, orig: "[00:01.00]uno\n[00:05.00]dos\n", generated: true},
+		{name: "generated: unstamped line is lost", current: cur + "Credit line\n", orig: cur, generated: true, want: true},
+	} {
+		root := t.TempDir()
+		p := filepath.Join(root, "t.lrc")
+		writeFixture(t, p, tc.current)
+		writeFixture(t, p+".orig", tc.orig)
+		opts := EditOptions{Roots: []string{root}, DurationSeconds: 30}
+		var lines []TimedLine
+		var tags []string
+		var err error
+		if tc.generated {
+			opts.Generated = &GeneratedEdit{}
+			lines = []TimedLine{{StartMS: 1000, Text: "one"}, {StartMS: 5000, Text: "two"}}
+		} else {
+			if lines, tags, err = OriginalLines(p, opts.Roots); tc.want {
+				if !errors.Is(err, ErrEditStaleOrig) {
+					t.Errorf("%s: OriginalLines err = %v, want ErrEditStaleOrig", tc.name, err)
+				}
+				lines = []TimedLine{{StartMS: 1000, Text: "x"}}
+			} else if err != nil {
+				t.Fatalf("%s: OriginalLines: %v", tc.name, err)
+			}
+		}
+		_, err = ApplyEdit(p, lines, tags, opts)
+		if tc.want != errors.Is(err, ErrEditStaleOrig) || (!tc.want && err != nil) {
+			t.Errorf("%s: ApplyEdit err = %v, want refused=%v", tc.name, err, tc.want)
+		}
+		if tc.want && readFile(t, p) != tc.current {
+			t.Errorf("%s: a refused edit rewrote the file:\n%s", tc.name, readFile(t, p))
+		}
+		if readFile(t, p+".orig") != tc.orig {
+			t.Errorf("%s: .orig touched", tc.name)
+		}
+	}
+}
