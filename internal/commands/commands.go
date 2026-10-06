@@ -1348,6 +1348,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		// banner. Default is OFF (the #210 gate is unchanged).
 		handlerOpts = append(handlerOpts,
 			server.WithWebUIAuth(bannerCfg, version, webAuth),
+			// Line is the top rung when no enabled lane can serve words (#1350):
+			// read once here from the lane list the worker was built from.
+			server.WithNoWordLane(lyricsDisabled || !providers.AnyWordCapable(laneNames(fetcher, fallbacks))),
 			server.WithOnboarding(onboarding),
 			// Back the Reports workspace with the same DB the rest of serve mode
 			// uses; the handler builds a read-only reports.Repo from it (#211).
@@ -2116,12 +2119,23 @@ func fallbackProviders(cfg config.Config, token, primaryName string, newFetcher 
 // providerGeneration is the cache-invalidation generation for the active lane
 // set (primary + fallbacks), computed over their provider names.
 func providerGeneration(primaryName string, fallbacks []providers.LyricsProvider) int {
+	return providers.Generation(laneNames(namedLane(primaryName), fallbacks))
+}
+
+// namedLane carries only a name, so providerGeneration and the web UI's top
+// rung (#1350) read one lane-name list.
+type namedLane string
+
+func (n namedLane) Name() string { return string(n) }
+
+// laneNames is the primary's name followed by each fallback's.
+func laneNames(primary interface{ Name() string }, fallbacks []providers.LyricsProvider) []string {
 	names := make([]string, 0, len(fallbacks)+1)
-	names = append(names, primaryName)
+	names = append(names, primary.Name())
 	for _, p := range fallbacks {
 		names = append(names, p.Name())
 	}
-	return providers.Generation(names)
+	return names
 }
 
 func providerDisabledIn(name string, disabled []string) bool {

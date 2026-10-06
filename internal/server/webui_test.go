@@ -144,6 +144,44 @@ func TestReportsTopRungFollowsWordSyncMode(t *testing.T) {
 	}
 }
 
+// TestReportsTopRungFollowsWordLanes pins #1350: with word sync on, a line-synced
+// row is Settled while a word-capable lane is enabled and Finished once none is
+// (WithNoWordLane); word_sync_mode = off still wins regardless of lanes.
+func TestReportsTopRungFollowsWordLanes(t *testing.T) {
+	finishedRow := regexp.MustCompile(`href="/queue/finished">Finished</a></td>\s*<td class="mx-cell-mono">(\d+)</td>`)
+	for _, tc := range []struct {
+		name string
+		mode config.WordSyncMode
+		none bool
+		want string
+	}{
+		{"word lane enabled", config.WordSyncModeBoth, false, "0"},
+		{"no word lane", config.WordSyncModeBoth, true, "1"},
+		{"mode off, word lane enabled", config.WordSyncModeOff, false, "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			t.Cleanup(func() { _ = sqlDB.Close() })
+			if _, err := sqlDB.Exec(`INSERT INTO work_queue (artist, title, artist_key, title_key, status, outcome_type, sync_tier)
+				VALUES ('a', 't', 'a', 't', 'done', 'synced', 'line')`); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			cfg := config.Config{}
+			cfg.Output.WordSyncMode = tc.mode
+			h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", WithWebUI(cfg, "vtest"), WithNoWordLane(tc.none), WithReportsDB(sqlDB))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/queue", nil))
+			m := finishedRow.FindStringSubmatch(rec.Body.String())
+			if rec.Code != http.StatusOK || m == nil || m[1] != tc.want {
+				t.Fatalf("GET /queue = %d, Finished row %v, want %s", rec.Code, m, tc.want)
+			}
+		})
+	}
+}
+
 // TestWithoutWebUINoPages confirms that, absent WithWebUI, the handler serves
 // only the JSON API and the web routes 404.
 func TestWithoutWebUINoPages(t *testing.T) {
