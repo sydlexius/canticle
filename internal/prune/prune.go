@@ -143,7 +143,10 @@ type PrunedRow struct {
 // linkGuard carries the library the cross-library link check excludes; a nil
 // lib means the source's own library is unknown, so every link to a file other
 // than the source itself counts.
-type linkGuard struct{ lib *int64 }
+type linkGuard struct {
+	lib   *int64
+	roots []string // available library roots; a link under none cannot be proven gone
+}
 
 // ErrNotRecorded is what a Report hook returns for an AgedOut row whose backup
 // record it could not write and has accounted for itself: the row is kept (an
@@ -894,7 +897,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		case outcomeRelink:
 			toRelink = append(toRelink, cg.classifiedRelink)
 		case outcomePrune:
-			shared, err := p.sharedWithPresentFile(ctx, src, c, libraryID)
+			shared, err := p.sharedWithPresentFile(ctx, src, c, libraryID, roots)
 			if err != nil {
 				return Result{}, err
 			}
@@ -910,7 +913,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 				continue
 			}
 			row := prunedRow(src, c)
-			row.guard = &linkGuard{lib: linkScope(c, libraryID)}
+			row.guard = &linkGuard{lib: linkScope(c, libraryID), roots: roots}
 			toPrune = append(toPrune, row)
 		}
 	}
@@ -2268,17 +2271,22 @@ func linkedElsewhere(ctx context.Context, q queryer, items []workRow, lib *int64
 // link and its telemetry. Only reached for a row already classified for
 // deletion, so the unaffected path pays nothing. A stat that is not a clean
 // not-exist counts as present (retain on doubt).
-func (p *Pruner) sharedWithPresentFile(ctx context.Context, src string, c *candidate, scope *int64) (bool, error) {
+func (p *Pruner) sharedWithPresentFile(ctx context.Context, src string, c *candidate, scope *int64, roots []string) (bool, error) {
 	paths, err := linkedElsewhere(ctx, p.db, c.workItems, linkScope(c, scope), src, false)
 	if err != nil {
 		return false, err
 	}
-	return p.anyPresent(paths), nil
+	return p.anyPresent(paths, roots), nil
 }
 
-// anyPresent reports whether any path is not definitively gone.
-func (p *Pruner) anyPresent(paths []string) bool {
+// anyPresent reports whether any path is not definitively gone. A path under no
+// available root counts as present: an unmounted library's mountpoint reads
+// empty, so its files stat as not-exist without being gone.
+func (p *Pruner) anyPresent(paths, roots []string) bool {
 	for _, fp := range paths {
+		if !underAvailableRoot(fp, roots) {
+			return true
+		}
 		if _, err := p.stat(fp); !errors.Is(err, fs.ErrNotExist) {
 			return true
 		}
@@ -2751,7 +2759,7 @@ func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDe
 			if err != nil {
 				return 0, 0, 0, nil, err
 			}
-			if p.anyPresent(paths) {
+			if p.anyPresent(paths, row.guard.roots) {
 				skipped++
 				continue
 			}
