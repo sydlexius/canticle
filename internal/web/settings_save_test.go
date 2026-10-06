@@ -125,6 +125,51 @@ func TestSaveFieldHappyPath(t *testing.T) {
 	}
 }
 
+// TestSaveFieldOverRetiredBudgetPerCycle pins #1324: saving a setting into a
+// file that still carries the retired word_sync_generate.budget_per_cycle
+// (here wrong-typed) succeeds through the real handler, the page's reload of
+// the file shows the saved value, and the retired key is no longer a field.
+func TestSaveFieldOverRetiredBudgetPerCycle(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	seed := seedConfigTOML + "\n[word_sync_generate]\nbudget_per_cycle = \"lots\"\nconcurrency = 1\n"
+	if err := os.WriteFile(cfgPath, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	u := NewUI(config.Config{}, "v0", WithConfigPath(cfgPath), WithSecretStore(newFakeSecretStore()))
+	mux := http.NewServeMux()
+	u.Register(mux)
+
+	rec := postField(t, mux, url.Values{"path": {"word_sync_generate.concurrency"}, "value": {"2"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save over a leftover: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload after save: %v", err)
+	}
+	if cfg.WordSyncGenerate.Concurrency != 2 {
+		t.Errorf("concurrency = %d, want 2", cfg.WordSyncGenerate.Concurrency)
+	}
+	view := u.buildSettingsView(u.currentConfig(context.Background()))
+	found := false
+	for _, sec := range view.Sections {
+		for _, f := range sec.Fields {
+			if f.Path == "word_sync_generate.concurrency" {
+				found = true
+				if f.EffectiveValue != "2" {
+					t.Errorf("settings page shows concurrency %q, want 2 (reload fell back to the startup snapshot?)", f.EffectiveValue)
+				}
+			}
+			if f.Path == "word_sync_generate.budget_per_cycle" {
+				t.Error("settings page still renders the retired budget_per_cycle field")
+			}
+		}
+	}
+	if !found {
+		t.Error("settings page has no word_sync_generate.concurrency field")
+	}
+}
+
 func TestSaveFieldMalformedFormRejected(t *testing.T) {
 	store := newFakeSecretStore()
 	dir := t.TempDir()

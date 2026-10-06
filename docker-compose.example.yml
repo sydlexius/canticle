@@ -127,10 +127,12 @@ services:
       # The model is loaded at startup, so the first probe must not race it.
       start_period: 60s
 
-  # Optional word-sync forced-alignment sidecar (deploy/aligner, issue #1005),
-  # EXPERIMENTAL and off unless Canticle's [word_sync_generate] is configured
+  # Optional word-sync forced-alignment sidecar (deploy/aligner, issue #1005)
+  # behind the lyric editor's Auto alignment action. EXPERIMENTAL and off
+  # unless Canticle's [word_sync_generate] is configured
   # (MXLRC_WORD_SYNC_GENERATE_ENABLED plus MXLRC_WORD_SYNC_GENERATE_URL:
-  # "http://aligner:8080"). Pick ONE profile; do not start both:
+  # "http://aligner:8080"; MXLRC_WORD_SYNC_GENERATE_CONCURRENCY caps the runs
+  # at once). Pick ONE profile; do not start both:
   #   docker compose --profile aligner up -d       # CPU (amd64 or arm64)
   #   docker compose --profile aligner-gpu up -d   # NVIDIA GPU (amd64 only)
   # Profiled services never start under a plain `docker compose up`.

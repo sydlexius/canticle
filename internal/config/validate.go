@@ -415,11 +415,9 @@ func validatorFor(f FieldSpec) Validator {
 		// every TypeInt field, not specific to this key -- tracked at #1049,
 		// not fixed here.
 		return ValidateIntRange(1, wordSyncRecheckBatchMax)
-	case "word_sync_generate.budget_per_cycle", "word_sync_generate.concurrency":
+	case "word_sync_generate.concurrency":
 		// Strictly positive, matching the env and file re-default rules: a
-		// budget or concurrency of 0 would drain nothing while a future sweep
-		// still fires, the same failure mode timing_validation.revalidate_batch
-		// guards against.
+		// concurrency of 0 would admit no Auto alignment run at all.
 		return ValidatePositiveInt()
 	}
 	switch f.Type {

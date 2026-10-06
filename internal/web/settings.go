@@ -79,7 +79,7 @@ var settingsSectionOrder = []struct {
 	{"providers", "Providers"},
 	{"verification", "Verification"},
 	{"instrumental_detector", "Instrumental Detector"},
-	{"word_sync_generate", "Word-Sync Generate (Experimental)"},
+	{"word_sync_generate", "Auto Alignment (Experimental)"},
 	{"enrichment", "Enrichment"},
 	{"realign", "Realign"},
 	{"timing_validation", "Timing Validation"},
@@ -335,7 +335,6 @@ func buildFieldEnabledBy() map[string]string {
 	}
 	for _, p := range []string{
 		"word_sync_generate.url",
-		"word_sync_generate.budget_per_cycle",
 		"word_sync_generate.concurrency",
 		"word_sync_generate.model",
 	} {
@@ -421,7 +420,7 @@ var boolLabels = map[string][2]string{
 	"output.word_sync":                      {"Highlight each word as it is sung", "Highlight whole lines only"},
 	"verification.enabled":                  {"Verify lyrics against the audio", "Don't verify"},
 	"instrumental_detector.enabled":         {"Detect instrumental tracks", "Don't detect"},
-	"word_sync_generate.enabled":            {"Generate word timings (experimental)", "Don't generate"},
+	"word_sync_generate.enabled":            {"Offer Auto alignment (experimental)", "Off"},
 	"enrichment.enabled":                    {"Look up extra track info first", "Skip the lookup"},
 	"realign.enabled":                       {"Re-attach orphaned lyric files in serve mode", "Off"},
 	"realign.on_scan":                       {"Realign after every scan", "Only on watcher/webhook events"},
@@ -1149,8 +1148,6 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return strconv.FormatBool(cfg.WordSyncGenerate.Enabled)
 	case "word_sync_generate.url":
 		return cfg.WordSyncGenerate.URL
-	case "word_sync_generate.budget_per_cycle":
-		return strconv.Itoa(cfg.WordSyncGenerate.BudgetPerCycle)
 	case "word_sync_generate.concurrency":
 		return strconv.Itoa(cfg.WordSyncGenerate.Concurrency)
 	case "word_sync_generate.model":
@@ -1375,7 +1372,6 @@ var settingsLabels = map[string]string{
 	"instrumental_detector.backfill.cooldown_seconds": "Wait between checks during a background round (seconds)",
 	"word_sync_generate.enabled":                      "Enable the Auto alignment action in the lyric preview (experimental, needs a dedicated aligner sidecar)",
 	"word_sync_generate.url":                          "Aligner sidecar address",
-	"word_sync_generate.budget_per_cycle":             "No effect (belonged to a removed background sweep)",
 	"word_sync_generate.concurrency":                  "Auto alignment runs allowed at once across tracks (a start over the cap is refused as busy)",
 	"word_sync_generate.model":                        "Reserved, not sent yet (the sidecar picks its own model)",
 	"realign.enabled":                                 "Re-attach orphaned lyric files in serve mode",
