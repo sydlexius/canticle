@@ -132,7 +132,18 @@ type PrunedRow struct {
 	// Corrects: an AgedOut source is reported BEFORE its delete; if a row then stays, this second report replaces the first.
 	Corrects bool
 	States   []WorkState // each WorkItemIDs row's state, in the same order
+
+	// guard, when set, makes the delete transaction re-check that no queue row
+	// of this source is linked to a present file in another library (#1293): the
+	// preflight read ran before the transaction, so a scan may have linked one
+	// since. Unexported: a planning detail, never part of a backup record.
+	guard *linkGuard
 }
+
+// linkGuard carries the library the cross-library link check excludes; a nil
+// lib means the source's own library is unknown, so every link to a file other
+// than the source itself counts.
+type linkGuard struct{ lib *int64 }
 
 // ErrNotRecorded is what a Report hook returns for an AgedOut row whose backup
 // record it could not write and has accounted for itself: the row is kept (an
@@ -898,7 +909,9 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 				}
 				continue
 			}
-			toPrune = append(toPrune, prunedRow(src, c))
+			row := prunedRow(src, c)
+			row.guard = &linkGuard{lib: linkScope(c, libraryID)}
+			toPrune = append(toPrune, row)
 		}
 	}
 	// An aged row is deleted only if its file is STILL definitively gone now and
@@ -2197,11 +2210,35 @@ func (p *Pruner) otherLibraryPaths(ctx context.Context, src string, c *candidate
 	if lib == nil {
 		return nil, nil
 	}
+	return linkedElsewhere(ctx, p.db, c.workItems, lib, own, firstOnly)
+}
+
+// linkScope is the library the retain check excludes: the scope of a scoped
+// sweep, else the candidate's own library, nil when neither is known.
+func linkScope(c *candidate, scope *int64) *int64 {
+	if scope != nil {
+		return scope
+	}
+	return c.libraryID
+}
+
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// linkedElsewhere lists the files other than own that the given queue rows are
+// junction-linked to, in libraries other than lib (any library when lib is nil,
+// which the retain check uses when the source's library is unknown).
+func linkedElsewhere(ctx context.Context, q queryer, items []workRow, lib *int64, own string, firstOnly bool) ([]string, error) {
 	var out []string
-	for _, w := range c.workItems {
-		rows, err := p.db.QueryContext(ctx, `SELECT sr.file_path FROM work_queue_scan_results j
+	for _, w := range items {
+		query, args := `SELECT sr.file_path FROM work_queue_scan_results j
             JOIN scan_results sr ON sr.id = j.scan_result_id
-            WHERE j.work_queue_id = ? AND sr.library_id != ? AND sr.file_path != ?`, w.id, *lib, own)
+            WHERE j.work_queue_id = ? AND sr.file_path != ?`, []any{w.id, own}
+		if lib != nil {
+			query, args = query+` AND sr.library_id != ?`, append(args, *lib)
+		}
+		rows, err := q.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("prune: read other libraries' links: %w", err)
 		}
@@ -2232,16 +2269,21 @@ func (p *Pruner) otherLibraryPaths(ctx context.Context, src string, c *candidate
 // deletion, so the unaffected path pays nothing. A stat that is not a clean
 // not-exist counts as present (retain on doubt).
 func (p *Pruner) sharedWithPresentFile(ctx context.Context, src string, c *candidate, scope *int64) (bool, error) {
-	paths, err := p.otherLibraryPaths(ctx, src, c, scope, false)
+	paths, err := linkedElsewhere(ctx, p.db, c.workItems, linkScope(c, scope), src, false)
 	if err != nil {
 		return false, err
 	}
+	return p.anyPresent(paths), nil
+}
+
+// anyPresent reports whether any path is not definitively gone.
+func (p *Pruner) anyPresent(paths []string) bool {
 	for _, fp := range paths {
 		if _, err := p.stat(fp); !errors.Is(err, fs.ErrNotExist) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // replacementOnDisk reads src's directory once and reports whether an age-out
@@ -2697,6 +2739,23 @@ func (p *Pruner) deletePrunedTx(ctx context.Context, pruned []PrunedRow) (scanDe
 
 	for _, row := range pruned {
 		before, done := scanDeleted+workDeleted, PrunedRow{SourcePath: row.SourcePath, AgedOut: row.AgedOut}
+		if row.guard != nil {
+			// Re-checked inside the transaction (#1293): a scan may have linked
+			// another library's present file since the preflight read, and the
+			// DELETE below would cascade that link away. Keep the row whole.
+			items := make([]workRow, len(row.WorkItemIDs))
+			for i, id := range row.WorkItemIDs {
+				items[i].id = id
+			}
+			paths, err := linkedElsewhere(ctx, tx, items, row.guard.lib, row.SourcePath, false)
+			if err != nil {
+				return 0, 0, 0, nil, err
+			}
+			if p.anyPresent(paths) {
+				skipped++
+				continue
+			}
+		}
 		for i, id := range row.WorkItemIDs {
 			res, err := tx.ExecContext(ctx,
 				`DELETE FROM work_queue WHERE id = ? AND status != 'processing' AND source_path = ?`, id, row.SourcePath)
