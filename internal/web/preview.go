@@ -192,7 +192,7 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 			// The values pass the list page's own validator, against the spec of the
 			// bucket named by `from` (so a sort that bucket cannot apply is dropped); a failure (or a
 			// repeated key) drops all of them rather than reflecting any.
-			if st, err := parseQueueViewState(r.URL.Query(), b); err == nil {
+			if st, err := parseQueueViewState(r.URL.Query(), b, u.reports.TopRung()); err == nil {
 				view.BackHref = st.backLinkState().href(string(b), "")
 			}
 			view.BackLabel = "Back to " + queueBucketInfo[b][0]

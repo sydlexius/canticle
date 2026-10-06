@@ -1,6 +1,51 @@
 package ffmpeg
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"os/exec"
+)
+
+// ErrSampleFailed is matched (errors.Is) by an error SampleError builds when
+// ffmpeg RAN and could not decode the file. A caller uses it to tell a per-file
+// defect (retrying the same bytes fails identically) from an outage (classifier
+// down, context canceled, host trouble) that a later cycle may clear (#1149).
+var ErrSampleFailed = errors.New("ffmpeg could not sample the audio file")
+
+// sampleError keeps SampleError's rendered text byte-for-byte while adding the
+// ErrSampleFailed match alongside the wrapped cause for a decode failure.
+type sampleError struct {
+	msg    string
+	cause  error
+	decode bool
+}
+
+func (e *sampleError) Error() string { return e.msg }
+func (e *sampleError) Unwrap() []error {
+	if e.decode {
+		return []error{e.cause, ErrSampleFailed}
+	}
+	return []error{e.cause}
+}
+
+// isDecodeFailure reports whether err is a sampling process that started and
+// exited on its own with a non-zero status: the one shape that says the FILE is
+// the problem. Everything else is the host's and must stay retryable (#1149):
+// a start failure (*os.PathError, exec.ErrNotFound), a signal (an OOM kill, a
+// cgroup limit, an operator kill), exit 126/127 (the nice/ionice wrappers'
+// "could not execute ffmpeg"), and 255 (ffmpeg's exit after catching a
+// termination signal).
+func isDecodeFailure(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil || !exitErr.Exited() {
+		return false
+	}
+	switch exitErr.ExitCode() {
+	case 0, 126, 127, 255:
+		return false
+	}
+	return true
+}
 
 // SampleError builds the error returned when an ffmpeg sample invocation
 // fails, for a subsystem-prefixed caller (e.g. "verification", "detector").
@@ -27,5 +72,6 @@ import "fmt"
 // starts failing rather than deferring must not silently widen a leak. The path
 // belongs in the caller's slog.Warn, never here.
 func SampleError(subsystem string, err error, output string) error {
-	return fmt.Errorf("%s: sample audio with ffmpeg: %w: %s", subsystem, err, BoundOutput(output))
+	msg := fmt.Sprintf("%s: sample audio with ffmpeg: %v: %s", subsystem, err, BoundOutput(output))
+	return &sampleError{msg: msg, cause: err, decode: isDecodeFailure(err)}
 }

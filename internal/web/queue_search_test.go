@@ -188,7 +188,7 @@ func TestQueueViewStateRoundTrip(t *testing.T) {
 	}
 	for _, c := range cases {
 		v, _ := url.ParseQuery(c.raw)
-		got, err := parseQueueViewState(v, reports.BucketPending)
+		got, err := parseQueueViewState(v, reports.BucketPending, reports.TopRungWord)
 		if err != nil || got != c.want {
 			t.Errorf("parse(%q) = %+v, %v; want %+v", c.raw, got, err, c.want)
 		}
@@ -198,7 +198,7 @@ func TestQueueViewStateRoundTrip(t *testing.T) {
 	}
 	for _, bad := range []string{"q=a&q=b", "after=1&after=2", "sort=a&sort=b", "dir=asc&dir=desc"} {
 		v, _ := url.ParseQuery(bad)
-		if _, err := parseQueueViewState(v, reports.BucketPending); err == nil {
+		if _, err := parseQueueViewState(v, reports.BucketPending, reports.TopRungWord); err == nil {
 			t.Errorf("parse(%q) accepted, want error", bad)
 		}
 	}

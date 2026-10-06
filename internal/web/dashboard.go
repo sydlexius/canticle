@@ -307,7 +307,7 @@ func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
 			Label:   b.Label,
 			Value:   strconv.FormatInt(b.Value(qs), 10),
 			Href:    queueBucketHref(b.Key),
-			Tooltip: b.Tooltip,
+			Tooltip: b.tooltip(qs.TopRung),
 		})
 	}
 	return tiles
@@ -324,10 +324,14 @@ func queueBucketHref(b reports.Bucket) string { return "/queue/" + string(b) }
 func buildResultsTiles(b reports.ResultsBreakdown) []templates.StatTile {
 	tiles := make([]templates.StatTile, 0, len(resultBuckets))
 	for _, rb := range resultBuckets {
+		tip := rb.Tooltip
+		if b.TopRung == reports.TopRungLine && rb.LineTooltip != "" {
+			tip = rb.LineTooltip
+		}
 		tiles = append(tiles, templates.StatTile{
 			Label:   rb.Label,
 			Value:   strconv.FormatInt(rb.Value(b), 10),
-			Tooltip: rb.Tooltip,
+			Tooltip: tip,
 		})
 	}
 	return tiles

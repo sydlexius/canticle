@@ -120,7 +120,7 @@ func TestQueueLibrarySelectAndLinksCarryState(t *testing.T) {
 		}
 	}
 	// The preview back link returns to the same library view.
-	st, err := parseQueueViewState(url.Values{"library": {"2"}}, reports.BucketSettled)
+	st, err := parseQueueViewState(url.Values{"library": {"2"}}, reports.BucketSettled, reports.TopRungWord)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,14 +344,14 @@ func TestQueueLaneSelectAndLinksCarryState(t *testing.T) {
 			}
 		}
 	}
-	st, err := parseQueueViewState(url.Values{"lane": {"bogus"}, "library": {"2"}}, reports.BucketSettled)
+	st, err := parseQueueViewState(url.Values{"lane": {"bogus"}, "library": {"2"}}, reports.BucketSettled, reports.TopRungWord)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if h := queuePreviewHref(reports.BucketRow{ID: 7, Previewable: true}, reports.BucketSettled, st); strings.Contains(h, "lane") {
 		t.Errorf("preview link %q carries an invalid lane", h)
 	}
-	st, _ = parseQueueViewState(url.Values{"lane": {"innertube"}}, reports.BucketSettled)
+	st, _ = parseQueueViewState(url.Values{"lane": {"innertube"}}, reports.BucketSettled, reports.TopRungWord)
 	if h := queuePreviewHref(reports.BucketRow{ID: 7, Previewable: true}, reports.BucketSettled, st); !strings.Contains(h, "lane=innertube") {
 		t.Errorf("preview link %q drops the lane", h)
 	}
@@ -504,11 +504,11 @@ func TestQueueReasonSelectAndLinksCarryState(t *testing.T) {
 		}
 	}
 	// A value the bucket does not offer is dropped before any link or preview href.
-	st, err := parseQueueViewState(url.Values{"reason": {"miss"}}, reports.BucketUnavailable)
+	st, err := parseQueueViewState(url.Values{"reason": {"miss"}}, reports.BucketUnavailable, reports.TopRungWord)
 	if err != nil || st.Reason != "" {
 		t.Errorf("reason=miss on unavailable parsed to %q (err %v), want ignored", st.Reason, err)
 	}
-	st, _ = parseQueueViewState(url.Values{"reason": {"miss"}, "library": {"2"}}, reports.BucketDeferred)
+	st, _ = parseQueueViewState(url.Values{"reason": {"miss"}, "library": {"2"}}, reports.BucketDeferred, reports.TopRungWord)
 	if h := queuePreviewHref(reports.BucketRow{ID: 7, Previewable: true}, reports.BucketDeferred, st); !strings.Contains(h, "reason=miss") {
 		t.Errorf("preview link %q drops the reason", h)
 	}

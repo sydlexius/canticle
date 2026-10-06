@@ -4,9 +4,9 @@ package templates
 // bucket with its count and a link to the drill-down. The rows are the
 // dashboard's own queue tiles (same labels, counts, order and hrefs), so the
 // two surfaces cannot disagree. Finished and Settled rows add a hint about the
-// player, since those buckets are the only route to it: Finished tracks are
-// word-synced and open read-only, Settled line-synced tracks can be edited.
-templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
+// player, since those buckets are the only route to it (see queueIndexHint for
+// which bucket holds the editable line-synced tracks under each word sync mode).
+templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musixmatchInactive bool, musixmatchServing bool, lineTop bool) {
 	@Layout("Queue", "/queue", version, reports, "/static/css/queue-index.css", musixmatchInactive, musixmatchServing) {
 		<h1 class="mx-page-title">Queue</h1>
 		<p class="mx-page-subtitle">Every track canticle is working on, by where it stands. Pick a bucket to see its tracks.</p>
@@ -26,7 +26,7 @@ templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musix
 							<td class="mx-cell-mono">{ t.Value }</td>
 							<td>
 								{ t.Tooltip }
-								if hint := queueIndexHint(t.Href); hint != "" {
+								if hint := queueIndexHint(t.Href, lineTop); hint != "" {
 									<span class="mx-queue-index-hint">{ hint }</span>
 								}
 							</td>
@@ -41,12 +41,16 @@ templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musix
 // queueIndexHint is the player hint for a bucket row, or "" for a bucket with
 // no Preview links. Finished rows are word-tier, which the preview page opens
 // read-only (fillPreviewEditor); Settled rows can hold line-synced tracks,
-// which get the offset editor.
-func queueIndexHint(href string) string {
-	switch href {
-	case "/queue/finished":
+// which get the offset editor. With word sync off (lineTop, #1275) the
+// line-synced tracks are Finished, so the editor hint moves with them and
+// Settled holds no previewable track.
+func queueIndexHint(href string, lineTop bool) string {
+	switch {
+	case href == "/queue/finished" && lineTop:
+		return "Synced tracks here can be previewed; line-synced ones can also have their timing edited."
+	case href == "/queue/finished":
 		return "Synced tracks here can be previewed (read-only: they have word timing)."
-	case "/queue/settled":
+	case href == "/queue/settled" && !lineTop:
 		return "Line-synced tracks here can be previewed and their timing edited."
 	}
 	return ""

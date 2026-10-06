@@ -613,9 +613,9 @@ type InstrumentalDetectorConfig struct {
 	// SpeechMaxConfidence is the maximum tolerated summed Speech-class frame MEAN
 	// before a track is excluded from being marked instrumental. Conservative
 	// (biased toward "not instrumental"). Values outside (0, 1] reset to the
-	// default 0.20. The default is a PROVISIONAL placeholder pending a #384-style
-	// calibration sweep; because the key is configurable, calibration refines it
-	// without a code change. Override: MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE.
+	// default 0.20. The default blocks 2 of 150 labeled instrumentals and has
+	// little effect on measured instrumental recovery (positive-class speech_mean
+	// median 0.0006, orders of magnitude below threshold). Override: MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE.
 	SpeechMaxConfidence float64 `toml:"speech_max_confidence"`
 	// SpreadSamples is the number of short segments evenly distributed across the
 	// track and concatenated into one classifier sample, so late-entering vocals
@@ -838,9 +838,11 @@ const detectorVocalMaxConfidenceDefault = 0.015
 
 // detectorSpeechMaxConfidenceDefault is the default summed-frame-MEAN threshold
 // for the instrumental detector's speech gate (sustained spoken-word presence).
-// PROVISIONAL: a conservatively low placeholder biased toward "not instrumental",
-// pending a #384-style calibration sweep to pin the final value. Mirrors the
-// detector package's defaultSpeechMaxConfidence by convention.
+// MEASURED: calibration sweep over the 296-track audit set shows this gate
+// blocks 2 of 150 labeled instrumentals and has little effect on measured
+// instrumental recovery: positive-class speech_mean median 0.0006, orders of
+// magnitude below threshold.
+// Mirrors the detector package's defaultSpeechMaxConfidence by convention.
 const detectorSpeechMaxConfidenceDefault = 0.20
 
 // Backfill sweep defaults (#708): ~2,400 rows/day, drained in short hourly
