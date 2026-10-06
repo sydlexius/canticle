@@ -149,7 +149,9 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 	if song.WordAnswer == models.WordAnswerAbsent {
 		// The gated orchestrator's aggregate: every word lane answered, none
 		// with usable words (a held or unqualified word result included, plan
-		// 2.4 rows 2-3; no automatic path retimes them now, the #1008 Auto action is on demand).
+		// 2.4 rows 2-3). This path never retimes them: an enabled upgrade sweep
+		// may re-fetch an eligible mis_synced row (#1120), and forced alignment
+		// of the existing words is only the on-demand #1008 Auto action.
 		w.consecutiveFailures = 0
 		return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
 	}
