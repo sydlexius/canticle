@@ -442,3 +442,36 @@ func TestUpgradeTrip_MissyncedKeptRecordsPass(t *testing.T) {
 		t.Fatalf("kept pass re-offered after the hold: %v", got)
 	}
 }
+
+// failingCompleteQueue fails Complete over the real DBQueue, standing in for a
+// persistent DB write error at the end of a pass.
+type failingCompleteQueue struct{ *queue.DBQueue }
+
+func (failingCompleteQueue) Complete(context.Context, int64) error {
+	return errors.New("injected complete failure")
+}
+
+// TestUpgradeTrip_CompleteFailureAppliesAttemptCap (#1119): a trip whose
+// Complete fails counts toward upgradeMaxAttempts and settles at the cap
+// instead of retrying as an ordinary failed row forever.
+func TestUpgradeTrip_CompleteFailureAppliesAttemptCap(t *testing.T) {
+	t.Run("below the cap the trip fails and stays armed", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+		r.w.queue = failingCompleteQueue{r.q}
+		r.run(t)
+		if got := r.row(t); got != "failed outcome=synced timing=ok lane=musixmatch misses=14 armed=1" {
+			t.Fatalf("row = %q, want failed and still armed", got)
+		}
+	})
+	t.Run("at the cap the trip settles", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+		r.w.queue = failingCompleteQueue{r.q}
+		if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ? WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+			t.Fatal(err)
+		}
+		r.run(t)
+		if got := r.row(t); got != "done outcome=synced timing=ok lane=musixmatch misses=14 armed=0" {
+			t.Fatalf("row = %q, want settled done describing the written file", got)
+		}
+	})
+}
