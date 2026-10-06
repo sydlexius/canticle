@@ -98,8 +98,7 @@ safe in that direction.
 
 The `vocal_max_confidence = 0.015` default was calibrated on 2026-07-19 against a
 296-track labeled sample scored by the live sidecar: 146 tracks that provider
-lyrics prove are vocal, and 150 provider-labeled instrumentals. The music gate
-was held at `0.90` and the speech gate at `0.20`.
+lyrics prove are vocal, and 150 provider-labeled instrumentals.
 
 **The two classes overlap; there is no clean separating margin.** An earlier
 6-track sample suggested instrumentals topped out near `0.021` while vocals
@@ -128,11 +127,33 @@ recovery. At n=146 a single track is 0.68%, so a 1% ceiling is finer than the
 sample can resolve and pushes the sweep into a strictly worse operating point.
 Treat the sweep as evidence, not as the decision.
 
-**The music gate, not the vocal gate, is now the binding constraint on
-recovery.** 32 of the 150 labeled instrumentals (21%) score `music_sum < 0.90`
-and cannot be recovered at any vocal threshold. The speech gate blocks only 2 of
-150. Further recovery gains have to come from `min_confidence`, which has not
-been calibrated.
+**The music gate is the binding constraint on recovery.** The `min_confidence =
+0.90` default was measured against the same 296-track sample with vocal gate held
+at the calibrated 0.015 and speech gate at 0.20:
+
+| `min_confidence` | False instrumental (of 146 known-vocal) | True instrumental recovered (of 150) |
+|---|---|---|
+| 0.95 | 1.37% | 49.3% |
+| **0.90** (default) | **1.37%** | **54.0%** |
+| 0.85 | 1.37% | 57.3% |
+| 0.80 | 2.05% | 60.0% |
+| 0.70 | 2.05% | 60.0% |
+| 0.50 | 2.05% | 60.7% |
+
+Total headroom is about 7 percentage points, and recovery plateaus hard below
+0.80. Lowering `min_confidence` to 0.85 is free in error rate (identical 1.37%
+false-positive rate) and recovers 3.3 additional percentage points, but that is
+5 tracks out of 150 and is marginal at this sample size. **Do not change the
+default.** The value in this measurement is knowing the recovery ceiling, not
+moving the constant.
+
+An earlier analysis claimed the music gate capped recovery at roughly 79%. That
+figure was inferred from 32 of 150 negatives failing the `music_sum >= 0.90`
+gate, not directly measured. The sweep shows the real ceiling is about 61%:
+most of those 32 rows do not become recoverable when the gate lowers, because
+they fail on other grounds too. The speech gate blocks 2 of 150 and is inert at
+current levels (positive-class `speech_mean` median 0.0006, orders of magnitude
+below the 0.20 threshold).
 
 ### Applying a threshold change to rows already decided
 
@@ -243,6 +264,13 @@ All keys live under `[instrumental_detector]`; each has an
 **The defaults are the calibrated values - do not change the thresholds without a
 specific reason.** They were tuned against real audio (#384) to maximize the
 margin between instrumentals and vocals.
+
+**Recovery is ceiling-bound by the detector, not by the thresholds.** The three
+gates trade against each other in a narrow band (7pp headroom), and the recovery
+ceiling is a property of the acoustic model and feature set rather than any
+constant. The goal of recovering sustained melodic instrumentals that read faintly
+as vocals (#510) is not reachable by threshold tuning alone; it requires a
+different model or different input features.
 
 If you do tune:
 
