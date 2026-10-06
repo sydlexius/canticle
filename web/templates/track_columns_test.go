@@ -97,7 +97,7 @@ func TestTrackTablesArtistAlbumTitle(t *testing.T) {
 		{"reports recent", tableRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
 		{"reports instrumentals", tableInstrumentals([]InstrumentalRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
 		{"failure group", FailureGroupRows(FailureGroupView{Rows: []FailureItemRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}})},
-		{"review queue", tableReviewQueue([]ReviewQueueRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
+		{"review queue", tableReviewQueue([]ReviewQueueRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,7 +147,7 @@ func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
 		{"reports recent", tableRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"reports instrumentals", tableInstrumentals([]InstrumentalRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"failure group", FailureGroupRows(FailureGroupView{Rows: []FailureItemRow{{Artist: tcArtist, Title: tcTitle}}})},
-		{"review queue", tableReviewQueue([]ReviewQueueRow{{Artist: tcArtist, Title: tcTitle}})},
+		{"review queue", tableReviewQueue([]ReviewQueueRow{{Artist: tcArtist, Title: tcTitle}}, "")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

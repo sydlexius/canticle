@@ -123,10 +123,29 @@ const retiredPredicate = `COALESCE(last_error, '') = '` + queue.UnresolvableGone
 //
 // A prune-retired row (retiredPredicate) is excluded: it keeps the stale
 // tier it had, but its source is gone and it is not a finished result.
-const wordTierPredicate = `sync_tier = 'word'
-                      AND NOT ` + retiredPredicate + `
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
+const wordTierPredicate = wordTierFilePredicate + `
+                      AND ` + timingVerdictExclusion
+
+// tierRecordedPredicate is the part of "this row's recorded tier still
+// describes its file" that both tier predicates and previewableFilePredicate
+// share: not prune-retired, not mid word-recheck. Defined once so the copies
+// cannot drift. No leading AND/WHERE.
+const tierRecordedPredicate = `NOT ` + retiredPredicate + `
                       AND COALESCE(word_timing_state, '') <> 'queued'`
+
+// timingVerdictExclusion is the timing-verdict half of the tier predicates: a
+// row the timing guard flagged is not at its recorded tier. The review queue
+// lists exactly such rows, so previewableFilePredicate omits it.
+const timingVerdictExclusion = `COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')`
+
+// wordTierFilePredicate and lineTierFilePredicate are the tier predicates
+// minus the verdict exclusion; each tier predicate is its base AND the verdict
+// exclusion, and previewableFilePredicate is the OR of the two bases.
+const wordTierFilePredicate = `sync_tier = 'word'
+                      AND ` + tierRecordedPredicate
+
+const lineTierFilePredicate = `sync_tier = 'line'
+                      AND ` + tierRecordedPredicate
 
 // TierUnknownPredicate is the ONE definition of the dashboard's "Synced (tier
 // unknown)" rows (#1143): the tier-unknown arm of ResultsBreakdown, exported so the
@@ -831,6 +850,8 @@ func (r *Repo) groupedReasons(ctx context.Context, status string) ([]FailureGrou
 // ReviewQueueItem is one work_queue row whose synced-lyric timing verdict needs
 // operator attention: a demotion (mis_synced) or a quarantine (categorical).
 type ReviewQueueItem struct {
+	// ID is the work_queue row id, the key of the /preview/{id} player.
+	ID     int64
 	Artist string
 	Title  string
 	Album  string
@@ -846,7 +867,23 @@ type ReviewQueueItem struct {
 	Ratio float64
 	// EvaluatedAt is when the timing verdict was reached (work_queue.evaluated_at).
 	EvaluatedAt time.Time
+	// Previewable reports a row whose recorded tier is a settled word/line one
+	// (previewableFilePredicate); the file may still be gone. Decided in
+	// SQL from the row, never by touching the disk (the #684 rule).
+	Previewable bool
 }
+
+// previewableFilePredicate is "the row's recorded state is a settled synced
+// word/line tier": the word/line tier predicates MINUS their timing-verdict
+// exclusion, built from the same bases. The review queue lists only rows whose
+// timing_outcome is mis_synced or categorical, which the tier predicates
+// always exclude, so reusing them verbatim would never offer the player here.
+// It reflects the RECORDED tier only: a row remediated before a remediation
+// cleared sync_tier (#1130) and not yet backfilled by `scan reconcile-remediated`
+// can keep a stale tier with its .lrc gone, and the player then 404s. No
+// per-row stat decides it (the #684 rule). No leading AND/WHERE.
+const previewableFilePredicate = `status = 'done' AND outcome_type = 'synced'
+                      AND ((` + wordTierFilePredicate + `) OR (` + lineTierFilePredicate + `))`
 
 // ReviewQueue returns the work_queue rows the timing guard flagged for
 // operator review: 'mis_synced' (demoted to .txt, words kept) and
@@ -874,7 +911,8 @@ type ReviewQueueItem struct {
 // already carry artist/title/path for the same reason.
 func (r *Repo) ReviewQueue(ctx context.Context) ([]ReviewQueueItem, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT artist, title, album, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at
+		`SELECT id, artist, title, album, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at,
+                COALESCE(`+previewableFilePredicate+`, 0)
          FROM work_queue
          WHERE timing_outcome IN ('mis_synced', 'categorical')
          ORDER BY evaluated_at DESC, id DESC`,
@@ -892,7 +930,7 @@ func (r *Repo) ReviewQueue(ctx context.Context) ([]ReviewQueueItem, error) {
 			ratio          sql.NullFloat64
 			evaluatedAt    sql.NullString
 		)
-		if err := rows.Scan(&it.Artist, &it.Title, &it.Album, &it.Outcome, &overrunSeconds, &ratio, &evaluatedAt); err != nil {
+		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Outcome, &overrunSeconds, &ratio, &evaluatedAt, &it.Previewable); err != nil {
 			return nil, fmt.Errorf("reports: scan review queue item: %w", err)
 		}
 		// The 0.0-on-NULL fallback is UNREACHABLE for this report's filter, and

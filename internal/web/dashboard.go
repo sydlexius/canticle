@@ -328,9 +328,14 @@ func buildResultsTiles(b reports.ResultsBreakdown) []templates.StatTile {
 		if b.TopRung == reports.TopRungLine && rb.LineTooltip != "" {
 			tip = rb.LineTooltip
 		}
+		href := ""
+		if rb.Href != nil {
+			href = rb.Href(b.TopRung)
+		}
 		tiles = append(tiles, templates.StatTile{
 			Label:   rb.Label,
 			Value:   strconv.FormatInt(rb.Value(b), 10),
+			Href:    href,
 			Tooltip: tip,
 		})
 	}

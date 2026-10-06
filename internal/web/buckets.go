@@ -1,6 +1,8 @@
 package web
 
 import (
+	"strconv"
+
 	"github.com/sydlexius/canticle/internal/reports"
 )
 
@@ -93,6 +95,32 @@ type resultBucket struct {
 	// LineTooltip, when set, replaces Tooltip under reports.TopRungLine (#1275).
 	LineTooltip string
 	Value       func(reports.ResultsBreakdown) int64
+	// Href is the Work Queue view listing exactly this tile's population under
+	// rung top, or "" when no bucket + chip combination yields it (#1237). A
+	// near-miss filter is never linked: the list's total must equal the tile's
+	// count, which TestResultTilesLinkToEqualPopulations pins per rung.
+	Href func(top reports.TopRung) string
+}
+
+// resultsHref is the /queue/{bucket} URL carrying the given chip state. It is
+// built through queueViewState.href, the page's own serializer, so the link
+// and what parseQueueViewState reads back cannot drift.
+func resultsHref(b reports.Bucket, s queueViewState) string { return s.href(string(b), "") }
+
+// wrongTimingQueueHref is the Work Queue's Mis-synced view: the Settled bucket
+// with the Mis-synced chip, which Settled offers under both rungs.
+func wrongTimingQueueHref() string {
+	return resultsHref(reports.BucketSettled, queueViewState{MisSynced: true})
+}
+
+// reviewPreviewHref is the player link for a review-queue row, "" unless its
+// recorded tier is a settled word/line one (the file may still be gone). No `from`: the row is not
+// listed in a bucket, so the player's Back falls back to /queue.
+func reviewPreviewHref(q reports.ReviewQueueItem) string {
+	if !q.Previewable {
+		return ""
+	}
+	return "/preview/" + strconv.FormatInt(q.ID, 10)
 }
 
 // resultBuckets is the ONE definition of the dashboard Results row (#599). It
@@ -107,12 +135,30 @@ var resultBuckets = []resultBucket{
 		Label:   "Word-synced",
 		Tooltip: "Synced lyrics with word-level timing on disk. Terminal: nothing further to gain from a re-fetch or word-sync recheck.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.WordSynced },
+		// Finished is the word tier only under the word rung (the same
+		// wordTierPredicate). Under the line rung Finished also holds the line
+		// tier and no word chip exists, so the population has no exact view.
+		Href: func(top reports.TopRung) string {
+			if top == reports.TopRungLine {
+				return ""
+			}
+			return resultsHref(reports.BucketFinished, queueViewState{})
+		},
 	},
 	{
 		Label:       "Line-synced",
 		Tooltip:     "The .lrc on disk has line-level timing and no word timing. It may still be upgraded.",
 		LineTooltip: "The .lrc on disk has line-level timing and no word timing: the best result with word sync off.",
 		Value:       func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
+		// The Line-synced chip lives on Settled under the word rung and moves to
+		// Finished under the line rung (reports.BucketChips).
+		Href: func(top reports.TopRung) string {
+			b := reports.BucketSettled
+			if top == reports.TopRungLine {
+				b = reports.BucketFinished
+			}
+			return resultsHref(b, queueViewState{Tier: reports.TierLine})
+		},
 	},
 	{
 		Label:   "Unsynced",
