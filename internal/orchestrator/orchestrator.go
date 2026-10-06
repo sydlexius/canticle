@@ -334,7 +334,10 @@ type dispatchResult struct {
 	bestQuality Quality
 	topErr      error
 	topClass    OutcomeClass
-	consulted   int
+	// hollowErr is the first hollow-body error seen (#1131), kept apart from
+	// the single ranked topErr so a higher-ranked non-provider error cannot hide it.
+	hollowErr error
+	consulted int
 	// held is the first result that is SUITABLE but that the timing guard would
 	// demote to .txt (MisSynced / degenerate, #950): the result a build before
 	// #950 committed on the spot. It outranks every retained (non-suitable)
@@ -428,16 +431,25 @@ func (r *dispatchResult) retain(song models.Song, laneName string, q Quality) bo
 // rankErr keeps err if its class outranks the current top error (Gap 4).
 // Whether the erroring lane answered at all is the caller's noteUntried.
 func (r *dispatchResult) rankErr(err error, class OutcomeClass) {
+	hollow := errors.Is(err, musixmatch.ErrTruncatedResponse)
+	if hollow && r.hollowErr == nil {
+		r.hollowErr = err
+	}
 	if r.topErr == nil || class.precedence() > r.topClass.precedence() {
 		r.topErr, r.topClass = err, class
-		return
-	}
-	// A hollow body is the one benign miss that is not an answer (#1131); on a
-	// tie it must not be masked by another lane's clean miss, or the worker
-	// cannot tell the post-settle pass was never judged.
-	if class == r.topClass && class == OutcomeBenignMiss &&
-		errors.Is(err, musixmatch.ErrTruncatedResponse) && !errors.Is(r.topErr, musixmatch.ErrTruncatedResponse) {
+	} else if class == r.topClass && class == OutcomeBenignMiss && hollow &&
+		!errors.Is(r.topErr, musixmatch.ErrTruncatedResponse) {
+		// A hollow body is the one benign miss that is not an answer (#1131); on a
+		// tie it must not be masked by another lane's clean miss, or the worker
+		// cannot tell the post-settle pass was never judged.
 		r.topErr = err
+	}
+	// A non-provider lane's outage / not-ready (precedence 2) must not mask a
+	// provider's hollow body either: the detector says nothing about the lyric.
+	// Provider transport/auth/unavailable (precedence >= 3) still win.
+	if r.hollowErr != nil && r.topClass.precedence() > OutcomeBenignMiss.precedence() &&
+		r.topClass.precedence() <= OutcomeLaneOutage.precedence() {
+		r.topErr, r.topClass = r.hollowErr, OutcomeBenignMiss
 	}
 }
 
