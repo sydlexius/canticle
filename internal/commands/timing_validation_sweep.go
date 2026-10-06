@@ -11,6 +11,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -420,36 +421,16 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 	return res, nil
 }
 
-// stampAttempts and stampBackoff bound the in-process retry of a row stamp that
-// follows an already-applied remediation (#1136). The filesystem change cannot
-// be redone and a later pass cannot rediscover it (the sidecar is gone), so a
-// transient write failure (a busy or locked database) is retried before the
-// stamp is given up on. Variables, not constants, so a test can shrink them.
-var (
-	stampAttempts = 4
-	stampBackoff  = 250 * time.Millisecond
-)
+// stampAttempts bounds the in-process retry of a row stamp that follows an
+// already-applied remediation (#1136). The filesystem change cannot be redone
+// and a later pass cannot rediscover it (the sidecar is gone), so a transient
+// SQLITE_BUSY is retried (db.RetryOnBusy, geometric backoff); any other error
+// is permanent and returns at once, so a bad batch is not slowed per row.
+const stampAttempts = 4
 
-// retryStamp runs op up to stampAttempts times, doubling stampBackoff between
-// tries, and returns the last error. A canceled context stops it at once.
+// retryStamp runs op, retrying only on SQLITE_BUSY up to stampAttempts times.
 func retryStamp(ctx context.Context, op func() error) error {
-	var err error
-	delay := stampBackoff
-	for i := 0; i < stampAttempts; i++ {
-		if err = op(); err == nil {
-			return nil
-		}
-		if i == stampAttempts-1 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return err
-		case <-time.After(delay):
-		}
-		delay *= 2
-	}
-	return err
+	return db.RetryOnBusy(ctx, stampAttempts, op)
 }
 
 // holdEditedRows strips the planned remediation from every sidecar that ANY

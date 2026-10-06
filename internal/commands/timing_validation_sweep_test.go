@@ -1258,15 +1258,13 @@ func TestSweepApplyBackupFailureTouchesNothing(t *testing.T) {
 // first stamp writes fail; the cycle retries and the row is still recorded.
 func TestRunCycleRetriesAFailedRowStamp(t *testing.T) {
 	ctx := context.Background()
-	old := stampBackoff
-	stampBackoff = time.Millisecond
-	t.Cleanup(func() { stampBackoff = old })
+	busy := triggerBusyErr(t)
 	job, q, _, _ := sweepFixture(t, nil)
 	calls := 0
 	job.setTiming = func(ctx context.Context, id int64, rec queue.TimingRecord) error {
 		calls++
 		if calls <= 2 {
-			return errors.New("injected stamp failure")
+			return busy
 		}
 		return q.SetTimingOutcome(ctx, id, rec)
 	}

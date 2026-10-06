@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
@@ -787,45 +786,84 @@ func TestRevalidateApplyLookupFailureExitsNonZero(t *testing.T) {
 	}
 }
 
-// failFirstStamps fails the first n stamp writes against the real queue, then
-// delegates, modeling a transient database error after a remediation applied.
+// triggerBusyErr returns a real SQLITE_BUSY from the driver by contending two
+// connections on one file.
+func triggerBusyErr(t *testing.T) error {
+	t.Helper()
+	dsn := filepath.Join(t.TempDir(), "busy.db") + "?_pragma=busy_timeout(0)"
+	open := func() *sql.DB {
+		d, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		d.SetMaxOpenConns(1)
+		t.Cleanup(func() { _ = d.Close() })
+		return d
+	}
+	a, b := open(), open()
+	if _, err := a.ExecContext(t.Context(), "CREATE TABLE t (id INTEGER)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	tx, err := a.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	if _, err := tx.ExecContext(t.Context(), "INSERT INTO t (id) VALUES (1)"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err = b.ExecContext(t.Context(), "INSERT INTO t (id) VALUES (2)")
+	if !db.IsSQLiteBusy(err) {
+		t.Fatalf("expected SQLITE_BUSY, got %v", err)
+	}
+	return err
+}
+
+// failFirstStamps fails the first n stamp writes with err against the real
+// queue, then delegates, modeling a database error after a remediation applied.
 type failFirstStamps struct {
 	*queue.DBQueue
 	n     int
+	err   error
 	calls int
 }
 
 func (f *failFirstStamps) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec queue.TimingRecord) (bool, error) {
 	f.calls++
 	if f.calls <= f.n {
-		return false, errors.New("injected stamp failure")
+		return false, f.err
 	}
 	return f.DBQueue.SetTimingOutcomeIfIdle(ctx, id, rec)
 }
 
-// TestStampRemediatedRowsRetriesATransientStampFailure (#1136): a stamp write
-// that fails after the remediation applied is retried and lands; one that never
-// succeeds is counted failed.
-func TestStampRemediatedRowsRetriesATransientStampFailure(t *testing.T) {
-	old := stampBackoff
-	stampBackoff = time.Millisecond
-	t.Cleanup(func() { stampBackoff = old })
+// TestStampRemediatedRowsRetriesOnlyBusyStampFailures (#1136): a SQLITE_BUSY
+// stamp after the remediation applied is retried and lands; a permanent error is
+// attempted exactly once and counted failed.
+func TestStampRemediatedRowsRetriesOnlyBusyStampFailures(t *testing.T) {
+	busy := triggerBusyErr(t)
 	for _, tc := range []struct {
 		name       string
 		failures   int
+		err        error
+		wantCalls  int
 		wantStamp  int
 		wantFailed int
 		wantRow    string
 	}{
-		{"transient", 2, 1, 0, "categorical"},
-		{"permanent", stampAttempts, 0, 1, ""},
+		{"busy then success", 2, busy, 3, 1, 0, "categorical"},
+		{"busy exhausted", 99, busy, stampAttempts, 0, 1, ""},
+		{"permanent", 99, errors.New("injected permanent failure"), 1, 0, 1, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgPath, _, lrc := revalidateFixture(t, "[00:10.00]alpha\n")
 			audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
 			q := seedRevalidateRow(t, cfgPath, audio)
 			findings := []revalidate.Finding{{Path: "/x/Track.lrc", AudioPath: audio, Outcome: timing.Categorical, Action: "quarantine"}}
-			stamped, _, failed := stampRemediatedRows(t.Context(), &failFirstStamps{DBQueue: q, n: tc.failures}, findings, map[string]struct{}{})
+			fq := &failFirstStamps{DBQueue: q, n: tc.failures, err: tc.err}
+			stamped, _, failed := stampRemediatedRows(t.Context(), fq, findings, map[string]struct{}{})
+			if fq.calls != tc.wantCalls {
+				t.Errorf("stamp attempts = %d, want %d", fq.calls, tc.wantCalls)
+			}
 			if stamped != tc.wantStamp || failed != tc.wantFailed {
 				t.Errorf("stamped=%d failed=%d, want %d and %d", stamped, failed, tc.wantStamp, tc.wantFailed)
 			}
