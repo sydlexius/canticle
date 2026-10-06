@@ -4027,15 +4027,14 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	return nil
 }
 
+// defaultConfigPath is where `config set` writes when no --config is given.
+// It delegates to config.ResolveConfigPath so the write target is the same
+// file serve and `config get` read, including /config under MXLRC_DOCKER (#980).
 func defaultConfigPath() string {
-	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
-		return filepath.Join(base, "mxlrcgo-svc", "config.toml")
+	if p := config.ResolveConfigPath(""); p != "" {
+		return p
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join("config.toml")
-	}
-	return filepath.Join(home, ".config", "mxlrcgo-svc", "config.toml")
+	return "config.toml"
 }
 
 func splitCSV(s string) []string {
