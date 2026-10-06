@@ -106,6 +106,7 @@ func TestRedactURIValidatesAllowlistedValues(t *testing.T) {
 		{"dir invalid", "/queue/pending?dir=sideways", "/queue/pending?dir=REDACTED"},
 		{"ro sort valid", "/reports/recent-outcomes?ro_sort=completed", "/reports/recent-outcomes?ro_sort=completed"},
 		{"ro sort invalid", "/reports/recent-outcomes?ro_sort=SECRETARTIST", "/reports/recent-outcomes?ro_sort=REDACTED"},
+		{"fg dir invalid", "/reports/failure-group?fg_dir=sideways", "/reports/failure-group?fg_dir=REDACTED"},
 		{"rq dir desc", "/reports/review-queue?rq_dir=desc", "/reports/review-queue?rq_dir=desc"},
 		{"in sort valid", "/reports/instrumental-inventory?in_sort=detect", "/reports/instrumental-inventory?in_sort=detect"},
 		{"from valid", "/preview/3?from=failed", "/preview/3?from=failed"},

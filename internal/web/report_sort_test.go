@@ -154,6 +154,63 @@ func TestReportSortReviewQueue(t *testing.T) {
 	}
 }
 
+// TestFailureGroupSort pins that a failure group sorts by the requested column
+// and direction, and that its header links address the same group.
+func TestFailureGroupSort(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	exec := func(q string, a ...any) error { _, err := sqlDB.ExecContext(context.Background(), q, a...); return err }
+	const reason = "musixmatch: unexpected matcher status_code 500"
+	// Default order is updated_at DESC, id DESC: Cc (newest id), Aa, Bb is the
+	// reverse of insertion, so insert Bb, Aa, Cc.
+	for _, title := range []string{"Bb", "Aa", "Cc"} {
+		seedFailureRow(t, title, "failed", reason, exec)
+	}
+	mux := newReportsUIServer(t, sqlDB)
+	get := func(extra string) string {
+		q := url.Values{"status": {"failed"}, "signature": {reason}}.Encode()
+		rec := getFailureGroupQuery(t, mux, q+extra)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		return rec.Body.String()
+	}
+	assertOrder(t, "default", get(""), "Cc", "Aa", "Bb")
+	body := get("&fg_sort=title&fg_dir=asc")
+	assertOrder(t, "title asc", body, "Aa", "Bb", "Cc")
+	if !strings.Contains(body, `hx-target="closest td"`) || !strings.Contains(body, "fg_sort=title") {
+		t.Error("sort links should be htmx GETs into the group's cell under the fg_ namespace")
+	}
+	// The group's identity travels with every sort link.
+	if !strings.Contains(body, "status=failed") || !strings.Contains(body, "signature=") {
+		t.Error("sort links lost the group's status/signature")
+	}
+	for _, q := range badSorts("fg") {
+		assertOrder(t, q, get("&"+q), "Cc", "Aa", "Bb")
+	}
+}
+
+// TestFailureGroupSortKeepsRowSet pins that sorting a truncated group arranges
+// the rows it already shows (the newest page) and never swaps in others.
+func TestFailureGroupSortKeepsRowSet(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	exec := func(q string, a ...any) error { _, err := sqlDB.ExecContext(context.Background(), q, a...); return err }
+	const reason = "musixmatch: unexpected matcher status_code 500"
+	// "A-old" sorts first by title but is the OLDEST row, outside the shown page.
+	seedFailureRow(t, "A-old", "failed", reason, exec)
+	for i := 0; i < failureGroupPageSize; i++ {
+		seedFailureRow(t, "Z"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+string(rune('a'+i/26)), "failed", reason, exec)
+	}
+	mux := newReportsUIServer(t, sqlDB)
+	q := url.Values{"status": {"failed"}, "signature": {reason}}.Encode()
+	body := getFailureGroupQuery(t, mux, q+"&fg_sort=title&fg_dir=asc").Body.String()
+	if strings.Contains(body, "A-old") {
+		t.Error("sorting pulled in a row outside the newest page")
+	}
+	if !strings.Contains(body, "Showing the newest") {
+		t.Error("truncation note missing")
+	}
+}
+
 // TestDashboardHasNoSortLinks pins that the Dashboard tables, which share
 // queries and look with the Reports tables, stay fixed-order.
 func TestDashboardHasNoSortLinks(t *testing.T) {

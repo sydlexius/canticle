@@ -9,6 +9,10 @@ type SortHeaderView struct {
 	Label string
 	Href  string
 	Aria  string
+	// HxTarget, when set, makes the link an htmx GET swapped into that target
+	// (an htmx selector such as "closest td"), for a table that is itself a
+	// fragment (a failure group's rows); Href stays the no-JS fallback.
+	HxTarget string
 }
 
 // SortHeader renders one header cell: a link that toggles the sort, aria-sort on
@@ -24,7 +28,15 @@ templ SortHeader(h SortHeaderView) {
 		if h.Href == "" {
 			{ h.Label }
 		} else {
-			<a class="mx-sort-link" href={ templ.SafeURL(h.Href) }>
+			<a
+				class="mx-sort-link"
+				href={ templ.SafeURL(h.Href) }
+				if h.HxTarget != "" {
+					hx-get={ h.Href }
+					hx-target={ h.HxTarget }
+					hx-swap="innerHTML"
+				}
+			>
 				{ h.Label }
 				if h.Aria == "ascending" {
 					<span class="mx-sort-arrow" aria-hidden="true">&#9650;</span>

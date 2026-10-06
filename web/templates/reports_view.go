@@ -148,6 +148,7 @@ type FailureItemRow struct {
 // FailureGroupView is the expanded-group fragment. Truncated says the group
 // holds more rows than Rows shows.
 type FailureGroupView struct {
+	Columns   []SortHeaderView
 	Rows      []FailureItemRow
 	Truncated bool
 }
