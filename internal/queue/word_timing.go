@@ -432,9 +432,7 @@ func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string,
 		if err := requireAffected(res, "queue: settle word recheck"); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE scan_results SET status = 'done'
-             WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-               AND status != 'done'`, id); err != nil {
+		if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 			return fmt.Errorf("queue: settle word recheck scan_results writeback: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -485,9 +483,7 @@ func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter tim
 			return fmt.Errorf("queue: defer word recheck id %d: %w", id, err)
 		}
 		if released {
-			if _, err := tx.ExecContext(ctx, `UPDATE scan_results SET status = 'done'
-             WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-               AND status != 'done'`, id); err != nil {
+			if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 				return fmt.Errorf("queue: release word recheck scan_results writeback: %w", err)
 			}
 		}

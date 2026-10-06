@@ -721,13 +721,7 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
 		return err
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return fmt.Errorf("queue: complete scan_results writeback: %w", err)
 	}
 
@@ -890,13 +884,7 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
 		return q.classifyNoSettle(ctx, tx, id)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return SettleFailed, fmt.Errorf("queue: settle instrumental scan_results writeback: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -984,13 +972,7 @@ func (q *DBQueue) settleGuardRejectedOnce(ctx context.Context, id int64, reason 
 		return q.classifyNoSettle(ctx, tx, id)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return SettleFailed, fmt.Errorf("queue: settle guard-rejected scan_results writeback: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1204,8 +1186,14 @@ func (q *DBQueue) Release(ctx context.Context, id int64) error {
 // Processing and completed rows are preserved to avoid racing active workers or
 // losing history for work that has already finished.
 func (q *DBQueue) Cleanup(ctx context.Context, inputs models.Inputs) (int64, error) {
-	res, err := q.db.ExecContext(ctx,
-		`DELETE FROM work_queue
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("queue: cleanup begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM work_queue
          WHERE artist_key = ?
            AND title_key = ?
            AND status IN ('pending', 'failed', 'deferred')`+notWordRecheckQueued,
@@ -1215,9 +1203,45 @@ func (q *DBQueue) Cleanup(ctx context.Context, inputs models.Inputs) (int64, err
 	if err != nil {
 		return 0, fmt.Errorf("queue: cleanup: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("queue: cleanup rows affected: %w", err)
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("queue: cleanup scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("queue: cleanup rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("queue: cleanup close: %w", err)
+	}
+
+	var n int64
+	for _, id := range ids {
+		// Reset the results this row alone kept alive before deleting it, or a
+		// scan (which offers only pending results) never revisits them (#1038).
+		if err := resetScanResultsPending(ctx, tx, id); err != nil {
+			return 0, fmt.Errorf("queue: cleanup scan_results reset: %w", err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM work_queue
+             WHERE id = ?
+               AND status IN ('pending', 'failed', 'deferred')`+notWordRecheckQueued, id)
+		if err != nil {
+			return 0, fmt.Errorf("queue: cleanup: %w", err)
+		}
+		c, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("queue: cleanup rows affected: %w", err)
+		}
+		n += c
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("queue: cleanup commit: %w", err)
 	}
 	return n, nil
 }
@@ -1490,13 +1514,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
 		return WorkItem{}, fmt.Errorf("queue: retire miss: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return WorkItem{}, fmt.Errorf("queue: retire miss scan_results writeback: %w", err)
 	}
 
@@ -3426,6 +3444,12 @@ func cancelByLibrary(ctx context.Context, tx *sql.Tx, libraryID int64, dryRun bo
 			// per-row write during which the worker could move the row to
 			// 'processing'. A 0 affected-rows result means the row moved on
 			// and we skip counting it without raising an error.
+			// Reset the results this row alone kept alive first (#1038): the
+			// delete cascades the junction away, and a non-pending result is
+			// never offered to a scan again.
+			if err := resetScanResultsPending(ctx, tx, c.id); err != nil {
+				return 0, 0, fmt.Errorf("queue: cancel scan_results reset row %d: %w", c.id, err)
+			}
 			res, err := tx.ExecContext(ctx,
 				`DELETE FROM work_queue
                  WHERE id = ?

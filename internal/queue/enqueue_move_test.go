@@ -172,6 +172,14 @@ func TestGoneSourceMoveScanResultsAndRaces(t *testing.T) {
 			want: ".mp3|processing|.mp3|-|.mp3:processing,.flac:processing"},
 		{name: "vanished scan_result in flight under another row is kept", setup: otherInFlight,
 			want: ".flac|done|.flac|.flac|.mp3:processing,.flac:done"},
+		// #1038: the incoming scan_result is also linked to another live row,
+		// so the moved row's settle must not mark it done.
+		{name: "incoming scan_result owned by a live sibling stays unsettled",
+			setup: `INSERT INTO work_queue (artist, title, artist_key, title_key, outdir, filename, status)
+             VALUES ('B', 'B', 'b', 'b', '/x', 'b.lrc', 'pending');
+         INSERT INTO work_queue_scan_results SELECT wq.id, sr.id FROM work_queue wq, scan_results sr
+             WHERE wq.artist_key = 'b' AND sr.file_path LIKE '%.flac'`,
+			want: ".flac|done|.flac|.flac|.flac:processing"},
 		{name: "repoint links the junction; an unsettled row leaves the scan_result unsettled",
 			extra: "status = 'pending', upgrade_queued = 1", want: ".flac|pending|.flac|.flac|.flac:processing"},
 	}
