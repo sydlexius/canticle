@@ -29,7 +29,7 @@ func (f *fakeAuto) AlignFile(context.Context, io.Reader, []string) (aligner.Resu
 
 // runFake is an AutoAligner whose AlignFile blocks on hold (when set) until it
 // is closed or the run's context ends (deaf: only until it is closed), then
-// answers err or two words.
+// answers err and res, or two zero words when res is nil.
 type runFake struct {
 	fakeAuto
 	mu     sync.Mutex
@@ -39,6 +39,7 @@ type runFake struct {
 	audio  string
 	lines  []string
 	err    error
+	res    *aligner.Result
 	hold   chan struct{}
 	deaf   bool
 	pre    func() // runs first
@@ -56,7 +57,7 @@ func (f *runFake) AlignFile(ctx context.Context, audio io.Reader, lines []string
 	f.mu.Lock()
 	f.aligns.Add(1)
 	f.audio, f.lines = string(b), lines
-	err, hold := f.err, f.hold
+	err, hold, res := f.err, f.hold, f.res
 	f.mu.Unlock()
 	if hold != nil && f.deaf {
 		<-hold
@@ -67,6 +68,9 @@ func (f *runFake) AlignFile(ctx context.Context, audio io.Reader, lines []string
 			f.ended.Add(1)
 			return aligner.Result{}, fmt.Errorf("aligner: %w", ctx.Err())
 		}
+	}
+	if res != nil {
+		return *res, err
 	}
 	return aligner.Result{Words: make([]aligner.Word, 2)}, err
 }
