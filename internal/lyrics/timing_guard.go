@@ -2,9 +2,12 @@ package lyrics
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/timing"
 )
 
@@ -155,6 +158,26 @@ func unsyncedFallbackBody(song models.Song) string {
 	return b.String()
 }
 
+// cachedEntry is the lyrics_cache payload: the song plus the lane and fetch
+// time of the one fetch that stored it (#1207). A cache row is written in
+// exactly one place, after that fetch's result landed, so both are facts about
+// the entry like its lyric body. Upstream stays excluded (#850, see
+// docs/provider-attribution.md). Keys absent from an older row decode as zero.
+type cachedEntry struct {
+	models.Song
+	Lane    string    `json:",omitempty"`
+	Fetched time.Time `json:",omitzero"`
+}
+
+// EncodeCachedSong is the lyrics_cache encoding DecodeCachedSong reverses.
+func EncodeCachedSong(song models.Song) (string, error) {
+	b, err := json.Marshal(cachedEntry{Song: song, Lane: song.WinningLane, Fetched: song.FetchedAt})
+	if err != nil {
+		return "", fmt.Errorf("lyrics: encode cached song: %w", err)
+	}
+	return string(b), nil
+}
+
 // DecodeCachedSong decodes a lyrics_cache row's stored string into a
 // models.Song, pairing it with the live file's identity (fallback).
 //
@@ -172,12 +195,25 @@ func unsyncedFallbackBody(song models.Song) string {
 // A row that fails to decode, or decodes to an empty identity, is legacy plain
 // text: it is wrapped as an unsynced Lyrics body against fallback, exactly as
 // before this package owned the decode.
+//
+// The lane and fetch time EncodeCachedSong stored are restored onto
+// WinningLane/FetchedAt (#1207). An entry stored before #1207 carries neither
+// and decodes laneless, as before: no lane is ever guessed. A stored lane that
+// is not a built-in provider (providers.IsKnown) is dropped rather than
+// restored, so a cache hit can never write an unrecognized token into
+// [source:] or name the detector lane, whose verdicts are never cached. A known
+// lane that is merely disabled now is kept: it is still who served the entry.
 func DecodeCachedSong(cached string, fallback models.Track) models.Song {
-	var song models.Song
-	if err := json.Unmarshal([]byte(cached), &song); err == nil && (song.Track.ArtistName != "" || song.Track.TrackName != "") {
+	var entry cachedEntry
+	if err := json.Unmarshal([]byte(cached), &entry); err == nil && (entry.Track.ArtistName != "" || entry.Track.TrackName != "") {
+		song := entry.Song
 		song.Track.ArtistName = fallback.ArtistName
 		song.Track.TrackName = fallback.TrackName
 		song.Track.AlbumName = fallback.AlbumName
+		if providers.IsKnown(entry.Lane) {
+			song.WinningLane = providers.NormalizeName(entry.Lane)
+		}
+		song.FetchedAt = entry.Fetched
 		return song
 	}
 	return models.Song{

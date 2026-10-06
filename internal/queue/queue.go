@@ -2494,7 +2494,8 @@ type CompletionProvenance struct {
 	ISRC string
 	// MBID is the MusicBrainz recording ID from the resolved provider result.
 	MBID string
-	// FetchedAt is when the provider round-trip completed. Zero on a cache hit.
+	// FetchedAt is when the provider round-trip completed; on a cache hit, the
+	// one that stored the entry (#1207), zero for an entry stored before that.
 	FetchedAt time.Time
 	// WriterVersion is the app version that produced the output
 	// (internal/version.Version), matching the .lrc [ve:] tag.

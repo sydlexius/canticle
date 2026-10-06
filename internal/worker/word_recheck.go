@@ -92,9 +92,10 @@ func (w *Worker) wordGeneration() int64 {
 //     transport, verification error): re-deferred still 'queued', at most
 //     maxWordRecheckWaits times, then un-flipped (queue.DeferWordRecheck).
 //
-// The cache is NOT consulted: an entry carries no lane or fetch time, so a
-// cache-served rewrite would strip [source:]/[fetched:] from a settled file
-// and NULL fetched_at. No path calls Defer, RetireMiss or Fail, and none writes
+// The cache is NOT consulted: an entry records the fetch that stored it, not a
+// fresh word-lane answer, and one stored before #1207 carries no lane or fetch
+// time, so a cache-served rewrite could strip [source:]/[fetched:] from a
+// settled file and NULL fetched_at. No path calls Defer, RetireMiss or Fail, and none writes
 // lane_attempts or provider_outcomes: a recheck result would repoint the row's
 // ordinary per-track hit history (#282), e.g. flip a Musixmatch hit to a miss
 // when only its words were missing, and would count hits with no matching miss.
@@ -352,8 +353,9 @@ type wordLandingWriter interface {
 
 // ordinaryWordVerdict is an ORDINARY completion's word verdict (#982 slice 4),
 // or "" for none. Only a synced .lrc served by a word-capable lane, with
-// word_sync_mode not off, carries one, so a txt, instrumental, refused or
-// innertube/cache-served completion leaves the row a recheck candidate:
+// word_sync_mode not off, carries one, so a txt, instrumental, refused,
+// innertube or laneless (pre-#1207) cache-served completion leaves the row a
+// recheck candidate (a hit restores the storing lane but never WordAnswer):
 //
 //   - served: the words LANDED at every output path (the writer's own
 //     HasQualifyingWords, inline or in an owned companion), never merely
